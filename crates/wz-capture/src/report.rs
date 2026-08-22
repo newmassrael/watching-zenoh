@@ -5640,6 +5640,12 @@ mod tests {
         // the packet that stands for "no parser" had to become one that still
         // is — 50, ESP, whose remainder is encrypted. GRE gets its own packet
         // below, under the counter it now reaches.
+        //
+        // Item 260 MOVED the second leg for the same reason one carrier down.
+        // Its ethertype was `0x6558`, which stood for "GRE opened, payload
+        // unwalked" and is now WALKED — so the fixture had gone on asserting
+        // the shape of the day it was written. `0x8847` (MPLS unicast) is what
+        // still stands for it.
         d.push_packet(
             crate::link::LINKTYPE_ETHERNET,
             4,
@@ -5648,7 +5654,7 @@ mod tests {
         d.push_packet(
             crate::link::LINKTYPE_ETHERNET,
             5,
-            &eth_ipv4_proto(47, &gre(0x0000, 0x6558, &[], &[0u8; 8])),
+            &eth_ipv4_proto(47, &gre(0x0000, 0x8847, &[], &[0u8; 8])),
         );
         d.finish();
 
@@ -5696,7 +5702,7 @@ mod tests {
             "1 tunnel not opened",
             "tunnel IP protocol(s) not opened: 50",
             "1 GRE payload not walked",
-            "GRE payload ethertype(s) not walked: 0x6558",
+            "GRE payload ethertype(s) not walked: 0x8847",
             "terminate at the host: 1",
             "reader skipped: 6 packet(s)",
         ] {
@@ -5717,7 +5723,9 @@ mod tests {
             "\"gre_payload\":1",
             "\"encapsulations\":[50]",
             "\"not_transport_protos\":[1]",
-            "\"gre_payloads\":[25944]",
+            // 0x8847, MPLS unicast. Item 260 moved it off 0x6558 (25944) with
+            // the fixture above, because that ethertype is now walked.
+            "\"gre_payloads\":[34887]",
         ] {
             assert!(
                 hjson.contains(key),
@@ -6278,23 +6286,28 @@ mod tests {
     /// The distinction is the whole reason `GrePayload` is its own variant.
     /// `tunnel IP protocol(s) not opened: 47` would tell a reader to add GRE
     /// support that is now present — the misdirection R311y863 measured on
-    /// protocol 4, one carrier later. Transparent Ethernet Bridging is a whole
-    /// Ethernet frame, so what is actually missing is a link strip, and the
-    /// number on the page is what says so.
+    /// protocol 4, one carrier later. What is actually missing for the
+    /// ethertype below is an MPLS label walk, and the number on the page is
+    /// what says so.
+    ///
+    /// Item 260 MOVED this leg. It used `0x6558`, which was this class's one
+    /// known member and is now WALKED — so the leg had stopped witnessing the
+    /// class and started asserting a build that no longer exists. The class
+    /// survives its only member being paid off, and this is what says so.
     #[test]
     fn a_gre_payload_this_reader_does_not_walk_is_named_by_its_ethertype() {
         let mut d = crate::Dissection::new();
         d.push_packet(
             crate::link::LINKTYPE_ETHERNET,
             0,
-            &eth_ipv4_proto(47, &gre(0x0000, 0x6558, &[], &[0u8; 32])),
+            &eth_ipv4_proto(47, &gre(0x0000, 0x8847, &[], &[0u8; 32])),
         );
         d.finish();
 
         let sk = d.skip_census();
         assert_eq!(sk.gre_payload, 1, "counted under its own reason: {sk:?}");
         assert!(
-            sk.gre_payloads.contains(&0x6558),
+            sk.gre_payloads.contains(&0x8847),
             "and by the ethertype, which is what names the next thing to \
              build: {sk:?}"
         );
@@ -6306,7 +6319,7 @@ mod tests {
         assert_eq!(sk.bytes_absent(), 1, "which is bytes absent: {sk:?}");
         let text = CaptureReport::of(&d).to_text();
         assert!(
-            text.contains("GRE payload ethertype(s) not walked: 0x6558"),
+            text.contains("GRE payload ethertype(s) not walked: 0x8847"),
             "the page names the ethertype: {text}"
         );
         assert!(
@@ -6395,6 +6408,62 @@ mod tests {
             "so the capture is complete: {}",
             CaptureReport::of(&d).to_text()
         );
+    }
+
+    /// Item 260 — GRETAP reaches BOTH doors, which is the question R311y863
+    /// asked of protocol 4 and R311y864 asked of GRE, asked once more of the
+    /// carrier this round adds.
+    ///
+    /// A GRETAP carrier is the one MOST likely to be fragmented of the three:
+    /// it adds an IP header, a GRE header AND a whole Ethernet header to a
+    /// packet that was already at the path MTU. If the reassembly door opened
+    /// only the two IP-bodied ethertypes, the ordinary capture would be the one
+    /// that failed and the exception would be the one that worked.
+    ///
+    /// Asserted against the UNFRAGMENTED reading of the same session, not
+    /// against a transcribed expectation: the whole finding of R311y863 was two
+    /// doors that disagreed, and only a comparison can fail on that.
+    #[test]
+    fn a_fragmented_gretap_carrier_reads_as_the_unfragmented_one_does() {
+        let inner = eth(&ipv4_packet(
+            17,
+            [192, 168, 0, 1],
+            [192, 168, 0, 2],
+            &zenoh_udp(48),
+        ));
+        let carrier = gre(0x0000, 0x6558, &[], &inner);
+
+        let mut whole = crate::Dissection::new();
+        whole.push_packet(
+            crate::link::LINKTYPE_ETHERNET,
+            0,
+            &eth_ipv4_proto(47, &carrier),
+        );
+        whole.finish();
+
+        let mut split = crate::Dissection::new();
+        push_fragmented_carrier(&mut split, 47, 0x6558, 0, &carrier);
+        split.finish();
+
+        let sk = split.skip_census();
+        assert_eq!(
+            split.datagram_flows().len(),
+            whole.datagram_flows().len(),
+            "the fragmented GRETAP carrier must read as the whole one does: \
+             {sk:?}"
+        );
+        assert_eq!(
+            split.datagram_flows()[0].frames.len(),
+            whole.datagram_flows()[0].frames.len(),
+            "and carry the same messages: {sk:?}"
+        );
+        assert_eq!(split.datagram_flows()[0].frames.len(), 48);
+        assert_eq!(
+            (sk.gre_payload, sk.unwalked_encapsulation, sk.not_ip),
+            (0, 0, 0),
+            "and reach none of the three ways this could be refused: {sk:?}"
+        );
+        assert_eq!(sk.bytes_absent(), 0, "no bytes absent: {sk:?}");
     }
 
     /// R311y863 — a carrier the sender FRAGMENTED is walked like one that

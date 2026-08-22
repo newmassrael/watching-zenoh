@@ -115,6 +115,15 @@ const ETHERTYPE_IPV6: u16 = 0x86DD;
 const ETHERTYPE_VLAN: u16 = 0x8100;
 const ETHERTYPE_QINQ: u16 = 0x88A8;
 
+/// Transparent Ethernet Bridging — GRE's payload when the tunnel carries a
+/// whole Ethernet FRAME rather than an IP packet (`GRETAP`, and what every
+/// cloud overlay builds an L2 segment out of).
+///
+/// It is the one ethertype whose body does not continue the IP walk, which is
+/// why it needed the link layer to become reachable from inside the walk
+/// rather than only from the front door.
+const ETHERTYPE_TEB: u16 = 0x6558;
+
 const IP_PROTO_TCP: u8 = 6;
 const IP_PROTO_UDP: u8 = 17;
 
@@ -468,12 +477,20 @@ pub enum SkipReason {
     /// Distinct from [`Self::Encapsulation`]`(47)` and the distinction is the
     /// point. That variant means the tunnel itself could not be opened, and
     /// tells a reader to add GRE. This one means GRE was opened and what came
-    /// out is something else — Transparent Ethernet Bridging (0x6558) above
-    /// all, which is a whole Ethernet frame and therefore a link strip rather
-    /// than another turn of the IP walk. Reporting 47 for it would send a
-    /// reader to write a parser that already exists, which is the misdirection
-    /// R311y863 measured on protocol 4 and this variant exists to avoid
-    /// repeating one carrier later.
+    /// out is something else. Reporting 47 for it would send a reader to write
+    /// a parser that already exists, which is the misdirection R311y863
+    /// measured on protocol 4 and this variant exists to avoid repeating one
+    /// carrier later.
+    ///
+    /// Item 260 CORRECTS this paragraph rather than deleting the correction.
+    /// It used to name Transparent Ethernet Bridging (0x6558) "above all" as
+    /// the member of this class, and that is no longer true: TEB is WALKED —
+    /// `step_gre` hands its frame to `enter_link`, the same door the
+    /// capture's own frames come through. What reaches here now is the rest —
+    /// MPLS, PPP, an ethertype nobody in this workspace has yet met. The
+    /// sentence is corrected in place because a comment stating a settled
+    /// half-answer is what stops the next reader looking (R311y838), and the
+    /// number on the page is still what names the next thing to build.
     ///
     /// Bytes absent, not furniture: whatever GRE was carrying could have been a
     /// zenoh session, exactly as for the tunnel around it.
@@ -643,6 +660,49 @@ struct IpDatagram<'a> {
     fragment: Option<FragmentInfo>,
 }
 
+/// What a LINK-layer frame turned out to carry.
+///
+/// The link layer has two arms, not one, and this type is what makes that
+/// countable. [`strip_raweth`] answers first and [`strip_link`] second, and a
+/// caller that reached for only the second would classify a zenoh-pico raweth
+/// frame as [`SkipReason::NotIp`] — furniture — while the identical frame
+/// arriving at the front door reached its own arm.
+enum LinkBody<'a> {
+    /// The frame carried an IP packet: its bytes, and whether they are v6.
+    Ip { bytes: &'a [u8], is_v6: bool },
+    /// The frame WAS a zenoh-pico raweth frame; there is no IP layer under it.
+    RawEth(Datagram),
+}
+
+/// The ONE door onto a link-layer frame.
+///
+/// Item 260 — extracted from [`decapsulate`] because GRETAP made the link
+/// layer reachable from a SECOND place: a GRE tunnel carrying Transparent
+/// Ethernet Bridging hands back a whole Ethernet frame, which has to be
+/// entered exactly as the capture's own frames are. Writing that second entry
+/// as `strip_link` alone is the trap R311y864 declined to walk into, and it is
+/// R311y863's "two doors" defect one carrier further down: the same frame
+/// would read one way inside a tunnel and another way outside it.
+///
+/// Keeping both arms behind one function is what makes the two doors the same
+/// door rather than two that agree today.
+fn enter_link(
+    link_type: u32,
+    bytes: &[u8],
+    packet_index: usize,
+) -> Result<LinkBody<'_>, SkipReason> {
+    if link_type == LINKTYPE_ETHERNET {
+        if let Some(d) = strip_raweth(bytes, packet_index) {
+            return Ok(LinkBody::RawEth(d));
+        }
+    }
+    let (ip_bytes, is_v6) = strip_link(link_type, bytes)?;
+    Ok(LinkBody::Ip {
+        bytes: ip_bytes,
+        is_v6,
+    })
+}
+
 /// Decapsulate one captured packet down to the transport payload zenoh uses.
 ///
 /// R311y584 (A3) — returns both transports rather than TCP alone. The
@@ -656,13 +716,18 @@ pub fn decapsulate(
     if link_type == LINKTYPE_VSOCK {
         return strip_vsockmon(bytes, packet_index).map(Transport::Vsock);
     }
-    if link_type == LINKTYPE_ETHERNET {
-        if let Some(d) = strip_raweth(bytes, packet_index) {
-            return Ok(Transport::RawEth(d));
-        }
-    }
-    let (ip_bytes, is_v6) = strip_link(link_type, bytes)?;
-    let (ip, ip_checksum) = walk_ip_chain(ip_bytes, is_v6, 0, None)?;
+    let (ip_bytes, is_v6) = match enter_link(link_type, bytes, packet_index)? {
+        LinkBody::RawEth(d) => return Ok(Transport::RawEth(d)),
+        LinkBody::Ip { bytes, is_v6 } => (bytes, is_v6),
+    };
+    let (end, ip_checksum) = walk_ip_chain(ip_bytes, is_v6, 0, None, packet_index)?;
+    let ip = match end {
+        // A GRETAP tunnel whose inner frame was a pico raweth one. The walk
+        // reached the link layer and the link layer answered, so there is no
+        // IP header here to strip a transport off — the datagram IS the answer.
+        ChainEnd::RawEth(d) => return Ok(Transport::RawEth(d)),
+        ChainEnd::Ip(ip) => ip,
+    };
     // R311y606 — a fragment leaves here before the transport strip, because
     // there is no transport to strip. Even the FIRST fragment must: its header
     // is present but the body behind it is a prefix, and reading it as whole is
@@ -762,6 +827,46 @@ fn strip_gre(bytes: &[u8]) -> Result<(&[u8], u16), SkipReason> {
     Ok((&bytes[len..], protocol_type))
 }
 
+/// Consume ONE GRE carrier: the header, and whatever its ethertype names.
+///
+/// Item 260 — its own function because the step is reached from BOTH doors
+/// onto the walk, and R311y863's finding was that a step written at one of
+/// them makes the same carrier readable at one packet and unreadable at two.
+/// Every ethertype this reader opens is opened here, once.
+fn step_gre(payload: &[u8], packet_index: usize) -> Result<LinkBody<'_>, SkipReason> {
+    let (body, protocol_type) = strip_gre(payload)?;
+    match protocol_type {
+        ETHERTYPE_IPV4 => Ok(LinkBody::Ip {
+            bytes: body,
+            is_v6: false,
+        }),
+        ETHERTYPE_IPV6 => Ok(LinkBody::Ip {
+            bytes: body,
+            is_v6: true,
+        }),
+        // Transparent Ethernet Bridging: the body is a whole FRAME, so it
+        // re-enters at the link layer through the same door the capture's own
+        // frames use. [`enter_link`] rather than [`strip_link`] — see its doc
+        // for the defect the shorter spelling would have reproduced.
+        ETHERTYPE_TEB => enter_link(LINKTYPE_ETHERNET, body, packet_index),
+        // A payload this reader cannot walk, named BY ITS ETHERTYPE rather
+        // than as protocol 47, which would send a reader to build GRE support
+        // that is already here.
+        other => Err(SkipReason::GrePayload(other)),
+    }
+}
+
+/// Where a chain walk ended.
+///
+/// Item 260 — a walk that can step through GRETAP can end at the LINK layer
+/// instead of at an IP header, so the return type has to be able to say so.
+/// Before that, "the chain ended" and "the chain ended at an IP header" were
+/// the same sentence.
+enum ChainEnd<'a> {
+    Ip(IpDatagram<'a>),
+    RawEth(Datagram),
+}
+
 /// Walk an IP-in-IP chain down to the header whose body is NOT another packet.
 ///
 /// R311y862 wrote this loop inside [`decapsulate`]; R311y863 lifted it out
@@ -784,12 +889,16 @@ fn strip_gre(bytes: &[u8]) -> Result<(&[u8], u16), SkipReason> {
 ///
 /// `start_depth` is likewise the caller's count of carriers already consumed,
 /// so [`MAX_ENCAPSULATION_DEPTH`] bounds the CHAIN and not the call.
+///
+/// `packet_index` is carried only so a GRETAP frame can be handed to the link
+/// layer, which stamps it onto the datagram it produces. Item 260.
 fn walk_ip_chain<'a>(
     bytes: &'a [u8],
     is_v6: bool,
     start_depth: usize,
     start_checksum: Option<bool>,
-) -> Result<(IpDatagram<'a>, Option<bool>), SkipReason> {
+    packet_index: usize,
+) -> Result<(ChainEnd<'a>, Option<bool>), SkipReason> {
     let mut cursor: &'a [u8] = bytes;
     let mut v6 = is_v6;
     let mut ip_checksum = start_checksum;
@@ -810,7 +919,7 @@ fn walk_ip_chain<'a>(
         // layer down. The piece is reported, and the datagram the reassembler
         // rebuilds out of it re-enters this walk through `transport_from_ip`.
         if d.fragment.is_some() {
-            return Ok((d, ip_checksum));
+            return Ok((ChainEnd::Ip(d), ip_checksum));
         }
         if d.proto == IP_PROTO_IPV4_IN_IP || d.proto == IP_PROTO_IPV6_IN_IP {
             depth += 1;
@@ -829,22 +938,23 @@ fn walk_ip_chain<'a>(
             if depth > MAX_ENCAPSULATION_DEPTH {
                 return Err(SkipReason::Encapsulation(IP_PROTO_GRE));
             }
-            let (body, protocol_type) = strip_gre(d.payload)?;
-            match protocol_type {
-                ETHERTYPE_IPV4 => v6 = false,
-                ETHERTYPE_IPV6 => v6 = true,
-                // A payload this reader cannot walk, named BY ITS ETHERTYPE.
-                // Transparent Ethernet Bridging (0x6558) is the one that
-                // matters and it is a whole frame, so it needs the link strip
-                // rather than the IP strip — a different step, and naming the
-                // number is what says so instead of leaving a reader to guess
-                // that "GRE" was the missing piece.
-                other => return Err(SkipReason::GrePayload(other)),
+            // Item 260 — the ethertype step, INCLUDING the TEB arm that
+            // re-enters at the link layer. `depth` is not incremented a second
+            // time for the Ethernet header GRETAP adds: the bound counts
+            // CARRIERS, and one GRETAP carrier is one carrier that happens to
+            // cost a link header as well as a GRE one. That the bound's unit
+            // is a carrier and not a header is open-debt item 262, which this
+            // step joins rather than settles.
+            match step_gre(d.payload, packet_index)? {
+                LinkBody::Ip { bytes, is_v6 } => {
+                    v6 = is_v6;
+                    cursor = bytes;
+                }
+                LinkBody::RawEth(dg) => return Ok((ChainEnd::RawEth(dg), ip_checksum)),
             }
-            cursor = body;
             continue;
         }
-        return Ok((d, ip_checksum));
+        return Ok((ChainEnd::Ip(d), ip_checksum));
     }
 }
 
@@ -884,18 +994,31 @@ pub fn transport_from_ip(
         // as a fragmented IPIP one and R311y863 would otherwise have left the
         // new walk reachable through only one of the two doors again.
         IP_PROTO_IPV4_IN_IP | IP_PROTO_IPV6_IN_IP | IP_PROTO_GRE => {
-            let (ip, ip_checksum) = if proto == IP_PROTO_GRE {
+            let (end, ip_checksum) = if proto == IP_PROTO_GRE {
                 // The reassembled body IS the GRE header, so the step the walk
                 // takes for protocol 47 has to happen before re-entering it.
-                let (body, protocol_type) = strip_gre(payload)?;
-                let v6 = match protocol_type {
-                    ETHERTYPE_IPV4 => false,
-                    ETHERTYPE_IPV6 => true,
-                    other => return Err(SkipReason::GrePayload(other)),
-                };
-                walk_ip_chain(body, v6, 1, checksums.ip)?
+                // Item 260 — through `step_gre`, so this door opens exactly the
+                // ethertypes the other one does, GRETAP included.
+                match step_gre(payload, packet_index)? {
+                    LinkBody::Ip { bytes, is_v6 } => {
+                        walk_ip_chain(bytes, is_v6, 1, checksums.ip, packet_index)?
+                    }
+                    // A reassembled GRETAP carrier whose inner frame was a pico
+                    // raweth one: the walk is over before it starts.
+                    LinkBody::RawEth(dg) => return Ok(Transport::RawEth(dg)),
+                }
             } else {
-                walk_ip_chain(payload, proto == IP_PROTO_IPV6_IN_IP, 1, checksums.ip)?
+                walk_ip_chain(
+                    payload,
+                    proto == IP_PROTO_IPV6_IN_IP,
+                    1,
+                    checksums.ip,
+                    packet_index,
+                )?
+            };
+            let ip = match end {
+                ChainEnd::Ip(ip) => ip,
+                ChainEnd::RawEth(dg) => return Ok(Transport::RawEth(dg)),
             };
             if let Some(info) = ip.fragment {
                 // A FRAGMENT INSIDE A REASSEMBLED CARRIER, which is a real
@@ -926,8 +1049,9 @@ pub fn transport_from_ip(
                 transport: transport_checksum(&ip.src, &ip.dst, ip.proto, ip.payload),
             };
             // Recursion of depth exactly ONE: `walk_ip_chain` returns either a
-            // fragment (handled above) or a header whose proto is none of 4, 41
-            // and 47, so this call cannot reach this arm again.
+            // fragment (handled above), a raweth datagram (returned above), or
+            // a header whose proto is none of 4, 41 and 47, so this call cannot
+            // reach this arm again.
             transport_from_ip(ip.src, ip.dst, ip.proto, ip.payload, packet_index, inner)
         }
         // R311y862 — an encapsulation is NOT furniture, and this arm is what
@@ -2150,6 +2274,136 @@ mod tests {
             Ok(Transport::RawEth(d)) => assert_eq!(d.payload, b"abc"),
             other => panic!("expected a raweth datagram, got {other:?}"),
         }
+    }
+
+    // ---- item 260: GRETAP -- a GRE tunnel whose payload is a whole frame ---
+    //
+    // R311y864 opened GRE and stopped at the ethertype, naming `0x6558`
+    // (Transparent Ethernet Bridging) rather than half-opening it. The reason
+    // it named it instead is the trap the second leg below pins: TEB's body
+    // re-enters at the LINK layer, and the link layer already has two arms.
+
+    /// Ethernet + IPv4 carrying an arbitrary protocol number.
+    ///
+    /// The carrier is addressed `10.0.0.x`, distinct from every inner address
+    /// these legs use, so a flow keyed by the WRONG header is visible as a
+    /// wrong address rather than only as a wrong count.
+    fn eth_ipv4_carrier(proto: u8, body: &[u8]) -> Vec<u8> {
+        let mut ip = Vec::new();
+        ip.push(0x45);
+        ip.push(0);
+        ip.extend_from_slice(&((20 + body.len()) as u16).to_be_bytes());
+        ip.extend_from_slice(&0u16.to_be_bytes());
+        ip.extend_from_slice(&0u16.to_be_bytes());
+        ip.push(64);
+        ip.push(proto);
+        ip.extend_from_slice(&0u16.to_be_bytes());
+        ip.extend_from_slice(&[10, 0, 0, 1]);
+        ip.extend_from_slice(&[10, 0, 0, 2]);
+        ip.extend_from_slice(body);
+
+        let mut eth = vec![0u8; 12];
+        eth.extend_from_slice(&ETHERTYPE_IPV4.to_be_bytes());
+        eth.extend_from_slice(&ip);
+        eth
+    }
+
+    /// A GRE header with no optional fields, wrapping `body`.
+    fn gre_no_options(protocol_type: u16, body: &[u8]) -> Vec<u8> {
+        let mut out = vec![0u8, 0];
+        out.extend_from_slice(&protocol_type.to_be_bytes());
+        out.extend_from_slice(body);
+        out
+    }
+
+    /// THE GAP. GRETAP is what a cloud overlay puts a session inside, and its
+    /// payload is a whole Ethernet frame rather than one more turn of the IP
+    /// walk. Before this the capture reported `GRE payload ethertype(s) not
+    /// walked: 0x6558` and zero flows.
+    ///
+    /// The inner addresses are asserted, not merely the arm: a link strip that
+    /// lands a few bytes off does not error, it decodes a plausible flow out of
+    /// the middle of the frame.
+    #[test]
+    fn zenoh_inside_a_gretap_tunnel_is_read() {
+        let inner = eth_ipv4_udp([192, 168, 0, 1], 7447, [192, 168, 0, 2], 40000, b"zenoh");
+        let pkt = eth_ipv4_carrier(IP_PROTO_GRE, &gre_no_options(ETHERTYPE_TEB, &inner));
+        match decapsulate(LINKTYPE_ETHERNET, 3, &pkt) {
+            Ok(Transport::Udp(d)) => {
+                assert_eq!(d.payload, b"zenoh");
+                assert_eq!(d.packet_index, 3);
+                let mut ends = vec![d.flow.low.addr().to_vec(), d.flow.high.addr().to_vec()];
+                ends.sort();
+                assert_eq!(
+                    ends,
+                    vec![vec![192, 168, 0, 1], vec![192, 168, 0, 2]],
+                    "keyed by the INNER header, never by the carrier's 10.0.0.x"
+                );
+            }
+            other => panic!("GRETAP must be read to its transport, got {other:?}"),
+        }
+    }
+
+    /// THE TRAP, and the reason R311y864 named the ethertype rather than
+    /// half-opening it.
+    ///
+    /// [`decapsulate`] tries [`strip_raweth`] BEFORE [`strip_link`], so an
+    /// inner frame handed only to `strip_link` would send a zenoh-pico raweth
+    /// frame inside the tunnel to `NotIp` — furniture — while the identical
+    /// frame outside it reaches its own arm. That is R311y863's "two doors"
+    /// defect regenerated one carrier down, so the two are asserted EQUAL
+    /// rather than each asserted separately: a leg that only checked the
+    /// tunnelled frame would pass against a second, diverging door.
+    #[test]
+    fn a_pico_raweth_frame_reads_the_same_inside_a_gretap_tunnel_as_outside() {
+        use wz_session_core::raweth_link::DEFAULT_ETHTYPE;
+        let smac = [0x30, 0x03, 0xc8, 0x37, 0x25, 0xa1];
+        let dmac = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
+        let bare = raweth_frame(smac, dmac, DEFAULT_ETHTYPE, b"zenoh-batch");
+        let tunnelled = eth_ipv4_carrier(IP_PROTO_GRE, &gre_no_options(ETHERTYPE_TEB, &bare));
+
+        let outside = decapsulate(LINKTYPE_ETHERNET, 7, &bare);
+        let inside = decapsulate(LINKTYPE_ETHERNET, 7, &tunnelled);
+        assert_eq!(
+            inside, outside,
+            "the tunnel must not become a second door onto the link layer"
+        );
+        match inside {
+            Ok(Transport::RawEth(d)) => assert_eq!(d.payload, b"zenoh-batch"),
+            other => panic!("expected a raweth datagram, got {other:?}"),
+        }
+    }
+
+    /// CONTROL. An ethertype this reader genuinely does not walk is still
+    /// named by its number, so opening TEB did not open everything.
+    #[test]
+    fn a_gre_payload_ethertype_that_is_not_teb_is_still_named() {
+        const ETHERTYPE_MPLS: u16 = 0x8847;
+        let pkt = eth_ipv4_carrier(IP_PROTO_GRE, &gre_no_options(ETHERTYPE_MPLS, &[0u8; 32]));
+        assert_eq!(
+            decapsulate(LINKTYPE_ETHERNET, 0, &pkt),
+            Err(SkipReason::GrePayload(ETHERTYPE_MPLS)),
+        );
+    }
+
+    /// CONTROL. A TEB frame whose own ethertype is neither IP nor raweth is
+    /// `NotIp` — the same answer the identical frame gets outside a tunnel,
+    /// which is the invariant the trap above is about.
+    #[test]
+    fn a_gretap_frame_carrying_neither_ip_nor_raweth_is_not_ip() {
+        let mut inner = vec![0u8; 12];
+        inner.extend_from_slice(&0x0806u16.to_be_bytes()); // ARP
+        inner.extend_from_slice(&[0u8; 28]);
+        let pkt = eth_ipv4_carrier(IP_PROTO_GRE, &gre_no_options(ETHERTYPE_TEB, &inner));
+        assert_eq!(
+            decapsulate(LINKTYPE_ETHERNET, 0, &pkt),
+            decapsulate(LINKTYPE_ETHERNET, 0, &inner),
+            "inside the tunnel and outside it must classify identically"
+        );
+        assert_eq!(
+            decapsulate(LINKTYPE_ETHERNET, 0, &pkt),
+            Err(SkipReason::NotIp)
+        );
     }
 
     // ---- R311y597: the IPv6 leg, which had NO tests at all ----------------

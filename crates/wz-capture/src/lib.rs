@@ -282,8 +282,14 @@ pub struct SkipCensus {
     /// misdirection R311y863 measured on protocol 4.
     pub gre_payload: usize,
     /// The ETHERTYPES behind that count, on [`Self::unwalked_encapsulations`]'s
-    /// reasoning: `0x6558` is Transparent Ethernet Bridging and names the next
-    /// thing to build, where a bare count names nothing.
+    /// reasoning: the number names the next thing to build, where a bare count
+    /// names nothing.
+    ///
+    /// Item 260 — this doc used `0x6558` (Transparent Ethernet Bridging) as
+    /// its example, and that number is now WALKED, so the example became a
+    /// claim about the build that was false. The mechanism it illustrated is
+    /// unchanged and the demonstration is better than the sentence: naming the
+    /// ethertype is what turned this set's one member into a closed debt.
     pub gre_payloads: BTreeSet<u16>,
 }
 
