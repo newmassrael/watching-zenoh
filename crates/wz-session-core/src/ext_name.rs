@@ -444,6 +444,43 @@ pub const ALL_CARRIERS: &[ExtCarrier] = &[
     ExtCarrier::Auth,
 ];
 
+/// Round 2034 (item 320) — THE CARRIERS WHOSE ROW SET IS EMPTY ON PURPOSE, and
+/// what makes each one empty.
+///
+/// # The distinction this restores
+///
+/// `rows` answers `&[]` for a carrier upstream gives no named extension, and it
+/// answers `&[]` for a carrier nobody has filled in yet. Those are opposite
+/// facts and the type cannot tell them apart, which is the population-of-zero
+/// shape in its documentary form: an empty answer that reads as a finding.
+///
+/// Naming them turns emptiness into a CLAIM. A carrier added later with a
+/// forgotten row set is not quietly one of these; it fails the sweep below
+/// until someone decides which it is. And when upstream gives one of these a
+/// named extension and wz fills the rows in, this list stops being true and
+/// fails in the other direction, so the entry cannot outlive its reason —
+/// which is the seat item 320 was holding for `debt-47`.
+///
+/// # The measurement, with the pin it was taken at
+///
+/// Read directly from upstream at pin `49c8a53` rather than recalled: the
+/// `Reply` struct in `commons/zenoh-protocol/src/zenoh/reply.rs` carries
+/// `consolidation`, `payload`, and `ext_unknown: Vec<ZExtUnknown>` — one
+/// extension field, unnamed, so EVERY extension on a Reply is anonymous by
+/// upstream's own count.
+pub const DECLARED_EMPTY: &[(ExtCarrier, &str)] = &[
+    (
+        ExtCarrier::TransportPlain,
+        "`Close` and `KeepAlive` declare no extension upstream at all",
+    ),
+    (
+        ExtCarrier::Reply,
+        "upstream's `zenoh::Reply` names no extension and takes any chain into \
+         `ext_unknown`, so the emptiness is upstream's own count and not a gap \
+         here (read at pin 49c8a53)",
+    ),
+];
+
 /// What this extension header IS in this carrier, or `None` when the carrier
 /// declares no extension with that eid.
 ///
@@ -557,6 +594,65 @@ mod tests {
         // And `Del` has no SHM row at all, under any encoding or flag.
         assert_eq!(ext_name(ExtCarrier::Del, 0x02 | EXT_FLAG_M), None);
         assert_eq!(ext_name(ExtCarrier::Del, 0x02), None);
+    }
+
+    /// Round 2034 (item 320) — AN EMPTY ROW SET IS A CLAIM, in both directions.
+    ///
+    /// # What was wrong with saying nothing
+    ///
+    /// `ExtCarrier::Reply` has no rows because upstream names no extension on a
+    /// Reply, and a carrier nobody has filled in yet also has no rows. `rows`
+    /// answers `&[]` to both, so the table could not distinguish a measured
+    /// fact from an unstarted one — and the fact is exactly the kind that goes
+    /// stale silently, because it is a fact about SOMEONE ELSE'S code.
+    ///
+    /// # Both directions, and what each one catches
+    ///
+    /// Forwards: a carrier whose rows are empty must be in [`DECLARED_EMPTY`],
+    /// so a variant added with its rows forgotten fails here rather than
+    /// joining the silent-empty set.
+    ///
+    /// Backwards: a carrier in [`DECLARED_EMPTY`] must really have no rows, so
+    /// the day upstream names an extension on a Reply and someone fills the
+    /// rows in, the stale claim beside them fails. That is the seat item 320
+    /// was holding open for `debt-47`: a reason outliving the code it explains,
+    /// with nothing measuring it.
+    ///
+    /// ⚠ What this does NOT do, said rather than implied: it does not re-read
+    /// upstream. Nothing here can — upstream is a reference and not a
+    /// dependency of this workspace, so a gate that read it would be green on
+    /// one machine and unrunnable on the next. What it holds is the SHAPE, and
+    /// the reason string carries the measurement with the pin it was taken at.
+    #[test]
+    fn every_empty_row_set_says_why_it_is_empty() {
+        // ANTI-VACUITY: a sweep over no carriers, or a declaration list that
+        // named nothing, would make both directions below true.
+        assert!(!ALL_CARRIERS.is_empty(), "a gate over nothing is green");
+        assert!(
+            !DECLARED_EMPTY.is_empty(),
+            "and so is a claim about nothing"
+        );
+        for carrier in ALL_CARRIERS {
+            if rows(*carrier).is_empty() {
+                assert!(
+                    DECLARED_EMPTY.iter().any(|(c, _)| c == carrier),
+                    "{carrier:?} has no rows and nothing says why -- an empty \
+                     row set must be a measured claim about upstream, not the \
+                     shape a forgotten carrier happens to have"
+                );
+            }
+        }
+        for (carrier, why) in DECLARED_EMPTY {
+            assert!(
+                rows(*carrier).is_empty(),
+                "{carrier:?} now HAS rows and this still claims it is empty \
+                 because {why} -- delete the claim rather than the rows"
+            );
+            assert!(
+                ALL_CARRIERS.contains(carrier),
+                "{carrier:?} is claimed empty and is not in the sweep at all"
+            );
+        }
     }
 
     /// An id the carrier does not declare gets NO name — not a guess, and not a
