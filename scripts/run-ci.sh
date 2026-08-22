@@ -2103,6 +2103,13 @@ layer_c0mut_verdict_legs() {
         echo "  Layer C0mut FAIL: python3 not on PATH — the leg sweep cannot run" >&2
         return 1
     fi
+    # Round 2012 (item 253) — THE GATE'S OWN TEST, and it runs FIRST because it
+    # costs milliseconds and the sweep below costs minutes. The term extractor
+    # inside that program fails by SILENCE: a predicate shape it cannot read is
+    # one it declines to check, and declining is indistinguishable from
+    # passing. Item 253 is what that looks like left alone — the check reached
+    # one recipe-bearing predicate out of six and reported OK about the rest.
+    python3 scripts/lib/verdict_leg_mutation.py --selftest || return 1
     python3 scripts/lib/verdict_leg_mutation.py || return 1
     return 0
 }

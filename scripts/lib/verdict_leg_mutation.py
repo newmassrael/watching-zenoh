@@ -464,6 +464,23 @@ IMPL = re.compile(r"^impl(?:<[^>]*>)?\s+([A-Za-z_]\w*)", re.M)
 # nothing else. See `unswept_summands` for why the test has to be this tight.
 SUMMAND = re.compile(r"self\.\w+")
 
+# Round 2012 (item 253) — ONE TERM OF A PREDICATE, whatever joins them.
+#
+# A field or accessor read on a receiver: `self.frames`, `s.expired`,
+# `self.open_fragment_chains()`. The trailing `()` is part of the term because
+# a recipe zeroes the CALL, not the name.
+#
+# Deliberately NOT anchored to `self`: `unfinished_fragment_chains` binds
+# `let s = self.fragments.stats()` and adds `s.expired + s.evicted`, and those
+# two are exactly the terms a recipe zeroes. A pattern that only saw `self.`
+# would report that predicate as having one term (`self.open_fragment_chains`)
+# and miss the two that a `let` had renamed.
+TERM = re.compile(r"\b([a-z_]\w*)((?:\.\w+)+)(\(\))?")
+
+# Receivers that name a NAMESPACE rather than a value, so a read through them
+# is not a term this gate can ask a recipe to zero.
+NOT_A_RECEIVER = frozenset({"crate", "core", "alloc", "std", "super"})
+
 
 def _last_segment(path: str) -> str:
     return path.rsplit("::", 1)[-1]
@@ -537,9 +554,37 @@ def uncovered_calls(pristine: str) -> list[tuple[str, str, str, str]]:
     return out
 
 
+def result_expression(body: str) -> str:
+    """A predicate body's RESULT, with its `let` bindings dropped.
+
+    Round 2012 (item 253) — the bindings have to go or the reads that produce
+    them are counted as terms. `unfinished_fragment_chains` opens with
+    `let s = self.fragments.stats();`, and that call is how the terms are
+    OBTAINED rather than one of them: no recipe zeroes it, and requiring one
+    would be this gate inventing a finding.
+
+    Split on `;` rather than parsed, which is enough because a predicate is one
+    expression with at most a few bindings in front of it — and if one ever
+    stops being that, the terms it reports change and a recipe has to be
+    written, which is the direction this gate is meant to fail in.
+    """
+    statements = [s for s in body.split(";") if s.strip()]
+    return statements[-1] if statements else ""
+
+
+def predicate_terms(body: str) -> set[str]:
+    """Every term a predicate's result reads, whatever operator joins them."""
+    out: set[str] = set()
+    for receiver, path, call in TERM.findall(result_expression(body)):
+        if receiver in NOT_A_RECEIVER:
+            continue
+        out.add(f"{receiver}{path}{call}")
+    return out
+
+
 def unswept_summands() -> list[tuple[str, str]]:
-    """`(anchor, term)` for every `self.X` a summing predicate adds that no
-    recipe zeroes.
+    """`(anchor, term)` for every term a recipe-bearing predicate reads that no
+    recipe touches.
 
     R311y862 — THE RECIPE LISTS ARE HAND-WRITTEN AND THE ACCESSORS THEY DESCRIBE
     ARE NOT. `SkipCensus::bytes_absent` grew a sixth field this round; the loop
@@ -549,31 +594,127 @@ def unswept_summands() -> list[tuple[str, str]]:
     on the file itself.
 
     Read from the function body rather than from a second list, because a second
-    list is the thing that just went stale. A summing predicate is one whose
-    body is `self.a + self.b + ...`; anything else (a comparison, a call) is not
-    this check's business and is left to `uncovered_calls`.
+    list is the thing that just went stale.
+
+    ## Round 2012 (item 253) — WHY THIS STOPPED BEING ABOUT SUMS
+
+    It used to split the body on `+` and walk away unless EVERY chunk was a
+    bare `self.field`. That test was written to keep `drops.any` — a `||`
+    chain — from being reported as one enormous summand, and it worked, by
+    declining to look at it at all. Measured before this round: of the SIX
+    recipe-bearing predicates, exactly ONE reached the check. `drops.any` could
+    grow a seventh disjunct and `unfinished_fragment_chains` a fourth term, and
+    the gate would have reported OK about a counter nothing measured — which is
+    the very sentence the paragraph above is written against.
+
+    The operator was never the point. A predicate grows COVERAGE DEBT by
+    growing a TERM, and `+`, `||` and `&&` are three spellings of that. So the
+    terms are extracted from the result expression whatever joins them, and a
+    term counts as covered when some recipe for that predicate MENTIONS it —
+    `is_decisive`'s recipe rewrites `self.undecided == 0`, which is how it
+    zeroes the term `self.undecided`, and a set difference over bare names
+    would have called that uncovered.
     """
     out: list[tuple[str, str]] = []
     covered: dict[tuple[str, str], set[str]] = {}
     for _label, rel, anchor, old, _new in PREDICATES:
         covered.setdefault((rel, anchor), set()).add(old.strip())
-    for (rel, anchor), terms in covered.items():
+    for (rel, anchor), recipes in covered.items():
         text = (REPO_ROOT / rel).read_text(encoding="utf-8")
         if anchor not in text:
             continue
         at, end = _function_span(text, anchor)
         body = text[text.index("{", at) + 1 : end - 1]
-        summands = {t.strip() for t in body.split("+")}
-        # EVERY term must be a bare field read, not merely start with `self.`.
-        # `drops.any` is `self.frames > 0 || ...` -- one chunk, beginning with
-        # `self.`, and a looser test would report that whole expression as an
-        # unswept summand. A predicate that is not a plain sum is not this
-        # check's business.
-        if not all(SUMMAND.fullmatch(s) for s in summands):
-            continue
-        for s in sorted(summands - terms):
-            out.append((anchor, s))
+        for term in sorted(predicate_terms(body)):
+            if not any(term in recipe for recipe in recipes):
+                out.append((anchor, term))
     return out
+
+
+# Round 2012 (item 253) — THE TERM EXTRACTOR'S OWN TEST.
+#
+# R1994's lesson, applied where it was earned: a gate is code, and a gate with
+# no test is a claim. This one is worth more than most, because its failure
+# mode is SILENCE — a shape it cannot read is a predicate it declines to check,
+# and declining looks exactly like passing. That is precisely how item 253
+# survived: `unswept_summands` reported OK for two years while reaching one
+# predicate out of six.
+#
+# `(label, body, expected terms)`. The bodies are the four real shapes plus the
+# two the old splitter could not read, spelled out here so the extractor can be
+# asked about them without a tree to read.
+TERM_CASES = (
+    (
+        "a plain sum",
+        "self.a + self.b + self.c",
+        {"self.a", "self.b", "self.c"},
+    ),
+    (
+        "an || chain -- what the sum splitter walked away from",
+        "self.frames > 0\n || self.stream_bytes > 0\n || self.flows > 0",
+        {"self.frames", "self.stream_bytes", "self.flows"},
+    ),
+    (
+        "an && chain, which nothing had ever asked about",
+        "self.opened && self.closed",
+        {"self.opened", "self.closed"},
+    ),
+    (
+        "a let binding: the bound call is NOT a term, the reads through it are",
+        "let s = self.fragments.stats();\n s.expired + s.evicted + self.open()",
+        {"s.expired", "s.evicted", "self.open()"},
+    ),
+    (
+        "a comparison, whose term is the side that can grow",
+        "self.undecided == 0",
+        {"self.undecided"},
+    ),
+    (
+        "a whole-value equality reads no field and has no term",
+        "*self == Self::default()",
+        set(),
+    ),
+    (
+        "a path is a namespace, not a receiver",
+        "self.n + crate::limits::FLOOR",
+        {"self.n"},
+    ),
+)
+
+
+def selftest() -> int:
+    """Drive [`predicate_terms`] over the shapes above, both directions.
+
+    The second direction is the half that matters and it is asserted at the
+    end: a term NOT named by any recipe must be reported. A checker that
+    returned the empty list for everything would pass every case above.
+    """
+    failures: list[str] = []
+    for label, body, expected in TERM_CASES:
+        got = predicate_terms(body)
+        if got != expected:
+            failures.append(f"  {label}: expected {sorted(expected)}, got {sorted(got)}")
+
+    # The gate's own claim, driven rather than trusted: a term no recipe
+    # mentions is REPORTED, and one a recipe mentions is not.
+    terms = predicate_terms("self.a + self.b")
+    recipes = {"self.a"}
+    unswept = sorted(t for t in terms if not any(t in r for r in recipes))
+    if unswept != ["self.b"]:
+        failures.append(f"  coverage test: expected ['self.b'], got {unswept}")
+    if [t for t in predicate_terms("self.a") if not any(t in r for r in {"self.a == 0"})]:
+        failures.append("  coverage test: a recipe rewriting a COMPARISON must cover its term")
+
+    if failures:
+        print("verdict-leg mutation selftest: FAIL", file=sys.stderr)
+        for f in failures:
+            print(f, file=sys.stderr)
+        return 1
+    print(
+        f"verdict-leg mutation selftest: OK — {len(TERM_CASES)} predicate "
+        "shape(s) read, including the two the sum splitter could not"
+    )
+    return 0
 
 
 def _function_span(text: str, anchor: str) -> tuple[int, int]:
@@ -743,8 +884,16 @@ def main() -> int:
         arg = argv.pop(0)
         if arg == "--only" and argv:
             only = argv.pop(0)
+        elif arg == "--selftest":
+            # Round 2012 (item 253) — the term extractor asked about fixtures
+            # rather than about the tree. Cheap, needs no build, and it is what
+            # would have caught this gate reaching one predicate out of six.
+            return selftest()
         else:
-            print(f"usage: {Path(sys.argv[0]).name} [--only VARIANT]", file=sys.stderr)
+            print(
+                f"usage: {Path(sys.argv[0]).name} [--only VARIANT] [--selftest]",
+                file=sys.stderr,
+            )
             return 2
 
     source_path = REPO_ROOT / SOURCE
@@ -864,16 +1013,18 @@ def main() -> int:
         print("verdict-leg mutation: FAIL", file=sys.stderr)
         for anchor, term in unswept:
             print(
-                f"  `{anchor.strip()}` sums `{term}`, and no recipe zeroes it "
+                f"  `{anchor.strip()}` reads `{term}`, and no recipe zeroes it "
                 "-- the sweep would report OK while that counter is measured "
                 "by nothing",
                 file=sys.stderr,
             )
         print(
-            "\nAdd it to that predicate's recipe loop in PREDICATES. A field "
-            "added to a\nsumming accessor is a new way for the capture to be "
+            "\nAdd it to that predicate's recipe loop in PREDICATES. A term "
+            "added to a\nverdict predicate is a new way for the capture to be "
             "short, and the question\nthis gate asks is whether anything "
-            "notices.",
+            "notices. Round 2012 (item 253) — `reads`\nand not `sums`: the "
+            "check no longer walks away from a predicate whose terms\nare "
+            "joined by `||` or `&&` rather than by `+`.",
             file=sys.stderr,
         )
         return 1
