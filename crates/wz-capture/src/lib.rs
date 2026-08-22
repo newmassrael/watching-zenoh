@@ -2735,6 +2735,51 @@ impl DissectionHealth {
     /// Deliberately NOT "anything looks unusual": retransmissions and
     /// reordering are normal on a real network and an `any_*` that included
     /// them would be true for almost every capture.
+    /// Round 2041 (open-debt item 356) — the layers on which this reader
+    /// verified a checksum and NOT ONE of them passed.
+    ///
+    /// # Why this is not a completeness reason
+    ///
+    /// [`crate::report::VerdictReason`] answers "are the rows all the rows",
+    /// and it judges the TRANSPORT axis alone for a reason R311y884 wrote down:
+    /// the IPv4 header checksum covers the header only, is recomputed at every
+    /// hop, and does not exist in IPv6, so it says nothing about the bytes the
+    /// rows are built from. Adding it there would take the exit code with it on
+    /// every capture through a device that rewrites headers — the shape
+    /// R311y860 removed from `packets_skipped`, where a reason true of almost
+    /// everything stopped meaning anything.
+    ///
+    /// So this is a FINDING and not a verdict: an axis with no corroboration is
+    /// worth a sentence beside the numbers, and worth nothing in the exit code.
+    ///
+    /// # Why `invalid > 0 && valid == 0` rather than `invalid > 0`
+    ///
+    /// Checksum offload. A host capturing its own transmit path sees the field
+    /// before the NIC fills it, so a few wrong ones are ordinary; a layer where
+    /// nothing at all verified is the shape that says the evidence is missing
+    /// rather than the wire being bad. `absent` is counted on neither side —
+    /// IPv6 has no header checksum and a zero UDP checksum is the sender
+    /// declining (RFC 768), and a capture of either is not uncorroborated, it
+    /// is unchecked.
+    ///
+    /// Named layers rather than a bool, because the three send a reader to
+    /// three different places: an IP axis usually means a rewriting device on
+    /// the path, a transport axis means the payload is unvouched for, and a
+    /// tunnel axis means the carrier is.
+    pub fn uncorroborated_layers(&self) -> alloc::vec::Vec<&'static str> {
+        let mut out = alloc::vec::Vec::new();
+        if self.ip_checksum_invalid > 0 && self.ip_checksum_valid == 0 {
+            out.push("ip");
+        }
+        if self.transport_checksum_invalid > 0 && self.transport_checksum_valid == 0 {
+            out.push("transport");
+        }
+        if self.tunnel_checksum_invalid > 0 && self.tunnel_checksum_valid == 0 {
+            out.push("tunnel");
+        }
+        out
+    }
+
     pub fn any_checksum_invalid(&self) -> bool {
         self.ip_checksum_invalid > 0
             || self.transport_checksum_invalid > 0

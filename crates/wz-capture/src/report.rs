@@ -3445,6 +3445,22 @@ pub fn health_json(d: &crate::Dissection) -> String {
         fr.sn_without_resolution,
     );
     skips_json(d.skip_census(), &mut out);
+    // Round 2041 (item 356) — the same finding the page carries, as a key a
+    // program can branch on. ALWAYS rendered, empty array or not: R311y720's
+    // standing rule, and the one this plane's own `payload_mapping` follows —
+    // a consumer that had to test for the key would read its absence as "every
+    // layer is corroborated", which is exactly the assumption the finding
+    // exists to stop being made for free.
+    out.push_str(",\"uncorroborated_layers\":[");
+    for (i, layer) in d.health().uncorroborated_layers().iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push('"');
+        out.push_str(layer);
+        out.push('"');
+    }
+    out.push(']');
     out.push('}');
     out
 }
@@ -3510,6 +3526,24 @@ pub fn health_text(d: &crate::Dissection) -> String {
         h.tunnel_checksum_invalid,
         h.tunnel_checksum_absent
     ));
+    // Round 2041 (item 356) — AND WHAT THOSE NUMBERS MEAN, when a layer has no
+    // corroboration at all. Nine figures on one line told a reader everything
+    // except which of them was a finding; `any_checksum_invalid` could have
+    // answered and had no shipping caller at all.
+    //
+    // Printed only when it fires, unlike the counts beside it: a line saying
+    // "nothing is uncorroborated" on every ordinary capture is the noise this
+    // reader's verdict enumeration already refuses.
+    let uncorroborated = h.uncorroborated_layers();
+    if !uncorroborated.is_empty() {
+        s.push_str(&format!(
+            "    NOT CORROBORATED: {} -- this reader verified a checksum on \
+             that layer and none passed. An `ip` axis alone usually means a \
+             device on the path rewrote the headers; `transport` means the \
+             payload the rows are built from is unvouched for\n",
+            uncorroborated.join(", ")
+        ));
+    }
     s.push_str(&format!(
         "  framing: {} gap(s) forced, {} byte(s) missing, {} desync(s), \
          {} recovery(ies), {} byte(s) skipped resynchronising, \
@@ -6049,6 +6083,135 @@ mod tests {
     }
 
     /// Ethernet + IPv4 carrying an arbitrary protocol number.
+    /// Round 2041 (item 356) — AN AXIS WITH NO CORROBORATION IS SAID, on both
+    /// surfaces, without touching the completeness verdict.
+    ///
+    /// # The harm, measured before anything changed
+    ///
+    /// A probe built this capture and asserted what the two documents said
+    /// about it: the nine checksum figures, and not one word naming the shape.
+    /// `DissectionHealth::any_checksum_invalid` could have answered and had no
+    /// shipping caller at all — R311y884 wrote that down and it was still true.
+    ///
+    /// # And the shape is this file's own default
+    ///
+    /// `ipv4_packet` and `eth_ipv4_proto` both write a ZERO header checksum,
+    /// which for IPv4 is not "absent" — the field is mandatory and has no
+    /// declining form, so zero is simply wrong. Every IPv4 fixture in this file
+    /// therefore sits with its whole IP axis in the invalid bucket. Item 356
+    /// asked how common the shape is; here it is universal, and until this
+    /// round nothing anywhere said so.
+    ///
+    /// # What is deliberately NOT done
+    ///
+    /// The verdict enumeration is untouched. `reasons()` judges the transport
+    /// axis alone because that is the layer the rows are built from, and an IP
+    /// leg there would flip `complete` on every capture through a NAT. This is
+    /// a finding printed beside the numbers; the exit code does not move.
+    #[test]
+    fn an_uncorroborated_layer_is_named_on_both_surfaces() {
+        let read = |sum: bool| {
+            let mut ip = ipv4_packet(17, [10, 0, 0, 1], [10, 0, 0, 2], &zenoh_udp(4));
+            if sum {
+                wz_packet_fixtures::fill_ipv4_checksum(&mut ip[..20]);
+            }
+            let mut d = crate::Dissection::new();
+            d.push_packet(crate::link::LINKTYPE_ETHERNET, 0, &eth(&ip));
+            d.finish();
+            d
+        };
+        let d = read(false);
+        let h = d.health();
+        assert!(
+            h.ip_checksum_invalid > 0 && h.ip_checksum_valid == 0,
+            "the fixture must put the IP axis entirely in the invalid bucket: {h:?}"
+        );
+        assert_eq!(
+            h.uncorroborated_layers(),
+            alloc::vec!["ip"],
+            "the IP axis and only the IP axis: {h:?}"
+        );
+        let text = health_text(&d);
+        let json = health_json(&d);
+        assert!(text.contains("ip 0 valid / 1 invalid"), "{text}");
+        assert!(
+            text.contains("NOT CORROBORATED: ip") && text.contains("rewrote the headers"),
+            "the page must name the layer AND where it sends a reader: {text}"
+        );
+        assert!(
+            json.contains("\"uncorroborated_layers\":[\"ip\"]"),
+            "and the machine rendering carries the same finding: {json}"
+        );
+        // THE VERDICT DOES NOT MOVE. This is the half of the round that is a
+        // decision rather than a repair: a capture through a rewriting device
+        // is not INCOMPLETE, and R311y884's reasoning for judging the transport
+        // axis alone stands.
+        // THE WHOLE LIST, not a containment claim. `reasons()` is a SET, so
+        // "does not contain" stays true while any other leg fires — and the
+        // defect this leg is about is a guard that got WIDER, which is exactly
+        // what containment cannot see. The pin is empty here: a capture whose
+        // only oddity is a rewritten IP header is COMPLETE.
+        let report = CaptureReport::of(&d);
+        assert_eq!(
+            report.reasons(),
+            alloc::vec![],
+            "an IP-only axis must not take the exit code, and nothing else in \
+             this fixture may either"
+        );
+
+        // CONTROL: the same frame with a CORRECT header checksum, so the
+        // fixture is measuring the axis and not the builder.
+        let sound = read(true);
+        let sh = sound.health();
+        assert!(
+            sh.ip_checksum_valid > 0 && sh.ip_checksum_invalid == 0,
+            "the control must corroborate its IP axis: {sh:?}"
+        );
+        assert!(
+            sh.uncorroborated_layers().is_empty(),
+            "and then nothing is uncorroborated: {sh:?}"
+        );
+        assert!(
+            !health_text(&sound).contains("NOT CORROBORATED"),
+            "the line is printed only when it fires -- a reassurance on every \
+             ordinary capture is the noise this reader refuses: {}",
+            health_text(&sound)
+        );
+        assert!(
+            health_json(&sound).contains("\"uncorroborated_layers\":[]"),
+            "but the KEY is always there, so its absence can never be read as \
+             `all corroborated`: {}",
+            health_json(&sound)
+        );
+
+        // ⚠ CHECKSUM OFFLOAD -- the leg the `valid == 0` guard exists for, and
+        // the one this test did not have until a surviving mutation said so.
+        // A host capturing its own transmit path sees the field before the NIC
+        // fills it, so SOME packets are present-and-wrong through no fault of
+        // the wire. A rule on `invalid > 0` would call that capture
+        // uncorroborated, which is the "true of almost everything" shape this
+        // reader's verdict enumeration already refuses.
+        let mut mixed = crate::Dissection::new();
+        for sum in [false, true] {
+            let mut ip = ipv4_packet(17, [10, 0, 0, 1], [10, 0, 0, 2], &zenoh_udp(4));
+            if sum {
+                wz_packet_fixtures::fill_ipv4_checksum(&mut ip[..20]);
+            }
+            mixed.push_packet(crate::link::LINKTYPE_ETHERNET, 0, &eth(&ip));
+        }
+        mixed.finish();
+        let mh = mixed.health();
+        assert!(
+            mh.ip_checksum_invalid > 0 && mh.ip_checksum_valid > 0,
+            "the offload fixture must hold BOTH answers: {mh:?}"
+        );
+        assert!(
+            mh.uncorroborated_layers().is_empty(),
+            "one verified checksum is corroboration -- this layer is not \
+             uncorroborated, it has some wrong packets: {mh:?}"
+        );
+    }
+
     fn eth_ipv4_proto(proto: u8, body: &[u8]) -> alloc::vec::Vec<u8> {
         let mut ip = alloc::vec::Vec::new();
         ip.push(0x45);
