@@ -2775,6 +2775,21 @@ fn render_listings(
                 out.push_str(&misbinding.sentence());
                 out.push('\n');
             }
+            // Round 2029 (item 298) — AND WHETHER THOSE SAMPLE COUNTS ARE
+            // WHOLE. Each sentence above says "N sample(s)", and the verdict
+            // is reached during the walk, so `--max-messages` cuts the tally
+            // as well as the listing. The FINDINGS survive — a rule bound to
+            // the wrong thing shows in the first few samples — and it is the
+            // numbers that go soft, which is why saying nothing was the
+            // dangerous shape. Printed only when a cap actually bit.
+            if !declarations.counts_are_exact() {
+                out.push_str(&format!(
+                    "  (those sample counts are a FLOOR: {} message(s) were not \
+                     walked because of --max-messages, so no rule was applied \
+                     to them)\n",
+                    declarations.unwalked()
+                ));
+            }
         }
         Format::Json => {
             out.push_str("\"fields\":[");

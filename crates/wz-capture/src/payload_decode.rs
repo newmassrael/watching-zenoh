@@ -75,6 +75,19 @@ pub struct Declarations<'a> {
     /// that is already bounded and would make the veto's honesty depend on a
     /// number nobody chose.
     rescans: RefCell<(usize, usize)>,
+    /// Round 2029 (item 298) — messages a listing CAP kept this run from
+    /// walking at all.
+    ///
+    /// The misbinding verdict is reached during the walk, so a message the cap
+    /// held back is a message no rule was ever applied to. The SET of
+    /// misbindings stays complete over the range that WAS walked; the per-key
+    /// sample counts become a floor, and until this round no row said so.
+    ///
+    /// ⚠ It is the counts that go soft, not the findings. A rule bound to the
+    /// wrong thing on a busy topic shows up in the first few samples, so the
+    /// list is the durable half — which is exactly why quietly truncating the
+    /// numbers beside it was the dangerous shape rather than a harmless one.
+    unwalked: RefCell<usize>,
 }
 
 /// R311y875 — what one misbinding IS, as a key: the topic, the rule's decoder,
@@ -92,7 +105,36 @@ impl<'a> Declarations<'a> {
             used: RefCell::new(BTreeSet::new()),
             misbound: RefCell::new(alloc::collections::BTreeMap::new()),
             rescans: RefCell::new((0, 0)),
+            unwalked: RefCell::new(0),
         }
+    }
+
+    /// Round 2029 (item 298) — record that a listing cap held one message back,
+    /// so no rule was applied to it.
+    ///
+    /// Called by the WALKER rather than by this module: the cap lives in the
+    /// listing and this type cannot see it. That is the coupling item 298
+    /// named — two surfaces each emitting their own `omitted` with nothing
+    /// joining them — and this is the join.
+    pub fn note_unwalked(&self) {
+        *self.unwalked.borrow_mut() += 1;
+    }
+
+    /// How many messages a cap kept this run from walking.
+    pub fn unwalked(&self) -> usize {
+        *self.unwalked.borrow()
+    }
+
+    /// Round 2029 (item 298) — whether [`Self::misbindings`]'s SAMPLE COUNTS
+    /// are the whole answer rather than a floor.
+    ///
+    /// `false` when a cap held any message back. Named for the same question
+    /// [`crate::interest::Coverage::unclaimed_exact`] and
+    /// [`crate::agg::KeyexprRow::anchors_exact`] answer, and deliberately the
+    /// same word: a reader who has learned what `_exact` means on one plane
+    /// should not have to learn it again here.
+    pub fn counts_are_exact(&self) -> bool {
+        self.unwalked() == 0
     }
 
     /// Round 2026 (item 289) — how many payloads the claim check re-walked, and
@@ -434,6 +476,17 @@ pub fn push_misbindings(declarations: Option<&Declarations<'_>>, out: &mut Strin
         }
     }
     out.push(']');
+    // Round 2029 (item 298) — AND WHETHER THOSE SAMPLE COUNTS ARE THE WHOLE
+    // ANSWER. The verdict is reached during the walk, so a listing cap
+    // truncates the tally as well as the listing; both surfaces already
+    // reported their own `omitted` and nothing joined the two.
+    //
+    // STRUCTURAL, and `true` when no ledger is present at all: with no rules
+    // there are no counts, and a consumer must not have to test for the key to
+    // learn whether the numbers beside it are a floor.
+    let exact = declarations.is_none_or(Declarations::counts_are_exact);
+    out.push_str(",\"payload_mapping_counts_exact\":");
+    out.push_str(if exact { "true" } else { "false" });
 }
 
 /// R311y701 (PF2) — what a keyexpr id is resolved AGAINST.

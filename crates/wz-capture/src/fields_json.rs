@@ -157,6 +157,14 @@ fn push_stream_flow(
         spaces.absorb_frame(frame);
         if cap.is_some_and(|c| shown >= c) {
             omitted += 1;
+            // Round 2029 (item 298) — TELL THE RULE RUN. The misbinding verdict
+            // is reached inside `push_walk` below, so a message held back here
+            // is one no rule was applied to: the tally beside the findings is
+            // a floor from this point on. Both surfaces already emitted their
+            // own `omitted` and nothing joined them, which is the item.
+            if let Some(d) = declarations {
+                d.note_unwalked();
+            }
             continue;
         }
         shown += 1;
@@ -243,6 +251,12 @@ fn push_datagram_flow(
         };
         if cap.is_some_and(|c| shown >= c) {
             omitted += 1;
+            // Item 298 — the datagram half of the same join. Both listings cap,
+            // so a fix on one of them would leave a capture of a UDP
+            // deployment reporting exact counts it does not have.
+            if let Some(d) = declarations {
+                d.note_unwalked();
+            }
             continue;
         }
         shown += 1;
@@ -731,6 +745,138 @@ mod tests {
     /// `start: 0` -- a number that is in range, looks plausible beside every
     /// other span in the row, and points at the message header.
     #[cfg(feature = "network-codecs")]
+    #[test]
+    fn the_misbinding_counts_say_they_are_a_floor_when_a_cap_bit() {
+        use crate::payload::formats::FormatMap;
+        use crate::payload_decode::Declarations;
+
+        // THREE samples on one topic, all under a rule that is wrong for them:
+        // declared JSON, and the rule says protobuf. Three so a cap of one has
+        // two messages to hold back.
+        let payload = br#"{"a":1}"#;
+        let mut framed = Vec::new();
+        for _ in 0..3 {
+            let push = crate::datagram_tests::frame_carrying(
+                &crate::payload::tests_support::push_declaring("demo/sensor", 5, payload),
+            );
+            framed.push(push.len() as u8);
+            framed.push(0);
+            framed.extend_from_slice(&push);
+        }
+        let mut d = Dissection::new();
+        d.push_packet(LINKTYPE_ETHERNET, 0, &tcp_packet(1000, &framed));
+        d.finish();
+        let file = crate::pcap::write(1, &[(0, 0, tcp_packet(1000, &framed).as_slice())]);
+
+        let mut map = FormatMap::new();
+        map.declare("demo/**=protobuf").expect("a keyexpr pattern");
+
+        // UNCAPPED: every message walked, so the count beside the finding is
+        // the whole answer.
+        let whole = Declarations::new(&map);
+        let out = fields_json(&d, &file, None, Some(&whole));
+        assert_eq!(whole.unwalked(), 0, "nothing was held back: {out}");
+        assert!(whole.counts_are_exact(), "so the counts are exact: {out}");
+        assert!(
+            out.contains("\"payload_mapping_counts_exact\":true"),
+            "and the document says so: {out}"
+        );
+        // THE POPULATION. Without a finding to qualify, everything above and
+        // below is true of an empty array.
+        let found = whole.misbindings();
+        assert_eq!(found.len(), 1, "one rule is misbound: {found:?}");
+        assert_eq!(found[0].samples, 3, "over all three samples: {found:?}");
+
+        // CAPPED AT ONE: two messages are never walked, so no rule is applied
+        // to them and the count is a floor.
+        let capped = Declarations::new(&map);
+        let out = fields_json(&d, &file, Some(1), Some(&capped));
+        assert_eq!(
+            capped.unwalked(),
+            2,
+            "the cap held two messages back: {out}"
+        );
+        assert!(!capped.counts_are_exact());
+        assert!(
+            out.contains("\"payload_mapping_counts_exact\":false"),
+            "and the document must SAY the counts are a floor -- this is item \
+             298: {out}"
+        );
+        // ⚠ THE FINDING SURVIVES AND THE NUMBER DOES NOT. That asymmetry is
+        // the whole reason the flag is worth having: a reader who saw
+        // `samples: 1` with nothing beside it would take a three-sample
+        // misbinding for a one-off.
+        let found = capped.misbindings();
+        assert_eq!(found.len(), 1, "the rule is still named: {found:?}");
+        assert_eq!(found[0].samples, 1, "but the count is short: {found:?}");
+    }
+
+    /// ITEM 298, THE DATAGRAM DOOR — both listings cap, so both must say so.
+    ///
+    /// # Why this leg exists, as what happened rather than as a principle
+    ///
+    /// The stream witness above landed green, and removing the datagram
+    /// listing's `note_unwalked` SURVIVED the whole suite. Four rounds running
+    /// now, the first witness has been written against whichever door was
+    /// convenient and the other has gone unasked — 2013 at `push_fragment`,
+    /// 2014 at the reassembly door, 2019 at the space check, and this.
+    ///
+    /// A UDP deployment is not the exotic case here: multicast scouting and
+    /// every `udp/...` link land in this listing, so a capture of one would
+    /// have reported exact counts it did not have.
+    #[test]
+    fn the_datagram_listing_says_its_counts_are_a_floor_too() {
+        use crate::payload::formats::FormatMap;
+        use crate::payload_decode::Declarations;
+
+        // Three samples on one topic, each its own datagram, all declared JSON
+        // under a protobuf rule.
+        let payload = br#"{"a":1}"#;
+        let mut packets = Vec::new();
+        for _ in 0..3 {
+            packets.push(udp_packet(
+                [10, 0, 0, 1],
+                43210,
+                [10, 0, 0, 2],
+                7447,
+                &crate::datagram_tests::frame_carrying(
+                    &crate::payload::tests_support::push_declaring("demo/sensor", 5, payload),
+                ),
+            ));
+        }
+        let mut d = Dissection::new();
+        for (i, p) in packets.iter().enumerate() {
+            d.push_packet(LINKTYPE_ETHERNET, i, p);
+        }
+        d.finish();
+        let refs: Vec<(u32, u32, &[u8])> = packets
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (i as u32, 0u32, p.as_slice()))
+            .collect();
+        let file = crate::pcap::write(1, &refs);
+
+        let mut map = FormatMap::new();
+        map.declare("demo/**=protobuf").expect("a keyexpr pattern");
+
+        // THE POPULATION FIRST, on the uncapped run: without three misbound
+        // samples in the DATAGRAM listing this leg is about nothing.
+        let whole = Declarations::new(&map);
+        let out = fields_json(&d, &file, None, Some(&whole));
+        let found = whole.misbindings();
+        assert_eq!(found.len(), 1, "one rule is misbound: {found:?}\n{out}");
+        assert_eq!(found[0].samples, 3, "over all three: {found:?}");
+        assert_eq!(whole.unwalked(), 0);
+
+        let capped = Declarations::new(&map);
+        let out = fields_json(&d, &file, Some(1), Some(&capped));
+        assert_eq!(capped.unwalked(), 2, "the cap held two back: {out}");
+        assert!(
+            out.contains("\"payload_mapping_counts_exact\":false"),
+            "the datagram listing must say its counts are a floor too: {out}"
+        );
+    }
+
     #[test]
     fn a_declared_format_decodes_the_payload_and_the_spans_are_the_messages() {
         use crate::payload::formats::FormatMap;

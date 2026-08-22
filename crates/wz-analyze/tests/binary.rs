@@ -4300,8 +4300,22 @@ fn a_message_level_failure_is_a_row_and_a_flow_level_one_is_a_note() {
     );
     assert!(notes.is_empty(), "and it is NOT also a note: {json}");
     assert!(
-        mapping.trim_end_matches([']', '}']).is_empty(),
+        // Round 2029 (item 298) — the array is followed by
+        // `payload_mapping_counts_exact`, so the tail this trims is no longer
+        // only brackets. Split at the new key rather than widening the trim
+        // set: a trim that swallowed more characters would keep passing on an
+        // array that had stopped being empty.
+        mapping
+            .split_once("],\"payload_mapping_counts_exact\":")
+            .map(|(array, _)| array)
+            .unwrap_or(mapping)
+            .is_empty(),
         "and no rule is misbound in this capture: {json}"
+    );
+    assert!(
+        json.contains("\"payload_mapping_counts_exact\":true"),
+        "and with no cap in force the counts beside it are the whole answer: \
+         {json}"
     );
 
     // FLOW level: a datagram flow with nothing walkable in it.
