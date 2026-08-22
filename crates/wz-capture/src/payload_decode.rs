@@ -1253,6 +1253,163 @@ mod tests {
         );
     }
 
+    /// A THIRD-PARTY FORMAT: the shape this trait is an extension point FOR.
+    ///
+    /// Item 280 — it does NOT override `encodings()`, which is the whole
+    /// subject. Every built-in names its own, so the default arm has users
+    /// (anyone implementing this trait for a proprietary format) and, until
+    /// Round 2023, no witness.
+    ///
+    /// The decoder is deliberately trivial and self-identifying: one field
+    /// whose value is the byte count. What is under test is the CLAIM
+    /// arbitration, not a parser.
+    struct Proprietary;
+
+    impl crate::payload::formats::PayloadFormat for Proprietary {
+        fn name(&self) -> &str {
+            "acme-telemetry"
+        }
+        fn decode(
+            &self,
+            payload: &[u8],
+        ) -> Result<
+            alloc::vec::Vec<crate::payload::formats::PayloadField>,
+            crate::payload::formats::PayloadFormatError,
+        > {
+            Ok(vec![crate::payload::formats::PayloadField {
+                path: String::from("len"),
+                // `None` as a decoder returns it, which is the invariant
+                // `PayloadField::name` states: a name comes from a
+                // declaration, never from a decoder.
+                name: None,
+                value: alloc::format!("{} byte(s)", payload.len()),
+                start: 0,
+                end: payload.len(),
+            }])
+        }
+        // `encodings()` NOT overridden — see the struct doc.
+    }
+
+    /// ITEM 280 — A FORMAT THAT DECLINES TO NAME ITS ENCODINGS IS APPLIED
+    /// WHATEVER THE PUBLISHER DECLARED.
+    ///
+    /// # The arm
+    ///
+    /// `judge_claim` returns `Claim::Agrees` the moment `encodings()` is
+    /// `None`, before it looks at the declaration at all. That is the
+    /// documented meaning — the opt-out restores the behaviour that existed
+    /// before encodings were checked — and it is the arm a third-party format
+    /// actually takes, because only a format that knows its own MIME names can
+    /// name them.
+    ///
+    /// Nothing drove it. Every built-in overrides `encodings()`, so every
+    /// existing test enters `judge_claim` past that line.
+    ///
+    /// # The three declarations, and why the third is not optional
+    ///
+    /// A publisher saying nothing (`zenoh/bytes`), one declaring a MIME the
+    /// format has never heard of, and one declaring a MIME whose bytes ITSELF
+    /// contradicts. The third is the discriminator: for a format that DOES name
+    /// its encodings that case ends in `Claim::Refuted` and the rule still
+    /// applies but the report says `despite_encoding`. For a format that
+    /// declines, there is no claim to refute and no qualification to print —
+    /// and a fix that routed the opt-out through `inspect` anyway would pass
+    /// the first two legs and fail this one.
+    #[test]
+    fn a_format_that_names_no_encodings_is_applied_whatever_was_declared() {
+        let acme = Proprietary;
+        let mut map = FormatMap::new();
+        map.insert("demo/**", &acme).expect("a keyexpr pattern");
+        let spaces = KeyexprSpaces::new();
+        let at = KeyexprAt::new(Direction::A, &spaces);
+        let run = Declarations::new(&map);
+
+        // JSON bytes, so the `ENC_JSON` leg is a declaration its own bytes
+        // AGREE with — the case a naive opt-out is likeliest to get wrong by
+        // deferring to `inspect` and finding nothing to refute.
+        let body: &[u8] = b"{\"a\":1}";
+
+        for (what, encoding) in [
+            ("said nothing", ENC_ZENOH_BYTES),
+            ("declared JSON, and meant it", ENC_JSON),
+        ] {
+            match decode_payload(&put_declaring(encoding, body), &run, at) {
+                PayloadDecoding::Decoded {
+                    ref fields,
+                    ref despite_encoding,
+                    ..
+                } => {
+                    assert_eq!(
+                        fields.first().map(|f| f.value.as_str()),
+                        Some("7 byte(s)"),
+                        "{what}: the third-party format ran: {fields:?}"
+                    );
+                    assert_eq!(
+                        despite_encoding.as_deref(),
+                        None,
+                        "{what}: a format that names no encodings has no claim \
+                         to be acting DESPITE -- printing one would tell the \
+                         reader this decode overrode something"
+                    );
+                }
+                other => panic!("{what}: the rule must apply: {other:?}"),
+            }
+        }
+
+        // THE DISCRIMINATOR. Bytes that are NOT JSON under a `application/json`
+        // label: for a format that names its encodings this is
+        // `Claim::Refuted` and the report says so. Here there is no claim, so
+        // the decode is unqualified — same as the two legs above, which is
+        // exactly the point.
+        let protobuf: &[u8] = &[0x08, 0x2a];
+        match decode_payload(&put_declaring(ENC_JSON, protobuf), &run, at) {
+            PayloadDecoding::Decoded {
+                ref fields,
+                ref despite_encoding,
+                ..
+            } => {
+                assert_eq!(fields.first().map(|f| f.value.as_str()), Some("2 byte(s)"));
+                assert_eq!(
+                    despite_encoding.as_deref(),
+                    None,
+                    "there is no claim here to be acting despite: the format \
+                     declined to name encodings, so nothing was contradicted"
+                );
+            }
+            other => panic!("the rule must apply here too: {other:?}"),
+        }
+
+        // THE CONTROL, and the reason this test is not just describing itself:
+        // a format that DOES name its encodings reports the same declaration
+        // differently. Without this leg, `despite_encoding == None` above could
+        // mean the field is never populated by anything.
+        //
+        // ⚠ The pairing is the REFUTED one and not any mismatch. A format that
+        // names its encodings meeting a declaration it does not accept has two
+        // outcomes: `Claim::Refuted` when `inspect` can prove the label false —
+        // which decodes, qualified — and `Claim::Vetoes` when it cannot, which
+        // returns `EncodingMismatch` and decodes nothing. The first draft of
+        // this control picked the second (JSON bytes labelled protobuf, which
+        // `inspect` cannot refute because protobuf is opaque) and failed for a
+        // reason that had nothing to do with item 280.
+        let mut named = FormatMap::new();
+        named
+            .declare("demo/**=protobuf")
+            .expect("a keyexpr pattern");
+        let named_run = Declarations::new(&named);
+        match decode_payload(&put_declaring(ENC_JSON, protobuf), &named_run, at) {
+            PayloadDecoding::Decoded {
+                ref despite_encoding,
+                ..
+            } => assert!(
+                despite_encoding.is_some(),
+                "a format that NAMES its encodings does qualify its decode, so \
+                 `None` above is a decision and not an empty field"
+            ),
+            other => panic!("the control must decode: {other:?}"),
+        }
+    }
+
     /// R311y874 — A DECLARATION ITS OWN BYTES CONTRADICT DOES NOT GET TO VETO
     /// THE RULE.
     ///
