@@ -6078,3 +6078,83 @@ fn an_auth_extension_is_dissected_into_the_methods_it_carries() {
          {json}"
     );
 }
+
+/// Round 2000 — THE TWO DOORS ONTO THE REPORT AGREE, and until now nothing
+/// said so.
+///
+/// Round 1999 split `analyze_request` into "build a dissection from capture
+/// bytes" and [`wz_analyze::analyze_dissection`], "report on one somebody else
+/// built", because a live tap has no capture file to hand over. Every test in
+/// this workspace came through the first door; the live arm is the only caller
+/// of the second, and it cannot be driven without `CAP_NET_RAW`.
+///
+/// That is exactly R311y863's finding one layer up: two doors onto one walk,
+/// only one of them reached, and the failure mode is not a crash but a report
+/// that quietly differs. A step added to `analyze_request` after the
+/// construction would be invisible to the live path and to every test.
+///
+/// Compared on the RENDERED REPORT rather than on a field of it: the whole
+/// claim is that the two produce the same document, and any narrower assertion
+/// picks a part and leaves the rest unwitnessed. The capture is the decrypting
+/// one, so the comparison covers the key-log pass, the field walk and the
+/// census planes rather than a summary line.
+///
+/// ⚠ WHAT THIS FIXTURE CANNOT DISCRIMINATE, measured by mutating the file door
+/// three ways rather than assumed. Building it under
+/// `DissectionLimits::for_live_tap` unconditionally: NO DIVERGENCE, because the
+/// caps never bite on a capture this small. Declaring udp/7447 to be QUIC: NO
+/// DIVERGENCE, because this is a TLS-over-TCP capture with no datagram flow to
+/// declare. Declaring the capture's OWN link type (1, Ethernet) to be raw
+/// serial: RED, which is what says the comparison has teeth at all.
+///
+/// So this leg covers a construction argument that reaches THIS capture and a
+/// step added after construction. It does not cover the bounded axis or the
+/// QUIC axis, and a second fixture is what would.
+#[test]
+fn the_two_doors_onto_the_report_agree() {
+    let (file, log, _) = capture_and_key_log();
+    let request = wz_analyze::Request {
+        capture: &file,
+        keylog: Some(log.as_bytes()),
+        format: wz_analyze::Format::Text,
+        per_flow: true,
+        per_message: true,
+        messages_per_flow: None,
+        quic_ports: &[],
+        quic_cid_len: None,
+        payload_rules: &[],
+        payload_field_names: &[],
+        serial_linktypes: &[],
+        census: wz_analyze::Census::all(),
+        per_field: true,
+        bounded: false,
+        health: true,
+        select: None,
+    };
+
+    let (through_bytes, bytes_outcome) =
+        wz_analyze::analyze_request(&request).expect("the file door");
+
+    // The caller's door, handed a dissection built with the SAME declarations
+    // `analyze_request` would have used. Building it differently would make
+    // this a test about construction arguments rather than about the two doors.
+    let built = wz_capture::Dissection::from_capture_declaring(&file, &[], &[])
+        .expect("the same capture, dissected by the caller");
+    let (through_dissection, dissection_outcome) =
+        wz_analyze::analyze_dissection(built, &request).expect("the caller's door");
+
+    assert_eq!(
+        through_bytes, through_dissection,
+        "the two doors onto the report must render the same document"
+    );
+    assert_eq!(
+        bytes_outcome.complete, dissection_outcome.complete,
+        "and reach the same verdict about completeness"
+    );
+    // A positive control on the comparison itself: an empty report would make
+    // the assertion above pass while proving nothing about either door.
+    assert!(
+        through_bytes.contains("messages decoded:"),
+        "the fixture must actually produce a report: {through_bytes}"
+    );
+}
