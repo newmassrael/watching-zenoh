@@ -1494,6 +1494,16 @@ mod tests {
     /// so is the deliverable; a comparison that answered anyway would be
     /// confident about nothing, which is the defect item 270 exists to end
     /// rather than to relocate.
+    ///
+    /// ⚠ GATED ON `filter-wildcards`, and the reason is different from the
+    /// wildcard Round 2018 removed from two other fixtures. There the wildcard
+    /// was incidental and a literal keyexpr said the same thing. Here it is the
+    /// SUBJECT: this leg needs ONE declaration matching TWO rows, one per
+    /// direction, and only a pattern can do that. Without the matcher the
+    /// declaration is `undecidable` and there is no match to inspect — so the
+    /// honest answer is to declare the dependency rather than to weaken the
+    /// fixture until it no longer asks the question.
+    #[cfg(feature = "filter-wildcards")]
     #[test]
     fn a_window_and_a_row_in_different_stream_directions_are_not_compared() {
         use crate::datagram_tests::{tcp_packet, tcp_packet_reverse};
