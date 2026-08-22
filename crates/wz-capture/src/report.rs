@@ -6939,6 +6939,143 @@ mod tests {
         );
     }
 
+    /// Ethernet framing with NO padding to 60 bytes.
+    ///
+    /// Item 262 measures header COST, and the padded [`eth`] would add up to
+    /// 46 bytes of zeroes to every inner frame — noise that swamps the very
+    /// difference being measured.
+    fn eth_exact(ip: &[u8]) -> alloc::vec::Vec<u8> {
+        let mut frame = alloc::vec![0u8; 12];
+        frame.extend_from_slice(&0x0800u16.to_be_bytes());
+        frame.extend_from_slice(ip);
+        frame
+    }
+
+    /// A chain of `n` carriers of one KIND around `payload`, plus the bytes of
+    /// header that chain cost.
+    ///
+    /// Item 262 — the cost is returned rather than asserted here so the test
+    /// below can compare kinds. It is derived (whole packet minus the payload
+    /// it wraps), not counted by hand, because a hand-counted header size is
+    /// the transcription this workspace keeps paying for.
+    fn carrier_chain(kind: &str, n: usize, payload: &[u8]) -> (alloc::vec::Vec<u8>, usize) {
+        let mut body = payload.to_vec();
+        for i in 0..n {
+            let (a, b) = ([10, 0, i as u8, 1], [10, 0, i as u8, 2]);
+            body = match kind {
+                "ipip" => ipv4_packet(4, a, b, &body),
+                // GRE whose payload is an IP packet: four bytes of GRE on top
+                // of the IPv4 header carrying it.
+                "gre" => ipv4_packet(47, a, b, &gre(0, 0x0800, &[], &body)),
+                // GRETAP: the same, plus a whole Ethernet header, because the
+                // payload is a FRAME. One carrier by the bound's unit; two
+                // headers by any other measure -- which is item 262.
+                "gretap" => ipv4_packet(47, a, b, &gre(0, 0x6558, &[], &eth_exact(&body))),
+                other => panic!("unknown carrier kind {other}"),
+            };
+        }
+        let cost = body.len() - payload.len();
+        (eth_exact(&body), cost)
+    }
+
+    /// ITEM 262 — THE BOUND'S UNIT IS A CARRIER, AND THAT IS NOW WRITTEN DOWN.
+    ///
+    /// # The item
+    ///
+    /// `MAX_ENCAPSULATION_DEPTH` counts CARRIERS. R311y864 made a GRE carrier
+    /// cost one of the four, and R311y864's own carry said so was a choice
+    /// nobody had recorded: the bound was written when every carrier was an IP
+    /// header, and a GRE carrier's header is not the same size — a GRETAP one
+    /// is not even the same SHAPE, since it adds a whole Ethernet header the
+    /// bound never sees.
+    ///
+    /// # What closing it means
+    ///
+    /// Not changing the unit. A carrier is the right unit for what the bound
+    /// protects — the walk's RECURSION, which is per carrier whatever the
+    /// header costs — and byte-counting would bound a different thing while
+    /// making the limit depend on optional GRE fields a sender controls.
+    ///
+    /// What was missing is the RECORD, and a record nobody can check is the
+    /// same class of nothing. So the asymmetry is measured here: the same four
+    /// carriers cost materially different numbers of header bytes, all three
+    /// are admitted, and one more of any of them is refused. A round that
+    /// changes the unit will fail this test and have to say what it did.
+    #[test]
+    fn the_depth_bound_counts_carriers_whatever_a_carrier_costs() {
+        let inner = ipv4_packet(17, [192, 168, 0, 1], [192, 168, 0, 2], &zenoh_udp(4));
+        let bound = crate::link::MAX_ENCAPSULATION_DEPTH;
+
+        // What ONE carrier of each kind costs, derived from the protocols
+        // rather than transcribed from a run: an IPv4 header is 20 bytes
+        // (RFC 791, no options); a GRE carrier is that plus GRE's four fixed
+        // bytes (RFC 2784 §2.1, no optional fields); a GRETAP carrier is that
+        // plus a whole Ethernet header, because its payload is a FRAME.
+        const IPV4: usize = 20;
+        const GRE_FIXED: usize = 4;
+        const ETHERNET: usize = 14;
+        let per_carrier = |kind: &str| match kind {
+            "ipip" => IPV4,
+            "gre" => IPV4 + GRE_FIXED,
+            "gretap" => IPV4 + GRE_FIXED + ETHERNET,
+            other => panic!("unknown carrier kind {other}"),
+        };
+
+        let mut costs: alloc::vec::Vec<(&str, usize)> = alloc::vec::Vec::new();
+        for kind in ["ipip", "gre", "gretap"] {
+            let (at_bound, cost) = carrier_chain(kind, bound, &inner);
+            let mut d = crate::Dissection::new();
+            d.push_packet(crate::link::LINKTYPE_ETHERNET, 0, &at_bound);
+            d.finish();
+            assert_eq!(
+                d.datagram_flows().len(),
+                1,
+                "{kind}: {bound} carriers is AT the bound and must read: {:?}",
+                d.skip_census()
+            );
+            assert_eq!(d.datagram_flows()[0].frames.len(), 4, "{kind}");
+            assert_eq!(
+                d.datagram_flows()[0].carriers().tunnels()[0].hops().len(),
+                bound,
+                "{kind}: and all {bound} are recorded as carriers"
+            );
+
+            let (past, _) = carrier_chain(kind, bound + 1, &inner);
+            let mut over = crate::Dissection::new();
+            over.push_packet(crate::link::LINKTYPE_ETHERNET, 0, &past);
+            over.finish();
+            assert_eq!(
+                over.skip_census().encapsulation_too_deep,
+                1,
+                "{kind}: one more is past it, and the unit does not change \
+                 with the kind"
+            );
+            costs.push((kind, cost));
+        }
+
+        // THE ASYMMETRY, as numbers rather than as a sentence. Equal counts,
+        // unequal costs -- precisely the choice item 262 says nobody wrote
+        // down. Each expectation is `bound × what that carrier's headers are`,
+        // so this reads as an arithmetic a reader can check against the RFCs
+        // rather than as three figures somebody once observed.
+        let expected: alloc::vec::Vec<(&str, usize)> = ["ipip", "gre", "gretap"]
+            .into_iter()
+            .map(|k| (k, bound * per_carrier(k)))
+            .collect();
+        assert_eq!(
+            costs, expected,
+            "the same {bound} carriers cost different header bytes by kind, \
+             and the bound spends one of its four on each regardless"
+        );
+        // Stated as an ordering too, because the equality above would still
+        // hold if every kind were changed to the same shape -- and the whole
+        // record is that they are NOT the same shape.
+        assert!(
+            costs[0].1 < costs[1].1 && costs[1].1 < costs[2].1,
+            "{costs:?}"
+        );
+    }
+
     /// R311y864 — zenoh inside a GRE tunnel is READ, at every optional-field
     /// combination.
     ///

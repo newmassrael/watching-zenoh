@@ -147,15 +147,44 @@ const IP_PROTO_IPV6_IN_IP: u8 = 41;
 /// holding such a capture.
 const IP_PROTO_GRE: u8 = 47;
 
-/// R311y862 — how many nested IP headers this reader will walk.
+/// R311y862 — how many nested CARRIERS this reader will walk.
 ///
 /// A BOUND and not a recursion, for the reason every other limit in this crate
 /// exists: the depth is read out of the packet, so a crafted chain of headers
 /// would otherwise decide how much work this function does. Four is far past
 /// any real deployment — one tunnel is ordinary, two is a tunnel inside a VPN,
-/// and nothing this workspace has seen goes further — and a chain beyond it is
-/// reported as an encapsulation this reader did not walk, which is the same
-/// answer as for GRE and is honest for the same reason.
+/// and nothing this workspace has seen goes further.
+///
+/// Round 2013 (item 256) — a chain beyond it is
+/// [`SkipReason::EncapsulationTooDeep`] and NOT `Encapsulation`. This doc used
+/// to end "which is the same answer as for GRE and is honest for the same
+/// reason", and it was neither: GRE is a tunnel this build opens, so answering
+/// a too-deep chain with its number told a reader to write a parser that
+/// already exists.
+///
+/// # The unit is a CARRIER, and that is a choice — Round 2015 (item 262)
+///
+/// It was made when every carrier was an IP header and left unrecorded when
+/// GRE arrived, which is what item 262 named. Recorded now, with what it costs.
+///
+/// A carrier is the right unit for what this bound protects: the walk's own
+/// RECURSION, which advances once per carrier whatever that carrier's header
+/// weighs. Bounding header BYTES instead would bound a different thing, and it
+/// would make the limit depend on GRE's optional fields — Key, Sequence,
+/// Checksum — which the sender chooses. A bound a sender can move is not one.
+///
+/// The price is that four carriers is not one amount of parsing.
+/// `the_depth_bound_counts_carriers_whatever_a_carrier_costs` measures it:
+/// four IPIP carriers are 80 header bytes, four GRE 96, four GRETAP 152,
+/// because a GRETAP carrier carries a whole Ethernet header the count never
+/// sees. The spread is under a factor of two and every arm is bounded, which is
+/// why the unit stands — but it stands as a decision with a number on it rather
+/// than as the way it happened to be written.
+///
+/// ⚠ It is also NOT the only carrier bound. `Dissection::push_fragment` holds a
+/// separate one, on a different subject — how many times a completed datagram
+/// turns out to be another fragment — and open-debt item 257 is where the two
+/// are told apart.
 pub(crate) const MAX_ENCAPSULATION_DEPTH: usize = 4;
 
 /// R311y862 — IP protocol numbers whose body is ANOTHER packet.
