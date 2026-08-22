@@ -4100,6 +4100,37 @@ layer_c1af_cargo_test_shm() {
     # the test is not compiled there at all.
     _runci_guarded_test C1af 27 cargo test -p wz-session-core --features session-extshm,dissect --lib shm --quiet \
         || return 1
+    # Round 2037, open-debt item 330 — THE TRANSPORT-OAM BATCH WALK, which no
+    # lane in this file was running.
+    #
+    # `is_credible_transport_header` refuses `T_MID_OAM` on purpose, and the
+    # decision (`oam_is_a_transport_mid_this_gate_still_refuses`, in wz-codecs)
+    # rests on a compensation: the DECODER still names an OAM and reports its
+    # length, so a batch walk steps over one and reaches what follows. Two
+    # tests assert exactly that -- and they sit behind `codec-keep-alive`,
+    # which `dissect` pulls in and which NO `cargo test -p wz-session-core`
+    # invocation in this file selects. The leg above is the only one that turns
+    # the feature on at all and it filters on `shm`, so both were compiled by
+    # C1bf's clippy and RUN BY NOTHING.
+    #
+    # That is this workspace's standing hazard landing on a load-bearing test:
+    # the half of a measured decision that makes the refusal survivable was
+    # asserted by a suite nobody executed. A name pin would say they EXIST;
+    # this runs them.
+    #
+    # SCOPED TO `passive::` DELIBERATELY, and the scope was measured rather
+    # than guessed. A plain `oam` filter selects EIGHT here, and six of those
+    # already run: five `dissect::tests::` ones through C1bn's `dissect::` leg,
+    # and the `ext_admit` one in the default build. Only the two `passive::`
+    # walkers were unreached, so this leg claims those and no more -- a count
+    # that swept in already-covered tests would move whenever THEIR lane did.
+    #
+    # ⚠ THE FILTER WAS RUN BEFORE THE COUNT WAS WRITTEN, which the comment on
+    # the leg above asks for in as many words (open-debt 400). The first draft
+    # said `a_transport_oam` and 2, and that filter selects ONE: the sibling is
+    # `an_oam_id_wider_than_u16_...`. `batch_walk` is what both names share.
+    _runci_guarded_test C1af 2 cargo test -p wz-session-core --features dissect --lib batch_walk --quiet \
+        || return 1
     _runci_guarded_test C1af 3 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_provider --quiet \
         || return 1
     # R311y507 — 2 -> 5. The target gained the challenge-response over a real

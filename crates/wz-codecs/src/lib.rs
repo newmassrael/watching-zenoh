@@ -1108,6 +1108,31 @@ mod transport_header_space {
     /// from 5 to 14 at 65536. A reader that recovers nothing is worse at
     /// reading OAMs than one that will not resume on their header.
     ///
+    /// # The OTHER price, measured at Round 2037 (open-debt item 330)
+    ///
+    /// Everything above is what ADMITTING the MID costs. What REFUSING it
+    /// costs — how often a reader must resume framing on a transport OAM —
+    /// went uncounted for the life of this decision, and item 330 was filed
+    /// against exactly that gap.
+    ///
+    /// Counted, at zenoh pin `49c8a53`, by reading upstream rather than
+    /// recalling it: `TransportBody::OAM` is constructed nowhere in that tree
+    /// except `TransportBody::rand`'s generator
+    /// (`zenoh-protocol/src/transport/mod.rs:161`). The two live OAM senders
+    /// — `zenoh/src/net/protocol/network.rs:358` and
+    /// `routing/hat/p2p_peer/gossip.rs:229` — both build `NetworkBody::OAM`,
+    /// which is the NETWORK OAM and rides inside a Frame. So a peer of that
+    /// vintage puts no transport OAM on the wire at all, and the frequency
+    /// this refusal costs is zero against that traffic.
+    ///
+    /// ⚠ NOTHING IN THIS WORKSPACE GATES THAT, and the reason is the same one
+    /// `wz_session_core::ext_name::DECLARED_EMPTY` states: upstream is a
+    /// REFERENCE and not a dependency here, so a check that read it would be
+    /// green on one machine and unrunnable on the next. The pin is written
+    /// into this paragraph so the count can be retaken rather than trusted.
+    /// If a later vintage gains a transport-OAM sender, this half of the
+    /// decision is what changes.
+    ///
     /// # What is NOT given up
     ///
     /// The decoder's reach. `parse_inbound` names an OAM and reports its
@@ -1116,6 +1141,16 @@ mod transport_header_space {
     /// asymmetry is the same one
     /// `the_header_gate_and_the_decoder_disagree_on_reserved_bits_and_on_oam`
     /// already documents for reserved bits, with a second reason.
+    ///
+    /// ⚠ Round 2037 — and that compensation is asserted by
+    /// `passive::tests::a_transport_oam_is_measured_so_the_batch_walk_reaches_what_follows_it`
+    /// and its `an_oam_id_wider_than_u16_...` sibling, which until this round
+    /// NO LANE RAN. They sit behind `codec-keep-alive`, which `dissect` pulls
+    /// in and which no `cargo test -p wz-session-core` invocation in
+    /// `run-ci.sh` selected without a filter that excluded them, so C1bf's
+    /// clippy compiled them and nothing executed them. Layer C1af runs them
+    /// now. The half of this decision that makes the refusal survivable was
+    /// resting on a green suite nobody was running.
     #[test]
     fn oam_is_a_transport_mid_this_gate_still_refuses() {
         assert_eq!(
