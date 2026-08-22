@@ -7752,7 +7752,7 @@ layer_c1bz_docs_resolve() {
         wz-mcu-session-acceptor:4
         wz-routing-graph:6
         wz-runtime-coop:12
-        wz-runtime-tokio:524
+        wz-runtime-tokio:523
         wz-session-core:538
         wz-session-lwip:4
         wz-switchboard-codegen:8

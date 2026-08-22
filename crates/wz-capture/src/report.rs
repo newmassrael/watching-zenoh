@@ -7226,7 +7226,15 @@ mod tests {
 
         let declare = {
             let wire =
-                wz_session_core::declare_build::build_declare_subscriber(7, 0, Some("robot/**"))
+                // ⚠ A LITERAL keyexpr, not `robot/**`. Round 2016 used a
+                // wildcard, and without `filter-wildcards` the matcher cannot
+                // evaluate one: the declaration lands in `undecidable`, which
+                // the page renders as a COUNT and not as a row, so no line
+                // names any declarer and this test failed on hosted Layer C1bt
+                // while every default-feature build passed. The item is about
+                // naming the declarer; the wildcard was carrying a feature
+                // dependency that had nothing to do with it.
+                wz_session_core::declare_build::build_declare_subscriber(7, 0, Some("robot/arm"))
                     .expect("the production builder")
                     .try_as_borrowed()
                     .expect("re-borrow")
@@ -7297,7 +7305,7 @@ mod tests {
 
         let (text, json) = page(&named, true);
         assert!(
-            text.contains("a1a1a1a1 subscriber robot/**"),
+            text.contains("a1a1a1a1 subscriber robot/arm"),
             "the declarer must be NAMED on the page -- this IS item 268:\n{text}"
         );
         assert!(
@@ -7312,7 +7320,7 @@ mod tests {
         // ARM 2 -- reported, unprefixed, and NOT dropped.
         let (anon_text, anon_json) = page(&anonymous, true);
         assert!(
-            anon_text.contains("subscriber robot/**"),
+            anon_text.contains("subscriber robot/arm"),
             "a declaration whose declarer cannot be named is still a \
              declaration:\n{anon_text}"
         );
@@ -7323,7 +7331,7 @@ mod tests {
 
         // ARM 3 -- no node plane attached reads like arm 2.
         let (bare_text, bare_json) = page(&named, false);
-        assert!(bare_text.contains("subscriber robot/**"), "{bare_text}");
+        assert!(bare_text.contains("subscriber robot/arm"), "{bare_text}");
         assert!(!bare_text.contains("a1a1a1a1 subscriber"), "{bare_text}");
         assert!(bare_json.contains("\"declarer_zid\":null"), "{bare_json}");
     }
@@ -7388,7 +7396,12 @@ mod tests {
                     sport,
                     dst,
                     7447,
-                    &framed_declare(1, "robot/**"),
+                    // ⚠ LITERAL, for the reason item 268's leg above states:
+                    // a wildcard is `undecidable` without `filter-wildcards`,
+                    // the page then renders a COUNT instead of rows, and this
+                    // gate would pass with nothing to repeat — a
+                    // population-of-zero green wearing its own words.
+                    &framed_declare(1, "robot/arm"),
                 ),
             );
         }
