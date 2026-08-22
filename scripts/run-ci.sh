@@ -7732,11 +7732,13 @@ layer_c1bz_docs_resolve() {
         wz-mcu-session-acceptor:4
         wz-routing-graph:6
         wz-runtime-coop:12
-        # Round 1998 (item 470): 532 -> 524. The eight went with
-        # `raweth_socket` and `live_capture` when they moved to
-        # `wz-packet-socket` -- a count that FELL because code left, which the
-        # ratchet requires be written down in the same commit rather than left
+        # Round 1998 (item 470): 532 -> 524. The eight went with the
+        # raweth_socket and live_capture modules when they moved to
+        # wz-packet-socket -- a count that FELL because code left, which the
+        # ratchet requires be written down in the same push rather than left
         # as slack the next round could spend.
+        # (No backticks in this block: shellcheck reads them as legacy command
+        # substitution even inside a comment, and Layer 0 said so.)
         wz-runtime-tokio:524
         wz-session-core:538
         wz-session-lwip:4
