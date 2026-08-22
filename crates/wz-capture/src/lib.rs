@@ -5891,6 +5891,122 @@ mod datagram_tests {
         );
     }
 
+    /// Round 2006 (open-debt item 243) — WHO JUDGES THE `held` CLASS.
+    ///
+    /// R311y860 gave `total()` the property that a field in NO class falls out
+    /// of the sum and reds. That closed the hole for the census as a whole and
+    /// left it one step INSIDE: a field ADDED to `held` is summed, rendered,
+    /// and judged by nobody. `held` is the class whose fate is not the census's
+    /// to know -- its members are counted at the door and decided elsewhere --
+    /// so a member with no elsewhere is a skip that quietly means nothing.
+    ///
+    /// Two mechanisms, and neither works alone. The DESTRUCTURE makes a new
+    /// field a compile error here, so the table below cannot silently stop
+    /// covering the struct. The TABLE names, for each field the class actually
+    /// sums, the thing that judges it -- and the set is DERIVED by probing
+    /// `held()` rather than transcribed, so a field moved into the class
+    /// without a judge reds even though nobody edited this test.
+    ///
+    /// Deriving the set is the whole point: a transcript would agree with
+    /// itself. The population today is ONE, which is exactly why the gate must
+    /// be about the SET and not about a second member that does not exist.
+    #[test]
+    fn every_member_of_the_held_class_has_something_that_judges_it() {
+        // Each field the census counts, with the smallest edit that moves it.
+        // The destructure below is what keeps this list complete.
+        #[allow(clippy::type_complexity)]
+        let setters: &[(&str, fn(&mut SkipCensus))] = &[
+            ("unsupported_link_type", |c| c.unsupported_link_type = 1),
+            ("truncated", |c| c.truncated = 1),
+            ("not_ip", |c| c.not_ip = 1),
+            ("not_transport", |c| c.not_transport = 1),
+            ("ipv4_fragment", |c| c.ipv4_fragment = 1),
+            ("ip_fragment_pending", |c| c.ip_fragment_pending = 1),
+            ("vsock_non_payload", |c| c.vsock_non_payload = 1),
+            ("ipv6_extension_chain", |c| c.ipv6_extension_chain = 1),
+            ("ipv6_fragment", |c| c.ipv6_fragment = 1),
+            ("unwalked_encapsulation", |c| c.unwalked_encapsulation = 1),
+            ("gre_payload", |c| c.gre_payload = 1),
+        ];
+
+        // WHO decides the fate of each held member, named rather than assumed.
+        // A round that moves a field into `held` must add its row here, and
+        // writing the row is where it has to answer the question.
+        let judges: &[(&str, &str)] = &[(
+            "ip_fragment_pending",
+            "Dissection::unfinished_fragment_chains -- only the reassembly \
+             table knows how a chain ENDED",
+        )];
+
+        // The destructure: a field added to `SkipCensus` fails to compile here
+        // until someone lists it above and decides what class it is in.
+        let SkipCensus {
+            unsupported_link_type: _,
+            unsupported_link_types: _,
+            truncated: _,
+            not_ip: _,
+            not_transport: _,
+            ipv4_fragment: _,
+            ip_fragment_pending: _,
+            vsock_non_payload: _,
+            ipv6_extension_chain: _,
+            ipv6_fragment: _,
+            unwalked_encapsulation: _,
+            unwalked_encapsulations: _,
+            not_transport_protos: _,
+            gre_payload: _,
+            gre_payloads: _,
+        } = SkipCensus::default();
+
+        let held_members: alloc::vec::Vec<&str> = setters
+            .iter()
+            .filter(|(_, set)| {
+                let mut c = SkipCensus::default();
+                set(&mut c);
+                c.held() == 1
+            })
+            .map(|(name, _)| *name)
+            .collect();
+        let judged: alloc::vec::Vec<&str> = judges.iter().map(|(name, _)| *name).collect();
+        assert_eq!(
+            held_members, judged,
+            "every field `held()` sums must be named beside the thing that \
+             judges it -- a member with no judge is a skip that means nothing"
+        );
+
+        // THE PROBE IS ALIVE: the same derivation over a class with a different
+        // membership must NOT return the held set. Without this, a `held()`
+        // that returned 0 for everything would make the assertion above pass
+        // over two empty lists.
+        let absent_members: alloc::vec::Vec<&str> = setters
+            .iter()
+            .filter(|(_, set)| {
+                let mut c = SkipCensus::default();
+                set(&mut c);
+                c.bytes_absent() == 1
+            })
+            .map(|(name, _)| *name)
+            .collect();
+        assert!(
+            !held_members.is_empty() && !absent_members.is_empty(),
+            "the derivation must find members at all"
+        );
+        assert!(
+            absent_members.iter().all(|f| !held_members.contains(f)),
+            "the two classes must be disjoint, or the derivation is not \
+             reading the accessors it thinks it is"
+        );
+
+        // And every counter belongs to SOME class -- the property `total()`
+        // already carries, restated here so this test fails for the RIGHT
+        // reason when a field is added and left out of every accessor.
+        for (name, set) in setters {
+            let mut c = SkipCensus::default();
+            set(&mut c);
+            assert_eq!(c.total(), 1, "`{name}` is in no class at all");
+        }
+    }
+
     /// R311y643 (§1.1e) — the census counts EVERY skip, including the ones the
     /// capped list threw away.
     ///
