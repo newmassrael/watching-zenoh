@@ -95,9 +95,33 @@ WITNESSES = {
 # a flow count is not a witness for this, however green it is.
 COUNTERS = ("checksum_invalid", "checksum_valid")
 
-# A local bound from one of these is a FRAME, and a checksum covers it.
-BUILDER = re.compile(
-    r"let mut (\w+)\s*=\s*[\w:]*\b(?:tcp|udp)[a-z_0-9]*\s*\(", re.M
+# A local bound from a function CALL, whatever that function is named.
+#
+# R2043 (open-debt item 368) — the population used to be `tcp|udp` in the
+# callee's NAME, and a naming convention deciding a population is the shape
+# that fails in silence. MEASURED before this changed: ZERO locals in the tree
+# matched it, so every run reported "0 post-build edit(s) left unrepaired" over
+# nothing at all — and the `0` in that sentence was a literal, not a count, so
+# the emptiness could not be seen from the output either.
+#
+# The names it missed are ordinary: `padded_frame`, `frame`, `segment`,
+# `make_packet`. What separates a frame this arm has an opinion about from one
+# it does not is not the builder's name but its BEHAVIOUR — see
+# [`CHECKSUMMED_BUILDER`].
+BOUND_FROM_CALL = re.compile(r"let mut (\w+)\s*=\s*([\w:]*[a-z_0-9]+)\s*\(", re.M)
+
+# A builder whose body FILLS a checksum, which is what makes the frame it
+# returns one a later write can corrupt.
+#
+# R2043 (item 368) — derived rather than named, and the derivation is what
+# stops the widening from being wrong. `raweth_link.rs` builds a RAW ETHERNET
+# frame with `frame(..)` and rewrites its length field on purpose; there is no
+# IP or TCP checksum over those bytes, so a gate that claimed it by name would
+# report a defect that cannot exist. That builder fills nothing, and this
+# rule excludes it for the reason it should be excluded.
+FILLS_CHECKSUM = re.compile(r"\bfill_\w*checksum\s*\(")
+CHECKSUMMED_BUILDER = re.compile(
+    r"\bfn\s+([a-z_0-9]+)\s*\([^)]*\)[^{]*\{", re.M
 )
 # An indexed write into it. `lo` past the Ethernet header means the bytes are
 # inside what an IPv4 or TCP checksum covers.
@@ -105,6 +129,22 @@ INDEXED_WRITE = re.compile(r"(\w+)\[(\d+)\.\.(\d+)\]\s*\.copy_from_slice")
 ETHERNET_HEADER = 14
 # What makes such a write safe: the frame's sums are put back.
 REFILL = re.compile(r"(?:set_tcp_source_port|fill_\w*checksum)\s*\(")
+
+# The OTHER thing that makes it safe: the fixture asserts the frame no longer
+# verifies.
+#
+# R2043 (open-debt item 368) — found by the widened population on its FIRST
+# run, which is the best evidence the widening was real. `the_port_is_inside_
+# what_the_sum_covers` writes a port raw on purpose and asserts the sum breaks:
+# "a raw port write must break the sum, or this class is imaginary". That is
+# the negative control the repaired arm beside it depends on, and a gate that
+# demanded a refill there would delete the proof that the defect exists.
+#
+# Corrupting a frame and SAYING SO is a different act from corrupting one and
+# moving on. This escape is as loose as the refill one above and for the same
+# reason: this arm's population is small, and a rule that cannot express "on
+# purpose" turns a deliberate control into a lie.
+DELIBERATE = re.compile(r"\bassert_ne!\s*\(")
 
 # How far after the binding a write is still "this frame", and how far after the
 # write a refill still counts. Both generous: the sites this finds are inside
@@ -183,15 +223,42 @@ def witness_findings() -> list[str]:
     return findings
 
 
-def edit_findings() -> list[str]:
+def checksummed_builders(src: str) -> set[str]:
+    """Every function in `src` whose body fills a checksum.
+
+    R2043 (item 368) — a crude body scan on purpose: from each `fn name(` to
+    the next one, which is the same slicing this file's witness arm already
+    does. A builder that calls into a helper that fills is missed, and that
+    residue is STATED rather than hidden — what this replaces missed every
+    builder whose name lacked `tcp` or `udp`, which measured as all of them.
+    """
+    out: set[str] = set()
+    starts = [(m.group(1), m.end()) for m in CHECKSUMMED_BUILDER.finditer(src)]
+    for idx, (name, at) in enumerate(starts):
+        end = starts[idx + 1][1] if idx + 1 < len(starts) else len(src)
+        if FILLS_CHECKSUM.search(src[at:end]):
+            out.add(name)
+    return out
+
+
+def edit_findings(sources: list[tuple[str, str]] | None = None) -> tuple[list[str], int]:
+    """Findings, and HOW MANY candidate writes were examined.
+
+    R2043 (item 368) — the count is returned because the OK line used to
+    hardcode a zero. "0 unrepaired" over 0 candidates and over 40 read
+    identically, and this arm was the former for its whole life.
+    """
     findings: list[str] = []
-    for path in rust_files():
-        lines = path.read_text().splitlines()
+    examined = 0
+    files = sources if sources is not None else [(str(p.relative_to(ROOT)), p.read_text()) for p in rust_files()]
+    for rel, text in files:
+        lines = text.splitlines()
+        builders = checksummed_builders(text)
         # frame local -> line it was bound on
         bound: dict[str, int] = {}
         for i, line in enumerate(lines):
-            m = BUILDER.search(line)
-            if m:
+            m = BOUND_FROM_CALL.search(line)
+            if m and m.group(2).rsplit("::", 1)[-1] in builders:
                 bound[m.group(1)] = i
             w = INDEXED_WRITE.search(line)
             if not w:
@@ -200,11 +267,20 @@ def edit_findings() -> list[str]:
             at = bound.get(name)
             if at is None or i - at > WRITE_WINDOW or lo < ETHERNET_HEADER:
                 continue
+            # A CANDIDATE: a write into a checksum-covered frame. Counted here
+            # rather than after the refill test, because what the OK line has
+            # to report is how many writes this arm WEIGHED -- a repaired one
+            # is evidence the arm is looking, and an unrepaired one is a
+            # finding.
+            examined += 1
             window = "\n".join(lines[i : i + REFILL_WINDOW + 1])
             if REFILL.search(window) and name in window:
                 continue
+            # R2043 (item 368) — or the fixture says the break is the point.
+            if DELIBERATE.search(window) and name in window:
+                continue
             findings.append(
-                f"{path.relative_to(ROOT)}:{i + 1}: `{name}` was built by a "
+                f"{rel}:{i + 1}: `{name}` was built by a "
                 f"packet builder on line {at + 1} and is written at byte {lo}, "
                 f"which is inside what its checksums cover, with no refill "
                 f"after it. Use `wz_packet_fixtures::set_tcp_source_port` (or "
@@ -212,11 +288,88 @@ def edit_findings() -> list[str]:
                 f"the TRANSPORT axis alone, and the IPv4 axis staying clean is "
                 f"why nobody notices"
             )
-    return findings
+    return findings, examined
+
+
+def selftest() -> int:
+    """R2043 (item 368) — prove the edit arm still DETECTS.
+
+    Its live population measured ZERO before this round, and a population of
+    zero passes every check written over it. The narrow-vle census needed the
+    same witness for the same reason two rounds ago: a gate whose recogniser
+    can only be exercised by the tree it guards cannot show it recognises
+    anything once that tree stops producing candidates.
+    """
+    checksummed = (
+        "fn built(p: &[u8]) -> Vec<u8> {\n    let mut f = vec![0u8; 60];\n"
+        "    fill_tcp_checksum([0;4], [0;4], &mut f);\n    f\n}\n"
+    )
+    raw = "fn frame(p: &[u8]) -> Vec<u8> {\n    vec![0u8; 60]\n}\n"
+    cases: list[tuple[str, str, int, int]] = [
+        (
+            "a raw write into a checksummed frame is CAUGHT",
+            checksummed + 'fn t() {\n    let mut f = built(b"x");\n'
+            "    f[34..36].copy_from_slice(&1u16.to_be_bytes());\n}\n",
+            1,
+            1,
+        ),
+        (
+            "and the same write with a refill after it is clean",
+            checksummed + 'fn t() {\n    let mut f = built(b"x");\n'
+            "    f[34..36].copy_from_slice(&1u16.to_be_bytes());\n"
+            "    fill_tcp_checksum([0;4], [0;4], &mut f);\n}\n",
+            0,
+            1,
+        ),
+        (
+            "A RAW ETHERNET FRAME IS NOT CLAIMED -- its builder fills no "
+            "checksum, so there is nothing over those bytes to corrupt. This "
+            "is the case a name-based population would have reported as a "
+            "defect that cannot exist",
+            raw + 'fn t() {\n    let mut f = frame(b"x");\n'
+            "    f[14..16].copy_from_slice(&300u16.to_be_bytes());\n}\n",
+            0,
+            0,
+        ),
+        (
+            "A NEGATIVE CONTROL is not a defect: a fixture that corrupts a "
+            "frame and ASSERTS the sum broke is proving the class is real, and "
+            "demanding a refill there would delete the proof",
+            checksummed + 'fn t() {\n    let mut f = built(b"x");\n'
+            "    f[34..36].copy_from_slice(&1u16.to_be_bytes());\n"
+            "    assert_ne!(tcp_sum_of(&f), 0, \"must break\");\n}\n",
+            0,
+            1,
+        ),
+        (
+            "a write INSIDE the Ethernet header is not covered either",
+            checksummed + 'fn t() {\n    let mut f = built(b"x");\n'
+            "    f[0..6].copy_from_slice(&[1, 2, 3, 4, 5, 6]);\n}\n",
+            0,
+            0,
+        ),
+    ]
+    failed = False
+    for name, src, want_findings, want_examined in cases:
+        got, examined = edit_findings([("fx.rs", src)])
+        if len(got) != want_findings or examined != want_examined:
+            failed = True
+            print(
+                f"  packet-fixture SELFTEST FAIL: {name}\n"
+                f"    want {want_findings} finding(s) over {want_examined} "
+                f"candidate(s)\n    got  {len(got)} over {examined}"
+            )
+    if failed:
+        return 1
+    print(f"  packet-fixture selftest: {len(cases)} detector case(s) hold")
+    return 0
 
 
 def main() -> int:
-    findings = witness_findings() + edit_findings()
+    if "--selftest" in sys.argv[1:]:
+        return selftest()
+    edits, examined = edit_findings()
+    findings = witness_findings() + edits
     if findings:
         print("packet-fixture-lint: FAIL", file=sys.stderr)
         for f in findings:
@@ -227,10 +380,13 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
+    # R2043 (item 368) — the candidate COUNT, not a hardcoded zero. "0
+    # unrepaired" said nothing about whether anything was weighed, and this arm
+    # weighed nothing at all for its whole life.
     print(
         f"  packet-fixture-lint: {len(WITNESSES)} crate(s) lay packets by hand, "
-        f"each with a witness that reads a checksum counter; 0 post-build edit(s) "
-        f"left unrepaired"
+        f"each with a witness that reads a checksum counter; {examined} "
+        f"post-build edit(s) into a checksummed frame, 0 left unrepaired"
     )
     return 0
 

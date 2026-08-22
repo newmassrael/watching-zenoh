@@ -1967,6 +1967,15 @@ PY
     # seventh crate cannot join quietly), and a frame edited AFTER it was built
     # must have its sums refilled (measured: three more live sites in
     # wz-capture, invisible because the IPv4 axis stays clean).
+    # Round 2043, open-debt item 368 — THE SELFTEST FIRST, and this gate needed
+    # it more than most: its post-build-edit arm decided the population by a
+    # NAMING convention (`tcp` or `udp` in the builder's name), and MEASURED
+    # this round, zero locals in the tree matched. Every run reported "0
+    # post-build edit(s) left unrepaired" over nothing at all, with the `0` a
+    # literal rather than a count. The population is now derived from what a
+    # builder DOES — it fills a checksum — and the OK line prints how many
+    # writes were weighed.
+    python3 scripts/lib/packet_fixture_lint.py --selftest || return 1
     python3 scripts/lib/packet_fixture_lint.py || return 1
     # R311y889 (debt-build-evidence) — a BUILD this CI runs must not throw its
     # own output away.
