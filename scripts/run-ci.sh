@@ -9496,7 +9496,13 @@ layer_ewirez_zenohd_wire_dissection() {
         _z_unavailable "zenohd not built ($zenohd; run: bash scripts/build-zenohd.sh)" || return 1
         return 0
     fi
-    _runci_guarded_test "Ewirez stock-zenohd dissection" 2 \
+    # Round 2020 (item 271) — THREE, not two. The third is
+    # `the_interest_plane_reads_a_real_zenohd_session`: the interop lanes
+    # existed and not one of them read a capture with the INTEREST plane, so
+    # every fixture that plane had ever seen was built by this tree's own
+    # encoders. The count is pinned here rather than left to grow because a
+    # binary-dep lane that silently runs fewer tests reports the same `ok`.
+    _runci_guarded_test "Ewirez stock-zenohd dissection" 3 \
         cargo test -p wz-integration-tests \
         --test zenohd_wire_dissection -- --ignored --quiet --test-threads=1 \
         || return 1

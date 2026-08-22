@@ -441,7 +441,14 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # captures would have graded wz's encoder against wz's decoder. A stock
 # `z_get` carrying `transport/auth/usrpwd/{user,password}` is the initiator
 # here, and a stock zenohd holding the dictionary is the acceptor.
-FOREIGN_ADJUDICATOR_LINKS = 855
+# Round 2020 (item 271) — 855 -> 856. The INTEREST plane gained a foreign
+# adjudicator: `the_interest_plane_reads_a_real_zenohd_session` runs
+# `wz_capture::interest::interests` over a real zenohd session, where every
+# fixture that plane had ever seen was built by this tree's own encoders.
+# R311y569 asked for this counter precisely so that closing a plane MOVES it,
+# and the gate refused the push until the claim was written here — which is the
+# counter working rather than an obstacle to it.
+FOREIGN_ADJUDICATOR_LINKS = 856
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

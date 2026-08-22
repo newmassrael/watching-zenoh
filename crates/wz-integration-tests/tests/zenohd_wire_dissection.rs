@@ -686,3 +686,159 @@ fn the_analyzer_parses_what_a_real_zenohd_sends_when_it_actually_routes() {
          {unknown:?} (whole set: {records:?})"
     );
 }
+
+/// ITEM 271 — THE INTEREST PLANE, OVER BYTES THIS WORKSPACE DID NOT WRITE.
+///
+/// # The item
+///
+/// Every fixture the interest plane has ever been driven by is built by
+/// `interest_build` / `declare_build` — this tree's own encoders. That is the
+/// right discipline for "does the plane read what wz SENDS", and it is not the
+/// question a foreign capture asks. R311y870 filed it and named the shape of
+/// the gap exactly: the interop lanes exist, and not one of them reads a
+/// capture with this plane.
+///
+/// # What this leg claims, and what it does not
+///
+/// It runs `wz_capture::interest::interests` over a real zenohd session and
+/// asserts that whatever the plane produced is INTERNALLY SOUND — every row
+/// points at a flow this dissection holds, no withdrawal precedes its own
+/// declaration, and nothing closes a declaration the tap never saw opened.
+/// That is what a foreign capture can prove and a self-authored fixture
+/// cannot: a fixture can only show the plane reads bytes this tree wrote in
+/// the shape this tree writes them.
+///
+/// ⚠ The assertion is deliberately NOT "the plane found declarations". A
+/// capture where the router happened to declare nothing is a description of
+/// that run, not a defect; a capture where the plane invented a row IS one.
+/// Writing it the other way would make this witness fail on zenohd's mood.
+///
+/// It does NOT claim the exotic cases item 271 lists — an `InterestOptions`
+/// combination wz's builders cannot make, a reused id, a face-closing
+/// `Interest(Final)`. Each needs a fixture that makes a router DO it. This is
+/// the door they come through, not everything that walks it.
+// wz-proves: session-unicast-open wz->zenohd
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo + zenohd); Layer Ewirez runs via --ignored"]
+fn the_interest_plane_reads_a_real_zenohd_session() {
+    let demo = wz_ap_demo_binary();
+    let reservation = PortReservation::pick();
+    let zenohd_port = reservation.port();
+
+    let mut zenohd = ChildGuard::wrap(
+        "zenohd (interest plane witness)",
+        Command::new(zenohd_binary())
+            .arg("-l")
+            .arg(format!("tcp/127.0.0.1:{zenohd_port}"))
+            .arg("--no-multicast-scouting")
+            .arg("--rest-http-port")
+            .arg("none")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn zenohd"),
+    );
+    if let Err(e) =
+        wait_for_tcp_accept_alive(zenohd.child_mut(), zenohd_port, ZENOHD_TCP_ACCEPT_BUDGET)
+    {
+        panic!("zenohd never accepted: {e}");
+    }
+
+    let (proxy_port, recording) = tap_proxy(zenohd_port);
+
+    // A SUBSCRIBER, because a subscriber is what puts a `DeclareSubscriber` on
+    // the wire and gives the router something to answer.
+    let sub_stderr = tempfile::tempfile().expect("tempfile for subscriber stderr");
+    let sub_writer = sub_stderr.try_clone().expect("dup subscriber stderr");
+    let mut sub_reader = sub_stderr;
+    let mut subscriber = ChildGuard::wrap(
+        "wz-ap-demo subscriber (through the tap proxy)",
+        Command::new(&demo)
+            .arg("--connect")
+            .arg(format!("127.0.0.1:{proxy_port}"))
+            .arg("--key")
+            .arg("demo/**")
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(sub_writer))
+            .spawn()
+            .expect("spawn wz-ap-demo subscriber"),
+    );
+    let handshook = wait_for_both_directions(&recording, Duration::from_secs(15));
+    // A moment past the handshake, so a declaration the demo sends after its
+    // session opens is inside the recording rather than racing the kill below.
+    std::thread::sleep(Duration::from_millis(500));
+    let _ = subscriber.child_mut().kill();
+    let _ = subscriber.child_mut().wait();
+    let _ = zenohd.child_mut().kill();
+    let _ = zenohd.child_mut().wait();
+    std::thread::sleep(Duration::from_millis(200));
+
+    let sub_captured = read_captured(&mut sub_reader);
+    assert!(
+        handshook,
+        "the subscriber never completed a handshake through the tap, so this \
+         capture holds no session for the plane to read.\n\
+         --- subscriber ---\n{sub_captured}"
+    );
+
+    let segments = recording.lock().expect("recording lock").clone();
+    assert!(!segments.is_empty(), "the tap recorded nothing");
+    let pcap = synthesise_pcap(&segments, DIALER_PORT, LISTENER_PORT);
+    let dissection = Dissection::from_pcap(&pcap).expect("the synthesised pcap parses");
+
+    // THE POPULATION, before anything is asked of the plane. A dissection with
+    // no flow or no decoded message would satisfy every soundness claim below
+    // by having nothing to be unsound about — this workspace's own
+    // population-of-zero rule, in the one kind of test where the population
+    // depends on another process.
+    let flows = dissection.flows();
+    assert_eq!(flows.len(), 1, "one relayed connection is one flow");
+    let decoded = flows[0].frames.len();
+    assert!(
+        decoded > 0,
+        "the capture decoded no transport message at all:\n{sub_captured}"
+    );
+
+    let census = wz_capture::interest::interests(&dissection);
+    eprintln!(
+        "interest plane over stock zenohd: {} declaration(s), {} request(s), \
+         {} orphan withdrawal(s), out of {decoded} decoded message(s)",
+        census.interests().len(),
+        census.requests().len(),
+        census.orphan_withdrawals(),
+    );
+
+    let live = flows[0].flow;
+    for (at, d) in census.interests().iter().enumerate() {
+        assert_eq!(
+            d.flow, live,
+            "declaration {at} names a flow this capture does not hold: {d:?}"
+        );
+        if let Some(closed) = d.withdrawn_at {
+            assert!(
+                closed >= d.declared_at,
+                "declaration {at} was withdrawn BEFORE it was declared \
+                 ({closed} < {}): {d:?}",
+                d.declared_at
+            );
+        }
+    }
+    for (at, r) in census.requests().iter().enumerate() {
+        assert_eq!(
+            r.flow, live,
+            "request {at} names a flow this capture does not hold: {r:?}"
+        );
+    }
+
+    // AND THE PLANE MUST NOT HAVE INVENTED A WITHDRAWAL. An orphan withdrawal
+    // is a real and honest state for a capture begun mid-session; this one
+    // begins at the handshake, so nothing went past before the tap and every
+    // withdrawal here must have its own declaration.
+    assert_eq!(
+        census.orphan_withdrawals(),
+        0,
+        "this capture starts at the handshake, so no withdrawal can be closing \
+         something the tap missed"
+    );
+}
