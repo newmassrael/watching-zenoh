@@ -2662,6 +2662,105 @@ mod tests {
         assert!(fresh.refusals().is_empty());
     }
 
+    /// Round 2032 (item 302) — THE PLANE IS BOUNDED BY THE DEPLOYMENT, NOT BY
+    /// THE CAPTURE, which is what makes its prose affordable.
+    ///
+    /// # The measurement this holds in place
+    ///
+    /// Item 302 asked what the `note` costs and answered "unmeasured". It was
+    /// measured this round, on realistic rows: a misbinding row is 326 bytes
+    /// with 206 of them prose, a refusal row is 400 with 253 — so the sentence
+    /// is roughly 1.7x the machine fields it repeats, and the item's "twice the
+    /// bytes" is if anything an understatement. The refusal's `example` is
+    /// carried verbatim TWICE, once as a field and once inside its own
+    /// sentence.
+    ///
+    /// That price is paid on purpose: a consumer that only forwards findings
+    /// must not have to compose prose, and the `note` key cannot be withdrawn
+    /// from an ABI whose contract permits ADDED keys and nothing else. What
+    /// makes it affordable is not the ratio but the DENOMINATOR — the plane
+    /// holds one row per (topic, rule, verdict), while the `fields` listing
+    /// beside it holds one per message. The plane is the small half by
+    /// construction, and stays small on exactly the capture it exists for.
+    ///
+    /// # What this gate actually catches
+    ///
+    /// A finding keyed on something PER-SAMPLE. This round nearly shipped one:
+    /// the obvious key for a refusal includes the decoder's reason, and a
+    /// scanner's reason carries a byte offset, so `demo/a` refusing 10,000
+    /// samples at 10,000 offsets would have rendered 10,000 rows — the very
+    /// shape this plane exists to collapse, at 400 bytes and 63% prose each.
+    /// That was avoided by hand and nothing held it. Now something does: ten
+    /// times the traffic on one topic must still be ONE row, and the document
+    /// may grow only by the digits of the count.
+    #[test]
+    fn ten_times_the_traffic_is_the_same_finding_and_almost_the_same_bytes() {
+        let mut map = FormatMap::new();
+        map.declare("demo/**=json").expect("a keyexpr pattern");
+        let spaces = KeyexprSpaces::new();
+        let at = KeyexprAt::new(Direction::A, &spaces);
+        // One topic, one rule, and BOTH tallies populated so neither can pass
+        // by being empty. Truncated JSON under a JSON label is applied and
+        // refuses; a `application/protobuf` label under the same JSON rule is
+        // a contradiction the bytes cannot refute (binary shapes come back
+        // `Opaque`), so it vetoes and is tallied as a misbinding instead.
+        //
+        // ⚠ AND THE REFUSING SAMPLES ARE NOT IDENTICAL. The first draft sent
+        // one payload ten times, which made the per-sample mutation below
+        // SURVIVE: a key that carries the decoder's reason cannot fragment
+        // when every sample fails at the same byte. A busy topic does not look
+        // like that, so each document is truncated one byte further along and
+        // the reasons really differ.
+        let misbinds = put_declaring(ENC_PROTOBUF, &[0x08, 0x2a]);
+        let truncated = |i: usize| {
+            let mut doc = alloc::vec::Vec::from(&b"{\""[..]);
+            doc.resize(doc.len() + i + 1, b'a');
+            doc.extend_from_slice(b"\":");
+            doc
+        };
+
+        let render = |samples: usize| {
+            let run = Declarations::new(&map);
+            for i in 0..samples {
+                let refuses = put_declaring(ENC_JSON, &truncated(i));
+                decode_payload(&refuses, &run, at);
+                decode_payload(&misbinds, &run, at);
+            }
+            let mut out = String::new();
+            push_misbindings(Some(&run), &mut out);
+            (run.misbindings().len() + run.refusals().len(), out)
+        };
+
+        let (rows_1, small) = render(1);
+        let (rows_10, large) = render(10);
+        // ANTI-VACUITY: there is something to be bounded. Without this the two
+        // equalities below are true of a plane that found nothing at all.
+        assert_eq!(rows_1, 2, "one misbinding and one refusal: {small}");
+        assert_eq!(
+            rows_10, rows_1,
+            "ten times the traffic on one topic is the SAME finding -- a key \
+             that carried anything per-sample would render ten times the rows \
+             here, at 400 bytes and 63% prose each: {large}"
+        );
+        // AND THE BYTES SAY SO TOO, which the row count alone does not: a row
+        // that grew a per-sample LIST would keep the count at 2 and blow the
+        // document up anyway.
+        let grew = large.len() - small.len();
+        assert!(
+            grew <= 4 * rows_1,
+            "the plane may grow only by the digits of its counts ({} -> {} is \
+             +{grew} for {rows_1} row(s)): {large}",
+            small.len(),
+            large.len()
+        );
+        // And the counts really did move, so the two documents are not the
+        // same document by accident.
+        assert!(
+            small.contains("\"samples\":1") && large.contains("\"samples\":10"),
+            "the tally must have counted: {small} / {large}"
+        );
+    }
+
     /// Round 2031 (item 300) — EVERY refusal word is distinct, and the walk
     /// visits every arm without a list to keep true.
     ///
