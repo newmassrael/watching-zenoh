@@ -6130,6 +6130,7 @@ fn the_two_doors_onto_the_report_agree() {
         bounded: false,
         health: true,
         select: None,
+        csv: None,
     };
 
     let (through_bytes, bytes_outcome) =

@@ -43,6 +43,14 @@ extern crate std;
 /// ACROSS messages rather than decoding one, and because keyexpr resolution
 /// needs both id spaces — something only an observer of both directions has.
 pub mod agg;
+/// Round 2001 (item 473) — the same planes as ROWS, for the tool that reads
+/// tables rather than documents.
+///
+/// A THIRD rendering, and the risk it brings is a third opinion about what a
+/// row is (open-debt item 253's family). It reads the same typed tables
+/// [`census_json`] reads, so a row here is a row there by construction, and the
+/// leg that pins it compares the two renderings of ONE table.
+pub mod census_csv;
 /// R311y851 (§1.1f) — every analysis plane above as ONE self-describing
 /// document, beside the types that build them rather than inside a consumer.
 ///

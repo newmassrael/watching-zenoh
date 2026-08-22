@@ -35,12 +35,45 @@ pub enum Format {
     Json,
 }
 
+/// Round 2001 (item 473) — which census plane `--csv` renders as ROWS.
+///
+/// An enum rather than a string carried to the render site, so the set this
+/// build emits is a closed thing the parser can refuse against and the usage
+/// text can list. A plane arriving as a typo would otherwise become an empty
+/// table, which reads as "this capture carried nothing".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CsvPlane {
+    /// The keyexpr throughput plane: which keyexpr carried what.
+    Throughput,
+}
+
+impl CsvPlane {
+    /// The plane names this build emits, in the order a refusal lists them.
+    ///
+    /// ONE today, and the refusal names the set rather than saying "unknown":
+    /// the other planes are typed tables of the same kind and each is an
+    /// addition here, so a reader who asked for one must learn which exist
+    /// rather than that theirs does not.
+    pub const NAMES: &'static [&'static str] = &["throughput"];
+
+    /// The plane a name means, or `None` if this build emits no such plane.
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "throughput" => Some(Self::Throughput),
+            _ => None,
+        }
+    }
+}
+
 /// What the command line asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Options {
     /// The capture file to read. Empty when [`Self::interface`] names a live
     /// tap instead — the two are alternatives and the parser refuses both.
     pub capture: String,
+    /// Round 2001 (item 473) — render one census plane as CSV instead of the
+    /// report. Implies that plane's census, so the table it renders exists.
+    pub csv: Option<CsvPlane>,
     /// Round 1999 (item 470) — read from a live `AF_PACKET` tap on this
     /// interface instead of from a file.
     ///
@@ -281,6 +314,17 @@ pub enum UsageError {
     /// re-reads the CAPTURE's own bytes (`quic_pass`), which a tap does not
     /// keep, so `--quic` on a live read would be a flag that changes nothing.
     LiveCannotDo(&'static str),
+    /// Round 2001 (item 473) — `--csv` named a plane this build does not emit.
+    ///
+    /// The message lists the set rather than saying "unknown", because the
+    /// planes are typed tables of one kind and the reader's question is which
+    /// of them they can have.
+    UnknownCsvPlane(String),
+    /// Round 2001 — `--csv` and `--json` together.
+    ///
+    /// Two renderings and one stdout. Picking either silently would make the
+    /// other flag's presence meaningless, which is this parser's standing rule.
+    CsvAndJson,
 }
 
 impl core::fmt::Display for UsageError {
@@ -316,6 +360,16 @@ impl core::fmt::Display for UsageError {
                 f,
                 "{flag} needs the capture's own bytes, which a live read does \
                  not keep; it would change nothing here"
+            ),
+            Self::UnknownCsvPlane(got) => write!(
+                f,
+                "--csv does not emit `{got}`; this build emits: {}",
+                CsvPlane::NAMES.join(", ")
+            ),
+            Self::CsvAndJson => write!(
+                f,
+                "--csv and --json are two renderings and there is one output; \
+                 give one"
             ),
         }
     }
@@ -367,6 +421,19 @@ OPTIONS:
                       with the direction, offset and namespace of each.
                       Implies --flows
     --json            render the report as JSON instead of text
+    --csv <plane>     render ONE census plane as CSV rows instead of the
+                      report, for the tool that reads tables. Turns that
+                      plane's census on, so the table it renders exists.
+                      REPLACES the report rather than adding to it: a CSV
+                      stream holds one table, and a second appended after the
+                      first is a file no reader of this format can open --
+                      which is also why it is refused together with --json.
+                      The rows are the ones --json emits, in the same order:
+                      both renderings read the same typed table, so a row here
+                      is a row there rather than a third opinion about what a
+                      row is. `share_bp` is EMPTY, never 0, where the capture
+                      holds no sizeable payload to be a share OF.
+                      Planes: throughput.
     --payload-format <keyexpr>=<format>
                       decode the PAYLOAD of messages whose key expression
                       matches <keyexpr>, using <format>. Repeatable; the
@@ -531,6 +598,7 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
     let mut health = false;
     let mut interface: Option<String> = None;
     let mut live_ms: Option<u64> = None;
+    let mut csv: Option<CsvPlane> = None;
     let mut at = 0usize;
     while at < args.len() {
         let arg = &args[at];
@@ -669,6 +737,19 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
                         .ok_or(UsageError::MissingValue("--keylog"))?,
                 );
             }
+            // Round 2001 (item 473) — and it TURNS THE PLANE ON. A flag that
+            // asked for a rendering of a table the run did not build would emit
+            // a header and nothing else, which reads as an empty capture.
+            "--csv" => {
+                at += 1;
+                let raw = args.get(at).ok_or(UsageError::MissingValue("--csv"))?;
+                let plane =
+                    CsvPlane::parse(raw).ok_or_else(|| UsageError::UnknownCsvPlane(raw.clone()))?;
+                match plane {
+                    CsvPlane::Throughput => census.throughput = true,
+                }
+                csv = Some(plane);
+            }
             "--interface" => {
                 at += 1;
                 interface = Some(
@@ -738,12 +819,16 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
         // `--for` alone bounds nothing: a file ends by itself.
         return Err(UsageError::LiveCannotDo("--for"));
     }
+    if csv.is_some() && format == Format::Json {
+        return Err(UsageError::CsvAndJson);
+    }
     Ok(Options {
         capture: match (capture, &interface) {
             (Some(path), _) => path,
             (None, Some(_)) => String::new(),
             (None, None) => return Err(UsageError::NoCapture),
         },
+        csv,
         interface,
         live_ms,
         keylogs,
@@ -891,6 +976,7 @@ pub fn analyze_declaring_quic(
         bounded: false,
         health: false,
         select: None,
+        csv: None,
     })
 }
 
@@ -951,6 +1037,13 @@ pub struct Request<'a> {
     /// selects everything, which is what the planes' unfiltered entry points
     /// already pass.
     pub select: Option<&'a wz_capture::filter::Filter>,
+    /// Round 2001 (item 473) — render ONE census plane as CSV rows instead of
+    /// the report.
+    ///
+    /// Replaces the rendering rather than adding to it, because a CSV stream
+    /// holds one table: appending a second would produce a file no reader of
+    /// this format can open.
+    pub csv: Option<CsvPlane>,
 }
 
 /// Read a capture and report on it, as [`Request`] describes.
@@ -1010,6 +1103,7 @@ pub fn analyze_dissection(
         bounded,
         health,
         select,
+        csv,
     } = request;
     // R311y699 ([REDACTED-REQ]) — the rules become a MAP here, in the composition
     // root: `wz-capture` owns the mapping and never a format, so this is the
@@ -1258,6 +1352,26 @@ pub fn analyze_dissection(
         key_log_connections,
         foreign_secrets_blocks: foreign,
     };
+    // Round 2001 (item 473) — the CSV rendering REPLACES the report, because a
+    // CSV stream holds one table. The `Outcome` above is computed first and
+    // unchanged: whether this reader saw the whole capture is a fact about the
+    // capture, not about which of three documents was asked for, and an exit
+    // code that moved with the rendering would be the wrong kind of surprise.
+    //
+    // The table is the one this run already folded (`--csv` turns its census
+    // on), and it is re-folded here only if some future caller reaches this
+    // path without the parser -- the same `unwrap_or_else` the interest plane
+    // uses one screen up, rather than a panic in a library.
+    if let Some(plane) = csv {
+        let rows = match plane {
+            CsvPlane::Throughput => {
+                let table = throughput
+                    .unwrap_or_else(|| wz_capture::agg::aggregate_where(&dissection, filter));
+                wz_capture::census_csv::keyexprs_csv(&table)
+            }
+        };
+        return Ok((rows, outcome));
+    }
     // R311y668 — the JSON is COMPOSED and no longer spliced. The report names
     // its own keys ([`CaptureReport::json_fields`]) and this is the only place
     // that decides where the object begins and ends, so a flow list is one more
@@ -4779,6 +4893,41 @@ mod tests {
         }
     }
 
+    /// Round 2001 (item 473) — `--csv` names a plane, turns that plane's
+    /// census on, and refuses the two ways of asking for nothing.
+    ///
+    /// The census implication is the load-bearing part and is asserted rather
+    /// than trusted: without it the run builds no table, the renderer emits a
+    /// header and no rows, and a reader sees what an empty capture looks like.
+    #[test]
+    fn csv_names_a_plane_turns_it_on_and_refuses_the_rest() {
+        let ok = parse(&args(&["cap.pcapng", "--csv", "throughput"])).expect("a csv run");
+        assert_eq!(ok.csv, Some(CsvPlane::Throughput));
+        assert!(
+            ok.census.throughput,
+            "--csv must turn its own plane on, or it renders a header and no rows"
+        );
+
+        // The refusal NAMES the set, so a reader learns which planes exist.
+        let refused =
+            parse(&args(&["cap.pcapng", "--csv", "throughpt"])).expect_err("a typo is not a plane");
+        assert_eq!(refused, UsageError::UnknownCsvPlane("throughpt".into()));
+        assert!(
+            refused.to_string().contains("throughput"),
+            "the message must list what this build emits: {refused}"
+        );
+
+        assert_eq!(
+            parse(&args(&["cap.pcapng", "--csv", "throughput", "--json"])),
+            Err(UsageError::CsvAndJson),
+            "two renderings and one output"
+        );
+        assert_eq!(
+            parse(&args(&["cap.pcapng", "--csv"])),
+            Err(UsageError::MissingValue("--csv")),
+        );
+    }
+
     #[test]
     fn a_capture_path_alone_is_a_complete_command_line() {
         assert_eq!(
@@ -4802,6 +4951,7 @@ mod tests {
                 bounded: false,
                 health: false,
                 select: None,
+                csv: None,
             })
         );
     }
@@ -4837,6 +4987,7 @@ mod tests {
                 bounded: false,
                 health: false,
                 select: None,
+                csv: None,
             })
         );
     }
@@ -5101,6 +5252,7 @@ mod tests {
             per_field: false,
             health,
             select: None,
+            csv: None,
         })
         .expect("the capture reads")
         .0
@@ -5552,6 +5704,7 @@ mod tests {
             bounded: false,
             health: false,
             select: None,
+            csv: None,
         })
         .expect("the capture reads")
         .0;
@@ -5647,6 +5800,7 @@ mod tests {
             bounded: false,
             health: false,
             select: None,
+            csv: None,
         })
         .expect("the capture reads")
         .0;
@@ -5727,6 +5881,7 @@ mod tests {
                 bounded: false,
                 health: false,
                 select: None,
+                csv: None,
             })
             .expect("the capture reads")
             .0
@@ -5868,6 +6023,7 @@ mod tests {
                 bounded: false,
                 health: false,
                 select: None,
+                csv: None,
             })
             .expect("the capture reads")
             .0
@@ -5988,6 +6144,7 @@ mod tests {
             bounded: false,
             health: false,
             select: None,
+            csv: None,
         })
         .expect("the capture reads")
         .0;
@@ -7608,6 +7765,7 @@ mod quic_pass_tests {
                 bounded: false,
                 health: false,
                 select: None,
+                csv: None,
             })
             .expect("the capture reads")
             .0
@@ -7682,6 +7840,7 @@ mod quic_pass_tests {
                 bounded: false,
                 health: false,
                 select: None,
+                csv: None,
             })
             .expect("the capture reads")
             .0
@@ -7927,6 +8086,7 @@ mod quic_pass_tests {
             bounded: false,
             health: false,
             select: None,
+            csv: None,
         })
         .expect("the capture reads")
         .0;
@@ -8021,6 +8181,7 @@ mod quic_pass_tests {
             bounded: false,
             health: false,
             select: None,
+            csv: None,
         })
         .expect("the capture reads")
         .0;
@@ -8061,6 +8222,7 @@ mod quic_pass_tests {
             bounded: false,
             health: false,
             select: None,
+            csv: None,
         })
         .expect("the capture reads")
         .0;
@@ -8159,6 +8321,7 @@ mod quic_pass_tests {
                 bounded: false,
                 health: false,
                 select: None,
+                csv: None,
             })
             .expect("the capture reads")
             .0
@@ -8253,6 +8416,7 @@ mod quic_pass_tests {
             bounded: false,
             health: false,
             select,
+            csv: None,
         };
 
         // UNBOUNDED: the fixture's flow carries more than one sequence, or the

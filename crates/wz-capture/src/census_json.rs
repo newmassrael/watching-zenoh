@@ -1020,6 +1020,64 @@ mod fed_tests {
         four_plane_capture_with_file(keyexpr, None, false).0
     }
 
+    /// Round 2001 (item 473) — THE THIRD RENDERING IS THE SAME ROWS.
+    ///
+    /// `crate::census_csv` exists so a plane can reach a table tool, and the
+    /// danger it brings is a third opinion about what a row IS — the family
+    /// open-debt item 253 names. This is where that is refused: ONE table, both
+    /// renderings, and the CSV's lines must be the JSON's rows in the JSON's
+    /// order.
+    ///
+    /// It lives here rather than in `census_csv` because the fixture does. A
+    /// second fixture over there would be a second opinion about what a plane
+    /// CONTAINS, which is the same defect one level up.
+    ///
+    /// Asserted on the keyexpr IN EACH POSITION rather than on a count: a
+    /// renderer emitting the right number of wrong rows would satisfy a count,
+    /// and reordering is exactly what a second sort would introduce.
+    #[test]
+    fn the_csv_rendering_is_the_json_rendering_row_for_row() {
+        let d = four_plane_capture("demo/a");
+        let table = crate::agg::aggregate(&d);
+        let csv = crate::census_csv::keyexprs_csv(&table);
+        let lines: Vec<&str> = csv.lines().collect();
+
+        assert_eq!(
+            lines[0],
+            crate::census_csv::KEYEXPR_COLUMNS,
+            "the header must be the constant a consumer reads, not a copy"
+        );
+        // The population is non-zero, asserted rather than assumed: an empty
+        // table would make every comparison below vacuously true.
+        assert!(
+            !table.rows().is_empty(),
+            "the fixture must attribute at least one keyexpr"
+        );
+        assert_eq!(
+            lines.len() - 1,
+            table.rows().len(),
+            "one line per row and no more: {csv}"
+        );
+        for (line, row) in lines[1..].iter().zip(table.rows()) {
+            assert!(
+                line.starts_with(&row.keyexpr) || line.starts_with('"'),
+                "row order must follow the table's: {line} vs {}",
+                row.keyexpr
+            );
+        }
+        // And the JSON is over the SAME table, so every keyexpr the CSV names
+        // is a keyexpr that document names. This is the join that makes the two
+        // renderings one plane rather than two.
+        let json = keyexprs_json(&table);
+        for row in table.rows() {
+            assert!(
+                json.contains(&row.keyexpr),
+                "keyexpr {} is in the CSV and not in the JSON: {json}",
+                row.keyexpr
+            );
+        }
+    }
+
     /// The two directions' framed streams, so the fixture above can build both
     /// a dissection and the capture file over the same bytes.
     /// R311y930 (item 465) — a Put DECLARING an encoding its bytes refute, so

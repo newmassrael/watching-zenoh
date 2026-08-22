@@ -160,6 +160,7 @@ fn main() -> ExitCode {
         bounded: options.bounded,
         health: options.health,
         select: options.select.as_ref(),
+        csv: options.csv,
     };
     let analysed = match live {
         Some(read) => {

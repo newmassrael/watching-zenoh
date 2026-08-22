@@ -214,6 +214,17 @@ ONLY_CLI = {
         "boundary to buy a caller something it can already do. Round 1999 "
         "(item 470).",
     ),
+    "a census plane as CSV rows": (
+        "--csv",
+        "DELIBERATE, and the reason is what CSV IS. Every wz_dissect_* entry "
+        "point hands back a JSON document a caller parses; CSV is a rendering "
+        "for a tool that reads tables, and a C consumer holding the census "
+        "document already has the rows -- it would be asking this library to "
+        "format for it. The EMIT is shared, not the flag: "
+        "`wz_capture::census_csv` reads the same typed tables `census_json` "
+        "does, so an ABI symbol is one call away if a consumer ever wants the "
+        "bytes rather than the fields. Round 2001 (item 473).",
+    ),
     "bounding a live read": (
         "--for",
         "Rides the row above; a bound is meaningless without a tap to bound, "
