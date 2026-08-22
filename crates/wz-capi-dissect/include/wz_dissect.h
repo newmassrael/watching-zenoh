@@ -312,7 +312,30 @@ int wz_dissect_pcap_fields(const unsigned char *bytes, size_t len,
  * empty array when nothing is misbound -- the same rule despite_encoding
  * follows, for the same reason. The tally counts the messages this listing
  * WALKED, so a bound you passed bounds it too; each flow's `omitted` is what
- * makes that legible. The SET is complete for what was walked. */
+ * makes that legible. The SET is complete for what was walked.
+ *
+ * Round 2031 -- and `payload_refusals` beside it, the THIRD finding: a rule
+ * that was actually applied and whose decoder then REFUSED the bytes. Neither
+ * side is caught out by the other there, so it is not a misbinding and does
+ * not appear in the array above; until this round it existed only per message,
+ * once per row in a listing you bound because it is that long. Each entry is
+ * one (`keyexpr`, `format`) pair with `samples`, one sample's reason as
+ * `example`, a `note`, and `under` -- what the publisher had said, which is
+ * what decides where to look:
+ *
+ *     `corroborated`  the publisher declared an encoding your rule IS for and
+ *                     the decoder still refused; both claims agree and the
+ *                     bytes are the odd one out, so look at the capture
+ *     `unclaimed`     nothing was declared that this reader could weigh, so
+ *                     your rule is the only claim and the traffic contradicts
+ *                     it; check the rule first
+ *     `refuted`       the publisher declared something its own bytes refute,
+ *                     your rule was applied over that label, and it refused
+ *                     too -- both are wrong about this traffic
+ *
+ * Always present, empty array when nothing refused, and bounded by the same
+ * walk: `payload_mapping_counts_exact` covers BOTH tallies, because being a
+ * floor is a property of the walk rather than of either finding. */
 int wz_dissect_pcap_fields_with_payloads(const unsigned char *bytes, size_t len,
                                          size_t max_messages_per_flow,
                                          const char *declarations, char **out);

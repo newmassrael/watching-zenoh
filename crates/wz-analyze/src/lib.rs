@@ -2775,6 +2775,17 @@ fn render_listings(
                 out.push_str(&misbinding.sentence());
                 out.push('\n');
             }
+            // Round 2031 (item 300) — AND THE THIRD FINDING, in the same place
+            // and for the same reason: a rule that was applied and whose
+            // decoder refused is about the reader's command line or their
+            // capture, not about one flow. It went out per message until this
+            // round, so a capture whose rule cannot read a topic said so once
+            // per row and never once as a finding.
+            for refusal in declarations.refusals() {
+                out.push_str("  ");
+                out.push_str(&refusal.sentence());
+                out.push('\n');
+            }
             // Round 2029 (item 298) — AND WHETHER THOSE SAMPLE COUNTS ARE
             // WHOLE. Each sentence above says "N sample(s)", and the verdict
             // is reached during the walk, so `--max-messages` cuts the tally
@@ -5986,6 +5997,126 @@ mod tests {
                  \"declared\":\"application/json\",\"wrong\":\"rule\",\"samples\":1,"
             ),
             "and both verdicts: {json}"
+        );
+    }
+
+    /// Round 2031 (item 300) — THE THIRD FINDING FROM THE COMMAND LINE, on
+    /// both surfaces.
+    ///
+    /// # The door this exists for
+    ///
+    /// The tally is proved in `wz-capture`'s own tests. What is proved HERE is
+    /// that both renderings reach a reader: the text loop in `render_listings`
+    /// and the JSON array in `push_misbindings`. Those are two doors, and this
+    /// session has now paid four times for a witness written against whichever
+    /// door the fixture already had — so each is asserted, and removing either
+    /// alone reds this test.
+    ///
+    /// # Why two topics
+    ///
+    /// The finding's whole value is telling the arms apart. `demo/a`'s
+    /// publisher declares JSON and ships bytes that are not JSON, so the rule
+    /// and the label AGREE and the capture is what to look at. `demo/b`
+    /// declares nothing, so the rule is the only claim there is. One row each,
+    /// and the sentences send a reader to different places.
+    #[test]
+    fn a_rule_that_was_applied_and_refused_reaches_the_terminal_and_the_json() {
+        const JSON: u32 = 5;
+        const NOTHING: u32 = 0;
+        // Truncated JSON: the scanner refuses it, and it is not protobuf or
+        // anything else this build would decode by accident.
+        const TRUNCATED: &[u8] = br#"{"a":"#;
+        let packets = [
+            udp_from_zenoh_port(&frame_carrying(&put_declaring("demo/a", JSON, TRUNCATED))),
+            udp_from_zenoh_port(&frame_carrying(&put_declaring("demo/a", JSON, TRUNCATED))),
+            udp_from_zenoh_port(&frame_carrying(&put_declaring(
+                "demo/b", NOTHING, TRUNCATED,
+            ))),
+        ];
+        let refs: Vec<(u32, u64, &[u8])> = packets
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (0u32, 1_000_000 + i as u64 * 100, p.as_slice()))
+            .collect();
+        let capture = wz_capture::pcapng::write(&[(wz_capture::link::LINKTYPE_ETHERNET, 6)], &refs);
+        let rules = [(String::from("demo/**"), String::from("json"))];
+
+        let run = |format: Format| {
+            analyze_request(&Request {
+                capture: &capture,
+                keylog: None,
+                format,
+                per_flow: true,
+                per_message: true,
+                messages_per_flow: None,
+                quic_ports: &[],
+                quic_cid_len: None,
+                payload_rules: &rules,
+                payload_field_names: &[],
+                serial_linktypes: &[],
+                census: Census::default(),
+                per_field: true,
+                bounded: false,
+                health: false,
+                select: None,
+                csv: None,
+            })
+            .expect("the capture reads")
+            .0
+        };
+
+        let text = run(Format::Text);
+        // ANTI-VACUITY: all three records decoded as MESSAGES, so it is the
+        // payload decode that refused and not the walk that found nothing.
+        assert!(
+            text.contains("messages decoded: 3"),
+            "the fixture must decode: {text}"
+        );
+        // THE CORROBORATED ARM: both claims agree, so the reader is sent to
+        // their capture and NOT to their command line.
+        assert!(
+            text.contains("WIRE DISAGREES WITH BOTH -- 2 sample(s) on `demo/a`"),
+            "two samples on one topic must be counted ONCE, as a finding: \
+             {text}"
+        );
+        // THE UNCLAIMED ARM, told apart from it. A build that read
+        // `zenoh/bytes` as corroboration would print the sentence above for
+        // this topic too and send a reader to a capture over a rule that is
+        // only a guess.
+        assert!(
+            text.contains("RULE REFUSED -- 1 sample(s) on `demo/b`"),
+            "and the topic that declared nothing must be a different finding: \
+             {text}"
+        );
+        // Neither is a MISBINDING: nothing here caught either side out, which
+        // is why this is a third plane and not a third word in that one.
+        assert!(
+            !text.contains("MAPPING WRONG") && !text.contains("PUBLISHER MISLABELLING"),
+            "no rule is misbound in this capture: {text}"
+        );
+
+        // And the same plane in the JSON a program reads, through
+        // `wz-capture`'s own emitter, so the two documents cannot disagree
+        // about the shape of one finding.
+        let json = run(Format::Json);
+        assert!(
+            json.contains(
+                "\"payload_refusals\":[{\"keyexpr\":\"demo/a\",\"format\":\"json\",\
+                 \"under\":\"corroborated\",\"samples\":2,"
+            ),
+            "the JSON arm carries the plane too, most samples first: {json}"
+        );
+        assert!(
+            json.contains(
+                "{\"keyexpr\":\"demo/b\",\"format\":\"json\",\
+                 \"under\":\"unclaimed\",\"samples\":1,"
+            ),
+            "and both claims: {json}"
+        );
+        assert!(
+            json.contains("\"payload_mapping\":[]"),
+            "with the misbinding array empty beside it, so a consumer can see \
+             the two planes answer different questions: {json}"
         );
     }
 

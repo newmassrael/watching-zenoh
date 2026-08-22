@@ -4305,12 +4305,34 @@ fn a_message_level_failure_is_a_row_and_a_flow_level_one_is_a_note() {
         // only brackets. Split at the new key rather than widening the trim
         // set: a trim that swallowed more characters would keep passing on an
         // array that had stopped being empty.
+        // Round 2031 (item 300) — and the key that follows is now
+        // `payload_refusals`, which is what this boundary discipline is FOR:
+        // the old split left `],"payload_refusals":[` inside the slice and
+        // reddened here rather than absorbing it, which is exactly the failure
+        // the comment above predicted.
         mapping
-            .split_once("],\"payload_mapping_counts_exact\":")
+            .split_once("],\"payload_refusals\":[")
             .map(|(array, _)| array)
             .unwrap_or(mapping)
             .is_empty(),
         "and no rule is misbound in this capture: {json}"
+    );
+    // Round 2031 (item 300) — AND THE THIRD ARRAY IS ITS OWN ASSERTION. Naming
+    // the boundary above only keeps the mapping claim honest; without this the
+    // refusals array is a key nothing here reads, which is how a key stops
+    // being checked.
+    let refusals = mapping
+        .split_once("],\"payload_refusals\":[")
+        .map(|(_, after)| after)
+        .unwrap_or_else(|| panic!("the refusals array follows the mapping: {json}"));
+    assert!(
+        refusals
+            .split_once("],\"payload_mapping_counts_exact\":")
+            .map(|(array, _)| array)
+            .unwrap_or(refusals)
+            .is_empty(),
+        "and no rule was applied and refused either -- this capture declares \
+         no formats at all: {json}"
     );
     assert!(
         json.contains("\"payload_mapping_counts_exact\":true"),

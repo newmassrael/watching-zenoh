@@ -1396,6 +1396,28 @@ mod tests {
         }
     }
 
+    /// Round 2031 (item 300) — AND THE HEADER NAMES EVERY `payload_refusals`
+    /// CLAIM, held from the round that vocabulary is introduced.
+    ///
+    /// The sibling above, on the third finding. Same argument and the same
+    /// walk-driven population: a claim added upstream demands a header entry
+    /// without anyone here remembering to widen a constant. A C consumer that
+    /// branched on the header's list would otherwise fall through on a real
+    /// finding — and this vocabulary is the one that decides WHERE the reader
+    /// is sent, so falling through sends them nowhere.
+    #[test]
+    fn the_header_names_every_refusal_claim() {
+        const HEADER: &str = include_str!("../include/wz_dissect.h");
+        for claim in wz_capture::payload_decode::RefusedUnder::names() {
+            assert!(
+                HEADER.contains(&format!("`{claim}`")),
+                "wz_dissect.h never names the `{claim}` claim, which this \
+                 library emits in payload_refusals -- a C consumer branching \
+                 on the header's list would fall through on a real finding"
+            );
+        }
+    }
+
     /// Drive the ABI the way C does — raw pointers in, owned string out,
     /// freed through the library's own free. Calling the Rust functions
     /// directly would prove the walkers work and say nothing about the

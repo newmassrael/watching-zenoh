@@ -58,6 +58,15 @@ pub struct Declarations<'a> {
     /// R311y875 — the rules that bound the WRONG thing, tallied by the triple
     /// that identifies one misbinding. See [`Self::misbindings`].
     misbound: RefCell<alloc::collections::BTreeMap<MisbindingKey, usize>>,
+    /// Round 2031 (item 300) — THE THIRD FINDING: a decoder that was actually
+    /// applied and then REFUSED the bytes, tallied by the pair that identifies
+    /// one refusal plus what the publisher had said.
+    ///
+    /// `misbound` above answers the two cases where one side is caught out by
+    /// the other. This answers the case where the decode itself failed, which
+    /// went out per message and reached no plane at all — in the listing a
+    /// reader bounds precisely because it is that long. See [`Self::refusals`].
+    refused: RefCell<alloc::collections::BTreeMap<RefusalKey, (usize, String)>>,
     /// Round 2026 (item 289) — WHAT THE SECOND SCAN COST: how many payloads
     /// [`crate::payload::inspect`] re-walked, and how many bytes it walked.
     ///
@@ -97,6 +106,16 @@ pub struct Declarations<'a> {
 /// [`Misbinding`] is the value a reader is handed.
 type MisbindingKey = (String, String, String, Misbound);
 
+/// Round 2031 (item 300) — what one REFUSAL is, as a key: the topic, the rule's
+/// decoder, and what the publisher had said about the bytes.
+///
+/// The decoder's own reason is deliberately NOT in the key. It is unbounded
+/// text off a scanner — "unexpected byte at offset 17" and the same failure at
+/// offset 43 are one thing to go look at — and keying on it would make a busy
+/// topic render one row per sample, which is the very shape this plane exists
+/// to collapse. One reason rides along as an EXAMPLE instead.
+type RefusalKey = (String, String, RefusedUnder);
+
 impl<'a> Declarations<'a> {
     /// A fresh ledger over `map`, with nothing applied yet.
     pub fn new(map: &'a FormatMap<'a>) -> Self {
@@ -104,6 +123,7 @@ impl<'a> Declarations<'a> {
             map,
             used: RefCell::new(BTreeSet::new()),
             misbound: RefCell::new(alloc::collections::BTreeMap::new()),
+            refused: RefCell::new(alloc::collections::BTreeMap::new()),
             rescans: RefCell::new((0, 0)),
             unwalked: RefCell::new(0),
         }
@@ -214,6 +234,78 @@ impl<'a> Declarations<'a> {
             .or_insert(0) += 1;
     }
 
+    /// Round 2031 (item 300) — one sample a decoder was APPLIED to and refused,
+    /// TALLIED.
+    ///
+    /// Called from [`decode_payload`] at the decoder's own `Err` arm, which is
+    /// the only place holding the topic, the rule and the claim the decode ran
+    /// under at once. The first reason seen for a key is kept as the example:
+    /// deterministic, cheap, and honest about being ONE sample's reason rather
+    /// than a summary of them all.
+    fn record_refusal(&self, keyexpr: &str, format: &str, under: RefusedUnder, why: &str) {
+        let mut refused = self.refused.borrow_mut();
+        let row = refused
+            .entry((String::from(keyexpr), String::from(format), under))
+            .or_insert_with(|| (0, String::from(why)));
+        row.0 += 1;
+    }
+
+    /// Round 2031 (item 300) — THE RULES THAT WERE APPLIED AND REFUSED, which
+    /// is the third question this plane can be asked and the last one it could
+    /// not answer.
+    ///
+    /// # The silence this ends
+    ///
+    /// [`Self::misbindings`] ended it for the two findings where one side is
+    /// caught out by the other, and stopped exactly there. The decode that ran
+    /// and failed still went out ONE MESSAGE AT A TIME: a capture whose rule
+    /// cannot read a topic said so once per row, in a listing a reader bounds
+    /// with `--max-messages` because it is that long. Two of the three findings
+    /// reached a plane and the third did not, and the asymmetry was itself
+    /// invisible — a reader shown "the publisher is mislabelling" was never
+    /// told the rule had not read the bytes either.
+    ///
+    /// # Why the unit is (topic, rule, claim) and not the sample
+    ///
+    /// A reader's remedy is per topic and rule: every sample on `demo/a` that a
+    /// `protobuf` rule refuses is ONE thing to go look at. The claim it ran
+    /// under belongs in the key rather than beside it because it is what
+    /// decides WHERE to look — see [`RefusedUnder`] — and two samples on one
+    /// topic can genuinely differ in it, one publisher labelling and another
+    /// not.
+    ///
+    /// # What bounds this answer, stated rather than hidden
+    ///
+    /// The same bound [`Self::misbindings`] carries and for the same reason:
+    /// the verdict is reached during the walk, so a caller that bounded the
+    /// listing bounded this too. [`Self::counts_are_exact`] covers both tallies
+    /// — it is a property of the walk, not of either finding.
+    ///
+    /// Most samples first, ties broken on the key, so the order is total and
+    /// two runs over one capture render identically.
+    pub fn refusals(&self) -> Vec<Refusal> {
+        let mut found: Vec<Refusal> = self
+            .refused
+            .borrow()
+            .iter()
+            .map(|((keyexpr, format, under), (samples, example))| Refusal {
+                keyexpr: keyexpr.clone(),
+                format: format.clone(),
+                under: *under,
+                samples: *samples,
+                example: example.clone(),
+            })
+            .collect();
+        found.sort_by(|a, b| {
+            b.samples
+                .cmp(&a.samples)
+                .then_with(|| a.keyexpr.cmp(&b.keyexpr))
+                .then_with(|| a.format.cmp(&b.format))
+                .then_with(|| a.under.cmp(&b.under))
+        });
+        found
+    }
+
     /// R311y875 — THE RULES THAT BOUND THE WRONG THING, which is the question
     /// [`Self::unused`] is the other half of.
     ///
@@ -278,6 +370,91 @@ impl<'a> Declarations<'a> {
                 .then_with(|| a.wrong.cmp(&b.wrong))
         });
         found
+    }
+}
+
+/// Round 2031 (item 300) — WHAT THE PUBLISHER HAD SAID when a decoder that was
+/// actually applied then refused the bytes.
+///
+/// # Why this is a separate vocabulary from [`Misbound`]
+///
+/// `Misbound` answers "which side is wrong", and a refusal is the case where
+/// NEITHER side is caught out by the other: the rule was applied, so it was not
+/// vetoed, and the label did not lose either. What failed is the decode, and the
+/// remedy is somewhere else again — the capture, or the publisher's actual
+/// bytes. Folding a third word into `Misbound` would make a consumer branching
+/// on "which side to go fix" receive a row where the answer is "neither".
+///
+/// # Why three words and not one
+///
+/// The three send a reader to three different places, which is this plane's own
+/// standing argument for splitting a finding rather than merging it:
+///
+/// - [`Self::Corroborated`] — the operator's rule and the publisher's label
+///   name the same encoding and the bytes are still not it. Both claims agree
+///   and the WIRE is the odd one out; this is the arm where a reader's capture
+///   is genuinely the thing to go look at.
+/// - [`Self::Unclaimed`] — nothing was declared that this reader could weigh,
+///   so the rule is the only claim in the room and the traffic contradicts it.
+///   The rule is the first suspect.
+/// - [`Self::Refuted`] — the publisher declared something else, its own bytes
+///   refuted that label, the rule was applied over it, and the rule refused
+///   too. BOTH claims are now wrong about this traffic.
+///
+/// Counting only two of the three — which is what shipping without this type
+/// did, by tallying `Refuted` as a misbinding and losing the refusal beside it
+/// — hides that asymmetry: a reader sees "the publisher is mislabelling" and is
+/// never told the rule did not read the bytes either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RefusedUnder {
+    /// The publisher named an encoding this decoder claims, and the bytes are
+    /// still not that format.
+    Corroborated,
+    /// Nothing was declared that this reader could weigh.
+    Unclaimed,
+    /// The publisher named something else, its own bytes refuted that, and the
+    /// rule applied over the label then refused as well.
+    Refuted,
+}
+
+impl RefusedUnder {
+    /// The word a consumer branches on, written ONCE.
+    ///
+    /// Literals rather than an index into a list — R311y926 (item 461) measured
+    /// what indexing costs on the sibling vocabulary: a variant added with
+    /// someone else's number compiled, shipped, and silently shared that
+    /// variant's word.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Corroborated => "corroborated",
+            Self::Unclaimed => "unclaimed",
+            Self::Refuted => "refuted",
+        }
+    }
+
+    /// Every word [`Self::name`] can return, WALKED rather than written down.
+    ///
+    /// The shape [`Misbound::names`] arrived at: a shipping caller for the
+    /// chain, so an arm added later is forced at `cargo build` and not only at
+    /// `cargo test`. `wz-capi-dissect` asserts its header names each of these,
+    /// which is the half a compiler cannot hold.
+    pub fn names() -> alloc::vec::Vec<&'static str> {
+        let mut out = alloc::vec::Vec::new();
+        let mut cur = Some(Self::Corroborated);
+        while let Some(v) = cur {
+            out.push(v.name());
+            cur = v.next();
+        }
+        out
+    }
+
+    /// The next word, so the walk above visits every arm without a list.
+    fn next(self) -> Option<Self> {
+        Some(match self {
+            Self::Corroborated => Self::Unclaimed,
+            Self::Unclaimed => Self::Refuted,
+            Self::Refuted => return None,
+        })
     }
 }
 
@@ -434,6 +611,87 @@ impl Misbinding {
     }
 }
 
+/// Round 2031 (item 300) — one rule that WAS applied and refused, as a row.
+///
+/// The sibling of [`Misbinding`] on the third finding. Separate rather than a
+/// variant of it because the two answer different questions and send a reader
+/// to different places; see [`RefusedUnder`] for why the claim it ran under is
+/// part of the identity rather than a detail beside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refusal {
+    /// The key expression the rule was matched against.
+    pub keyexpr: String,
+    /// The decoder that refused.
+    pub format: String,
+    /// What the publisher had said about these payloads.
+    pub under: RefusedUnder,
+    /// How many WALKED samples refused this way. A lower bound where a listing
+    /// bound bit; see [`Declarations::refusals`].
+    pub samples: usize,
+    /// ONE sample's reason, kept as an example rather than as a summary.
+    ///
+    /// The first seen for this key. A scanner's reason carries an offset, so
+    /// the reasons across a topic's samples differ in ways a reader does not
+    /// need and a tally must not fragment on — which is why it is here and not
+    /// in the key.
+    pub example: String,
+}
+
+impl Refusal {
+    /// The prose BOTH surfaces carry, written ONCE — [`Misbinding::sentence`]'s
+    /// rule, applied to this finding from the round it is introduced.
+    ///
+    /// Each arm names WHERE TO LOOK, because that is the whole value of telling
+    /// the three apart.
+    pub fn sentence(&self) -> String {
+        let Self {
+            keyexpr,
+            format,
+            under,
+            samples,
+            example,
+        } = self;
+        match under {
+            RefusedUnder::Corroborated => alloc::format!(
+                "WIRE DISAGREES WITH BOTH -- {samples} sample(s) on `{keyexpr}` declare an \
+                 encoding the `{format}` rule is for, and the `{format}` decoder still \
+                 refused them ({example}). Your rule and the publisher agree; look at \
+                 the capture"
+            ),
+            RefusedUnder::Unclaimed => alloc::format!(
+                "RULE REFUSED -- {samples} sample(s) on `{keyexpr}` declare nothing this \
+                 reader can weigh, and the `{format}` decoder refused them ({example}). \
+                 The rule is the only claim there is; check the --payload-format rule"
+            ),
+            RefusedUnder::Refuted => alloc::format!(
+                "NEITHER CLAIM HOLDS -- {samples} sample(s) on `{keyexpr}` carry a label \
+                 their own bytes refute, and the `{format}` rule applied over that label \
+                 refused them too ({example}). The publisher and the rule are both wrong \
+                 about this traffic"
+            ),
+        }
+    }
+}
+
+/// Round 2031 (item 300) — the machine-readable rendering of one refusal,
+/// written ONCE, for the reason [`push_misbinding`] is written once.
+pub fn push_refusal(refusal: &Refusal, out: &mut String) {
+    use wz_session_core::json::escape_into;
+    out.push_str("{\"keyexpr\":");
+    escape_into(&refusal.keyexpr, out);
+    out.push_str(",\"format\":");
+    escape_into(&refusal.format, out);
+    out.push_str(",\"under\":\"");
+    out.push_str(refusal.under.name());
+    out.push_str("\",\"samples\":");
+    out.push_str(&refusal.samples.to_string());
+    out.push_str(",\"example\":");
+    escape_into(&refusal.example, out);
+    out.push_str(",\"note\":");
+    escape_into(&refusal.sentence(), out);
+    out.push('}');
+}
+
 /// R311y875 — the machine-readable rendering of one misbinding, written ONCE.
 ///
 /// Both surfaces emit this array — `wz-analyze`'s `--fields --json` and the C
@@ -465,6 +723,20 @@ pub fn push_misbinding(misbinding: &Misbinding, out: &mut String) {
 /// standing rule. A consumer that had to test for the key would read its absence
 /// as "no rule is misbound", which is exactly the assumption this plane exists
 /// to stop being made for free.
+///
+/// # Round 2031 (item 300) — and `payload_refusals` beside it, under this name
+///
+/// The name undersells what this emits and has since R311y875's own
+/// `payload_mapping_counts_exact`, which is not a misbinding either. Stated
+/// rather than quietly widened: this function renders THE PAYLOAD MAPPING
+/// PLANE, and the third finding is emitted here rather than through a sibling
+/// for two reasons a rename would not buy back.
+///
+/// The exactness flag covers BOTH tallies — it is a property of the walk, not
+/// of either finding — and a consumer must not have to look beside a different
+/// array to learn whether these numbers are a floor. And there are two callers,
+/// `wz-analyze` and the C ABI; a second function is a second thing each of them
+/// can forget, which is the shape this module refuses one doc-comment up.
 pub fn push_misbindings(declarations: Option<&Declarations<'_>>, out: &mut String) {
     out.push_str("\"payload_mapping\":[");
     if let Some(declarations) = declarations {
@@ -473,6 +745,19 @@ pub fn push_misbindings(declarations: Option<&Declarations<'_>>, out: &mut Strin
                 out.push(',');
             }
             push_misbinding(misbinding, out);
+        }
+    }
+    out.push(']');
+    // Round 2031 (item 300) — THE THIRD FINDING, which until this round existed
+    // only per message. Same rule as the array above: always rendered, empty or
+    // not, so an absent key can never be read as "nothing refused".
+    out.push_str(",\"payload_refusals\":[");
+    if let Some(declarations) = declarations {
+        for (i, refusal) in declarations.refusals().iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            push_refusal(refusal, out);
         }
     }
     out.push(']');
@@ -890,7 +1175,21 @@ fn declared_encoding(node: &Field) -> Encoding<'_> {
 enum Claim {
     /// Nothing stands in the rule's way: the format named no encodings, the
     /// publisher named none, or the two agree.
-    Agrees,
+    ///
+    /// Round 2031 (item 300) — the `bool` says WHICH of those, because a
+    /// refusal downstream means opposite things under them. `true` when the
+    /// publisher named an encoding this decoder claims, so the operator and
+    /// the publisher AGREE and only the bytes are the odd one out. `false`
+    /// when nobody claimed anything this reader could weigh — the format
+    /// opted out, the record carried no encoding, the id was `zenoh/bytes`,
+    /// or this build cannot read the id — and then the rule is the only
+    /// claim there is.
+    ///
+    /// Carried rather than recomputed at the refusal, which would be a second
+    /// spelling of the judgement this function exists to make once. The shape
+    /// is [`Self::Vetoes`]'s own: a verdict word plus the measurement it
+    /// rests on.
+    Agrees(bool),
     /// The declaration contradicts the rule and the rule loses. Carries the
     /// declared name and whether anything CHECKED that name.
     ///
@@ -942,7 +1241,7 @@ impl Claim {
     /// test compare the variant set with itself.
     fn outcome(&self) -> &'static str {
         match self {
-            Self::Agrees => "applies",
+            Self::Agrees(_) => "applies",
             Self::Vetoes(..) => "withholds",
             Self::Refuted(_) => "overrides",
         }
@@ -956,7 +1255,7 @@ impl Claim {
     /// that drive real traffic through it.
     fn next(&self) -> Option<Self> {
         Some(match self {
-            Self::Agrees => Self::Vetoes(String::new(), false),
+            Self::Agrees(_) => Self::Vetoes(String::new(), false),
             Self::Vetoes(..) => Self::Refuted(String::new()),
             Self::Refuted(_) => return None,
         })
@@ -965,7 +1264,7 @@ impl Claim {
     /// Every arm, walked rather than listed.
     fn all() -> alloc::vec::Vec<Self> {
         let mut out = alloc::vec::Vec::new();
-        let mut cur = Some(Self::Agrees);
+        let mut cur = Some(Self::Agrees(false));
         while let Some(v) = cur {
             cur = v.next();
             out.push(v);
@@ -1013,20 +1312,34 @@ fn judge_claim(
     // eventually does not.
     run: &Declarations<'_>,
 ) -> Claim {
+    // Round 2031 (item 300) — `false`: the format opted out of the question,
+    // so no label was weighed and the rule stands unopposed.
     let Some(accepted) = format.encodings() else {
-        return Claim::Agrees;
+        return Claim::Agrees(false);
     };
     let declared = declared_encoding(node);
+    // `false` again, and for the same reason from a reader's side: the record
+    // carried no encoding, or carried an id this build's table does not have.
     let Encoding::Known { id, name, .. } = declared else {
-        return Claim::Agrees;
+        return Claim::Agrees(false);
     };
     // Id 0 is `zenoh/bytes`, which a publisher gets by saying nothing at all.
     // Told apart from the other table entries HERE rather than by leaving it
     // out of the table: it is a real encoding a publisher may also name
     // deliberately, and this reader cannot distinguish the two — so the
     // benefit of the doubt goes to the traffic.
-    if id == 0 || accepted.contains(&name) {
-        return Claim::Agrees;
+    //
+    // Round 2031 (item 300) — and the two halves of this condition are now
+    // told apart, because they are not the same fact. `accepted.contains` is
+    // a publisher CORROBORATING the rule; id 0 is a publisher saying nothing
+    // and being given the benefit of the doubt. Both let the decoder run and
+    // only one of them is evidence, which is exactly the distinction a
+    // refusal downstream needs.
+    if accepted.contains(&name) {
+        return Claim::Agrees(true);
+    }
+    if id == 0 {
+        return Claim::Agrees(false);
     }
     // Round 2026 (item 289) — THE SECOND SCAN, counted at the line that starts
     // it. Everything above this returns without re-reading the payload; from
@@ -1081,7 +1394,18 @@ pub fn decode_payload(field: &Field, map: &Declarations<'_>, at: KeyexprAt<'_>) 
     // per message until this round and reached no plane at all, so a capture
     // where a mapping is wrong for every sample on a topic said so once per row
     // — in the listing a reader bounds precisely because it is that long.
+    // Round 2031 (item 300) — and the claim the decoder ends up running UNDER
+    // is carried down to its `Err` arm, because a refusal means opposite things
+    // under the three of them. Derived from the judgement already made rather
+    // than asked again below, which would be a second spelling of it.
+    let mut under = RefusedUnder::Unclaimed;
     let despite_encoding = match judge_claim(format, node, bytes, map) {
+        Claim::Agrees(corroborated) => {
+            if corroborated {
+                under = RefusedUnder::Corroborated;
+            }
+            None
+        }
         Claim::Vetoes(declared, checked) => {
             map.record_misbinding(&keyexpr, format.name(), &declared, Misbound::Rule);
             return PayloadDecoding::EncodingMismatch {
@@ -1093,9 +1417,14 @@ pub fn decode_payload(field: &Field, map: &Declarations<'_>, at: KeyexprAt<'_>) 
         }
         Claim::Refuted(declared) => {
             map.record_misbinding(&keyexpr, format.name(), &declared, Misbound::Publisher);
+            // Round 2031 (item 300) — a refusal AFTER this is the arm where
+            // both claims are wrong, and until this round the misbinding above
+            // was tallied while the refusal beside it was dropped. A reader was
+            // told the publisher was mislabelling and never told the rule did
+            // not read the bytes either.
+            under = RefusedUnder::Refuted;
             Some(declared)
         }
-        Claim::Agrees => None,
     };
     match format.decode(bytes) {
         Ok(mut fields) => {
@@ -1121,11 +1450,20 @@ pub fn decode_payload(field: &Field, map: &Declarations<'_>, at: KeyexprAt<'_>) 
                 despite_encoding,
             }
         }
-        Err(why) => PayloadDecoding::Refused {
-            keyexpr,
-            format: format.name().to_string(),
-            why: why.to_string(),
-        },
+        Err(why) => {
+            let why = why.to_string();
+            // Round 2031 (item 300) — TALLIED, at the one point that holds the
+            // topic, the rule, and the claim the decode ran under. The finding
+            // went out per message until this round and reached no plane at
+            // all, which on a busy topic is one row per sample in a listing a
+            // reader bounds precisely because it is that long.
+            map.record_refusal(&keyexpr, format.name(), under, &why);
+            PayloadDecoding::Refused {
+                keyexpr,
+                format: format.name().to_string(),
+                why,
+            }
+        }
     }
 }
 
@@ -1307,6 +1645,7 @@ mod tests {
     /// hard-coded blind: an upstream insertion that shifted the table would
     /// otherwise silently retarget every assertion below.
     const ENC_ZENOH_BYTES: u16 = 0;
+    const ENC_TEXT_PLAIN: u16 = 4;
     const ENC_JSON: u16 = 5;
     const ENC_PROTOBUF: u16 = 13;
 
@@ -2199,6 +2538,147 @@ mod tests {
             fresh.unused().len(),
             2,
             "a map is configuration and does not remember a previous walk"
+        );
+    }
+
+    /// Round 2031 (item 300) — THE RUN COUNTS ITS REFUSALS, keyed on the claim
+    /// the decoder ran under.
+    ///
+    /// # The harm this round measured before changing anything
+    ///
+    /// A probe drove all three arms and asserted what the plane said: for the
+    /// first two, `misbindings()` was EMPTY — a decode that ran and failed
+    /// reached nothing at all — and for the third the publisher's label was
+    /// tallied while the refusal beside it was dropped on the floor. So a
+    /// reader of that capture was told "the publisher is mislabelling" and was
+    /// never told the rule had not read the bytes either. That probe passed,
+    /// which is what made it a harm and not a hypothesis.
+    ///
+    /// # Why all three arms and not just the one the item names
+    ///
+    /// Item 300 is about the CORROBORATED arm, where the operator and the
+    /// publisher agree and the reader's capture is genuinely the thing to look
+    /// at. It is only distinguishable if the other two exist beside it: a plane
+    /// that lumped "both agreed" together with "nobody claimed anything" would
+    /// send a reader to their capture over traffic whose rule is a guess.
+    ///
+    /// Each arm is a separate leg with its own traffic, so no arm can pass by
+    /// another arm's work — the class this session has paid for four times.
+    #[test]
+    fn the_run_counts_the_rules_it_applied_and_that_refused() {
+        let mut map = FormatMap::new();
+        map.declare("demo/**=json").expect("a keyexpr pattern");
+        let spaces = KeyexprSpaces::new();
+        let at = KeyexprAt::new(Direction::A, &spaces);
+
+        // CORROBORATED: the publisher declares this decoder's own encoding and
+        // the bytes are still not it. TWICE, so the count cannot pass by being
+        // hard-coded to the one-sample answer.
+        let run = Declarations::new(&map);
+        let truncated = put_declaring(ENC_JSON, br#"{"a":"#);
+        for _ in 0..2 {
+            let seen = decode_payload(&truncated, &run, at);
+            assert!(
+                matches!(seen, PayloadDecoding::Refused { .. }),
+                "the bytes are not JSON: {seen:?}"
+            );
+        }
+        assert!(
+            run.misbindings().is_empty(),
+            "nothing is MISBOUND here -- neither side was caught out by the \
+             other, which is why this is a third finding and not a third word \
+             in that vocabulary"
+        );
+        let found = run.refusals();
+        assert_eq!(found.len(), 1, "one topic, one rule, one claim: {found:?}");
+        assert_eq!(found[0].under, RefusedUnder::Corroborated);
+        assert_eq!(found[0].samples, 2, "both samples: {found:?}");
+        assert_eq!(found[0].keyexpr, "demo/a");
+        assert_eq!(found[0].format, "json");
+        assert!(
+            !found[0].example.is_empty(),
+            "and ONE reason rides along: {found:?}"
+        );
+        assert!(
+            found[0].sentence().contains("look at the capture"),
+            "this arm's whole value is where it sends a reader: {}",
+            found[0].sentence()
+        );
+
+        // UNCLAIMED: id 0 is a publisher saying nothing, so the rule is the
+        // only claim there is and the traffic contradicts it.
+        let run = Declarations::new(&map);
+        let bare = put_declaring(ENC_ZENOH_BYTES, br#"{"a":"#);
+        let seen = decode_payload(&bare, &run, at);
+        assert!(
+            matches!(seen, PayloadDecoding::Refused { .. }),
+            "the bytes are not JSON: {seen:?}"
+        );
+        let found = run.refusals();
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(
+            found[0].under,
+            RefusedUnder::Unclaimed,
+            "`zenoh/bytes` is SILENCE, not corroboration -- a build that read \
+             the benefit of the doubt as evidence would send this reader to \
+             their capture over a rule that is only a guess: {found:?}"
+        );
+        assert!(
+            found[0].sentence().contains("--payload-format"),
+            "and this arm names the flag instead: {}",
+            found[0].sentence()
+        );
+
+        // REFUTED: the label says text, its own bytes refute that, the rule is
+        // applied over the label -- and refuses too.
+        let run = Declarations::new(&map);
+        let both_wrong = put_declaring(ENC_TEXT_PLAIN, &[0xFF, 0xFE]);
+        let seen = decode_payload(&both_wrong, &run, at);
+        assert!(
+            matches!(seen, PayloadDecoding::Refused { .. }),
+            "neither claim reads these bytes: {seen:?}"
+        );
+        assert_eq!(
+            run.misbindings().len(),
+            1,
+            "the label is still a misbinding: {seen:?}"
+        );
+        let found = run.refusals();
+        assert_eq!(
+            found.len(),
+            1,
+            "AND the refusal beside it is a finding of its own -- this is the \
+             asymmetry item 300 names: {found:?}"
+        );
+        assert_eq!(found[0].under, RefusedUnder::Refuted);
+        assert!(
+            found[0].sentence().contains("both wrong"),
+            "so the sentence says both: {}",
+            found[0].sentence()
+        );
+
+        // A map is configuration: a second run over it remembers nothing.
+        let fresh = Declarations::new(&map);
+        assert!(fresh.refusals().is_empty());
+    }
+
+    /// Round 2031 (item 300) — EVERY refusal word is distinct, and the walk
+    /// visits every arm without a list to keep true.
+    ///
+    /// [`Misbound`]'s own gate, on the vocabulary introduced this round rather
+    /// than after a prose copy of it has drifted — R311y926's lesson applied
+    /// forwards: an arm added later that reuses another arm's word compiles and
+    /// ships, and only a distinctness test catches it.
+    #[test]
+    fn every_refusal_claim_has_its_own_word() {
+        let words = RefusedUnder::names();
+        assert_eq!(words.len(), 3, "the walk visits every arm: {words:?}");
+        let unique: alloc::collections::BTreeSet<_> = words.iter().collect();
+        assert_eq!(
+            unique.len(),
+            words.len(),
+            "two claims sharing a word makes a C consumer's branch silently \
+             wrong on real traffic: {words:?}"
         );
     }
 
