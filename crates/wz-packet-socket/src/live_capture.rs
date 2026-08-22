@@ -15,10 +15,21 @@
 //! `wz-capture` is `no_std` with ZERO third-party dependencies, deliberately: a
 //! capture parser is a pure function of bytes and stays testable on any target.
 //! A live tap is the opposite — a socket, a privilege, a kernel timestamp — so
-//! putting it there would cost that crate its whole shape for one module. This
-//! crate already has `std`, `libc`, and the [`AfPacketSocket`] that
-//! R311y579 (G9) built for the raweth LINK, and a capture tap is the same
-//! socket read for a different purpose.
+//! putting it there would cost that crate its whole shape for one module.
+//!
+//! ## Why here and not in `wz-runtime-tokio` — Round 1998 (item 470)
+//!
+//! It WAS there, next to the [`AfPacketSocket`](crate::raweth_socket::AfPacketSocket)
+//! it opens, and the argument for that placement read well: the runtime crate
+//! already had `std`, `libc`, and the socket, and a capture tap is the same
+//! socket read for a different purpose. What the argument left out is what that
+//! crate ALSO has — a mandatory `tokio`. So `wz-analyze`, a passive file reader
+//! that depends on no runtime at all, could not reach this module without
+//! pulling a multi-thread runtime and the whole session stack behind it, and a
+//! capability nothing can call is the shape this workspace pays for most.
+//!
+//! Neither the async runtime nor the `no_std` dissector, then. The socket layer
+//! is its own crate, and the tap rides with the socket it opens.
 //!
 //! ## The clock is the KERNEL's, not the reader's
 //!
@@ -541,7 +552,7 @@ mod tests {
     /// shape this repo has been burned by before. Run it with:
     ///
     /// ```text
-    /// cargo test -p wz-runtime-tokio --features live-capture --lib --no-run
+    /// cargo test -p wz-packet-socket --features tap --lib --no-run
     /// sudo <the built binary> live_capture::tests::a_real_tap --ignored --exact
     /// ```
     ///

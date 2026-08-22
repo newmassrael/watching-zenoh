@@ -63,6 +63,12 @@ members = [
     # zenoh; the seam is a byte stream plus a direction, so a live tap can
     # replace the file reader without touching the decode side.
     "wz-capture",
+    # Round 1998 (item 470) — Linux packet I/O: the `AF_PACKET` socket, the
+    # raweth link over it, and the capture tap. Split out of `wz-runtime-tokio`,
+    # which never drove either and whose MANDATORY `tokio` is what kept the tap
+    # unreachable from a passive reader. Neither the async runtime's nor the
+    # `no_std` dissector's — the third place both refuse.
+    "wz-packet-socket",
     "wz-capi-dissect",
     "wz-codecs",
     "wz-codecs-test-support",

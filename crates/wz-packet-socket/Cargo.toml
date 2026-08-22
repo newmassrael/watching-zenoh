@@ -1,0 +1,56 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-packet-socket — Round 1998 (item 470), Linux packet I/O: an `AF_PACKET`
+# socket, the raweth link driven over it, and the capture TAP built on the same
+# read.
+#
+# ## Why this is a crate and not a module
+#
+# Both files here were in `wz-runtime-tokio` and neither uses `tokio` — measured,
+# not assumed: `tokio|async|await` matches nothing in either, outside one line of
+# doc text. They were there because that crate already had `std` and `libc`, which
+# is a reason to put a file somewhere and not a reason to keep it there.
+#
+# What made it cost something is that `tokio` is a MANDATORY dependency of
+# `wz-runtime-tokio`. So `wz-analyze` — a passive file reader that depends on no
+# runtime at all — could not reach the tap without pulling a multi-thread runtime
+# and the whole session stack behind it.
+#
+# The obvious relocation is refused by the target's own contract: `wz-capture` is
+# `#![no_std]` with zero third-party dependencies and says in writing that it must
+# keep building for the MCU profiles. A socket is exactly what that crate is not
+# allowed to hold.
+#
+# So: neither the async runtime nor the no_std dissector. Its own crate, which is
+# what a Linux socket layer was all along.
+[package]
+name = "wz-packet-socket"
+version = "0.1.0"
+edition = "2021"
+license = "LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial"
+publish = false
+
+[features]
+default = []
+
+# The capture TAP. Default-off because it is the only thing here that needs a
+# dissection to feed, and the raweth link does not: a consumer wiring the L2 link
+# should not be charged for the analyzer's half.
+tap = ["dep:wz-capture"]
+
+[dependencies]
+libc = { version = "0.2" }
+# The raweth FRAMING SSOT — `raweth_socket` carries frames it does not define.
+# `transport-link-raweth` is what gates that module there, so naming it here is
+# the same selection `wz-runtime-tokio` made when this file lived beside it.
+wz-session-core = { path = "../wz-session-core", default-features = false, features = [
+    "transport-link-raweth",
+] }
+# Only `tap` needs it, for `Dissection` and `LINKTYPE_ETHERNET` — the types the
+# pump feeds. `default-features = false` + `reassembly` mirrors what
+# `wz-runtime-tokio` selected when this module lived there, so the feature
+# unification a consumer sees does not move with the file.
+wz-capture = { path = "../wz-capture", optional = true, default-features = false, features = [
+    "reassembly",
+] }

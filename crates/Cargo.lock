@@ -2651,6 +2651,15 @@ name = "wz-packet-fixtures"
 version = "0.1.0"
 
 [[package]]
+name = "wz-packet-socket"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "wz-capture",
+ "wz-session-core",
+]
+
+[[package]]
 name = "wz-plugin-abi"
 version = "0.1.0"
 
@@ -2753,6 +2762,7 @@ dependencies = [
  "wz-capture",
  "wz-codecs",
  "wz-codecs-test-support",
+ "wz-packet-socket",
  "wz-plugin-abi",
  "wz-routing-graph",
  "wz-runtime-core",

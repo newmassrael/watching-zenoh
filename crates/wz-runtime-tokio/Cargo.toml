@@ -1158,14 +1158,28 @@ zenoh-config-emit = []
 # `#error "Raweth transport only supported on linux systems"`
 # (raweth_unix.c:42), and a feature that refused to compile on macOS would make
 # the FRAMING half unreachable there too, for no reason -- it is pure data.
-transport-link-raweth = ["wz-session-core/transport-link-raweth", "dep:libc"]
+#
+# Round 1998 (item 470) — the socket itself now lives in `wz-packet-socket` and
+# this feature pulls that crate instead of `dep:libc`. `lib.rs` re-exports the
+# module under its old path, so the name a consumer writes has not moved.
+transport-link-raweth = [
+    "wz-session-core/transport-link-raweth",
+    "dep:wz-packet-socket",
+]
 
 # R311y594 (B1) — the live capture source. Implies the raweth link because it
 # reuses that round's `AfPacketSocket`: one socket, opened the same way, read
 # for a different purpose. Its own feature rather than a free rider on
 # `transport-link-raweth`, because a deployment that speaks raweth is not
 # thereby asking to tap the wire.
-live-capture = ["transport-link-raweth", "dep:wz-capture"]
+#
+# Round 1998: forwards to `wz-packet-socket/tap`, which is where the module went.
+# `dep:wz-capture` stays because this crate's own code reads that crate too.
+live-capture = [
+    "transport-link-raweth",
+    "wz-packet-socket/tap",
+    "dep:wz-capture",
+]
 # R311il — FOUNDATIONAL session gate. Forwards to wz-session-core's
 # `session-unicast`, which codegens the engine-free unicast session FSM
 # (sources/session/session_fsm_unicast.scxml, `--no-std`) into the
@@ -1827,6 +1841,10 @@ tokio-vsock = { version = "0.5", optional = true }
 # Linux is a subset of unix, so the unixpipe consumer is unaffected (its own code
 # keeps its `target_os = "linux"` gate).
 libc = { version = "0.2", optional = true }
+# Round 1998 (item 470) — the AF_PACKET socket and the capture tap, which this
+# crate re-exports rather than owns. Optional and pulled only by
+# `transport-link-raweth`, so every other build is byte-identical.
+wz-packet-socket = { path = "../wz-packet-socket", optional = true }
 # R311y492 (§5.22 plugin-dynamic-loading) — `dlopen`/`dlsym` for the dynamic
 # plugin host. In the `cfg(unix)` table because that is what the atom is scoped
 # to: its inventory reason records it as "AP/std-only, unsafe-FFI", and no MCU or

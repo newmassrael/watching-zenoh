@@ -608,18 +608,26 @@ pub mod retry_period;
 pub mod zenoh_config;
 
 /// R311y579 (G9) — the raweth (L2) link's TRANSPORT: an `AF_PACKET` socket and
-/// the [`RawEthIo`](raweth_socket::RawEthIo) seam that lets the framing above
-/// it be driven without `CAP_NET_RAW`. Framing SSOT is
-/// [`wz_session_core::raweth_link`]. Linux-only, like pico's own raweth.
+/// the `RawEthIo` seam that lets the framing above it be driven without
+/// `CAP_NET_RAW`. Framing SSOT is [`wz_session_core::raweth_link`].
+/// Linux-only, like pico's own raweth.
+///
+/// Round 1998 (item 470) moved the code to `wz-packet-socket` and left this
+/// name pointing at it. A re-export rather than a deletion because the path is
+/// public API and neither module ever needed this crate — see that crate's
+/// docs for why a mandatory `tokio` was the whole cost.
 #[cfg(all(feature = "transport-link-raweth", target_os = "linux"))]
-pub mod raweth_socket;
+pub use wz_packet_socket::raweth_socket;
 
 /// R311y594 (B1) — the LIVE capture source: an `AF_PACKET` tap feeding the
 /// same [`wz_capture::Dissection`] a pcap file does, with the KERNEL's
 /// timestamp as the observer's clock. Linux-only, and privileged — see the
 /// module docs for what it deliberately is not.
+///
+/// Round 1998 (item 470): re-exported from `wz-packet-socket`, on the argument
+/// above.
 #[cfg(all(feature = "live-capture", target_os = "linux"))]
-pub mod live_capture;
+pub use wz_packet_socket::live_capture;
 
 /// R121k-2 — application-layer remote-declaration registries. Route
 /// decoded `Declare(Decl*|Undecl*)` records to user-registered

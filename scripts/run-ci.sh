@@ -7869,19 +7869,32 @@ _c1bz_check_subset() {
 layer_c1bs_live_capture() {
     local out bin
 
-    (cd crates && cargo clippy -p wz-runtime-tokio \
-        --features live-capture --all-targets --quiet -- -D warnings) || return 1
+    # Round 1998 (item 470) — the module MOVED to `wz-packet-socket`, and this
+    # lane names a crate three times: clippy, the unprivileged filter, and the
+    # test-binary path it greps for. A split that updated the first two and not
+    # the third would leave an ARMED lane locating nothing, which is the failure
+    # this file exists to prevent. `wz-runtime-tokio` still re-exports the path,
+    # so a consumer's spelling is unchanged; the LANE follows the code.
+    (cd crates && cargo clippy -p wz-packet-socket \
+        --features tap --all-targets --quiet -- -D warnings) || return 1
 
-    out="$(cd crates && cargo test -p wz-runtime-tokio --features live-capture \
+    out="$(cd crates && cargo test -p wz-packet-socket --features tap \
         --lib live_capture:: --quiet 2>&1)" || { echo "$out"; return 1; }
     grep -qE '^test result: ok\. [1-9][0-9]* passed' <<<"$out" || {
         echo "  C1bs FAIL: the live_capture filter matched no test"; echo "$out"; return 1; }
 
+    # The re-export is load-bearing and is CHECKED, not assumed: the old path is
+    # public API and a consumer that writes it must still compile.
+    (cd crates && cargo check -p wz-runtime-tokio --features live-capture --quiet) || {
+        echo "  C1bs FAIL: wz-runtime-tokio no longer re-exports the moved modules" >&2
+        return 1
+    }
+
     # The privileged half. Build as THIS user and run the binary under sudo, so
     # the cargo target dir never acquires root-owned artefacts.
-    bin="$(cd crates && cargo test -p wz-runtime-tokio --features live-capture \
+    bin="$(cd crates && cargo test -p wz-packet-socket --features tap \
         --lib --no-run --message-format=short 2>&1 \
-        | grep -oE 'target/debug/deps/wz_runtime_tokio-[a-f0-9]+' | tail -1)"
+        | grep -oE 'target/debug/deps/wz_packet_socket-[a-f0-9]+' | tail -1)"
     if [[ -z "$bin" ]]; then
         echo "  C1bs FAIL: could not locate the built test binary" >&2
         return 1

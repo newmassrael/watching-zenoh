@@ -9,6 +9,11 @@
 //! `_z_close_raweth`). The framing this carries is
 //! [`wz_session_core::raweth_link`].
 //!
+//! Round 1998 (item 470) moved this file out of `wz-runtime-tokio` unchanged.
+//! It never used `tokio`; it lived there because that crate already had `std`
+//! and `libc`, which is a reason to put a file somewhere and not a reason to
+//! keep it there. See this crate's manifest for what that placement cost.
+//!
 //! ## Why the I/O is behind a trait
 //!
 //! `AF_PACKET` needs `CAP_NET_RAW`. An unprivileged process — which is what a

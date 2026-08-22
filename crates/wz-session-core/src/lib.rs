@@ -370,8 +370,9 @@ pub mod serial_link;
 /// R311y579 (G9) — the raweth (L2) link's FRAMING SSOT: the 16 / 20-byte
 /// Ethernet header zenoh-pico's raweth transport puts a batch inside, its
 /// source-MAC allow-list, and the `reth/` locator. Pure data, `no_std` +
-/// alloc; the AF_PACKET socket that carries it lives in wz-runtime-tokio,
-/// the same split as the serial link's.
+/// alloc; the AF_PACKET socket that carries it lives in `wz-packet-socket`
+/// (Round 1998 moved it out of wz-runtime-tokio, which never drove it and
+/// charged every consumer a mandatory `tokio` to reach it).
 #[cfg(feature = "transport-link-raweth")]
 pub mod raweth_link;
 
