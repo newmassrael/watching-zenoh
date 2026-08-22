@@ -243,6 +243,32 @@ pub enum VerdictReason {
     ExpiredChains,
     /// A chain still open when the capture ended.
     AbandonedChains,
+    /// Round 2008 (open-debt item 245) — an IP fragment chain this reader's own
+    /// DEADLINE gave up on. The remedy is a wider reassembly window.
+    ///
+    /// One of three that used to be one. `UnfinishedFragmentChains` folded the
+    /// deadline, the cap and the file's own end into a single reason, and the
+    /// page named a different knob for each -- so a consumer branching on
+    /// `reasons()` was told a capture was short and not which of three things
+    /// to change. The zenoh chain layer had already made this split
+    /// ([`Self::ExpiredChains`] / [`Self::AbandonedChains`]) and R311y656
+    /// measured why eviction is not a third disjunct THERE; the IP fragment
+    /// layer never followed.
+    ///
+    /// The rule the split follows is this file's own, from R311y864: two
+    /// findings that send a reader to different work are two reasons.
+    FragmentChainsExpired,
+    /// Round 2008 (item 245) — an IP fragment chain the CONCURRENCY CAP threw
+    /// out to make room. The remedy is a higher cap, and it is a different knob
+    /// from the deadline's.
+    FragmentChainsEvicted,
+    /// Round 2008 (item 245) — an IP fragment chain still open when the file
+    /// ended.
+    ///
+    /// The one of the three with NO remedy: nothing was too small, the capture
+    /// simply stopped mid-datagram. Telling an operator to widen a window they
+    /// never hit is the misdirection this split exists to end.
+    FragmentChainsOpenAtEnd,
     /// A hole the assembler stepped over rather than waiting on forever.
     GapsForced,
     /// The zenoh framing lost and found again.
@@ -274,8 +300,6 @@ pub enum VerdictReason {
     PayloadGaps,
     /// Payloads a selector could not judge either way.
     PayloadUndecided,
-    /// IP fragment chains that never became a datagram.
-    UnfinishedFragmentChains,
     /// Every checksum this reader could verify on a layer FAILED, so nothing
     /// corroborates the headers the rows were built from.
     ChecksumsUncorroborated,
@@ -313,7 +337,9 @@ impl VerdictReason {
             Self::ExchangeUndecided => "exchange_undecided",
             Self::PayloadGaps => "payload_gaps",
             Self::PayloadUndecided => "payload_undecided",
-            Self::UnfinishedFragmentChains => "unfinished_fragment_chains",
+            Self::FragmentChainsExpired => "fragment_chains_expired",
+            Self::FragmentChainsEvicted => "fragment_chains_evicted",
+            Self::FragmentChainsOpenAtEnd => "fragment_chains_open_at_end",
         }
     }
 }
@@ -448,8 +474,28 @@ impl<'a> CaptureReport<'a> {
         // One number answers both, because the question is about CHAINS and the
         // census counts PIECES: a chain that completed is not here, and a chain
         // that expired, was evicted, or was still open when the file ended is.
-        if self.dissection.unfinished_fragment_chains() > 0 {
-            out.push(VerdictReason::UnfinishedFragmentChains);
+        //
+        // Round 2008 (open-debt item 245) — THREE REASONS, because the page
+        // already named three knobs and the verdict named one. Each disjunct is
+        // read from its own counter rather than from the sum, so a consumer
+        // branching on `reasons()` learns WHICH bound bit -- the deadline, the
+        // cap, or neither.
+        //
+        // ⚠ Each is REACHABLE, which R311y656 made the standing question here
+        // when it declined to add an eviction disjunct on the zenoh side: a
+        // disjunct nothing can reach is a claim no test can hold. The deadline
+        // is driven by `FragmentTable::bounded(_, Some(window))`, the cap by
+        // `bounded(Some(n), _)`, and the third by a capture that simply ends
+        // mid-datagram, which is the ordinary shape of a short capture.
+        let fragments = self.dissection.fragment_stats();
+        if fragments.expired > 0 {
+            out.push(VerdictReason::FragmentChainsExpired);
+        }
+        if fragments.evicted > 0 {
+            out.push(VerdictReason::FragmentChainsEvicted);
+        }
+        if self.dissection.open_fragment_chains() > 0 {
+            out.push(VerdictReason::FragmentChainsOpenAtEnd);
         }
         // R311y884 (open-debt item 233) — THE CHECKSUM COUNTERS, WHICH WERE
         // RENDERED AND NEVER JUDGED.
@@ -5897,7 +5943,11 @@ mod tests {
         );
         assert_eq!(
             CaptureReport::of(&d).reasons(),
-            alloc::vec![VerdictReason::UnfinishedFragmentChains],
+            // Round 2008 (item 245) — the ending with NO remedy. This fixture
+            // and the two below used to assert the SAME reason, which is the
+            // defect that item names: three fixtures, three endings, one
+            // indistinguishable verdict.
+            alloc::vec![VerdictReason::FragmentChainsOpenAtEnd],
             "a datagram whose rest never arrived makes the totals a floor, \
              and says which floor: {}",
             CaptureReport::of(&d).to_text()
@@ -6053,7 +6103,9 @@ mod tests {
         );
         assert_eq!(
             CaptureReport::of(&d).reasons(),
-            alloc::vec![VerdictReason::UnfinishedFragmentChains],
+            // Round 2008 (item 245) — the DEADLINE's ending, whose remedy is a
+            // wider window. Distinct from the leg above, which has none.
+            alloc::vec![VerdictReason::FragmentChainsExpired],
             "and the verdict says exactly that: {}",
             CaptureReport::of(&d).to_text()
         );
@@ -6097,7 +6149,10 @@ mod tests {
         );
         assert_eq!(
             CaptureReport::of(&d).reasons(),
-            alloc::vec![VerdictReason::UnfinishedFragmentChains],
+            // Round 2008 (item 245) — the CAP's ending, whose remedy is a
+            // higher cap. A different knob from the deadline's, which is why
+            // one reason for both was a verdict an operator could not act on.
+            alloc::vec![VerdictReason::FragmentChainsEvicted],
             "and the verdict says exactly that -- the WHOLE list, because a \
              containment claim holds while every other leg fires too: {}",
             CaptureReport::of(&d).to_text()
