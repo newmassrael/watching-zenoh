@@ -5693,6 +5693,16 @@ mod tests {
     /// sit on one side would let a plane that ignores `Direction` pass, and
     /// this plane's whole first assertion is about which side declared.
     fn udp_from_zenoh_port(payload: &[u8]) -> Vec<u8> {
+        udp_from_publisher(2, payload)
+    }
+
+    /// Round 2034 (item 304) — the same datagram from a NAMED publisher, so a
+    /// fixture can put more than one of them on one topic.
+    ///
+    /// A second host rather than a second port: two publishers on a keyexpr is
+    /// the ordinary pub/sub shape, and the flow key a reader sees is the
+    /// address pair. `host` is the last octet of the sender's address.
+    fn udp_from_publisher(host: u8, payload: &[u8]) -> Vec<u8> {
         let mut udp = Vec::new();
         udp.extend_from_slice(&7447u16.to_be_bytes());
         udp.extend_from_slice(&50000u16.to_be_bytes());
@@ -5703,7 +5713,7 @@ mod tests {
         let mut ip = vec![0x45u8, 0];
         ip.extend_from_slice(&((20 + udp.len()) as u16).to_be_bytes());
         ip.extend_from_slice(&[0, 0, 0, 0, 64, 17, 0, 0]);
-        ip.extend_from_slice(&[10, 0, 0, 2]);
+        ip.extend_from_slice(&[10, 0, 0, host]);
         ip.extend_from_slice(&[10, 0, 0, 1]);
         ip.extend_from_slice(&udp);
 
@@ -6084,6 +6094,109 @@ mod tests {
                  \"declared\":\"application/json\",\"wrong\":\"rule\",\"samples\":1,"
             ),
             "and both verdicts: {json}"
+        );
+    }
+
+    /// Round 2034 (item 304) — TWO VERDICTS ON ONE TOPIC IS A DEPLOYMENT, not
+    /// a fixture's convenience, and that is what makes the ordering worth
+    /// having.
+    ///
+    /// # The question this answers
+    ///
+    /// Every earlier witness for the tally put both verdicts on one topic by
+    /// having ONE publisher alternate good and bad bytes, because proving the
+    /// key needs two rows that differ in `wrong` alone. Item 304's objection is
+    /// that nobody had shown a real deployment doing it, and if it never
+    /// happens then "most samples first" is sorting a list that is always one
+    /// row long per topic.
+    ///
+    /// It happens, and the reason is structural rather than lucky: a keyexpr is
+    /// a TOPIC and several publishers may hold one, which is the ordinary
+    /// pub/sub shape rather than an edge case. This fixture is two hosts on
+    /// `demo/a` -- one whose label its bytes bear out, so the rule is what is
+    /// wrong, and one whose label its bytes refute, so the publisher is. Two
+    /// verdicts, one topic, and neither publisher had to change its mind.
+    ///
+    /// # And the counts differ, so the order is a claim
+    ///
+    /// Three samples from the mislabelling host and one from the other, so the
+    /// larger finding must come first and cannot pass by being tied. A reader
+    /// with one broken publisher among many needs it at the top.
+    ///
+    /// ⚠ WHAT THIS ROUND DID NOT FIX, and filed instead: neither row names the
+    /// publisher. `PUBLISHER MISLABELLING` tells a reader to go fix a publisher
+    /// and this capture has two of them on that topic. Nothing here can tell
+    /// them which.
+    #[test]
+    fn two_publishers_on_one_topic_are_two_findings_and_the_bigger_is_first() {
+        const JSON: u32 = 5;
+        // Its own label borne out: the rule loses, nothing is decoded.
+        const BEARS_OUT: &[u8] = br#"{"a":1}"#;
+        // Its own label refuted: the rule wins over the label.
+        const REFUTES: &[u8] = &[0x08, 0x96, 0x01];
+        let packets = [
+            udp_from_publisher(
+                2,
+                &frame_carrying(&put_declaring("demo/a", JSON, BEARS_OUT)),
+            ),
+            udp_from_publisher(3, &frame_carrying(&put_declaring("demo/a", JSON, REFUTES))),
+            udp_from_publisher(3, &frame_carrying(&put_declaring("demo/a", JSON, REFUTES))),
+            udp_from_publisher(3, &frame_carrying(&put_declaring("demo/a", JSON, REFUTES))),
+        ];
+        let refs: Vec<(u32, u64, &[u8])> = packets
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (0u32, 1_000_000 + i as u64 * 100, p.as_slice()))
+            .collect();
+        let capture = wz_capture::pcapng::write(&[(wz_capture::link::LINKTYPE_ETHERNET, 6)], &refs);
+        let rules = [(String::from("demo/**"), String::from("protobuf"))];
+
+        let text = analyze_request(&Request {
+            capture: &capture,
+            keylog: None,
+            format: Format::Text,
+            per_flow: true,
+            per_message: true,
+            messages_per_flow: None,
+            quic_ports: &[],
+            quic_cid_len: None,
+            payload_rules: &rules,
+            payload_field_names: &[],
+            serial_linktypes: &[],
+            census: Census::default(),
+            per_field: true,
+            bounded: false,
+            health: false,
+            select: None,
+            csv: None,
+        })
+        .expect("the capture reads")
+        .0;
+
+        // ANTI-VACUITY: all four records decoded, and they really came from
+        // two different senders -- otherwise this is the old one-publisher
+        // fixture wearing a new name.
+        assert!(
+            text.contains("messages decoded: 4"),
+            "the fixture must decode: {text}"
+        );
+        assert!(
+            text.contains("10.0.0.2") && text.contains("10.0.0.3"),
+            "two publishers must actually be in this capture: {text}"
+        );
+        // TWO VERDICTS ON ONE TOPIC, from a shape nobody had to contrive.
+        let mislabelling = text
+            .find("PUBLISHER MISLABELLING -- 3 sample(s) on `demo/a`")
+            .unwrap_or_else(|| panic!("the mislabelling host must be a finding: {text}"));
+        let mapping = text
+            .find("MAPPING WRONG -- 1 sample(s) on `demo/a`")
+            .unwrap_or_else(|| panic!("and the honest host a different one: {text}"));
+        // AND THE ORDER IS THE CLAIM: most samples first, so the reader meets
+        // the three-sample finding before the one-sample one.
+        assert!(
+            mislabelling < mapping,
+            "the larger finding must come first -- that ordering is what item \
+             304 asked whether anything real depends on: {text}"
         );
     }
 
