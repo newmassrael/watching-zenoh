@@ -4420,6 +4420,14 @@ impl Dissection {
         // header for `decapsulate` to strip -- the bytes ARE the serial stream.
         // Declared and never sniffed: see `serial`'s module doc for why a
         // pseudo-header this machine cannot verify must not be parsed.
+        //
+        // R2055 (open-debt item 392) — and BEFORE means the declaration WINS
+        // over `link::READABLE_LINK_TYPES`, which is not a detail: `--serial 1`
+        // takes an Ethernet capture's decapsulation away and decodes nothing.
+        // The help used to imply the opposite by calling the flag's argument
+        // one of the OTHER types; it now says which one wins, and
+        // `serial`'s `declaring_a_readable_link_type_as_serial_takes_its_\
+        // decapsulation_away` is what holds this order down.
         if self.declared_serial_linktypes.contains(&link_type) {
             self.push_serial(interface_id, packet_index, ts_millis, bytes);
             return;

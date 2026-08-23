@@ -734,6 +734,74 @@ mod plane_tests {
         assert_eq!(crate::payload::payloads(&d).payloads(), 0);
     }
 
+    /// R2055 (open-debt item 392) — a DECLARATION OVERRIDES DECAPSULATION for
+    /// the same link type, and until this test nothing said so.
+    ///
+    /// The help offers two sentences four lines apart: "a capture whose packets
+    /// carry any other pcap link type is opened and counted, and none of it is
+    /// decoded", and "`--serial <linktype>` declares one of the OTHER types as
+    /// raw serial bytes". The word doing all the work is OTHER, and it is only
+    /// prose — `push_packet_on` checks the declared set BEFORE it decapsulates,
+    /// so declaring a link type that IS on the readable list silently takes the
+    /// decapsulated path away. A reader holding a serial capture stands exactly
+    /// between those two sentences, and this is the fact neither of them
+    /// states.
+    ///
+    /// Judged by WHICH PATH RAN, not by a count: `serial_census()` is `None`
+    /// when nothing was declared and `Some` when a line was read, so the two
+    /// halves below are different findings about the same bytes rather than
+    /// "some number went to zero".
+    #[test]
+    fn declaring_a_readable_link_type_as_serial_takes_its_decapsulation_away() {
+        use crate::datagram_tests::tcp_packet;
+        use crate::link::LINKTYPE_ETHERNET;
+
+        // The most ordinary member of the readable list, carrying zenoh the way
+        // this tool is usually pointed at it. The 16-bit length prefix is the
+        // TCP transport's framing and is exactly what a serial line does NOT
+        // have -- the contrast this whole test is about, visible in the
+        // fixture.
+        let put = frame_carrying(&push(sender_space(0, Some("home/temp")), &[0u8; 24]));
+        let mut framed = alloc::vec![put.len() as u8, 0];
+        framed.extend_from_slice(&put);
+        let capture = crate::pcap::write(
+            LINKTYPE_ETHERNET,
+            &[(0, 0, tcp_packet(1000, &framed).as_slice())],
+        );
+
+        // CONTROL: undeclared, the Ethernet header is stripped and the message
+        // decodes. Without this leg the assertion below would hold on a capture
+        // that was simply unreadable.
+        let plain =
+            Dissection::from_capture_declaring(&capture, &[], &[]).expect("the capture reads");
+        assert!(
+            plain.decoded_messages() > 0,
+            "the control must actually decode, or the override proves nothing"
+        );
+        assert!(
+            plain.serial_census().is_none(),
+            "nothing was declared, so no serial line was read"
+        );
+
+        // DECLARED: the same bytes go down the serial path instead, header and
+        // all, and the readable list no longer applies to link type 1.
+        let declared = Dissection::from_capture_declaring(&capture, &[], &[LINKTYPE_ETHERNET])
+            .expect("the capture reads");
+        let census = declared
+            .serial_census()
+            .expect("a declared link type is read as a serial line even when it is decapsulable");
+        assert_eq!(
+            declared.decoded_messages(),
+            0,
+            "an Ethernet frame is not a COBS envelope, so the declaration \
+             costs the decode it would otherwise have had"
+        );
+        assert!(
+            census.bytes > 0,
+            "and the bytes really were handed to the serial reader: {census:?}"
+        );
+    }
+
     /// The THROUGHPUT plane: the keyexpr a serial line carried.
     ///
     /// Gated on `network-codecs` like the two below it, and MEASURED rather

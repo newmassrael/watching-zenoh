@@ -542,14 +542,22 @@ OPTIONS:
     -h, --help        print this and exit
 
 LINK TYPES READ:
+    DECAPSULATED -- the link header is stripped and what is under it decoded:
     0 NULL, 1 ETHERNET, 101 RAW, 108 LOOP, 113 LINUX_SLL, 228 IPV4, 229 IPV6,
     271 VSOCK, 276 LINUX_SLL2
-    A capture whose packets carry any other pcap link type is opened and
+    DECLARED -- ANY link type at all, named with `--serial <linktype>`, whose
+    packets are then taken as raw zenoh serial bytes: COBS envelope, CRC32,
+    handshake flags. No link header is stripped, because none is assumed.
+    A DECLARATION WINS over the list above, and this is the one interaction
+    worth reading twice: `--serial 1` reads an ETHERNET capture as a serial
+    line, finds no COBS envelope in it, and decodes nothing -- so declaring a
+    type that is already on the first list is a way to get zero out of a
+    capture that would otherwise have read.
+    A capture whose packets carry a link type on NEITHER list is opened and
     counted, and none of it is decoded -- the report says which types it
     could not read. Ask here rather than there: an unread capture reports
     `messages decoded: 0`, and that is also what a capture with no zenoh
-    traffic reports. `--serial <linktype>` declares one of the OTHER types as
-    raw serial bytes, which is the way to read a link this list omits.
+    traffic reports.
 
 EXT BODIES READ:
     ZBuf  Auth/pubkey, Auth/usrpwd, Declare/timestamp,
@@ -5462,13 +5470,17 @@ mod tests {
         // The other direction: a `<code> <NAME>` pair in the block that the
         // dispatch does not read. Scanned off the block itself so a stale row
         // left behind by a removed arm cannot survive here.
+        // R2055 (item 392) — sliced between the two HEADINGS now, not between
+        // the section and its prose. The block grew a second list, and a slice
+        // that ran to the first paragraph would have swallowed it and read its
+        // sentences as `<code> <NAME>` rows.
         let block = USAGE
-            .split("LINK TYPES READ:")
+            .split("DECAPSULATED -- the link header is stripped and what is under it decoded:")
             .nth(1)
-            .expect("the section")
-            .split("\n    A capture whose")
+            .expect("the decapsulated heading")
+            .split("\n    DECLARED")
             .next()
-            .expect("the list, before its prose");
+            .expect("the list, before the second heading");
         for entry in block.split(',') {
             let entry = entry.trim().trim_end_matches('\n').trim();
             if entry.is_empty() {
@@ -5479,6 +5491,79 @@ mod tests {
                 "the help claims {entry} and the dispatch does not read it"
             );
         }
+    }
+
+    /// R2055 (open-debt item 392) — the help's SECOND list, bound to the
+    /// parser rather than to its own prose.
+    ///
+    /// # The gap
+    ///
+    /// `--serial <linktype>` reads a link type the sweep counts as UNREADABLE,
+    /// which is correct: nothing is decapsulated, the declared bytes ARE the
+    /// serial stream. So the help said, four lines apart, "any other link type
+    /// is opened and counted, and none of it is decoded" and "`--serial`
+    /// declares one of the OTHER types". Two meanings of "read", and only prose
+    /// between them — a person holding an `RTAC_SERIAL` capture stands exactly
+    /// there.
+    ///
+    /// The block is now two lists, DECAPSULATED and DECLARED, and this test is
+    /// what stops the second one going the way of the first. The claim it holds
+    /// down is the word ANY: the parser must accept a link type from BOTH
+    /// classes, one already on the decapsulated list and one that is not. If
+    /// `--serial` is ever narrowed to refuse the first class, this reds and the
+    /// help has to change in the same commit.
+    ///
+    /// ⚠ It does NOT re-prove what happens after acceptance. That is
+    /// `wz_capture::serial`'s
+    /// `declaring_a_readable_link_type_as_serial_takes_its_decapsulation_away`,
+    /// which drives a real Ethernet capture both ways and shows the declaration
+    /// takes the decode away. Splitting them keeps each one's failure legible:
+    /// this one is about the command line, that one is about the dispatch.
+    #[test]
+    fn the_usage_names_a_second_list_and_the_parser_accepts_both_its_classes() {
+        assert!(
+            USAGE.contains("DECAPSULATED -- the link header is stripped"),
+            "the help must name the first list as its own list"
+        );
+        assert!(
+            USAGE.contains("DECLARED -- ANY link type at all"),
+            "and the second, which is the distinction item 392 is about"
+        );
+        assert!(
+            USAGE.contains("A DECLARATION WINS over the list above"),
+            "and it must say which one wins where they overlap"
+        );
+
+        // ONE FROM EACH CLASS. `LINKTYPE_ETHERNET` is on the decapsulated list;
+        // 250 (`LINKTYPE_RTAC_SERIAL`) is not, and is the type the flag exists
+        // for. Taken from the dispatch's own table rather than typed, so a
+        // build that stopped decapsulating Ethernet could not leave this test
+        // quietly asserting about one class twice.
+        let readable: Vec<u32> = wz_capture::link::READABLE_LINK_TYPES
+            .iter()
+            .map(|(code, _)| *code)
+            .collect();
+        let on_the_first_list = wz_capture::link::LINKTYPE_ETHERNET;
+        let rtac_serial = 250u32;
+        assert!(readable.contains(&on_the_first_list));
+        assert!(
+            !readable.contains(&rtac_serial),
+            "250 must be OFF the first list, or the two classes are one"
+        );
+
+        let opts = parse(&args(&[
+            "--serial",
+            &on_the_first_list.to_string(),
+            "--serial",
+            &rtac_serial.to_string(),
+            "capture.pcap",
+        ]))
+        .expect("both classes are accepted");
+        assert_eq!(
+            opts.serial_linktypes,
+            vec![on_the_first_list, rtac_serial],
+            "the help says ANY link type; the parser has to mean it"
+        );
     }
 
     /// Round 2033 (item 303) — THE HELP'S PAYLOAD VOCABULARIES, pinned in both
