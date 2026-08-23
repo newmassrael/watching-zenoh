@@ -9557,6 +9557,13 @@ layer_ewire_pico_wire_dissection() {
 # Falsification MEASURED: bypassing the tap (dialling zenohd directly) reds with
 # `the tap never saw both directions` -- the session succeeds either way and only
 # the recording tells them apart.
+# R2049 — the wall clock every witness in this layer runs under. Named once so
+# the five legs cannot drift apart, and generous on purpose: these tests finish
+# in well under a second, so this can only fire on a HANG. Overridable for a
+# slow machine; a value this large is not a performance budget and must not be
+# read as one.
+EWIREZ_WITNESS_BUDGET="${EWIREZ_WITNESS_BUDGET:-180}"
+
 layer_ewirez_zenohd_wire_dissection() {
     local zenohd="${WZ_ZENOHD_BIN:-$PWD/target/zenohd/zenohd}"
     (cd crates && cargo build -p wz-ap-demo --quiet) || return 1
@@ -9570,8 +9577,18 @@ layer_ewirez_zenohd_wire_dissection() {
     # every fixture that plane had ever seen was built by this tree's own
     # encoders. The count is pinned here rather than left to grow because a
     # binary-dep lane that silently runs fewer tests reports the same `ok`.
+    # R2049 — every witness in this lane runs under a WALL CLOCK, and the reason
+    # was paid for locally rather than reasoned about. A libtest binary has no
+    # per-test timeout, and these tests spawn foreign processes and block on
+    # sockets and locks; one of them deadlocked on a non-reentrant port
+    # reservation and printed `running 1 test` followed by NOTHING, forever. A
+    # hang and a slow lane are then the same observation. `_runci_guarded_test`
+    # already judges the exit status, so `timeout`'s 124 becomes a legible FAIL
+    # — the same idiom the QEMU runner beside it has used since R311y14. These
+    # tests complete in under a second, so the ceiling is ~200x headroom and can
+    # only fire on a hang.
     _runci_guarded_test "Ewirez stock-zenohd dissection" 3 \
-        cargo test -p wz-integration-tests \
+        timeout "$EWIREZ_WITNESS_BUDGET" cargo test -p wz-integration-tests \
         --test zenohd_wire_dissection -- --ignored --quiet --test-threads=1 \
         || return 1
     echo "  Ewirez: the analyzer parsed a real zenohd session, idle and routing"
@@ -9601,6 +9618,7 @@ layer_ewirez_zenohd_wire_dissection() {
         return 0
     fi
     _runci_guarded_test "Ewirez stock-zenoh ext bodies" 1 \
+        timeout "$EWIREZ_WITNESS_BUDGET" \
         env WZ_ZENOH_CORE_EXAMPLES_DIR="$core_examples_dir" \
         cargo test -p wz-integration-tests \
         --test zenoh_ext_body_foreign_witness -- --ignored --quiet --test-threads=1 \
@@ -9618,6 +9636,7 @@ layer_ewirez_zenohd_wire_dissection() {
     # extension, so folding the two would make the ext-body witness depend on
     # auth succeeding.
     _runci_guarded_test "Ewirez stock-zenoh auth bodies" 1 \
+        timeout "$EWIREZ_WITNESS_BUDGET" \
         env WZ_ZENOH_CORE_EXAMPLES_DIR="$core_examples_dir" \
         cargo test -p wz-integration-tests \
         --test zenoh_auth_body_foreign_witness -- --ignored --quiet --test-threads=1 \
@@ -9635,11 +9654,30 @@ layer_ewirez_zenohd_wire_dissection() {
     # checks membership without an is-empty guard, so a pubkey-configured
     # zenohd refuses every client. Multilink is the route that works.
     _runci_guarded_test "Ewirez stock-zenoh multilink bodies" 1 \
+        timeout "$EWIREZ_WITNESS_BUDGET" \
         env WZ_ZENOH_CORE_EXAMPLES_DIR="$core_examples_dir" \
         cargo test -p wz-integration-tests \
         --test zenoh_multilink_body_foreign_witness -- --ignored --quiet --test-threads=1 \
         || return 1
     echo "  Ewirez: the multilink walker read bytes a stock zenohd handshake wrote"
+
+    # R2049 (open-debt item 390, the `shm` half) — the SHM ESTABLISHMENT leg, and
+    # the only witness in this family with NO wz process and no `z_get` either.
+    # `shared-memory` is absent from zenoh's `default` set, so the stock oracle
+    # has no `Shm` ext compiled in at all; the variant that does installs
+    # `zenohd` ALONE, so the dialer is a SECOND zenohd rather than an example.
+    #
+    # The oracle is NOT provisioned in hosted CI (no `zenohd-shm` in ci.yml), so
+    # the test SKIPs where it is absent and this lane's guard would then see zero
+    # passed. `+` rather than `1` is wrong here for the same reason: a skip
+    # prints `1 passed` because the skip is a `return` inside the test. That is
+    # stated rather than hidden — this leg is a LOCAL witness until the variant
+    # is provisioned, which is open-debt item 484.
+    _runci_guarded_test "Ewirez stock-zenoh shm bodies" 1 \
+        timeout "$EWIREZ_WITNESS_BUDGET" cargo test -p wz-integration-tests \
+        --test zenoh_shm_body_foreign_witness -- --ignored --quiet --test-threads=1 \
+        || return 1
+    echo "  Ewirez: the SHM establishment walker read bytes two stock zenohd wrote"
 }
 
 layer_e_ap_demo_round_trip() {

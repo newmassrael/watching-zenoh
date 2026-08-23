@@ -90,6 +90,63 @@ pub mod common {
         }
     }
 
+    // R2049 — whether THIS thread already holds a `PortReservation`.
+    //
+    // `port_lock` is a plain `std::sync::Mutex`, which is NOT reentrant, so a
+    // second `PortReservation::pick` on a thread that already holds one blocks
+    // FOREVER. `pick_pair`'s doc has named that hazard since R311pk, and naming
+    // it was not enough: R2049 wrote a witness that called `pick` twice, and it
+    // printed `running 1 test` followed by NOTHING until it was killed. libtest
+    // has no per-test timeout, so a hang and a slow lane are the same
+    // observation — which is why the gate belongs on the CONDITION rather than
+    // in a static lint. The precise hazard is an OVERLAPPING reservation, and a
+    // grep for two `pick()` calls cannot see whether the first is still alive:
+    // 164 call sites, ten files with two or more, and almost all of them are
+    // one-per-test and correct.
+    //
+    // A thread-local rather than a global because the hazard is re-entry by ONE
+    // thread: libtest runs tests on many threads and two of them each holding a
+    // reservation is the ordinary case the mutex exists to serialise.
+    thread_local! {
+        static HOLDS_PORT_RESERVATION: core::cell::Cell<bool> =
+            const { core::cell::Cell::new(false) };
+    }
+
+    /// Sets `HOLDS_PORT_RESERVATION` for as long as a reservation is alive, and
+    /// refuses a second one on the same thread.
+    ///
+    /// Armed BEFORE the mutex is taken, which is the whole point: after the
+    /// `lock()` call there is nothing left to report from.
+    struct ReentryGuard;
+
+    impl ReentryGuard {
+        fn arm(caller: &str) -> Self {
+            HOLDS_PORT_RESERVATION.with(|held| {
+                assert!(
+                    !held.get(),
+                    "PortReservation::{caller} was called on a thread that \
+                     ALREADY holds a reservation. `port_lock` is a \
+                     non-reentrant mutex, so this call would block forever and \
+                     libtest would print nothing until the job was killed.\n  \
+                     If you need two ports, use \
+                     `PortReservation::pick_pair()`, which reserves both under \
+                     ONE acquisition and guarantees they differ.\n  \
+                     If the first reservation is genuinely finished, drop it \
+                     first -- the guard must live only until the child has \
+                     bound its port."
+                );
+                held.set(true);
+            });
+            Self
+        }
+    }
+
+    impl Drop for ReentryGuard {
+        fn drop(&mut self) {
+            HOLDS_PORT_RESERVATION.with(|held| held.set(false));
+        }
+    }
+
     /// Process-global port reservation guard for the bind → child-spawn
     /// → bind-confirmed window.
     ///
@@ -144,6 +201,10 @@ pub mod common {
         /// same drop. See `CrossProcessPortLock` for why the mutex alone was
         /// only one seventeenth of the exclusion this window needs.
         _cross_process: Option<CrossProcessPortLock>,
+        /// R2049 — clears [`HOLDS_PORT_RESERVATION`] when this reservation
+        /// dies, so a LATER `pick` on the same thread is fine and only an
+        /// OVERLAPPING one is refused.
+        _reentry: ReentryGuard,
     }
 
     impl PortReservation {
@@ -155,6 +216,8 @@ pub mod common {
         /// dropping the guard before that point reintroduces the
         /// race for the next reservation.
         pub fn pick() -> Self {
+            // BEFORE the mutex, or the deadlock wins the race to report itself.
+            let reentry = ReentryGuard::arm("pick");
             let guard = port_lock()
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -168,6 +231,7 @@ pub mod common {
                 port,
                 _guard: guard,
                 _cross_process: cross_process,
+                _reentry: reentry,
             }
         }
 
@@ -188,6 +252,7 @@ pub mod common {
         /// the lock until dropped, exactly like [`pick`](Self::pick): drop it
         /// once the child has bound both ports.
         pub fn pick_pair() -> (Self, u16) {
+            let reentry = ReentryGuard::arm("pick_pair");
             let guard = port_lock()
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -205,6 +270,7 @@ pub mod common {
                     port: p1,
                     _guard: guard,
                     _cross_process: cross_process,
+                    _reentry: reentry,
                 },
                 p2,
             )
