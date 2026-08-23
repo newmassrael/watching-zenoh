@@ -296,6 +296,82 @@ mod tests {
         }
     }
 
+    /// R2059 (open-debt item 421) — EVERY zid width a Hello can carry, decoded
+    /// off the wire and compared BYTE FOR BYTE.
+    ///
+    /// # The gap
+    ///
+    /// A zid's length rides in the top nibble of the common byte, stored minus
+    /// one, so a Hello can name a zid of 1 to 16 bytes. Item 420 fixed a misread
+    /// of that nibble and item 421 recorded what the fix left behind: the two
+    /// scouting e2e each pin ONE width -- 16 bytes in `wz_scout_zenohd_interop`
+    /// and 4 in `zenohd_scouts_wz_interop` -- so between them they walk two
+    /// values out of sixteen, and only when a zenohd is present.
+    ///
+    /// The item is careful, and it was right to be: the short path is NOT
+    /// unwalked, because the second e2e really does decode a 4-byte zid. What
+    /// was missing is a DETERMINISTIC reading of the whole axis, and the test
+    /// beside this one shows why the existing coverage did not amount to it --
+    /// `a_hello_without_locators_decodes` builds a 4-byte zid, decodes it, and
+    /// then asserts about `version` and `whatami` and never looks at `zid` at
+    /// all. A decode that dropped or truncated the zid passes it.
+    ///
+    /// # Why the bytes and not the length
+    ///
+    /// Asserting the recovered LENGTH would pass on a decoder that read the
+    /// right count from the wrong offset. The zid here is filled with a
+    /// width-dependent pattern so that every width has a distinct body, and the
+    /// comparison is against the bytes that went in.
+    #[cfg(feature = "codec-hello")]
+    #[test]
+    fn every_zid_width_a_hello_can_carry_decodes_to_the_bytes_that_went_in() {
+        let mut widths_seen = alloc::vec::Vec::new();
+        for len in 1usize..=16 {
+            // A distinct body per width: `len` in the top byte so a decode that
+            // read the right count at the wrong offset cannot match, and an
+            // ascending tail so a truncation shows up as a short vector rather
+            // than as equal-prefix bytes.
+            let zid: alloc::vec::Vec<u8> = (0..len).map(|i| (len as u8) << 4 | i as u8).collect();
+
+            let mut hello = Hello::new();
+            hello.version = 0x09;
+            hello.set_whatami(0x01);
+            hello.set_zid_len_m1((len - 1) as u8);
+            hello.zid = &zid;
+            let mut wire = alloc::vec![wire_const::S_MID_HELLO];
+            wire.extend_from_slice(&hello.encode_to_vec(0));
+
+            match parse_scouting(&wire).expect("a well-formed HELLO must decode") {
+                ScoutingFrame::Hello { body, .. } => {
+                    assert_eq!(
+                        body.zid_len_m1(),
+                        (len - 1) as u8,
+                        "a {len}-byte zid must come back with nibble {}",
+                        len - 1
+                    );
+                    assert_eq!(
+                        &body.zid[..],
+                        &zid[..],
+                        "the {len}-byte zid decoded to different bytes than it \
+                         was encoded from"
+                    );
+                    widths_seen.push(len);
+                }
+                other => panic!("a {len}-byte-zid HELLO decoded as {other:?}"),
+            }
+        }
+
+        // ANTI-VACUITY: the loop above is the population, and a body that
+        // stopped decoding would land in the panic arm rather than here -- but a
+        // range that stopped being a range would leave this empty and agree
+        // with everything.
+        assert_eq!(
+            widths_seen,
+            (1usize..=16).collect::<alloc::vec::Vec<usize>>(),
+            "the sweep did not reach every width the nibble can name"
+        );
+    }
+
     /// A JOIN's MID means nothing in this namespace, and the answer is a NAME
     /// for the gap rather than a decode of the wrong message.
     #[test]

@@ -46,7 +46,8 @@ use std::time::Duration;
 
 use wz_integration_tests::common::{
     assert_demo_binary_newer_than_sources, configured_zid_value, face_zid_value,
-    spawn_zenohd_multicast_scouting_with_args, wait_for_substring, wz_ap_demo_binary, ChildGuard,
+    per_process_zid_hex, spawn_zenohd_multicast_scouting_with_args, wait_for_substring,
+    wz_ap_demo_binary, ChildGuard,
 };
 
 const RESPONDER_NEEDLE: &str = "SCOUT RESPONDER listening on ";
@@ -150,7 +151,11 @@ fn a_stock_zenohd_discovers_wz_by_scouting_and_dials_what_its_hello_advertised()
     // shared with a leftover or concurrent copy makes zenoh's scouted-peer
     // dedupe skip the dial, which is the least diagnosable failure this test
     // has. The prefix differs from wz's `7073` so the two can never collide.
-    let zenohd_zid_hex = format!("2e0d{:04x}", std::process::id() & 0xffff);
+    // R2059 (item 421) — through the shared helper, so the WIDTH is stated
+    // rather than implied by the hex string's length. Byte-identical to the
+    // `format!` it replaces; `SCOUTING_E2E_ZID_WIDTHS` records that this test
+    // is the suite's SHORT-zid foreign witness.
+    let zenohd_zid_hex = per_process_zid_hex("2e0d", 4);
     let zenohd_zid = configured_zid_value(&zenohd_zid_hex);
     let zenohd_id_cfg = format!("id:\"{zenohd_zid_hex}\"");
     let zenohd = listening.is_ok().then(|| {

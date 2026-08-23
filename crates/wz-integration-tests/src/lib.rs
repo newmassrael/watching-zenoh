@@ -1485,6 +1485,59 @@ pub mod common {
         u128::from_le_bytes(bytes)
     }
 
+    /// R2059 (open-debt item 421) — WHICH ZID WIDTH EACH SCOUTING E2E ACTUALLY
+    /// DRIVES, in one place.
+    ///
+    /// # Why this exists rather than a sentence in each test
+    ///
+    /// A zid's length rides in a nibble, so a Hello can carry 1 to 16 bytes,
+    /// and each of these tests pins ONE width in a `format!` whose hex-string
+    /// length is the only place the number appears. Item 420 fixed a misread of
+    /// that nibble; item 421 recorded that the fix left nobody able to say, in
+    /// one place, which widths the suite walks — and warned that the honest
+    /// first step is to WRITE IT DOWN before building another fixture, because
+    /// a fixture built first measures whatever it happens to measure.
+    ///
+    /// So this is the writing-down, and it is derived: each row's width is
+    /// asserted against what [`per_process_zid_hex`] actually produces, and the
+    /// e2e build their zids through that function rather than beside it.
+    ///
+    /// ⚠ WHAT IT DOES NOT DO is close the axis. Two widths out of sixteen, and
+    /// only when a zenohd is present, is not a reading of the nibble.
+    /// `wz_session_core::scouting_message`'s
+    /// `every_zid_width_a_hello_can_carry_decodes_to_the_bytes_that_went_in`
+    /// is what walks all sixteen deterministically; these two are the FOREIGN
+    /// witness for two of them, which is a different and smaller claim.
+    pub const SCOUTING_E2E_ZID_WIDTHS: &[(&str, usize)] = &[
+        ("wz_scout_zenohd_interop", 16),
+        ("zenohd_scouts_wz_interop", 4),
+    ];
+
+    /// A zenohd zid of exactly `bytes` bytes, unique to this process.
+    ///
+    /// Per-process rather than fixed for the reason both e2e already record: a
+    /// fixed zid collides with a leftover or a concurrent copy in zenoh's peer
+    /// dedupe. `prefix` keeps the two tests' zids distinguishable in a log, and
+    /// the filler is deterministic so the value a test pins is the value it
+    /// compares against.
+    pub fn per_process_zid_hex(prefix: &str, bytes: usize) -> String {
+        assert!(
+            (1..=16).contains(&bytes),
+            "a zid is 1 to 16 bytes; the length nibble cannot name {bytes}"
+        );
+        let want = bytes * 2;
+        let mut hex = format!("{prefix}{:04x}", std::process::id() & 0xffff);
+        assert!(
+            hex.len() <= want,
+            "prefix {prefix:?} plus the pid is already {} hex chars, more than \
+             the {want} a {bytes}-byte zid has",
+            hex.len()
+        );
+        const FILLER: &str = "0123456789abcdef0123456789abcdef";
+        hex.push_str(&FILLER[..want - hex.len()]);
+        hex
+    }
+
     pub fn read_captured(file: &mut File) -> String {
         use std::os::unix::fs::FileExt;
         let mut bytes = Vec::new();
@@ -4059,6 +4112,48 @@ mod tests {
         parse_zenoh_admin_sessions, wait_for_tcp_accept_alive, ChildGuard, ZenohSession,
         ZENOHD_TCP_ACCEPT_BUDGET,
     };
+
+    /// R2059 (open-debt item 421) — the recorded e2e zid widths are the widths
+    /// the helper actually produces, and the record is the whole roster.
+    ///
+    /// Both directions. A row whose width the helper does not produce is a
+    /// record that has stopped describing the test it names; a scouting e2e
+    /// added with a third width and no row here is the drift the item asks to
+    /// be prevented, and the pinned set is what makes that visible.
+    #[test]
+    fn the_scouting_e2e_zid_widths_are_the_widths_their_helper_builds() {
+        use super::common::{per_process_zid_hex, SCOUTING_E2E_ZID_WIDTHS};
+
+        assert!(
+            !SCOUTING_E2E_ZID_WIDTHS.is_empty(),
+            "a record of nothing describes nothing"
+        );
+        for (test, bytes) in SCOUTING_E2E_ZID_WIDTHS {
+            let hex = per_process_zid_hex("abcd", *bytes);
+            assert_eq!(
+                hex.len(),
+                bytes * 2,
+                "{test} is recorded as a {bytes}-byte zid and the helper built \
+                 {} hex chars",
+                hex.len()
+            );
+            assert!(
+                (1..=16).contains(bytes),
+                "{test}'s width {bytes} is not one a length nibble can name"
+            );
+        }
+
+        // The SET, pinned: two widths out of sixteen, and the doc on
+        // `SCOUTING_E2E_ZID_WIDTHS` says why that is a foreign-witness claim
+        // rather than a reading of the axis. The deterministic sweep lives in
+        // `wz_session_core::scouting_message`.
+        let widths: Vec<usize> = SCOUTING_E2E_ZID_WIDTHS.iter().map(|(_, b)| *b).collect();
+        assert_eq!(
+            widths,
+            vec![16, 4],
+            "the scouting e2e no longer walk the widths this record names"
+        );
+    }
 
     /// A face line as `wz-ap-demo` renders one, for the three tests below.
     fn face_line(zid_hex: &str) -> String {

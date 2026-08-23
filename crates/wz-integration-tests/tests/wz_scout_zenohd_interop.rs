@@ -47,7 +47,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    configured_zid_value, hello_zid_value, read_captured,
+    configured_zid_value, hello_zid_value, per_process_zid_hex, read_captured,
     spawn_zenohd_multicast_scouting_with_args, wait_for_substring, wz_ap_demo_binary, ChildGuard,
 };
 
@@ -89,11 +89,11 @@ fn wz_scout_discovers_zenohd_over_multicast_and_opens_the_advertised_locator() {
     // Per-process for the reason the sibling test's `--zid` is: a fixed zid
     // shared with a leftover or a concurrent copy collides in zenoh's peer
     // dedupe.
-    let zenohd_zid_hex = format!(
-        "3f1c{:04x}{}",
-        std::process::id() & 0xffff,
-        "0123456789abcdef01234567"
-    );
+    // R2059 (item 421) — built through the shared helper so the WIDTH is a
+    // number this test states rather than the length of a hex literal, and so
+    // `SCOUTING_E2E_ZID_WIDTHS` can say in one place which widths the suite's
+    // foreign witnesses walk. Byte-identical to the `format!` it replaces.
+    let zenohd_zid_hex = per_process_zid_hex("3f1c", 16);
     let (mut zenohd, zenohd_port) = spawn_zenohd_multicast_scouting_with_args(
         "zenohd (multicast-scouting router)",
         &["--cfg", &format!("id:\"{zenohd_zid_hex}\"")],
