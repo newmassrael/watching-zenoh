@@ -9694,6 +9694,22 @@ layer_ewirez_zenohd_wire_dissection() {
         --test zenoh_join_qos_foreign_witness -- --ignored --quiet --test-threads=1 \
         || return 1
     echo "  Ewirez: the Join qos table read bytes a stock zenohd broadcast"
+
+    # R2051 (open-debt item 378) — the TIMESTAMP leg, and the only one in this
+    # family with THREE processes and TWO implementations on the wire: pico
+    # publishes, zenohd stamps while routing, pico subscribes. It therefore
+    # needs the pico CLI as well as zenohd, which is why it sits after the legs
+    # that need only the latter.
+    #
+    # The stamp is a Put body's INLINE field, not the network `timestamp`
+    # extension: zenoh reads that extension and never writes it (every
+    # `ext_tstamp = Some` upstream is in a decoder), so the extension form has
+    # no reachable foreign producer at all. The test asserts its ABSENCE too.
+    _runci_guarded_test "Ewirez stock-zenoh timestamp" 1 \
+        timeout "$EWIREZ_WITNESS_BUDGET" cargo test -p wz-integration-tests \
+        --test zenoh_timestamp_ext_foreign_witness -- --ignored --quiet --test-threads=1 \
+        || return 1
+    echo "  Ewirez: the timestamp walker read the stamp a stock zenohd added"
 }
 
 layer_e_ap_demo_round_trip() {
