@@ -567,7 +567,18 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
   namespace: "demo/ns",
   timestamping: {{ enabled: true }},
   queries_default_timeout: 11000,
-  routing: {{ interests: {{ timeout: 9000 }} }},
+  // R2065 — `peer/mode` joins the EXISTING `routing` block rather than opening
+  // a second one. The first cut added its own `routing: {{ … }}` earlier in the
+  // file and this later object silently won, so `interests/timeout` was named
+  // and `peer/mode` was not: in JSON5 a duplicate key reads as a MISSING key,
+  // and this leg is what caught it.
+  //
+  // Named for the same reason as the multicast leaves above — it must reach
+  // NOTHING here. The expansion emits `--peer-mode` only for `peer-to-peer`,
+  // and this says `linkstate`, which is upstream's default and what an absent
+  // flag already means; a client dialling one endpoint has no discovery plane
+  // to switch.
+  routing: {{ interests: {{ timeout: 9000 }}, peer: {{ mode: "linkstate" }} }},
   adminspace: {{ enabled: true, permissions: {{ read: true, write: false }} }},
 }}
 "#

@@ -1338,10 +1338,8 @@ mod stock_config_tests {
                     .collect();
                 let token = token.trim_end_matches('.').to_string();
                 let slashed = token.replace('.', "/");
-                if slashed.matches('/').count() >= 1 && !slashed.is_empty() {
-                    if !cited.contains(&slashed) {
-                        cited.push(slashed);
-                    }
+                if !slashed.is_empty() && slashed.contains('/') && !cited.contains(&slashed) {
+                    cited.push(slashed);
                 }
             }
         }
