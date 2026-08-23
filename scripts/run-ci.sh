@@ -10662,8 +10662,9 @@ layer_q_qemu_mcu_e2e() {
     # `arm-none-eabi-size --format=berkeley` counts .rodata inside its `text`
     # column — so an un-normalised footprint number partly measures THE LENGTH
     # OF THE BUILD DIRECTORY PATH. Measured on mcu-multicast-e2e at one commit
-    # and one rustc: 50964 built at /w, 51164 at /home/coin/watching-zenoh, and
-    # 51344 at the CI runner's /home/runner/work/watching-zenoh/watching-zenoh
+    # and one rustc: 50964 under a 2-character path (`/w`), 51164 under a
+    # 25-character developer checkout, and 51344 under the CI runner's
+    # 47-character /home/runner/work/watching-zenoh/watching-zenoh
     # — a 380 B spread on IDENTICAL code, against a +/-256 B band. That is what
     # kept Layer Q red on hosted CI for ~20 pushes while the local pre-push
     # run-ci stayed green: two machines gating one absolute-byte baseline they

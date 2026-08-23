@@ -206,10 +206,15 @@ declare -A BASELINE_MC_TEXT=(
     # as in-band. The code never regressed. Two environment variables were being
     # measured as if they were code — an unpinned rustc in CI (1.96 -> 1.97 on
     # the very day the streak began) and the absolute build path embedded in
-    # .rodata. The same commit + same rustc measured 50964 built at /w, 51164 at
-    # /home/coin/watching-zenoh and 51344 at the runner's
+    # .rodata. The same commit + same rustc measured 50964 built under a
+    # 2-character path (`/w`), 51164 under a 25-character developer checkout and
+    # 51344 under the runner's 47-character
     # /home/runner/work/watching-zenoh/watching-zenoh — a 380 B spread on
     # identical code against this +-256 B band, ordered purely by path length.
+    # The middle path is given as its LENGTH and not its spelling: the number is
+    # what the measurement rests on, and a developer's home layout is not a fact
+    # this repository publishes (the External-references rule in CLAUDE.md, and
+    # the reason `scripts/lib/home-path-scan.sh` exists).
     # rust-toolchain.toml + Layer Q's --remap-path-prefix remove both. thumbv7m
     # is byte-identical everywhere (50956 on this host, in a runner-path
     # container, and on the runner itself).

@@ -107,6 +107,24 @@ else
     echo "          the range is unbounded and this gate did NOT run." >&2
 fi
 
+# ─── gate 0b — home-directory paths (R2064) ─────────────────────────
+# The sibling of gate 0 and the same argument one notch smaller: origin is
+# PUBLIC, a push cannot be un-published, and CLAUDE.md's ban on machine-local
+# absolute paths was until now enforced by an agent remembering it. Unlike
+# gate 0 this scans the WHOLE tracked tree rather than a diff range, because
+# the atomic store's ceiling is a property of the file and not of the push.
+# shellcheck disable=SC1091  # constant path, resolved at run time
+if ! source scripts/lib/home-path-scan.sh; then
+    echo "pre-push: scripts/lib/home-path-scan.sh missing or unreadable." >&2
+    exit 1
+fi
+if ! wz_home_path_scan "$(git rev-parse --show-toplevel)"; then
+    echo "pre-push: a tracked file names this machine's home directory." >&2
+    echo "          Origin is public and a push does not un-publish." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+
 # ─── gate 1 — schema pin, on the COMMITS BEING PUSHED (R311y418) ────
 # pre-commit grades the index, which covers `git commit` and nothing else:
 # cherry-pick, rebase, merge and --no-verify all reach origin without ever

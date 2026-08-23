@@ -318,7 +318,9 @@ own thin runtime crates for link drivers and intrinsics.
 
 ### 4.1 SCE provides (existing)
 
-Verified against `/home/coin/scxml-core-engine/` on 2026-04-24.
+Verified against the SCE checkout on 2026-04-24. (The path is machine-local and
+deliberately not recorded here — CLAUDE.md's External-references rule, and the
+reason `scripts/lib/home-path-scan.sh` exists.)
 
 - SCXML parser, IR, W3C algorithms
 - Expression transpiler (bitwise ops, arithmetic, comparisons —
