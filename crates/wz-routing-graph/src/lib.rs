@@ -23,18 +23,39 @@
 //! that prunes nodes no longer reachable from self once a link drops or an
 //! advertisement is withdrawn (zenoh `network.rs:786,948,990`).
 //!
+//! Each entry below names its KIND first, because "deferred" on its own cannot
+//! separate a thing we decided not to build from a thing nobody has built yet.
+//! That ambiguity has already cost: an outside reader put both of these, plus a
+//! third entry that was in fact finished, on one table as gaps of one size.
+//!
 //! EXPLICITLY DEFERRED (tracked, not silently dropped):
-//! - the `local_mappings` forwarding table, and PRODUCTION ACTIVATION of
-//!   gossip-autoconnect. (The autoconnect chain is wired end to end in code —
-//!   the [`AutoConnect`] / [`AutoConnectStrategy`] policy, the driver's discovery
-//!   emit, and the accept-loop dial — but no deploy enables it yet, so it is
-//!   inert at runtime; a deploy opt-in is the remaining step. The onward re-flood
-//!   `propagate_link_states`, `network.rs:804`, is DONE: the graph supplies
-//!   the [`build_linkstate_split`] payload builder — `new` nodes full,
-//!   `updated` nodes links-only, the D4 `Details` split — and the per-face
-//!   re-flood lives in the driver `linkstate_forward::propagate`, R311ra+sl.)
-//! - the real handshake `whatami` (the driver currently records every
-//!   peer-mesh neighbour as Peer).
+//! - DECIDED — the `local_mappings` forwarding table. Round 311qq deferred it
+//!   as YAGNI and Round 311sk argued why: normalize-to-literal is a deliberate
+//!   SIMPLIFICATION of zenoh's per-face re-aliasing (its `local_mappings` /
+//!   `remote_mappings` two-table scheme), not a match for it, and it is valid
+//!   here because wz keeps no outbound alias table — it never emits a
+//!   DeclKexpr. Not to be confused with the keyexpr-id mapping spaces of the
+//!   same name, which ARE implemented, in `wz-session-core`
+//!   `wireexpr_resolve::MappingSpaces`.
+//! - NOT STARTED — PRODUCTION ACTIVATION of gossip-autoconnect. The chain is
+//!   wired end to end in code — the [`AutoConnect`] / [`AutoConnectStrategy`]
+//!   policy, the driver's discovery emit, and the accept-loop dial — and it has
+//!   a zenohd interop witness, so what is missing is not the mechanism but a
+//!   deploy that turns it on: none of the four `deploy/*.yaml` names it. The
+//!   onward re-flood `propagate_link_states` (zenoh `network.rs:804`) is DONE:
+//!   the graph supplies the [`build_linkstate_split`] payload builder — `new`
+//!   nodes full, `updated` nodes links-only, the D4 `Details` split — and the
+//!   per-face re-flood lives in the driver `linkstate_forward::propagate`,
+//!   R311ra+sl.
+//!
+//! What that list must NEVER hold is a claim about what a CALLER hands this
+//! crate, and one did for months: "the driver records every peer-mesh
+//! neighbour as Peer". The role arrives as a PARAMETER of `add_link`, so this
+//! crate records whatever it is given and is structurally unable to check that
+//! sentence — which is why it outlived the driver by many rounds and was still
+//! being read as a live gap long after `linkstate_forward` began threading the
+//! real handshake role at R311td. Both rules are enforced by the test
+//! `every_deferred_entry_names_its_kind`, which reads this comment.
 //!
 //! Drop observability (E2): a dropped ingest entry — an unresolvable psid /
 //! link / zid, an invalid whatami — is now surfaced through the `log` facade
@@ -1939,6 +1960,98 @@ mod tests {
 
     fn zid(b: u8) -> Zid {
         Zid::from_slice(&[b, b, b, b])
+    }
+
+    /// The module doc's deferral list, adjudicated out of this very file.
+    ///
+    /// TWO RULES, BOTH PAID FOR.
+    ///
+    /// (1) Every entry names its KIND. "Deferred" on its own cannot separate a
+    /// thing we decided not to build from a thing nobody has built yet, and a
+    /// 2026-08-23 outside review read a decided simplification, an unactivated
+    /// feature and an item that was FINISHED as three gaps of one size.
+    ///
+    /// (2) No entry mentions the neighbour role. That value reaches this crate
+    /// only as an ARGUMENT to `add_link`, so the crate records whatever it is
+    /// handed and cannot check a sentence about what a caller passes. One such
+    /// sentence lived here for months -- "the driver records every peer-mesh
+    /// neighbour as Peer" -- and stayed readable as a live gap long after
+    /// `linkstate_forward` began threading the handshake role at R311td. The
+    /// three tests that prove it does are in THAT module, not this one, which
+    /// is exactly the point: the claim was made where it could not be tested.
+    ///
+    /// The block is delimited as the comment is written: it opens at the
+    /// deferral header and closes at the first later doc line that has content,
+    /// is not a `- ` bullet, and is not a three-space continuation. Blank doc
+    /// lines do not close it.
+    #[test]
+    fn every_deferred_entry_names_its_kind() {
+        const SRC: &str = include_str!("lib.rs");
+        const HEADER: &str = concat!("EXPLICITLY ", "DEFERRED");
+
+        let mut lines = SRC.lines().skip_while(|l| !l.contains(HEADER));
+        assert!(
+            lines.next().is_some(),
+            "the module doc no longer carries a `{HEADER}` header; this gate has lost its subject"
+        );
+
+        let mut bullets: Vec<String> = Vec::new();
+        for line in lines {
+            let Some(doc) = line.strip_prefix("//!") else {
+                break;
+            };
+            if doc.trim().is_empty() {
+                continue;
+            }
+            if let Some(rest) = doc.strip_prefix(" - ") {
+                bullets.push(rest.to_string());
+            } else if let Some(cont) = doc.strip_prefix("   ") {
+                let last = bullets
+                    .last_mut()
+                    .expect("a continuation line before any bullet");
+                last.push(' ');
+                last.push_str(cont.trim());
+            } else {
+                break;
+            }
+        }
+
+        // ANTI-VACUITY, both halves. An empty harvest satisfies every rule
+        // below by having nothing to judge, and a harvest that stopped at each
+        // entry's FIRST line would miss the `Round` citations that live on the
+        // continuations -- so the joined length is checked too.
+        assert!(
+            !bullets.is_empty(),
+            "harvested no entries: the delimiters moved and this gate now judges nothing"
+        );
+        let harvested: usize = bullets.iter().map(String::len).sum();
+        assert!(
+            harvested > 300,
+            "harvested only {harvested} chars across {} entries -- continuations were not joined",
+            bullets.len()
+        );
+
+        for bullet in &bullets {
+            let decided = bullet.starts_with("DECIDED ");
+            assert!(
+                decided || bullet.starts_with("NOT STARTED "),
+                "a deferral must open with DECIDED or NOT STARTED, so a decision \
+                 cannot be read as unstarted work; this one opens: {bullet:.60}"
+            );
+            if decided {
+                assert!(
+                    bullet.contains("Round "),
+                    "a DECIDED deferral must cite the ledger round that decided \
+                     it, otherwise it is an assertion with no author: {bullet:.60}"
+                );
+            }
+            assert!(
+                !bullet.contains("whatami"),
+                "this list must not describe what a CALLER hands `add_link` -- \
+                 the crate cannot check such a claim, which is how the last one \
+                 outlived the code by months: {bullet:.60}"
+            );
+        }
     }
 
     #[test]
