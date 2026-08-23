@@ -1,6 +1,6 @@
 // SCE-GENERATED — DO NOT EDIT
 // source-hash: 99260466e63c238c521b53a49c2d24ed893cd4da2faa8f8e2153cc050b338ba0
-// template-hash: f7291ab6d7896ee95dd448a8f7fc2759f6a0259c69bcc8f54f868651f4b8fe72
+// template-hash: 35c8283af859855fefb53b36dbcc38c1c549511d8a5bf7a3250f4215fef24b75
 // generated-at: 0
 // SCE-MAP: temp_reading_codec.scxml:16 :: _forge_body
 
