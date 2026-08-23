@@ -8570,13 +8570,14 @@ layer_c1bn_passive_dissection_features() {
     listing="$(cd crates && cargo test -p wz-session-core \
         --features dissect,session-multicast,codec-join,transport-qos dissect:: -- --list 2>&1)" \
         || { echo "$listing"; return 1; }
-    for name in \
-        dissect::tests::no_join_row_declared_opaque_is_one_encode_join_emits
-    do
-        grep -qF "$name: test" <<<"$listing" || {
-            echo "  C1bn FAIL: $name is absent from the multicast-union dissect build"
-            echo "$listing"; return 1; }
-    done
+    # ONE name, so no loop: shellcheck's SC2043 refuses a `for` over a single
+    # item and it is right to -- the loop shape above is for a set, and copying
+    # it here would say "set" where there is one. A second name arriving turns
+    # this back into the loop.
+    gate_name="dissect::tests::no_join_row_declared_opaque_is_one_encode_join_emits"
+    grep -qF "$gate_name: test" <<<"$listing" || {
+        echo "  C1bn FAIL: $gate_name is absent from the multicast-union dissect build"
+        echo "$listing"; return 1; }
     out="$(cd crates && cargo test -p wz-session-core \
         --features dissect,session-multicast,codec-join,transport-qos dissect:: --quiet 2>&1)" \
         || { echo "$out"; return 1; }
