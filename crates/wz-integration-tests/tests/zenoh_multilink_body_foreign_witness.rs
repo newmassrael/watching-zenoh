@@ -273,7 +273,22 @@ fn assert_stage_records(body: &Body, want: &[&str], stage: &str) {
 ///
 /// The `zenohd` in the name is LOAD-BEARING: Layer C0's skip-token rule reads
 /// the FUNCTION name, because that is what libtest's `--skip` matches.
-// wz-proves: session-extmultilink zenohd->wz partial
+// WHY THIS DECLARES NO ATOM, which Layer A4 taught this round rather than the
+// other way round.
+//
+// The first push claimed `session-extmultilink` (not an atom at all) and the
+// second `transport-multilink`. A4 refused both, the second for the right
+// reason: `transport-multilink` is NOT in this crate's enabled feature closure,
+// so wz's multilink ESTABLISHMENT code is not compiled into this binary and
+// cannot have been proven by it. Exactly true. What runs here is
+// `wz_session_core::dissect`'s walker reading FOREIGN bytes, behind the
+// `dissect` feature; wz's own producer never executes.
+//
+// Turning the feature on to satisfy containment would have made the claim pass
+// while changing nothing about what executes, which is the vacuity A4 exists to
+// catch. If the inventory ever grows an atom for the dissection surface itself,
+// the line below is where it belongs.
+// wz-proves: none -- grades the dissector on foreign bytes; wz's multilink producer never runs
 #[test]
 #[ignore = "binary-dep e2e (zenohd + zenoh z_get, multilink); Layer Ewirez runs via --ignored"]
 fn the_multilink_walker_reads_what_a_stock_zenohd_handshake_wrote() {
