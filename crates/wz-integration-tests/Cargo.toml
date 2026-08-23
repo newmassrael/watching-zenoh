@@ -414,6 +414,16 @@ tokio = { version = "1", features = ["net", "rt-multi-thread", "macros", "time"]
 # false` matches the wz-runtime-tokio pin — the only default is serialport's
 # libudev port-enumeration backend, which nothing here calls.
 tokio-serial = { version = "5.4", default-features = false }
+# R2046 (open-debt item 419) — the usrpwd foreign witness recomputes the
+# handshake digest so it can assert the dissected `hmac` by VALUE rather than
+# by framing. Upstream's `zenoh_crypto::hmac::sign` is `Hmac::<Sha3_256>`
+# (commons/zenoh-crypto/src/hmac.rs:19-23), so the witness needs the same two
+# crates. Deliberately NOT reached for through wz-session-core's private twin:
+# a digest borrowed from the tree under test could agree with it while both
+# disagreed with the wire. Same pins wz-session-core already carries, so
+# `crates/Cargo.lock` gains an edge and no package.
+hmac = { version = "0.12", default-features = false }
+sha3 = { version = "0.10", default-features = false }
 
 [lints]
 workspace = true

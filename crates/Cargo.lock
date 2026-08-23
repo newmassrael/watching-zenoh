@@ -2588,11 +2588,13 @@ dependencies = [
 name = "wz-integration-tests"
 version = "0.1.0"
 dependencies = [
+ "hmac",
  "libc",
  "libloading",
  "proptest",
  "sce-forge-runtime",
  "sce-rust-runtime",
+ "sha3",
  "socket2",
  "tempfile",
  "tokio",

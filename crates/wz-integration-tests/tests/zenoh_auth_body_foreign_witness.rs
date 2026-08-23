@@ -67,16 +67,41 @@
 //!
 //! ## What is held against what
 //!
-//! `user` is asserted against the username this test spawned the client with.
-//! That is the sharpest binding available: a config value is not a constant
-//! this tree could have copied wrong, so a walker that mis-framed the two
-//! ZBufs — swapping `user` and `hmac`, or reading the length as part of the
-//! value — passes every self-witness in the workspace and reds here.
+//! `user` is asserted against the username this test spawned the client with:
+//! a config value is not a constant this tree could have copied wrong, so a
+//! walker that mis-framed the two ZBufs — swapping `user` and `hmac`, or
+//! reading the length as part of the value — passes every self-witness in the
+//! workspace and reds here.
+//!
+//! ## R2046 (open-debt item 419) — the other two rows, by value
+//!
+//! For three rounds `user` was the ONLY value this file held against anything.
+//! The item recorded what that left open, and the dump printed it plainly:
+//!
+//! ```text
+//!   A Init/usrpwd enc=Some(1) read=[]                        <- the challenge
+//!   B Open/usrpwd ... hmac=<32 byte(s)>                      <- the answer
+//! ```
+//!
+//! The acceptor's Z64 CHALLENGE showed NO reading at all — not because the
+//! dissector dropped it (a scalar body's value is exactly what it should
+//! report) but because this harness folded `value` away as envelope for every
+//! row alike. And the `hmac` was asserted only as "non-empty ZBuf of its own",
+//! which is framing, not identity: any other 32-byte span satisfied it.
+//!
+//! Both are closed the same way, and with material that was already in the
+//! capture. The nonce is now surfaced ([`Body::value`]) and used as the KEY to
+//! recompute the digest over the password this test chose, upstream's algorithm
+//! reproduced in [`usrpwd_hmac`]. See
+//! [`assert_the_hmac_is_the_password_keyed_by_the_challenge`] — it is the whole
+//! usrpwd calculation bound to foreign bytes, where before only a username was.
 
 use std::io::Write as _;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use hmac::{Hmac, Mac};
+use sha3::Sha3_256;
 use tempfile::NamedTempFile;
 use wz_capture::Dissection;
 use wz_integration_tests::common::{
@@ -228,6 +253,18 @@ struct Body {
     /// CHILDREN. A one-level fold would report `usrpwd=<4 field(s)>` and have
     /// nothing to hold against a username.
     read: Vec<(String, Reading)>,
+    /// The entry's OWN `value`, when the walk left one standing.
+    ///
+    /// R2046 (open-debt item 419). [`ENVELOPE`] keeps `value` out of
+    /// [`Self::read`] on purpose: for a body that IS walked it is the raw span
+    /// the reading stands in for, and folding it in would let the "was the
+    /// chain walked, or left opaque" assertions above be satisfied by the
+    /// opaque case. But a SCALAR body has no walked group and the value IS the
+    /// whole reading, so excluding it everywhere printed the acceptor's usrpwd
+    /// CHALLENGE as `read=[]` — the one number in this handshake that keys
+    /// everything else, invisible to every assertion in this file. Kept beside
+    /// `read` rather than inside it so both meanings survive.
+    value: Option<Reading>,
 }
 
 impl Body {
@@ -242,8 +279,12 @@ impl Body {
             .map(|(n, v)| format!("{n}={v}"))
             .collect::<Vec<_>>()
             .join(", ");
+        let value = match &self.value {
+            Some(v) => format!(" value={v}"),
+            None => String::new(),
+        };
         format!(
-            "{:?} {}/{} enc={:?} read=[{read}]",
+            "{:?} {}/{} enc={:?}{value} read=[{read}]",
             self.direction, self.carrier, self.name, self.encoding
         )
     }
@@ -270,6 +311,25 @@ fn fold_readings(field: &Field, out: &mut Vec<(String, Reading)>) {
     }
 }
 
+/// This entry's OWN child by name — NOT [`Field::find`], which is depth-first
+/// and RECURSIVE.
+///
+/// R2046: the difference is silent everywhere except the field this round
+/// added. `ext_name` and `encoding` are pushed before any body, so a recursive
+/// search reaches the direct child first and the distinction never showed.
+/// `value` is not like that: on a WALKED ZBuf body there is no direct `value`
+/// at all — the walked group replaces it — so a recursive search would descend
+/// into the body and hand back a SUB-EXTENSION's value. The `auth` chain would
+/// then report its first method's number as its own, and since a wrong nonce
+/// keys a wrong digest, the assertion built on it would have failed for a
+/// reason nobody could read.
+fn own_child<'f>(field: &'f Field, name: &str) -> Option<&'f Field> {
+    match &field.value {
+        FieldValue::Nested(children) => children.iter().find(|c| c.name == name),
+        _ => None,
+    }
+}
+
 /// Collect every `ext` entry under `field`, attributing each to the innermost
 /// enclosing message group.
 fn collect(field: &Field, direction: Direction, carrier: &str, out: &mut Vec<Body>) {
@@ -279,18 +339,19 @@ fn collect(field: &Field, direction: Direction, carrier: &str, out: &mut Vec<Bod
         carrier
     };
     if field.name == "ext" {
-        if let Some(FieldValue::Label(name)) = field.find("ext_name").map(|f| &f.value) {
+        if let Some(FieldValue::Label(name)) = own_child(field, "ext_name").map(|f| &f.value) {
             let mut read = Vec::new();
             fold_readings(field, &mut read);
             out.push(Body {
                 direction,
                 carrier: carrier.to_string(),
                 name: name.to_string(),
-                encoding: match field.find("encoding").map(|f| &f.value) {
+                encoding: match own_child(field, "encoding").map(|f| &f.value) {
                     Some(FieldValue::Bits(v)) | Some(FieldValue::Uint(v)) => Some(*v),
                     _ => None,
                 },
                 read,
+                value: own_child(field, "value").and_then(Reading::of),
             });
         }
     }
@@ -394,6 +455,185 @@ fn assert_one_id_three_encodings(bodies: &[Body], acceptor: Direction, initiator
         covered,
         [ENC_UNIT, ENC_Z64, ENC_ZBUF],
         "the three encodings must be distinct, not three sightings of one",
+    );
+}
+
+/// NO ENTRY IS CREDITED WITH A DESCENDANT'S NUMBER.
+///
+/// R2046. Surfacing [`Body::value`] made this file able to say what a scalar
+/// body holds, and in the same stroke made it able to say something FALSE: the
+/// obvious way to fetch that field is [`Field::find`], which is depth-first and
+/// recursive, and an `auth` entry's body is a CHAIN whose members have values
+/// of their own. Asked for "the value" of the acceptor's `Init/auth`, a
+/// recursive search walks into the chain and returns the usrpwd challenge —
+/// the parent row then prints its child's nonce as if it were its own.
+///
+/// [`own_child`] is the fix. This is what makes the fix load-bearing, because
+/// nothing else does: with the recursive lookup in place every other assertion
+/// in this file passed, including the digest one, since that one selects the
+/// `usrpwd` row by name and reaches the same number by luck. The damage was
+/// visible only in the dump, one row above the row being asserted.
+///
+/// The rule is exact rather than approximate, and reads off `walk_ext_entry`:
+///
+/// * ENC_UNIT — no body bytes exist at all, so ANY value is borrowed.
+/// * ENC_ZBUF, walked — `fields.push(walked.unwrap_or(value))` pushes exactly
+///   one of the two, so a walked body leaves no `value` behind.
+/// * ENC_ZBUF, not walked / ENC_Z64 — a value of its own is exactly right, and
+///   these rows are why the rule is not "no row has a value".
+fn assert_no_entry_borrows_a_descendants_value(bodies: &[Body]) {
+    let walked = |b: &Body| {
+        b.read
+            .iter()
+            .any(|(n, r)| n == &b.name && matches!(r, Reading::Group(_)))
+    };
+    let mut swept = 0usize;
+    for body in bodies {
+        let why = if body.encoding == Some(ENC_UNIT) {
+            "a UNIT extension has no body bytes at all"
+        } else if body.encoding == Some(ENC_ZBUF) && walked(body) {
+            "a walked ZBuf body replaces the entry's `value` rather than \
+             standing beside it"
+        } else {
+            continue;
+        };
+        swept += 1;
+        assert!(
+            body.value.is_none(),
+            "this entry reports a value it cannot own -- {why}. The number \
+             belongs to something BELOW it, which means the lookup that \
+             fetched it descended out of the entry:\n  {}\nwhole capture:\n{}",
+            body.describe(),
+            dump(bodies)
+        );
+    }
+    // A rule that sweeps nothing is green for the wrong reason, and on this
+    // wire both classes are populated -- four UNIT offers and four walked
+    // bodies -- so a zero here means the shapes changed, not that the tree did.
+    assert!(
+        swept >= 2,
+        "only {swept} row(s) of this capture could carry a borrowed value, so \
+         the rule above is close to vacuous:\n{}",
+        dump(bodies)
+    );
+}
+
+/// Upstream's usrpwd digest, recomputed here rather than borrowed.
+///
+/// `zenoh_crypto::hmac::sign` is `Hmac::<Sha3_256>` over `data` keyed by `key`
+/// (`commons/zenoh-crypto/src/hmac.rs:19-23`), and usrpwd calls it with
+/// `key = state.nonce.to_le_bytes()` and `data = password`
+/// (`.../establishment/ext/auth/usrpwd.rs:325-327` on the initiator,
+/// `:420-423` on the acceptor, which recomputes and compares). Written from
+/// that algorithm and not from `wz_session_core::extauth_usrpwd`'s private
+/// twin on purpose: a digest borrowed from the tree under test could agree
+/// with it while both disagreed with the wire.
+fn usrpwd_hmac(nonce: u64, password: &[u8]) -> Vec<u8> {
+    let mut mac = <Hmac<Sha3_256> as Mac>::new_from_slice(&nonce.to_le_bytes())
+        .expect("HMAC accepts a key of any length");
+    mac.update(password);
+    mac.finalize().into_bytes().to_vec()
+}
+
+/// THE DIGEST, BY VALUE — the acceptor's challenge and the initiator's answer
+/// held against each other.
+///
+/// R2046, open-debt item 419. Until this round the `hmac` was asserted only as
+/// "a non-empty ZBuf of its own", which is a claim about FRAMING: a walker that
+/// pointed at some other 32-byte span — the tail of the digest, an adjacent
+/// field, the challenge echoed back — satisfied it. Only `user` was held
+/// against a value, and `user` is the FIRST of the two records, so nothing in
+/// the file constrained where the second one started beyond its length prefix.
+///
+/// Everything needed to close that was already in the capture. The challenge
+/// nonce is the acceptor's Z64 body; the password is a value this test chose;
+/// the algorithm is upstream's and is reproduced in [`usrpwd_hmac`]. Recomputing
+/// it binds the WHOLE usrpwd calculation to foreign bytes:
+///
+/// | what is asserted | what a mis-read would do |
+/// |---|---|
+/// | the challenge row has a value at all | a scalar body reported as `read=[]` |
+/// | that value keys the observed digest | a nonce read at the wrong width / offset |
+/// | the digest equals HMAC(nonce, password) | an `hmac` span off by any amount |
+///
+/// ⚠ This is NOT producer parity, and saying so matters: `usrpwd_zenohd_interop.rs`
+/// already proves wz COMPUTES this digest correctly, because a wrong one fails
+/// the handshake. What is bound here is that the DISSECTOR names the right
+/// bytes — which no amount of successful authentication can show.
+fn assert_the_hmac_is_the_password_keyed_by_the_challenge(
+    bodies: &[Body],
+    acceptor: Direction,
+    initiator: Direction,
+) {
+    // ── THE CHALLENGE, FROM THE ACCEPTOR'S HALF ───────────────────────────
+    let challenge = bodies
+        .iter()
+        .filter(|b| b.direction == acceptor && b.carrier == "Init" && b.name == "usrpwd")
+        .find(|b| b.encoding == Some(ENC_Z64))
+        .unwrap_or_else(|| {
+            panic!(
+                "no Z64 `usrpwd` body on the acceptor's Init, so this handshake \
+                 carried no challenge to key a digest with:\n{}",
+                dump(bodies)
+            )
+        });
+    let Some(Reading::Number(nonce)) = challenge.value else {
+        panic!(
+            "the acceptor's usrpwd CHALLENGE reached this witness with no value \
+             of its own. A scalar Z64 body's value IS its reading, so a row that \
+             reports none is one nothing in this file can assert against: {}",
+            challenge.describe()
+        )
+    };
+
+    // ── THE ANSWER, FROM THE INITIATOR'S HALF ─────────────────────────────
+    let answered = bodies
+        .iter()
+        .filter(|b| b.direction == initiator && b.carrier == "Open" && b.name == "usrpwd")
+        .find(|b| b.reading("hmac").is_some())
+        .unwrap_or_else(|| {
+            panic!(
+                "no walked `usrpwd` body on the initiator's Open carries an \
+                 `hmac`:\n{}",
+                dump(bodies)
+            )
+        });
+    let Some(Reading::Bytes(observed)) = answered.reading("hmac") else {
+        panic!(
+            "the `hmac` reading is not raw bytes: {}",
+            answered.describe()
+        )
+    };
+
+    let expected = usrpwd_hmac(nonce, PASSWORD.as_bytes());
+    assert_eq!(
+        observed,
+        &expected,
+        "the 32 bytes this build points at as `hmac` are not \
+         HMAC-SHA3-256(nonce_le, password) for the challenge the acceptor sent \
+         ({nonce}) and the password this test spawned the client with. Either \
+         the challenge or the digest is being read from the wrong span.\n  \
+         challenge: {}\n  answer:    {}",
+        challenge.describe(),
+        answered.describe(),
+    );
+
+    // ── ANTI-VACUITY: THE EQUALITY MUST DEPEND ON BOTH INPUTS ─────────────
+    // A digest that ignored its key would satisfy the assertion above while
+    // proving nothing about the challenge, and one that ignored its message
+    // would prove nothing about the password. Both directions are checked so
+    // that "the nonce was read correctly" is a thing this test can fail on.
+    assert_ne!(
+        usrpwd_hmac(nonce ^ 1, PASSWORD.as_bytes()),
+        expected,
+        "the digest does not depend on its key, so the assertion above says \
+         nothing about the challenge nonce",
+    );
+    assert_ne!(
+        usrpwd_hmac(nonce, b"not-the-password-this-test-chose"),
+        expected,
+        "the digest does not depend on its message, so the assertion above \
+         says nothing about the password",
     );
 }
 
@@ -588,6 +828,11 @@ fn the_auth_chain_walkers_read_what_a_stock_zenohd_usrpwd_handshake_wrote() {
     // R311y900's lesson, in the order it was paid for.
     assert_witnessed_set(&bodies);
 
+    // ── NO ROW IS CREDITED WITH A DESCENDANT'S NUMBER ─────────────────────
+    // Before any reading is judged, because a row that borrowed a value from
+    // below it makes every assertion under it a claim about the wrong entry.
+    assert_no_entry_borrows_a_descendants_value(&bodies);
+
     // ── THE CHAIN WAS WALKED, ON BOTH HALVES ──────────────────────────────
     // `auth` is an ext whose body is a CHAIN, not a value. A build that left
     // it opaque would still produce an `auth` row, so the assertion is that it
@@ -646,10 +891,10 @@ fn the_auth_chain_walkers_read_what_a_stock_zenohd_usrpwd_handshake_wrote() {
          spawned with: {}",
         named.describe()
     );
-    // The hmac is NOT asserted by value -- it is a keyed digest and this test
-    // holds no key. What IS asserted is that it was framed as its own ZBuf and
-    // is not empty, which is what separates "two records were read" from "one
-    // record was read and the rest swallowed".
+    // FRAMING first: the second ZBuf exists, is its own record, and is not
+    // empty. That separates "two records were read" from "one record was read
+    // and the rest swallowed", and it is the assertion that still holds if the
+    // capture ever stops carrying a challenge to key the digest with.
     match named.reading("hmac") {
         Some(Reading::Bytes(h)) if !h.is_empty() => {}
         other => panic!(
@@ -658,4 +903,11 @@ fn the_auth_chain_walkers_read_what_a_stock_zenohd_usrpwd_handshake_wrote() {
             named.describe()
         ),
     }
+
+    // ── AND THEN BY VALUE ─────────────────────────────────────────────────
+    // R2046 (item 419). The framing check above is a claim about lengths; this
+    // one recomputes the digest from the challenge the acceptor actually sent
+    // and the password the client was actually given, so the two ZBufs are
+    // pinned to where they start rather than to how long they are.
+    assert_the_hmac_is_the_password_keyed_by_the_challenge(&bodies, acceptor_side, initiator_side);
 }
