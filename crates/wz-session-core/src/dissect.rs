@@ -7499,21 +7499,49 @@ mod tests {
         );
     }
 
-    /// The CARRIER control. `Open` declares the same auth ext at the same id
-    /// with the same encoding (`open.rs:121`), so both carriers must walk it —
-    /// a guard written against `Init` alone would leave half the handshake
-    /// opaque, and the OpenSyn half is the one carrying the credential.
-    #[test]
-    fn an_open_carriers_auth_body_is_walked_the_same_way() {
+    /// An `Open` carrying an auth chain, built once for the two tests below.
+    ///
+    /// R2059 (item 401) — a helper because the two cases differ ONLY in the
+    /// sub-ext body, which is the whole point: same carrier, same id, same
+    /// encoding, and the body decides whether the walk happens.
+    fn open_with_auth_sub(method_id: u8, body: &[u8]) -> alloc::vec::Vec<u8> {
         let mut bytes =
             alloc::vec![wz_codecs::wire_const::T_MID_OPEN | wz_codecs::wire_const::FLAG_T_Z];
         bytes.extend(vle(10_000));
         bytes.extend(vle(7));
         bytes.extend(vle(0));
-        let mut body = alloc::vec![0x02u8 | crate::ext_header::EXT_ENC_ZBUF];
-        body.extend(vle(4));
-        body.extend_from_slice(b"user");
-        bytes.extend(ext_zbuf(0x03, false, &body));
+        bytes.extend(ext_zbuf(0x03, false, &ext_zbuf(method_id, false, body)));
+        bytes
+    }
+
+    /// The CARRIER control. `Open` declares the same auth ext at the same id
+    /// with the same encoding (`open.rs:121`), so both carriers must walk it —
+    /// a guard written against `Init` alone would leave half the handshake
+    /// opaque, and the OpenSyn half is the one carrying the credential.
+    ///
+    /// # R2059 (open-debt item 401): what this test used to assert
+    ///
+    /// Its body was `vle(4) ++ "user"` — ONE ZBuf record. Upstream's OpenSyn
+    /// usrpwd body is `{user, hmac}`, TWO records
+    /// (`io/zenoh-transport/src/unicast/establishment/ext/auth/usrpwd.rs:230`,
+    /// whose `WCodec` writes `user` then `hmac`), and
+    /// [`walk_auth_usrpwd_body`] reads exactly two. So the walker DECLINED this
+    /// fixture and the entry came back opaque — while the test stayed green,
+    /// because the only thing it asserted was the method NAME.
+    ///
+    /// A test named "walked the same way" that could not tell walked from
+    /// declined is the defect item 401 recorded, and it is the same shape
+    /// R2059 found one round earlier in `a_hello_without_locators_decodes`:
+    /// a fixture that BUILDS the interesting case and then asserts about
+    /// something else. The body is now a real OpenSyn and the assertion is the
+    /// Init sibling's, which is what "the same way" has to mean.
+    #[test]
+    fn an_open_carriers_auth_body_is_walked_the_same_way() {
+        let body = concat(&[
+            zbuf_record(b"alice"),
+            zbuf_record(&[0x01, 0x02, 0x03, 0x04]),
+        ]);
+        let bytes = open_with_auth_sub(0x02, &body);
         let f = dissect_transport_message(&bytes, 0).expect("the walker rejected an auth Open");
         let auth = f
             .find("extensions")
@@ -7522,6 +7550,45 @@ mod tests {
         assert_eq!(
             ext_names_in_order(auth),
             alloc::vec![String::from("usrpwd")],
+        );
+
+        // The half the old assertion could not reach: the SAME fields the
+        // `Init` carrier yields, from the same bytes.
+        let walked = sub_ext_body(auth, "usrpwd");
+        assert_eq!(raw(walked, "user"), b"alice".to_vec());
+        assert_eq!(raw(walked, "hmac"), alloc::vec![0x01, 0x02, 0x03, 0x04]);
+    }
+
+    /// R2059 (open-debt item 401) — and the DECLINE case, said out loud.
+    ///
+    /// A usrpwd body of one record is not an OpenSyn: upstream's has two, so
+    /// the walker refuses rather than reporting a `user` and inventing an
+    /// absent `hmac`. That refusal is correct and it was INVISIBLE — the old
+    /// carrier test carried exactly these bytes and nothing recorded what
+    /// happened to them, so the next reader had every reason to read it as
+    /// walked.
+    ///
+    /// Asserting the refusal is what keeps the sibling above honest: if the
+    /// walker ever started accepting a short body, that test would keep passing
+    /// on its own two-record fixture and this one would red.
+    #[test]
+    fn a_usrpwd_body_of_one_record_is_declined_rather_than_half_read() {
+        let body = zbuf_record(b"user");
+        let bytes = open_with_auth_sub(0x02, &body);
+        let f = dissect_transport_message(&bytes, 0).expect("the walker rejected an auth Open");
+        let auth = f
+            .find("extensions")
+            .and_then(|e| e.find("auth"))
+            .expect("the chain is still walked; it is the BODY that declines");
+        let usrpwd = entry_named(auth, "usrpwd").expect("the method is still named");
+
+        assert!(
+            has_direct_child(usrpwd, "value"),
+            "a declined body is shown as the bytes it is: {usrpwd:?}"
+        );
+        assert!(
+            !has_direct_child(usrpwd, "user") && !has_direct_child(usrpwd, "hmac"),
+            "half a record set must not be reported as a credential: {usrpwd:?}"
         );
     }
 
