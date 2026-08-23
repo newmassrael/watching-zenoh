@@ -223,6 +223,59 @@ def witness_findings() -> list[str]:
     return findings
 
 
+IPV4_HEADER_END = ETHERNET_HEADER + 20
+
+
+def repair_for(lo: int) -> str:
+    """The repair that fits a write at byte `lo` — open-debt item 367.
+
+    # What was wrong with one sentence for every edit
+
+    The advice used to be "use `wz_packet_fixtures::set_tcp_source_port` (or
+    refill explicitly)". That helper edits ONE field, and it is the only helper
+    there is, so the advice was right for a source-port write and wrong for
+    every other one: it cannot repair a destination port, an address, or a
+    length, and a reader following it would edit a field they did not mean to.
+    Item 367 filed that as "the fix becomes a second helper rather than a
+    call".
+
+    # Why NOT a second helper
+
+    MEASURED this round, with the population the previous one made visible: the
+    whole tree holds ONE post-build write into a checksummed frame, and it is
+    the negative control that proves the class is real. There is no fixture
+    editing a destination port or an address, so a helper for that edit would
+    be API written for nobody. What the class actually needs today is advice
+    that fits the edit in front of it.
+
+    # The two layers, and why the offset decides
+
+    A write below `IPV4_HEADER_END` is in the IPv4 header, which its own
+    checksum covers and the transport checksum does NOT -- the pseudo-header
+    takes the addresses, so an address edit breaks both and a TTL edit breaks
+    only one. At or past it the bytes are in the segment, which the transport
+    sum covers and IPv4's does not. That asymmetry is the whole reason this
+    class is hard to notice, and naming it is what makes the advice actionable.
+    """
+    if lo < IPV4_HEADER_END:
+        return (
+            "That is inside the IPv4 HEADER: refill with "
+            "`wz_packet_fixtures::fill_ipv4_checksum`, and if the bytes are "
+            "the source or destination ADDRESS refill the transport sum too "
+            "-- the pseudo-header takes them, so an address edit breaks both "
+            "axes while a TTL edit breaks only the IPv4 one"
+        )
+    return (
+        "That is inside the TRANSPORT segment: refill with "
+        "`wz_packet_fixtures::fill_tcp_checksum` or `fill_udp_checksum`. "
+        "`set_tcp_source_port` does the edit and the refill together, but ONLY "
+        "for the TCP source port -- it is the one field with a helper, so any "
+        "other edit refills explicitly. A raw write leaves the frame corrupt "
+        "on the transport axis alone, and the IPv4 axis staying clean is why "
+        "nobody notices"
+    )
+
+
 def checksummed_builders(src: str) -> set[str]:
     """Every function in `src` whose body fills a checksum.
 
@@ -283,10 +336,7 @@ def edit_findings(sources: list[tuple[str, str]] | None = None) -> tuple[list[st
                 f"{rel}:{i + 1}: `{name}` was built by a "
                 f"packet builder on line {at + 1} and is written at byte {lo}, "
                 f"which is inside what its checksums cover, with no refill "
-                f"after it. Use `wz_packet_fixtures::set_tcp_source_port` (or "
-                f"refill explicitly) -- a raw write leaves the frame corrupt on "
-                f"the TRANSPORT axis alone, and the IPv4 axis staying clean is "
-                f"why nobody notices"
+                f"after it. {repair_for(lo)}"
             )
     return findings, examined
 
@@ -349,6 +399,47 @@ def selftest() -> int:
             0,
         ),
     ]
+    # R2044 (open-debt item 367) — THE ADVICE MUST FIT THE EDIT. One sentence
+    # naming `set_tcp_source_port` was right for a source-port write and wrong
+    # for every other one; a reader following it on an IPv4-header edit would
+    # change a field they did not mean to.
+    ipv4_write = (
+        checksummed + 'fn t() {\n    let mut f = built(b"x");\n'
+        "    f[26..30].copy_from_slice(&[1, 2, 3, 4]);\n}\n"
+    )
+    segment_write = (
+        checksummed + 'fn t() {\n    let mut f = built(b"x");\n'
+        "    f[36..38].copy_from_slice(&1u16.to_be_bytes());\n}\n"
+    )
+    for label, src, want in (
+        ("an IPv4-header write", ipv4_write, "fill_ipv4_checksum"),
+        ("a segment write", segment_write, "fill_tcp_checksum"),
+    ):
+        got, _ = edit_findings([("fx.rs", src)])
+        if len(got) != 1 or want not in got[0]:
+            print(
+                f"  packet-fixture SELFTEST FAIL: {label} must be told to use "
+                f"`{want}`\n    got {got}"
+            )
+            return 1
+    # And the two must not be told the SAME thing, or the offset is decorative.
+    if edit_findings([("fx.rs", ipv4_write)])[0] == edit_findings([("fx.rs", segment_write)])[0]:
+        print("  packet-fixture SELFTEST FAIL: both layers get one sentence")
+        return 1
+    # ⚠ AND THE ONE HELPER MUST NOT BE OFFERED AS A GENERAL ONE. This is item
+    # 367's own sentence: `set_tcp_source_port` edits the TCP source port and
+    # nothing else, so advice that names it without saying so sends a reader to
+    # change a field they did not mean to. A mutation that dropped the limit
+    # SURVIVED the two checks above -- they only ask which refill is named.
+    segment_msg = edit_findings([("fx.rs", segment_write)])[0][0]
+    if "ONLY for the TCP source port" not in segment_msg:
+        print(
+            "  packet-fixture SELFTEST FAIL: the advice offers "
+            "`set_tcp_source_port` without saying it edits ONE field\n"
+            f"    got {segment_msg}"
+        )
+        return 1
+
     failed = False
     for name, src, want_findings, want_examined in cases:
         got, examined = edit_findings([("fx.rs", src)])
