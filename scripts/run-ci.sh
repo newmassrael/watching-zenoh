@@ -8474,6 +8474,23 @@ layer_c1bn_passive_dissection_features() {
         echo "  C1bn FAIL: the pcap/dlt.h ceiling adjudicator did not run"
         echo "$out"; return 1; }
 
+    # R2058 (open-debt item 250) — the IP protocol FURNITURE split, ARMED.
+    #
+    # `is_encapsulation` names 13 numbers and the other 241 are furniture, whose
+    # claim -- "this could not have carried a session" -- was inherited from
+    # ABSENCE outside ICMP and IGMP. This adjudicator splits those 241 into the
+    # ones a shipped tool speaks for (a judgement) and the ones nobody here has
+    # examined (the honest remainder), so a number that GAINS an opinion reds
+    # instead of sitting in a bigger count. Its sources are `/etc/protocols`
+    # (netbase, on every Debian-family image) and `tcpdump`, which this job
+    # already installs for the leg above; `WZ_PROTO_REGISTRY_REQUIRE=1` is what
+    # stops a missing source reading as agreement.
+    out="$(cd crates && WZ_PROTO_REGISTRY_REQUIRE=1 cargo test -p wz-integration-tests \
+        --test ip_protocol_opinion_split --quiet 2>&1)" || { echo "$out"; return 1; }
+    grep -qE '^test result: ok\. 1 passed' <<<"$out" || {
+        echo "  C1bn FAIL: the IP protocol furniture split did not run"
+        echo "$out"; return 1; }
+
     # R311y645 — the tests that need BOTH `reassembly` and `network-codecs`, so
     # C1bt's arms cannot see them: its network arm has no reassembly and its
     # default-off arm has neither. This is the only lane that builds the pair,

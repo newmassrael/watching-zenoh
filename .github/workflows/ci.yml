@@ -2427,8 +2427,13 @@ jobs:
           # `DLT_MATCHING_MAX`, the highest link type a capture file can name.
           # Layer C1bn runs that adjudicator with `WZ_DLT_HEADER_REQUIRE=1`, so
           # the header has to be here for the same reason `tcpdump` does.
+          # R2058 (open-debt item 250) — `netbase` ships `/etc/protocols`, one of
+          # the two sources the IP-protocol furniture split reads. It is
+          # Priority: important and so already on the image; named anyway,
+          # because "the image happens to carry it" is not a thing this file
+          # states and the leg below arms on its absence.
           bash scripts/lib/apt-install.sh cmake libclang-dev clang perl tcpdump \
-            libpcap-dev
+            libpcap-dev netbase
 
       - name: Save apt archives
         # `always()`: the job this exists for is the one a slow mirror REDS, and

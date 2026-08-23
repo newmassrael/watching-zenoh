@@ -237,7 +237,15 @@ pub(crate) const MAX_ENCAPSULATION_DEPTH: usize = 4;
 /// reassembled carrier is READ. The sentence is corrected rather than deleted
 /// because a comment stating a settled half-answer is what stops the next
 /// reader looking (R311y838).
-fn is_encapsulation(proto: u8) -> bool {
+///
+/// R2058 (item 250) made this `pub`, for the reason
+/// [`LINK_TYPE_SWEEP_CEILING`] is public: the adjudicator that holds the
+/// furniture class to what shipped tools say about each number lives in
+/// another crate, because this one is `no_std` and can neither open
+/// `/etc/protocols` nor run `tcpdump`. A predicate and the gate over it have to
+/// be reading the same thing, and a second spelling of the set in the other
+/// crate would be the copy this whole family of gates exists to prevent.
+pub fn is_encapsulation(proto: u8) -> bool {
     matches!(
         proto,
         IP_PROTO_IPV4_IN_IP

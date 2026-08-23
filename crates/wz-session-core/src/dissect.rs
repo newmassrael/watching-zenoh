@@ -8048,7 +8048,7 @@ mod tests {
         );
 
         // ── THE PIN, BOTH DIRECTIONS ────────────────────────────────────────
-        let pinned: BTreeSet<&str> = UPSTREAM_TYPE_GROUPS.iter().map(|r| r.name).collect();
+        let pinned: BTreeSet<&str> = UPSTREAM_TYPE_GROUPS.iter().map(|r| r.ext).collect();
         assert_eq!(
             multi, pinned,
             "the set of ext names walked by more than one carrier has moved. A \
@@ -8059,7 +8059,7 @@ mod tests {
 
         // ── THE PARTITIONS ──────────────────────────────────────────────────
         for row in UPSTREAM_TYPE_GROUPS {
-            let walked = by_name.get(row.name).expect("multi == pinned, above");
+            let walked = by_name.get(row.ext).expect("multi == pinned, above");
 
             let mut upstream_of: BTreeMap<C, usize> = BTreeMap::new();
             for (index, group) in row.groups.iter().enumerate() {
@@ -8067,7 +8067,7 @@ mod tests {
                     assert!(
                         upstream_of.insert(*carrier, index).is_none(),
                         "{} names {carrier:?} in two upstream groups",
-                        row.name
+                        row.ext
                     );
                 }
             }
@@ -8077,7 +8077,7 @@ mod tests {
                 derived, claimed,
                 "{} is walked by a different set of carriers than {} was read \
                  for ({})",
-                row.name, row.name, row.cite
+                row.ext, row.ext, row.cite
             );
 
             for (a, id_a) in walked {
@@ -8091,7 +8091,7 @@ mod tests {
                          walker. A walker spanning an upstream split reports \
                          fields the narrower type does not define, which is \
                          what item 412 was",
-                        row.name,
+                        row.ext,
                         if same_upstream {
                             "share a type"
                         } else {
@@ -8113,7 +8113,14 @@ mod tests {
     /// pin in [`UPSTREAM_TYPE_GROUPS`]'s own doc.
     struct UpstreamTypeGroups {
         /// The ext name, as `ext_name`'s table spells it.
-        name: &'static str,
+        ///
+        /// Spelled `ext` and not `name`, which is not style: Layer C0's
+        /// dissect-name census harvests every `name: "..."` literal in this
+        /// crate -- doc comments and tests included, deliberately, because a
+        /// test writing one is how it once reported a walker that did not
+        /// exist. A row here is a claim about upstream, not a field a walker
+        /// emits, so it must not enter that vocabulary.
+        ext: &'static str,
         /// The carriers, partitioned by the Rust type upstream gives the ext at
         /// that position. One group means one type everywhere.
         groups: &'static [&'static [crate::ext_name::ExtCarrier]],
@@ -8136,7 +8143,7 @@ mod tests {
     /// that makes a new arrival visible.
     const UPSTREAM_TYPE_GROUPS: &[UpstreamTypeGroups] = &[
         UpstreamTypeGroups {
-            name: "qos",
+            ext: "qos",
             groups: &[
                 &[
                     crate::ext_name::ExtCarrier::Push,
@@ -8162,7 +8169,7 @@ mod tests {
                    response.rs has exactly one",
         },
         UpstreamTypeGroups {
-            name: "timestamp",
+            ext: "timestamp",
             groups: &[&[
                 crate::ext_name::ExtCarrier::Push,
                 crate::ext_name::ExtCarrier::Request,
@@ -8178,7 +8185,7 @@ mod tests {
                    sites",
         },
         UpstreamTypeGroups {
-            name: "node_id",
+            ext: "node_id",
             groups: &[&[
                 crate::ext_name::ExtCarrier::Push,
                 crate::ext_name::ExtCarrier::Request,
@@ -8189,7 +8196,7 @@ mod tests {
                    declare.rs:74 and interest.rs:194",
         },
         UpstreamTypeGroups {
-            name: "patch",
+            ext: "patch",
             groups: &[&[
                 crate::ext_name::ExtCarrier::Init,
                 crate::ext_name::ExtCarrier::Join,
@@ -8197,7 +8204,7 @@ mod tests {
             cite: "transport::ext::PatchType<ID> at init.rs:175 and join.rs:138",
         },
         UpstreamTypeGroups {
-            name: "source_info",
+            ext: "source_info",
             groups: &[&[
                 crate::ext_name::ExtCarrier::Put,
                 crate::ext_name::ExtCarrier::Del,
@@ -8208,7 +8215,7 @@ mod tests {
                    query.rs:98 and err.rs:63",
         },
         UpstreamTypeGroups {
-            name: "responder_id",
+            ext: "responder_id",
             groups: &[&[
                 crate::ext_name::ExtCarrier::Response,
                 crate::ext_name::ExtCarrier::ResponseFinal,
@@ -8217,7 +8224,7 @@ mod tests {
                    whose `ext` module both carriers share",
         },
         UpstreamTypeGroups {
-            name: "auth",
+            ext: "auth",
             groups: &[&[
                 crate::ext_name::ExtCarrier::Init,
                 crate::ext_name::ExtCarrier::Open,

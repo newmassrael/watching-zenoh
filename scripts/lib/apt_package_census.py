@@ -177,6 +177,21 @@ _add(
 # `pcap_dlt_header_adjudicator` with `WZ_DLT_HEADER_REQUIRE=1`, so an absent
 # header reds instead of skipping. ONE job, the same one as `tcpdump` above and
 # for the same reason: it is where wz-capture's default-feature tests live.
+# R2058 (open-debt item 250) — `/etc/protocols`, one of the two sources the IP
+# protocol furniture split reads (the other is `tcpdump`, above). It splits the
+# 241 numbers this build calls furniture into the ones a shipped tool speaks for
+# and the ones nobody here has examined, so a number that gains an opinion reds
+# instead of hiding in a count. `netbase` is Priority: important and therefore
+# already on the runner image; declared anyway because Layer C1bn ARMS on the
+# file's absence, which makes its presence a statement rather than a guess. The
+# install is a no-op when it is already there, so the mirror cost is nil.
+_add(
+    "netbase",
+    "/etc/protocols, which Layer C1bn holds the IP protocol furniture class "
+    "against (item 250); armed with WZ_PROTO_REGISTRY_REQUIRE so its absence "
+    "reds instead of skipping.",
+    ["feature-gates"],
+)
 _add(
     "libpcap-dev",
     "pcap/dlt.h, which Layer C1bn holds LINK_TYPE_SWEEP_CEILING against via "
