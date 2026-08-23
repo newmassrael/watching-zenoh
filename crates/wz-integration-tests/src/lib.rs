@@ -4791,6 +4791,8 @@ pub mod wire_tap {
 
     const ETHERTYPE_IPV4: u16 = 0x0800;
     const IPPROTO_TCP: u8 = 6;
+    /// R2050 — the multicast half of this module writes UDP.
+    const IPPROTO_UDP: u8 = 17;
 
     /// Wrap one recorded segment as Ethernet / IPv4 / TCP.
     ///
@@ -4833,6 +4835,74 @@ pub mod wire_tap {
         wz_packet_fixtures::fill_ipv4_checksum(&mut pkt[14..34]);
         wz_packet_fixtures::fill_tcp_checksum(HOST, HOST, &mut pkt[34..]);
         pkt
+    }
+
+    /// One IPv4/UDP frame carrying `payload`, from `src` to a MULTICAST group.
+    ///
+    /// R2050 — the datagram sibling of [`tcp_packet`], and it exists because a
+    /// multicast JOIN cannot be reached through the tap at all: `tap_proxy` is a
+    /// TCP relay and zenoh's multicast transport is UDP, so the three witnesses
+    /// that share this module had no way to feed the analyzer a FOREIGN Join.
+    ///
+    /// The destination MAC is the IPv4 multicast mapping (`01:00:5e` plus the
+    /// low 23 bits of the group), not a made-up address: `wz-capture` reads the
+    /// L2 header, and a frame whose MAC contradicts its IP destination is a
+    /// capture no tool would have produced.
+    fn udp_multicast_packet(
+        src_port: u16,
+        group: [u8; 4],
+        dst_port: u16,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        const HOST: [u8; 4] = [127, 0, 0, 1];
+        let mut pkt = Vec::with_capacity(14 + 20 + 8 + payload.len());
+        // 01:00:5e:xx:xx:xx — RFC 1112 §6.4, low 23 bits of the group.
+        pkt.extend_from_slice(&[0x01, 0x00, 0x5e, group[1] & 0x7f, group[2], group[3]]);
+        pkt.extend_from_slice(&[0x02, 0, 0, 0, 0, 0x01]);
+        pkt.extend_from_slice(&ETHERTYPE_IPV4.to_be_bytes());
+        let udp_len = (8 + payload.len()) as u16;
+        let total_len = 20 + udp_len;
+        pkt.extend_from_slice(&[0x45, 0x00]);
+        pkt.extend_from_slice(&total_len.to_be_bytes());
+        // No DF on a multicast datagram, and TTL 1 is what a link-local group
+        // gets: this is the shape a real capture of `iface=lo` holds.
+        pkt.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 1, IPPROTO_UDP, 0x00, 0x00]);
+        pkt.extend_from_slice(&HOST);
+        pkt.extend_from_slice(&group);
+        pkt.extend_from_slice(&src_port.to_be_bytes());
+        pkt.extend_from_slice(&dst_port.to_be_bytes());
+        pkt.extend_from_slice(&udp_len.to_be_bytes());
+        pkt.extend_from_slice(&[0x00, 0x00]);
+        pkt.extend_from_slice(payload);
+        wz_packet_fixtures::fill_ipv4_checksum(&mut pkt[14..34]);
+        wz_packet_fixtures::fill_udp_checksum(HOST, group, &mut pkt[34..]);
+        pkt
+    }
+
+    /// Wrap recorded multicast datagrams as a pcap the analyzer can open.
+    ///
+    /// R2050. One packet per datagram, in the order they arrived, because on a
+    /// datagram link the datagram IS the framing unit — there is no stream to
+    /// rebuild and no sequence numbers to thread. That is also why a decoded
+    /// message's `stream_offset` is the PACKET INDEX here (`DatagramDissection`
+    /// says so on `frames`), which is what lets a caller resolve a message back
+    /// to the bytes it recorded.
+    pub fn synthesise_multicast_pcap(
+        datagrams: &[Vec<u8>],
+        src_port: u16,
+        group: [u8; 4],
+        dst_port: u16,
+    ) -> Vec<u8> {
+        let packets: Vec<Vec<u8>> = datagrams
+            .iter()
+            .map(|d| udp_multicast_packet(src_port, group, dst_port, d))
+            .collect();
+        let borrowed: Vec<(u32, u32, &[u8])> = packets
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (1, i as u32, p.as_slice()))
+            .collect();
+        wz_capture::pcap::write(wz_capture::link::LINKTYPE_ETHERNET, &borrowed)
     }
 
     /// What a single-byte damage sweep found, by outcome.
@@ -5051,6 +5121,15 @@ pub mod ext_bodies {
     /// Needed because `dissect_transport_message` returns one tree per
     /// transport message and a `Frame` descends into its whole record batch:
     /// without this every `qos` inside a frame would be attributed to `Frame`.
+    ///
+    /// R2050 — `Join` was MISSING, and the reason it stayed missing is the
+    /// point: every witness that had ever used this list read a TCP unicast
+    /// capture, and a Join is a MULTICAST announcement. So the omission was
+    /// invisible until a capture carried one, and then it was not a wrong
+    /// attribution but a blank one — `?/qos` for the very body the round was
+    /// asserting about. This list is now every transport MID
+    /// (`wire_const::T_MID_*`) plus every network one, checked against them
+    /// rather than extended by one.
     pub const MESSAGE_NAMES: &[&str] = &[
         "Init",
         "Open",
@@ -5058,6 +5137,7 @@ pub mod ext_bodies {
         "KeepAlive",
         "Frame",
         "Fragment",
+        "Join",
         "Oam",
         "Push",
         "Request",

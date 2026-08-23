@@ -9678,6 +9678,22 @@ layer_ewirez_zenohd_wire_dissection() {
         --test zenoh_shm_body_foreign_witness -- --ignored --quiet --test-threads=1 \
         || return 1
     echo "  Ewirez: the SHM establishment walker read bytes two stock zenohd wrote"
+
+    # R2050 (open-debt item 390, the JOIN half) — the MULTICAST leg, and the
+    # only one in this family with no proxy and no second process: a group needs
+    # no relay, so the test joins it and records. It is also the only
+    # ONE-DIRECTIONAL capture here, correctly so, because a Join is an
+    # announcement rather than an exchange.
+    #
+    # It needs the stock oracle only (no variant), but it needs the HOST to pass
+    # multicast on loopback and it binds a group port with SO_REUSEADDR, so it
+    # is kept last: a machine that cannot do either fails HERE rather than
+    # anywhere ambiguous.
+    _runci_guarded_test "Ewirez stock-zenoh join qos" 1 \
+        timeout "$EWIREZ_WITNESS_BUDGET" cargo test -p wz-integration-tests \
+        --test zenoh_join_qos_foreign_witness -- --ignored --quiet --test-threads=1 \
+        || return 1
+    echo "  Ewirez: the Join qos table read bytes a stock zenohd broadcast"
 }
 
 layer_e_ap_demo_round_trip() {
