@@ -7952,4 +7952,281 @@ mod tests {
             "two variants share a kind word, so a consumer cannot tell them apart: {walked:?}",
         );
     }
+
+    /// R2057 (open-debt item 437) — UPSTREAM'S TYPE PARTITION PER EXT NAME,
+    /// held against THIS TREE'S WALKER PARTITION.
+    ///
+    /// # The gap
+    ///
+    /// [`zbuf_body_walker`] and [`z64_body_walker`] dispatch by NAME, with the
+    /// carrier used only as a guard. Upstream does not work that way: the same
+    /// ext name can be a DIFFERENT RUST TYPE depending on which message carries
+    /// it, and a walker that spans such a split reports fields the carrier's
+    /// own type does not define. Open-debt item 412 was exactly that instance —
+    /// `Frame/qos` read as `[priority, congestion, express]` when
+    /// `transport::ext::QoSType` has only `priority()` — and it was found BY
+    /// ACCIDENT, on the first round that fed the walker foreign bytes.
+    ///
+    /// The dispatch has been right ever since. What was missing, and what item
+    /// 437 records as "nothing measures that today", is anything that would
+    /// catch the NEXT one.
+    ///
+    /// # Why the shape is a pinned conclusion and not a gate over upstream
+    ///
+    /// The input is a machine-local Rust checkout that no clone and no CI
+    /// runner has, so it cannot be read at test time — a gate whose input is
+    /// absent must fail rather than skip, and this one would then be red
+    /// everywhere. Items 407 and 411 set the precedent: read upstream ONCE,
+    /// pin the CONCLUSION in the repository with its citations, and let the
+    /// derived side move against it. So [`UPSTREAM_TYPE_GROUPS`] is a reading
+    /// of zenoh at the pin below, and everything it is compared to is derived
+    /// from this tree at run time.
+    ///
+    /// # What actually reds
+    ///
+    /// Both directions, and neither is the interesting one alone. A name that
+    /// becomes walked by a second carrier with no row here reds — that is the
+    /// case item 437 is about, a new split arriving unexamined. A row naming a
+    /// name that is no longer multi-carrier reds too, because a pin that has
+    /// stopped pointing at anything is how this table would rot quietly.
+    /// And for each row the PARTITIONS must match: carriers upstream gives one
+    /// type must share one walker, and carriers it splits must not.
+    #[test]
+    fn every_ext_name_more_than_one_carrier_walks_matches_upstreams_type_split() {
+        use crate::ext_name::ExtCarrier as C;
+        use alloc::collections::{BTreeMap, BTreeSet};
+
+        /// Which walker a carrier gets for a name, as an identity that cannot
+        /// collide across the two encodings.
+        ///
+        /// The LABEL cannot serve here: both `qos` arms of [`z64_body_walker`]
+        /// return `"qos"`, which is the whole point of the split. The address
+        /// is what says two carriers are read by the same code.
+        type WalkerId = (u8, usize);
+        type WalkedBy = Vec<(C, WalkerId)>;
+        fn walker_of(carrier: C, name: &str) -> Option<WalkerId> {
+            if let Some((_, f)) = zbuf_body_walker(carrier, name) {
+                return Some((crate::ext_header::EXT_ENC_ZBUF, f as usize));
+            }
+            z64_body_walker(carrier, name)
+                .map(|(_, f)| (crate::ext_header::EXT_ENC_Z64, f as usize))
+        }
+
+        // ── DERIVED: name -> the carriers that walk it, with which walker ────
+        let mut by_name: BTreeMap<&str, WalkedBy> = BTreeMap::new();
+        for carrier in crate::ext_name::ALL_CARRIERS {
+            for (_, _, _, name) in crate::ext_name::rows(*carrier) {
+                if let Some(id) = walker_of(*carrier, name) {
+                    let seen = by_name.entry(name).or_default();
+                    if !seen.iter().any(|(c, _)| c == carrier) {
+                        seen.push((*carrier, id));
+                    }
+                }
+            }
+        }
+        let multi: BTreeSet<&str> = by_name
+            .iter()
+            .filter(|(_, v)| v.len() > 1)
+            .map(|(k, _)| *k)
+            .collect();
+
+        // ── ANTI-VACUITY ────────────────────────────────────────────────────
+        // Everything below is an assertion about a population, and the two
+        // ways this could be green over nothing are an empty population and a
+        // population with no split in it. `qos` is named because it is the
+        // known three-way case; without it the "carriers upstream splits must
+        // not share a walker" half would be a claim about zero carriers.
+        assert!(
+            multi.contains("qos"),
+            "the one name known to be split upstream is not even multi-carrier \
+             here, so this gate is asserting nothing: {multi:?}"
+        );
+        assert!(
+            UPSTREAM_TYPE_GROUPS.iter().any(|row| row.groups.len() > 1),
+            "no pinned row splits, so every partition check below compares a \
+             single group with itself"
+        );
+
+        // ── THE PIN, BOTH DIRECTIONS ────────────────────────────────────────
+        let pinned: BTreeSet<&str> = UPSTREAM_TYPE_GROUPS.iter().map(|r| r.name).collect();
+        assert_eq!(
+            multi, pinned,
+            "the set of ext names walked by more than one carrier has moved. A \
+             name on the left and not the right is a split nobody has asked \
+             upstream about -- item 437's whole subject. A name on the right \
+             and not the left is a pin that has stopped pointing at anything"
+        );
+
+        // ── THE PARTITIONS ──────────────────────────────────────────────────
+        for row in UPSTREAM_TYPE_GROUPS {
+            let walked = by_name.get(row.name).expect("multi == pinned, above");
+
+            let mut upstream_of: BTreeMap<C, usize> = BTreeMap::new();
+            for (index, group) in row.groups.iter().enumerate() {
+                for carrier in *group {
+                    assert!(
+                        upstream_of.insert(*carrier, index).is_none(),
+                        "{} names {carrier:?} in two upstream groups",
+                        row.name
+                    );
+                }
+            }
+            let derived: BTreeSet<C> = walked.iter().map(|(c, _)| *c).collect();
+            let claimed: BTreeSet<C> = upstream_of.keys().copied().collect();
+            assert_eq!(
+                derived, claimed,
+                "{} is walked by a different set of carriers than {} was read \
+                 for ({})",
+                row.name, row.name, row.cite
+            );
+
+            for (a, id_a) in walked {
+                for (b, id_b) in walked {
+                    let same_upstream = upstream_of[a] == upstream_of[b];
+                    let same_walker = id_a == id_b;
+                    assert_eq!(
+                        same_walker,
+                        same_upstream,
+                        "{}: {a:?} and {b:?} {} upstream ({}), and this tree {} \
+                         walker. A walker spanning an upstream split reports \
+                         fields the narrower type does not define, which is \
+                         what item 412 was",
+                        row.name,
+                        if same_upstream {
+                            "share a type"
+                        } else {
+                            "have different types"
+                        },
+                        row.cite,
+                        if same_walker {
+                            "gives them ONE"
+                        } else {
+                            "gives them a DIFFERENT"
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    /// One ext name's upstream type map, read from the zenoh checkout at the
+    /// pin in [`UPSTREAM_TYPE_GROUPS`]'s own doc.
+    struct UpstreamTypeGroups {
+        /// The ext name, as `ext_name`'s table spells it.
+        name: &'static str,
+        /// The carriers, partitioned by the Rust type upstream gives the ext at
+        /// that position. One group means one type everywhere.
+        groups: &'static [&'static [crate::ext_name::ExtCarrier]],
+        /// Where it was read, so the next reader re-checks rather than trusts.
+        cite: &'static str,
+    }
+
+    /// R2057 (item 437) — every ext name this tree walks from more than one
+    /// carrier, with the type upstream gives it at each.
+    ///
+    /// READ DIRECTLY from `zenoh` at `49c8a53`, not remembered. The paths below
+    /// are relative to that checkout's `commons/zenoh-protocol/src/`.
+    ///
+    /// The interesting row is the first one, and it is the reason the rest are
+    /// here: `qos` is THREE types, not one and not two. The Join case had been
+    /// known since before item 412 (a different ENCODING, ZBuf against Z64),
+    /// and item 412 found the second split a layer under it — same encoding,
+    /// different type, different field count. A table with only the rows that
+    /// split would not have said that the other six do NOT, which is the half
+    /// that makes a new arrival visible.
+    const UPSTREAM_TYPE_GROUPS: &[UpstreamTypeGroups] = &[
+        UpstreamTypeGroups {
+            name: "qos",
+            groups: &[
+                &[
+                    crate::ext_name::ExtCarrier::Push,
+                    crate::ext_name::ExtCarrier::Request,
+                    crate::ext_name::ExtCarrier::Response,
+                    crate::ext_name::ExtCarrier::ResponseFinal,
+                    crate::ext_name::ExtCarrier::Declare,
+                    crate::ext_name::ExtCarrier::Interest,
+                    crate::ext_name::ExtCarrier::NetworkOam,
+                ],
+                &[
+                    crate::ext_name::ExtCarrier::Frame,
+                    crate::ext_name::ExtCarrier::Fragment,
+                    crate::ext_name::ExtCarrier::TransportOam,
+                ],
+                &[crate::ext_name::ExtCarrier::Join],
+            ],
+            cite: "network::ext::QoSType<ID> (network/mod.rs:398) for the seven \
+                   network carriers; transport::ext::QoSType<ID> \
+                   (transport/mod.rs:270) for frame.rs:83, fragment.rs:90 and \
+                   transport/oam.rs:61; Box<[PrioritySn; Priority::NUM]> for \
+                   join.rs:127. ResponseFinal shares Response's `ext` module -- \
+                   response.rs has exactly one",
+        },
+        UpstreamTypeGroups {
+            name: "timestamp",
+            groups: &[&[
+                crate::ext_name::ExtCarrier::Push,
+                crate::ext_name::ExtCarrier::Request,
+                crate::ext_name::ExtCarrier::Response,
+                crate::ext_name::ExtCarrier::ResponseFinal,
+                crate::ext_name::ExtCarrier::Declare,
+                crate::ext_name::ExtCarrier::Interest,
+                crate::ext_name::ExtCarrier::NetworkOam,
+            ]],
+            cite: "network::ext::TimestampType<ID> at push.rs:62, \
+                   request.rs:81, response.rs:67, declare.rs:71, \
+                   interest.rs:191 and network/oam.rs:71 -- one alias, six \
+                   sites",
+        },
+        UpstreamTypeGroups {
+            name: "node_id",
+            groups: &[&[
+                crate::ext_name::ExtCarrier::Push,
+                crate::ext_name::ExtCarrier::Request,
+                crate::ext_name::ExtCarrier::Declare,
+                crate::ext_name::ExtCarrier::Interest,
+            ]],
+            cite: "network::ext::NodeIdType<ID> at push.rs:65, request.rs:84, \
+                   declare.rs:74 and interest.rs:194",
+        },
+        UpstreamTypeGroups {
+            name: "patch",
+            groups: &[&[
+                crate::ext_name::ExtCarrier::Init,
+                crate::ext_name::ExtCarrier::Join,
+            ]],
+            cite: "transport::ext::PatchType<ID> at init.rs:175 and join.rs:138",
+        },
+        UpstreamTypeGroups {
+            name: "source_info",
+            groups: &[&[
+                crate::ext_name::ExtCarrier::Put,
+                crate::ext_name::ExtCarrier::Del,
+                crate::ext_name::ExtCarrier::Query,
+                crate::ext_name::ExtCarrier::Err,
+            ]],
+            cite: "zenoh::ext::SourceInfoType<ID> at put.rs:68, del.rs:57, \
+                   query.rs:98 and err.rs:63",
+        },
+        UpstreamTypeGroups {
+            name: "responder_id",
+            groups: &[&[
+                crate::ext_name::ExtCarrier::Response,
+                crate::ext_name::ExtCarrier::ResponseFinal,
+            ]],
+            cite: "network::ext::EntityGlobalIdType<ID> at response.rs:70, \
+                   whose `ext` module both carriers share",
+        },
+        UpstreamTypeGroups {
+            name: "auth",
+            groups: &[&[
+                crate::ext_name::ExtCarrier::Init,
+                crate::ext_name::ExtCarrier::Open,
+            ]],
+            cite: "init.rs:156 and open.rs:121 each declare their OWN \
+                   `pub type Auth = zextzbuf!(0x3, false)`. Two declarations \
+                   rather than one shared alias, and identical -- so ONE walker \
+                   is right, but the reason is that the expansions agree and \
+                   not that a single type is named",
+        },
+    ];
 }

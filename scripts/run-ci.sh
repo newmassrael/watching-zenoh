@@ -8563,7 +8563,8 @@ layer_c1bn_passive_dissection_features() {
         dissect::tests::the_readable_ext_bodies_line_is_the_dispatch_read_back \
         dissect::tests::a_node_id_wider_than_a_u16_reports_what_a_receiver_acts_on \
         dissect::tests::a_patch_level_wider_than_a_byte_is_read_as_upstream_reads_it \
-        dissect::tests::a_budget_that_narrows_to_zero_is_no_budget_at_all
+        dissect::tests::a_budget_that_narrows_to_zero_is_no_budget_at_all \
+        dissect::tests::every_ext_name_more_than_one_carrier_walks_matches_upstreams_type_split
     do
         grep -qF "$name: test" <<<"$listing" || {
             echo "  C1bn FAIL: $name is absent from the dissect build"; return 1; }
