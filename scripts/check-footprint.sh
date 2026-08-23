@@ -501,8 +501,85 @@ declare -A BASELINE_MC_TEXT=(
     # the delta is what transfers across toolchains and the absolute is not
     # (this host reads 4 B under CI on M3, 36 B on M4F). Old: 55308/55420
     # (Round 1953, hosted run 32437029707, +1612 / +1624 over R311y878).
-    ["thumbv7m-none-eabi"]=55164
-    ["thumbv7em-none-eabihf"]=55268
+    #
+    # Round 2047 — GREW across ONE SCE pin bump, and this is the THIRD instance
+    # of the mechanism Round 1953 named: `mcu-multicast-e2e` links
+    # `sce-rust-runtime` out of `vendor/sce`, so a pin moves this binary even
+    # when the generated `out/**` does not. R2045 bumped `6399fad49c` ->
+    # `87f4b1d831` and checked EXHAUSTIVELY that every changed line of `out/**`
+    # was a `template-hash` comment. That was true, and it is the other half of
+    # the same fact rather than a contradiction of this one: the emit did not
+    # move, the LINKED RUNTIME did.
+    #
+    # THE WHOLE DELTA IS THE PIN, established by building the same tree at both
+    # pins in ONE working directory so the path-derived and toolchain terms
+    # cancel (R311y267's property, used as an instrument here):
+    #
+    #   | vendor/sce                | M3 text | M4F text |
+    #   |---------------------------|---------|----------|
+    #   | 6399fad49c (the old pin)  |   55160 |    55232 |
+    #   | 87f4b1d831 (the new pin)  |   55624 |    55564 |
+    #
+    # The old-pin build sits 4 B under / 36 B under the baseline below it, i.e.
+    # IN BAND — so nothing between Round 1955 and R2045 contributed, and the
+    # +464 / +332 belongs entirely to the bump.
+    #
+    # WHICH UPSTREAM COMMITS, bisected on M3 (the byte-stable axis) across the
+    # four commits of the range that touch `backends/rust/runtime/`:
+    #
+    #   | upstream commit                              | M3 text | delta |
+    #   |----------------------------------------------|---------|-------|
+    #   | f3765c95c9 enter a saved configuration       |   55160 |    +0 |
+    #   | 27670e5441 configuration links by label      |   55160 |    +0 |
+    #   | b261c8a076 W3C B.2.8.1 payload reading       |   55264 |  +104 |
+    #   | 314959ac27 event reached a stopped machine   |   55624 |  +360 |
+    #
+    # Two `+0` rows, which are the control: the instrument tracks the engine
+    # rather than the toolchain, the same role upstream's middle row played in
+    # Round 1953's table.
+    #
+    # WHERE THE BYTES LANDED, by per-symbol ELF diff of the two pin builds
+    # (`arm-none-eabi-nm -S`, `t`/`T` only; total 49792 -> 50252 = +460, which
+    # is the whole section delta):
+    #
+    #   +328  sce_rust_runtime::engine::Engine<..>, across THREE instantiations
+    #         MulticastPeerPolicy       +22 process_event / +70 run_main_event_loop
+    #         ReassemblySlotPolicy      +58 process_event (NEW symbol) / +84
+    #         SessionFsmMulticastPolicy +22 process_event / +72 run_main_event_loop
+    #   +174  __cortex_m_rt_main -- the ABSORBER; see the warning above, its
+    #         delta is not its own cost and the NEW +58 symbol is part of why
+    #    -42  wz_session_core::reassembly_dispatch, which shrank
+    #     +0  sce_forge_runtime -- `CodecError as Debug::fmt` is a pure rename
+    #         (`.168` -> `.170`), 44 B on both sides
+    #
+    # NOT GATEABLE FROM HERE, and the shape is worth stating because it is the
+    # same one Round 1955 claimed 132 B from. `314959ac27` adds a REPORT, not a
+    # refusal: `unseen_external_events`, `last_unseen_event`, the drain loop
+    # that fills them and two accessors. The refusal itself -- W3C SCXML 3.13,
+    # an event delivered to a machine that has already stopped -- is semantics
+    # and must stay. The counters are exactly the kind of thing
+    # `no_macrostep_diagnostics` exists to switch off, and this image ALREADY
+    # sets that flag (Round 1955) and grew anyway, because the new report is not
+    # behind it. SCE is read-only from this workspace, so the ask is recorded
+    # rather than made here.
+    #
+    # THE FIGURES ARE THE HOSTED ONES, cross-checked against Round 1955's
+    # delta method rather than chosen over it: hosted run `32613481018` reads
+    # 55620 / 55604, and baseline+local-delta gives 55164+464 = 55628 and
+    # 55268+332 = 55600. The two methods agree within 8 B / 4 B. The hosted
+    # absolute wins because the hosted job is the gate that blocks main.
+    #
+    # NOTE -- THE M3 SPREAD FLIPPED SIGN. The note above records this host reading
+    # 4 B UNDER CI on M3; it now reads 4 B OVER (55624 vs 55620). M4F is 40 B
+    # under against a recorded 36. So the spread is jitter with a magnitude,
+    # not a fixed offset -- do not subtract it as a constant.
+    #
+    # NOTE -- bss reads 272276 on this host and 272268 hosted, on BOTH pins. That is
+    # a toolchain term, not drift: it does not move across the bump, so the
+    # INFO-axis `+8` a local run prints is this host's newlib, not a regression.
+    # Old: 55164/55268 (Round 1955).
+    ["thumbv7m-none-eabi"]=55620
+    ["thumbv7em-none-eabihf"]=55604
 )
 # shellcheck disable=SC2034  # resolved through the `declare -n _bt/_bd/_bb`
                             # namerefs in the `case "$artifact"` dispatch below; shellcheck
