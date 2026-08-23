@@ -4946,3 +4946,395 @@ pub mod wire_tap {
         }
     }
 }
+
+/// R2048 — how a walked extension entry becomes an assertable row, in ONE
+/// place.
+///
+/// # Why this is in the library and not in each witness
+///
+/// Three foreign-witness tests read a capture the same way: walk every
+/// transport message, find every `ext` entry, attribute it to the message that
+/// CARRIED it, and flatten what the walker made of its body into something an
+/// assertion can hold a value against. Each had its own copy, and the copies
+/// had already diverged the way copies do — R2046 found that `Field::find` is
+/// depth-first and hands back a SUB-EXTENSION's `value` for a walked body,
+/// fixed it in one file, and left the same call standing in another. Worse,
+/// the file it was left in carries a doc comment ARGUING the lookup is safe:
+/// true of `ext_name`, which `walk_ext_entry` pushes ahead of the body, and
+/// false of `value`, which a walked body does not push at all.
+///
+/// Same reasoning as [`wire_tap`]: the envelope rules are one fact, and two
+/// copies of them drift the moment one witness needs something the other does
+/// not.
+pub mod ext_bodies {
+    use wz_session_core::dissect::{Field, FieldValue};
+    use wz_session_core::passive::Direction;
+
+    /// The `encoding` bits of an extension entry, as `walk_ext_entry` reports
+    /// them: a UNIT body has none, a Z64 body is one VLE, a ZBuf body is a
+    /// length and that many bytes.
+    pub const ENC_UNIT: u64 = 0;
+    /// See [`ENC_UNIT`].
+    pub const ENC_Z64: u64 = 1;
+    /// See [`ENC_UNIT`].
+    pub const ENC_ZBUF: u64 = 2;
+
+    /// The message groups a walked tree names, so an extension is attributed
+    /// to the message that CARRIED it rather than to the transport envelope.
+    ///
+    /// Needed because `dissect_transport_message` returns one tree per
+    /// transport message and a `Frame` descends into its whole record batch:
+    /// without this every `qos` inside a frame would be attributed to `Frame`.
+    pub const MESSAGE_NAMES: &[&str] = &[
+        "Init",
+        "Open",
+        "Close",
+        "KeepAlive",
+        "Frame",
+        "Fragment",
+        "Oam",
+        "Push",
+        "Request",
+        "Response",
+        "ResponseFinal",
+        "Interest",
+        "Declare",
+    ];
+
+    /// The fields `walk_ext_entry` pushes for EVERY entry whatever the body —
+    /// the envelope, not a reading of it.
+    ///
+    /// Excluded from [`Body::read`] so that an empty `read` means "this body
+    /// got no walker output", a claim more than one witness rests on. `value`
+    /// is excluded here and surfaced separately as [`Body::value`], because for
+    /// a SCALAR body the value IS the whole reading while for a walked one it
+    /// is the span the reading stands in for.
+    pub const ENVELOPE: &[&str] = &[
+        "header",
+        "ext_id",
+        "m",
+        "encoding",
+        "z",
+        "ext_name",
+        "value",
+        "value_len",
+    ];
+
+    /// One reading a walker produced.
+    ///
+    /// [`Group`](Reading::Group) exists so that "the body was walked into a
+    /// subtree" and "the body got no walker at all" are DIFFERENT entries
+    /// rather than two ways of contributing nothing.
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum Reading {
+        /// A name this build resolved from the bits (`"Block"`, `"AllComplete"`).
+        Label(String),
+        /// A single bit (`express`, `complete`, `absent_to_receiver`).
+        Flag(bool),
+        /// A number (`distance`, `read_as`, a scalar Z64 body).
+        Number(u64),
+        /// Raw bytes — how `user`, `hmac` and a public key's limbs come back.
+        Bytes(Vec<u8>),
+        /// Text a walker resolved.
+        Text(String),
+        /// A walked sub-structure and its child count.
+        Group(usize),
+    }
+
+    impl core::fmt::Display for Reading {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            match self {
+                Reading::Label(v) => write!(f, "{v}"),
+                Reading::Flag(v) => write!(f, "{v}"),
+                Reading::Number(v) => write!(f, "{v}"),
+                // Rendered as text when it is text, because `user` is and a
+                // failure message naming it in hex would be unreadable.
+                Reading::Bytes(v) => match core::str::from_utf8(v) {
+                    Ok(s) if !s.is_empty() && s.chars().all(|c| !c.is_control()) => {
+                        write!(f, "{s:?}")
+                    }
+                    _ => write!(f, "<{} byte(s)>", v.len()),
+                },
+                Reading::Text(v) => write!(f, "{v:?}"),
+                Reading::Group(n) => write!(f, "<{n} field(s)>"),
+            }
+        }
+    }
+
+    impl Reading {
+        /// The reading a field carries, or `None` for an opaque one.
+        pub fn of(field: &Field) -> Option<Reading> {
+            match &field.value {
+                FieldValue::Label(v) => Some(Reading::Label(v.to_string())),
+                FieldValue::Flag(v) => Some(Reading::Flag(*v)),
+                FieldValue::Bits(v) | FieldValue::Uint(v) => Some(Reading::Number(*v)),
+                FieldValue::Bytes(v) => Some(Reading::Bytes(v.clone())),
+                FieldValue::Text(v) => Some(Reading::Text(v.to_string())),
+                FieldValue::Nested(children) => Some(Reading::Group(children.len())),
+                FieldValue::Opaque => None,
+            }
+        }
+    }
+
+    /// How far under an entry [`Body::read`] reaches.
+    ///
+    /// Not a preference: the two answers are about different subjects. An auth
+    /// method body is a GROUP whose assertable fields (`user`, `hmac`) are its
+    /// children, so a one-level fold reports `usrpwd=<4 field(s)>` and has
+    /// nothing to hold against a username. A Z64 witness wants the opposite —
+    /// one level, so a nested chain's readings do not appear to belong to the
+    /// entry above them.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Depth {
+        /// This entry's own children only.
+        Shallow,
+        /// Every reading below the envelope, at any depth, EXCLUDING nested
+        /// `ext` entries — those become rows of their own.
+        Deep,
+    }
+
+    /// One extension body the capture carried, flattened for assertion.
+    #[derive(Debug, Clone)]
+    pub struct Body {
+        /// Which half wrote it.
+        pub direction: Direction,
+        /// The message that carried it — the innermost [`MESSAGE_NAMES`] group.
+        pub carrier: String,
+        /// `ext_name`: which row of `wz_session_core::ext_name`'s table this is.
+        pub name: String,
+        /// The entry's `encoding` bits. Kept OUT of [`Self::read`] because it
+        /// is envelope rather than a reading — but kept, because one id can
+        /// carry three of them across a handshake and that is assertable.
+        pub encoding: Option<u64>,
+        /// The entry's OWN `value`, when the walk left one standing.
+        ///
+        /// A scalar body has no walked group and the value IS its whole
+        /// reading; a walked body's `value` is replaced by the group. Read with
+        /// [`own_child`] and never with `Field::find` — see
+        /// [`assert_no_entry_borrows_a_descendants_value`].
+        pub value: Option<Reading>,
+        /// What the walker made of the body, minus [`ENVELOPE`].
+        pub read: Vec<(String, Reading)>,
+    }
+
+    impl Body {
+        /// The first reading under this entry with this name.
+        pub fn reading(&self, name: &str) -> Option<&Reading> {
+            self.read.iter().find(|(n, _)| n == name).map(|(_, v)| v)
+        }
+
+        /// Every reading name under this entry, in tree order.
+        pub fn read_names(&self) -> Vec<&str> {
+            self.read.iter().map(|(n, _)| n.as_str()).collect()
+        }
+
+        /// One line naming this row and everything it carries.
+        pub fn describe(&self) -> String {
+            let read = self
+                .read
+                .iter()
+                .map(|(n, v)| format!("{n}={v}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let value = match &self.value {
+                Some(v) => format!(" value={v}"),
+                None => String::new(),
+            };
+            format!(
+                "{:?} {}/{} enc={:?}{value} read=[{read}]",
+                self.direction, self.carrier, self.name, self.encoding
+            )
+        }
+    }
+
+    /// This entry's OWN child by name — NOT `Field::find`, which is depth-first
+    /// and RECURSIVE.
+    ///
+    /// R2046. The difference is silent for `ext_name` and `encoding`, which
+    /// `walk_ext_entry` pushes before any body so the direct child wins the
+    /// search by accident of ordering. It is not silent for `value`: a walked
+    /// ZBuf body has no direct `value` at all, so a recursive search descends
+    /// into the body and returns a SUB-EXTENSION's number. An `auth` chain then
+    /// reports its first method's value as its own.
+    pub fn own_child<'f>(field: &'f Field, name: &str) -> Option<&'f Field> {
+        match &field.value {
+            FieldValue::Nested(children) => children.iter().find(|c| c.name == name),
+            _ => None,
+        }
+    }
+
+    fn fold_deep(field: &Field, out: &mut Vec<(String, Reading)>) {
+        if let FieldValue::Nested(children) = &field.value {
+            for child in children {
+                if ENVELOPE.contains(&child.name.as_ref()) {
+                    continue;
+                }
+                // A nested `ext` is a sub-extension: `collect` gives it its own
+                // row, so folding it here too would report it twice.
+                if child.name == "ext" || child.name == "extensions" {
+                    continue;
+                }
+                if let Some(r) = Reading::of(child) {
+                    out.push((child.name.to_string(), r));
+                }
+                fold_deep(child, out);
+            }
+        }
+    }
+
+    fn fold_shallow(field: &Field) -> Vec<(String, Reading)> {
+        match &field.value {
+            FieldValue::Nested(children) => children
+                .iter()
+                .filter(|c| !ENVELOPE.contains(&c.name.as_ref()))
+                .filter_map(|c| Reading::of(c).map(|r| (c.name.to_string(), r)))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Collect every `ext` entry under `field`, attributing each to the
+    /// innermost enclosing message group.
+    pub fn collect(
+        field: &Field,
+        direction: Direction,
+        carrier: &str,
+        depth: Depth,
+        out: &mut Vec<Body>,
+    ) {
+        let carrier = if MESSAGE_NAMES.contains(&field.name.as_ref()) {
+            field.name.as_ref()
+        } else {
+            carrier
+        };
+        if field.name == "ext" {
+            if let Some(FieldValue::Label(name)) = own_child(field, "ext_name").map(|f| &f.value) {
+                let read = match depth {
+                    Depth::Shallow => fold_shallow(field),
+                    Depth::Deep => {
+                        let mut acc = Vec::new();
+                        fold_deep(field, &mut acc);
+                        acc
+                    }
+                };
+                out.push(Body {
+                    direction,
+                    carrier: carrier.to_string(),
+                    name: name.to_string(),
+                    encoding: match own_child(field, "encoding").map(|f| &f.value) {
+                        Some(FieldValue::Bits(v)) | Some(FieldValue::Uint(v)) => Some(*v),
+                        _ => None,
+                    },
+                    value: own_child(field, "value").and_then(Reading::of),
+                    read,
+                });
+            }
+        }
+        if let FieldValue::Nested(children) = &field.value {
+            for child in children {
+                collect(child, direction, carrier, depth, out);
+            }
+        }
+    }
+
+    /// Walk every message of `flow` and collect its extension bodies.
+    ///
+    /// A message whose bytes cannot be sliced or whose walk fails is SKIPPED
+    /// rather than reported. The set assertion each witness makes is what stops
+    /// a silent skip from emptying the capture: a walk that failed everywhere
+    /// yields an empty set and reds there.
+    pub fn bodies_of(flow: &wz_capture::FlowDissection, depth: Depth) -> Vec<Body> {
+        let mut out = Vec::new();
+        for frame in flow.frames.iter() {
+            let Ok(bytes) = flow.message_bytes(frame) else {
+                continue;
+            };
+            let Ok(walked) = wz_session_core::dissect::dissect_transport_message(bytes, 0) else {
+                continue;
+            };
+            collect(&walked, frame.direction, "?", depth, &mut out);
+        }
+        out
+    }
+
+    /// Every row, one per line.
+    pub fn dump(bodies: &[Body]) -> String {
+        bodies
+            .iter()
+            .map(|b| format!("  {}", b.describe()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The SET of `ext_name`s this capture carried, held against a claim, BOTH
+    /// ways.
+    ///
+    /// Asserted before any claim about a reading: a body that vanished leaves
+    /// an assertion about nothing, and a body that APPEARED is a foreign
+    /// reading going unjudged. `witnessed` must be sorted and deduplicated.
+    pub fn assert_witnessed_set(bodies: &[Body], witnessed: &[&str], what: &str) {
+        let mut seen: Vec<&str> = bodies.iter().map(|b| b.name.as_str()).collect();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(
+            seen,
+            witnessed,
+            "the extension bodies {what} are not the set that file asserts. A \
+             difference either way means an assertion below is about nothing, \
+             or a foreign reading is going unjudged. Whole capture:\n{}",
+            dump(bodies)
+        );
+    }
+
+    /// NO ENTRY IS CREDITED WITH A DESCENDANT'S NUMBER.
+    ///
+    /// R2046. Surfacing [`Body::value`] made a witness able to say what a
+    /// scalar body holds, and in the same stroke able to say something FALSE:
+    /// the obvious way to fetch that field is `Field::find`, which is
+    /// depth-first, and an `auth` entry's body is a CHAIN whose members have
+    /// values of their own.
+    ///
+    /// The rule is exact rather than approximate, and reads off
+    /// `walk_ext_entry`:
+    ///
+    /// * ENC_UNIT — no body bytes exist at all, so ANY value is borrowed.
+    /// * ENC_ZBUF, walked — `fields.push(walked.unwrap_or(value))` pushes
+    ///   exactly one of the two, so a walked body leaves no `value` behind.
+    /// * ENC_ZBUF not walked / ENC_Z64 — a value of its own is exactly right,
+    ///   and these rows are why the rule is not "no row has a value".
+    pub fn assert_no_entry_borrows_a_descendants_value(bodies: &[Body]) {
+        let walked = |b: &Body| {
+            b.read
+                .iter()
+                .any(|(n, r)| n == &b.name && matches!(r, Reading::Group(_)))
+        };
+        let mut swept = 0usize;
+        for body in bodies {
+            let why = if body.encoding == Some(ENC_UNIT) {
+                "a UNIT extension has no body bytes at all"
+            } else if body.encoding == Some(ENC_ZBUF) && walked(body) {
+                "a walked ZBuf body replaces the entry's `value` rather than \
+                 standing beside it"
+            } else {
+                continue;
+            };
+            swept += 1;
+            assert!(
+                body.value.is_none(),
+                "this entry reports a value it cannot own -- {why}. The number \
+                 belongs to something BELOW it, which means the lookup that \
+                 fetched it descended out of the entry:\n  {}\nwhole \
+                 capture:\n{}",
+                body.describe(),
+                dump(bodies)
+            );
+        }
+        // A rule that sweeps nothing is green for the wrong reason.
+        assert!(
+            swept >= 2,
+            "only {swept} row(s) of this capture could carry a borrowed value, \
+             so the rule above is close to vacuous:\n{}",
+            dump(bodies)
+        );
+    }
+}

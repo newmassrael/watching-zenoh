@@ -63,6 +63,25 @@ wz-capture = { path = "../wz-capture" }
 # present-and-wrong rather than absent, under a comment claiming wz-capture did
 # not verify them — it does, on both axes.
 wz-packet-fixtures = { path = "../wz-packet-fixtures" }
+# R2048 — promoted to LIB scope for the same reason wz-capture was: the
+# walked-extension-body harness (`ext_bodies`) now lives in `src/lib.rs`
+# because THREE foreign witnesses read a capture the same way, and three
+# copies of "how a walked ext entry becomes an assertable row" drift the
+# moment one of them is fixed. They already had: R2046's direct-child
+# lookup landed in one copy and not the others. Test-only crate
+# (`publish = false`), so this reaches no footprint, MCU or no_std lane.
+# The rest of the feature list stays where it is, in dev-dependencies
+# below: a dep in both tables unifies for a TEST build, and those features
+# belong beside the tests that ask for them.
+#
+# `dissect` does NOT get to stay there, and the reason is worth naming
+# because it cost a C1bz red rather than a compile error. Unification is a
+# property of building the TESTS; `cargo doc` builds the LIB alone, where
+# dev-dependencies do not exist. So the lib compiled fine under
+# `cargo test` and `cargo doc` reported `could not find dissect in
+# wz_session_core`. A feature the LIB target needs must be declared on the
+# LIB's own dependency edge.
+wz-session-core = { path = "../wz-session-core", features = ["dissect"] }
 
 [dev-dependencies]
 # R311y498 — the §5.27 api-compat-c layout gate dlopens wz's OWN cdylib to read

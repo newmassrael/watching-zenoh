@@ -108,8 +108,11 @@ use wz_integration_tests::common::{
     read_captured, wait_for_tcp_accept_alive, zenoh_core_example_binary, zenohd_binary, ChildGuard,
     PortReservation, ZENOHD_TCP_ACCEPT_BUDGET,
 };
+use wz_integration_tests::ext_bodies::{
+    assert_no_entry_borrows_a_descendants_value, assert_witnessed_set, bodies_of, dump, Body,
+    Depth, Reading, ENC_UNIT, ENC_Z64, ENC_ZBUF,
+};
 use wz_integration_tests::wire_tap::{synthesise_pcap, tap_proxy, Recording, Side};
-use wz_session_core::dissect::{Field, FieldValue};
 use wz_session_core::passive::Direction;
 
 /// The synthesised endpoint ports. NOT the real ones, and named because they
@@ -146,261 +149,17 @@ const GET_WALL_CLOCK: Duration = Duration::from_secs(20);
 /// stops this file from passing on a capture that had quietly lost them.
 const WITNESSED: &[&str] = &["auth", "patch", "qos", "timeout", "usrpwd"];
 
-/// The `encoding` bits of an extension entry, as `walk_ext_entry` reports
-/// them: a UNIT body has none, a Z64 body is one VLE, a ZBuf body is a length
-/// and that many bytes.
-///
-/// Named here because this capture's sharpest fact is about them — see
-/// [`assert_one_id_three_encodings`].
-const ENC_UNIT: u64 = 0;
-const ENC_Z64: u64 = 1;
-const ENC_ZBUF: u64 = 2;
+// R2048 — `Reading`, `Body`, the ENVELOPE / MESSAGE_NAMES tables and the
+// ENC_* constants moved to `wz_integration_tests::ext_bodies`. Three witnesses
+// read a capture this way and the copies had already diverged: R2046's
+// direct-child lookup landed here and nowhere else. The doc that used to sit on
+// each item is on the shared item now.
 
-/// The message groups a walked tree names, so an extension is attributed to
-/// the message that CARRIED it rather than to the transport envelope.
-const MESSAGE_NAMES: &[&str] = &[
-    "Init",
-    "Open",
-    "Close",
-    "KeepAlive",
-    "Frame",
-    "Fragment",
-    "Oam",
-    "Push",
-    "Request",
-    "Response",
-    "ResponseFinal",
-    "Interest",
-    "Declare",
-];
-
-/// The fields `walk_ext_entry` pushes for EVERY entry whatever the body — the
-/// envelope, not a reading of it.
-const ENVELOPE: &[&str] = &[
-    "header",
-    "ext_id",
-    "m",
-    "encoding",
-    "z",
-    "ext_name",
-    "value",
-    "value_len",
-];
-
-/// One reading a walker produced.
-#[derive(Debug, Clone, PartialEq)]
-enum Reading {
-    Label(String),
-    Flag(bool),
-    Number(u64),
-    /// Raw bytes — how `user` and `hmac` come back.
-    Bytes(Vec<u8>),
-    Text(String),
-    /// A walked sub-structure and its child count. An auth body IS one, so
-    /// this is what tells "the chain was walked" from "the chain was left
-    /// opaque".
-    Group(usize),
-}
-
-impl core::fmt::Display for Reading {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Reading::Label(v) => write!(f, "{v}"),
-            Reading::Flag(v) => write!(f, "{v}"),
-            Reading::Number(v) => write!(f, "{v}"),
-            // Rendered as text when it is text, because `user` is and a
-            // failure message naming it in hex would be unreadable.
-            Reading::Bytes(v) => match core::str::from_utf8(v) {
-                Ok(s) if s.chars().all(|c| !c.is_control()) => write!(f, "{s:?}"),
-                _ => write!(f, "<{} byte(s)>", v.len()),
-            },
-            Reading::Text(v) => write!(f, "{v:?}"),
-            Reading::Group(n) => write!(f, "<{n} field(s)>"),
-        }
-    }
-}
-
-impl Reading {
-    fn of(field: &Field) -> Option<Reading> {
-        match &field.value {
-            FieldValue::Label(v) => Some(Reading::Label(v.to_string())),
-            FieldValue::Flag(v) => Some(Reading::Flag(*v)),
-            FieldValue::Bits(v) | FieldValue::Uint(v) => Some(Reading::Number(*v)),
-            FieldValue::Bytes(v) => Some(Reading::Bytes(v.clone())),
-            FieldValue::Text(v) => Some(Reading::Text(v.to_string())),
-            FieldValue::Nested(children) => Some(Reading::Group(children.len())),
-            FieldValue::Opaque => None,
-        }
-    }
-}
-
-/// One extension body the capture carried, flattened for assertion.
-#[derive(Debug, Clone)]
-struct Body {
-    direction: Direction,
-    /// The message that carried it — the innermost [`MESSAGE_NAMES`] group.
-    carrier: String,
-    /// `ext_name`: which row of `wz_session_core::ext_name`'s table this is.
-    name: String,
-    /// The entry's `encoding` bits. Kept OUT of [`Self::read`] because it is
-    /// envelope rather than a reading — but kept, because on this wire one id
-    /// carries three of them and that is the fact worth asserting.
-    encoding: Option<u64>,
-    /// Every reading under this entry, at ANY depth below the envelope.
-    ///
-    /// Depth matters here in a way it did not for the Z64 rows: an auth method
-    /// body is a group, and the fields worth asserting (`user`, `hmac`) are its
-    /// CHILDREN. A one-level fold would report `usrpwd=<4 field(s)>` and have
-    /// nothing to hold against a username.
-    read: Vec<(String, Reading)>,
-    /// The entry's OWN `value`, when the walk left one standing.
-    ///
-    /// R2046 (open-debt item 419). [`ENVELOPE`] keeps `value` out of
-    /// [`Self::read`] on purpose: for a body that IS walked it is the raw span
-    /// the reading stands in for, and folding it in would let the "was the
-    /// chain walked, or left opaque" assertions above be satisfied by the
-    /// opaque case. But a SCALAR body has no walked group and the value IS the
-    /// whole reading, so excluding it everywhere printed the acceptor's usrpwd
-    /// CHALLENGE as `read=[]` — the one number in this handshake that keys
-    /// everything else, invisible to every assertion in this file. Kept beside
-    /// `read` rather than inside it so both meanings survive.
-    value: Option<Reading>,
-}
-
-impl Body {
-    fn reading(&self, name: &str) -> Option<&Reading> {
-        self.read.iter().find(|(n, _)| n == name).map(|(_, v)| v)
-    }
-
-    fn describe(&self) -> String {
-        let read = self
-            .read
-            .iter()
-            .map(|(n, v)| format!("{n}={v}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let value = match &self.value {
-            Some(v) => format!(" value={v}"),
-            None => String::new(),
-        };
-        format!(
-            "{:?} {}/{} enc={:?}{value} read=[{read}]",
-            self.direction, self.carrier, self.name, self.encoding
-        )
-    }
-}
-
-/// Fold every reading under `field`, at any depth, skipping the envelope and
-/// skipping NESTED ext entries (which become rows of their own).
-fn fold_readings(field: &Field, out: &mut Vec<(String, Reading)>) {
-    if let FieldValue::Nested(children) = &field.value {
-        for child in children {
-            if ENVELOPE.contains(&child.name.as_ref()) {
-                continue;
-            }
-            // A nested `ext` is a sub-extension: `collect` gives it its own
-            // row, so folding it here too would report it twice.
-            if child.name == "ext" || child.name == "extensions" {
-                continue;
-            }
-            if let Some(r) = Reading::of(child) {
-                out.push((child.name.to_string(), r));
-            }
-            fold_readings(child, out);
-        }
-    }
-}
-
-/// This entry's OWN child by name — NOT [`Field::find`], which is depth-first
-/// and RECURSIVE.
-///
-/// R2046: the difference is silent everywhere except the field this round
-/// added. `ext_name` and `encoding` are pushed before any body, so a recursive
-/// search reaches the direct child first and the distinction never showed.
-/// `value` is not like that: on a WALKED ZBuf body there is no direct `value`
-/// at all — the walked group replaces it — so a recursive search would descend
-/// into the body and hand back a SUB-EXTENSION's value. The `auth` chain would
-/// then report its first method's number as its own, and since a wrong nonce
-/// keys a wrong digest, the assertion built on it would have failed for a
-/// reason nobody could read.
-fn own_child<'f>(field: &'f Field, name: &str) -> Option<&'f Field> {
-    match &field.value {
-        FieldValue::Nested(children) => children.iter().find(|c| c.name == name),
-        _ => None,
-    }
-}
-
-/// Collect every `ext` entry under `field`, attributing each to the innermost
-/// enclosing message group.
-fn collect(field: &Field, direction: Direction, carrier: &str, out: &mut Vec<Body>) {
-    let carrier = if MESSAGE_NAMES.contains(&field.name.as_ref()) {
-        field.name.as_ref()
-    } else {
-        carrier
-    };
-    if field.name == "ext" {
-        if let Some(FieldValue::Label(name)) = own_child(field, "ext_name").map(|f| &f.value) {
-            let mut read = Vec::new();
-            fold_readings(field, &mut read);
-            out.push(Body {
-                direction,
-                carrier: carrier.to_string(),
-                name: name.to_string(),
-                encoding: match own_child(field, "encoding").map(|f| &f.value) {
-                    Some(FieldValue::Bits(v)) | Some(FieldValue::Uint(v)) => Some(*v),
-                    _ => None,
-                },
-                read,
-                value: own_child(field, "value").and_then(Reading::of),
-            });
-        }
-    }
-    if let FieldValue::Nested(children) = &field.value {
-        for child in children {
-            collect(child, direction, carrier, out);
-        }
-    }
-}
-
-/// Walk every message of `flow` and collect its extension bodies.
-fn bodies_of(flow: &wz_capture::FlowDissection) -> Vec<Body> {
-    let mut out = Vec::new();
-    for frame in flow.frames.iter() {
-        let Ok(bytes) = flow.message_bytes(frame) else {
-            continue;
-        };
-        let Ok(walked) = wz_session_core::dissect::dissect_transport_message(bytes, 0) else {
-            continue;
-        };
-        collect(&walked, frame.direction, "?", &mut out);
-    }
-    out
-}
-
-fn dump(bodies: &[Body]) -> String {
-    bodies
-        .iter()
-        .map(|b| format!("  {}", b.describe()))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// Hold this file's claim about what the capture carries against what it
-/// actually carried — both ways, and before any reading is judged.
-fn assert_witnessed_set(bodies: &[Body]) {
-    let mut seen: Vec<&str> = bodies.iter().map(|b| b.name.as_str()).collect();
-    seen.sort_unstable();
-    seen.dedup();
-    assert_eq!(
-        seen,
-        WITNESSED,
-        "the extension bodies a stock zenoh usrpwd handshake put on this wire \
-         are not the set this file asserts. A difference either way means an \
-         assertion below is about nothing, or a foreign reading is going \
-         unjudged. Whole capture:\n{}",
-        dump(bodies)
-    );
-}
+// R2048 — `fold_readings` / `own_child` / `collect` / `bodies_of` / `dump` /
+// `assert_witnessed_set` moved to `wz_integration_tests::ext_bodies`. The fold
+// this file needs is `Depth::Deep`, which is why that enum exists: the Z64
+// witness beside it wants one level and the two answers are about different
+// subjects, not about taste.
 
 /// ONE extension id, THREE encodings, and a different reading for each.
 ///
@@ -458,65 +217,10 @@ fn assert_one_id_three_encodings(bodies: &[Body], acceptor: Direction, initiator
     );
 }
 
-/// NO ENTRY IS CREDITED WITH A DESCENDANT'S NUMBER.
-///
-/// R2046. Surfacing [`Body::value`] made this file able to say what a scalar
-/// body holds, and in the same stroke made it able to say something FALSE: the
-/// obvious way to fetch that field is [`Field::find`], which is depth-first and
-/// recursive, and an `auth` entry's body is a CHAIN whose members have values
-/// of their own. Asked for "the value" of the acceptor's `Init/auth`, a
-/// recursive search walks into the chain and returns the usrpwd challenge —
-/// the parent row then prints its child's nonce as if it were its own.
-///
-/// [`own_child`] is the fix. This is what makes the fix load-bearing, because
-/// nothing else does: with the recursive lookup in place every other assertion
-/// in this file passed, including the digest one, since that one selects the
-/// `usrpwd` row by name and reaches the same number by luck. The damage was
-/// visible only in the dump, one row above the row being asserted.
-///
-/// The rule is exact rather than approximate, and reads off `walk_ext_entry`:
-///
-/// * ENC_UNIT — no body bytes exist at all, so ANY value is borrowed.
-/// * ENC_ZBUF, walked — `fields.push(walked.unwrap_or(value))` pushes exactly
-///   one of the two, so a walked body leaves no `value` behind.
-/// * ENC_ZBUF, not walked / ENC_Z64 — a value of its own is exactly right, and
-///   these rows are why the rule is not "no row has a value".
-fn assert_no_entry_borrows_a_descendants_value(bodies: &[Body]) {
-    let walked = |b: &Body| {
-        b.read
-            .iter()
-            .any(|(n, r)| n == &b.name && matches!(r, Reading::Group(_)))
-    };
-    let mut swept = 0usize;
-    for body in bodies {
-        let why = if body.encoding == Some(ENC_UNIT) {
-            "a UNIT extension has no body bytes at all"
-        } else if body.encoding == Some(ENC_ZBUF) && walked(body) {
-            "a walked ZBuf body replaces the entry's `value` rather than \
-             standing beside it"
-        } else {
-            continue;
-        };
-        swept += 1;
-        assert!(
-            body.value.is_none(),
-            "this entry reports a value it cannot own -- {why}. The number \
-             belongs to something BELOW it, which means the lookup that \
-             fetched it descended out of the entry:\n  {}\nwhole capture:\n{}",
-            body.describe(),
-            dump(bodies)
-        );
-    }
-    // A rule that sweeps nothing is green for the wrong reason, and on this
-    // wire both classes are populated -- four UNIT offers and four walked
-    // bodies -- so a zero here means the shapes changed, not that the tree did.
-    assert!(
-        swept >= 2,
-        "only {swept} row(s) of this capture could carry a borrowed value, so \
-         the rule above is close to vacuous:\n{}",
-        dump(bodies)
-    );
-}
+// R2048 — `assert_no_entry_borrows_a_descendants_value` moved to
+// `wz_integration_tests::ext_bodies` with the rest of the harness. It was
+// written here in R2046 because a mutation SURVIVED this file; it belongs
+// beside the lookup it guards, where the other two witnesses get it too.
 
 /// Upstream's usrpwd digest, recomputed here rather than borrowed.
 ///
@@ -818,7 +522,7 @@ fn the_auth_chain_walkers_read_what_a_stock_zenohd_usrpwd_handshake_wrote() {
     );
     let (acceptor_side, initiator_side) = (Direction::A, Direction::B);
 
-    let bodies = bodies_of(flow);
+    let bodies = bodies_of(flow, Depth::Deep);
     eprintln!(
         "extension bodies a stock zenoh usrpwd handshake put on this wire:\n{}",
         dump(&bodies)
@@ -826,7 +530,11 @@ fn the_auth_chain_walkers_read_what_a_stock_zenohd_usrpwd_handshake_wrote() {
 
     // ── THE CLAIM ABOUT THE CAPTURE, BEFORE ANY CLAIM ABOUT A READING ─────
     // R311y900's lesson, in the order it was paid for.
-    assert_witnessed_set(&bodies);
+    assert_witnessed_set(
+        &bodies,
+        WITNESSED,
+        "a stock zenoh usrpwd handshake put on this wire",
+    );
 
     // ── NO ROW IS CREDITED WITH A DESCENDANT'S NUMBER ─────────────────────
     // Before any reading is judged, because a row that borrowed a value from

@@ -9623,6 +9623,23 @@ layer_ewirez_zenohd_wire_dissection() {
         --test zenoh_auth_body_foreign_witness -- --ignored --quiet --test-threads=1 \
         || return 1
     echo "  Ewirez: the auth chain walkers read bytes a stock usrpwd handshake wrote"
+
+    # R2048 (open-debt item 416) — the MULTILINK leg, and the third capture in
+    # this family for the same reason the second was separate: both processes
+    # carry `transport/unicast/max_links:2`, which the other two must NOT have
+    # (it puts an extra extension on every Init and Open and would move their
+    # asserted body SETS). It grades `walk_pubkey_challenge_body`, which serves
+    # three carriers off one implementation — so this is also the only foreign
+    # witness the `pubkey` auth method will ever get through stock binaries:
+    # `AuthPubKey::from_config` never populates its lookup set and the acceptor
+    # checks membership without an is-empty guard, so a pubkey-configured
+    # zenohd refuses every client. Multilink is the route that works.
+    _runci_guarded_test "Ewirez stock-zenoh multilink bodies" 1 \
+        env WZ_ZENOH_CORE_EXAMPLES_DIR="$core_examples_dir" \
+        cargo test -p wz-integration-tests \
+        --test zenoh_multilink_body_foreign_witness -- --ignored --quiet --test-threads=1 \
+        || return 1
+    echo "  Ewirez: the multilink walker read bytes a stock zenohd handshake wrote"
 }
 
 layer_e_ap_demo_round_trip() {

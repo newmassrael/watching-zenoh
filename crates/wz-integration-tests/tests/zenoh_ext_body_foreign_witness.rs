@@ -306,7 +306,22 @@ fn collect(field: &Field, direction: Direction, carrier: &str, out: &mut Vec<Bod
                 direction,
                 carrier: carrier.to_string(),
                 name: name.to_string(),
-                value: match field.find("value").map(|f| &f.value) {
+                // R2048 — this entry's OWN `value`, not `Field::find`'s.
+                //
+                // The paragraph above argues that a recursive search is safe
+                // here, and it is RIGHT about `ext_name`: `walk_ext_entry`
+                // pushes that ahead of the body, so the direct child wins. The
+                // argument does not carry to `value`, which a WALKED ZBuf body
+                // does not push at all — the walked group replaces it — so a
+                // recursive search descends into the body and hands back a
+                // SUB-EXTENSION's number. R2046 found that in the auth witness,
+                // where an `auth` chain reported its first method's nonce as its
+                // own; nothing in this capture has a nested chain today, which
+                // is why it never showed here. `ext_bodies::own_child` is the
+                // shared form of this fix.
+                value: match wz_integration_tests::ext_bodies::own_child(field, "value")
+                    .map(|f| &f.value)
+                {
                     Some(FieldValue::Uint(v)) | Some(FieldValue::Bits(v)) => Some(*v),
                     _ => None,
                 },
