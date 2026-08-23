@@ -2,7 +2,18 @@
 # SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
-# R2064 — HOME-DIRECTORY PATH gate for the push path.
+# R2064 (no register item) — HOME-DIRECTORY PATH gate for the push path.
+#
+# The citation says NO REGISTER ITEM, and the reason is worth one sentence
+# because "none" here does not mean "nothing was tracked". The class this gate
+# closes was raised by the owner directly, and what it could NOT close -- the
+# 137 home-path lines already inside the append-only ledger -- is carried as
+# item 492 in the operator's own register, which lives OUTSIDE the store. The
+# store's `debt-` namespace, which is what this citation is resolved against,
+# has no entry for it; citing one would be inventing an id, and that collision
+# is a cost this project has already paid once. R2069 added this line after the
+# hosted lane caught its absence: a gate written in a hurry lands in the
+# provenance lint or nowhere, and this one landed there.
 #
 # The shebang is for SHELLCHECK, not for execution: this file is sourced, never
 # run, exactly as `nda-scan.sh` and `schema-pin-gate.sh` beside it are.

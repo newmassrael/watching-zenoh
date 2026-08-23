@@ -2299,8 +2299,33 @@ layer_c0b_job_budget_margin() {
         return 1
     fi
 
+    # R2069 — THE FLOOR MUST NOT FIRE ON A JOB THAT DIED. Its own message opens
+    # "Nothing failed", and until this round the script had no way to know that:
+    # in run 32652466813 a job died at Layer C0 after 234s of an 1800s budget
+    # and the floor reported the 13% as an oversized budget, so one cause
+    # produced two reds. The workflow runs this step under `if: always()`, which
+    # makes that pair the rule for every fast failure rather than an accident.
+    #
+    # The PAIR is the arm again, and the pair is the SAME percentage: 50% under
+    # a floor of 60 must fail with a success status and pass with a failure
+    # status. Only the status differs between the two calls, so neither a floor
+    # that stopped firing nor a status check that ignores its argument can
+    # satisfy both.
+    if WZ_JOB_BUDGET_NOW=1000900 bash "$script" "$stamp" 1800 90 60 success >/dev/null 2>&1; then
+        echo "  Layer C0b FAIL: floor 60 ACCEPTED 50% on a SUCCESSFUL job -- the" \
+            "status argument has disarmed the floor outright" >&2
+        return 1
+    fi
+    if ! WZ_JOB_BUDGET_NOW=1000900 bash "$script" "$stamp" 1800 90 60 failure >/dev/null 2>&1; then
+        echo "  Layer C0b FAIL: floor 60 refused 50% on a FAILED job -- the short" \
+            "elapsed time belongs to the failure, and reporting it as an oversized" \
+            "budget puts a second red under one cause" >&2
+        return 1
+    fi
+
     echo "  job-budget-margin gate: OK (passes 83%, refuses 94%, refuses a missing stamp" \
-        "and a zero budget; floor 30 passes 50% and floor 60 refuses it)"
+        "and a zero budget; floor 30 passes 50%, floor 60 refuses it on a green job" \
+        "and stands down on a failed one)"
     return 0
 }
 

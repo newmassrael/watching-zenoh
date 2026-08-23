@@ -717,7 +717,7 @@ jobs:
         # and their build to e2e-demo), which lands this job near 68% and leaves
         # room the checkout can move inside.
         if: always()
-        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1800 90 30
+        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1800 90 30 '${{ job.status }}'
 
   # ─────────────────────────────────────────────────────────────────
   # R311y385 — the VALIDATE + CODEGEN job. Layers A/A2/A3/A4 (Mnemosyne
@@ -2834,7 +2834,7 @@ jobs:
         # and taught the reader to ignore it. 20% (540s) clears the band; the
         # 90% alarm (2430s) clears the high end by nearly as much.
         if: always()
-        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 2700 90 20
+        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 2700 90 20 '${{ job.status }}'
 
   # ─────────────────────────────────────────────────────────────────
   # R311y793 — the ROUTING + ADMINSPACE job. Eight lanes peeled off
@@ -2994,7 +2994,7 @@ jobs:
         # floor of 30% (810s) would be inside that noise before it was inside
         # the signal. 20% is 540s.
         if: always()
-        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 2700 90 20
+        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 2700 90 20 '${{ job.status }}'
 
   transport-modes:
     name: transport-MODE lanes (the §5.1 mode axis)
@@ -3884,7 +3884,7 @@ jobs:
         # exactly what it did at R311y892, and the number above records what it
         # was measured to cost.
         if: always()
-        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 900 90 30
+        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 900 90 30 '${{ job.status }}'
 
   portability:
     name: portability (${{ matrix.os }})

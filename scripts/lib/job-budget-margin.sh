@@ -58,9 +58,23 @@
 # job 45 minutes for its COLD first run and wrote down that nothing would ever
 # make anyone lower it again.
 #
+# R2069 — THE FLOOR NEEDS THE JOB'S STATUS, AND ITS OWN MESSAGE SAID SO.
+# That message opens "Nothing failed." and this script had no way to know it.
+# In run 32652466813 it fired on a job that used 13% of 1800s because the job
+# DIED at Layer C0 after 234 seconds -- so an early red manufactured a second,
+# unrelated red underneath it, and the workflow runs this step under
+# `if: always()`, which means EVERY fast failure produces that pair. Two reds
+# for one cause is the misattribution this repository pays whole rounds to
+# undo. The ALARM stays unconditional: a job that ran long and then failed did
+# still approach its timeout, and that is worth knowing either way.
+#
+# The status argument is OPTIONAL and defaults to `success`, so a caller that
+# passes no floor is unaffected and one that passes a floor without a status
+# keeps the old behaviour rather than silently going quiet.
+#
 # USAGE
 #   job-budget-margin.sh <start-epoch-file> <budget-seconds> <alarm-percent>
-#                        [floor-percent]
+#                        [floor-percent] [job-status]
 #
 # Exit 0 = inside the margin. Exit 1 = at or past the alarm fraction. Any
 # malformed input is exit 2 and is NOT treated as "inside the margin": a gate
@@ -68,9 +82,9 @@
 
 set -euo pipefail
 
-if [[ $# -lt 3 || $# -gt 4 ]]; then
+if [[ $# -lt 3 || $# -gt 5 ]]; then
     echo "job-budget-margin: usage: $0 <start-epoch-file> <budget-seconds>" \
-        "<alarm-percent> [floor-percent]" >&2
+        "<alarm-percent> [floor-percent] [job-status]" >&2
     exit 2
 fi
 
@@ -78,6 +92,7 @@ start_file="$1"
 budget_seconds="$2"
 alarm_pct="$3"
 floor_pct="${4:-}"
+job_status="${5:-success}"
 
 if [[ ! -r "${start_file}" ]]; then
     echo "job-budget-margin: FAIL: start-epoch file '${start_file}' is unreadable." \
@@ -119,7 +134,13 @@ pct=$(( elapsed * 100 / budget_seconds ))
 echo "job-budget-margin: elapsed ${elapsed}s of ${budget_seconds}s budget (${pct}%)," \
     "alarm at ${alarm_pct}%${floor_pct:+, floor at ${floor_pct}%}"
 
-if [[ -n "${floor_pct}" && "${pct}" -lt "${floor_pct}" ]]; then
+if [[ -n "${floor_pct}" && "${pct}" -lt "${floor_pct}" && "${job_status}" != "success" ]]; then
+    echo "job-budget-margin: floor NOT applied — job status is '${job_status}'," \
+        "so the short elapsed time is the failure's, not the budget's." \
+        "The alarm half still applies and did not fire." >&2
+fi
+
+if [[ -n "${floor_pct}" && "${pct}" -lt "${floor_pct}" && "${job_status}" == "success" ]]; then
     cat >&2 <<EOF
 ::error::job used only ${pct}% of its ${budget_seconds}s budget (floor at ${floor_pct}%).
 Nothing failed. What this says is that the budget is too large to be a GATE: a
