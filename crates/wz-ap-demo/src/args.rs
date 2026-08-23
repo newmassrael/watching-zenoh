@@ -1375,6 +1375,252 @@ mod stock_config_tests {
         );
     }
 
+    /// Every double-quoted string literal in `src`, escapes left as written.
+    ///
+    /// Deliberately naive -- it does not know a comment from code -- because
+    /// the two sweeps below want OVER-inclusion: a flag named in a comment and
+    /// nowhere else is still a flag someone will type.
+    fn string_literals(src: &str) -> Vec<&str> {
+        let bytes = src.as_bytes();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] != b'"' {
+                i += 1;
+                continue;
+            }
+            let start = i + 1;
+            let mut j = start;
+            while j < bytes.len() && bytes[j] != b'"' {
+                j += if bytes[j] == b'\\' { 2 } else { 1 };
+            }
+            let end = j.min(bytes.len());
+            if src.is_char_boundary(start) && src.is_char_boundary(end) {
+                out.push(&src[start..end]);
+            }
+            i = end + 1;
+        }
+        out
+    }
+
+    /// The `--help` entry for one flag: its own line plus every continuation
+    /// line under it, joined. A continuation is a printed line indented to the
+    /// description column, which is how this file lays every entry out.
+    fn usage_entry(src: &str, flag: &str) -> Option<String> {
+        const DESCRIPTION_COLUMN: &str = "                             ";
+        let head = format!("    --{flag} ");
+        let literals = string_literals(src);
+        let start = literals.iter().position(|l| l.starts_with(&head))?;
+        let mut entry = literals[start].to_string();
+        for line in &literals[start + 1..] {
+            let Some(continuation) = line.strip_prefix(DESCRIPTION_COLUMN) else {
+                break;
+            };
+            entry.push(' ');
+            entry.push_str(continuation.trim());
+        }
+        Some(entry)
+    }
+
+    /// Every flag argv accepts is PRINTED by `--help`, or named below as a
+    /// deliberate omission.
+    ///
+    /// WHY AN OMISSION IS A DEFECT AND NOT A SILENCE -- this file already makes
+    /// the argument, about its other list: "an omission does not read as
+    /// silence; it reads as 'that flag is off'". An operator reaching for wz in
+    /// place of zenoh reads `--help` as the set of things this binary can do,
+    /// and 48 of the 106 flags it accepts are not in it -- including, until this
+    /// round, the ONLY run mode that announces the zenoh router role.
+    ///
+    /// A RATCHET, NOT A FIX. Documenting all 48 is a separate piece of work and
+    /// some may deserve to stay hidden; what must not happen is a 49th joining
+    /// them unnoticed. So the set is PINNED, not the count: a new undocumented
+    /// flag fails here, and documenting one fails here too, telling the author
+    /// to shrink the list in the same commit.
+    #[test]
+    fn every_flag_the_parser_accepts_is_printed_or_declared_absent() {
+        const MAIN: &str = include_str!("main.rs");
+        const ARGS: &str = include_str!("args.rs");
+        const RUNNER: &str = include_str!("runner.rs");
+        const USAGE: &str = include_str!("usage.rs");
+
+        // Stored WITHOUT the leading dashes on purpose: this list lives inside
+        // args.rs, which the sweep below reads, and a dashed literal here would
+        // enter its own population -- a flag deleted from the parser would then
+        // still look present, which is the one way this gate could go quietly
+        // blind.
+        //
+        // The same care applies to PROSE in this file. The sweep is deliberately
+        // naive about comments (see string_literals), so a dashed flag written
+        // inside quotes anywhere here becomes a flag it hunts for. That is not
+        // a silent failure -- an illustration written that way fails this test
+        // by name, which is how this very comment got rewritten.
+        const UNDOCUMENTED: &[&str] = &[
+            "acl-deny",
+            "advanced-publish-heartbeat",
+            "batch",
+            "config",
+            "config-queryable",
+            "config-writable",
+            "config-write-permit",
+            "connect-after",
+            "connect-retry",
+            "declare-id",
+            "downsample",
+            "downsample-freq",
+            "downsample-interface",
+            "downsample-link-protocol",
+            "express-high",
+            "group-join",
+            "group-lease-secs",
+            "group-member-id",
+            "interest-timeout",
+            "low",
+            "max-links",
+            "max-payload",
+            "multicast-locator",
+            "multicast-qos",
+            "namespace",
+            "no-admin-read",
+            "plugin",
+            "publish-after-ms",
+            "put-key",
+            "put-payload",
+            "qos",
+            "qos-band",
+            "qos-rel",
+            "quic-ca",
+            "quic-cert",
+            "quic-key",
+            "shm",
+            "storage-gc-lifespan-ms",
+            "storage-gc-period-ms",
+            "storage-host",
+            "storage-host-dir",
+            "storage-volume",
+            "storage-volume-config",
+            "subscribe",
+            "tls-ca",
+            "tls-cert",
+            "tls-key",
+            "unsubscribe-after-data",
+        ];
+
+        fn is_flag_name(name: &str) -> bool {
+            name.starts_with(|c: char| c.is_ascii_lowercase())
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        }
+
+        let mut parser: Vec<&str> = Vec::new();
+        for src in [MAIN, ARGS, RUNNER] {
+            for literal in string_literals(src) {
+                if let Some(name) = literal.strip_prefix("--") {
+                    if is_flag_name(name) {
+                        parser.push(name);
+                    }
+                }
+            }
+        }
+        parser.sort_unstable();
+        parser.dedup();
+
+        let mut printed: Vec<String> = Vec::new();
+        for literal in string_literals(USAGE) {
+            for tail in literal.split("--").skip(1) {
+                let name: String = tail
+                    .chars()
+                    .take_while(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '-')
+                    .collect();
+                if is_flag_name(&name) {
+                    printed.push(name);
+                }
+            }
+        }
+        printed.sort_unstable();
+        printed.dedup();
+
+        // ── ANTI-VACUITY ─────────────────────────────────────────────────
+        // Either sweep could stop matching and agree with everything. These
+        // floors are far below the measured 106 / 62, so ordinary movement of
+        // the argv surface does not touch them; only a broken sweep does.
+        assert!(
+            parser.len() >= 90,
+            "the parser sweep found only {} flag(s); the sweep changed, not the file",
+            parser.len()
+        );
+        assert!(
+            printed.len() >= 50,
+            "the usage sweep found only {} flag(s); the sweep changed, not the file",
+            printed.len()
+        );
+
+        // ── THE CLAIM, BOTH DIRECTIONS ───────────────────────────────────
+        let absent: Vec<&str> = parser
+            .iter()
+            .copied()
+            .filter(|f| !printed.iter().any(|p| p == f))
+            .collect();
+
+        let unlisted: Vec<&&str> = absent
+            .iter()
+            .filter(|f| !UNDOCUMENTED.contains(f))
+            .collect();
+        assert!(
+            unlisted.is_empty(),
+            "argv accepts {unlisted:?} and `--help` never prints them. An \
+             operator reads the help as what this binary can do, so an \
+             undocumented flag reads as an absent capability. Print them, or \
+             add them to UNDOCUMENTED and file why."
+        );
+
+        let now_documented: Vec<&&str> = UNDOCUMENTED
+            .iter()
+            .filter(|f| !absent.contains(*f))
+            .collect();
+        assert!(
+            now_documented.is_empty(),
+            "{now_documented:?} are listed as undocumented but `--help` now \
+             prints them (or argv no longer accepts them). Shrink the list in \
+             the same commit -- a backlog that cannot shrink is a count, not a \
+             ratchet."
+        );
+    }
+
+    /// Each run mode's `--help` entry names the zenoh wire role it announces.
+    ///
+    /// The flag names do NOT carry this: `--connect` announces `client` while
+    /// naming neither, and `--router` announces `peer` -- only `--router-hat`
+    /// announces `router`. An operator picking a flag by its name to stand in
+    /// for a zenoh node therefore picks the wrong role, and nothing on the
+    /// screen contradicts them. The role each mode announces is decided in
+    /// `demo_session_init_params`, which is the SSOT this table follows.
+    #[test]
+    fn the_usage_text_names_the_wire_role_each_run_mode_announces() {
+        const USAGE: &str = include_str!("usage.rs");
+
+        // (flag, the role `demo_session_init_params` returns for its NodeKind)
+        const ROLES: &[(&str, &str)] = &[
+            ("listen", "peer"),
+            ("connect", "client"),
+            ("router", "peer"),
+            ("router-hat", "router"),
+            ("peer", "peer"),
+        ];
+
+        for (flag, role) in ROLES {
+            let entry = usage_entry(USAGE, flag)
+                .unwrap_or_else(|| panic!("`--{flag}` has no entry in the usage text at all"));
+            let phrase = format!("zenoh {role} role");
+            assert!(
+                entry.contains(&phrase),
+                "`--{flag}` announces the {role} role on the wire and its help \
+                 entry never says so. Expected the phrase `{phrase}` in: {entry}"
+            );
+        }
+    }
+
     /// R311y849 — `connect/retry` reaches the flag in the modes that dial and
     /// is WITHHELD everywhere else, spelled out rather than left to the census
     /// gate above (which only shows that the argv changed).

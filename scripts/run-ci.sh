@@ -948,7 +948,18 @@ layer_0_preflight_lints() {
         # that carries the instruction, which says the instruction is not
         # enough on its own. Recomputing it is one command, and the recipe is
         # the loop directly above this line.
-        local -r sc_files_min=38   # 35 *.sh (25 scripts/ + 10 scripts/lib/) + 3 .githooks
+        # Raised 38 -> 39 at R2068, and this is the THIRD time the paragraph
+        # above has had to be written: 33 had drifted to 38, 38 had drifted to
+        # 39 (R2064 added scripts/lib/home-path-scan.sh and left the floor),
+        # and each time the slack was found by someone recomputing it for an
+        # unrelated reason rather than by the gate. The instruction to bump it
+        # in the same commit is now demonstrably not enough on its own -- see
+        # open debt 495 for the shape that would not need one: compare this
+        # pathspec's result against the SAME suffix filter applied to the whole
+        # index, which catches a pathspec that stops matching without anyone
+        # maintaining a number, and is not circular the way auto-deriving the
+        # floor from the pathspec itself would be.
+        local -r sc_files_min=39   # 36 *.sh (25 scripts/ + 11 scripts/lib/) + 3 .githooks
         if (( ${#sc_files[@]} < sc_files_min )); then
             echo "  Layer0 FAIL: shellcheck discovery found ${#sc_files[@]} file(s), expected >= ${sc_files_min}" >&2
             return 1
@@ -4029,7 +4040,12 @@ layer_c1ay_cargo_test_router_hat() {
     # cheerful `0 passed`.
     # R2065 — 12 -> 13: the usage-citation gate joined this module. MEASURED by
     # running the guard's own command, not by adding one to the old number.
-    _runci_guarded_test "C1AY stock_config_tests 13" 13 \
+    # R2068 — 13 -> 15: the flag-census ratchet and the wire-role rule joined it,
+    # measured the same way. The module is where `--help` is adjudicated, so a
+    # usage gate belongs here and NOT in a module of its own: every demo test
+    # invocation in this file is filtered by module, so a new module would be a
+    # gate no lane runs.
+    _runci_guarded_test "C1AY stock_config_tests 15" 15 \
         cargo test -p wz-ap-demo --features zenoh-config stock_config_tests --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat --quiet -- -D warnings \
