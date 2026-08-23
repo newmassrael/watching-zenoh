@@ -374,10 +374,44 @@ fi
 
 echo "pre-push: testing changed crates only (default features): ${pkgs[*]}"
 echo "          feature-matrix / clippy / footprint / cross-compile / interop -> hosted CI."
+# ROUTED THROUGH THE BUILD-MACHINE WRAPPER WHEN ONE IS CONFIGURED (`$BX`),
+# because this loop is the heaviest thing this hook does to the machine it runs
+# on: one full `cargo test` per changed crate, serially.
+#
+# MEASURED 2026-08-20, and the finding is about the FLEET rather than this gate.
+# 81 build runs were placed across six repositories in thirty minutes, and not
+# one process tree under a git hook reached the wrapper — every heavy command a
+# hook launches, it launches itself. So this workstation sat at load 33 on 32
+# cores with 11GB in swap while three build machines idled at 0.11, 1.00 and
+# 0.00. One of the two things loading it at that moment was this very hook,
+# mid-push. The wrapper cannot place work it is never handed.
+#
+# `$BX` IS AN OPT-IN AND ITS ABSENCE IS THE OLD BEHAVIOUR. No host, path or
+# account is named in this tree — those belong to a machine, not to a public
+# repository — so a checkout without it runs the loop here, exactly as before.
+#
+# ⚠ THE WRAPPER'S OWN VERDICT IS FINAL — no second fallback. It already fails
+# open by itself: with no build machine available and room here, it runs the
+# command here and says so. It refuses only when it cannot proceed safely (an
+# untracked file it does not carry, a far side that does not match), and each of
+# those is the author's to fix. A refusal is a verdict, not an outage; re-running
+# the gate locally to paper over one is how a hook reports green about a tree
+# nobody checked.
+#
+# ⚠ `cd crates` IS KEPT. This workspace's manifest is `crates/Cargo.toml`, and
+# the wrapper resolves its run directory from the manifest at or above where it
+# is invoked — so calling it from inside the subshell puts the remote run in the
+# same directory the local one uses. The repository root is still what gets
+# synced; only the run directory differs.
 fail=0
 for pkg in "${pkgs[@]}"; do
     echo "pre-push:   cargo test -p $pkg ..."
-    if ! (cd crates && cargo test -p "$pkg" --quiet); then
+    if [[ -n "${BX:-}" && -x "${BX}" ]]; then
+        pkg_run=("${BX}" --label "pre-push-$pkg" -- cargo test -p "$pkg" --quiet)
+    else
+        pkg_run=(cargo test -p "$pkg" --quiet)
+    fi
+    if ! (cd crates && "${pkg_run[@]}"); then
         echo "pre-push:   $pkg tests FAILED" >&2
         fail=1
     fi
