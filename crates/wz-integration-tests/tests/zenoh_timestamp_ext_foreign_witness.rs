@@ -166,7 +166,7 @@ fn own_child<'f>(field: &'f Field, name: &str) -> Option<&'f Field> {
 /// Two steps rather than one search for "timestamp", because the network
 /// extension form produces a group of the same name and conflating them is the
 /// whole distinction this file rests on.
-fn put_timestamp<'f>(field: &'f Field) -> Option<&'f Field> {
+fn put_timestamp(field: &Field) -> Option<&Field> {
     if field.name == "put" {
         if let Some(ts) = own_child(field, "timestamp") {
             return Some(ts);
