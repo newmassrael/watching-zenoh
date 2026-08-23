@@ -100,7 +100,6 @@ use wz_integration_tests::common::{
     PortReservation, ZENOHD_TCP_ACCEPT_BUDGET,
 };
 use wz_integration_tests::wire_tap::{synthesise_pcap, tap_proxy, Recording, Side};
-use wz_session_core::dissect::{Field, FieldValue};
 use wz_session_core::passive::Direction;
 
 /// The synthesised endpoint ports, on `zenohd_wire_dissection.rs`'s rule: they
@@ -157,215 +156,32 @@ const WITNESSED: &[&str] = &[
     "timeout",
 ];
 
-/// The message groups a walked tree names, so an extension can be attributed
-/// to the message that CARRIED it rather than to the transport envelope it
-/// arrived in.
-///
-/// Needed because `dissect_transport_message` returns one tree per transport
-/// message and a `Frame` descends into its whole record batch: without this,
-/// every `qos` inside a frame would be attributed to `Frame` and the two
-/// per-message constants below could not be told apart.
-const MESSAGE_NAMES: &[&str] = &[
-    "Init",
-    "Open",
-    "Close",
-    "KeepAlive",
-    "Frame",
-    "Fragment",
-    "Oam",
-    "Push",
-    "Request",
-    "Response",
-    "ResponseFinal",
-    "Interest",
-    "Declare",
-];
-
-/// The fields `walk_ext_entry` pushes for EVERY entry whatever the body — the
-/// envelope, not a reading of it.
-///
-/// Excluded from [`Body::read`] so that an empty `read` means "this body got
-/// no walker output", which is the exact claim the `patch` leg rests on.
-const ENVELOPE: &[&str] = &[
-    "header",
-    "ext_id",
-    "m",
-    "encoding",
-    "z",
-    "ext_name",
-    "value",
-    "value_len",
-];
-
-/// One reading a walker produced.
-///
-/// [`Group`](Reading::Group) exists so that "the body was walked into a
-/// subtree" and "the body got no walker at all" are DIFFERENT entries rather
-/// than two ways of contributing nothing. Without it the `patch` leg's
-/// `read.is_empty()` would also be satisfied by a ZBuf body walked into a
-/// nested group, and that leg's whole subject is an emptiness.
-#[derive(Debug, Clone, PartialEq)]
-enum Reading {
-    /// A name this build resolved from the bits (`"Block"`, `"AllComplete"`).
-    Label(String),
-    /// A single bit (`express`, `complete`, `absent_to_receiver`).
-    Flag(bool),
-    /// A number (`distance`, `read_as`, `undefined_bits`).
-    Number(u64),
-    /// A walked sub-structure, with how many children it has. Only a ZBuf body
-    /// produces one; every Z64 walker in this build emits flat fields.
-    Group(usize),
-}
-
-impl core::fmt::Display for Reading {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Reading::Label(v) => write!(f, "{v}"),
-            Reading::Flag(v) => write!(f, "{v}"),
-            Reading::Number(v) => write!(f, "{v}"),
-            Reading::Group(n) => write!(f, "<{n} field(s)>"),
-        }
-    }
-}
-
-impl Reading {
-    fn of(field: &Field) -> Option<Reading> {
-        match &field.value {
-            FieldValue::Label(v) => Some(Reading::Label(v.to_string())),
-            FieldValue::Flag(v) => Some(Reading::Flag(*v)),
-            FieldValue::Bits(v) | FieldValue::Uint(v) => Some(Reading::Number(*v)),
-            FieldValue::Nested(children) => Some(Reading::Group(children.len())),
-            _ => None,
-        }
-    }
-}
-
-/// One extension body the capture carried, flattened for assertion.
-#[derive(Debug, Clone)]
-struct Body {
-    /// Which half wrote it.
-    direction: Direction,
-    /// The message that carried it — the innermost [`MESSAGE_NAMES`] group the
-    /// entry sits under.
-    carrier: String,
-    /// `ext_name`: which row of `wz_session_core::ext_name`'s table this is.
-    name: String,
-    /// The packed value as it stood on the wire, before any narrowing. `None`
-    /// for a `ExtUnit` entry, which has no body byte at all — `Init`'s `qos`
-    /// is one, and telling it apart from the Z64 `qos` is why this is an
-    /// `Option` rather than a defaulted zero.
-    value: Option<u64>,
-    /// Everything the walker made of it, in tree order, minus [`ENVELOPE`].
-    read: Vec<(String, Reading)>,
-}
-
-impl Body {
-    fn reading(&self, name: &str) -> Option<&Reading> {
-        self.read.iter().find(|(n, _)| n == name).map(|(_, v)| v)
-    }
-
-    fn describe(&self) -> String {
-        let read = self
-            .read
-            .iter()
-            .map(|(n, v)| format!("{n}={v}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!(
-            "{:?} {}/{} value={:?} read=[{read}]",
-            self.direction, self.carrier, self.name, self.value
-        )
-    }
-}
-
-/// Collect every `ext` entry under `field`, attributing each to the innermost
-/// enclosing message group.
-///
-/// Depth-first and INCLUDING nested chains (an auth body is itself a chain of
-/// ext entries), because a body's carrier is decided by where it sits. The
-/// name is read from the entry's own `ext_name` child, which `walk_ext_entry`
-/// pushes ahead of the body — so [`Field::find`]'s first match is this
-/// entry's name and never an inner one's.
-fn collect(field: &Field, direction: Direction, carrier: &str, out: &mut Vec<Body>) {
-    let carrier = if MESSAGE_NAMES.contains(&field.name.as_ref()) {
-        field.name.as_ref()
-    } else {
-        carrier
-    };
-    if field.name == "ext" {
-        if let Some(FieldValue::Label(name)) = field.find("ext_name").map(|f| &f.value) {
-            let read = match &field.value {
-                FieldValue::Nested(children) => children
-                    .iter()
-                    .filter(|c| !ENVELOPE.contains(&c.name.as_ref()))
-                    .filter_map(|c| Reading::of(c).map(|r| (c.name.to_string(), r)))
-                    .collect(),
-                _ => Vec::new(),
-            };
-            out.push(Body {
-                direction,
-                carrier: carrier.to_string(),
-                name: name.to_string(),
-                // R2048 — this entry's OWN `value`, not `Field::find`'s.
-                //
-                // The paragraph above argues that a recursive search is safe
-                // here, and it is RIGHT about `ext_name`: `walk_ext_entry`
-                // pushes that ahead of the body, so the direct child wins. The
-                // argument does not carry to `value`, which a WALKED ZBuf body
-                // does not push at all — the walked group replaces it — so a
-                // recursive search descends into the body and hands back a
-                // SUB-EXTENSION's number. R2046 found that in the auth witness,
-                // where an `auth` chain reported its first method's nonce as its
-                // own; nothing in this capture has a nested chain today, which
-                // is why it never showed here. `ext_bodies::own_child` is the
-                // shared form of this fix.
-                value: match wz_integration_tests::ext_bodies::own_child(field, "value")
-                    .map(|f| &f.value)
-                {
-                    Some(FieldValue::Uint(v)) | Some(FieldValue::Bits(v)) => Some(*v),
-                    _ => None,
-                },
-                read,
-            });
-        }
-    }
-    if let FieldValue::Nested(children) = &field.value {
-        for child in children {
-            collect(child, direction, carrier, out);
-        }
-    }
-}
-
-/// Walk every message of `flow` and collect its extension bodies.
-///
-/// A message whose bytes cannot be sliced or whose walk fails is SKIPPED here
-/// rather than reported, because this file's subject is the extension layer
-/// and the two witnesses beside it already refuse a capture with an unparsed
-/// message on either half. [`assert_witnessed_set`] is what stops a silent
-/// skip from emptying the capture: a walk that failed everywhere yields an
-/// empty set and reds there.
-fn bodies_of(flow: &wz_capture::FlowDissection) -> Vec<Body> {
-    let mut out = Vec::new();
-    for frame in flow.frames.iter() {
-        let Ok(bytes) = flow.message_bytes(frame) else {
-            continue;
-        };
-        let Ok(walked) = wz_session_core::dissect::dissect_transport_message(bytes, 0) else {
-            continue;
-        };
-        collect(&walked, frame.direction, "?", &mut out);
-    }
-    out
-}
-
-/// Every body, one per line, for a failure message.
-fn dump(bodies: &[Body]) -> String {
-    bodies
-        .iter()
-        .map(|b| format!("  {}", b.describe()))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
+// R2061 (open-debt item 483) — the LOCAL harness is gone; this file reads the
+// shared one.
+//
+// It had a private `MESSAGE_NAMES`, `ENVELOPE`, `Reading`, `Body`, `collect`,
+// `bodies_of` and `dump`, all of which R2048 had already lifted into
+// `wz_integration_tests::ext_bodies` for the auth and multilink witnesses. The
+// Z64 half was left behind because its `Body::value` was `Option<u64>` where
+// the shared one is `Option<Reading>` and its walk is one level deep — a port
+// that changes the assertion shape of a GREEN file, which is not a thing to do
+// by reflex.
+//
+// ⛔ Why it was worth doing anyway, and it is measured rather than argued: this
+// copy is where the class was DEMONSTRATED. R2046 fixed a `Field::find`
+// recursion bug in the auth copy — an entry reporting a descendant's value as
+// its own — and the same bug sat here untouched until R2048 fixed it by hand,
+// in this file, a second time. One copy is one more place for the next fix to
+// miss, and R2050's `MESSAGE_NAMES` gap (a missing `Join`) is the same story
+// from the other end: a list nobody could fix once.
+//
+// What the shared harness adds here rather than merely matching: `encoding` per
+// entry, `Depth`, `read_names`, and
+// `assert_no_entry_borrows_a_descendants_value`, which is the standing gate for
+// the very bug this file had to be repaired for.
+use wz_integration_tests::ext_bodies::{
+    assert_no_entry_borrows_a_descendants_value, bodies_of, dump, Body, Depth, Reading,
+};
 
 /// Hold the module doc's claim about what this capture carries against what it
 /// actually carried.
@@ -664,7 +480,12 @@ fn the_z64_body_walkers_read_what_a_stock_zenohd_and_queryable_wrote() {
     );
     let (router_side, client_side) = (Direction::A, Direction::B);
 
-    let bodies = bodies_of(flow);
+    // `Shallow` because the harness this file used to carry filtered the
+    // entry's DIRECT children only. Reading one level is the same reading, so
+    // the assertions below keep their meaning; `Deep` would fold a walked ZBuf
+    // body's grandchildren into `read` and change what an empty `read` means,
+    // which is the exact claim the `patch` leg rests on.
+    let bodies = bodies_of(flow, Depth::Shallow);
     eprintln!(
         "extension bodies a stock zenoh pair put on this wire:\n{}",
         dump(&bodies)
@@ -672,6 +493,14 @@ fn the_z64_body_walkers_read_what_a_stock_zenohd_and_queryable_wrote() {
 
     // ── THE CLAIM ABOUT THE CAPTURE, BEFORE ANY CLAIM ABOUT A READING ─────
     assert_witnessed_set(&bodies);
+
+    // R2061 (item 483) — the standing gate for the bug this file was repaired
+    // for TWICE. R2046 found an ext entry reporting a descendant's `value` as
+    // its own in the auth witness; the same bug was still here and R2048 fixed
+    // it by hand. The other three witnesses have called this since R2048 and
+    // this one did not, which is the shape of the whole item: a copy is a place
+    // the next fix does not reach, and so is a gate nobody wired up.
+    assert_no_entry_borrows_a_descendants_value(&bodies);
 
     let half = |d: Direction| -> Vec<Body> {
         bodies
@@ -754,11 +583,11 @@ fn the_z64_body_walkers_read_what_a_stock_zenohd_and_queryable_wrote() {
     for timeout in &timeouts {
         assert_eq!(
             timeout.value,
-            Some(
+            Some(Reading::Number(
                 GET_TIMEOUT_MS
                     .parse::<u64>()
                     .expect("GET_TIMEOUT_MS parses")
-            ),
+            )),
             "the querier was spawned `-o {GET_TIMEOUT_MS}` and the router \
              forwarded a different number: {}",
             timeout.describe()
@@ -788,7 +617,7 @@ fn the_z64_body_walkers_read_what_a_stock_zenohd_and_queryable_wrote() {
     for patch in &patches {
         assert_eq!(
             patch.value,
-            Some(1),
+            Some(Reading::Number(1)),
             "a stock zenoh 1.5.0 peer announces `PatchType::CURRENT` = 1 \
              (zenoh-protocol/src/transport/mod.rs:322): {}",
             patch.describe()

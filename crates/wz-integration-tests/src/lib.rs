@@ -5751,4 +5751,82 @@ pub mod ext_bodies {
             dump(bodies)
         );
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use wz_session_core::dissect::Span;
+
+        fn f(name: &'static str, value: FieldValue) -> Field {
+            Field {
+                name: name.into(),
+                span: Span { start: 0, end: 1 },
+                value,
+            }
+        }
+
+        /// R2061 (open-debt item 483) — the `own_child` fix, held down WITHOUT
+        /// an oracle.
+        ///
+        /// # Why this had to be written
+        ///
+        /// R2046 found `Field::find` handing an ext entry a DESCENDANT's
+        /// `value` — an `auth` chain reporting its first method's nonce as its
+        /// own — and R2048 lifted the fix into [`own_child`]. Measured in R2061:
+        /// reverting [`collect`] to the recursive `find` reds NOTHING in this
+        /// crate's library tests and NOTHING in the Z64 foreign witness. The
+        /// only thing that catches it is a capture carrying a nested chain,
+        /// which is the auth witness, which is a gated e2e behind three foreign
+        /// binaries.
+        ///
+        /// So the fix that this whole item is about was defended by an oracle
+        /// and by nothing else. This test is the deterministic half: a
+        /// hand-built entry whose walked body contains a nested entry with its
+        /// own `value`, which is exactly the shape `find` descends into.
+        #[test]
+        fn an_entrys_own_value_is_never_a_nested_entrys() {
+            // The inner entry: a Z64 body standing beside its own `value`.
+            let inner = f(
+                "ext",
+                FieldValue::Nested(vec![
+                    f("ext_name", FieldValue::Label("usrpwd".into())),
+                    f("encoding", FieldValue::Bits(ENC_Z64)),
+                    f("value", FieldValue::Uint(0x0BAD_F00D)),
+                ]),
+            );
+            // The outer entry: a WALKED ZBuf body, so it has no `value` of its
+            // own -- the walked group replaced it -- and the only `value`
+            // anywhere below it belongs to `inner`.
+            let outer = f(
+                "ext",
+                FieldValue::Nested(vec![
+                    f("ext_name", FieldValue::Label("auth".into())),
+                    f("encoding", FieldValue::Bits(ENC_ZBUF)),
+                    f("auth", FieldValue::Nested(vec![inner])),
+                ]),
+            );
+            let carrier = f("Init", FieldValue::Nested(vec![outer]));
+
+            let mut bodies = Vec::new();
+            collect(&carrier, Direction::A, "?", Depth::Shallow, &mut bodies);
+
+            // ANTI-VACUITY: both entries must have been collected, or the
+            // assertion below is about a tree the walk never entered.
+            let names: Vec<&str> = bodies.iter().map(|b| b.name.as_str()).collect();
+            assert_eq!(names, vec!["auth", "usrpwd"], "both entries: {names:?}");
+
+            let auth = &bodies[0];
+            assert!(
+                auth.value.is_none(),
+                "the outer entry's body was WALKED, so it owns no `value`; this \
+                 one borrowed {:?} from the entry below it",
+                auth.value
+            );
+            assert_eq!(
+                bodies[1].value,
+                Some(Reading::Number(0x0BAD_F00D)),
+                "and the inner entry must still report its own"
+            );
+        }
+    }
 }
