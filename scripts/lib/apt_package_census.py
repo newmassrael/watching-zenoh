@@ -168,6 +168,22 @@ _add(
     "reds instead of skipping.",
     ["feature-gates"],
 )
+# R2055 (open-debt item 391) — the ADJUDICATOR for `LINK_TYPE_SWEEP_CEILING`.
+# The link-type sweep claims to cover every type a capture file can name, which
+# is a claim about libpcap's assignments, and nothing re-read libpcap: a type
+# above the ceiling would be invisible to the sweep built to see it. libpcap
+# states the bound itself as `DLT_MATCHING_MAX` in `pcap/dlt.h`, and that header
+# is what `libpcap-dev` puts on the runner. Layer C1bn runs
+# `pcap_dlt_header_adjudicator` with `WZ_DLT_HEADER_REQUIRE=1`, so an absent
+# header reds instead of skipping. ONE job, the same one as `tcpdump` above and
+# for the same reason: it is where wz-capture's default-feature tests live.
+_add(
+    "libpcap-dev",
+    "pcap/dlt.h, which Layer C1bn holds LINK_TYPE_SWEEP_CEILING against via "
+    "DLT_MATCHING_MAX (item 391); armed with WZ_DLT_HEADER_REQUIRE so its "
+    "absence reds instead of skipping.",
+    ["feature-gates"],
+)
 # The `cmake` rows are DERIVED below as well as listed here; the list is what
 # makes an unjustified site fail by name, the derivation is what stops this
 # reason from being believed after the tree stops supporting it.

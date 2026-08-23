@@ -8454,6 +8454,26 @@ layer_c1bn_passive_dissection_features() {
         echo "  C1bn FAIL: the BSD address-family adjudicator did not run"
         echo "$out"; return 1; }
 
+    # R2055 (open-debt item 391) — the link-type sweep's CEILING, ARMED.
+    #
+    # `LINK_TYPE_SWEEP_CEILING` claims to cover every link type a capture file
+    # can name. That is a claim about libpcap, and until R2055 nothing re-read
+    # libpcap: a type assigned above the ceiling would be invisible to the sweep
+    # built to see it, with every lane green. The adjudicator reads
+    # `DLT_MATCHING_MAX` out of `pcap/dlt.h` and holds the constant to it, and it
+    # SKIPS where that header is absent -- right for a developer's machine,
+    # wrong for a lane, because a skip prints `ok`. `WZ_DLT_HEADER_REQUIRE=1`
+    # turns absence into a failure, and this job installs libpcap's headers so
+    # the flag is a statement rather than a gamble.
+    #
+    # C1bn for the same reason as the leg above: the SUBJECT is
+    # `wz_capture::link` and this lane owns wz-capture's default-feature tests.
+    out="$(cd crates && WZ_DLT_HEADER_REQUIRE=1 cargo test -p wz-integration-tests \
+        --test pcap_dlt_header_adjudicator --quiet 2>&1)" || { echo "$out"; return 1; }
+    grep -qE '^test result: ok\. 1 passed' <<<"$out" || {
+        echo "  C1bn FAIL: the pcap/dlt.h ceiling adjudicator did not run"
+        echo "$out"; return 1; }
+
     # R311y645 — the tests that need BOTH `reassembly` and `network-codecs`, so
     # C1bt's arms cannot see them: its network arm has no reassembly and its
     # default-off arm has neither. This is the only lane that builds the pair,

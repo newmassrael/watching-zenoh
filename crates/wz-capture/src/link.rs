@@ -99,6 +99,34 @@ pub fn readable_link_types_line() -> alloc::string::String {
     out
 }
 
+/// How far [`READABLE_LINK_TYPES`] is swept against the dispatch — one bound
+/// above the highest link type a capture file can carry.
+///
+/// # Why this is public, and why it is not "a big enough number"
+///
+/// R2055, open-debt item 391. This bound started as a literal `1000` inside
+/// the sweep, chosen because libpcap's assignments ran out in the 200s at the
+/// time someone looked. That is a JUDGEMENT ABOUT THE OUTSIDE WORLD living as
+/// a constant, and nothing re-read the outside world: a link type assigned
+/// above the ceiling would be invisible to the very sweep built to see it, and
+/// every lane would stay green.
+///
+/// libpcap states the bound itself. `pcap/dlt.h` splits the space at
+/// `DLT_MATCHING_MIN` (104): at or above it, "the `DLT_` value returned by
+/// `pcap_datalink()` ... and the `LINKTYPE_` value that appears in capture
+/// files, are the same", and `DLT_MATCHING_MAX` is "the highest value in the
+/// matching range". Below 104 the two namespaces diverge per platform and the
+/// `LINKTYPE_` side is full, which is why the matching range starts where it
+/// does. So the highest link type a capture file can name is
+/// `DLT_MATCHING_MAX`, and this constant has to stay above it.
+///
+/// `tests/pcap_dlt_header_adjudicator.rs` in `wz-integration-tests` is what
+/// reads that header and holds this number to it. It lives in another crate
+/// because this one is `no_std` and cannot open a file, which is the whole
+/// reason this constant is `pub`: the sweep and its adjudicator have to be
+/// talking about the same bound, and a `#[cfg(test)]` constant cannot be.
+pub const LINK_TYPE_SWEEP_CEILING: u32 = 1000;
+
 /// Bytes of `struct af_vsockmon_hdr` (`/usr/include/linux/vsockmon.h`), read
 /// off that header rather than remembered: `__le64 src_cid` + `__le64 dst_cid`
 /// + `__le32 src_port` + `__le32 dst_port` + `__le16 op` + `__le16 transport`
@@ -2091,10 +2119,13 @@ mod tests {
     /// declared list. A new arm nobody documented reds here; a documented row
     /// with no arm reds here too.
     ///
-    /// 1000 covers the whole assigned DLT space with room over — libpcap's
-    /// highest at this pin is in the 200s — and the sweep is a thousand calls
-    /// on a 64-byte buffer, so the bound buys certainty rather than costing
-    /// time.
+    /// The bound is [`LINK_TYPE_SWEEP_CEILING`], and R2055 (item 391) is why
+    /// it is a named constant rather than the literal it was: the claim "this
+    /// covers the whole assigned space" is a claim about libpcap, and until
+    /// that round nothing re-read libpcap. `pcap_dlt_header_adjudicator` in
+    /// `wz-integration-tests` now holds it against `DLT_MATCHING_MAX` in
+    /// `pcap/dlt.h`. The sweep itself is a thousand calls on a 64-byte buffer,
+    /// so the headroom buys certainty rather than costing time.
     ///
     /// The probe bytes are 64 zeros: long enough that no arm can call it
     /// truncated for its own header, and not IP under any of them, so every
@@ -2107,7 +2138,7 @@ mod tests {
         let declared: alloc::collections::BTreeSet<u32> =
             READABLE_LINK_TYPES.iter().map(|(c, _)| *c).collect();
         let mut read: alloc::collections::BTreeSet<u32> = alloc::collections::BTreeSet::new();
-        for code in 0u32..=1000 {
+        for code in 0u32..=LINK_TYPE_SWEEP_CEILING {
             match decapsulate(code, 0, &probe) {
                 Err(SkipReason::UnsupportedLinkType(n)) => {
                     assert_eq!(n, code, "the skip must name the link type it refused");
