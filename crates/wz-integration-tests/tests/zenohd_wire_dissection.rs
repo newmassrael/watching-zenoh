@@ -438,6 +438,31 @@ fn the_analyzer_parses_every_message_a_real_zenohd_puts_on_the_wire() {
          comes back Err, and this would say it is unfireable on this encoder's \
          output — a finding about wz's decoder, not a reason to drop it"
     );
+    // R2053 (open-debt item 371) — the CLASSIFIER's own invariant, which this
+    // consumer never asserted while the three no-frame outcomes were fused into
+    // one counter. Every visited position must land in exactly one bucket; an
+    // arm that stops counting makes the totals disagree, and nothing here would
+    // have noticed. Cheap, capture-independent, and it holds on any recording.
+    //
+    // The per-bucket SPLIT is pinned in `wire_tap`'s own tests against a crafted
+    // handshake, deliberately not here: this leg's capture is a live zenohd's,
+    // so its byte count varies run to run and exact literals would be noise.
+    // Item 371's second half was that the classification sat behind THIS
+    // `#[ignore]`d lane; it does not any more.
+    assert!(
+        sweep.is_exhaustive(),
+        "the damage sweep's buckets do not account for every swept position, so \
+         one arm is not counting: {sweep:?}"
+    );
+    assert_eq!(
+        sweep.pcap_rejected, 0,
+        "a damaged recording produced a pcap the reader REFUSED: {sweep:?}. \
+         That cannot happen by construction -- the damage is applied to the \
+         recording and `synthesise_pcap` then computes the checksums over the \
+         damaged bytes -- so a non-zero here means the synthesiser stopped \
+         doing that, which would make every outcome below it a statement about \
+         a corrupt envelope rather than about wz's decoder"
+    );
 }
 
 /// THE SECOND WITNESS (R311y762, carry N67): a router with something to route.

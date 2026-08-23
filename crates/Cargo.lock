@@ -2608,6 +2608,7 @@ dependencies = [
  "wz-runtime-tokio",
  "wz-runtime-tokio-test-support",
  "wz-session-core",
+ "wz-session-wire-fixtures",
  "zenoh-pico-sys",
 ]
 

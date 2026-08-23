@@ -443,6 +443,14 @@ tokio-serial = { version = "5.4", default-features = false }
 # `crates/Cargo.lock` gains an edge and no package.
 hmac = { version = "0.12", default-features = false }
 sha3 = { version = "0.10", default-features = false }
+# R2053 (open-debt item 371) — the damage sweep's classification was measured
+# only inside an `#[ignore]`d zenohd leg, so a shift between its buckets was
+# invisible to every lane that always runs. `wire_tap`'s own tests now sweep a
+# DETERMINISTIC handshake instead, and these are the crafted wire bytes that
+# make it deterministic. The alternative was to hand-lay an Init/Open exchange
+# in the test, which is a second copy of a wire shape this workspace already
+# keeps in one place.
+wz-session-wire-fixtures = { path = "../wz-session-wire-fixtures" }
 
 [lints]
 workspace = true

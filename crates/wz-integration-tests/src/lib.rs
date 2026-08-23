@@ -4912,18 +4912,54 @@ pub mod wire_tap {
     /// "the Err arm was not reached", and collapsing them would hide that the
     /// first is the analyzer refusing to frame at all while the second is the
     /// analyzer correctly not caring.
-    #[derive(Clone, Copy, Debug, Default)]
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     pub struct DamageSweep {
         /// Byte positions visited. Zero means the verdict is about nothing.
         pub swept: usize,
         /// Positions where at least one frame came back `Err`.
         pub yielded_err: usize,
-        /// Positions where the damaged half produced no frames at all — the
-        /// assembler desynchronised and the direction disappeared.
-        pub vanished: usize,
+        /// R2053 (open-debt item 371) — the capture did not PARSE at all.
+        ///
+        /// Split out of the old fused `vanished`, and the split is the point.
+        /// That one counter was incremented at THREE different sites, and the
+        /// three are different outcomes: the pcap reader refusing the file, the
+        /// reader accepting it and finding no flow, and a flow existing with the
+        /// damaged direction emptied. A move BETWEEN them was invisible, which
+        /// is exactly what item 371 says may have happened when
+        /// [`synthesise_pcap`] started writing REAL checksums (R311y886): a
+        /// flipped byte now breaks a checksum as well as a field, so the
+        /// outcome can shift from "the decoder objected" to "the capture never
+        /// got that far" with every assertion in the tree still green.
+        pub pcap_rejected: usize,
+        /// The pcap parsed and the reader found NO flow in it.
+        pub no_flow: usize,
+        /// A flow existed and the damaged direction had no frames left — the
+        /// assembler desynchronised and that half disappeared.
+        pub direction_lost: usize,
         /// Positions the decoder had no objection to, which is usually correct:
         /// a byte inside a payload is not the transport decoder's business.
         pub still_clean: usize,
+    }
+
+    impl DamageSweep {
+        /// The three ways a position can leave no readable frame, summed.
+        ///
+        /// Kept so a reader can still ask the coarse question, but it is a
+        /// DERIVED view now rather than the thing that is counted -- the
+        /// difference being that the three parts remain available to say WHICH.
+        pub fn vanished(&self) -> usize {
+            self.pcap_rejected + self.no_flow + self.direction_lost
+        }
+
+        /// Every visited position landed in exactly one bucket.
+        ///
+        /// An invariant of the classifier rather than a property of any capture,
+        /// so it holds on every recording and reds if a future arm forgets to
+        /// count. Nothing asserted this while the buckets were fused; a dropped
+        /// case would simply have made the totals disagree with nobody looking.
+        pub fn is_exhaustive(&self) -> bool {
+            self.yielded_err + self.vanished() + self.still_clean == self.swept
+        }
     }
 
     /// Flip every byte of one half of a recording in turn and classify what the
@@ -4962,12 +4998,12 @@ pub mod wire_tap {
                 sweep.swept += 1;
                 let pcap = synthesise_pcap(&damaged, dialer_port, listener_port);
                 let Ok(dissection) = wz_capture::Dissection::from_pcap(&pcap) else {
-                    sweep.vanished += 1;
+                    sweep.pcap_rejected += 1;
                     continue;
                 };
                 let flows = dissection.flows();
                 let Some(flow) = flows.first() else {
-                    sweep.vanished += 1;
+                    sweep.no_flow += 1;
                     continue;
                 };
                 // The damaged half is whichever direction carries the port the
@@ -4993,7 +5029,7 @@ pub mod wire_tap {
                 if errors > 0 {
                     sweep.yielded_err += 1;
                 } else if surviving == 0 {
-                    sweep.vanished += 1;
+                    sweep.direction_lost += 1;
                 } else {
                     sweep.still_clean += 1;
                 }
@@ -5040,6 +5076,143 @@ pub mod wire_tap {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        /// R2053 (open-debt item 371) — THE DAMAGE SWEEP'S CLASSIFICATION,
+        /// MEASURED IN A LANE THAT ALWAYS RUNS.
+        ///
+        /// # The two halves of the item
+        ///
+        /// R311y886 made [`synthesise_pcap`] write REAL checksums, which
+        /// changed the sweep's INPUT: a flipped byte now breaks a checksum as
+        /// well as a field, so a position can move from "the decoder objected"
+        /// to "the capture never parsed". Nobody re-measured the split. And the
+        /// only consumer is `zenohd_wire_dissection.rs`, which asserts
+        /// `swept > 0` and `yielded_err > 0` — so a move between the other
+        /// buckets keeps every assertion green — and it is `#[ignore]`d behind
+        /// a real zenohd, so the unmeasured classification sat behind an
+        /// interop lane.
+        ///
+        /// This test answers both. The recording is CRAFTED rather than
+        /// captured, from `wz-session-wire-fixtures`' own Init/Open bytes, so
+        /// the numbers below are deterministic and this runs in the ordinary
+        /// `cargo test -p wz-integration-tests` lane.
+        ///
+        /// # What is pinned, and what deliberately is not
+        ///
+        /// The exact per-bucket counts ARE pinned, because on a crafted
+        /// recording they are a property of the classifier rather than of a
+        /// capture that varies run to run. That is the whole value: a shift
+        /// caused by a change to the pcap envelope, the analyzer, or the
+        /// classifier reds HERE, with the bucket named, instead of being
+        /// absorbed by a `> 0`.
+        ///
+        /// MEASURED, not predicted — the first run of this test printed the
+        /// split and the literals below were written from it.
+        #[test]
+        fn the_damage_sweeps_classification_is_pinned_on_a_crafted_handshake() {
+            use wz_session_wire_fixtures as fixtures;
+
+            const COOKIE: &[u8] = &[0xC0, 0xC1, 0xC2, 0xC3];
+            // FRAMED, because the fixtures are BARE messages and this pcap is a
+            // TCP stream. zenoh's streamed links prefix every batch with a
+            // 16-bit little-endian length; the fixture crate omits it because
+            // its own consumers feed a framer directly. Leaving it off decoded
+            // to ZERO frames, which the anti-vacuity assertion below caught on
+            // the first run -- the framing is stated here rather than assumed.
+            let framed = |msg: Vec<u8>| -> Vec<u8> {
+                let mut out = Vec::with_capacity(2 + msg.len());
+                out.extend_from_slice(&(msg.len() as u16).to_le_bytes());
+                out.extend_from_slice(&msg);
+                out
+            };
+            let recording = vec![
+                (Side::FromDialer, framed(fixtures::craft_initsyn_wire())),
+                (
+                    Side::FromListener,
+                    framed(fixtures::craft_initack_wire(COOKIE)),
+                ),
+                (
+                    Side::FromDialer,
+                    framed(fixtures::craft_opensyn_wire(COOKIE)),
+                ),
+            ];
+
+            // ANTI-VACUITY BEFORE ANYTHING ELSE: the undamaged recording must
+            // dissect into frames, or every classification below is about a
+            // capture the analyzer could not read in the first place.
+            let clean = synthesise_pcap(&recording, 40_000, 7447);
+            let d = wz_capture::Dissection::from_pcap(&clean)
+                .expect("the crafted handshake must parse before it is damaged");
+            let flows = d.flows();
+            assert_eq!(flows.len(), 1, "one crafted conversation is one flow");
+            assert!(
+                !flows[0].frames.is_empty(),
+                "the crafted handshake decoded to NO frames, so a sweep over it \
+                 would be classifying nothing"
+            );
+
+            for side in [Side::FromDialer, Side::FromListener] {
+                let sweep = sweep_single_byte_damage(&recording, side, 40_000, 7447);
+                eprintln!("damage sweep over {side:?}: {sweep:?}");
+                assert!(
+                    sweep.swept > 0,
+                    "{side:?}: the sweep visited no byte, so its verdict is \
+                     about nothing"
+                );
+                // THE INVARIANT, which nothing asserted while the three
+                // no-frame outcomes were fused into one counter: every visited
+                // position lands in exactly one bucket.
+                assert!(
+                    sweep.is_exhaustive(),
+                    "{side:?}: the buckets do not account for every swept \
+                     position, so one arm is not counting: {sweep:?}"
+                );
+            }
+
+            let dialer = sweep_single_byte_damage(&recording, Side::FromDialer, 40_000, 7447);
+            let listener = sweep_single_byte_damage(&recording, Side::FromListener, 40_000, 7447);
+            assert_eq!(
+                (dialer, listener),
+                (DIALER_SPLIT, LISTENER_SPLIT),
+                "the damage sweep's classification MOVED. This is item 371's \
+                 subject: the split is a property of the classifier plus the \
+                 pcap envelope plus the analyzer, and until this test existed \
+                 the only consumer asserted `yielded_err > 0` -- which stays \
+                 green through any rearrangement of the rest. Re-measure, \
+                 decide whether the move is intended, and update these literals \
+                 in the same round rather than widening the assertion."
+            );
+        }
+
+        /// The measured split for the dialer's half of the crafted handshake.
+        ///
+        /// Written from the run's output, not predicted — and the two ZEROS are
+        /// the round's finding rather than filler. Item 371 supposed that
+        /// R311y886's real checksums may have moved positions into "the capture
+        /// never parsed", because a flipped byte now breaks a checksum as well
+        /// as a field. It CANNOT: [`sweep_single_byte_damage`] damages the
+        /// RECORDING and then calls [`synthesise_pcap`], which computes the IP
+        /// and TCP checksums over the damaged bytes. Every pcap it hands the
+        /// reader is checksum-clean by construction, so `pcap_rejected` is
+        /// structurally zero and `no_flow` with it. The premise was plausible
+        /// and is false, and pinning the zeros is what keeps it answered.
+        const DIALER_SPLIT: DamageSweep = DamageSweep {
+            swept: 22,
+            yielded_err: 4,
+            pcap_rejected: 0,
+            no_flow: 0,
+            direction_lost: 3,
+            still_clean: 15,
+        };
+        /// The measured split for the listener's half. See [`DIALER_SPLIT`].
+        const LISTENER_SPLIT: DamageSweep = DamageSweep {
+            swept: 17,
+            yielded_err: 2,
+            pcap_rejected: 0,
+            no_flow: 0,
+            direction_lost: 3,
+            still_clean: 12,
+        };
 
         /// R311y888 (open-debt item 363) — THE PCAP THIS MODULE SYNTHESISES IS
         /// CHECKSUM-CLEAN, in both directions.
