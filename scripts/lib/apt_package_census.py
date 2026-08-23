@@ -152,6 +152,22 @@ _add(
         "e2e-demo",
     ],
 )
+# R2054 (open-debt item 384) — the ADJUDICATOR for `wz_capture::link`'s BSD
+# address-family table. That set (`BSD_AF_INET6 = [24, 28, 30]`) was decided
+# once by hand, in a session, by feeding `tcpdump` families in both byte orders;
+# the repository kept the answer and not the question. Layer C1bn now runs
+# `bsd_af_tcpdump_adjudicator` with `WZ_TCPDUMP_REQUIRE=1`, which asks the tool
+# the same question on every run -- so the tool has to be on that job. ONE job
+# only, and the smallest one that owns wz-capture's default-feature tests: this
+# is a ~500 kB package on a mirror this file measures at ~27 kB/s, so it is
+# carried where the gate is and nowhere else.
+_add(
+    "tcpdump",
+    "the adjudicator Layer C1bn holds wz_capture::link's BSD address-family "
+    "table against (item 384); armed with WZ_TCPDUMP_REQUIRE so its absence "
+    "reds instead of skipping.",
+    ["feature-gates"],
+)
 # The `cmake` rows are DERIVED below as well as listed here; the list is what
 # makes an unjustified site fail by name, the derivation is what stops this
 # reason from being believed after the tree stops supporting it.

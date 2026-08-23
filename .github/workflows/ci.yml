@@ -2414,7 +2414,14 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          bash scripts/lib/apt-install.sh cmake libclang-dev clang perl
+          # R2054 (open-debt item 384) — `tcpdump` is the ADJUDICATOR for
+          # `wz_capture::link`'s BSD address-family table, which was decided once
+          # by hand in a session with no reproducer. Layer C1bn below runs that
+          # adjudicator with `WZ_TCPDUMP_REQUIRE=1`, so the tool has to be here:
+          # the test SKIPS where it is absent, and a skip prints `ok`. Installed
+          # explicitly rather than relied on from the runner image, because
+          # "the image happens to carry it" is not a thing this file states.
+          bash scripts/lib/apt-install.sh cmake libclang-dev clang perl tcpdump
 
       - name: Save apt archives
         # `always()`: the job this exists for is the one a slow mirror REDS, and

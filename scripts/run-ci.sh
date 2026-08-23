@@ -8434,6 +8434,26 @@ layer_c1bn_passive_dissection_features() {
     grep -qE '^test result: ok\. [1-9][0-9]* passed' <<<"$out" || {
         echo "  C1bn FAIL: wz-capture ran no tests"; echo "$out"; return 1; }
 
+    # R2054 (open-debt item 384) — the BSD address-family table, ARMED.
+    #
+    # `wz_capture::link`'s `BSD_AF_INET6` was decided once by hand against
+    # `tcpdump` in a session, with no reproducer in the repository. The
+    # adjudicator now lives in `wz-integration-tests` (it needs a tempdir and the
+    # packet-fixture checksums), and it SKIPS where `tcpdump` is absent -- which
+    # is right for a developer's machine and wrong for a lane, because a skip
+    # prints `ok` and reads as agreement. `WZ_TCPDUMP_REQUIRE=1` turns absence
+    # into a failure here, the same arming shape Layers D and F use, and this job
+    # installs `tcpdump` so the flag is a statement rather than a gamble.
+    #
+    # It rides C1bn because the SUBJECT is `wz_capture::link` and this is the
+    # lane that owns wz-capture's default-feature tests. It is not `#[ignore]`d,
+    # so a developer running the crate's tests gets the skip-or-check for free.
+    out="$(cd crates && WZ_TCPDUMP_REQUIRE=1 cargo test -p wz-integration-tests \
+        --test bsd_af_tcpdump_adjudicator --quiet 2>&1)" || { echo "$out"; return 1; }
+    grep -qE '^test result: ok\. 1 passed' <<<"$out" || {
+        echo "  C1bn FAIL: the BSD address-family adjudicator did not run"
+        echo "$out"; return 1; }
+
     # R311y645 — the tests that need BOTH `reassembly` and `network-codecs`, so
     # C1bt's arms cannot see them: its network arm has no reassembly and its
     # default-off arm has neither. This is the only lane that builds the pair,
