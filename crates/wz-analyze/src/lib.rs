@@ -3856,7 +3856,6 @@ fn render_sink_row(
         origin,
         space,
     } = at;
-    let keyexpr_at = lens.at(direction);
     // R311y679 — whether these bytes came out of a DECRYPTION. Not a constant:
     // this renderer took its second caller that round and the datagram rows it
     // produces are cleartext, so a hardcoded `(decrypted)` is a label that is
@@ -3868,6 +3867,12 @@ fn render_sink_row(
         wz_session_core::passive::Direction::A => ("A", endpoint(&flow.low), endpoint(&flow.high)),
         wz_session_core::passive::Direction::B => ("B", endpoint(&flow.high), endpoint(&flow.low)),
     };
+    // R2062 (open-debt item 478) — the misbinding plane learns WHO sent this
+    // row, so `PUBLISHER MISLABELLING` can end "Fix the publisher at `X`".
+    // `from` is the same endpoint this renderer already prints beside the row,
+    // which is what makes the finding and the row agree by construction rather
+    // than by a second lookup.
+    let keyexpr_at = lens.at(direction).published_by(&from);
     match (format, row) {
         (Format::Json, FieldRow::Walked(field)) => out.push_str(&format!(
             "{{\"from\":\"{from}\",\"to\":\"{to}\",\"direction\":\"{dir}\",\
@@ -6157,13 +6162,25 @@ mod tests {
              override must be said: {text}"
         );
         // R311y875's PLANE: the same two findings, counted, once per topic.
+        //
+        // R2062 (item 478) — and now per topic AND SENDER. The claim this leg
+        // makes is unchanged: two mislabelled samples are ONE finding, not two.
+        // What moved is that the finding names who to fix, which is the whole
+        // point of that round — both samples here come from one publisher, so
+        // the count is still 2 on one row.
         assert!(
             text.contains(
-                "PUBLISHER MISLABELLING -- 2 sample(s) on `demo/a` declare \
-                 `application/json`"
+                "PUBLISHER MISLABELLING -- 2 sample(s) on `demo/a` at \
+                 `10.0.0.2:7447` declare `application/json`"
             ),
             "the two mislabelled samples on one topic must be counted ONCE, as \
-             a finding about the deployment: {text}"
+             a finding about the deployment, and must name the publisher they \
+             tell the reader to fix: {text}"
+        );
+        assert!(
+            text.contains("Fix the publisher at `10.0.0.2:7447`"),
+            "and the instruction itself must carry that name, which is what a \
+             reader acts on: {text}"
         );
         assert!(
             text.contains("MAPPING WRONG -- 1 sample(s) on `demo/b` declare `application/json`"),

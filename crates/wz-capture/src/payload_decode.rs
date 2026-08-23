@@ -104,7 +104,7 @@ pub struct Declarations<'a> {
 ///
 /// A tuple and not a struct because it is a `BTreeMap` key and nothing else;
 /// [`Misbinding`] is the value a reader is handed.
-type MisbindingKey = (String, String, String, Misbound);
+type MisbindingKey = (String, String, String, Misbound, Option<String>);
 
 /// Round 2031 (item 300) — what one REFUSAL is, as a key: the topic, the rule's
 /// decoder, and what the publisher had said about the bytes.
@@ -221,7 +221,30 @@ impl<'a> Declarations<'a> {
     /// this type and not beside the render for the reason [`Self::unused`] is
     /// here: what a run MET is a fact about the run, and a `FormatMap` is
     /// configuration that does not change while a capture is walked.
-    fn record_misbinding(&self, keyexpr: &str, format: &str, declared: &str, wrong: Misbound) {
+    /// R2062 (open-debt item 478) — `publisher` is part of the key for
+    /// [`Misbound::Publisher`] AND ONLY FOR IT.
+    ///
+    /// The two verdicts do not want the same identity, which is why "put the
+    /// publisher in the key" was not the obvious answer the item warned against
+    /// taking. `PUBLISHER MISLABELLING` ends "Fix the publisher" and a reader
+    /// holding a topic with two of them cannot act on it — measured in R2034,
+    /// where a fixture with publishers at two addresses on one keyexpr rendered
+    /// a row naming neither. `MAPPING WRONG` ends "Fix the --payload-format
+    /// rule": the subject is the rule, the publisher is noise, and splitting
+    /// that row per sender would fragment one finding into several that all say
+    /// the same thing about the same rule.
+    fn record_misbinding(
+        &self,
+        keyexpr: &str,
+        format: &str,
+        declared: &str,
+        wrong: Misbound,
+        publisher: Option<&str>,
+    ) {
+        let publisher = match wrong {
+            Misbound::Publisher => publisher.map(String::from),
+            Misbound::Rule => None,
+        };
         *self
             .misbound
             .borrow_mut()
@@ -230,6 +253,7 @@ impl<'a> Declarations<'a> {
                 String::from(format),
                 String::from(declared),
                 wrong,
+                publisher,
             ))
             .or_insert(0) += 1;
     }
@@ -354,13 +378,16 @@ impl<'a> Declarations<'a> {
             .misbound
             .borrow()
             .iter()
-            .map(|((keyexpr, format, declared, wrong), samples)| Misbinding {
-                keyexpr: keyexpr.clone(),
-                format: format.clone(),
-                declared: declared.clone(),
-                wrong: *wrong,
-                samples: *samples,
-            })
+            .map(
+                |((keyexpr, format, declared, wrong, publisher), samples)| Misbinding {
+                    keyexpr: keyexpr.clone(),
+                    format: format.clone(),
+                    declared: declared.clone(),
+                    wrong: *wrong,
+                    publisher: publisher.clone(),
+                    samples: *samples,
+                },
+            )
             .collect();
         found.sort_by(|a, b| {
             b.samples
@@ -368,6 +395,10 @@ impl<'a> Declarations<'a> {
                 .then_with(|| a.keyexpr.cmp(&b.keyexpr))
                 .then_with(|| a.declared.cmp(&b.declared))
                 .then_with(|| a.wrong.cmp(&b.wrong))
+                // R2062 (item 478) — the publisher is part of the identity, so
+                // it has to be part of the total order too, or two rows that
+                // differ only by sender would tie and render in map order.
+                .then_with(|| a.publisher.cmp(&b.publisher))
         });
         found
     }
@@ -573,6 +604,14 @@ pub struct Misbinding {
     pub declared: String,
     /// Which side is wrong.
     pub wrong: Misbound,
+    /// R2062 (item 478) — WHO published these samples, for the verdict that
+    /// sends a reader to a publisher.
+    ///
+    /// `Some` only for [`Misbound::Publisher`], and only when the caller named
+    /// an endpoint. `None` on [`Misbound::Rule`] BY CONSTRUCTION, not by
+    /// accident: that verdict's sentence sends a reader to the rule, so a
+    /// sender here would be noise and would fragment one finding per publisher.
+    pub publisher: Option<String>,
     /// How many WALKED samples carried this triple. A lower bound where a
     /// listing bound bit; see [`Declarations::misbindings`].
     pub samples: usize,
@@ -595,7 +634,17 @@ impl Misbinding {
             declared,
             samples,
             wrong,
+            publisher,
         } = self;
+        // R2062 (item 478) — the sender, when this verdict has one to name.
+        //
+        // Rendered as a clause rather than folded into the sentence, so that a
+        // capture whose publisher the caller could not name reads exactly as it
+        // did before instead of carrying an empty pair of backticks.
+        let by = match publisher {
+            Some(p) => alloc::format!(" at `{p}`"),
+            None => String::new(),
+        };
         match wrong {
             Misbound::Rule => alloc::format!(
                 "MAPPING WRONG -- {samples} sample(s) on `{keyexpr}` declare `{declared}`, \
@@ -603,9 +652,9 @@ impl Misbinding {
                  nothing was decoded. Fix the --payload-format rule, not the wire"
             ),
             Misbound::Publisher => alloc::format!(
-                "PUBLISHER MISLABELLING -- {samples} sample(s) on `{keyexpr}` declare \
+                "PUBLISHER MISLABELLING -- {samples} sample(s) on `{keyexpr}`{by} declare \
                  `{declared}` and carry bytes that refute it; the `{format}` rule was \
-                 applied over the label and the fields are good. Fix the publisher"
+                 applied over the label and the fields are good. Fix the publisher{by}"
             ),
         }
     }
@@ -782,6 +831,14 @@ pub fn push_misbindings(declarations: Option<&Declarations<'_>>, out: &mut Strin
 pub struct KeyexprAt<'a> {
     direction: Direction,
     spaces: &'a KeyexprSpaces,
+    /// R2062 (open-debt item 478) — WHO sent this row, when the caller knows.
+    ///
+    /// `None` by default and set with [`Self::published_by`], so a caller that
+    /// has no endpoint to name (every unit fixture in this module) is unchanged
+    /// and a capture reader opts in. The identity is the SOURCE endpoint for
+    /// this direction, which is what `wz-analyze` already renders beside the
+    /// row and what item 478's evidence names its two publishers by.
+    publisher: Option<&'a str>,
 }
 
 impl<'a> KeyexprAt<'a> {
@@ -791,7 +848,24 @@ impl<'a> KeyexprAt<'a> {
     /// a caller that could supply one without the other could hand over a
     /// direction with nothing to resolve against.
     pub fn new(direction: Direction, spaces: &'a KeyexprSpaces) -> Self {
-        Self { direction, spaces }
+        Self {
+            direction,
+            spaces,
+            publisher: None,
+        }
+    }
+
+    /// R2062 (item 478) — name the endpoint this row came from.
+    ///
+    /// A builder rather than a third argument to [`Self::new`], and that is not
+    /// convenience: the pair in `new` is one fact (a direction is meaningless
+    /// without something to resolve against), while the publisher is a fact the
+    /// caller may simply not have. A capture reader knows the flow's endpoints;
+    /// a fixture handing one message to the decoder does not, and forcing it to
+    /// invent one would put a fabricated identity into a finding.
+    pub fn published_by(mut self, publisher: &'a str) -> Self {
+        self.publisher = Some(publisher);
+        self
     }
 }
 
@@ -1407,7 +1481,13 @@ pub fn decode_payload(field: &Field, map: &Declarations<'_>, at: KeyexprAt<'_>) 
             None
         }
         Claim::Vetoes(declared, checked) => {
-            map.record_misbinding(&keyexpr, format.name(), &declared, Misbound::Rule);
+            map.record_misbinding(
+                &keyexpr,
+                format.name(),
+                &declared,
+                Misbound::Rule,
+                at.publisher,
+            );
             return PayloadDecoding::EncodingMismatch {
                 keyexpr,
                 format: String::from(format.name()),
@@ -1416,7 +1496,13 @@ pub fn decode_payload(field: &Field, map: &Declarations<'_>, at: KeyexprAt<'_>) 
             };
         }
         Claim::Refuted(declared) => {
-            map.record_misbinding(&keyexpr, format.name(), &declared, Misbound::Publisher);
+            map.record_misbinding(
+                &keyexpr,
+                format.name(),
+                &declared,
+                Misbound::Publisher,
+                at.publisher,
+            );
             // Round 2031 (item 300) — a refusal AFTER this is the arm where
             // both claims are wrong, and until this round the misbinding above
             // was tallied while the refusal beside it was dropped. A reader was
@@ -2375,6 +2461,9 @@ mod tests {
                     format: String::from("protobuf"),
                     declared: String::from("application/json"),
                     wrong: Misbound::Publisher,
+                    // R2062 (item 478) — this caller named no endpoint, so
+                    // neither verdict carries one and the rows read as before.
+                    publisher: None,
                     samples: 2,
                 },
                 Misbinding {
@@ -2382,6 +2471,7 @@ mod tests {
                     format: String::from("protobuf"),
                     declared: String::from("application/json"),
                     wrong: Misbound::Rule,
+                    publisher: None,
                     samples: 1,
                 },
             ],
@@ -2394,6 +2484,88 @@ mod tests {
         assert!(
             Declarations::new(&map).misbindings().is_empty(),
             "a second run must not inherit the first run's findings"
+        );
+    }
+
+    /// R2062 (open-debt item 478) — "Fix the publisher" NAMES WHICH ONE, and
+    /// "Fix the rule" still does not.
+    ///
+    /// # The finding a reader could not act on
+    ///
+    /// R2034 built a deployment fixture with TWO publishers on `demo/a` and the
+    /// analyzer rendered `PUBLISHER MISLABELLING -- 3 sample(s) on `demo/a`
+    /// declare `application/json` ... Fix the publisher`. Which one? The row
+    /// carried keyexpr, format, declared, verdict and a count, and no sender at
+    /// all. And a topic with several publishers is not an edge case — it is the
+    /// ordinary shape of pub/sub, which is what item 304 settled.
+    ///
+    /// # Why the publisher is not simply "part of the key"
+    ///
+    /// Item 478 warned against exactly that, and this test is the assertion of
+    /// the warning: the two verdicts do not want the same identity.
+    /// `MAPPING WRONG` ends "Fix the --payload-format rule" — the subject is a
+    /// line the reader typed, the sender is noise, and keying on it would split
+    /// one finding into one per publisher that all say the same thing. So the
+    /// Publisher rows below are SPLIT by sender and the Rule row is not, from
+    /// the same three samples.
+    #[test]
+    fn a_publisher_verdict_names_its_sender_and_a_rule_verdict_does_not() {
+        let mut map = FormatMap::new();
+        map.declare("demo/**=protobuf").expect("a keyexpr pattern");
+        let spaces = KeyexprSpaces::new();
+        let refutes: &[u8] = &[0x08, 0x2a];
+        let bears_out: &[u8] = br#"{"a":1}"#;
+
+        // Item 478's own fixture: one keyexpr, two senders.
+        let from_2 = KeyexprAt::new(Direction::A, &spaces).published_by("10.0.0.2");
+        let from_3 = KeyexprAt::new(Direction::A, &spaces).published_by("10.0.0.3");
+
+        let run = Declarations::new(&map);
+        decode_payload(&put_declaring(ENC_JSON, refutes), &run, from_2);
+        decode_payload(&put_declaring(ENC_JSON, refutes), &run, from_3);
+        // The RULE verdict, from a third sender, to show it does not split.
+        decode_payload(&put_declaring(ENC_JSON, bears_out), &run, from_3);
+
+        let found = run.misbindings();
+        assert_eq!(
+            found.len(),
+            3,
+            "two publisher rows, one per sender, and one rule row: {found:?}"
+        );
+
+        let publisher_rows: Vec<&Misbinding> = found
+            .iter()
+            .filter(|m| m.wrong == Misbound::Publisher)
+            .collect();
+        let senders: Vec<Option<&str>> = publisher_rows
+            .iter()
+            .map(|m| m.publisher.as_deref())
+            .collect();
+        assert_eq!(
+            senders,
+            vec![Some("10.0.0.2"), Some("10.0.0.3")],
+            "each mislabelling is attributed to the endpoint that sent it"
+        );
+
+        let rule_rows: Vec<&Misbinding> =
+            found.iter().filter(|m| m.wrong == Misbound::Rule).collect();
+        assert_eq!(rule_rows.len(), 1, "the rule finding is ONE: {rule_rows:?}");
+        assert_eq!(
+            rule_rows[0].publisher, None,
+            "a rule finding sends the reader to the rule, so naming a sender \
+             would be noise and would fragment it"
+        );
+
+        // ── THE SENTENCE, which is what a reader actually gets ────────────
+        let said = publisher_rows[0].sentence();
+        assert!(
+            said.contains("Fix the publisher at `10.0.0.2`"),
+            "the instruction must name its subject: {said}"
+        );
+        assert!(
+            !rule_rows[0].sentence().contains("10.0.0."),
+            "and the rule sentence must not: {}",
+            rule_rows[0].sentence()
         );
     }
 
