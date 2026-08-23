@@ -589,6 +589,20 @@ pub(crate) fn expand_stock_zenoh_config(
             ));
         }
     }
+    // R2063 (open-debt item 214) — `routing/peer/mode` reaches the flag that
+    // implements it.
+    //
+    // Emitted only for `peer-to-peer`, because `linkstate` is what an absent
+    // `--peer-mode` already means: adding the flag for the default would put a
+    // word on the command line that changes nothing, and R311y844's rule for
+    // this expansion is that an added flag is a DIFFERENCE the file asked for.
+    // Withheld when the operator typed the flag, on the same rule every arm
+    // here follows -- an explicit argv beats a file.
+    if named("routing/peer/mode") && !cfg.peer_linkstate && !rest.iter().any(|a| a == "--peer-mode")
+    {
+        added.push("--peer-mode".into());
+        added.push("peer-to-peer".into());
+    }
     if named("transport/multicast/qos/enabled")
         && cfg.multicast_qos
         && cfg!(feature = "transport-qos")
@@ -1143,6 +1157,16 @@ mod stock_config_tests {
                 r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { multicast: { qos: { enabled: true } } } }"#,
             ),
+            // R2063 (open-debt item 214) — `peer-to-peer` and not the default,
+            // for the reason the `scouting/multicast/listen` row above states:
+            // the delta this gate looks for is a VALUE the file asked for, and
+            // `linkstate` is what an absent flag already means.
+            (
+                "routing/peer/mode",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     routing: { peer: { mode: "peer-to-peer" } } }"#,
+            ),
             (
                 "transport/shared_memory/enabled",
                 LISTEN_ONLY,
@@ -1266,6 +1290,90 @@ mod stock_config_tests {
             "a key the report calls honoured reaches no behaviour and is not \
              named in config_keys_the_demo_drops() (or one named there now does \
              something and should be removed)"
+        );
+    }
+
+    /// R2063 (open-debt item 214) — EVERY UPSTREAM KEY THIS DEMO'S `--help`
+    /// CITES IS ONE THE READER HONOURS.
+    ///
+    /// # The population, and why it is worth a gate of its own
+    ///
+    /// Item 214 records that `UNHONOURED_UPSTREAM_CONFIG_KEYS` mixes two
+    /// unrelated things under one name -- "wz cannot do this" and "the reader
+    /// has not learned it yet" -- and that sweeping all 82 is a round of its
+    /// own. It also points at a CHEAP SLICE that does not have to wait for that
+    /// sweep: the demo's own usage text cites upstream keys by path, and a key
+    /// this program tells an operator it implements had better be one the
+    /// reader can read.
+    ///
+    /// That population is six lines, derived here from the usage text rather
+    /// than listed, so a seventh citation arrives inside the gate instead of
+    /// beside it.
+    ///
+    /// # The two spellings, and why both are swept
+    ///
+    /// Upstream writes these paths with slashes and zenoh's own documentation
+    /// writes them with dots; this file does BOTH (`transport/link/tx/lease` at
+    /// one line, `routing.peer.mode` at another). A sweep that knew only one
+    /// form would have found five keys and reported the sixth as prose --
+    /// which is exactly the citation that turned out to be unhonoured.
+    #[test]
+    fn every_upstream_key_the_usage_text_cites_is_one_the_reader_honours() {
+        // The usage text as it ships, read rather than re-typed.
+        let usage = include_str!("usage.rs");
+
+        // A citation is `zenoh <path>` where the path has at least two
+        // segments in either spelling. Trailing punctuation is stripped
+        // because these appear inside sentences and parentheses.
+        let mut cited: Vec<String> = Vec::new();
+        for line in usage.lines() {
+            let mut rest = line;
+            while let Some(at) = rest.find("zenoh ") {
+                rest = &rest[at + "zenoh ".len()..];
+                let token: String = rest
+                    .chars()
+                    .take_while(|c| {
+                        c.is_ascii_alphanumeric() || *c == '_' || *c == '/' || *c == '.'
+                    })
+                    .collect();
+                let token = token.trim_end_matches('.').to_string();
+                let slashed = token.replace('.', "/");
+                if slashed.matches('/').count() >= 1 && !slashed.is_empty() {
+                    if !cited.contains(&slashed) {
+                        cited.push(slashed);
+                    }
+                }
+            }
+        }
+        cited.sort();
+
+        // ── ANTI-VACUITY ─────────────────────────────────────────────────
+        // A regex that stopped matching would find nothing and agree with
+        // everything. The count is not pinned -- a new citation should not red
+        // here, it should be CHECKED below -- but the sweep must reach the
+        // scale item 214 measured.
+        assert!(
+            cited.len() >= 5,
+            "the usage text cites {} upstream key(s); the sweep, not the file, \
+             is what changed: {cited:?}",
+            cited.len()
+        );
+        assert!(
+            cited.iter().any(|k| k.contains('.') || k.contains('/')),
+            "every citation must be a PATH: {cited:?}"
+        );
+
+        // ── THE CLAIM ────────────────────────────────────────────────────
+        let unhonoured: Vec<&String> = cited
+            .iter()
+            .filter(|k| !HONOURED_CONFIG_KEYS.contains(&k.as_str()))
+            .collect();
+        assert!(
+            unhonoured.is_empty(),
+            "this program's own `--help` tells an operator it implements \
+             {unhonoured:?}, and the config reader does not know those keys. A \
+             citation is a PROMISE: either honour the key or stop naming it. \
+             Cited: {cited:?}"
         );
     }
 

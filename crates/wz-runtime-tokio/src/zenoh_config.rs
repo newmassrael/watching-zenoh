@@ -212,6 +212,20 @@ pub struct ZenohNodeConfig {
     pub connect: Vec<String>,
     /// `scouting/multicast/enabled`.
     pub multicast_scouting: bool,
+    /// R2063 (open-debt item 214) — `routing/peer/mode`.
+    ///
+    /// `true` is upstream's `linkstate`, the default; `false` is
+    /// `peer-to-peer`. A `bool` and not a two-variant enum because that is the
+    /// shape the sink already has — `wz-ap-demo`'s `--peer-mode` parses to
+    /// `full_linkstate: bool` — and a third spelling here would be a type the
+    /// reader converts and nothing else consumes.
+    ///
+    /// ⚠ WHAT THIS HONOURS, precisely: it switches the DISCOVERY plane
+    /// (link-state ingest and re-flood) so a wz peer can learn and
+    /// gossip-autoconnect inside a default-configured zenoh subsystem. The
+    /// demo's own `--peer-mode` doc is explicit that the DATA plane in
+    /// `peer-to-peer` is not claimed, and reading the key does not widen that.
+    pub peer_linkstate: bool,
     /// `transport/link/tx/batch_size`.
     pub batch_size: u16,
     /// `transport/link/tx/lease` (milliseconds).
@@ -346,6 +360,12 @@ impl Default for ZenohNodeConfig {
             listen: Vec::new(),
             connect: Vec::new(),
             multicast_scouting: true,
+            // R2063 (item 214) — upstream's default is `linkstate`
+            // (`DEFAULT_CONFIG.json5`'s `routing.peer.mode`), and R2051's rule
+            // applies: a documented default is not a behaviour, so this
+            // matches what the SINK already defaults to -- `--peer-mode`
+            // absent is `full_linkstate = true` (`wz-ap-demo/src/main.rs:290`).
+            peer_linkstate: true,
             batch_size: 65_535,
             lease_ms: 10_000,
             max_links: 1,
@@ -711,6 +731,14 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     // validation with it, so a key routed there before this round would have
     // been honoured on paper and inert in fact.
     "connect/retry",
+    // R2063 (open-debt item 214) — MOVED from
+    // `UNHONOURED_UPSTREAM_CONFIG_KEYS`, and the reason is the item's own:
+    // that list carries two unrelated things under one name, and this key was
+    // the second kind -- not "wz cannot act on it" but "the reader had not
+    // learned it". The demo's `--peer-mode` has switched the discovery plane
+    // for rounds and its `--help` CITES this key by name (`usage.rs:128`), so
+    // an operator reading that line and putting it in their file got nothing.
+    "routing/peer/mode",
 ];
 
 /// R311y849 — the leaves that live INSIDE a honoured key which is a subtree
@@ -785,7 +813,10 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     "qos/network",
     "qos/publication",
     "routing/peer/linkstate/transport_weights",
-    "routing/peer/mode",
+    // R2063 (item 214) — `routing/peer/mode` MOVED to HONOURED_CONFIG_KEYS.
+    // It was in this list not because wz cannot act on it but because the
+    // reader had not learned it, which is exactly the two-kinds-under-one-name
+    // the item records. The demo's `--help` was already citing it.
     "routing/router/linkstate/transport_weights",
     "routing/router/peers_failover_brokering",
     "scouting/delay",
@@ -1157,6 +1188,32 @@ impl ZenohNodeConfig {
         if let Some(v) = want_endpoints(&doc, "listen/endpoints")? {
             out.listen = v;
             named.push("listen/endpoints");
+        }
+        // R2063 (open-debt item 214) — `routing/peer/mode`, which this demo's
+        // own `--help` has been citing as a key it implements while the reader
+        // did not know it. Matched against the two spellings upstream defines
+        // and nothing else: an unknown value is an ERROR rather than a silent
+        // fall back to `linkstate`, because a config that asks for
+        // `peer-to-peer` and quietly gets link-state discovery is the failure
+        // this key exists to prevent.
+        if let Some(v) = honoured(&doc, "routing/peer/mode") {
+            let Json5Value::String(name) = v else {
+                return Err(ConfigIngestError::WrongType {
+                    path: "routing/peer/mode",
+                    expected: "a string",
+                });
+            };
+            out.peer_linkstate = match name.as_str() {
+                "linkstate" => true,
+                "peer-to-peer" => false,
+                _ => {
+                    return Err(ConfigIngestError::WrongType {
+                        path: "routing/peer/mode",
+                        expected: "`linkstate` or `peer-to-peer`",
+                    })
+                }
+            };
+            named.push("routing/peer/mode");
         }
         if let Some(v) = want_bool(&doc, "scouting/multicast/enabled")? {
             out.multicast_scouting = v;
@@ -1706,6 +1763,14 @@ mod tests {
                 r#"{ "connect": { "retry": { "period_init_ms": 250,
                                             "period_max_ms": 9000,
                                             "period_increase_factor": 1.5 } } }"#,
+            ),
+            // R2063 (open-debt item 214) — `peer-to-peer` and not `linkstate`,
+            // because the default is `linkstate` and this gate requires the
+            // ingest to MOVE. A fixture naming the default would report the key
+            // honoured while proving only that the reader did not crash.
+            (
+                "routing/peer/mode",
+                r#"{ "routing": { "peer": { "mode": "peer-to-peer" } } }"#,
             ),
         ];
         // The case list IS the table, so a key added to one and not the other
