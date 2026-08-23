@@ -8555,6 +8555,35 @@ layer_c1bn_passive_dissection_features() {
         echo "  C1bn FAIL: the auth-union dissect filter matched no test"
         echo "$out"; return 1; }
 
+    # R2052 (open-debt item 377) — the MULTICAST UNION arm, and it exists for
+    # the same reason the auth one above does. The gate it carries holds
+    # `OPAQUE_ZBUF_BODIES`' "nothing in this tree writes it" reason against what
+    # `encode_join` ACTUALLY emits, so it needs the PRODUCER compiled in:
+    # `session-multicast` + `codec-join` + `transport-qos`, none of which
+    # `dissect` selects. Written without this arm it would have been
+    # `#[cfg]`-ed out of every lane in the file -- measured, not feared: the
+    # first run of `cargo test -p wz-session-core` found ZERO occurrences of it,
+    # and `cargo test --workspace` is not this tree's command at all (`no_std`
+    # and `http-send` unify into a `compile_error!`). That is open-debt item
+    # 386's population-0 shape arriving a third time in this same lane, so the
+    # test is pinned BY NAME rather than left to the count.
+    listing="$(cd crates && cargo test -p wz-session-core \
+        --features dissect,session-multicast,codec-join,transport-qos dissect:: -- --list 2>&1)" \
+        || { echo "$listing"; return 1; }
+    for name in \
+        dissect::tests::no_join_row_declared_opaque_is_one_encode_join_emits
+    do
+        grep -qF "$name: test" <<<"$listing" || {
+            echo "  C1bn FAIL: $name is absent from the multicast-union dissect build"
+            echo "$listing"; return 1; }
+    done
+    out="$(cd crates && cargo test -p wz-session-core \
+        --features dissect,session-multicast,codec-join,transport-qos dissect:: --quiet 2>&1)" \
+        || { echo "$out"; return 1; }
+    grep -qE '^test result: ok\. [1-9][0-9]* passed' <<<"$out" || {
+        echo "  C1bn FAIL: the multicast-union dissect filter matched no test"
+        echo "$out"; return 1; }
+
     # R311y605 — the JOIN arm of `parse_inbound`. Its own filter because the
     # `dissect::` one above cannot reach it: the tests live in `inbound`, and
     # the defect they pin was that the PASSIVE observer's parser reported every

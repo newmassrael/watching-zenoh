@@ -6310,6 +6310,155 @@ mod tests {
         }
     }
 
+    /// R2052 (open-debt item 377) — THE OPAQUE REASON AND THE PRODUCER, HELD
+    /// AGAINST EACH OTHER.
+    ///
+    /// # What the sweep above cannot see
+    ///
+    /// [`every_zbuf_row_is_either_walked_or_declared_opaque`] reds when a row
+    /// GAINS A WALKER while [`OPAQUE_ZBUF_BODIES`] still says it has none. That
+    /// is the LAST step of the failure, not the first. Item 377 names the first:
+    /// a row whose reason is "nothing in this tree writes it" becomes false the
+    /// day an ENCODER appears, and the walker is owed from that day — but the
+    /// sweep only notices once someone has already written the walker.
+    ///
+    /// R311y894 measured the cost of that gap. Two of the three rows the
+    /// paragraph then carried had had producers for HUNDREDS of rounds --
+    /// `multicast_join::write_join_qos_ext` since R311y227 and
+    /// `extshm::encode_shm_init_*_body` for as long as `session-extshm` existed
+    /// -- and both sat excluded under a reason that was already false. Nobody
+    /// found it by running anything; someone read the code.
+    ///
+    /// # What this checks instead
+    ///
+    /// The one row left whose reason is about ABSENCE of a producer is
+    /// `Join/shm`. Its producer, if it ever appears, is `encode_join` -- that
+    /// is the only thing in this tree that builds a Join. So the check is:
+    /// derive the SET of extension ids `encode_join` actually emits, FROM ITS
+    /// BYTES, and assert no `Join` row declared opaque is in it.
+    ///
+    /// Derived rather than declared, and by the DISSECTOR rather than by a
+    /// second reader: a pinned literal would be one more thing to go stale, and
+    /// that is the defect this test exists for.
+    ///
+    /// # Why the cfg is not a population-zero hole
+    ///
+    /// It looks like one twice over, and the second one WAS real until this
+    /// round fixed it.
+    ///
+    /// The cfg itself is right: the claim is "nothing in this tree WRITES it",
+    /// and only a build that HAS the writer can falsify it. A configuration
+    /// without `session-multicast` has no `encode_join` to contradict the
+    /// reason, so the gate's scope is exactly the claim's scope.
+    ///
+    /// ⚠ But a correctly-scoped gate still has to be RUN, and this one at first
+    /// was not. MEASURED: `cargo test -p wz-session-core` (default features)
+    /// reported zero occurrences of this test's name, and `cargo test
+    /// --workspace` is not this tree's command at all — `no_std` and
+    /// `http-send` unify into a `compile_error!`. Layer C1bn's `dissect-serde`
+    /// arm does not select `session-multicast` either. So the test existed and
+    /// ran nowhere, which is open-debt item 386's shape a third time in that
+    /// lane. C1bn now carries a MULTICAST-UNION arm that selects the producer's
+    /// features and pins this test BY NAME, exactly as R311y897 had to do for
+    /// the auth walkers.
+    #[cfg(all(
+        feature = "session-multicast",
+        feature = "codec-join",
+        feature = "transport-qos"
+    ))]
+    #[test]
+    fn no_join_row_declared_opaque_is_one_encode_join_emits() {
+        use crate::multicast_join::encode_join;
+        use crate::multicast_params::MulticastParams;
+        use crate::sn::MulticastTxConduits;
+        use wz_codecs::whatami::WhatAmI;
+
+        let base = MulticastParams {
+            version: 0x09,
+            whatami: WhatAmI::Peer,
+            zid: alloc::vec![0x01, 0x02, 0x03, 0x04],
+            lease_ms: 5_000,
+            join_interval_ms: 1,
+            seq_num_res: 0x02,
+            req_id_res: 0x02,
+            batch_size: 2_048,
+            is_qos: false,
+        };
+
+        // BOTH configurations, because the extension is `is_qos`-gated and a
+        // sweep of one of them would be a sweep of half the producer.
+        let mut emitted: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+        for is_qos in [false, true] {
+            let mut params = base.clone();
+            params.is_qos = is_qos;
+            let tx = MulticastTxConduits::new(crate::sn::mask_from_res(params.seq_num_res));
+            let dgram = encode_join(&params, &tx);
+            let walked = dissect_transport_message(&dgram, 0)
+                .expect("the walker rejected a JOIN this tree produced");
+            assert_eq!(
+                walked.span.end,
+                dgram.len(),
+                "the walk must account for every byte the producer wrote, or \
+                 the ids below are read out of a partial parse"
+            );
+            if let Some(exts) = walked.find("extensions") {
+                if let FieldValue::Nested(children) = &exts.value {
+                    for child in children {
+                        if child.name != "ext" {
+                            continue;
+                        }
+                        match child.find("ext_id").map(|f| &f.value) {
+                            Some(FieldValue::Bits(id)) | Some(FieldValue::Uint(id)) => {
+                                if !emitted.contains(id) {
+                                    emitted.push(*id);
+                                }
+                            }
+                            other => panic!("an ext entry with no readable id: {other:?}"),
+                        }
+                    }
+                }
+            }
+        }
+        emitted.sort_unstable();
+
+        // ANTI-VACUITY, and it is the whole instrument: if the walk saw NO
+        // extension at all then "no opaque row is emitted" would be true of a
+        // blind test. The qos configuration above must contribute one.
+        assert_eq!(
+            emitted,
+            alloc::vec![0x01],
+            "the SET of extension ids `encode_join` emits changed. This is a \
+             pinned set rather than a count because either direction matters: \
+             one FEWER means this test can no longer see an extension and its \
+             conclusion below is vacuous, one MORE means this tree started \
+             writing a Join extension it did not write before -- and if that id \
+             is a row of OPAQUE_ZBUF_BODIES, that row's reason is now false and \
+             a walker is owed",
+        );
+
+        // THE LINKAGE. Every `Join` row declared opaque must be an id the
+        // producer does NOT emit -- which is what its reason claims.
+        for (carrier, name, why) in OPAQUE_ZBUF_BODIES {
+            if *carrier != crate::ext_name::ExtCarrier::Join {
+                continue;
+            }
+            let id = crate::ext_name::rows(*carrier)
+                .iter()
+                .find(|(_, _, enc, n)| *enc == crate::ext_header::EXT_ENC_ZBUF && n == name)
+                .map(|(id, _, _, _)| u64::from(*id))
+                .unwrap_or_else(|| panic!("Join/{name} is not a ZBuf row of that carrier"));
+            assert!(
+                !emitted.contains(&id),
+                "Join/{name} is declared opaque because \"{why}\" -- and \
+                 `encode_join` now EMITS id {id:#x}. The reason is false as of \
+                 this build: a walker is owed, and until it lands a reader sees \
+                 hex for a body this tree writes itself. This is item 377's \
+                 failure caught at the ENCODER rather than hundreds of rounds \
+                 later at the walker.",
+            );
+        }
+    }
+
     // ── R311y898: the Z64 AXIS. Every walker above reads a ZBuf body. The
     // `ExtZint` arm of `walk_ext_entry` has never had one, so a Z64 extension
     // renders as `value: <n>` whatever structure that number holds — and three
