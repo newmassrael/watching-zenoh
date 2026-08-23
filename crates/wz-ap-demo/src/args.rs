@@ -304,6 +304,31 @@ pub(crate) fn expand_stock_zenoh_config(
     rest: &[String],
     read_file: impl FnOnce(&str) -> Result<String, String>,
 ) -> Result<Option<StockConfigExpansion>, String> {
+    expand_stock_zenoh_config_for_build(
+        rest,
+        read_file,
+        wz::runtime_tokio::compiled_in_link_schemes(),
+    )
+}
+
+/// [`expand_stock_zenoh_config`] with the reader's link census named rather
+/// than taken from this binary.
+///
+/// R2070 (open-debt item 487) — one function was answering two questions that
+/// only look alike. "Does this key reach a flag" is about the READER's
+/// key→flag mapping and is true or false whatever links are compiled in;
+/// "can this node open that endpoint" is about the BUILD and is the refusal
+/// this seam gained in R2070. They collided the moment the second arrived: the
+/// honoured-key coverage fixture states the TLS root-CA case over a `tls/...`
+/// endpoint, because `--tls-ca` has an endpoint-scheme precondition, and on a
+/// default build that file is now refused before any key is read. Naming the
+/// census makes each test say which of the two it is judging.
+#[cfg(feature = "zenoh-config")]
+pub(crate) fn expand_stock_zenoh_config_for_build(
+    rest: &[String],
+    read_file: impl FnOnce(&str) -> Result<String, String>,
+    compiled_in_schemes: &[&str],
+) -> Result<Option<StockConfigExpansion>, String> {
     use wz::runtime_tokio::zenoh_config::ZenohNodeConfig;
 
     let Some(path) = parse_pair(rest, "--config") else {
@@ -314,7 +339,14 @@ pub(crate) fn expand_stock_zenoh_config(
         ZenohNodeConfig::from_json5(&source).map_err(|e| format!("--config: {path}: {e}"))?;
     // A defect is refused HERE rather than surfacing as a failed bind some
     // milliseconds later, which is the whole reason `validate` exists.
-    let defects = ingest.config.validate();
+    //
+    // R2070 (open-debt item 487) — and the reader passes its OWN link census,
+    // because a config that is perfectly correct for the stock zenohd it was
+    // written for can still name a scheme THIS demo binary was not built with.
+    // `validate()` alone judged the file for zenohd and let `vsock/...` or
+    // `ws/...` through on a default build, which put the failure back in the
+    // post-start log this refusal exists to precede.
+    let defects = ingest.config.validate_for_build(Some(compiled_in_schemes));
     if !defects.is_empty() {
         let mut msg = format!("--config: {path} cannot work:");
         for d in &defects {
@@ -682,6 +714,29 @@ mod stock_config_tests {
             .map(|o| o.expect("--config was on the command line"))
     }
 
+    /// [`expand`] as a build that carries EVERY link zenoh does.
+    ///
+    /// R2070 (open-debt item 487) — the key-coverage fixtures state the TLS
+    /// root-CA case over a `tls/...` endpoint (that flag's precondition is an
+    /// endpoint of that scheme), and on a default build the reader now refuses
+    /// such a file before reading a key. That refusal is right, and it is
+    /// witnessed by `a_scheme_this_build_has_no_backend_for_is_refused_up_front`;
+    /// what it must not do is answer a question about key→flag mapping with a
+    /// fact about cargo features. So the coverage test names its reader, and
+    /// every other test here keeps using [`expand`] — the shipped path, census
+    /// and all.
+    fn expand_as_a_build_with_every_link(
+        cli: &[&str],
+        file: &str,
+    ) -> Result<StockConfigExpansion, String> {
+        expand_stock_zenoh_config_for_build(
+            &argv(cli),
+            |_| Ok(String::from(file)),
+            wz::runtime_tokio::zenoh_config::ZENOH_LINK_PROTOCOLS,
+        )
+        .map(|o| o.expect("--config was on the command line"))
+    }
+
     #[test]
     fn no_config_flag_leaves_the_command_line_untouched() {
         let out = expand_stock_zenoh_config(&argv(&["--listen", "127.0.0.1:1"]), |_| {
@@ -830,6 +885,55 @@ mod stock_config_tests {
         })
         .unwrap_err();
         assert!(unreadable.contains("gone.json5"), "{unreadable}");
+    }
+
+    /// R2070 (open-debt item 487) — a config that is correct FOR A STOCK
+    /// ZENOHD and wrong for this binary. The scheme is a real zenoh one, so
+    /// nothing about the file is malformed; what is missing is the link
+    /// backend in the reader, and before this round the demo said nothing and
+    /// failed at bind instead.
+    ///
+    /// The case is stated over a scheme that is NOT a default feature and is
+    /// picked from the census at run time, so the test cannot go stale by
+    /// asserting a gap that a later round closes: on a build that HAS every
+    /// backend there is nothing to refuse, and the test says so rather than
+    /// inventing a failure.
+    #[test]
+    fn a_scheme_this_build_has_no_backend_for_is_refused_up_front() {
+        let census = wz::runtime_tokio::compiled_in_link_schemes();
+        let Some(absent) = [
+            "vsock",
+            "serial",
+            "unixpipe",
+            "unixsock-stream",
+            "ws",
+            "tls",
+        ]
+        .into_iter()
+        .find(|s| !census.contains(s)) else {
+            // Every candidate is compiled in — there is no defect to produce,
+            // and asserting one would be asserting the build's feature set.
+            return;
+        };
+        let file =
+            format!(r#"{{ mode: "client", connect: {{ endpoints: ["{absent}/host:7447"] }} }}"#);
+        let err = expand(&["--config", "z.json5"], &file).unwrap_err();
+        assert!(err.contains("cannot work"), "{err}");
+        assert!(
+            err.contains("this build has no link backend for"),
+            "{absent} was not named as absent: {err}"
+        );
+        // CONTROL: the same file over a scheme the census DOES carry expands
+        // instead of refusing, so the refusal is about the backend and not
+        // about connect endpoints in general.
+        let carried = census.first().expect("a build that can open something");
+        let file =
+            format!(r#"{{ mode: "client", connect: {{ endpoints: ["{carried}/host:7447"] }} }}"#);
+        let out = expand(&["--config", "z.json5"], &file).expect("a carried scheme expands");
+        assert_eq!(
+            out.added,
+            argv(&["--connect", &format!("{carried}/host:7447")])
+        );
     }
 
     /// The keys wz does not honour reach the caller so they can be printed —
@@ -1266,9 +1370,9 @@ mod stock_config_tests {
         let mut reached_nothing: Vec<&str> = Vec::new();
         for (key, control, variant) in &fixtures {
             let cli = cli_for(key);
-            let base = expand(cli, control)
+            let base = expand_as_a_build_with_every_link(cli, control)
                 .unwrap_or_else(|e| panic!("{key}: the control config is not readable: {e}"));
-            let with = expand(cli, variant)
+            let with = expand_as_a_build_with_every_link(cli, variant)
                 .unwrap_or_else(|e| panic!("{key}: the variant config is not readable: {e}"));
             // Vacuity guard: a fixture that does not actually name the key
             // would report "dropped" for a typo in this table.

@@ -1754,6 +1754,69 @@ impl AcceptedLink {
     }
 }
 
+/// The link schemes THIS BUILD can actually bind and dial, derived from the
+/// very `#[cfg]` predicates that gate the [`dial_locator`] / [`bind_locator`]
+/// arms below — not from a list of what zenoh carries.
+///
+/// R2070 (open-debt item 487) — the distinction has a cost that was measured
+/// rather than argued. `zenoh_config::ZENOH_LINK_PROTOCOLS` names the nine
+/// schemes a stock zenoh 1.5.0 can carry, and it is RIGHT for the emit
+/// direction: a config generated for a real zenohd is coherent whatever this
+/// build compiled in. But wz's own links are every one of them a cargo
+/// feature, and the default build carries only `tcp` + `udp`. So a config
+/// naming `vsock/...` passed `validate()` clean and then failed at bind —
+/// exactly the post-start log line that verdict exists to precede.
+///
+/// It also answers the census question "which links does wz support", which
+/// is not the same question as "which does this build have". A 2026-08-23
+/// external review read the tree and reported `ws` as an ABSENT transport;
+/// `ws` is implemented, gated, and has two zenohd interop witnesses, but it
+/// is not a default feature, so a reader looking at default-build symbols
+/// could not tell it from a gap. A list the build derives cannot mislead
+/// that way: it says what THIS build has, and the feature that turns it on
+/// is named right next to it.
+///
+/// The scheme set is deliberately NOT one-to-one with the feature set:
+/// `transport-link-quic-datagram` adds no scheme, because its link declares
+/// the prefix `"quic"` and shares it with the stream backend (the same
+/// reason `ZENOH_LINK_PROTOCOLS` omits it).
+///
+/// Bound to reality by `zenoh_config`'s
+/// `the_compiled_in_scheme_census_agrees_with_what_bind_locator_does`, which
+/// asks `bind_endpoint` once per upstream scheme instead of re-reading this
+/// list — so a backend added without a line here fails a test rather than
+/// answering a config question wrongly. It lives over there because that is
+/// where the OTHER list (`ZENOH_LINK_PROTOCOLS`) is in scope, and the point
+/// of the check is that the two disagree in a known way.
+pub const COMPILED_IN_LINK_SCHEMES: &[&str] = &[
+    // `tcp` carries no arm-level cfg: this whole module is gated on
+    // `transport-link-tcp`, so reaching this constant IS the tcp predicate.
+    "tcp",
+    #[cfg(feature = "transport-link-udp")]
+    "udp",
+    #[cfg(feature = "transport-link-tls")]
+    "tls",
+    #[cfg(feature = "transport-link-quic")]
+    "quic",
+    #[cfg(feature = "transport-link-serial")]
+    "serial",
+    #[cfg(feature = "transport-link-unixsock")]
+    "unixsock-stream",
+    #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+    "unixpipe",
+    #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
+    "vsock",
+    #[cfg(feature = "transport-link-ws")]
+    "ws",
+];
+
+/// The sentence every cfg-off arm of [`dial_locator`] / [`bind_locator`] puts
+/// in its `Unsupported` error, minus the feature name. It is what tells a
+/// "this build lacks the backend" refusal apart from "the address did not
+/// take" or "no cert was supplied", and so it is the discriminator
+/// [`COMPILED_IN_LINK_SCHEMES`] is checked against.
+pub const NOT_COMPILED_IN_MARKER: &str = "requires the transport-link-";
+
 /// Dial a parsed [`AnyLocator`] to its raw transport — the mode-agnostic dial
 /// seam, dispatching on the locator's scheme.
 ///

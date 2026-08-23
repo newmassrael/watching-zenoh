@@ -1175,6 +1175,30 @@ pub mod quic_datagram_pipeline;
 #[cfg(all(feature = "transport-link-tcp", feature = "transport-unicast"))]
 pub mod session_open;
 
+/// The link schemes THIS BUILD can bind and dial — the always-compiled way to
+/// ask [`session_open::COMPILED_IN_LINK_SCHEMES`], which lives behind the same
+/// gate as the arms it is derived from.
+///
+/// R2070 (open-debt item 487) — a caller that judges a config does not
+/// necessarily carry the session-open module (`zenoh_config` is gated on
+/// `zenoh-config-emit`, which composes no transport), and the honest answer
+/// for a build without it is EMPTY: with no `dial_locator` and no
+/// `bind_locator` there is no scheme it can open, not even tcp. The two arms
+/// repeat the module's own gate on purpose — that is what makes the repeat
+/// safe, because a predicate that drifted from the `pub mod` line above would
+/// name a module that is not there and fail to compile rather than answer
+/// wrongly.
+pub fn compiled_in_link_schemes() -> &'static [&'static str] {
+    #[cfg(all(feature = "transport-link-tcp", feature = "transport-unicast"))]
+    {
+        session_open::COMPILED_IN_LINK_SCHEMES
+    }
+    #[cfg(not(all(feature = "transport-link-tcp", feature = "transport-unicast")))]
+    {
+        &[]
+    }
+}
+
 /// R311uy — the storage service DRIVER (§5.11 storage, atom 3/4): the AP
 /// tokio binding for the runtime-agnostic storage kernel. A
 /// [`storage_service::StorageService`] declares a capture [`Subscriber`]

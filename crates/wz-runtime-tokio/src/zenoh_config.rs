@@ -108,6 +108,44 @@ pub const ZENOH_LINK_PROTOCOLS: &[&str] = &[
     "ws",
 ];
 
+/// Every link scheme wz can serve, paired with the cargo feature that compiles
+/// its backend in.
+///
+/// R2070 (open-debt item 487) — the catalogue, as opposed to
+/// `crate::compiled_in_link_schemes()`, which is what ONE build has. Both
+/// answers are needed and they are different sentences: a 2026-08-23 external
+/// review read this tree and reported `ws` as a MISSING transport, when `ws`
+/// is implemented, feature-gated, and carries two zenohd interop witnesses —
+/// it simply is not on by default, and nothing said so in a place a reader
+/// would find. This table is that place, and it is what lets
+/// [`ConfigDefect::ProtocolNotCompiledIn`] end with the flag to flip instead
+/// of leaving an operator to guess it.
+///
+/// The mapping is NOT the identity, which is the whole reason it is written
+/// down: `unixsock-stream` is served by `transport-link-unixsock`, and a
+/// message that derived the feature name from the scheme would be wrong for
+/// exactly the scheme fewest people know by heart.
+pub const LINK_SCHEME_FEATURES: &[(&str, &str)] = &[
+    ("tcp", "transport-link-tcp"),
+    ("udp", "transport-link-udp"),
+    ("tls", "transport-link-tls"),
+    ("quic", "transport-link-quic"),
+    ("serial", "transport-link-serial"),
+    ("unixsock-stream", "transport-link-unixsock"),
+    ("unixpipe", "transport-link-unixpipe"),
+    ("vsock", "transport-link-vsock"),
+    ("ws", "transport-link-ws"),
+];
+
+/// The cargo feature that compiles in `scheme`'s link backend, if wz serves
+/// that scheme at all. See [`LINK_SCHEME_FEATURES`].
+pub fn link_scheme_feature(scheme: &str) -> Option<&'static str> {
+    LINK_SCHEME_FEATURES
+        .iter()
+        .find(|(s, _)| *s == scheme)
+        .map(|(_, feature)| *feature)
+}
+
 /// A reason a topology cannot work, stated before anything is started.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigDefect {
@@ -123,6 +161,23 @@ pub enum ConfigDefect {
         /// The endpoint as given.
         endpoint: String,
         /// The scheme that was not recognised.
+        protocol: String,
+    },
+    /// An endpoint whose protocol IS one stock zenoh carries, but which the
+    /// binary judging the config was not built with — so the node this config
+    /// starts cannot bind or dial it.
+    ///
+    /// R2070 (open-debt item 487) — this is the one defect that is a property
+    /// of the READER rather than of the file, which is why it is reported only
+    /// when [`ZenohNodeConfig::validate_for_build`] is told which schemes the
+    /// reader has. A config emitted for a stock zenohd must NOT collect it:
+    /// zenohd carries all nine, and narrowing the emit verdict to this build's
+    /// features would reject files that are perfectly correct for their
+    /// target.
+    ProtocolNotCompiledIn {
+        /// The endpoint as given.
+        endpoint: String,
+        /// The scheme this build has no link backend for.
         protocol: String,
     },
     /// The same listen endpoint twice. zenoh binds them in order and the
@@ -159,6 +214,23 @@ impl core::fmt::Display for ConfigDefect {
                 f,
                 "endpoint {endpoint:?} uses protocol {protocol:?}, which stock zenoh does not carry"
             ),
+            // The feature comes from `LINK_SCHEME_FEATURES` rather than from
+            // the scheme name: the mapping is not the identity, and the one
+            // place it differs (`unixsock-stream` -> `transport-link-unixsock`)
+            // is the scheme an operator is least likely to know by heart. A
+            // scheme with no entry is possible only if wz cannot serve it at
+            // all, and then the honest ending is silence, not a guess.
+            ConfigDefect::ProtocolNotCompiledIn { endpoint, protocol } => {
+                write!(
+                    f,
+                    "endpoint {endpoint:?} uses protocol {protocol:?}, which stock zenoh \
+                     carries but this build has no link backend for"
+                )?;
+                match link_scheme_feature(protocol) {
+                    Some(feature) => write!(f, " (compile it in with the {feature} feature)"),
+                    None => Ok(()),
+                }
+            }
             ConfigDefect::DuplicateListenEndpoint { endpoint } => {
                 write!(f, "listen endpoint {endpoint:?} appears more than once")
             }
@@ -474,7 +546,32 @@ impl ZenohNodeConfig {
     /// Every reason this topology cannot work, in a stable order. An empty
     /// result means the config is coherent — NOT that the node will find a
     /// peer, which is a question about the network rather than the config.
+    ///
+    /// This is the verdict for a STOCK zenohd: the reader is assumed to carry
+    /// every scheme zenoh does. To judge the same file for the wz binary
+    /// holding it, use [`ZenohNodeConfig::validate_for_build`].
     pub fn validate(&self) -> Vec<ConfigDefect> {
+        self.validate_for_build(None)
+    }
+
+    /// [`ZenohNodeConfig::validate`], plus the one verdict that depends on who
+    /// is reading: `compiled_in_schemes`, when supplied, is the set of link
+    /// schemes the READER can actually bind and dial, and an endpoint outside
+    /// it collects [`ConfigDefect::ProtocolNotCompiledIn`].
+    ///
+    /// R2070 (open-debt item 487) — the argument is an `Option` rather than a
+    /// narrowed constant because the two directions of this module genuinely
+    /// disagree. Emitting a config FOR a stock zenohd must accept all nine
+    /// schemes; starting a wz node FROM one must accept only what that node
+    /// was built with. Folding the second into the first would make the emit
+    /// path reject correct files, so the caller says which question it is
+    /// asking. `wz-runtime-tokio`'s answer for its own binary is
+    /// `crate::compiled_in_link_schemes()`.
+    ///
+    /// A scheme zenoh does not carry AT ALL stays a single
+    /// [`ConfigDefect::UnknownProtocol`]: it is already refused, and saying it
+    /// twice would turn one typo into two lines of a start-up refusal.
+    pub fn validate_for_build(&self, compiled_in_schemes: Option<&[&str]>) -> Vec<ConfigDefect> {
         let mut out = Vec::new();
         for endpoint in self.listen.iter().chain(self.connect.iter()) {
             match endpoint.split_once('/') {
@@ -484,6 +581,11 @@ impl ZenohNodeConfig {
                 Some((proto, _)) => {
                     if !ZENOH_LINK_PROTOCOLS.contains(&proto) {
                         out.push(ConfigDefect::UnknownProtocol {
+                            endpoint: endpoint.clone(),
+                            protocol: String::from(proto),
+                        });
+                    } else if compiled_in_schemes.is_some_and(|s| !s.contains(&proto)) {
+                        out.push(ConfigDefect::ProtocolNotCompiledIn {
                             endpoint: endpoint.clone(),
                             protocol: String::from(proto),
                         });
@@ -1510,6 +1612,217 @@ mod tests {
             let c = ZenohNodeConfig::default().listening_on(format!("{proto}x/x:1"));
             assert!(!c.validate().is_empty(), "{proto}x was accepted");
         }
+    }
+
+    // R2070 (open-debt item 487) — the two directions of this module disagree
+    // about the SAME file, and each half of this test is one of them. Before
+    // this round only the emit half existed, so a config naming a scheme this
+    // build has no backend for passed clean and failed at bind instead.
+    #[test]
+    fn a_scheme_the_build_cannot_open_is_a_defect_for_a_wz_node_but_not_for_an_emit() {
+        let c = ZenohNodeConfig::default().listening_on("vsock/2:7447");
+        // EMIT: unchanged, and it must stay unchanged — a stock zenohd carries
+        // vsock whatever this binary was built with.
+        assert!(
+            c.validate().is_empty(),
+            "the emit verdict narrowed: {:?}",
+            c.validate()
+        );
+        // WZ NODE: the same file, judged for a reader that can only open tcp.
+        assert_eq!(
+            c.validate_for_build(Some(&["tcp"])),
+            vec![ConfigDefect::ProtocolNotCompiledIn {
+                endpoint: String::from("vsock/2:7447"),
+                protocol: String::from("vsock"),
+            }]
+        );
+        // A scheme the reader DOES carry is not a defect — otherwise the check
+        // would be "any endpoint at all" wearing a protocol's name.
+        let c = ZenohNodeConfig::default().listening_on("tcp/127.0.0.1:7447");
+        assert!(
+            c.validate_for_build(Some(&["tcp"])).is_empty(),
+            "{:?}",
+            c.validate_for_build(Some(&["tcp"]))
+        );
+        // A scheme NOBODY carries stays exactly one defect. Two lines for one
+        // typo would be the reader repeating itself at start-up refusal time.
+        let c = ZenohNodeConfig::default().listening_on("carrier-pigeon/aviary:1");
+        assert_eq!(
+            c.validate_for_build(Some(&["tcp"])),
+            vec![ConfigDefect::UnknownProtocol {
+                endpoint: String::from("carrier-pigeon/aviary:1"),
+                protocol: String::from("carrier-pigeon"),
+            }]
+        );
+        // CONNECT endpoints are judged too, not just listen — the harm is
+        // symmetric (a dial that cannot be made is a node alone forever).
+        let c = ZenohNodeConfig::default().connecting_to("ws/example.org:7447");
+        assert_eq!(
+            c.validate_for_build(Some(&["tcp", "udp"])),
+            vec![ConfigDefect::ProtocolNotCompiledIn {
+                endpoint: String::from("ws/example.org:7447"),
+                protocol: String::from("ws"),
+            }]
+        );
+    }
+
+    // R2070 (open-debt item 487) — the census is only worth anything if it
+    // says what the BUILD does rather than what a list says, so the oracle
+    // here is `bind_locator` itself, asked once per upstream scheme. Gated on
+    // the session-open module's own predicate: without it there is nothing to
+    // ask, which is exactly the case `compiled_in_link_schemes` answers with
+    // an empty set.
+    #[cfg(all(feature = "transport-link-tcp", feature = "transport-unicast"))]
+    #[tokio::test]
+    async fn the_compiled_in_scheme_census_agrees_with_what_bind_locator_does() {
+        use crate::session_open::{
+            bind_endpoint, COMPILED_IN_LINK_SCHEMES, NOT_COMPILED_IN_MARKER,
+        };
+
+        // One probe endpoint per scheme, each chosen so that a build which DOES
+        // carry the backend leaves nothing behind: port 0 for the IP family
+        // (an ephemeral bind, dropped at once), a path under `/proc` for the
+        // two filesystem schemes (no directory can be made there, so no socket
+        // can be left), and a device name that is not a tty for serial.
+        const PROBES: &[(&str, &str)] = &[
+            ("tcp", "tcp/127.0.0.1:0"),
+            ("udp", "udp/127.0.0.1:0"),
+            ("tls", "tls/127.0.0.1:0"),
+            ("quic", "quic/127.0.0.1:0"),
+            ("serial", "serial//dev/wz-no-such-tty#baudrate=9600"),
+            ("unixsock-stream", "unixsock-stream//proc/wz-no-dir/x.sock"),
+            ("unixpipe", "unixpipe//proc/wz-no-dir/x.pipe"),
+            ("vsock", "vsock/2:0"),
+            ("ws", "ws/127.0.0.1:0"),
+        ];
+
+        // The population is the UPSTREAM surface, so a scheme zenoh gains
+        // arrives here as a missing probe rather than as silence.
+        for proto in ZENOH_LINK_PROTOCOLS {
+            assert!(
+                PROBES.iter().any(|(scheme, _)| scheme == proto),
+                "{proto} has no probe: a scheme entered ZENOH_LINK_PROTOCOLS \
+                 without anyone deciding whether this build can open it"
+            );
+        }
+        // And the census may not name a scheme the upstream list does not —
+        // the ratchet that keeps `quic-datagram` from acquiring a scheme of
+        // its own here while its link crate keeps sharing `"quic"`.
+        for scheme in COMPILED_IN_LINK_SCHEMES {
+            assert!(
+                ZENOH_LINK_PROTOCOLS.contains(scheme),
+                "{scheme} is compiled in but is not a scheme stock zenoh carries"
+            );
+        }
+
+        for (scheme, endpoint) in PROBES {
+            let refusal = match bind_endpoint(endpoint).await {
+                Ok(listener) => {
+                    drop(listener);
+                    None
+                }
+                // Every other failure — no cert, address unavailable, no such
+                // device — means the backend IS here and the address is not.
+                Err(e) => {
+                    let message = e.to_string();
+                    message.contains(NOT_COMPILED_IN_MARKER).then_some(message)
+                }
+            };
+            assert_eq!(
+                refusal.is_none(),
+                COMPILED_IN_LINK_SCHEMES.contains(scheme),
+                "{scheme}: the census says compiled-in={}, but bind_endpoint({endpoint:?}) says {}",
+                COMPILED_IN_LINK_SCHEMES.contains(scheme),
+                if refusal.is_some() {
+                    "the backend is absent"
+                } else {
+                    "the backend is here"
+                },
+            );
+            // And the SECOND column of the catalogue is checked against the
+            // arm's own words. Each cfg-off arm names the feature that would
+            // turn it on, a literal sitting beside the `#[cfg(feature = ...)]`
+            // the compiler checks — so a scheme paired with the wrong feature
+            // here is caught by the refusal itself rather than by a second
+            // copy of the pairing. Nothing else reads that column, which is
+            // how a hint like "enable transport-link-tls" could otherwise end
+            // up printed for a `ws/...` endpoint.
+            if let Some(message) = refusal {
+                let feature = link_scheme_feature(scheme)
+                    .unwrap_or_else(|| panic!("{scheme} is refusable but has no catalogue entry"));
+                assert!(
+                    message.contains(feature),
+                    "{scheme}: the catalogue says {feature}, but the arm refusing it says {message:?}"
+                );
+            }
+        }
+    }
+
+    // R2070 (open-debt item 487) — the catalogue half. `LINK_SCHEME_FEATURES`
+    // is prose in a const until something reads BOTH of its columns, and the
+    // right reader for the second column is cargo's own manifest: a feature
+    // that gets renamed (which has happened in this crate — the `zenoh-config`
+    // / `zenoh-config-emit` drift is still an open item) would otherwise leave
+    // a defect message telling an operator to enable a feature that no longer
+    // exists.
+    #[test]
+    fn every_scheme_names_a_cargo_feature_that_this_crate_actually_declares() {
+        // The manifest is read from the SHIPPED file, not from a fixture, so
+        // the assertion is about the crate rather than about a copy of it.
+        const MANIFEST: &str = include_str!("../Cargo.toml");
+
+        let mut catalogued: Vec<&str> = LINK_SCHEME_FEATURES.iter().map(|(s, _)| *s).collect();
+        let mut upstream: Vec<&str> = ZENOH_LINK_PROTOCOLS.to_vec();
+        catalogued.sort_unstable();
+        upstream.sort_unstable();
+        assert_eq!(
+            catalogued, upstream,
+            "the scheme catalogue and the upstream link list have diverged"
+        );
+
+        for (scheme, feature) in LINK_SCHEME_FEATURES {
+            assert!(
+                MANIFEST
+                    .lines()
+                    .any(|line| line.starts_with(&format!("{feature} ="))),
+                "{scheme} names the {feature} feature, which this crate does not declare"
+            );
+            assert_eq!(link_scheme_feature(scheme), Some(*feature));
+        }
+        // A scheme wz has no backend for at all would answer `None`, and the
+        // defect message would then end without a flag rather than with a
+        // wrong one.
+        assert_eq!(link_scheme_feature("carrier-pigeon"), None);
+
+        // The message an operator reads must carry the flag, not merely the
+        // diagnosis — that is the half the 2026-08-23 external review needed
+        // and did not have.
+        let named = ConfigDefect::ProtocolNotCompiledIn {
+            endpoint: String::from("unixsock-stream//tmp/z.sock"),
+            protocol: String::from("unixsock-stream"),
+        }
+        .to_string();
+        assert!(
+            named.contains("transport-link-unixsock"),
+            "the defect did not name the feature: {named}"
+        );
+    }
+
+    // R2070 — the census the binary actually answers with must agree with the
+    // module's, which is what makes `compiled_in_link_schemes()` safe to call
+    // from a caller that has no session-open module to reach into.
+    #[test]
+    fn the_always_compiled_accessor_answers_what_the_module_holds() {
+        #[cfg(all(feature = "transport-link-tcp", feature = "transport-unicast"))]
+        assert_eq!(
+            crate::compiled_in_link_schemes(),
+            crate::session_open::COMPILED_IN_LINK_SCHEMES
+        );
+        #[cfg(not(all(feature = "transport-link-tcp", feature = "transport-unicast")))]
+        assert!(
+            crate::compiled_in_link_schemes().is_empty(),
+            "a build with no session-open module can open no scheme at all"
+        );
     }
 
     #[test]
