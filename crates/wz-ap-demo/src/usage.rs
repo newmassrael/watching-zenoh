@@ -308,6 +308,17 @@ pub(crate) fn print_usage() {
     eprintln!("                             on_final callback. Lower = tighter bound on");
     eprintln!("                             post-deadline wall-time at the cost of more");
     eprintln!("                             wake-ups. Must be > 0. Default 100");
+    eprintln!("    --check-topology <file>  repeat once per node: read those stock-zenoh");
+    eprintln!("                             config files as ONE deployment, say whether they");
+    eprintln!("                             can form the network they describe, and exit");
+    eprintln!("                             (0 = yes, 2 = no) WITHOUT starting anything. Names");
+    eprintln!("                             a dial no node here listens on, two nodes claiming");
+    eprintln!("                             one address, and a set of nothing but clients —");
+    eprintln!("                             none of which a single config can be asked. The");
+    eprintln!("                             files are read as the WHOLE deployment, so a");
+    eprintln!("                             fragment's outward dials are reported as dangling.");
+    eprintln!("                             Nothing is resolved or probed. Requires the");
+    eprintln!("                             `zenoh-config` build feature");
     eprintln!("    --help, -h               print this help and exit");
     eprintln!();
     eprintln!("Exactly one of --listen / --connect / --scout is required.");

@@ -230,7 +230,12 @@ pub(crate) struct DynamicVolumeArgs {
 /// singleton, and `parse_pair` silently keeps only the first. A flag that
 /// accepts one value while its concept is plural is the shape that makes an
 /// operator's second `--plugin` disappear without a word.
-#[cfg(feature = "adminspace-config-hotreload")]
+///
+/// R2072 — the `zenoh-config` arm joined the gate rather than getting a second
+/// splitter of its own: `--check-topology` is plural for the same reason
+/// `--plugin` is, and a near-copy here would be a second opinion about what
+/// "repeatable" means.
+#[cfg(any(feature = "adminspace-config-hotreload", feature = "zenoh-config"))]
 pub(crate) fn parse_repeated(args: &[String], flag: &str) -> Vec<String> {
     args.windows(2)
         .filter(|w| w[0] == flag)
@@ -697,6 +702,115 @@ pub(crate) struct StockConfigExpansion {
     pub(crate) named: Vec<&'static str>,
     /// The keys the file carried that wz does not honour.
     pub(crate) ignored: Vec<String>,
+}
+
+/// R2072 (open-debt item 496) — `--check-topology <file>`, once per node:
+/// answer the SET question about a whole deployment before any of it starts.
+///
+/// ## Why a surface of its own, and not a widening of `--config`
+///
+/// [`expand_stock_zenoh_config`] reads the ONE file this process is about to
+/// become, and `validate_topology` cannot be reached from there. That node's
+/// `connect` list points OUTSIDE a set of one, so every entry in it would come
+/// back as a dangling target and the operator would be told their working
+/// deployment is broken — the exact false positive R2070b built its controls
+/// against. The set question needs the set, and only a caller holding every
+/// node's file can supply it. This is that caller: R2070b shipped the verdict
+/// with no consumer, and a verdict nothing asks for is a verdict nobody gets.
+///
+/// ## What the files are read as
+///
+/// A CLOSED deployment. "No node listens on it" means no node AMONG THESE, so
+/// handing this a fragment is answerable and the answer is its outward dials —
+/// the contract `validate_topology` states, surfaced here rather than
+/// softened. Nothing is started, resolved or probed: the verdict is a property
+/// of the documents, so it reproduces on a machine with no network.
+///
+/// Per-node defects are collected FIRST and named with the file that carried
+/// them, because a set verdict over a config that cannot work on its own would
+/// answer the harder question while the easier one is still open.
+#[cfg(feature = "zenoh-config")]
+pub(crate) fn check_topology(
+    rest: &[String],
+    read_file: impl FnMut(&str) -> Result<String, String>,
+) -> Option<Result<String, String>> {
+    check_topology_for_build(
+        rest,
+        read_file,
+        wz::runtime_tokio::compiled_in_link_schemes(),
+    )
+}
+
+/// [`check_topology`] with the reader's link census named rather than taken
+/// from this binary.
+///
+/// R2070's rule, applied here: a verdict that depends on WHO READS IT takes the
+/// reader as an argument. "Can this deployment form a network" is a property of
+/// the documents; "can THIS build open that endpoint" is a property of cargo's
+/// feature selection, and a test asking the first must not be answered with the
+/// second.
+#[cfg(feature = "zenoh-config")]
+pub(crate) fn check_topology_for_build(
+    rest: &[String],
+    mut read_file: impl FnMut(&str) -> Result<String, String>,
+    compiled_in_schemes: &[&str],
+) -> Option<Result<String, String>> {
+    use wz::runtime_tokio::zenoh_config::{validate_topology, ZenohNodeConfig};
+
+    let paths = parse_repeated(rest, "--check-topology");
+    if paths.is_empty() {
+        return None;
+    }
+
+    // A file that cannot be read or parsed ABORTS the check rather than being
+    // dropped from the set. Judging N-1 nodes and reporting on them would
+    // manufacture the very set defects this surface exists to state truly: the
+    // absent node is often the router, and without it the remainder is "every
+    // node is a client" plus a dangling dial apiece.
+    let mut configs = Vec::with_capacity(paths.len());
+    let mut notes = String::new();
+    for path in &paths {
+        let source = match read_file(path) {
+            Ok(source) => source,
+            Err(message) => return Some(Err(message)),
+        };
+        let ingest = match ZenohNodeConfig::from_json5(&source) {
+            Ok(ingest) => ingest,
+            Err(e) => return Some(Err(format!("--check-topology: {path}: {e}"))),
+        };
+        // Said out loud for the reason `--config` says it: a verdict of "these
+        // can form a network" over a document half of whose keys were never
+        // read would be taken for "this file is understood".
+        for key in &ingest.ignored {
+            notes.push_str(&format!("--check-topology: {path}: IGNORED {key}\n"));
+        }
+        configs.push(ingest.config);
+    }
+
+    let mut defects = String::new();
+    let mut count = 0usize;
+    for (path, config) in paths.iter().zip(configs.iter()) {
+        for defect in config.validate_for_build(Some(compiled_in_schemes)) {
+            count += 1;
+            defects.push_str(&format!("  {path}: {defect}\n"));
+        }
+    }
+    for defect in validate_topology(&configs) {
+        count += 1;
+        defects.push_str(&format!("  {defect}\n"));
+    }
+
+    if count == 0 {
+        Some(Ok(format!(
+            "{notes}--check-topology: {} node(s) can form the network they describe",
+            configs.len()
+        )))
+    } else {
+        Some(Err(format!(
+            "{notes}--check-topology: this deployment cannot work:\n{}",
+            defects.trim_end_matches('\n')
+        )))
+    }
 }
 
 #[cfg(all(test, feature = "zenoh-config"))]
@@ -1959,6 +2073,200 @@ mod stock_config_tests {
             TransportTuning::from_argv(&argv(&["--listen", "tcp/a:1"])).unwrap(),
             TransportTuning::default()
         );
+    }
+
+    // ── R2072 (open-debt item 496) — the deployment check ────────────────
+    //
+    // Every fixture below states a defect AND the legitimate shape one
+    // character away from it, in the same test. R2070b built `validate_topology`
+    // that way and this surface inherits the reason: a false positive here tells
+    // an operator their working deployment is broken, which is worse than the
+    // silence it replaces.
+
+    /// [`check_topology_for_build`] over a fixed set of in-memory files, with
+    /// the command line DERIVED from them so no fixture can name one file and
+    /// hand over another.
+    ///
+    /// The census is named rather than taken from this binary (R2070): every
+    /// fixture here asks whether these documents can form a network, and that
+    /// answer must not move when cargo's feature selection does.
+    fn check(files: &[(&str, &str)]) -> Result<String, String> {
+        let owned: Vec<(String, String)> = files
+            .iter()
+            .map(|(path, source)| (String::from(*path), String::from(*source)))
+            .collect();
+        let mut cli: Vec<String> = Vec::new();
+        for (path, _) in &owned {
+            cli.push(String::from("--check-topology"));
+            cli.push(path.clone());
+        }
+        check_topology_for_build(
+            &cli,
+            |wanted| {
+                owned
+                    .iter()
+                    .find(|(path, _)| path == wanted)
+                    .map(|(_, source)| source.clone())
+                    .ok_or_else(|| String::from("the fixture named a file it does not carry"))
+            },
+            wz::runtime_tokio::zenoh_config::ZENOH_LINK_PROTOCOLS,
+        )
+        .expect("the flag was on the command line")
+    }
+
+    const RTR_9: &str =
+        r#"{ id: "rtr", mode: "router", listen: { endpoints: ["tcp/10.0.0.9:7447"] } }"#;
+    const CLIENT_TO_9: &str =
+        r#"{ id: "c1", mode: "client", connect: { endpoints: ["tcp/10.0.0.9:7447"] } }"#;
+
+    /// A command line without the flag opens no file and judges nothing.
+    ///
+    /// The control for every fixture below: without it a reader that answered
+    /// unconditionally would pass all of them and also fire on every ordinary
+    /// run of this binary.
+    #[test]
+    fn without_the_flag_the_check_reads_nothing_and_judges_nothing() {
+        let out = check_topology(&argv(&["--listen", "127.0.0.1:1"]), |_| {
+            panic!("a command line without the flag must not open a file")
+        });
+        assert!(out.is_none(), "{out:?}");
+    }
+
+    /// A dial no node here answers is named; the SAME dialer beside the node
+    /// that does answer it is not.
+    ///
+    /// The two sets differ by one digit of one address. A check that reported
+    /// both would be telling an operator their working deployment is broken.
+    #[test]
+    fn a_dial_no_node_here_answers_is_named_and_the_matching_pair_is_not() {
+        const DIALER: &str =
+            r#"{ id: "edge", mode: "peer", connect: { endpoints: ["tcp/10.0.0.9:7447"] } }"#;
+        const ELSEWHERE: &str =
+            r#"{ id: "rtr", mode: "router", listen: { endpoints: ["tcp/10.0.0.8:7447"] } }"#;
+
+        let err = check(&[("edge.json5", DIALER), ("rtr.json5", ELSEWHERE)])
+            .expect_err("nothing in this set listens on 10.0.0.9");
+        assert!(
+            err.contains(r#"edge connects to "tcp/10.0.0.9:7447""#),
+            "{err}"
+        );
+
+        let ok = check(&[("edge.json5", DIALER), ("rtr.json5", RTR_9)])
+            .expect("the dial is answered by the node beside it");
+        assert!(ok.contains("2 node(s) can form"), "{ok}");
+    }
+
+    /// One concrete address claimed twice is named; two nodes on the same
+    /// WILDCARD are not.
+    ///
+    /// The control is the harder half. `tcp/0.0.0.0:7447` on two nodes is two
+    /// machines doing the ordinary thing, and calling that a collision would
+    /// refuse the commonest deployment there is.
+    #[test]
+    fn one_address_claimed_twice_is_named_and_two_wildcard_binds_are_not() {
+        const B_9: &str =
+            r#"{ id: "b", mode: "router", listen: { endpoints: ["tcp/10.0.0.9:7447"] } }"#;
+        const WILD_A: &str =
+            r#"{ id: "a", mode: "router", listen: { endpoints: ["tcp/0.0.0.0:7447"] } }"#;
+        const WILD_B: &str =
+            r#"{ id: "b", mode: "router", listen: { endpoints: ["tcp/0.0.0.0:7447"] } }"#;
+
+        let err = check(&[("a.json5", RTR_9), ("b.json5", B_9)])
+            .expect_err("two nodes cannot both bind one address");
+        assert!(err.contains("is claimed by rtr, b"), "{err}");
+
+        let ok = check(&[("a.json5", WILD_A), ("b.json5", WILD_B)])
+            .expect("two machines binding every interface is not a collision");
+        assert!(ok.contains("2 node(s) can form"), "{ok}");
+    }
+
+    /// A set of nothing but clients is named, and adding the one node that
+    /// listens clears it.
+    ///
+    /// The two sets differ by exactly one node, so a check that passed both
+    /// would be answering something other than the question asked.
+    #[test]
+    fn a_set_of_only_clients_is_named_and_one_listening_node_clears_it() {
+        const C2: &str =
+            r#"{ id: "c2", mode: "client", connect: { endpoints: ["tcp/10.0.0.9:7447"] } }"#;
+
+        let err = check(&[("c1.json5", CLIENT_TO_9), ("c2.json5", C2)])
+            .expect_err("a zenoh client never listens");
+        assert!(err.contains("every node is a client"), "{err}");
+
+        let ok = check(&[
+            ("c1.json5", CLIENT_TO_9),
+            ("c2.json5", C2),
+            ("rtr.json5", RTR_9),
+        ])
+        .expect("the router is what they attach to");
+        assert!(ok.contains("3 node(s) can form"), "{ok}");
+    }
+
+    /// A defect belonging to ONE node is named with the file that carried it,
+    /// and the bad file is SECOND on purpose — a report that always printed the
+    /// first path would pass a test that only asked whether a path appeared.
+    #[test]
+    fn a_per_node_defect_is_named_with_the_file_that_carried_it() {
+        const BAD: &str =
+            r#"{ id: "edge", mode: "peer", connect: { endpoints: ["banana/10.0.0.9:7447"] } }"#;
+
+        let err = check(&[("rtr.json5", RTR_9), ("edge.json5", BAD)])
+            .expect_err("`banana` is not a link protocol zenoh carries");
+        assert!(err.contains("edge.json5:"), "{err}");
+        assert!(!err.contains("rtr.json5:"), "{err}");
+    }
+
+    /// A clean verdict still names every key the check could not read.
+    ///
+    /// Without those lines "these can form a network" is read as "these files
+    /// are understood", and an operator whose access-control block decides who
+    /// may connect at all would have been told nothing about it.
+    #[test]
+    fn a_clean_verdict_still_names_every_key_the_check_could_not_read() {
+        const WITH_ACL: &str = r#"{ id: "rtr", mode: "router",
+             listen: { endpoints: ["tcp/10.0.0.9:7447"] },
+             access_control: { enabled: true } }"#;
+
+        let ok = check(&[("rtr.json5", WITH_ACL)]).expect("one router is a network of one");
+        assert!(
+            ok.contains("rtr.json5: IGNORED access_control/enabled"),
+            "{ok}"
+        );
+        assert!(ok.contains("1 node(s) can form"), "{ok}");
+    }
+
+    /// A file that cannot be read, or that reads but is not a config, ABORTS
+    /// the check rather than being dropped from the set.
+    ///
+    /// The discriminator is what the remaining nodes would say without it. The
+    /// absent file here is the ROUTER, so a check that skipped it would report
+    /// "every node is a client" plus a dangling dial — findings about a
+    /// deployment that is fine, manufactured by a typo in a path.
+    #[test]
+    fn a_file_that_cannot_be_read_aborts_rather_than_shrinking_the_set() {
+        let err = check_topology_for_build(
+            &argv(&[
+                "--check-topology",
+                "c1.json5",
+                "--check-topology",
+                "rtr.json5",
+            ]),
+            |wanted| match wanted {
+                "c1.json5" => Ok(String::from(CLIENT_TO_9)),
+                other => Err(format!("cannot read {other}: no such file")),
+            },
+            wz::runtime_tokio::zenoh_config::ZENOH_LINK_PROTOCOLS,
+        )
+        .expect("the flag was on the command line")
+        .expect_err("a file that cannot be read is not a deployment");
+        assert!(err.contains("cannot read rtr.json5"), "{err}");
+        assert!(!err.contains("every node is a client"), "{err}");
+
+        let err = check(&[("c1.json5", CLIENT_TO_9), ("rtr.json5", "{ mode: ")])
+            .expect_err("a truncated document is not a node");
+        assert!(err.contains("rtr.json5:"), "{err}");
+        assert!(!err.contains("every node is a client"), "{err}");
     }
 }
 

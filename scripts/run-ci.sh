@@ -4070,8 +4070,23 @@ layer_c1ay_cargo_test_router_hat() {
     # usage gate belongs here and NOT in a module of its own: every demo test
     # invocation in this file is filtered by module, so a new module would be a
     # gate no lane runs.
-    _runci_guarded_test "C1AY stock_config_tests 15" 15 \
+    # R2072 — 15 -> 23, and the number was ALREADY WRONG before this round
+    # touched it. R2070 added `a_scheme_this_build_has_no_backend_for_is_refused_
+    # up_front` to this module and left the guard at 15, so hosted C1ay has been
+    # red since that push (run 32674255995, step "Layer C1ay", "expected exactly
+    # 15 passed"). Measured here by RUNNING the lane's own command, which is the
+    # only way this number has ever been right: 16 at f80f6a19, plus the seven
+    # `--check-topology` witnesses this round adds.
+    _runci_guarded_test "C1AY stock_config_tests 23" 23 \
         cargo test -p wz-ap-demo --features zenoh-config stock_config_tests --quiet || return 1
+    # R2072 (open-debt item 496) — and the seam the module above structurally
+    # cannot reach: argv -> exit status. Every unit witness for `check_topology`
+    # would still pass if `main` never called it, which is item 479's class one
+    # layer up; only running the binary shows the flag is wired. Its own lane
+    # because it is its own test TARGET — the module filter above selects by
+    # name and would never reach it.
+    _runci_guarded_test "C1AY check_topology_binary 2" 2 \
+        cargo test -p wz-ap-demo --features zenoh-config --test check_topology_binary --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features routing-router-hat --quiet -- -D warnings \

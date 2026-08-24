@@ -128,6 +128,35 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    // R2072 (open-debt item 496) — `--check-topology <file>` once per node: the
+    // SET verdict over a whole deployment, before any of it is started. Handled
+    // ahead of `--config` and of every mode branch because it starts NOTHING:
+    // it reads the files, answers, and exits. R2070b shipped `validate_topology`
+    // with no consumer outside its own tests; this is the consumer.
+    #[cfg(feature = "zenoh-config")]
+    if let Some(verdict) = crate::args::check_topology(rest, |p| {
+        std::fs::read_to_string(p).map_err(|e| format!("--check-topology: cannot read {p}: {e}"))
+    }) {
+        return match verdict {
+            Ok(report) => {
+                eprintln!("wz-ap-demo: {report}");
+                ExitCode::SUCCESS
+            }
+            Err(report) => {
+                eprintln!("wz-ap-demo: {report}");
+                ExitCode::from(2)
+            }
+        };
+    }
+    #[cfg(not(feature = "zenoh-config"))]
+    if rest.iter().any(|a| a == "--check-topology") {
+        eprintln!(
+            "wz-ap-demo: --check-topology requires the `zenoh-config` feature \
+             (build: cargo build -p wz-ap-demo --features zenoh-config)"
+        );
+        return ExitCode::from(2);
+    }
+
     // R311y842 — `--config <file>`: the stock zenoh config an operator already
     // has, expanded into the argv every branch below already knows how to
     // parse. Handled HERE, ahead of every mode branch, because it can select
