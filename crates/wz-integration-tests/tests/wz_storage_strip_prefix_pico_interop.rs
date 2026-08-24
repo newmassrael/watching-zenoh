@@ -124,7 +124,14 @@ async fn wz_storage_strips_the_mount_prefix_from_a_pico_put() {
     );
 
     // wz acceptor handshake — the same accept path wz-ap-demo uses.
-    let (stream, _peer) = listener.accept().await.expect("accept pico client");
+    let (stream, _peer) = tokio::time::timeout(Duration::from_secs(8), listener.accept())
+        .await
+        .expect(
+            "zenoh-pico never dialled. It exits without connecting when its argv is \
+             wrong or its build lacks the feature under test, and a bare accept waits \
+             for that forever -- which does not fail the test, it cancels the job",
+        )
+        .expect("accept pico client");
     let params = fixture_session_init_params();
     let mut opened = accept_and_open_session(
         DialedLink::Tcp(stream),

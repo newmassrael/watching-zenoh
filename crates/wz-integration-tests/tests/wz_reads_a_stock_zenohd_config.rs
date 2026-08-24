@@ -1090,9 +1090,35 @@ fn init_syn_field_from_a_config(key: &str, fragment: &str) -> String {
         .expect("spawn wz-ap-demo");
     let guard = ChildGuard::wrap("wz-ap-demo (wire batch)", child);
 
-    let (mut stream, _) = listener
-        .accept()
-        .unwrap_or_else(|e| panic!("the demo never dialled the acceptor: {e}\n{source}"));
+    // R2083 — accept with a DEADLINE. `TcpListener::accept` blocks forever, and
+    // a test that waits forever does not fail: it takes the whole job's budget
+    // with it. That is not hypothetical — R2082's leg reached Layer E through a
+    // missing skip token, met a demo built without `zenoh-config` (which exits
+    // on `--config`), and the hosted `demo-spawning e2e` job was CANCELLED on
+    // its budget rather than reporting anything. The token is fixed above; this
+    // is the half that makes the leg safe wherever it runs.
+    listener
+        .set_nonblocking(true)
+        .expect("a listener that can be polled");
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let (mut stream, _) = loop {
+        match listener.accept() {
+            Ok(pair) => break pair,
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the demo never dialled the acceptor. Built without \
+                     `zenoh-config` it exits on `--config` and never connects, \
+                     which is what this deadline exists to say out loud\n{source}"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(e) => panic!("the acceptor could not accept: {e}\n{source}"),
+        }
+    };
+    stream
+        .set_nonblocking(false)
+        .expect("blocking reads on the accepted stream");
     stream
         .set_read_timeout(Some(Duration::from_secs(20)))
         .expect("a read deadline");

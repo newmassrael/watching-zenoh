@@ -2052,6 +2052,23 @@ PY
     # empty — a version that quietly analysed nothing would exit 0 forever and
     # read as coverage. Enforcement MEASURED by renaming a guarded test fn.
     python3 scripts/lib/count_guard_lint.py || return 1
+    # R2084 — the ACCEPT-DEADLINE gate. A test that opens a listener and spawns
+    # an external process at it has its liveness resting entirely on that
+    # process dialling; `TcpListener::accept` has no deadline and
+    # `#[tokio::test]` imposes none. When the partner does not come, such a test
+    # does not FAIL — the job is cancelled on its timeout and reports nothing,
+    # which is exactly how R2082's hosted `demo-spawning e2e` job produced no
+    # verdict at all while two other jobs carried the real reds.
+    #
+    # The rule was already this tree's convention (21 of 29 in-scope sites were
+    # deadlined before this gate existed); it simply had nothing holding it, so
+    # eight had drifted off. Accepts with an IN-PROCESS partner are a different
+    # failure mode and are counted out of scope out loud rather than swept in,
+    # since a gate that opens with 58 violations becomes a ceiling instead of a
+    # rule. Enforcement MEASURED by `--selftest`, which drives the same
+    # predicate the scan drives and checks the window actually binds.
+    python3 scripts/lib/accept_deadline_lint.py --selftest || return 1
+    python3 scripts/lib/accept_deadline_lint.py || return 1
     # R311y892 (debt-job-budget-binding) — the JOB-BUDGET BINDING gate. Layer
     # C0b already selftests `job-budget-margin.sh` in both directions, and what
     # had no gate at all was the number it is HANDED: the budget argument has to

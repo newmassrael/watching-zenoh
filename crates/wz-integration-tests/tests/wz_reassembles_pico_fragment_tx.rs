@@ -188,7 +188,14 @@ async fn run_pico_put_against_wz_acceptor(payload: &str, expect_match: bool) -> 
     // wz acceptor handshake (batch_size = 64). Same accept path as wz-ap-demo
     // (runner.rs), which `ap_demo_round_trip.rs` proves interoperates with a
     // pico z_put client; the only delta is the tiny advertised batch.
-    let (stream, _peer) = listener.accept().await.expect("accept pico client");
+    let (stream, _peer) = tokio::time::timeout(Duration::from_secs(8), listener.accept())
+        .await
+        .expect(
+            "zenoh-pico never dialled. It exits without connecting when its argv is \
+             wrong or its build lacks the feature under test, and a bare accept waits \
+             for that forever -- which does not fail the test, it cancels the job",
+        )
+        .expect("accept pico client");
     let mut params = fixture_session_init_params();
     params.batch_size = BATCH_SIZE;
     let mut opened = accept_and_open_session(

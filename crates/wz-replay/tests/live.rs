@@ -65,7 +65,15 @@ async fn the_binary_dials_a_peer_and_that_peer_decodes_the_captured_samples() {
     // than a spawned one -- the arrangement every in-process handshake test in
     // this workspace uses.
     let acceptor = async move {
-        let (stream, _peer) = listener.accept().await.expect("accept");
+        let (stream, _peer) =
+            tokio::time::timeout(std::time::Duration::from_secs(8), listener.accept())
+                .await
+                .expect(
+                    "the spawned wz-replay never dialled. A binary that exits on its \
+                     argv never connects, and a bare accept waits for that forever -- \
+                     which does not fail the test, it cancels the job",
+                )
+                .expect("accept");
         let clock = TokioTime::new();
         let OpenedSession {
             mut engine,
@@ -182,7 +190,15 @@ async fn the_alert_reaches_a_peer_and_a_clean_capture_sends_it_nothing() {
     let recorder = heard.clone();
 
     let acceptor = async move {
-        let (stream, _peer) = listener.accept().await.expect("accept");
+        let (stream, _peer) =
+            tokio::time::timeout(std::time::Duration::from_secs(8), listener.accept())
+                .await
+                .expect(
+                    "the spawned wz-replay never dialled. A binary that exits on its \
+                     argv never connects, and a bare accept waits for that forever -- \
+                     which does not fail the test, it cancels the job",
+                )
+                .expect("accept");
         let clock = TokioTime::new();
         let OpenedSession {
             mut engine,
@@ -370,7 +386,15 @@ async fn an_alert_fans_to_every_destination_and_retries_the_one_that_is_down() {
     let recorder = heard.clone();
 
     let acceptor = async move {
-        let (stream, _peer) = listener.accept().await.expect("accept");
+        let (stream, _peer) =
+            tokio::time::timeout(std::time::Duration::from_secs(8), listener.accept())
+                .await
+                .expect(
+                    "the spawned wz-replay never dialled. A binary that exits on its \
+                     argv never connects, and a bare accept waits for that forever -- \
+                     which does not fail the test, it cancels the job",
+                )
+                .expect("accept");
         let clock = TokioTime::new();
         let OpenedSession {
             mut engine,
