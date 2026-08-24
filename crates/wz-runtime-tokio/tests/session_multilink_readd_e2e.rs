@@ -189,8 +189,13 @@ async fn readd_dialed_link_auto_reconnects_onto_surviving_session() {
                 DialedLink::Tcp(stream),
                 fixture_params_with_zid(0x0B),
                 LinkReliabilityPref::Any,
-                false,
-                // R311y219 — qos=false, so the band is inert (no priority routing).
+                // R2096 (open-debt item 516) — the whole offer, where this took
+                // a bare `qos: bool`. The zero offer is what `false` meant, and
+                // it is what this suite wants: it measures the re-ADD, not a
+                // capability, so the handshake stays byte-identical to the era
+                // before the offer reached this entrypoint.
+                SessionOffer::universal(),
+                // R311y219 — no QoS offer, so the band is inert (no priority routing).
                 (
                     wz_session_core::qos::Priority::Control,
                     wz_session_core::qos::Priority::Background,
@@ -234,7 +239,6 @@ async fn readd_dialed_link_auto_reconnects_onto_surviving_session() {
             // means the del_link always lands first". The growth has its own witnesses.
             retry: RetryPolicy::constant(1000),
             max_links: 2,
-            qos: false,
         },
         fixture_params_with_zid(0x0A),
         TokioTime::new(),

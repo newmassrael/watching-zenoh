@@ -4131,20 +4131,27 @@ layer_c1ay_cargo_test_router_hat() {
     _runci_guarded_test "C1AY exclusive_transport_modes_binary 2" 2 \
         cargo test -p wz-ap-demo --features transport-qos,transport-lowlatency \
         --test exclusive_transport_modes_binary --quiet || return 1
-    # R2095 (open-debt item 513, its residual) — the OTHER refusal `main` makes
-    # about a capability that would not reach the wire: `--lowlatency` /
-    # `--compression` / `--shm` on an AGGREGATING mesh peer, whose open path
-    # stages no `SessionOffer`. Same shape as the arm above (argv -> exit status,
-    # controls in the same test) and it needs a wider feature set, because the
-    # file is gated on the three atoms that make the flag non-inert: without
+    # R2096 (open-debt item 516) — the INVERSE of the arm above: every capability
+    # an operator configures on an AGGREGATING mesh peer (`--max-links > 1`) must
+    # be ACCEPTED, and the `--max-links 1` control sits in the same test.
+    #
+    # R2095 registered this file as a REFUSAL witness, because the aggregating
+    # open path took a bare `qos: bool` and could carry nothing else. R2096 gave
+    # both `_with_multilink` entrypoints the whole `SessionOffer`, so the refusal
+    # became a false statement about the binary and the witness was inverted
+    # rather than deleted (open-debt item 47's class, paid in the round that
+    # invalidated it). The file was renamed with it.
+    #
+    # The wide feature set is what makes the flags non-inert: without
     # `transport-multilink` there is no `--max-links` to parse, without
-    # `routing-peer` no `--peer`, and without `transport-lowlatency` the flag is
-    # inert and correctly drops nothing. `transport-qos` is here for the CONTROL
-    # arm, which asserts `--qos --max-links 2` is NOT refused.
-    _runci_guarded_test "C1AY mesh_offer_multilink_refusal_binary 1" 1 \
+    # `routing-peer` no `--peer`, and `transport-lowlatency` / `transport-qos` /
+    # `session-extcompression` / `session-extshm` are the four capabilities the
+    # ARMS table asks about — a flag whose atom is absent is dropped correctly
+    # and would prove nothing.
+    _runci_guarded_test "C1AY mesh_offer_multilink_binary 1" 1 \
         cargo test -p wz-ap-demo \
-        --features transport-multilink,routing-peer,transport-lowlatency,transport-qos \
-        --test mesh_offer_multilink_refusal_binary --quiet || return 1
+        --features transport-multilink,routing-peer,transport-lowlatency,transport-qos,session-extcompression,session-extshm \
+        --test mesh_offer_multilink_binary --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features routing-router-hat --quiet -- -D warnings \

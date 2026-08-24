@@ -503,18 +503,39 @@ fn main() -> ExitCode {
             #[cfg(feature = "session-extqos")]
             let qos_link = parse_qos_link(rest);
             // R311y506 — REFUSE `--qos-band` on an AGGREGATING node rather than
-            // dropping it. The multilink open entrypoints take `(qos: bool, band)`
-            // and stage no `SessionOffer`, so the declared band would never reach
-            // the wire there: the session would establish on the presence-only
-            // UNIT ext, look perfectly healthy, and enforce none of the
-            // containment the operator asked for. A per-link band on the
-            // aggregation path is a real design step (zenoh's `PriorityRange` IS
-            // per link), not something to fake here — so this exits loudly and
-            // names the residual instead.
+            // dropping it.
+            //
+            // R2096 (open-debt item 516) CORRECTS the reason and KEEPS the rule,
+            // which is the honest half of paying that item. R311y506 wrote "the
+            // multilink open path stages no QoSLink, so the band would be
+            // silently dropped", and that stopped being true the moment the
+            // `_with_multilink` entrypoints started taking the whole
+            // `SessionOffer`: `apply_offer` stages `qos_link` on every path now.
+            // A reason that outlives the limitation it describes is open-debt
+            // item 47 in its code form, so it does not survive this round.
+            //
+            // The rule survives on a DIFFERENT and stronger ground. A declared
+            // band is now announced, uniformly, on every one of the N aggregated
+            // links — while `multilink_priority_range` gives each link a
+            // different LOCAL band (even ids `Control..=InteractiveLow`, odd ids
+            // `DataHigh..=Background`), which is what `select_link` actually
+            // routes by. So the node would announce a containment contract that
+            // no single link of it honours. Announcing something false is worse
+            // than announcing nothing, which is what the old wording described.
+            //
+            // Reconciling the two — per-link declared bands, zenoh's
+            // `PriorityRange` being per link — is a design step with an interop
+            // contract attached, and it needs a real zenohd oracle to settle
+            // (`wz_qos_link_zenohd_interop`). R2096 did not do it, so the
+            // refusal stands and says why.
             #[cfg(all(feature = "session-extqos", feature = "transport-multilink"))]
             if qos_link.is_some() && max_links > 1 {
                 eprintln!(
-                    "wz-ap-demo: --qos-band/--qos-rel is not supported with                      --max-links > 1: the multilink open path stages no QoSLink, so                      the band would be silently dropped. Use a single link, or drop                      the band."
+                    "wz-ap-demo: --qos-band/--qos-rel is not supported with \
+                     --max-links > 1: the band would be announced uniformly on \
+                     every aggregated link, while each link routes a different \
+                     per-parity band — a containment contract no link honours. \
+                     Use a single link, or drop the band."
                 );
                 std::process::exit(2);
             }
@@ -639,30 +660,25 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
-            // R2095 (open-debt item 513, its residual) — REFUSE a capability the
-            // AGGREGATING open path cannot put on the wire, rather than dropping
-            // it. Exactly the treatment R311y506 gave `--qos-band --max-links >
-            // 1`, and for the same reason: the session would establish, look
-            // healthy, and carry none of what was configured.
+            // R2096 (open-debt item 516) — the R2095 REFUSAL that stood here is
+            // gone, because the fact it stated stopped being true.
             //
-            // Before R2095 this needed no guard because the mesh dropped these
-            // on EVERY path. It needs one now: the single-link dial honours them
-            // and the aggregating dial does not, so silence here would be a
-            // divergence that depends on `--max-links`.
-            #[cfg(feature = "transport-multilink")]
-            {
-                let dropped = crate::runner::capabilities_the_multilink_path_drops(&peer_offer);
-                if max_links > 1 && !dropped.is_empty() {
-                    eprintln!(
-                        "wz-ap-demo: {} cannot be offered with --max-links > 1: the \
-                         aggregated open path stages no SessionOffer, so the \
-                         capability would be silently dropped. Use a single link, \
-                         or drop the flag.",
-                        dropped.join(" / ")
-                    );
-                    return ExitCode::from(2);
-                }
-            }
+            // R2095 could wire only `peer_loop`'s single-link dial to the offer;
+            // the aggregating dial was a different entrypoint that took a bare
+            // `qos: bool`, so `--lowlatency` / `--compression` / `--shm` with
+            // `--max-links > 1` would have established a healthy-looking session
+            // carrying none of them. Refusing the combination was the honest
+            // answer to a capability that could not reach the wire (R311y506's
+            // treatment of `--qos-band`), and it was explicitly temporary.
+            //
+            // R2096 widened `initiate_and_open_session_with_multilink` /
+            // `accept_and_open_session_with_multilink` to take the whole
+            // `SessionOffer`, so every capability reaches the aggregating path
+            // too. A guard left here would now refuse a configuration that
+            // works — the code form of open-debt item 47, a rule outliving the
+            // limitation it described. The witness that it is gone is
+            // `tests/mesh_offer_multilink_binary.rs`, which asserts the same
+            // argv REACHES the bind.
             return run_peer_mode(
                 peer_listen,
                 dial_targets,

@@ -3918,52 +3918,76 @@ pub async fn initiate_and_open_session_with_auth(
 /// physical link's `reliability_pref` before the handshake drives. The additive
 /// multilink-on sibling of the bare open. Initiator side; the acceptor mirrors via
 /// [`accept_and_open_session_with_multilink`].
+///
+/// R2096 (open-debt item 516) — takes the whole [`SessionOffer`], where it used
+/// to take a bare `qos: bool`. Two facts had become one: `qos` and `offer.mode`
+/// would both have answered "does this session offer the QoS transport", and a
+/// pair of parameters that can disagree is exactly the shape [`SessionOffer`]
+/// exists to remove (its own doc: the both-on configuration must be
+/// unrepresentable, not merely rejected). The OFFER is the SSOT — every caller
+/// moved to it — so a node's `lowlatency` / `compression` / `shm` now reach the
+/// aggregating dial as well as the single-link one. Before this the same flag
+/// reached the wire on `--max-links 1` and nothing at all on `--max-links 2`.
+///
+/// `band` stays a separate parameter, and that is the same line
+/// [`SessionOffer`] draws for multilink itself: the priority band is not
+/// negotiated at the handshake, it is a LOCAL `select_link` routing decision,
+/// and it is per PHYSICAL LINK where the offer is per session. It is applied
+/// only under a QoS offer, which is now read off the offer rather than told
+/// twice.
 #[cfg(feature = "transport-multilink")]
 #[allow(clippy::too_many_arguments)]
 pub async fn initiate_and_open_session_with_multilink(
     connected: DialedLink,
     params: SessionInitParams,
     reliability_pref: crate::config::LinkReliabilityPref,
-    qos: bool,
+    offer: SessionOffer,
     band: (Priority, Priority),
     clock: TokioTime,
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
-    let (inbound, outbound, writer_handle) = wire_dialed_link(connected);
-    let actions = new_session_actions(outbound, params, clock);
-    actions.install_multilink_dispatch(crate::multilink::open_multilink_dispatch());
-    actions.set_link_reliability_pref(reliability_pref);
-    // R311y218 — compose the QoS offer with multilink (orthogonal at the actions
-    // layer; only qos<->lowlatency conflict, and this path stages no lowlatency).
-    #[cfg(feature = "transport-qos")]
-    if qos {
-        actions.set_qos_offer(true);
-    }
-    #[cfg(not(feature = "transport-qos"))]
-    let _ = qos;
-    // R311y219 — pin this aggregated link to its deploy-assigned QoS-priority band
-    // so `select_link` routes each priority conduit to one link (the priority tier
-    // of zenoh's per-channel select). Applied ONLY under a negotiated QoS offer; the
-    // band type + setter are `all(multilink,qos)`-gated, so the whole block elides
-    // without `transport-qos` and `band` is consumed as a no-op (signature-stable).
-    #[cfg(feature = "transport-qos")]
-    if qos {
-        actions.set_link_priority_range(Some(
-            wz_session_core::session_actions::LinkPriorityRange::new(band.0, band.1),
-        ));
-    }
-    #[cfg(not(feature = "transport-qos"))]
-    let _ = band;
-    initiator_open(
-        inbound,
-        actions,
-        writer_handle,
+    initiator_open_offering(
+        connected,
+        params,
+        offer,
+        |actions| {
+            actions.install_multilink_dispatch(crate::multilink::open_multilink_dispatch());
+            actions.set_link_reliability_pref(reliability_pref);
+            stage_link_priority_band(actions, &offer, band);
+            Ok(())
+        },
         clock,
         max_iters,
         tick_interval_ms,
     )
     .await
+}
+
+/// R311y219 (transport-multilink) — pin an aggregated link to its
+/// deploy-assigned QoS-priority band so `select_link` routes each priority
+/// conduit to one link (the priority tier of zenoh's per-channel select).
+///
+/// Applied ONLY under a negotiated QoS offer, which R2096 reads off the
+/// [`SessionOffer`] rather than off a second boolean saying the same thing. The
+/// band type + setter are `all(multilink,qos)`-gated, so the whole body elides
+/// without `transport-qos` and `band` is consumed as a no-op (signature-stable).
+///
+/// One function for both directions because the two used to be one copied
+/// block, and the copy is how item 516's defect spread: whatever the dial path
+/// staged, the accept path had to be edited separately to match.
+#[cfg(feature = "transport-multilink")]
+fn stage_link_priority_band(
+    #[allow(unused_variables)] actions: &Arc<SessionLinkActions>,
+    #[allow(unused_variables)] offer: &SessionOffer,
+    #[allow(unused_variables)] band: (Priority, Priority),
+) {
+    #[cfg(feature = "transport-qos")]
+    if offer.mode == TransportMode::Qos {
+        actions.set_link_priority_range(Some(
+            wz_session_core::session_actions::LinkPriorityRange::new(band.0, band.1),
+        ));
+    }
 }
 
 /// transport-lowlatency — [`initiate_and_open_session`] with the lowlatency
@@ -4023,6 +4047,55 @@ pub async fn initiate_and_open_session_with_offer(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
+    initiator_open_offering(
+        connected,
+        params,
+        offer,
+        |_actions| Ok(()),
+        clock,
+        max_iters,
+        tick_interval_ms,
+    )
+    .await
+}
+
+/// R2096 (open-debt item 516) — the initiator open that HONOURS a
+/// [`SessionOffer`], with one extension point for staging that is not part of
+/// the offer.
+///
+/// Both capability-aware initiator entrypoints run through here:
+/// [`initiate_and_open_session_with_offer`] stages nothing extra, and
+/// [`initiate_and_open_session_with_multilink`] stages the 0x4 dispatch, the
+/// link's reliability preference and its QoS-priority band. That split is the
+/// [`SessionOffer`] doc's own line drawn in code — the offer is the SSOT for
+/// "which capability exts does the InitSyn carry", and multilink / reliability
+/// pref / priority band are deliberately NOT in it because they are not
+/// negotiated that way.
+///
+/// It exists because item 516 was the cost of NOT having it. The aggregating
+/// entrypoint was written as a sibling rather than a caller, so it carried its
+/// own `qos: bool` and re-derived a fraction of what `apply_offer` does; three
+/// of the four capabilities then had no route through it at all, and the same
+/// flag reached the wire on `--max-links 1` and nothing on `--max-links 2`. A
+/// capability added to [`SessionOffer`] later now reaches both paths by
+/// construction, which is the property the duplicate could not have.
+///
+/// `stage` runs after `apply_offer` and BEFORE the handshake drives, so
+/// everything it installs is on the wire from the InitSyn onward. It returns
+/// [`OpenError`] because the accept-side twin's staging draws OS entropy, which
+/// can fail.
+async fn initiator_open_offering<S>(
+    connected: DialedLink,
+    params: SessionInitParams,
+    offer: SessionOffer,
+    stage: S,
+    clock: TokioTime,
+    max_iters: Option<usize>,
+    tick_interval_ms: u64,
+) -> Result<OpenedSession, OpenError>
+where
+    S: FnOnce(&Arc<SessionLinkActions>) -> Result<(), OpenError>,
+{
     // R311y435 — the lean wiring is chosen at RUNTIME from the offer, but ONLY in
     // a build that has the lean transport at all. Without `transport-lowlatency`,
     // `apply_offer` rejects `TransportMode::LowLatency` below, so the branch is
@@ -4052,6 +4125,7 @@ pub async fn initiate_and_open_session_with_offer(
         .apply_offer(&offer)
         .map_err(OpenError::UnsupportedCapability)?;
     install_shm_authenticator(&actions, &offer)?;
+    stage(&actions)?;
     let opened = initiator_open(
         inbound,
         actions,
@@ -4311,52 +4385,44 @@ pub async fn accept_and_open_session_with_auth(
 /// responder reflects the 0x4 ext in InitAck / OpenAck iff the peer offered it and
 /// captures the initiator's ephemeral pubkey. Accept-side twin of
 /// [`initiate_and_open_session_with_multilink`].
+///
+/// R2096 (open-debt item 516) — takes the whole [`SessionOffer`] for the same
+/// reason as that twin, and it MOVES WITH IT deliberately: upstream builds
+/// `StateOpen` (`io/zenoh-transport/src/unicast/establishment/open.rs:605-636`)
+/// and `StateAccept` (`.../accept.rs:725-755`) from the SAME
+/// `manager.config.unicast.{is_qos,is_lowlatency,is_compression}`, so a
+/// capability is a property of the NODE and not of which end dialled. Leaving
+/// the accept side on `qos: bool` would have made an aggregating node reflect
+/// QoS and nothing else — the asymmetry item 517 records for the single-session
+/// acceptor, re-introduced here on purpose.
 #[cfg(feature = "transport-multilink")]
 #[allow(clippy::too_many_arguments)]
 pub async fn accept_and_open_session_with_multilink(
     accepted: DialedLink,
     params: SessionInitParams,
     reliability_pref: crate::config::LinkReliabilityPref,
-    qos: bool,
+    offer: SessionOffer,
     band: (Priority, Priority),
     clock: TokioTime,
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
-    let (inbound, outbound, writer_handle) = wire_dialed_link(accepted);
-    let (actions, mut engine) = wire_session_engine(outbound, params, clock);
-    actions.install_multilink_dispatch(crate::multilink::accept_multilink_dispatch());
-    actions.set_link_reliability_pref(reliability_pref);
-    // R311y218 — reflect the QoS offer on the accept side iff the peer offered it
-    // (the `&=` merge finalizes it); orthogonal to the multilink 0x4 negotiation.
-    #[cfg(feature = "transport-qos")]
-    if qos {
-        actions.set_qos_offer(true);
-    }
-    #[cfg(not(feature = "transport-qos"))]
-    let _ = qos;
-    // R311y219 — pin this aggregated link to its deploy-assigned QoS-priority band
-    // (see the initiate twin). Applied ONLY under a negotiated QoS offer; the block
-    // elides without `transport-qos` and `band` is consumed as a no-op.
-    #[cfg(feature = "transport-qos")]
-    if qos {
-        actions.set_link_priority_range(Some(
-            wz_session_core::session_actions::LinkPriorityRange::new(band.0, band.1),
-        ));
-    }
-    #[cfg(not(feature = "transport-qos"))]
-    let _ = band;
-    // Fresh challenge nonce per accepted handshake (the pubkey responder replay
-    // defense) — drawn from AP OS entropy here because the no_std core cannot.
-    let nonce = crate::session_glue::nonce_from_os_entropy().map_err(OpenError::AuthEntropy)?;
-    actions.refresh_multilink_challenge_nonce(nonce);
-
-    engine.process_event(E::InboundStart);
-    drive_open_loop(
-        inbound,
-        actions,
-        engine,
-        writer_handle,
+    accept_open_offering(
+        accepted,
+        params,
+        offer,
+        |actions| {
+            actions.install_multilink_dispatch(crate::multilink::accept_multilink_dispatch());
+            actions.set_link_reliability_pref(reliability_pref);
+            stage_link_priority_band(actions, &offer, band);
+            // Fresh challenge nonce per accepted handshake (the pubkey responder
+            // replay defense) — drawn from AP OS entropy here because the no_std
+            // core cannot.
+            let nonce =
+                crate::session_glue::nonce_from_os_entropy().map_err(OpenError::AuthEntropy)?;
+            actions.refresh_multilink_challenge_nonce(nonce);
+            Ok(())
+        },
         clock,
         max_iters,
         tick_interval_ms,
@@ -4409,6 +4475,44 @@ pub async fn accept_and_open_session_with_offer(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
+    accept_open_offering(
+        accepted,
+        params,
+        offer,
+        |_actions| Ok(()),
+        clock,
+        max_iters,
+        tick_interval_ms,
+    )
+    .await
+}
+
+/// R2096 (open-debt item 516) — the accept-side twin of
+/// [`initiator_open_offering`]: the acceptor open that HONOURS a
+/// [`SessionOffer`], with one extension point for staging that is not part of
+/// the offer.
+///
+/// The asymmetry with the initiator twin is upstream's, not this seam's: an
+/// acceptor OFFERS in order to REFLECT (each ext is echoed in the InitAck only
+/// when the peer's InitSyn carried it), so `stage` still has to run before the
+/// drive — the `&=` merge reads the inbound InitSyn before the InitAck is
+/// emitted, and anything staged after that merge would be staged too late.
+///
+/// `stage` returns [`OpenError`] because the aggregating caller draws a FRESH
+/// per-handshake challenge nonce from OS entropy here (the responder replay
+/// defence), which the no_std session core cannot do for itself.
+async fn accept_open_offering<S>(
+    accepted: DialedLink,
+    params: SessionInitParams,
+    offer: SessionOffer,
+    stage: S,
+    clock: TokioTime,
+    max_iters: Option<usize>,
+    tick_interval_ms: u64,
+) -> Result<OpenedSession, OpenError>
+where
+    S: FnOnce(&Arc<SessionLinkActions>) -> Result<(), OpenError>,
+{
     // R311y435 — same compile-time elision as the initiator twin: without
     // `transport-lowlatency` the lean branch is unreachable (`apply_offer` rejects
     // the mode) and must not be compiled, or the lean wiring stops being dead code
@@ -4428,6 +4532,7 @@ pub async fn accept_and_open_session_with_offer(
         .apply_offer(&offer)
         .map_err(OpenError::UnsupportedCapability)?;
     install_shm_authenticator(&actions, &offer)?;
+    stage(&actions)?;
 
     engine.process_event(E::InboundStart);
     let opened = drive_open_loop(

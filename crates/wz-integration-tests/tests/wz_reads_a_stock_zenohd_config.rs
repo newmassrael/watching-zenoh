@@ -1120,7 +1120,7 @@ fn every_key_proven_on_the_wire_is_in_the_frame_a_zenohd_would_receive() {
          can hand the demo"
     );
 
-    // R2095 (open-debt item 513) — every fixture is asked in BOTH run-modes, and
+    // R2096 (open-debt item 516) — every fixture is asked in every ARM, and
     // every answer is COLLECTED rather than asserted where it is read.
     //
     // Both halves of that sentence were the item's. Until R2095 the leg ran one
@@ -1132,28 +1132,40 @@ fn every_key_proven_on_the_wire_is_in_the_frame_a_zenohd_would_receive() {
     // passed. Collecting means the report names every key that is wrong in every
     // mode it is wrong in, which is what makes a mutation here attributable.
     //
-    // The two modes are also the CONTROL PAIR. They exercise wz's two dial paths
+    // The modes are also the CONTROL PAIR. They exercise wz's two dial paths
     // — `Role::Initiator` and `peer_loop` — from the same file, so a wiring that
     // exists on one and not the other shows up as a run-mode-shaped column of
     // failures rather than as one dead leg.
+    //
+    // R2096 (open-debt item 516) added the SECOND axis, `--max-links`, and its
+    // control is in this same sweep for exactly the reason the run-mode axis
+    // needed one. `peer_loop` has TWO dial paths inside it — `dial_face` on a
+    // single link and `dial_face_multilink` when the aggregation budget is
+    // above 1 — and until R2096 only the first carried a `SessionOffer`. So a
+    // node offered `lowlatency` at `--max-links 1` and offered nothing at
+    // `--max-links 2`, from the same document. One arm cannot see that: it is a
+    // DIFFERENCE between two arms, which is why both are asked here and why a
+    // mutation that unwires the aggregating entrypoint reds one column and
+    // leaves the other green.
     let mut failures: Vec<String> = Vec::new();
-    for mode in [RunMode::Client, RunMode::PeerMesh, RunMode::RouterHat] {
+    for (mode, max_links) in ARMS {
         for (key, frag_a, want_a, frag_b, want_b) in FIXTURES {
-            let got_a = handshake_field_from_a_config(key, frag_a, mode);
-            let got_b = handshake_field_from_a_config(key, frag_b, mode);
+            let arm = ArmLabel(*mode, *max_links);
+            let got_a = handshake_field_from_a_config(key, frag_a, *mode, *max_links);
+            let got_b = handshake_field_from_a_config(key, frag_b, *mode, *max_links);
             if got_a != *want_a {
                 failures.push(format!(
-                    "{mode:?} {key}: the handshake carried {got_a} where the file said {want_a}"
+                    "{arm} {key}: the handshake carried {got_a} where the file said {want_a}"
                 ));
             }
             if got_b != *want_b {
                 failures.push(format!(
-                    "{mode:?} {key}: the handshake carried {got_b} where the file said {want_b}"
+                    "{arm} {key}: the handshake carried {got_b} where the file said {want_b}"
                 ));
             }
             if got_a == got_b {
                 failures.push(format!(
-                    "{mode:?} {key}: the wire value did not move with the file, \
+                    "{arm} {key}: the wire value did not move with the file, \
                      so the file is not what set it"
                 ));
             }
@@ -1164,9 +1176,49 @@ fn every_key_proven_on_the_wire_is_in_the_frame_a_zenohd_would_receive() {
         "{} of the {} readings this leg takes disagree with the file that \
          produced them:\n  {}",
         failures.len(),
-        FIXTURES.len() * 3 * 3,
+        FIXTURES.len() * ARMS.len() * 3,
         failures.join("\n  ")
     );
+}
+
+/// The (run-mode, `--max-links`) arms every fixture is asked in.
+///
+/// R2096 (open-debt item 516). `None` means the flag is not passed at all,
+/// which is not laziness — it is what those two run-modes DO with it:
+///
+/// * `Client` is `--connect`, the one-shot `Role::Initiator`. `main` parses
+///   `--max-links` only in the `--peer` arm, so there is no aggregation path
+///   here for the flag to select.
+/// * `RouterHat` builds its `FaceSources` with `max_links: 1` hard-coded
+///   (`runner.rs`, and its comment says why: router-tier aggregation is
+///   unwired). Passing a number would read as a claim this arm measures the
+///   aggregating path, and it does not.
+///
+/// `PeerMesh` carries BOTH numbers, and passes the flag EXPLICITLY at 1 as well
+/// as at 2 so the only difference between the control and the arm under
+/// judgement is the number itself — not whether a flag was present.
+const ARMS: &[(RunMode, Option<usize>)] = &[
+    (RunMode::Client, None),
+    (RunMode::PeerMesh, Some(1)),
+    (RunMode::PeerMesh, Some(2)),
+    (RunMode::RouterHat, None),
+];
+
+/// How one arm is named in a failure line: the run-mode plus its link budget.
+///
+/// A `{mode:?}` alone was enough while the run-mode was the only axis. With two
+/// arms sharing `PeerMesh` it is not — a report naming the mode twice with
+/// different verdicts is unreadable, and the whole point of the max-links axis
+/// is that its two columns are told apart.
+struct ArmLabel(RunMode, Option<usize>);
+
+impl std::fmt::Display for ArmLabel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.1 {
+            Some(n) => write!(f, "{:?}[--max-links {n}]", self.0),
+            None => write!(f, "{:?}", self.0),
+        }
+    }
 }
 
 /// Which run-mode a fixture's document brings up — and therefore WHICH of wz's
@@ -1228,7 +1280,12 @@ enum RunMode {
 /// `handshake_encode::encode_init`, wz's own production encoder. That keeps the
 /// instrument made of this tree's codec at BOTH ends, adds no public surface,
 /// and leaves the thing under judgement where it was — the bytes the demo sent.
-fn handshake_field_from_a_config(key: &str, fragment: &str, run_mode: RunMode) -> String {
+fn handshake_field_from_a_config(
+    key: &str,
+    fragment: &str,
+    run_mode: RunMode,
+    max_links: Option<usize>,
+) -> String {
     let demo = wz_ap_demo_binary();
     assert_demo_binary_newer_than_sources(&demo);
 
@@ -1290,11 +1347,27 @@ fn handshake_field_from_a_config(key: &str, fragment: &str, run_mode: RunMode) -
     // axis makes that reachable in a new way (`mode: "peer"` needs
     // `routing-peer`, `mode: "router"` needs `router-hat-router`), so the reason
     // has to survive to the failure message.
-    let mut child = Command::new(&demo)
-        .arg("--config")
+    // R2096 (open-debt item 516) — the aggregation budget rides ARGV, not the
+    // document, and that is deliberate.
+    //
+    // `transport/unicast/max_links` IS a honoured config key, so the file could
+    // carry it — but every fixture fragment already opens its own `transport`
+    // object, and a document with two of them is the `duplicate field` refusal
+    // R2077 met on `listen`. Typing the flag is not a workaround for that: the
+    // expansion treats an argv-typed flag as authoritative and withholds the
+    // file's value (`args.rs`, `decide_pair`), which is the documented override
+    // path. What is under judgement here is still only what the FILE's
+    // capability keys reached; the arm decides which of wz's dial paths carried
+    // them.
+    let mut cmd = Command::new(&demo);
+    cmd.arg("--config")
         .arg(file.path())
         .arg("--key")
-        .arg("demo/wire")
+        .arg("demo/wire");
+    if let Some(n) = max_links {
+        cmd.arg("--max-links").arg(n.to_string());
+    }
+    let mut child = cmd
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()

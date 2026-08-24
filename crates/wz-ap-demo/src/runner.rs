@@ -1837,47 +1837,6 @@ pub(crate) fn mesh_offer(
     Ok(offer)
 }
 
-/// R2095 (open-debt item 513, its residual) — the capabilities of an `offer`
-/// that the AGGREGATED (`--max-links > 1`) open path cannot put on the wire.
-///
-/// R2095 wired `peer_loop`'s SINGLE-link dial to the whole offer. The
-/// aggregating dial is a different entrypoint —
-/// `initiate_and_open_session_with_multilink`, which takes `(pref, qos, band)`
-/// and stages no [`SessionOffer`] at all — so on an aggregating peer three of
-/// the four capabilities would reach nothing. That is the exact shape R311y506
-/// met with `--qos-band` and answered by REFUSING the pair rather than dropping
-/// it, and the reasoning transfers verbatim: the session would establish, look
-/// perfectly healthy, and carry none of what the operator configured.
-///
-/// `--qos` is deliberately NOT in the returned set. It is the one capability
-/// the aggregation path DOES carry, by its own route (`FaceSources.qos` ->
-/// `set_qos_offer` inside the `_with_multilink` entrypoints), so refusing it
-/// would break the combination that path exists for.
-///
-/// Widening the aggregation entrypoints to take a `SessionOffer` is the real
-/// fix and a design step of its own — `qos: bool` and `offer.mode` would have
-/// to be reconciled, and every `_with_multilink` caller moves with them.
-///
-/// Gated on `transport-multilink` rather than feature-uniform, unlike
-/// [`exclusive_modes`]: that rule answers a CONTRADICTORY command line, which is
-/// contradictory whatever got compiled, while this one answers a build's real
-/// limitation. Without the feature there is no `--max-links` to parse and no
-/// aggregation path to drop anything, so a refusal here would be about nothing.
-#[cfg(feature = "transport-multilink")]
-pub(crate) fn capabilities_the_multilink_path_drops(offer: &SessionOffer) -> Vec<&'static str> {
-    let mut dropped = Vec::new();
-    if offer.mode == wz::runtime_tokio::session_open::TransportMode::LowLatency {
-        dropped.push("--lowlatency");
-    }
-    if offer.compression {
-        dropped.push("--compression");
-    }
-    if offer.shm {
-        dropped.push("--shm");
-    }
-    dropped
-}
-
 /// R2087 — the qos x lowlatency exclusivity, as ONE predicate this binary reads
 /// from two places: the argv parse (which exits before dialling anything) and
 /// [`initiator_offer`] (which is the seam the library sees).
@@ -3895,20 +3854,6 @@ async fn run_peer_until(
             // that many physical links to a peer zid into ONE logical session.
             #[cfg(feature = "transport-multilink")]
             max_links: wz_config.borrow().max_links,
-            // R311y218 — FaceSources.qos is gated transport-multilink (a plain bool),
-            // but WzConfig.qos is gated transport-qos, so bridge with an inner
-            // cfg-expr: the demo offers qos on its aggregated links iff `--qos` set.
-            #[cfg(feature = "transport-multilink")]
-            qos: {
-                #[cfg(feature = "transport-qos")]
-                {
-                    wz_config.borrow().qos
-                }
-                #[cfg(not(feature = "transport-qos"))]
-                {
-                    false
-                }
-            },
             // R2095 (open-debt item 513) — the capability offer every face this
             // peer opens carries, dialed and accepted alike (upstream builds
             // `StateOpen` and `StateAccept` from the same manager config; see
@@ -5022,8 +4967,6 @@ async fn run_router_hat_until(
             // multilink demo path is the --peer mesh mode, run_peer).
             #[cfg(feature = "transport-multilink")]
             max_links: 1,
-            #[cfg(feature = "transport-multilink")]
-            qos: false,
             // R2095 (open-debt item 513) — the capability offer every face this
             // router-hat opens carries, built by `mesh_offer` from the SAME argv
             // words the `--peer` mesh mode reads. The item named both run-modes
@@ -5035,8 +4978,8 @@ async fn run_router_hat_until(
             // run-mode for the first time: `mesh_dial_offer` calls
             // `parse_qos_link` for BOTH mesh arms, where the band used to be a
             // `--peer`-only affordance. A router-hat holds one link per peer
-            // (`max_links: 1` below), so there is no aggregation path here for
-            // it to be dropped on.
+            // (`max_links: 1` above), so the aggregation path R2096 wired for
+            // item 516 is not reached from this run-mode at all.
             offer: opts.offer,
             // R311y786 — the re-dial schedule, from `--connect-retry` (default =
             // zenoh's own 1s/4s/x2). This is the router's ONE source for it: the
@@ -6609,6 +6552,11 @@ mod peer_quic_cert_tests {
             qos: false,
             #[cfg(feature = "session-extqos")]
             qos_link: None,
+            // R2096 — R2095 added `PeerOpts.offer` and did not reach these two
+            // `#[cfg(all(test, routing-peer, quic))]` fixtures, so the crate's
+            // test target stopped compiling at that feature pair. The zero
+            // offer: both legs are BIND witnesses that never open a session.
+            offer: wz::runtime_tokio::session_open::SessionOffer::universal(),
             #[cfg(feature = "transport-qos")]
             publish_band: None,
             tls_cert: None,
@@ -6703,6 +6651,11 @@ mod peer_failfast_tests {
             qos: false,
             #[cfg(feature = "session-extqos")]
             qos_link: None,
+            // R2096 — R2095 added `PeerOpts.offer` and did not reach these two
+            // `#[cfg(all(test, routing-peer, quic))]` fixtures, so the crate's
+            // test target stopped compiling at that feature pair. The zero
+            // offer: both legs are BIND witnesses that never open a session.
+            offer: wz::runtime_tokio::session_open::SessionOffer::universal(),
             #[cfg(feature = "transport-qos")]
             publish_band: None,
             tls_cert: None,

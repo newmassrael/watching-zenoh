@@ -146,6 +146,12 @@ use crate::session_open::{
 #[cfg(feature = "transport-multilink")]
 use std::collections::BTreeSet;
 use wz_session_core::transport_mode::SessionOffer;
+// R2096 (open-debt item 516) — the loop reads the QoS half of its offer off the
+// mode (`multilink_pref_for`), which is the whole point of the item: the offer
+// is the SSOT and `FaceSources.qos` is gone. `transport-qos`-gated because that
+// is the only arm that reads it — an ungated import would warn everywhere else.
+#[cfg(all(feature = "transport-multilink", feature = "transport-qos"))]
+use wz_session_core::transport_mode::TransportMode;
 // R311y227 — also the multicast INGRESS band (McastIngressItem.priority +
 // route_mcast_ingress), which is `codec-push`-gated, not multilink.
 #[cfg(any(feature = "transport-multilink", feature = "codec-push"))]
@@ -653,17 +659,25 @@ fn multilink_pref(id: FaceId) -> LinkReliabilityPref {
 /// with QoS ON every link is UNIFORM `Reliable` so the per-face priority band (not
 /// the reliability class) is the live `select_link` discriminant for the reliable
 /// data channel. The `#[cfg(not(transport-qos))]` build never applies a band, so it
-/// keeps the y205 even/odd spread regardless of the runtime `qos` bool (byte-
+/// keeps the y205 even/odd spread regardless of what was offered (byte-
 /// identical). Placed at the deploy caller (not inside the `_with_multilink`
 /// entrypoint) so a direct-entrypoint caller keeps the exact pref it passes.
+///
+/// R2096 (open-debt item 516) — reads the QoS half off the [`SessionOffer`]
+/// this loop carries, where it took a bare `qos: bool` before. The axis chosen
+/// here and the offer put on the wire are ONE fact, so they now come from one
+/// value: a node that reads `--qos` into the offer and `false` into this
+/// argument would segregate its links by reliability while telling the peer it
+/// segregates by priority, and nothing would say so.
 #[cfg(feature = "transport-multilink")]
-fn multilink_pref_for(id: FaceId, qos: bool) -> LinkReliabilityPref {
+fn multilink_pref_for(
+    id: FaceId,
+    #[allow(unused_variables)] offer: &SessionOffer,
+) -> LinkReliabilityPref {
     #[cfg(feature = "transport-qos")]
-    if qos {
+    if offer.mode == TransportMode::Qos {
         return LinkReliabilityPref::Reliable;
     }
-    #[cfg(not(feature = "transport-qos"))]
-    let _ = qos;
     multilink_pref(id)
 }
 
@@ -703,7 +717,7 @@ async fn open_face_multilink(
     peer: AcceptedPeer,
     accepted: AcceptedLink,
     pref: LinkReliabilityPref,
-    qos: bool,
+    offer: SessionOffer,
     band: (Priority, Priority),
     params: SessionInitParams,
     clock: TokioTime,
@@ -718,7 +732,7 @@ async fn open_face_multilink(
                 link,
                 params,
                 pref,
-                qos,
+                offer,
                 band,
                 clock,
                 None,
@@ -744,19 +758,24 @@ async fn dial_face_multilink(
     id: FaceId,
     peer: SocketAddr,
     pref: LinkReliabilityPref,
-    qos: bool,
+    offer: SessionOffer,
     band: (Priority, Priority),
     params: SessionInitParams,
     clock: TokioTime,
     tick_interval_ms: u64,
 ) -> OpenResult {
     let result = match TcpStream::connect(peer).await {
+        // R2096 (open-debt item 516) — THE seam the item names. R2095 wired the
+        // SINGLE-link dial (`dial_face`) to the whole offer and this one kept a
+        // bare `qos: bool`, so on an aggregating node three of the four
+        // capabilities reached no InitSyn at all and the wire form depended on
+        // `--max-links`.
         Ok(stream) => {
             initiate_and_open_session_with_multilink(
                 DialedLink::Tcp(stream),
                 params,
                 pref,
-                qos,
+                offer,
                 band,
                 clock,
                 None,
@@ -791,14 +810,14 @@ async fn dial_face_multilink_after(
     peer: SocketAddr,
     backoff_ms: u64,
     pref: LinkReliabilityPref,
-    qos: bool,
+    offer: SessionOffer,
     band: (Priority, Priority),
     params: SessionInitParams,
     clock: TokioTime,
     tick_interval_ms: u64,
 ) -> OpenResult {
     tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
-    dial_face_multilink(id, peer, pref, qos, band, params, clock, tick_interval_ms).await
+    dial_face_multilink(id, peer, pref, offer, band, params, clock, tick_interval_ms).await
 }
 
 /// R311y786 — the per-PEER-ADDRESS re-dial schedule: how long each dropped or
@@ -988,7 +1007,7 @@ fn schedule_redial(
 fn schedule_multilink_redial(
     addr: SocketAddr,
     pref: LinkReliabilityPref,
-    qos: bool,
+    offer: SessionOffer,
     band: (Priority, Priority),
     ml_dial_endpoints: &mut BTreeMap<
         FaceId,
@@ -1024,7 +1043,7 @@ fn schedule_multilink_redial(
         addr,
         backoff_ms,
         pref,
-        qos,
+        offer,
         band,
         params.clone(),
         clock,
@@ -1436,15 +1455,6 @@ pub struct FaceSources {
     /// so the struct — and every non-multilink caller — is unchanged without it.
     #[cfg(feature = "transport-multilink")]
     pub max_links: usize,
-    /// R311y218 (transport-multilink) — whether this loop OFFERS the QoS transport
-    /// on every aggregated link it opens (sourced from `WzConfig.qos`). Uniform per
-    /// loop (unlike the per-face `multilink_pref`); staged via `set_qos_offer` in
-    /// the `_with_multilink` entrypoints. `false` = single-conduit, byte-identical.
-    /// Gated `transport-multilink` (a plain bool like `max_links`, not
-    /// `all(..,transport-qos)`) so the threading carries no per-call-site cfg branch;
-    /// the value is only honored under `transport-qos` (else `set_qos_offer` elides).
-    #[cfg(feature = "transport-multilink")]
-    pub qos: bool,
     /// R2095 (open-debt item 513) — the capability SET every face this loop
     /// opens OFFERS at its handshake, dialed and accepted alike.
     ///
@@ -1466,6 +1476,13 @@ pub struct FaceSources {
     /// so a node configured for a capability offers it whichever end dialled.
     /// A per-face offer would be the per-link QoS band refinement, which is a
     /// separate design step (zenoh's `PriorityRange` IS per link).
+    ///
+    /// R2096 (open-debt item 516) — it is now the loop's ONLY answer to "what
+    /// does this node offer". The `qos: bool` that used to sit beside it, and
+    /// travel separately into the `_with_multilink` entrypoints, is gone: two
+    /// fields for one fact is what let `--max-links 2` disagree with
+    /// `--max-links 1` about the same flag. Read the QoS half as
+    /// `offer.mode == TransportMode::Qos`.
     ///
     /// [`SessionOffer::universal`] — also its `Default` — is the zero offer, so
     /// an accept-only or capability-free loop is byte-identical to the era
@@ -1522,8 +1539,6 @@ where
         mut reconcile,
         #[cfg(feature = "transport-multilink")]
         max_links,
-        #[cfg(feature = "transport-multilink")]
-        qos,
         offer,
         retry,
     } = sources;
@@ -1658,8 +1673,8 @@ where
             Box::pin(dial_face_multilink(
                 id,
                 peer,
-                multilink_pref_for(id, qos),
-                qos,
+                multilink_pref_for(id, &offer),
+                offer,
                 multilink_priority_range(id),
                 params.clone(),
                 clock,
@@ -1685,7 +1700,7 @@ where
                 id,
                 (
                     peer,
-                    multilink_pref_for(id, qos),
+                    multilink_pref_for(id, &offer),
                     multilink_priority_range(id),
                 ),
             );
@@ -1943,7 +1958,7 @@ where
                                 schedule_multilink_redial(
                                     addr,
                                     pref,
-                                    qos,
+                                    offer,
                                     band,
                                     &mut ml_dial_endpoints,
                                     &mut redial,
@@ -2054,7 +2069,7 @@ where
                             schedule_multilink_redial(
                                 addr,
                                 pref,
-                                qos,
+                                offer,
                                 band,
                                 &mut ml_dial_endpoints,
                                 &mut redial,
@@ -2157,8 +2172,8 @@ where
                             Box::pin(dial_face_multilink(
                                 id,
                                 addr,
-                                multilink_pref_for(id, qos),
-                                qos,
+                                multilink_pref_for(id, &offer),
+                                offer,
                                 multilink_priority_range(id),
                                 params.clone(),
                                 clock,
@@ -2183,7 +2198,7 @@ where
                                 id,
                                 (
                                     addr,
-                                    multilink_pref_for(id, qos),
+                                    multilink_pref_for(id, &offer),
                                     multilink_priority_range(id),
                                 ),
                             );
@@ -2210,8 +2225,8 @@ where
                                     opening.push(Box::pin(dial_face_multilink(
                                         id,
                                         addr,
-                                        multilink_pref_for(id, qos),
-                                        qos,
+                                        multilink_pref_for(id, &offer),
+                                        offer,
                                         multilink_priority_range(id),
                                         params.clone(),
                                         clock,
@@ -2225,7 +2240,7 @@ where
                                         id,
                                         (
                                             addr,
-                                            multilink_pref_for(id, qos),
+                                            multilink_pref_for(id, &offer),
                                             multilink_priority_range(id),
                                         ),
                                     );
@@ -2383,8 +2398,8 @@ where
                         id,
                         peer,
                         accepted,
-                        multilink_pref_for(id, qos),
-                        qos,
+                        multilink_pref_for(id, &offer),
+                        offer,
                         multilink_priority_range(id),
                         params.clone(),
                         clock,
@@ -2467,8 +2482,6 @@ where
             // the full mesh entry that carries `max_links`); byte-identical to today.
             #[cfg(feature = "transport-multilink")]
             max_links: 1,
-            #[cfg(feature = "transport-multilink")]
-            qos: false,
             // accept-only: the zero offer. `accept_loop` is the entry for a node
             // that carries no capability configuration of its own — a mesh node
             // that does reaches `peer_loop`, which is where R2095 threads the
@@ -2703,46 +2716,76 @@ mod tests {
     /// `multilink_pref_for` chooses the segregation AXIS: with QoS ON every link is
     /// UNIFORM Reliable (so the priority band is the `select_link` discriminant),
     /// with QoS OFF it keeps the y205 even/odd reliability spread. A build WITHOUT
-    /// `transport-qos` never applies a band, so the qos bool is inert there.
+    /// `transport-qos` never applies a band, so the QoS mode is inert there.
+    ///
+    /// R2096 (open-debt item 516) — the axis is read off a [`SessionOffer`] now.
+    /// The LowLatency arm is new with it and is not decoration: the exclusive
+    /// mode is a THIRD state the old `qos: bool` could not represent, and the
+    /// spread it must take is the non-QoS one. A `!= Universal` test written in
+    /// place of `== Qos` would pass every other assertion here.
     #[cfg(feature = "transport-multilink")]
     #[test]
     fn multilink_pref_for_uniform_reliable_iff_qos() {
+        let plain = SessionOffer::universal();
         // QoS OFF: the y205 even/odd reliability spread (matches multilink_pref).
         assert_eq!(
-            multilink_pref_for(FaceId(0), false),
+            multilink_pref_for(FaceId(0), &plain),
             LinkReliabilityPref::Reliable
         );
         assert_eq!(
-            multilink_pref_for(FaceId(1), false),
+            multilink_pref_for(FaceId(1), &plain),
             LinkReliabilityPref::BestEffort
         );
         assert_eq!(
-            multilink_pref_for(FaceId(0), false),
+            multilink_pref_for(FaceId(0), &plain),
             multilink_pref(FaceId(0))
         );
         assert_eq!(
-            multilink_pref_for(FaceId(1), false),
+            multilink_pref_for(FaceId(1), &plain),
             multilink_pref(FaceId(1))
         );
+        // A capability that is NOT the QoS mode must not move the axis: the
+        // reliability spread answers `mode == Qos`, not "is anything offered".
+        let compressing = SessionOffer::universal().with_compression(true);
+        assert_eq!(
+            multilink_pref_for(FaceId(1), &compressing),
+            LinkReliabilityPref::BestEffort,
+            "compression is orthogonal to the segregation axis"
+        );
         // QoS ON: uniform Reliable (priority is the discriminant) — but ONLY when
-        // transport-qos compiles (else the band is never applied, so qos is inert).
+        // transport-qos compiles (else the band is never applied, so the mode is
+        // inert).
         #[cfg(feature = "transport-qos")]
         {
+            let qos = SessionOffer::universal().with_mode(TransportMode::Qos);
             assert_eq!(
-                multilink_pref_for(FaceId(0), true),
+                multilink_pref_for(FaceId(0), &qos),
                 LinkReliabilityPref::Reliable
             );
             assert_eq!(
-                multilink_pref_for(FaceId(1), true),
+                multilink_pref_for(FaceId(1), &qos),
                 LinkReliabilityPref::Reliable,
                 "with qos ON the odd link is Reliable too (uniform), not BestEffort"
             );
         }
         #[cfg(not(feature = "transport-qos"))]
+        {
+            let qos = SessionOffer::universal()
+                .with_mode(wz_session_core::transport_mode::TransportMode::Qos);
+            assert_eq!(
+                multilink_pref_for(FaceId(1), &qos),
+                LinkReliabilityPref::BestEffort,
+                "without transport-qos the QoS mode is inert: even/odd spread holds"
+            );
+        }
+        // The exclusive THIRD mode: lowlatency is not qos, so it keeps the y205
+        // spread in every build.
+        let lean = SessionOffer::universal()
+            .with_mode(wz_session_core::transport_mode::TransportMode::LowLatency);
         assert_eq!(
-            multilink_pref_for(FaceId(1), true),
+            multilink_pref_for(FaceId(1), &lean),
             LinkReliabilityPref::BestEffort,
-            "without transport-qos the qos bool is inert: even/odd spread holds"
+            "the lean mode is not the QoS mode: the reliability spread holds"
         );
     }
 
@@ -3968,8 +4011,6 @@ mod tests {
                 retry: RetryPolicy::constant(1000),
                 #[cfg(feature = "transport-multilink")]
                 max_links: 1,
-                #[cfg(feature = "transport-multilink")]
-                qos: false,
             },
             peer_params(),
             TokioTime::new(),
@@ -4060,8 +4101,6 @@ mod tests {
                 retry: RetryPolicy::constant(1000),
                 #[cfg(feature = "transport-multilink")]
                 max_links: 1,
-                #[cfg(feature = "transport-multilink")]
-                qos: false,
             },
             peer_params(),
             TokioTime::new(),
@@ -4151,8 +4190,6 @@ mod tests {
                 retry: RetryPolicy::constant(1000),
                 #[cfg(feature = "transport-multilink")]
                 max_links: 1,
-                #[cfg(feature = "transport-multilink")]
-                qos: false,
             },
             peer_params(),
             TokioTime::new(),

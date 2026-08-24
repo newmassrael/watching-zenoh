@@ -96,8 +96,6 @@ async fn observed_gaps_ms(retry: RetryPolicy, want: usize) -> Vec<u128> {
             reconcile: None,
             #[cfg(feature = "transport-multilink")]
             max_links: 1,
-            #[cfg(feature = "transport-multilink")]
-            qos: false,
             offer: SessionOffer::universal(),
             retry,
         },
@@ -211,8 +209,6 @@ async fn a_peer_removed_and_re_added_starts_over_at_the_initial_wait() {
             reconcile: Some(reconcile_rx),
             #[cfg(feature = "transport-multilink")]
             max_links: 1,
-            #[cfg(feature = "transport-multilink")]
-            qos: false,
             offer: SessionOffer::universal(),
             retry: RetryPolicy {
                 period_init_ms: 50,

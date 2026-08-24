@@ -47,11 +47,11 @@ use wz_runtime_tokio::multilink::{join_link, JoinOutcome};
 use wz_runtime_tokio::retry_period::RetryPolicy;
 use wz_runtime_tokio::runtime_impl::{TokioRuntime, TokioTime};
 use wz_runtime_tokio::session_glue::{drive_session_until_terminal, SessionLinkActions};
-use wz_runtime_tokio::session_open::SessionOffer;
 use wz_runtime_tokio::session_open::{
     initiate_and_open_session_with_multilink, BoundListener, DialedLink, OpenedSession,
     DEFAULT_OPEN_TICK_MS,
 };
+use wz_runtime_tokio::session_open::{SessionOffer, TransportMode};
 use wz_runtime_tokio_test_support::fixture_params_with_zid;
 use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
 use wz_session_core::network_message::NetworkMessage;
@@ -162,7 +162,15 @@ async fn dial_multilink(
         DialedLink::Tcp(stream),
         fixture_params_with_zid(init_zid),
         pref,
-        qos,
+        // R2096 (open-debt item 516) — the entrypoint takes the whole
+        // `SessionOffer` now. This file's axis is still the one boolean, so the
+        // adapter lives here rather than as a second representation in the
+        // library; `false` is the zero offer, byte-identical on the wire.
+        if qos {
+            SessionOffer::universal().with_mode(TransportMode::Qos)
+        } else {
+            SessionOffer::universal()
+        },
         band,
         TokioTime::new(),
         Some(ITER_CAP),
@@ -256,7 +264,6 @@ async fn deploy_active_two_links_aggregate_segregate_reject_survive() {
             // than the new schedule; the growth has its own witnesses.
             retry: RetryPolicy::constant(1000),
             max_links: 2,
-            qos: false,
         },
         fixture_params_with_zid(0x0B),
         TokioTime::new(),
@@ -472,7 +479,6 @@ async fn deploy_active_dial_side_aggregates_through_the_loop() {
             // than the new schedule; the growth has its own witnesses.
             retry: RetryPolicy::constant(1000),
             max_links: 2,
-            qos: false,
         },
         fixture_params_with_zid(0x0B),
         TokioTime::new(),
@@ -505,7 +511,6 @@ async fn deploy_active_dial_side_aggregates_through_the_loop() {
             // than the new schedule; the growth has its own witnesses.
             retry: RetryPolicy::constant(1000),
             max_links: 2,
-            qos: false,
         },
         fixture_params_with_zid(0x0A),
         TokioTime::new(),
@@ -601,13 +606,17 @@ async fn deploy_active_qos_priority_segregates_across_links() {
             mcast_members: None,
             mcast_group_subs: None,
             reconcile: None,
-            offer: SessionOffer::universal(),
+            // R2096 (open-debt item 516) — B's QoS offer, which used to be the
+            // separate `qos: true` field below. One value now: `FaceSources.qos`
+            // is gone because it and `offer.mode` answered the same question,
+            // and a pair that can disagree is what let `--max-links` decide
+            // whether a capability reached the wire.
+            offer: SessionOffer::universal().with_mode(TransportMode::Qos),
             // R311y786 — pin the PRE-y786 cadence (fixed 1 s, no growth) so this
             // suite keeps measuring the aggregation path it was written for rather
             // than the new schedule; the growth has its own witnesses.
             retry: RetryPolicy::constant(1000),
             max_links: 2,
-            qos: true,
         },
         fixture_params_with_zid(0x0B),
         TokioTime::new(),

@@ -46,7 +46,8 @@ use wz_runtime_tokio::runtime_impl::{TokioRuntime, TokioTime};
 use wz_runtime_tokio::session_glue::{drive_session_until_terminal, SessionLinkActions};
 use wz_runtime_tokio::session_open::{
     accept_and_open_session, accept_and_open_session_with_multilink, initiate_and_open_session,
-    initiate_and_open_session_with_multilink, DialedLink, OpenedSession, DEFAULT_OPEN_TICK_MS,
+    initiate_and_open_session_with_multilink, DialedLink, OpenedSession, SessionOffer,
+    TransportMode, DEFAULT_OPEN_TICK_MS,
 };
 use wz_runtime_tokio_test_support::fixture_params_with_zid;
 use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
@@ -94,6 +95,21 @@ fn push_recorder(link_id: usize, log: RxLog) -> impl FnMut(IterationEvent<'_>) {
     }
 }
 
+/// R2096 (open-debt item 516) — the [`SessionOffer`] these legs mean by `qos`.
+///
+/// The `_with_multilink` entrypoints take the whole offer now, where they took
+/// a bare `qos: bool`; this file's axis is still exactly that one boolean, so
+/// the adapter lives HERE rather than as a second representation in the
+/// library. `false` is [`SessionOffer::universal`] — the zero offer, which is
+/// what the bool meant and is byte-identical on the wire.
+fn multilink_offer(qos: bool) -> SessionOffer {
+    if qos {
+        SessionOffer::universal().with_mode(TransportMode::Qos)
+    } else {
+        SessionOffer::universal()
+    }
+}
+
 /// Open ONE loopback-TCP link both-sides-established with the multilink 0x4
 /// handshake + a per-side reliability preference. Returns `(acceptor, initiator)`
 /// `OpenedSession`s (both Established, both having captured the peer's ephemeral
@@ -113,7 +129,7 @@ async fn open_multilink_link(
             DialedLink::Tcp(stream),
             fixture_params_with_zid(acc_zid),
             acc_pref,
-            qos,
+            multilink_offer(qos),
             // R311y219 — a full-range band; these tests assert reliability
             // segregation / qos NEGOTIATION, not priority routing, so the band
             // is inert (no prioritized send exercises select_link's band tier).
@@ -131,7 +147,7 @@ async fn open_multilink_link(
             DialedLink::Tcp(stream),
             fixture_params_with_zid(init_zid),
             init_pref,
-            qos,
+            multilink_offer(qos),
             (Priority::Control, Priority::Background),
             TokioTime::new(),
             Some(ITER_CAP),

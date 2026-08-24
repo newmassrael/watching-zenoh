@@ -83,7 +83,7 @@ use wz_runtime_tokio::multilink::{join_link, JoinOutcome};
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_open::{
     accept_and_open_session_with_multilink, initiate_and_open_session_with_multilink, DialedLink,
-    OpenedSession, DEFAULT_OPEN_TICK_MS,
+    OpenedSession, SessionOffer, DEFAULT_OPEN_TICK_MS,
 };
 use wz_runtime_tokio::{LinkDriver, LinkEvent};
 use wz_runtime_tokio_test_support::fixture_params_with_zid;
@@ -235,7 +235,11 @@ async fn open_link(
             DialedLink::Tcp(stream),
             fixture_params_with_zid(acc_zid),
             LinkReliabilityPref::Reliable,
-            false,
+            // R2096 (open-debt item 516) — the whole offer, where this took a
+            // bare `qos: bool`. The zero offer is what `false` meant: this file
+            // measures Close SCOPE over an aggregation, so the handshake stays
+            // byte-identical to the era before the offer reached this seam.
+            SessionOffer::universal(),
             (Priority::Control, Priority::Background),
             TokioTime::new(),
             Some(ITER_CAP),
@@ -250,7 +254,7 @@ async fn open_link(
             DialedLink::Tcp(stream),
             fixture_params_with_zid(init_zid),
             LinkReliabilityPref::Reliable,
-            false,
+            SessionOffer::universal(),
             (Priority::Control, Priority::Background),
             TokioTime::new(),
             Some(ITER_CAP),
