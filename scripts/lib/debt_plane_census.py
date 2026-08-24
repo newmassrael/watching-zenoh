@@ -138,6 +138,40 @@ def roster(text: str) -> tuple[set[int], set[int], int]:
     return target, owner, swept
 
 
+def unclosed_folds(text: str) -> list[int]:
+    """Line numbers of every `<details>` the register never closes.
+
+    R2088 -- MEASURED, on the real register. A round that closes an item folds
+    its old wording into `<details><summary>...`, and R2081 opened one for item
+    500 without closing it. Every item after 500 -- seven of them, all open --
+    then rendered INSIDE that collapsed fold, so a person reading the register
+    in anything that understands HTML saw the debt backlog end at 500 while this
+    script happily counted the items behind it.
+
+    That is the sharpest possible version of the failure this file exists to
+    prevent: the instrument and the human were reading different documents, and
+    the instrument was the one that was right. `is_open` looks at a title line
+    and never at structure, so nothing here could have noticed -- verified by
+    running this script against a fixture with an unclosed fold, which printed a
+    clean count and exited 0.
+
+    Deliberately a LINE SCAN and not an HTML parse: the register is Markdown
+    with a handful of literal tags in it, and a parser would bring opinions
+    about everything else in the file. What is wanted is one balance.
+    """
+    depth = 0
+    opened: list[int] = []
+    for i, line in enumerate(text.splitlines(), 1):
+        if "<details>" in line:
+            depth += 1
+            opened.append(i)
+        if "</details>" in line:
+            depth -= 1
+            if opened:
+                opened.pop()
+    return opened
+
+
 def main() -> int:
     path = register_path()
     if not path.is_file():
@@ -156,6 +190,13 @@ def main() -> int:
     target, owner, swept = roster(text)
 
     findings: list[str] = []
+    for line_no in unclosed_folds(text):
+        findings.append(
+            f"the `<details>` opened at line {line_no} is never closed, so every "
+            f"item after it renders inside that collapsed fold. The count below "
+            f"would still be right and the file would still read as if the "
+            f"backlog ended there -- close it in the same edit"
+        )
     for n in sorted(target | owner):
         if n not in found:
             findings.append(f"the roster names item {n} and the register has no such item")

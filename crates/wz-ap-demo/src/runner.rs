@@ -5997,6 +5997,84 @@ pub(crate) async fn run_storage_host(
     Ok(())
 }
 
+/// R2088 — the refusal inside [`initiator_offer`] itself, which nothing reached.
+///
+/// R2087 wired `--qos` and put the qos x lowlatency rule in TWO places: `main`'s
+/// argv parse (so nothing is dialled) and this function (so the library-facing
+/// seam cannot be bypassed). Its binary witness proves the FIRST. It cannot
+/// prove the second, and that was measured rather than suspected: replacing
+/// `exclusive_modes(..)?` here with a discarded call left
+/// `exclusive_transport_modes_binary` green and the whole crate suite green,
+/// because `main` refuses before this function is ever called with the pair.
+///
+/// So this branch is unreachable from argv BY DESIGN, and unreachable is exactly
+/// the state open-debt item 479 is about: code that can answer a question while
+/// nothing asks it. The idiom this follows is `SessionActions::apply_offer`,
+/// which asserts its own unreachable exclusivity guard rather than dropping it —
+/// the guard is there for a caller that assembles a `Role` without going through
+/// the parse, and a guard with no test is a guard that will be deleted by
+/// someone who cannot tell it from dead code.
+///
+/// A unit test is the RIGHT instrument here and not a repeat of 496's mistake:
+/// 496 was a shipping seam witnessed only by units, and its fix was to add the
+/// binary. Here the shipping seam already HAS its binary witness; what has no
+/// route from argv is this branch, so a unit test is the only thing that can
+/// reach it at all.
+#[cfg(test)]
+mod exclusive_mode_seam_tests {
+    use super::{exclusive_modes, initiator_offer};
+
+    /// The seam refuses the pair on its own, and passes everything zenoh runs.
+    ///
+    /// The control arms are the harder half and share this test on purpose: a
+    /// guard widened to `qos || lowlatency` would still refuse the pair, so a
+    /// test that only asserted the refusal would call that correct.
+    #[test]
+    fn the_offer_seam_refuses_the_pair_and_nothing_else() {
+        let refused = initiator_offer(true, true, false, false)
+            .expect_err("qos + lowlatency has no representation in a SessionOffer");
+        assert!(
+            refused.contains("--qos") && refused.contains("--lowlatency"),
+            "the refusal must name both flags so a caller knows which to drop: {refused}"
+        );
+
+        for (qos, lowlatency) in [(false, false), (true, false), (false, true)] {
+            assert!(
+                initiator_offer(qos, lowlatency, true, true).is_ok(),
+                "qos={qos} lowlatency={lowlatency} is a configuration zenoh runs, \
+                 and the offer seam refused it"
+            );
+        }
+    }
+
+    /// The predicate is FEATURE-INDEPENDENT, which is the half a build without
+    /// the atoms would otherwise hide. `--qos` on a build without
+    /// `transport-qos` is inert, so a rule compiled out alongside the atom would
+    /// let a contradictory command line run; zenoh bails on the CONFIGURATION,
+    /// not on what was compiled in.
+    #[test]
+    fn the_rule_does_not_depend_on_which_atoms_this_build_carries() {
+        assert!(exclusive_modes(true, true).is_err());
+        assert!(exclusive_modes(true, false).is_ok());
+        assert!(exclusive_modes(false, true).is_ok());
+        assert!(exclusive_modes(false, false).is_ok());
+    }
+
+    /// Under `transport-qos` the accepted offer actually carries the MODE, so
+    /// this file's own claim ("qos maps to TransportMode::Qos") is checked where
+    /// the atom exists. The wire leg proves the same thing end to end; this is
+    /// the arm that reds in seconds instead of needing a spawned demo.
+    #[cfg(feature = "transport-qos")]
+    #[test]
+    fn qos_selects_the_qos_transport_mode() {
+        use wz::runtime_tokio::session_open::TransportMode;
+        let offer = initiator_offer(true, false, false, false).expect("qos alone is legal");
+        assert_eq!(offer.mode, TransportMode::Qos);
+        let plain = initiator_offer(false, false, false, false).expect("the zero offer is legal");
+        assert_eq!(plain.mode, TransportMode::Universal);
+    }
+}
+
 #[cfg(all(test, feature = "adminspace-config-hotreload"))]
 mod storage_host_volume_tests {
     use super::storage_host_volume_id;
