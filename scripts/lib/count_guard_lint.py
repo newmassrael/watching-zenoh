@@ -141,6 +141,35 @@ def main() -> int:
         binm = TEST_BIN_RE.search(seg)
         pkgm = PKG_RE.search(seg)
         where = f"run-ci.sh:{lineno}"
+
+        # R2074 — a bare guard MUST select one cargo target, and this is a
+        # FAILURE rather than an out-of-scope note because the hazard is not
+        # about deriving the number at all.
+        #
+        # `grep -q` exits at its first match. If cargo goes on writing after
+        # that -- which it does the moment the package has a second test target
+        # -- the write hits a closed pipe and cargo dies, and `set -o pipefail`
+        # turns that into a RED that names nothing. MEASURED: R2072 added a
+        # second test target to `wz-ap-demo` and all six unconstrained guards in
+        # Layer C1bl failed at once with rc=101 on hosted CI (run 32679319923),
+        # while every command inside them passed when run on its own. It cost a
+        # round to attribute.
+        #
+        # A guard that names `--lib`, `--test NAME`, `--bin NAME` or `--bins`
+        # runs exactly one target, so its summary IS the last line and the race
+        # cannot happen. That is why the other guards in this file were latent
+        # and safe -- not by care, by accident of selection.
+        if not re.search(r"--lib\b|--test\s|--bin\s|--bins\b", seg):
+            failures.append(
+                f"{where}: a bare `| grep -q` count guard that does not select "
+                f"one cargo target. `grep -q` exits at its first match and "
+                f"cargo then dies on the closed pipe as soon as the package "
+                f"grows a second test target, which `set -o pipefail` reports "
+                f"as an unattributable rc=101. Use `_runci_guarded_test` "
+                f"(it captures instead of racing), or name the target."
+            )
+            continue
+
         if not binm or not pkgm:
             out_of_scope.append(f"{where}: not a `-p PKG --test BIN` selection")
             continue

@@ -5305,24 +5305,48 @@ layer_c1w_cargo_test_routing_accept() {
 # already carry anchored `^test result: ok\. 1 passed` count-guards (no run-ci
 # change), so hosting converts an already-falsification-proven lane from local-only
 # to continuously enforced.
+# R2074 — the six count guards here were the LAST of the bare
+# `... --quiet 2>&1 | grep -qE '^test result: ok\. N passed'` form, and
+# `_runci_guarded_test`'s own doc names why that form is a trap: the `grep -q`
+# stage exits at its first match and its upstream then races a SIGPIPE, which
+# `set -o pipefail` turns into a FALSE RED. It stayed latent only because
+# `wz-ap-demo` had exactly one test target, so the matched summary was the LAST
+# thing cargo wrote. R2072 gave the crate a second target
+# (`tests/check_topology_binary.rs`), output continued past the match, and all
+# six went red at once on hosted CI (run 32679319923, Layer C1bl, rc=101) while
+# every command in them passes when run on its own. Moving them to the helper
+# captures the output instead of racing it, and makes a real failure legible
+# instead of opaque.
 layer_c1bl_cargo_test_router_failfast() {
-    (cd crates \
-        && cargo test -p wz-ap-demo --features routing-router,transport-link-unixpipe run_router_accepts_a_unixpipe_listen_at_bind --quiet 2>&1 | grep -qE '^test result: ok\. 1 passed' \
-        && cargo clippy -p wz-ap-demo --all-targets --features routing-router,transport-link-unixpipe --quiet -- -D warnings \
-        && cargo test -p wz-ap-demo --features routing-router,quic run_router_admits_a_quic_listen_with_cert_at_bind --quiet 2>&1 | grep -qE '^test result: ok\. 1 passed' \
-        && cargo clippy -p wz-ap-demo --all-targets --features routing-router,quic --quiet -- -D warnings \
-        && cargo test -p wz-ap-demo --features routing-peer,quic run_peer_admits_a_quic_listen_with_cert_at_bind --quiet 2>&1 | grep -qE '^test result: ok\. 1 passed' \
-        && cargo clippy -p wz-ap-demo --all-targets --features routing-peer,quic --quiet -- -D warnings \
-        && cargo test -p wz-ap-demo --features router-hat-router,quic run_router_hat_admits_a_quic_listen_with_cert_at_bind --quiet 2>&1 | grep -qE '^test result: ok\. 1 passed' \
-        && cargo clippy -p wz-ap-demo --all-targets --features router-hat-router,quic --quiet -- -D warnings)
+    _runci_guarded_test "C1BL unixpipe_listen 1" 1 \
+        cargo test -p wz-ap-demo --features routing-router,transport-link-unixpipe \
+        run_router_accepts_a_unixpipe_listen_at_bind --quiet || return 1
+    (cd crates && cargo clippy -p wz-ap-demo --all-targets \
+        --features routing-router,transport-link-unixpipe --quiet -- -D warnings) || return 1
+    _runci_guarded_test "C1BL router_quic_listen 1" 1 \
+        cargo test -p wz-ap-demo --features routing-router,quic \
+        run_router_admits_a_quic_listen_with_cert_at_bind --quiet || return 1
+    (cd crates && cargo clippy -p wz-ap-demo --all-targets \
+        --features routing-router,quic --quiet -- -D warnings) || return 1
+    _runci_guarded_test "C1BL peer_quic_listen 1" 1 \
+        cargo test -p wz-ap-demo --features routing-peer,quic \
+        run_peer_admits_a_quic_listen_with_cert_at_bind --quiet || return 1
+    (cd crates && cargo clippy -p wz-ap-demo --all-targets \
+        --features routing-peer,quic --quiet -- -D warnings) || return 1
+    _runci_guarded_test "C1BL router_hat_quic_listen 1" 1 \
+        cargo test -p wz-ap-demo --features router-hat-router,quic \
+        run_router_hat_admits_a_quic_listen_with_cert_at_bind --quiet || return 1
+    (cd crates && cargo clippy -p wz-ap-demo --all-targets \
+        --features router-hat-router,quic --quiet -- -D warnings) || return 1
     # R311y809 — the mesh `--connect` target resolution, on BOTH hosts. Same lane
     # because it is the same claim as the four above: what this binary ADMITS at
     # startup. Run under each mesh feature ALONE, not only together, because the
     # helper is `cfg(any(..))` and a build with one of the two must still compile
     # and still resolve; a single combined run would not distinguish them.
-    (cd crates \
-        && cargo test -p wz-ap-demo --features routing-peer mesh_dial_target --quiet 2>&1 | grep -qE '^test result: ok\. 3 passed' \
-        && cargo test -p wz-ap-demo --features router-hat-router mesh_dial_target --quiet 2>&1 | grep -qE '^test result: ok\. 3 passed')
+    _runci_guarded_test "C1BL mesh_dial_target peer 3" 3 \
+        cargo test -p wz-ap-demo --features routing-peer mesh_dial_target --quiet || return 1
+    _runci_guarded_test "C1BL mesh_dial_target router-hat 3" 3 \
+        cargo test -p wz-ap-demo --features router-hat-router mesh_dial_target --quiet || return 1
 }
 
 # ─── Layer C1bm — pico admits a multi-client unixpipe listen (R311y392) ─────
@@ -13473,10 +13497,14 @@ layer_e7u_router_hat_unixpipe_forward() {
         return 0
     fi
     # (1) the R311y396 product-code fail-fast unit (non-IP router-hat REQUIRES --zid).
-    (cd crates && cargo test -p wz-ap-demo \
+    # R2074 — was a bare `| tee | grep -q` over an UNCONSTRAINED `cargo test -p
+    # wz-ap-demo`; see the note on Layer C1bl for why that form dies with an
+    # unattributable rc=101 once the package has a second test target.
+    _runci_guarded_test "E7U router_hat_no_zid 1" 1 \
+        cargo test -p wz-ap-demo \
         --features router-hat-router,transport-link-unixpipe \
         run_router_hat_without_zid_on_a_unixpipe_listen_fails_fast \
-        -- --test-threads=1 --quiet 2>&1 | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+        -- --test-threads=1 --quiet || return 1
     # (2) the e2e: build the router-hat+unixpipe binary, then route a Put between two
     #     distinct-zid --connect unixpipe clients through the true-Router.
     (cd crates && cargo build -p wz-ap-demo \
@@ -13510,10 +13538,12 @@ layer_e6u_peer_unixpipe_forward() {
         return 0
     fi
     # (1) the R311y397 product-code fail-fast unit (non-IP peer REQUIRES --zid).
-    (cd crates && cargo test -p wz-ap-demo \
+    # R2074 — same conversion as Layer E7u's twin above, for the same reason.
+    _runci_guarded_test "E6U peer_no_zid 1" 1 \
+        cargo test -p wz-ap-demo \
         --features routing-peer,transport-link-unixpipe \
         run_peer_without_zid_on_a_unixpipe_listen_fails_fast \
-        -- --test-threads=1 --quiet 2>&1 | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+        -- --test-threads=1 --quiet || return 1
     # (2) the e2e: build the peer+unixpipe binary, then route a Put between two
     #     distinct-zid --connect unixpipe clients through the peer.
     (cd crates && cargo build -p wz-ap-demo \
