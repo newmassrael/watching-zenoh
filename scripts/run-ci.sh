@@ -367,6 +367,25 @@ while [[ $# -gt 0 ]]; do
         --skip-codegen) SKIP_CODEGEN=1; shift ;;
         --resume) RESUME=1; shift ;;
         --layer)
+            # R2097 — a SECOND `--layer` is refused, not absorbed.
+            #
+            # `ONLY_LAYER` is a scalar consumed by a `!=` comparison, so a repeat
+            # used to overwrite silently: `--layer C1bl --layer E7u --layer C1bf`
+            # ran ONLY C1bf and then printed "run-ci: all required layers pass".
+            # Measured here on 2026-08-25, and it was read as three green lanes.
+            # That is the same defect this script already refuses one level down
+            # (a `--layer` matching no lane is a hard error at the tail, because
+            # a flag that ran nothing must not report success); a flag that ran
+            # ONE of the three asked for is the same lie with a smaller gap.
+            #
+            # REFUSED rather than accumulated on purpose: making it a list would
+            # change the type every one of those consumers reads, and the caller
+            # wanting several lanes can run several invocations — which is what
+            # keeps each lane's verdict its own exit status.
+            if [[ -n "$ONLY_LAYER" ]]; then
+                echo "run-ci: --layer given twice ('$ONLY_LAYER' then '${2:-}') — this script runs ONE lane per invocation, and absorbing the second would report a single lane's green as both. Run it once per lane." >&2
+                exit 2
+            fi
             ONLY_LAYER="$2"
             shift 2
             ;;

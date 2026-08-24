@@ -72,10 +72,23 @@ fn assert_arm_pairing(include: &Path) {
         .expect("nm reads the cdylib's dynamic symbols");
     let wz_is_unstable = String::from_utf8_lossy(&out.stdout).contains("z_source_info_new");
     assert_eq!(
-        wz_is_unstable, oracle_is_unstable,
-        "ABI ARM MISMATCH: the cdylib on disk is the {} arm and this oracle's header          is the {} one. Every field past the short prefix of a feature-conditional          options struct would be read at the wrong offset, and the diff below would          report that as a behavioural divergence. Build the matching arm          (`cargo build -p wz-capi-c{}`) or run Layer C1cc, which does it for you.",
-        if wz_is_unstable { "unstable" } else { "no-unstable" },
-        if oracle_is_unstable { "unstable" } else { "no-unstable" },
+        wz_is_unstable,
+        oracle_is_unstable,
+        "ABI ARM MISMATCH: the cdylib on disk is the {} arm and this oracle's header \
+         is the {} one. Every field past the short prefix of a feature-conditional \
+         options struct would be read at the wrong offset, and the diff below would \
+         report that as a behavioural divergence. Build the matching arm \
+         (`cargo build -p wz-capi-c{}`) or run Layer C1cc, which does it for you.",
+        if wz_is_unstable {
+            "unstable"
+        } else {
+            "no-unstable"
+        },
+        if oracle_is_unstable {
+            "unstable"
+        } else {
+            "no-unstable"
+        },
         if oracle_is_unstable {
             ""
         } else {

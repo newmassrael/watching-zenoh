@@ -1023,7 +1023,8 @@ mod tests {
             .to_vec();
             assert_eq!(
                 after, before,
-                "the pointer handed out before the growth no longer reads its own string,                  so a reallocating push moved the entry"
+                "the pointer handed out before the growth no longer reads its own \
+                 string, so a reallocating push moved the entry"
             );
             assert_eq!(after, b"first");
 

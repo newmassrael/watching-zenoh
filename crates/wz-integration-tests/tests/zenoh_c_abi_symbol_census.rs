@@ -466,7 +466,10 @@ fn wz_exports_nothing_the_reference_does_not() {
         .collect::<Vec<_>>();
     assert!(
         extra.is_empty(),
-        "wz's zenoh-c drop-in exports {} public symbol(s) the real libzenohc.so does          NOT define on the '{arm}' arm. Each is either a symbol upstream gates behind          a `Z_FEATURE_*` that wz exports unconditionally, or a name wz invented —          both make wz's surface differ from the ABI it claims to be:\n{}",
+        "wz's zenoh-c drop-in exports {} public symbol(s) the real libzenohc.so does \
+         NOT define on the '{arm}' arm. Each is either a symbol upstream gates behind \
+         a `Z_FEATURE_*` that wz exports unconditionally, or a name wz invented — \
+         both make wz's surface differ from the ABI it claims to be:\n{}",
         extra.len(),
         extra.join("\n")
     );

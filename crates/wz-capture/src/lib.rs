@@ -6281,7 +6281,8 @@ mod datagram_tests {
         assert_ne!(
             SEG % framed_frame(0).len(),
             0,
-            "a segment that held whole frames would splice on a boundary and              prove nothing"
+            "a segment that held whole frames would splice on a boundary and \
+             prove nothing"
         );
         let segments: Vec<&[u8]> = stream.chunks(SEG).collect();
         const LOST: usize = 7;
@@ -8376,13 +8377,15 @@ mod datagram_tests {
         let fh = d.framing_health();
         assert_eq!(
             fh.sn_without_resolution, 0,
-            "the handshake must have resolved the numbering, or this fixture              measures the reader instead of the wire: {fh:?}"
+            "the handshake must have resolved the numbering, or this fixture \
+             measures the reader instead of the wire: {fh:?}"
         );
         assert_eq!(fh.sn_missing, 2, "frames 2 and 3: {fh:?}");
         let reasons = crate::report::CaptureReport::of(&d).reasons();
         assert!(
             reasons.contains(&crate::report::VerdictReason::SnMissing),
-            "two frames the sender numbered are not in this capture, and the              page must say so: {reasons:?}"
+            "two frames the sender numbered are not in this capture, and the \
+             page must say so: {reasons:?}"
         );
         // R311y727 (N19) -- and the WHOLE list, so this witness holds every
         // other leg QUIET as well as naming its own.
