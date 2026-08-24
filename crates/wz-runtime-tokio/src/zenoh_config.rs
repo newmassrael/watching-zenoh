@@ -1322,13 +1322,21 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
 /// defect. Refusing a document a real zenohd accepts is worse than accepting one
 /// it refuses: the first stops a working deployment, the second only fails to
 /// catch a typo. Every entry earns its place by execution.
-const DEEPENABLE_UPSTREAM_KEYS: &[&str] = &[
+pub const DEEPENABLE_UPSTREAM_KEYS: &[&str] = &[
     "connect/endpoints",
     "connect/exit_on_failure",
     "connect/retry",
     "connect/timeout_ms",
     "listen/endpoints",
     "listen/exit_on_failure",
+    // R2079 — `listen/retry` was MISSING from R2078's list, which made wz refuse
+    // `listen: { retry: { period_init_ms: 250 } }` — a file a real zenohd starts
+    // on. It is `connect/retry`'s twin and opaque for the same reason; R2078
+    // enumerated the mode-dependent keys from upstream's declarations and did
+    // not think to look for a second opaque subtree beside the one it knew.
+    // Found by sweeping the WHOLE surface against a real zenohd rather than by
+    // re-reading the list.
+    "listen/retry",
     "listen/timeout_ms",
     "metadata",
     "plugins",
@@ -3393,6 +3401,64 @@ mod tests {
                  would refuse it"
             );
         }
+    }
+
+    /// Build `{ mode: "peer", <path as nested objects>: <value> }`.
+    fn nested(path: &str, value: &str) -> String {
+        let segs: Vec<&str> = path.split('/').collect();
+        let mut out = String::from("{ mode: \"peer\", ");
+        for (i, seg) in segs.iter().enumerate() {
+            out.push_str(seg);
+            out.push_str(": ");
+            if i + 1 < segs.len() {
+                out.push_str("{ ");
+            }
+        }
+        out.push_str(value);
+        for _ in 1..segs.len() {
+            out.push_str(" }");
+        }
+        out.push_str(" }");
+        out
+    }
+
+    /// EVERY surface key outside the deepenable list refuses a deeper shape.
+    ///
+    /// R2079 (open-debt item 502) — the exhaustive half, on wz's side, and it is
+    /// here rather than in the zenohd lane because it needs no oracle and can
+    /// therefore cover the WHOLE surface instead of a sample. A key that quietly
+    /// gained prefix-acceptance would show up here as an acceptance, which is
+    /// the direction that re-opens R2078.
+    ///
+    /// The value is `{ zzz_not_a_mode: 1 }` on purpose: it is not a mode name, so
+    /// a mode-dependent key refuses it too. The claim is about the SHAPE being
+    /// rejected at the boundary, not about the value being right.
+    #[test]
+    fn every_surface_key_outside_the_deepenable_list_refuses_a_deeper_shape() {
+        let mut checked = 0usize;
+        for key in HONOURED_CONFIG_KEYS
+            .iter()
+            .chain(UNHONOURED_UPSTREAM_CONFIG_KEYS)
+        {
+            if DEEPENABLE_UPSTREAM_KEYS.contains(key) {
+                continue;
+            }
+            let doc = nested(key, "{ zzz_not_a_mode: 1 }");
+            let err = match ZenohNodeConfig::from_json5(&doc) {
+                Ok(read) => panic!("{key}: a deeper shape was accepted: {read:?}\n{doc}"),
+                Err(e) => e,
+            };
+            assert!(
+                matches!(err, ConfigIngestError::UnknownKey { .. }),
+                "{key}: refused, but not at the boundary: {err:?}\n{doc}"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked > 80,
+            "only {checked} key(s) were checked; the surface constants moved and \
+             this sweep is no longer covering them"
+        );
     }
 
     /// A mode table's own leaves are NOT reported as keys wz does not honour.

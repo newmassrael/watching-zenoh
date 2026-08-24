@@ -66,7 +66,8 @@ use wz_integration_tests::common::{
     ChildGuard, PortReservation,
 };
 use wz_runtime_tokio::zenoh_config::{
-    ZenohNodeConfig, HONOURED_CONFIG_KEYS, UNHONOURED_UPSTREAM_CONFIG_KEYS,
+    ZenohNodeConfig, DEEPENABLE_UPSTREAM_KEYS, HONOURED_CONFIG_KEYS,
+    UNHONOURED_UPSTREAM_CONFIG_KEYS,
 };
 use wz_session_core::json5::{self, Json5Value};
 
@@ -891,6 +892,55 @@ fn the_acceptance_boundary_is_measured_against_zenohd_case_by_case() {
     }
 }
 
+/// Build one JSON5 document from `(slash path, value)` pairs, MERGING shared
+/// prefixes.
+///
+/// R2079 — string concatenation cannot do this, and that is not a style point:
+/// two pairs under `scouting` emitted separately produce two `scouting` objects,
+/// which a real zenohd refuses for `duplicate field` — the trap R2077 paid a
+/// round for. Merging is what lets a sweep put its subject beside the
+/// multicast-off every row needs, whatever the subject's path.
+fn json5_document(pairs: &[(&str, &str)]) -> String {
+    fn emit(depth: usize, rows: &[(Vec<&str>, &str)]) -> String {
+        let mut out = String::from("{ ");
+        let mut i = 0;
+        let mut first = true;
+        while i < rows.len() {
+            let head = rows[i].0[depth];
+            let mut j = i;
+            while j < rows.len() && rows[j].0[depth] == head {
+                j += 1;
+            }
+            if !first {
+                out.push_str(", ");
+            }
+            first = false;
+            out.push_str(head);
+            out.push_str(": ");
+            if rows[i].0.len() == depth + 1 {
+                assert_eq!(
+                    j - i,
+                    1,
+                    "`{}` is both a leaf and a prefix in the same document",
+                    rows[i].0.join("/")
+                );
+                out.push_str(rows[i].1);
+            } else {
+                out.push_str(&emit(depth + 1, &rows[i..j]));
+            }
+            i = j;
+        }
+        out.push_str(" }");
+        out
+    }
+    let mut rows: Vec<(Vec<&str>, &str)> = pairs
+        .iter()
+        .map(|(p, v)| (p.split('/').collect::<Vec<_>>(), *v))
+        .collect();
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    emit(0, &rows)
+}
+
 /// Wait up to `budget` for a child to exit, returning its status.
 ///
 /// R2076 — the refusal witness for the boundary leg. A text marker cannot serve
@@ -910,6 +960,107 @@ fn exits_within(guard: &mut ChildGuard, budget: Duration) -> Option<std::process
             return None;
         }
         std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+// wz-proves: none -- same registration gap as the differential leg above.
+/// R2079 (open-debt item 502) — EVERY key wz lets deepen is asked of a real
+/// zenohd, not three of them.
+///
+/// ## Why a sweep and not more rows
+///
+/// R2078 widened the acceptance boundary's exception list to sixteen keys, each
+/// verified once by hand, and R2076's leg then re-asked THREE of them. The other
+/// thirteen were a claim about zenoh that nothing checked, and the failure
+/// direction is the bad one: a key wrongly on the list makes wz accept a typo,
+/// while a key wrongly OFF it makes wz refuse a file a real zenohd starts on and
+/// the operator hears only "it will not start".
+///
+/// ⛔ That is not hypothetical — it had already happened. Sweeping the WHOLE
+/// surface against zenohd (and not re-reading the list) found `listen/retry`
+/// missing: `connect/retry`'s twin, opaque for the same reason, and R2078
+/// enumerated the mode-dependent keys carefully while never looking for a second
+/// opaque subtree. This leg is what would have caught it.
+///
+/// ## The values are legal on purpose
+///
+/// Six probes in the round that built this list came back "refused" and were
+/// DEAD — four on `duplicate field` because a fixture restated its own base key,
+/// two on a wrong value shape (`autoconnect` takes an ARRAY,
+/// `DEFAULT_CONFIG.json5:146-149`). So each row here carries a value upstream
+/// documents, the document is MERGED rather than concatenated, and a row that
+/// stops meaning what it says shows up as zenohd refusing to start.
+#[test]
+#[ignore = "binary-dep e2e: needs target/zenohd/zenohd (scripts/build-zenohd.sh)"]
+fn every_key_wz_lets_deepen_is_one_a_real_zenohd_deepens_too() {
+    /// (key, a deeper value upstream documents for it)
+    ///
+    /// `listen/endpoints` takes the ROUTER row deliberately: this node is a
+    /// peer, so it binds nothing and the leg cannot collide with a port.
+    const LEGAL: &[(&str, &str)] = &[
+        ("connect/endpoints", r#"{ router: ["tcp/127.0.0.1:1"] }"#),
+        ("connect/exit_on_failure", "{ router: true }"),
+        ("connect/retry", "{ period_init_ms: 250 }"),
+        ("connect/timeout_ms", "{ router: 1000 }"),
+        ("listen/endpoints", "{ router: [] }"),
+        ("listen/exit_on_failure", "{ router: true }"),
+        ("listen/retry", "{ period_init_ms: 250 }"),
+        ("listen/timeout_ms", "{ router: 1000 }"),
+        ("metadata", r#"{ name: "strawberry" }"#),
+        ("plugins", "{ rest: { zzz_unknown: 1 } }"),
+        ("scouting/gossip/autoconnect", "{ router: [] }"),
+        (
+            "scouting/gossip/autoconnect_strategy",
+            r#"{ peer: { to_router: "always" } }"#,
+        ),
+        ("scouting/gossip/target", r#"{ router: ["router"] }"#),
+        ("scouting/multicast/autoconnect", "{ router: [] }"),
+        (
+            "scouting/multicast/autoconnect_strategy",
+            r#"{ peer: { to_router: "always" } }"#,
+        ),
+        ("scouting/multicast/listen", "{ router: true }"),
+        ("timestamping/enabled", "{ router: true }"),
+    ];
+
+    // ── EXHAUSTIVE ──────────────────────────────────────────────────────
+    // The population is the CONSTANT, so a key added to it without a measured
+    // value reds here rather than going unasked.
+    let mut named: Vec<&str> = LEGAL.iter().map(|(k, _)| *k).collect();
+    named.sort_unstable();
+    let mut declared: Vec<&str> = DEEPENABLE_UPSTREAM_KEYS.to_vec();
+    declared.sort_unstable();
+    assert_eq!(
+        named, declared,
+        "every key the reader lets deepen needs a value this leg can hand a \
+         real zenohd"
+    );
+
+    for (key, value) in LEGAL {
+        let source = json5_document(&[
+            ("mode", "\"peer\""),
+            ("scouting/multicast/enabled", "false"),
+            (key, value),
+        ]);
+
+        // wz first: nothing about the running node can have informed it.
+        ZenohNodeConfig::from_json5(&source).unwrap_or_else(|e| {
+            panic!("{key}: wz refuses a shape it declares deepenable: {e:?}\n{source}")
+        });
+
+        let file = staged_config(&source);
+        let (guard, mut capture) = spawn_on_config("zenohd (deepenable)", file.path());
+        wait_for_substring(&mut capture, RESOLVED_CONF_MARKER, STARTUP_BUDGET).unwrap_or_else(
+            |e| {
+                panic!(
+                    "{key}: wz lets this deepen and a real zenohd does not start on \
+                     it — an operator's legal file would be refused by wz for the \
+                     opposite reason, or accepted by wz and refused by zenohd: \
+                     {e}\n{source}"
+                )
+            },
+        );
+        drop(guard);
     }
 }
 
