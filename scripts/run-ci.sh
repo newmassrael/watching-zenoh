@@ -11379,12 +11379,15 @@ PY
     # PLACED HERE, above the zenohd guard, for the reason the y428 leg is placed
     # above the pico guard: it needs a multicast route and NOTHING else, so a box
     # with multicast but no external binaries still runs it. Its own demo build,
-    # with the THREE features the leg exercises — `router-hat-router` for the
+    # with the FOUR features the leg exercises — `router-hat-router` for the
     # run-mode under test, `routing-peer` for the control arm in the same test,
-    # `scouting-responder` for the answering half both use. KEEP ON ONE LINE:
-    # `feature_closure.py`'s scraper cannot cross a newline, and all three claims
-    # must sit inside this build's closure or A4-5 containment reds.
-    (cd crates && cargo build -p wz-ap-demo --features router-hat-router,routing-peer,scouting-responder --quiet) || return 1
+    # `scouting-responder` for the answering half both use, and (R2091, open-debt
+    # item 508) `zenoh-config` for the two arms started from ONE stock zenoh
+    # config file and no other argument, which is the invocation a drop-in
+    # actually performs. KEEP ON ONE LINE: `feature_closure.py`'s scraper cannot
+    # cross a newline, and all four claims must sit inside this build's closure
+    # or A4-5 containment reds.
+    (cd crates && cargo build -p wz-ap-demo --features router-hat-router,routing-peer,scouting-responder,zenoh-config --quiet) || return 1
     # Guarded through the helper rather than a bare `| grep -q` (R2074): the
     # binary is one target with one test, and a rename would otherwise select
     # nothing and exit 0.

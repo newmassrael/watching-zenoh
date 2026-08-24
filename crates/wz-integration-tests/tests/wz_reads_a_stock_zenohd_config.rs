@@ -80,6 +80,22 @@ use wz_session_core::lease::lease_from_wire;
 /// zenohd prints its resolved config on this line before doing anything else.
 const RESOLVED_CONF_MARKER: &str = "Initial conf:";
 
+/// zenohd's own line for the thing a DIALLER depends on: the listener is up.
+///
+/// R2091 — separate from [`RESOLVED_CONF_MARKER`] because the two are not the
+/// same event and the drop-in leg was gated on the wrong one. Measured on this
+/// tree: a TCP connect issued 0.1 ms after `Initial conf:` is REFUSED, and the
+/// port becomes connectable **34 ms later** — so a leg that spawns a dialler on
+/// the conf line races a bind that has not happened, and loses. That leg had
+/// been red on this machine at HEAD, four runs out of four, with a diagnosis
+/// ("never established a session") that named no cause. The other legs here
+/// only READ the resolved config out of that line and are correct to wait on
+/// it; only a leg that connects needs this one.
+///
+/// Upstream's text, quoted from `zenoh/src/net/runtime/orchestrator.rs:586` in
+/// the pinned checkout (`tracing::info!("Zenoh can be reached at: {}", locator)`).
+const LISTENER_UP_MARKER: &str = "Zenoh can be reached at:";
+
 /// How long to wait for zenohd to print its resolved config.
 const STARTUP_BUDGET: Duration = Duration::from_secs(30);
 
@@ -1774,6 +1790,12 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
         spawn_on_config("zenohd (drop-in target)", router_file.path());
     wait_for_substring(&mut router_capture, RESOLVED_CONF_MARKER, STARTUP_BUDGET)
         .unwrap_or_else(|e| panic!("zenohd never came up: {e}"));
+    // R2091 — and then for the LISTENER, which is a later event. The demo below
+    // dials once and exits on a refusal, so gating it on the conf line put a
+    // 34 ms hole between "zenohd said something" and "zenohd can be reached",
+    // which this machine lost every time. See [`LISTENER_UP_MARKER`].
+    wait_for_substring(&mut router_capture, LISTENER_UP_MARKER, STARTUP_BUDGET)
+        .unwrap_or_else(|e| panic!("zenohd printed its config but never bound a listener: {e}"));
 
     let capture = tempfile::tempfile().expect("tempfile for demo output");
     let out = capture.try_clone().expect("dup demo stdout handle");

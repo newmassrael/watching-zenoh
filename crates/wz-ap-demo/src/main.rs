@@ -178,17 +178,25 @@ fn main() -> ExitCode {
             // this used to print them as one. The old line said "honoured" and
             // listed everything the READER took from the file; whether any of it
             // reached this NODE was a separate line the operator had to diff
-            // against by hand. A key with no sink in this binary is a legitimate
-            // state (see `args::config_keys_the_demo_drops`) — what is not
-            // legitimate is calling it honoured and stopping there.
+            // against by hand.
+            //
+            // R2091 (open-debt item 508) — and the second line used to lie. It
+            // was derived from a per-BUILD list of keys with no sink, so every
+            // key whose flag carries an INVOCATION precondition was reported
+            // applied while the expansion silently withheld it. Measured before
+            // this round, on a file naming five such keys: all five printed as
+            // APPLIED beside an `argv +=` line that carried none of them. The
+            // verdicts are now decided where the flags are decided, and the
+            // not-applied half names WHY for each key — "no sink in this build"
+            // is one reason among several, and it is no longer the only one the
+            // report can express.
             let applied = exp.applied();
-            let read_only = exp.read_but_not_applied();
+            let read_only = exp.read_but_not_applied_with_reasons();
             eprintln!("wz-ap-demo: --config {}: READ {:?}", exp.path, exp.named);
             eprintln!("wz-ap-demo: --config {}: APPLIED {applied:?}", exp.path);
             if !read_only.is_empty() {
                 eprintln!(
-                    "wz-ap-demo: --config {}: READ BUT NOT APPLIED {read_only:?} \
-                     (no sink in this build)",
+                    "wz-ap-demo: --config {}: READ BUT NOT APPLIED {read_only:?}",
                     exp.path
                 );
             }

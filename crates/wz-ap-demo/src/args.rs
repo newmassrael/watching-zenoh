@@ -290,7 +290,7 @@ pub(crate) fn parse_pair(args: &[String], flag: &str) -> Option<String> {
 ///
 /// | the config says | argv gains |
 /// |---|---|
-/// | `mode: "router"` + a listen endpoint | `--router <ep>` |
+/// | `mode: "router"` + a listen endpoint | `--router-hat <ep>` (+ `--connect <a,b>`) |
 /// | `mode: "peer"` + listen AND connect | `--peer <listen>` `--connect <a,b>` |
 /// | a listen endpoint otherwise | `--listen <ep>` |
 /// | a connect endpoint, nothing listening | `--connect <ep>` |
@@ -382,77 +382,212 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
     }
 
     let named = |key: &str| ingest.named.contains(&key);
+    // R2091 (open-debt item 508) — the BUILD axis, consulted by every site
+    // rather than restated at four of them. `config_keys_the_demo_drops` was
+    // the report's whole derivation before this round; it is now one of the
+    // inputs to a per-key verdict, and binding the sites to it is what keeps
+    // the two from drifting apart the next time a key gains a feature gate.
+    let dropped_by_this_build = config_keys_the_demo_drops();
+    let no_sink = |key: &str| {
+        dropped_by_this_build
+            .contains(&key)
+            .then_some(KeyEffect::NoSinkInThisBuild)
+    };
     let cfg = &ingest.config;
-    let mut added: Vec<String> = Vec::new();
+    let mut exp = Expansion {
+        rest,
+        added: Vec::new(),
+        effects: Vec::new(),
+    };
 
     // The role flags, as a set: naming ANY of them on the command line means
     // the operator has chosen the topology and the file must not second-guess
     // it. `--scout` is here because it is a role too (discover, do not dial).
-    const ROLE_FLAGS: &[&str] = &[
-        "--listen",
-        "--connect",
-        "--router",
-        "--peer",
-        "--storage-host",
-        "--scout",
-    ];
-    let role_on_cli = rest.iter().any(|a| ROLE_FLAGS.contains(&a.as_str()));
-    if !role_on_cli {
+    //
+    // R2091 (open-debt item 508) — the set is [`RUN_MODE_ROLES`] rather than a
+    // list of its own, and `--router-hat` is in it BECAUSE this round makes the
+    // role expansion emit that flag: a second list would have to gain the entry
+    // by hand, and a typed `--router-hat` beside a `mode: "router"` file would
+    // otherwise carry the same run-mode flag twice with two addresses. The
+    // table is ordered as `main` dispatches, so `find` returns the mode the
+    // command line actually selects and not merely one it mentions.
+    let typed_role: Option<(&str, WhatAmI)> = RUN_MODE_ROLES
+        .iter()
+        .copied()
+        .find(|(flag, _)| exp.typed(flag));
+    let role_on_cli = typed_role.is_some();
+
+    // Which run-mode the FILE selects, and the wire role that run-mode
+    // announces. `None` means this expansion selected none — either the
+    // operator already chose one, or the document names no endpoint at all.
+    //
+    // ## R2091 (open-debt item 508) — the topology decision
+    //
+    // `mode: "router"` selects `--router-hat`, not `--router`.
+    //
+    // zenoh's `mode: "router"` is a node that announces `WhatAmI::Router` on
+    // the wire and hosts the discovery a stock client's
+    // `scouting/multicast/autoconnect: ["router"]` default asks for. `--router`
+    // is neither of those things: `demo_session_init_params` maps
+    // `NodeKind::Router` to `WhatAmI::Peer` (a stand-in kept so the R121c/e
+    // accept tests are unchanged) and `run_router` spawns no responder. So the
+    // file that deploys a zenoh router produced a wz node in a DIFFERENT role
+    // that nothing on the network could find.  `--router-hat` is wz's router:
+    // `WhatAmI::Router` on the wire, and since R2089 the responder host.
+    //
+    // Deliberately NOT `cfg!`-guarded, and that is the decision rather than an
+    // omission. A guard would make the SAME file come up in a different
+    // run-mode depending on which features the binary carries, which is worse
+    // than a refusal: the operator gets a node that starts and is the wrong
+    // thing. A build without the run-mode says so and exits(2), which is the
+    // answer every other run-mode flag already gives. R311y844's rule — a key
+    // whose SINK is compiled out must not turn a valid stock config into a node
+    // that refuses to start — governs OPTIONAL keys, whose honest fallback is
+    // to drop them; `mode` has no such fallback, because dropping it IS the
+    // different-node-per-build disease. And the refusal class is not new:
+    // measured on a build carrying `router-hat-router` and not `routing-router`,
+    // this same file already exited 2 with "--router requires the
+    // `routing-router` feature". After this round that build runs it.
+    let selected: Option<(&'static str, WhatAmI)> = if role_on_cli {
+        None
+    } else {
         let listen = cfg.listen.first();
         let connect = &cfg.connect;
         match (cfg.mode, listen, connect.is_empty()) {
             (WhatAmI::Router, Some(ep), _) => {
-                added.push("--router".into());
-                added.push(ep.clone());
+                exp.added.push("--router-hat".into());
+                exp.added.push(ep.clone());
+                // A router federates by DIALLING its peer routers, and
+                // `run_router_hat` reads that set off `--connect` exactly as the
+                // peer arm does. Withheld when the file carries none, so a lone
+                // router gains no empty flag.
+                if !connect.is_empty() {
+                    exp.added.push("--connect".into());
+                    exp.added.push(connect.join(","));
+                }
+                Some(("--router-hat", WhatAmI::Router))
             }
             (WhatAmI::Peer, Some(ep), false) => {
-                added.push("--peer".into());
-                added.push(ep.clone());
-                added.push("--connect".into());
-                added.push(connect.join(","));
+                exp.added.push("--peer".into());
+                exp.added.push(ep.clone());
+                exp.added.push("--connect".into());
+                exp.added.push(connect.join(","));
+                Some(("--peer", WhatAmI::Peer))
             }
             (_, Some(ep), _) => {
-                added.push("--listen".into());
-                added.push(ep.clone());
+                exp.added.push("--listen".into());
+                exp.added.push(ep.clone());
+                // The one-shot acceptor announces Peer (`NodeKind::Acceptor` in
+                // `demo_session_init_params`), which is what makes the `mode`
+                // verdict below a COMPARISON and not a "a role flag was added".
+                Some(("--listen", WhatAmI::Peer))
             }
             (_, None, false) => {
-                added.push("--connect".into());
-                added.push(connect[0].clone());
+                exp.added.push("--connect".into());
+                exp.added.push(connect[0].clone());
+                Some(("--connect", WhatAmI::Client))
             }
-            (_, None, true) => {}
+            (_, None, true) => None,
         }
+    };
+
+    // R2091 (open-debt item 508) — `mode` is APPLIED exactly when the run-mode
+    // the endpoints selected announces the role the file asked for. Stated as a
+    // comparison rather than as "some role flag was emitted", because the two
+    // differ in the cases that matter: a `mode: "router"` document carrying only
+    // `connect` endpoints selects `--connect`, and that comes up as a CLIENT.
+    //
+    // The typed half is the SAME comparison and not a blanket "the operator
+    // wins": a `mode: "peer"` file beside a typed `--listen` describes the node
+    // that actually came up, so calling it overridden would be a false alarm of
+    // exactly the kind this verdict exists to remove.
+    if named("mode") {
+        exp.record(
+            "mode",
+            match (typed_role, selected) {
+                (Some((_, role)), _) if role == cfg.mode => KeyEffect::AlreadyOnTheCommandLine,
+                (Some(_), _) => KeyEffect::OverriddenOnTheCommandLine,
+                (None, Some((_, role))) if role == cfg.mode => KeyEffect::Expanded,
+                (None, Some(_)) => KeyEffect::NotTheRoleTheseEndpointsSelect,
+                (None, None) => {
+                    KeyEffect::WithheldFromThisRun("the document names no endpoint to bind or dial")
+                }
+            },
+        );
     }
-    if named("transport/unicast/max_links") && !rest.iter().any(|a| a == "--max-links") {
-        added.push("--max-links".into());
-        added.push(cfg.max_links.to_string());
+    if named("listen/endpoints") {
+        exp.record(
+            "listen/endpoints",
+            match (role_on_cli, cfg.listen.is_empty()) {
+                (true, _) => KeyEffect::OverriddenOnTheCommandLine,
+                // An empty list is what binding nothing already means.
+                (false, true) => KeyEffect::AlreadyTheBehaviour,
+                (false, false) => KeyEffect::Expanded,
+            },
+        );
     }
-    if named("transport/unicast/qos/enabled") && cfg.qos && !rest.iter().any(|a| a == "--qos") {
-        added.push("--qos".into());
+    if named("connect/endpoints") {
+        let dialled = matches!(selected, Some(("--peer" | "--connect" | "--router-hat", _)))
+            && !cfg.connect.is_empty();
+        exp.record(
+            "connect/endpoints",
+            match (role_on_cli, cfg.connect.is_empty(), dialled) {
+                (true, _, _) => KeyEffect::OverriddenOnTheCommandLine,
+                (false, true, _) => KeyEffect::AlreadyTheBehaviour,
+                (false, false, true) => KeyEffect::Expanded,
+                (false, false, false) => {
+                    KeyEffect::WithheldFromThisRun("this run's mode dials nothing")
+                }
+            },
+        );
     }
-    if named("transport/unicast/lowlatency")
-        && cfg.lowlatency
-        && !rest.iter().any(|a| a == "--lowlatency")
-    {
-        added.push("--lowlatency".into());
+    if named("transport/unicast/max_links") {
+        exp.pair(
+            "transport/unicast/max_links",
+            "--max-links",
+            cfg.max_links.to_string(),
+            None,
+        );
     }
-    if named("transport/unicast/compression/enabled")
-        && cfg.compression
-        && !rest.iter().any(|a| a == "--compression")
-    {
-        added.push("--compression".into());
+    if named("transport/unicast/qos/enabled") {
+        exp.presence("transport/unicast/qos/enabled", "--qos", cfg.qos, None);
+    }
+    if named("transport/unicast/lowlatency") {
+        exp.presence(
+            "transport/unicast/lowlatency",
+            "--lowlatency",
+            cfg.lowlatency,
+            None,
+        );
+    }
+    if named("transport/unicast/compression/enabled") {
+        exp.presence(
+            "transport/unicast/compression/enabled",
+            "--compression",
+            cfg.compression,
+            None,
+        );
     }
     // The two that reach the WIRE rather than a local policy: `batch_size` and
     // `lease` are InitSyn / OpenSyn fields, so a dropped one is not a setting
     // that failed to apply but a value the peer is told and the operator was
     // not. Unlike the booleans above these are honoured at ANY value, because
     // there is no "off" for them — the file naming the key is the instruction.
-    if named("transport/link/tx/batch_size") && !rest.iter().any(|a| a == "--batch-size") {
-        added.push("--batch-size".into());
-        added.push(cfg.batch_size.to_string());
+    if named("transport/link/tx/batch_size") {
+        exp.pair(
+            "transport/link/tx/batch_size",
+            "--batch-size",
+            cfg.batch_size.to_string(),
+            None,
+        );
     }
-    if named("transport/link/tx/lease") && !rest.iter().any(|a| a == "--lease-ms") {
-        added.push("--lease-ms".into());
-        added.push(cfg.lease_ms.to_string());
+    if named("transport/link/tx/lease") {
+        exp.pair(
+            "transport/link/tx/lease",
+            "--lease-ms",
+            cfg.lease_ms.to_string(),
+            None,
+        );
     }
     // R311y844 — the ten keys wz already acted on. Each row is a flag that has
     // been in this binary for rounds, so what changed is not the capability but
@@ -470,6 +605,7 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
     // start. zenoh scopes these keys to TLS links; so does this.
     let dials_tls = cfg.connect.iter().any(|e| e.starts_with("tls/"));
     let listens_tls = cfg.listen.iter().any(|e| e.starts_with("tls/"));
+    const NO_TLS_LINK: &str = "this deployment has no tls endpoint";
     for (key, flag, value, usable) in [
         ("id", "--zid", cfg.id.as_ref(), true),
         ("namespace", "--namespace", cfg.namespace.as_ref(), true),
@@ -492,10 +628,15 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             listens_tls,
         ),
     ] {
-        if let Some(value) = value {
-            if usable && named(key) && !rest.iter().any(|a| a == flag) {
-                added.push(String::from(flag));
-                added.push(value.clone());
+        if named(key) {
+            match value {
+                Some(value) => {
+                    let blocked = (!usable).then_some(KeyEffect::WithheldFromThisRun(NO_TLS_LINK));
+                    exp.pair(key, flag, value.clone(), blocked);
+                }
+                // A key the document names with no value asks for nothing, and
+                // asking for nothing is what this node already does.
+                None => exp.record(key, KeyEffect::AlreadyTheBehaviour),
             }
         }
     }
@@ -511,31 +652,39 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
     // silence would lose an instruction the operator gave directly; a key that
     // arrives inside a file full of keys wz cannot all act on is the opposite
     // case, and the honest answer there is to leave the flag off.
-    let preconditioned: [(&str, &str, Option<u64>, bool); 3] = [
+    // R2091 (open-debt item 508) — and withholding the flag is no longer
+    // SILENT. Each precondition names itself into the key's verdict, so a key
+    // this run has nothing to parse is reported as read-and-not-applied with
+    // the reason attached, rather than reported applied while reaching nothing.
+    let preconditioned: [(&str, &str, Option<u64>, Option<KeyEffect>); 3] = [
         (
             "queries_default_timeout",
             "--query-timeout-ms",
             cfg.queries_default_timeout_ms,
-            rest.iter().any(|a| a == "--query"),
+            (!exp.typed("--query"))
+                .then_some(KeyEffect::WithheldFromThisRun("this run has no --query")),
         ),
         (
             "routing/interests/timeout",
             "--interest-timeout",
             cfg.interests_timeout_ms,
-            cfg!(feature = "routing-interest-pending-gc"),
+            no_sink("routing/interests/timeout"),
         ),
         (
             "scouting/timeout",
             "--scout-timeout-ms",
             cfg.scouting_timeout_ms,
-            rest.iter().any(|a| a == "--scout"),
+            (!exp.typed("--scout"))
+                .then_some(KeyEffect::WithheldFromThisRun("this run does not scout")),
         ),
     ];
-    for (key, flag, value, usable) in preconditioned {
-        if let Some(value) = value {
-            if usable && named(key) && !rest.iter().any(|a| a == flag) {
-                added.push(String::from(flag));
-                added.push(value.to_string());
+    for (key, flag, value, blocked) in preconditioned {
+        if named(key) {
+            match value {
+                Some(value) => {
+                    exp.pair(key, flag, value.to_string(), blocked);
+                }
+                None => exp.record(key, KeyEffect::AlreadyTheBehaviour),
             }
         }
     }
@@ -574,32 +723,37 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
     // `--router-hat` on the command line plus a file carrying `listen: true`
     // expanded to `argv += []` while REPORTING the key APPLIED.
     //
-    // `--router-hat` is only ever TYPED, never emitted: the role expansion above
-    // maps `mode: "router"` to `--router` (the star router, which announces the
-    // PEER role on the wire), so a file alone cannot reach this arm. That gap is
-    // its own registered item, not this one — changing what `mode: "router"`
-    // expands to is a topology decision, not a wiring fix.
-    let role_answers_scouts = rest
+    // R2091 (open-debt item 508) — and `added` can now carry `--router-hat`,
+    // which is what makes a `mode: "router"` drop-in findable. Before this round
+    // the role expansion could only ever put `--peer` there, so a stock ROUTER
+    // config met this precondition in NO invocation at all: the sentence that
+    // used to stand here said `--router-hat` is only ever typed, and that was
+    // true because `mode: "router"` mapped to `--router`.
+    let role_answers_scouts = exp
+        .rest
         .iter()
-        .chain(added.iter())
+        .chain(exp.added.iter())
         .any(|a| a == "--peer" || a == "--router-hat");
-    let listen_expanded = cfg!(feature = "scouting-responder")
-        && named("scouting/multicast/listen")
-        && cfg.scout_multicast_listen == Some(true)
-        && role_answers_scouts
-        && !rest.iter().any(|a| a == "--scout-listen");
-    if listen_expanded {
-        added.push("--scout-listen".into());
-    }
+    let listen_blocked = no_sink("scouting/multicast/listen").or_else(|| {
+        (!role_answers_scouts).then_some(KeyEffect::WithheldFromThisRun(
+            "this run's mode answers no scouts",
+        ))
+    });
+    let listen_expanded = named("scouting/multicast/listen")
+        && exp.presence(
+            "scouting/multicast/listen",
+            "--scout-listen",
+            cfg.scout_multicast_listen == Some(true),
+            listen_blocked,
+        ) == KeyEffect::Expanded;
     // R311y845 — WHERE the node looks for its peers. Same precondition as
     // `scouting/timeout` above (`--scout` on the command line), because the
     // three flags carry the same one: a scouting socket is an instruction to a
     // node that is scouting, and the demo rejects it otherwise. R311y846 widened
     // "is scouting" to include the answering direction, which joins the same
     // socket.
-    let scouting = rest.iter().any(|a| a == "--scout")
-        || rest.iter().any(|a| a == "--scout-listen")
-        || listen_expanded;
+    let scouting = exp.typed("--scout") || exp.typed("--scout-listen") || listen_expanded;
+    const NO_SCOUT_SOCKET: &str = "this run neither asks for nor answers scouts";
     for (key, flag, value) in [
         (
             "scouting/multicast/address",
@@ -617,10 +771,14 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             cfg.scout_multicast_ttl.map(|t| t.to_string()),
         ),
     ] {
-        if let Some(value) = value {
-            if scouting && named(key) && !rest.iter().any(|a| a == flag) {
-                added.push(String::from(flag));
-                added.push(value);
+        if named(key) {
+            match value {
+                Some(value) => {
+                    let blocked =
+                        (!scouting).then_some(KeyEffect::WithheldFromThisRun(NO_SCOUT_SOCKET));
+                    exp.pair(key, flag, value, blocked);
+                }
+                None => exp.record(key, KeyEffect::AlreadyTheBehaviour),
             }
         }
     }
@@ -644,26 +802,35 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
     // which is the single invocation this path exists for. Measured, by a test
     // written before the fix: the config-only expansion came out
     // `["--peer", …, "--connect", …]` with no schedule at all.
-    let dials = rest
+    let dials = exp
+        .rest
         .iter()
-        .chain(added.iter())
+        .chain(exp.added.iter())
         .any(|a| a == "--peer" || a == "--router-hat");
-    if named("connect/retry")
-        && cfg!(any(feature = "routing-peer", feature = "router-hat-router"))
-        && dials
-        && !rest.iter().any(|a| a == "--connect-retry")
-    {
-        if let Some(retry) = cfg.connect_retry {
-            added.push("--connect-retry".into());
+    if named("connect/retry") {
+        let blocked = no_sink("connect/retry").or_else(|| {
+            (!dials).then_some(KeyEffect::WithheldFromThisRun(
+                "this run's mode owns no connect list",
+            ))
+        });
+        match cfg.connect_retry {
             // Rendered in the flag's own three-comma-separated spelling, and
             // re-parsed by `parse_connect_retry` downstream on purpose: that
             // parser is the single place the acceptance POLICY lives (a factor
             // below 1.0 is refused there and nowhere else), so a config file
             // reaches the same boundary a command line does.
-            added.push(format!(
-                "{},{},{}",
-                retry.period_init_ms, retry.period_max_ms, retry.period_increase_factor
-            ));
+            Some(retry) => {
+                exp.pair(
+                    "connect/retry",
+                    "--connect-retry",
+                    format!(
+                        "{},{},{}",
+                        retry.period_init_ms, retry.period_max_ms, retry.period_increase_factor
+                    ),
+                    blocked,
+                );
+            }
+            None => exp.record("connect/retry", KeyEffect::AlreadyTheBehaviour),
         }
     }
     // R2063 (open-debt item 214) — `routing/peer/mode` reaches the flag that
@@ -674,52 +841,119 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
     // word on the command line that changes nothing, and R311y844's rule for
     // this expansion is that an added flag is a DIFFERENCE the file asked for.
     // Withheld when the operator typed the flag, on the same rule every arm
-    // here follows -- an explicit argv beats a file.
-    if named("routing/peer/mode") && !cfg.peer_linkstate && !rest.iter().any(|a| a == "--peer-mode")
-    {
-        added.push("--peer-mode".into());
-        added.push("peer-to-peer".into());
+    // here follows -- an explicit argv beats a file. A file that STATES the
+    // default therefore reads as already-the-behaviour rather than as expanded,
+    // which is the honest verdict for it.
+    if named("routing/peer/mode") {
+        if cfg.peer_linkstate {
+            exp.record("routing/peer/mode", KeyEffect::AlreadyTheBehaviour);
+        } else {
+            exp.pair(
+                "routing/peer/mode",
+                "--peer-mode",
+                String::from("peer-to-peer"),
+                None,
+            );
+        }
     }
-    if named("transport/multicast/qos/enabled")
-        && cfg.multicast_qos
-        && cfg!(feature = "transport-qos")
-        && !rest.iter().any(|a| a == "--multicast-qos")
-    {
-        added.push("--multicast-qos".into());
+    if named("transport/multicast/qos/enabled") {
+        exp.presence(
+            "transport/multicast/qos/enabled",
+            "--multicast-qos",
+            cfg.multicast_qos,
+            no_sink("transport/multicast/qos/enabled"),
+        );
     }
-    if named("transport/shared_memory/enabled")
-        && cfg.shared_memory
-        && !rest.iter().any(|a| a == "--shm")
-    {
-        added.push("--shm".into());
+    if named("transport/shared_memory/enabled") {
+        exp.presence(
+            "transport/shared_memory/enabled",
+            "--shm",
+            cfg.shared_memory,
+            None,
+        );
+    }
+    // The two keys this binary models NOWHERE, said out loud rather than
+    // quietly folded into the applied half.
+    //
+    // `scouting/multicast/enabled` is reachability, not a role: it says whether
+    // to LISTEN for a scout beacon, and the demo's `--scout` says to discover
+    // INSTEAD of dialling, which is a different sentence — mapping one onto the
+    // other would rewrite the operator's topology. And nothing on the demo's
+    // push path stamps a source timestamp (`Timestamp` does not occur anywhere
+    // under `wz-ap-demo/src/`), so `timestamping/enabled` has no flag either.
+    //
+    // Both are UNCONDITIONAL members of `config_keys_the_demo_drops()` — there
+    // is no build in which they gain a flag — so their verdict is written here
+    // rather than derived from `no_sink`, and
+    // `every_key_this_build_drops_is_told_so_by_the_site_that_decides_it` is
+    // what refuses the two lists coming apart.
+    for key in ["scouting/multicast/enabled", "timestamping/enabled"] {
+        if named(key) {
+            exp.record(key, KeyEffect::NoSinkInThisBuild);
+        }
     }
     // The adminspace block, whose three upstream keys expand to four wz flags.
     // Keyed on the BLOCK rather than on `adminspace/enabled`, because a
     // document that names only a permission still describes an admin space —
     // that is the same reading `from_json5` takes when it builds the Option.
-    if let Some(admin) = &cfg.adminspace {
-        if !rest.iter().any(|a| a == "--config-queryable") {
-            added.push("--config-queryable".into());
-        }
-        if !admin.read && !rest.iter().any(|a| a == "--no-admin-read") {
-            added.push("--no-admin-read".into());
-        }
-        if admin.write {
-            if !rest.iter().any(|a| a == "--config-writable") {
-                added.push("--config-writable".into());
+    //
+    // zenoh states the admin space as ONE `permissions.write`; wz splits it
+    // into hosting the write subscriber (`--config-writable`) and permitting
+    // the write (`--config-write-permit`), so the single upstream key expands
+    // to both — either alone yields a node that does not do what the operator's
+    // file says, which is why the key's verdict below is the WEAKER of the two.
+    match &cfg.adminspace {
+        Some(admin) => {
+            if named("adminspace/enabled") {
+                exp.presence("adminspace/enabled", "--config-queryable", true, None);
             }
-            if !rest.iter().any(|a| a == "--config-write-permit") {
-                added.push("--config-write-permit".into());
+            if named("adminspace/permissions/read") {
+                exp.presence(
+                    "adminspace/permissions/read",
+                    "--no-admin-read",
+                    !admin.read,
+                    None,
+                );
+            }
+            if named("adminspace/permissions/write") {
+                let hosted = exp.decide_presence("--config-writable", admin.write, None);
+                let permitted = exp.decide_presence("--config-write-permit", admin.write, None);
+                let effect = if hosted == permitted {
+                    hosted
+                } else if hosted.reached_the_node() && permitted.reached_the_node() {
+                    KeyEffect::Expanded
+                } else if hosted.reached_the_node() {
+                    permitted
+                } else {
+                    hosted
+                };
+                exp.record("adminspace/permissions/write", effect);
+            }
+        }
+        None => {
+            // `enabled: false` is read as no admin space at all, and no admin
+            // space is what this binary does with none of the four flags — so
+            // the file's sentence IS this node's behaviour.
+            for key in [
+                "adminspace/enabled",
+                "adminspace/permissions/read",
+                "adminspace/permissions/write",
+            ] {
+                if named(key) {
+                    exp.record(key, KeyEffect::AlreadyTheBehaviour);
+                }
             }
         }
     }
 
+    let Expansion { added, effects, .. } = exp;
     let mut argv: Vec<String> = rest.to_vec();
     argv.extend(added.iter().cloned());
     Ok(Some(StockConfigExpansion {
         path,
         argv,
         added,
+        effects,
         named: ingest.named,
         ignored: ingest.ignored,
         stated_for_other_modes: ingest.stated_for_other_modes,
@@ -740,6 +974,9 @@ pub(crate) struct StockConfigExpansion {
     pub(crate) argv: Vec<String>,
     /// Only what the file contributed, in the order it was appended.
     pub(crate) added: Vec<String>,
+    /// R2091 (open-debt item 508) — what became of each honoured key the file
+    /// named, decided at the site that decides the flag.
+    pub(crate) effects: Vec<(&'static str, KeyEffect)>,
     /// The honoured keys the file actually named.
     pub(crate) named: Vec<&'static str>,
     /// The keys the file carried that wz does not honour.
@@ -761,23 +998,216 @@ impl StockConfigExpansion {
     /// site, because a test cannot reach `main` and a second copy of the filter
     /// would be a second answer to "did my setting take effect". One derivation,
     /// read by the report and by the witnesses.
+    /// R2091 (open-debt item 508) — derived from what the expansion DID, not
+    /// from a per-build list of keys it could never do. The two differ every
+    /// time a flag's precondition is unmet by the invocation: measured before
+    /// this round, a `mode: "peer"` drop-in naming
+    /// `scouting/multicast/{listen,address}`, `queries_default_timeout`,
+    /// `transport/link/tls/root_ca_certificate` and `adminspace/enabled` printed
+    /// all five as APPLIED with `argv += ["--listen", …]` and nothing else.
     pub(crate) fn applied(&self) -> Vec<&'static str> {
-        let dropped = config_keys_the_demo_drops();
         self.named
             .iter()
             .copied()
-            .filter(|k| !dropped.contains(k))
+            .filter(|k| self.effect(k).is_some_and(KeyEffect::reached_the_node))
             .collect()
     }
 
-    /// The honoured keys this build has no sink for: READ, and reaching nothing.
+    /// The honoured keys that did NOT reach this node.
+    ///
+    /// A key with no recorded verdict lands HERE and not in [`Self::applied`],
+    /// which is the safe side of the only bug this split can have: the report
+    /// can never call a key applied unless a decision site said so.
     pub(crate) fn read_but_not_applied(&self) -> Vec<&'static str> {
-        let dropped = config_keys_the_demo_drops();
         self.named
             .iter()
             .copied()
-            .filter(|k| dropped.contains(k))
+            .filter(|k| !self.effect(k).is_some_and(KeyEffect::reached_the_node))
             .collect()
+    }
+
+    /// [`Self::read_but_not_applied`], each key carrying WHY.
+    ///
+    /// Without the reason "not applied" sends an operator looking in their file
+    /// for a defect that is in the invocation — a withheld `--scout-addr` is not
+    /// a mistyped group, it is a run that answers no scouts.
+    pub(crate) fn read_but_not_applied_with_reasons(&self) -> Vec<String> {
+        self.read_but_not_applied()
+            .into_iter()
+            .map(|k| {
+                let why = self
+                    .effect(k)
+                    .map_or(UNRECORDED_VERDICT, KeyEffect::why_not);
+                format!("{k} ({why})")
+            })
+            .collect()
+    }
+
+    fn effect(&self, key: &str) -> Option<KeyEffect> {
+        self.effects
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, e)| *e)
+    }
+}
+
+/// What [`StockConfigExpansion::read_but_not_applied_with_reasons`] prints for a
+/// key no decision site spoke for.
+///
+/// Named rather than inlined so the gate that forbids it
+/// (`every_named_key_gets_a_verdict_from_the_site_that_decides_its_flag`) checks
+/// for the same string the report would print.
+#[cfg(feature = "zenoh-config")]
+pub(crate) const UNRECORDED_VERDICT: &str = "no decision site spoke for it";
+
+/// R2091 (open-debt item 508) — what became of ONE honoured key the file named.
+///
+/// The report used to derive this from a per-BUILD list of keys with no sink,
+/// which answers a question nobody asked: "could this binary EVER act on the
+/// key". What an operator asks is whether THIS RUN did, and the two differ
+/// wherever a flag carries a precondition the invocation does not meet. Six of
+/// the honoured keys have such a precondition, and before this round every one
+/// of them was reported APPLIED while the expansion silently withheld its flag.
+#[cfg(feature = "zenoh-config")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KeyEffect {
+    /// The file's value reached the command line, as the flag that carries it.
+    Expanded,
+    /// No flag, and none was needed: what the file states is what this binary
+    /// does with the flag absent.
+    AlreadyTheBehaviour,
+    /// The operator typed the same value; the file is redundant, not ignored.
+    AlreadyOnTheCommandLine,
+    /// The operator typed a DIFFERENT value, and an explicit argv beats a file.
+    OverriddenOnTheCommandLine,
+    /// This BUILD compiled no sink for the key.
+    NoSinkInThisBuild,
+    /// This RUN has nothing the flag could qualify, so the expansion withheld
+    /// it rather than hand the binary an argument it exits(2) on. The `&str`
+    /// names what is missing.
+    WithheldFromThisRun(&'static str),
+    /// `mode` only: the run-mode these endpoints select announces a different
+    /// role than the file asked for.
+    NotTheRoleTheseEndpointsSelect,
+}
+
+#[cfg(feature = "zenoh-config")]
+impl KeyEffect {
+    /// Whether this node's behaviour carries what the file's key says.
+    pub(crate) fn reached_the_node(self) -> bool {
+        matches!(
+            self,
+            Self::Expanded | Self::AlreadyTheBehaviour | Self::AlreadyOnTheCommandLine
+        )
+    }
+
+    /// The reason the report prints. Empty for the applied half, which never
+    /// asks for one.
+    pub(crate) fn why_not(self) -> &'static str {
+        match self {
+            Self::Expanded | Self::AlreadyTheBehaviour | Self::AlreadyOnTheCommandLine => "",
+            Self::OverriddenOnTheCommandLine => "the command line says otherwise",
+            Self::NoSinkInThisBuild => "no sink in this build",
+            Self::WithheldFromThisRun(what) => what,
+            Self::NotTheRoleTheseEndpointsSelect => {
+                "these endpoints select a run-mode in another role"
+            }
+        }
+    }
+}
+
+/// The expansion under construction: the flags it has added, and the verdict it
+/// has recorded for each key it has passed.
+///
+/// R2091 (open-debt item 508) — the two travel together, and every site goes
+/// through [`Expansion::pair`] / [`Expansion::presence`], because a site that
+/// could report one thing and add another is exactly the defect item 508 names.
+/// Before this round the report was derived a second time, from a different
+/// input, at a different place.
+#[cfg(feature = "zenoh-config")]
+struct Expansion<'a> {
+    rest: &'a [String],
+    added: Vec<String>,
+    effects: Vec<(&'static str, KeyEffect)>,
+}
+
+#[cfg(feature = "zenoh-config")]
+impl Expansion<'_> {
+    fn typed(&self, flag: &str) -> bool {
+        self.rest.iter().any(|a| a == flag)
+    }
+
+    fn record(&mut self, key: &'static str, effect: KeyEffect) {
+        self.effects.push((key, effect));
+    }
+
+    /// Decide a `<flag> <value>` key's fate AND act on the decision.
+    fn decide_pair(
+        &mut self,
+        flag: &'static str,
+        value: String,
+        blocked: Option<KeyEffect>,
+    ) -> KeyEffect {
+        if let Some(blocked) = blocked {
+            return blocked;
+        }
+        // Keyed on the flag's PRESENCE and not on `parse_pair`, so a trailing
+        // `--max-links` with no value still counts as typed: the old code
+        // withheld on presence, and reading it as absent would append a second
+        // copy of a flag the operator already gave.
+        if self.typed(flag) {
+            return match parse_pair(self.rest, flag) {
+                Some(typed) if typed == value => KeyEffect::AlreadyOnTheCommandLine,
+                _ => KeyEffect::OverriddenOnTheCommandLine,
+            };
+        }
+        self.added.push(String::from(flag));
+        self.added.push(value);
+        KeyEffect::Expanded
+    }
+
+    fn pair(
+        &mut self,
+        key: &'static str,
+        flag: &'static str,
+        value: String,
+        blocked: Option<KeyEffect>,
+    ) -> KeyEffect {
+        let effect = self.decide_pair(flag, value, blocked);
+        self.record(key, effect);
+        effect
+    }
+
+    /// A presence flag: the file's `true` is what asks for it, and its `false`
+    /// is what the absent flag already means.
+    fn decide_presence(
+        &mut self,
+        flag: &'static str,
+        on: bool,
+        blocked: Option<KeyEffect>,
+    ) -> KeyEffect {
+        match (blocked, self.typed(flag), on) {
+            (Some(blocked), _, _) => blocked,
+            (None, true, true) => KeyEffect::AlreadyOnTheCommandLine,
+            (None, true, false) => KeyEffect::OverriddenOnTheCommandLine,
+            (None, false, true) => {
+                self.added.push(String::from(flag));
+                KeyEffect::Expanded
+            }
+            (None, false, false) => KeyEffect::AlreadyTheBehaviour,
+        }
+    }
+
+    fn presence(
+        &mut self,
+        key: &'static str,
+        flag: &'static str,
+        on: bool,
+        blocked: Option<KeyEffect>,
+    ) -> KeyEffect {
+        let effect = self.decide_presence(flag, on, blocked);
+        self.record(key, effect);
+        effect
     }
 }
 
@@ -993,12 +1423,30 @@ mod stock_config_tests {
 
     /// The four topology cases, each stated as the argv an operator would
     /// otherwise have typed.
+    ///
+    /// R2091 (open-debt item 508) — the router row moved from `--router` to
+    /// `--router-hat`, and the fifth row below is what that move is FOR: a
+    /// federating router carries its peer routers in `connect`, and
+    /// `run_router_hat` reads that set off `--connect` exactly as the peer arm
+    /// does. `--router` had no such parse, so those endpoints used to be
+    /// dropped on the floor.
     #[test]
     fn each_topology_the_config_can_describe_becomes_the_argv_for_it() {
         for (file, want) in [
             (
                 r#"{ mode: "router", listen: { endpoints: ["tcp/0.0.0.0:7447"] } }"#,
-                vec!["--router", "tcp/0.0.0.0:7447"],
+                vec!["--router-hat", "tcp/0.0.0.0:7447"],
+            ),
+            (
+                r#"{ mode: "router",
+                     listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     connect: { endpoints: ["tcp/r2:7447", "tcp/r3:7447"] } }"#,
+                vec![
+                    "--router-hat",
+                    "tcp/0.0.0.0:7447",
+                    "--connect",
+                    "tcp/r2:7447,tcp/r3:7447",
+                ],
             ),
             (
                 r#"{ mode: "peer",
@@ -1035,6 +1483,12 @@ mod stock_config_tests {
             vec!["--listen", "127.0.0.1:1"],
             vec!["--connect", "127.0.0.1:1"],
             vec!["--router", "127.0.0.1:1"],
+            // R2091 (open-debt item 508) — `--router-hat` is in the set BECAUSE
+            // the role expansion now emits it. Without this row a typed
+            // `--router-hat` plus the `mode: "router"` file below would append a
+            // second one, and the operator's command line would carry the same
+            // run-mode flag twice with two different addresses.
+            vec!["--router-hat", "127.0.0.1:1"],
             vec!["--peer", "127.0.0.1:1"],
             vec!["--storage-host", "127.0.0.1:1"],
             vec!["--scout"],
@@ -1906,16 +2360,29 @@ mod stock_config_tests {
     fn the_usage_text_names_the_wire_role_each_run_mode_announces() {
         const USAGE: &str = include_str!("usage.rs");
 
-        // (flag, the role `demo_session_init_params` returns for its NodeKind)
-        const ROLES: &[(&str, &str)] = &[
-            ("listen", "peer"),
-            ("connect", "client"),
-            ("router", "peer"),
-            ("router-hat", "router"),
-            ("peer", "peer"),
-        ];
+        // R2091 (open-debt item 508) — the pairs are READ OFF [`RUN_MODE_ROLES`]
+        // rather than restated here. This test and the config expansion's `mode`
+        // verdict ask the same question of the same flags, and a second copy of
+        // the answer is a second thing to keep in step with
+        // `demo_session_init_params`.
+        //
+        // `--storage-host` and `--scout` are excluded from the SWEEP, not from
+        // the table: their usage entries describe a hosting mode and a discovery
+        // step rather than a role an operator picks a node to be, so requiring
+        // the phrase of them would be writing the test's convenience into the
+        // help text.
+        const NOT_PICKED_BY_ROLE: &[&str] = &["--storage-host", "--scout"];
 
-        for (flag, role) in ROLES {
+        for (flag, whatami) in RUN_MODE_ROLES
+            .iter()
+            .filter(|(f, _)| !NOT_PICKED_BY_ROLE.contains(f))
+        {
+            let role = match whatami {
+                WhatAmI::Router => "router",
+                WhatAmI::Peer => "peer",
+                WhatAmI::Client => "client",
+            };
+            let flag = flag.trim_start_matches("--");
             let entry = usage_entry(USAGE, flag)
                 .unwrap_or_else(|| panic!("`--{flag}` has no entry in the usage text at all"));
             let phrase = format!("zenoh {role} role");
@@ -2106,6 +2573,225 @@ mod stock_config_tests {
              expansion must withhold it: {:?}",
             star.added
         );
+    }
+
+    /// R2091 (open-debt item 508) — ONE stock zenoh router file, and nothing
+    /// else on the command line, becomes a wz node in the ROUTER role that
+    /// answers Scouts.
+    ///
+    /// This is the invocation an operator performs when they drop wz in where a
+    /// zenohd was: `wz-ap-demo --config their.json5`. Before this round it
+    /// expanded to `["--router", <ep>]` — a run-mode that announces
+    /// `WhatAmI::Peer` on the wire (`demo_session_init_params`) and spawns no
+    /// responder — so the file that deploys a router produced a node in the
+    /// wrong role that nothing could find. R2089 had already made the ROUTER
+    /// answer Scouts; what was missing is that no FILE could select it.
+    ///
+    /// The peer row is the CONTROL and it is in the same test: it shares every
+    /// key with the router row and differs in the one word `mode`, so an
+    /// expansion that emitted `--router-hat` for everything, or `--scout-listen`
+    /// for everything, fails one of the two. The client row is the second
+    /// control, and it is the one that keeps `--scout-listen` from being read as
+    /// unconditional: a client dials and answers nothing.
+    #[test]
+    #[cfg(all(
+        feature = "scouting-responder",
+        feature = "routing-peer",
+        feature = "router-hat-router"
+    ))]
+    fn a_stock_router_config_on_its_own_becomes_a_findable_router() {
+        fn file(mode: &str, endpoints: &str) -> String {
+            format!(
+                r#"{{ mode: "{mode}", {endpoints},
+                   scouting: {{ multicast: {{ enabled: true, listen: true,
+                                            address: "224.0.0.99:7999" }} }} }}"#
+            )
+        }
+        const LISTENS: &str = r#"listen: { endpoints: ["tcp/127.0.0.1:0"] }"#;
+        const DIALS: &str = r#"connect: { endpoints: ["tcp/r:7447"] }"#;
+
+        let router = expand(&["--config", "z.json5"], &file("router", LISTENS)).unwrap();
+        assert_eq!(
+            router.added[..2],
+            argv(&["--router-hat", "tcp/127.0.0.1:0"])[..],
+            "a `mode: \"router\"` file must select wz's ROUTER run-mode, which \
+             is the only one that announces WhatAmI::Router: {:?}",
+            router.added
+        );
+        assert!(
+            !router.added.iter().any(|a| a == "--router"),
+            "the star router announces the PEER role and hosts no responder, so \
+             a router file that reached it is a node in the wrong role: {:?}",
+            router.added
+        );
+        for flag in ["--scout-listen", "--scout-addr"] {
+            assert!(
+                router.added.iter().any(|a| a == flag),
+                "a router told by its file to be findable must join the group \
+                 it names ({flag} missing): {:?}",
+                router.added
+            );
+        }
+
+        // CONTROL 1 — the same document, one word different. A peer is findable
+        // too, and it must NOT be reached through the router's flag.
+        let peer = expand(&["--config", "z.json5"], &file("peer", LISTENS)).unwrap();
+        assert!(
+            peer.added.iter().any(|a| a == "--listen") && peer.added.iter().all(|a| a != "--peer"),
+            "a peer with no connect list is the one-shot acceptor: {:?}",
+            peer.added
+        );
+        assert!(
+            !peer.added.iter().any(|a| a == "--router-hat"),
+            "only `mode: \"router\"` selects the router run-mode: {:?}",
+            peer.added
+        );
+
+        // CONTROL 2 — a client dials and answers nothing, so the same
+        // `listen: true` reaches no flag at all. Without this row the two
+        // scouting assertions above would pass against an expansion that emitted
+        // the flags unconditionally.
+        let client = expand(&["--config", "z.json5"], &file("client", DIALS)).unwrap();
+        assert_eq!(client.added, argv(&["--connect", "tcp/r:7447"]));
+        assert!(
+            !client.applied().contains(&"scouting/multicast/listen"),
+            "a client answers no Scouts, so its file's `listen: true` reached \
+             nothing and must not be reported applied: {:?}",
+            client.applied()
+        );
+    }
+
+    /// R2091 (open-debt item 508) — A KEY WHOSE FLAG THIS RUN WITHHELD IS NOT
+    /// REPORTED APPLIED.
+    ///
+    /// Measured before this round, on a real binary and a real file: an
+    /// invocation whose `argv +=` line was `["--listen", "tcp/127.0.0.1:0"]` and
+    /// nothing more printed `APPLIED [… "scouting/multicast/address",
+    /// "scouting/multicast/listen", "queries_default_timeout", …]`. The report
+    /// was derived from a per-BUILD list of keys with no sink, so every key
+    /// withheld for an INVOCATION reason was counted as applied.
+    ///
+    /// The control is the same three keys in the same test, in an invocation
+    /// that MEETS their preconditions. Without it this test would pass against a
+    /// report that called nothing applied, which is the opposite lie.
+    #[test]
+    #[cfg(all(feature = "scouting-responder", feature = "routing-peer"))]
+    fn a_key_whose_flag_this_run_withholds_is_not_reported_as_applied() {
+        const WITHHELD_KEYS: [&str; 3] = [
+            "scouting/multicast/listen",
+            "scouting/multicast/address",
+            "queries_default_timeout",
+        ];
+        fn body(endpoints: &str) -> String {
+            format!(
+                r#"{{ mode: "peer", {endpoints},
+                   queries_default_timeout: 12000,
+                   scouting: {{ multicast: {{ listen: true,
+                                            address: "224.0.0.99:7999" }} }} }}"#
+            )
+        }
+
+        // A one-shot acceptor: it answers no Scouts, and the command line has no
+        // `--query` for the timeout to qualify.
+        let withheld = expand(
+            &["--config", "z.json5"],
+            &body(r#"listen: { endpoints: ["tcp/127.0.0.1:0"] }"#),
+        )
+        .unwrap();
+        for flag in ["--scout-listen", "--scout-addr", "--query-timeout-ms"] {
+            assert!(
+                !withheld.added.iter().any(|a| a == flag),
+                "the fixture is not measuring a withheld flag any more: {:?}",
+                withheld.added
+            );
+        }
+        let reasons = withheld.read_but_not_applied_with_reasons();
+        for key in WITHHELD_KEYS {
+            assert!(
+                !withheld.applied().contains(&key),
+                "{key} reached no flag and was reported applied: {:?}",
+                withheld.applied()
+            );
+            let named = reasons
+                .iter()
+                .find(|line| line.starts_with(&format!("{key} (")))
+                .unwrap_or_else(|| panic!("{key} is in neither half: {reasons:?}"));
+            assert!(
+                !named.contains(UNRECORDED_VERDICT),
+                "{named}: a key with no verdict is a site that did not speak"
+            );
+        }
+
+        // THE CONTROL. Same three keys, same document shape; the invocation now
+        // supplies what each one needs — a connect list (so the peer MESH mode
+        // is selected, which hosts the responder) and a `--query`.
+        let met = expand(
+            &["--config", "z.json5", "--query", "demo/**"],
+            &body(
+                r#"listen: { endpoints: ["tcp/127.0.0.1:0"] },
+                   connect: { endpoints: ["tcp/r:7447"] }"#,
+            ),
+        )
+        .unwrap();
+        for key in WITHHELD_KEYS {
+            assert!(
+                met.applied().contains(&key),
+                "{key}: the control must reach a flag, or the assertions above \
+                 are measuring a report that calls nothing applied: {:?} / {:?}",
+                met.applied(),
+                met.added
+            );
+        }
+    }
+
+    /// R2091 (open-debt item 508) — every honoured key the document names gets a
+    /// verdict from the site that decides its flag, and the BUILD axis is the
+    /// one `config_keys_the_demo_drops()` states.
+    ///
+    /// Both directions, because either alone is satisfiable by a bug: a key in
+    /// the drop list with no site would report `applied` (the pre-round defect),
+    /// and a site that answered `NoSinkInThisBuild` for a key not in the list
+    /// would put the two lists back into the drift this binding exists to end.
+    #[test]
+    fn every_key_this_build_drops_is_told_so_by_the_site_that_decides_it() {
+        let dropped = config_keys_the_demo_drops();
+        for (key, _control, variant) in honoured_key_fixtures() {
+            let exp = expand_as_a_build_with_every_link(cli_for(key), variant)
+                .unwrap_or_else(|e| panic!("{key}: the variant config is not readable: {e}"));
+            let effect = exp
+                .effects
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, e)| *e)
+                .unwrap_or_else(|| {
+                    panic!("{key}: no decision site spoke for it ({:?})", exp.effects)
+                });
+            if dropped.contains(&key) {
+                assert_eq!(effect, KeyEffect::NoSinkInThisBuild, "{key}");
+            } else {
+                assert_ne!(
+                    effect,
+                    KeyEffect::NoSinkInThisBuild,
+                    "{key}: reported as having no sink while not in \
+                     config_keys_the_demo_drops()"
+                );
+            }
+
+            // And the two halves of the report partition `named` — no key is
+            // dropped from both, and none is claimed by both.
+            let mut both = exp.applied();
+            both.extend(exp.read_but_not_applied());
+            both.sort_unstable();
+            let mut named = exp.named.clone();
+            named.sort_unstable();
+            assert_eq!(
+                both, named,
+                "{key}: the report's halves are not a partition"
+            );
+            for line in exp.read_but_not_applied_with_reasons() {
+                assert!(!line.contains(UNRECORDED_VERDICT), "{key}: {line}");
+            }
+        }
     }
 
     /// R311y843 — the config's two WIRE values, followed from the file all the
@@ -2933,6 +3619,39 @@ impl Role {
 /// announced a different version than the InitSyn that follows would be a wire
 /// inconsistency with no single place to correct it.
 pub(crate) const DEMO_PROTO_VERSION: u8 = 0x09;
+
+/// The wire role each run-mode flag announces, in the order `main` DISPATCHES
+/// them — so the first entry a command line matches is the mode that command
+/// line actually selects.
+///
+/// The flag names do not carry this and cannot be read for it: `--connect`
+/// announces `client` while naming neither, `--router` announces `peer`, and
+/// only `--router-hat` announces `router`. [`demo_session_init_params`] is
+/// where the decision is made; this is that decision as a table, so the two
+/// callers who need it — the config expansion's `mode` verdict and the usage
+/// text's own gate — read one answer instead of keeping two.
+///
+/// R2091 (open-debt item 508) — named this round because the expansion's `mode`
+/// verdict became a COMPARISON. "Was a role flag emitted" is not the question an
+/// operator asks; "did this node come up in the role my file named" is, and the
+/// two differ whenever the endpoints select a mode in another role.
+///
+/// Gated like [`config_keys_the_demo_drops`], and for the same reason: both of
+/// its readers are, so an ungated copy is dead code in a build without the
+/// config reader.
+#[cfg(feature = "zenoh-config")]
+pub(crate) const RUN_MODE_ROLES: &[(&str, WhatAmI)] = &[
+    ("--router", WhatAmI::Peer),
+    ("--peer", WhatAmI::Peer),
+    ("--router-hat", WhatAmI::Router),
+    ("--storage-host", WhatAmI::Peer),
+    // The single-session roles, which `main` reaches last.
+    ("--listen", WhatAmI::Peer),
+    ("--connect", WhatAmI::Client),
+    // Scouting is pre-session locator resolution; everything downstream of the
+    // resolved string is the ordinary one-shot Initiator (`main.rs`).
+    ("--scout", WhatAmI::Client),
+];
 
 /// The demo's default zenoh id, overridable with `--zid <hex>`.
 ///

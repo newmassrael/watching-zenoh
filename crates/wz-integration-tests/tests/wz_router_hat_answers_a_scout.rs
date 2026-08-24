@@ -41,6 +41,23 @@
 //! fails the router arm while the peer arm stays green — which is the whole
 //! point of keeping the two in one test rather than two files.
 //!
+//! ## R2091 (open-debt item 508) — the two CONFIG-FILE arms
+//!
+//! R2089 closed the run-mode half: a node TYPED as `--router-hat --scout-listen`
+//! answers. What it left open is that no FILE could select that run-mode. An
+//! operator replacing a zenohd runs `wz-ap-demo --config their.json5` and
+//! nothing else, and `mode: "router"` expanded to `--router` — a different
+//! run-mode, which announces `WhatAmI::Peer` (`demo_session_init_params`) and
+//! hosts no responder. Measured on this tree before the fix, on a build carrying
+//! `router-hat-router` and not `routing-router`: that invocation printed
+//! `argv += ["--router", "tcp/127.0.0.1:0"]` and exited 2, while REPORTING
+//! `scouting/multicast/listen` as APPLIED.
+//!
+//! So two more arms, started from ONE stock config file apiece and no other
+//! argument. They carry their own control for the same reason the typed pair
+//! does: the config-router's `0b00` is read beside a config-peer's `0b01`, so an
+//! expansion that mapped every `mode` onto one run-mode fails one of them.
+//!
 //! Each node owns a DISTINCT group AND port. Distinct PORTS specifically,
 //! because Linux `IP_MULTICAST_ALL` delivers to a wildcard-bound socket by port
 //! regardless of which group the datagram carried (open-debt item 225 is the
@@ -49,8 +66,8 @@
 //!
 //! Opt-in (`#[ignore]`, run-ci Layer M): it spawns the demo binary and drives a
 //! real multicast group, which is the pair Layer M owns. Needs the demo built
-//! with `router-hat-router` + `scouting-responder` + `routing-peer` (that lane
-//! builds it).
+//! with `router-hat-router` + `scouting-responder` + `routing-peer` +
+//! `zenoh-config` (that lane builds it).
 
 use std::io::ErrorKind;
 use std::net::{Ipv4Addr, UdpSocket};
@@ -74,17 +91,91 @@ const WHAT_PEER: u8 = 0b010;
 const RESPONDER_NEEDLE: &str = "SCOUT RESPONDER listening on ";
 const ADVERTISED_NEEDLE: &str = "ADVERTISED SELF LOCATOR ";
 
+/// How one arm's node is told what to be — the whole independent variable.
+///
+/// R2091 (open-debt item 508) — a second spelling, because the two are DIFFERENT
+/// claims. `Typed` is an operator who already knows wz's flags; `ConfigFile` is
+/// one who has a zenoh deployment and a file, which is the population a
+/// replacement is for. R2089 proved the first and left the second failing.
+enum Start {
+    /// The run-mode flag, with the scouting socket typed beside it.
+    Typed(&'static str),
+    /// ONE stock zenoh config file, `mode: "<this>"`, and no other argument.
+    ConfigFile(&'static str),
+}
+
 /// One node under test: how it is started, where it answers, and what the wire
 /// must say about it.
 struct Arm {
-    /// The run-mode flag, which is the whole independent variable.
-    mode_flag: &'static str,
+    start: Start,
+    /// What the failure messages call this arm.
+    name: &'static str,
     group: Ipv4Addr,
     port: u16,
     zid_prefix: &'static str,
     /// The `whatami` the Hello must carry — the 2-bit HANDSHAKE form, which is
     /// what `walk_hello` reads out of `cbyte & 0x03`.
     expect_whatami: WhatAmI,
+}
+
+impl Arm {
+    /// The argv this arm starts the demo with, and the file it had to write to
+    /// mean it.
+    ///
+    /// The config arms name the SAME group, port and zid the typed arms pass on
+    /// the command line, through the upstream keys that carry them
+    /// (`scouting/multicast/{listen,address}` and `id`). That is deliberate: a
+    /// fixture that reached the socket some other way would prove the node
+    /// answers and not that the FILE is what put it on that group.
+    fn argv(&self, zid_hex: &str, dir: &std::path::Path) -> Vec<String> {
+        match self.start {
+            Start::Typed(flag) => [
+                flag,
+                "tcp/127.0.0.1:0",
+                "--scout-listen",
+                // The group is MOVED off zenoh's default on purpose. Two nodes
+                // in one test cannot share the default socket, and a run of this
+                // test must not answer the Scouts of a zenohd another lane is
+                // driving on `224.0.0.224:7446`.
+                "--scout-addr",
+                &format!("{}:{}", self.group, self.port),
+                // PER-PROCESS: a fixed zid shared with a leftover or a
+                // concurrent copy of this test would let the wrong node's Hello
+                // satisfy the zid assertion below.
+                "--zid",
+                zid_hex,
+            ]
+            .iter()
+            .map(|s| String::from(*s))
+            .collect(),
+            Start::ConfigFile(mode) => {
+                let path = dir.join(format!("{}.json5", self.zid_prefix));
+                std::fs::write(
+                    &path,
+                    format!(
+                        r#"{{
+  // The two config arms differ in exactly this word, which is what makes each
+  // one the other's control. `connect` is present in BOTH — a lone `mode:
+  // "peer"` with only a listen endpoint selects the one-shot acceptor, which
+  // answers no Scouts, so a peer arm without it would differ in two things and
+  // measure neither cleanly. Nothing listens on port 1; the dial is refused and
+  // retried, which is a normal state for a node whose neighbours are not up.
+  mode: "{mode}",
+  id: "{zid_hex}",
+  listen: {{ endpoints: ["tcp/127.0.0.1:0"] }},
+  connect: {{ endpoints: ["tcp/127.0.0.1:1"] }},
+  scouting: {{ multicast: {{ enabled: true, listen: true,
+                           address: "{}:{}" }} }},
+}}
+"#,
+                        self.group, self.port
+                    ),
+                )
+                .unwrap_or_else(|e| panic!("{}: staging the config file: {e}", self.name));
+                vec![String::from("--config"), path.display().to_string()]
+            }
+        }
+    }
 }
 
 /// What one arm's node actually DID: the bytes it answered with, plus the two
@@ -175,7 +266,7 @@ fn scout_and_read_hello(
             return Err(format!(
                 "the {} node exited before answering (status: {status})\n\
                  --- captured output ---\n{}",
-                arm.mode_flag,
+                arm.name,
                 wz_integration_tests::common::read_captured(capture)
             ));
         }
@@ -183,7 +274,7 @@ fn scout_and_read_hello(
             return Err(format!(
                 "no Hello from the {} node on {}:{} within the budget (process \
                  still alive)\n--- captured output ---\n{}",
-                arm.mode_flag,
+                arm.name,
                 arm.group,
                 arm.port,
                 wz_integration_tests::common::read_captured(capture)
@@ -204,7 +295,8 @@ fn scout_and_read_hello(
 // and links no foreign implementation. Measured, not assumed: both spellings
 // were tried this round and both were refused, in that order.
 #[test]
-#[ignore = "binary-dep e2e: needs wz-ap-demo[+router-hat-router,scouting-responder,routing-peer] \
+#[ignore = "binary-dep e2e: needs \
+            wz-ap-demo[+router-hat-router,scouting-responder,routing-peer,zenoh-config] \
             and a multicast route; runs via --ignored"]
 fn a_wz_router_hat_answers_a_scout_with_a_hello_that_says_router() {
     let demo = wz_ap_demo_binary();
@@ -214,9 +306,12 @@ fn a_wz_router_hat_answers_a_scout_with_a_hello_that_says_router() {
     // in the responder for a defect that is in the build.
     assert_demo_binary_newer_than_sources(&demo);
 
+    let staging = tempfile::tempdir().expect("a directory for the config arms' files");
+
     let arms = [
         Arm {
-            mode_flag: "--router-hat",
+            start: Start::Typed("--router-hat"),
+            name: "--router-hat",
             group: Ipv4Addr::new(224, 0, 0, 231),
             port: 17452,
             zid_prefix: "7201",
@@ -226,10 +321,33 @@ fn a_wz_router_hat_answers_a_scout_with_a_hello_that_says_router() {
         // discipline; one word of argv different. See the module doc: without
         // it the router assertion is reading a zero.
         Arm {
-            mode_flag: "--peer",
+            start: Start::Typed("--peer"),
+            name: "--peer",
             group: Ipv4Addr::new(224, 0, 0, 232),
             port: 17453,
             zid_prefix: "7202",
+            expect_whatami: WhatAmI::Peer,
+        },
+        // R2091 (open-debt item 508) — THE DROP-IN. One stock zenoh router
+        // config and no other argument. This is the invocation an operator
+        // performs, and before this round it selected `--router`: a run-mode
+        // that announces the PEER role and hosts no responder.
+        Arm {
+            start: Start::ConfigFile("router"),
+            name: "--config <mode: router>",
+            group: Ipv4Addr::new(224, 0, 0, 233),
+            port: 17454,
+            zid_prefix: "7203",
+            expect_whatami: WhatAmI::Router,
+        },
+        // Its control, by the same argument the typed pair makes: the config
+        // path must not have been taught to answer `router` for everything.
+        Arm {
+            start: Start::ConfigFile("peer"),
+            name: "--config <mode: peer>",
+            group: Ipv4Addr::new(224, 0, 0, 234),
+            port: 17455,
+            zid_prefix: "7204",
             expect_whatami: WhatAmI::Peer,
         },
     ];
@@ -250,28 +368,16 @@ fn a_wz_router_hat_answers_a_scout_with_a_hello_that_says_router() {
         let capture = tempfile::tempfile().expect("tempfile for the node's stderr");
         let writer = capture.try_clone().expect("dup the stderr handle");
         let mut capture = capture;
+        let args = arm.argv(&zid_hex, staging.path());
         let mut node = ChildGuard::wrap(
-            arm.mode_flag,
+            arm.name,
             Command::new(&demo)
-                .arg(arm.mode_flag)
-                .arg("tcp/127.0.0.1:0")
-                .arg("--scout-listen")
-                // The group is MOVED off zenoh's default on purpose. Two nodes
-                // in one test cannot share the default socket, and a run of this
-                // test must not answer the Scouts of a zenohd another lane is
-                // driving on `224.0.0.224:7446`.
-                .arg("--scout-addr")
-                .arg(format!("{}:{}", arm.group, arm.port))
-                // PER-PROCESS: a fixed zid shared with a leftover or a
-                // concurrent copy of this test would let the wrong node's Hello
-                // satisfy the zid assertion below.
-                .arg("--zid")
-                .arg(&zid_hex)
+                .args(&args)
                 .env("RUST_LOG", "info")
                 .stdout(Stdio::null())
                 .stderr(Stdio::from(writer))
                 .spawn()
-                .unwrap_or_else(|e| panic!("spawn {} {}: {e}", demo.display(), arm.mode_flag)),
+                .unwrap_or_else(|e| panic!("spawn {} {args:?}: {e}", demo.display())),
         );
 
         // Readiness in the order the node reaches it: the advertise decision
@@ -321,7 +427,7 @@ fn a_wz_router_hat_answers_a_scout_with_a_hello_that_says_router() {
                 "the {} node advertised a locator but never joined the scouting \
                  group; without the join there is no responder and the run below \
                  would be measuring nothing\n--- captured output ---\n{}",
-                arm.mode_flag,
+                arm.name,
                 wz_integration_tests::common::read_captured(&mut capture)
             )),
             (Err(e), _) => Err(e),
@@ -338,7 +444,7 @@ fn a_wz_router_hat_answers_a_scout_with_a_hello_that_says_router() {
             banner,
         } = match verdict {
             Ok(v) => v,
-            Err(e) => panic!("{} arm: {e}", arm.mode_flag),
+            Err(e) => panic!("{} arm: {e}", arm.name),
         };
 
         // THIS TREE'S DISSECT reads the answer. `dissect_scouting_message` is a
@@ -350,7 +456,7 @@ fn a_wz_router_hat_answers_a_scout_with_a_hello_that_says_router() {
             .unwrap_or_else(|e| {
                 panic!(
                     "{} arm: wz answered {} bytes this tree cannot dissect: {e:?}",
-                    arm.mode_flag,
+                    arm.name,
                     hello.len()
                 )
             })
@@ -358,13 +464,13 @@ fn a_wz_router_hat_answers_a_scout_with_a_hello_that_says_router() {
                 panic!(
                     "{} arm: the answer's first byte is not a scouting MID, so it \
                      is not a Hello at all: {:02x?}",
-                    arm.mode_flag, hello
+                    arm.name, hello
                 )
             });
         assert_eq!(
             walked.name, "Hello",
             "{} arm: a Scout must be answered with a Hello, got {}",
-            arm.mode_flag, walked.name
+            arm.name, walked.name
         );
 
         // THE CLAIM. The role is read off the wire, not off the banner.
@@ -374,7 +480,7 @@ fn a_wz_router_hat_answers_a_scout_with_a_hello_that_says_router() {
             "{} arm: the Hello must carry this node's own role. The banner said \
              {banner:?} and the wire said otherwise, which is the R311y471 shape: \
              an advertise decision that agrees with itself and not with the wire",
-            arm.mode_flag,
+            arm.name,
         );
 
         // The answer came from the node this arm STARTED, not from a stray
@@ -384,7 +490,7 @@ fn a_wz_router_hat_answers_a_scout_with_a_hello_that_says_router() {
             Some(FieldValue::Bytes(b)) => b.clone(),
             other => panic!(
                 "{} arm: a Hello always carries a zid; got {other:?}",
-                arm.mode_flag
+                arm.name
             ),
         };
         let zid_hex: String = zid.iter().map(|b| format!("{b:02x}")).collect();
@@ -392,7 +498,7 @@ fn a_wz_router_hat_answers_a_scout_with_a_hello_that_says_router() {
             zid_hex.starts_with(arm.zid_prefix),
             "{} arm: the Hello came from zid {zid_hex}, which is not the node this \
              arm started (prefix {})",
-            arm.mode_flag,
+            arm.name,
             arm.zid_prefix
         );
 
@@ -404,18 +510,18 @@ fn a_wz_router_hat_answers_a_scout_with_a_hello_that_says_router() {
             other => panic!(
                 "{} arm: the Hello carries no locator, so a node that discovers \
                  this one still cannot reach it; got {other:?}",
-                arm.mode_flag
+                arm.name
             ),
         };
         assert_eq!(
             &locator, advertised,
             "{} arm: the Hello must advertise the string wz itself chose",
-            arm.mode_flag
+            arm.name
         );
         assert!(
             locator.starts_with("tcp/127.0.0.1:"),
             "{} arm: expected an ephemeral tcp advertise, got {locator:?}",
-            arm.mode_flag
+            arm.name
         );
     }
 }
