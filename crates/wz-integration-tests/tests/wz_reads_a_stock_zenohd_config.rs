@@ -1033,6 +1033,37 @@ fn every_key_proven_on_the_wire_is_in_the_frame_a_zenohd_would_receive() {
             "transport: { link: { tx: { lease: 3300 } } }",
             "3300",
         ),
+        // R2086 — the three transport CAPABILITIES, settled by whether the
+        // InitSyn offers the extension at all. `true` has to produce the ext and
+        // `false` has to produce nothing; a build that offered them
+        // unconditionally would give the same answer twice and red.
+        // ⚠ The lowlatency row states `qos: { enabled: false }` ITSELF. zenoh's
+        // own rule is that the two are mutually exclusive, and wz enforces it at
+        // ingest, so a row that only asked for lowlatency was REFUSED outright --
+        // the demo never dialled and the leg blamed the build. Same shape as the
+        // scouting collision R2078 met: when a row's claim needs a neighbouring
+        // key held down, the row owns that too rather than leaning on a default.
+        (
+            "transport/unicast/lowlatency",
+            "transport: { unicast: { lowlatency: true, qos: { enabled: false } } }",
+            "offered",
+            "transport: { unicast: { lowlatency: false, qos: { enabled: false } } }",
+            "absent",
+        ),
+        (
+            "transport/unicast/compression/enabled",
+            "transport: { unicast: { compression: { enabled: true } } }",
+            "offered",
+            "transport: { unicast: { compression: { enabled: false } } }",
+            "absent",
+        ),
+        // ⚠ `transport/unicast/qos/enabled` is NOT here, and the reason is
+        // measured rather than assumed: with the key true AND false, the InitSyn
+        // offered `["patch"]` both times. `initiator_offer` (runner.rs) maps
+        // `--lowlatency` and `--compression` onto the offer and takes no qos
+        // argument at all, so the key reaches a flag with no wire sink on this
+        // path. Filed as open debt 506; adding it here without that wiring would
+        // be a claim with no witness.
     ];
 
     // The POPULATION is the constant, so a key declared wire-proven without a
@@ -1149,7 +1180,8 @@ fn handshake_field_from_a_config(key: &str, fragment: &str) -> String {
 
     let payload = read_stream_frame(&mut stream, &source, "the demo's first frame");
 
-    let (frame, wire_name) = wire_reading(key);
+    let (frame, reading) = wire_reading(key);
+    let wire_name = reading.field();
     let payload = match frame {
         HandshakeFrame::InitSyn => payload,
         HandshakeFrame::OpenSyn => {
@@ -1189,6 +1221,33 @@ fn handshake_field_from_a_config(key: &str, fragment: &str) -> String {
     let field = dissect_transport_message(&payload, 0)
         .unwrap_or_else(|e| panic!("wz cannot dissect the frame it asked for: {e:?}\n{source}"));
 
+    // R2086 — a key can be settled by a field that is either THERE or NOT, with
+    // no value to read. The four transport capabilities the demo offers ride the
+    // InitSyn as UNIT extensions (`ext_name.rs`: `qos` 0x1, `multi_link` 0x4,
+    // `low_latency` 0x5, `compression` 0x6): a UNIT ext carries no payload, so
+    // its PRESENCE is the whole announcement. Reporting that as a value keeps the
+    // sweep's contract intact -- two runs must still disagree -- without pretending
+    // to read a number that is not on the wire.
+    if let Reading::Presence(name) = reading {
+        // ⚠ NOT `field.find(name)`. The dissector does not name an extension's
+        // field after the extension: it emits a field CALLED `ext_name` whose
+        // VALUE is the name (`dissect.rs:742`), because an ext entry's identity
+        // is its id and the name is a reading of that id. `find` would have
+        // returned None for every extension that exists, which is a green
+        // "absent" for the wrong reason -- and both runs would have agreed, so
+        // only the two-run rule would have caught it.
+        let offered = ext_names(&field);
+        // The verdict stays canonical so the sweep can compare it; the list goes
+        // to stderr, where a round asking "why is this absent" reads it under
+        // `--nocapture` instead of re-deriving it.
+        eprintln!("wire {key}: the InitSyn offered {offered:?}");
+        return if offered.iter().any(|n| n == name) {
+            "offered".to_string()
+        } else {
+            "absent".to_string()
+        };
+    }
+
     match field.find(wire_name).map(|f| &f.value) {
         Some(FieldValue::Uint(v)) if wire_name == "lease" => {
             // The lease's UNIT is on the wire, in the OPEN's `t` flag: set means
@@ -1220,11 +1279,56 @@ enum HandshakeFrame {
     OpenSyn,
 }
 
-fn wire_reading(key: &str) -> (HandshakeFrame, &'static str) {
+/// Every extension NAME the dissector could read in this frame, in order.
+///
+/// An ext entry is identified on the wire by its id; `ext_name` is the
+/// dissector's READING of that id, carried as a `Label` field beside it. So the
+/// question "was this capability offered" is a scan for that label's value, and
+/// it has to visit every entry -- `Field::find` stops at the first match, and
+/// what is wanted here is the whole chain.
+fn ext_names(field: &wz_session_core::dissect::Field) -> Vec<String> {
+    fn walk(f: &wz_session_core::dissect::Field, out: &mut Vec<String>) {
+        if f.name == "ext_name" {
+            if let FieldValue::Label(name) = &f.value {
+                out.push(name.to_string());
+            }
+        }
+        if let FieldValue::Nested(children) = &f.value {
+            for child in children {
+                walk(child, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(field, &mut out);
+    out
+}
+
+/// How a key's effect shows up in its frame: as a field carrying a VALUE, or as
+/// a field that is simply present or missing.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Reading {
+    Value(&'static str),
+    Presence(&'static str),
+}
+
+impl Reading {
+    fn field(self) -> &'static str {
+        match self {
+            Self::Value(name) | Self::Presence(name) => name,
+        }
+    }
+}
+
+fn wire_reading(key: &str) -> (HandshakeFrame, Reading) {
+    use HandshakeFrame::{InitSyn, OpenSyn};
     match key {
-        "transport/link/tx/batch_size" => (HandshakeFrame::InitSyn, "batch_size"),
-        "id" => (HandshakeFrame::InitSyn, "zid"),
-        "transport/link/tx/lease" => (HandshakeFrame::OpenSyn, "lease"),
+        "transport/link/tx/batch_size" => (InitSyn, Reading::Value("batch_size")),
+        "id" => (InitSyn, Reading::Value("zid")),
+        "transport/link/tx/lease" => (OpenSyn, Reading::Value("lease")),
+        "transport/unicast/lowlatency" => (InitSyn, Reading::Presence("low_latency")),
+        "transport/unicast/compression/enabled" => (InitSyn, Reading::Presence("compression")),
+        "transport/unicast/qos/enabled" => (InitSyn, Reading::Presence("qos")),
         other => panic!("{other} is declared wire-proven and this leg cannot read it"),
     }
 }

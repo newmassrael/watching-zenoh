@@ -1320,10 +1320,22 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
 /// to send one — which is why 211 could prove only one of the two values it
 /// named. The leg now returns an InitAck built by `handshake_encode::encode_init`
 /// and reads the OPEN that follows.
+///
+/// R2086 adds two transport CAPABILITIES. They carry no value on the wire —
+/// each is a UNIT extension on the InitSyn (`ext_name.rs`: `low_latency` 0x5,
+/// `compression` 0x6) — so what the leg reads is whether the node offered it at
+/// all, which is the whole of what the file asked for.
+///
+/// ⚠ `transport/unicast/qos/enabled` is the third such key and is deliberately
+/// NOT here. Measured with the key both true and false, the InitSyn offered the
+/// same set either way: the demo's initiator offer takes no qos argument, so the
+/// key reaches a flag that has no wire sink on that path (open debt 506).
 pub const CONFIG_KEYS_PROVEN_ON_THE_WIRE: &[&str] = &[
     "id",
     "transport/link/tx/batch_size",
     "transport/link/tx/lease",
+    "transport/unicast/lowlatency",
+    "transport/unicast/compression/enabled",
 ];
 
 /// The only keys below which a real zenohd accepts leaves this tree's census
