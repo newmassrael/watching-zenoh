@@ -605,6 +605,199 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
 }
 
 // wz-proves: none -- same registration gap as the differential leg above.
+/// R2076 (open-debt item 197) — the acceptance boundary, measured case by case
+/// against a real zenohd instead of described.
+///
+/// ## What LEG 3 already covers, and what it cannot
+///
+/// `a_config_key_zenohd_refuses_is_one_wz_refuses_too` pins ONE shape: an
+/// unknown key at the TOP level. Item 197's complaint is a level down — wz's
+/// `upstream_knows` accepts anything BELOW a key it knows, while zenoh's own
+/// derives carry `deny_unknown_fields`. The item recorded that as prose and
+/// noted "no test tells the two apart today"; this leg is that test.
+///
+/// ## The measurement corrected BOTH sides of the record
+///
+/// Run this round against zenohd v1.5.0, not inferred: most nested typos ARE
+/// refused (`transport.link.tls.root_ca_certificat`, `scouting.multicast.addres`,
+/// `transport.link.tx.batch_siz`, and a bogus field inside `qos.network`,
+/// `access_control.policies`, `downsampling`, `aggregation`, `low_pass_filter`).
+/// Three subtrees are genuinely opaque and start anyway: `connect.retry`,
+/// `plugins`, `metadata`. So item 197's "zenoh refuses nested typos too" was
+/// right in general and wrong about `connect.retry`, while the code comment that
+/// measured `connect.retry` was right about it and read as a general rule. The
+/// truth is a THREE-entry exception list, and it is a fact about zenoh that only
+/// zenoh can be asked.
+///
+/// ## Why the rows below both agree and disagree, and why that is the finding
+///
+/// wz's prefix rule is mostly neutralised downstream: a typo under an HONOURED
+/// key reaches a typed reader that refuses it anyway, so the two implementations
+/// land in the same place by different routes. Where nothing type-checks — a
+/// typo under an UNHONOURED key, which wz never reads — the prefix rule is the
+/// only thing looking, and it says yes while zenohd refuses to start. That is
+/// the leak, stated as a pinned SET rather than a count so that TIGHTENING the
+/// boundary (the next round's work) fails here too, and cannot quietly widen the
+/// refusals onto a config zenohd accepts.
+#[test]
+#[ignore = "binary-dep e2e: needs target/zenohd/zenohd (scripts/build-zenohd.sh)"]
+fn the_acceptance_boundary_is_measured_against_zenohd_case_by_case() {
+    /// (label, the fragment added to an otherwise minimal config,
+    ///  does a real zenohd START on it, does wz's reader ACCEPT it)
+    ///
+    /// A row where the two booleans differ is a recorded divergence, not a
+    /// passing grade. They are here so the set cannot change unnoticed.
+    const BOUNDARY: &[(&str, &str, bool, bool)] = &[
+        // Both refuse: the shape LEG 3 already pins, kept here as the control
+        // that this table's zenohd half is not answering "yes" to everything.
+        ("top-level unknown", "bogus_top: 1", false, false),
+        // Both refuse: a near-miss under an honoured key. wz gets there through
+        // its typed reader rather than through the boundary, which is why the
+        // prefix rule is invisible in this row.
+        (
+            "honoured leaf, typo'd sibling",
+            r#"transport: { link: { tx: { batch_siz: 4096 } } }"#,
+            false,
+            false,
+        ),
+        // Both refuse: R2075's mode-table field check does this one.
+        (
+            "mode table, typo'd mode name",
+            r#"listen: { endpoints: { rooter: ["tcp/127.0.0.1:1"] } } , connect: { endpoints: [] }"#,
+            false,
+            false,
+        ),
+        // Both ACCEPT: the three subtrees upstream does not validate inside.
+        (
+            "opaque subtree: connect.retry",
+            r#"connect: { retry: { period_init_mss: 250 } }"#,
+            true,
+            true,
+        ),
+        (
+            "opaque subtree: plugins",
+            r#"plugins: { rest: { http_port: 8000 } }"#,
+            true,
+            true,
+        ),
+        (
+            "opaque subtree: metadata",
+            r#"metadata: { name: "strawberry" }"#,
+            true,
+            true,
+        ),
+        // THE DIVERGENCE: a typo BELOW an unhonoured key. Nothing in wz reads
+        // it, so nothing type-checks it, and the prefix rule is the only
+        // judgement there is.
+        (
+            "unhonoured leaf, deepened",
+            r#"access_control: { enabled: { xyz: true } }"#,
+            false,
+            true,
+        ),
+        (
+            "unhonoured leaf, deepened (auth)",
+            r#"transport: { auth: { usrpwd: { user: { xyz: 1 } } } }"#,
+            false,
+            true,
+        ),
+    ];
+
+    /// The rows where the two implementations DISAGREE, by label. Pinned as a
+    /// SET: closing one without shrinking this list fails, and opening a new one
+    /// fails too.
+    const DIVERGES: &[&str] = &[
+        "unhonoured leaf, deepened",
+        "unhonoured leaf, deepened (auth)",
+    ];
+
+    // ── ANTI-VACUITY ────────────────────────────────────────────────────
+    // A table that agreed everywhere would read as "the boundary matches" while
+    // measuring nothing, and one that disagreed everywhere would mean the
+    // fixture is broken rather than the boundary.
+    let declared: Vec<&str> = BOUNDARY
+        .iter()
+        .filter(|(_, _, z, w)| z != w)
+        .map(|(label, _, _, _)| *label)
+        .collect();
+    assert_eq!(
+        declared, DIVERGES,
+        "the pinned divergence set no longer matches the table"
+    );
+    assert!(
+        BOUNDARY.iter().any(|(_, _, z, w)| z == w) && !DIVERGES.is_empty(),
+        "the table must carry both agreements and divergences"
+    );
+
+    for (label, fragment, zenohd_starts, wz_accepts) in BOUNDARY {
+        let reservation = PortReservation::pick();
+        let port = reservation.port();
+        let source = format!(
+            r#"{{
+  mode: "peer",
+  listen: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
+  scouting: {{ multicast: {{ enabled: false }} }},
+  {fragment}
+}}
+"#
+        );
+
+        // wz first, and its verdict is read as accept/refuse only -- what it
+        // made of the values is every other leg's question.
+        let wz = ZenohNodeConfig::from_json5(&source);
+        assert_eq!(
+            wz.is_ok(),
+            *wz_accepts,
+            "{label}: wz {} it\n{source}{}",
+            if wz.is_ok() { "accepted" } else { "refused" },
+            match &wz {
+                Ok(_) => String::new(),
+                Err(e) => format!("{e:?}"),
+            }
+        );
+
+        let file = staged_config(&source);
+        drop(reservation);
+        let (mut guard, mut capture) = spawn_on_config("zenohd (boundary)", file.path());
+        if *zenohd_starts {
+            wait_for_substring(&mut capture, RESOLVED_CONF_MARKER, STARTUP_BUDGET)
+                .unwrap_or_else(|e| panic!("{label}: zenohd was expected to start: {e}\n{source}"));
+        } else {
+            let status = exits_within(&mut guard, STARTUP_BUDGET).unwrap_or_else(|| {
+                panic!("{label}: zenohd was expected to refuse and is still running\n{source}")
+            });
+            assert!(
+                !status.success(),
+                "{label}: zenohd exited SUCCESSFULLY on a config it should refuse\n{source}"
+            );
+        }
+        drop(guard);
+    }
+}
+
+/// Wait up to `budget` for a child to exit, returning its status.
+///
+/// R2076 — the refusal witness for the boundary leg. A text marker cannot serve
+/// here: zenohd refuses an unknown key with "unknown field" and a mistyped SHAPE
+/// with an "invalid type" message, so a leg that knew only one of them would
+/// read the other as a hang and blame the wrong thing. The exit is the fact
+/// both refusals share.
+fn exits_within(guard: &mut ChildGuard, budget: Duration) -> Option<std::process::ExitStatus> {
+    let deadline = std::time::Instant::now() + budget;
+    loop {
+        match guard.child_mut().try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) => {}
+            Err(_) => return None,
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+// wz-proves: none -- same registration gap as the leg above.
 /// R2075 (open-debt item 499) — upstream's MODE-DEPENDENT spelling, on the key
 /// where refusing it is fatal rather than merely partial.
 ///

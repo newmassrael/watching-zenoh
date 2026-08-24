@@ -11988,7 +11988,12 @@ layer_z_zenohd_interop() {
     # a node that does not start, on one of the two most ordinary keys there is.
     # The leg runs two zenohds of different modes over the SAME bytes and
     # requires each to bind its own row and not the other's.
-    _runci_guarded_test Z 7 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+    # R2076 raises 7 -> 8 for LEG 8 (open-debt item 197): the acceptance boundary
+    # BELOW the top level, which LEG 3 never reaches. Each row records what a real
+    # zenohd does with a shape and what wz's reader does, and the rows where they
+    # disagree are pinned as a SET — so tightening the boundary later cannot
+    # quietly start refusing a config zenohd accepts.
+    _runci_guarded_test Z 8 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_reads_a_stock_zenohd_config -- --ignored --quiet --test-threads=1 \
         || return 1
     # R311y528 — §5.27 api-compat-pico LEG 9: upstream's own `z_info.c`, linked
