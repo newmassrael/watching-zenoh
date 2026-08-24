@@ -1421,17 +1421,44 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
         seen.contains(&format!("tcp/127.0.0.1:{port}")),
         "the demo's own report does not name the endpoint the file carried\n{seen}"
     );
+    // R2081 (open-debt item 208) — the report is THREE lines now, and this leg
+    // asserts all three because it is the only place the SHIPPING binary's own
+    // words are read. The old single `honoured` line said what the reader took
+    // and nothing about what this node does with it; a key with no sink here
+    // printed under the same word as one that reached a flag, so an operator
+    // asking "did my setting take effect" had to diff it against `argv +=`
+    // themselves.
+    for line in ["READ ", "APPLIED ", "READ BUT NOT APPLIED "] {
+        assert!(
+            seen.contains(line),
+            "the demo's report is missing its `{line}` line\n{seen}"
+        );
+    }
+    // And the split is a real partition, not a relabelling: `timestamping/enabled`
+    // has no sink in this binary, so it must appear on the READ-BUT-NOT-APPLIED
+    // line and NOT on the APPLIED one. Read off the lines themselves, because a
+    // report that printed the same list twice would satisfy the check above.
+    let applied_line = seen
+        .lines()
+        .find(|l| l.contains("APPLIED [") && !l.contains("NOT APPLIED"))
+        .unwrap_or_else(|| panic!("no APPLIED line in the demo's report\n{seen}"));
     assert!(
-        seen.contains("honoured"),
-        "the demo did not report what it took from the file\n{seen}"
+        !applied_line.contains("timestamping/enabled"),
+        "a key with no sink in this build was reported as applied\n{applied_line}"
+    );
+    let not_applied_line = seen
+        .lines()
+        .find(|l| l.contains("READ BUT NOT APPLIED"))
+        .expect("checked above");
+    assert!(
+        not_applied_line.contains("timestamping/enabled"),
+        "the key with no sink is not named as unapplied\n{not_applied_line}"
     );
     // R311y843 — the SHIPPING binary's own account of what the file became.
-    // A key the reader ingests and the demo then drops still prints under
-    // `honoured`, which is the defect this round removed; the `argv +=` line is
-    // where a dropped key is visibly absent. Asserted here rather than only in
-    // the unit test because that test calls the expansion directly, and this is
-    // the binary an operator runs, in a process a real zenohd opened a session
-    // with.
+    // The `argv +=` line is where a dropped key is visibly absent. Asserted here
+    // rather than only in the unit test because that test calls the expansion
+    // directly, and this is the binary an operator runs, in a process a real
+    // zenohd opened a session with.
     for expected in [
         "--batch-size",
         "4096",

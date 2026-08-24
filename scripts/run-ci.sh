@@ -4077,7 +4077,10 @@ layer_c1ay_cargo_test_router_hat() {
     # 15 passed"). Measured here by RUNNING the lane's own command, which is the
     # only way this number has ever been right: 16 at f80f6a19, plus the seven
     # `--check-topology` witnesses this round adds.
-    _runci_guarded_test "C1AY stock_config_tests 23" 23 \
+    # R2081 — 23 -> 25: the report's READ/APPLIED split (item 208) and the
+    # other-modes axis reaching the expansion (item 500). MEASURED by running the
+    # guard's own command, not by adding two to the old number.
+    _runci_guarded_test "C1AY stock_config_tests 25" 25 \
         cargo test -p wz-ap-demo --features zenoh-config stock_config_tests --quiet || return 1
     # R2072 (open-debt item 496) — and the seam the module above structurally
     # cannot reach: argv -> exit status. Every unit witness for `check_topology`

@@ -174,10 +174,38 @@ fn main() -> ExitCode {
         }
         Ok(None) => rest,
         Ok(Some(exp)) => {
-            eprintln!(
-                "wz-ap-demo: --config {}: honoured {:?}",
-                exp.path, exp.named
-            );
+            // R2081 (open-debt item 208) — READ and APPLIED are two facts and
+            // this used to print them as one. The old line said "honoured" and
+            // listed everything the READER took from the file; whether any of it
+            // reached this NODE was a separate line the operator had to diff
+            // against by hand. A key with no sink in this binary is a legitimate
+            // state (see `args::config_keys_the_demo_drops`) — what is not
+            // legitimate is calling it honoured and stopping there.
+            let applied = exp.applied();
+            let read_only = exp.read_but_not_applied();
+            eprintln!("wz-ap-demo: --config {}: READ {:?}", exp.path, exp.named);
+            eprintln!("wz-ap-demo: --config {}: APPLIED {applied:?}", exp.path);
+            if !read_only.is_empty() {
+                eprintln!(
+                    "wz-ap-demo: --config {}: READ BUT NOT APPLIED {read_only:?} \
+                     (no sink in this build)",
+                    exp.path
+                );
+            }
+            // R2081 (open-debt item 500) — the third answer. A key the file
+            // states as a `{ router, peer, client }` table that names no row for
+            // this node's mode is neither honoured nor ignored, and until this
+            // round no line carried it: the operator's file spoke, and it did not
+            // speak to this node.
+            if !exp.stated_for_other_modes.is_empty() {
+                eprintln!(
+                    "wz-ap-demo: --config {}: STATED FOR OTHER MODES {:?} \
+                     (this node is {})",
+                    exp.path,
+                    exp.stated_for_other_modes,
+                    exp.mode.to_str()
+                );
+            }
             // Said out loud rather than swallowed: the operator's file is full
             // of keys wz has no opinion about, and a reader that applies what
             // it knows in silence lets a TLS root-CA path look like it took

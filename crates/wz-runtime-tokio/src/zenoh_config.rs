@@ -1403,6 +1403,20 @@ pub struct ZenohConfigIngest {
     pub named: Vec<&'static str>,
     /// Leaf paths the document carried that wz does not honour, sorted.
     pub ignored: Vec<String>,
+    /// R2081 (open-debt item 500) — honoured keys the document states as a
+    /// `{ router, peer, client }` table that names no row for THIS node's mode.
+    ///
+    /// The third answer, and it is neither of the other two: not [`named`], which
+    /// would claim an instruction this node never got; not [`ignored`], which
+    /// would say wz cannot read the key when it reads it fine and correctly did
+    /// nothing. A caller that reports only the first two tells an operator
+    /// nothing about a file that speaks entirely to other nodes — the outcome
+    /// [`ZenohNodeConfig::from_json5`]'s own comment calls the one this partition
+    /// exists to make impossible.
+    ///
+    /// [`named`]: ZenohConfigIngest::named
+    /// [`ignored`]: ZenohConfigIngest::ignored
+    pub stated_for_other_modes: Vec<&'static str>,
 }
 
 /// Why a stock zenoh config could not be read.
@@ -1559,6 +1573,25 @@ fn for_this_mode<'a>(
         .filter(|v| !matches!(v, Json5Value::Null)))
 }
 
+/// What a mode-dependent key said to THIS node.
+///
+/// R2081 (open-debt item 500) — three answers, because the two that used to
+/// collapse into one are not the same fact. `Absent` is "the document is silent
+/// here"; `ForOtherModes` is "the document HAS an instruction and it is not for
+/// this node", which an operator needs told: their file says something, and this
+/// node is not who it says it to. Both used to arrive at the caller as `None`,
+/// so the second went into neither `named` nor `ignored` and no report carried
+/// it — the one outcome `from_json5`'s own comment says the partition exists to
+/// make impossible.
+enum ModeRead<T> {
+    /// The document does not mention the key.
+    Absent,
+    /// A `{ router, peer, client }` table that names no row for this mode.
+    ForOtherModes,
+    /// A value for this node.
+    Value(T),
+}
+
 fn bool_of(value: &Json5Value, path: &'static str) -> Result<bool, ConfigIngestError> {
     match value {
         Json5Value::Bool(b) => Ok(*b),
@@ -1581,13 +1614,13 @@ fn want_bool_for_mode(
     doc: &Json5Value,
     path: &'static str,
     mode: WhatAmI,
-) -> Result<Option<bool>, ConfigIngestError> {
+) -> Result<ModeRead<bool>, ConfigIngestError> {
     let Some(value) = honoured(doc, path) else {
-        return Ok(None);
+        return Ok(ModeRead::Absent);
     };
     match for_this_mode(value, mode, path)? {
-        None => Ok(None),
-        Some(v) => bool_of(v, path).map(Some),
+        None => Ok(ModeRead::ForOtherModes),
+        Some(v) => bool_of(v, path).map(ModeRead::Value),
     }
 }
 
@@ -1681,13 +1714,13 @@ fn want_endpoints(
     doc: &Json5Value,
     path: &'static str,
     mode: WhatAmI,
-) -> Result<Option<Vec<String>>, ConfigIngestError> {
+) -> Result<ModeRead<Vec<String>>, ConfigIngestError> {
     let Some(value) = honoured(doc, path) else {
-        return Ok(None);
+        return Ok(ModeRead::Absent);
     };
     match for_this_mode(value, mode, path)? {
-        None => Ok(None),
-        Some(v) => endpoints_of(v, path).map(Some),
+        None => Ok(ModeRead::ForOtherModes),
+        Some(v) => endpoints_of(v, path).map(ModeRead::Value),
     }
 }
 
@@ -1720,6 +1753,12 @@ impl ZenohNodeConfig {
 
         let mut out = Self::default();
         let mut named: Vec<&'static str> = Vec::new();
+        // R2081 (open-debt item 500) — keys the document states for OTHER modes.
+        // Neither honoured (this node got no instruction) nor ignored (wz reads
+        // the key perfectly well), and until this round in neither list, so an
+        // operator whose file says nothing to THIS node was told nothing about
+        // that.
+        let mut other_modes: Vec<&'static str> = Vec::new();
 
         if let Some(mode) = honoured(&doc, "mode") {
             let Json5Value::String(name) = mode else {
@@ -1741,9 +1780,13 @@ impl ZenohNodeConfig {
         // R2075 — the mode-dependent keys are all read AFTER `mode` above, and
         // that ordering is load-bearing: the table is resolved with this node's
         // own mode, exactly as upstream's `.get(whatami)` does.
-        if let Some(v) = want_endpoints(&doc, "connect/endpoints", out.mode)? {
-            out.connect = v;
-            named.push("connect/endpoints");
+        match want_endpoints(&doc, "connect/endpoints", out.mode)? {
+            ModeRead::Value(v) => {
+                out.connect = v;
+                named.push("connect/endpoints");
+            }
+            ModeRead::ForOtherModes => other_modes.push("connect/endpoints"),
+            ModeRead::Absent => {}
         }
         // R311y849 — `connect/retry`, read next to the endpoints it paces.
         //
@@ -1768,9 +1811,13 @@ impl ZenohNodeConfig {
                 named.push("connect/retry");
             }
         }
-        if let Some(v) = want_endpoints(&doc, "listen/endpoints", out.mode)? {
-            out.listen = v;
-            named.push("listen/endpoints");
+        match want_endpoints(&doc, "listen/endpoints", out.mode)? {
+            ModeRead::Value(v) => {
+                out.listen = v;
+                named.push("listen/endpoints");
+            }
+            ModeRead::ForOtherModes => other_modes.push("listen/endpoints"),
+            ModeRead::Absent => {}
         }
         // R2063 (open-debt item 214) — `routing/peer/mode`, which this demo's
         // own `--help` has been citing as a key it implements while the reader
@@ -1836,13 +1883,21 @@ impl ZenohNodeConfig {
         // R311y846 — the ANSWERING half. Read next to the three socket keys
         // because it is the same subsystem read the other way round: those
         // three say where to look, this says whether to be findable.
-        if let Some(v) = want_bool_for_mode(&doc, "scouting/multicast/listen", out.mode)? {
-            out.scout_multicast_listen = Some(v);
-            named.push("scouting/multicast/listen");
+        match want_bool_for_mode(&doc, "scouting/multicast/listen", out.mode)? {
+            ModeRead::Value(v) => {
+                out.scout_multicast_listen = Some(v);
+                named.push("scouting/multicast/listen");
+            }
+            ModeRead::ForOtherModes => other_modes.push("scouting/multicast/listen"),
+            ModeRead::Absent => {}
         }
-        if let Some(v) = want_bool_for_mode(&doc, "timestamping/enabled", out.mode)? {
-            out.timestamping = v;
-            named.push("timestamping/enabled");
+        match want_bool_for_mode(&doc, "timestamping/enabled", out.mode)? {
+            ModeRead::Value(v) => {
+                out.timestamping = v;
+                named.push("timestamping/enabled");
+            }
+            ModeRead::ForOtherModes => other_modes.push("timestamping/enabled"),
+            ModeRead::Absent => {}
         }
         if let Some(v) = want_u64(&doc, "transport/unicast/max_links")? {
             out.max_links = usize::try_from(v).map_err(|_| ConfigIngestError::OutOfRange {
@@ -1962,6 +2017,7 @@ impl ZenohNodeConfig {
             config: out,
             named,
             ignored,
+            stated_for_other_modes: other_modes,
         })
     }
 }
@@ -3420,6 +3476,46 @@ mod tests {
         }
         out.push_str(" }");
         out
+    }
+
+    /// A table that names no row for this node lands in the THIRD list, and the
+    /// SAME document read by the mode it does name lands in `named`.
+    ///
+    /// R2081 (open-debt item 500) — the pair is the point. One document, two
+    /// readers, two different answers, and neither of them is `ignored`: wz reads
+    /// the key perfectly well in both cases. Before this round the first case
+    /// reached no list at all, so an operator whose file spoke only to other
+    /// nodes was told nothing about it.
+    #[test]
+    fn a_table_stated_only_for_other_modes_is_reported_as_exactly_that() {
+        const DOC: &str =
+            r#"{ mode: "MODE", listen: { endpoints: { router: ["tcp/10.0.0.1:7447"] } } }"#;
+
+        let theirs = ZenohNodeConfig::from_json5(&DOC.replace("MODE", "client"))
+            .expect("a table that does not mention clients is readable");
+        assert_eq!(theirs.stated_for_other_modes, vec!["listen/endpoints"]);
+        assert!(!theirs.named.contains(&"listen/endpoints"));
+        assert!(theirs.ignored.is_empty(), "{:?}", theirs.ignored);
+        assert!(theirs.config.listen.is_empty());
+
+        let mine = ZenohNodeConfig::from_json5(&DOC.replace("MODE", "router"))
+            .expect("the same document, read by the mode it names");
+        assert!(mine.named.contains(&"listen/endpoints"));
+        assert!(
+            mine.stated_for_other_modes.is_empty(),
+            "{:?}",
+            mine.stated_for_other_modes
+        );
+        assert_eq!(mine.config.listen, vec![String::from("tcp/10.0.0.1:7447")]);
+
+        // And the control for the axis itself: a document with no table at all
+        // must not put anything in the new list.
+        let plain = ZenohNodeConfig::from_json5(
+            r#"{ mode: "client", listen: { endpoints: ["tcp/10.0.0.9:7447"] } }"#,
+        )
+        .expect("the plain spelling still reads");
+        assert!(plain.stated_for_other_modes.is_empty());
+        assert!(plain.named.contains(&"listen/endpoints"));
     }
 
     /// EVERY surface key outside the deepenable list refuses a deeper shape.

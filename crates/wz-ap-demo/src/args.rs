@@ -682,6 +682,8 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
         added,
         named: ingest.named,
         ignored: ingest.ignored,
+        stated_for_other_modes: ingest.stated_for_other_modes,
+        mode: ingest.config.mode,
     }))
 }
 
@@ -702,6 +704,41 @@ pub(crate) struct StockConfigExpansion {
     pub(crate) named: Vec<&'static str>,
     /// The keys the file carried that wz does not honour.
     pub(crate) ignored: Vec<String>,
+    /// R2081 (open-debt item 500) — honoured keys the file states only for OTHER
+    /// modes. Carried out rather than dropped for the same reason `ignored` is:
+    /// the operator's file said something, and it did not say it to this node.
+    pub(crate) stated_for_other_modes: Vec<&'static str>,
+    /// The role this node ends up in, so the report above can name WHO the
+    /// other-modes rows were not for.
+    pub(crate) mode: WhatAmI,
+}
+
+#[cfg(feature = "zenoh-config")]
+impl StockConfigExpansion {
+    /// The honoured keys that reach a flag in THIS build.
+    ///
+    /// R2081 (open-debt item 208) — the split lives HERE and not at the print
+    /// site, because a test cannot reach `main` and a second copy of the filter
+    /// would be a second answer to "did my setting take effect". One derivation,
+    /// read by the report and by the witnesses.
+    pub(crate) fn applied(&self) -> Vec<&'static str> {
+        let dropped = config_keys_the_demo_drops();
+        self.named
+            .iter()
+            .copied()
+            .filter(|k| !dropped.contains(k))
+            .collect()
+    }
+
+    /// The honoured keys this build has no sink for: READ, and reaching nothing.
+    pub(crate) fn read_but_not_applied(&self) -> Vec<&'static str> {
+        let dropped = config_keys_the_demo_drops();
+        self.named
+            .iter()
+            .copied()
+            .filter(|k| dropped.contains(k))
+            .collect()
+    }
 }
 
 /// R2072 (open-debt item 496) — `--check-topology <file>`, once per node:
@@ -811,6 +848,60 @@ pub(crate) fn check_topology_for_build(
             defects.trim_end_matches('\n')
         )))
     }
+}
+
+/// Keys the reader ingests that reach NO behaviour in this binary.
+///
+/// Empty is the goal and not the invariant — a key with no sink is a legitimate
+/// state, but it has to be written down here rather than hide behind a report
+/// that calls it honoured.
+///
+/// R311y844 made this BUILD-DEPENDENT, and the two kinds inside it are worth
+/// telling apart. The first two rows are keys with no sink at all in this
+/// binary. The `cfg!` rows are keys whose sink exists but is compiled out here:
+/// their flags exit(2) when the feature is absent, so expanding into one would
+/// turn a valid stock config into a node that refuses to start — which is what
+/// the round measured its own first cut doing.
+///
+/// R2081 (open-debt item 208) — MOVED out of the test module, because the
+/// runtime report needs the same list the gate checks. The `honoured` line said
+/// what the READER took from the file and nothing about what the NODE does with
+/// it, so an operator had to diff it against the `argv +=` line beside it by
+/// hand. Two copies of this list would have been two answers to "did my setting
+/// take effect"; one copy, read by both, is the point of the move.
+#[cfg(feature = "zenoh-config")]
+pub(crate) fn config_keys_the_demo_drops() -> Vec<&'static str> {
+    let mut out = vec![
+        // Reachability, not a role: `scouting/multicast/enabled` says whether to
+        // LISTEN for a scout beacon, and the demo's `--scout` says to discover
+        // INSTEAD of dialling, which is a different sentence. Mapping one onto
+        // the other would rewrite the operator's topology.
+        "scouting/multicast/enabled",
+        // No sink in this binary: nothing on the demo's push path stamps a
+        // source timestamp — `Timestamp` does not occur anywhere under
+        // `wz-ap-demo/src/` — so there is no flag to expand into and honouring
+        // it would be a claim about a plane that does not exist yet.
+        "timestamping/enabled",
+    ];
+    if !cfg!(feature = "routing-interest-pending-gc") {
+        out.push("routing/interests/timeout");
+    }
+    if !cfg!(feature = "transport-qos") {
+        out.push("transport/multicast/qos/enabled");
+    }
+    // R311y846 — the responder's flag exits(2) without its feature (the demo
+    // says so and names the build), so a build without it must DROP the key
+    // rather than expand into a refusal.
+    if !cfg!(feature = "scouting-responder") {
+        out.push("scouting/multicast/listen");
+    }
+    // R311y849 — `--connect-retry` is parsed by the `--peer` and `--router-hat`
+    // arms only, and neither exists without its feature, so a build with neither
+    // has no sink to expand into.
+    if !cfg!(any(feature = "routing-peer", feature = "router-hat-router")) {
+        out.push("connect/retry");
+    }
+    out
 }
 
 #[cfg(all(test, feature = "zenoh-config"))]
@@ -1159,53 +1250,6 @@ mod stock_config_tests {
     /// `validate()` checks for. Paired with a `--scout` command line (see
     /// `cli_for`), so no role flag expands and the argv delta is the one key.
     const SCOUT_ONLY: &str = r#"{ mode: "peer" }"#;
-
-    /// Keys the reader ingests that reach NO behaviour in this binary.
-    ///
-    /// Empty is the goal and not the invariant — a key with no sink is a
-    /// legitimate state, but it has to be written down here rather than hide
-    /// behind a report that calls it honoured.
-    /// R311y844 made this BUILD-DEPENDENT, and the two kinds inside it are
-    /// worth telling apart. The first two rows are keys with no sink at all in
-    /// this binary. The `cfg!` rows are keys whose sink exists but is compiled
-    /// out here: their flags exit(2) when the feature is absent, so expanding
-    /// into one would turn a valid stock config into a node that refuses to
-    /// start — which is what the round measured its own first cut doing.
-    fn config_keys_the_demo_drops() -> Vec<&'static str> {
-        let mut out = vec![
-            // Reachability, not a role: `scouting/multicast/enabled` says
-            // whether to LISTEN for a scout beacon, and the demo's `--scout`
-            // says to discover INSTEAD of dialling, which is a different
-            // sentence. Mapping one onto the other would rewrite the
-            // operator's topology.
-            "scouting/multicast/enabled",
-            // No sink in this binary: nothing on the demo's push path stamps a
-            // source timestamp — `Timestamp` does not occur anywhere under
-            // `wz-ap-demo/src/` — so there is no flag to expand into and
-            // honouring it would be a claim about a plane that does not exist
-            // yet.
-            "timestamping/enabled",
-        ];
-        if !cfg!(feature = "routing-interest-pending-gc") {
-            out.push("routing/interests/timeout");
-        }
-        if !cfg!(feature = "transport-qos") {
-            out.push("transport/multicast/qos/enabled");
-        }
-        // R311y846 — the responder's flag exits(2) without its feature (the
-        // demo says so and names the build), so a build without it must DROP the
-        // key rather than expand into a refusal.
-        if !cfg!(feature = "scouting-responder") {
-            out.push("scouting/multicast/listen");
-        }
-        // R311y849 — `--connect-retry` is parsed by the `--peer` and
-        // `--router-hat` arms only, and neither exists without its feature, so a
-        // build with neither has no sink to expand into.
-        if !cfg!(any(feature = "routing-peer", feature = "router-hat-router")) {
-            out.push("connect/retry");
-        }
-        out
-    }
 
     /// The invocation a key is applicable IN.
     ///
@@ -2073,6 +2117,77 @@ mod stock_config_tests {
             TransportTuning::from_argv(&argv(&["--listen", "tcp/a:1"])).unwrap(),
             TransportTuning::default()
         );
+    }
+
+    /// READ and APPLIED are different sets, and a key that is read while
+    /// reaching nothing lands in both halves correctly.
+    ///
+    /// R2081 (open-debt item 208) — the old report printed one list and called it
+    /// "honoured", so an operator asking "did my setting take effect" had to diff
+    /// it against the `argv +=` line themselves. `timestamping/enabled` is the
+    /// sharp case: the reader honours it and this binary has no sink for it at
+    /// all, so it belongs in READ and must NOT appear in APPLIED.
+    #[test]
+    fn a_key_that_is_read_while_reaching_nothing_is_not_reported_as_applied() {
+        let exp = expand(
+            &["--config", "z.json5", "--listen", "tcp/127.0.0.1:1"],
+            r#"{ mode: "peer", timestamping: { enabled: true } }"#,
+        )
+        .expect("the fixture is readable");
+
+        assert!(
+            exp.named.contains(&"timestamping/enabled"),
+            "{:?}",
+            exp.named
+        );
+        assert!(
+            exp.read_but_not_applied().contains(&"timestamping/enabled"),
+            "{:?}",
+            exp.read_but_not_applied()
+        );
+        assert!(
+            !exp.applied().contains(&"timestamping/enabled"),
+            "a key with no sink in this build was reported as applied: {:?}",
+            exp.applied()
+        );
+
+        // The CONTROL, and it is what makes the split a measurement rather than
+        // a relabelling: a key that DOES reach a flag here must land in APPLIED.
+        let reaching = expand(
+            &["--config", "z.json5", "--listen", "tcp/127.0.0.1:1"],
+            r#"{ mode: "peer", transport: { unicast: { max_links: 3 } } }"#,
+        )
+        .expect("the fixture is readable");
+        assert!(
+            reaching.applied().contains(&"transport/unicast/max_links"),
+            "{:?}",
+            reaching.applied()
+        );
+        assert!(reaching.read_but_not_applied().is_empty());
+
+        // The two halves partition `named` — neither drops a key nor invents one.
+        for e in [&exp, &reaching] {
+            let mut both = e.applied();
+            both.extend(e.read_but_not_applied());
+            both.sort_unstable();
+            let mut named = e.named.clone();
+            named.sort_unstable();
+            assert_eq!(both, named, "the report's two halves are not a partition");
+        }
+    }
+
+    /// The expansion carries the other-modes axis and the node's own role out to
+    /// the report, rather than losing them at the boundary.
+    #[test]
+    fn the_expansion_carries_what_the_other_modes_line_needs() {
+        let exp = expand(
+            &["--config", "z.json5", "--listen", "tcp/127.0.0.1:1"],
+            r#"{ mode: "client", timestamping: { enabled: { router: true } } }"#,
+        )
+        .expect("the fixture is readable");
+        assert_eq!(exp.stated_for_other_modes, vec!["timestamping/enabled"]);
+        assert_eq!(exp.mode, WhatAmI::Client);
+        assert!(!exp.named.contains(&"timestamping/enabled"));
     }
 
     // ── R2072 (open-debt item 496) — the deployment check ────────────────
