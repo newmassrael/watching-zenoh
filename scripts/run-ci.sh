@@ -4099,7 +4099,18 @@ layer_c1ay_cargo_test_router_hat() {
     # guard's own command, not by adding two to the old number.
     # R2083 — 25 -> 26: the per-key classification of what proves a honoured
     # key's EFFECT (item 220), measured by running the guard's own command.
-    _runci_guarded_test "C1AY stock_config_tests 26" 26 \
+    # R2092 — 26 -> 28, and the number was ALREADY WRONG when this round found
+    # it: R2091 (item 508) added `every_key_this_build_drops_is_told_so_by_the_
+    # site_that_decides_it` to this module and left the guard at 26, so hosted
+    # C1ay went red on that push (run 32727736443, step "Layer C1ay", "expected
+    # exactly 26 passed"). The pre-push hook does not run C1ay, which is the
+    # third time this same class has reached origin — the other two are recorded
+    # above. The 28th is this round's `the_run_mode_is_the_role_the_file_names_
+    # not_the_shape_of_its_endpoints` (item 511). MEASURED by running the
+    # guard's own command, which remains the only way this number has ever been
+    # right: the module's OTHER new tests are `cfg`-gated on run-mode features
+    # this lane does not build, so counting the diff would have got 30.
+    _runci_guarded_test "C1AY stock_config_tests 28" 28 \
         cargo test -p wz-ap-demo --features zenoh-config stock_config_tests --quiet || return 1
     # R2072 (open-debt item 496) — and the seam the module above structurally
     # cannot reach: argv -> exit status. Every unit witness for `check_topology`
