@@ -11982,7 +11982,13 @@ layer_z_zenohd_interop() {
     # to when the operator's file is SILENT — the case a drop-in actually meets.
     # LEG 6 pins that key by key against the same real zenohd, and names the keys
     # whose upstream default the resolved tree structurally cannot show.
-    _runci_guarded_test Z 6 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+    # R2075 raises 6 -> 7 for LEG 7 (open-debt item 499): upstream spells several
+    # keys `ModeDependentValue<T>`, so `listen.endpoints` may be a
+    # `{ router, peer, client }` table, and wz's reader used to REFUSE that —
+    # a node that does not start, on one of the two most ordinary keys there is.
+    # The leg runs two zenohds of different modes over the SAME bytes and
+    # requires each to bind its own row and not the other's.
+    _runci_guarded_test Z 7 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_reads_a_stock_zenohd_config -- --ignored --quiet --test-threads=1 \
         || return 1
     # R311y528 — §5.27 api-compat-pico LEG 9: upstream's own `z_info.c`, linked

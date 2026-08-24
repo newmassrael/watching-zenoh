@@ -1420,14 +1420,112 @@ fn honoured<'a>(doc: &'a Json5Value, path: &str) -> Option<&'a Json5Value> {
     }
 }
 
-fn want_bool(doc: &Json5Value, path: &'static str) -> Result<Option<bool>, ConfigIngestError> {
-    match honoured(doc, path) {
-        None => Ok(None),
-        Some(Json5Value::Bool(b)) => Ok(Some(*b)),
-        Some(_) => Err(ConfigIngestError::WrongType {
+/// The honoured keys upstream spells as `ModeDependentValue<T>` — either the
+/// value itself, or a `{ router, peer, client }` table the node resolves with
+/// its OWN mode.
+///
+/// R2075 (open-debt item 499) — this is not a wz convention, it is upstream's
+/// type (`commons/zenoh-config/src/mode_dependent.rs:78`, `Unique(T)` or
+/// `Dependent(ModeValues<T>)`, where `ModeValues` is three `Option<T>`), read at
+/// the pinned checkout. Every key below is declared with it in
+/// `commons/zenoh-config/src/lib.rs`, and a real zenohd starts on the table
+/// spelling: handed `listen: { endpoints: { router: [..], peer: [..] } }` with
+/// `mode: "router"` it binds the ROUTER entry and says so
+/// (`Zenoh can be reached at: …`), measured rather than inferred.
+///
+/// Until this round wz's reader accepted only the `Unique` spelling and
+/// answered the other with `WrongType`, which is worse than not honouring a key:
+/// the node does not start at all. Two of the four are `listen/endpoints` and
+/// `connect/endpoints`, so the refusal reached the most ordinary config there
+/// is.
+///
+/// A table that names no entry for THIS node's mode is "no instruction", not an
+/// error — that is exactly what upstream's `.get(whatami)` returns, and a wz
+/// node must fall back to the same default a zenohd would.
+pub const MODE_DEPENDENT_CONFIG_KEYS: &[&str] = &[
+    "connect/endpoints",
+    "listen/endpoints",
+    "scouting/multicast/listen",
+    "timestamping/enabled",
+];
+
+/// The three fields `ModeValues` has, and the only keys a mode table may carry.
+const MODE_TABLE_FIELDS: &[&str] = &["router", "peer", "client"];
+
+/// Whether `leaf` sits INSIDE one of the mode-dependent keys.
+///
+/// Those leaves (`listen/endpoints/router`) are wz's to honour, so they must not
+/// fall into the ignored partition — a reader that resolved the table and then
+/// reported its leaves as "wz does not honour this" would be contradicting
+/// itself in the same breath.
+fn inside_a_mode_table(leaf: &str) -> bool {
+    MODE_DEPENDENT_CONFIG_KEYS.iter().any(|key| {
+        leaf.len() > key.len() && leaf.starts_with(key) && leaf.as_bytes()[key.len()] == b'/'
+    })
+}
+
+/// Resolve one value the way upstream's `.get(whatami)` does.
+///
+/// `Ok(None)` is "this document gives THIS node no instruction here", which a
+/// caller must treat exactly as an absent key. An object whose fields are not
+/// all mode names is an ERROR rather than a value: upstream's `ModeValues`
+/// would refuse it, and silently reading it as `Unique` would let a typo
+/// (`rooter:`) look like a setting that took effect.
+fn for_this_mode<'a>(
+    value: &'a Json5Value,
+    mode: WhatAmI,
+    path: &'static str,
+) -> Result<Option<&'a Json5Value>, ConfigIngestError> {
+    let Json5Value::Object(fields) = value else {
+        return Ok(Some(value));
+    };
+    if fields.is_empty()
+        || !fields
+            .iter()
+            .all(|(name, _)| MODE_TABLE_FIELDS.contains(&name.as_str()))
+    {
+        return Err(ConfigIngestError::WrongType {
+            path,
+            expected: "a value, or a { router, peer, client } table",
+        });
+    }
+    let want = mode.to_str();
+    Ok(fields
+        .iter()
+        .find(|(name, _)| name == want)
+        .map(|(_, v)| v)
+        .filter(|v| !matches!(v, Json5Value::Null)))
+}
+
+fn bool_of(value: &Json5Value, path: &'static str) -> Result<bool, ConfigIngestError> {
+    match value {
+        Json5Value::Bool(b) => Ok(*b),
+        _ => Err(ConfigIngestError::WrongType {
             path,
             expected: "a boolean",
         }),
+    }
+}
+
+fn want_bool(doc: &Json5Value, path: &'static str) -> Result<Option<bool>, ConfigIngestError> {
+    match honoured(doc, path) {
+        None => Ok(None),
+        Some(v) => bool_of(v, path).map(Some),
+    }
+}
+
+/// [`want_bool`] for a key upstream declares `ModeDependentValue<bool>`.
+fn want_bool_for_mode(
+    doc: &Json5Value,
+    path: &'static str,
+    mode: WhatAmI,
+) -> Result<Option<bool>, ConfigIngestError> {
+    let Some(value) = honoured(doc, path) else {
+        return Ok(None);
+    };
+    match for_this_mode(value, mode, path)? {
+        None => Ok(None),
+        Some(v) => bool_of(v, path).map(Some),
     }
 }
 
@@ -1495,29 +1593,39 @@ fn want_string(
     }
 }
 
+fn endpoints_of(value: &Json5Value, path: &'static str) -> Result<Vec<String>, ConfigIngestError> {
+    let Json5Value::Array(items) = value else {
+        return Err(ConfigIngestError::WrongType {
+            path,
+            expected: "an array of endpoint strings",
+        });
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let Json5Value::String(s) = item else {
+            return Err(ConfigIngestError::WrongType {
+                path,
+                expected: "an array of endpoint strings",
+            });
+        };
+        out.push(s.clone());
+    }
+    Ok(out)
+}
+
+/// R2075 — both endpoint lists are `ModeDependentValue<Vec<EndPoint>>`
+/// upstream, so the table spelling has to resolve here rather than be refused.
 fn want_endpoints(
     doc: &Json5Value,
     path: &'static str,
+    mode: WhatAmI,
 ) -> Result<Option<Vec<String>>, ConfigIngestError> {
-    match honoured(doc, path) {
+    let Some(value) = honoured(doc, path) else {
+        return Ok(None);
+    };
+    match for_this_mode(value, mode, path)? {
         None => Ok(None),
-        Some(Json5Value::Array(items)) => {
-            let mut out = Vec::with_capacity(items.len());
-            for item in items {
-                let Json5Value::String(s) = item else {
-                    return Err(ConfigIngestError::WrongType {
-                        path,
-                        expected: "an array of endpoint strings",
-                    });
-                };
-                out.push(s.clone());
-            }
-            Ok(Some(out))
-        }
-        Some(_) => Err(ConfigIngestError::WrongType {
-            path,
-            expected: "an array of endpoint strings",
-        }),
+        Some(v) => endpoints_of(v, path).map(Some),
     }
 }
 
@@ -1568,7 +1676,10 @@ impl ZenohNodeConfig {
                 })?;
             named.push("mode");
         }
-        if let Some(v) = want_endpoints(&doc, "connect/endpoints")? {
+        // R2075 — the mode-dependent keys are all read AFTER `mode` above, and
+        // that ordering is load-bearing: the table is resolved with this node's
+        // own mode, exactly as upstream's `.get(whatami)` does.
+        if let Some(v) = want_endpoints(&doc, "connect/endpoints", out.mode)? {
             out.connect = v;
             named.push("connect/endpoints");
         }
@@ -1595,7 +1706,7 @@ impl ZenohNodeConfig {
                 named.push("connect/retry");
             }
         }
-        if let Some(v) = want_endpoints(&doc, "listen/endpoints")? {
+        if let Some(v) = want_endpoints(&doc, "listen/endpoints", out.mode)? {
             out.listen = v;
             named.push("listen/endpoints");
         }
@@ -1663,11 +1774,11 @@ impl ZenohNodeConfig {
         // R311y846 — the ANSWERING half. Read next to the three socket keys
         // because it is the same subsystem read the other way round: those
         // three say where to look, this says whether to be findable.
-        if let Some(v) = want_bool(&doc, "scouting/multicast/listen")? {
+        if let Some(v) = want_bool_for_mode(&doc, "scouting/multicast/listen", out.mode)? {
             out.scout_multicast_listen = Some(v);
             named.push("scouting/multicast/listen");
         }
-        if let Some(v) = want_bool(&doc, "timestamping/enabled")? {
+        if let Some(v) = want_bool_for_mode(&doc, "timestamping/enabled", out.mode)? {
             out.timestamping = v;
             named.push("timestamping/enabled");
         }
@@ -1778,6 +1889,10 @@ impl ZenohNodeConfig {
             .filter(|p| {
                 !HONOURED_CONFIG_KEYS.contains(&p.as_str())
                     && !HONOURED_SUBTREE_LEAVES.contains(&p.as_str())
+                    // R2075 — a mode table's own leaves (`listen/endpoints/router`)
+                    // are wz's to honour, so reporting them as unhonoured would
+                    // contradict the resolution that just happened.
+                    && !inside_a_mode_table(p)
             })
             .collect();
         ignored.dedup();
@@ -3008,5 +3123,162 @@ mod tests {
         assert_eq!(z.batch_size, 65_535);
         assert_eq!(z.lease_ms, 10_000);
         assert!(z.validate().is_empty(), "{:?}", z.validate());
+    }
+
+    // ── R2075 (open-debt item 499) — upstream's mode-dependent spelling ──
+    //
+    // Each witness below states the spelling that was REFUSED and the one that
+    // already worked, in the same test. The pairing matters more than usual
+    // here: the failure this round removes is not a wrong value, it is a node
+    // that does not start, so a reader that merely stopped erroring would look
+    // fixed while resolving the wrong entry.
+
+    /// Build `{ mode: "router", <path as nested objects>: <value> }`.
+    ///
+    /// From the slash path rather than hand-written per key, so the sweep below
+    /// can be driven by the constant instead of by a second list that would
+    /// drift from it.
+    fn doc_with(path: &str, value: &str) -> String {
+        let segs: Vec<&str> = path.split('/').collect();
+        let mut out = String::from("{ mode: \"router\", ");
+        for (i, seg) in segs.iter().enumerate() {
+            out.push_str(seg);
+            out.push_str(": ");
+            if i + 1 < segs.len() {
+                out.push_str("{ ");
+            }
+        }
+        out.push_str(value);
+        for _ in 1..segs.len() {
+            out.push_str(" }");
+        }
+        out.push_str(" }");
+        out
+    }
+
+    /// A `{ router, peer, client }` table resolves to THIS node's own entry.
+    ///
+    /// The same bytes handed to three nodes of different modes must yield three
+    /// different answers — that is what makes this a RESOLUTION and not a parse.
+    /// A reader that returned the first entry, or the whole table, would pass a
+    /// test that only asked whether it stopped erroring.
+    #[test]
+    fn a_mode_table_resolves_to_this_nodes_own_entry() {
+        const TABLE: &str = r#"{ mode: "MODE",
+             listen: { endpoints: { router: ["tcp/10.0.0.1:7447"],
+                                    peer:   ["tcp/10.0.0.2:7447"],
+                                    client: ["tcp/10.0.0.3:7447"] } } }"#;
+        for (mode, want) in [
+            ("router", "tcp/10.0.0.1:7447"),
+            ("peer", "tcp/10.0.0.2:7447"),
+            ("client", "tcp/10.0.0.3:7447"),
+        ] {
+            let ingest = ZenohNodeConfig::from_json5(&TABLE.replace("MODE", mode))
+                .unwrap_or_else(|e| panic!("{mode}: {e:?}"));
+            assert_eq!(ingest.config.listen, vec![String::from(want)], "{mode}");
+            assert!(ingest.named.contains(&"listen/endpoints"), "{mode}");
+        }
+
+        // The `Unique` spelling, beside it and unchanged.
+        let plain = ZenohNodeConfig::from_json5(
+            r#"{ mode: "router", listen: { endpoints: ["tcp/10.0.0.9:7447"] } }"#,
+        )
+        .expect("the plain spelling still reads");
+        assert_eq!(plain.config.listen, vec![String::from("tcp/10.0.0.9:7447")]);
+    }
+
+    /// A table that names no entry for this node is NO INSTRUCTION, not an
+    /// error — the same fallback a real zenohd takes, whose `.get(whatami)`
+    /// returns `None` and leaves the key at its default.
+    #[test]
+    fn a_mode_table_without_this_nodes_entry_is_no_instruction() {
+        let ingest = ZenohNodeConfig::from_json5(
+            r#"{ mode: "client", listen: { endpoints: { router: ["tcp/10.0.0.1:7447"] } } }"#,
+        )
+        .expect("a table that does not mention clients is not an error");
+        assert!(
+            ingest.config.listen.is_empty(),
+            "{:?}",
+            ingest.config.listen
+        );
+        assert!(!ingest.named.contains(&"listen/endpoints"));
+    }
+
+    /// An object whose fields are not ALL mode names is REFUSED rather than read
+    /// as a value. `rooter:` is one keystroke from `router:`, and a reader that
+    /// shrugged at it would let the operator believe the setting took effect.
+    ///
+    /// ⛔ The MIXED table is the case that carries this test, and it was added
+    /// because a mutation found the first cut vacuous: with only the all-wrong
+    /// table below, weakening the check from `all` to `any` changed nothing,
+    /// because no field was a mode name either way. A typo NEXT TO a valid entry
+    /// is also the realistic operator mistake — the one where a config half
+    /// works and the half that does not is silent.
+    #[test]
+    fn a_table_whose_fields_are_not_all_modes_is_refused() {
+        for doc in [
+            r#"{ mode: "router", listen: { endpoints: { rooter: ["tcp/10.0.0.1:7447"] } } }"#,
+            r#"{ mode: "router", listen: { endpoints: { router: ["tcp/10.0.0.1:7447"],
+                                                        rooter: ["tcp/10.0.0.2:7447"] } } }"#,
+        ] {
+            let err = match ZenohNodeConfig::from_json5(doc) {
+                Ok(read) => panic!("`rooter` is not a mode, and it read anyway: {read:?}\n{doc}"),
+                Err(e) => e,
+            };
+            assert!(
+                matches!(
+                    err,
+                    ConfigIngestError::WrongType {
+                        path: "listen/endpoints",
+                        ..
+                    }
+                ),
+                "{err:?}\n{doc}"
+            );
+        }
+    }
+
+    /// EVERY key upstream declares mode-dependent takes both spellings, swept
+    /// from the constant rather than from a list written here.
+    ///
+    /// A key added to `MODE_DEPENDENT_CONFIG_KEYS` without a reader that
+    /// resolves its table reds this, and so does one that is not honoured at all
+    /// — the two halves of "this constant describes the reader".
+    #[test]
+    fn every_mode_dependent_key_takes_both_spellings() {
+        assert!(
+            !MODE_DEPENDENT_CONFIG_KEYS.is_empty(),
+            "an empty population is green for the wrong reason"
+        );
+        for key in MODE_DEPENDENT_CONFIG_KEYS {
+            assert!(
+                HONOURED_CONFIG_KEYS.contains(key),
+                "{key} is declared mode-dependent and is not honoured at all"
+            );
+            let value = match *key {
+                "connect/endpoints" | "listen/endpoints" => "[\"tcp/10.0.0.1:7447\"]",
+                _ => "true",
+            };
+            let plain = doc_with(key, value);
+            ZenohNodeConfig::from_json5(&plain)
+                .unwrap_or_else(|e| panic!("{key} plain spelling: {e:?}\n{plain}"));
+            let table = doc_with(key, &format!("{{ router: {value} }}"));
+            ZenohNodeConfig::from_json5(&table)
+                .unwrap_or_else(|e| panic!("{key} table spelling: {e:?}\n{table}"));
+        }
+    }
+
+    /// A mode table's own leaves are NOT reported as keys wz does not honour.
+    ///
+    /// Saying `listen/endpoints/router` was ignored would contradict the
+    /// resolution that just consumed it, and would send an operator looking for
+    /// a flag that already exists.
+    #[test]
+    fn a_mode_tables_leaves_are_not_reported_as_unhonoured() {
+        let ingest = ZenohNodeConfig::from_json5(
+            r#"{ mode: "router", listen: { endpoints: { router: ["tcp/10.0.0.1:7447"] } } }"#,
+        )
+        .expect("a mode table reads");
+        assert!(ingest.ignored.is_empty(), "{:?}", ingest.ignored);
     }
 }

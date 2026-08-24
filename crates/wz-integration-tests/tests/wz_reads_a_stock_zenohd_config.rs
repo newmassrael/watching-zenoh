@@ -604,6 +604,82 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
     drop(guard);
 }
 
+// wz-proves: none -- same registration gap as the differential leg above.
+/// R2075 (open-debt item 499) — upstream's MODE-DEPENDENT spelling, on the key
+/// where refusing it is fatal rather than merely partial.
+///
+/// `listen.endpoints` is `ModeDependentValue<Vec<EndPoint>>` upstream
+/// (`commons/zenoh-config/src/lib.rs`, read at the pinned checkout), so a file
+/// may give it as a `{ router, peer, client }` table and each node takes its own
+/// row. wz's reader accepted only the plain list and answered the table with
+/// `WrongType` — which is not a missing feature but a node that does not start,
+/// on one of the two most ordinary keys a config has.
+///
+/// The two halves are ONE leg on purpose. A unit test can show wz resolving the
+/// table; only a real zenohd can show that the table MEANS what wz now takes it
+/// to mean, and it shows it by BINDING — two nodes of different modes, reading
+/// the same bytes, landing on different ports. Each mode also asserts the OTHER
+/// row was not bound, because "it came up somewhere" is what a reader that
+/// flattened the table would also produce.
+#[test]
+#[ignore = "binary-dep e2e: needs target/zenohd/zenohd (scripts/build-zenohd.sh)"]
+fn a_mode_dependent_endpoint_table_binds_the_same_row_for_zenohd_and_for_wz() {
+    /// zenohd's own line for the endpoint it actually reached the network on.
+    const REACHABLE: &str = "Zenoh can be reached at: ";
+
+    // `pick_pair` and not two `pick`s: the reservation mutex is non-reentrant,
+    // and the pair form is what guarantees the two ports differ.
+    let (reservation, peer_port) = PortReservation::pick_pair();
+    let router_port = reservation.port();
+    let template = format!(
+        r#"{{
+  mode: "MODE",
+  listen: {{ endpoints: {{ router: ["tcp/127.0.0.1:{router_port}"],
+                           peer:   ["tcp/127.0.0.1:{peer_port}"] }} }},
+  scouting: {{ multicast: {{ enabled: false }} }},
+}}
+"#
+    );
+    drop(reservation);
+
+    for (mode, mine, theirs) in [
+        ("router", router_port, peer_port),
+        ("peer", peer_port, router_port),
+    ] {
+        let source = template.replace("MODE", mode);
+
+        // wz reads the file BEFORE zenohd is started, so nothing about the
+        // running node can have informed it.
+        let ingest = ZenohNodeConfig::from_json5(&source).unwrap_or_else(|e| {
+            panic!("{mode}: wz cannot read the table spelling: {e:?}\n{source}")
+        });
+        assert_eq!(
+            ingest.config.listen,
+            vec![format!("tcp/127.0.0.1:{mine}")],
+            "{mode}: wz resolved the wrong row\n{source}"
+        );
+
+        let file = staged_config(&source);
+        let (guard, mut capture) = spawn_on_config("zenohd (mode table)", file.path());
+        let captured = wait_for_substring(&mut capture, REACHABLE, STARTUP_BUDGET)
+            .unwrap_or_else(|e| panic!("{mode}: zenohd never came up: {e}\n{source}"));
+        let line = captured
+            .lines()
+            .find(|l| l.contains(REACHABLE))
+            .expect("the marker is in the capture");
+        assert!(
+            line.contains(&format!("tcp/127.0.0.1:{mine}")),
+            "{mode}: zenohd bound something other than its own row: {line}"
+        );
+        assert!(
+            !line.contains(&format!("tcp/127.0.0.1:{theirs}")),
+            "{mode}: zenohd bound the other mode's row too, so the table is not \
+             a per-mode selection after all: {line}"
+        );
+        drop(guard);
+    }
+}
+
 // wz-proves: none -- same registration gap as the leg above.
 #[test]
 #[ignore = "binary-dep e2e: needs target/zenohd/zenohd (scripts/build-zenohd.sh)"]
