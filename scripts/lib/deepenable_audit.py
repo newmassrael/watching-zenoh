@@ -58,15 +58,21 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import pathlib
 import re
 import subprocess
 import sys
 import tempfile
+import time
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 SOURCE = REPO_ROOT / "crates" / "wz-runtime-tokio" / "src" / "zenoh_config.rs"
-ZENOHD = REPO_ROOT / "target" / "zenohd" / "zenohd"
+# R2080 — the same override the test harness reads (`zenohd_binary()`), so the
+# lane and this script cannot end up asking two different binaries.
+ZENOHD = pathlib.Path(
+    os.environ.get("WZ_ZENOHD_BIN") or REPO_ROOT / "target" / "zenohd" / "zenohd"
+)
 
 MODE_TABLE_MARKER = "expected one of `router`, `peer`, `client`"
 STARTED_MARKER = "Zenoh can be reached at"
@@ -97,22 +103,42 @@ def document_for(key: str) -> str:
 
 
 def verdict_for(key: str, workdir: pathlib.Path) -> str:
-    path = workdir / "probe.json5"
-    path.write_text(document_for(key) + "\n")
-    try:
-        run = subprocess.run(
-            [str(ZENOHD), "-c", str(path), "--rest-http-port", "none"],
-            capture_output=True,
-            text=True,
-            timeout=15,
+    """Run one probe, and STOP as soon as the answer is on the page.
+
+    R2080 — the first cut let `subprocess.run` hit a fixed timeout, so every key
+    whose subtree is opaque cost the whole timeout instead of the ~60ms it takes
+    zenohd to print its resolved config. Waiting for a deadline that has already
+    been answered is not caution, it is just slower; the refusals still cost what
+    zenohd's own startup costs, and that part is not ours to shorten.
+    """
+    config = workdir / "probe.json5"
+    config.write_text(document_for(key) + "\n")
+    log = workdir / "probe.log"
+    accepted = False
+    with open(log, "wb") as sink:
+        proc = subprocess.Popen(
+            [str(ZENOHD), "-c", str(config), "--rest-http-port", "none"],
+            stdout=sink,
+            stderr=sink,
         )
-        blob = run.stdout + run.stderr
-    except subprocess.TimeoutExpired as expired:
-        blob = (expired.stdout or b"").decode(errors="replace") + (
-            expired.stderr or b""
-        ).decode(errors="replace")
-    if STARTED_MARKER in blob or RESOLVED_MARKER in blob:
+        deadline = time.monotonic() + 30.0
+        while True:
+            blob = log.read_text(errors="replace")
+            if STARTED_MARKER in blob or RESOLVED_MARKER in blob:
+                accepted = True
+                break
+            if proc.poll() is not None:
+                break
+            if time.monotonic() > deadline:
+                break
+            time.sleep(0.02)
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+
+    if accepted:
         return "OPAQUE"
+    blob = log.read_text(errors="replace")
     if MODE_TABLE_MARKER in blob:
         return "MODE_TABLE"
     return "REFUSED"
@@ -137,8 +163,24 @@ def main() -> int:
         | set(rust_const("UNHONOURED_UPSTREAM_CONFIG_KEYS"))
     )
     declared = set(rust_const("DEEPENABLE_UPSTREAM_KEYS"))
-    if not surface or not declared:
-        raise SystemExit("deepenable-audit: FAIL -- an empty population reads as agreement")
+    # R2080 — FLOORS, not just non-emptiness. The constants are read out of Rust
+    # by regex, so a reformat that split one of them differently would be read
+    # PARTIALLY, and a partial read PASSES: fewer keys probed, nothing said. That
+    # is "a population of zero is green" in its quieter form. The floors sit far
+    # below the measured 116 / 17, so ordinary movement of the surface does not
+    # touch them and only a broken read can reach them.
+    if len(surface) < 100:
+        raise SystemExit(
+            f"deepenable-audit: FAIL -- read only {len(surface)} surface key(s) out "
+            f"of {SOURCE.name}. The constant moved, so this sweep is measuring a "
+            f"fraction of the surface while reporting on all of it."
+        )
+    if len(declared) < 10:
+        raise SystemExit(
+            f"deepenable-audit: FAIL -- read only {len(declared)} deepenable key(s). "
+            f"A partial read of the exception list makes every key it lost look "
+            f"like a missing entry."
+        )
 
     accepts: set[str] = set()
     undecided: set[str] = set()

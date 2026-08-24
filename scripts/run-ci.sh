@@ -11564,6 +11564,29 @@ layer_z_zenohd_interop() {
         _z_unavailable "zenohd not built ($zenohd; run: bash scripts/build-zenohd.sh)" || return 1
         return 0
     fi
+    # R2080 (open-debt item 503) — the COMPLETENESS audit of the acceptance
+    # boundary's exception list, run HERE for the same reason the close-scope
+    # witness below is: it needs zenohd and nothing else.
+    #
+    # LEG 9 asks a real zenohd about every key `DEEPENABLE_UPSTREAM_KEYS` NAMES.
+    # It structurally cannot see a key the list is MISSING, and that is the
+    # dangerous direction — a missing key makes wz REFUSE a file zenohd starts
+    # on, and the only other detection path is an operator saying their node
+    # will not come up. R2078 shipped exactly that (`listen/retry`) and R2079
+    # found it by sweeping the whole surface by hand.
+    #
+    # Item 503 filed this as "no lane runs it" on the premise that the oracle is
+    # untracked. That premise was WRONG and re-checking it is what closed the
+    # item: this lane already provisions zenohd. The real cost is wall clock,
+    # MEASURED at 219s for 116 keys — 111 of them refusals, each paying zenohd's
+    # own ~2s startup, which is not ours to shorten. Hosted-only: pre-push never
+    # runs Layer Z, so this does not slow a push.
+    if ! WZ_ZENOHD_BIN="$zenohd" python3 scripts/lib/deepenable_audit.py; then
+        echo "  Z FAIL: the acceptance boundary's exception list no longer matches" \
+             "what a real zenohd accepts — see the lines above for which key and" \
+             "which direction"
+        return 1
+    fi
     # R311y839 — the CLOSE SCOPE witness, run HERE: above every pico-CLI check
     # below, because it needs zenohd and nothing else, and a SKIP on an absent
     # z_sub would take a zenohd-only measurement down with it.
