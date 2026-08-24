@@ -29,10 +29,19 @@
 //! 190-with-the-feature against a 189 budget until this line stopped being a
 //! link.
 //!
-//! * **validate** — `ZenohNodeConfig::validate` answers "can this topology
-//!   work" WITHOUT starting a node: an unknown link protocol, a client that
-//!   can reach nothing, the QoS-with-lowlatency pair zenoh's own config
-//!   documents as incompatible.
+//! * **validate** — `ZenohNodeConfig::validate` answers "can this NODE work"
+//!   WITHOUT starting it: an unknown link protocol, a node that can reach
+//!   nothing, the QoS-with-lowlatency pair zenoh's own config documents as
+//!   incompatible. `validate_for_build` adds the one verdict that depends on
+//!   the reader — a scheme this build has no link backend for (R2070).
+//! * **validate_topology** (R2070b) — the SET question the line above used to
+//!   claim and could not keep. It said "can this topology work", but the
+//!   receiver is one config and the body reads `self`; a dial nobody listens
+//!   on, two nodes claiming one address, and a set of nothing but clients are
+//!   all invisible from inside a single node. `validate_topology` takes the
+//!   slice and answers them, and the wording here was corrected in the same
+//!   round — a doc that promises a wider scope than the code has is worse
+//!   than a missing check, because the reader stops looking.
 //! * **ingest** (R311y842) — `ZenohNodeConfig::from_json5` reads the file
 //!   `zenohd -c` reads.
 //!
@@ -90,6 +99,12 @@ use core::fmt::Write as _;
 use wz_codecs::whatami::WhatAmI;
 use wz_session_core::json::escape_into;
 use wz_session_core::json5::{number_as_u64, Json5Value};
+// R2070b (open-debt item 486) — the topology pass compares endpoints, and the
+// tested parser is the one the dial seam already uses. Writing a second
+// splitter here would be a second opinion about IPv6 brackets and `#iface=`
+// spans, which is exactly the kind of near-copy this module has been paying
+// off all round.
+use wz_session_core::locator::{parse_any_locator, AnyLocator, Proto};
 
 /// Link protocols a stock zenoh 1.5.0 can carry, read off the reference's own
 /// `io/zenoh-links/*/src/lib.rs` `*_LOCATOR_PREFIX` constants plus
@@ -247,6 +262,291 @@ impl core::fmt::Display for ConfigDefect {
             ConfigDefect::ZeroMaxLinks => write!(f, "max_links is 0"),
         }
     }
+}
+
+/// A reason a set of nodes cannot form the network their configs describe —
+/// a question no single config can be asked.
+///
+/// R2070b (open-debt item 486) — [`ZenohNodeConfig::validate`] judges ONE
+/// node, and its doc said "this topology", which is a promise one receiver
+/// cannot keep: the body reads `self` and has no channel through which
+/// another node could be seen. Every defect below ends the same way — the
+/// nodes start cleanly and nothing attaches — which is the failure
+/// [`ConfigDefect::Unreachable`] calls the most expensive to diagnose, one
+/// level up where nobody was looking.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TopologyDefect {
+    /// A node dials an endpoint that no node in the set listens on.
+    DanglingConnectTarget {
+        /// Which node dials it — its `id` when the config states one, else
+        /// its position in the slice.
+        node: String,
+        /// The connect endpoint as given.
+        endpoint: String,
+    },
+    /// Two or more nodes claim the same concrete listen address. At most one
+    /// of them can bind it.
+    ListenEndpointCollision {
+        /// The endpoint they share, as the first of them spells it.
+        endpoint: String,
+        /// Every node claiming it, in slice order.
+        nodes: Vec<String>,
+    },
+    /// Every node is a `client`. A zenoh client dials and never listens
+    /// (upstream `orchestrator.rs`'s `start_client` reads `connect` and
+    /// scouting only, and binds no listener), so a set of them has nothing
+    /// to attach to.
+    NoNodeAccepts,
+}
+
+impl core::fmt::Display for TopologyDefect {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            TopologyDefect::DanglingConnectTarget { node, endpoint } => write!(
+                f,
+                "{node} connects to {endpoint:?}, which no node here listens on"
+            ),
+            TopologyDefect::ListenEndpointCollision { endpoint, nodes } => write!(
+                f,
+                "listen endpoint {endpoint:?} is claimed by {}",
+                nodes.join(", ")
+            ),
+            TopologyDefect::NoNodeAccepts => write!(
+                f,
+                "every node is a client, and a zenoh client never listens"
+            ),
+        }
+    }
+}
+
+/// What an endpoint says about WHERE it is, reduced to the part two endpoints
+/// can be compared on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EndpointHost {
+    /// A wildcard bind (`0.0.0.0`, `[::]`) — it answers on every interface,
+    /// so it can serve a dial addressed to any host.
+    Any,
+    /// A literal address. Two different literals are two different hosts.
+    Ip(std::net::IpAddr),
+    /// A DNS name, unresolved on purpose (resolution is the dial layer's job
+    /// and would make this verdict depend on the network it is judging).
+    Name(String),
+}
+
+/// An endpoint reduced to what a topology question needs, or `None` when the
+/// string does not parse — which [`ZenohNodeConfig::validate`] already reports
+/// per node and this pass must not report a second time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EndpointFace {
+    /// An IP-family endpoint: the two things that must agree for a dial to
+    /// land, plus the host that may or may not pin one machine.
+    Ip {
+        /// The scheme, compared as the parsed value rather than as text.
+        proto: Proto,
+        /// The host, to whatever precision the string states it.
+        host: EndpointHost,
+        /// The port.
+        port: u16,
+    },
+    /// A serial / unixsock / unixpipe / vsock endpoint, whose address IS its
+    /// whole string. Compared verbatim, because none of them has a host part
+    /// this pass could reason about.
+    NonIp(String),
+}
+
+impl EndpointFace {
+    fn of(endpoint: &str) -> Option<EndpointFace> {
+        match parse_any_locator(endpoint).ok()? {
+            AnyLocator::Ip(ip) => Some(EndpointFace::Ip {
+                proto: ip.proto,
+                host: if ip.addr.ip().is_unspecified() {
+                    EndpointHost::Any
+                } else {
+                    EndpointHost::Ip(ip.addr.ip())
+                },
+                port: ip.addr.port(),
+            }),
+            AnyLocator::Named {
+                proto, host, port, ..
+            } => Some(EndpointFace::Ip {
+                proto,
+                host: EndpointHost::Name(host),
+                port,
+            }),
+            _ => Some(EndpointFace::NonIp(String::from(endpoint))),
+        }
+    }
+
+    /// Whether a dial to `self` could be answered by a node listening on
+    /// `listener`.
+    ///
+    /// Deliberately ASYMMETRIC and deliberately generous: a pair this cannot
+    /// rule out is treated as a match, because the defect it feeds is a
+    /// negative ("nobody listens on it") and a false positive there would tell
+    /// an operator their working deployment is broken. A name and a literal
+    /// are therefore compatible — the name might resolve to it, and only the
+    /// network knows.
+    fn could_be_answered_by(&self, listener: &EndpointFace) -> bool {
+        match (self, listener) {
+            (
+                EndpointFace::Ip {
+                    proto: dp,
+                    host: dh,
+                    port: dport,
+                },
+                EndpointFace::Ip {
+                    proto: lp,
+                    host: lh,
+                    port: lport,
+                },
+            ) => {
+                if dp != lp || dport != lport {
+                    return false;
+                }
+                match (dh, lh) {
+                    // A wildcard listen answers whatever addressed it.
+                    (_, EndpointHost::Any) | (EndpointHost::Any, _) => true,
+                    // Two literals, or two names, are comparable and decide it.
+                    (EndpointHost::Ip(a), EndpointHost::Ip(b)) => a == b,
+                    (EndpointHost::Name(a), EndpointHost::Name(b)) => a == b,
+                    // A name against a literal: unresolvable here, so allowed.
+                    _ => true,
+                }
+            }
+            (EndpointFace::NonIp(a), EndpointFace::NonIp(b)) => a == b,
+            _ => false,
+        }
+    }
+
+    /// Whether this listen endpoint pins ONE machine, and so whether a second
+    /// node claiming the same string is necessarily a collision.
+    ///
+    /// A wildcard does not: two nodes on two machines both bind `0.0.0.0`
+    /// legitimately, every day. Nor does loopback: `127.0.0.1:7447` on two
+    /// machines is two separate, working (if unreachable) binds. Nor does a
+    /// path-shaped scheme, since two machines each have their own `/tmp`.
+    /// What is left — a routable literal, or a name, which resolves to one
+    /// host — is a claim only one node can win.
+    fn pins_one_machine(&self) -> bool {
+        match self {
+            EndpointFace::Ip { host, .. } => match host {
+                EndpointHost::Any => false,
+                EndpointHost::Ip(addr) => !addr.is_loopback(),
+                EndpointHost::Name(_) => true,
+            },
+            EndpointFace::NonIp(_) => false,
+        }
+    }
+}
+
+/// Every reason this SET of nodes cannot form the network its configs
+/// describe, in a stable order.
+///
+/// R2070b (open-debt item 486) — the sibling of
+/// [`ZenohNodeConfig::validate_for_build`], not an extension of it. The
+/// defects here cannot be asked of one config, so folding them into the
+/// per-node verdict would hand a single-node caller a false positive on every
+/// one of them; and each is a question about the SET, which is why the set is
+/// the receiver.
+///
+/// The slice is read as a CLOSED deployment: "no node listens on it" means no
+/// node *here*. A set that is a fragment of a larger network — a node dialing
+/// an external zenohd, say — will collect
+/// [`TopologyDefect::DanglingConnectTarget`] for the endpoints it reaches
+/// outward on, and that is the correct answer to the question this function
+/// asks rather than a defect in it. Nothing is inferred about the network:
+/// no name is resolved and no address is probed, so the verdict is a property
+/// of the configs and reproduces without a network to run on.
+///
+/// A malformed or unknown-protocol endpoint is NOT reported here.
+/// [`ZenohNodeConfig::validate`] already names it per node, and saying it
+/// twice would make one typo look like two faults.
+pub fn validate_topology(nodes: &[ZenohNodeConfig]) -> Vec<TopologyDefect> {
+    // The node's name is built ONCE, here, so every defect below spells the
+    // same node the same way. Two call sites deriving it independently is two
+    // places for the identity to drift from the row it labels.
+    let named: Vec<(String, &ZenohNodeConfig)> = nodes
+        .iter()
+        .enumerate()
+        .map(|(i, node)| {
+            let name = match &node.id {
+                Some(id) => id.clone(),
+                None => format!("node[{i}]"),
+            };
+            (name, node)
+        })
+        .collect();
+
+    let listeners: Vec<EndpointFace> = named
+        .iter()
+        .flat_map(|(_, node)| node.listen.iter())
+        .filter_map(|endpoint| EndpointFace::of(endpoint))
+        .collect();
+
+    let mut out = Vec::new();
+
+    for (name, node) in &named {
+        for endpoint in &node.connect {
+            let Some(face) = EndpointFace::of(endpoint) else {
+                continue;
+            };
+            if !listeners.iter().any(|l| face.could_be_answered_by(l)) {
+                out.push(TopologyDefect::DanglingConnectTarget {
+                    node: name.clone(),
+                    endpoint: endpoint.clone(),
+                });
+            }
+        }
+    }
+
+    // A collision is reported ONCE, against the endpoint's first speller, with
+    // every claimant listed — one finding about one address, rather than one
+    // per node, which would turn a two-node clash into two separate reports of
+    // the same fact.
+    //
+    // Claimants are counted by SLICE POSITION and not by name. A node that
+    // lists the same endpoint twice is `ConfigDefect::DuplicateListenEndpoint`
+    // and belongs to the per-node pass; deduplicating by name instead would
+    // ALSO swallow the real collision between two nodes that share an `id`,
+    // which is a worse trade than the one it saves.
+    let mut seen: Vec<(EndpointFace, String, Vec<usize>)> = Vec::new();
+    for (index, (_, node)) in named.iter().enumerate() {
+        for endpoint in &node.listen {
+            let Some(face) = EndpointFace::of(endpoint) else {
+                continue;
+            };
+            if !face.pins_one_machine() {
+                continue;
+            }
+            match seen.iter_mut().find(|(f, _, _)| *f == face) {
+                Some((_, _, claimants)) => {
+                    if !claimants.contains(&index) {
+                        claimants.push(index);
+                    }
+                }
+                None => seen.push((face, endpoint.clone(), vec![index])),
+            }
+        }
+    }
+    for (_, endpoint, claimants) in seen {
+        if claimants.len() > 1 {
+            out.push(TopologyDefect::ListenEndpointCollision {
+                endpoint,
+                nodes: claimants.iter().map(|i| named[*i].0.clone()).collect(),
+            });
+        }
+    }
+
+    // Upstream `start_client` (`zenoh/src/net/runtime/orchestrator.rs`) reads
+    // `connect` and the scouting block and binds no listener, so a set with no
+    // router and no peer has nobody to attach to. An EMPTY set is not this
+    // defect: it describes no deployment, and answering it would be answering
+    // a question nobody asked.
+    if !named.is_empty() && named.iter().all(|(_, node)| node.mode == WhatAmI::Client) {
+        out.push(TopologyDefect::NoNodeAccepts);
+    }
+
+    out
 }
 
 /// Admin-space exposure of the emitted node.
@@ -543,9 +843,17 @@ impl ZenohNodeConfig {
         self
     }
 
-    /// Every reason this topology cannot work, in a stable order. An empty
-    /// result means the config is coherent — NOT that the node will find a
-    /// peer, which is a question about the network rather than the config.
+    /// Every reason THIS NODE cannot work, in a stable order. An empty result
+    /// means the config is coherent — NOT that the node will find a peer,
+    /// which is a question about the network rather than the config.
+    ///
+    /// R2070b (open-debt item 486) — this doc said "this topology" for many
+    /// rounds, and one receiver cannot answer that: the body below reads
+    /// `self` and has no channel through which a second node could be seen.
+    /// The set-level questions live in [`validate_topology`], which takes the
+    /// slice; they are deliberately NOT folded in here, because a caller
+    /// holding one config would then be told its perfectly good node is
+    /// broken.
     ///
     /// This is the verdict for a STOCK zenohd: the reader is assumed to carry
     /// every scheme zenoh does. To judge the same file for the wz binary
@@ -1756,6 +2064,163 @@ mod tests {
                 );
             }
         }
+    }
+
+    // R2070b (open-debt item 486) — the topology pass. Every defect is stated
+    // as a PAIR: the case that must be reported, and the neighbouring case
+    // that must NOT be, because each of these three has a legitimate shape one
+    // character away from it and a false positive here tells an operator their
+    // working deployment is broken.
+    fn node(mode: WhatAmI, id: &str) -> ZenohNodeConfig {
+        ZenohNodeConfig {
+            mode,
+            id: Some(String::from(id)),
+            multicast_scouting: false,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_connect_target_nobody_listens_on_is_named_with_the_node_that_dials_it() {
+        let dialer = node(WhatAmI::Client, "A").connecting_to("tcp/10.0.0.9:7447");
+        let listener = node(WhatAmI::Router, "R").listening_on("tcp/10.0.0.5:7447");
+        assert_eq!(
+            validate_topology(&[dialer.clone(), listener.clone()]),
+            vec![TopologyDefect::DanglingConnectTarget {
+                node: String::from("A"),
+                endpoint: String::from("tcp/10.0.0.9:7447"),
+            }],
+            "the dangling dial was not reported, or not against its dialer"
+        );
+
+        // CONTROL 1 — the same shape with the ports agreed is NOT a defect.
+        let dialer = node(WhatAmI::Client, "A").connecting_to("tcp/10.0.0.5:7447");
+        assert!(validate_topology(&[dialer, listener.clone()]).is_empty());
+
+        // CONTROL 2 — a WILDCARD listen answers a dial addressed to a name it
+        // could never be compared with. Ruling this a defect is the single
+        // most likely way to break a real deployment, since `0.0.0.0` is what
+        // a router listens on and a name is what its clients dial.
+        let dialer = node(WhatAmI::Client, "A").connecting_to("tcp/router.example:7447");
+        let wildcard = node(WhatAmI::Router, "R").listening_on("tcp/0.0.0.0:7447");
+        assert!(
+            validate_topology(&[dialer, wildcard]).is_empty(),
+            "a wildcard listen was not credited with answering a named dial"
+        );
+
+        // CONTROL 3 — the PORT still decides. A wildcard on the wrong port
+        // answers nothing, which is what keeps control 2 from being "anything
+        // matches anything".
+        let dialer = node(WhatAmI::Client, "A").connecting_to("tcp/router.example:7447");
+        let wrong_port = node(WhatAmI::Router, "R").listening_on("tcp/0.0.0.0:7448");
+        assert_eq!(
+            validate_topology(&[dialer, wrong_port]),
+            vec![TopologyDefect::DanglingConnectTarget {
+                node: String::from("A"),
+                endpoint: String::from("tcp/router.example:7447"),
+            }]
+        );
+
+        // CONTROL 4 — the SCHEME decides too, on the same argument.
+        let dialer = node(WhatAmI::Client, "A").connecting_to("udp/10.0.0.5:7447");
+        assert_eq!(
+            validate_topology(&[dialer, listener]),
+            vec![TopologyDefect::DanglingConnectTarget {
+                node: String::from("A"),
+                endpoint: String::from("udp/10.0.0.5:7447"),
+            }]
+        );
+    }
+
+    #[test]
+    fn two_nodes_claiming_one_concrete_address_collide_and_two_wildcards_do_not() {
+        let a = node(WhatAmI::Peer, "A").listening_on("tcp/10.0.0.5:7447");
+        let b = node(WhatAmI::Peer, "B").listening_on("tcp/10.0.0.5:7447");
+        assert_eq!(
+            validate_topology(&[a, b]),
+            vec![TopologyDefect::ListenEndpointCollision {
+                endpoint: String::from("tcp/10.0.0.5:7447"),
+                nodes: vec![String::from("A"), String::from("B")],
+            }],
+            "the collision must name BOTH claimants, once"
+        );
+
+        // CONTROL 1 — two WILDCARD listens are two machines doing the ordinary
+        // thing. This is the case that makes the check worth restricting.
+        let a = node(WhatAmI::Peer, "A").listening_on("tcp/0.0.0.0:7447");
+        let b = node(WhatAmI::Peer, "B").listening_on("tcp/0.0.0.0:7447");
+        assert!(
+            validate_topology(&[a, b]).is_empty(),
+            "two wildcard binds were called a collision"
+        );
+
+        // CONTROL 2 — loopback likewise: two hosts each have their own.
+        let a = node(WhatAmI::Peer, "A").listening_on("tcp/127.0.0.1:7447");
+        let b = node(WhatAmI::Peer, "B").listening_on("tcp/127.0.0.1:7447");
+        assert!(validate_topology(&[a, b]).is_empty());
+
+        // CONTROL 3 — the SAME node listing an endpoint twice is already
+        // `DuplicateListenEndpoint` from the per-node pass, and must not be
+        // re-reported here as a collision with itself.
+        let solo = node(WhatAmI::Peer, "A")
+            .listening_on("tcp/10.0.0.5:7447")
+            .listening_on("tcp/10.0.0.5:7447");
+        assert!(
+            validate_topology(std::slice::from_ref(&solo)).is_empty(),
+            "a node colliding with itself is the per-node pass's finding"
+        );
+        assert_eq!(
+            solo.validate(),
+            vec![ConfigDefect::DuplicateListenEndpoint {
+                endpoint: String::from("tcp/10.0.0.5:7447"),
+            }],
+            "and the per-node pass must still be the one that says it"
+        );
+    }
+
+    #[test]
+    fn a_set_of_only_clients_has_nobody_to_attach_to() {
+        let a = node(WhatAmI::Client, "A").connecting_to("tcp/10.0.0.5:7447");
+        let b = node(WhatAmI::Client, "B").connecting_to("tcp/10.0.0.5:7447");
+        let defects = validate_topology(&[a.clone(), b.clone()]);
+        assert!(
+            defects.contains(&TopologyDefect::NoNodeAccepts),
+            "an all-client set was not called out: {defects:?}"
+        );
+
+        // CONTROL 1 — ONE router turns it into an ordinary deployment, and the
+        // dangling dials go with it.
+        let r = node(WhatAmI::Router, "R").listening_on("tcp/10.0.0.5:7447");
+        assert!(validate_topology(&[a, b, r]).is_empty());
+
+        // CONTROL 2 — an EMPTY set describes no deployment. Reporting it would
+        // be answering a question nobody asked, and would make the defect fire
+        // on every caller that has not read its files yet.
+        assert!(validate_topology(&[]).is_empty());
+    }
+
+    #[test]
+    fn the_topology_pass_is_silent_about_what_the_per_node_pass_already_says() {
+        // A malformed endpoint, an unknown protocol, and a node with no way
+        // out at all: three defects the per-node verdict names. Saying any of
+        // them again here would make one typo look like two faults.
+        let bad = ZenohNodeConfig {
+            mode: WhatAmI::Peer,
+            id: Some(String::from("A")),
+            multicast_scouting: false,
+            ..Default::default()
+        }
+        .connecting_to("tcp-no-slash")
+        .connecting_to("carrier-pigeon/aviary:1");
+        let per_node = bad.validate();
+        assert!(
+            per_node.len() >= 2,
+            "the per-node pass stopped naming these: {per_node:?}"
+        );
+        assert!(
+            validate_topology(std::slice::from_ref(&bad)).is_empty(),
+            "the topology pass repeated a per-node defect"
+        );
     }
 
     // R2070 (open-debt item 487) — the catalogue half. `LINK_SCHEME_FEATURES`
