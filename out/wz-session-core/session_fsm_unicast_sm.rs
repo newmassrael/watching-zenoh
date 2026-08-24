@@ -1,6 +1,6 @@
 // SCE-GENERATED — DO NOT EDIT
 // source-hash: c36e29adfc747e86ea85756b63ebc03873d856936c9ec601c29dbdb44c63bd04
-// template-hash: 90a17b01a07fa6e2db248839e7823280de5374963642bfa559a2f033a153c586
+// template-hash: 580f12cd61336d7449660775c4fcc4f615ee3c32bffa0e9792363e260aed93e2
 // generated-at: 0
 
 
@@ -161,9 +161,8 @@ impl SessionFsmUnicastEvent {
 
 // ── W3C SCXML G.7: <sce:action> host-dispatch trait ──
 /// W3C SCXML G.7: host operations dispatched by `<sce:action>`.
-/// The generated `Policy` is generic over an implementation of this
-/// trait; the host supplies the side effects while the statechart keeps
-/// each operation symbolic. No runtime script engine is involved.
+/// The host supplies the side effects while the statechart keeps each
+/// operation symbolic. No runtime script engine is involved.
 pub trait SessionFsmUnicastActions {
     fn enable_rx_tx_regions(&mut self);
     fn free_pool_slots(&mut self);
@@ -404,6 +403,27 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             SessionFsmUnicastState::SentInitAck => "SentInitAck",
             SessionFsmUnicastState::SentInitSyn => "SentInitSyn",
             SessionFsmUnicastState::SentOpenAck => "SentOpenAck",
+        }
+    }
+
+    // The inverse of the table above, emitted from the same loop over the
+    // document's states so the two age together. It is what lets a host turn a
+    // recorded configuration back into the `StateChain` `enter_at` takes.
+    fn get_state_from_name(name: &str) -> Option<Self::State> {
+        match name {
+            "Accepting" => Some(SessionFsmUnicastState::Accepting),
+            "AwaitingInitSyn" => Some(SessionFsmUnicastState::AwaitingInitSyn),
+            "Closed" => Some(SessionFsmUnicastState::Closed),
+            "Closing" => Some(SessionFsmUnicastState::Closing),
+            "Established" => Some(SessionFsmUnicastState::Established),
+            "GotInitAck" => Some(SessionFsmUnicastState::GotInitAck),
+            "Init" => Some(SessionFsmUnicastState::Init),
+            "LinkOpening" => Some(SessionFsmUnicastState::LinkOpening),
+            "Opening" => Some(SessionFsmUnicastState::Opening),
+            "SentInitAck" => Some(SessionFsmUnicastState::SentInitAck),
+            "SentInitSyn" => Some(SessionFsmUnicastState::SentInitSyn),
+            "SentOpenAck" => Some(SessionFsmUnicastState::SentOpenAck),
+            _ => None,
         }
     }
 

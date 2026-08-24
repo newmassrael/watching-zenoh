@@ -1,6 +1,6 @@
 // SCE-GENERATED — DO NOT EDIT
 // source-hash: e812b8b9426089658c190b079d72f4505398532fde65fe2c41c3ec6148939d1b
-// template-hash: 90a17b01a07fa6e2db248839e7823280de5374963642bfa559a2f033a153c586
+// template-hash: 580f12cd61336d7449660775c4fcc4f615ee3c32bffa0e9792363e260aed93e2
 // generated-at: 0
 
 
@@ -161,9 +161,8 @@ impl<A: ReassemblySlotActions + 'static> ReassemblySlotInject for ::sce_rust_run
 
 // ── W3C SCXML G.7: <sce:action> host-dispatch trait ──
 /// W3C SCXML G.7: host operations dispatched by `<sce:action>`.
-/// The generated `Policy` is generic over an implementation of this
-/// trait; the host supplies the side effects while the statechart keeps
-/// each operation symbolic. No runtime script engine is involved.
+/// The host supplies the side effects while the statechart keeps each
+/// operation symbolic. No runtime script engine is involved.
 pub trait ReassemblySlotActions {
     fn abort_codec(&mut self);
     fn abort_evicted(&mut self);
@@ -354,6 +353,20 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
             ReassemblySlotState::Empty => "Empty",
             ReassemblySlotState::Receiving => "Receiving",
             ReassemblySlotState::TimedOut => "TimedOut",
+        }
+    }
+
+    // The inverse of the table above, emitted from the same loop over the
+    // document's states so the two age together. It is what lets a host turn a
+    // recorded configuration back into the `StateChain` `enter_at` takes.
+    fn get_state_from_name(name: &str) -> Option<Self::State> {
+        match name {
+            "Aborted" => Some(ReassemblySlotState::Aborted),
+            "Complete" => Some(ReassemblySlotState::Complete),
+            "Empty" => Some(ReassemblySlotState::Empty),
+            "Receiving" => Some(ReassemblySlotState::Receiving),
+            "TimedOut" => Some(ReassemblySlotState::TimedOut),
+            _ => None,
         }
     }
 
