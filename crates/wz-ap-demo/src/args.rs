@@ -562,11 +562,31 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
     // the node R311y846 made findable came up invisible on precisely the path
     // R311y846 exists to serve. `--scout` needs no such treatment: it is a role
     // the expansion never emits, so only a typed one can exist.
-    let role_dials_as_peer = rest.iter().chain(added.iter()).any(|a| a == "--peer");
+    //
+    // R2089 (open-debt item 222) — and the precondition is now `--peer` OR
+    // `--router-hat`, because THIS ROUND made the second one true. The sentence
+    // above ("the flag is read there and nowhere else") was a statement about
+    // `run_peer` owning the only responder spawn; `run_router_hat` owns one too
+    // now, so leaving the precondition at `--peer` would have left a comment
+    // that lies about the code beside it and, worse, kept the ROUTER — the role
+    // a stock client's `autoconnect` default actually asks for — unfindable on
+    // the one invocation a drop-in performs. Measured before it was changed: a
+    // `--router-hat` on the command line plus a file carrying `listen: true`
+    // expanded to `argv += []` while REPORTING the key APPLIED.
+    //
+    // `--router-hat` is only ever TYPED, never emitted: the role expansion above
+    // maps `mode: "router"` to `--router` (the star router, which announces the
+    // PEER role on the wire), so a file alone cannot reach this arm. That gap is
+    // its own registered item, not this one — changing what `mode: "router"`
+    // expands to is a topology decision, not a wiring fix.
+    let role_answers_scouts = rest
+        .iter()
+        .chain(added.iter())
+        .any(|a| a == "--peer" || a == "--router-hat");
     let listen_expanded = cfg!(feature = "scouting-responder")
         && named("scouting/multicast/listen")
         && cfg.scout_multicast_listen == Some(true)
-        && role_dials_as_peer
+        && role_answers_scouts
         && !rest.iter().any(|a| a == "--scout-listen");
     if listen_expanded {
         added.push("--scout-listen".into());
@@ -2038,6 +2058,53 @@ mod stock_config_tests {
             "a config-only drop-in must still answer Scouts, or the node stays \
              invisible to the network it is replacing a member of: {:?}",
             drop_in.added
+        );
+    }
+
+    /// R2089 (open-debt item 222) — the same question asked of the ROUTER, which
+    /// is the role a stock client's `autoconnect` default looks for.
+    ///
+    /// PROBED before it was fixed, and the reading is why this test exists: the
+    /// invocation below expanded to `argv += []` while the binary REPORTED
+    /// `scouting/multicast/listen` as APPLIED. A key that is announced applied
+    /// and reaches no flag is worse than one that is announced ignored — the
+    /// operator has been told the opposite of what happened.
+    ///
+    /// The negative arm is in the same test on purpose. `--router` is a
+    /// DIFFERENT run mode (it announces the peer role on the wire and hosts no
+    /// responder), so the widened precondition must not reach it: an expansion
+    /// that emitted `--scout-listen` there would hand the binary an argument it
+    /// exits(2) on, which is the failure R311y844 measured and this file's whole
+    /// `usable` discipline exists to prevent.
+    #[test]
+    #[cfg(all(feature = "scouting-responder", feature = "router-hat-router"))]
+    fn a_router_hat_told_to_be_findable_by_a_file_gets_the_flag() {
+        let file = r#"{ scouting: { multicast: { enabled: true, listen: true } } }"#;
+
+        let drop_in = expand(
+            &["--router-hat", "tcp/127.0.0.1:0", "--config", "z.json5"],
+            file,
+        )
+        .unwrap();
+        assert!(
+            drop_in.added.iter().any(|a| a == "--scout-listen"),
+            "a ROUTER told by its file to be findable must answer Scouts; the \
+             role every unconfigured client asks for is the one that cannot \
+             afford to be silent: {:?}",
+            drop_in.added
+        );
+
+        // THE CONTROL: the star router is not the responder's host.
+        let star = expand(
+            &["--router", "tcp/127.0.0.1:0", "--config", "z.json5"],
+            file,
+        )
+        .unwrap();
+        assert!(
+            !star.added.iter().any(|a| a == "--scout-listen"),
+            "--router hosts no responder and exits(2) on the flag, so the \
+             expansion must withhold it: {:?}",
+            star.added
         );
     }
 

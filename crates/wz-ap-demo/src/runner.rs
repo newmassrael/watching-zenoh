@@ -4372,6 +4372,21 @@ pub(crate) struct RouterHatOpts {
     /// to let an e2e drive the growth on a sub-second cadence), not to opt into a
     /// behaviour nothing would otherwise exercise.
     pub connect_retry: wz::runtime_tokio::retry_period::RetryPolicy,
+    /// R2089 (open-debt item 222) — `--scout-listen`: ANSWER Scouts, so a foreign
+    /// node discovers this ROUTER without being reconfigured.
+    ///
+    /// R311y846 wired the responder into `run_peer` only, and that left the mode
+    /// most in need of it silent: a stock zenoh CLIENT's
+    /// `scouting/multicast/autoconnect` default is `["router"]`, so the one role
+    /// every unconfigured client looks for was the one wz would not answer as.
+    /// This is the same `ScoutSocketArgs` the peer arm carries, because a network
+    /// that moved its scouting group moved it for every role on it.
+    ///
+    /// Plain field (not `scouting-responder`-gated) for the reason `multicast_qos`
+    /// above is plain: the run-mode surface stays feature-stable, and the local
+    /// discard in `run_router_hat_until` keeps a responder-less build
+    /// warning-clean.
+    pub scout_listen: Option<crate::args::ScoutSocketArgs>,
 }
 
 #[cfg(feature = "router-hat-router")]
@@ -4429,12 +4444,22 @@ async fn run_router_hat_until(
     // unconditional so the bundle is feature-stable; the local discard is what keeps
     // a build without those legs warning-clean.
     let no_admin_read = opts.no_admin_read;
+    // R2089 (open-debt item 222) — same shape again, one feature over: the
+    // scouting socket is consumed only by the responder spawn below, which is
+    // `scouting-responder`-gated. Read into a local HERE so the field is read in
+    // every build (an unconditional field that only a cfg'd arm touches is a
+    // `dead_code` error under `-D warnings`, which is how the first cut of this
+    // round failed the `router-hat-router`-alone clippy arm), and discarded below
+    // when nothing consumes it.
+    let scout_listen = opts.scout_listen.as_ref();
     #[cfg(not(feature = "router-multicast-faces"))]
     let _ = multicast_qos;
     #[cfg(not(feature = "router-multicast-faces"))]
     let _ = multicast_locator;
     #[cfg(not(feature = "adminspace-router-linkstate"))]
     let _ = no_admin_read;
+    #[cfg(not(feature = "scouting-responder"))]
+    let _ = scout_listen;
     use std::time::Duration;
     use wz::runtime_tokio::accept_loop::{peer_loop, AcceptEvent, FaceSources};
     use wz::runtime_tokio::linkstate_forward::Zid;
@@ -4718,6 +4743,59 @@ async fn run_router_hat_until(
     #[cfg(not(feature = "router-connect-reconcile"))]
     let reconcile: Option<wz::runtime_tokio::accept_loop::ReconcileReceiver> = None;
 
+    // The dial hint this router puts on the wire, decided ONCE. R311y470 — the
+    // scheme comes from `advertised_locator()` in BOTH arms, NOT from
+    // `transport_name()`: that is a log word, and on two variants it is not a
+    // dialable scheme at all (`unixsock` vs zenoh's `unixsock-stream`;
+    // `quic-datagram`, which zenoh spells `quic/<addr>?rel=0`). An unspecified IP
+    // bind advertises NOTHING (the run_peer discipline): `tcp/0.0.0.0:<port>` is a
+    // locator no peer can dial.
+    //
+    // R2089 (open-debt item 222) — hoisted out of the adminspace block below,
+    // which used to own it. It now feeds TWO consumers — the admin `local_data`
+    // and the Hello this router answers Scouts with — and computing it twice is
+    // exactly the blind spot R311y471 named: two advertise decisions that agree
+    // with each other and not with the wire.
+    let self_locators: Vec<String> = match local_ip {
+        Some(addr) if !addr.ip().is_unspecified() => {
+            vec![listener.advertised_locator(&addr.to_string())]
+        }
+        Some(_) => Vec::new(),
+        None => vec![listener.advertised_locator(&local_display)],
+    };
+    // R311y471 — log what we advertise, so the string wz actually chose is
+    // observable to an e2e instead of reachable only through an adminspace query.
+    for locator in &self_locators {
+        log::info!("wz-ap-demo: ADVERTISED SELF LOCATOR {locator}");
+    }
+    // R2089 (open-debt item 222) — the ANSWERING half, on the mode a stock
+    // client's autoconnect default actually looks for. Spawned HERE, after the
+    // advertise decision above and before the face loop below, for the reason
+    // run_peer spawns it where it does: a responder that came up first would
+    // answer with a locator list it did not have yet.
+    //
+    // `WhatAmI::Router` is this node's ROLE, not a value copied for the type's
+    // sake: it is what makes the `what` gate in `answer_scout` admit a client
+    // scouting for routers, and it is what the answering Hello carries.
+    #[cfg(feature = "scouting-responder")]
+    if let Some(scout_socket) = scout_listen {
+        spawn_scouting_responder(
+            scout_socket,
+            wz::runtime_tokio::session_glue::WhatAmI::Router,
+            &params.zid,
+            self_locators.clone(),
+        )
+        .await?;
+    }
+    // Neither consumer compiles: the binding stays (it is where the advertise is
+    // DECIDED) and the discard keeps that build warning-clean — the same shape
+    // `multicast_qos` / `no_admin_read` use at the top of this function.
+    #[cfg(not(any(
+        feature = "adminspace-router-linkstate",
+        feature = "scouting-responder"
+    )))]
+    let _ = &self_locators;
+
     // §5.23 adminspace-router-linkstate — host the router's built-in admin
     // queryable on `@/<zid>/router/**`. The self-sourced qabl is advertised into
     // BOTH meshes at register time (+ re-advertised to late joiners via the derive
@@ -4745,24 +4823,9 @@ async fn run_router_hat_until(
         let version = env!("CARGO_PKG_VERSION").to_string();
         // The admin `local_data` dial locator: the router sets no forwarder
         // self-locator, but its listen address is a faithful `local_data` locator
-        // (withheld on an unspecified IP bind, the run_peer discipline). R311y470 —
-        // the scheme comes from `advertised_locator()` in BOTH arms, NOT from
-        // `transport_name()`: that is a log word, and on two variants it is not a
-        // dialable scheme at all (`unixsock` vs zenoh's `unixsock-stream`;
-        // `quic-datagram`, which zenoh spells `quic/<addr>?rel=0`).
-        let locators: Vec<String> = match local_ip {
-            Some(addr) if !addr.ip().is_unspecified() => {
-                vec![listener.advertised_locator(&addr.to_string())]
-            }
-            Some(_) => Vec::new(),
-            None => vec![listener.advertised_locator(&local_display)],
-        };
-        // R311y471 — same observability as run_peer's advertise above; the
-        // router-hat's `local_data` locators go through the same seam and had the
-        // same blind spot.
-        for locator in &locators {
-            log::info!("wz-ap-demo: ADVERTISED SELF LOCATOR {locator}");
-        }
+        // — the SAME string the Hello carries, taken from the ONE decision above
+        // rather than re-derived here (R2089, open-debt item 222).
+        let locators: Vec<String> = self_locators.clone();
         let queryable_key = admin_queryable_key(&zid_hex, whatami_str);
         let routers_view = forwarder.routers_net_view();
         let peers_view = forwarder.peers_net_view();

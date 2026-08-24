@@ -11371,6 +11371,26 @@ PY
     # gate-skew argument as the scouting-active clippy above.
     (cd crates && cargo clippy -p wz-runtime-tokio --all-targets \
         --features scouting-responder --quiet -- -D warnings) || return 1
+    # R2089 (open-debt item 222) — the RUN-MODE half of the same subsystem: a wz
+    # `--router-hat` answers a Scout, and the Hello says `router`. y846 wired the
+    # responder into `run_peer` alone, so the one role a stock client's
+    # `autoconnect` default asks for was the one wz would never answer as.
+    #
+    # PLACED HERE, above the zenohd guard, for the reason the y428 leg is placed
+    # above the pico guard: it needs a multicast route and NOTHING else, so a box
+    # with multicast but no external binaries still runs it. Its own demo build,
+    # with the THREE features the leg exercises — `router-hat-router` for the
+    # run-mode under test, `routing-peer` for the control arm in the same test,
+    # `scouting-responder` for the answering half both use. KEEP ON ONE LINE:
+    # `feature_closure.py`'s scraper cannot cross a newline, and all three claims
+    # must sit inside this build's closure or A4-5 containment reds.
+    (cd crates && cargo build -p wz-ap-demo --features router-hat-router,routing-peer,scouting-responder --quiet) || return 1
+    # Guarded through the helper rather than a bare `| grep -q` (R2074): the
+    # binary is one target with one test, and a rename would otherwise select
+    # nothing and exit 0.
+    _runci_guarded_test "M router-hat answers a scout" 1 \
+        cargo test -p wz-integration-tests \
+        --test wz_router_hat_answers_a_scout -- --ignored || return 1
     (cd crates && cargo test -p wz-runtime-tokio \
         --features transport-multicast,transport-fragmentation \
         --test multicast_pubsub_loopback -- --ignored --quiet) || return 1

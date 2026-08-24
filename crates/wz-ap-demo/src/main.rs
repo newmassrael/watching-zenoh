@@ -763,6 +763,53 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
+            // R2089 (open-debt item 222) — `--scout-listen` on the ROUTER. Parsed
+            // here rather than beside `--scout` further down for the reason the
+            // `--peer` arm gives: that block is downstream of this mode's `return`,
+            // and the two scouting directions do not share a code path even though
+            // they share a socket. Byte-identical shape to the peer arm's parse,
+            // deliberately: one spelling means one thing across run-modes, and the
+            // socket flags qualify answering exactly as they qualify asking.
+            #[cfg(feature = "scouting-responder")]
+            let scout_listen = if rest.iter().any(|a| a == "--scout-listen") {
+                match crate::args::parse_scout_socket(rest) {
+                    Ok(v) => Some(v),
+                    Err(msg) => {
+                        eprintln!("wz-ap-demo: {msg}");
+                        return ExitCode::from(2);
+                    }
+                }
+            } else {
+                // The socket flags without the direction that uses them: refused
+                // rather than ignored. In `--router-hat` mode `--scout` is not a
+                // role, so `--scout-listen` is the only thing they can qualify.
+                match crate::args::parse_scout_socket(rest) {
+                    Ok(v) if v != crate::args::ScoutSocketArgs::default() => {
+                        eprintln!(
+                            "wz-ap-demo: --scout-addr / --scout-iface / --scout-ttl \
+                             require --scout-listen in --router-hat mode"
+                        );
+                        return ExitCode::from(2);
+                    }
+                    Ok(_) => None,
+                    Err(msg) => {
+                        eprintln!("wz-ap-demo: {msg}");
+                        return ExitCode::from(2);
+                    }
+                }
+            };
+            #[cfg(not(feature = "scouting-responder"))]
+            let scout_listen: Option<crate::args::ScoutSocketArgs> = {
+                if rest.iter().any(|a| a == "--scout-listen") {
+                    eprintln!(
+                        "wz-ap-demo: --scout-listen requires the `scouting-responder` \
+                         build feature (build: cargo build -p wz-ap-demo --features \
+                         scouting-responder)"
+                    );
+                    return ExitCode::from(2);
+                }
+                None
+            };
             return run_router_hat_mode(
                 router_hat_listen,
                 dial_targets,
@@ -795,6 +842,9 @@ fn main() -> ExitCode {
                     no_admin_read: rest.iter().any(|a| a == "--no-admin-read"),
                     connect_retry,
                     tuning,
+                    // R2089 (open-debt item 222) — what makes a stock client's
+                    // `autoconnect: ["router"]` default reach a wz node at all.
+                    scout_listen,
                 },
             );
         }
