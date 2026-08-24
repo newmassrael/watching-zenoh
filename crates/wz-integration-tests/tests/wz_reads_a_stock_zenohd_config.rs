@@ -643,14 +643,27 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
 #[ignore = "binary-dep e2e: needs target/zenohd/zenohd (scripts/build-zenohd.sh)"]
 fn the_acceptance_boundary_is_measured_against_zenohd_case_by_case() {
     /// (label, the fragment added to an otherwise minimal config,
-    ///  does a real zenohd START on it, does wz's reader ACCEPT it)
+    ///  does a real zenohd START on it, does wz's reader ACCEPT it,
+    ///  and when zenohd refuses — the REASON its message must carry)
     ///
     /// A row where the two booleans differ is a recorded divergence, not a
     /// passing grade. They are here so the set cannot change unnoticed.
-    const BOUNDARY: &[(&str, &str, bool, bool)] = &[
+    ///
+    /// R2077 added the fifth column, and it is the fix for this leg's own first
+    /// defect: a row can refuse for a reason that has nothing to do with its
+    /// label and still look green. "zenohd said no" is not the measurement —
+    /// "zenohd said no BECAUSE of the thing this row is about" is. Accepting
+    /// rows carry an empty reason and never reach the check.
+    const BOUNDARY: &[(&str, &str, bool, bool, &str)] = &[
         // Both refuse: the shape LEG 3 already pins, kept here as the control
         // that this table's zenohd half is not answering "yes" to everything.
-        ("top-level unknown", "bogus_top: 1", false, false),
+        (
+            "top-level unknown",
+            "bogus_top: 1",
+            false,
+            false,
+            "unknown field `bogus_top`",
+        ),
         // Both refuse: a near-miss under an honoured key. wz gets there through
         // its typed reader rather than through the boundary, which is why the
         // prefix rule is invisible in this row.
@@ -659,13 +672,24 @@ fn the_acceptance_boundary_is_measured_against_zenohd_case_by_case() {
             r#"transport: { link: { tx: { batch_siz: 4096 } } }"#,
             false,
             false,
+            "unknown field `batch_siz`",
         ),
-        // Both refuse: R2075's mode-table field check does this one.
+        // Both refuse: R2075's mode-table field check does this one, and
+        // upstream answers `unknown field "rooter", expected one of "router",
+        // "peer", "client"`.
+        //
+        // R2077 — this row used to put the table on `listen.endpoints`, which the
+        // base document ALREADY states. zenohd then refused it for
+        // `duplicate field "listen"` and the row passed while measuring
+        // something other than its own label. `connect` is a key the base does
+        // not state, and the collision guard below is what now keeps that class
+        // from coming back.
         (
             "mode table, typo'd mode name",
-            r#"listen: { endpoints: { rooter: ["tcp/127.0.0.1:1"] } } , connect: { endpoints: [] }"#,
+            r#"connect: { endpoints: { rooter: ["tcp/127.0.0.1:1"] } }"#,
             false,
             false,
+            "unknown field `rooter`",
         ),
         // Both ACCEPT: the three subtrees upstream does not validate inside.
         (
@@ -673,18 +697,21 @@ fn the_acceptance_boundary_is_measured_against_zenohd_case_by_case() {
             r#"connect: { retry: { period_init_mss: 250 } }"#,
             true,
             true,
+            "",
         ),
         (
             "opaque subtree: plugins",
             r#"plugins: { rest: { http_port: 8000 } }"#,
             true,
             true,
+            "",
         ),
         (
             "opaque subtree: metadata",
             r#"metadata: { name: "strawberry" }"#,
             true,
             true,
+            "",
         ),
         // THE DIVERGENCE: a typo BELOW an unhonoured key. Nothing in wz reads
         // it, so nothing type-checks it, and the prefix rule is the only
@@ -694,12 +721,14 @@ fn the_acceptance_boundary_is_measured_against_zenohd_case_by_case() {
             r#"access_control: { enabled: { xyz: true } }"#,
             false,
             true,
+            "invalid type: map, expected a boolean",
         ),
         (
             "unhonoured leaf, deepened (auth)",
             r#"transport: { auth: { usrpwd: { user: { xyz: 1 } } } }"#,
             false,
             true,
+            "invalid type: map, expected a string",
         ),
     ];
 
@@ -717,19 +746,29 @@ fn the_acceptance_boundary_is_measured_against_zenohd_case_by_case() {
     // fixture is broken rather than the boundary.
     let declared: Vec<&str> = BOUNDARY
         .iter()
-        .filter(|(_, _, z, w)| z != w)
-        .map(|(label, _, _, _)| *label)
+        .filter(|(_, _, z, w, _)| z != w)
+        .map(|(label, _, _, _, _)| *label)
         .collect();
     assert_eq!(
         declared, DIVERGES,
         "the pinned divergence set no longer matches the table"
     );
     assert!(
-        BOUNDARY.iter().any(|(_, _, z, w)| z == w) && !DIVERGES.is_empty(),
+        BOUNDARY.iter().any(|(_, _, z, w, _)| z == w) && !DIVERGES.is_empty(),
         "the table must carry both agreements and divergences"
     );
+    // R2077 — a refusing row without a reason would be back to "zenohd said no"
+    // as the whole measurement, which is the defect this column exists to close.
+    for (label, _, zenohd_starts, _, reason) in BOUNDARY {
+        assert_eq!(
+            reason.is_empty(),
+            *zenohd_starts,
+            "{label}: a row zenohd refuses needs the reason it refuses FOR, and a \
+             row it accepts must not claim one"
+        );
+    }
 
-    for (label, fragment, zenohd_starts, wz_accepts) in BOUNDARY {
+    for (label, fragment, zenohd_starts, wz_accepts, reason) in BOUNDARY {
         let reservation = PortReservation::pick();
         let port = reservation.port();
         let source = format!(
@@ -740,6 +779,32 @@ fn the_acceptance_boundary_is_measured_against_zenohd_case_by_case() {
   {fragment}
 }}
 "#
+        );
+
+        // R2077 — THE COLLISION GUARD, and it exists because this leg shipped
+        // with a row that did not measure its own label. The base document
+        // states `mode`, `listen` and `scouting`; a fragment that re-states one
+        // of them produces a document zenohd refuses for `duplicate field`,
+        // which is a refusal for the wrong reason and looks exactly like the
+        // right one from the outside. Parsing with wz's own reader and counting
+        // top-level names is the check that catches it, whatever the fragment
+        // spells.
+        let parsed = json5::parse(&source)
+            .unwrap_or_else(|e| panic!("{label}: the fixture is not JSON5: {e:?}\n{source}"));
+        let Json5Value::Object(entries) = &parsed else {
+            panic!("{label}: the fixture is not an object\n{source}")
+        };
+        let mut names: Vec<&str> = entries.iter().map(|(k, _)| k.as_str()).collect();
+        names.sort_unstable();
+        let stated = names.len();
+        names.dedup();
+        assert_eq!(
+            stated,
+            names.len(),
+            "{label}: the fragment re-states a key the base document already \
+             has. zenohd refuses such a file for `duplicate field`, so this row \
+             would pass on a refusal that has nothing to do with what it \
+             claims\n{source}"
         );
 
         // wz first, and its verdict is read as accept/refuse only -- what it
@@ -763,8 +828,16 @@ fn the_acceptance_boundary_is_measured_against_zenohd_case_by_case() {
             wait_for_substring(&mut capture, RESOLVED_CONF_MARKER, STARTUP_BUDGET)
                 .unwrap_or_else(|e| panic!("{label}: zenohd was expected to start: {e}\n{source}"));
         } else {
+            // The REASON first: a refusal for some other cause is what this
+            // leg's own first version accepted as proof.
+            wait_for_substring(&mut capture, reason, STARTUP_BUDGET).unwrap_or_else(|e| {
+                panic!(
+                    "{label}: zenohd refused (or hung), but never for the stated \
+                     reason `{reason}`: {e}\n{source}"
+                )
+            });
             let status = exits_within(&mut guard, STARTUP_BUDGET).unwrap_or_else(|| {
-                panic!("{label}: zenohd was expected to refuse and is still running\n{source}")
+                panic!("{label}: zenohd printed the refusal and is still running\n{source}")
             });
             assert!(
                 !status.success(),
