@@ -87,6 +87,29 @@ struct Arm {
     expect_whatami: WhatAmI,
 }
 
+/// What one arm's node actually DID: the bytes it answered with, plus the two
+/// strings it said about itself on the way there.
+///
+/// The three travel together because the assertions cross-check them against
+/// each other rather than reading each alone — the Hello has to carry the
+/// locator this node's own advertise seam chose (`advertised`), and `banner` is
+/// what the run-mode INTENDED, quoted back in the failure when the wire
+/// disagrees with it. That pairing is the R311y471 shape this file exists to
+/// catch, so it is a record with named fields and not a tuple.
+struct Answer {
+    hello: Vec<u8>,
+    advertised: String,
+    banner: String,
+}
+
+/// One arm's outcome: what it answered, or a DIAGNOSIS naming what it did
+/// instead.
+///
+/// Named because it is collected for EVERY arm before any assertion runs (see
+/// the loop below), so the type is written once at the collection site and once
+/// at the reading site and the two must not drift.
+type Verdict = Result<Answer, String>;
+
 /// A Scout datagram in the shape both wz's own `scout_emit` and zenoh's
 /// `Runtime::scout` put on the group: MID header, version, flags, no zid.
 ///
@@ -221,7 +244,7 @@ fn a_wz_router_hat_answers_a_scout_with_a_hello_that_says_router() {
     // failure still reports what the other did — "the router is silent" and
     // "nothing on this host can answer a Scout" are different diagnoses and the
     // second is not worth a round of hunting.
-    let mut verdicts: Vec<(&Arm, Result<(Vec<u8>, String, String), String>)> = Vec::new();
+    let mut verdicts: Vec<(&Arm, Verdict)> = Vec::new();
     for arm in &arms {
         let zid_hex = per_process_zid_hex(arm.zid_prefix, 4);
         let capture = tempfile::tempfile().expect("tempfile for the node's stderr");
@@ -284,10 +307,15 @@ fn a_wz_router_hat_answers_a_scout_with_a_hello_that_says_router() {
             .ok()
         });
 
-        let verdict = match (advertised, banner) {
+        let verdict: Verdict = match (advertised, banner) {
             (Ok(advertised), Some(banner)) => {
-                scout_and_read_hello(&scouter, arm, node.child_mut(), &mut capture)
-                    .map(|hello| (hello, advertised, banner))
+                scout_and_read_hello(&scouter, arm, node.child_mut(), &mut capture).map(|hello| {
+                    Answer {
+                        hello,
+                        advertised,
+                        banner,
+                    }
+                })
             }
             (Ok(_), None) => Err(format!(
                 "the {} node advertised a locator but never joined the scouting \
@@ -300,11 +328,15 @@ fn a_wz_router_hat_answers_a_scout_with_a_hello_that_says_router() {
         };
         let _ = node.child_mut().kill();
         let _ = node.child_mut().wait();
-        verdicts.push((arm, verdict.map(|(h, a, b)| (h, a, b))));
+        verdicts.push((arm, verdict));
     }
 
     for (arm, verdict) in &verdicts {
-        let (hello, advertised, banner) = match verdict {
+        let Answer {
+            hello,
+            advertised,
+            banner,
+        } = match verdict {
             Ok(v) => v,
             Err(e) => panic!("{} arm: {e}", arm.mode_flag),
         };
