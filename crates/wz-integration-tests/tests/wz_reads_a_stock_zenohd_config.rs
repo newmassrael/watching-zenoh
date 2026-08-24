@@ -55,7 +55,8 @@
 //! green is one Layer A4 goes on counting as executed.
 
 use std::fs::File;
-use std::io::Write;
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -69,6 +70,7 @@ use wz_runtime_tokio::zenoh_config::{
     ZenohNodeConfig, DEEPENABLE_UPSTREAM_KEYS, HONOURED_CONFIG_KEYS,
     UNHONOURED_UPSTREAM_CONFIG_KEYS,
 };
+use wz_session_core::dissect::{dissect_transport_message, FieldValue};
 use wz_session_core::json5::{self, Json5Value};
 
 /// zenohd prints its resolved config on this line before doing anything else.
@@ -964,6 +966,124 @@ fn exits_within(guard: &mut ChildGuard, budget: Duration) -> Option<std::process
 }
 
 // wz-proves: none -- same registration gap as the differential leg above.
+/// R2082 (open-debt item 211) — the config's transport value on the WIRE, and
+/// the discriminator the drop-in leg structurally cannot have.
+///
+/// ## What LEG 4 proves, and the one line that says it is not enough
+///
+/// LEG 4 stands a node up from the file alone and requires a real zenohd to open
+/// a session with it. Item 211's complaint is that this cannot separate honoured
+/// from dropped, "because a discarded value opens a session just as well" — so
+/// that leg passes whether `transport/link/tx/batch_size` reached the bytes or
+/// was thrown away, and nothing else was looking. The chain was witnessed as far
+/// as `SessionInitParams`; the last hop, into the InitSyn, was not.
+///
+/// ## No new public surface, because the item was right to refuse one
+///
+/// The round that filed 211 declined to re-export `handshake_encode` for a test
+/// and said so. Nothing is exported here either: this tree's own DISSECTOR reads
+/// `batch_size` out of an InitSyn, and the analyzer plane is exactly the right
+/// oracle for "did my configuration reach the bytes". The listener is the test's
+/// own, so the frame read is the frame the demo actually wrote — a length prefix
+/// and a payload, the shape `StreamEnvelope` puts on a streamed link.
+///
+/// ## The discriminator is the SECOND run
+///
+/// One run cannot tell a honoured value from a default that happens to agree
+/// with it. Two files differing ONLY in `batch_size`, and the dissected number
+/// has to move with them: a dropped key gives the same number twice, which is
+/// precisely the failure this leg exists to catch.
+#[test]
+#[ignore = "binary-dep e2e: needs wz-ap-demo built with `--features zenoh-config`"]
+fn the_batch_size_a_config_carries_is_the_one_that_reaches_the_wire() {
+    let first = init_syn_batch_size_from_a_config(4096);
+    let second = init_syn_batch_size_from_a_config(8192);
+
+    assert_eq!(
+        first, 4096,
+        "the InitSyn carried {first} where the file said 4096"
+    );
+    assert_eq!(
+        second, 8192,
+        "the InitSyn carried {second} where the file said 8192"
+    );
+    // THE DISCRIMINATOR. Both numbers being right is what makes this a
+    // measurement; both being EQUAL is what a dropped key looks like, and the
+    // two assertions above would not catch it if the default happened to be one
+    // of the two.
+    assert_ne!(
+        first, second,
+        "the wire value did not move with the file, so the file is not what set it"
+    );
+}
+
+/// Run the demo configured ONLY by a file that names `batch_size`, and return
+/// the `batch_size` its InitSyn actually carried.
+///
+/// The listener is this test's own socket, so what is read is what the demo
+/// wrote. The 2-byte little-endian length prefix is `StreamEnvelope`'s
+/// (`stream_link.rs`), and the payload behind it is handed to the dissector
+/// rather than to a hand-rolled reader — a second opinion about the InitSyn
+/// layout is the last thing a leg about wire fidelity should carry.
+fn init_syn_batch_size_from_a_config(batch: u16) -> u64 {
+    let demo = wz_ap_demo_binary();
+    assert_demo_binary_newer_than_sources(&demo);
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback acceptor");
+    let port = listener
+        .local_addr()
+        .expect("the acceptor has an address")
+        .port();
+    let source = format!(
+        r#"{{
+  mode: "peer",
+  connect: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
+  scouting: {{ multicast: {{ enabled: false }} }},
+  transport: {{ link: {{ tx: {{ batch_size: {batch} }} }} }},
+}}
+"#
+    );
+    let file = staged_config(&source);
+
+    let child = Command::new(&demo)
+        .arg("--config")
+        .arg(file.path())
+        .arg("--key")
+        .arg("demo/wire")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn wz-ap-demo");
+    let guard = ChildGuard::wrap("wz-ap-demo (wire batch)", child);
+
+    let (mut stream, _) = listener
+        .accept()
+        .unwrap_or_else(|e| panic!("the demo never dialled the acceptor: {e}\n{source}"));
+    stream
+        .set_read_timeout(Some(Duration::from_secs(20)))
+        .expect("a read deadline");
+
+    let mut prefix = [0u8; 2];
+    stream
+        .read_exact(&mut prefix)
+        .unwrap_or_else(|e| panic!("no length prefix from the demo: {e}\n{source}"));
+    let len = u16::from_le_bytes(prefix) as usize;
+    assert!(len > 0, "a zero-length frame is not an InitSyn\n{source}");
+    let mut payload = vec![0u8; len];
+    stream
+        .read_exact(&mut payload)
+        .unwrap_or_else(|e| panic!("the frame was short of its own prefix: {e}\n{source}"));
+    drop(guard);
+
+    let field = dissect_transport_message(&payload, 0)
+        .unwrap_or_else(|e| panic!("wz cannot dissect its own first frame: {e:?}\n{source}"));
+    match field.find("batch_size").map(|f| &f.value) {
+        Some(FieldValue::Uint(v)) => *v,
+        other => panic!("the first frame carries no batch_size: {other:?}\n{field:?}"),
+    }
+}
+
+// wz-proves: none -- same registration gap as the leg above.
 /// R2079 (open-debt item 502) — EVERY key wz lets deepen is asked of a real
 /// zenohd, not three of them.
 ///

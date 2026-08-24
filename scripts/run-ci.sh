@@ -12024,7 +12024,13 @@ layer_z_zenohd_interop() {
     # driven by the CONSTANT, so a key added without a measured value reds — and
     # sweeping the whole surface this way is what found `listen/retry` missing
     # from R2078's list, a legal file wz had started refusing.
-    _runci_guarded_test Z 9 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+    # R2082 raises 9 -> 10 for LEG 10 (open-debt item 211): the file's
+    # `batch_size` read back OUT of the InitSyn the demo actually wrote, by this
+    # tree's own dissector. LEG 4 could not tell honoured from dropped — a
+    # discarded value opens a session too — and the mutation that proves this leg
+    # shows exactly that: with the key dropped, the wire carried 65535 where the
+    # file said 4096.
+    _runci_guarded_test Z 10 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_reads_a_stock_zenohd_config -- --ignored --quiet --test-threads=1 \
         || return 1
     # R311y528 — §5.27 api-compat-pico LEG 9: upstream's own `z_info.c`, linked
