@@ -1299,6 +1299,22 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
 /// bogus field INSIDE `connect/retry` too, where this accepts anything under a
 /// known opaque node. wz's boundary is therefore a SUPERSET of zenoh's by
 /// exactly the fields nested inside subtrees wz does not model.
+/// Honoured keys whose EFFECT is witnessed on the WIRE — read back out of a
+/// frame the node actually wrote, not out of a struct it filled in.
+///
+/// R2083 (open-debt item 220) — the distinction this constant exists for is the
+/// one 220 names: an oracle that compares VALUES shows wz read what zenoh read,
+/// and says nothing about wz DOING it. R2082 built the first such chain
+/// (`batch_size`, dissected out of the InitSyn the demo sent) after item 211
+/// observed that a discarded value opens a session just as well as an honoured
+/// one. A key here has that chain; a key not here does not, and the sweep in
+/// `wz-ap-demo`'s tests makes which is which a per-key fact rather than prose.
+///
+/// ⚠ It is SHORT on purpose and must not be padded. Adding a key here is a claim
+/// that a leg reads it off a frame, and `wz_reads_a_stock_zenohd_config`'s wire
+/// leg is driven by this constant — a name added without a witness reds there.
+pub const CONFIG_KEYS_PROVEN_ON_THE_WIRE: &[&str] = &["id", "transport/link/tx/batch_size"];
+
 /// The only keys below which a real zenohd accepts leaves this tree's census
 /// surface does not list.
 ///

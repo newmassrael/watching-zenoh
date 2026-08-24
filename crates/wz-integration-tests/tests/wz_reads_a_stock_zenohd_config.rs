@@ -67,8 +67,8 @@ use wz_integration_tests::common::{
     ChildGuard, PortReservation,
 };
 use wz_runtime_tokio::zenoh_config::{
-    ZenohNodeConfig, DEEPENABLE_UPSTREAM_KEYS, HONOURED_CONFIG_KEYS,
-    UNHONOURED_UPSTREAM_CONFIG_KEYS,
+    ZenohNodeConfig, CONFIG_KEYS_PROVEN_ON_THE_WIRE, DEEPENABLE_UPSTREAM_KEYS,
+    HONOURED_CONFIG_KEYS, UNHONOURED_UPSTREAM_CONFIG_KEYS,
 };
 use wz_session_core::dissect::{dissect_transport_message, FieldValue};
 use wz_session_core::json5::{self, Json5Value};
@@ -995,26 +995,60 @@ fn exits_within(guard: &mut ChildGuard, budget: Duration) -> Option<std::process
 /// precisely the failure this leg exists to catch.
 #[test]
 #[ignore = "binary-dep e2e: needs wz-ap-demo built with `--features zenoh-config`"]
-fn the_batch_size_a_config_carries_is_the_one_that_reaches_the_wire() {
-    let first = init_syn_batch_size_from_a_config(4096);
-    let second = init_syn_batch_size_from_a_config(8192);
+fn every_key_proven_on_the_wire_is_in_the_frame_a_zenohd_would_receive() {
+    /// (key, the fragment for run A, its expected wire spelling,
+    ///       the fragment for run B, its expected wire spelling)
+    ///
+    /// R2083 — two runs per key, and BOTH numbers checked. One run cannot
+    /// separate a honoured value from a default that happens to agree with it;
+    /// two runs that agree with each OTHER are what a dropped key looks like.
+    const FIXTURES: &[(&str, &str, &str, &str, &str)] = &[
+        (
+            "transport/link/tx/batch_size",
+            "transport: { link: { tx: { batch_size: 4096 } } }",
+            "4096",
+            "transport: { link: { tx: { batch_size: 8192 } } }",
+            "8192",
+        ),
+        (
+            "id",
+            r#"id: "a1b2c3d4""#,
+            "a1b2c3d4",
+            r#"id: "0f1e2d3c""#,
+            "0f1e2d3c",
+        ),
+    ];
 
+    // The POPULATION is the constant, so a key declared wire-proven without a
+    // fixture here reds rather than going unasked — and a fixture for a key the
+    // constant no longer claims reds too.
+    let mut named: Vec<&str> = FIXTURES.iter().map(|(k, ..)| *k).collect();
+    named.sort_unstable();
+    let mut declared: Vec<&str> = CONFIG_KEYS_PROVEN_ON_THE_WIRE.to_vec();
+    declared.sort_unstable();
     assert_eq!(
-        first, 4096,
-        "the InitSyn carried {first} where the file said 4096"
+        named, declared,
+        "every key declared proven on the wire needs a pair of files this leg \
+         can hand the demo"
     );
-    assert_eq!(
-        second, 8192,
-        "the InitSyn carried {second} where the file said 8192"
-    );
-    // THE DISCRIMINATOR. Both numbers being right is what makes this a
-    // measurement; both being EQUAL is what a dropped key looks like, and the
-    // two assertions above would not catch it if the default happened to be one
-    // of the two.
-    assert_ne!(
-        first, second,
-        "the wire value did not move with the file, so the file is not what set it"
-    );
+
+    for (key, frag_a, want_a, frag_b, want_b) in FIXTURES {
+        let got_a = init_syn_field_from_a_config(key, frag_a);
+        let got_b = init_syn_field_from_a_config(key, frag_b);
+        assert_eq!(
+            got_a, *want_a,
+            "{key}: the InitSyn carried {got_a} where the file said {want_a}"
+        );
+        assert_eq!(
+            got_b, *want_b,
+            "{key}: the InitSyn carried {got_b} where the file said {want_b}"
+        );
+        assert_ne!(
+            got_a, got_b,
+            "{key}: the wire value did not move with the file, so the file is \
+             not what set it"
+        );
+    }
 }
 
 /// Run the demo configured ONLY by a file that names `batch_size`, and return
@@ -1025,7 +1059,7 @@ fn the_batch_size_a_config_carries_is_the_one_that_reaches_the_wire() {
 /// (`stream_link.rs`), and the payload behind it is handed to the dissector
 /// rather than to a hand-rolled reader — a second opinion about the InitSyn
 /// layout is the last thing a leg about wire fidelity should carry.
-fn init_syn_batch_size_from_a_config(batch: u16) -> u64 {
+fn init_syn_field_from_a_config(key: &str, fragment: &str) -> String {
     let demo = wz_ap_demo_binary();
     assert_demo_binary_newer_than_sources(&demo);
 
@@ -1039,7 +1073,7 @@ fn init_syn_batch_size_from_a_config(batch: u16) -> u64 {
   mode: "peer",
   connect: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
   scouting: {{ multicast: {{ enabled: false }} }},
-  transport: {{ link: {{ tx: {{ batch_size: {batch} }} }} }},
+  {fragment},
 }}
 "#
     );
@@ -1077,9 +1111,20 @@ fn init_syn_batch_size_from_a_config(batch: u16) -> u64 {
 
     let field = dissect_transport_message(&payload, 0)
         .unwrap_or_else(|e| panic!("wz cannot dissect its own first frame: {e:?}\n{source}"));
-    match field.find("batch_size").map(|f| &f.value) {
-        Some(FieldValue::Uint(v)) => *v,
-        other => panic!("the first frame carries no batch_size: {other:?}\n{field:?}"),
+
+    // The dissector's own field names, one per key. A key whose wire spelling
+    // this leg cannot read is refused loudly rather than reported as a miss:
+    // adding it to `CONFIG_KEYS_PROVEN_ON_THE_WIRE` is a claim that something
+    // reads it, and this is where that claim is kept.
+    let wire_name = match key {
+        "transport/link/tx/batch_size" => "batch_size",
+        "id" => "zid",
+        other => panic!("{other} is declared wire-proven and this leg cannot read it"),
+    };
+    match field.find(wire_name).map(|f| &f.value) {
+        Some(FieldValue::Uint(v)) => v.to_string(),
+        Some(FieldValue::Bytes(b)) => b.iter().map(|byte| format!("{byte:02x}")).collect(),
+        other => panic!("the first frame carries no {wire_name}: {other:?}\n{field:?}"),
     }
 }
 

@@ -908,7 +908,7 @@ pub(crate) fn config_keys_the_demo_drops() -> Vec<&'static str> {
 mod stock_config_tests {
     use super::*;
 
-    use wz::runtime_tokio::zenoh_config::HONOURED_CONFIG_KEYS;
+    use wz::runtime_tokio::zenoh_config::{CONFIG_KEYS_PROVEN_ON_THE_WIRE, HONOURED_CONFIG_KEYS};
 
     fn argv(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| String::from(*s)).collect()
@@ -2116,6 +2116,88 @@ mod stock_config_tests {
         assert_eq!(
             TransportTuning::from_argv(&argv(&["--listen", "tcp/a:1"])).unwrap(),
             TransportTuning::default()
+        );
+    }
+
+    /// EVERY honoured key is classified by what proves its EFFECT, and the three
+    /// classes partition the surface.
+    ///
+    /// R2083 (open-debt item 220) — 220's complaint is that the config oracle
+    /// compares VALUES: it shows wz read what zenoh read, and says nothing about
+    /// wz doing it. It named the gap in prose — "the remaining ten have no
+    /// chain" — and prose cannot be re-measured. This makes it a per-key fact:
+    ///
+    /// * `wire` — a leg reads the value back off a frame the node WROTE
+    ///   (`CONFIG_KEYS_PROVEN_ON_THE_WIRE`, driven by the wire sweep in
+    ///   `wz_reads_a_stock_zenohd_config`)
+    /// * `no sink` — this build has nothing to expand into, and says so
+    ///   (`config_keys_the_demo_drops`, already gated)
+    /// * `argv only` — the expansion is witnessed and nothing past it is
+    ///
+    /// ⛔ The third class is 220 itself, and this test does NOT shrink it — it
+    /// counts it. A key moving from `argv only` to `wire` is the work; a key
+    /// appearing in neither of the first two without anyone noticing is what
+    /// this partition makes impossible.
+    #[test]
+    fn every_honoured_key_is_classified_by_what_proves_its_effect() {
+        let no_sink = config_keys_the_demo_drops();
+        let wire: Vec<&str> = CONFIG_KEYS_PROVEN_ON_THE_WIRE.to_vec();
+
+        // The two named classes must be disjoint: a key with no sink here cannot
+        // also be one a frame carries, and a row in both would mean one of the
+        // two lists is describing a different build than the other.
+        for key in &wire {
+            assert!(
+                !no_sink.contains(key),
+                "{key} is claimed both wire-proven and sink-less"
+            );
+        }
+
+        let argv_only: Vec<&str> = HONOURED_CONFIG_KEYS
+            .iter()
+            .copied()
+            .filter(|k| !wire.contains(k) && !no_sink.contains(k))
+            .collect();
+
+        // EXHAUSTIVE: the three classes are the surface, with nothing left over
+        // and nothing invented.
+        let mut union: Vec<&str> = wire.clone();
+        union.extend(no_sink.iter().copied());
+        union.extend(argv_only.iter().copied());
+        union.sort_unstable();
+        let mut honoured: Vec<&str> = HONOURED_CONFIG_KEYS.to_vec();
+        honoured.sort_unstable();
+        assert_eq!(
+            union, honoured,
+            "the three classes are not a partition of the honoured surface"
+        );
+
+        // The tally, printed rather than asserted: it is the size of open debt
+        // 220 in this build, and a round that moves a key from `argv only` to
+        // `wire` should be able to read the number without re-deriving it. An
+        // assertion on it would be a count guard over a BUILD-DEPENDENT set,
+        // which is the shape this project has paid for twice.
+        eprintln!(
+            "config-effect classes: wire {} / no sink {} / argv only {} of {} honoured",
+            wire.len(),
+            no_sink.len(),
+            argv_only.len(),
+            HONOURED_CONFIG_KEYS.len()
+        );
+        eprintln!("config-effect argv-only: {argv_only:?}");
+
+        // ANTI-VACUITY, both ends. An empty `wire` would mean 220 gained nothing
+        // and this test would still pass; an empty `argv only` would mean the
+        // debt is closed, which is a claim that has to be made deliberately and
+        // not arrived at by a list going quiet.
+        assert!(
+            !wire.is_empty(),
+            "no key is proven on the wire, so this partition measures nothing"
+        );
+        assert!(
+            !argv_only.is_empty(),
+            "no key is argv-only any more — open debt 220 is closed, and closing \
+             it is a decision to record rather than a state to discover here"
         );
     }
 

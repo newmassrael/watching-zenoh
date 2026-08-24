@@ -84,12 +84,24 @@ UNDECIDABLE_BY_THIS_PROBE = {"plugins"}
 
 
 def rust_const(name: str) -> list[str]:
-    """Read a `&[&str]` constant out of the reader's own source."""
+    """Read a `&[&str]` constant out of the reader's own source.
+
+    R2083 — COMMENT LINES ARE DROPPED FIRST, and that is not tidiness. These
+    constants carry long `//` rationales between their entries, and several of
+    those quote a phrase: `"wz cannot do this"`, `"the reader does not read
+    this"`. A string sweep that does not strip comments reads PROSE AS DATA —
+    measured, it turned `HONOURED_CONFIG_KEYS`'s 30 entries into 35 and put a
+    wrong surface number into this project's own notes for a round. The floors
+    below could not catch it: counting too MANY passes every one of them.
+    """
     src = SOURCE.read_text()
     m = re.search(r"(?:pub )?const " + name + r": &\[&str\] = &\[(.*?)\n\];", src, re.S)
     if not m:
         raise SystemExit(f"deepenable-audit: FAIL -- {name} not found in {SOURCE}")
-    return re.findall(r'"([^"]+)"', m.group(1))
+    body = "\n".join(
+        line for line in m.group(1).splitlines() if not line.strip().startswith("//")
+    )
+    return re.findall(r'"([^"]+)"', body)
 
 
 def document_for(key: str) -> str:
