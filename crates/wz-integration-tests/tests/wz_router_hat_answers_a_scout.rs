@@ -155,15 +155,17 @@ impl Arm {
                     format!(
                         r#"{{
   // The two config arms differ in exactly this word, which is what makes each
-  // one the other's control. `connect` is present in BOTH — a lone `mode:
-  // "peer"` with only a listen endpoint selects the one-shot acceptor, which
-  // answers no Scouts, so a peer arm without it would differ in two things and
-  // measure neither cleanly. Nothing listens on port 1; the dial is refused and
-  // retried, which is a normal state for a node whose neighbours are not up.
+  // one the other's control.
+  //
+  // R2091b (open-debt item 511) — and there is no `connect` list any more. It
+  // was here because a lone `mode: "peer"` with only a listen endpoint used to
+  // select the one-shot acceptor, which answers no Scouts; that was the defect
+  // item 511 records, and closing it makes the peer arm below a WITNESS for it
+  // rather than a workaround around it. The two documents are now identical
+  // apart from the role, which is the strongest shape this pair can have.
   mode: "{mode}",
   id: "{zid_hex}",
   listen: {{ endpoints: ["tcp/127.0.0.1:0"] }},
-  connect: {{ endpoints: ["tcp/127.0.0.1:1"] }},
   scouting: {{ multicast: {{ enabled: true, listen: true,
                            address: "{}:{}" }} }},
 }}
@@ -342,6 +344,12 @@ fn a_wz_router_hat_answers_a_scout_with_a_hello_that_says_router() {
         },
         // Its control, by the same argument the typed pair makes: the config
         // path must not have been taught to answer `router` for everything.
+        //
+        // R2091b (open-debt item 511) — and this arm now carries a claim of its
+        // own, because its document is a listen-only peer: that shape used to
+        // select the one-shot acceptor and answer nothing at all, so a green
+        // here is "a stock peer file is findable" and not only "the router arm
+        // is not reading a constant".
         Arm {
             start: Start::ConfigFile("peer"),
             name: "--config <mode: peer>",

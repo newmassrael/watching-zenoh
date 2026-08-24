@@ -1573,6 +1573,41 @@ pub const MODE_DEPENDENT_CONFIG_KEYS: &[&str] = &[
 /// The three fields `ModeValues` has, and the only keys a mode table may carry.
 const MODE_TABLE_FIELDS: &[&str] = &["router", "peer", "client"];
 
+/// What a stock zenoh node BINDS when its document names no `listen/endpoints`
+/// at all.
+///
+/// R2091b (open-debt item 511) — this is upstream's own default, quoted from
+/// `DEFAULT_CONFIG.json5` in the pinned checkout, where the key is written as a
+/// mode table: `endpoints: { router: ["tcp/[::]:7447"], peer: ["tcp/[::]:0"] }`.
+/// A `client` row is ABSENT there, and its absence is the instruction: a zenoh
+/// client never listens.
+///
+/// ## Why this is a value and not a silence
+///
+/// The expansion this feeds has a standing rule -- only keys the document NAMED
+/// are applied, never a value that merely resolved to a default -- and that rule
+/// exists to stop a merged `qos: true` from adding `--qos` to every invocation.
+/// It is about not inventing a DIFFERENCE. Here the default is not a difference:
+/// it is what a real zenohd does with the very same file, and wz's silence was
+/// the divergence. Measured against a real zenohd rather than inferred: given
+/// `{ mode: "router", connect: [..] }` it answers on port 7447 on every
+/// interface; given the same document as `peer` it answers on an ephemeral port;
+/// and given `{ mode: "client", listen: [..] }` it starts and binds NOTHING,
+/// naming no locator at all.
+///
+/// A document that NAMES the key -- including as an explicitly EMPTY list --
+/// suppresses this, and that is upstream's behaviour too (measured: an empty
+/// list starts a node that binds nothing). So the caller must consult
+/// [`ZenohConfigIngest::named`] before reaching for it, exactly as it would for
+/// any other key.
+pub fn default_listen_endpoint(mode: WhatAmI) -> Option<&'static str> {
+    match mode {
+        WhatAmI::Router => Some("tcp/[::]:7447"),
+        WhatAmI::Peer => Some("tcp/[::]:0"),
+        WhatAmI::Client => None,
+    }
+}
+
 /// Whether `leaf` sits INSIDE one of the mode-dependent keys.
 ///
 /// Those leaves (`listen/endpoints/router`) are wz's to honour, so they must not

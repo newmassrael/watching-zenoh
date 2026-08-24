@@ -12098,7 +12098,12 @@ layer_z_zenohd_interop() {
     # discarded value opens a session too — and the mutation that proves this leg
     # shows exactly that: with the key dropped, the wire carried 65535 where the
     # file said 4096.
-    _runci_guarded_test Z 10 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+    # R2091b raises 10 -> 11 for LEG 11 (open-debt item 511): the endpoint a
+    # stock node binds when its document names none, read out of the RESOLVED
+    # config a real zenohd prints rather than off its listener — a router's
+    # default is port 7447, and proving it by binding would turn an
+    # upstream-agreement claim into a port-availability one.
+    _runci_guarded_test Z 11 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_reads_a_stock_zenohd_config -- --ignored --quiet --test-threads=1 \
         || return 1
     # R311y528 — §5.27 api-compat-pico LEG 9: upstream's own `z_info.c`, linked

@@ -68,8 +68,8 @@ use wz_integration_tests::common::{
     ChildGuard, PortReservation,
 };
 use wz_runtime_tokio::zenoh_config::{
-    ZenohNodeConfig, CONFIG_KEYS_PROVEN_ON_THE_WIRE, DEEPENABLE_UPSTREAM_KEYS,
-    HONOURED_CONFIG_KEYS, UNHONOURED_UPSTREAM_CONFIG_KEYS,
+    default_listen_endpoint, ZenohNodeConfig, CONFIG_KEYS_PROVEN_ON_THE_WIRE,
+    DEEPENABLE_UPSTREAM_KEYS, HONOURED_CONFIG_KEYS, UNHONOURED_UPSTREAM_CONFIG_KEYS,
 };
 use wz_runtime_tokio_test_support::zenoh_interop_session_init_params;
 use wz_session_core::dissect::{dissect_transport_message, FieldValue};
@@ -1149,9 +1149,25 @@ fn handshake_field_from_a_config(key: &str, fragment: &str) -> String {
         .local_addr()
         .expect("the acceptor has an address")
         .port();
+    // R2091b (open-debt item 511) — `client`, and the word is load-bearing.
+    //
+    // This said `peer` until the round that made `mode` select the run-mode, and
+    // it worked only because a peer document with no listen endpoint USED to
+    // expand to `--connect`, the single-session initiator. It expands to the
+    // peer MESH now, which is what a stock peer is — and the mesh's dial builds
+    // no `SessionOffer` at all, so the three capability keys stopped reaching
+    // the InitSyn. Measured here, by this leg: `transport/unicast/lowlatency`
+    // came back `absent` where the file said `offered`.
+    //
+    // That gap is REAL and it is not this key set's: `initiator_offer` is
+    // reached from the `Role::Initiator` arm and from nowhere else, so no wz
+    // mesh node has ever offered qos / lowlatency / compression / shm on a dial.
+    // It is registered as its own item rather than patched around here, and this
+    // fixture names the run-mode it was written to measure — the one that
+    // produces the InitSyn under test.
     let source = format!(
         r#"{{
-  mode: "peer",
+  mode: "client",
   connect: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
   scouting: {{ multicast: {{ enabled: false }} }},
   {fragment},
@@ -2118,4 +2134,107 @@ fn attempts_in_window(demo: &std::path::Path, source: &str) -> usize {
          `cargo build -p wz-ap-demo --features routing-peer`"
     );
     logged.matches(FAILED_DIAL).count()
+}
+
+// wz-proves: none -- same registration gap as the legs above.
+/// R2091b (open-debt item 511) — LEG 11: THE ENDPOINT A NODE BINDS WHEN ITS
+/// DOCUMENT NAMES NONE, adjudicated by the implementation that would bind it.
+///
+/// wz's `--config` expansion materialises [`default_listen_endpoint`] for a
+/// document that names no `listen/endpoints`, which is what makes a stock
+/// `{ mode: "router", connect: [..] }` come up as a ROUTER instead of as a
+/// client. That constant is an UPSTREAM fact, and a constant quoted out of a
+/// checkout is a fact about a file somebody read once; a running zenohd
+/// resolving the same document is the fact itself.
+///
+/// ## Why the RESOLVED CONFIG and not the listener
+///
+/// A router's default is port 7447 — a real, fixed port. A leg that proved this
+/// by reading `Zenoh can be reached at:` would bind it, and would then fail on
+/// any machine where something else already had it: an upstream-agreement claim
+/// turned into a port-availability claim, which is the class this very file paid
+/// for one round ago. zenohd renders the WHOLE mode table into its
+/// `Initial conf:` line whatever mode it is in (measured, both ways), so the
+/// answer is there without a socket.
+///
+/// ## The client row is an ABSENCE, and it is the sharp one
+///
+/// Upstream's table has `router` and `peer` entries and no `client` entry, and
+/// that absence is the instruction: a zenoh client never listens. wz encodes it
+/// as `None`, and the pairing is asserted in both directions here — a table that
+/// grew a `client` row, or a wz that started returning an address for one, is
+/// the same divergence seen from either end.
+#[test]
+#[ignore = "binary-dep e2e: needs target/zenohd/zenohd (scripts/build-zenohd.sh)"]
+fn the_endpoint_a_node_binds_when_its_document_names_none_is_upstreams_own() {
+    // Names NO listen key at all, which is the whole precondition: a document
+    // that named one — an empty list included — would suppress the default on
+    // both sides, and this leg would be measuring nothing.
+    let source = String::from(
+        r#"{ mode: "peer",
+             connect: { endpoints: ["tcp/127.0.0.1:1"] },
+             scouting: { multicast: { enabled: false } } }"#,
+    );
+    let ingest = ZenohNodeConfig::from_json5(&source)
+        .unwrap_or_else(|e| panic!("wz cannot read the fixture: {e}\n{source}"));
+    assert!(
+        !ingest.named.contains(&"listen/endpoints"),
+        "the fixture names the key, so nothing here reaches a default: {:?}",
+        ingest.named
+    );
+
+    let file = staged_config(&source);
+    let (guard, mut capture) = spawn_on_config("zenohd (no listen key)", file.path());
+    let captured = wait_for_substring(&mut capture, RESOLVED_CONF_MARKER, STARTUP_BUDGET)
+        .unwrap_or_else(|e| panic!("zenohd never printed its resolved config: {e}\n{source}"));
+    let resolved = resolved_config_of(&captured);
+
+    // `Json5Value::Object` is an ordered Vec of pairs, not a map — the reader
+    // keeps document order on purpose — so a field is a search.
+    fn field<'a>(fields: &'a [(String, Json5Value)], name: &str) -> Option<&'a Json5Value> {
+        fields.iter().find(|(k, _)| k == name).map(|(_, v)| v)
+    }
+
+    let Json5Value::Object(root) = &resolved else {
+        panic!("zenohd's resolved config is not an object");
+    };
+    let Some(Json5Value::Object(listen)) = field(root, "listen") else {
+        panic!("zenohd's resolved config carries no `listen` object\n{captured}");
+    };
+    let Some(Json5Value::Object(table)) = field(listen, "endpoints") else {
+        panic!(
+            "zenohd resolved `listen.endpoints` to something other than the mode \
+             table this leg reads: {:?}",
+            field(listen, "endpoints")
+        );
+    };
+
+    for (mode, row) in [(WhatAmI::Router, "router"), (WhatAmI::Peer, "peer")] {
+        let Some(Json5Value::Array(items)) = field(table, row) else {
+            panic!("upstream's default table has no `{row}` row: {table:?}");
+        };
+        let Some(Json5Value::String(upstream)) = items.first() else {
+            panic!("upstream's `{row}` default is not an endpoint string: {items:?}");
+        };
+        assert_eq!(
+            default_listen_endpoint(mode).map(String::from),
+            Some(upstream.clone()),
+            "wz binds a different address than a stock {row} does when the \
+             document names none"
+        );
+    }
+
+    // The absence, both ways.
+    assert!(
+        field(table, "client").is_none(),
+        "upstream's default table grew a `client` row, so \"a zenoh client never \
+         listens\" is no longer what its absence says: {table:?}"
+    );
+    assert_eq!(
+        default_listen_endpoint(WhatAmI::Client),
+        None,
+        "wz would bind an address for a client that upstream never gives one"
+    );
+
+    drop(guard);
 }

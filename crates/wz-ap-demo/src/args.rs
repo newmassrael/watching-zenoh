@@ -448,46 +448,89 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
     // measured on a build carrying `router-hat-router` and not `routing-router`,
     // this same file already exited 2 with "--router requires the
     // `routing-router` feature". After this round that build runs it.
+    // ## R2091b (open-debt item 511) — the ROLE selects the run-mode, and the
+    // endpoints only supply its address
+    //
+    // Until this round the run-mode was chosen by the SHAPE of the endpoint
+    // lists, with `mode` used only to break the tie, so three ordinary stock
+    // documents came up as something they did not say. All three measured, and
+    // measured on BOTH implementations, because the claim is a divergence and a
+    // divergence needs two readings:
+    //
+    // - `{ mode: "peer", listen: [..] }`. zenohd binds it and is findable; wz
+    //   selected `--listen`, the one-shot acceptor, which answers no Scouts and
+    //   leaves after a round-trip. It is not a peer deployment at all.
+    // - `{ mode: "router", connect: [..] }` with no listen. zenohd binds port
+    //   7447 on every interface (its own mode-dependent default) and is a
+    //   ROUTER; wz selected `--connect` and came up as a CLIENT.
+    // - `{ mode: "client", listen: [..] }`. zenohd starts and binds NOTHING,
+    //   naming no locator; wz bound the endpoint. This one runs the other way --
+    //   wz doing something upstream does not -- and it was found by asking the
+    //   oracle rather than by reading wz.
+    //
+    // So: `mode` picks the run-mode, [`default_listen_endpoint`] supplies the
+    // address when the document names none, and a client's `listen` is dropped
+    // the way upstream drops it. A document that NAMES the key -- an explicitly
+    // empty list included -- suppresses the default, which is also upstream's
+    // behaviour (measured: an empty list starts a node that binds nothing).
+    //
+    // ## The cost, stated rather than hidden
+    //
+    // `mode: "peer"` now needs `routing-peer` and `mode: "router"` needs
+    // `router-hat-router`, where before both could come up on a build with
+    // neither. That is R2091's decision applied uniformly: a node that starts
+    // and is the wrong thing is worse than one that refuses and says which
+    // feature it wants. It is also narrower than it looks -- `--config` is
+    // itself behind `zenoh-config`, which no default build carries, so the
+    // population that can read a file at all is already a chosen build.
     let selected: Option<(&'static str, WhatAmI)> = if role_on_cli {
         None
     } else {
-        let listen = cfg.listen.first();
         let connect = &cfg.connect;
-        match (cfg.mode, listen, connect.is_empty()) {
-            (WhatAmI::Router, Some(ep), _) => {
-                exp.added.push("--router-hat".into());
-                exp.added.push(ep.clone());
-                // A router federates by DIALLING its peer routers, and
-                // `run_router_hat` reads that set off `--connect` exactly as the
-                // peer arm does. Withheld when the file carries none, so a lone
-                // router gains no empty flag.
+        // The address this node binds: what the document named, or upstream's
+        // own default for this mode when it named nothing.
+        let bind = cfg.listen.first().cloned().or_else(|| {
+            (!named("listen/endpoints"))
+                .then(|| wz::runtime_tokio::zenoh_config::default_listen_endpoint(cfg.mode))
+                .flatten()
+                .map(String::from)
+        });
+        // The two BINDING modes take the same shape -- bind one address, dial
+        // the whole connect list -- so they are one arm with the flag as its
+        // only difference. A router federates by DIALLING its peer routers, and
+        // `run_router_hat` reads that set off `--connect` exactly as the peer
+        // arm does; the flag is withheld when the file carries no list, so a
+        // lone node gains no empty argument.
+        match (cfg.mode, bind) {
+            (mode @ (WhatAmI::Router | WhatAmI::Peer), Some(ep)) => {
+                let flag = if mode == WhatAmI::Router {
+                    "--router-hat"
+                } else {
+                    "--peer"
+                };
+                exp.added.push(String::from(flag));
+                exp.added.push(ep);
                 if !connect.is_empty() {
                     exp.added.push("--connect".into());
                     exp.added.push(connect.join(","));
                 }
-                Some(("--router-hat", WhatAmI::Router))
+                Some((flag, mode))
             }
-            (WhatAmI::Peer, Some(ep), false) => {
-                exp.added.push("--peer".into());
-                exp.added.push(ep.clone());
-                exp.added.push("--connect".into());
-                exp.added.push(connect.join(","));
-                Some(("--peer", WhatAmI::Peer))
-            }
-            (_, Some(ep), _) => {
-                exp.added.push("--listen".into());
-                exp.added.push(ep.clone());
-                // The one-shot acceptor announces Peer (`NodeKind::Acceptor` in
-                // `demo_session_init_params`), which is what makes the `mode`
-                // verdict below a COMPARISON and not a "a role flag was added".
-                Some(("--listen", WhatAmI::Peer))
-            }
-            (_, None, false) => {
+            // A binding mode whose document names an EMPTY listen list. zenohd
+            // runs such a node -- it scouts and dials without accepting -- and
+            // wz has no run-mode that binds nothing, so nothing is selected and
+            // the verdict below says so rather than inventing an address the
+            // file refused.
+            (WhatAmI::Router | WhatAmI::Peer, None) => None,
+            // A zenoh client never listens, so its `listen` list is not an
+            // address here -- it is a key that reaches nothing, reported as
+            // such below.
+            (WhatAmI::Client, _) if !connect.is_empty() => {
                 exp.added.push("--connect".into());
                 exp.added.push(connect[0].clone());
                 Some(("--connect", WhatAmI::Client))
             }
-            (_, None, true) => None,
+            (WhatAmI::Client, _) => None,
         }
     };
 
@@ -509,20 +552,37 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
                 (Some(_), _) => KeyEffect::OverriddenOnTheCommandLine,
                 (None, Some((_, role))) if role == cfg.mode => KeyEffect::Expanded,
                 (None, Some(_)) => KeyEffect::NotTheRoleTheseEndpointsSelect,
-                (None, None) => {
-                    KeyEffect::WithheldFromThisRun("the document names no endpoint to bind or dial")
+                // R2091b (open-debt item 511) — reachable in exactly two ways
+                // now, and they are different sentences. A CLIENT with nothing
+                // to dial has no run-mode here because `--scout` is a role this
+                // expansion never emits; a binding mode reaches it only by
+                // naming an EMPTY listen list, which upstream honours as "bind
+                // nothing" and wz has no run-mode for.
+                (None, None) if cfg.mode == WhatAmI::Client => {
+                    KeyEffect::WithheldFromThisRun("the document names nothing to dial")
                 }
+                (None, None) => KeyEffect::WithheldFromThisRun(
+                    "the document names an empty listen list, and no run-mode here binds nothing",
+                ),
             },
         );
     }
     if named("listen/endpoints") {
         exp.record(
             "listen/endpoints",
-            match (role_on_cli, cfg.listen.is_empty()) {
-                (true, _) => KeyEffect::OverriddenOnTheCommandLine,
+            match (role_on_cli, cfg.mode, cfg.listen.is_empty()) {
+                (true, _, _) => KeyEffect::OverriddenOnTheCommandLine,
+                // R2091b (open-debt item 511) — a zenoh client never listens, so
+                // the endpoint it names reaches nothing HERE for the same reason
+                // it reaches nothing in a real zenohd. Measured: handed
+                // `{ mode: "client", listen: [..] }` a zenohd starts and names no
+                // locator at all.
+                (false, WhatAmI::Client, false) => {
+                    KeyEffect::WithheldFromThisRun("a zenoh client never listens")
+                }
                 // An empty list is what binding nothing already means.
-                (false, true) => KeyEffect::AlreadyTheBehaviour,
-                (false, false) => KeyEffect::Expanded,
+                (false, _, true) => KeyEffect::AlreadyTheBehaviour,
+                (false, _, false) => KeyEffect::Expanded,
             },
         );
     }
@@ -1459,9 +1519,39 @@ mod stock_config_tests {
                     "tcp/a:7447,tcp/b:7447",
                 ],
             ),
+            // R2091b (open-debt item 511) — a peer with NO connect list is still
+            // a peer. It used to be the one-shot acceptor, which answers no
+            // Scouts and leaves after a round-trip.
+            (
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] } }"#,
+                vec!["--peer", "tcp/0.0.0.0:7447"],
+            ),
+            // R2091b — and a node that names no listen binds what a stock node
+            // binds. Both values are upstream's own
+            // (`DEFAULT_CONFIG.json5` `endpoints: { router: [..], peer: [..] }`),
+            // and both were measured against a real zenohd: it answers on 7447
+            // as a router and on an ephemeral port as a peer.
+            (
+                r#"{ mode: "router", connect: { endpoints: ["tcp/r2:7447"] } }"#,
+                vec!["--router-hat", "tcp/[::]:7447", "--connect", "tcp/r2:7447"],
+            ),
+            (
+                r#"{ mode: "peer", connect: { endpoints: ["tcp/r2:7447"] } }"#,
+                vec!["--peer", "tcp/[::]:0", "--connect", "tcp/r2:7447"],
+            ),
+            // R2091b — a NAMED empty list suppresses that default, which is
+            // upstream's behaviour too (measured: a zenohd handed an empty list
+            // starts and names no locator). wz has no run-mode that binds
+            // nothing, so it selects none rather than inventing an address the
+            // document refused.
+            (r#"{ mode: "peer", listen: { endpoints: [] } }"#, vec![]),
+            // R2091b — a zenoh client NEVER listens, so the endpoint reaches
+            // nothing. Measured on a real zenohd: handed this document it starts
+            // and names no locator at all, while the same file as a peer answers
+            // on that address.
             (
                 r#"{ mode: "client", listen: { endpoints: ["tcp/0.0.0.0:7447"] } }"#,
-                vec!["--listen", "tcp/0.0.0.0:7447"],
+                vec![],
             ),
             (
                 r#"{ mode: "client", connect: { endpoints: ["tcp/router:7447"] } }"#,
@@ -2635,10 +2725,23 @@ mod stock_config_tests {
 
         // CONTROL 1 — the same document, one word different. A peer is findable
         // too, and it must NOT be reached through the router's flag.
+        //
+        // R2091b (open-debt item 511) — this control used to assert `--listen`,
+        // and that assertion was the DEFECT written down: a `mode: "peer"`
+        // document with no connect list selected the one-shot acceptor, which
+        // answers no Scouts. It selects the peer mesh now, so the control also
+        // carries item 511's own claim.
         let peer = expand(&["--config", "z.json5"], &file("peer", LISTENS)).unwrap();
+        assert_eq!(
+            peer.added[..2],
+            argv(&["--peer", "tcp/127.0.0.1:0"])[..],
+            "a `mode: \"peer\"` document selects the peer mesh, not the one-shot \
+             acceptor: {:?}",
+            peer.added
+        );
         assert!(
-            peer.added.iter().any(|a| a == "--listen") && peer.added.iter().all(|a| a != "--peer"),
-            "a peer with no connect list is the one-shot acceptor: {:?}",
+            peer.added.iter().any(|a| a == "--scout-listen"),
+            "and it is findable, which the acceptor never was: {:?}",
             peer.added
         );
         assert!(
@@ -2658,6 +2761,116 @@ mod stock_config_tests {
             "a client answers no Scouts, so its file's `listen: true` reached \
              nothing and must not be reported applied: {:?}",
             client.applied()
+        );
+    }
+
+    /// R2091b (open-debt item 511) — THE RUN-MODE IS THE ROLE THE FILE NAMES,
+    /// NOT THE SHAPE OF ITS ENDPOINT LISTS.
+    ///
+    /// Three ordinary stock documents used to come up as something they did not
+    /// say, and each was measured against a REAL zenohd before it was written
+    /// here — the claim is a DIVERGENCE between two implementations, and one
+    /// implementation cannot adjudicate that on its own:
+    ///
+    /// | the document | a real zenohd | wz, before this round |
+    /// |---|---|---|
+    /// | `peer` + listen | binds it and is findable | `--listen`, the one-shot acceptor |
+    /// | `router` + connect, no listen | binds port 7447 as a ROUTER | `--connect`, a CLIENT |
+    /// | `client` + listen | starts and binds NOTHING | bound the endpoint |
+    ///
+    /// The rows are each other's controls, which is why they are one test. Each
+    /// differs from a neighbour in ONE word, so an expansion that answered a
+    /// single run-mode for everything fails a row; the two default rows differ
+    /// in which default they get, so one that hardcoded either address fails the
+    /// other; and the empty-list row fails anything that materialises a default
+    /// unconditionally.
+    #[test]
+    fn the_run_mode_is_the_role_the_file_names_not_the_shape_of_its_endpoints() {
+        const L: &str = "tcp/127.0.0.1:7447";
+        const C: &str = "tcp/r:7447";
+
+        for (what, file, want) in [
+            // ITEM 511 (a). A peer with no connect list is still a peer.
+            (
+                "peer + listen",
+                format!(r#"{{ mode: "peer", listen: {{ endpoints: ["{L}"] }} }}"#),
+                vec!["--peer", L],
+            ),
+            // ITEM 511 (b). A router that names no listen binds what a stock
+            // router binds, and stays a ROUTER.
+            (
+                "router + connect",
+                format!(r#"{{ mode: "router", connect: {{ endpoints: ["{C}"] }} }}"#),
+                vec!["--router-hat", "tcp/[::]:7447", "--connect", C],
+            ),
+            // The control for that default: a different mode gets a DIFFERENT
+            // address, so an expansion carrying one constant fails here.
+            (
+                "peer + connect",
+                format!(r#"{{ mode: "peer", connect: {{ endpoints: ["{C}"] }} }}"#),
+                vec!["--peer", "tcp/[::]:0", "--connect", C],
+            ),
+            // The control for materialising it at all: a NAMED empty list is
+            // upstream's own way of saying "bind nothing", and wz has no
+            // run-mode that binds nothing.
+            (
+                "peer + an empty listen list",
+                String::from(r#"{ mode: "peer", listen: { endpoints: [] } }"#),
+                vec![],
+            ),
+            // ITEM 511 (c). A zenoh client never listens.
+            (
+                "client + listen",
+                format!(r#"{{ mode: "client", listen: {{ endpoints: ["{L}"] }} }}"#),
+                vec![],
+            ),
+            // Its control: the same mode with something it CAN act on, so the
+            // row above does not read as "a client reaches nothing whatever it
+            // says".
+            (
+                "client + connect",
+                format!(r#"{{ mode: "client", connect: {{ endpoints: ["{C}"] }} }}"#),
+                vec!["--connect", C],
+            ),
+        ] {
+            let out = expand(&["--config", "z.json5"], &file)
+                .unwrap_or_else(|e| panic!("{what}: the fixture is not readable: {e}"));
+            assert_eq!(out.added, argv(&want), "{what}: {file}");
+        }
+
+        // AND THE REPORT AGREES WITH THE ARGV, on the row where the two used to
+        // disagree most: a client's listen endpoint reaches nothing, and saying
+        // so is the difference between an operator who knows their file did not
+        // take effect and one who does not.
+        let client = expand(
+            &["--config", "z.json5"],
+            &format!(r#"{{ mode: "client", listen: {{ endpoints: ["{L}"] }} }}"#),
+        )
+        .unwrap();
+        assert!(
+            !client.applied().contains(&"listen/endpoints"),
+            "{:?}",
+            client.applied()
+        );
+        assert!(
+            client
+                .read_but_not_applied_with_reasons()
+                .iter()
+                .any(|l| l.contains("listen/endpoints (a zenoh client never listens)")),
+            "{:?}",
+            client.read_but_not_applied_with_reasons()
+        );
+        // The CONTROL for that verdict, in the same test: one word different,
+        // and the same endpoint is applied.
+        let peer = expand(
+            &["--config", "z.json5"],
+            &format!(r#"{{ mode: "peer", listen: {{ endpoints: ["{L}"] }} }}"#),
+        )
+        .unwrap();
+        assert!(
+            peer.applied().contains(&"listen/endpoints") && peer.applied().contains(&"mode"),
+            "{:?}",
+            peer.applied()
         );
     }
 
@@ -2682,20 +2895,27 @@ mod stock_config_tests {
             "scouting/multicast/address",
             "queries_default_timeout",
         ];
-        fn body(endpoints: &str) -> String {
+        fn body(mode: &str, endpoints: &str) -> String {
             format!(
-                r#"{{ mode: "peer", {endpoints},
+                r#"{{ mode: "{mode}", {endpoints},
                    queries_default_timeout: 12000,
                    scouting: {{ multicast: {{ listen: true,
                                             address: "224.0.0.99:7999" }} }} }}"#
             )
         }
 
-        // A one-shot acceptor: it answers no Scouts, and the command line has no
+        // A CLIENT: it dials, answers no Scouts, and the command line has no
         // `--query` for the timeout to qualify.
+        //
+        // R2091b (open-debt item 511) — this fixture used to be a `mode: "peer"`
+        // document with only a listen endpoint, and that shape no longer
+        // withholds anything: it selects the peer mesh now, which answers. The
+        // fixture moved rather than the claim -- what is measured is still "a
+        // key whose flag this run withholds is not called applied", and a client
+        // is a run that genuinely withholds all three.
         let withheld = expand(
             &["--config", "z.json5"],
-            &body(r#"listen: { endpoints: ["tcp/127.0.0.1:0"] }"#),
+            &body("client", r#"connect: { endpoints: ["tcp/r:7447"] }"#),
         )
         .unwrap();
         for flag in ["--scout-listen", "--scout-addr", "--query-timeout-ms"] {
@@ -2722,15 +2942,12 @@ mod stock_config_tests {
             );
         }
 
-        // THE CONTROL. Same three keys, same document shape; the invocation now
-        // supplies what each one needs — a connect list (so the peer MESH mode
-        // is selected, which hosts the responder) and a `--query`.
+        // THE CONTROL. Same three keys, same document shape; one word of `mode`
+        // different, plus the `--query` the timeout needs. A PEER hosts the
+        // responder, so all three reach a flag.
         let met = expand(
             &["--config", "z.json5", "--query", "demo/**"],
-            &body(
-                r#"listen: { endpoints: ["tcp/127.0.0.1:0"] },
-                   connect: { endpoints: ["tcp/r:7447"] }"#,
-            ),
+            &body("peer", r#"connect: { endpoints: ["tcp/r:7447"] }"#),
         )
         .unwrap();
         for key in WITHHELD_KEYS {
@@ -2863,7 +3080,11 @@ mod stock_config_tests {
         assert_eq!(
             out.added,
             argv(&[
-                "--listen",
+                // R2091b (open-debt item 511) — `--peer`, because a document
+                // that names no `mode` resolves to upstream's own default and
+                // that default is `peer` (`DEFAULT_CONFIG.json5:12`). It used to
+                // read as the one-shot acceptor.
+                "--peer",
                 "tcp/0.0.0.0:7447",
                 "--compression",
                 "--config-queryable",
