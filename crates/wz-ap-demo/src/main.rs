@@ -628,6 +628,41 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
+            // R2095 (open-debt item 513) — the capability offer this peer puts on
+            // every handshake it opens, dialled or accepted. Read off the SAME
+            // argv words the single-session initiator reads, and refused loudly
+            // on the exclusive qos x lowlatency pair rather than resolved.
+            let peer_offer = match mesh_dial_offer(rest) {
+                Ok(offer) => offer,
+                Err(msg) => {
+                    eprintln!("wz-ap-demo: {msg}");
+                    return ExitCode::from(2);
+                }
+            };
+            // R2095 (open-debt item 513, its residual) — REFUSE a capability the
+            // AGGREGATING open path cannot put on the wire, rather than dropping
+            // it. Exactly the treatment R311y506 gave `--qos-band --max-links >
+            // 1`, and for the same reason: the session would establish, look
+            // healthy, and carry none of what was configured.
+            //
+            // Before R2095 this needed no guard because the mesh dropped these
+            // on EVERY path. It needs one now: the single-link dial honours them
+            // and the aggregating dial does not, so silence here would be a
+            // divergence that depends on `--max-links`.
+            #[cfg(feature = "transport-multilink")]
+            {
+                let dropped = crate::runner::capabilities_the_multilink_path_drops(&peer_offer);
+                if max_links > 1 && !dropped.is_empty() {
+                    eprintln!(
+                        "wz-ap-demo: {} cannot be offered with --max-links > 1: the \
+                         aggregated open path stages no SessionOffer, so the \
+                         capability would be silently dropped. Use a single link, \
+                         or drop the flag.",
+                        dropped.join(" / ")
+                    );
+                    return ExitCode::from(2);
+                }
+            }
             return run_peer_mode(
                 peer_listen,
                 dial_targets,
@@ -664,6 +699,7 @@ fn main() -> ExitCode {
                     #[cfg(feature = "scouting-responder")]
                     scout_listen,
                     connect_retry: peer_connect_retry,
+                    offer: peer_offer,
                 },
                 InterceptorOpts {
                     acl_deny,
@@ -818,6 +854,17 @@ fn main() -> ExitCode {
                 }
                 None
             };
+            // R2095 (open-debt item 513) — the capability offer this router-hat
+            // puts on every handshake it opens. Refused loudly (not resolved)
+            // when the argv names the exclusive qos x lowlatency pair, which is
+            // the same refusal the single-session parse below makes.
+            let offer = match mesh_dial_offer(rest) {
+                Ok(offer) => offer,
+                Err(msg) => {
+                    eprintln!("wz-ap-demo: {msg}");
+                    return ExitCode::from(2);
+                }
+            };
             return run_router_hat_mode(
                 router_hat_listen,
                 dial_targets,
@@ -853,6 +900,7 @@ fn main() -> ExitCode {
                     // R2089 (open-debt item 222) — what makes a stock client's
                     // `autoconnect: ["router"]` default reach a wz node at all.
                     scout_listen,
+                    offer,
                 },
             );
         }
@@ -2136,6 +2184,45 @@ fn main() -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+/// R2095 (open-debt item 513) — the capability offer a MESH run-mode
+/// (`--peer` / `--router-hat`) hands its loop, read off the SAME argv words the
+/// single-session `Role::Initiator` parse reads.
+///
+/// It exists because the mesh had NO such reader. `--qos`, `--lowlatency`,
+/// `--compression` and `--shm` parse in every build and are reported as applied
+/// by the stock-config expansion, but `peer_loop`'s dial went out through the
+/// bare open, so on a mesh node all four settled into booleans no InitSyn ever
+/// carried. Measured by `wz_reads_a_stock_zenohd_config`'s wire leg the round
+/// `mode: "peer"` began selecting the peer MESH instead of expanding to
+/// `--connect`.
+///
+/// The presence reads are the initiator arm's, verbatim, and the SET is built by
+/// `runner::mesh_offer` -> `runner::initiator_offer` — the seam that drops a
+/// capability this build cannot provide and refuses the qos x lowlatency pair.
+/// Reading the same words through the same builder is what keeps "what a flag
+/// means" from becoming a per-run-mode fact.
+///
+/// Gated on the two MESH run-modes because it has exactly two callers and they
+/// are those arms. A build with neither has no `--peer` and no `--router-hat`
+/// to parse, so there is no mesh dial for an offer to ride.
+#[cfg(any(feature = "routing-peer", feature = "router-hat-router"))]
+fn mesh_dial_offer(
+    rest: &[String],
+) -> Result<wz::runtime_tokio::session_open::SessionOffer, String> {
+    crate::runner::mesh_offer(
+        rest.iter().any(|a| a == "--qos"),
+        rest.iter().any(|a| a == "--lowlatency"),
+        rest.iter().any(|a| a == "--compression"),
+        rest.iter().any(|a| a == "--shm"),
+        // A declared band is part of the offer, and `mesh_offer` folds it into
+        // the qos half of the exclusive pair BEFORE the refusal so that
+        // `--qos-band --lowlatency` is refused rather than silently resolved.
+        #[cfg(feature = "session-extqos")]
+        crate::args::parse_qos_link(rest),
+    )
+    .map_err(str::to_string)
 }
 
 /// Decode a `--zid <hex>` value into raw zid bytes — non-empty, even-length hex

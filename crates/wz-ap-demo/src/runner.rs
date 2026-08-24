@@ -1791,6 +1791,93 @@ pub(crate) fn initiator_offer(
     Ok(offer)
 }
 
+/// R2095 (open-debt item 513) — the MESH run-modes' offer: what every face a
+/// `--peer` / `--router-hat` node opens puts on its handshake.
+///
+/// The item this closes was not that the mesh offered the WRONG capabilities —
+/// it offered NONE. `peer_loop`'s dial went out through the bare open, so
+/// `--qos`, `--lowlatency`, `--compression`, `--shm` and every stock config key
+/// that expands into one of them settled into booleans no InitSyn ever read.
+/// The gap was invisible for as long as a `mode: "peer"` document expanded to
+/// `--connect` (the single-session initiator, which does build an offer); it
+/// surfaced the round `mode` began selecting the run-mode.
+///
+/// It delegates to [`initiator_offer`] rather than re-deriving the set, because
+/// that function is where "a flag whose atom was not built is INERT" lives and
+/// where the qos x lowlatency refusal lives. What is added here is the declared
+/// QoS band, which the single-session path has no flag for.
+///
+/// A declared band IS a QoS offer — zenoh reaches the endpoint metadata only
+/// inside the `is_qos` arm of `State::new` — so it is folded into the `qos`
+/// half of the exclusive pair BEFORE the refusal rather than after it. Passing
+/// it through afterwards would let `--qos-band` + `--lowlatency` reach
+/// `with_qos_link`, whose `with_mode(Qos)` would silently overwrite the lean
+/// mode the operator asked for. That is the silent drop this whole seam exists
+/// to refuse.
+///
+/// Gated on the two MESH run-modes: its only caller is `main`'s
+/// `mesh_dial_offer`, which those arms own. [`initiator_offer`] below stays
+/// ungated — the single-session initiator is in every build.
+#[cfg(any(feature = "routing-peer", feature = "router-hat-router"))]
+pub(crate) fn mesh_offer(
+    qos: bool,
+    lowlatency: bool,
+    compression: bool,
+    shm: bool,
+    #[cfg(feature = "session-extqos")] qos_link: Option<wz::runtime_tokio::extqos::QosLinkState>,
+) -> Result<SessionOffer, &'static str> {
+    #[cfg(feature = "session-extqos")]
+    let qos = qos || qos_link.is_some();
+    #[allow(unused_mut)]
+    let mut offer = initiator_offer(qos, lowlatency, compression, shm)?;
+    #[cfg(feature = "session-extqos")]
+    if let Some(state) = qos_link {
+        offer = offer.with_qos_link(state);
+    }
+    Ok(offer)
+}
+
+/// R2095 (open-debt item 513, its residual) — the capabilities of an `offer`
+/// that the AGGREGATED (`--max-links > 1`) open path cannot put on the wire.
+///
+/// R2095 wired `peer_loop`'s SINGLE-link dial to the whole offer. The
+/// aggregating dial is a different entrypoint —
+/// `initiate_and_open_session_with_multilink`, which takes `(pref, qos, band)`
+/// and stages no [`SessionOffer`] at all — so on an aggregating peer three of
+/// the four capabilities would reach nothing. That is the exact shape R311y506
+/// met with `--qos-band` and answered by REFUSING the pair rather than dropping
+/// it, and the reasoning transfers verbatim: the session would establish, look
+/// perfectly healthy, and carry none of what the operator configured.
+///
+/// `--qos` is deliberately NOT in the returned set. It is the one capability
+/// the aggregation path DOES carry, by its own route (`FaceSources.qos` ->
+/// `set_qos_offer` inside the `_with_multilink` entrypoints), so refusing it
+/// would break the combination that path exists for.
+///
+/// Widening the aggregation entrypoints to take a `SessionOffer` is the real
+/// fix and a design step of its own — `qos: bool` and `offer.mode` would have
+/// to be reconciled, and every `_with_multilink` caller moves with them.
+///
+/// Gated on `transport-multilink` rather than feature-uniform, unlike
+/// [`exclusive_modes`]: that rule answers a CONTRADICTORY command line, which is
+/// contradictory whatever got compiled, while this one answers a build's real
+/// limitation. Without the feature there is no `--max-links` to parse and no
+/// aggregation path to drop anything, so a refusal here would be about nothing.
+#[cfg(feature = "transport-multilink")]
+pub(crate) fn capabilities_the_multilink_path_drops(offer: &SessionOffer) -> Vec<&'static str> {
+    let mut dropped = Vec::new();
+    if offer.mode == wz::runtime_tokio::session_open::TransportMode::LowLatency {
+        dropped.push("--lowlatency");
+    }
+    if offer.compression {
+        dropped.push("--compression");
+    }
+    if offer.shm {
+        dropped.push("--shm");
+    }
+    dropped
+}
+
 /// R2087 — the qos x lowlatency exclusivity, as ONE predicate this binary reads
 /// from two places: the argv parse (which exits before dialling anything) and
 /// [`initiator_offer`] (which is the seam the library sees).
@@ -2937,11 +3024,23 @@ pub(crate) struct PeerOpts {
     pub qos: bool,
     /// R311y506 (session-extqos) — the QoS link METADATA this peer declares
     /// (`--qos-band` / `--qos-rel`). Routed through [`WzConfig::with_qos_link`]
-    /// into `FaceSources.qos_link`, which switches BOTH the dial and the accept
-    /// side onto the `_with_offer` entrypoints so the z64 `QoSLink` rides the Init.
+    /// so the admin GET renders the band actually in force; the value that
+    /// reaches the WIRE travels in [`Self::offer`], which
+    /// [`mesh_offer`] builds from the same flags.
     /// `None` = undeclared (the presence-only UNIT ext, byte-identical to `--qos`).
     #[cfg(feature = "session-extqos")]
     pub qos_link: Option<wz::runtime_tokio::extqos::QosLinkState>,
+    /// R2095 (open-debt item 513) — the capability SET every face this peer
+    /// opens OFFERS at its handshake.
+    ///
+    /// Built by [`mesh_offer`] from the same `--qos` / `--lowlatency` /
+    /// `--compression` / `--shm` words the single-session initiator reads,
+    /// through the same [`initiator_offer`] seam, so a mesh dial and a
+    /// `--connect` dial cannot disagree about what a flag means. Before this
+    /// field the mesh built no [`SessionOffer`] at all: every one of those flags
+    /// — and every stock config key that expands into one — was parsed,
+    /// reported as applied, and reached no wire.
+    pub offer: SessionOffer,
     /// R311y220 (transport-qos) — the QoS band `--express-high` / `--low` select for
     /// the `--publish` origination (`None` = plain DEFAULT publish). Effective only on
     /// an aggregated QoS multilink session; a no-op band otherwise (the `is_qos()`
@@ -3810,23 +3909,17 @@ async fn run_peer_until(
                     false
                 }
             },
-            // R311y506 (session-extqos) — the declared QoS band / reliability
-            // class, routed from `--qos-band` / `--qos-reliability` through the
-            // same shared WzConfig. Unconditional field (empty without the
-            // feature), so this bridge needs no outer cfg.
-            qos_link: wz::runtime_tokio::accept_loop::FaceQosLink {
-                // `Some` iff this node offers QoS at all (zenoh `State::QoS`),
-                // carrying whatever metadata `--qos-band` / `--qos-rel` declared
-                // — empty metadata is the presence-only UNIT ext. So under
-                // `session-extqos` a bare `--qos` reaches the wire on the SINGLE
-                // link too, which it could not before (the y218 scope boundary:
-                // `FaceSources.qos` is a multilink-path field).
-                #[cfg(feature = "session-extqos")]
-                state: {
-                    let cfg = wz_config.borrow();
-                    cfg.qos.then(|| cfg.qos_link.unwrap_or_default())
-                },
-            },
+            // R2095 (open-debt item 513) — the capability offer every face this
+            // peer opens carries, dialed and accepted alike (upstream builds
+            // `StateOpen` and `StateAccept` from the same manager config; see
+            // `FaceSources::offer`). It arrives ALREADY BUILT from `main`'s argv
+            // parse, through `mesh_offer`, so the run-mode that dials is not a
+            // second place that decides what a flag means.
+            //
+            // R311y506's declared QoS band is one field of it now. Before R2095
+            // it was the ONLY thing this loop could offer, which is why a mesh
+            // node's `--lowlatency` / `--compression` / `--shm` reached no wire.
+            offer: opts.offer,
             // R311y786 — the re-dial schedule, off the SAME shared WzConfig the
             // admin GET renders, so the peer mesh mode reports the cadence it
             // runs.
@@ -4387,6 +4480,11 @@ pub(crate) struct RouterHatOpts {
     /// discard in `run_router_hat_until` keeps a responder-less build
     /// warning-clean.
     pub scout_listen: Option<crate::args::ScoutSocketArgs>,
+    /// R2095 (open-debt item 513) — the capability SET every face this router-hat
+    /// opens OFFERS at its handshake, built by [`mesh_offer`] from the same argv
+    /// words `--peer` reads. The item named `--peer` AND `--router-hat`, because
+    /// both dial through `peer_loop` and neither built a [`SessionOffer`].
+    pub offer: SessionOffer,
 }
 
 #[cfg(feature = "router-hat-router")]
@@ -4926,12 +5024,20 @@ async fn run_router_hat_until(
             max_links: 1,
             #[cfg(feature = "transport-multilink")]
             qos: false,
-            // R311y506 (session-extqos) — a router-hat declares no QoS band. The
-            // `--qos-band` flags belong to the `--peer` mesh mode (run_peer),
-            // which is where the config lives; this run-mode has no reader for
-            // them, so the empty default is the honest value rather than a
-            // silently-dropped one.
-            qos_link: wz::runtime_tokio::accept_loop::FaceQosLink::default(),
+            // R2095 (open-debt item 513) — the capability offer every face this
+            // router-hat opens carries, built by `mesh_offer` from the SAME argv
+            // words the `--peer` mesh mode reads. The item named both run-modes
+            // and it meant both: a `--router-hat` dial went out through the bare
+            // open too, so a router configured `transport/unicast/lowlatency`
+            // offered the lean transport to nobody.
+            //
+            // R311y506's declared QoS band rides in it, and reaches this
+            // run-mode for the first time: `mesh_dial_offer` calls
+            // `parse_qos_link` for BOTH mesh arms, where the band used to be a
+            // `--peer`-only affordance. A router-hat holds one link per peer
+            // (`max_links: 1` below), so there is no aggregation path here for
+            // it to be dropped on.
+            offer: opts.offer,
             // R311y786 — the re-dial schedule, from `--connect-retry` (default =
             // zenoh's own 1s/4s/x2). This is the router's ONE source for it: the
             // same value seeds the admin config below, so the cadence the loop runs

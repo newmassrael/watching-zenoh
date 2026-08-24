@@ -37,13 +37,12 @@ use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 
-use wz_runtime_tokio::accept_loop::{
-    peer_loop, AcceptEvent, FaceForwarder, FaceId, FaceQosLink, FaceSources,
-};
+use wz_runtime_tokio::accept_loop::{peer_loop, AcceptEvent, FaceForwarder, FaceId, FaceSources};
 use wz_runtime_tokio::config::LinkReliabilityPref;
 use wz_runtime_tokio::retry_period::RetryPolicy;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_glue::{drive_session_until_terminal, SessionLinkActions};
+use wz_runtime_tokio::session_open::SessionOffer;
 use wz_runtime_tokio::session_open::{
     accept_and_open_session_with_multilink, BoundListener, DialedLink, OpenedSession,
     DEFAULT_OPEN_TICK_MS,
@@ -229,7 +228,7 @@ async fn readd_dialed_link_auto_reconnects_onto_surviving_session() {
             mcast_members: None,
             mcast_group_subs: None,
             reconcile: None,
-            qos_link: FaceQosLink::default(),
+            offer: SessionOffer::universal(),
             // R311y786 — pin the PRE-y786 cadence (fixed 1 s, no growth): this suite
             // asserts the re-add lands, and its comment relies on "the 1s backoff
             // means the del_link always lands first". The growth has its own witnesses.

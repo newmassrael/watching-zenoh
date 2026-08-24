@@ -4131,6 +4131,20 @@ layer_c1ay_cargo_test_router_hat() {
     _runci_guarded_test "C1AY exclusive_transport_modes_binary 2" 2 \
         cargo test -p wz-ap-demo --features transport-qos,transport-lowlatency \
         --test exclusive_transport_modes_binary --quiet || return 1
+    # R2095 (open-debt item 513, its residual) — the OTHER refusal `main` makes
+    # about a capability that would not reach the wire: `--lowlatency` /
+    # `--compression` / `--shm` on an AGGREGATING mesh peer, whose open path
+    # stages no `SessionOffer`. Same shape as the arm above (argv -> exit status,
+    # controls in the same test) and it needs a wider feature set, because the
+    # file is gated on the three atoms that make the flag non-inert: without
+    # `transport-multilink` there is no `--max-links` to parse, without
+    # `routing-peer` no `--peer`, and without `transport-lowlatency` the flag is
+    # inert and correctly drops nothing. `transport-qos` is here for the CONTROL
+    # arm, which asserts `--qos --max-links 2` is NOT refused.
+    _runci_guarded_test "C1AY mesh_offer_multilink_refusal_binary 1" 1 \
+        cargo test -p wz-ap-demo \
+        --features transport-multilink,routing-peer,transport-lowlatency,transport-qos \
+        --test mesh_offer_multilink_refusal_binary --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features routing-router-hat --quiet -- -D warnings \
@@ -11877,7 +11891,16 @@ layer_z_zenohd_interop() {
     # nobody can attribute. Additive like the rest -- `--qos` is absent from
     # every other leg's argv, and the feature pulls `routing-peer`, which this
     # set already carries. Both restatements of this line carry it.
-    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,routing-router,router-hat-router,router-connect-reconcile,routing-token-tables,namespace,transport-qos,transport-lowlatency,session-extcompression,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,transport-multilink,zenoh-config --quiet) || return 1
+    # R2095 adds `session-extshm` (open-debt item 513). The wire sweep now asks
+    # `transport/shared_memory/enabled` the same question it asks the other
+    # three capabilities, and without the feature `initiator_offer` drops the
+    # offer so BOTH runs answer "absent" -- the same green a dropped key gives,
+    # caught by the two-run rule as an unattributable red. Additive: `--shm` is
+    # absent from every other leg's argv here, and the two legs that DO pass it
+    # (`wz_shm_establishment_zenohd_interop`) already rebuild the demo with this
+    # exact feature and then restore this line, so they are unaffected either
+    # way. Both restatements of this line carry it.
+    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,routing-router,router-hat-router,router-connect-reconcile,routing-token-tables,namespace,transport-qos,transport-lowlatency,session-extcompression,session-extshm,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,transport-multilink,zenoh-config --quiet) || return 1
     # R311y442 review (REVIEWER 3, finding 3) added a clippy of the demo's
     # `advanced` arm right here, closing the `-D warnings` hole R311y433 closed
     # for transport-lowlatency and session-extcompression. R311y443-review
@@ -11983,7 +12006,13 @@ layer_z_zenohd_interop() {
     # and the offer is compiled out without this feature -- both runs would
     # answer "absent", which is what a dropped key looks like. Additive: `--qos`
     # is in no other leg's argv. Both restatements of this line carry it.
-    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,routing-router,router-hat-router,router-connect-reconcile,routing-token-tables,namespace,transport-qos,transport-lowlatency,session-extcompression,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,transport-multilink,zenoh-config --quiet) || return 1
+    # R2095 adds `session-extshm` (open-debt item 513): the wire sweep now asks
+    # `transport/shared_memory/enabled` too, and without the feature the offer is
+    # dropped in `initiator_offer` so both runs answer "absent". Additive here in
+    # the strongest sense -- this restatement exists to RESTORE the lane's build
+    # after the two legs that rebuild with `session-extshm` alone, so the feature
+    # was already reaching those legs' binary. Both restatements carry it.
+    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,routing-router,router-hat-router,router-connect-reconcile,routing-token-tables,namespace,transport-qos,transport-lowlatency,session-extcompression,session-extshm,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,transport-multilink,zenoh-config --quiet) || return 1
     # R311y435 — wz COMPOSED lowlatency x compression cross-impl: the measurement
     # R311y434 explicitly did NOT claim ("no leg dials zenohd with both modes,
     # because the demo cannot stage both offers"). The offer-SET widening of

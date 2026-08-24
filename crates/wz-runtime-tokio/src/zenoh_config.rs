@@ -1335,10 +1335,39 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
 /// reached nothing. Unlike its two siblings, this one is half of an EXCLUSIVE
 /// pair — zenoh bails on qos + lowlatency at `unicast/manager.rs:264` — so
 /// wiring it meant refusing the pair, not just adding a third boolean.
+///
+/// R2095 (open-debt item 513) adds the FOURTH capability,
+/// `transport/shared_memory/enabled`, and — more importantly — WIDENS what
+/// every entry above claims.
+///
+/// # The claim's scope, which item 513 was filed to move
+///
+/// Until R2095 these keys were proven on ONE of wz's two dial paths. The leg's
+/// fixture said `mode: "client"` and the comment beside it said why: a peer
+/// document had begun selecting the peer MESH, and the mesh built no
+/// [`SessionOffer`](crate::session_open::SessionOffer) at all, so
+/// `initiator_offer` was reached from the single-session `Role::Initiator` arm
+/// and from nowhere else. The three capability keys were therefore proven of
+/// `--connect` and of nothing else — a narrowing that was written down rather
+/// than hidden, and left as this item's work.
+///
+/// The leg now asks every key of THREE run-modes — `--connect`, `--peer` and
+/// `--router-hat` — from the same document, and a key is declared here only
+/// when all three carry it. `peer_loop` threads a per-node offer through both
+/// its dial and its accept sites (`accept_loop.rs`, `FaceSources::offer`), which
+/// is upstream's own shape: `StateOpen` and `StateAccept` are built from the
+/// same `manager.config.unicast.*`.
+///
+/// ⚠ The `shm` row is the Init offer (`extshm::SHM_INIT_EXT_HEADER`, ZBuf at
+/// id `0x2`), NOT the UNIT at the same numeric id that R311y505's cross-impl
+/// note is about. The two live in one module and one sentence has covered both;
+/// the leg measured which one the InitSyn actually carries rather than reading
+/// that sentence.
 pub const CONFIG_KEYS_PROVEN_ON_THE_WIRE: &[&str] = &[
     "id",
     "transport/link/tx/batch_size",
     "transport/link/tx/lease",
+    "transport/shared_memory/enabled",
     "transport/unicast/lowlatency",
     "transport/unicast/compression/enabled",
     "transport/unicast/qos/enabled",

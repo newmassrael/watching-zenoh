@@ -41,13 +41,11 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::watch;
 
-use wz_runtime_tokio::accept_loop::{
-    peer_loop, AcceptEvent, FaceQosLink, FaceSources, NoOpForwarder,
-};
+use wz_runtime_tokio::accept_loop::{peer_loop, AcceptEvent, FaceSources, NoOpForwarder};
 use wz_runtime_tokio::link_pipeline::bind_tcp;
 use wz_runtime_tokio::retry_period::RetryPolicy;
 use wz_runtime_tokio::runtime_impl::TokioTime;
-use wz_runtime_tokio::session_open::{BoundListener, DEFAULT_OPEN_TICK_MS};
+use wz_runtime_tokio::session_open::{BoundListener, SessionOffer, DEFAULT_OPEN_TICK_MS};
 use wz_runtime_tokio_test_support::fixture_session_init_params;
 
 /// A loopback address with NOTHING listening: bind it, read the port, drop the
@@ -100,7 +98,7 @@ async fn observed_gaps_ms(retry: RetryPolicy, want: usize) -> Vec<u128> {
             max_links: 1,
             #[cfg(feature = "transport-multilink")]
             qos: false,
-            qos_link: FaceQosLink::default(),
+            offer: SessionOffer::universal(),
             retry,
         },
         fixture_session_init_params(),
@@ -215,7 +213,7 @@ async fn a_peer_removed_and_re_added_starts_over_at_the_initial_wait() {
             max_links: 1,
             #[cfg(feature = "transport-multilink")]
             qos: false,
-            qos_link: FaceQosLink::default(),
+            offer: SessionOffer::universal(),
             retry: RetryPolicy {
                 period_init_ms: 50,
                 period_max_ms: 800,

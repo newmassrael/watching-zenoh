@@ -102,8 +102,7 @@ use crate::session_glue::{
 #[cfg(any(test, feature = "transport-multilink"))]
 use crate::session_glue::drive_session_until_terminal;
 use crate::session_open::{
-    accept_and_open_session, initiate_and_open_session, AcceptedLink, AcceptedPeer, BoundListener,
-    DialedLink, OpenError, OpenedSession,
+    AcceptedLink, AcceptedPeer, BoundListener, DialedLink, OpenError, OpenedSession,
 };
 use wz_session_core::locator::{parse_locator, Proto};
 
@@ -128,16 +127,24 @@ use crate::multilink::{join_link, JoinOutcome};
 use crate::session_open::{
     accept_and_open_session_with_multilink, initiate_and_open_session_with_multilink,
 };
-// session-extqos (R311y506) — the offer-carrying open entrypoints, used when a
-// node declares a QoS priority band / reliability class so the z64 `QoSLink`
-// rides the Init and the directional containment arms on both roles.
-#[cfg(feature = "session-extqos")]
+// R311y506 (session-extqos) / R2095 (open-debt item 513) — the offer-carrying
+// open entrypoints, and they are UNCONDITIONAL as of R2095.
+//
+// Gated on `session-extqos` they could carry only a declared QoS band, so every
+// OTHER capability an operator configured on a mesh node — qos, lowlatency,
+// compression, shm — reached no InitSyn this loop ever wrote: `SessionOffer` was
+// assembled on the demo's single-session `Role::Initiator` arm and nowhere else,
+// which is what open-debt item 513 measured. zenoh takes all of them off ONE
+// manager config that BOTH directions read (`StateOpen` at
+// `io/zenoh-transport/src/unicast/establishment/open.rs:605-636` and
+// `StateAccept` at `io/zenoh-transport/src/unicast/establishment/accept.rs:725-755`
+// are built from the same `manager.config.unicast.*` fields), which is the shape
+// [`FaceSources::offer`] restores here.
 use crate::session_open::{
     accept_and_open_session_with_offer, initiate_and_open_session_with_offer,
 };
 #[cfg(feature = "transport-multilink")]
 use std::collections::BTreeSet;
-#[cfg(feature = "session-extqos")]
 use wz_session_core::transport_mode::SessionOffer;
 // R311y227 — also the multicast INGRESS band (McastIngressItem.priority +
 // route_mcast_ingress), which is `codec-push`-gated, not multilink.
@@ -544,121 +551,36 @@ type DriveFuture<'f> = Pin<Box<dyn Future<Output = (Face, DriverOutcome)> + 'f>>
 /// [`OpenError::AcceptHandshake`], an isolated `FaceFailed`). Production
 /// semantics: `max_iters = None` (the accept-side open-deadline —
 /// `accepting.inactivity_timeout`, 1s — bounds a silent peer; see
-/// [`accept_and_open_session`]).
+/// [`accept_and_open_session_with_offer`]).
 async fn open_face(
     id: FaceId,
     peer: AcceptedPeer,
     accepted: AcceptedLink,
     params: SessionInitParams,
-    qos_link: FaceQosLink,
+    offer: SessionOffer,
     clock: TokioTime,
     tick_interval_ms: u64,
 ) -> OpenResult {
     let result = match accepted.handshake().await {
-        // session-extqos — a declared band routes through the offer entrypoint so
-        // the ACCEPTOR arms the subset containment against the initiator's
-        // `QoSLink`; undeclared keeps the bare open verbatim.
-        Ok(link) => accept_open_face(link, params, qos_link, clock, tick_interval_ms).await,
+        // R2095 — the loop's WHOLE capability offer rides the accept open, the
+        // same value its dials carry. A declared QoS band still arms the
+        // acceptor's subset containment against the initiator's `QoSLink`; what
+        // is new is that the other capabilities travel with it, which is what
+        // zenoh's acceptor does off the manager config the opener also reads.
+        Ok(link) => {
+            accept_and_open_session_with_offer(link, params, offer, clock, None, tick_interval_ms)
+                .await
+        }
         Err(e) => Err(OpenError::AcceptHandshake(e)),
     };
     (id, peer, result)
 }
 
-/// session-extqos (R311y506) — the ONE place a declared band becomes a
-/// [`SessionOffer`], so the dial and accept sides cannot disagree about what a
-/// declared band implies. `TransportMode::Qos` is part of it by construction:
-/// zenoh emits `QoSLink` only from the `State::QoS` arm, so a band without the
-/// QoS offer is a state upstream cannot reach.
-#[cfg(feature = "session-extqos")]
-fn qos_link_offer(state: wz_session_core::extqos::QosLinkState) -> SessionOffer {
-    SessionOffer::universal()
-        .with_mode(wz_session_core::transport_mode::TransportMode::Qos)
-        .with_qos_link(state)
-}
-
-/// The accept-side open, with the `session-extqos` branch isolated in a cfg'd
-/// SHIM rather than inside [`open_face`]. Two tiny twins keep the caller's body
-/// single-form: without the feature there is no declared band and no
-/// `_with_offer` entrypoint to name, so the bare open is the only shape that can
-/// typecheck there.
-#[cfg(feature = "session-extqos")]
-async fn accept_open_face(
-    link: DialedLink,
-    params: SessionInitParams,
-    qos_link: FaceQosLink,
-    clock: TokioTime,
-    tick_interval_ms: u64,
-) -> Result<OpenedSession, OpenError> {
-    match qos_link.state {
-        Some(state) => {
-            accept_and_open_session_with_offer(
-                link,
-                params,
-                qos_link_offer(state),
-                clock,
-                None,
-                tick_interval_ms,
-            )
-            .await
-        }
-        None => accept_and_open_session(link, params, clock, None, tick_interval_ms).await,
-    }
-}
-
-/// See [`accept_open_face`] — the feature-off twin.
-#[cfg(not(feature = "session-extqos"))]
-async fn accept_open_face(
-    link: DialedLink,
-    params: SessionInitParams,
-    _qos_link: FaceQosLink,
-    clock: TokioTime,
-    tick_interval_ms: u64,
-) -> Result<OpenedSession, OpenError> {
-    accept_and_open_session(link, params, clock, None, tick_interval_ms).await
-}
-
-/// The dial-side twin of [`accept_open_face`].
-#[cfg(feature = "session-extqos")]
-async fn dial_open_face(
-    link: DialedLink,
-    params: SessionInitParams,
-    qos_link: FaceQosLink,
-    clock: TokioTime,
-    tick_interval_ms: u64,
-) -> Result<OpenedSession, OpenError> {
-    match qos_link.state {
-        Some(state) => {
-            initiate_and_open_session_with_offer(
-                link,
-                params,
-                qos_link_offer(state),
-                clock,
-                None,
-                tick_interval_ms,
-            )
-            .await
-        }
-        None => initiate_and_open_session(link, params, clock, None, tick_interval_ms).await,
-    }
-}
-
-/// See [`dial_open_face`] — the feature-off twin.
-#[cfg(not(feature = "session-extqos"))]
-async fn dial_open_face(
-    link: DialedLink,
-    params: SessionInitParams,
-    _qos_link: FaceQosLink,
-    clock: TokioTime,
-    tick_interval_ms: u64,
-) -> Result<OpenedSession, OpenError> {
-    initiate_and_open_session(link, params, clock, None, tick_interval_ms).await
-}
-
 /// Dial one configured peer and bring the OUTBOUND link up to Established — the
 /// dial-out twin of [`open_face`]. Where `open_face` opens an *accepted* link via
-/// [`accept_and_open_session`], this connects to `peer` then opens the
-/// *initiated* link via [`initiate_and_open_session`] (the same SSOT the
-/// single-session initiator drives), tagged `(id, peer)` so its completion
+/// [`accept_and_open_session_with_offer`], this connects to `peer` then opens the
+/// *initiated* link via [`initiate_and_open_session_with_offer`] (the same SSOT
+/// the single-session initiator drives), tagged `(id, peer)` so its completion
 /// routes through the same `opening` arm. A failed TCP connect surfaces as
 /// [`OpenError::Dial`] (a `FaceFailed`, not a panic), so one unreachable peer
 /// never sinks the mesh. TCP only (the mesh DIAL side): after R311y376 (Stage 3)
@@ -672,20 +594,25 @@ async fn dial_face(
     id: FaceId,
     peer: SocketAddr,
     params: SessionInitParams,
-    qos_link: FaceQosLink,
+    offer: SessionOffer,
     clock: TokioTime,
     tick_interval_ms: u64,
 ) -> OpenResult {
     let result = match TcpStream::connect(peer).await {
-        // session-extqos — the INITIATOR side of the same seam: a declared band
-        // rides the InitSyn as `QoSLink` and arms the superset containment
-        // against the acceptor's InitAck.
+        // R2095 (open-debt item 513) — THE seam the item names. Every capability
+        // the node was configured with rides THIS InitSyn; before it a mesh dial
+        // went out through the bare open, so a `--peer` / `--router-hat` node
+        // offered nothing at all no matter what its config file said. A declared
+        // band still arms the initiator's superset containment against the
+        // acceptor's InitAck — it is one field of the offer now rather than the
+        // only thing in it.
         Ok(stream) => {
-            dial_open_face(
+            initiate_and_open_session_with_offer(
                 DialedLink::Tcp(stream),
                 params,
-                qos_link,
+                offer,
                 clock,
+                None,
                 tick_interval_ms,
             )
             .await
@@ -951,12 +878,12 @@ async fn dial_face_after(
     peer: SocketAddr,
     backoff_ms: u64,
     params: SessionInitParams,
-    qos_link: FaceQosLink,
+    offer: SessionOffer,
     clock: TokioTime,
     tick_interval_ms: u64,
 ) -> OpenResult {
     tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
-    dial_face(id, peer, params, qos_link, clock, tick_interval_ms).await
+    dial_face(id, peer, params, offer, clock, tick_interval_ms).await
 }
 
 /// Schedule a re-dial of a dropped/failed outbound peer IF it is still desired
@@ -990,11 +917,12 @@ fn schedule_redial(
     next_id: &mut u64,
     announce: bool,
     params: &SessionInitParams,
-    // R311y506 (session-extqos) — a re-dial must carry the SAME declared band as
-    // the original. Without it a peer flap would silently re-establish on the
-    // presence-only UNIT ext, losing the containment the operator configured, and
-    // nothing downstream would report the downgrade.
-    qos_link: FaceQosLink,
+    // R311y506 (session-extqos) / R2095 — a re-dial must carry the SAME offer as
+    // the original. Without it a peer flap would silently re-establish with the
+    // capabilities dropped — the containment a declared band configures, and
+    // since R2095 the lowlatency / compression / shm offers too — and nothing
+    // downstream would report the downgrade.
+    offer: SessionOffer,
     clock: TokioTime,
     tick_interval_ms: u64,
 ) {
@@ -1031,7 +959,7 @@ fn schedule_redial(
         addr,
         backoff_ms,
         params.clone(),
-        qos_link,
+        offer,
         clock,
         tick_interval_ms,
     )));
@@ -1517,18 +1445,32 @@ pub struct FaceSources {
     /// the value is only honored under `transport-qos` (else `set_qos_offer` elides).
     #[cfg(feature = "transport-multilink")]
     pub qos: bool,
-    /// session-extqos (R311y506) — the QoS link METADATA every face this loop
-    /// opens declares (sourced from [`WzConfig.qos_link`](crate::config::WzConfig)).
-    /// Uniform per loop, like [`Self::qos`], because it mirrors zenoh's per-
-    /// MANAGER endpoint metadata rather than anything per-peer.
+    /// R2095 (open-debt item 513) — the capability SET every face this loop
+    /// opens OFFERS at its handshake, dialed and accepted alike.
     ///
-    /// Declared metadata switches both the dial and the accept side onto the
-    /// `_with_offer` entrypoints so the z64 `QoSLink` rides the Init and the
-    /// directional containment arms; undeclared leaves every open path
-    /// byte-identical. Carried as [`FaceQosLink`] — unconditional, and EMPTY
-    /// without the feature — so the eight open call sites in this loop stay
-    /// cfg-free (the `FaceSources.qos` threading discipline).
-    pub qos_link: FaceQosLink,
+    /// This is the field that closes item 513. It replaces a `FaceQosLink` that
+    /// could carry a declared QoS band and nothing else, so a mesh node's
+    /// `--qos` / `--lowlatency` / `--compression` / `--shm` — and every stock
+    /// config key that expands into one of them — reached no wire at all: the
+    /// only `SessionOffer` in the demo was built on the single-session
+    /// `Role::Initiator` arm. Measured by
+    /// `wz_reads_a_stock_zenohd_config`'s wire leg, which reads the InitSyn a
+    /// config-driven node actually wrote.
+    ///
+    /// UNIFORM PER LOOP AND PER DIRECTION, and that is upstream's shape rather
+    /// than a simplification: zenoh builds `StateOpen`
+    /// (`io/zenoh-transport/src/unicast/establishment/open.rs:605-636`) and
+    /// `StateAccept`
+    /// (`io/zenoh-transport/src/unicast/establishment/accept.rs:725-755`) from
+    /// the SAME `manager.config.unicast.{is_qos,is_lowlatency,is_compression}`,
+    /// so a node configured for a capability offers it whichever end dialled.
+    /// A per-face offer would be the per-link QoS band refinement, which is a
+    /// separate design step (zenoh's `PriorityRange` IS per link).
+    ///
+    /// [`SessionOffer::universal`] — also its `Default` — is the zero offer, so
+    /// an accept-only or capability-free loop is byte-identical to the era
+    /// before this field: `apply_offer` of the universal offer stages nothing.
+    pub offer: SessionOffer,
     /// R311y786 — the connection-retry period every re-dial this loop schedules is
     /// paced by: zenoh's `connect.retry` (`period_init_ms` / `period_max_ms` /
     /// `period_increase_factor`), sourced from
@@ -1537,37 +1479,11 @@ pub struct FaceSources {
     /// `transport-multilink` per-link re-add — which shared the fixed constant it
     /// replaced.
     ///
-    /// UNCONDITIONAL, like [`Self::qos_link`] and for the same reason: the
+    /// UNCONDITIONAL, like [`Self::offer`] and for the same reason: the
     /// alternative is a `#[cfg(any(..))]` on the field, which every construction
     /// site would then repeat and every new site would be a place to forget. A
     /// build with neither re-dial substrate simply never reads it.
     pub retry: RetryPolicy,
-}
-
-/// session-extqos (R311y506) — the per-loop QoS link metadata, threaded to every
-/// open site as ONE unconditional parameter.
-///
-/// The field inside is feature-gated but the STRUCT is not, so without
-/// `session-extqos` this is a zero-sized value that every call site passes and
-/// every open helper ignores. That is the same trade `FaceSources.qos` makes
-/// (a plain `bool` gated only on `transport-multilink`, "so the threading
-/// carries no per-call-site cfg branch"): the alternative is a `#[cfg]` on the
-/// parameter, which forces a matching `#[cfg]` at all eight call sites and makes
-/// every future open site a place to forget one.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct FaceQosLink {
-    /// Isomorphic to zenoh's establishment `State`
-    /// (`establishment/ext/qos.rs`), deliberately: `None` is `State::NoQoS` —
-    /// this loop makes no QoS offer at all — and `Some(metadata)` is
-    /// `State::QoS { priorities, reliability }`, where the DEFAULT (both fields
-    /// `None`) is the presence-only UNIT ext and anything else is the z64
-    /// `QoSLink`.
-    ///
-    /// Collapsing "do we offer QoS" and "with what metadata" into one option is
-    /// what makes `metadata without an offer` unrepresentable here, matching the
-    /// upstream enum rather than re-deriving the invariant at each open site.
-    #[cfg(feature = "session-extqos")]
-    pub state: Option<wz_session_core::extqos::QosLinkState>,
 }
 
 /// Bind-once, hold-N: the shared multi-face drive core behind both
@@ -1608,7 +1524,7 @@ where
         max_links,
         #[cfg(feature = "transport-multilink")]
         qos,
-        qos_link,
+        offer,
         retry,
     } = sources;
     tokio::pin!(shutdown);
@@ -1733,7 +1649,7 @@ where
             id,
             peer,
             params.clone(),
-            qos_link,
+            offer,
             clock,
             tick_interval_ms,
         )));
@@ -1754,7 +1670,7 @@ where
                 id,
                 peer,
                 params.clone(),
-                qos_link,
+                offer,
                 clock,
                 tick_interval_ms,
             )) as OpenFuture
@@ -2063,7 +1979,7 @@ where
                                     &mut next_id,
                                     false,
                                     &params,
-                                    qos_link,
+                                    offer,
                                     clock,
                                     tick_interval_ms,
                                 );
@@ -2192,7 +2108,7 @@ where
                         &mut next_id,
                         true,
                         &params,
-                        qos_link,
+                        offer,
                         clock,
                         tick_interval_ms,
                     );
@@ -2232,7 +2148,7 @@ where
                             id,
                             addr,
                             params.clone(),
-                            qos_link,
+                            offer,
                             clock,
                             tick_interval_ms,
                         )));
@@ -2253,7 +2169,7 @@ where
                                 id,
                                 addr,
                                 params.clone(),
-                                qos_link,
+                                offer,
                                 clock,
                                 tick_interval_ms,
                             )) as OpenFuture
@@ -2401,7 +2317,7 @@ where
                             id,
                             addr,
                             params.clone(),
-                            qos_link,
+                            offer,
                             clock,
                             tick_interval_ms,
                         )));
@@ -2457,7 +2373,7 @@ where
                     peer,
                     accepted,
                     params.clone(),
-                    qos_link,
+                    offer,
                     clock,
                     tick_interval_ms,
                 )));
@@ -2480,7 +2396,7 @@ where
                         peer,
                         accepted,
                         params.clone(),
-                        qos_link,
+                        offer,
                         clock,
                         tick_interval_ms,
                     )) as OpenFuture
@@ -2553,9 +2469,11 @@ where
             max_links: 1,
             #[cfg(feature = "transport-multilink")]
             qos: false,
-            // accept-only: no declared QoS band (the empty default is also the
-            // whole value without `session-extqos`).
-            qos_link: FaceQosLink::default(),
+            // accept-only: the zero offer. `accept_loop` is the entry for a node
+            // that carries no capability configuration of its own — a mesh node
+            // that does reaches `peer_loop`, which is where R2095 threads the
+            // configured offer.
+            offer: SessionOffer::universal(),
             // accept-only: the loop schedules no outbound dial at all, so no
             // re-dial either. Carried because the field is unconditional; never
             // read on this path.
@@ -4044,7 +3962,7 @@ mod tests {
                 mcast_members: None,
                 mcast_group_subs: None,
                 reconcile: None,
-                qos_link: FaceQosLink::default(),
+                offer: SessionOffer::universal(),
                 // R311y786 — the PRE-y786 cadence (fixed 1 s), so these suites keep
                 // measuring what they were written for; the growth has its own.
                 retry: RetryPolicy::constant(1000),
@@ -4136,7 +4054,7 @@ mod tests {
                 mcast_members: None,
                 mcast_group_subs: None,
                 reconcile: None,
-                qos_link: FaceQosLink::default(),
+                offer: SessionOffer::universal(),
                 // R311y786 — the PRE-y786 cadence (fixed 1 s), so these suites keep
                 // measuring what they were written for; the growth has its own.
                 retry: RetryPolicy::constant(1000),
@@ -4227,7 +4145,7 @@ mod tests {
                 mcast_members: None,
                 mcast_group_subs: None,
                 reconcile: None,
-                qos_link: FaceQosLink::default(),
+                offer: SessionOffer::universal(),
                 // R311y786 — the PRE-y786 cadence (fixed 1 s), so these suites keep
                 // measuring what they were written for; the growth has its own.
                 retry: RetryPolicy::constant(1000),

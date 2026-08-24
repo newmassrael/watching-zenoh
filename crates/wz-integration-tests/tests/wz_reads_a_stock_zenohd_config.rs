@@ -1090,6 +1090,21 @@ fn every_key_proven_on_the_wire_is_in_the_frame_a_zenohd_would_receive() {
             "transport: { unicast: { qos: { enabled: false }, lowlatency: false } }",
             "absent",
         ),
+        // R2095 (open-debt item 513) — the FOURTH capability on the
+        // `initiator_offer` seam, and the reason it is here is the item's own
+        // instruction: the leg used to stop at the first failure, so `qos`,
+        // `compression` and `shm` were left UNMEASURED when `lowlatency` died,
+        // and unmeasured must not be read as passed. `shm` was worse than
+        // unmeasured — it had no row at all, so nothing would ever have asked.
+        //
+        // ⚠ It is read by extension IDENTITY, not by name; see `wire_reading`.
+        (
+            "transport/shared_memory/enabled",
+            "transport: { shared_memory: { enabled: true } }",
+            "offered",
+            "transport: { shared_memory: { enabled: false } }",
+            "absent",
+        ),
     ];
 
     // The POPULATION is the constant, so a key declared wire-proven without a
@@ -1105,23 +1120,96 @@ fn every_key_proven_on_the_wire_is_in_the_frame_a_zenohd_would_receive() {
          can hand the demo"
     );
 
-    for (key, frag_a, want_a, frag_b, want_b) in FIXTURES {
-        let got_a = handshake_field_from_a_config(key, frag_a);
-        let got_b = handshake_field_from_a_config(key, frag_b);
-        assert_eq!(
-            got_a, *want_a,
-            "{key}: the handshake carried {got_a} where the file said {want_a}"
-        );
-        assert_eq!(
-            got_b, *want_b,
-            "{key}: the handshake carried {got_b} where the file said {want_b}"
-        );
-        assert_ne!(
-            got_a, got_b,
-            "{key}: the wire value did not move with the file, so the file is \
-             not what set it"
-        );
+    // R2095 (open-debt item 513) — every fixture is asked in BOTH run-modes, and
+    // every answer is COLLECTED rather than asserted where it is read.
+    //
+    // Both halves of that sentence were the item's. Until R2095 the leg ran one
+    // run-mode (`mode: "client"`, the single-session initiator) and `assert_eq!`
+    // on the spot, so when 511 sent a `mode: "peer"` document to the peer MESH
+    // the leg died on the FIRST capability — `lowlatency` — and left `qos`,
+    // `compression` and `shm` unmeasured. Three keys that share a seam with the
+    // one that failed read, from the outside, exactly like three keys that
+    // passed. Collecting means the report names every key that is wrong in every
+    // mode it is wrong in, which is what makes a mutation here attributable.
+    //
+    // The two modes are also the CONTROL PAIR. They exercise wz's two dial paths
+    // — `Role::Initiator` and `peer_loop` — from the same file, so a wiring that
+    // exists on one and not the other shows up as a run-mode-shaped column of
+    // failures rather than as one dead leg.
+    let mut failures: Vec<String> = Vec::new();
+    for mode in [RunMode::Client, RunMode::PeerMesh, RunMode::RouterHat] {
+        for (key, frag_a, want_a, frag_b, want_b) in FIXTURES {
+            let got_a = handshake_field_from_a_config(key, frag_a, mode);
+            let got_b = handshake_field_from_a_config(key, frag_b, mode);
+            if got_a != *want_a {
+                failures.push(format!(
+                    "{mode:?} {key}: the handshake carried {got_a} where the file said {want_a}"
+                ));
+            }
+            if got_b != *want_b {
+                failures.push(format!(
+                    "{mode:?} {key}: the handshake carried {got_b} where the file said {want_b}"
+                ));
+            }
+            if got_a == got_b {
+                failures.push(format!(
+                    "{mode:?} {key}: the wire value did not move with the file, \
+                     so the file is not what set it"
+                ));
+            }
+        }
     }
+    assert!(
+        failures.is_empty(),
+        "{} of the {} readings this leg takes disagree with the file that \
+         produced them:\n  {}",
+        failures.len(),
+        FIXTURES.len() * 3 * 3,
+        failures.join("\n  ")
+    );
+}
+
+/// Which run-mode a fixture's document brings up — and therefore WHICH of wz's
+/// two dial paths wrote the frame under judgement.
+///
+/// R2095 (open-debt item 513) added the axis. It is not a variation for its own
+/// sake: the two arms reach different code, and the item exists because one of
+/// them reached no [`SessionOffer`](wz_runtime_tokio::session_open::SessionOffer)
+/// at all.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RunMode {
+    /// `mode: "client"` — a stock zenoh client never listens, so the document's
+    /// `connect` list selects `--connect`: the demo's ONE-SHOT
+    /// `Role::Initiator`, which builds its offer in `runner::initiator_offer`.
+    ///
+    /// This is the arm that was green throughout the item's life, and it is the
+    /// CONTROL: a mutation that unwires the mesh must leave it green, or what
+    /// the mesh arm measures is not specific to the mesh.
+    Client,
+    /// `mode: "peer"` — the peer MESH. The document names no `listen`, so
+    /// `default_listen_endpoint(Peer)` supplies `tcp/[::]:0` and the run-mode is
+    /// `--peer`, whose dials go through `peer_loop`.
+    ///
+    /// This arm is the whole of what item 513 is about. Before R2095 it carried
+    /// `batch_size`, `id` and `lease` — the `SessionInitParams` values — and NO
+    /// capability extension whatever, because `peer_loop`'s dial went out
+    /// through the bare open.
+    PeerMesh,
+    /// `mode: "router"` — the router hat, `--router-hat`, the OTHER caller of
+    /// `peer_loop`.
+    ///
+    /// Item 513 named both mesh run-modes, so measuring one would have left the
+    /// other's wiring a claim. It is a distinct arm and not a rename of
+    /// [`Self::PeerMesh`]: the two are built from different `main` branches
+    /// (`RouterHatOpts` vs `PeerOpts`) and either could carry the offer while
+    /// the other did not.
+    ///
+    /// ⚠ Unlike the other two this document NAMES its `listen`, because
+    /// `default_listen_endpoint(Router)` is upstream's `tcp/[::]:7447` — a fixed
+    /// port, which in a test is a collision waiting for a second run. Naming
+    /// `tcp/127.0.0.1:0` keeps the arm ephemeral. What is under judgement is the
+    /// frame this node DIALS out, so the address it binds is scaffolding.
+    RouterHat,
 }
 
 /// Run the demo configured ONLY by a file that names `key`, and return what its
@@ -1140,7 +1228,7 @@ fn every_key_proven_on_the_wire_is_in_the_frame_a_zenohd_would_receive() {
 /// `handshake_encode::encode_init`, wz's own production encoder. That keeps the
 /// instrument made of this tree's codec at BOTH ends, adds no public surface,
 /// and leaves the thing under judgement where it was — the bytes the demo sent.
-fn handshake_field_from_a_config(key: &str, fragment: &str) -> String {
+fn handshake_field_from_a_config(key: &str, fragment: &str, run_mode: RunMode) -> String {
     let demo = wz_ap_demo_binary();
     assert_demo_binary_newer_than_sources(&demo);
 
@@ -1149,26 +1237,42 @@ fn handshake_field_from_a_config(key: &str, fragment: &str) -> String {
         .local_addr()
         .expect("the acceptor has an address")
         .port();
-    // R2091b (open-debt item 511) — `client`, and the word is load-bearing.
+    // R2091b (open-debt item 511) pinned this to `client` and said why; R2095
+    // (item 513) makes it a PARAMETER, which is the whole shape of the fix.
     //
-    // This said `peer` until the round that made `mode` select the run-mode, and
-    // it worked only because a peer document with no listen endpoint USED to
-    // expand to `--connect`, the single-session initiator. It expands to the
-    // peer MESH now, which is what a stock peer is — and the mesh's dial builds
-    // no `SessionOffer` at all, so the three capability keys stopped reaching
-    // the InitSyn. Measured here, by this leg: `transport/unicast/lowlatency`
-    // came back `absent` where the file said `offered`.
+    // The history is worth keeping. It said `peer` until the round that made
+    // `mode` select the run-mode, and it worked only because a peer document
+    // with no listen endpoint USED to expand to `--connect`, the single-session
+    // initiator. It expands to the peer MESH now, which is what a stock peer is
+    // — and the mesh's dial built no `SessionOffer` at all, so the three
+    // capability keys stopped reaching the InitSyn. Measured here, by this leg:
+    // `transport/unicast/lowlatency` came back `absent` where the file said
+    // `offered`. Item 511 pinned the fixture to the run-mode it could still
+    // measure and filed the gap as 513 rather than papering over it.
     //
-    // That gap is REAL and it is not this key set's: `initiator_offer` is
-    // reached from the `Role::Initiator` arm and from nowhere else, so no wz
-    // mesh node has ever offered qos / lowlatency / compression / shm on a dial.
-    // It is registered as its own item rather than patched around here, and this
-    // fixture names the run-mode it was written to measure — the one that
-    // produces the InitSyn under test.
+    // R2095 wired `peer_loop`'s dial and accept sites to a `SessionOffer` and
+    // this leg is what holds that wiring: `PeerMesh` asks the SAME files of the
+    // mesh path, and `Client` stays as the control that says a mesh failure is
+    // the mesh's.
+    //
+    // ⚠ `PeerMesh` deliberately names NO `listen`. A binding mode whose document
+    // names an empty listen list selects no run-mode at all (`args.rs`), so
+    // spelling one here would swap the arm under test for a node that never
+    // dials. Leaving it unnamed is what lets `default_listen_endpoint(Peer)`
+    // supply `tcp/[::]:0`, which is upstream's own default for the mode.
+    // `RouterHat` names one for the opposite reason — see that variant's doc.
+    let (mode, listen) = match run_mode {
+        RunMode::Client => ("client", ""),
+        RunMode::PeerMesh => ("peer", ""),
+        RunMode::RouterHat => (
+            "router",
+            "  listen: { endpoints: [\"tcp/127.0.0.1:0\"] },\n",
+        ),
+    };
     let source = format!(
         r#"{{
-  mode: "client",
-  connect: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
+  mode: "{mode}",
+{listen}  connect: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
   scouting: {{ multicast: {{ enabled: false }} }},
   {fragment},
 }}
@@ -1176,16 +1280,42 @@ fn handshake_field_from_a_config(key: &str, fragment: &str) -> String {
     );
     let file = staged_config(&source);
 
-    let child = Command::new(&demo)
+    // R2095 (open-debt item 507's discipline, applied here) — the child's stderr
+    // is PIPED, not discarded.
+    //
+    // It used to be `Stdio::null()`, and that is exactly the shape 507 is about:
+    // when the demo refuses a document — a mode this build has no feature for, a
+    // key it will not take — it says so on stderr and exits, and a leg that
+    // dropped the pipe could report only "the demo never dialled". The run-mode
+    // axis makes that reachable in a new way (`mode: "peer"` needs
+    // `routing-peer`, `mode: "router"` needs `router-hat-router`), so the reason
+    // has to survive to the failure message.
+    let mut child = Command::new(&demo)
         .arg("--config")
         .arg(file.path())
         .arg("--key")
         .arg("demo/wire")
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .expect("spawn wz-ap-demo");
-    let guard = ChildGuard::wrap("wz-ap-demo (wire batch)", child);
+    // Drained on a thread so a demo that fills the pipe buffer is not blocked by
+    // this test's own read schedule. The receiver is read only on the failure
+    // paths below, where it is the whole point.
+    let stderr = child.stderr.take().expect("the child's stderr is piped");
+    let (stderr_tx, stderr_rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        let mut text = String::new();
+        let mut stderr = stderr;
+        let _ = std::io::Read::read_to_string(&mut stderr, &mut text);
+        let _ = stderr_tx.send(text);
+    });
+    let drained = move || {
+        stderr_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap_or_else(|_| String::from("<the child's stderr did not close>"))
+    };
+    let mut guard = ChildGuard::wrap("wz-ap-demo (wire batch)", child);
 
     // R2083 — accept with a DEADLINE. `TcpListener::accept` blocks forever, and
     // a test that waits forever does not fail: it takes the whole job's budget
@@ -1202,11 +1332,26 @@ fn handshake_field_from_a_config(key: &str, fragment: &str) -> String {
         match listener.accept() {
             Ok(pair) => break pair,
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // R2095 — ask whether the child is still ALIVE before asking
+                // whether the deadline has passed. A demo that exited on the
+                // first line of `main` will never dial, and waiting the full 20s
+                // to say so turns one refused document into 20 seconds of the
+                // job's budget per fixture. `try_wait` is the cheap question;
+                // the stderr it exited with is the answer the message needs.
+                if let Ok(Some(status)) = guard.child_mut().try_wait() {
+                    panic!(
+                        "the demo exited ({status}) before dialling the \
+                         acceptor:\n{}\n{source}",
+                        drained()
+                    );
+                }
                 assert!(
                     std::time::Instant::now() < deadline,
-                    "the demo never dialled the acceptor. Built without \
-                     `zenoh-config` it exits on `--config` and never connects, \
-                     which is what this deadline exists to say out loud\n{source}"
+                    "the demo never dialled the acceptor, and it is still \
+                     running. Built without `zenoh-config` it exits on \
+                     `--config` and never connects, which is what this deadline \
+                     exists to say out loud\n{}\n{source}",
+                    drained()
                 );
                 std::thread::sleep(Duration::from_millis(20));
             }
@@ -1371,6 +1516,20 @@ fn wire_reading(key: &str) -> (HandshakeFrame, Reading) {
         "transport/unicast/lowlatency" => (InitSyn, Reading::Presence("low_latency")),
         "transport/unicast/compression/enabled" => (InitSyn, Reading::Presence("compression")),
         "transport/unicast/qos/enabled" => (InitSyn, Reading::Presence("qos")),
+        // R2095 — the FOURTH capability on the `initiator_offer` seam, and the
+        // one item 513 named as unmeasured. Its Init form is
+        // `extshm::SHM_INIT_EXT_HEADER` = 0x42 (ZBuf `0x40` | id `0x2`), which
+        // is the identity `crate::ext_name`'s `Init` table already spells `shm`
+        // — so it reads by NAME like its three siblings.
+        //
+        // ⚠ That was MEASURED here, not assumed, and the assumption it replaced
+        // was wrong. R2095 first wrote this row as a read by `(id, encoding)`
+        // on the strength of R311y505's sentence that "wz offers a UNIT at the
+        // same numeric id (header 0x02)", which is true of
+        // `extshm::shm_unit_ext` and NOT of the Init offer this leg reads. The
+        // leg reported the frame's actual ext identities and it was `(2, 2)` —
+        // ZBuf. Two rows in the same module, one sentence about them.
+        "transport/shared_memory/enabled" => (InitSyn, Reading::Presence("shm")),
         other => panic!("{other} is declared wire-proven and this leg cannot read it"),
     }
 }
@@ -2164,9 +2323,17 @@ fn attempts_in_window(demo: &std::path::Path, source: &str) -> usize {
 /// as `None`, and the pairing is asserted in both directions here — a table that
 /// grew a `client` row, or a wz that started returning an address for one, is
 /// the same divergence seen from either end.
+///
+/// R2095 — the name carries `zenohd` because this FILE's basename declares that
+/// family and Layer C0's skip-token obligation matches on the FUNCTION name.
+/// R2092 landed it as `the_endpoint_a_node_binds_when_its_document_names_none_is_upstreams_own`,
+/// which reads well and is invisible to `--skip zenohd`: Layer E's default sweep
+/// would RUN a leg that needs a zenohd it does not build. Paid here rather than
+/// carried, because it is the same file this round rewrites and it is what stops
+/// Layer C0 from reaching any gate behind it.
 #[test]
 #[ignore = "binary-dep e2e: needs target/zenohd/zenohd (scripts/build-zenohd.sh)"]
-fn the_endpoint_a_node_binds_when_its_document_names_none_is_upstreams_own() {
+fn zenohd_and_wz_agree_on_the_endpoint_a_node_binds_when_its_document_names_none() {
     // Names NO listen key at all, which is the whole precondition: a document
     // that named one — an empty list included — would suppress the default on
     // both sides, and this leg would be measuring nothing.
