@@ -103,6 +103,26 @@ pub(crate) enum Role {
         /// `namespace` feature, in which case the flag is inert. Applied once, on
         /// the one-shot open (runner.rs; reconnect is out of demo scope).
         namespace: Option<String>,
+        /// R2087 (open-debt item 506) — `--qos` offers the QoS transport ext
+        /// (UNIT ext 0x1) on the InitSyn, so a peer that also offers it
+        /// negotiates the per-(priority, reliability) SN conduits.
+        ///
+        /// The flag itself is older than this field: it has selected the
+        /// AGGREGATED (`--max-links > 1`) QoS path since R311y218. What it could
+        /// not do was reach the SINGLE-link open, so `transport/unicast/qos/
+        /// enabled` — a key the stock-config reader calls honoured, and expands
+        /// into exactly this flag — settled into a boolean that no InitSyn ever
+        /// read. Measured, both ways: the frame offered `["patch"]` whether the
+        /// file said true or false, while its two siblings moved.
+        ///
+        /// Feature-uniform and inert-when-unbuilt on the same
+        /// `runner::initiator_offer` seam as `lowlatency` / `compression`;
+        /// initiator-only and one-shot-only. EXCLUSIVE with `lowlatency` —
+        /// zenoh bails at `unicast/manager.rs:264` on the pair and
+        /// [`TransportMode`](wz::runtime_tokio::session_open::TransportMode)
+        /// cannot represent it, so `main` refuses the pair up front rather than
+        /// letting the offer builder pick a winner.
+        qos: bool,
         /// R311y372 — `--lowlatency` offers the Z_EXT_LOWLATENCY transport ext on
         /// the InitSyn, so a peer that also offers it negotiates the lean
         /// transport that drops the Frame(sn) wrapper on the data path.
@@ -1748,7 +1768,11 @@ mod stock_config_tests {
             "publish-after-ms",
             "put-key",
             "put-payload",
-            "qos",
+            // R2087 — `qos` LEFT this list. It became an operator-facing flag on
+            // the ordinary `--connect` path (open-debt item 506), so the reason
+            // it was undocumented — it only selected the aggregated multilink
+            // arm — stopped being true, and the ratchet said so before this
+            // round noticed.
             "qos-band",
             "qos-rel",
             "quic-ca",

@@ -4109,6 +4109,17 @@ layer_c1ay_cargo_test_router_hat() {
     # name and would never reach it.
     _runci_guarded_test "C1AY check_topology_binary 2" 2 \
         cargo test -p wz-ap-demo --features zenoh-config --test check_topology_binary --quiet || return 1
+    # R2087 (open-debt item 506) — the same argv -> exit status seam, for the qos
+    # x lowlatency exclusivity that wiring `--qos` into `initiator_offer` made
+    # this binary responsible for. Run at the feature set where BOTH modes are
+    # compiled in, which is the arm a feature-gated rule would fail: on a build
+    # carrying neither atom both flags are inert, so a refusal that only ever
+    # fired there would prove nothing about the deployment that can actually
+    # negotiate both. The DEFAULT-feature build is covered too, by `pre-push`
+    # over the changed crate.
+    _runci_guarded_test "C1AY exclusive_transport_modes_binary 2" 2 \
+        cargo test -p wz-ap-demo --features transport-qos,transport-lowlatency \
+        --test exclusive_transport_modes_binary --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features routing-router-hat --quiet -- -D warnings \
@@ -11801,7 +11812,17 @@ layer_z_zenohd_interop() {
     # Measured at this exact set on 2026-08-18: the control arm dialled ONCE in
     # six seconds while the admin config rendered zenoh's 1s/4s/2.0, which is how
     # that leg reded on hosted. Both restatements of this line carry it.
-    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,routing-router,router-hat-router,router-connect-reconcile,routing-token-tables,namespace,transport-lowlatency,session-extcompression,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,transport-multilink,zenoh-config --quiet) || return 1
+    # R2087 adds `transport-qos` (open-debt item 506). The wire sweep in
+    # `wz_reads_a_stock_zenohd_config` now asks `transport/unicast/qos/enabled`
+    # the same question it asks lowlatency and compression -- does the InitSyn
+    # carry the ext -- and the QoS ext is the one of the three whose offer is
+    # compiled out by default. Without the feature the demo drops the mode in
+    # `initiator_offer` and BOTH runs answer "absent", which is the same green a
+    # dropped key gives: the sweep's two-run rule catches it, but only as a red
+    # nobody can attribute. Additive like the rest -- `--qos` is absent from
+    # every other leg's argv, and the feature pulls `routing-peer`, which this
+    # set already carries. Both restatements of this line carry it.
+    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,routing-router,router-hat-router,router-connect-reconcile,routing-token-tables,namespace,transport-qos,transport-lowlatency,session-extcompression,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,transport-multilink,zenoh-config --quiet) || return 1
     # R311y442 review (REVIEWER 3, finding 3) added a clippy of the demo's
     # `advanced` arm right here, closing the `-D warnings` hole R311y433 closed
     # for transport-lowlatency and session-extcompression. R311y443-review
@@ -11902,7 +11923,12 @@ layer_z_zenohd_interop() {
     # Measured at this exact set on 2026-08-18: the control arm dialled ONCE in
     # six seconds while the admin config rendered zenoh's 1s/4s/2.0, which is how
     # that leg reded on hosted. Both restatements of this line carry it.
-    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,routing-router,router-hat-router,router-connect-reconcile,routing-token-tables,namespace,transport-lowlatency,session-extcompression,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,transport-multilink,zenoh-config --quiet) || return 1
+    # R2087 adds `transport-qos` (open-debt item 506): the wire sweep asks
+    # `transport/unicast/qos/enabled` whether the InitSyn carries the QoS ext,
+    # and the offer is compiled out without this feature -- both runs would
+    # answer "absent", which is what a dropped key looks like. Additive: `--qos`
+    # is in no other leg's argv. Both restatements of this line carry it.
+    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,routing-router,router-hat-router,router-connect-reconcile,routing-token-tables,namespace,transport-qos,transport-lowlatency,session-extcompression,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,transport-multilink,zenoh-config --quiet) || return 1
     # R311y435 — wz COMPOSED lowlatency x compression cross-impl: the measurement
     # R311y434 explicitly did NOT claim ("no leg dials zenohd with both modes,
     # because the demo cannot stage both offers"). The offer-SET widening of

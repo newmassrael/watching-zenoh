@@ -86,6 +86,9 @@ pub(crate) fn print_usage() {
     eprintln!("    --connect <addr>         initiator mode (HOST:PORT or tcp/|ws/HOST:PORT);");
     eprintln!("                             this is the zenoh client role — there is no");
     eprintln!("                             --client flag, and this is what to reach for");
+    eprintln!("    --qos                    offer the QoS transport on --connect (UNIT ext 0x1;");
+    eprintln!("                             per-(priority, reliability) SN conduits). Mutually");
+    eprintln!("                             exclusive with --lowlatency, as upstream");
     eprintln!("    --lowlatency             offer the lowlatency transport on --connect");
     eprintln!("    --compression            offer per-batch lz4 compression on --connect");
     eprintln!("                             (Z_EXT_COMPRESSION 0x6; combinable with");

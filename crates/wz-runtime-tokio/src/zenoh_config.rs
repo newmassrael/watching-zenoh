@@ -1326,16 +1326,22 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
 /// `compression` 0x6) — so what the leg reads is whether the node offered it at
 /// all, which is the whole of what the file asked for.
 ///
-/// ⚠ `transport/unicast/qos/enabled` is the third such key and is deliberately
-/// NOT here. Measured with the key both true and false, the InitSyn offered the
-/// same set either way: the demo's initiator offer takes no qos argument, so the
-/// key reaches a flag that has no wire sink on that path (open debt 506).
+/// R2087 (open-debt item 506) adds the THIRD such key,
+/// `transport/unicast/qos/enabled` (`qos` 0x1), and it is the one that had to be
+/// BUILT rather than measured. R2086 asked it both ways and got the same offer
+/// set either way, because the demo's initiator offer took no qos argument at
+/// all: the key was honoured by the reader, expanded into `--qos`, and the flag
+/// selected only the AGGREGATED multilink path, so on a single-link open it
+/// reached nothing. Unlike its two siblings, this one is half of an EXCLUSIVE
+/// pair — zenoh bails on qos + lowlatency at `unicast/manager.rs:264` — so
+/// wiring it meant refusing the pair, not just adding a third boolean.
 pub const CONFIG_KEYS_PROVEN_ON_THE_WIRE: &[&str] = &[
     "id",
     "transport/link/tx/batch_size",
     "transport/link/tx/lease",
     "transport/unicast/lowlatency",
     "transport/unicast/compression/enabled",
+    "transport/unicast/qos/enabled",
 ];
 
 /// The only keys below which a real zenohd accepts leaves this tree's census

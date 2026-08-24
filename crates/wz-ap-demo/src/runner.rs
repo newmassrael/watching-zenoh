@@ -1754,13 +1754,26 @@ async fn race_against_shutdown<O>(
 /// rejection standing only because `session_open` had one entrypoint per MODE
 /// and none staged both offers. `initiate_and_open_session_with_offer` takes the
 /// SET, so that reason is gone and the guard went with it.
-fn initiator_offer(
-    #[allow(unused)] lowlatency: bool,
+///
+/// R2087 (open-debt item 506) — `qos` joins the argument list, and it is the
+/// argument that makes this function fallible. The other three are independent
+/// booleans; `qos` and `lowlatency` are the two halves of ONE exclusive choice
+/// (`TransportMode`), so a both-on input has no representation to be built into.
+/// Answering it by picking a winner is exactly the silent-drop this function
+/// exists to refuse, so it is refused instead — see [`exclusive_modes`].
+pub(crate) fn initiator_offer(
+    qos: bool,
+    lowlatency: bool,
     #[allow(unused)] compression: bool,
     #[allow(unused)] shm: bool,
-) -> SessionOffer {
+) -> Result<SessionOffer, &'static str> {
+    exclusive_modes(qos, lowlatency)?;
     #[allow(unused_mut)]
     let mut offer = SessionOffer::universal();
+    #[cfg(feature = "transport-qos")]
+    if qos {
+        offer = offer.with_mode(wz::runtime_tokio::session_open::TransportMode::Qos);
+    }
     #[cfg(feature = "transport-lowlatency")]
     if lowlatency {
         offer = offer.with_mode(wz::runtime_tokio::session_open::TransportMode::LowLatency);
@@ -1775,7 +1788,33 @@ fn initiator_offer(
     if shm {
         offer = offer.with_shm(true);
     }
-    offer
+    Ok(offer)
+}
+
+/// R2087 — the qos x lowlatency exclusivity, as ONE predicate this binary reads
+/// from two places: the argv parse (which exits before dialling anything) and
+/// [`initiator_offer`] (which is the seam the library sees).
+///
+/// It is deliberately FEATURE-INDEPENDENT. `--qos` on a build without
+/// `transport-qos` is inert, so a lean build could accept the contradictory
+/// command line and run — but what the operator ASKED for is contradictory
+/// either way, and answering it with a session is worse than refusing it. zenoh
+/// makes the same call at `io/zenoh-transport/src/unicast/manager.rs:264-265`
+/// (`'qos' and 'lowlatency' options are incompatible`), which is a runtime bail
+/// on the configuration and not on what got compiled in.
+///
+/// The message names the FLAGS rather than the modes because both callers reach
+/// it from a command line; the stock-config reader states the same rule in its
+/// own vocabulary (`zenoh_config.rs`, "qos and lowlatency are mutually
+/// exclusive"), one layer earlier, on the file it read.
+pub(crate) fn exclusive_modes(qos: bool, lowlatency: bool) -> Result<(), &'static str> {
+    if qos && lowlatency {
+        return Err(
+            "--qos and --lowlatency are mutually exclusive (zenoh bails on the \
+             pair at unicast/manager.rs:264; a session offers ONE transport mode)",
+        );
+    }
+    Ok(())
 }
 
 /// R311y505 — the ACCEPT-side offer. Only SHM is staged here: `lowlatency` and
@@ -1959,22 +1998,28 @@ pub(crate) async fn run_demo(
                     .await
                 }
                 Role::Initiator { .. } => {
-                    // R311y372 / R311y433 — an Initiator with `--lowlatency` or
-                    // `--compression` OFFERS that mode's establishment ext on the
-                    // InitSyn (`initiate_and_open_session_with_*` ->
-                    // `set_*_offer(true)`), so a peer that also offers it negotiates
-                    // it: lowlatency drops the Frame(sn) wrapper, compression lz4-
-                    // wraps every post-establishment batch. `main.rs` rejects the
-                    // pair, so the classification below is total. The per-mode
-                    // atom gating (and the inert-flag fallback for a build without
-                    // the atom) lives in `open_initiator_with_offer`.
+                    // R311y372 / R311y433 / R2087 — an Initiator with `--qos`,
+                    // `--lowlatency` or `--compression` OFFERS that capability's
+                    // establishment ext on the InitSyn
+                    // (`initiate_and_open_session_with_*` -> `set_*_offer(true)`),
+                    // so a peer that also offers it negotiates it: qos splits the
+                    // SN space per (priority, reliability), lowlatency drops the
+                    // Frame(sn) wrapper, compression lz4-wraps every
+                    // post-establishment batch. The per-mode atom gating (and the
+                    // inert-flag fallback for a build without the atom) lives in
+                    // `initiator_offer`, which also holds the qos x lowlatency
+                    // refusal — `main` has already refused that pair at the argv
+                    // parse, so reaching the `Err` here means a caller built a
+                    // `Role` without going through it.
                     let offer = match &role {
                         Role::Initiator {
+                            qos,
                             lowlatency,
                             compression,
                             shm,
                             ..
-                        } => initiator_offer(*lowlatency, *compression, *shm),
+                        } => initiator_offer(*qos, *lowlatency, *compression, *shm)
+                            .map_err(io::Error::other)?,
                         _ => SessionOffer::universal(),
                     };
                     open_initiator_with_offer(offer, dialed, params, session_clock).await

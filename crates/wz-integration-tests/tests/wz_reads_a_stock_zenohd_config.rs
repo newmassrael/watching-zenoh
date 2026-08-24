@@ -1057,13 +1057,23 @@ fn every_key_proven_on_the_wire_is_in_the_frame_a_zenohd_would_receive() {
             "transport: { unicast: { compression: { enabled: false } } }",
             "absent",
         ),
-        // ⚠ `transport/unicast/qos/enabled` is NOT here, and the reason is
-        // measured rather than assumed: with the key true AND false, the InitSyn
-        // offered `["patch"]` both times. `initiator_offer` (runner.rs) maps
-        // `--lowlatency` and `--compression` onto the offer and takes no qos
-        // argument at all, so the key reaches a flag with no wire sink on this
-        // path. Filed as open debt 506; adding it here without that wiring would
-        // be a claim with no witness.
+        // R2087 (open-debt item 506) — the THIRD capability, and the one that
+        // took a wire sink to earn its row. R2086 measured this key true AND
+        // false and got `["patch"]` both times: `initiator_offer` (runner.rs)
+        // took `lowlatency` / `compression` / `shm` and no qos argument at all,
+        // so the honoured key reached a flag nothing read.
+        // ⚠ The row states `lowlatency: false` ITSELF, for the same reason the
+        // lowlatency row states `qos: { enabled: false }` — the two are mutually
+        // exclusive upstream and wz refuses the pair at ingest, so a row that
+        // leaned on a default would be refused outright the moment the default
+        // moved.
+        (
+            "transport/unicast/qos/enabled",
+            "transport: { unicast: { qos: { enabled: true }, lowlatency: false } }",
+            "offered",
+            "transport: { unicast: { qos: { enabled: false }, lowlatency: false } }",
+            "absent",
+        ),
     ];
 
     // The POPULATION is the constant, so a key declared wire-proven without a

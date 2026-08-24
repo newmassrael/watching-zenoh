@@ -464,11 +464,20 @@ fn main() -> ExitCode {
                 })
                 .unwrap_or(1);
             // R311y218 (transport-qos) — `--qos` (presence bool) offers the QoS
-            // transport on this peer's aggregated links (the WzConfig.qos knob).
-            // TAKES EFFECT ONLY WITH `--max-links > 1`: qos is threaded through the
-            // multilink open path (option-b), so a single-link peer (`--max-links 1`,
-            // the default) takes the bare open arms and does NOT offer qos — `--qos`
-            // is a runtime no-op there. Priority segregation across links is y219.
+            // transport on this peer's aggregated links (the WzConfig.qos knob),
+            // threaded through the multilink open path (option-b). Priority
+            // segregation across links is y219.
+            //
+            // R2087 CORRECTS the sentence that stood here, which had outlived
+            // the code by exactly one round in the other direction: it read
+            // "TAKES EFFECT ONLY WITH `--max-links > 1` ... a single-link peer
+            // takes the bare open arms and does NOT offer qos". That was true of
+            // THIS arm and was written as though it were true of the flag, and
+            // the flag has a second reader now — the single-session
+            // `Role::Initiator` parse stages `TransportMode::Qos` on the
+            // `SessionOffer` whatever `--max-links` says (open-debt item 506).
+            // A scope stated as a property of a flag is the shape open-debt item
+            // 47 is about, so it is stated as a property of this ARM instead.
             #[cfg(feature = "transport-qos")]
             let qos = rest.iter().any(|a| a == "--qos");
             // R311y506 (session-extqos) — `--qos-band START-END` / `--qos-rel 0|1`
@@ -1025,6 +1034,25 @@ fn main() -> ExitCode {
     // builds the offer.
     let lowlatency = rest.iter().any(|a| a == "--lowlatency");
     let compression = rest.iter().any(|a| a == "--compression");
+    // R2087 (open-debt item 506) — `--qos` reaches the SINGLE-session open too.
+    // It has selected the aggregated (`--max-links > 1`) QoS path since R311y218
+    // and been a no-op here, which is what made
+    // `transport/unicast/qos/enabled` a honoured key with no wire sink: the
+    // reader expanded it into this flag and the flag reached nothing. Parsed
+    // feature-uniformly, like its two siblings above — `initiator_offer` is
+    // where a build without `transport-qos` drops it.
+    let qos = rest.iter().any(|a| a == "--qos");
+    // The qos x lowlatency exclusivity, refused BEFORE anything is dialled. The
+    // rule itself lives in `runner::exclusive_modes`, which `initiator_offer`
+    // reads as well, so the argv path and the library-facing seam cannot drift
+    // apart; what this call site adds is WHERE it is noticed — a usage error
+    // that costs a peer a connection is a usage error reported late.
+    if let Err(msg) = crate::runner::exclusive_modes(qos, lowlatency) {
+        eprintln!("wz-ap-demo: {msg}");
+        eprintln!();
+        print_usage();
+        return ExitCode::from(2);
+    }
     // R311y505 — `--shm` presence flag: offer the SHM establishment UNIT ext
     // (id 0x2) on the InitSyn. Presence-parsed like its two siblings.
     let shm = rest.iter().any(|a| a == "--shm");
@@ -1071,6 +1099,9 @@ fn main() -> ExitCode {
             quic_ca: parse_pair(rest, "--quic-ca"),
             // R311y369 — keyexpr namespace prefix for outbound publishes.
             namespace: parse_pair(rest, "--namespace"),
+            // R2087 — `--qos` presence flag: offer the QoS UNIT ext (0x1) on the
+            // InitSyn. Exclusive with `--lowlatency`, refused above.
+            qos,
             // R311y372 — `--lowlatency` presence flag: offer the lowlatency
             // transport on the InitSyn (mirror of `--reconnect` presence parsing).
             lowlatency,
@@ -1801,6 +1832,7 @@ fn main() -> ExitCode {
             tls_ca,
             quic_ca,
             namespace,
+            qos,
             lowlatency,
             compression,
             shm,
@@ -1817,6 +1849,9 @@ fn main() -> ExitCode {
             }
             if let Some(ns) = namespace {
                 log::info!("namespace = {ns} (outbound keyexprs prefixed {ns}/<key>)");
+            }
+            if *qos {
+                log::info!("qos = on (offers the QoS UNIT ext 0x1 on the InitSyn)");
             }
             if *lowlatency {
                 log::info!("lowlatency = on (offers Z_EXT_LOWLATENCY on the InitSyn)");
