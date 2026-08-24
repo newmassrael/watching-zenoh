@@ -448,7 +448,19 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # R311y569 asked for this counter precisely so that closing a plane MOVES it,
 # and the gate refused the push until the claim was written here — which is the
 # counter working rather than an obstacle to it.
-FOREIGN_ADJUDICATOR_LINKS = 856
+# R2094 (item 510) — 856 -> 859, in the NEW zenohd_scouts_wz_router_interop.rs.
+# ONE leg, THREE links, MEASURED not guessed (856 -> 859 is exactly the three
+# `wz-proves` lines added), and one of them takes `scouting-responder` OFF the
+# SINGLE-ADJUDICATOR list this file prints. The atom's only foreign witness was
+# `zenohd_scouts_wz_interop`, which drives the PEER role on a demo built without
+# `router-hat-router` — so the role a stock zenoh client's autoconnect default
+# actually asks for (`["router"]`, DEFAULT_CONFIG.json5:149) had answered nothing
+# but this tree's own scouter, and R2089's witness is wz<->wz precisely because
+# A4-3 refuses it a marker. `router-hat-router` gains its first foreign witness
+# on the DISCOVERY plane for the same reason: its existing zenohd adjudicators
+# all dial, or are dialled at, an endpoint the test hands over, and none of them
+# establish that the run-mode can be FOUND.
+FOREIGN_ADJUDICATOR_LINKS = 859
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

@@ -11505,6 +11505,27 @@ run: bash scripts/build-zenohd.sh)"
         _runci_guarded_test "M zenohd->wz scout" 1 \
             cargo test -p wz-integration-tests \
             --test zenohd_scouts_wz_interop -- --ignored || return 1
+        # R2094 (open-debt item 510) — THE SAME MIRROR, ON THE ROUTER ROLE. The
+        # leg above builds the demo WITHOUT `router-hat-router`, so the binary it
+        # drives has no `--router-hat` in it: until this round the only reader of
+        # a wz ROUTER's Hello was wz itself (R2089's witness is wz<->wz and A4-3
+        # refuses it a cross-impl marker for exactly that). The role a stock
+        # zenoh client's autoconnect default asks for is `router`, so a
+        # replacement nobody can find in that role is not a replacement.
+        #
+        # Its own demo build, on the argument the two legs above each make for
+        # theirs: the MINIMAL feature set that carries the claim is
+        # `router-hat-router` (the run-mode under test, which pulls
+        # `routing-peer` transitively for the control arm in the same test) plus
+        # `scouting-responder` (the answering half). Merging it into the set
+        # above would prove only that the two run-modes answer when built
+        # together. KEEP ON ONE LINE — `feature_closure.py`'s scraper cannot
+        # cross a newline, and every claim the file makes must sit inside a
+        # build's closure or A4-5 containment reds.
+        (cd crates && cargo build -p wz-ap-demo --features router-hat-router,scouting-responder --quiet) || return 1
+        _runci_guarded_test "M zenohd->wz router scout" 1 \
+            cargo test -p wz-integration-tests \
+            --test zenohd_scouts_wz_router_interop -- --ignored || return 1
     fi
     # R311nm — wz->pico multicast JOIN+Push interop e2e: a wz in-library
     # multicast publisher's JOIN beacon + framed Push are admitted and

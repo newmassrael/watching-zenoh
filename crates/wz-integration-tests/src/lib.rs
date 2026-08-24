@@ -1511,6 +1511,12 @@ pub mod common {
     pub const SCOUTING_E2E_ZID_WIDTHS: &[(&str, usize)] = &[
         ("wz_scout_zenohd_interop", 16),
         ("zenohd_scouts_wz_interop", 4),
+        // R2094 (open-debt item 510) — the ROUTER-role foreign witness, and a
+        // THIRD width. The row is the width of the zid in the Hello UNDER TEST,
+        // which is wz's own here: this leg is read by a foreign decoder, so
+        // eight bytes is a length nibble no zenohd in this suite had been
+        // handed. It is the width the leg PINS, not one it happened to get.
+        ("zenohd_scouts_wz_router_interop", 8),
     ];
 
     /// A zenohd zid of exactly `bytes` bytes, unique to this process.
@@ -4143,14 +4149,14 @@ mod tests {
             );
         }
 
-        // The SET, pinned: two widths out of sixteen, and the doc on
-        // `SCOUTING_E2E_ZID_WIDTHS` says why that is a foreign-witness claim
-        // rather than a reading of the axis. The deterministic sweep lives in
-        // `wz_session_core::scouting_message`.
+        // The SET, pinned: three widths out of sixteen (R2094 added the third),
+        // and the doc on `SCOUTING_E2E_ZID_WIDTHS` says why that is a
+        // foreign-witness claim rather than a reading of the axis. The
+        // deterministic sweep lives in `wz_session_core::scouting_message`.
         let widths: Vec<usize> = SCOUTING_E2E_ZID_WIDTHS.iter().map(|(_, b)| *b).collect();
         assert_eq!(
             widths,
-            vec![16, 4],
+            vec![16, 4, 8],
             "the scouting e2e no longer walk the widths this record names"
         );
     }
