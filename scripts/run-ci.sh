@@ -11952,7 +11952,13 @@ layer_z_zenohd_interop() {
     # its own and is registered here anyway, because this is the file that owns
     # "wz reads a stock zenohd config" and the guard is an EXACT count -- a leg
     # added without moving the number reds the lane, which is the drift catch.
-    _runci_guarded_test Z 5 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+    # R2073 raises 5 -> 6 for LEG 6 (open-debt item 216), the axis LEG 1 cannot
+    # reach: LEG 1's fixture moves every value AWAY from a default so the two
+    # cannot agree by accident, which makes it blind to what each side falls back
+    # to when the operator's file is SILENT — the case a drop-in actually meets.
+    # LEG 6 pins that key by key against the same real zenohd, and names the keys
+    # whose upstream default the resolved tree structurally cannot show.
+    _runci_guarded_test Z 6 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_reads_a_stock_zenohd_config -- --ignored --quiet --test-threads=1 \
         || return 1
     # R311y528 — §5.27 api-compat-pico LEG 9: upstream's own `z_info.c`, linked

@@ -218,6 +218,32 @@ fn resolved_config_of(captured: &str) -> Json5Value {
         .unwrap_or_else(|e| panic!("wz cannot read zenohd's own resolved config: {e}\n{body}"))
 }
 
+/// One resolved value in the spelling wz's own side renders it in, so the two
+/// are literally comparable.
+///
+/// R2073 — extracted from the differential leg below rather than copied for the
+/// silence leg. Two renderers would be two opinions about how a number or an
+/// array is spelled, and the whole point of both legs is that one side's answer
+/// is compared to the other's without a translation step in between.
+fn render_resolved(value: &Json5Value) -> String {
+    match value {
+        Json5Value::Bool(b) => b.to_string(),
+        Json5Value::Number(n) => n.clone(),
+        Json5Value::String(s) => format!("\"{s}\""),
+        Json5Value::Array(items) => {
+            let joined: Vec<String> = items
+                .iter()
+                .map(|i| match i {
+                    Json5Value::String(s) => format!("\"{s}\""),
+                    other => format!("{other:?}"),
+                })
+                .collect();
+            format!("[{}]", joined.join(","))
+        }
+        other => format!("{other:?}"),
+    }
+}
+
 // wz-proves: none -- for the reason its emit-direction sibling
 // (zenoh_config_emit_zenohd_interop) records: `zenoh-config-emit` is not an
 // inventory atom, so A4-1 would reject the name, and registering one is a round
@@ -329,22 +355,7 @@ fn wz_reads_the_same_values_out_of_a_config_that_zenohd_does() {
         let zenoh_says = resolved
             .get(path)
             .unwrap_or_else(|| panic!("zenohd's resolved config has no {path}\n{captured}"));
-        let rendered = match zenoh_says {
-            Json5Value::Bool(b) => b.to_string(),
-            Json5Value::Number(n) => n.clone(),
-            Json5Value::String(s) => format!("\"{s}\""),
-            Json5Value::Array(items) => {
-                let joined: Vec<String> = items
-                    .iter()
-                    .map(|i| match i {
-                        Json5Value::String(s) => format!("\"{s}\""),
-                        other => format!("{other:?}"),
-                    })
-                    .collect();
-                format!("[{}]", joined.join(","))
-            }
-            other => format!("{other:?}"),
-        };
+        let rendered = render_resolved(zenoh_says);
         assert_eq!(
             &rendered, wz_says,
             "{path}: zenohd resolved {rendered}, wz read {wz_says}\nsource:\n{source}"
@@ -374,6 +385,220 @@ fn wz_reads_the_same_values_out_of_a_config_that_zenohd_does() {
         resolved.get("transport/link/tx/threads"),
         Some(&Json5Value::Number(String::from("8"))),
         "the fixture's unhonoured key is one zenohd itself applied"
+    );
+
+    drop(guard);
+}
+
+// wz-proves: none -- same registration gap as the differential leg above.
+/// R2073 (open-debt item 216) — what each implementation falls back to when the
+/// operator's file says NOTHING, key by key.
+///
+/// ## Why the differential leg above cannot ask this
+///
+/// Its fixture moves EVERY value away from a default on purpose, so the two
+/// implementations cannot agree by both landing on one. That is the right shape
+/// for "did wz read what zenohd read", and it is structurally blind to the
+/// question underneath it: a drop-in is handed a file that omits most keys, and
+/// what the node then does is decided by whichever default each side carries.
+/// Two readers can agree on every stated byte and still describe two different
+/// nodes. `ZenohNodeConfig::default`'s own doc makes exactly this promise —
+/// "zenoh's own defaults for the subset this struct covers, so a caller that
+/// overrides one field is not silently redefining the other ten" — and until
+/// this leg nothing measured it.
+///
+/// ## What is comparable, and what would be a category error
+///
+/// Only the fields that answer with a VALUE for a silent file are claims about
+/// what the node does. The `Option` fields are not: `None` there means "the file
+/// gave no instruction", which is a record of the DOCUMENT, while zenohd's tree
+/// is a RESOLUTION. Comparing the two would be comparing different kinds of
+/// statement, and `adminspace` is the trap that makes it concrete — wz's `None`
+/// is documented as leaving the block out, while a real zenohd resolves
+/// `adminspace/enabled: true`. That pair is pinned below as what it is, rather
+/// than asserted as an equality it was never meant to satisfy.
+///
+/// ## The oracle's own blind spot, named rather than left implicit
+///
+/// A key a real zenohd resolves to `null` is one the tree has no answer for,
+/// and upstream's actual default for it lives in its config crate instead.
+/// MEASURED this round rather than assumed: `timestamping/enabled` resolves to
+/// `null` under BOTH `mode: "peer"` and `mode: "router"`, while upstream's
+/// declared default is per-whatami (`DEFAULT_CONFIG.json5:206`,
+/// `{ router: true, peer: false, client: false }`, read at the pinned
+/// checkout). wz carries a flat `bool` there, so it agrees with a peer and
+/// differs from a ROUTER, and no resolved tree can ever show that. Those keys
+/// are listed below so a green run cannot be read as coverage of them.
+#[test]
+#[ignore = "binary-dep e2e: needs target/zenohd/zenohd (scripts/build-zenohd.sh)"]
+fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zenohd() {
+    // The three keys the census fixture states. Everything else in the upstream
+    // surface is silent in it, which is this leg's premise and is asserted
+    // below rather than trusted.
+    const STATED: &[&str] = &["mode", "listen/endpoints", "scouting/multicast/enabled"];
+
+    // Keys a real zenohd resolves to `null` for a silent file: the tree has no
+    // answer, so this leg deliberately does NOT compare them, and says so.
+    const THE_TREE_ANSWERS_NULL: &[&str] = &[
+        "id",
+        "namespace",
+        "queries_default_timeout",
+        "routing/interests/timeout",
+        "scouting/timeout",
+        "transport/link/tls/root_ca_certificate",
+        "transport/link/tls/listen_certificate",
+        "transport/link/tls/listen_private_key",
+        "scouting/multicast/address",
+        "scouting/multicast/interface",
+        "scouting/multicast/ttl",
+        "scouting/multicast/listen",
+        "connect/retry",
+        // The two where wz DOES carry a flat default and upstream's is a
+        // function of `mode`. See this leg's doc: not a gap in the fixture, a
+        // limit of the oracle.
+        "timestamping/enabled",
+        "routing/peer/mode",
+    ];
+
+    // `adminspace` is a BLOCK on wz's side and three resolved leaves on
+    // zenohd's, so the two are different kinds of statement rather than two
+    // answers to one question.
+    const A_BLOCK_ON_ONE_SIDE_AND_LEAVES_ON_THE_OTHER: &[&str] = &[
+        "adminspace/enabled",
+        "adminspace/permissions/read",
+        "adminspace/permissions/write",
+    ];
+
+    let reservation = PortReservation::pick();
+    let port = reservation.port();
+    let source = census_config(port);
+
+    let ingest = ZenohNodeConfig::from_json5(&source)
+        .unwrap_or_else(|e| panic!("wz cannot read the census config: {e}\n{source}"));
+
+    // ANTI-VACUITY: the whole leg is about SILENCE, so a fixture that had grown
+    // a key would quietly narrow it. The premise is asserted, not assumed.
+    let mut named = ingest.named.clone();
+    named.sort_unstable();
+    let mut stated = STATED.to_vec();
+    stated.sort_unstable();
+    assert_eq!(
+        named, stated,
+        "the census fixture must state these keys and no others, or this leg is \
+         measuring the fixture instead of the defaults\n{source}"
+    );
+
+    let file = staged_config(&source);
+    drop(reservation);
+    let (guard, mut capture) = spawn_on_config("zenohd (silent config)", file.path());
+    let captured = wait_for_substring(&mut capture, RESOLVED_CONF_MARKER, STARTUP_BUDGET)
+        .unwrap_or_else(|e| panic!("zenohd never printed its resolved config: {e}\n{source}"));
+    let resolved = resolved_config_of(&captured);
+
+    // Every key where wz's struct answers with a value for a silent file, in
+    // the resolved tree's own spelling.
+    let wz = &ingest.config;
+    let claims: Vec<(&str, String)> = vec![
+        ("connect/endpoints", String::from("[]")),
+        ("transport/unicast/max_links", wz.max_links.to_string()),
+        ("transport/unicast/lowlatency", wz.lowlatency.to_string()),
+        ("transport/unicast/qos/enabled", wz.qos.to_string()),
+        (
+            "transport/unicast/compression/enabled",
+            wz.compression.to_string(),
+        ),
+        ("transport/link/tx/batch_size", wz.batch_size.to_string()),
+        ("transport/link/tx/lease", wz.lease_ms.to_string()),
+        (
+            "transport/multicast/qos/enabled",
+            wz.multicast_qos.to_string(),
+        ),
+        (
+            "transport/shared_memory/enabled",
+            wz.shared_memory.to_string(),
+        ),
+    ];
+    assert!(wz.connect.is_empty(), "the fixture states no connect list");
+
+    for (path, wz_says) in &claims {
+        let zenoh_says = resolved
+            .get(path)
+            .unwrap_or_else(|| panic!("zenohd's resolved config has no {path}\n{captured}"));
+        // A key that STARTED resolving to null upstream would turn this row
+        // into a comparison against nothing, which is the direction that reads
+        // as coverage while measuring none.
+        assert_ne!(
+            zenoh_says,
+            &Json5Value::Null,
+            "{path} used to resolve to a value and now resolves to null; it \
+             belongs in THE_TREE_ANSWERS_NULL, not here\n{captured}"
+        );
+        assert_eq!(
+            &render_resolved(zenoh_says),
+            wz_says,
+            "{path}: a file that never mentions it starts a zenohd with {} and \
+             a wz node with {wz_says} — two different nodes, and nothing said \
+             so\n{captured}",
+            render_resolved(zenoh_says),
+        );
+    }
+
+    for path in THE_TREE_ANSWERS_NULL {
+        assert_eq!(
+            resolved.get(path),
+            Some(&Json5Value::Null),
+            "{path} is listed as one the tree cannot answer and a real zenohd \
+             now resolves it; move it into the compared set\n{captured}"
+        );
+    }
+
+    // The pair that is two kinds of statement, stated as that.
+    assert!(
+        wz.adminspace.is_none(),
+        "wz's default leaves the block out — `None` is the document, not a \
+         resolution"
+    );
+    assert_eq!(
+        resolved.get("adminspace/enabled"),
+        Some(&Json5Value::Bool(true)),
+        "a real zenohd gives a silent file an ENABLED adminspace; wz's reader \
+         has nothing to hand on\n{captured}"
+    );
+    assert_eq!(
+        resolved.get("adminspace/permissions/read"),
+        Some(&Json5Value::Bool(true)),
+        "{captured}"
+    );
+    assert_eq!(
+        resolved.get("adminspace/permissions/write"),
+        Some(&Json5Value::Bool(false)),
+        "{captured}"
+    );
+
+    // EXHAUSTIVE: every honoured key is in exactly one class. A key added to
+    // the surface without a decision about its silent default reds here, which
+    // is the only thing keeping this leg from going quietly narrow.
+    let mut accounted: Vec<&str> = STATED
+        .iter()
+        .copied()
+        .chain(claims.iter().map(|(k, _)| *k))
+        .chain(THE_TREE_ANSWERS_NULL.iter().copied())
+        .chain(A_BLOCK_ON_ONE_SIDE_AND_LEAVES_ON_THE_OTHER.iter().copied())
+        .collect();
+    accounted.sort_unstable();
+    let before = accounted.len();
+    accounted.dedup();
+    assert_eq!(
+        before,
+        accounted.len(),
+        "a key is accounted for twice: {accounted:?}"
+    );
+    let mut honoured: Vec<&str> = HONOURED_CONFIG_KEYS.to_vec();
+    honoured.sort_unstable();
+    assert_eq!(
+        accounted, honoured,
+        "every honoured key needs a decision about what wz falls back to when \
+         the file is silent — compared, or named as one the tree cannot answer"
     );
 
     drop(guard);
