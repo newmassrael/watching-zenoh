@@ -62,6 +62,7 @@ use std::time::Duration;
 
 use tempfile::NamedTempFile;
 
+use wz_codecs::whatami::WhatAmI;
 use wz_integration_tests::common::{
     assert_demo_binary_newer_than_sources, wait_for_substring, wz_ap_demo_binary, zenohd_binary,
     ChildGuard, PortReservation,
@@ -70,8 +71,11 @@ use wz_runtime_tokio::zenoh_config::{
     ZenohNodeConfig, CONFIG_KEYS_PROVEN_ON_THE_WIRE, DEEPENABLE_UPSTREAM_KEYS,
     HONOURED_CONFIG_KEYS, UNHONOURED_UPSTREAM_CONFIG_KEYS,
 };
+use wz_runtime_tokio_test_support::zenoh_interop_session_init_params;
 use wz_session_core::dissect::{dissect_transport_message, FieldValue};
+use wz_session_core::handshake_encode::encode_init;
 use wz_session_core::json5::{self, Json5Value};
+use wz_session_core::lease::lease_from_wire;
 
 /// zenohd prints its resolved config on this line before doing anything else.
 const RESOLVED_CONF_MARKER: &str = "Initial conf:";
@@ -1017,6 +1021,18 @@ fn every_key_proven_on_the_wire_is_in_the_frame_a_zenohd_would_receive() {
             r#"id: "0f1e2d3c""#,
             "0f1e2d3c",
         ),
+        // R2085 (item 505) — the first key read out of a frame BEYOND the
+        // InitSyn. Both values are deliberately not whole seconds: the OPEN
+        // carries a unit flag, and a pair that could be sent either way would
+        // let a unit bug pass. The reported number is normalised through
+        // `lease_from_wire`, so what is compared is milliseconds either way.
+        (
+            "transport/link/tx/lease",
+            "transport: { link: { tx: { lease: 7500 } } }",
+            "7500",
+            "transport: { link: { tx: { lease: 3300 } } }",
+            "3300",
+        ),
     ];
 
     // The POPULATION is the constant, so a key declared wire-proven without a
@@ -1033,15 +1049,15 @@ fn every_key_proven_on_the_wire_is_in_the_frame_a_zenohd_would_receive() {
     );
 
     for (key, frag_a, want_a, frag_b, want_b) in FIXTURES {
-        let got_a = init_syn_field_from_a_config(key, frag_a);
-        let got_b = init_syn_field_from_a_config(key, frag_b);
+        let got_a = handshake_field_from_a_config(key, frag_a);
+        let got_b = handshake_field_from_a_config(key, frag_b);
         assert_eq!(
             got_a, *want_a,
-            "{key}: the InitSyn carried {got_a} where the file said {want_a}"
+            "{key}: the handshake carried {got_a} where the file said {want_a}"
         );
         assert_eq!(
             got_b, *want_b,
-            "{key}: the InitSyn carried {got_b} where the file said {want_b}"
+            "{key}: the handshake carried {got_b} where the file said {want_b}"
         );
         assert_ne!(
             got_a, got_b,
@@ -1051,15 +1067,23 @@ fn every_key_proven_on_the_wire_is_in_the_frame_a_zenohd_would_receive() {
     }
 }
 
-/// Run the demo configured ONLY by a file that names `batch_size`, and return
-/// the `batch_size` its InitSyn actually carried.
+/// Run the demo configured ONLY by a file that names `key`, and return what its
+/// handshake actually carried for that key.
 ///
 /// The listener is this test's own socket, so what is read is what the demo
 /// wrote. The 2-byte little-endian length prefix is `StreamEnvelope`'s
 /// (`stream_link.rs`), and the payload behind it is handed to the dissector
-/// rather than to a hand-rolled reader — a second opinion about the InitSyn
+/// rather than to a hand-rolled reader — a second opinion about the frame
 /// layout is the last thing a leg about wire fidelity should carry.
-fn init_syn_field_from_a_config(key: &str, fragment: &str) -> String {
+///
+/// R2085 (open-debt item 505) reaches PAST the first frame. A key announced in
+/// the OPEN rather than the INIT — `lease` is the one 211 named — is invisible
+/// to a listener that never answers, because the demo has no reason to proceed.
+/// So for those keys this speaks the one frame it has to: an InitAck built by
+/// `handshake_encode::encode_init`, wz's own production encoder. That keeps the
+/// instrument made of this tree's codec at BOTH ends, adds no public surface,
+/// and leaves the thing under judgement where it was — the bytes the demo sent.
+fn handshake_field_from_a_config(key: &str, fragment: &str) -> String {
     let demo = wz_ap_demo_binary();
     assert_demo_binary_newer_than_sources(&demo);
 
@@ -1123,35 +1147,103 @@ fn init_syn_field_from_a_config(key: &str, fragment: &str) -> String {
         .set_read_timeout(Some(Duration::from_secs(20)))
         .expect("a read deadline");
 
-    let mut prefix = [0u8; 2];
-    stream
-        .read_exact(&mut prefix)
-        .unwrap_or_else(|e| panic!("no length prefix from the demo: {e}\n{source}"));
-    let len = u16::from_le_bytes(prefix) as usize;
-    assert!(len > 0, "a zero-length frame is not an InitSyn\n{source}");
-    let mut payload = vec![0u8; len];
-    stream
-        .read_exact(&mut payload)
-        .unwrap_or_else(|e| panic!("the frame was short of its own prefix: {e}\n{source}"));
+    let payload = read_stream_frame(&mut stream, &source, "the demo's first frame");
+
+    let (frame, wire_name) = wire_reading(key);
+    let payload = match frame {
+        HandshakeFrame::InitSyn => payload,
+        HandshakeFrame::OpenSyn => {
+            // The InitSyn is not what is being read here, but it is still the
+            // frame that has to have arrived: answering an OPEN with an INIT|ACK
+            // would leave the next read waiting on a peer that had already given
+            // up, and the deadline would then blame the wrong thing.
+            let init = dissect_transport_message(&payload, 0).unwrap_or_else(|e| {
+                panic!("wz cannot dissect the demo's first frame: {e:?}\n{source}")
+            });
+            assert!(
+                init.find("batch_size").is_some(),
+                "the first frame is not an InitSyn, so the OPEN this leg wants \
+                 will never be sent\n{init:?}"
+            );
+
+            // An honest InitAck, built by THIS TREE'S OWN encoder. Nothing is
+            // exported to make it: `handshake_encode::encode_init` is already
+            // public, which is what open-debt 505 had not checked when it listed
+            // "a new observation surface" and "a hand-rolled accept FSM" as the
+            // only two routes to the OPEN. The acceptor here is an INSTRUMENT --
+            // what is judged is still only what the DEMO wrote.
+            let mut params = zenoh_interop_session_init_params(WhatAmI::Router, vec![0x0a; 4]);
+            params.cookie = vec![0xc0, 0x0c, 0x1e, 0x00];
+            let ack = encode_init(&params, true, &[], None)
+                .unwrap_or_else(|e| panic!("wz cannot encode its own InitAck: {e:?}"));
+            let len = u16::try_from(ack.len()).expect("an InitAck fits a 2-byte prefix");
+            stream
+                .write_all(&len.to_le_bytes())
+                .and_then(|()| stream.write_all(&ack))
+                .unwrap_or_else(|e| panic!("could not answer the InitSyn: {e}\n{source}"));
+            read_stream_frame(&mut stream, &source, "the demo's OPEN")
+        }
+    };
     drop(guard);
 
     let field = dissect_transport_message(&payload, 0)
-        .unwrap_or_else(|e| panic!("wz cannot dissect its own first frame: {e:?}\n{source}"));
+        .unwrap_or_else(|e| panic!("wz cannot dissect the frame it asked for: {e:?}\n{source}"));
 
-    // The dissector's own field names, one per key. A key whose wire spelling
-    // this leg cannot read is refused loudly rather than reported as a miss:
-    // adding it to `CONFIG_KEYS_PROVEN_ON_THE_WIRE` is a claim that something
-    // reads it, and this is where that claim is kept.
-    let wire_name = match key {
-        "transport/link/tx/batch_size" => "batch_size",
-        "id" => "zid",
-        other => panic!("{other} is declared wire-proven and this leg cannot read it"),
-    };
     match field.find(wire_name).map(|f| &f.value) {
+        Some(FieldValue::Uint(v)) if wire_name == "lease" => {
+            // The lease's UNIT is on the wire, in the OPEN's `t` flag: set means
+            // seconds. Reporting the raw number would make a leg about wire
+            // fidelity depend on which unit the encoder happened to choose, so
+            // the flag is read and the value normalised back to milliseconds by
+            // the same `lease_from_wire` the receiving side uses.
+            let in_seconds = matches!(
+                field.find("t").map(|f| &f.value),
+                Some(FieldValue::Flag(true))
+            );
+            lease_from_wire(in_seconds, *v).to_string()
+        }
         Some(FieldValue::Uint(v)) => v.to_string(),
         Some(FieldValue::Bytes(b)) => b.iter().map(|byte| format!("{byte:02x}")).collect(),
-        other => panic!("the first frame carries no {wire_name}: {other:?}\n{field:?}"),
+        other => panic!("the frame carries no {wire_name}: {other:?}\n{field:?}"),
     }
+}
+
+/// Which handshake frame a wire-proven key rides in, and the dissector's own
+/// name for it there.
+///
+/// A key whose wire spelling this leg cannot read is refused LOUDLY rather than
+/// reported as a miss: adding a name to `CONFIG_KEYS_PROVEN_ON_THE_WIRE` is a
+/// claim that something reads it, and this is where that claim is kept.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum HandshakeFrame {
+    InitSyn,
+    OpenSyn,
+}
+
+fn wire_reading(key: &str) -> (HandshakeFrame, &'static str) {
+    match key {
+        "transport/link/tx/batch_size" => (HandshakeFrame::InitSyn, "batch_size"),
+        "id" => (HandshakeFrame::InitSyn, "zid"),
+        "transport/link/tx/lease" => (HandshakeFrame::OpenSyn, "lease"),
+        other => panic!("{other} is declared wire-proven and this leg cannot read it"),
+    }
+}
+
+/// One `StreamEnvelope` frame: a 2-byte little-endian length and its payload
+/// (`stream_link.rs`). `what` names the frame so a short read blames the read
+/// that was actually being attempted.
+fn read_stream_frame(stream: &mut std::net::TcpStream, source: &str, what: &str) -> Vec<u8> {
+    let mut prefix = [0u8; 2];
+    stream
+        .read_exact(&mut prefix)
+        .unwrap_or_else(|e| panic!("no length prefix for {what}: {e}\n{source}"));
+    let len = u16::from_le_bytes(prefix) as usize;
+    assert!(len > 0, "a zero-length frame is not {what}\n{source}");
+    let mut payload = vec![0u8; len];
+    stream
+        .read_exact(&mut payload)
+        .unwrap_or_else(|e| panic!("{what} was short of its own prefix: {e}\n{source}"));
+    payload
 }
 
 // wz-proves: none -- same registration gap as the leg above.

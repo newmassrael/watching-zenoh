@@ -1313,7 +1313,18 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
 /// ⚠ It is SHORT on purpose and must not be padded. Adding a key here is a claim
 /// that a leg reads it off a frame, and `wz_reads_a_stock_zenohd_config`'s wire
 /// leg is driven by this constant — a name added without a witness reds there.
-pub const CONFIG_KEYS_PROVEN_ON_THE_WIRE: &[&str] = &["id", "transport/link/tx/batch_size"];
+///
+/// R2085 (open-debt item 505) adds `transport/link/tx/lease`, the first entry
+/// read out of a frame BEYOND the demo's first. `lease` is announced in the
+/// OPEN, and a listener that never answers the InitSyn gives the node no reason
+/// to send one — which is why 211 could prove only one of the two values it
+/// named. The leg now returns an InitAck built by `handshake_encode::encode_init`
+/// and reads the OPEN that follows.
+pub const CONFIG_KEYS_PROVEN_ON_THE_WIRE: &[&str] = &[
+    "id",
+    "transport/link/tx/batch_size",
+    "transport/link/tx/lease",
+];
 
 /// The only keys below which a real zenohd accepts leaves this tree's census
 /// surface does not list.
