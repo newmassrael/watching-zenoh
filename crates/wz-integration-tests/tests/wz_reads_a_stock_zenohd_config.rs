@@ -720,25 +720,45 @@ fn the_acceptance_boundary_is_measured_against_zenohd_case_by_case() {
             "unhonoured leaf, deepened",
             r#"access_control: { enabled: { xyz: true } }"#,
             false,
-            true,
+            false,
             "invalid type: map, expected a boolean",
         ),
         (
             "unhonoured leaf, deepened (auth)",
             r#"transport: { auth: { usrpwd: { user: { xyz: 1 } } } }"#,
             false,
-            true,
+            false,
             "invalid type: map, expected a string",
+        ),
+        // R2078 — the controls that make the tightening safe, and the reason the
+        // exception list is measured rather than guessed: each of these deepens
+        // BELOW a key the surface names, and a real zenohd starts on all three.
+        // A boundary that refused them would stop a working deployment, which is
+        // the worse half of this trade.
+        (
+            "deepenable: a mode table on an unhonoured key",
+            r#"connect: { timeout_ms: { router: 1000, peer: 2000 } }"#,
+            true,
+            true,
+            "",
+        ),
+        (
+            "deepenable: a table of tables",
+            r#"scouting: { multicast: { enabled: false },
+                           gossip: { autoconnect_strategy: { peer: { to_router: "always" } } } }"#,
+            true,
+            true,
+            "",
         ),
     ];
 
-    /// The rows where the two implementations DISAGREE, by label. Pinned as a
-    /// SET: closing one without shrinking this list fails, and opening a new one
-    /// fails too.
-    const DIVERGES: &[&str] = &[
-        "unhonoured leaf, deepened",
-        "unhonoured leaf, deepened (auth)",
-    ];
+    /// The rows where the two implementations DISAGREE, by label.
+    ///
+    /// R2078 emptied it: the two rows that were here are the divergence R2076
+    /// measured and this round closed. The constant STAYS, and stays asserted
+    /// against the table, so a new divergence has to be declared rather than
+    /// noticed.
+    const DIVERGES: &[&str] = &[];
 
     // ── ANTI-VACUITY ────────────────────────────────────────────────────
     // A table that agreed everywhere would read as "the boundary matches" while
@@ -753,9 +773,14 @@ fn the_acceptance_boundary_is_measured_against_zenohd_case_by_case() {
         declared, DIVERGES,
         "the pinned divergence set no longer matches the table"
     );
+    // R2078 — the divergence set is empty now, so the anti-vacuity check moved to
+    // the ORACLE: the table must still make a real zenohd both start and refuse.
+    // A fixture that had drifted into all-accepting would agree with wz
+    // everywhere and measure nothing, which is the shape an empty DIVERGES could
+    // otherwise hide.
     assert!(
-        BOUNDARY.iter().any(|(_, _, z, w, _)| z == w) && !DIVERGES.is_empty(),
-        "the table must carry both agreements and divergences"
+        BOUNDARY.iter().any(|(_, _, z, _, _)| *z) && BOUNDARY.iter().any(|(_, _, z, _, _)| !*z),
+        "the table must exercise BOTH of zenohd's verdicts"
     );
     // R2077 — a refusing row without a reason would be back to "zenohd said no"
     // as the whole measurement, which is the defect this column exists to close.
@@ -771,11 +796,29 @@ fn the_acceptance_boundary_is_measured_against_zenohd_case_by_case() {
     for (label, fragment, zenohd_starts, wz_accepts, reason) in BOUNDARY {
         let reservation = PortReservation::pick();
         let port = reservation.port();
+        // R2078 — a row whose subject IS `scouting` has to supply the whole
+        // block, because JSON5 has no way to add a field to an object stated
+        // above and the collision guard (rightly) refuses a second one. Such a
+        // row therefore owes the multicast-off the base would have given it,
+        // and is required to carry it rather than trusted to.
+        let owns_scouting = fragment.trim_start().starts_with("scouting");
+        if owns_scouting {
+            assert!(
+                fragment.contains("enabled: false"),
+                "{label}: a row that supplies its own `scouting` block must keep \
+                 multicast off, or the node chatters on the group"
+            );
+        }
+        let base_scouting = if owns_scouting {
+            ""
+        } else {
+            "scouting: { multicast: { enabled: false } },"
+        };
         let source = format!(
             r#"{{
   mode: "peer",
   listen: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
-  scouting: {{ multicast: {{ enabled: false }} }},
+  {base_scouting}
   {fragment}
 }}
 "#

@@ -1299,16 +1299,70 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
 /// bogus field INSIDE `connect/retry` too, where this accepts anything under a
 /// known opaque node. wz's boundary is therefore a SUPERSET of zenoh's by
 /// exactly the fields nested inside subtrees wz does not model.
+/// The only keys below which a real zenohd accepts leaves this tree's census
+/// surface does not list.
+///
+/// R2078 (open-debt item 501) — MEASURED, one zenohd run per entry, at the
+/// pinned checkout. Two kinds sit here together because the acceptance boundary
+/// treats them the same:
+///
+/// * OPAQUE subtrees whose contents upstream does not validate at all —
+///   `plugins` (a plugin's own config), `metadata` (free-form), and
+///   `connect/retry`, which is the one exception in an otherwise strict tree
+///   (measured: a real zenohd handed `connect: { retry: { period_init_mss: 250 } }`
+///   starts and drops the field, while the same typo under `transport/link/tx`
+///   or `transport/link/tls` refuses to start).
+/// * MODE-DEPENDENT keys, whose value may be a `{ router, peer, client }` table
+///   instead of the value itself. Every one of them was run: the table form
+///   starts. The two `autoconnect_strategy` keys nest one level FURTHER
+///   (`{ peer: { to_router: "always" } }`, `DEFAULT_CONFIG.json5:159-162`), which
+///   is why a prefix rule and not a fixed depth.
+///
+/// ⛔ This list is what keeps the tightening below from becoming the OPPOSITE
+/// defect. Refusing a document a real zenohd accepts is worse than accepting one
+/// it refuses: the first stops a working deployment, the second only fails to
+/// catch a typo. Every entry earns its place by execution.
+const DEEPENABLE_UPSTREAM_KEYS: &[&str] = &[
+    "connect/endpoints",
+    "connect/exit_on_failure",
+    "connect/retry",
+    "connect/timeout_ms",
+    "listen/endpoints",
+    "listen/exit_on_failure",
+    "listen/timeout_ms",
+    "metadata",
+    "plugins",
+    "scouting/gossip/autoconnect",
+    "scouting/gossip/autoconnect_strategy",
+    "scouting/gossip/target",
+    "scouting/multicast/autoconnect",
+    "scouting/multicast/autoconnect_strategy",
+    "scouting/multicast/listen",
+    "timestamping/enabled",
+];
+
+/// Whether upstream would accept this leaf path at all.
+///
+/// R2078 (open-debt item 501) — this used to accept anything BELOW a key it
+/// knew, and that prefix rule was the last judge in exactly one place: a typo
+/// under an UNHONOURED key, whose value wz never reads and therefore never
+/// type-checks. `access_control: { enabled: { xyz: true } }` passed here and a
+/// real zenohd refuses to start on it, so a typo the operator's OLD node caught
+/// ran silently under wz — the precise inverse of a drop-in.
+///
+/// The rule is now EXACT, with [`DEEPENABLE_UPSTREAM_KEYS`] as the measured
+/// exception. `wz_reads_a_stock_zenohd_config`'s boundary leg holds both
+/// directions against a real zenohd.
 fn upstream_knows(path: &str) -> bool {
+    let under = |known: &&str| {
+        path.len() > known.len() && path.starts_with(*known) && path.as_bytes()[known.len()] == b'/'
+    };
     HONOURED_CONFIG_KEYS
         .iter()
         .chain(UNHONOURED_UPSTREAM_CONFIG_KEYS)
-        .any(|known| {
-            path == *known
-                || (path.len() > known.len()
-                    && path.starts_with(known)
-                    && path.as_bytes()[known.len()] == b'/')
-        })
+        .any(|known| path == *known)
+        || HONOURED_SUBTREE_LEAVES.contains(&path)
+        || DEEPENABLE_UPSTREAM_KEYS.iter().any(under)
 }
 
 /// The result of reading a stock zenoh config: what wz took from it, and —
@@ -3265,6 +3319,79 @@ mod tests {
             let table = doc_with(key, &format!("{{ router: {value} }}"));
             ZenohNodeConfig::from_json5(&table)
                 .unwrap_or_else(|e| panic!("{key} table spelling: {e:?}\n{table}"));
+        }
+    }
+
+    // ── R2078 (open-debt item 501) — the acceptance boundary, tightened ──
+
+    /// A typo BELOW an unhonoured key is refused, and the shapes that
+    /// legitimately deepen are still read.
+    ///
+    /// The pair is the whole trade. Tightening is only worth doing if it stops
+    /// exactly what a real zenohd stops and nothing else: refusing a document
+    /// upstream accepts would stop a working deployment, which is a worse
+    /// failure than letting a typo through. Both halves are measured against a
+    /// real zenohd by `wz_reads_a_stock_zenohd_config`'s boundary leg; these are
+    /// the same claims where a unit test can hold them.
+    #[test]
+    fn a_typo_below_an_unhonoured_key_is_refused_and_the_deepenable_shapes_are_not() {
+        for doc in [
+            // Nothing in wz READS these, so before this round nothing
+            // type-checked them either and the prefix rule said yes.
+            r#"{ mode: "peer", access_control: { enabled: { xyz: true } } }"#,
+            r#"{ mode: "peer", transport: { auth: { usrpwd: { user: { xyz: 1 } } } } }"#,
+            r#"{ mode: "peer", transport: { link: { tls: { root_ca_certificat: "/x" } } } }"#,
+        ] {
+            let err = match ZenohNodeConfig::from_json5(doc) {
+                Ok(read) => panic!("a key upstream refuses was accepted: {read:?}\n{doc}"),
+                Err(e) => e,
+            };
+            assert!(
+                matches!(err, ConfigIngestError::UnknownKey { .. }),
+                "{err:?}\n{doc}"
+            );
+        }
+
+        // The controls: each deepens BELOW a key the surface names, and a real
+        // zenohd starts on every one of them.
+        for doc in [
+            r#"{ mode: "peer", plugins: { rest: { http_port: 8000 } } }"#,
+            r#"{ mode: "peer", metadata: { name: "strawberry" } }"#,
+            r#"{ mode: "peer", connect: { retry: { period_init_mss: 250 } } }"#,
+            r#"{ mode: "peer", connect: { timeout_ms: { router: 1000, peer: 2000 } } }"#,
+            r#"{ mode: "peer", scouting: { gossip: { autoconnect_strategy:
+                 { peer: { to_router: "always" } } } } }"#,
+        ] {
+            ZenohNodeConfig::from_json5(doc)
+                .unwrap_or_else(|e| panic!("a document zenohd accepts was refused: {e:?}\n{doc}"));
+        }
+    }
+
+    /// Every key in the deepenable exception list is one the census surface
+    /// actually names.
+    ///
+    /// An entry that names nothing would widen the boundary for a path upstream
+    /// has no key at, which is the direction that quietly re-opens what this
+    /// round closed. The list is also required NON-EMPTY: an empty one would
+    /// make the boundary exact everywhere and refuse `plugins.rest.http_port`.
+    #[test]
+    fn every_deepenable_key_is_one_the_upstream_surface_names() {
+        assert!(!DEEPENABLE_UPSTREAM_KEYS.is_empty());
+        for key in DEEPENABLE_UPSTREAM_KEYS {
+            assert!(
+                HONOURED_CONFIG_KEYS.contains(key) || UNHONOURED_UPSTREAM_CONFIG_KEYS.contains(key),
+                "{key} is an exception to the boundary and is not in the surface at all"
+            );
+        }
+        // And every key upstream declares mode-dependent must be here: the table
+        // spelling is legal on all of them, so a missing one is a refusal wz
+        // would issue and zenohd would not.
+        for key in MODE_DEPENDENT_CONFIG_KEYS {
+            assert!(
+                DEEPENABLE_UPSTREAM_KEYS.contains(key),
+                "{key} takes a `{{ router, peer, client }}` table and the boundary \
+                 would refuse it"
+            );
         }
     }
 
