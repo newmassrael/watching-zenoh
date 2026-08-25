@@ -1302,8 +1302,22 @@ layer_b_verify_codegen() {
 # ─── Layer B2 — committed-codegen regen-diff gate (R311y22) ─────────
 #
 # R311y22 moved the SCXML->Rust codegen out of the per-crate build.rs
-# scripts and into committed files under out/** (so a plain `cargo build`
-# of the wz stack needs no libxml2/SCE toolchain). This gate keeps the
+# scripts and into committed files under out/**, so a plain `cargo build`
+# no longer RUNS the SCE codegen binary.
+#
+# R2105 (open-debt item 526) — that clause used to end "so a plain `cargo
+# build` of the wz stack needs no libxml2/SCE toolchain", and the second half
+# of that was FALSE. Measured: `cargo tree -e normal,build -i libxml
+# --workspace` reaches `libxml` through `sce-forge-runtime`'s own build script
+# (`sce-build` -> `libxml`), and sce-forge-runtime is the runtime support crate
+# every generated codec links. So a plain `cargo build` needs native libxml2
+# whether or not it runs codegen. The `portability` job's vcpkg step has said
+# so in its own comment for rounds, which made this tree carry two statements
+# that contradicted each other -- and the consumer who hit the wall had
+# believed this one. What R311y22 removed is the sce-codegen BINARY
+# requirement, not the libxml2 one.
+#
+# This gate keeps the
 # committed tree honest: regenerate it via the xtask codegen SSOT, then
 # fail if it differs from what is committed. With this gate, the committed
 # out/** is a VERIFIED CACHE of the SCXML SSOT (committed == regenerated),

@@ -6,7 +6,20 @@
 //! Regenerates the committed generated Rust under `out/**` from the SCXML
 //! sources. It is the ONE place codegen is invoked; the per-crate `build.rs`
 //! scripts stop running codegen and instead `include!` the committed files,
-//! so a plain `cargo build` of the wz stack needs no libxml2/SCE toolchain.
+//! so a plain `cargo build` of the wz stack no longer RUNS the SCE codegen
+//! binary.
+//!
+//! R2105 (open-debt item 526) — that sentence used to end "needs no
+//! libxml2/SCE toolchain", and the libxml2 half was FALSE. `cargo tree -e
+//! normal,build -i libxml --workspace` reaches `libxml` through
+//! `sce-forge-runtime`'s OWN build script (`sce-build` -> `libxml`), and
+//! sce-forge-runtime is the runtime support crate every generated codec
+//! links — so native libxml2 is needed whether or not codegen runs. This
+//! tree carried the claim twice (here and in `run-ci.sh`'s Layer B2 note)
+//! while the `portability` job's vcpkg step said the opposite, and the
+//! consumer who hit the wall had believed these two. The build prerequisites
+//! now live in README's BUILD-PREREQS block, which
+//! `scripts/lib/apt_package_census.py` holds to what CI actually installs.
 //!
 //! Faithfulness: each emit uses the SAME `sce_build::compile_forge_with_imports`
 //! call (+ the SAME SCE-MAP strip) the pre-R311y22 `wz-codecs/build.rs` used,
