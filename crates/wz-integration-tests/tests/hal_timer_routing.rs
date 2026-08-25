@@ -154,6 +154,19 @@ impl StatePolicy for TimerProbePolicy {
     fn get_state_name(_s: Self::State) -> &'static str {
         "s0"
     }
+    // SCE pin 4fd846df76 made `get_state_name` invertible: the runtime
+    // now requires the reverse lookup so a host can turn a recorded
+    // configuration back into the `StateChain` `enter_at` takes. The
+    // contract it documents is an identity —
+    // `get_state_from_name(get_state_name(s))` is `Some(s)` — and a name
+    // the document does not carry is `None` rather than a guess, which
+    // is why the arm list is exhaustive rather than a catch-all `Some`.
+    fn get_state_from_name(name: &str) -> Option<Self::State> {
+        match name {
+            "s0" => Some(St::S0),
+            _ => None,
+        }
+    }
 
     fn last_transition_is_internal(&self) -> bool {
         self.last_internal
