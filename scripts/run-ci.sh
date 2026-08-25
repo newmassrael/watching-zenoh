@@ -8355,6 +8355,36 @@ layer_c1bo_dissect_c_abi() {
     return 0
 }
 
+# ─── Layer C1so — every cdylib carries its SONAME (R2103, item 521) ─────────
+#
+# Cargo emits a `cdylib` with no DT_SONAME, and the linker then records in the
+# CONSUMER's DT_NEEDED whatever string it used to find the library. Link by
+# PATH -- which is what CMake's `target_link_libraries(app /abs/path/lib.so)`
+# generates -- and that string is an absolute build-tree path. The consumer
+# cannot ship what it built: an absolute DT_NEEDED is not a search key, the
+# dynamic linker OPENS it, and RPATH / $ORIGIN / LD_LIBRARY_PATH are never
+# consulted. A downstream C/C++ consumer of `wz-capi-dissect` was carrying
+# `patchelf --set-soname` over every copy it took.
+#
+# Its own lane and not a leg of C1bo, because the SUBJECT is wider than that
+# lane's crate by four: this workspace emits FIVE cdylibs and the report named
+# four. That is also why the gate derives its population from cargo metadata --
+# the hand-written list was wrong on the day it was written, and a sixth cdylib
+# crate must arrive already gated rather than one report later.
+#
+# The DEV profile: a SONAME is a linker argument with no profile-dependent path
+# through `wz_cdylib_build`, and nothing LTO can remove. Release is one flag
+# away (`--profile release`) and costs minutes under `lto = "thin"` +
+# `codegen-units = 1` for a claim the dev artifact already settles.
+#
+# `WZ_SONAME_REQUIRE` turns the non-ELF-platform SKIP into a FAIL, the arming
+# rule Layers A3/A4/A5/Qz use. Hosted sets it: a lane that SKIPs where the job
+# provisions its input is a provisioning regression wearing a green badge.
+layer_c1so_cdylib_soname() {
+    python3 scripts/lib/cdylib_soname_gate.py || return 1
+    return 0
+}
+
 # R311y612 (§5.11) — wz-capture at `--no-default-features`, which NO lane had.
 #
 # The gap was not hypothetical. R311y609 found that `wz-capture` did not
@@ -14806,6 +14836,7 @@ run_layer C1be layer_c1be_cargo_test_query_value || overall=1
 run_layer C1bf layer_c1bf_cargo_clippy_all_features || overall=1
 run_layer C1bn layer_c1bn_passive_dissection_features || overall=1
 run_layer C1bo layer_c1bo_dissect_c_abi || overall=1
+run_layer C1so layer_c1so_cdylib_soname || overall=1
 run_layer C1bt layer_c1bt_capture_no_default_features || overall=1
 run_layer C1bq layer_c1bq_zero_copy_arena || overall=1
 run_layer C1br layer_c1br_uring_fixed_buffers || overall=1

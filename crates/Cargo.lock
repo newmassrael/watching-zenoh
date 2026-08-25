@@ -2441,6 +2441,7 @@ name = "wz-capi-c"
 version = "0.1.0"
 dependencies = [
  "wz-capi-core",
+ "wz-cdylib-build",
  "wz-runtime-tokio",
  "wz-runtime-tokio-test-support",
 ]
@@ -2461,6 +2462,7 @@ name = "wz-capi-dissect"
 version = "0.1.0"
 dependencies = [
  "wz-capture",
+ "wz-cdylib-build",
  "wz-codecs",
  "wz-packet-fixtures",
  "wz-session-core",
@@ -2474,6 +2476,7 @@ dependencies = [
  "libc",
  "tokio",
  "wz-capi-core",
+ "wz-cdylib-build",
  "wz-runtime-tokio",
  "wz-runtime-tokio-test-support",
 ]
@@ -2486,6 +2489,10 @@ dependencies = [
  "wz-packet-fixtures",
  "wz-session-core",
 ]
+
+[[package]]
+name = "wz-cdylib-build"
+version = "0.1.0"
 
 [[package]]
 name = "wz-codecs"
@@ -2671,6 +2678,7 @@ version = "0.1.0"
 name = "wz-plugin-example"
 version = "0.1.0"
 dependencies = [
+ "wz-cdylib-build",
  "wz-plugin-abi",
 ]
 
@@ -2908,6 +2916,7 @@ version = "0.1.0"
 name = "wz-volume-example"
 version = "0.1.0"
 dependencies = [
+ "wz-cdylib-build",
  "wz-volume-abi",
 ]
 

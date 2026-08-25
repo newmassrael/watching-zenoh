@@ -43,6 +43,12 @@ name = "wz_capi_pico"
 path = "src/lib.rs"
 crate-type = ["cdylib", "rlib"]
 
+# R2103 (open-debt item 521) — build.rs gives the cdylib its SONAME. Without
+# one, a pico program that links this artifact by path records that absolute
+# build-time path in DT_NEEDED and cannot redistribute what it built.
+[build-dependencies]
+wz-cdylib-build = { path = "../wz-cdylib-build" }
+
 [features]
 # R311y391 (CALLER fail-fast, pico half) — off-default `unixpipe/` (Unix
 # named-pipe) ACCEPT transport, forwarding wz-runtime-tokio's

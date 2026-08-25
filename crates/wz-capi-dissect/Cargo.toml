@@ -24,6 +24,13 @@ workspace = true
 name = "wz_capi_dissect"
 crate-type = ["cdylib", "rlib"]
 
+# R2103 (open-debt item 521) — build.rs gives the cdylib its SONAME. This is
+# the crate the downstream C/C++ consumer reported: it was linking the artifact
+# by path, so its own DT_NEEDED held an absolute build-tree path and it was
+# working around that with `patchelf --set-soname` on every copy.
+[build-dependencies]
+wz-cdylib-build = { path = "../wz-cdylib-build" }
+
 [dependencies]
 # R311y855 — `dissect` selected HERE, because this crate is the second
 # consumption root for the field walker (`wz-analyze` is the first). The feature

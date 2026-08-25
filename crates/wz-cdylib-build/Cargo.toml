@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-cdylib-build — shared build-script helper for the cdylib crates.
+#
+# R2103 (open-debt item 521) — cargo does not give a `cdylib` a SONAME, and
+# without one a consumer that links the artifact BY PATH (which is what
+# CMake's `target_link_libraries(app /abs/path/lib.so)` does) gets that
+# absolute build-time path recorded in its own DT_NEEDED. The consumer then
+# cannot ship what it built: the dynamic linker OPENS that path rather than
+# searching it, so an `$ORIGIN` RPATH is never consulted.
+#
+# One crate rather than five copies of the same dozen lines, on the
+# `wz-codegen-build` precedent: that crate exists because the sce-codegen
+# lookup had been duplicated across three build scripts. The ELF-target list
+# is the part that would rot in five places at once, because it is the only
+# judgement the whole helper makes.
+
+[package]
+name = "wz-cdylib-build"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Shared build-script helper: give a cdylib target its SONAME, so a consumer linking it by path does not record an absolute build-time path in DT_NEEDED."
+
+[lib]
+name = "wz_cdylib_build"
+path = "src/lib.rs"
+
+[lints]
+workspace = true

@@ -104,6 +104,12 @@ members = [
     # itself.
     "wz-volume-example",
     "wz-codegen-build",
+    # R2103 (open-debt item 521) — the SONAME every cdylib in this workspace
+    # was shipping without. A build-script helper on the `wz-codegen-build`
+    # pattern above, and for the same stated reason: the one judgement it makes
+    # (which target platforms take `-Wl,-soname`) would otherwise be duplicated
+    # across FIVE build scripts and corrected in fewer than five.
+    "wz-cdylib-build",
     "wz-runtime-core",
     "wz-session-core",
     "wz-session-core-test-support",

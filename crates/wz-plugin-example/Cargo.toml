@@ -35,5 +35,13 @@ crate-type = ["cdylib"]
 [dependencies]
 wz-plugin-abi = { path = "../wz-plugin-abi" }
 
+# R2103 (open-debt item 521) — build.rs gives the cdylib its SONAME. A plugin
+# is dlopen'd rather than linked, so nothing here is at stake for a consumer's
+# DT_NEEDED; it is done anyway because this crate is the EXAMPLE a plugin author
+# copies. A build-dependency, so the "depends on wz-plugin-abi AND NOTHING ELSE"
+# claim above — which is about what a plugin must LINK — still holds exactly.
+[build-dependencies]
+wz-cdylib-build = { path = "../wz-cdylib-build" }
+
 [lints]
 workspace = true

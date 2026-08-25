@@ -443,6 +443,21 @@ jobs:
       - name: Layer C1 — cargo test --workspace
         run: bash scripts/run-ci.sh --layer C1
 
+      - name: Layer C1so — every cdylib carries its SONAME
+        # R2103 (open-debt item 521). In THIS job because Layer C1 above has
+        # just compiled the whole workspace at the dev profile, so the five
+        # cdylibs the gate reads are already linked and it costs a `readelf`
+        # each. A job of its own would rebuild them to learn the same thing.
+        #
+        # WZ_SONAME_REQUIRE turns the gate's non-ELF SKIP into a FAIL. This
+        # runner is Linux, so the SKIP path here could only mean the gate
+        # stopped recognising the platform it is for -- and a lane that SKIPs
+        # where the job provisions its input is a provisioning regression
+        # wearing a green badge (the A3/A4/A5/Qz rule).
+        env:
+          WZ_SONAME_REQUIRE: "1"
+        run: bash scripts/run-ci.sh --layer C1so
+
       # ─── R311y865: Layer C1cc, the zenoh-c oracle and the pico CLI build all
       # LEFT this job for `capi-c-arms`, and Layers E / E3 / E4 / E4i / E5 /
       # E5u / E7u / E6u left for the new `e2e-demo` job. See the budget note at

@@ -42,5 +42,13 @@ crate-type = ["cdylib"]
 [dependencies]
 wz-volume-abi = { path = "../wz-volume-abi" }
 
+# R2103 (open-debt item 521) — build.rs gives the cdylib its SONAME. THE FIFTH
+# cdylib in this workspace, and the one the downstream report's list of four did
+# not contain; the gate derives its population from cargo metadata for exactly
+# that reason. A build-dependency, so the "depends on wz-volume-abi AND NOTHING
+# ELSE" claim above — which is about what a volume must LINK — still holds.
+[build-dependencies]
+wz-cdylib-build = { path = "../wz-cdylib-build" }
+
 [lints]
 workspace = true

@@ -53,6 +53,13 @@ name = "wz_capi_c"
 path = "src/lib.rs"
 crate-type = ["cdylib", "rlib"]
 
+# R2103 (open-debt item 521) — build.rs gives the cdylib its SONAME. Without
+# one, a consumer that links this artifact by path records that absolute
+# build-time path in DT_NEEDED and cannot redistribute what it built, which for
+# a crate whose whole claim is "binary drop-in for zenoh-c" is the claim itself.
+[build-dependencies]
+wz-cdylib-build = { path = "../wz-cdylib-build" }
+
 [features]
 # zenoh-c's own build flags change its ABI, so wz's must be able to follow.
 # `z_owned_bytes_t` is 40 bytes in upstream's published standalone archive (built

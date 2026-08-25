@@ -2,7 +2,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
-# The IDENTITY gate — which addresses may author or commit in this tree.
+# R2103 (no register item) — the IDENTITY gate: which addresses may author or
+# commit in this tree.
+#
+# The citation is R2103's and the gate is 83dedb45's. It shipped without one and
+# Layer C0's gate-provenance lint went red on it immediately, which is that
+# lint working: a gate under scripts/lib that does not name what it closes
+# leaves the register unable to answer mechanically. `no register item` is the
+# honest answer here — this closes a DEFECT found in its own round (the eight
+# work-address commits below), not a listed debt.
 #
 # ## What it is for, measured
 #
