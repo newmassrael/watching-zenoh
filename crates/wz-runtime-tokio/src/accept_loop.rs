@@ -1434,8 +1434,8 @@ pub struct McastIngressItem {
 pub struct FaceSources {
     /// The bound listeners for inbound peers (accept source), each scheme-keyed
     /// ([`BoundListener`]) so a router/peer accepts the whole stream family
-    /// (tcp/ws/tls) — [`face_drive_loop`]'s `select!` arm accepts one raw
-    /// connection per iteration via [`accept_any`], and the ws/tls SERVER
+    /// (tcp/ws/tls) — `face_drive_loop`'s `select!` arm accepts one raw
+    /// connection per iteration via `accept_any`, and the ws/tls SERVER
     /// handshake is deferred to the spawned open future so a slow handshake never
     /// blocks the loop. R311y376 (Stage 3) generalized this from a bare
     /// [`tokio::net::TcpListener`].
@@ -1452,8 +1452,12 @@ pub struct FaceSources {
     /// ONE field rather than "the listener plus the extra ones", for the reason
     /// R2096 gave when it retired `qos: bool` beside [`Self::offer`]: two fields
     /// for one fact is what lets the two disagree. A single-element `Vec` is the
-    /// byte-identical prior behaviour — [`accept_any`] awaits that one listener
+    /// byte-identical prior behaviour — `accept_any` awaits that one listener
     /// directly, with no `select_all` in the path.
+    ///
+    /// (`face_drive_loop` / `accept_any` are named in code spans rather than
+    /// intra-doc links: they are PRIVATE, and a public item's doc linking to one
+    /// is a rustdoc error this crate's C1bz budget counts.)
     ///
     /// EMPTY is representable and means "accept nothing": the arm parks forever,
     /// so a dial-only node is expressible without inventing a listener. That is
