@@ -4141,7 +4141,13 @@ layer_c1ay_cargo_test_router_hat() {
     # guard's own command, which remains the only way this number has ever been
     # right: the module's OTHER new tests are `cfg`-gated on run-mode features
     # this lane does not build, so counting the diff would have got 30.
-    _runci_guarded_test "C1AY stock_config_tests 28" 28 \
+    # R2099 (open-debt item 512): 28 -> 30. Two tests, both unconditional at
+    # this feature set: the argv half of the multi-endpoint expansion, and the
+    # verdict function that refuses to call a truncated list applied. MEASURED
+    # on this exact command, which is item 400's prescription — a count moved on
+    # a different measurement than the one that will check it is a count nobody
+    # can reason about.
+    _runci_guarded_test "C1AY stock_config_tests 30" 30 \
         cargo test -p wz-ap-demo --features zenoh-config stock_config_tests --quiet || return 1
     # R2072 (open-debt item 496) — and the seam the module above structurally
     # cannot reach: argv -> exit status. Every unit witness for `check_topology`
@@ -4183,6 +4189,24 @@ layer_c1ay_cargo_test_router_hat() {
         cargo test -p wz-ap-demo \
         --features transport-multilink,routing-peer,transport-lowlatency,transport-qos,session-extcompression,session-extshm \
         --test mesh_offer_multilink_binary --quiet || return 1
+    # R2099 (open-debt item 512) — `listen/endpoints` is a LIST and the node binds
+    # every member of it. The unit half lives in `stock_config_tests` above (the
+    # argv carries both); this is the half no unit test can reach — the run-mode
+    # HOST's bind, which took `listen[0]` while the report said APPLIED.
+    #
+    # The arms START NODES and DIAL them, so this is the slowest lane in C1AY by
+    # a wide margin. That is what the claim costs: a TCP connect to a bound-but-
+    # unaccepted port succeeds out of the kernel backlog, so only a real session
+    # open separates "two sockets exist" from "the accept loop watches both".
+    #
+    # The feature set is the file's own `cfg` gate plus `scouting-responder`:
+    # `zenoh-config` for `--config`, and BOTH binding run-modes because the two
+    # hosts (`run_peer_until` / `run_router_hat_until`) wrote their own bind and
+    # a fix to one would leave the other exactly as item 512 found it.
+    _runci_guarded_test "C1AY config_listen_endpoints_binary 2" 2 \
+        cargo test -p wz-ap-demo \
+        --features zenoh-config,routing-peer,router-hat-router,scouting-responder \
+        --test config_listen_endpoints_binary --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features routing-router-hat --quiet -- -D warnings \

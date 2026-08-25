@@ -85,7 +85,21 @@ pub(crate) enum Role {
     /// the one-shot `establish_link` reads it (the reconnect path is out of demo
     /// scope, runner.rs).
     Initiator {
-        connect: String,
+        /// R2099 (open-debt item 512, the `connect/endpoints` residue) — the
+        /// candidate dial LIST, in the order the document (or the argv) named
+        /// them, not a single address.
+        ///
+        /// `connect/endpoints` is a list in every stock zenoh document, and until
+        /// this round the expansion's CLIENT arm emitted `connect[0]` and dropped
+        /// the rest while reporting the key APPLIED — the same half-truth item
+        /// 512 measured on `listen/endpoints`, one arm over.
+        ///
+        /// Upstream's client walks the list: `connect_peers_single_link`
+        /// (`zenoh/src/net/runtime/orchestrator.rs:346-369`) tries each endpoint
+        /// and returns on the first that opens, failing only when none did
+        /// ("Unable to connect to any of {:?}!"). `establish_link` does exactly
+        /// that. A single-element list is the byte-identical prior behaviour.
+        connect: Vec<String>,
         reconnect: bool,
         tls_ca: Option<String>,
         /// R311y366 — the `--quic-ca <path>` root-CA PEM a `quic/...` --connect
@@ -271,6 +285,31 @@ pub(crate) fn parse_pair(args: &[String], flag: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// R2099 (open-debt item 512) — one spelling of "an endpoint LIST on argv":
+/// comma-separated, each member trimmed, empty members dropped.
+///
+/// The shape `--connect` has always had, promoted to a named function because
+/// this round gives it to `--peer` and `--router-hat` too. `listen/endpoints` and
+/// `connect/endpoints` are both LISTS in a stock zenoh document, and until this
+/// round wz's two BINDING run-modes took a single address — so a document naming
+/// two listen endpoints came up bound to one of them, with the key still reported
+/// APPLIED. A shared function rather than a third inline `split(',')` because
+/// three copies of a splitter is three opinions about what an empty member means.
+///
+/// Empty members are DROPPED rather than kept as `""`: a trailing comma is a
+/// typo, and an empty string reaches `plan_endpoint` as a malformed locator whose
+/// error names the empty string — an error about the user's typo, told in a way
+/// that does not name it. Dropping leaves `--peer ""` (a genuinely empty value)
+/// to be caught by `bind_all_endpoints`'s empty-list refusal, which says exactly
+/// that.
+pub(crate) fn split_endpoint_list(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(String::from)
+        .collect()
 }
 
 /// R311y842 — turn the stock zenoh config an operator already has into the
@@ -483,52 +522,96 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
     // feature it wants. It is also narrower than it looks -- `--config` is
     // itself behind `zenoh-config`, which no default build carries, so the
     // population that can read a file at all is already a chosen build.
-    let selected: Option<(&'static str, WhatAmI)> = if role_on_cli {
+    let selected: Option<Selected> = if role_on_cli {
         None
     } else {
         let connect = &cfg.connect;
         // The address this node binds: what the document named, or upstream's
         // own default for this mode when it named nothing.
-        let bind = cfg.listen.first().cloned().or_else(|| {
+        //
+        // ## R2099 (open-debt item 512) — the WHOLE list, not its first member
+        //
+        // This used to be `cfg.listen.first()`, and that single `.first()` was
+        // item 512: a document naming two listen endpoints produced a node bound
+        // to ONE of them while `listen/endpoints` was still reported APPLIED. The
+        // measurement in the register is `{ mode: "router", listen: { endpoints:
+        // ["tcp/127.0.0.1:0", "tcp/127.0.0.2:0"] } }` -> `--router-hat
+        // tcp/127.0.0.1:0` and one `listening on` line.
+        //
+        // Upstream binds all of them: `bind_listeners_impl`
+        // (`zenoh/src/net/runtime/orchestrator.rs:520-541`) loops the configured
+        // slice calling `add_listener` on each. So the fix is (a) from the
+        // register's two shapes -- IMPLEMENT the multi-bind -- and not (b), the
+        // truncated report. `--peer` / `--router-hat` now take the comma list
+        // `--connect` always took, and `runner::bind_all_endpoints` binds every
+        // member and logs one `BOUND LISTEN ENDPOINT` line per address.
+        let bind: Vec<String> = if cfg.listen.is_empty() {
             (!named("listen/endpoints"))
                 .then(|| wz::runtime_tokio::zenoh_config::default_listen_endpoint(cfg.mode))
                 .flatten()
-                .map(String::from)
-        });
-        // The two BINDING modes take the same shape -- bind one address, dial
-        // the whole connect list -- so they are one arm with the flag as its
-        // only difference. A router federates by DIALLING its peer routers, and
-        // `run_router_hat` reads that set off `--connect` exactly as the peer
+                .map(|ep| vec![String::from(ep)])
+                .unwrap_or_default()
+        } else {
+            cfg.listen.clone()
+        };
+        // The two BINDING modes take the same shape -- bind the whole listen
+        // list, dial the whole connect list -- so they are one arm with the flag
+        // as its only difference. A router federates by DIALLING its peer routers,
+        // and `run_router_hat` reads that set off `--connect` exactly as the peer
         // arm does; the flag is withheld when the file carries no list, so a
         // lone node gains no empty argument.
         match (cfg.mode, bind) {
-            (mode @ (WhatAmI::Router | WhatAmI::Peer), Some(ep)) => {
+            (mode @ (WhatAmI::Router | WhatAmI::Peer), eps) if !eps.is_empty() => {
                 let flag = if mode == WhatAmI::Router {
                     "--router-hat"
                 } else {
                     "--peer"
                 };
+                let listen_carried = eps.len();
                 exp.added.push(String::from(flag));
-                exp.added.push(ep);
+                exp.added.push(eps.join(","));
                 if !connect.is_empty() {
                     exp.added.push("--connect".into());
                     exp.added.push(connect.join(","));
                 }
-                Some((flag, mode))
+                Some(Selected {
+                    flag,
+                    role: mode,
+                    listen_carried,
+                    connect_carried: connect.len(),
+                })
             }
             // A binding mode whose document names an EMPTY listen list. zenohd
             // runs such a node -- it scouts and dials without accepting -- and
             // wz has no run-mode that binds nothing, so nothing is selected and
             // the verdict below says so rather than inventing an address the
             // file refused.
-            (WhatAmI::Router | WhatAmI::Peer, None) => None,
+            (WhatAmI::Router | WhatAmI::Peer, _) => None,
             // A zenoh client never listens, so its `listen` list is not an
             // address here -- it is a key that reaches nothing, reported as
             // such below.
+            //
+            // R2099 — the WHOLE connect list, which is item 512's same-seam
+            // residue: this arm used to emit `connect[0]` and drop the rest,
+            // while `connect/endpoints` was reported Expanded. Upstream's client
+            // does NOT stop at the first either -- `connect_peers_single_link`
+            // (`orchestrator.rs:346-369`) walks the configured slice and returns
+            // on the first endpoint that opens, which is exactly what
+            // `runner::establish_link` now does with this list.
             (WhatAmI::Client, _) if !connect.is_empty() => {
                 exp.added.push("--connect".into());
-                exp.added.push(connect[0].clone());
-                Some(("--connect", WhatAmI::Client))
+                exp.added.push(connect.join(","));
+                Some(Selected {
+                    flag: "--connect",
+                    role: WhatAmI::Client,
+                    // A client binds nothing, so no listen member reaches it --
+                    // the `listen/endpoints` verdict below never consults this
+                    // count on the client path (it is `WithheldFromThisRun`
+                    // before it gets here), and zero is the honest value if it
+                    // ever did.
+                    listen_carried: 0,
+                    connect_carried: connect.len(),
+                })
             }
             (WhatAmI::Client, _) => None,
         }
@@ -550,7 +633,7 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             match (typed_role, selected) {
                 (Some((_, role)), _) if role == cfg.mode => KeyEffect::AlreadyOnTheCommandLine,
                 (Some(_), _) => KeyEffect::OverriddenOnTheCommandLine,
-                (None, Some((_, role))) if role == cfg.mode => KeyEffect::Expanded,
+                (None, Some(s)) if s.role == cfg.mode => KeyEffect::Expanded,
                 (None, Some(_)) => KeyEffect::NotTheRoleTheseEndpointsSelect,
                 // R2091b (open-debt item 511) — reachable in exactly two ways
                 // now, and they are different sentences. A CLIENT with nothing
@@ -582,19 +665,42 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
                 }
                 // An empty list is what binding nothing already means.
                 (false, _, true) => KeyEffect::AlreadyTheBehaviour,
-                (false, _, false) => KeyEffect::Expanded,
+                // R2099 (open-debt item 512) — DERIVED, not asserted: how many of
+                // the document's listen endpoints the selection actually put on
+                // the command line, compared against how many it named. Before
+                // this round the arm read `KeyEffect::Expanded` unconditionally
+                // while the selection carried `listen.first()`.
+                //
+                // `selected` is `Some` here by construction (a binding mode with
+                // a non-empty listen list always selects its flag, and the client
+                // and empty-list cases are the arms above), so a `None` would be
+                // a selection that changed shape without this verdict following —
+                // reported as carrying nothing, which is the safe direction.
+                (false, _, false) => {
+                    list_key_effect(cfg.listen.len(), selected.map_or(0, |s| s.listen_carried))
+                }
             },
         );
     }
     if named("connect/endpoints") {
-        let dialled = matches!(selected, Some(("--peer" | "--connect" | "--router-hat", _)))
-            && !cfg.connect.is_empty();
+        let dialled = matches!(
+            selected,
+            Some(Selected {
+                flag: "--peer" | "--connect" | "--router-hat",
+                ..
+            })
+        ) && !cfg.connect.is_empty();
         exp.record(
             "connect/endpoints",
             match (role_on_cli, cfg.connect.is_empty(), dialled) {
                 (true, _, _) => KeyEffect::OverriddenOnTheCommandLine,
                 (false, true, _) => KeyEffect::AlreadyTheBehaviour,
-                (false, false, true) => KeyEffect::Expanded,
+                // R2099 — the same derivation as `listen/endpoints` above, and it
+                // is item 512's same-seam residue: the CLIENT arm used to emit
+                // `connect[0]` and drop the rest while this said `Expanded`.
+                (false, false, true) => {
+                    list_key_effect(cfg.connect.len(), selected.map_or(0, |s| s.connect_carried))
+                }
                 (false, false, false) => {
                     KeyEffect::WithheldFromThisRun("this run's mode dials nothing")
                 }
@@ -1097,7 +1203,7 @@ impl StockConfigExpansion {
             .map(|k| {
                 let why = self
                     .effect(k)
-                    .map_or(UNRECORDED_VERDICT, KeyEffect::why_not);
+                    .map_or_else(|| UNRECORDED_VERDICT.to_string(), KeyEffect::why_not);
                 format!("{k} ({why})")
             })
             .collect()
@@ -1149,6 +1255,64 @@ pub(crate) enum KeyEffect {
     /// `mode` only: the run-mode these endpoints select announces a different
     /// role than the file asked for.
     NotTheRoleTheseEndpointsSelect,
+    /// R2099 (open-debt item 512) — the key is a LIST and only SOME of its
+    /// members reached the command line.
+    ///
+    /// [`Self::reached_the_node`] is FALSE for it, which is the whole point:
+    /// item 512 was a `listen/endpoints` naming two addresses, a node bound to
+    /// one of them, and the key reported APPLIED. "Applied to most of it" is not
+    /// a state an operator can act on -- they read APPLIED and believe both
+    /// addresses answer.
+    ///
+    /// Population ZERO for every expansion this binary produces, and that is a
+    /// claim rather than an accident: both list-valued keys now carry every
+    /// member (see [`list_key_effect`]'s callers). It is a live guard against a
+    /// FUTURE run-mode that carries fewer, which is exactly the shape item 512
+    /// took -- so its own witness drives [`list_key_effect`] directly rather
+    /// than waiting for such a run-mode to exist.
+    PartlyExpanded { named: usize, carried: usize },
+}
+
+/// R2099 (open-debt item 512) — the run-mode the FILE selected, and how much of
+/// each endpoint LIST the emitted argv actually carries.
+///
+/// Was a `(&'static str, WhatAmI)` pair. It grew the two counts because the
+/// `listen/endpoints` and `connect/endpoints` verdicts must be DERIVED from what
+/// the selection emitted rather than asserted beside it: item 512 is a site that
+/// wrote `listen.first()` and `KeyEffect::Expanded` three hundred lines apart,
+/// with nothing in between comparing them. Now the same block that pushes the
+/// flag records how many members went with it, and [`list_key_effect`] does the
+/// comparison.
+#[cfg(feature = "zenoh-config")]
+#[derive(Clone, Copy)]
+struct Selected {
+    /// The run-mode flag this expansion emitted (`--peer` / `--router-hat` /
+    /// `--connect`).
+    flag: &'static str,
+    /// The wire role that run-mode announces, compared against `mode`.
+    role: WhatAmI,
+    /// How many `listen/endpoints` members the emitted flag carries.
+    listen_carried: usize,
+    /// How many `connect/endpoints` members the emitted argv carries.
+    connect_carried: usize,
+}
+
+/// R2099 (open-debt item 512) — the verdict for a LIST-valued key, derived from
+/// how many members the document named against how many the expansion actually
+/// put on the command line.
+///
+/// A FUNCTION of the two counts, not a judgement made at the decision site,
+/// because item 512 is precisely what happens when the site asserts the verdict
+/// instead of deriving it: the site that wrote `listen.first()` also wrote
+/// `Expanded`, and nothing compared them. Both callers pass the count they
+/// actually emitted, so a truncation cannot be reported as an application.
+#[cfg(feature = "zenoh-config")]
+fn list_key_effect(named: usize, carried: usize) -> KeyEffect {
+    if carried == named {
+        KeyEffect::Expanded
+    } else {
+        KeyEffect::PartlyExpanded { named, carried }
+    }
 }
 
 #[cfg(feature = "zenoh-config")]
@@ -1163,14 +1327,24 @@ impl KeyEffect {
 
     /// The reason the report prints. Empty for the applied half, which never
     /// asks for one.
-    pub(crate) fn why_not(self) -> &'static str {
+    ///
+    /// R2099 — `String` rather than `&'static str` because
+    /// [`Self::PartlyExpanded`] answers with NUMBERS, and an operator told "some
+    /// of your endpoints reached the node" without being told how many has been
+    /// given a puzzle instead of a fact.
+    pub(crate) fn why_not(self) -> String {
         match self {
-            Self::Expanded | Self::AlreadyTheBehaviour | Self::AlreadyOnTheCommandLine => "",
-            Self::OverriddenOnTheCommandLine => "the command line says otherwise",
-            Self::NoSinkInThisBuild => "no sink in this build",
-            Self::WithheldFromThisRun(what) => what,
+            Self::Expanded | Self::AlreadyTheBehaviour | Self::AlreadyOnTheCommandLine => {
+                String::new()
+            }
+            Self::OverriddenOnTheCommandLine => "the command line says otherwise".into(),
+            Self::NoSinkInThisBuild => "no sink in this build".into(),
+            Self::WithheldFromThisRun(what) => what.into(),
             Self::NotTheRoleTheseEndpointsSelect => {
-                "these endpoints select a run-mode in another role"
+                "these endpoints select a run-mode in another role".into()
+            }
+            Self::PartlyExpanded { named, carried } => {
+                format!("only {carried} of its {named} endpoints reach this run-mode")
             }
         }
     }
@@ -1563,6 +1737,98 @@ mod stock_config_tests {
             // The expansion APPENDS; it never rewrites what was already there.
             assert_eq!(&out.argv[..2], &argv(&["--config", "z.json5"])[..]);
         }
+    }
+
+    /// R2099 (open-debt item 512) — an endpoint LIST reaches the command line
+    /// whole, in both keys and in every run-mode that reads them.
+    ///
+    /// This is the unit half of item 512. Until this round the binding arm took
+    /// `listen.first()` and the CLIENT arm took `connect[0]`, so a document
+    /// naming two addresses produced a node that used one of them — while the
+    /// report called the key APPLIED. Each row states BOTH counts through the
+    /// argv it expects, so a regression to `.first()` fails on the value and not
+    /// on some downstream symptom.
+    #[test]
+    fn an_endpoint_list_reaches_the_command_line_whole() {
+        for (file, want) in [
+            // The register's own measurement of item 512, verbatim.
+            (
+                r#"{ mode: "router",
+                     listen: { endpoints: ["tcp/127.0.0.1:0", "tcp/127.0.0.2:0"] } }"#,
+                vec!["--router-hat", "tcp/127.0.0.1:0,tcp/127.0.0.2:0"],
+            ),
+            // The peer host is a DIFFERENT run-mode host with its own bind, so
+            // it is asked separately rather than assumed to follow.
+            (
+                r#"{ mode: "peer",
+                     listen: { endpoints: ["tcp/127.0.0.1:0", "tcp/127.0.0.2:0"] } }"#,
+                vec!["--peer", "tcp/127.0.0.1:0,tcp/127.0.0.2:0"],
+            ),
+            // Both lists at once: a binding mode carries its whole listen list
+            // AND its whole connect list, which is the row that would catch a
+            // fix applied to one key and not the other.
+            (
+                r#"{ mode: "peer",
+                     listen: { endpoints: ["tcp/127.0.0.1:0", "tcp/127.0.0.2:0"] },
+                     connect: { endpoints: ["tcp/a:7447", "tcp/b:7447"] } }"#,
+                vec![
+                    "--peer",
+                    "tcp/127.0.0.1:0,tcp/127.0.0.2:0",
+                    "--connect",
+                    "tcp/a:7447,tcp/b:7447",
+                ],
+            ),
+            // The same-seam residue item 512 named: the CLIENT arm, which used
+            // to emit `connect[0]` while `--peer` joined the whole list.
+            // Upstream's client walks the list too — `connect_peers_single_link`
+            // returns on the first endpoint that OPENS, not on the first named.
+            (
+                r#"{ mode: "client",
+                     connect: { endpoints: ["tcp/r1:7447", "tcp/r2:7447"] } }"#,
+                vec!["--connect", "tcp/r1:7447,tcp/r2:7447"],
+            ),
+        ] {
+            let out = expand(&["--config", "z.json5"], file).unwrap();
+            assert_eq!(out.added, argv(&want), "{file}");
+        }
+    }
+
+    /// R2099 (open-debt item 512) — the verdict for a LIST-valued key is a
+    /// FUNCTION of what the expansion carried, and a partial carry is NOT
+    /// applied.
+    ///
+    /// [`KeyEffect::PartlyExpanded`] has population zero in every expansion this
+    /// binary produces, which is exactly why its witness drives
+    /// [`list_key_effect`] directly: a guard whose only test is "no expansion
+    /// reaches it" is a guard nobody has ever seen work. The counts item 512
+    /// actually measured — two named, one carried — are the row that matters.
+    #[test]
+    fn a_list_key_is_applied_only_when_every_member_of_it_was_carried() {
+        assert_eq!(list_key_effect(2, 2), KeyEffect::Expanded);
+        assert!(list_key_effect(2, 2).reached_the_node());
+        assert_eq!(list_key_effect(1, 1), KeyEffect::Expanded);
+
+        let partial = list_key_effect(2, 1);
+        assert_eq!(
+            partial,
+            KeyEffect::PartlyExpanded {
+                named: 2,
+                carried: 1
+            }
+        );
+        assert!(
+            !partial.reached_the_node(),
+            "a key whose list was truncated is not applied"
+        );
+        // The operator is told the numbers, not just that something is wrong:
+        // "some of your endpoints" is a puzzle, "1 of its 2" is a fact.
+        assert_eq!(
+            partial.why_not(),
+            "only 1 of its 2 endpoints reach this run-mode"
+        );
+        // And the direction that means "the flag carried nothing at all" is not
+        // silently folded into success either.
+        assert!(!list_key_effect(2, 0).reached_the_node());
     }
 
     /// A topology named on the command line wins — the file supplies defaults,

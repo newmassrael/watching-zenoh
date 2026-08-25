@@ -251,7 +251,7 @@ async fn deploy_active_two_links_aggregate_segregate_reject_survive() {
     // dials (accept-only). It aggregates inbound links through its own handlers.
     let b_loop = peer_loop(
         FaceSources {
-            listener: BoundListener::Tcp(b_listener),
+            listeners: vec![BoundListener::Tcp(b_listener)],
             dial_targets: vec![],
             dial_intents: None,
             mcast_ingress: None,
@@ -466,7 +466,7 @@ async fn deploy_active_dial_side_aggregates_through_the_loop() {
     let (b_shut_tx, b_shut_rx) = watch::channel(false);
     let b_loop = peer_loop(
         FaceSources {
-            listener: BoundListener::Tcp(b_listener),
+            listeners: vec![BoundListener::Tcp(b_listener)],
             dial_targets: vec![],
             dial_intents: None,
             mcast_ingress: None,
@@ -498,7 +498,7 @@ async fn deploy_active_dial_side_aggregates_through_the_loop() {
     let (a_shut_tx, a_shut_rx) = watch::channel(false);
     let a_loop = peer_loop(
         FaceSources {
-            listener: BoundListener::Tcp(a_listener),
+            listeners: vec![BoundListener::Tcp(a_listener)],
             dial_targets: vec![b_addr, b_addr],
             dial_intents: None,
             mcast_ingress: None,
@@ -599,7 +599,7 @@ async fn deploy_active_qos_priority_segregates_across_links() {
     // B only RECEIVES here, so what B observes is decided entirely by A's select_link.
     let b_loop = peer_loop(
         FaceSources {
-            listener: BoundListener::Tcp(b_listener),
+            listeners: vec![BoundListener::Tcp(b_listener)],
             dial_targets: vec![],
             dial_intents: None,
             mcast_ingress: None,

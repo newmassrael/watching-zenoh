@@ -226,7 +226,7 @@ async fn readd_dialed_link_auto_reconnects_onto_surviving_session() {
     let (a_shut_tx, a_shut_rx) = watch::channel(false);
     let a_loop = peer_loop(
         FaceSources {
-            listener: BoundListener::Tcp(a_listener),
+            listeners: vec![BoundListener::Tcp(a_listener)],
             dial_targets: vec![b_addr, b_addr],
             dial_intents: None,
             mcast_ingress: None,

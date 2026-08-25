@@ -89,6 +89,11 @@ use wz::runtime_tokio::session_open::{
     initiate_and_open_session_with_offer, AcceptConfig, DialConfig, DialedLink, OpenError,
     OpenedSession, SessionOffer, DEFAULT_OPEN_TICK_MS,
 };
+// R2099 (open-debt item 512) — the multi-bind helper's own two names, on the
+// same gate the helper carries: a build with neither binding run-mode compiles
+// no `bind_all_endpoints`, and an ungated import would then be unused.
+#[cfg(any(feature = "routing-peer", feature = "router-hat-router"))]
+use wz::runtime_tokio::session_open::{bind_endpoint_with_config, BoundListener};
 use wz::runtime_tokio::sync::Mutex;
 
 #[cfg(any(feature = "scouting-active", feature = "scouting-responder"))]
@@ -273,6 +278,69 @@ fn apply_tls_ca(cfg: DialConfig, tls_ca: &Option<String>) -> io::Result<DialConf
 #[cfg(not(feature = "tls"))]
 fn apply_tls_ca(cfg: DialConfig, _tls_ca: &Option<String>) -> io::Result<DialConfig> {
     Ok(cfg)
+}
+
+/// R2099 (open-debt item 512) — bind EVERY endpoint the node was told to listen
+/// on, in order, and return one [`BoundListener`] per member.
+///
+/// The seam that makes `listen/endpoints` a LIST in the two BINDING run-modes
+/// (`--peer`, `--router-hat`). Both used to bind `listen.first()` and drop the
+/// rest without a word, so a stock document naming two addresses produced a node
+/// reachable at one of them — while the expansion still reported the key APPLIED.
+///
+/// Upstream shape (read, not remembered): zenoh's `bind_listeners_impl`
+/// (`zenoh/src/net/runtime/orchestrator.rs:520-541`) loops the whole configured
+/// slice calling `add_listener` on each, then `print_locators` names every bound
+/// locator — one node, N bound addresses, one session table.
+///
+/// FAIL-FAST on any member, which is upstream's `exit_on_failure` default for
+/// `listen` (`DEFAULT_CONFIG.json5`: the listen retry block sets
+/// `exit_on_failure: true`, against `false` for connect). A node that silently
+/// came up on half its addresses is exactly the half-truth this function exists
+/// to remove, so a failed member is an error and not a warning.
+///
+/// EMPTY is rejected here rather than lower down: every caller reaches this from
+/// a run-mode flag whose whole argument is the address, so an empty list is a
+/// malformed invocation, not a "bind nothing" node (which upstream does express,
+/// and which wz has no run-mode for — the expansion in `args.rs` says so).
+///
+/// Gated on the two run-modes that call it, because a build carrying neither
+/// compiles no binding host at all and an ungated helper would be `dead_code`
+/// there — the `-D warnings` arm that caught the first cut of this function.
+#[cfg(any(feature = "routing-peer", feature = "router-hat-router"))]
+async fn bind_all_endpoints(
+    listen: &[String],
+    accept_cfg: &AcceptConfig,
+    run_mode: &str,
+) -> io::Result<Vec<BoundListener>> {
+    if listen.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("wz-ap-demo {run_mode}: no listen endpoint given"),
+        ));
+    }
+    let mut bound = Vec::with_capacity(listen.len());
+    for (index, endpoint) in listen.iter().enumerate() {
+        let listener = bind_endpoint_with_config(endpoint, accept_cfg).await?;
+        // ONE line per BOUND address, emitted HERE rather than in each run-mode
+        // host, so a future binding run-mode gets the witness structurally instead
+        // of by remembering to copy a log line. This is the observable half of the
+        // fix: item 512 was measured by a node that logged a single "listening on"
+        // while its document named two endpoints, and the only honest answer to
+        // "which addresses did this node bind" is a line per address, carrying the
+        // RESOLVED display (so a `:0` ephemeral bind names its real port).
+        // Upstream does the same thing at the same moment — `print_locators`
+        // (`zenoh/src/net/runtime/orchestrator.rs:581-587`) logs
+        // "Zenoh can be reached at: {locator}" once per bound locator.
+        log::info!(
+            "wz-ap-demo {run_mode}: BOUND LISTEN ENDPOINT {}/{} {} (from {endpoint})",
+            index + 1,
+            listen.len(),
+            listener.local_addr_display()?,
+        );
+        bound.push(listener);
+    }
+    Ok(bound)
 }
 
 /// R311y406 — the four `--<scheme>-cert` / `--<scheme>-key` PEM paths a mesh listen
@@ -798,15 +866,45 @@ async fn establish_link(role: &Role) -> io::Result<DialedLink> {
             // `--tls-ca` / `--quic-ca` root-CA into the matching `DialConfig` slot;
             // every cert-free transport takes the default.
             let dial_cfg = build_dial_config(tls_ca, quic_ca)?;
-            let dialed = dial_endpoint(connect, &dial_cfg).await?;
-            // R311po — log WHICH transport was dialed (the DialedLink variant
-            // name). This is the WS legs' witness that a `ws/...` --connect
-            // really opened a WebSocket link, not a silent TCP fallback.
-            log::info!(
-                "wz-ap-demo: connected to {connect} over {} transport",
-                dialed.transport_name()
-            );
-            Ok(dialed)
+            // R2099 (open-debt item 512, the `connect/endpoints` residue) — try
+            // EVERY candidate in order and take the first that opens, which is
+            // upstream's client: `connect_peers_single_link`
+            // (`zenoh/src/net/runtime/orchestrator.rs:346-369`) loops the
+            // configured slice, returns on the first `peer_connector` that
+            // succeeds, and fails with "Unable to connect to any of {:?}!" only
+            // when none did. Before this round wz's client took `connect[0]` and
+            // the rest of the list reached nothing while the key read APPLIED.
+            //
+            // The LAST error is what surfaces, not the first: an operator whose
+            // whole list is unreachable is told about the endpoint the node gave
+            // up on, and every attempt is logged as it fails, so a list that
+            // succeeded on its third member still shows the two that did not.
+            let mut last: Option<io::Error> = None;
+            for endpoint in connect {
+                match dial_endpoint(endpoint, &dial_cfg).await {
+                    Ok(dialed) => {
+                        // R311po — log WHICH transport was dialed (the DialedLink
+                        // variant name). This is the WS legs' witness that a
+                        // `ws/...` --connect really opened a WebSocket link, not a
+                        // silent TCP fallback.
+                        log::info!(
+                            "wz-ap-demo: connected to {endpoint} over {} transport",
+                            dialed.transport_name()
+                        );
+                        return Ok(dialed);
+                    }
+                    Err(e) => {
+                        log::warn!("wz-ap-demo: unable to connect to {endpoint}: {e}");
+                        last = Some(e);
+                    }
+                }
+            }
+            Err(last.unwrap_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "wz-ap-demo: --connect named no endpoint to dial",
+                )
+            }))
         }
     }
 }
@@ -2002,8 +2100,37 @@ pub(crate) async fn run_demo(
             // reconnect would thread its config here (out of demo scope). A
             // non-reconnectable `--connect` (serial/...) surfaces as a typed
             // OpenError::NotReconnectable inside the {e:?}.
+            //
+            // R2099 (open-debt item 512) — the retry-supervised client uses the
+            // FIRST candidate ONLY, and that is upstream's behaviour rather than
+            // a wz shortcut: `connect_peers_single_link`
+            // (`zenoh/src/net/runtime/orchestrator.rs:346-369`) walks the list
+            // only on its no-retry branch; when a retry schedule is configured it
+            // calls `peer_connector_retry(endpoint)` on the first endpoint and
+            // RETURNS, so the remaining members are never tried. `--reconnect` is
+            // that branch. The extra members are named in a warning rather than
+            // dropped in silence — the whole subject of item 512 is a list whose
+            // tail went nowhere without anyone saying so.
+            //
+            // Not reachable from `--config`: the expansion's CLIENT arm emits
+            // `--connect` and never `--reconnect`, so a stock document's list
+            // takes the one-shot fall-through path below.
+            let primary = connect.first().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "wz-ap-demo: --connect named no endpoint to dial",
+                )
+            })?;
+            if connect.len() > 1 {
+                log::warn!(
+                    "wz-ap-demo: --reconnect supervises the FIRST --connect \
+                     endpoint ({primary}); the other {} are not tried (zenoh's \
+                     retry branch does the same)",
+                    connect.len() - 1
+                );
+            }
             let recon = reconnect_endpoint(
-                connect,
+                primary,
                 params,
                 DialConfig::default(),
                 session_clock,
@@ -3053,7 +3180,7 @@ pub(crate) struct PeerOpts {
 
 #[cfg(feature = "routing-peer")]
 pub(crate) async fn run_peer(
-    listen: &str,
+    listen: &[String],
     dial_targets: &[String],
     opts: &PeerOpts,
     interceptors: &crate::InterceptorOpts,
@@ -3077,7 +3204,12 @@ pub(crate) async fn run_peer(
 /// peer twin of [`run_router_until`].
 #[cfg(feature = "routing-peer")]
 async fn run_peer_until(
-    listen: &str,
+    // R2099 (open-debt item 512) — the WHOLE `listen/endpoints` list, not its
+    // first member. Every one is bound (see [`bind_all_endpoints`]); the node's
+    // identity-bearing derivations (zid, "listening on" display) key on the FIRST,
+    // which is the address the operator wrote first and the one this demo's zid
+    // derivation has always used.
+    listen: &[String],
     dial_targets: &[String],
     opts: &PeerOpts,
     interceptors: &crate::InterceptorOpts,
@@ -3116,8 +3248,6 @@ async fn run_peer_until(
         InterceptorFlow, InterceptorLink, LinkstateForwarder, LowPassMessage, LowPassRule,
         Permission, SubjectSelector, WhatAmI, Zid,
     };
-    use wz::runtime_tokio::session_open::bind_endpoint_with_config;
-
     // Per-peer routing zid = an explicit `--zid` when given, else this 2-byte prefix
     // + the listen port (derived below; R311y397 — the `--zid` override, when
     // present, bypasses this prefix entirely, and a non-IP listen REQUIRES it). The
@@ -3143,7 +3273,8 @@ async fn run_peer_until(
         &opts.quic_cert,
         &opts.quic_key,
     )?;
-    let listener = bind_endpoint_with_config(listen, &accept_cfg).await?;
+    // R2099 (item 512) — bind EVERY member of `listen/endpoints`, not the first.
+    let listeners = bind_all_endpoints(listen, &accept_cfg, "peer").await?;
     // Non-IP-safe addressing (R311y397, mirroring run_router_hat's R311y396 seam):
     // the "listening on" log + the self dial locator render from the per-variant
     // display (`local_addr_display`, total over every transport), and the
@@ -3153,8 +3284,16 @@ async fn run_peer_until(
     // zenoh-faithful config-id; the port derivation is a demo IP-only convenience).
     // `local_addr()` is the IP accessor that errors for the non-IP families, so it
     // is taken as an `Option`, never `?`-propagated.
-    let local_display = listener.local_addr_display()?;
-    let local_ip: Option<std::net::SocketAddr> = listener.local_addr().ok();
+    //
+    // R2099 — the node's IDENTITY reads the FIRST bound listener. A zenoh node has
+    // one zid no matter how many addresses it binds, so the derivation must pick
+    // one, and the first is the one the operator wrote first (and the one every
+    // pre-R2099 invocation already used, so a single-endpoint document is
+    // byte-identical). `bind_all_endpoints` rejects an empty list, so the index
+    // is total.
+    let primary = &listeners[0];
+    let local_display = primary.local_addr_display()?;
+    let local_ip: Option<std::net::SocketAddr> = primary.local_addr().ok();
 
     // This peer's DISTINCT routing zid (the mesh routing graph keys on it, so two
     // peers MUST NOT share one). Computed BEFORE the "listening on" log so a non-IP
@@ -3260,19 +3399,30 @@ async fn run_peer_until(
     // topology still converges, only the (not-yet-consumed) dial hint is withheld.
     // A non-IP listen (unixpipe / …) has no wildcard bind, so it advertises its
     // scheme+path unconditionally (the R311y396 run_router_hat discipline).
-    let self_locators: Vec<String> = match local_ip {
-        Some(addr) if !addr.ip().is_unspecified() => {
-            vec![listener.advertised_locator(&addr.to_string())]
-        }
-        Some(addr) => {
-            log::warn!(
-                "listen address {addr} is unspecified (bind-all); advertising no dial \
-                 locator (interface expansion is a tracked follow-up)"
-            );
-            Vec::new()
-        }
-        None => vec![listener.advertised_locator(&local_display)],
-    };
+    //
+    // R2099 (item 512) — one locator per BOUND listener, not one for the first.
+    // The list is what a neighbour dials, so a node that binds two addresses and
+    // advertises one is reachable by luck; zenoh's `print_locators` publishes
+    // `manager().get_locators()`, which is every added listener's locator.
+    let self_locators: Vec<String> = listeners
+        .iter()
+        .filter_map(|listener| match listener.local_addr().ok() {
+            Some(addr) if !addr.ip().is_unspecified() => {
+                Some(listener.advertised_locator(&addr.to_string()))
+            }
+            Some(addr) => {
+                log::warn!(
+                    "listen address {addr} is unspecified (bind-all); advertising no dial \
+                     locator (interface expansion is a tracked follow-up)"
+                );
+                None
+            }
+            None => listener
+                .local_addr_display()
+                .ok()
+                .map(|display| listener.advertised_locator(&display)),
+        })
+        .collect();
     // R311y471 — log what we advertise. Until this line the advertised locator was
     // reachable only through an adminspace query, which is why R311y470's two
     // undialable schemes (`unixsock/<path>`, `quic-datagram/<addr>`) survived: no
@@ -3838,7 +3988,9 @@ async fn run_peer_until(
 
     let loop_fut = peer_loop(
         FaceSources {
-            listener,
+            // R2099 (item 512) — EVERY bound `listen/endpoints` member, so an
+            // inbound peer reaches this node at any address its document named.
+            listeners,
             dial_targets: dials,
             dial_intents,
             // A peer node hosts no router multicast ingress plane.
@@ -4434,7 +4586,7 @@ pub(crate) struct RouterHatOpts {
 
 #[cfg(feature = "router-hat-router")]
 pub(crate) async fn run_router_hat(
-    listen: &str,
+    listen: &[String],
     dial_targets: &[String],
     connect_after: Option<(u64, Vec<String>)>,
     zid_override: Option<Vec<u8>>,
@@ -4460,7 +4612,9 @@ pub(crate) async fn run_router_hat(
 /// [`shutdown_signal`]. The router-hat twin of [`run_router_until`] / [`run_peer_until`].
 #[cfg(feature = "router-hat-router")]
 async fn run_router_hat_until(
-    listen: &str,
+    // R2099 (open-debt item 512) — the WHOLE `listen/endpoints` list; see
+    // [`bind_all_endpoints`] and `run_peer_until`'s twin note.
+    listen: &[String],
     dial_targets: &[String],
     connect_after: Option<(u64, Vec<String>)>,
     // Optional `--zid <hex>` override: pin this router's routing zid instead of
@@ -4507,8 +4661,6 @@ async fn run_router_hat_until(
     use wz::runtime_tokio::accept_loop::{peer_loop, AcceptEvent, FaceSources};
     use wz::runtime_tokio::linkstate_forward::Zid;
     use wz::runtime_tokio::router_forward::RouterForwarder;
-    use wz::runtime_tokio::session_open::bind_endpoint_with_config;
-
     // Distinct 2-byte zid prefix ("rh") so a router-hat node and a peer bound to
     // the same port still derive DIFFERENT routing zids: RouterForwarder dedups
     // faces by zid (`dedups_faces_by_zid`), and two mesh nodes sharing a zid would
@@ -4524,7 +4676,8 @@ async fn run_router_hat_until(
     // bind's AcceptConfig via the shared build_accept_config, so a `--router-hat tls/`
     // / `--router-hat quic/` presents its cert (was bind_endpoint's cert-free default).
     let accept_cfg = cert_paths.build()?;
-    let listener = bind_endpoint_with_config(listen, &accept_cfg).await?;
+    // R2099 (item 512) — bind EVERY member of `listen/endpoints`, not the first.
+    let listeners = bind_all_endpoints(listen, &accept_cfg, "router-hat").await?;
     // Non-IP-safe addressing (R311y396): the log line + the adminspace `local_data`
     // dial locator render from the per-variant display (`local_addr_display`, total
     // over every transport), and the port-derived zid fallback applies ONLY when the
@@ -4534,8 +4687,12 @@ async fn run_router_hat_until(
     // convenience). `local_addr()` is the IP accessor that errors for the non-IP
     // families, so it is taken as an `Option`, never `?`-propagated (the R311y392
     // multi-client unixpipe acceptor already makes such a listen mesh-capable).
-    let local_display = listener.local_addr_display()?;
-    let local_ip: Option<std::net::SocketAddr> = listener.local_addr().ok();
+    //
+    // R2099 — the node's IDENTITY reads the FIRST bound listener, for the reason
+    // `run_peer_until` gives: one node, one zid, however many addresses it binds.
+    let primary = &listeners[0];
+    let local_display = primary.local_addr_display()?;
+    let local_ip: Option<std::net::SocketAddr> = primary.local_addr().ok();
 
     // The node's DISTINCT routing zid (the run_peer discipline) — the mesh graph
     // keys on it (RouterForwarder dedups faces by zid). Computed BEFORE the
@@ -4799,13 +4956,22 @@ async fn run_router_hat_until(
     // and the Hello this router answers Scouts with — and computing it twice is
     // exactly the blind spot R311y471 named: two advertise decisions that agree
     // with each other and not with the wire.
-    let self_locators: Vec<String> = match local_ip {
-        Some(addr) if !addr.ip().is_unspecified() => {
-            vec![listener.advertised_locator(&addr.to_string())]
-        }
-        Some(_) => Vec::new(),
-        None => vec![listener.advertised_locator(&local_display)],
-    };
+    //
+    // R2099 (item 512) — one locator per BOUND listener, the run_peer discipline:
+    // a router that binds two addresses and advertises one is reachable by luck.
+    let self_locators: Vec<String> = listeners
+        .iter()
+        .filter_map(|listener| match listener.local_addr().ok() {
+            Some(addr) if !addr.ip().is_unspecified() => {
+                Some(listener.advertised_locator(&addr.to_string()))
+            }
+            Some(_) => None,
+            None => listener
+                .local_addr_display()
+                .ok()
+                .map(|display| listener.advertised_locator(&display)),
+        })
+        .collect();
     // R311y471 — log what we advertise, so the string wz actually chose is
     // observable to an e2e instead of reachable only through an adminspace query.
     for locator in &self_locators {
@@ -4952,7 +5118,8 @@ async fn run_router_hat_until(
 
     let loop_fut = peer_loop(
         FaceSources {
-            listener,
+            // R2099 (item 512) — EVERY bound `listen/endpoints` member.
+            listeners,
             dial_targets: dials,
             // No gossip-autoconnect on a router (zenoh: routers are reached via
             // configured links, `default_autoconnect_matcher(Router)` is empty) —

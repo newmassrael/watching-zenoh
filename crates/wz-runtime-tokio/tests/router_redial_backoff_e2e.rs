@@ -85,7 +85,7 @@ async fn observed_gaps_ms(retry: RetryPolicy, want: usize) -> Vec<u128> {
 
     let loop_fut = peer_loop(
         FaceSources {
-            listener,
+            listeners: vec![listener],
             // The ONE unreachable desired peer. Seeded statically, so it enters
             // `desired` and every failed dial is re-scheduled.
             dial_targets: vec![target],
@@ -200,7 +200,7 @@ async fn a_peer_removed_and_re_added_starts_over_at_the_initial_wait() {
 
     let loop_fut = peer_loop(
         FaceSources {
-            listener,
+            listeners: vec![listener],
             dial_targets: vec![target],
             dial_intents: None,
             mcast_ingress: None,

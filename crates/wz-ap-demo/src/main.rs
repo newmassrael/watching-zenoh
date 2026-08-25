@@ -680,7 +680,11 @@ fn main() -> ExitCode {
             // `tests/mesh_offer_multilink_binary.rs`, which asserts the same
             // argv REACHES the bind.
             return run_peer_mode(
-                peer_listen,
+                // R2099 (open-debt item 512) — `--peer` takes an endpoint LIST,
+                // the shape `--connect` above already has, because
+                // `listen/endpoints` is a list in every stock zenoh document and
+                // upstream binds all of it.
+                crate::args::split_endpoint_list(&peer_listen),
                 dial_targets,
                 crate::runner::PeerOpts {
                     publish_key,
@@ -882,7 +886,10 @@ fn main() -> ExitCode {
                 }
             };
             return run_router_hat_mode(
-                router_hat_listen,
+                // R2099 (open-debt item 512) — an endpoint LIST, exactly as
+                // `--peer` now takes: both are BINDING run-modes reading the same
+                // `listen/endpoints` key, and upstream binds every member.
+                crate::args::split_endpoint_list(&router_hat_listen),
                 dial_targets,
                 connect_after,
                 zid_override,
@@ -1209,8 +1216,21 @@ fn main() -> ExitCode {
             // decoder.
             shm,
         },
+        // R2099 (open-debt item 512, the `connect/endpoints` residue) — an
+        // endpoint LIST, the shape the mesh run-modes' `--connect` has always
+        // had. A stock document's `connect/endpoints` is a list; this arm used to
+        // receive only its first member because the expansion emitted only that.
+        // An all-empty value (`--connect ""`, or nothing but commas) is a usage
+        // error refused HERE rather than surfaced later as a dial failure that
+        // names an empty locator.
+        (None, Some(addr)) if crate::args::split_endpoint_list(&addr).is_empty() => {
+            eprintln!("wz-ap-demo: --connect {addr:?} names no endpoint to dial");
+            eprintln!();
+            print_usage();
+            return ExitCode::from(2);
+        }
         (None, Some(addr)) => Role::Initiator {
-            connect: addr,
+            connect: crate::args::split_endpoint_list(&addr),
             reconnect,
             // R311y365 — the root-CA PEM path for a `tls/...` --connect (verified
             // against server name `localhost`). Read here, applied only on the
@@ -1959,7 +1979,9 @@ fn main() -> ExitCode {
             compression,
             shm,
         } => {
-            log::info!("connect = {connect}");
+            // R2099 — the whole candidate list, in dial order; `establish_link`
+            // takes the first that opens.
+            log::info!("connect = {}", connect.join(","));
             if *reconnect {
                 log::info!("reconnect = on (long-lived supervised lifecycle)");
             }
@@ -2397,7 +2419,7 @@ pub(crate) struct InterceptorOpts {
 /// and neither does a hold-only mesh peer.
 #[cfg(feature = "routing-peer")]
 fn run_peer_mode(
-    listen: String,
+    listen: Vec<String>,
     dial_targets: Vec<String>,
     opts: crate::runner::PeerOpts,
     interceptors: InterceptorOpts,
@@ -2475,7 +2497,7 @@ fn run_storage_host_mode(
 /// the node announces Router and hosts no application I/O (a pure router).
 #[cfg(feature = "router-hat-router")]
 fn run_router_hat_mode(
-    listen: String,
+    listen: Vec<String>,
     dial_targets: Vec<String>,
     connect_after: Option<(u64, Vec<String>)>,
     zid_override: Option<Vec<u8>>,

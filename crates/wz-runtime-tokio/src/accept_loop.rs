@@ -1194,6 +1194,46 @@ async fn forwarder_tick(timer: &mut Option<tokio::time::Interval>) {
     }
 }
 
+/// Await the next inbound connection on ANY of the node's bound listeners — the
+/// accept arm of [`face_drive_loop`]'s `select!`, and the seam that makes
+/// `listen/endpoints` a LIST rather than a first-element (R2099, open-debt item
+/// 512).
+///
+/// Upstream shape: zenoh's `bind_listeners_impl`
+/// (`zenoh/src/net/runtime/orchestrator.rs:520-541`) adds every configured
+/// endpoint to the one transport manager, which then accepts on all of them into
+/// a single session table. wz has no manager-owned accept task, so the fan-in is
+/// here: every listener is polled each iteration and the first to yield wins.
+///
+/// Three arms, and the first two exist to keep the pre-existing shapes exactly as
+/// they were:
+/// * EMPTY — park forever. A `FaceSources` with no listener accepts nothing (a
+///   dial-only node), and a parking arm is how every other optional source in
+///   this loop spells that (see [`recv_dial_intent`]).
+/// * ONE — await it directly. No `select_all`, no boxing: the single-listener
+///   path is the one every node before this round took, and it stays identical.
+/// * MANY — `select_all` over one [`BoundListener::accept_raw`] future per
+///   listener. Cancel-safe in both directions: `select_all` drops the losers, and
+///   every `accept_raw` arm is individually cancel-safe (its per-variant doc says
+///   so — the channel-backed ones are bare `recv`s, the socket-backed ones are
+///   `accept` syscalls that buffer in the kernel), which is the same property the
+///   surrounding `select!` already relies on.
+///
+/// FAIRNESS: `select_all` polls in order, so a listener that is always ready can
+/// starve a later one within a single call. It cannot starve it across calls —
+/// each call builds a fresh future set — and the same in-order bias already
+/// exists between the `select!` arms themselves, so this adds no new class.
+async fn accept_any(listeners: &mut [BoundListener]) -> io::Result<(AcceptedLink, AcceptedPeer)> {
+    match listeners {
+        [] => std::future::pending().await,
+        [only] => only.accept_raw().await,
+        many => {
+            let futures: Vec<_> = many.iter_mut().map(|l| Box::pin(l.accept_raw())).collect();
+            futures_util::future::select_all(futures).await.0
+        }
+    }
+}
+
 /// Await the next gossip-autoconnect [`DialIntent`], or park forever when there
 /// is no dial-intent channel (autoconnect not enabled) — the dial-intent twin of
 /// [`forwarder_tick`], so the `select!` arm-set is fixed at compile time. When
@@ -1392,14 +1432,34 @@ pub struct McastIngressItem {
 }
 
 pub struct FaceSources {
-    /// The bound listener for inbound peers (accept source), scheme-keyed
+    /// The bound listeners for inbound peers (accept source), each scheme-keyed
     /// ([`BoundListener`]) so a router/peer accepts the whole stream family
     /// (tcp/ws/tls) — [`face_drive_loop`]'s `select!` arm accepts one raw
-    /// connection per iteration via [`BoundListener::accept_raw`], and the ws/tls
-    /// SERVER handshake is deferred to the spawned open future so a slow handshake
-    /// never blocks the loop. R311y376 (Stage 3) generalized this from a bare
+    /// connection per iteration via [`accept_any`], and the ws/tls SERVER
+    /// handshake is deferred to the spawned open future so a slow handshake never
+    /// blocks the loop. R311y376 (Stage 3) generalized this from a bare
     /// [`tokio::net::TcpListener`].
-    pub listener: BoundListener,
+    ///
+    /// R2099 (open-debt item 512) — a LIST, because `listen/endpoints` is a list
+    /// and upstream binds every member of it: zenoh's `bind_listeners_impl`
+    /// (`zenoh/src/net/runtime/orchestrator.rs:520-541`) loops the whole
+    /// configured slice calling `add_listener` on each, and `print_locators`
+    /// then names every bound locator. Until this round wz bound
+    /// `listen.first()` and dropped the rest silently, which is the half-truth
+    /// item 512 measured: the key reached the flag carrying ONE of its members,
+    /// and was still reported APPLIED.
+    ///
+    /// ONE field rather than "the listener plus the extra ones", for the reason
+    /// R2096 gave when it retired `qos: bool` beside [`Self::offer`]: two fields
+    /// for one fact is what lets the two disagree. A single-element `Vec` is the
+    /// byte-identical prior behaviour — [`accept_any`] awaits that one listener
+    /// directly, with no `select_all` in the path.
+    ///
+    /// EMPTY is representable and means "accept nothing": the arm parks forever,
+    /// so a dial-only node is expressible without inventing a listener. That is
+    /// upstream's shape too — `bind_listeners` returns `Ok` on an empty slice
+    /// after warning "Starting with no listener endpoints!".
+    pub listeners: Vec<BoundListener>,
     /// The peer addresses to dial at startup (static outbound source); empty for
     /// a pure acceptor.
     pub dial_targets: Vec<SocketAddr>,
@@ -1530,7 +1590,7 @@ where
     F: FnMut(&AcceptEvent),
 {
     let FaceSources {
-        mut listener,
+        mut listeners,
         dial_targets,
         mut dial_intents,
         mut mcast_ingress,
@@ -1716,7 +1776,8 @@ where
             // (ws/tls SERVER handshake deferred to the spawned open future, so a
             // slow handshake never stalls this arm). R311y376 (Stage 3) — was
             // `accept_tcp_on(&listener)`; now scheme-keyed via `accept_raw`.
-            accepted = listener.accept_raw() => Step::Accepted(accepted),
+            // R2099 (item 512) — over EVERY bound listener, not the first one.
+            accepted = accept_any(&mut listeners) => Step::Accepted(accepted),
             _ = forwarder_tick(&mut tick_timer) => Step::Tick,
             intent = recv_dial_intent(&mut dial_intents) => Step::Dial(intent),
             item = recv_mcast_ingress(&mut mcast_ingress) => Step::McastIngress(item),
@@ -2468,7 +2529,10 @@ where
 {
     face_drive_loop(
         FaceSources {
-            listener,
+            // accept-only: ONE listener, the one this entry point binds. A node
+            // that binds a whole `listen/endpoints` list reaches `peer_loop`,
+            // which is where R2099 threads the multi-bind.
+            listeners: vec![listener],
             dial_targets: Vec::new(),
             // accept-only: no static dials and no autoconnect dial-intent stream.
             dial_intents: None,
@@ -3998,7 +4062,7 @@ mod tests {
         };
         let peer = peer_loop(
             FaceSources {
-                listener: peer_listener,
+                listeners: vec![peer_listener],
                 dial_targets: vec![acc_addr],
                 dial_intents: None,
                 mcast_ingress: None,
@@ -4088,7 +4152,7 @@ mod tests {
         };
         let peer = peer_loop(
             FaceSources {
-                listener: peer_listener,
+                listeners: vec![peer_listener],
                 dial_targets: vec![],
                 dial_intents: Some(intent_rx),
                 mcast_ingress: None,
@@ -4177,7 +4241,7 @@ mod tests {
 
         let peer = peer_loop(
             FaceSources {
-                listener: peer_listener,
+                listeners: vec![peer_listener],
                 dial_targets: vec![acc_addr],
                 dial_intents: None,
                 mcast_ingress: None,

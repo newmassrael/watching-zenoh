@@ -83,9 +83,12 @@ pub(crate) fn print_usage() {
     eprintln!("OPTIONS:");
     eprintln!("    --listen <addr>          acceptor mode (e.g. 127.0.0.1:7447); announces the");
     eprintln!("                             zenoh peer role on the wire");
-    eprintln!("    --connect <addr>         initiator mode (HOST:PORT or tcp/|ws/HOST:PORT);");
+    eprintln!("    --connect <a[,b..]>      initiator mode (HOST:PORT or tcp/|ws/HOST:PORT);");
     eprintln!("                             this is the zenoh client role — there is no");
-    eprintln!("                             --client flag, and this is what to reach for");
+    eprintln!("                             --client flag, and this is what to reach for.");
+    eprintln!("                             A comma-separated list is dialled in order and the");
+    eprintln!("                             FIRST endpoint that opens wins, as zenoh's client");
+    eprintln!("                             does with connect/endpoints");
     eprintln!("    --qos                    offer the QoS transport on --connect (UNIT ext 0x1;");
     eprintln!("                             per-(priority, reliability) SN conduits). Mutually");
     eprintln!("                             exclusive with --lowlatency, as upstream");
@@ -130,18 +133,18 @@ pub(crate) fn print_usage() {
     eprintln!("                             NOTE: despite the flag name this announces the zenoh");
     eprintln!("                             peer role on the wire, not the router role; only");
     eprintln!("                             --router-hat announces router.");
-    eprintln!("    --router-hat <addr>      ROUTER mode proper: the only run mode that announces");
+    eprintln!("    --router-hat <a[,b..]>   ROUTER mode proper: the only run mode that announces");
     eprintln!("                             the zenoh router role on the wire, so a connecting");
     eprintln!("                             peer's linkstate graph tags this node as a router and");
+    eprintln!("                             faces are partitioned by role. BINDS every address in");
+    eprintln!("                             its comma-separated list, the way zenoh binds every");
+    eprintln!("                             listen/endpoints member. --connect takes a");
+    eprintln!("                             comma-separated list too. Needs `router-hat-router`.");
+    eprintln!("    --peer <a[,b..]>         peer-MESH mode: bind EVERY listed address AND dial");
+    eprintln!("                             every --connect target, holding both directions and");
+    eprintln!("                             forwarding along the linkstate spanning tree. Both");
     eprintln!(
-        "                             faces are partitioned by role. Takes a comma-separated"
-    );
-    eprintln!("                             --connect list. Requires `router-hat-router`.");
-    eprintln!("    --peer <addr>            peer-MESH mode: bind <addr> AND dial every --connect");
-    eprintln!("                             target, holding both directions and forwarding along");
-    eprintln!("                             the linkstate spanning tree. --connect takes a");
-    eprintln!(
-        "                             comma-separated list here. Requires the `routing-peer`"
+        "                             lists are comma-separated. Requires the `routing-peer`"
     );
     eprintln!("                             build feature. Announces the zenoh peer role.");
     eprintln!("    --peer-mode <linkstate|peer-to-peer>");
