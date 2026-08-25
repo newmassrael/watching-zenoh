@@ -110,6 +110,15 @@ ACCOUNTING = (
     # -- and a position that keeps advancing is what proves nothing was quietly
     # skipped (R311y661).
     "self.base +=",
+    # R2102 (open-debt item 524) — the LIVE drain's loss tally. Same kind as
+    # `self.drops.` above and it could not wear that name: the counter is
+    # reached through a destructured `&mut self`, because the walk holds
+    # `self.dissection` borrowed while the bookkeeping runs. A TOKEN rather
+    # than an ALLOWED entry for the sites that use it, deliberately -- an
+    # allow-list entry excuses a site forever, and a round that deleted the
+    # tally beside one of those removals would still pass. This way the gate
+    # keeps reading it.
+    "*lost +=",
 )
 
 # (crate/file, the exact source line, why it owes nothing). Matched on the
@@ -120,7 +129,12 @@ ACCOUNTING = (
 ALLOWED = [
     (
         "wz-session-core/passive_messages.rs",
-        "frame: Some(self.0.remove(0)),",
+        # R2102 — `self.0` became `self.held` when `MessageList` grew its
+        # `produced` counter and stopped being a tuple struct. The line is
+        # matched EXACTLY, so the rename showed up here as a stale entry plus
+        # an unaccounted site, which is the pair this list is supposed to
+        # produce when a registered site moves.
+        "frame: Some(self.held.remove(0)),",
         "R311y723 — THE DOOR ITSELF. This removal accounts for nothing on "
         "purpose: it hands back a `#[must_use] Discarded` whose destructor "
         "PANICS unless the caller took the frame, so the obligation is moved "
@@ -173,6 +187,23 @@ ALLOWED = [
         "let Some(entry) = open.remove(&key) else {",
         "an exchange leaving the OPEN set because it completed; the entry is "
         "folded into the totals on the next line rather than dropped",
+    ),
+    (
+        "wz-capi-dissect/lib.rs",
+        "let n = handle.drain(buffer);",
+        "R2102 (open-debt item 524) — NOT A REMOVAL. `LiveDissection::drain` is "
+        "the live door's delivery call: it COPIES decoded messages into the "
+        "caller's buffer and takes nothing out of the dissection. The regex "
+        "matches the word, which is the right default for `Vec::drain` and is "
+        "a false positive on a method that happens to share its name. What "
+        "this call could NOT hand over is counted, one layer down, by the "
+        "`*lost +=` tallies the ACCOUNTING list now reads",
+    ),
+    (
+        "wz-capi-dissect/lib.rs",
+        "let written = handle.drain(&mut buffer);",
+        "R2102 — the same call from a TEST, and the same reason. Nothing "
+        "captured leaves the dissection here",
     ),
     (
         "wz-capture/exit.rs",

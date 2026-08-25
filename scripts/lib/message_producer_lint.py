@@ -51,11 +51,25 @@ the only one of the three that can do it.
 ## What counts as reached
 
 The enumeration names a field directly (`self.serial_frames`), or names a method
-that does (`frame_lists`). So the scan follows one hop: a field named in
-`message_lists` is reached, and so is a field named in any method
-`message_lists` calls. One hop and not a full call graph, deliberately — a
-deeper walk would start proving things about code this gate cannot read, and the
-shape it has to catch is a field nobody mentions anywhere.
+that does (`frame_lists_with_origin`). So the scan follows one hop: a field named
+in the enumeration is reached, and so is a field named in any method the
+enumeration calls. One hop and not a full call graph, deliberately — a deeper
+walk would start proving things about code this gate cannot read, and the shape
+it has to catch is a field nobody mentions anywhere.
+
+## R2102 — the enumeration is `message_lists_with_origin`, one name over
+
+`Dissection::message_lists` is now a PROJECTION of
+`Dissection::message_lists_with_origin`, which is where the fields are named.
+The planes still call the short one and see exactly what they saw before; what
+moved is only where the list names are written down.
+
+ONE HOP IS WHY THIS CONSTANT HAD TO MOVE WITH IT, and the gate said so itself:
+left pointing at `message_lists`, the scan reached
+`message_lists_with_origin` (hop one) and stopped, so `quic_datagrams` — named
+only inside `frame_lists_with_origin`, hop two — went unreached and the lane
+failed by name. That is the gate working, and the fix is to point it at the
+method that is actually the enumeration rather than to deepen the walk.
 """
 
 from __future__ import annotations
@@ -69,8 +83,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # The WHOLE workspace: a producer in any crate is a producer.
 CRATES = REPO_ROOT / "crates"
 
-# The enumeration every plane walks.
-ENUMERATION = "message_lists"
+# The enumeration every plane walks — through `message_lists`, which projects
+# this one. See the module doc for why the constant names the longer method.
+ENUMERATION = "message_lists_with_origin"
 
 # A field whose declaration MENTIONS the type, in any container. `=` is the one
 # character excluded: a struct declaration has none, and allowing `;` is what

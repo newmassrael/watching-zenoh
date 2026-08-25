@@ -73,26 +73,78 @@ use crate::passive::PassiveFrame;
 
 /// Decoded transport messages, in the order the observer produced them.
 ///
-/// See the module doc: this is a newtype so that the population of "things a
-/// census plane must be shown" is a NAME rather than a container shape, and so
-/// that growth and removal have exactly one door each.
+/// See the module doc: this is a wrapper type so that the population of "things
+/// a census plane must be shown" is a NAME rather than a container shape, and
+/// so that growth and removal have exactly one door each.
+///
+/// R2102 (open-debt item 524) — it holds a second field now, and having the one
+/// door is what let it: [`MessageList::produced`] is maintained by `push` and
+/// `append` and by nothing else, which is a claim only a type whose growth has
+/// exactly one door can make.
 #[derive(Debug, Default)]
-pub struct MessageList(Vec<PassiveFrame>);
+pub struct MessageList {
+    held: Vec<PassiveFrame>,
+    /// R2102 (open-debt item 524) — messages EVER appended to this list, which
+    /// is a different number from `len` the moment a bound bites.
+    ///
+    /// # Why a monotone total, and why it lives on the list
+    ///
+    /// A reader that consumes this list INCREMENTALLY — a live tap draining
+    /// what has become decodable since it last looked — needs a watermark that
+    /// says "I have taken the first N of this list". An INDEX into the held
+    /// vector cannot be that watermark: [`MessageList::discard_oldest`] removes
+    /// from the FRONT, so every trim silently renumbers every position behind
+    /// it, and a consumer holding index 40 would re-deliver messages or skip
+    /// them depending on which way the trim went.
+    ///
+    /// This counter is untouched by removal, so `produced - len` is the
+    /// produced-index of the OLDEST message still here. A consumer compares its
+    /// own watermark against that number and learns, exactly, how many messages
+    /// were discarded out from under it — which is the same obligation
+    /// [`Discarded`] states for the census, one consumer over: a bound that
+    /// takes something away from a reader and does not say so reports a floor
+    /// as a total.
+    ///
+    /// It also tells a list APART from its successor. A flow evicted and then
+    /// reopened under the same 5-tuple gets a fresh list whose `produced` is
+    /// zero, and a watermark above zero is how a consumer knows the slot it was
+    /// tracking is not the list now standing in it.
+    produced: u64,
+}
 
 impl MessageList {
     /// An empty list.
     pub fn new() -> Self {
-        Self(Vec::new())
+        Self {
+            held: Vec::new(),
+            produced: 0,
+        }
     }
 
     /// Append one decoded message.
     pub fn push(&mut self, frame: PassiveFrame) {
-        self.0.push(frame);
+        self.held.push(frame);
+        self.produced += 1;
     }
 
     /// Append a decoded batch, which is what a datagram unit yields.
     pub fn append(&mut self, frames: impl IntoIterator<Item = PassiveFrame>) {
-        self.0.extend(frames);
+        let before = self.held.len();
+        self.held.extend(frames);
+        // The DIFFERENCE rather than the iterator's own count: an
+        // `IntoIterator` may report a size hint it does not deliver, and the
+        // vector's growth is the one measurement that cannot disagree with what
+        // is now in the list.
+        self.produced += (self.held.len() - before) as u64;
+    }
+
+    /// R2102 (open-debt item 524) — messages ever appended here, never
+    /// decremented.
+    ///
+    /// See the field's own doc for why an index into [`MessageList::as_slice`]
+    /// cannot do this job.
+    pub fn produced(&self) -> u64 {
+        self.produced
     }
 
     /// R311y723 — drop the OLDEST message, and hand back a receipt for it.
@@ -107,11 +159,14 @@ impl MessageList {
     /// already follow.
     #[must_use = "a discarded message must be accounted for -- see `Discarded`"]
     pub fn discard_oldest(&mut self) -> Option<Discarded> {
-        if self.0.is_empty() {
+        if self.held.is_empty() {
             return None;
         }
         Some(Discarded {
-            frame: Some(self.0.remove(0)),
+            // `produced` deliberately does NOT move here. It counts what was
+            // ever appended, and a trim is the one event a consumer's watermark
+            // has to be able to see across.
+            frame: Some(self.held.remove(0)),
         })
     }
 
@@ -121,7 +176,7 @@ impl MessageList {
     /// `&[PassiveFrame]` parameter relies on coercion and a caller building an
     /// iterator chain often cannot.
     pub fn as_slice(&self) -> &[PassiveFrame] {
-        &self.0
+        &self.held
     }
 }
 
@@ -341,7 +396,7 @@ impl Deref for MessageList {
     type Target = [PassiveFrame];
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        &self.held
     }
 }
 
@@ -349,7 +404,7 @@ impl DerefMut for MessageList {
     /// A SLICE, so an in-place rewrite of a frame's coordinates works and a
     /// growth or removal does not. See the module doc.
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
+        &mut self.held
     }
 }
 
@@ -358,7 +413,7 @@ impl<'a> IntoIterator for &'a MessageList {
     type IntoIter = core::slice::Iter<'a, PassiveFrame>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.0.iter()
+        self.held.iter()
     }
 }
 
@@ -422,6 +477,46 @@ mod tests {
         assert!(list.is_empty(), "the list no longer holds it");
         assert_eq!(census.total(), 1, "and the census does");
         assert_eq!(census.keep_alive(), 1, "in the bucket the message names");
+    }
+
+    /// R2102 (open-debt item 524) — THE PRODUCED TOTAL SURVIVES A TRIM, which
+    /// is the whole of why it is not `len`.
+    ///
+    /// # What this discriminates
+    ///
+    /// The only failure that matters here is a `produced` that moves when a
+    /// message LEAVES: an implementation that decremented it, or that returned
+    /// `held.len()`, satisfies every other test in this file and destroys the
+    /// one property an incremental consumer relies on. So the assertion is not
+    /// "produced == 3" on its own — it is the PAIR, `produced` unmoved and
+    /// `len` moved, measured across the same trim.
+    ///
+    /// `produced - len` is asserted by name because that difference is the
+    /// arithmetic a consumer performs: it is the produced-index of the oldest
+    /// message still here, and therefore how many went past unseen.
+    #[test]
+    fn the_produced_total_counts_what_a_trim_took_away() {
+        let mut list = MessageList::new();
+        list.push(frame());
+        list.append([frame(), frame()]);
+        assert_eq!(list.produced(), 3, "one pushed and two appended");
+        assert_eq!(list.len(), 3, "and all three are still held");
+
+        let mut census = DroppedFrameCensus::default();
+        census.absorb(list.discard_oldest().expect("a message to discard"));
+        assert_eq!(list.len(), 2, "the trim took one");
+        assert_eq!(
+            list.produced(),
+            3,
+            "and the produced total is what it always was -- a counter a trim \
+             could move is a counter an incremental reader cannot use"
+        );
+        assert_eq!(
+            list.produced() - list.len() as u64,
+            1,
+            "so the oldest message still held is produced-index 1, and a \
+             consumer whose watermark is 0 knows exactly one went past it"
+        );
     }
 
     /// The other half: the buckets DISCRIMINATE, so a total that moved is not

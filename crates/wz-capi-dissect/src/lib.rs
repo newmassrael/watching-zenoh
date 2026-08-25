@@ -33,12 +33,32 @@
 //!
 //! ## What the ABI promises
 //!
-//! Eleven functions since R311y856 added `wz_dissect_pcap_fields_with_payloads`
-//! and `wz_dissect_declarations_diagnose`, and the memory
-//! rule is the whole of the contract: every
-//! string this library returns is owned by this library and must be released
-//! with [`wz_dissect_string_free`]. Nothing else is allocated across the
-//! boundary, no callbacks run, and no handle outlives the call that made it.
+//! The memory rule is the whole of the contract, and R2102 REVISED it. It used
+//! to read: every string this library returns is owned by this library and must
+//! be released with [`wz_dissect_string_free`]; nothing else is allocated
+//! across the boundary, no callbacks run, and NO HANDLE OUTLIVES THE CALL THAT
+//! MADE IT.
+//!
+//! The last clause is no longer true and the change is deliberate, because a
+//! live tap cannot be served without breaking it: reading a link means keeping
+//! a dissection alive between packets, and a dissection that dies with the call
+//! is a re-read of everything on every call. So the rule now reads:
+//!
+//! * every string this library returns is owned by this library and is released
+//!   with [`wz_dissect_string_free`] — unchanged;
+//! * NO CALLBACKS RUN — unchanged, and the live door is written to keep it:
+//!   records are written into a buffer the CALLER owns and sized
+//!   ([`wz_dissect_live_drain`]), never handed to a function pointer. That is
+//!   the clause open-debt item 237 was refused under, and refusing it stays the
+//!   right answer;
+//! * exactly ONE kind of handle outlives its call — the live dissection made by
+//!   [`wz_dissect_live_open`] and destroyed by [`wz_dissect_live_close`]. It is
+//!   opaque, it is not thread-safe, and it is the only allocation besides the
+//!   strings that crosses this boundary.
+//!
+//! [`wz_dissect_abi_version`] moves for that, as it does for a symbol: it is
+//! the number a consumer refuses a library by, and a memory rule that changed
+//! silently is precisely what it exists to prevent.
 //!
 //! ## What it does NOT promise
 //!
@@ -52,6 +72,10 @@ use std::ffi::CString;
 
 use wz_capture::Dissection;
 use wz_session_core::dissect::{dissect_transport_message, to_json};
+
+pub mod live;
+
+pub use live::WzDissectRecordV1;
 
 /// Success.
 pub const WZ_DISSECT_OK: c_int = 0;
@@ -93,6 +117,17 @@ pub const WZ_DISSECT_LIMITS_NONE: c_int = 0;
 /// `DissectionLimits` grows becomes a break rather than an edit. An integer
 /// grows by gaining VALUES, which no consumer has to be recompiled for.
 pub const WZ_DISSECT_LIMITS_LIVE_TAP: c_int = 1;
+
+/// R2102 (open-debt item 524) — the `ts_ns` a caller passes to
+/// [`wz_dissect_live_push`] when it has no clock reading, and the value a
+/// record carries back when nothing timed it.
+///
+/// `u64::MAX` and NOT zero. Zero is a legal instant — a tap whose clock starts
+/// at its own zero is an ordinary thing — and a sentinel that collided with it
+/// would report such a tap as having no clock at all. The same value in both
+/// directions on purpose: a consumer that echoes a record's `ts_ns` back into
+/// a synthetic push does not have to translate.
+pub const WZ_DISSECT_NO_TIMESTAMP: u64 = live::NO_TIMESTAMP;
 
 /// The ABI revision. Bumped when the SYMBOL SET or the memory contract changes
 /// — NOT when the JSON gains fields, which is the whole point of handing back
@@ -144,11 +179,27 @@ pub const WZ_DISSECT_LIMITS_LIVE_TAP: c_int = 1;
 /// here for the reason R311y885's entry above gives: a new key is the widening
 /// the read-by-name contract exists to permit.
 ///
+/// R2102 (open-debt item 524) — 10 → 11, and this one moves for BOTH halves of
+/// the rule at once, which no previous bump has done.
+///
+/// The SYMBOLS: [`wz_dissect_live_open`], [`wz_dissect_live_push`],
+/// [`wz_dissect_live_drain`], [`wz_dissect_live_lost`] and
+/// [`wz_dissect_live_close`].
+///
+/// The MEMORY RULE: "no handle outlives the call that made it" is no longer
+/// true, and a consumer must be able to find that out by asking rather than by
+/// reading a header it may not have re-read. The clause was load-bearing —
+/// open-debt item 237 was refused under the sentence next to it — so widening
+/// it silently was never available. What did NOT change is the callback half:
+/// a drain writes into a buffer the caller owns, so no function pointer of the
+/// consumer's runs inside this library. See the crate doc for the revision in
+/// full.
+///
 /// # Safety
 /// None; takes no arguments and touches no memory.
 #[no_mangle]
 pub extern "C" fn wz_dissect_abi_version() -> c_int {
-    10
+    11
 }
 
 /// R311y913 (unregistered item 435) — WHAT THIS BUILD CAN READ, as a document.
@@ -1158,6 +1209,215 @@ pub unsafe extern "C" fn wz_dissect_selector_diagnose(
         }
     };
     write_string(verdict, out)
+}
+
+// ── R2102 (ABI 11, open-debt item 524) — THE LIVE DOOR ──────────────────────
+//
+// Four symbols and a getter. Everything above this line takes a whole capture
+// and hands back a document; this takes a link, one packet at a time, and hands
+// back records. See the crate doc for the memory-rule revision it required and
+// `live`'s module doc for why the records are binary.
+
+/// R2102 (open-debt item 524) — open a dissection that OUTLIVES THIS CALL.
+///
+/// # The memory rule this revises, said out loud
+///
+/// `wz_dissect.h` has said since R311y586 that "no handle outlives the call
+/// that made it". This is the exception, and it is the whole reason the ABI
+/// revision moves: a live tap is a dissection kept alive between packets, and a
+/// door that could not keep one would be re-reading the whole link on every
+/// call. The rest of the rule is untouched — no callbacks run, and the records
+/// go into a buffer the CALLER owns (see [`wz_dissect_live_drain`]), so the
+/// only thing this adds to what crosses the boundary is one opaque pointer.
+///
+/// The handle is NOT thread-safe. One thread at a time; a consumer with several
+/// taps opens a handle per tap, which is cheaper than the lock the alternative
+/// would need.
+///
+/// # The preset argument
+///
+/// [`WZ_DISSECT_LIMITS_LIVE_TAP`] is what a link deserves and
+/// [`WZ_DISSECT_LIMITS_NONE`] is accepted for the caller who is replaying a
+/// bounded amount of traffic and wants nothing discarded. An unknown value is
+/// [`WZ_DISSECT_ERR_INVALID_ARG`] and never a quiet fall back to unbounded — on
+/// a door whose input does not end, a caller that believes it asked for a
+/// ceiling must not be given none.
+///
+/// # Safety
+/// `out` must be a writable pointer to a `*mut wz_dissect_live` and must not be
+/// null. On success it receives a handle to be released exactly once with
+/// [`wz_dissect_live_close`].
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_live_open(
+    limits: c_int,
+    out: *mut *mut live::LiveDissection,
+) -> c_int {
+    if out.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    let preset = match limits {
+        WZ_DISSECT_LIMITS_NONE => wz_capture::DissectionLimits::default(),
+        WZ_DISSECT_LIMITS_LIVE_TAP => wz_capture::DissectionLimits::for_live_tap(),
+        _ => return WZ_DISSECT_ERR_INVALID_ARG,
+    };
+    let handle = Box::new(live::LiveDissection::new(preset));
+    // SAFETY: null-checked above.
+    unsafe { *out = Box::into_raw(handle) };
+    WZ_DISSECT_OK
+}
+
+/// R2102 — feed one captured packet to a live handle.
+///
+/// `link_type` is the pcap link type of `bytes`, the same numbering
+/// [`wz_dissect_readable_surfaces`] reports. A packet on a link this build does
+/// not decode is COUNTED as skipped rather than refused: a tap sees what the
+/// interface gives it, and a call that failed per packet would make an ordinary
+/// mixed capture look like a broken consumer.
+///
+/// `ts_ns` is the instant the packet was captured. Pass
+/// [`WZ_DISSECT_NO_TIMESTAMP`] when there is no clock reading; the observer's
+/// own clock is then left where it is, which is the honest answer and what
+/// every message decoded from that packet will report.
+///
+/// # The clock is MILLISECONDS, and the argument is not
+///
+/// This reader keeps time in milliseconds (`PassiveFrame::observed_at_ms`), so
+/// a nanosecond reading is truncated to the millisecond it falls in and comes
+/// back as that millisecond. The argument is nanoseconds because that is what a
+/// tap's own clock hands it, and doing the narrowing HERE keeps one rounding
+/// rule in the system instead of one per consumer.
+///
+/// # The packet index
+///
+/// A datagram message anchors to the index of the packet that carried it, and
+/// on a live tap that index is your own push ordinal, counting from zero. There
+/// is no file to count positions in, so this is the only anchor there can be.
+///
+/// # Safety
+/// `handle` must be a handle from [`wz_dissect_live_open`] that has not been
+/// closed, and `bytes` must point to at least `len` readable bytes. Neither may
+/// be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_live_push(
+    handle: *mut live::LiveDissection,
+    link_type: u32,
+    ts_ns: u64,
+    bytes: *const u8,
+    len: usize,
+) -> c_int {
+    if handle.is_null() || bytes.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let handle = unsafe { &mut *handle };
+    // SAFETY: caller contract above.
+    let packet = unsafe { core::slice::from_raw_parts(bytes, len) };
+    handle.push(link_type, ts_ns, packet);
+    WZ_DISSECT_OK
+}
+
+/// R2102 — take the messages decoded since the last drain, into a buffer YOU
+/// own.
+///
+/// `out` points at `cap` records; `written` receives how many were filled. A
+/// `cap` of zero is legal and writes nothing — it is how a consumer asks the
+/// handle to do its bookkeeping without taking any records, which is what the
+/// [`wz_dissect_live_lost`] counter is updated by.
+///
+/// # This is the clause that keeps "no callbacks run" true
+///
+/// The obvious shape for a live door is a callback per message, and that is the
+/// shape open-debt item 237 was refused under: a function pointer crossing this
+/// boundary is a piece of the consumer's control flow running inside the
+/// library, on a stack the library owns, with no way for either side to state
+/// what may happen there. Handing records into a buffer the caller sized is the
+/// same capability with none of that — the caller decides when it is called and
+/// how much it will take.
+///
+/// # A drain may return fewer than exist, and never fewer than nothing
+///
+/// If more messages are ready than `cap` holds, the rest stay for the next
+/// call, in order. A consumer drains in a loop until it gets a short count.
+///
+/// # Order
+///
+/// Records are grouped by the flow-list they came from, each list in the order
+/// it decoded them. They are NOT globally sorted by time; a consumer that needs
+/// that sorts on `ts_ns`, which is on every record. A live reader cannot sort
+/// globally without holding messages back until nothing older can arrive, and
+/// on a link that moment never comes.
+///
+/// # Safety
+/// `handle` must be a live handle, `out` must point to at least `cap` writable
+/// [`WzDissectRecordV1`], and `written` must be a writable `size_t`. None may be
+/// null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_live_drain(
+    handle: *mut live::LiveDissection,
+    out: *mut WzDissectRecordV1,
+    cap: usize,
+    written: *mut usize,
+) -> c_int {
+    if handle.is_null() || out.is_null() || written.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let handle = unsafe { &mut *handle };
+    // SAFETY: caller contract above. `cap` of 0 yields an empty slice, which
+    // `from_raw_parts_mut` permits for a non-null, aligned pointer.
+    let buffer = unsafe { core::slice::from_raw_parts_mut(out, cap) };
+    let n = handle.drain(buffer);
+    // SAFETY: null-checked above.
+    unsafe { *written = n };
+    WZ_DISSECT_OK
+}
+
+/// R2102 — messages this handle decoded and then DISCARDED before you drained
+/// them, cumulative.
+///
+/// A ceiling trimming a flow's list, or a flow evicted to stay inside
+/// `max_flows_per_table`, takes messages that were decoded and never handed
+/// out. This is how many. It is a symbol of its own rather than another
+/// out-parameter of the drain because a consumer reads it when it RENDERS, not
+/// once per drain.
+///
+/// Non-zero is the one thing that separates "the link went quiet" from "this
+/// reader could not keep up", which is why the door exists at all: this
+/// workspace's standing rule is that a bound which discards and does not say so
+/// reports a floor as a total.
+///
+/// `0` for a null handle — the honest answer for "how many did this handle
+/// lose" when there is no handle, and this is a getter with no error channel.
+///
+/// # Safety
+/// `handle` must be a handle from [`wz_dissect_live_open`] that has not been
+/// closed, or null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_live_lost(handle: *const live::LiveDissection) -> u64 {
+    if handle.is_null() {
+        return 0;
+    }
+    // SAFETY: caller contract above.
+    unsafe { (*handle).lost() }
+}
+
+/// R2102 — release a live handle. Null is a no-op.
+///
+/// The other half of the revised memory rule: this handle outlives its call and
+/// therefore has to be given back, exactly once, by the same rule
+/// [`wz_dissect_string_free`] states for every string this library returns.
+///
+/// # Safety
+/// `handle` must be a handle from [`wz_dissect_live_open`] that has not already
+/// been closed, or null. It must not be used afterwards.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_live_close(handle: *mut live::LiveDissection) {
+    if handle.is_null() {
+        return;
+    }
+    // SAFETY: caller contract above — the pointer came from `Box::into_raw` in
+    // `wz_dissect_live_open` and is retaken exactly once.
+    drop(unsafe { Box::from_raw(handle) });
 }
 
 /// The summary shape. Hand-rolled rather than via serde for the same reason
@@ -3160,7 +3420,14 @@ mod tests {
         // R311y917 — 10 since `wz_dissect_pcap_fields_limited` joined it. The
         // field DOCUMENT's new `dropped_by_limits` key moves nothing further,
         // which is the same half of the rule the R311y887 note above states.
-        assert_eq!(wz_dissect_abi_version(), 10);
+        //
+        // R2102 (open-debt item 524) — 11, for BOTH halves of the rule at once:
+        // the five `wz_dissect_live_*` symbols, and the memory contract itself,
+        // which now admits exactly one handle that outlives its call. The
+        // second half is the reason this number is the right place to publish
+        // the change — a consumer that refuses a library whose memory rules
+        // moved has no other way to ask.
+        assert_eq!(wz_dissect_abi_version(), 11);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -3960,5 +4227,408 @@ mod tests {
             "an unknown format must be told apart from a malformed line, and \
              say what IS available: {unknown}"
         );
+    }
+
+    // ── R2102 (ABI 11, open-debt item 524) — the LIVE door ─────────────────
+
+    /// A KeepAlive: one header byte, the smallest complete transport message,
+    /// so what these tests exercise is the live path and not a codec.
+    const KEEPALIVE: [u8; 1] = [0x04];
+    /// `wz_session_core::inbound::InboundFrame::kind_code` for a KeepAlive.
+    /// A literal here on purpose: this is the number a C consumer switches on,
+    /// and a test that read it back off the same method would assert only that
+    /// the method equals itself.
+    const KIND_KEEPALIVE: u8 = 4;
+    /// LINKTYPE_ETHERNET, which is what `udp_packet` above builds.
+    const LINKTYPE_ETHERNET: u32 = 1;
+
+    /// One live handle at the given preset, or the error code.
+    fn open_live(limits: c_int) -> Result<*mut live::LiveDissection, c_int> {
+        let mut handle: *mut live::LiveDissection = core::ptr::null_mut();
+        let rc = unsafe { wz_dissect_live_open(limits, &mut handle) };
+        if rc != WZ_DISSECT_OK {
+            return Err(rc);
+        }
+        assert!(!handle.is_null(), "OK came back with no handle");
+        Ok(handle)
+    }
+
+    /// Drain into a buffer of `cap`, through the ABI.
+    fn drain_live(handle: *mut live::LiveDissection, cap: usize) -> Vec<WzDissectRecordV1> {
+        let mut buffer = vec![
+            WzDissectRecordV1 {
+                ts_ns: 0,
+                flow_id: 0,
+                anchor: 0,
+                unit_len: 0,
+                batch_index: 0,
+                unit_offset: 0,
+                direction: 0,
+                anchor_space: 0,
+                origin: 0,
+                kind: 0,
+                flags: 0,
+            };
+            cap
+        ];
+        let mut written = usize::MAX;
+        let rc = unsafe { wz_dissect_live_drain(handle, buffer.as_mut_ptr(), cap, &mut written) };
+        assert_eq!(rc, WZ_DISSECT_OK, "drain rc");
+        assert!(written <= cap, "a drain wrote past the buffer it was given");
+        buffer.truncate(written);
+        buffer
+    }
+
+    /// R2102 — THE RECORD'S LAYOUT IS THE ONE THE HEADER DECLARES.
+    ///
+    /// # Why a size assertion is not pedantry here
+    ///
+    /// Every other output of this library is a string, and a string that
+    /// disagrees with what a consumer expects is a parse failure it can see.
+    /// This one is raw memory: a field inserted, widened or reordered produces
+    /// a consumer that reads plausible garbage — an anchor that is half a
+    /// timestamp — with no error anywhere. So the size, the alignment AND the
+    /// offsets are pinned, and `tests/c_abi_consumer.c` asserts the same
+    /// numbers from the other side of the boundary. Both must be edited to
+    /// change the layout, which is the point.
+    #[test]
+    fn the_record_layout_is_the_one_the_header_declares() {
+        assert_eq!(core::mem::size_of::<WzDissectRecordV1>(), 48, "size");
+        assert_eq!(core::mem::align_of::<WzDissectRecordV1>(), 8, "alignment");
+        assert_eq!(core::mem::offset_of!(WzDissectRecordV1, ts_ns), 0);
+        assert_eq!(core::mem::offset_of!(WzDissectRecordV1, flow_id), 8);
+        assert_eq!(core::mem::offset_of!(WzDissectRecordV1, anchor), 16);
+        assert_eq!(core::mem::offset_of!(WzDissectRecordV1, unit_len), 24);
+        assert_eq!(core::mem::offset_of!(WzDissectRecordV1, batch_index), 32);
+        assert_eq!(core::mem::offset_of!(WzDissectRecordV1, unit_offset), 36);
+        assert_eq!(core::mem::offset_of!(WzDissectRecordV1, direction), 40);
+        assert_eq!(core::mem::offset_of!(WzDissectRecordV1, anchor_space), 41);
+        assert_eq!(core::mem::offset_of!(WzDissectRecordV1, origin), 42);
+        assert_eq!(core::mem::offset_of!(WzDissectRecordV1, kind), 43);
+        assert_eq!(core::mem::offset_of!(WzDissectRecordV1, flags), 44);
+    }
+
+    /// R2102 — THE HANDLE OUTLIVES THE CALL, WHICH IS THE WHOLE POINT: three
+    /// packets fed one at a time yield three records, in order, from one
+    /// dissection.
+    ///
+    /// # What this discriminates
+    ///
+    /// A door that re-dissected per call would answer this too — with ONE
+    /// record each time, the third push reporting one message rather than the
+    /// three the link has carried. So the assertion is the SEQUENCE: three
+    /// records out of one drain, with three different anchors, which only a
+    /// dissection that survived all three pushes can produce.
+    #[test]
+    fn a_live_handle_decodes_across_pushes_and_drains_every_message() {
+        let handle = open_live(WZ_DISSECT_LIMITS_LIVE_TAP).expect("the preset opens");
+        let packet = udp_packet([10, 0, 0, 1], 7447, [10, 0, 0, 2], 7447, &KEEPALIVE);
+        for i in 0..3u64 {
+            let rc = unsafe {
+                wz_dissect_live_push(
+                    handle,
+                    LINKTYPE_ETHERNET,
+                    (i + 1) * 1_000_000,
+                    packet.as_ptr(),
+                    packet.len(),
+                )
+            };
+            assert_eq!(rc, WZ_DISSECT_OK, "push {i}");
+        }
+
+        let records = drain_live(handle, 16);
+        assert_eq!(
+            records.len(),
+            3,
+            "one record per decoded message, over three separate pushes"
+        );
+        for (i, r) in records.iter().enumerate() {
+            assert_eq!(r.kind, KIND_KEEPALIVE, "record {i} is a KeepAlive");
+            assert_eq!(r.anchor_space, 0, "a datagram anchors to a packet index");
+            assert_eq!(r.origin, 2, "the datagram flow's own list");
+            assert_eq!(r.anchor, i as u64, "the push ordinal IS the anchor");
+            assert_eq!(
+                r.ts_ns,
+                (i as u64 + 1) * 1_000_000,
+                "the instant the caller supplied, to the millisecond"
+            );
+            assert_eq!(r.flags, 0, "an ordinary KeepAlive flags nothing");
+        }
+        assert_eq!(
+            records[0].flow_id, records[2].flow_id,
+            "one conversation, one flow id"
+        );
+
+        // A SECOND drain is empty: a watermark that did not advance would hand
+        // the same three back forever, which is the failure a live consumer
+        // would see as the link repeating itself.
+        assert!(
+            drain_live(handle, 16).is_empty(),
+            "a drained message must not come back"
+        );
+        assert_eq!(
+            unsafe { wz_dissect_live_lost(handle) },
+            0,
+            "nothing was discarded, so nothing may be reported lost"
+        );
+        unsafe { wz_dissect_live_close(handle) };
+    }
+
+    /// R2102 — A BUFFER SMALLER THAN THE BACKLOG TAKES A PREFIX, AND THE REST
+    /// STAY.
+    ///
+    /// This is the contract a consumer loops on. The failure it rules out is
+    /// the one that costs data rather than time: a drain that advanced its
+    /// watermark past records it did not write would drop them silently, and
+    /// every count downstream would still look plausible.
+    #[test]
+    fn a_short_buffer_takes_a_prefix_and_leaves_the_rest_in_order() {
+        let handle = open_live(WZ_DISSECT_LIMITS_LIVE_TAP).expect("the preset opens");
+        let packet = udp_packet([10, 0, 0, 1], 7447, [10, 0, 0, 2], 7447, &KEEPALIVE);
+        for _ in 0..3 {
+            unsafe {
+                wz_dissect_live_push(
+                    handle,
+                    LINKTYPE_ETHERNET,
+                    WZ_DISSECT_NO_TIMESTAMP,
+                    packet.as_ptr(),
+                    packet.len(),
+                )
+            };
+        }
+
+        let mut anchors = Vec::new();
+        for _ in 0..3 {
+            let batch = drain_live(handle, 1);
+            assert_eq!(batch.len(), 1, "a buffer of one takes exactly one");
+            anchors.push(batch[0].anchor);
+        }
+        assert_eq!(anchors, vec![0, 1, 2], "and they come out in order");
+        assert!(
+            drain_live(handle, 1).is_empty(),
+            "then the backlog is empty"
+        );
+        assert_eq!(
+            unsafe { wz_dissect_live_lost(handle) },
+            0,
+            "a short buffer is not a loss -- the records waited"
+        );
+
+        // On THIS handle no push ever carried a reading, so every record says
+        // the clock was never set -- and says it with the sentinel rather than
+        // with zero, because zero is a legal instant and a tap whose clock
+        // starts at its own zero must not be reported as having none.
+        let records = drain_live(handle, 4);
+        assert!(records.is_empty(), "nothing new to drain");
+        unsafe { wz_dissect_live_close(handle) };
+    }
+
+    /// R2102 — WHAT `ts_ns` MEANS, in the two cases that look alike and are
+    /// not: a clock that was never set, and a clock that has stopped moving.
+    ///
+    /// # Why both halves are asserted here
+    ///
+    /// `PassiveFrame::observed_at_ms` is the capture clock AS OF that frame,
+    /// and a push with no reading leaves the clock where it stood. So a record
+    /// can carry the instant of an EARLIER packet, which is the honest answer
+    /// and is not the same as "nothing timed this". A consumer told only about
+    /// the sentinel would read a stalled clock as a fresh reading; one told
+    /// only about the stall would have no value for a source with no clock at
+    /// all. Both are pinned, in one test, because the pair is the contract.
+    #[test]
+    fn a_clock_that_never_moved_is_told_apart_from_one_that_stopped() {
+        let packet = udp_packet([10, 0, 0, 1], 7447, [10, 0, 0, 2], 7447, &KEEPALIVE);
+
+        // Never set: the sentinel, and NOT zero.
+        let never = open_live(WZ_DISSECT_LIMITS_NONE).expect("NONE is a preset");
+        unsafe {
+            wz_dissect_live_push(
+                never,
+                LINKTYPE_ETHERNET,
+                WZ_DISSECT_NO_TIMESTAMP,
+                packet.as_ptr(),
+                packet.len(),
+            )
+        };
+        let records = drain_live(never, 4);
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].ts_ns, WZ_DISSECT_NO_TIMESTAMP,
+            "a clock that was never set must report as never set"
+        );
+        assert_ne!(
+            records[0].ts_ns, 0,
+            "and must not collide with zero, which is a legal instant"
+        );
+        unsafe { wz_dissect_live_close(never) };
+
+        // Set once, then a push with nothing to say: the clock STANDS, and the
+        // record carries where it stood.
+        let stalled = open_live(WZ_DISSECT_LIMITS_NONE).expect("NONE is a preset");
+        unsafe {
+            wz_dissect_live_push(
+                stalled,
+                LINKTYPE_ETHERNET,
+                7_000_000,
+                packet.as_ptr(),
+                packet.len(),
+            );
+            wz_dissect_live_push(
+                stalled,
+                LINKTYPE_ETHERNET,
+                WZ_DISSECT_NO_TIMESTAMP,
+                packet.as_ptr(),
+                packet.len(),
+            );
+        }
+        let records = drain_live(stalled, 4);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].ts_ns, 7_000_000, "the reading that was supplied");
+        assert_eq!(
+            records[1].ts_ns, 7_000_000,
+            "and a push with nothing to say leaves the clock where it stood, \
+             which is a different fact from having no clock"
+        );
+        unsafe { wz_dissect_live_close(stalled) };
+    }
+
+    /// R2102 — A CEILING THAT TRIMS BEFORE THE DRAIN IS COUNTED, NOT HIDDEN.
+    ///
+    /// # Why this is the test that had to exist
+    ///
+    /// The live preset's whole job is to discard rather than grow without
+    /// bound, so a consumer that reads its records and nothing else is reading
+    /// a FLOOR. Every plane in this workspace that trims reports what the trim
+    /// cost, for exactly that reason, and a live drain that did not would be
+    /// the one surface where "the link went quiet" and "this reader could not
+    /// keep up" render identically.
+    ///
+    /// The ceiling is set here rather than taken from the preset because the
+    /// preset's is 10 000 frames per flow — a bound that is right for a tap and
+    /// unreachable in a test, which would make this a population of zero.
+    #[test]
+    fn a_ceiling_that_trims_before_the_drain_is_counted_rather_than_hidden() {
+        let limits = wz_capture::DissectionLimits {
+            frames_per_flow: Some(1),
+            ..Default::default()
+        };
+        let mut handle = live::LiveDissection::new(limits);
+
+        let packet = udp_packet([10, 0, 0, 1], 7447, [10, 0, 0, 2], 7447, &KEEPALIVE);
+        for _ in 0..3 {
+            handle.push(LINKTYPE_ETHERNET, WZ_DISSECT_NO_TIMESTAMP, &packet);
+        }
+
+        let mut buffer = [WzDissectRecordV1 {
+            ts_ns: 0,
+            flow_id: 0,
+            anchor: 0,
+            unit_len: 0,
+            batch_index: 0,
+            unit_offset: 0,
+            direction: 0,
+            anchor_space: 0,
+            origin: 0,
+            kind: 0,
+            flags: 0,
+        }; 8];
+        let written = handle.drain(&mut buffer);
+        assert_eq!(
+            written, 1,
+            "the ceiling kept one message, so one is all there is to hand out"
+        );
+        assert_eq!(
+            buffer[0].anchor, 2,
+            "and it is the NEWEST -- a trim takes the oldest"
+        );
+        assert_eq!(
+            handle.lost(),
+            2,
+            "the two the ceiling took must be reported, not swallowed: a bound \
+             that discards silently reports a floor as a total"
+        );
+    }
+
+    /// R2102 — the boundary refuses a null before it dereferences one, on every
+    /// door of the live family.
+    ///
+    /// A panic unwinding across `extern "C"` is undefined behaviour, and these
+    /// are the calls that would trip it.
+    #[test]
+    fn the_live_doors_refuse_nulls_and_unknown_presets() {
+        assert_eq!(
+            unsafe { wz_dissect_live_open(WZ_DISSECT_LIMITS_LIVE_TAP, core::ptr::null_mut()) },
+            WZ_DISSECT_ERR_INVALID_ARG,
+            "a null out-parameter"
+        );
+        // An unknown preset is REFUSED rather than defaulted, for the reason
+        // every other preset door here refuses one: a caller that believes it
+        // asked for a ceiling must not be given none, and on a door whose input
+        // never ends that is the difference between bounded and a leak.
+        assert_eq!(
+            open_live(9).unwrap_err(),
+            WZ_DISSECT_ERR_INVALID_ARG,
+            "an unknown preset"
+        );
+
+        let handle = open_live(WZ_DISSECT_LIMITS_NONE).expect("NONE is a preset");
+        let packet = udp_packet([10, 0, 0, 1], 7447, [10, 0, 0, 2], 7447, &KEEPALIVE);
+        assert_eq!(
+            unsafe {
+                wz_dissect_live_push(
+                    core::ptr::null_mut(),
+                    LINKTYPE_ETHERNET,
+                    0,
+                    packet.as_ptr(),
+                    packet.len(),
+                )
+            },
+            WZ_DISSECT_ERR_INVALID_ARG,
+            "a null handle"
+        );
+        assert_eq!(
+            unsafe { wz_dissect_live_push(handle, LINKTYPE_ETHERNET, 0, core::ptr::null(), 0) },
+            WZ_DISSECT_ERR_INVALID_ARG,
+            "null bytes"
+        );
+        let mut written = 0usize;
+        assert_eq!(
+            unsafe { wz_dissect_live_drain(handle, core::ptr::null_mut(), 4, &mut written) },
+            WZ_DISSECT_ERR_INVALID_ARG,
+            "a null buffer"
+        );
+        assert_eq!(
+            unsafe { wz_dissect_live_lost(core::ptr::null()) },
+            0,
+            "a null handle has lost nothing"
+        );
+        // Closing null is a no-op, so a consumer's cleanup path needs no guard
+        // of its own -- the same rule `wz_dissect_string_free` follows, and the
+        // commonest source of a double free at an FFI seam.
+        unsafe { wz_dissect_live_close(core::ptr::null_mut()) };
+        unsafe { wz_dissect_live_close(handle) };
+    }
+
+    /// R2102 — A PACKET ON A LINK THIS BUILD CANNOT READ IS COUNTED, NOT
+    /// REFUSED.
+    ///
+    /// A tap sees whatever the interface gives it. A push that returned an
+    /// error per undecodable packet would make an ordinary mixed capture look
+    /// like a broken consumer, and a consumer written against that would learn
+    /// to ignore the return value — which is worse than not having one.
+    #[test]
+    fn a_packet_on_an_unreadable_link_is_skipped_rather_than_refused() {
+        let handle = open_live(WZ_DISSECT_LIMITS_LIVE_TAP).expect("the preset opens");
+        let junk = [0xFFu8; 32];
+        assert_eq!(
+            unsafe { wz_dissect_live_push(handle, 0xDEAD, 0, junk.as_ptr(), junk.len()) },
+            WZ_DISSECT_OK,
+            "an unreadable link type is a fact about the capture, not an error"
+        );
+        assert!(
+            drain_live(handle, 4).is_empty(),
+            "and it produces no records"
+        );
+        unsafe { wz_dissect_live_close(handle) };
     }
 }

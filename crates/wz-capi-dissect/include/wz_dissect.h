@@ -8,6 +8,40 @@
  * Nothing else crosses the boundary allocated, no callbacks run, and no
  * handle outlives the call that made it.
  *
+ * R2102 (ABI 11) REVISED THAT LAST CLAUSE, and this paragraph is the
+ * revision rather than a note beside it. It used to be true without
+ * exception; there is now exactly ONE exception and it is named:
+ *
+ *   - every char* is still owned by this library and still released with
+ *     wz_dissect_string_free;
+ *   - NO CALLBACKS RUN. Unchanged, and the live door below is built to keep
+ *     it: records are written into a buffer YOU own and sized
+ *     (wz_dissect_live_drain), never handed to a function pointer of yours
+ *     that this library would call. A callback is a piece of your control
+ *     flow executing inside this library, on a stack it owns, and that is
+ *     what this ABI declines to admit;
+ *   - ONE KIND OF HANDLE OUTLIVES ITS CALL: the opaque wz_dissect_live made
+ *     by wz_dissect_live_open and released, exactly once, by
+ *     wz_dissect_live_close. It is not thread-safe. Use one handle from one
+ *     thread at a time, and open a handle per tap rather than sharing one.
+ *
+ * WHY IT COULD NOT STAY: a live tap is a dissection kept alive between
+ * packets. A door that could not keep one would re-read the whole link on
+ * every call, which is not a tap, it is a file read repeated. Widening the
+ * sentence quietly was never available -- the clause is load-bearing, and
+ * the callback half of it is the ground a previously proposed
+ * callback-registration door was refused on. So the rule is restated here,
+ * and wz_dissect_abi_version moves for the memory rule exactly as it moves
+ * for a symbol.
+ *
+ * THE LIVE RECORDS ARE BINARY, alone among this library's outputs. That is
+ * not a retreat from the self-describing-document design below: these
+ * records carry no walker output. They are the fixed scalars that say a
+ * message arrived -- when, on which flow, which way, how long, what kind --
+ * and a live tap renders them at line rate, where a JSON round trip per
+ * message is work proportional to the traffic for eight fields. A consumer
+ * wanting the field TREE of one message still asks for it by name.
+ *
  * THE JSON SHAPE IS NOT FROZEN. Field names are wz's walker names and may
  * gain siblings as walkers are added. Read by name and tolerate unknown
  * keys — that forward-compatibility is the reason this ABI hands back a
@@ -38,11 +72,18 @@
  * deliberately: its document is a FIELD TREE whose keys are the walkers' own
  * names, generated per protocol element, so there is no fixed key set for a
  * revision to be about.
+ *
+ * The live door emits no document at all, so it is outside this scheme
+ * rather than an omission from it. Its compatibility statement is the name
+ * wz_dissect_record_v1: a field read by OFFSET cannot be read by name and
+ * cannot tolerate an unknown one, so a layout change is a new struct and a
+ * new door, never a quiet reinterpretation of this one.
  */
 #ifndef WZ_DISSECT_H
 #define WZ_DISSECT_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -435,6 +476,209 @@ int wz_dissect_declarations_diagnose(const char *declarations, char **out);
  * them as lists splits on ", " and cannot be shown a different answer than
  * `--help` gives. */
 int wz_dissect_readable_surfaces(char **out);
+
+/* ── R2102 (ABI 11) — THE LIVE DOOR ──────────────────────────────────────
+ *
+ * Every door above takes a whole capture and hands back a document. That is
+ * right for a FILE, which ends, and wrong for a LINK, which does not: a
+ * consumer watching a running system could either re-hand the same growing
+ * buffer in and pay a full re-dissection per call, or cut the stream into
+ * windows and lose every message that straddles a cut.
+ *
+ * This is the other shape. Open a handle, feed it packets as they arrive,
+ * and take the messages that became decodable into a buffer you own:
+ *
+ *     wz_dissect_live *h;
+ *     if (wz_dissect_live_open(WZ_DISSECT_LIMITS_LIVE_TAP, &h)) { ... }
+ *     for (;;) {
+ *         wz_dissect_live_push(h, link_type, ts_ns, pkt, pkt_len);
+ *         wz_dissect_record_v1 buf[256];
+ *         size_t n;
+ *         while (!wz_dissect_live_drain(h, buf, 256, &n) && n) {
+ *             ...                        // render buf[0..n]
+ *             if (n < 256) break;        // a short count means drained
+ *         }
+ *     }
+ *     wz_dissect_live_close(h);
+ *
+ * READ THE MEMORY RULE AT THE TOP OF THIS FILE FIRST. This family is the
+ * one exception to it, the exception is stated there, and nothing else in
+ * this header creates anything you have to give back except a char*.
+ */
+
+/* A live dissection. Opaque: its size and contents are this library's, and
+ * a consumer holds only the pointer. */
+typedef struct wz_dissect_live wz_dissect_live;
+
+/* The `ts_ns` you pass when you have no clock reading, and the value a
+ * record carries back when nothing timed it.
+ *
+ * NOT zero, and that is the whole reason it is spelled out: zero is a legal
+ * instant, and a sentinel colliding with it would report a tap whose clock
+ * starts at zero as a tap with no clock. */
+#define WZ_DISSECT_NO_TIMESTAMP UINT64_MAX
+
+/* wz_dissect_record_v1.kind — the message kinds. Derived from the decoder's
+ * own variants (`InboundFrame::kind_code`), so a kind this build gained
+ * appears here and in that match on the same commit.
+ *
+ * 0 and 255 sit at the ends deliberately. UNDECODABLE is not a message kind
+ * at all -- it is this reader failing -- and UNKNOWN is a MID this build
+ * does not recognise, which is a fact about the wire. Both are answers, and
+ * neither is the absence of one. The numbers in between are contiguous so a
+ * kind added later gets the next one and a consumer's switch falls through
+ * to its own default rather than onto a neighbour's case. */
+#define WZ_DISSECT_KIND_UNDECODABLE 0
+#define WZ_DISSECT_KIND_INIT 1
+#define WZ_DISSECT_KIND_OPEN 2
+#define WZ_DISSECT_KIND_CLOSE 3
+#define WZ_DISSECT_KIND_KEEPALIVE 4
+#define WZ_DISSECT_KIND_FRAME 5
+#define WZ_DISSECT_KIND_FRAGMENT 6
+#define WZ_DISSECT_KIND_JOIN 7
+#define WZ_DISSECT_KIND_OAM 8
+#define WZ_DISSECT_KIND_UNKNOWN 255
+
+/* wz_dissect_record_v1.origin — which of a flow's message lists this came
+ * out of. A flow can carry several at once (a UDP conversation may hold
+ * cleartext datagrams AND messages recovered from inside QUIC), and they
+ * are different lists rather than one interleaved one. */
+#define WZ_DISSECT_ORIGIN_STREAM 1
+#define WZ_DISSECT_ORIGIN_DATAGRAM 2
+#define WZ_DISSECT_ORIGIN_QUIC_STREAM 3
+#define WZ_DISSECT_ORIGIN_QUIC_DATAGRAM 4
+#define WZ_DISSECT_ORIGIN_SERIAL 5
+
+/* wz_dissect_record_v1.anchor_space — how to read `anchor`. They are small
+ * numbers either way and cannot be told apart by looking, which is why the
+ * record says. A PACKET index must not be added to anything. */
+#define WZ_DISSECT_ANCHOR_PACKET 0
+#define WZ_DISSECT_ANCHOR_STREAM_BYTES 1
+
+/* wz_dissect_record_v1.flags — zero for an ordinary message. */
+/* The frame's wire length exceeded the batch_size its session's InitAck
+ * agreed to: a protocol violation by the sender. The message still
+ * decoded, and is reported rather than dropped -- dropping is what makes a
+ * non-conforming peer invisible. */
+#define WZ_DISSECT_FLAG_EXCEEDS_NEGOTIATED_BATCH 0x1u
+/* This message cannot occur on the link that carried it (an INIT or OPEN on
+ * a multicast-capable link), so it was decoded and reported but NOT folded
+ * into the session context. */
+#define WZ_DISSECT_FLAG_INADMISSIBLE_ON_LINK 0x2u
+/* The first message after the reader recovered its framing. Whatever stood
+ * between the loss and this message was skipped. */
+#define WZ_DISSECT_FLAG_AFTER_RESYNC 0x4u
+
+/* ONE decoded transport message.
+ *
+ * 48 bytes, 8-aligned, with every field explicitly sized. Both sides assert
+ * that -- `the_record_layout_is_the_one_the_header_declares` in the Rust
+ * crate and a sizeof/offsetof block in tests/c_abi_consumer.c -- because
+ * this is the one output of this library that is raw memory rather than
+ * text: a field inserted or widened gives a consumer plausible garbage (an
+ * anchor that is half a timestamp) with no error anywhere.
+ *
+ * The `_v1` is the compatibility statement. A field read by OFFSET cannot
+ * tolerate an unknown one, so a layout change is a new struct and a new
+ * door, never a new meaning for this one. */
+typedef struct wz_dissect_record_v1 {
+    /* This reader's clock AS OF this message, in nanoseconds, or
+     * WZ_DISSECT_NO_TIMESTAMP if it was never set.
+     *
+     * Two things that look alike and are not:
+     *
+     *   - the clock is MILLISECONDS, so what comes back is the nanosecond
+     *     value you pushed, truncated to the millisecond it fell in and
+     *     widened again. The narrowing happens at the boundary rather than
+     *     in your code so there is one rounding rule in the system;
+     *   - a push carrying WZ_DISSECT_NO_TIMESTAMP leaves the clock WHERE IT
+     *     STOOD, so a record can carry the instant of an earlier packet.
+     *     That is a different fact from having no clock, and only the
+     *     second reports the sentinel. */
+    uint64_t ts_ns;
+    /* A number this handle assigns each flow it sees, from zero, in order of
+     * first appearance. Stable for the life of the handle, meaningless
+     * outside it. */
+    uint64_t flow_id;
+    /* Where the message sits. Read it according to `anchor_space`: a packet
+     * INDEX (which is your own push ordinal, counting from zero) or a byte
+     * offset within one direction of this list's stream. */
+    uint64_t anchor;
+    /* The length the framing unit DECLARED, in bytes. */
+    uint64_t unit_len;
+    /* Which message of its framing unit this is, from zero. A batch puts
+     * several messages at one anchor and this is what keeps them apart. */
+    uint32_t batch_index;
+    /* Byte offset of this message within its framing unit. */
+    uint32_t unit_offset;
+    /* 0 = direction A (conventionally the initiator), 1 = B. */
+    uint8_t direction;
+    /* WZ_DISSECT_ANCHOR_*. */
+    uint8_t anchor_space;
+    /* WZ_DISSECT_ORIGIN_*. */
+    uint8_t origin;
+    /* WZ_DISSECT_KIND_*. */
+    uint8_t kind;
+    /* WZ_DISSECT_FLAG_* bits, or zero. */
+    uint32_t flags;
+} wz_dissect_record_v1;
+
+/* Open a live dissection. `limits` is WZ_DISSECT_LIMITS_LIVE_TAP for a link,
+ * or WZ_DISSECT_LIMITS_NONE for a bounded replay you want nothing discarded
+ * from. An unknown value is WZ_DISSECT_ERR_INVALID_ARG and never a quiet
+ * fall back to unbounded: on a door whose input does not end, a caller that
+ * believes it asked for a ceiling must not be given none.
+ *
+ * On WZ_DISSECT_OK, `*out` is a handle to be released exactly once with
+ * wz_dissect_live_close. */
+int wz_dissect_live_open(int limits, wz_dissect_live **out);
+
+/* Feed one captured packet. `link_type` is its pcap link type -- the same
+ * numbering wz_dissect_readable_surfaces reports.
+ *
+ * `ts_ns` is when the packet was captured, or WZ_DISSECT_NO_TIMESTAMP; see
+ * the record's own field for what this reader does with it.
+ *
+ * A packet on a link this build does not decode is COUNTED as skipped and
+ * returns WZ_DISSECT_OK. A tap sees whatever the interface gives it, and a
+ * call that failed per packet would make an ordinary mixed capture look
+ * like a broken consumer -- which teaches a consumer to ignore the return
+ * value, and that is worse than not having one. */
+int wz_dissect_live_push(wz_dissect_live *h, unsigned int link_type,
+                         uint64_t ts_ns, const unsigned char *bytes,
+                         size_t len);
+
+/* Take the messages decoded since the last drain into `out`, which holds
+ * `cap` records; `*written` receives how many were filled.
+ *
+ * If more are ready than `cap` holds, the rest stay, in order -- drain in a
+ * loop until you get a short count. A `cap` of zero writes nothing and is
+ * legal: it is how you ask the handle to bring its own accounting up to
+ * date without taking anything.
+ *
+ * ORDER: records are grouped by the flow-list they came from, each list in
+ * the order it decoded them. They are NOT globally sorted by time. Sort on
+ * `ts_ns` if you need that -- a live reader cannot do it for you without
+ * holding messages back until nothing older can arrive, and on a link that
+ * moment never comes. */
+int wz_dissect_live_drain(wz_dissect_live *h, wz_dissect_record_v1 *out,
+                          size_t cap, size_t *written);
+
+/* Messages this handle decoded and then DISCARDED before you drained them,
+ * cumulative: a ceiling trimming a flow's list, or a flow evicted to stay
+ * inside the flow cap.
+ *
+ * Read it when you RENDER, not once per drain, which is why it is its own
+ * door rather than another out-parameter. Non-zero is the one thing that
+ * separates "the link went quiet" from "this reader could not keep up", and
+ * a bounded read that could not say so would be reporting a floor as a
+ * total. `0` for a null handle. */
+uint64_t wz_dissect_live_lost(const wz_dissect_live *h);
+
+/* Release a live handle. Null is a no-op, so your cleanup path needs no
+ * guard of its own -- the same rule wz_dissect_string_free follows, and the
+ * commonest source of a double free at an FFI seam. */
+void wz_dissect_live_close(wz_dissect_live *h);
 
 #ifdef __cplusplus
 }

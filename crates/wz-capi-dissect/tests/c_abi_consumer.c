@@ -17,6 +17,7 @@
  */
 #include "wz_dissect.h"
 
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -30,6 +31,350 @@
         }                                                                      \
     } while (0)
 
+/* R2102 -- Ethernet + IPv4 + UDP carrying `payload`, built HERE in C.
+ *
+ * The Rust tests build the same frame from the same rules, and that is not a
+ * duplicate to be factored away: the point of this file is that a C
+ * translation unit can drive the live door with bytes it produced itself,
+ * which is what a consumer will actually do. A fixture handed across the
+ * boundary would be testing this library against its own idea of a packet.
+ *
+ * The IPv4 header checksum is REAL and the UDP one is left zero, which RFC 768
+ * permits an IPv4 sender to do -- so this is a sender that declined rather than
+ * one that got it wrong, and nothing in the report lands in the corruption
+ * bucket. Returns the frame length. */
+/* RFC 1071 over `n` bytes, folded onto whatever `seed` already accumulated --
+ * which is what lets the TCP checksum add a pseudo-header without a second
+ * implementation of the arithmetic. */
+static unsigned long ones_complement(const unsigned char *b, size_t n,
+                                     unsigned long seed) {
+    size_t i;
+    for (i = 0; i + 1 < n; i += 2) {
+        seed += (unsigned long)((b[i] << 8) | b[i + 1]);
+    }
+    if (n & 1) {
+        seed += (unsigned long)(b[n - 1] << 8);
+    }
+    return seed;
+}
+
+static unsigned short fold(unsigned long sum) {
+    while (sum >> 16) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    return (unsigned short)((~sum) & 0xFFFF);
+}
+
+/* The Ethernet + IPv4 head both builders share. `proto` is 17 or 6, `paylen`
+ * is what follows the IP header. Returns the offset of the transport header. */
+static size_t ipv4_head(unsigned char *out, unsigned char proto, size_t paylen) {
+    unsigned short ck;
+    memset(out, 0, 64);
+    out[12] = 0x08; /* ethertype IPv4 */
+    out[13] = 0x00;
+    out[14] = 0x45; /* v4, IHL 5 */
+    out[16] = (unsigned char)((20 + paylen) >> 8);
+    out[17] = (unsigned char)((20 + paylen) & 0xFF);
+    out[22] = 64; /* TTL */
+    out[23] = proto;
+    out[26] = 10; /* 10.0.0.1 */
+    out[27] = 0;
+    out[28] = 0;
+    out[29] = 1;
+    out[30] = 10; /* 10.0.0.2 */
+    out[31] = 0;
+    out[32] = 0;
+    out[33] = 2;
+    ck = fold(ones_complement(out + 14, 20, 0));
+    out[24] = (unsigned char)(ck >> 8);
+    out[25] = (unsigned char)(ck & 0xFF);
+    return 34;
+}
+
+static size_t udp_keepalive_frame(unsigned char *out) {
+    static const unsigned char payload[1] = {0x04}; /* a whole KeepAlive */
+    size_t n = ipv4_head(out, 17, 8 + sizeof payload);
+
+    /* UDP: 7447 both ways. The checksum is left ZERO deliberately -- RFC 768
+     * lets an IPv4 sender decline it, so this is a sender that declined rather
+     * than one that got it wrong, and nothing lands in the corruption bucket.
+     * IPv4 and TCP have no such form, which is why theirs are computed. */
+    out[n + 0] = 0x1D;
+    out[n + 1] = 0x17;
+    out[n + 2] = 0x1D;
+    out[n + 3] = 0x17;
+    out[n + 5] = (unsigned char)(8 + sizeof payload);
+    n += 8;
+
+    memcpy(out + n, payload, sizeof payload);
+    n += sizeof payload;
+    return n < 60 ? 60 : n; /* Ethernet's minimum frame. */
+}
+
+/* R2102 -- the same message on a STREAM link, which is a different message
+ * LIST and a different coordinate space. Having both in this file is what
+ * makes the `origin` and `anchor_space` fields discriminating here: a test
+ * that only ever saw datagrams would pass against a library that answered one
+ * constant for every message. */
+static size_t tcp_keepalive_frame(unsigned char *out, unsigned long seq) {
+    /* A zenoh stream frames each unit with a 2-byte little-endian length
+     * prefix, so one KeepAlive on the wire is 01 00 04. */
+    static const unsigned char payload[3] = {0x01, 0x00, 0x04};
+    unsigned long sum;
+    unsigned short ck;
+    size_t n = ipv4_head(out, 6, 20 + sizeof payload);
+
+    out[n + 0] = 0x04; /* source port 1111 */
+    out[n + 1] = 0x57;
+    out[n + 2] = 0x1D; /* destination port 7447 */
+    out[n + 3] = 0x17;
+    out[n + 4] = (unsigned char)((seq >> 24) & 0xFF);
+    out[n + 5] = (unsigned char)((seq >> 16) & 0xFF);
+    out[n + 6] = (unsigned char)((seq >> 8) & 0xFF);
+    out[n + 7] = (unsigned char)(seq & 0xFF);
+    out[n + 12] = 5 << 4; /* data offset */
+    out[n + 13] = 0x10;   /* ACK */
+    out[n + 15] = 64;     /* window */
+    memcpy(out + n + 20, payload, sizeof payload);
+
+    /* The pseudo-header, then the segment, through the same accumulator. */
+    sum = ones_complement(out + 26, 8, 0); /* src + dst addresses */
+    sum += 6;                              /* protocol */
+    sum += 20 + sizeof payload;            /* TCP length */
+    ck = fold(ones_complement(out + n, 20 + sizeof payload, sum));
+    out[n + 16] = (unsigned char)(ck >> 8);
+    out[n + 17] = (unsigned char)(ck & 0xFF);
+
+    n += 20 + sizeof payload;
+    return n < 60 ? 60 : n;
+}
+
+/* R2102 -- the LIVE door, driven from C.
+ *
+ * Split out of main because it is a whole capability rather than one more
+ * call: a handle that survives between calls, packets fed one at a time, and
+ * records taken into a buffer THIS translation unit declared on its own stack.
+ * That last part is the half no Rust test can make -- the struct layout under
+ * test is the one the C compiler computed from the header, not the one Rust
+ * computed from its own definition. If the two ever disagree, this is where it
+ * shows. */
+static int check_live_door(void) {
+    wz_dissect_live *h = NULL;
+    unsigned char frame[64];
+    size_t frame_len;
+    wz_dissect_record_v1 records[8];
+    size_t written = 999;
+    size_t i;
+    int rc;
+
+    /* THE LAYOUT, computed by the C compiler from this header. The Rust side
+     * asserts the same numbers from its own definition. Both have to be edited
+     * to change the layout, which is the point -- this is the one output of
+     * this library that is raw memory, so a field inserted or widened gives a
+     * consumer plausible garbage with no error anywhere. */
+    CHECK(sizeof(wz_dissect_record_v1) == 48,
+          "the record is %zu bytes, expected 48", sizeof(wz_dissect_record_v1));
+    CHECK(offsetof(wz_dissect_record_v1, ts_ns) == 0, "ts_ns offset");
+    CHECK(offsetof(wz_dissect_record_v1, flow_id) == 8, "flow_id offset");
+    CHECK(offsetof(wz_dissect_record_v1, anchor) == 16, "anchor offset");
+    CHECK(offsetof(wz_dissect_record_v1, unit_len) == 24, "unit_len offset");
+    CHECK(offsetof(wz_dissect_record_v1, batch_index) == 32, "batch_index offset");
+    CHECK(offsetof(wz_dissect_record_v1, unit_offset) == 36, "unit_offset offset");
+    CHECK(offsetof(wz_dissect_record_v1, direction) == 40, "direction offset");
+    CHECK(offsetof(wz_dissect_record_v1, anchor_space) == 41, "anchor_space offset");
+    CHECK(offsetof(wz_dissect_record_v1, origin) == 42, "origin offset");
+    CHECK(offsetof(wz_dissect_record_v1, kind) == 43, "kind offset");
+    CHECK(offsetof(wz_dissect_record_v1, flags) == 44, "flags offset");
+
+    /* An unknown preset is REFUSED. A consumer that believes it asked for a
+     * ceiling must not be handed an unbounded read of a link that never ends. */
+    rc = wz_dissect_live_open(9, &h);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "unknown preset rc=%d", rc);
+    CHECK(h == NULL, "a refused open handed back a handle");
+
+    rc = wz_dissect_live_open(WZ_DISSECT_LIMITS_LIVE_TAP, &h);
+    CHECK(rc == WZ_DISSECT_OK, "live_open rc=%d", rc);
+    CHECK(h != NULL, "OK came back with no handle");
+
+    /* THE HANDLE OUTLIVES THE CALL, which is the revision this ABI made. Three
+     * packets, three separate calls, one dissection. */
+    frame_len = udp_keepalive_frame(frame);
+    for (i = 0; i < 3; i++) {
+        rc = wz_dissect_live_push(h, 1 /* ETHERNET */,
+                                  (uint64_t)(i + 1) * 1000000u, frame, frame_len);
+        CHECK(rc == WZ_DISSECT_OK, "live_push %zu rc=%d", i, rc);
+    }
+
+    /* A packet on a link this build cannot read is COUNTED, not refused: a tap
+     * sees whatever the interface gives it. */
+    rc = wz_dissect_live_push(h, 0xDEAD, WZ_DISSECT_NO_TIMESTAMP, frame, frame_len);
+    CHECK(rc == WZ_DISSECT_OK, "an unreadable link type must not be an error: %d", rc);
+
+    rc = wz_dissect_live_drain(h, records, 8, &written);
+    CHECK(rc == WZ_DISSECT_OK, "live_drain rc=%d", rc);
+    CHECK(written == 3, "expected 3 records across 3 pushes, got %zu", written);
+
+    for (i = 0; i < written; i++) {
+        CHECK(records[i].kind == WZ_DISSECT_KIND_KEEPALIVE,
+              "record %zu kind=%u, expected KEEPALIVE", i,
+              (unsigned)records[i].kind);
+        CHECK(records[i].origin == WZ_DISSECT_ORIGIN_DATAGRAM,
+              "record %zu origin=%u, expected DATAGRAM", i,
+              (unsigned)records[i].origin);
+        CHECK(records[i].anchor_space == WZ_DISSECT_ANCHOR_PACKET,
+              "a datagram message anchors to a packet index");
+        /* The push ordinal IS the anchor, and asserting the SEQUENCE is what
+         * separates a live handle from a door that re-dissected per call: the
+         * latter would answer 0 every time. */
+        CHECK(records[i].anchor == (uint64_t)i, "record %zu anchor=%llu", i,
+              (unsigned long long)records[i].anchor);
+        CHECK(records[i].ts_ns == (uint64_t)(i + 1) * 1000000u,
+              "record %zu ts_ns=%llu", i, (unsigned long long)records[i].ts_ns);
+        CHECK(records[i].flags == 0, "an ordinary KeepAlive flags nothing");
+        CHECK(records[i].flow_id == records[0].flow_id,
+              "one conversation must carry one flow id");
+    }
+
+    /* A drained message must not come back. A watermark that did not advance
+     * would hand the same three over forever, which a consumer reads as the
+     * link repeating itself. */
+    written = 999;
+    rc = wz_dissect_live_drain(h, records, 8, &written);
+    CHECK(rc == WZ_DISSECT_OK, "second live_drain rc=%d", rc);
+    CHECK(written == 0, "a drained message came back: %zu", written);
+
+    /* Nothing was discarded, so nothing may be reported lost. */
+    CHECK(wz_dissect_live_lost(h) == 0, "lost=%llu with no ceiling reached",
+          (unsigned long long)wz_dissect_live_lost(h));
+
+    /* A SHORT BUFFER takes a prefix and leaves the rest, in order. This is the
+     * contract a consumer loops on, and the failure it rules out costs data
+     * rather than time: a drain that advanced past records it did not write
+     * would lose them while every count downstream still looked plausible. */
+    for (i = 0; i < 2; i++) {
+        rc = wz_dissect_live_push(h, 1, WZ_DISSECT_NO_TIMESTAMP, frame, frame_len);
+        CHECK(rc == WZ_DISSECT_OK, "live_push rc=%d", rc);
+    }
+    written = 999;
+    rc = wz_dissect_live_drain(h, records, 1, &written);
+    CHECK(rc == WZ_DISSECT_OK, "short live_drain rc=%d", rc);
+    CHECK(written == 1, "a buffer of one takes exactly one, got %zu", written);
+    CHECK(records[0].anchor == 4, "the older of the two first, got %llu",
+          (unsigned long long)records[0].anchor);
+    /* A push with NO clock reading leaves the observer's clock WHERE IT STOOD,
+     * so this record carries the last instant that was supplied (3 ms, from the
+     * third push above) rather than the sentinel. That is the honest answer and
+     * a consumer has to know it: `ts_ns` is when this reader's clock last
+     * moved, not a per-packet stamp it invented. The sentinel means the clock
+     * was NEVER set -- checked below, on a handle where it never was. */
+    CHECK(records[0].ts_ns == 3000000u,
+          "a timestamp-less push must leave the clock where it stood, got %llu",
+          (unsigned long long)records[0].ts_ns);
+    written = 999;
+    rc = wz_dissect_live_drain(h, records, 8, &written);
+    CHECK(rc == WZ_DISSECT_OK, "remainder live_drain rc=%d", rc);
+    CHECK(written == 1, "the remainder is one record, got %zu", written);
+    CHECK(records[0].anchor == 5, "and it is the one left behind, got %llu",
+          (unsigned long long)records[0].anchor);
+
+    /* Nulls are refused before anything is dereferenced. A panic unwinding
+     * across extern "C" is undefined behaviour and these are the calls that
+     * would trip it. */
+    rc = wz_dissect_live_push(NULL, 1, 0, frame, frame_len);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null handle push rc=%d", rc);
+    rc = wz_dissect_live_push(h, 1, 0, NULL, 0);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null bytes push rc=%d", rc);
+    rc = wz_dissect_live_drain(h, NULL, 8, &written);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null buffer drain rc=%d", rc);
+    rc = wz_dissect_live_drain(h, records, 8, NULL);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null written drain rc=%d", rc);
+    rc = wz_dissect_live_open(WZ_DISSECT_LIMITS_LIVE_TAP, NULL);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null out open rc=%d", rc);
+    CHECK(wz_dissect_live_lost(NULL) == 0, "a null handle has lost nothing");
+
+    /* Closing null is a no-op, so a cleanup path needs no guard of its own. */
+    wz_dissect_live_close(NULL);
+    wz_dissect_live_close(h);
+
+    /* A HANDLE WHOSE CLOCK WAS NEVER SET reports the sentinel, and the sentinel
+     * is not zero -- zero is a legal instant, and a tap whose clock starts at
+     * its own zero must not be reported as a tap with no clock at all. A fresh
+     * handle, because on the one above the clock HAD been set and the value
+     * would be that reading rather than this distinction. */
+    h = NULL;
+    rc = wz_dissect_live_open(WZ_DISSECT_LIMITS_NONE, &h);
+    CHECK(rc == WZ_DISSECT_OK, "second live_open rc=%d", rc);
+    rc = wz_dissect_live_push(h, 1, WZ_DISSECT_NO_TIMESTAMP, frame, frame_len);
+    CHECK(rc == WZ_DISSECT_OK, "clockless push rc=%d", rc);
+    written = 999;
+    rc = wz_dissect_live_drain(h, records, 8, &written);
+    CHECK(rc == WZ_DISSECT_OK, "clockless drain rc=%d", rc);
+    CHECK(written == 1, "expected one record, got %zu", written);
+    CHECK(records[0].ts_ns == WZ_DISSECT_NO_TIMESTAMP,
+          "a clock that was never set must report as never set, got %llu",
+          (unsigned long long)records[0].ts_ns);
+
+    /* A STREAM message on the same handle: a different list, a different
+     * coordinate space, and a different flow. Without this arm the `origin` and
+     * `anchor_space` assertions above would pass against a library that
+     * answered one constant for every message -- a datagram-only test cannot
+     * tell a discriminator from a default. */
+    frame_len = tcp_keepalive_frame(frame, 1000);
+    rc = wz_dissect_live_push(h, 1, 5000000u, frame, frame_len);
+    CHECK(rc == WZ_DISSECT_OK, "tcp push rc=%d", rc);
+    written = 999;
+    rc = wz_dissect_live_drain(h, records, 8, &written);
+    CHECK(rc == WZ_DISSECT_OK, "tcp drain rc=%d", rc);
+    CHECK(written == 1, "a stream KeepAlive is one message, got %zu", written);
+    CHECK(records[0].kind == WZ_DISSECT_KIND_KEEPALIVE, "kind=%u",
+          (unsigned)records[0].kind);
+    CHECK(records[0].origin == WZ_DISSECT_ORIGIN_STREAM,
+          "a TCP flow's messages come from the STREAM list, got %u",
+          (unsigned)records[0].origin);
+    CHECK(records[0].anchor_space == WZ_DISSECT_ANCHOR_STREAM_BYTES,
+          "and their anchor is a byte offset, not a packet index, got %u",
+          (unsigned)records[0].anchor_space);
+    /* The 2-byte length prefix framed one message of one byte. */
+    CHECK(records[0].unit_len == 1, "unit_len=%llu, expected 1",
+          (unsigned long long)records[0].unit_len);
+    wz_dissect_live_close(h);
+
+    /* A CEILING THAT BITES IS COUNTED, through the shipped preset rather than a
+     * number invented for a test.
+     *
+     * WZ_DISSECT_LIMITS_LIVE_TAP keeps 10 000 decoded messages per flow, so
+     * feeding two more than that and draining afterwards is the whole of the
+     * shape: the oldest two are gone, and a reader that only counted what it
+     * received would read a FLOOR as a total. This is the assertion that makes
+     * wz_dissect_live_lost a measurement rather than a field that is always
+     * zero. */
+    h = NULL;
+    rc = wz_dissect_live_open(WZ_DISSECT_LIMITS_LIVE_TAP, &h);
+    CHECK(rc == WZ_DISSECT_OK, "ceiling live_open rc=%d", rc);
+    frame_len = udp_keepalive_frame(frame);
+    for (i = 0; i < 10002; i++) {
+        rc = wz_dissect_live_push(h, 1, (uint64_t)(i + 1) * 1000000u, frame, frame_len);
+        CHECK(rc == WZ_DISSECT_OK, "ceiling push %zu rc=%d", i, rc);
+    }
+    CHECK(wz_dissect_live_lost(h) == 0,
+          "nothing is lost until a drain looks: the counter is what the "
+          "CONSUMER missed, got %llu", (unsigned long long)wz_dissect_live_lost(h));
+    written = 999;
+    rc = wz_dissect_live_drain(h, records, 8, &written);
+    CHECK(rc == WZ_DISSECT_OK, "ceiling drain rc=%d", rc);
+    CHECK(written == 8, "the buffer takes what it holds, got %zu", written);
+    CHECK(wz_dissect_live_lost(h) == 2,
+          "the ceiling discarded 2 of 10002 and must say so, got %llu",
+          (unsigned long long)wz_dissect_live_lost(h));
+    /* And the first record handed out is the OLDEST SURVIVOR, not the oldest
+     * message: a drain that resumed from a watermark the trim invalidated would
+     * be reading the list at the wrong place entirely. */
+    CHECK(records[0].anchor == 2, "expected the third packet, got %llu",
+          (unsigned long long)records[0].anchor);
+    wz_dissect_live_close(h);
+    return 0;
+}
+
 int main(void) {
     /* The symbol/memory-contract revision. A consumer refuses a library whose
      * memory rules moved; this asserts the value the header was written for. */
@@ -41,8 +386,13 @@ int main(void) {
      * constants arrived here, and neither moves this number: a document key is
      * read by name and a constant is compiled in, while a symbol is linked. */
     /* R311y913 -- 9 since wz_dissect_readable_surfaces joined it.
-     * R311y917 -- 10 since wz_dissect_pcap_fields_limited joined it. */
-    CHECK(wz_dissect_abi_version() == 10, "abi version is %d, expected 10",
+     * R311y917 -- 10 since wz_dissect_pcap_fields_limited joined it.
+     * R2102 -- 11, and this is the first bump that moves for BOTH halves of
+     * the rule: five wz_dissect_live_* symbols, AND the memory contract, which
+     * now admits exactly one handle that outlives its call. The second half is
+     * why the number is the right place to publish it -- a consumer that
+     * refuses a library whose memory rules moved has nothing else to ask. */
+    CHECK(wz_dissect_abi_version() == 11, "abi version is %d, expected 11",
           wz_dissect_abi_version());
 
     /* A KeepAlive: one header byte, the smallest complete transport message,
@@ -482,6 +832,12 @@ int main(void) {
               "reads it before parsing the body: %s",
               revisioned[i].name, revisioned[i].doc);
         wz_dissect_string_free(revisioned[i].doc);
+    }
+
+    /* R2102 (ABI 11) -- the LIVE door, which is the one capability in this
+     * header that is not a call over a buffer the caller already holds whole. */
+    if (check_live_door() != 0) {
+        return 1;
     }
 
     printf("  C1bo: C consumer linked the cdylib and read the tree\n");

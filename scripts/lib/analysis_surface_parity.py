@@ -175,6 +175,21 @@ BOTH = {
     # census row names `--select`: it is the half that was missing from the
     # ABI's bounded reach.
     "the field layer under a ceiling": ("--fields", "wz_dissect_pcap_fields_limited"),
+    # R2102 (open-debt item 524) — READING A LINK INCREMENTALLY, which is a
+    # capability and not a transport detail: a dissection that survives between
+    # packets is the difference between watching a system and re-reading a
+    # buffer that keeps growing.
+    #
+    # It was in ONLY_CLI until this round and the reason there was OVERSTATED,
+    # in exactly the shape R311y857's row records for `--health`. It said every
+    # ABI entry point "takes capture BYTES the CALLER holds, which is what makes
+    # a C consumer able to feed a tap it opened itself". Measured: a consumer
+    # feeding a tap through those doors had two choices, and neither is a tap.
+    # Re-hand the whole growing buffer and pay a full re-dissection per call, or
+    # cut the stream into windows and lose every message that straddles a cut.
+    # What was true is the half about SOCKETS -- see the row that kept, in
+    # ONLY_CLI, with that half of the reason and nothing else.
+    "incremental read of a link": ("--interface", "wz_dissect_live_push"),
 }
 
 # Reachable ONLY from the command line, each with the reason it is not on the
@@ -204,15 +219,16 @@ ONLY_CLI = {
         "--serial",
         "DELIBERATE, on the same argument as the QUIC declaration above.",
     ),
-    "reading from a live tap": (
+    "OPENING a live tap": (
         "--interface",
-        "DELIBERATE and it is the ABI's own design, not an omission. Every "
-        "wz_dissect_* entry point takes capture BYTES the CALLER holds, which "
-        "is what makes a C consumer able to feed a tap it opened itself -- "
-        "`DissectionLimits::for_live_tap` exists there for exactly that. "
-        "Widening the ABI to open sockets would move a privilege across an FFI "
-        "boundary to buy a caller something it can already do. Round 1999 "
-        "(item 470).",
+        "DELIBERATE, and this is the half of the old reason that survived R2102. "
+        "Opening an interface is a PRIVILEGE -- a raw socket, a capability, a "
+        "device the operator chose -- and moving it across an FFI boundary buys "
+        "a caller nothing it cannot do itself with the API its own platform "
+        "gives it. What the ABI owes such a caller is somewhere to put the "
+        "packets, and since R2102 it has one: see `incremental read of a link` "
+        "in BOTH. The reason this row used to carry claimed that door already "
+        "existed, and it did not. Round 1999 (item 470), corrected by item 524.",
     ),
     "a census plane as CSV rows": (
         "--csv",
@@ -266,6 +282,42 @@ ONLY_CAPI = {
     "releasing a returned string": (
         "wz_dissect_string_free",
         "The memory contract. Not an analysis capability.",
+    ),
+    # R2102 (open-debt item 524) — the rest of the live family. The `push` half
+    # is in BOTH above, because reading a link a packet at a time is a
+    # capability both surfaces have; these four are the shape a LINKING consumer
+    # needs and a terminal has no counterpart for.
+    "a dissection that outlives the call": (
+        "wz_dissect_live_open",
+        "DELIBERATE and structural. A command line holds its dissection in its "
+        "own process for as long as it runs, so it has no handle to be given "
+        "and none to give back. This is also the ONE exception to this ABI's "
+        "memory rule, which is why it is a symbol a consumer can see rather "
+        "than a property it has to infer.",
+    ),
+    "decoded messages as BINARY records": (
+        "wz_dissect_live_drain",
+        "DELIBERATE. The command line RENDERS -- its output is for a person "
+        "reading a terminal, and `--json` already covers the machine-readable "
+        "form of the same walk. A live consumer wants the eight scalars that "
+        "say a message arrived, at line rate, into a buffer it sized; a JSON "
+        "round trip per message is work proportional to the traffic for fields "
+        "that never vary. Records into a CALLER's buffer and not a callback is "
+        "what keeps `no callbacks run` true (see item 237).",
+    ),
+    "what a live ceiling discarded before the CONSUMER took it": (
+        "wz_dissect_live_lost",
+        "DELIBERATE, and a different figure from `--health`'s "
+        "`dropped_by_limits`, which both surfaces have. That one counts what "
+        "the DISSECTION discarded; this counts what was discarded before this "
+        "consumer drained it, which is a number that can only exist where "
+        "there is a consumer draining incrementally. A terminal reading a file "
+        "has no such gap to fall into.",
+    ),
+    "releasing a live handle": (
+        "wz_dissect_live_close",
+        "The other half of the memory contract, like `wz_dissect_string_free`. "
+        "Not an analysis capability.",
     ),
 }
 

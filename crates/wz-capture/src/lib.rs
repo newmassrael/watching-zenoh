@@ -643,6 +643,53 @@ impl AnchorSpace {
     }
 }
 
+/// R2102 (open-debt item 524) — WHICH list of decoded messages this is, as a
+/// value a consumer can hold across calls.
+///
+/// # The question it answers, and why [`AnchorSpace`] cannot
+///
+/// `AnchorSpace` says how to READ a frame's anchor. This says which list the
+/// frame came out of, and the two are genuinely different: a flow's cleartext
+/// datagram list and its recovered QUIC-datagram list share a space and are two
+/// lists, while a stream flow and a QUIC stream are two spaces and, from an
+/// incremental reader's point of view, two lists that must not be confused.
+///
+/// # Why an incremental reader needs it
+///
+/// A reader draining messages as they are decoded remembers "I have taken the
+/// first N of this list" and must find the same list again next time. Neither
+/// the flow key nor a position in [`Dissection::message_lists_with_origin`] is
+/// that name on its own:
+///
+/// * a TCP and a UDP flow may carry the identical 5-tuple, so the key alone
+///   does not separate [`Self::Stream`] from [`Self::Datagram`];
+/// * flows are evicted from the MIDDLE of their table and QUIC streams are
+///   appended to theirs, so an ordinal points somewhere else after either.
+///
+/// So the discriminator is made of facts the WIRE supplies — which table, and
+/// for a QUIC stream the stream's own id — and is stable for as long as the
+/// list is.
+///
+/// A reused key is still a different list: a flow evicted and reopened under
+/// the same 5-tuple gets a fresh [`messages::MessageList`] whose
+/// [`messages::MessageList::produced`] restarts at zero, which is how a
+/// consumer tells the successor from the list it was tracking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MessageListOrigin {
+    /// The stream flow table: one list per TCP-like flow, reassembled bytes.
+    Stream,
+    /// A datagram flow's cleartext list — UDP or raw Ethernet.
+    Datagram,
+    /// One recovered QUIC stream of a datagram flow, named by the QUIC stream
+    /// id rather than by its position, for the reason this type exists.
+    QuicStream(u64),
+    /// A datagram flow's recovered RFC 9221 DATAGRAM list.
+    QuicDatagram,
+    /// The declared serial line. There is at most one per capture, so it needs
+    /// nothing to distinguish it — see [`link::FlowKey::serial_line`].
+    Serial,
+}
+
 /// R311y718 (§1.2a) — one recovered QUIC stream, framed as zenoh.
 ///
 /// The QUIC half of it — packet protection, frame walking, reassembly — is a
@@ -761,22 +808,58 @@ impl DatagramDissection {
     /// meanings — see [`Self::quic_streams`] — so this is deliberately an
     /// iterator of SLICES and not a flattened frame iterator, which would fuse
     /// two offset spaces into one sequence.
+    ///
+    /// R2102 — a projection of [`Self::frame_lists_with_origin`] rather than a
+    /// second walk of the same fields. See that method for why the origin
+    /// exists; this one drops it because every existing caller counts or folds
+    /// and none of them needs to tell one list from another.
     pub fn frame_lists(&self) -> impl Iterator<Item = (AnchorSpace, &[PassiveFrame])> {
-        core::iter::once((AnchorSpace::PacketIndex, self.frames.as_slice()))
-            .chain(
-                self.quic_streams
-                    .iter()
-                    .map(|s| (AnchorSpace::StreamBytes, s.frames.as_slice())),
+        self.frame_lists_with_origin()
+            .map(|(_, space, list)| (space, list.as_slice()))
+    }
+
+    /// R2102 (open-debt item 524) — the same enumeration, saying WHICH list
+    /// each one is and handing back the [`messages::MessageList`] itself.
+    ///
+    /// # Why a consumer needs the origin
+    ///
+    /// [`Self::frame_lists`] is enough for a fold: a plane that sums or groups
+    /// does not care which list a frame came out of. An INCREMENTAL reader
+    /// does. It has to remember "I have taken the first N of THIS list" across
+    /// calls, and a position in this iterator is not that identity — the QUIC
+    /// stream list grows a member whenever a peer opens a stream, so anything
+    /// keyed by ordinal would silently re-point at a different list the moment
+    /// it did. [`MessageListOrigin::QuicStream`] carries the stream's own id,
+    /// so the identity is the wire's rather than this iterator's.
+    ///
+    /// The `MessageList` and not its slice, because the other half of that
+    /// identity is [`messages::MessageList::produced`] — the total a trim
+    /// cannot move — and a slice has lost it.
+    pub fn frame_lists_with_origin(
+        &self,
+    ) -> impl Iterator<Item = (MessageListOrigin, AnchorSpace, &messages::MessageList)> {
+        core::iter::once((
+            MessageListOrigin::Datagram,
+            AnchorSpace::PacketIndex,
+            &self.frames,
+        ))
+        .chain(self.quic_streams.iter().map(|s| {
+            (
+                MessageListOrigin::QuicStream(s.id),
+                AnchorSpace::StreamBytes,
+                &s.frames,
             )
-            // R311y918 — the SAME space as the cleartext list beside it, which
-            // is what `quic_datagrams`' own doc says: the anchor is the index
-            // of the QUIC packet that carried the message. The two lists are
-            // kept apart because one consumer RESOLVES the coordinate against
-            // protected bytes, not because the coordinate differs.
-            .chain(core::iter::once((
-                AnchorSpace::PacketIndex,
-                self.quic_datagrams.as_slice(),
-            )))
+        }))
+        // R311y918 — the SAME space as the cleartext list beside it, which
+        // is what `quic_datagrams`' own doc says: the anchor is the index
+        // of the QUIC packet that carried the message. The two lists are
+        // kept apart because one consumer RESOLVES the coordinate against
+        // protected bytes, not because the coordinate differs.
+        .chain(core::iter::once((
+            MessageListOrigin::QuicDatagram,
+            AnchorSpace::PacketIndex,
+            &self.quic_datagrams,
+        )))
     }
 
     /// R311y713 (§B6) — the chains this flow lost, whatever the cause.
@@ -3736,23 +3819,72 @@ impl Dissection {
     /// SLICES and not a flattened frame iterator, deliberately: each list keeps
     /// its own coordinate meaning (see [`DatagramDissection::quic_streams`]),
     /// and fusing them into one sequence would fuse three offset spaces.
+    ///
+    /// R2102 — a projection of [`Self::message_lists_with_origin`], which is
+    /// where the fields are now named. The planes call this one; nothing about
+    /// what they see changed.
     pub fn message_lists(&self) -> impl Iterator<Item = (FlowKey, AnchorSpace, &[PassiveFrame])> {
+        self.message_lists_with_origin()
+            .map(|(flow, _, space, list)| (flow, space, list.as_slice()))
+    }
+
+    /// R2102 (open-debt item 524) — THE enumeration, saying which list each one
+    /// is and handing back the [`messages::MessageList`] rather than its slice.
+    ///
+    /// # Why this is the primary and [`Self::message_lists`] the projection
+    ///
+    /// The lists are named HERE, once, so there is still exactly one place a
+    /// new producer has to be added — which is the whole point of the door and
+    /// the reason `message_producer_lint` reads this method. Had the origin
+    /// arrived as a second walk beside the old one, the two would have been two
+    /// enumerations to keep in step, which is the shape this door exists to end.
+    ///
+    /// # What the origin is FOR
+    ///
+    /// An incremental consumer — a live tap draining what became decodable
+    /// since it last looked — must remember a watermark PER LIST, and it needs
+    /// a name for a list that survives the table moving underneath it. A
+    /// position in this iterator is not such a name: flows are evicted from the
+    /// middle of their table and QUIC streams are appended to theirs, so an
+    /// ordinal points at a different list after either. `(FlowKey,
+    /// MessageListOrigin)` is a name made of the wire's own facts, and it is
+    /// exact where the flow key alone is not — a TCP flow and a UDP flow can
+    /// carry the identical 5-tuple, and [`MessageListOrigin::Stream`] and
+    /// [`MessageListOrigin::Datagram`] are what tell those two apart.
+    pub fn message_lists_with_origin(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            FlowKey,
+            MessageListOrigin,
+            AnchorSpace,
+            &messages::MessageList,
+        ),
+    > {
         self.flows
             .iter()
-            .map(|f| (f.flow, AnchorSpace::StreamBytes, f.frames.as_slice()))
+            .map(|f| {
+                (
+                    f.flow,
+                    MessageListOrigin::Stream,
+                    AnchorSpace::StreamBytes,
+                    &f.frames,
+                )
+            })
             .chain(self.datagram_flows.iter().flat_map(|f| {
-                f.frame_lists()
-                    .map(move |(space, frames)| (f.flow, space, frames))
+                f.frame_lists_with_origin()
+                    .map(move |(origin, space, frames)| (f.flow, origin, space, frames))
             }))
             .chain(core::iter::once((
                 // The key a serial line stands under: empty in every field,
                 // because a serial link is point to point and there is one per
                 // capture. See `FlowKey::serial_line`.
                 FlowKey::serial_line(),
+                MessageListOrigin::Serial,
                 // A serial line is a byte stream with two directions, so its
                 // anchor is an offset like any other stream's.
                 AnchorSpace::StreamBytes,
-                self.serial_frames.as_slice(),
+                &self.serial_frames,
             )))
     }
 

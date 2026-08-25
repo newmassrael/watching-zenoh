@@ -376,6 +376,62 @@ impl InboundFrame {
             InboundFrame::Unknown { .. } => "Unknown",
         }
     }
+
+    /// R2102 (open-debt item 524) — the SAME fact as [`Self::kind_name`], as a
+    /// number a fixed-layout record can carry.
+    ///
+    /// # Why a second projection rather than the name
+    ///
+    /// A live tap draining decoded messages over a C ABI takes BINARY records —
+    /// that is the whole reason such a door exists rather than one more JSON
+    /// document — and a `&'static str` is not a field of a fixed-layout struct.
+    /// A consumer that had to receive the name would be receiving a pointer
+    /// into this library's rodata, which is exactly the shape that ABI's memory
+    /// rule refuses.
+    ///
+    /// # Why it sits HERE, beside the name
+    ///
+    /// For the reason [`Self::kind_name`]'s own doc gives: the arms are under
+    /// the same `#[cfg]`s as the variants, so exhaustiveness is the COMPILER's
+    /// and a variant added upstream fails this match. Written in the ABI crate
+    /// instead, it would mirror seven feature gates that crate does not own —
+    /// and a mirror drifts. The two projections are adjacent so that the round
+    /// which adds a message kind is shown both at once.
+    ///
+    /// # The numbers are an ABI, and they only ever grow
+    ///
+    /// A consumer compiled against `WZ_DISSECT_KIND_FRAME == 5` keeps reading
+    /// that value, so an arm's number is fixed once published. `0` is reserved
+    /// for a message this reader could NOT decode — which is not a variant of
+    /// this enum at all, and is assigned by the caller holding the `Result` —
+    /// and `255` is `Unknown`, a message whose MID this build does not know.
+    /// Those two are deliberately at the ends: a value that arrives in between
+    /// and that a consumer has no case for is a kind this library gained, which
+    /// is the only growth this scheme permits.
+    pub fn kind_code(&self) -> u8 {
+        match self {
+            #[cfg(feature = "codec-init-body")]
+            InboundFrame::Init { .. } => 1,
+            #[cfg(feature = "codec-open-body")]
+            InboundFrame::Open { .. } => 2,
+            #[cfg(feature = "codec-close")]
+            InboundFrame::Close { .. } => 3,
+            #[cfg(feature = "codec-keep-alive")]
+            InboundFrame::KeepAlive { .. } => 4,
+            #[cfg(feature = "codec-frame")]
+            InboundFrame::Frame { .. } => 5,
+            #[cfg(feature = "reassembly")]
+            InboundFrame::Fragment { .. } => 6,
+            #[cfg(feature = "codec-join")]
+            InboundFrame::Join { .. } => 7,
+            InboundFrame::Oam { .. } => 8,
+            // 255 and not 9, for the reason the doc above states: an unknown
+            // MID is not the ninth kind, it is the absence of a kind, and
+            // leaving the low numbers contiguous is what lets a tenth arm be
+            // added without a consumer's switch falling through to this one.
+            InboundFrame::Unknown { .. } => 255,
+        }
+    }
 }
 
 /// R311y215 — project the QoS priority carried by a decoded Frame/Fragment ext
@@ -1377,5 +1433,76 @@ mod kind_name_tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), before, "two variants share a name: {names:?}");
+    }
+
+    /// R2102 (open-debt item 524) — THE NUMBER IS PINNED, because it is an ABI.
+    ///
+    /// `kind_code` is what a C consumer of the live door switches on, and a
+    /// consumer compiled today against `WZ_DISSECT_KIND_FRAME == 5` reads that
+    /// value for as long as the library it links exports the symbol. So the
+    /// number is not free to move the way an internal discriminant would be,
+    /// and the literal below is where it is held down.
+    ///
+    /// Asserted over a real `parse_inbound` decode, on this module's own house
+    /// rule: a code proven over a hand-built value proves the constructor and
+    /// not the decoder. The table is keyed by the NAME so the two projections
+    /// are checked against each other in one place — a round that renumbered
+    /// one arm and not the other fails here rather than in a consumer.
+    #[test]
+    fn every_reachable_variant_answers_its_pinned_code() {
+        for (wire, name) in reachable() {
+            let want: u8 = match name {
+                "Init" => 1,
+                "Open" => 2,
+                "Close" => 3,
+                "KeepAlive" => 4,
+                "Frame" => 5,
+                "Fragment" => 6,
+                "Join" => 7,
+                "Oam" => 8,
+                "Unknown" => 255,
+                // A NAME this table does not know is a kind the enum gained
+                // with no number written down for it, which is precisely the
+                // event a consumer cannot survive silently.
+                other => panic!(
+                    "`{other}` is a message kind with no pinned code. Add it \
+                     here AND to `wz_dissect.h`'s WZ_DISSECT_KIND_* set in the \
+                     same commit -- a code a consumer has never been told \
+                     about is one it has no case for."
+                ),
+            };
+            let frame = parse_inbound(&wire).expect("the fixture wire decodes");
+            assert_eq!(
+                frame.kind_code(),
+                want,
+                "wire {wire:02X?} decoded to `{name}`, whose pinned code is \
+                 {want} -- a code that moves renames a message for every \
+                 consumer already compiled against it"
+            );
+        }
+    }
+
+    /// The codes must be pairwise DISTINCT, for the reason the names must be:
+    /// two arms answering one number makes a live tap report two message kinds
+    /// as one, which reads as traffic that carried more of the first and none
+    /// of the second.
+    ///
+    /// Over what `kind_code` ACTUALLY answers rather than over the table in the
+    /// test above — those are literals in this file, so a distinctness check on
+    /// them would assert only that this file's own list has no duplicate.
+    #[test]
+    fn no_two_variants_answer_the_same_code() {
+        let mut codes: Vec<u8> = reachable()
+            .into_iter()
+            .map(|(wire, _)| {
+                parse_inbound(&wire)
+                    .expect("the fixture wire decodes")
+                    .kind_code()
+            })
+            .collect();
+        let before = codes.len();
+        codes.sort_unstable();
+        codes.dedup();
+        assert_eq!(codes.len(), before, "two variants share a code: {codes:?}");
     }
 }

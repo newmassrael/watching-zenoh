@@ -50,9 +50,26 @@ import subprocess
 import sys
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 10
+EXPECTED_VERSION = 11
 EXPECTED_SYMBOLS = {
     "wz_dissect_abi_version",
+    # R2102 (open-debt item 524) — THE LIVE DOOR. Five symbols, and the first
+    # entry here whose revision bump is not only about symbols: the memory rule
+    # itself moved, because a live tap is a dissection kept alive between
+    # packets and the header had promised that "no handle outlives the call
+    # that made it".
+    #
+    # That is exactly the case the module doc above says must still be recorded
+    # here -- "legitimate for a MEMORY-RULE change and must still be a
+    # deliberate edit" -- and this round is both halves at once, which no
+    # previous one has been. The callback half of the rule did NOT move: the
+    # drain writes into a buffer the caller owns, which is what let this be a
+    # widening rather than the callback registration that was refused before.
+    "wz_dissect_live_open",
+    "wz_dissect_live_push",
+    "wz_dissect_live_drain",
+    "wz_dissect_live_lost",
+    "wz_dissect_live_close",
     # R311y913 (unregistered item 435) — what this build can READ, with no
     # capture. The command line had answered it in `--help` for a while and the
     # linked surface could not answer it at all; R311y912 gave
