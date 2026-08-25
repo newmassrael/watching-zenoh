@@ -2082,6 +2082,17 @@ PY
     # FAILs on any tracked file still carrying it. `out/**` and `vendor/**` are
     # skipped BY PATH (SCE owns the generation-time header policy; vendored
     # code keeps its own), never by pattern.
+    #
+    # R2104b (open-debt item 523) — the SELFTEST runs first, and it is what
+    # makes the line below mean something. This file WRITES in one of its
+    # modes, and it used to reach that mode by default: every argument that
+    # was not `--check` fell through to the rewrite, so `--help` walked 1000+
+    # tracked files with write intent and exited 0. The check below could
+    # never have caught that — it is the safe mode grading the tree, not the
+    # program grading its own dispatch. The selftest drives both modes against
+    # a fixture `git init` tree and asserts, for every non-write arm, that the
+    # fixture is UNCHANGED. Mutating either refusal reds it.
+    python3 scripts/lib/relicense_spdx.py --selftest || return 1
     python3 scripts/lib/relicense_spdx.py --check || return 1
     # R2084 — the ACCEPT-DEADLINE gate. A test that opens a listener and spawns
     # an external process at it has its liveness resting entirely on that

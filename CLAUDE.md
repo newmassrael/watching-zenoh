@@ -257,6 +257,14 @@ substitution is rerunnable and gated —
 `scripts/lib/relicense_spdx.py` (exact-literal, `--check` mode FAILs
 when any tracked file still carries the old expression).
 
+That script takes a REQUIRED mode and has no default: `--check`
+reads, `--apply` writes, `--selftest` drives both against a fixture.
+An unknown argument is refused by name. Until R2104b it decided with
+`"--check" in sys.argv`, so every other input — `--help`, a typo, no
+argument at all — fell through to the REWRITE path; `--help` printed
+`rewrote 0 file(s)` and exited 0. Read and write are opposites here,
+so the program will not guess which was meant.
+
 Author-side source files (SCXML, Rust, C, header, deploy YAML) carry
 the SPDX header:
 
