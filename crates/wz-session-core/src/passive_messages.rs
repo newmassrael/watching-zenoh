@@ -640,4 +640,51 @@ mod tests {
         assert!(list.iter().all(|f| f.stream_offset == 8));
         assert_eq!(list.len(), 3, "a rewrite cannot grow or shrink the list");
     }
+
+    /// R2109 (open-debt item 528) — A TRIMMED LIST STILL READS WHOLE.
+    ///
+    /// # Why this test had to be written to close that item
+    ///
+    /// R2109 made the store a `VecDeque` so a trim stops costing list-length,
+    /// and every reader of this type takes a contiguous `&[PassiveFrame]`. The
+    /// two facts are only compatible while the ring has not wrapped, which the
+    /// mutators maintain — and MUTATION SAID NOBODY WAS CHECKING: disabling
+    /// `keep_contiguous` left all 343 tests in this crate green, because none
+    /// of them pushes and discards enough to make a deque wrap. A slice reader
+    /// would then have seen a SHORT list with no error anywhere, which is this
+    /// workspace's "a floor reported as a total" one layer down.
+    ///
+    /// The interleaving is what does it: filling, then alternating a discard
+    /// with a push, walks the head around the buffer. `as_slice().len()` is the
+    /// assertion because that is the number every consumer actually gets.
+    #[test]
+    fn a_list_that_has_wrapped_its_ring_still_hands_back_every_message() {
+        let mut list = MessageList::new();
+        let mut census = DroppedFrameCensus::default();
+        for _ in 0..8 {
+            list.push(frame());
+        }
+        // Enough cycles to carry the head past the end of the buffer several
+        // times over, which is the state `remove(0)` could never produce.
+        // Every receipt is absorbed: the type's own destructor refuses a
+        // discard nobody accounted for, which is how this test first failed.
+        for _ in 0..64 {
+            census.absorb(list.discard_oldest().expect("the list is not empty"));
+            list.push(frame());
+        }
+        assert_eq!(census.total(), 64, "every discard was accounted for");
+        assert_eq!(list.len(), 8, "a discard and a push leave the length alone");
+        assert_eq!(
+            list.as_slice().len(),
+            list.len(),
+            "the slice every consumer reads is shorter than the list, so the \
+             ring wrapped and nothing put it back together"
+        );
+        assert_eq!(list.iter().count(), 8, "and the iterator agrees with it");
+        assert_eq!(
+            list.produced(),
+            8 + 64,
+            "a trim never moves `produced`, which is what a watermark reads"
+        );
+    }
 }
