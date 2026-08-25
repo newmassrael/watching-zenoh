@@ -92,7 +92,14 @@ pub fn census_json(d: &crate::Dissection) -> String {
 /// before the tap started cannot be judged against `key == demo/**`, and
 /// counting it as a non-match would make a short total look whole.
 pub fn census_json_where(d: &crate::Dissection, filter: &crate::filter::Filter) -> String {
-    let mut out = String::from("{\"keyexprs\":");
+    // R2100 (open-debt item 509) — the document's OWN revision, first key, so
+    // a consumer reads it without walking the body. Until this round a key
+    // rename here was a break that nothing in the document could express: the
+    // ABI revision is defined not to move for a JSON change, and the JSON
+    // carried no revision.
+    let mut out = String::from("{");
+    crate::doc_revision::envelope_into(crate::doc_revision::CENSUS, &mut out);
+    out.push_str(",\"keyexprs\":");
     out.push_str(&keyexprs_json(&crate::agg::aggregate_where(d, filter)));
     // Round 2016 (item 268) — built ONCE and lent to both planes that read it.
     // The interest plane names the zid that declared each row, and a second
@@ -919,8 +926,14 @@ mod tests {
 /// mean anything: without the network codecs a Push inside a frame is an
 /// unknown MID, every plane here answers zero HONESTLY, and these assertions
 /// would fail for a reason that has nothing to do with the emitter.
+// R2100 (open-debt item 509) — `pub(crate)` so `fields_json`'s revision pin can
+// build its document over the SAME four-plane capture this module's census pin
+// uses. A second fixture over there would be a second opinion about what a rich
+// capture contains, and a key-set pin taken over a THIN one silently stops
+// covering the keys that capture never reaches. The pattern is already here:
+// this module reads `crate::exchange::tests` and `crate::node::tests`.
 #[cfg(all(test, feature = "network-codecs"))]
-mod fed_tests {
+pub(crate) mod fed_tests {
     use super::*;
     use crate::datagram_tests::{push, sender_space, tcp_packet, tcp_packet_reverse};
     use crate::link::LINKTYPE_ETHERNET;
@@ -967,7 +980,7 @@ mod fed_tests {
     /// `locator` is an Option so the six callers of [`four_plane_capture`] see
     /// a byte-identical capture: passing `None` adds no packets, and the
     /// key-set pin and the plane assertions are measuring what they were.
-    fn four_plane_capture_with_file(
+    pub(crate) fn four_plane_capture_with_file(
         keyexpr: &'static str,
         locator: Option<&str>,
         contradicting: bool,
@@ -1271,212 +1284,32 @@ mod fed_tests {
         let mut seen = json_keys(&doc);
         seen.sort_unstable();
         seen.dedup();
-        // MEASURED, not transcribed: the first run of this test carried an
-        // empty table and printed the set, which is the same trick the C1bz
-        // budget is re-measured with. 136 keys over the four planes plus the
-        // interest plane and the loss group.
-        let expected: Vec<&str> = alloc::vec![
-            "a",
-            "a_to_b",
-            "addr",
-            "admissible",
-            "aggregate",
-            "anchors_exact",
-            "answers",
-            "answers_in_scope",
-            "asked_at",
-            "asker",
-            "asks",
-            "at_most_bytes",
-            "attributed_bytes",
-            "b",
-            "b_to_a",
-            "by_kind",
-            "bytes",
-            "cancelled_at",
-            // Round 2042 (open-debt item 359) — the CEILINGS in force, beside
-            // the losses they were measured against. Five keys under one
-            // `caps` object, so a reader of `dropped_by_limits` can tell an
-            // unbounded run from a bounded one: before this the two rendered
-            // identically, which is the distinction `--bounded` exists for.
-            // Every one is an ADDED key, which this document's contract
-            // permits where a rename or a removal would break a consumer.
-            "caps",
-            "children",
-            "closed_at",
-            "completed",
-            "completion",
-            "consistent",
-            "contradictions",
-            "count",
-            "declaration",
-            "declarations",
-            "declared",
-            "declared_at",
-            "declarer",
-            // Round 2016 (item 268) — the zid that made a declaration, joined
-            // from the node plane. ADDED and not renamed, so it falls on the
-            // side of `wz_dissect.h`'s line a linking consumer may ignore: a
-            // reader that does not know the key reads the document exactly as
-            // before, and one that does gets "who" beside "what".
-            "declarer_zid",
-            "dels",
-            "descriptors",
-            "dropped_by_limits",
-            "elsewhere",
-            "errs",
-            "evidence",
-            "exchanges",
-            "first_anchor",
-            "first_packet",
-            "first_reply",
-            "flow",
-            "flows",
-            "frames",
-            "frames_per_flow",
-            "gaps",
-            "halted_batches",
-            "hello",
-            "high",
-            "id",
-            "inadmissible",
-            "init",
-            "interests",
-            "join",
-            "judged",
-            "keyexpr",
-            "keyexprs",
-            "keys",
-            "kind",
-            "last_anchor",
-            "links",
-            "liveliness_token",
-            "locators",
-            "low",
-            "matched",
-            "max_flows_per_table",
-            "max_ms",
-            "max_scout_askers",
-            "mean_ms",
-            "messages",
-            "min_ms",
-            "mismatched",
-            "mode",
-            "narrowed_by_selector",
-            "nodes",
-            "non_monotonic",
-            "not_as_declared",
-            "offset_space",
-            "orphan_answers",
-            "orphan_responses",
-            "orphan_withdrawals",
-            "payload_bytes",
-            "payload_bytes_ceiling",
-            "payloads",
-            "port",
-            "prefix",
-            "puts",
-            "queries",
-            "queryable",
-            "queryables",
-            "records",
-            "rejected",
-            "replies",
-            "requests",
-            "restricted",
-            "rows",
-            "scout",
-            "scout_askers",
-            "selection",
-            "share_bp",
-            "silent",
-            "skipped",
-            "skipped_packets",
-            "solicited_by",
-            "source_ahead_of_observer",
-            "stream_bytes",
-            "stream_bytes_per_direction",
-            "subscriber",
-            "subscribers",
-            "subtrees",
-            "tokens",
-            "total_ms",
-            "total_payload_bytes",
-            "totals",
-            "unanswered",
-            "unattributed_bytes",
-            "unattributed_records",
-            "unattributed_requests",
-            "unclaimed",
-            "unclaimed_exact",
-            "unclosed",
-            "undecidable",
-            "undecided",
-            "undeclarations",
-            "undecompressible_batches",
-            "unjudged_answers",
-            "unknown_ids",
-            "unlocatable_records",
-            "unmeasured_payloads",
-            "unparsed_bytes",
-            "unread",
-            "unresolvable_fragments",
-            "unresolved",
-            "unresolved_declarations",
-            "unresolved_records",
-            "unsized_payloads",
-            "unstamped",
-            "walked_records",
-            "whatami",
-            "wire_bytes",
-            "withdrawn_at",
-            "zid",
-        ];
+        // R2100 (open-debt item 509) — the set MOVED to
+        // `doc_revision::CENSUS_R1_KEYS`, beside the revision it belongs to.
+        // R311y923 wrote it as a literal here, which pinned the shape for the
+        // AUTHOR and told the CONSUMER nothing; the revision is what the
+        // consumer reads, and a key set pinned in one file with a revision
+        // declared in another is two facts that can disagree.
+        //
+        // MEASURED, not transcribed, at both addresses: this test printed the
+        // set it saw and the table was filled from that printout.
+        let expected: Vec<&str> = crate::doc_revision::CENSUS_R1_KEYS.to_vec();
         assert_eq!(
             seen, expected,
-            "the census document's key set moved; if that is deliberate, put the \
-             new set here and say in the same commit which side of \
-             `wz_dissect.h`'s line it falls on"
+            "the census document's key set moved; if that is deliberate, APPEND a \
+             revision to `doc_revision::DOCUMENT_HISTORY` carrying the new set — and \
+             if a key is going away, announce it in the previous revision's \
+             `retiring` first, which is what makes a rename an edit a consumer can \
+             follow instead of a break"
         );
     }
 
-    /// Every KEY in a JSON document, in order of appearance, duplicates
-    /// included.
-    ///
-    /// A string is a key when the next non-space character after it is a colon.
-    /// Deliberately not a parser: this crate already has one
-    /// (`payload::json_wellformed`, which the test above runs), and a second
-    /// would be a second opinion about what JSON is.
-    fn json_keys(doc: &str) -> Vec<&str> {
-        let b = doc.as_bytes();
-        let mut out = Vec::new();
-        let mut i = 0usize;
-        while i < b.len() {
-            if b[i] != b'"' {
-                i += 1;
-                continue;
-            }
-            let start = i + 1;
-            let mut j = start;
-            while j < b.len() && b[j] != b'"' {
-                // The escape is what stops a key containing a quote from
-                // ending here, which the hostile-string test above makes real.
-                j += if b[j] == b'\\' { 2 } else { 1 };
-            }
-            if j >= b.len() {
-                break;
-            }
-            let mut k = j + 1;
-            while k < b.len() && b[k] == b' ' {
-                k += 1;
-            }
-            if k < b.len() && b[k] == b':' {
-                out.push(&doc[start..j]);
-            }
-            i = j + 1;
-        }
-        out
-    }
+    // R2100 (open-debt item 509) — `json_keys` MOVED to
+    // `crate::doc_revision`, and is `pub` there. Two crates now take key-set
+    // pins (`wz-capi-dissect` owns four of the six documents), and a second
+    // copy of the extractor over there would be a second opinion about what a
+    // KEY is — the same argument this function's own doc makes about parsers.
+    use crate::doc_revision::json_keys;
 
     /// R311y920 (open-debt item 380) — A WIRE STRING FULL OF JSON
     /// METACHARACTERS LEAVES EVERY DOCUMENT WELL-FORMED.
@@ -1752,7 +1585,7 @@ mod fed_tests {
         let json = census_json(&four_plane_capture("demo/temp"));
 
         // The keyexpr plane: the literal, and the bytes under it.
-        let keyexprs = plane(&json, "{\"keyexprs\":");
+        let keyexprs = plane(&json, ",\"keyexprs\":");
         assert!(
             keyexprs.contains("\"keyexpr\":\"demo/temp\""),
             "the key the Put travelled under is missing: {keyexprs}"
@@ -1940,14 +1773,14 @@ mod fed_tests {
         let d = four_plane_capture("demo/temp");
         let whole = census_json(&d);
         assert!(
-            plane(&whole, "{\"keyexprs\":").contains("\"keyexpr\":\"demo/q\""),
+            plane(&whole, ",\"keyexprs\":").contains("\"keyexpr\":\"demo/q\""),
             "the CONTROL must carry the key the selector will reject: {whole}"
         );
 
         let filter = crate::filter::Filter::parse("key == demo/temp").expect("compiles");
         let narrowed = census_json_where(&d, &filter);
 
-        let keyexprs = plane(&narrowed, "{\"keyexprs\":");
+        let keyexprs = plane(&narrowed, ",\"keyexprs\":");
         assert!(
             keyexprs.contains("\"keyexpr\":\"demo/temp\""),
             "the matching key must survive: {keyexprs}"

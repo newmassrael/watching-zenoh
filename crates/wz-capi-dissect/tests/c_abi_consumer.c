@@ -333,7 +333,10 @@ int main(void) {
     verdict = NULL;
     rc = wz_dissect_selector_diagnose("key == demo/**", &verdict);
     CHECK(rc == WZ_DISSECT_OK, "diagnose rc=%d", rc);
-    CHECK(strcmp(verdict, "{\"ok\":true}") == 0, "not a pass: %s", verdict);
+    CHECK(strcmp(verdict,
+                 "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":1},"
+                 "\"ok\":true}") == 0,
+          "not a pass: %s", verdict);
     wz_dissect_string_free(verdict);
 
     /* R311y855 -- the FIELD door is reachable from C, and its document has the
@@ -393,7 +396,9 @@ int main(void) {
     char *declared = NULL;
     rc = wz_dissect_declarations_diagnose("demo/temp=protobuf", &declared);
     CHECK(rc == WZ_DISSECT_OK, "diagnose rc=%d", rc);
-    CHECK(strcmp(declared, "{\"ok\":true,\"installed\":1}") == 0,
+    CHECK(strcmp(declared,
+                 "{\"document\":{\"name\":\"declarations_diagnose\",\"revision\":1},"
+                 "\"ok\":true,\"installed\":1}") == 0,
           "a good declaration text must verify: %s", declared);
     wz_dissect_string_free(declared);
 
@@ -432,6 +437,52 @@ int main(void) {
     rc = wz_dissect_readable_surfaces(NULL);
     CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG,
           "a null out-pointer must be refused, got rc=%d", rc);
+
+    /* R2100 (open-debt item 509) -- THE REVISION EVERY DOCUMENT CARRIES, read
+     * from the side that needs it.
+     *
+     * wz_dissect_abi_version() above is the SYMBOL contract and is defined not
+     * to move for a JSON change. That left a key RENAME or REMOVAL -- a real
+     * break for a consumer reading by name, which is what this header tells it
+     * to do -- with no number anywhere that could express it. Each document now
+     * opens with its own, so a consumer pins the shape it was written against
+     * and refuses one it has not seen, exactly as it already does with the ABI
+     * revision.
+     *
+     * Asserted HERE and not only in Rust because that is the whole claim: a
+     * revision a linking product cannot read is not a signal to a consumer. */
+    struct {
+        const char *name;
+        char *doc;
+    } revisioned[4];
+    revisioned[0].name = "census";
+    revisioned[0].doc = NULL;
+    rc = wz_dissect_pcap_census(pcap, sizeof pcap, &revisioned[0].doc);
+    CHECK(rc == WZ_DISSECT_OK, "census rc=%d", rc);
+    revisioned[1].name = "summary";
+    revisioned[1].doc = NULL;
+    rc = wz_dissect_pcap_summary(pcap, sizeof pcap, &revisioned[1].doc);
+    CHECK(rc == WZ_DISSECT_OK, "summary rc=%d", rc);
+    revisioned[2].name = "fields";
+    revisioned[2].doc = NULL;
+    rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
+    CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);
+    revisioned[3].name = "readable_surfaces";
+    revisioned[3].doc = NULL;
+    rc = wz_dissect_readable_surfaces(&revisioned[3].doc);
+    CHECK(rc == WZ_DISSECT_OK, "surfaces rc=%d", rc);
+
+    for (size_t i = 0; i < sizeof revisioned / sizeof revisioned[0]; i++) {
+        char want[128];
+        snprintf(want, sizeof want,
+                 "{\"document\":{\"name\":\"%s\",\"revision\":1}",
+                 revisioned[i].name);
+        CHECK(strncmp(revisioned[i].doc, want, strlen(want)) == 0,
+              "the %s document must OPEN with its own revision so a consumer "
+              "reads it before parsing the body: %s",
+              revisioned[i].name, revisioned[i].doc);
+        wz_dissect_string_free(revisioned[i].doc);
+    }
 
     printf("  C1bo: C consumer linked the cdylib and read the tree\n");
     return 0;

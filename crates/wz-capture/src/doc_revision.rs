@@ -1,0 +1,835 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+// SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+
+//! R2100 (open-debt item 509) — every emitted document says its OWN revision,
+//! and a key rename or removal cannot ship without moving it.
+//!
+//! # The hole this fills
+//!
+//! `wz_dissect.h` states the consumer contract in prose: read the returned
+//! JSON *by name*, tolerate unknown keys, and `wz_dissect_abi_version` moves
+//! "when a SYMBOL or the memory rule changes, never when the JSON gains
+//! fields". Both halves of that are right, and together they left a break with
+//! no way to be expressed. A key RENAMED or REMOVED is a real break for a
+//! consumer reading by name — and the ABI revision is defined not to move for
+//! it, while the document itself carried no revision of its own. Measured
+//! 2026-08-24 for item 509: `schema_version` / `document_version` /
+//! `doc_revision` / `"version"` appeared ZERO times in `census_json.rs` and
+//! `fields_json.rs`.
+//!
+//! Item 288's landing (`the_census_documents_key_set_is_pinned`) closed the
+//! AUTHOR-side half: a shape change now lands on a table inside the repository
+//! where the author has to state it. What no signal reached was the CONSUMER,
+//! which is a different mechanism and is what this module is.
+//!
+//! # Per DOCUMENT, not per library, and the basis is measured
+//!
+//! Item 509 left this round to decide it and named the test: does the consumer
+//! read the documents as SEPARATE symbols? Read off `wz_dissect.h`, it does —
+//! `wz_dissect_pcap_census`, `wz_dissect_pcap_fields`, `wz_dissect_pcap_summary`,
+//! `wz_dissect_readable_surfaces`, `wz_dissect_selector_diagnose` and
+//! `wz_dissect_declarations_diagnose` are six separate doors, and a consumer
+//! calls the one it wants. A single library-wide number would tell a reader of
+//! the census that the shape moved when what actually moved was the field
+//! document it never calls, and the only safe response to a number that moved
+//! is to re-check — so a coupled number costs exactly the audits it cannot
+//! justify.
+//!
+//! # The dance a revision makes ordinary
+//!
+//! With a per-document revision, a rename stops being a break and becomes a
+//! two-step edit anyone can execute:
+//!
+//! 1. append a revision that emits BOTH the old key and the new one, with the
+//!    old one listed in [`crate::doc_revision::DocumentShape::retiring`];
+//! 2. append the next revision, which drops it.
+//!
+//! Fully-qualified rather than bare, and that is not a style choice: this
+//! module's doc is MERGED with the `pub mod` doc in `lib.rs`, so a bare
+//! `[`audit`]` is resolved in the crate root where no such item exists — two
+//! rustdoc errors on the first run of this file, and `wz-capture` carries a
+//! doc-link budget of zero.
+//!
+//! [`crate::doc_revision::audit`] is what makes that the ONLY expressible path: a key that vanishes
+//! between consecutive revisions without having been announced in the older
+//! one is an error, so a silent removal cannot be written down at all.
+//!
+//! # What this module is NOT
+//!
+//! Not `capi_abi_pin.py`, and not item 240's table. Those pin the SYMBOL set
+//! against the ABI revision. This pins the DOCUMENTS those symbols hand back,
+//! one layer in — the distinction item 509 drew when it filed.
+//!
+//! `wz_dissect_transport_message` is deliberately OUT of scope, and that is a
+//! decision rather than an omission: its document is a FIELD TREE whose keys
+//! are the walkers' own field names, generated per protocol element, so there
+//! is no fixed key set to pin and "the shape moved" is not a statement about
+//! it. The walkers' naming contract is a different one and belongs with them.
+
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::fmt::Write as _;
+
+/// One document's shape AT one revision.
+///
+/// A ROW IN A HISTORY, not a description of today: the newest row for a
+/// document is what it emits now, and the older rows are what make a removal
+/// checkable. Dropping the history and keeping only the current shape would
+/// leave the author free to rename a key by editing one line, which is the
+/// state item 509 measured.
+pub struct DocumentShape {
+    /// The document's name, as it appears in its own `document.name`.
+    pub document: &'static str,
+    /// This shape's revision. Starts at 1 per document and rises by one.
+    pub revision: u32,
+    /// Every key the document emits at this revision, sorted and deduped.
+    ///
+    /// The WHOLE set and not the additions, for the reason
+    /// `the_census_documents_key_set_is_pinned` gives: a rule that only
+    /// refused removals would let the shape grow unremarked, and the growth is
+    /// what a consumer pinned to a revision has to be told about.
+    pub keys: &'static [&'static str],
+    /// Keys ANNOUNCED here as going away in the next revision.
+    ///
+    /// The first half of the rename dance. Every entry must be in
+    /// [`Self::keys`] — announcing the retirement of a key the document does
+    /// not emit says nothing to anyone.
+    pub retiring: &'static [&'static str],
+}
+
+/// Every document this library hands a consumer, at every revision it has had.
+///
+/// APPEND-ONLY IN SPIRIT AND CHECKED IN EFFECT. Nothing here forbids editing a
+/// row in place, and nothing needs to: [`audit`] refuses a key that leaves
+/// without having been announced in the PREVIOUS row, and an in-place edit
+/// cannot retroactively put an announcement there. So the one edit that
+/// matters — a rename — is the one that has to be spelled as two new rows.
+///
+/// Every document starts at revision 1 in the round that introduced the
+/// number. That is not a claim that the shapes are new; it is the claim that
+/// this is the first revision a consumer could ever read.
+pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
+    DocumentShape {
+        document: CENSUS,
+        revision: 1,
+        keys: CENSUS_R1_KEYS,
+        retiring: &[],
+    },
+    DocumentShape {
+        document: FIELDS,
+        revision: 1,
+        keys: FIELDS_R1_KEYS,
+        retiring: &[],
+    },
+    DocumentShape {
+        document: SUMMARY,
+        revision: 1,
+        keys: SUMMARY_R1_KEYS,
+        retiring: &[],
+    },
+    DocumentShape {
+        document: READABLE_SURFACES,
+        revision: 1,
+        keys: READABLE_SURFACES_R1_KEYS,
+        retiring: &[],
+    },
+    DocumentShape {
+        document: SELECTOR_DIAGNOSE,
+        revision: 1,
+        keys: SELECTOR_DIAGNOSE_R1_KEYS,
+        retiring: &[],
+    },
+    DocumentShape {
+        document: DECLARATIONS_DIAGNOSE,
+        revision: 1,
+        keys: DECLARATIONS_DIAGNOSE_R1_KEYS,
+        retiring: &[],
+    },
+];
+
+// The key sets below are MEASURED, never transcribed: each was printed by the
+// pin test that checks it, on the same fixture that test uses, and pasted back.
+// That is item 400's prescription — a table filled from a different reading
+// than the one that will be checked against it is a table nobody can reason
+// about — and it is how `the_census_documents_key_set_is_pinned` and the C1bz
+// budget are both maintained.
+
+/// The census document (`wz_dissect_pcap_census` and its narrowed doors).
+pub const CENSUS: &str = "census";
+/// The field document (`wz_dissect_pcap_fields` and its bounded doors).
+pub const FIELDS: &str = "fields";
+/// The capture summary (`wz_dissect_pcap_summary`).
+pub const SUMMARY: &str = "summary";
+/// The readable-surfaces catalogue (`wz_dissect_readable_surfaces`).
+pub const READABLE_SURFACES: &str = "readable_surfaces";
+/// A selector's verdict (`wz_dissect_selector_diagnose`).
+pub const SELECTOR_DIAGNOSE: &str = "selector_diagnose";
+/// A declaration block's verdict (`wz_dissect_declarations_diagnose`).
+pub const DECLARATIONS_DIAGNOSE: &str = "declarations_diagnose";
+
+/// The census document's key set at revision 1.
+///
+/// MOVED here from `the_census_documents_key_set_is_pinned`, which R311y923
+/// wrote as a literal inside the test. The test now reads this table, so there
+/// is ONE place the census document's shape is written down and the revision
+/// sits beside it — the whole point of the move: a key set pinned in one file
+/// and a revision declared in another are two facts that can disagree.
+pub const CENSUS_R1_KEYS: &[&str] = &[
+    "a",
+    "a_to_b",
+    "addr",
+    "admissible",
+    "aggregate",
+    "anchors_exact",
+    "answers",
+    "answers_in_scope",
+    "asked_at",
+    "asker",
+    "asks",
+    "at_most_bytes",
+    "attributed_bytes",
+    "b",
+    "b_to_a",
+    "by_kind",
+    "bytes",
+    "cancelled_at",
+    // Round 2042 (open-debt item 359) — the CEILINGS in force, beside the
+    // losses they were measured against. Five keys under one `caps` object, so
+    // a reader of `dropped_by_limits` can tell an unbounded run from a bounded
+    // one.
+    "caps",
+    "children",
+    "closed_at",
+    "completed",
+    "completion",
+    "consistent",
+    "contradictions",
+    "count",
+    "declaration",
+    "declarations",
+    "declared",
+    "declared_at",
+    "declarer",
+    // Round 2016 (item 268) — the zid that made a declaration, joined from the
+    // node plane. ADDED and not renamed, so it falls on the side of
+    // `wz_dissect.h`'s line a linking consumer may ignore.
+    "declarer_zid",
+    "dels",
+    "descriptors",
+    // R2100 (open-debt item 509) — the envelope's own three keys. They are the
+    // reason a consumer can tell this revision from the next one, so they are
+    // part of the pinned set like any other.
+    "document",
+    "dropped_by_limits",
+    "elsewhere",
+    "errs",
+    "evidence",
+    "exchanges",
+    "first_anchor",
+    // ITEM 455 LIVES HERE: over a stream link this number is a BYTE OFFSET and
+    // the name says packet. Renaming it is now an ordinary two-revision edit
+    // (emit both, announce the old one in `retiring`, drop it next revision)
+    // rather than the unexpressible break item 509 measured.
+    "first_packet",
+    "first_reply",
+    "flow",
+    "flows",
+    "frames",
+    "frames_per_flow",
+    "gaps",
+    "halted_batches",
+    "hello",
+    "high",
+    "id",
+    "inadmissible",
+    "init",
+    "interests",
+    "join",
+    "judged",
+    "keyexpr",
+    "keyexprs",
+    "keys",
+    "kind",
+    "last_anchor",
+    "links",
+    "liveliness_token",
+    "locators",
+    "low",
+    "matched",
+    "max_flows_per_table",
+    "max_ms",
+    "max_scout_askers",
+    "mean_ms",
+    "messages",
+    "min_ms",
+    "mismatched",
+    "mode",
+    "name",
+    "narrowed_by_selector",
+    "nodes",
+    "non_monotonic",
+    "not_as_declared",
+    "offset_space",
+    "orphan_answers",
+    "orphan_responses",
+    "orphan_withdrawals",
+    "payload_bytes",
+    "payload_bytes_ceiling",
+    "payloads",
+    "port",
+    "prefix",
+    "puts",
+    "queries",
+    "queryable",
+    "queryables",
+    "records",
+    "rejected",
+    "replies",
+    "requests",
+    "restricted",
+    "revision",
+    "rows",
+    "scout",
+    "scout_askers",
+    "selection",
+    "share_bp",
+    "silent",
+    "skipped",
+    "skipped_packets",
+    "solicited_by",
+    "source_ahead_of_observer",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "subscriber",
+    "subscribers",
+    "subtrees",
+    "tokens",
+    "total_ms",
+    "total_payload_bytes",
+    "totals",
+    "unanswered",
+    "unattributed_bytes",
+    "unattributed_records",
+    "unattributed_requests",
+    "unclaimed",
+    "unclaimed_exact",
+    "unclosed",
+    "undecidable",
+    "undecided",
+    "undeclarations",
+    "undecompressible_batches",
+    "unjudged_answers",
+    "unknown_ids",
+    "unlocatable_records",
+    "unmeasured_payloads",
+    "unparsed_bytes",
+    "unread",
+    "unresolvable_fragments",
+    "unresolved",
+    "unresolved_declarations",
+    "unresolved_records",
+    "unsized_payloads",
+    "unstamped",
+    "walked_records",
+    "whatami",
+    "wire_bytes",
+    "withdrawn_at",
+    "zid",
+];
+/// The field document's key set at revision 1.
+///
+/// Taken over `census_json::fed_tests::four_plane_capture_with_file` — the
+/// RICH fixture, so the row renderers are reached rather than one KeepAlive's
+/// worth of them. `declarations: None`: a payload map is the operator's input
+/// rather than the capture's, so the keys it adds belong to a revision that
+/// declares them and not to whichever fixture passed one.
+pub const FIELDS_R1_KEYS: &[&str] = &[
+    "addr",
+    "caps",
+    "capture_reread",
+    "datagram_flows",
+    "direction",
+    "document",
+    "dropped_by_limits",
+    "end",
+    "fields",
+    "flow",
+    "flows",
+    "frames",
+    "frames_per_flow",
+    "high",
+    "kind",
+    "low",
+    "max_flows_per_table",
+    "max_scout_askers",
+    "message_at",
+    "messages",
+    "name",
+    "offset_space",
+    "omitted",
+    "payload_mapping",
+    "payload_mapping_counts_exact",
+    "payload_refusals",
+    "port",
+    "revision",
+    "scout_askers",
+    "shown",
+    "skipped",
+    "skipped_packets",
+    "start",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "stream_flows",
+    "value",
+];
+/// The summary document's key set at revision 1.
+///
+/// The largest of the six, because `report::health_json` rides inside it: the
+/// stream-health, checksum and encapsulation counters are the summary's keys as
+/// far as a consumer is concerned, whichever module renders them.
+pub const SUMMARY_R1_KEYS: &[&str] = &[
+    "bytes_absent",
+    "caps",
+    "capture_reported_drops",
+    "completed",
+    "datagram_flows",
+    "desyncs",
+    "document",
+    "dropped_by_limits",
+    "duplicates",
+    "encapsulation_depth_bound",
+    "encapsulation_too_deep",
+    "encapsulations",
+    "evicted",
+    "expired",
+    "flows",
+    "fragments",
+    "frames",
+    "frames_per_flow",
+    "framing",
+    "gap_bytes_missing",
+    "gaps",
+    "gaps_forced",
+    "gre_payload",
+    "gre_payloads",
+    "health",
+    "held",
+    "ip_checksum_absent",
+    "ip_checksum_invalid",
+    "ip_checksum_valid",
+    "ip_fragment_pending",
+    "ipv4_fragment",
+    "ipv6_extension_chain",
+    "ipv6_fragment",
+    "link_types",
+    "malformed",
+    "max_flows_per_table",
+    "max_scout_askers",
+    "missing",
+    "name",
+    "not_ip",
+    "not_this_protocol",
+    "not_transport",
+    "not_transport_protos",
+    "open",
+    "out_of_order",
+    "out_of_window",
+    "overlapping",
+    "partial_overlaps",
+    "pieces",
+    "recoveries",
+    "reserved_headers",
+    "resync_skipped_bytes",
+    "retransmits",
+    "revision",
+    "scout_askers",
+    "sequence",
+    "skipped",
+    "skipped_packets",
+    "skips",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "streams",
+    "tcp_flows",
+    "too_deep_protos",
+    "total",
+    "transport_checksum_absent",
+    "transport_checksum_invalid",
+    "transport_checksum_valid",
+    "truncated",
+    "tunnel_checksum_absent",
+    "tunnel_checksum_invalid",
+    "tunnel_checksum_valid",
+    "uncorroborated_layers",
+    "unfinished",
+    "unfinished_bytes",
+    "unsupported_link_type",
+    "unwalked_encapsulation",
+    "vsock_non_payload",
+    "without_resolution",
+    "ws_desyncs",
+    "ws_recoveries",
+    "ws_resync_skipped_bytes",
+];
+/// The readable-surfaces document's key set at revision 1.
+pub const READABLE_SURFACES_R1_KEYS: &[&str] = &[
+    "document",
+    "doors",
+    "ext_bodies",
+    "link_types",
+    "name",
+    "revision",
+    "subsumed_by",
+    "z64",
+    "zbuf",
+];
+/// The selector verdict's key set at revision 1, over BOTH branches.
+///
+/// The UNION of `{ok:true}` and `{ok:false,at,message}`: a pin over one branch
+/// would leave the other's keys unwatched, which is a gate that reads green
+/// over half a contract.
+pub const SELECTOR_DIAGNOSE_R1_KEYS: &[&str] =
+    &["at", "document", "message", "name", "ok", "revision"];
+/// The declaration verdict's key set at revision 1, over BOTH branches.
+pub const DECLARATIONS_DIAGNOSE_R1_KEYS: &[&str] = &[
+    "document",
+    "installed",
+    "line",
+    "message",
+    "name",
+    "ok",
+    "revision",
+    "text",
+];
+
+/// The three keys the envelope itself contributes to every document.
+///
+/// Named rather than repeated into six tables: they are the same three keys
+/// for every document by construction, and a table that spelled them out six
+/// times would be six places to get them wrong.
+pub const ENVELOPE_KEYS: &[&str] = &["document", "name", "revision"];
+
+/// The newest shape recorded for `document`, or `None` for a name this library
+/// does not emit.
+pub fn newest(document: &str) -> Option<&'static DocumentShape> {
+    DOCUMENT_HISTORY
+        .iter()
+        .filter(|s| s.document == document)
+        .max_by_key(|s| s.revision)
+}
+
+/// The revision `document` emits today.
+pub fn revision(document: &str) -> Option<u32> {
+    newest(document).map(|s| s.revision)
+}
+
+/// Write the envelope every emitted document opens with.
+///
+/// FIRST KEY IN THE DOCUMENT at every call site, so a consumer reads the
+/// revision without walking the body — which is the difference between a
+/// number it can branch on and a number it finds after it has already parsed
+/// the shape it was trying to check.
+///
+/// A document name this library does not know is a programming error and is
+/// written as `revision: 0`, a value [`audit`] refuses, rather than being
+/// silently omitted: a document with no envelope is exactly the state item 509
+/// measured, and it must not be reachable by a typo.
+pub fn envelope_into(document: &str, out: &mut String) {
+    out.push_str("\"document\":{\"name\":\"");
+    out.push_str(document);
+    let _ = write!(out, "\",\"revision\":{}}}", revision(document).unwrap_or(0));
+}
+
+/// The whole envelope as its own string, for a caller building a document with
+/// `format!` rather than by pushing.
+pub fn envelope(document: &str) -> String {
+    let mut out = String::new();
+    envelope_into(document, &mut out);
+    out
+}
+
+/// Every KEY in a JSON document, in order of appearance, duplicates included.
+///
+/// A string is a key when the next non-space character after it is a colon.
+/// Deliberately not a parser: this crate already has one
+/// (`payload::json_wellformed`), and a second would be a second opinion about
+/// what JSON is.
+///
+/// R2100 (open-debt item 509) — moved here from `census_json`'s test module and
+/// made `pub`, because the key-set pins now live in TWO crates:
+/// `wz-capi-dissect` builds four of the six documents. A copy over there would
+/// be a second opinion about what a key is, which is the same argument the
+/// paragraph above makes about parsers, one level up.
+pub fn json_keys(doc: &str) -> Vec<&str> {
+    let b = doc.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < b.len() {
+        if b[i] != b'"' {
+            i += 1;
+            continue;
+        }
+        let start = i + 1;
+        let mut j = start;
+        while j < b.len() && b[j] != b'"' {
+            // The escape is what stops a key containing a quote from ending
+            // here, which the hostile-string test in `census_json` makes real.
+            j += if b[j] == b'\\' { 2 } else { 1 };
+        }
+        if j >= b.len() {
+            break;
+        }
+        let mut k = j + 1;
+        while k < b.len() && b[k] == b' ' {
+            k += 1;
+        }
+        if k < b.len() && b[k] == b':' {
+            out.push(&doc[start..j]);
+        }
+        i = j + 1;
+    }
+    out
+}
+
+/// The sorted, deduped key set of `doc` — what a pin compares against a
+/// revision's [`DocumentShape::keys`].
+///
+/// One function so the six pins cannot disagree about whether the comparison
+/// is order-sensitive. It is not: a document's key ORDER is a rendering detail
+/// (the same key appears once per row), while its key SET is the contract.
+pub fn key_set(doc: &str) -> Vec<&str> {
+    let mut keys = json_keys(doc);
+    keys.sort_unstable();
+    keys.dedup();
+    keys
+}
+
+/// Check a revision history for the rules that make a rename expressible and a
+/// silent break impossible.
+///
+/// Takes the rows as a PARAMETER rather than reading [`DOCUMENT_HISTORY`]
+/// directly, and that is what gives the rules a population: over the real table
+/// every rule holds by construction, so a checker that could only be run
+/// against it would be a guard nobody had ever seen fire. The tests drive it
+/// with the histories a future round will actually write — an announced
+/// removal, a silent one, a skipped revision.
+pub fn audit(rows: &[DocumentShape]) -> Result<(), String> {
+    let mut names: Vec<&str> = rows.iter().map(|r| r.document).collect();
+    names.sort_unstable();
+    names.dedup();
+    for name in names {
+        let doc: Vec<&DocumentShape> = rows.iter().filter(|r| r.document == name).collect();
+        let mut ordered = doc.clone();
+        ordered.sort_by_key(|r| r.revision);
+        // A history that does not start at 1 leaves a consumer unable to tell
+        // "revision 3 is the first there ever was" from "I am missing two".
+        if ordered[0].revision != 1 {
+            return Err(alloc::format!(
+                "{name}: the first revision is {}, and a document's history starts at 1",
+                ordered[0].revision
+            ));
+        }
+        for (i, row) in ordered.iter().enumerate() {
+            if row.revision != (i + 1) as u32 {
+                return Err(alloc::format!(
+                    "{name}: revision {} follows revision {}; revisions rise by one so a \
+                     consumer can tell a shape it has not seen from one it has",
+                    row.revision,
+                    ordered[i.saturating_sub(1)].revision
+                ));
+            }
+            let mut sorted: Vec<&str> = row.keys.to_vec();
+            sorted.sort_unstable();
+            if sorted != row.keys {
+                return Err(alloc::format!(
+                    "{name} r{}: the key set is not sorted, so comparing two revisions \
+                     would depend on the order someone typed them in",
+                    row.revision
+                ));
+            }
+            let mut deduped = sorted.clone();
+            deduped.dedup();
+            if deduped.len() != sorted.len() {
+                return Err(alloc::format!(
+                    "{name} r{}: the key set repeats a key",
+                    row.revision
+                ));
+            }
+            // A document with no envelope is exactly the state item 509
+            // measured, so a revision whose key set does not contain the
+            // envelope's own keys is a revision describing a document a
+            // consumer cannot read the revision off.
+            for envelope in ENVELOPE_KEYS {
+                if !row.keys.contains(envelope) {
+                    return Err(alloc::format!(
+                        "{name} r{}: the key set is missing the envelope key \
+                         {envelope:?}, so this revision describes a document that \
+                         does not say which revision it is",
+                        row.revision
+                    ));
+                }
+            }
+            for going in row.retiring {
+                if !row.keys.contains(going) {
+                    return Err(alloc::format!(
+                        "{name} r{}: {going:?} is announced for retirement but this \
+                         revision does not emit it",
+                        row.revision
+                    ));
+                }
+            }
+        }
+        // THE RULE ITEM 509 EXISTS FOR: a key may only leave after the
+        // revision before it said so. That is what turns a rename into
+        // "emit both, then drop one" and a removal into an announcement.
+        for pair in ordered.windows(2) {
+            let (before, after) = (pair[0], pair[1]);
+            for key in before.keys {
+                if !after.keys.contains(key) && !before.retiring.contains(key) {
+                    return Err(alloc::format!(
+                        "{name} r{} drops {key:?}, which r{} did not announce in \
+                         `retiring`; a consumer reading by name breaks on that, so \
+                         emit both keys for one revision and drop it in the next",
+                        after.revision,
+                        before.revision
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+
+    // Every synthetic row carries the envelope's own three keys, because a
+    // revision that does not is refused on its own rule — see
+    // `a_revision_describes_a_document_that_says_which_revision_it_is`.
+    const A: &[&str] = &["alpha", "beta", "document", "name", "revision"];
+    const A_RENAMED: &[&str] = &["alpha", "beta", "document", "gamma", "name", "revision"];
+    const A_DROPPED: &[&str] = &["alpha", "document", "gamma", "name", "revision"];
+
+    fn row(
+        revision: u32,
+        keys: &'static [&'static str],
+        retiring: &'static [&'static str],
+    ) -> DocumentShape {
+        DocumentShape {
+            document: "d",
+            revision,
+            keys,
+            retiring,
+        }
+    }
+
+    /// The real table obeys its own rules.
+    #[test]
+    fn the_shipped_history_passes_its_own_audit() {
+        audit(DOCUMENT_HISTORY).expect("the shipped document history");
+    }
+
+    /// Every door this library exports names a document here, and every
+    /// document here is reachable.
+    ///
+    /// The pairing is the point: a document with no envelope is item 509's
+    /// original state, and an envelope for a document nothing emits is a
+    /// revision nobody can read.
+    #[test]
+    fn every_document_name_resolves_to_a_revision() {
+        for name in [
+            CENSUS,
+            FIELDS,
+            SUMMARY,
+            READABLE_SURFACES,
+            SELECTOR_DIAGNOSE,
+            DECLARATIONS_DIAGNOSE,
+        ] {
+            assert_eq!(revision(name), Some(1), "{name}");
+            assert_eq!(
+                envelope(name),
+                alloc::format!("\"document\":{{\"name\":\"{name}\",\"revision\":1}}")
+            );
+        }
+        // A name this library does not emit renders revision 0, which the
+        // audit refuses — so a typo is loud rather than a document that
+        // quietly claims a shape.
+        assert_eq!(revision("no-such-document"), None);
+        assert!(envelope("no-such-document").contains("\"revision\":0"));
+    }
+
+    /// THE RULE: a key cannot leave unannounced, and CAN leave once announced.
+    ///
+    /// Both directions in one test, because a checker that refused every
+    /// removal would pass the first assertion and make the rename dance
+    /// impossible — which is the failure that would leave item 509 open while
+    /// looking closed.
+    #[test]
+    fn a_key_leaves_only_after_the_revision_before_it_said_so() {
+        // The dance, done right: r2 emits both names and announces the old
+        // one, r3 drops it.
+        let danced = vec![
+            row(1, A, &[]),
+            row(2, A_RENAMED, &["beta"]),
+            row(3, A_DROPPED, &[]),
+        ];
+        audit(&danced).expect("an announced retirement is the supported path");
+
+        // The same removal with no announcement.
+        let silent = vec![
+            row(1, A, &[]),
+            row(2, A_RENAMED, &[]),
+            row(3, A_DROPPED, &[]),
+        ];
+        let err = audit(&silent).expect_err("a silent removal is the break item 509 named");
+        assert!(err.contains("did not announce"), "{err}");
+        assert!(err.contains("\"beta\""), "{err}");
+    }
+
+    /// A history that skips a number, and one that does not start at 1.
+    #[test]
+    fn revisions_start_at_one_and_rise_by_one() {
+        let skipped = vec![row(1, A, &[]), row(3, A, &[])];
+        let err = audit(&skipped).expect_err("a skipped revision");
+        assert!(err.contains("rise by one"), "{err}");
+
+        let late = vec![row(2, A, &[])];
+        let err = audit(&late).expect_err("a history that does not start at 1");
+        assert!(err.contains("starts at 1"), "{err}");
+    }
+
+    /// An announcement has to be about a key the document actually emits.
+    #[test]
+    fn a_retirement_names_a_key_this_revision_emits() {
+        let phantom: Vec<DocumentShape> = vec![row(1, A, &["delta"])];
+        let err = audit(&phantom).expect_err("announcing a key that is not emitted");
+        assert!(err.contains("does not emit it"), "{err}");
+    }
+
+    /// A revision describes a document that SAYS which revision it is.
+    ///
+    /// The rule looks circular and is not: it is what stops a round from
+    /// declaring a revision for a document whose emitter never grew an
+    /// envelope — which is item 509's original state, recorded in the table as
+    /// though it had been fixed.
+    #[test]
+    fn a_revision_describes_a_document_that_says_which_revision_it_is() {
+        const NO_ENVELOPE: &[&str] = &["alpha", "beta"];
+        let err = audit(&[row(1, NO_ENVELOPE, &[])]).expect_err("a document with no envelope");
+        assert!(err.contains("missing the envelope key"), "{err}");
+    }
+
+    /// The key sets are sorted and deduped, so two revisions can be compared
+    /// at all.
+    #[test]
+    fn a_key_set_is_sorted_and_deduped() {
+        const UNSORTED: &[&str] = &["document", "name", "revision", "beta", "alpha"];
+        const REPEATED: &[&str] = &["alpha", "alpha", "document", "name", "revision"];
+        let err = audit(&[row(1, UNSORTED, &[])]).expect_err("an unsorted key set");
+        assert!(err.contains("not sorted"), "{err}");
+        let err = audit(&[row(1, REPEATED, &[])]).expect_err("a repeated key");
+        assert!(err.contains("repeats a key"), "{err}");
+    }
+}

@@ -84,7 +84,11 @@ pub fn fields_json(
     // nothing either way -- folded here so the row renderers ask one question
     // rather than two.
     let declarations = declarations.filter(|d| !d.is_empty());
-    let mut out = String::from("{\"stream_flows\":[");
+    // R2100 (open-debt item 509) — the document's own revision, first key. See
+    // `doc_revision`; the census document opens the same way.
+    let mut out = String::from("{");
+    crate::doc_revision::envelope_into(crate::doc_revision::FIELDS, &mut out);
+    out.push_str(",\"stream_flows\":[");
     for (i, flow) in d.flows().iter().enumerate() {
         if i > 0 {
             out.push(',');
@@ -449,6 +453,49 @@ mod tests {
     use crate::Dissection;
 
     use alloc::vec;
+
+    /// R2100 (open-debt item 509) — THE FIELD DOCUMENT'S KEY SET IS PINNED
+    /// AGAINST ITS REVISION.
+    ///
+    /// The census document got this at R311y923 and this one did not, which is
+    /// half of what item 509 measured: `fields_json.rs` was named in the same
+    /// breath as `census_json.rs` and had neither a revision nor a pin. A
+    /// consumer of `wz_dissect_pcap_fields` had no way to be told a key had
+    /// moved and the author had nothing that would notice.
+    ///
+    /// # The fixture is the RICH one, on purpose
+    ///
+    /// `census_json::tests::four_plane_capture_with_file` carries declares,
+    /// interests, a Put, a Query and its closing Reply — so the document it
+    /// produces reaches the row renderers rather than one KeepAlive's worth of
+    /// them. A pin taken over a thin capture silently stops covering every key
+    /// that capture never reaches, which is a gate that reads green while the
+    /// keys it was written for go unwatched.
+    ///
+    /// The declarations argument stays `None`: a payload map is the operator's
+    /// input, not the capture's, and the keys it adds belong to a revision that
+    /// declares them rather than to whichever fixture happened to pass one.
+    ///
+    /// Gated on `network-codecs` because the fixture is: without the decoders a
+    /// Push inside a frame is an unknown MID, so the document would be pinned
+    /// over a capture whose rows never rendered — a pin taken on a shape that
+    /// only exists in that build.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn the_field_documents_key_set_is_pinned() {
+        let (d, file) =
+            crate::census_json::fed_tests::four_plane_capture_with_file("demo/temp", None, false);
+        let doc = fields_json(&d, &file, None, None);
+        let seen = crate::doc_revision::key_set(&doc);
+        let expected: Vec<&str> = crate::doc_revision::FIELDS_R1_KEYS.to_vec();
+        assert_eq!(
+            seen, expected,
+            "the field document's key set moved; if that is deliberate, APPEND a \
+             revision to `doc_revision::DOCUMENT_HISTORY` carrying the new set — and \
+             if a key is going away, announce it in the previous revision's \
+             `retiring` first"
+        );
+    }
 
     /// One framed KeepAlive: a two-byte length prefix and the message.
     fn framed_keepalive() -> Vec<u8> {

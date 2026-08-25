@@ -203,7 +203,10 @@ pub unsafe extern "C" fn wz_dissect_readable_surfaces(out: *mut *mut c_char) -> 
     if out.is_null() {
         return WZ_DISSECT_ERR_INVALID_ARG;
     }
-    let mut s = String::from("{\"link_types\":");
+    // R2100 (open-debt item 509) — this document's own revision, first key.
+    let mut s = String::from("{");
+    wz_capture::doc_revision::envelope_into(wz_capture::doc_revision::READABLE_SURFACES, &mut s);
+    s.push_str(",\"link_types\":");
     wz_session_core::json::escape_into(&wz_capture::link::readable_link_types_line(), &mut s);
     s.push_str(",\"ext_bodies\":{\"zbuf\":");
     wz_session_core::json::escape_into(
@@ -920,10 +923,13 @@ pub unsafe extern "C" fn wz_dissect_declarations_diagnose(
         Err(_) => return WZ_DISSECT_ERR_INVALID_ARG,
     };
     let mut map = wz_capture::payload::formats::FormatMap::new();
+    // R2100 (open-debt item 509) — the envelope opens BOTH branches, for the
+    // reason the selector verdict above gives.
+    let head = wz_capture::doc_revision::envelope(wz_capture::doc_revision::DECLARATIONS_DIAGNOSE);
     let verdict = match map.declare_all(text) {
-        Ok(installed) => format!("{{\"ok\":true,\"installed\":{installed}}}"),
+        Ok(installed) => format!("{{{head},\"ok\":true,\"installed\":{installed}}}"),
         Err(bad) => {
-            let mut s = String::from("{\"ok\":false,\"line\":");
+            let mut s = format!("{{{head},\"ok\":false,\"line\":");
             s.push_str(&bad.line.to_string());
             s.push_str(",\"text\":");
             // The SAME escaper the rest of this ABI's documents use: the line
@@ -1132,10 +1138,15 @@ pub unsafe extern "C" fn wz_dissect_selector_diagnose(
         Ok(s) => s,
         Err(_) => return WZ_DISSECT_ERR_INVALID_ARG,
     };
+    // R2100 (open-debt item 509) — the envelope opens BOTH branches, so the
+    // revision is readable off a verdict whichever way it went. A revision a
+    // consumer can only see on failure is one it cannot check before trusting
+    // a success.
+    let head = wz_capture::doc_revision::envelope(wz_capture::doc_revision::SELECTOR_DIAGNOSE);
     let verdict = match wz_capture::filter::Filter::parse(expr) {
-        Ok(_) => String::from("{\"ok\":true}"),
+        Ok(_) => format!("{{{head},\"ok\":true}}"),
         Err(e) => {
-            let mut s = String::from("{\"ok\":false,\"at\":");
+            let mut s = format!("{{{head},\"ok\":false,\"at\":");
             s.push_str(&e.at.to_string());
             s.push_str(",\"message\":");
             // The SAME escaper the census document uses: a message quotes the
@@ -1153,7 +1164,10 @@ pub unsafe extern "C" fn wz_dissect_selector_diagnose(
 /// [`to_json`] is: this crate must not force a serde dependency on a
 /// consumer that only wants a decode out of the library.
 fn summary_json(d: &Dissection) -> String {
-    let mut s = String::from("{\"tcp_flows\":[");
+    // R2100 (open-debt item 509) — this document's own revision, first key.
+    let mut s = String::from("{");
+    wz_capture::doc_revision::envelope_into(wz_capture::doc_revision::SUMMARY, &mut s);
+    s.push_str(",\"tcp_flows\":[");
     for (i, f) in d.flows().iter().enumerate() {
         if i > 0 {
             s.push(',');
@@ -2936,7 +2950,12 @@ mod tests {
             .expect("utf8")
             .to_string();
         unsafe { wz_dissect_string_free(out) };
-        assert_eq!(verdict, "{\"ok\":true}");
+        // R2100 (open-debt item 509) — the verdict now OPENS with its own
+        // revision, so a consumer can tell this shape from the next one.
+        assert_eq!(
+            verdict,
+            "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":1},\"ok\":true}"
+        );
 
         out = core::ptr::null_mut();
         let bad = std::ffi::CString::new("kind == frobnicate").expect("no NUL");
@@ -2951,7 +2970,9 @@ mod tests {
             .to_string();
         unsafe { wz_dissect_string_free(out) };
         assert!(
-            verdict.starts_with("{\"ok\":false,\"at\":"),
+            verdict.starts_with(
+                "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":1},\"ok\":false,\"at\":"
+            ),
             "the verdict must carry a position: {verdict}"
         );
         assert!(
@@ -3197,9 +3218,14 @@ mod tests {
         // R311y932 (item 451) — the tail moved when the `doors` axis joined,
         // so this asserts the document's OPENING and that it parses, rather
         // than a closing brace count that describes the shape of the day.
+        // R2100 (open-debt item 509) — every document now opens with its
+        // revision, so the OPENING this asserts is the envelope; the
+        // link-types line is what follows it.
         assert!(
-            doc.starts_with("{\"link_types\":\""),
-            "the document is one JSON object: {doc}"
+            doc.starts_with(
+                "{\"document\":{\"name\":\"readable_surfaces\",\"revision\":1},\"link_types\":\""
+            ),
+            "the document is one JSON object opening with its revision: {doc}"
         );
         // R311y932 (item 451) — the doors axis is IN the document, and the
         // subsumption is what a C consumer could not learn anywhere else.
@@ -3552,6 +3578,146 @@ mod tests {
         Ok(s)
     }
 
+    /// R2100 (open-debt item 509) — EVERY DOCUMENT THIS ABI BUILDS SAYS ITS OWN
+    /// REVISION, AND ITS KEY SET IS PINNED AGAINST IT.
+    ///
+    /// # What was missing
+    ///
+    /// `wz_dissect.h` promises a consumer it may read by name and ignore keys
+    /// it does not know, and states that `wz_dissect_abi_version` does not move
+    /// for a JSON change. Both are right, and together they left a RENAME or a
+    /// REMOVAL — a real break for a name-reading consumer — with no number
+    /// anywhere that could express it. Item 288's landing pinned the census
+    /// document's key set for the AUTHOR; nothing reached the consumer, and the
+    /// four documents built in THIS crate had neither half.
+    ///
+    /// # Why all four in one test
+    ///
+    /// The claim is about the ABI's documents as a set. Asserted one per test,
+    /// a door added later simply would not appear, and "no test names it" is
+    /// indistinguishable from "it passes". Here the table is the population and
+    /// its length is asserted, so a fifth document in this crate has to join it
+    /// or the count is wrong.
+    ///
+    /// Every arm is COLLECTED rather than asserted where it is read: an arm
+    /// that panics leaves the later ones unmeasured, and unmeasured must not
+    /// read as passed.
+    #[test]
+    fn every_document_this_abi_builds_carries_its_revision_and_a_pinned_key_set() {
+        use wz_capture::doc_revision as rev;
+
+        // A capture rich enough that the summary reaches its flow rows: one
+        // TCP packet carrying a framed KeepAlive, plus a datagram flow.
+        let stream = wz_capture::pcap::write(1, &[(0, 0, &[0u8; 4])]);
+
+        // The two verdicts are asked in BOTH polarities, because their key
+        // sets differ by branch — `{ok:true}` against `{ok:false,at,message}`.
+        // A pin over one branch would leave the other's keys unwatched, which
+        // is the shape of gate that reads green over half a contract.
+        let selector_ok = call_selector_diagnose("");
+        let selector_bad = call_selector_diagnose("key ==");
+        let decl_ok = call_declarations_diagnose("");
+        let decl_bad = call_declarations_diagnose("not a declaration");
+
+        let documents: Vec<(&str, Vec<String>)> = vec![
+            (
+                rev::SUMMARY,
+                vec![call_summary(&stream).expect("the summary door reads a pcap")],
+            ),
+            (rev::READABLE_SURFACES, vec![call_readable_surfaces()]),
+            (rev::SELECTOR_DIAGNOSE, vec![selector_ok, selector_bad]),
+            (rev::DECLARATIONS_DIAGNOSE, vec![decl_ok, decl_bad]),
+        ];
+
+        let mut failures: Vec<String> = Vec::new();
+        for (name, docs) in &documents {
+            let want = rev::revision(name).expect("a document this crate emits has a revision");
+            let mut union: Vec<&str> = Vec::new();
+            for doc in docs {
+                let envelope = format!("\"document\":{{\"name\":\"{name}\",\"revision\":{want}}}");
+                if !doc.contains(&envelope) {
+                    failures.push(format!(
+                        "{name}: the document does not open with its own revision \
+                         ({envelope} not found).\n{doc}"
+                    ));
+                }
+                union.extend(rev::key_set(doc));
+            }
+            union.sort_unstable();
+            union.dedup();
+            let pinned: Vec<&str> = rev::newest(name).expect("a shape").keys.to_vec();
+            if union != pinned {
+                failures.push(format!(
+                    "{name}: the key set moved.\n     saw {union:?}\n  pinned {pinned:?}\n\
+                     If that is deliberate, APPEND a revision to \
+                     `doc_revision::DOCUMENT_HISTORY`; if a key is going away, announce \
+                     it in the previous revision's `retiring` first."
+                ));
+            }
+        }
+        assert_eq!(
+            documents.len(),
+            4,
+            "this crate builds four documents; a fifth must join the table above"
+        );
+
+        // The other two documents are BUILT in `wz-capture` and their key sets
+        // are pinned there — but they reach a consumer THROUGH these doors, and
+        // that is the claim item 509 is actually about. Asserted at the
+        // boundary rather than trusted from the builder: a revision that never
+        // crossed the C ABI is a revision no consumer can read.
+        for (name, doc) in [
+            (rev::CENSUS, call_census(&stream).expect("the census door")),
+            (
+                rev::FIELDS,
+                call_fields(&stream, 0).expect("the fields door"),
+            ),
+        ] {
+            let want = rev::revision(name).expect("a revision");
+            let envelope = format!("\"document\":{{\"name\":\"{name}\",\"revision\":{want}}}");
+            if !doc.contains(&envelope) {
+                failures.push(format!(
+                    "{name}: the document crossed the ABI without its revision \
+                     ({envelope} not found).\n{doc}"
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    }
+
+    /// Drive the readable-surfaces catalogue the way C does.
+    fn call_readable_surfaces() -> String {
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe { wz_dissect_readable_surfaces(&mut out) };
+        assert_eq!(
+            rc, WZ_DISSECT_OK,
+            "the catalogue takes no input and cannot fail"
+        );
+        let s = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("utf8")
+            .to_string();
+        unsafe { wz_dissect_string_free(out) };
+        s
+    }
+
+    /// Drive the selector diagnostic the way C does.
+    fn call_selector_diagnose(selector: &str) -> String {
+        let text = CString::new(selector).expect("no interior NUL");
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe { wz_dissect_selector_diagnose(text.as_ptr(), &mut out) };
+        assert_eq!(
+            rc, WZ_DISSECT_OK,
+            "a refused selector is a successful DIAGNOSIS, not an error"
+        );
+        let s = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("utf8")
+            .to_string();
+        unsafe { wz_dissect_string_free(out) };
+        s
+    }
+
     /// Drive the declaration diagnostic the way C does.
     fn call_declarations_diagnose(declarations: &str) -> String {
         let text = CString::new(declarations).expect("no interior NUL");
@@ -3762,9 +3928,11 @@ mod tests {
     /// which is the failure R311y854 named for the selector.
     #[test]
     fn the_declaration_diagnostic_names_the_line_and_needs_no_capture() {
+        // R2100 (open-debt item 509) — the verdict opens with its own revision.
+        const HEAD: &str = "{\"document\":{\"name\":\"declarations_diagnose\",\"revision\":1}";
         assert_eq!(
             call_declarations_diagnose("demo/**=protobuf\ndemo/**:1=temperature"),
-            "{\"ok\":true,\"installed\":2}"
+            format!("{HEAD},\"ok\":true,\"installed\":2}}")
         );
 
         // The SECOND line is the bad one, and the verdict must say so: an index
@@ -3773,7 +3941,9 @@ mod tests {
         // before.
         let verdict = call_declarations_diagnose("demo/**=protobuf\nnot a declaration");
         assert!(
-            verdict.starts_with("{\"ok\":false,\"line\":1,\"text\":\"not a declaration\""),
+            verdict.starts_with(&format!(
+                "{HEAD},\"ok\":false,\"line\":1,\"text\":\"not a declaration\""
+            )),
             "the verdict must point at the offending line and quote it: {verdict}"
         );
         assert!(

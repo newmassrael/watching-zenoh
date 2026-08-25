@@ -61,6 +61,15 @@ pub mod census_csv;
 /// dependency graph the whole time and had no symbol. One emit beside the
 /// types is what stops a third consumer from inventing a fourth rendering.
 pub mod census_json;
+/// R2100 (open-debt item 509) — the REVISION every emitted document carries,
+/// and the history that makes a key rename an expressible edit instead of an
+/// unexpressible break.
+///
+/// Lives beside the documents rather than in `wz-capi-dissect`, because two of
+/// the six are built here and four are built there: putting the table in the
+/// crate that owns the shapes is what stops the two sides from keeping
+/// separate answers to "what revision is this".
+pub mod doc_revision;
 /// R311y615 (§1.1f) — the second ANALYSIS plane: Query/Reply exchanges and
 /// their latency at the tap.
 ///

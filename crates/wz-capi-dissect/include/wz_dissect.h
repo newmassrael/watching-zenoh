@@ -14,6 +14,30 @@
  * self-describing document instead of a struct tree. wz_dissect_abi_version
  * moves when a SYMBOL or the memory rule changes, never when the JSON gains
  * fields.
+ *
+ * EVERY DOCUMENT SAYS ITS OWN REVISION, and that is a different number from
+ * the one above. Each one OPENS with
+ *
+ *     {"document":{"name":"census","revision":1}, ...}
+ *
+ * so a consumer reads it before parsing the body. The names are "census",
+ * "fields", "summary", "readable_surfaces", "selector_diagnose" and
+ * "declarations_diagnose" — one per door group, because a consumer calls the
+ * door it wants and a single library-wide number would tell a reader of the
+ * census that a document it never calls had moved.
+ *
+ * WHY IT EXISTS: reading by name is safe against ADDED keys and is not safe
+ * against a key that is RENAMED or REMOVED, and wz_dissect_abi_version is
+ * defined not to move for either. The document revision is the number that
+ * does. A key never leaves without the revision before it having emitted it
+ * alongside its replacement, so a consumer pinned to a revision always has one
+ * revision's notice: read the revision, and refuse — or re-check — a value you
+ * were not written against.
+ *
+ * wz_dissect_transport_message is the one door with no such revision, and
+ * deliberately: its document is a FIELD TREE whose keys are the walkers' own
+ * names, generated per protocol element, so there is no fixed key set for a
+ * revision to be about.
  */
 #ifndef WZ_DISSECT_H
 #define WZ_DISSECT_H
