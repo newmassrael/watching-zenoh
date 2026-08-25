@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
 # xtask — the codegen SSOT (R311y22). The ONE place that turns the SCXML
@@ -19,7 +19,7 @@ name = "xtask"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
-license = "LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial"
+license = "AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial"
 authors = ["newmassrael"]
 description = "watching-zenoh codegen SSOT: regenerate the committed out/** Rust from the SCXML sources (R311y22)."
 

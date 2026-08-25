@@ -1,5 +1,5 @@
 <!--
-SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 -->
 
@@ -47,7 +47,7 @@ license header 휘말림 위험이 발생.
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
   SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 -->
 <!--
@@ -61,7 +61,7 @@ license header 휘말림 위험이 발생.
 </scxml>
 ```
 
-SPDX 식별자 `LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial`
+SPDX 식별자 `AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial`
 는 Round 12 (`73c509e`) 이중 라이선스 결정의 표현형. 자세한 라이선스
 선택지는 root `LICENSE` 파일 참조.
 

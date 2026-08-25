@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
 # mcu-noheap-probe — R311hl Track 2 no-alloc gating: runtime proof.
@@ -44,7 +44,7 @@ name = "mcu-noheap-probe"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.81"
-license = "LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial"
+license = "AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial"
 authors = ["newmassrael"]
 description = "R311hl no-heap runtime proof: wz-session-core registries run on QEMU MCU with zero global allocator."
 

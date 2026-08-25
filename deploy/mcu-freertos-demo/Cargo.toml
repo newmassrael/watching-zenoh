@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
 # mcu-freertos-demo — QEMU mps2-an385 (Cortex-M3) e2e proving the LAYER-2
@@ -21,7 +21,7 @@
 name = "mcu-freertos-demo"
 version = "0.1.0"
 edition = "2021"
-license = "LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial"
+license = "AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial"
 publish = false
 
 [[bin]]

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
 # R311y420 — FILE-SCOPED, and only this file. Every lane runs through
@@ -2071,6 +2071,18 @@ PY
     # empty — a version that quietly analysed nothing would exit 0 forever and
     # read as coverage. Enforcement MEASURED by renaming a guarded test fn.
     python3 scripts/lib/count_guard_lint.py || return 1
+    # 2026-08-25 — the RELICENSE gate. The free tier moved from
+    # `LGPL-3.0-or-later` to `AGPL-3.0-or-later` across 1032 tracked files in
+    # one substitution, and the failure mode of that operation is not a crash:
+    # it is a HANDFUL OF MISSES, which are invisible and are precisely the
+    # files left under the old terms. A count printed once by the tool that did
+    # the rewrite proves nothing later — a file added from a stale template, a
+    # revert, or a cherry-pick from a pre-change branch reintroduces the old
+    # expression silently. So the check re-reads the tree on every run and
+    # FAILs on any tracked file still carrying it. `out/**` and `vendor/**` are
+    # skipped BY PATH (SCE owns the generation-time header policy; vendored
+    # code keeps its own), never by pattern.
+    python3 scripts/lib/relicense_spdx.py --check || return 1
     # R2084 — the ACCEPT-DEADLINE gate. A test that opens a listener and spawns
     # an external process at it has its liveness resting entirely on that
     # process dialling; `TcpListener::accept` has no deadline and

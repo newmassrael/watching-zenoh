@@ -242,18 +242,26 @@ here.
 
 ## License + SPDX header policy
 
-This project is **dual-licensed**: `LGPL-3.0-or-later` (free, with
-LGPL-3 obligations including anti-tivoization) OR
-`LicenseRef-watching-zenoh-Commercial` (paid, 5-way exemption). See
-`LICENSE` for the overview, `LICENSE-LGPL-3.0.md` /
-`LICENSE-GPL-3.0.md` for the verbatim free-tier texts, and
-`LICENSE-COMMERCIAL.md` for the commercial alternative.
+This project is **dual-licensed**: `AGPL-3.0-or-later` (free, with
+AGPL-3 obligations — whole-work copyleft, anti-tivoization, and the
+§13 source offer to remote users of a modified version) OR
+`LicenseRef-watching-zenoh-Commercial` (paid, 6-way exemption). See
+`LICENSE` for the overview, `LICENSE-AGPL-3.0.md` for the verbatim
+free-tier text, and `LICENSE-COMMERCIAL.md` for the commercial
+alternative.
+
+The free tier was `LGPL-3.0-or-later` until 2026-08-25. Revisions
+published under it keep those terms for the copies they were given
+with; this tree carries the AGPL expression from that commit on. The
+substitution is rerunnable and gated —
+`scripts/lib/relicense_spdx.py` (exact-literal, `--check` mode FAILs
+when any tracked file still carries the old expression).
 
 Author-side source files (SCXML, Rust, C, header, deploy YAML) carry
 the SPDX header:
 
 ```
-SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 ```
 

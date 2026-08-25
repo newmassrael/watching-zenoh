@@ -1,5 +1,5 @@
 <!--
-SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 -->
 
@@ -162,19 +162,27 @@ cargo install --path /path/to/mnemosyne/crates/mnemosyne-cli
 
 This repo is **dual-licensed**.
 
-- **LGPL-3.0-or-later** — free tier under the usual LGPL-3
-  obligations (including anti-tivoization). Full text in
-  LICENSE-LGPL-3.0.md and LICENSE-GPL-3.0.md.
+- **AGPL-3.0-or-later** — free tier under the usual AGPL-3
+  obligations: whole-work copyleft on anything you convey,
+  anti-tivoization, and the §13 source offer to users who interact
+  with a modified version over a network. Full text in
+  LICENSE-AGPL-3.0.md.
 - **LicenseRef-watching-zenoh-Commercial** — paid tier with a
-  five-way exemption. Full text in LICENSE-COMMERCIAL.md.
+  six-way exemption. Full text in LICENSE-COMMERCIAL.md.
 
 The LICENSE file is the entry overview.
+
+Revisions published before this change offered the free tier as
+LGPL-3.0-or-later, with the same commercial alternative. Those grants
+stay valid for the copies they were given with — a licence already
+granted cannot be withdrawn — but they do not extend to this revision
+or later ones.
 
 Author-side source files (SCXML, Rust, C, header, deploy YAML)
 carry the SPDX header:
 
 ```
-SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 ```
 

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
 # mcu-multicast-e2e — R311mi composable-framework MCU multicast footprint
@@ -43,7 +43,7 @@ name = "mcu-multicast-e2e"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
-license = "LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial"
+license = "AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial"
 authors = ["newmassrael"]
 description = "R311mi composable-framework MCU multicast footprint artifact — links the full multicast profile via wz_mcu_multicast_e2e::run_multicast_e2e (transport-multicast + transport-fragmentation + codec-push) for the Layer Q.5 footprint gate on Cortex-M3/M4/M7."
 

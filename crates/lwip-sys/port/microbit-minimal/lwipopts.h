@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+/* SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
  * SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
  *
  * lwip-sys microbit-minimal lwipopts.h — nrf51-class (Cortex-M0, 16 KB

@@ -4,30 +4,42 @@ Copyright (c) 2026 newmassrael
 This project is dual licensed — choose either license:
 
 ================================================================================
-OPTION 1: GNU Lesser General Public License version 3 (or later)
+OPTION 1: GNU Affero General Public License version 3 (or later)
 ================================================================================
 
 Use this for:
-- Open source projects (any LGPL-compatible license)
-- Projects willing to comply with LGPL-3 obligations:
-    (a) For each shipped binary, provide the LGPL-3 §4 information
-        (object code or source for the watching-zenoh portion, sufficient
-        to relink against a modified watching-zenoh).
-    (b) For "User Products" (consumer devices, embedded firmware),
-        LGPL-3 §4.e + §6 ("anti-tivoization") requires providing the
-        user with the means to install a modified watching-zenoh on that
-        device — signing keys, build instructions, relink procedure.
-    (c) Modifications to watching-zenoh's own source must be distributed
-        under LGPL-3 (no private modifications under this option).
-- Note: there is NO Static Linking Exception under this option. Static
-  linking still triggers the LGPL-3 §4 disclosure obligation.
+- Open source projects (any AGPL-compatible license)
+- Projects willing to comply with AGPL-3 obligations:
+    (a) Any work you convey that is based on watching-zenoh must itself
+        be licensed as a whole under AGPL-3 — the entire combined work,
+        not merely the watching-zenoh portion. Dynamic linking does not
+        avoid this; there is no LGPL-style "relink" carve-out.
+    (b) AGPL-3 §13: if you MODIFY watching-zenoh and let users interact
+        with your modified version REMOTELY over a network, you must
+        offer those users the Corresponding Source of your version, at
+        no charge, from a network server. Running it as a service is
+        not a way around (a) — this is the clause that distinguishes
+        AGPL from plain GPL.
+    (c) For "User Products" (consumer devices, embedded firmware),
+        AGPL-3 §6 ("anti-tivoization") requires providing the user with
+        the Installation Information needed to install a modified
+        watching-zenoh on that device — signing keys, build
+        instructions, install procedure.
+    (d) Modifications to watching-zenoh's own source must be
+        distributed under AGPL-3 (no private modifications under this
+        option once you convey or serve the result).
 
-If any of (a), (b), or (c) is unacceptable for your distribution, use
+If any of (a) through (d) is unacceptable for your product, use
 Option 2 (Commercial License) instead.
 
-Full LGPL-3.0 text:    LICENSE-LGPL-3.0.md
-Full GPL-3.0 text:     LICENSE-GPL-3.0.md (base license LGPL-3.0 supplements)
-Official LGPL-3.0:     https://www.gnu.org/licenses/lgpl-3.0.html
+Full AGPL-3.0 text:    LICENSE-AGPL-3.0.md
+Official AGPL-3.0:     https://www.gnu.org/licenses/agpl-3.0.html
+
+Note on earlier releases. Commits published before this change offered
+the free tier as LGPL-3.0-or-later instead of AGPL-3.0-or-later, with
+the same commercial alternative. A licence already granted cannot be
+withdrawn: anyone who obtained a copy under those terms keeps them for
+that copy. This file governs THIS revision and everything after it.
 
 ================================================================================
 OPTION 2: Commercial License
@@ -35,6 +47,8 @@ OPTION 2: Commercial License
 
 Use this for:
 - Proprietary applications (closed source)
+- Network services built on a modified watching-zenoh where you do not
+  wish to publish your modifications (the AGPL-3 §13 waiver)
 - Embedded firmware with secure boot, signed binaries, or locked-down
   update channels (anti-tivoization waiver)
 - Private modifications to watching-zenoh's own source (keep changes
@@ -42,9 +56,8 @@ Use this for:
 - Redistribution of watching-zenoh as part of a derivative SDK, library
   wrapper, or rebranded product
 
-Pricing (via GitHub Sponsors — cumulative sponsorship model):
-- Individual: $5000 USD cumulative
-- Enterprise (5+ developers): Contact for quote
+Pricing: contact the Licensor. Terms depend on team size, product,
+and distribution model, so there is no published figure here.
 
 Sponsor:  https://github.com/newmassrael
 Contact:  newmassrael@gmail.com
@@ -96,12 +109,18 @@ Quick Decision Guide
 
 | Your Situation                                | License Choice | Cost            |
 |-----------------------------------------------|----------------|-----------------|
-| Open source project, LGPL-compatible          | LGPL-3.0+      | FREE            |
-| Internal company use, source compliance OK    | LGPL-3.0+      | FREE            |
-| Proprietary commercial product                | Commercial     | $5000 / Contact |
-| Embedded firmware (signed / locked devices)   | Commercial     | $5000 / Contact |
-| Private modifications to watching-zenoh       | Commercial     | $5000 / Contact |
-| Redistribute as SDK / rebranded product       | Commercial     | $5000 / Contact |
+| Open source project, AGPL-compatible          | AGPL-3.0+      | FREE            |
+| Internal use, never conveyed and never served | AGPL-3.0+      | FREE            |
+| Proprietary commercial product                | Commercial     | Contact         |
+| Network service on a modified watching-zenoh  | Commercial     | Contact         |
+| Embedded firmware (signed / locked devices)   | Commercial     | Contact         |
+| Private modifications to watching-zenoh       | Commercial     | Contact         |
+| Redistribute as SDK / rebranded product       | Commercial     | Contact         |
+
+"Internal use" is narrow on purpose: AGPL-3 obligations attach when you
+CONVEY a covered work, and — under §13 — when you let users interact
+with a MODIFIED version over a network. Running an unmodified
+watching-zenoh for yourself triggers neither.
 
 ================================================================================
 SPDX IDENTIFIER
@@ -109,5 +128,5 @@ SPDX IDENTIFIER
 
 Files covered by this dual license use the following SPDX expression:
 
-    SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+    SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
     SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
 # R311y578 (G1) — the CAPTURE-side input path: pcap ingest, link/IP/TCP
@@ -18,7 +18,7 @@
 name = "wz-capture"
 version = "0.1.0"
 edition = "2021"
-license = "LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial"
+license = "AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial"
 publish = false
 
 [lints]

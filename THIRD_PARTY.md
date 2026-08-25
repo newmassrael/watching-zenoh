@@ -1,5 +1,5 @@
 <!--
-SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 -->
 
@@ -192,7 +192,7 @@ codegen SSOT and, as of R311y22, are COMMITTED in-repo (regenerated
 out-of-band, not at consumer build time; gated by run-ci Layer B2).
 They carry SCE's MIT header where SCE emits one (statechart `*_sm.rs`)
 and no SPDX header on the codec / pool emits. They are not authored by
-watching-zenoh and are not tracked under the LGPL-3.0 / Commercial
+watching-zenoh and are not tracked under the AGPL-3.0 / Commercial
 license that covers the rest of this repo. See `LICENSE-GENERATED.md`
 in the SCE repo for the generation-time policy.
 

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
 # wz-packet-socket — Round 1998 (item 470), Linux packet I/O: an `AF_PACKET`
@@ -28,7 +28,7 @@
 name = "wz-packet-socket"
 version = "0.1.0"
 edition = "2021"
-license = "LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial"
+license = "AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial"
 publish = false
 
 [features]

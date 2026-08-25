@@ -1,5 +1,5 @@
 /*
- * SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+ * SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
  * SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
  *
  * wz_capi_pico.h — §5.27 api-compat-pico, Round 1 C ABI.

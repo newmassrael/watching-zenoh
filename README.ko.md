@@ -1,5 +1,5 @@
 <!--
-SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 -->
 
@@ -156,19 +156,26 @@ cargo install --path /path/to/mnemosyne/crates/mnemosyne-cli
 
 이 저장소는 **dual-licensed**.
 
-- **LGPL-3.0-or-later** — free tier, LGPL-3 의무사항 (anti-
-  tivoization 포함) 동의. 자세히는 LICENSE-LGPL-3.0.md 와
-  LICENSE-GPL-3.0.md.
-- **LicenseRef-watching-zenoh-Commercial** — paid tier, 5-way
+- **AGPL-3.0-or-later** — free tier, AGPL-3 의무사항 동의: 배포하는
+  결합 저작물 «전체»에 copyleft, anti-tivoization, 그리고 §13 —
+  수정본을 네트워크 너머의 사용자가 쓰게 하면 그 사용자에게
+  Corresponding Source 를 제공해야 한다. 자세히는
+  LICENSE-AGPL-3.0.md.
+- **LicenseRef-watching-zenoh-Commercial** — paid tier, 6-way
   면제. 자세히는 LICENSE-COMMERCIAL.md.
 
 개요는 LICENSE 가 출발점.
+
+이 변경 «이전»에 공개된 리비전은 free tier 가 AGPL-3.0-or-later 가
+아니라 LGPL-3.0-or-later 였고, 상용 대안은 같았다. 이미 부여된
+라이선스는 회수되지 않으므로 그 사본에 대해서는 그 조건이 계속
+유효하다 — 다만 이 리비전 이후에는 미치지 않는다.
 
 저작자측 소스 파일 (SCXML, Rust, C, header, deploy YAML) 은
 다음 SPDX 헤더를 carry 한다.
 
 ```
-SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 ```
 

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
 # mcu-session-acceptor — Stage 5, the Layer Q.4 acceptor session e2e bin.
@@ -44,7 +44,7 @@ name = "mcu-session-acceptor"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
-license = "LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial"
+license = "AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial"
 authors = ["newmassrael"]
 description = "Stage 5 Layer Q.4 QEMU acceptor session e2e — boots wz_mcu_session_acceptor::run_acceptor_e2e (handshake to Established + Frame dispatch over lwIP loopback) on Cortex-M3/M4/M7."
 

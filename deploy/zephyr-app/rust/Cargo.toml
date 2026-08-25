@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
 # zephyr-app/rust — the wz Rust STATICLIB linked into the Zephyr image by the
@@ -20,7 +20,7 @@ name = "wz-zephyr-app"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.81"
-license = "LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial"
+license = "AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial"
 authors = ["newmassrael"]
 publish = false
 description = "wz Rust staticlib for the Zephyr cooperative single-task profile e2e (Path B) — CoopRuntime<ZephyrClock> hosted in one Zephyr thread, linked into the qemu_cortex_m3 image."
