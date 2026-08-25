@@ -1838,24 +1838,37 @@ pub mod formats {
             // which carries no `=` and so is not a declaration by the reader's
             // own grammar; `Declaration::text` says "How the reader wrote it"
             // and it now is.
+            // R2111 (open-debt item 462) — QUOTED on the way out, because this
+            // side holds patterns as the operator means them and
+            // `declaration_text` writes the text spelling. Without it a
+            // colon-bearing pattern would be reported as a line that reads back
+            // as a different declaration, which is the round-trip contract
+            // `parse_declaration(&declaration_text(d)) == d` broken by the very
+            // patterns this round makes expressible.
             for (at, (pattern, format)) in self.rules.iter().enumerate() {
+                let (pattern, format) = (escape_field(pattern), escape_field(format.name()));
                 out.push(Declaration {
                     id: DeclarationId(at),
                     kind: DeclarationKind::FormatRule,
                     text: declaration_text(&DeclarationText::Rule {
-                        pattern,
-                        format: format.name(),
+                        pattern: &pattern,
+                        format: &format,
                     }),
                 });
             }
             for (at, (pattern, path, name)) in self.names.iter().enumerate() {
+                let (pattern, path, name) = (
+                    escape_field(pattern),
+                    escape_field(path),
+                    escape_field(name),
+                );
                 out.push(Declaration {
                     id: DeclarationId(self.rules.len() + at),
                     kind: DeclarationKind::FieldName,
                     text: declaration_text(&DeclarationText::Name {
-                        pattern,
-                        path,
-                        name,
+                        pattern: &pattern,
+                        path: &path,
+                        name: &name,
                     }),
                 });
             }
@@ -1874,9 +1887,15 @@ pub mod formats {
             if pattern.contains('*') && !cfg!(feature = "filter-wildcards") {
                 return Err(FormatMapError::WildcardUnsupported(pattern.to_owned()));
             }
-            if pattern.contains(':') {
-                return Err(FormatMapError::PatternNotDeclarable(pattern.to_owned()));
-            }
+            // R2111 (open-debt item 462) — the `contains(':')` refusal that
+            // stood here is GONE, and its removal is the item. R311y923 added
+            // it so a colon-bearing pattern would not install and read back as
+            // the other spelling, which was right while the grammar had no way
+            // to write one; it made the refusal loud instead of silent, and
+            // left the capability missing. Upstream permits `:` in a key
+            // expression, so a wz that cannot declare a format for
+            // `demo/temp:c` is a replacement with a hole. Quoting closes it,
+            // and `declarations()` writes the pattern back quoted.
             self.rules.push((pattern.to_owned(), format));
             Ok(())
         }
@@ -1944,9 +1963,9 @@ pub mod formats {
             if pattern.contains('*') && !cfg!(feature = "filter-wildcards") {
                 return Err(FormatMapError::WildcardUnsupported(pattern.to_owned()));
             }
-            if pattern.contains(':') {
-                return Err(FormatMapError::PatternNotDeclarable(pattern.to_owned()));
-            }
+            // R2111 (item 462) — removed with its twin above, and for the same
+            // reason. This door had the identical refusal, so BOTH spellings
+            // were shut against a colon-bearing topic.
             if path.is_empty() || name.is_empty() {
                 return Err(FormatMapError::EmptyFieldName(pattern.to_owned()));
             }
@@ -2068,6 +2087,85 @@ pub mod formats {
         }
     }
 
+    /// The character that quotes the two the grammar reserves.
+    ///
+    /// R2111 (open-debt item 462) — and it is NOT chosen for being a character
+    /// a key expression cannot carry, because MEASURED against upstream there
+    /// is no such character. `zenoh-keyexpr`'s validator
+    /// (`key_expr/borrowed.rs`, the `TryFrom<&str>` character loop) refuses
+    /// exactly `#`, `?`, an unbound `$` and a bare `*`; every other byte is
+    /// legal inside a chunk, backslash included.
+    ///
+    /// That measurement is what rules OUT the shape the register proposed —
+    /// move the discriminator to a character canon rejects — twice over. It
+    /// breaks every declaration already written, and it binds this grammar to
+    /// an upstream fact that can widen: wz is zenoh's REPLACEMENT, so a canon
+    /// that admits `#` tomorrow would force the same break again. Quoting is
+    /// immune to that, because doubling resolves the ambiguity without needing
+    /// any character to be unavailable.
+    const ESCAPE: char = '\\';
+
+    /// Write `s` so [`unescape_field`] reads it back, whatever it contains.
+    ///
+    /// All three of [`ESCAPE`], `:` and `=` are quoted, not just the one a
+    /// given position needs. The alternative is a per-field rule ("`:` matters
+    /// in a scope, `=` matters everywhere") and a reader would then have to
+    /// know which field it is looking at to know what a backslash meant.
+    fn escape_field(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        for c in s.chars() {
+            if c == ESCAPE || c == ':' || c == '=' {
+                out.push(ESCAPE);
+            }
+            out.push(c);
+        }
+        out
+    }
+
+    /// Read a quoted field back. `None` when the quoting is malformed.
+    ///
+    /// A trailing lone [`ESCAPE`] and a quote of anything other than the three
+    /// reserved characters are both REFUSED rather than passed through. Passing
+    /// them through would make `a\b` and `ab` the same declaration, so a
+    /// pattern an operator typed would silently match a different topic — the
+    /// class of failure this whole grammar's refusals exist for.
+    fn unescape_field(s: &str) -> Option<String> {
+        let mut out = String::with_capacity(s.len());
+        let mut chars = s.chars();
+        while let Some(c) = chars.next() {
+            if c != ESCAPE {
+                out.push(c);
+                continue;
+            }
+            match chars.next() {
+                Some(q) if q == ESCAPE || q == ':' || q == '=' => out.push(q),
+                _ => return None,
+            }
+        }
+        Some(out)
+    }
+
+    /// [`str::rsplit_once`] that ignores a separator the writer quoted.
+    ///
+    /// Scanning is LEFT to right even though the answer is the last match,
+    /// because whether a character is quoted is a fact about what precedes it —
+    /// a right-to-left scan cannot tell `\:` from a `:` after a quoted
+    /// backslash (`\\:`), and would split the second one in the wrong place.
+    fn rsplit_once_unescaped(s: &str, sep: char) -> Option<(&str, &str)> {
+        let mut at = None;
+        let mut quoted = false;
+        for (i, c) in s.char_indices() {
+            if quoted {
+                quoted = false;
+            } else if c == ESCAPE {
+                quoted = true;
+            } else if c == sep {
+                at = Some(i);
+            }
+        }
+        at.map(|i| (&s[..i], &s[i + sep.len_utf8()..]))
+    }
+
     /// Read one declaration line.
     ///
     /// The line is taken WHOLE and never trimmed: a pattern with a trailing
@@ -2075,8 +2173,15 @@ pub mod formats {
     /// reader who typed it.
     pub fn parse_declaration(line: &str) -> Result<DeclarationText<'_>, FormatMapError> {
         let bad = || FormatMapError::NotADeclaration(line.to_owned());
-        let (scope, value) = line.rsplit_once('=').ok_or_else(bad)?;
-        match scope.rsplit_once(':') {
+        // R2111 (open-debt item 462) — the LAST UNQUOTED separator, at both
+        // levels. `demo/temp\:c=cbor` is now a rule about the topic
+        // `demo/temp:c`, which no spelling of this grammar could express
+        // before: the `:` split ate it and the line read back as a field name
+        // for `demo/temp`. The fields stay in QUOTED form here -- this type is
+        // the text spelling, and [`FormatMap::declare`] is the boundary that
+        // reads it back.
+        let (scope, value) = rsplit_once_unescaped(line, '=').ok_or_else(bad)?;
+        match rsplit_once_unescaped(scope, ':') {
             Some((pattern, path)) => {
                 if pattern.is_empty() || path.is_empty() || value.is_empty() {
                     return Err(bad());
@@ -2133,11 +2238,21 @@ pub mod formats {
         /// `--payload-format` has made since R311y699, moved here so both
         /// surfaces make it.
         pub fn declare(&mut self, line: &str) -> Result<DeclarationKind, FormatMapError> {
+            // R2111 (open-debt item 462) — THE BOUNDARY. `parse_declaration`
+            // answers in the TEXT spelling, where the reserved characters are
+            // quoted; a `FormatMap` holds patterns as an operator means them.
+            // Unquoting here rather than in the parser is what lets
+            // `DeclarationText` keep borrowing the line, and it puts one
+            // conversion between the two spellings instead of one per caller.
+            let unquote = |s: &str| {
+                unescape_field(s).ok_or_else(|| FormatMapError::NotADeclaration(line.to_owned()))
+            };
             match parse_declaration(line)? {
                 DeclarationText::Rule { pattern, format } => {
-                    let decoder = builtin(format)
-                        .ok_or_else(|| FormatMapError::NoSuchFormat(format.to_owned()))?;
-                    self.insert(pattern, decoder)?;
+                    let (pattern, format) = (unquote(pattern)?, unquote(format)?);
+                    let decoder = builtin(&format)
+                        .ok_or_else(|| FormatMapError::NoSuchFormat(format.clone()))?;
+                    self.insert(&pattern, decoder)?;
                     Ok(DeclarationKind::FormatRule)
                 }
                 DeclarationText::Name {
@@ -2145,7 +2260,8 @@ pub mod formats {
                     path,
                     name,
                 } => {
-                    self.name_field(pattern, path, name)?;
+                    let (pattern, path, name) = (unquote(pattern)?, unquote(path)?, unquote(name)?);
+                    self.name_field(&pattern, &path, &name)?;
                     Ok(DeclarationKind::FieldName)
                 }
             }
@@ -2310,42 +2426,107 @@ mod format_map_tests {
     /// is a door the other walks around: the typed API and the line reader
     /// each refuse, and the field-name spelling refuses on the same ground as
     /// the rule spelling.
+    /// R2111 (open-debt item 462) — A COLON-BEARING TOPIC IS DECLARABLE, in
+    /// BOTH spellings, and reads back as what it was.
+    ///
+    /// This test used to assert the opposite, and the assertion was right for
+    /// its round: with no way to WRITE such a pattern, installing one produced
+    /// a line that read back as a different declaration, so R311y923 refused it
+    /// and made the loss loud. Loud is not closed. Upstream permits `:` inside
+    /// a key expression -- measured in `zenoh-keyexpr`'s own character loop,
+    /// which forbids only `#`, `?`, an unbound `$` and a bare `*` -- so a wz
+    /// that cannot map a format onto `demo/temp:c` is a replacement with a hole
+    /// in it, and item 462 is that hole.
+    ///
+    /// The round trip is the whole proof, and it is asserted in the direction
+    /// that can fail silently: not "the line parses" but "what came back out of
+    /// the map is the pattern that went in". A quoting bug that dropped the
+    /// backslash would still parse -- as a declaration about a different topic.
     #[test]
-    fn a_pattern_that_would_read_back_as_the_other_spelling_is_refused_by_name() {
+    fn a_colon_bearing_pattern_declares_and_reads_back_as_itself() {
+        let proto = Marker("protobuf");
+        let mut map = FormatMap::new();
+
+        // THE TYPED API takes it as the operator means it: no quoting, because
+        // this side is not text.
+        map.insert("demo/temp:c", &proto)
+            .expect("a colon-bearing pattern is a rule this dialect can hold");
+        map.name_field("demo/temp:c", "1", "celsius")
+            .expect("and a field name under the same pattern");
+
+        // THE TEXT SIDE quotes it, so each line reads back as its own kind
+        // rather than as the other spelling.
+        let out = map.declarations();
+        assert_eq!(out.len(), 2, "one rule and one name: {out:?}");
+        assert_eq!(out[0].text, "demo/temp\\:c=protobuf");
+        assert_eq!(out[1].text, "demo/temp\\:c:1=celsius");
+        for (d, want) in out
+            .iter()
+            .zip([DeclarationKind::FormatRule, DeclarationKind::FieldName])
+        {
+            let back = parse_declaration(&d.text)
+                .unwrap_or_else(|e| panic!("`{}` does not read back: {e:?}", d.text));
+            assert_eq!(
+                back.kind(),
+                want,
+                "`{}` read back as the other spelling",
+                d.text
+            );
+        }
+
+        // AND THE LINE READER installs the same two from that text, landing on
+        // the same patterns. This is the leg that would pass on a reader that
+        // silently dropped the quote, so the PATTERN is compared and not just
+        // the count.
+        let mut round = FormatMap::new();
+        for d in &out {
+            round.declare(&d.text).unwrap_or_else(|e| {
+                panic!("`{}` does not install: {e:?}", d.text);
+            });
+        }
+        assert_eq!(
+            round
+                .declarations()
+                .iter()
+                .map(|d| d.text.clone())
+                .collect::<alloc::vec::Vec<_>>(),
+            out.iter()
+                .map(|d| d.text.clone())
+                .collect::<alloc::vec::Vec<_>>(),
+            "the text a map writes must install into a map that writes the same text"
+        );
+
+        // MALFORMED QUOTING IS REFUSED rather than passed through: `a\b` and
+        // `ab` must not be the same declaration, or an operator's pattern would
+        // silently match a different topic.
+        let mut bad = FormatMap::new();
+        for line in ["demo/temp\\c=protobuf", "demo/temp\\=protobuf"] {
+            assert!(
+                bad.declare(line).is_err(),
+                "`{line}` quotes nothing and must not install"
+            );
+        }
+    }
+
+    /// The UNQUOTED colon still resolves toward the name spelling, and that is
+    /// a decision this round keeps rather than an ambiguity it left behind.
+    ///
+    /// R2111 (item 462) — `demo/temp:c=protobuf` is a well-formed FIELD NAME
+    /// (pattern `demo/temp`, path `c`, name `protobuf`), and it must go on
+    /// meaning that: every declaration written before this round is unquoted,
+    /// so any other reading would break all of them. What the round adds is a
+    /// way to say the OTHER thing -- `demo/temp\:c=protobuf` -- which no
+    /// spelling could express before. Zero existing lines change meaning, which
+    /// is the property that made quoting an extension rather than a break.
+    #[test]
+    fn an_unquoted_colon_still_reads_as_the_field_name_spelling() {
         let proto = Marker("protobuf");
         let mut map = FormatMap::new();
 
         assert_eq!(
-            map.insert("demo/temp:c", &proto),
-            Err(FormatMapError::PatternNotDeclarable(
-                alloc::string::String::from("demo/temp:c")
-            )),
-            "a rule whose pattern carries the discriminator is refused, and by name"
-        );
-        assert_eq!(
-            map.name_field("demo/temp:c", "1", "celsius"),
-            Err(FormatMapError::PatternNotDeclarable(
-                alloc::string::String::from("demo/temp:c")
-            )),
-            "and so is a field name under the same pattern"
-        );
-        assert_eq!(
-            map.declarations().len(),
-            0,
-            "and nothing was installed on the way to those refusals"
-        );
-
-        // The line reader is NOT asked to refuse the same text, and that is
-        // the point rather than an omission: `demo/temp:c=protobuf` is a
-        // well-formed FIELD NAME in this dialect -- pattern `demo/temp`, path
-        // `c`, name `protobuf` -- and refusing it would take the field-name
-        // spelling away entirely. The ambiguity is real and the dialect
-        // resolves it toward the name. What must not happen is the other
-        // direction: something INSTALLED that cannot be written back.
-        assert_eq!(
             map.declare("demo/temp:c=protobuf"),
             Ok(DeclarationKind::FieldName),
-            "the dialect reads a colon in the scope as the name spelling"
+            "the dialect reads an UNQUOTED colon in the scope as the name spelling"
         );
         let named = map.declarations();
         assert_eq!(named.len(), 1, "one name: {named:?}");
@@ -2359,9 +2540,7 @@ mod format_map_tests {
         );
 
         let mut map = FormatMap::new();
-
-        // The colon is the only thing being refused: the same topic without it
-        // installs and reads back as what it was.
+        // A topic with no colon at all is untouched by any of this.
         assert!(map.insert("demo/temp_c", &proto).is_ok());
         let declared = map.declarations();
         assert_eq!(declared.len(), 1, "one rule: {declared:?}");
