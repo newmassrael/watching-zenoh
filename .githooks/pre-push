@@ -125,6 +125,47 @@ if ! wz_home_path_scan "$(git rev-parse --show-toplevel)"; then
     exit 1
 fi
 
+# ─── gate 0c — the identities being published (2026-08-25) ──────────
+# Third in the gate-0 family and the same argument again: origin is PUBLIC
+# and a push cannot be un-published. This one is here because that sentence
+# stopped being a caution and became a bill. Eight commits authored with a
+# work address reached this repository; the history rewrite that removed them
+# from `main` left all eight reachable by SHA, GitHub kept serving them and
+# kept listing the other account as a contributor, and the only thing that
+# actually removed them was deleting and recreating the repository -- which
+# cost 1146 runs of CI history.
+#
+# WHY THE PUSH AND NOT ONLY THE COMMIT. pre-commit carries the same gate, and
+# it would not have caught this: those commits were made where the hooks were
+# not installed. The push is the last moment before publication and the first
+# one this tree controls, which is the identical argument gate 1 makes for
+# the schema pin one gate down.
+#
+# The range is `<remote>..<local>` normally and a bare `<local>` when origin
+# does not have the ref yet. That second case grades the WHOLE history, and
+# it is deliberate rather than incidental: it is the state this repository
+# was in immediately after the recreation, and it is exactly when a stray
+# identity would otherwise be republished wholesale.
+# shellcheck disable=SC1091  # constant path, resolved at run time
+if ! source scripts/lib/ident-gate.sh; then
+    echo "pre-push: scripts/lib/ident-gate.sh missing or unreadable." >&2
+    exit 1
+fi
+for sha in "${push_shas[@]}"; do
+    ident_range="$sha"
+    if [[ -n "$remote_sha" && "$remote_sha" != "$zero_sha" ]]; then
+        ident_range="${remote_sha}..${sha}"
+    fi
+    if ! wz_ident_gate_range 'pre-push' "$ident_range"; then
+        echo "" >&2
+        echo "pre-push: origin is public and a push does not un-publish." >&2
+        echo "          Rewrite the offending commits before pushing:" >&2
+        echo "            git rebase -r --exec 'git commit --amend --no-edit --reset-author' <base>" >&2
+        echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+        exit 1
+    fi
+done
+
 # ─── gate 1 — schema pin, on the COMMITS BEING PUSHED (R311y418) ────
 # pre-commit grades the index, which covers `git commit` and nothing else:
 # cherry-pick, rebase, merge and --no-verify all reach origin without ever

@@ -193,6 +193,26 @@ wz_schema_pin_cochange_gate 'pre-commit' || exit 1
 # the condition that causes it, before the next mutate.
 wz_local_cli_pin_gate 'pre-commit' ':' || exit 1
 
+# ─── Check 5: the identity this commit will carry (2026-08-25) ─────
+#
+# The rule, the allow-list and the refusal all live in
+# scripts/lib/ident-gate.sh, because pre-push needs the very same list
+# against the commits being pushed -- the same reason check 3 puts the schema
+# pin in a library rather than here. One list is one place; two would be two
+# facts that can disagree, which is the class this workspace pays for most.
+#
+# The incident it exists for, in one line: eight commits reached this PUBLIC
+# repository under a different address, a history rewrite did NOT un-publish
+# them, and the repository had to be deleted and recreated. The library's own
+# header carries the full account.
+# shellcheck disable=SC1091  # constant path, resolved at run time
+if ! source scripts/lib/ident-gate.sh; then
+    echo "pre-commit: scripts/lib/ident-gate.sh missing or unreadable." >&2
+    exit 1
+fi
+
+wz_ident_gate_pending 'pre-commit' || exit 1
+
 # ─── Check 4: Mnemosyne SSOT gate ──────────────────────────────────
 if ! command -v mnemosyne-cli >/dev/null 2>&1; then
     echo "pre-commit: mnemosyne-cli not on PATH — install with" >&2
