@@ -1456,6 +1456,14 @@ jobs:
             test -x "target/zenohd/$ex" \
               || { echo "::error::$ex missing — the wz QueryTarget proof cannot run"; exit 1; }
           done
+          # R2109 (open-debt item 514) — the reference DOCUMENT, not a binary.
+          # Layer Z's LEG 12 derives upstream's default `mode` from it rather
+          # than transcribing `peer` into a wz source, so its absence turns a
+          # graded expectation into an ungraded constant. Only a SOURCE build
+          # installs it (it lives at the zenoh repo root, in no published crate),
+          # which is the same split the plugin cdylib and the examples have.
+          test -f target/zenohd/DEFAULT_CONFIG.json5 \
+            || { echo "::error::DEFAULT_CONFIG.json5 missing — LEG 12 has no upstream oracle to derive the library default mode from"; exit 1; }
 
       - name: Build zenoh-pico CLI binaries
         run: bash scripts/build-zenoh-pico-cli.sh

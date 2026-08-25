@@ -173,6 +173,17 @@ if [[ -n "$ZH" ]]; then
         echo "  set ZENOHD_VERSION=$checkout_version, or ZENOHD_FORCE_CRATES_IO=1 for the crates.io path." >&2
         exit 1
     fi
+    # R2109 (open-debt item 514) — the reference DOCUMENT, installed beside the
+    # reference BINARY. `DEFAULT_CONFIG.json5` is the upstream statement of what
+    # a key an operator's file omits resolves to, and the wz leg that grades
+    # `mode`'s silence against it needs the file itself: a constant transcribed
+    # into a wz source is a fact about a file somebody read once. It travels with
+    # this provisioning rather than off a machine-local checkout path so it has
+    # ONE identity with the binary (the same pinned tree built it) and so it
+    # survives the hosted cache, which restores $INSTALL_DIR and not $BUILD_DIR.
+    # Only a source tree carries it -- the published crate does not -- which is
+    # the same split the plugin cdylib and the examples already have.
+    DEFAULT_CONFIG_SRC="$ZH/DEFAULT_CONFIG.json5"
     echo "build-zenohd: building zenohd (release, +$TOOLCHAIN)${VARIANT_NAME:+ [+$VARIANT_NAME]} ..." >&2
     # shellcheck disable=SC2086  # VARIANT_FEATURE is an intentional word-split flag
     CARGO_TARGET_DIR="$BUILD_DIR" cargo "+$TOOLCHAIN" build -p zenohd --release \
@@ -275,6 +286,9 @@ else
     EXT_EXAMPLES_SRC=""
     # Nor the core zenoh examples, for the same reason.
     CORE_EXAMPLES_SRC=""
+    # Nor DEFAULT_CONFIG.json5 (R2109): it lives at the repo root, not inside
+    # any published crate, so the crates.io path has no copy to install.
+    DEFAULT_CONFIG_SRC=""
 fi
 
 mkdir -p "$INSTALL_DIR"
@@ -311,6 +325,15 @@ if [[ -n "$EXT_EXAMPLES_SRC" ]]; then
 else
     echo "build-zenohd: zenoh-ext examples NOT provisioned (variant or source B);" >&2
     echo "  the wz<->zenoh-ext advanced-pubsub interop legs cannot run." >&2
+fi
+if [[ -n "$DEFAULT_CONFIG_SRC" && -f "$DEFAULT_CONFIG_SRC" ]]; then
+    # 0644, not 0755: this one is a document, and the only reader is a test that
+    # parses it.
+    install -m 0644 "$DEFAULT_CONFIG_SRC" "$INSTALL_DIR/DEFAULT_CONFIG.json5"
+    echo "build-zenohd: installed -> $INSTALL_DIR/DEFAULT_CONFIG.json5" >&2
+else
+    echo "build-zenohd: DEFAULT_CONFIG.json5 NOT provisioned (source B / crates.io);" >&2
+    echo "  the wz leg that grades an unstated \`mode\` against upstream cannot run." >&2
 fi
 if [[ -n "$CORE_EXAMPLES_SRC" ]]; then
     for ex in z_queryable z_get; do

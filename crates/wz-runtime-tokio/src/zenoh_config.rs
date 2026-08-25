@@ -728,7 +728,11 @@ impl Default for ZenohNodeConfig {
     /// that overrides one field is not silently redefining the other ten.
     fn default() -> Self {
         Self {
-            mode: WhatAmI::Peer,
+            // R2109 (open-debt item 514) — the CONSTANT, not a second spelling
+            // of it. This field is what a document that names no `mode`
+            // resolves to, and [`LIBRARY_DEFAULT_MODE`] is where that fact is
+            // graded against upstream.
+            mode: LIBRARY_DEFAULT_MODE,
             listen: Vec::new(),
             connect: Vec::new(),
             multicast_scouting: true,
@@ -1493,6 +1497,35 @@ pub struct ZenohConfigIngest {
     pub stated_for_other_modes: Vec<&'static str>,
 }
 
+impl ZenohConfigIngest {
+    /// The FOURTH answer: what this document's silence about `mode` means.
+    ///
+    /// R2109 (open-debt item 514). `Some` exactly when the document named no
+    /// `mode` — which is not a key the other three partitions can carry, because
+    /// they all enumerate keys the file WROTE. A silence has no leaf to sit
+    /// beside, and until this round that made it unreportable: the expansion
+    /// records a `mode` verdict only when [`named`] carries the key, so the one
+    /// document whose role nobody stated is the one the report said nothing
+    /// about.
+    ///
+    /// [`read_as`] is read off [`config`] rather than from
+    /// [`LIBRARY_DEFAULT_MODE`], so the sentence states what THIS ingest
+    /// produced. The two are the same value by construction — an unnamed `mode`
+    /// leaves the field at its default, and that default IS the constant — and
+    /// deriving it here rather than restating it is what keeps the report honest
+    /// if they ever stop being.
+    ///
+    /// [`named`]: ZenohConfigIngest::named
+    /// [`config`]: ZenohConfigIngest::config
+    /// [`read_as`]: UnstatedMode::read_as
+    pub fn mode_left_unstated(&self) -> Option<UnstatedMode> {
+        (!self.named.contains(&"mode")).then_some(UnstatedMode {
+            read_as: self.config.mode,
+            a_daemon_reads: DAEMON_DEFAULT_MODE,
+        })
+    }
+}
+
 /// Why a stock zenoh config could not be read.
 ///
 /// A key ZENOH knows and wz does not honour is never one of these — it is
@@ -1634,6 +1667,81 @@ pub fn default_listen_endpoint(mode: WhatAmI) -> Option<&'static str> {
         WhatAmI::Router => Some("tcp/[::]:7447"),
         WhatAmI::Peer => Some("tcp/[::]:0"),
         WhatAmI::Client => None,
+    }
+}
+
+/// The run-mode a document that names NO `mode` comes up in, as the zenoh
+/// LIBRARY reads that silence.
+///
+/// Upstream's own default, in two places that agree: `zenoh-config`'s
+/// `defaults::mode` is `WhatAmI::Peer`, and `DEFAULT_CONFIG.json5` documents it
+/// as the uncommented `mode: "peer"` near the top of the file. A library node's
+/// runtime resolves an absent key through that constant
+/// (`unwrap_or_default!(config.mode())`), so this is what the silence MEANS to
+/// every zenoh node that is not the daemon.
+///
+/// Named here rather than spelled a second time in
+/// [`ZenohNodeConfig::default`], which now reads it: two pins that must move
+/// together are one pin, and an upstream release that moved this default would
+/// otherwise have to be chased twice.
+pub const LIBRARY_DEFAULT_MODE: WhatAmI = WhatAmI::Peer;
+
+/// The run-mode the SAME silence comes up in when a zenoh DAEMON reads it.
+///
+/// R2109 (open-debt item 514) — `zenohd` overwrites an absent `mode` before it
+/// builds a runtime at all: `if config.mode().is_none() { config.set_mode(
+/// Some(WhatAmI::Router)) }` (`zenohd/src/main.rs` in the pinned checkout).
+/// Measured rather than quoted: handed a one-line `{ listen: [..] }` document, a
+/// real zenohd prints `"mode":"router"` in its own resolved config.
+///
+/// ## Why wz keeps the LIBRARY reading and states this one
+///
+/// Neither reading is wrong. `wz-ap-demo` is a library node, so the library
+/// default is the correct comparand and R2092 decided it that way. What item
+/// 514 is about is the half that decision does not cover: the north star is a
+/// replacement for zenoh AND for zenohd, and an operator who swaps a zenohd out
+/// for wz with a mode-less file gets a PEER standing where a router used to be
+/// — silently, because nothing in the report mentions a key the file never
+/// named. This constant exists so the report can say it; the sentence is
+/// [`UnstatedMode`], reached through [`ZenohConfigIngest::mode_left_unstated`].
+///
+/// R2109 chose to SAY it rather than to offer a daemon-reading switch. The
+/// switch is expressible — it would be an argv flag, not a `cfg!`, so it would
+/// not fall foul of the line R2091 drew about the same file coming up
+/// differently per BUILD — but it answers a question nobody has asked: this
+/// tree ships no daemon, and a flag that changes a node's role would owe its own
+/// witness on the wire to be worth anything. The harm the register records is
+/// the word "silently", and a line in the report is what removes it.
+pub const DAEMON_DEFAULT_MODE: WhatAmI = WhatAmI::Router;
+
+/// What a document's silence about `mode` means — in BOTH readings at once.
+///
+/// R2109 (open-debt item 514). Two roles rather than one, because the fact IS a
+/// divergence: a line saying only "this node is a peer" reports wz's own
+/// behaviour and gives an operator nothing to act on, and the thing they need to
+/// act on is that the daemon they are replacing read the same bytes the other
+/// way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnstatedMode {
+    /// The run-mode wz selected — [`LIBRARY_DEFAULT_MODE`], carried as a value
+    /// rather than re-quoted so a reader sees what THIS document actually got.
+    pub read_as: WhatAmI,
+    /// The run-mode a zenoh DAEMON would have selected from the same silence.
+    pub a_daemon_reads: WhatAmI,
+}
+
+impl core::fmt::Display for UnstatedMode {
+    /// The operator's sentence. Both roles are rendered from the values, so a
+    /// round that moves either constant moves this line with it.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "this document names no `mode`, so it is read as `{}` (the zenoh \
+             library default); a zenoh daemon reads the same silence as `{}`. \
+             Name `mode` to make the file say which.",
+            self.read_as.to_str(),
+            self.a_daemon_reads.to_str()
+        )
     }
 }
 

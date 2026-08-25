@@ -68,8 +68,9 @@ use wz_integration_tests::common::{
     ChildGuard, PortReservation,
 };
 use wz_runtime_tokio::zenoh_config::{
-    default_listen_endpoint, ZenohNodeConfig, CONFIG_KEYS_PROVEN_ON_THE_WIRE,
-    DEEPENABLE_UPSTREAM_KEYS, HONOURED_CONFIG_KEYS, UNHONOURED_UPSTREAM_CONFIG_KEYS,
+    default_listen_endpoint, ZenohNodeConfig, CONFIG_KEYS_PROVEN_ON_THE_WIRE, DAEMON_DEFAULT_MODE,
+    DEEPENABLE_UPSTREAM_KEYS, HONOURED_CONFIG_KEYS, LIBRARY_DEFAULT_MODE,
+    UNHONOURED_UPSTREAM_CONFIG_KEYS,
 };
 use wz_runtime_tokio_test_support::zenoh_interop_session_init_params;
 use wz_session_core::dissect::{dissect_transport_message, FieldValue};
@@ -2477,4 +2478,248 @@ fn zenohd_and_wz_agree_on_the_endpoint_a_node_binds_when_its_document_names_none
     );
 
     drop(guard);
+}
+
+/// Upstream's own statement of what an omitted key resolves to, installed
+/// beside the binary it was built from (`scripts/build-zenohd.sh`).
+///
+/// R2109 (open-debt item 514) — DERIVED from the zenohd path rather than read
+/// off a machine-local checkout path, for the reason the register's own
+/// pointers keep going stale: a path written down once is a fact about the
+/// machine that wrote it. The document travels with the oracle provisioning, so
+/// a tree that has a zenohd built from SOURCE has it and one that took the
+/// crates.io path has neither -- the same split the storage-manager cdylib and
+/// the example oracles already have (the published crates carry no copy of it;
+/// it lives at the repo root).
+fn upstream_default_config_document() -> String {
+    let zenohd = zenohd_binary();
+    let path = zenohd
+        .parent()
+        .unwrap_or_else(|| panic!("zenohd at {} has no parent dir", zenohd.display()))
+        .join("DEFAULT_CONFIG.json5");
+    // PANIC, never a fallback: an expectation that reverts to a constant when
+    // its oracle is missing is not an expectation, it IS the constant. A run
+    // that cannot reach upstream's document has to say so.
+    std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "upstream's DEFAULT_CONFIG.json5 is not at {} ({e}); it is installed \
+             beside zenohd by `scripts/build-zenohd.sh` from a SOURCE tree -- \
+             re-provision with ZENOHD_ALLOW_CLONE=1, or point ZENOHD_SRC at a \
+             zenoh checkout",
+            path.display()
+        )
+    })
+}
+
+/// The role a TOP-LEVEL `mode` names in an upstream document, or `None` when
+/// the document states none.
+///
+/// Parsed, never matched. `DEFAULT_CONFIG.json5` carries four uncommented
+/// `mode:` keys -- the top-level one plus `routing.peer.mode` and two
+/// `shm`/`tls` `mode: "lazy"` -- and zenohd's own resolved config carries
+/// three, so a pattern over either text answers a different question than this
+/// does. R2083 paid for exactly that shape once, counting quoted words inside a
+/// comment as keys.
+fn top_level_mode_of(document: &str) -> Option<WhatAmI> {
+    let Json5Value::Object(root) = json5::parse(document)
+        .unwrap_or_else(|e| panic!("wz cannot read upstream's own reference document: {e}"))
+    else {
+        panic!("upstream's reference document is not an object");
+    };
+    let (_, value) = root.iter().find(|(k, _)| k == "mode")?;
+    let Json5Value::String(name) = value else {
+        panic!("upstream's top-level `mode` is not a string: {value:?}");
+    };
+    Some(
+        [WhatAmI::Router, WhatAmI::Peer, WhatAmI::Client]
+            .into_iter()
+            .find(|w| w.to_str() == name)
+            .unwrap_or_else(|| panic!("upstream's top-level `mode` is {name:?}")),
+    )
+}
+
+// wz-proves: none -- same registration gap as the legs above.
+/// R2109 (open-debt item 514) — LEG 12: WHAT A DOCUMENT THAT NAMES NO `mode`
+/// MEANS, asked of BOTH upstream readers that read it.
+///
+/// The other eleven legs here grade a value the operator WROTE. This one grades
+/// a SILENCE, and `mode` is the only key whose silence upstream resolves two
+/// different ways:
+///
+/// * the zenoh LIBRARY resolves an absent `mode` through `zenoh-config`'s
+///   `defaults::mode`, which `DEFAULT_CONFIG.json5` states as the uncommented
+///   `mode: "peer"` near the top of the file. That document is the oracle for
+///   this half, DERIVED here rather than transcribed;
+/// * `zenohd` overwrites the absence with `WhatAmI::Router` before it builds a
+///   runtime. That half is measured by handing a real zenohd the SAME bytes and
+///   reading the mode out of its own resolved config -- LEG 11's argument, for
+///   LEG 11's reason: a constant quoted out of a checkout is a fact about a
+///   file somebody read once.
+///
+/// So a mode-less file deploys a ROUTER on zenohd and a PEER here, and until
+/// this round nothing measured that and nothing said it. wz KEEPS the library
+/// reading -- `wz-ap-demo` is a library node, which is what R2092 settled --
+/// and what this leg pins is that the reading is upstream's, that the daemon's
+/// is the other one, and that the shipping binary says both out loud.
+///
+/// ## Why the whole chain is ONE leg
+///
+/// Four assertions that could be four tests, and splitting them would dissolve
+/// the claim: "wz reads it as peer" is true of a wz that hardcoded peer,
+/// "upstream says peer" is true of a document nobody consulted, "a real zenohd
+/// says router" is true of a divergence nobody reports, and "the report has a
+/// line" is true of a line that names the wrong roles. The finding is the
+/// CONJUNCTION, and one fixture string handed to all three implementations is
+/// what makes it one.
+///
+/// The name carries `zenohd` because Layer C0's skip-token obligation matches
+/// on the FUNCTION name and Layer E's default sweep provisions no router.
+#[test]
+#[ignore = "binary-dep e2e: needs target/zenohd/zenohd + its DEFAULT_CONFIG.json5 (scripts/build-zenohd.sh)"]
+fn zenohd_reads_an_unstated_mode_as_router_where_wz_takes_the_library_default() {
+    // (1) THE UPSTREAM DERIVATION. There is no literal `peer` on this side of
+    // the comparison: a document stating no top-level `mode` FAILS here rather
+    // than yielding one, which is what stops this leg from grading a constant
+    // against itself.
+    let reference = upstream_default_config_document();
+    let library_default = top_level_mode_of(&reference).unwrap_or_else(|| {
+        panic!(
+            "upstream's DEFAULT_CONFIG.json5 states no top-level `mode`, so this \
+             leg has no derived expectation to grade wz against"
+        )
+    });
+    assert_eq!(
+        LIBRARY_DEFAULT_MODE,
+        library_default,
+        "wz reads a document's silence about `mode` as `{}` while upstream's own \
+         reference document gives an unset `mode` as `{}`",
+        LIBRARY_DEFAULT_MODE.to_str(),
+        library_default.to_str()
+    );
+
+    // (2) WZ, on a document that names no `mode` at all. The endpoint is there
+    // so the file describes a deployable node rather than an empty object;
+    // nothing in it speaks to the run-mode.
+    let source = String::from(
+        r#"{ listen: { endpoints: ["tcp/127.0.0.1:0"] },
+             scouting: { multicast: { enabled: false } } }"#,
+    );
+    let ingest = ZenohNodeConfig::from_json5(&source)
+        .unwrap_or_else(|e| panic!("wz cannot read the fixture: {e}\n{source}"));
+    assert!(
+        !ingest.named.contains(&"mode"),
+        "the fixture names the key, so there is no silence here to grade: {:?}",
+        ingest.named
+    );
+    assert_eq!(
+        ingest.config.mode, library_default,
+        "wz came up in a run-mode upstream's own document does not give an unset \
+         `mode`"
+    );
+    let unstated = ingest
+        .mode_left_unstated()
+        .expect("a document that names no `mode` left it unstated");
+    assert_eq!(unstated.read_as, library_default);
+
+    // (3) THE DAEMON, on the SAME bytes. Read out of zenohd's resolved config
+    // rather than off its wire role, for LEG 11's reason: a router's default is
+    // port 7447, and proving the role by connecting would turn an
+    // upstream-agreement claim into a port-availability one.
+    let file = staged_config(&source);
+    let (guard, mut capture) = spawn_on_config("zenohd (no mode key)", file.path());
+    let captured = wait_for_substring(&mut capture, RESOLVED_CONF_MARKER, STARTUP_BUDGET)
+        .unwrap_or_else(|e| panic!("zenohd never printed its resolved config: {e}\n{source}"));
+    let resolved = resolved_config_of(&captured);
+    let Json5Value::Object(root) = &resolved else {
+        panic!("zenohd's resolved config is not an object");
+    };
+    let (_, daemon_value) = root
+        .iter()
+        .find(|(k, _)| k == "mode")
+        .unwrap_or_else(|| panic!("zenohd resolved no top-level `mode` at all\n{captured}"));
+    let Json5Value::String(daemon_mode) = daemon_value else {
+        panic!("zenohd resolved `mode` to something that is not a role: {daemon_value:?}");
+    };
+    let daemon_mode = daemon_mode.clone();
+    drop(guard);
+    assert_eq!(
+        daemon_mode.as_str(),
+        DAEMON_DEFAULT_MODE.to_str(),
+        "a real zenohd resolved this mode-less document to a role other than the \
+         one `DAEMON_DEFAULT_MODE` tells operators it takes"
+    );
+    // THE DIVERGENCE ITSELF, asserted rather than assumed. Were upstream ever to
+    // make the two readings agree, every line this round added would be telling
+    // operators about a difference that no longer exists -- and BOTH assertions
+    // above would still pass.
+    assert_ne!(
+        daemon_mode.as_str(),
+        library_default.to_str(),
+        "the daemon and the library now read a silent `mode` the same way, so \
+         item 514's divergence is gone and the report should stop claiming it"
+    );
+
+    // (4) AND THE SHIPPING BINARY SAYS SO. The verdict above lives in a library
+    // this leg links; what an operator gets is what `main` prints, and the two
+    // are only the same while something reads them together.
+    let demo = wz_ap_demo_binary();
+    assert_demo_binary_newer_than_sources(&demo);
+    let demo_capture = tempfile::tempfile().expect("tempfile for demo output");
+    let out = demo_capture.try_clone().expect("dup demo stdout handle");
+    let err = demo_capture.try_clone().expect("dup demo stderr handle");
+    let mut command = Command::new(&demo);
+    command
+        .arg("--config")
+        .arg(file.path())
+        .env("RUST_LOG", "info")
+        .stdout(Stdio::from(out))
+        .stderr(Stdio::from(err));
+    // Spawned and dropped, never waited on: this node binds and stays up, so a
+    // witness that waited for it to exit would hang. The whole config report is
+    // written BEFORE any run-mode dispatch, which is what makes reading it here
+    // safe whatever this build can or cannot run.
+    let demo_guard = ChildGuard::wrap(
+        "wz-ap-demo (--config, unstated mode)",
+        command.spawn().expect("spawn wz-ap-demo"),
+    );
+    let mut demo_capture = demo_capture;
+    let seen = wait_for_substring(&mut demo_capture, "MODE UNSTATED", DEMO_BUDGET);
+    if let Err(e) = &seen {
+        let so_far = wz_integration_tests::common::read_captured(&mut demo_capture);
+        // PANIC, never skip: a build without the feature must fail the lane
+        // rather than pass it quietly.
+        assert!(
+            !so_far.contains("--config requires the `zenoh-config` feature"),
+            "this lane's wz-ap-demo was built without the feature under test; \
+             rebuild with `cargo build -p wz-ap-demo --features zenoh-config`"
+        );
+        panic!("the demo's report never named the mode it was not given: {e}\n{so_far}");
+    }
+    let seen = seen.expect("checked above");
+    drop(demo_guard);
+    let line = seen
+        .lines()
+        .find(|l| l.contains("MODE UNSTATED"))
+        .expect("checked above");
+    // BOTH roles on the one line. Naming only wz's own would report this node's
+    // behaviour, which the `argv +=` line already carries; the fact an operator
+    // migrating off a daemon needs is the OTHER reading.
+    for role in [library_default.to_str(), daemon_mode.as_str()] {
+        assert!(
+            line.contains(role),
+            "the operator's line does not name `{role}`\n{line}"
+        );
+    }
+    // And the run-mode it actually selected is the library reading, so the line
+    // and the argv cannot disagree.
+    let expected_flag = match library_default {
+        WhatAmI::Router => "--router-hat",
+        WhatAmI::Peer => "--peer",
+        WhatAmI::Client => "--connect",
+    };
+    assert!(
+        seen.contains(&format!("argv += [\"{expected_flag}\"")),
+        "the expansion selected a run-mode other than the one its own report \
+         names\n{seen}"
+    );
 }

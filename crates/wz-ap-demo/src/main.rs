@@ -200,6 +200,20 @@ fn main() -> ExitCode {
                     exp.path
                 );
             }
+            // R2109 (open-debt item 514) — the answer none of the three lines
+            // above can carry, because all three enumerate keys the FILE WROTE.
+            // A document that names no `mode` at all produced a report in which
+            // the word never appeared, while the run-mode it silently selected
+            // sat on the `argv +=` line below as a bare flag. That silence is
+            // read one way by the zenoh library and the OTHER way by zenohd, so
+            // a mode-less file that used to deploy a router deploys a peer here
+            // — the line says so rather than leaving it to be found on the wire.
+            if let Some(unstated) = exp.mode_unstated {
+                eprintln!(
+                    "wz-ap-demo: --config {}: MODE UNSTATED - {unstated}",
+                    exp.path
+                );
+            }
             // R2081 (open-debt item 500) — the third answer. A key the file
             // states as a `{ router, peer, client }` table that names no row for
             // this node's mode is neither honoured nor ignored, and until this

@@ -421,6 +421,10 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
     }
 
     let named = |key: &str| ingest.named.contains(&key);
+    // R2109 (open-debt item 514) — read BEFORE the ingest is taken apart below,
+    // and read from the ingest rather than recomputed from `named`: what a
+    // silence about `mode` MEANS is the reader's fact, not the expansion's.
+    let mode_unstated = ingest.mode_left_unstated();
     // R2091 (open-debt item 508) — the BUILD axis, consulted by every site
     // rather than restated at four of them. `config_keys_the_demo_drops` was
     // the report's whole derivation before this round; it is now one of the
@@ -1124,6 +1128,7 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
         ignored: ingest.ignored,
         stated_for_other_modes: ingest.stated_for_other_modes,
         mode: ingest.config.mode,
+        mode_unstated,
     }))
 }
 
@@ -1154,6 +1159,15 @@ pub(crate) struct StockConfigExpansion {
     /// The role this node ends up in, so the report above can name WHO the
     /// other-modes rows were not for.
     pub(crate) mode: WhatAmI,
+    /// R2109 (open-debt item 514) — set when the file named no `mode` at all.
+    ///
+    /// The other four partitions all enumerate keys the file WROTE, so none of
+    /// them can carry a key it did not: a mode-less document produced a report
+    /// in which the word `mode` never appeared, and the run-mode it selected was
+    /// visible only as a flag on the `argv +=` line an operator would have to
+    /// know to read. Carried out as a value rather than printed inside the
+    /// expansion for the reason `ignored` is: a test can assert on a value.
+    pub(crate) mode_unstated: Option<wz::runtime_tokio::zenoh_config::UnstatedMode>,
 }
 
 #[cfg(feature = "zenoh-config")]
@@ -1524,6 +1538,17 @@ pub(crate) fn check_topology_for_build(
         // read would be taken for "this file is understood".
         for key in &ingest.ignored {
             notes.push_str(&format!("--check-topology: {path}: IGNORED {key}\n"));
+        }
+        // R2109 (open-debt item 514) — the SAME seam one surface over, and it
+        // bites harder here than under `--config`: this check's whole verdict
+        // is a function of the roles, and `validate_topology` is what says
+        // "every node is a client, so nothing routes". A file the operator's
+        // zenohd deployed as the ROUTER counts here as a peer, and the reader
+        // has to be told which reading it just got a verdict under.
+        if let Some(unstated) = ingest.mode_left_unstated() {
+            notes.push_str(&format!(
+                "--check-topology: {path}: MODE UNSTATED - {unstated}\n"
+            ));
         }
         configs.push(ingest.config);
     }
@@ -3361,6 +3386,67 @@ mod stock_config_tests {
         );
     }
 
+    /// A document that names NO `mode` is reported as naming none, in both
+    /// readings of that silence.
+    ///
+    /// R2109 (open-debt item 514). The fixture above is the same shape and it
+    /// shows the harm: `--peer` appears on the `argv +=` line and the word
+    /// `mode` appears NOWHERE in the report, because every other partition
+    /// enumerates keys the file wrote. An operator moving that file off zenohd
+    /// -- which reads the same silence as `router` -- had nothing to read.
+    ///
+    /// Both roles are asserted from the CONSTANTS rather than from the literals
+    /// `peer` / `router`. The values themselves are graded against upstream by
+    /// the Layer Z leg that hands the same silence to a real zenohd; restating
+    /// them here would put a second, unoracled pin on the same fact.
+    #[test]
+    fn a_document_that_names_no_mode_reports_both_readings_of_its_silence() {
+        use wz::runtime_tokio::zenoh_config::{DAEMON_DEFAULT_MODE, LIBRARY_DEFAULT_MODE};
+
+        let silent = expand(
+            &["--config", "z.json5"],
+            r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] } }"#,
+        )
+        .unwrap();
+        assert!(
+            !silent.named.contains(&"mode"),
+            "the fixture names the key, so there is no silence here to report: {:?}",
+            silent.named
+        );
+        let unstated = silent
+            .mode_unstated
+            .expect("a document that names no `mode` left it unstated");
+        assert_eq!(unstated.read_as, silent.mode);
+        assert_eq!(unstated.read_as, LIBRARY_DEFAULT_MODE);
+        assert_eq!(unstated.a_daemon_reads, DAEMON_DEFAULT_MODE);
+        // The sentence, not just the struct: this is what `main` prints, and a
+        // pair of roles nobody rendered tells an operator nothing.
+        let said = unstated.to_string();
+        for role in [LIBRARY_DEFAULT_MODE.to_str(), DAEMON_DEFAULT_MODE.to_str()] {
+            assert!(
+                said.contains(role),
+                "the sentence never names `{role}`: {said}"
+            );
+        }
+        assert!(said.contains("daemon"), "{said}");
+
+        // CONTROL: the same file with the key NAMED reports no silence. Without
+        // it a field that was unconditionally `Some` would pass everything
+        // above and put the line on every run of this binary.
+        let named = expand(
+            &["--config", "z.json5"],
+            r#"{ mode: "peer", listen: { endpoints: ["tcp/0.0.0.0:7447"] } }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            named.mode, silent.mode,
+            "the two fixtures must differ only in \
+                    whether the key is WRITTEN, so the control cannot pass by \
+                    selecting a different run-mode"
+        );
+        assert!(named.mode_unstated.is_none(), "{:?}", named.mode_unstated);
+    }
+
     /// A value the operator mistyped is refused rather than rounded down to the
     /// demo's own — announcing a lease nobody asked for is the failure this
     /// round removes, and doing it after a parse error would be the same
@@ -3695,6 +3781,33 @@ mod stock_config_tests {
             "{ok}"
         );
         assert!(ok.contains("1 node(s) can form"), "{ok}");
+    }
+
+    /// A verdict reached over a mode-less document says which reading it was
+    /// reached under.
+    ///
+    /// R2109 (open-debt item 514) — the same seam as the `--config` report one
+    /// surface over, and sharper: this check's ENTIRE answer is a function of
+    /// the roles. The fixture is a lone node whose file names `listen` and
+    /// nothing else; wz grades it as a peer, a zenohd would have deployed it as
+    /// a router, and "1 node(s) can form the network they describe" is true of
+    /// both while meaning different networks.
+    #[test]
+    fn a_verdict_over_a_mode_less_document_says_which_reading_it_used() {
+        use wz::runtime_tokio::zenoh_config::{DAEMON_DEFAULT_MODE, LIBRARY_DEFAULT_MODE};
+
+        const SILENT: &str = r#"{ id: "edge", listen: { endpoints: ["tcp/10.0.0.9:7447"] } }"#;
+        let ok = check(&[("edge.json5", SILENT)]).expect("one node is a network of one");
+        assert!(ok.contains("edge.json5: MODE UNSTATED"), "{ok}");
+        for role in [LIBRARY_DEFAULT_MODE.to_str(), DAEMON_DEFAULT_MODE.to_str()] {
+            assert!(ok.contains(role), "the note never names `{role}`: {ok}");
+        }
+
+        // CONTROL: the SAME node with the key written carries no such line, so
+        // the assertion above is about the silence and not about the check
+        // having grown a line it always prints.
+        let ok = check(&[("rtr.json5", RTR_9)]).expect("one router is a network of one");
+        assert!(!ok.contains("MODE UNSTATED"), "{ok}");
     }
 
     /// A file that cannot be read, or that reads but is not a config, ABORTS

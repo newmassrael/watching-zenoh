@@ -4172,7 +4172,14 @@ layer_c1ay_cargo_test_router_hat() {
     # on this exact command, which is item 400's prescription — a count moved on
     # a different measurement than the one that will check it is a count nobody
     # can reason about.
-    _runci_guarded_test "C1AY stock_config_tests 30" 30 \
+    # R2109 (open-debt item 514): 30 -> 32. Two tests, both unconditional at this
+    # feature set: the `--config` report naming both readings of a document that
+    # states no `mode`, and the `--check-topology` verdict saying which reading
+    # it was reached under. MEASURED on this exact command (32 passed, 2 filtered
+    # out), and the OLD pattern was re-run against the same log to confirm it no
+    # longer matches — a count moved on a different measurement than the one that
+    # checks it is a count nobody can reason about.
+    _runci_guarded_test "C1AY stock_config_tests 32" 32 \
         cargo test -p wz-ap-demo --features zenoh-config stock_config_tests --quiet || return 1
     # R2072 (open-debt item 496) — and the seam the module above structurally
     # cannot reach: argv -> exit status. Every unit witness for `check_topology`
@@ -12308,7 +12315,13 @@ layer_z_zenohd_interop() {
     # config a real zenohd prints rather than off its listener — a router's
     # default is port 7447, and proving it by binding would turn an
     # upstream-agreement claim into a port-availability one.
-    _runci_guarded_test Z 11 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+    # R2109 raises 11 -> 12 for LEG 12 (open-debt item 514): what a document
+    # that names NO `mode` means, asked of both upstream readers. The library
+    # half is DERIVED from `DEFAULT_CONFIG.json5` (installed beside zenohd by
+    # build-zenohd.sh, since a hardcoded `peer` would grade a constant against
+    # itself); the daemon half is a real zenohd resolving the same bytes to
+    # `router`. MEASURED on this exact command: 11 before the leg, 12 after.
+    _runci_guarded_test Z 12 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_reads_a_stock_zenohd_config -- --ignored --quiet --test-threads=1 \
         || return 1
     # R311y528 — §5.27 api-compat-pico LEG 9: upstream's own `z_info.c`, linked

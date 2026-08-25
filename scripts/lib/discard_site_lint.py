@@ -134,7 +134,16 @@ ALLOWED = [
         # matched EXACTLY, so the rename showed up here as a stale entry plus
         # an unaccounted site, which is the pair this list is supposed to
         # produce when a registered site moves.
-        "frame: Some(self.held.remove(0)),",
+        #
+        # R2109 — and it produced that pair a SECOND time, unpaid until now:
+        # `0d6becc6` made the trim O(1) by turning `self.held.remove(0)` into
+        # `self.held.pop_front()` and lifting it out of the struct literal, so
+        # Layer C0 had been red on main with BOTH halves showing (an
+        # unaccounted `let frame = self.held.pop_front();` and this entry
+        # excusing nothing). The door has not moved -- it is the same removal
+        # handing back the same `#[must_use] Discarded` -- only its spelling
+        # has, which is exactly what an exact match is for.
+        "let frame = self.held.pop_front();",
         "R311y723 — THE DOOR ITSELF. This removal accounts for nothing on "
         "purpose: it hands back a `#[must_use] Discarded` whose destructor "
         "PANICS unless the caller took the frame, so the obligation is moved "
