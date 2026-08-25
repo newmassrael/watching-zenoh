@@ -77,13 +77,15 @@ pub const SONAME_TARGET_OS: &[&str] = &[
 /// `lib_name` is the crate's LIB TARGET name (the `[lib] name` key, or the
 /// package name with `-` replaced by `_` when that key is absent) — i.e. the
 /// stem cargo will use for the artifact, without the `lib` prefix or the `.so`
-/// suffix. Call it from `build.rs`:
+/// suffix. Call it from the `fn main` of the crate's `build.rs`:
 ///
 /// ```no_run
-/// fn main() {
-///     wz_cdylib_build::emit_soname("wz_capi_dissect");
-/// }
+/// wz_cdylib_build::emit_soname("wz_capi_dissect");
 /// ```
+///
+/// (The `fn main` wrapper is left out because clippy's `needless_doctest_main`
+/// reds on it and rustdoc supplies one anyway — the five real callers in this
+/// workspace are what show the whole file.)
 ///
 /// `cargo:rustc-cdylib-link-arg` is used rather than `rustc-link-arg` because
 /// it applies to the `cdylib` target ALONE. Three of the five callers also
