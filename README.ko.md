@@ -100,6 +100,32 @@ E binary-dep e2e fixture 가 로컬 10-lane CI (scripts/run-ci.sh
 
 ## 빌드 + 검증
 
+### 시스템 전제
+
+Debian/Ubuntu 패키지 이름. CI job 13개가 «전부» 이 집합을 깔므로, 이
+워크스페이스의 어느 부분을 빌드하든 필요한 것이다.
+
+<!-- BUILD-PREREQS-BEGIN -->
+```sh
+sudo apt-get install -y clang libclang-dev libxml2-dev pkg-config
+```
+<!-- BUILD-PREREQS-END -->
+
+넷 다 선택이 아니고, CI 전용도 아니다. `libclang-dev`/`clang` 은
+bindgen 의 것이고, `libxml2-dev`/`pkg-config` 는 `libxml` crate 의
+것인데 «맨» `cargo build` 가 `sce-forge-runtime` 의 build script 를 통해
+거기 닿는다 (`sce-build` -> `libxml` -> `bindgen`). 없으면 빌드가
+*"The system library `libxml-2.0` required by crate `libxml` was not
+found"* 에서 선다 — crate 이름만 대고 «패키지» 이름은 안 대는 에러이고,
+이 트리의 소비자가 실제로 만난 벽이다.
+
+위 목록은 손으로 유지하는 것이 «아니라 유도된다»: CI job 이 전부 까는
+집합이고, `scripts/lib/apt_package_census.py` 가 이 블록과 그 집합이
+어긋나면 «양방향으로» FAIL 한다. 레인별로 더 필요한 것이 있고
+(`cmake` 는 zenoh-pico-sys, `perl` 은 ring, `gcc-arm-none-eabi` 는 MCU
+cross-build …) 그건 그 레인의 몫이다 — `.github/workflows/ci.yml` 이
+각각을 깔고 정당화하는 자리다.
+
 SCE codegen 바이너리는 vendor submodule 에서 빌드한다.
 
 ```sh

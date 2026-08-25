@@ -708,6 +708,115 @@ def _module_owner(module: str) -> str | None:
     return owner.stdout.split(":", 1)[0].strip()
 
 
+# ─── The DOCUMENTED-PREREQ arm (R2105, open-debt item 526) ──────────────────
+#
+# The two arms above keep CI honest with itself. Neither says anything to a
+# person building this tree by hand, and item 526 is what that costs: a
+# downstream consumer met "The system library `libxml-2.0` required by crate
+# `libxml` was not found" -- an error naming a CRATE, not a package -- with no
+# document anywhere in the tree telling them what to install. Measured before
+# the fix: README.md, README.ko.md and THIRD_PARTY.md carried ZERO mentions of
+# `libxml2-dev`, `libclang-dev`, `pkg-config` or `clang`.
+#
+# THE LIST IS DERIVED, WHICH IS THE ONLY REASON WRITING IT DOWN IS SAFE. A
+# hand-maintained prerequisites section is a second source of truth that starts
+# rotting the day it is written (open-debt item 47). The set here is computed:
+# the packages that EVERY job installs. That is a meaningful population rather
+# than a convenient one -- a package on all thirteen jobs is one no lane can
+# avoid, so it is exactly what a build of any part of this workspace needs,
+# while `cmake` (9 jobs) or `perl` (10) belong to the lanes that name them.
+#
+# The downstream report suggested three packages. The derivation says FOUR:
+# `clang` is on every job and was missing from that list. Copying the report
+# would have inherited its hole, which is the whole argument for deriving.
+DOC_BLOCK = re.compile(
+    r"<!-- BUILD-PREREQS-BEGIN -->(.*?)<!-- BUILD-PREREQS-END -->",
+    re.DOTALL,
+)
+
+# Package names come from the INSTALL LINE inside the block and from nothing
+# else. The first version tokenised the whole block after stripping backticks,
+# and the fence ` ```sh ` then arrived as a package called `sh` -- on both
+# READMEs at once, which is what a parser reading decoration rather than
+# content looks like. `APT_INSTALL` is the same matcher the arms above use on
+# the workflows, so the doc and the workflow are read by one rule.
+_NOT_A_PACKAGE = {"sudo", "apt-get", "apt", "install"}
+
+
+def documented_prereqs() -> dict[str, set[str]]:
+    """README path -> the packages its BUILD-PREREQS block names.
+
+    Every `README*.md` at the repository root, found by glob rather than
+    listed: this tree carries an English and a Korean README, and a list here
+    would be one more place for them to diverge -- which is the class this arm
+    exists to close, one level up.
+    """
+    out: dict[str, set[str]] = {}
+    for path in sorted(ROOT.glob("README*.md")):
+        m = DOC_BLOCK.search(path.read_text(encoding="utf-8"))
+        if m is None:
+            out[path.name] = set()
+            continue
+        pkgs: set[str] = set()
+        for line in m.group(1).splitlines():
+            if not APT_INSTALL.search(line):
+                continue
+            pkgs.update(
+                w for w in APT_INSTALL.split(line, 1)[1].split()
+                if w and not w.startswith("-") and w not in _NOT_A_PACKAGE
+            )
+        out[path.name] = pkgs
+    return out
+
+
+def universal_packages(sites: dict[str, set[str]]) -> set[str]:
+    """Packages every job installs -- what a build of any part of this needs."""
+    if not sites:
+        return set()
+    return set.intersection(*sites.values())
+
+
+def undocumented(sites: dict[str, set[str]]) -> list[str]:
+    """Findings where a README's prerequisite block and the CI truth disagree."""
+    want = universal_packages(sites)
+    if not want:
+        # Every job installing nothing in common is possible in principle and
+        # false today; either way an empty expectation would make this arm
+        # agree with any README at all.
+        return [
+            "no package is installed by EVERY job, so the documented-prereq "
+            "arm has nothing to hold a README to and just asserted nothing"
+        ]
+
+    docs = documented_prereqs()
+    if not docs:
+        return [f"no README*.md at {ROOT} -- this arm has no subject"]
+
+    findings: list[str] = []
+    for name, got in sorted(docs.items()):
+        if not got:
+            findings.append(
+                f"{name} carries no <!-- BUILD-PREREQS-BEGIN --> block. A "
+                f"person building this tree by hand has nowhere to learn that "
+                f"it needs {' '.join(sorted(want))}; the error they get names "
+                f"a crate, not a package."
+            )
+            continue
+        for pkg in sorted(want - got):
+            findings.append(
+                f"{name}'s prerequisite block does not name `{pkg}`, which "
+                f"every CI job installs. A reader following that block builds "
+                f"a tree the CI would not."
+            )
+        for pkg in sorted(got - want):
+            findings.append(
+                f"{name}'s prerequisite block names `{pkg}`, which is NOT "
+                f"installed by every job -- it belongs to the lanes that need "
+                f"it, not to the baseline. Drop it, or move the claim."
+            )
+    return findings
+
+
 def shortfall() -> list[str]:
     """Every (workflow, job, package) the build demands and no apt step installs."""
     probed = probed_modules()
@@ -842,17 +951,26 @@ def main() -> int:
         failed = True
         print(f"  apt-packages FAIL: {finding}", file=sys.stderr)
 
+    # The DOCUMENTED-PREREQ arm. Runs even when the arms above have failed, so
+    # one round sees the whole picture instead of two.
+    for finding in undocumented(sites):
+        failed = True
+        print(f"  apt-packages FAIL: {finding}", file=sys.stderr)
+
     if failed:
         return 1
 
     derived = len([j for j, pkgs in sites.items() if "cmake" in pkgs])
     modules = probed_modules()
+    baseline = universal_packages(sites)
     print(
         f"  apt-packages: {len(found)} (job, package) pair(s) across "
         f"{len(sites)} job(s), every one adjudicated; {derived} cmake site(s) "
         f"derived against {'/'.join(CMAKE_CRATES)} rather than believed; "
         f"{len(modules)} pkg-config module(s) the build demands "
-        f"({', '.join(sorted(modules))}) installed everywhere they are reached"
+        f"({', '.join(sorted(modules))}) installed everywhere they are reached; "
+        f"{len(baseline)} package(s) on EVERY job ({' '.join(sorted(baseline))}) "
+        f"documented in {len(documented_prereqs())} README(s)"
     )
     return 0
 

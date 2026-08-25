@@ -106,6 +106,33 @@ mirrored by the GitHub Actions workflow.
 
 ## Build and verify
 
+### System prerequisites
+
+Debian/Ubuntu package names. Every CI job installs exactly this set, so it
+is what a build of any part of this workspace needs:
+
+<!-- BUILD-PREREQS-BEGIN -->
+```sh
+sudo apt-get install -y clang libclang-dev libxml2-dev pkg-config
+```
+<!-- BUILD-PREREQS-END -->
+
+None of these is optional and none of them is only for CI. `libclang-dev`
+and `clang` are bindgen's; `libxml2-dev` and `pkg-config` are the `libxml`
+crate's, which a plain `cargo build` reaches through
+`sce-forge-runtime`'s build script (`sce-build` -> `libxml` -> `bindgen`).
+Without them the build stops at *"The system library `libxml-2.0` required
+by crate `libxml` was not found"*, which names the crate and not the
+package — the error a consumer of this tree actually met.
+
+The list above is DERIVED, not maintained by hand: it is the set of
+packages every CI job installs, and
+`scripts/lib/apt_package_census.py` fails if this block and that set stop
+agreeing in either direction. Individual lanes need more (`cmake` for
+zenoh-pico-sys, `perl` for ring, `gcc-arm-none-eabi` for the MCU
+cross-builds, and others); those belong to the lane that names them, and
+`.github/workflows/ci.yml` is where each one is installed and justified.
+
 The SCE codegen binary builds from the vendored submodule.
 
 ```sh
