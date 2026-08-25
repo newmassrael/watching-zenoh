@@ -245,8 +245,16 @@ jobs:
         # ~20 remaining lanes' build scripts read a `.pc`, and nothing here has
         # measured that; the package costs about a second. Recorded so the next
         # reader knows the reason above is now historical rather than current.
+        #
+        # R2104 (open-debt item 522) — that measurement now EXISTS, and it says
+        # keeping it was right for a reason nobody had: the `libxml` crate's
+        # build script probes `libxml-2.0`, so every job compiling it needs both
+        # the tool and `libxml2-dev`. Ten jobs had neither and were getting them
+        # from the runner image. `apt_package_census.py`'s shortfall arm derives
+        # the requirement from the resolved build graph and reds on a job that
+        # reaches the crate without installing them.
         run: |
-          bash scripts/lib/apt-install.sh cmake libclang-dev clang perl pkg-config
+          bash scripts/lib/apt-install.sh cmake libclang-dev libxml2-dev clang perl pkg-config
 
       - name: Install shellcheck (pinned + checksum-verified)
         # Same contract as the actionlint step below, and for the same reason:
@@ -804,7 +812,7 @@ jobs:
         # (protoc below), and a save between the two would carry half the
         # archive and then sit on a key nothing updates.
         run: |
-          bash scripts/lib/apt-install.sh cmake libclang-dev clang perl
+          bash scripts/lib/apt-install.sh cmake libclang-dev libxml2-dev clang perl pkg-config
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
         run: rustup show
@@ -1080,7 +1088,7 @@ jobs:
         # what keeps that answer honest; it derives the cmake rows rather than
         # reading this comment.
         run: |
-          bash scripts/lib/apt-install.sh libclang-dev clang perl
+          bash scripts/lib/apt-install.sh libclang-dev libxml2-dev clang perl pkg-config
 
       - name: Save apt archives
         # See the `feature-gates` copy for why `always()` and why the dirty gate.
@@ -1243,7 +1251,7 @@ jobs:
         # `scripts/lib/apt_package_census.py` derives it and reds if this job's
         # lanes ever do reach it.
         run: |
-          bash scripts/lib/apt-install.sh libclang-dev clang perl
+          bash scripts/lib/apt-install.sh libclang-dev libxml2-dev clang perl pkg-config
 
       - name: Save apt archives
         # See the `feature-gates` copy for why `always()` and why the dirty gate.
@@ -1360,8 +1368,9 @@ jobs:
       - name: Install system dependencies
         # cmake + libclang-dev: zenoh-pico-sys (cmake crate + bindgen), which the
         # wz-integration-tests dev-dep pulls in even for the spawn-class lanes.
+        # libxml2-dev + pkg-config: the libxml probe (item 522).
         run: |
-          bash scripts/lib/apt-install.sh cmake libclang-dev clang
+          bash scripts/lib/apt-install.sh cmake libclang-dev libxml2-dev clang pkg-config
 
       - name: Save apt archives
         # See the `feature-gates` copy for why `always()` and why the dirty gate.
@@ -2037,8 +2046,8 @@ jobs:
         # `fatal error: string.h: No such file or directory` (Layer G.6 /
         # G.11). qemu-system-arm boots the mps2 / microbit ELFs (Q.2 / Q.4).
         run: |
-          bash scripts/lib/apt-install.sh libclang-dev clang \
-            gcc-arm-none-eabi libnewlib-arm-none-eabi qemu-system-arm
+          bash scripts/lib/apt-install.sh libclang-dev libxml2-dev clang \
+            pkg-config gcc-arm-none-eabi libnewlib-arm-none-eabi qemu-system-arm
 
       - name: Save apt archives
         # See the `feature-gates` copy. This is the job the gate matters MOST
@@ -2154,7 +2163,7 @@ jobs:
         run: |
           bash scripts/lib/apt-install.sh \
             cmake ninja-build device-tree-compiler \
-            libclang-dev clang \
+            libclang-dev libxml2-dev clang pkg-config \
             gcc-arm-none-eabi libnewlib-arm-none-eabi \
             qemu-system-arm xz-utils
 
@@ -2447,7 +2456,7 @@ jobs:
           # Priority: important and so already on the image; named anyway,
           # because "the image happens to carry it" is not a thing this file
           # states and the leg below arms on its absence.
-          bash scripts/lib/apt-install.sh cmake libclang-dev clang perl tcpdump \
+          bash scripts/lib/apt-install.sh cmake libclang-dev libxml2-dev clang perl pkg-config tcpdump \
             libpcap-dev netbase
 
       - name: Save apt archives
@@ -2953,7 +2962,7 @@ jobs:
         # `scripts/lib/apt_package_census.py`). It is the job whose 32.3 MB was
         # killed at the 900s ceiling on run 32266212482.
         run: |
-          bash scripts/lib/apt-install.sh libclang-dev clang perl
+          bash scripts/lib/apt-install.sh libclang-dev libxml2-dev clang perl pkg-config
 
       - name: Save apt archives
         # See the `feature-gates` copy for why `always()` and why the dirty gate.
@@ -3180,7 +3189,7 @@ jobs:
         # cmake + clang/libclang are for those two C builds (bindgen included);
         # perl matches the sibling job's set.
         run: |
-          bash scripts/lib/apt-install.sh cmake libclang-dev clang perl
+          bash scripts/lib/apt-install.sh cmake libclang-dev libxml2-dev clang perl pkg-config
 
       - name: Save apt archives
         # `always()`: the job this exists for is the one a slow mirror REDS, and
@@ -3378,7 +3387,7 @@ jobs:
         # few seconds of apt for a first-run red on a dependency this job has
         # never been observed to need or not need.
         run: |
-          bash scripts/lib/apt-install.sh cmake libclang-dev clang perl
+          bash scripts/lib/apt-install.sh cmake libclang-dev libxml2-dev clang perl pkg-config
 
       - name: Save apt archives
         # `always()`: the job this exists for is the one a slow mirror REDS, and
@@ -3551,7 +3560,7 @@ jobs:
         # while this job only ran C1ce and the arms gate; it stopped being right
         # the moment a cargo lane arrived.
         run: |
-          bash scripts/lib/apt-install.sh cmake libclang-dev clang perl pkg-config
+          bash scripts/lib/apt-install.sh cmake libclang-dev libxml2-dev clang perl pkg-config
 
       - name: Save apt archives
         # See the `feature-gates` copy for why `always()` and why the dirty gate.
@@ -3798,7 +3807,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          bash scripts/lib/apt-install.sh cmake libclang-dev clang perl pkg-config
+          bash scripts/lib/apt-install.sh cmake libclang-dev libxml2-dev clang perl pkg-config
 
       - name: Save apt archives
         # See the `feature-gates` copy for why `always()` and why the dirty gate.

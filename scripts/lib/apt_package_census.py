@@ -53,11 +53,64 @@ an oversight: `libclang-dev` is needed wherever `bindgen` is in the closure,
 which is everywhere, because `sce-forge-runtime`'s build script
 build-depends on `sce-build` -> `libxml` -> `bindgen`. A prose reason can go
 stale the way open-debt item 338 describes, and nothing here re-checks it.
+
+## The OTHER direction (R2104, open-debt item 522)
+
+Everything above measures EXCESS: is each installed package justified. The
+question it does not ask is SHORTFALL: is each package the build REQUIRES
+actually installed. Those are two different failures and only one of them was
+gated, so the tree carried the other for as long as it has existed.
+
+Measured 2026-08-25 from a downstream report: `libxml2-dev` appears ZERO times
+in any workflow, and the build requires it. On a clean `ubuntu:24.04` the build
+dies with "The system library `libxml-2.0` required by crate `libxml` was not
+found". Every hosted run passes only because the GitHub runner IMAGE happens to
+carry libxml2 — an inheritance nothing declares, nothing checks, and nothing
+would notice the removal of.
+
+The tree already KNEW, in three places, and knowing was not enough:
+`ci.yml`'s own comment says the resolved tree "pulls bindgen (libclang),
+libxml, and the vendor/sce crates" while the install line beside it names only
+`libclang-dev clang perl`; `run-ci.sh` states "CI Linux has libxml2 (it builds
+...)" as a fact about someone else's image; and the `portability` job installs
+libxml2 through vcpkg on Windows with a paragraph explaining exactly why the
+build needs it. Three statements of the requirement, no installation of it.
+
+WHAT THE SHORTFALL ARM DERIVES. The population is not a list of libraries
+anyone typed. `cargo metadata --all-features` resolves the real build graph;
+every package in it that has a build script has that script READ; and the
+pkg-config module names it probes for are the system libraries the build will
+demand. Today that derivation yields exactly one, `libxml-2.0`, wanted by the
+`libxml` crate — which is the crate the downstream error names.
+
+`MODULE_APT` maps a module to the Debian package that provides it, and it is
+the one hand-written thing here. It is not believed: wherever `pkg-config` and
+`dpkg` are both present the gate RESOLVES each row -- `pkg-config
+--variable=pcfiledir <mod>` then `dpkg -S <that>/<mod>.pc` -- and reds on a row
+that names the wrong package. Both directions again: a probed module with no
+row fails, and a row nothing probes fails.
+
+WHICH JOBS. The same reverse-reachability the `cmake` arm uses, over the real
+resolve graph: a job needs the package if anything it runs reaches a workspace
+member whose closure contains the probing crate. Scoped to jobs whose
+`runs-on` names ubuntu, because `apt-install.sh` is what this file is about —
+`portability` (macOS + Windows) needs libxml2 just as much and gets it from
+vcpkg, which is out of this gate's subject rather than exempt from it.
+
+STATED LIMIT: this arm sees pkg-config consumers and nothing else. `libclang`
+is dlopen'd by `clang-sys` rather than probed, `perl` is a program, and
+`libpcap-dev` is here for a header a gate reads. Those stay adjudicated as
+prose above. The class this closes is the one that actually bit: a crate that
+asks pkg-config for a library nobody installed.
 """
 
 from __future__ import annotations
 
+import functools
+import json
 import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -236,13 +289,61 @@ _add(
     "the MCU boot lanes' emulator (Layer Q / the Zephyr boot).",
     ["cross-mcu", "zephyr-mcu"],
 )
+# R2104 (open-debt item 522) — this row used to name three jobs, on the reason
+# that libxml was built "from a checkout rather than the image's copy" on those
+# and not the others. The SHORTFALL arm refutes it: `libxml`'s build script
+# probes pkg-config on EVERY job that compiles it, which is all thirteen, and
+# the other ten were getting the binary from the runner image.
 _add(
     "pkg-config",
-    "libxml's build script locates libxml2 through it; carried on the jobs "
-    "whose lanes build it from a checkout rather than the image's copy.",
-    ["ci", "capi-c-arms", "e2e-demo"],
+    "the tool libxml's build script probes libxml-2.0 through; required "
+    "wherever that build script runs, which the SHORTFALL arm derives as "
+    "every job reaching the crate.",
+    [
+        "ci",
+        "validate-codegen",
+        "verdict-legs",
+        "footprint",
+        "interop",
+        "cross-mcu",
+        "zephyr-mcu",
+        "feature-gates",
+        "routing-adminspace",
+        "transport-modes",
+        "isolated-crates",
+        "capi-c-arms",
+        "e2e-demo",
+    ],
 )
 _add("python3-yaml", "the workflow-shape lints Layer C0 runs on ci.yml.", ["ci"])
+# R2104 (open-debt item 522) — the other half of the `libclang-dev` chain, and
+# the package this file was carrying a hole for. `libxml`'s build script probes
+# pkg-config for `libxml-2.0` and PANICS when it is absent; every job below
+# builds a member whose closure reaches that crate. The job list is the same as
+# `libclang-dev`'s and that is not a copy: SHORTFALL below derives it from the
+# resolve graph, so the two lists check each other rather than agreeing by
+# habit.
+_add(
+    "libxml2-dev",
+    "libxml's build script probes pkg-config for `libxml-2.0`; reached "
+    "through sce-forge-runtime's build script (sce-build -> libxml), the same "
+    "chain libclang-dev is carried for. DERIVED by the SHORTFALL arm.",
+    [
+        "ci",
+        "validate-codegen",
+        "verdict-legs",
+        "footprint",
+        "interop",
+        "cross-mcu",
+        "zephyr-mcu",
+        "feature-gates",
+        "routing-adminspace",
+        "transport-modes",
+        "isolated-crates",
+        "capi-c-arms",
+        "e2e-demo",
+    ],
+)
 _add(
     "protobuf-compiler",
     "the Protobuf reference emit Layer B verifies.",
@@ -303,8 +404,12 @@ CMAKE_INVOCATION = re.compile(
 )
 
 
-def job_reachable_text() -> dict[str, str]:
+def job_reachable_text(path: Path = CI_YML) -> dict[str, str]:
     """job id -> everything that job runs, followed one level deep.
+
+    `path` defaults to `ci.yml`, which is what the arms above are about. The
+    shortfall arm passes every workflow in turn, because a requirement can go
+    unmet in any of them and `release.yml` was the one it was unmet in.
 
     A job's own `run:` blocks are not the whole of what it runs: `--layer N`
     reaches a `run-ci.sh` function, and `bash scripts/<x>.sh` reaches a script
@@ -315,7 +420,7 @@ def job_reachable_text() -> dict[str, str]:
     reading. A gate's first finding is a claim to adjudicate, not a verdict to
     obey (open-debt item 271's shape), and this comment is what that cost.
     """
-    yml = CI_YML.read_text().splitlines()
+    yml = path.read_text().splitlines()
     job = None
     raw: dict[str, list[str]] = {}
     for line in yml:
@@ -417,6 +522,260 @@ def jobs_needing_cmake() -> set[str]:
     return needing
 
 
+# ─── The SHORTFALL arm (R2104, open-debt item 522) ──────────────────────────
+#
+# What the build DEMANDS of the machine, against what the workflow installs.
+
+# `pkg_config::Config::…probe("mod")` / `probe_library("mod")`, the two spellings
+# the pkg-config crate offers. Matched in a build script's own source, so the
+# answer comes from the crate that will do the probing rather than from anyone's
+# recollection of which crates need libraries.
+PKG_CONFIG_PROBE = re.compile(r"""\.probe(?:_library)?\(\s*["']([^"']+)["']""")
+
+# pkg-config module -> the Debian package that ships its `.pc`.
+#
+# The ONE hand-written thing in this arm, and it is verified rather than
+# believed: `_module_owner` resolves each row through pkg-config and dpkg
+# wherever both are present. A probed module with no row here is a FAIL that
+# names it; a row here that nothing probes is a FAIL too, because a mapping
+# that outlives its consumer is the shape open-debt item 47 is about.
+MODULE_APT: dict[str, str] = {
+    "libxml-2.0": "libxml2-dev",
+}
+
+# The probe's own tool. A `.probe()` shells out to `pkg-config`, so a job that
+# reaches a probing crate needs the binary as much as it needs the `.pc` file,
+# and it was riding on the runner image on ten of the thirteen jobs.
+#
+# NOT resolved through dpkg the way MODULE_APT rows are, and the reason is a
+# measurement: on this workstation `/usr/bin/pkg-config` is a symlink into
+# `pkgconf-bin`, so dpkg answers `pkgconf-bin` — a package name that is correct
+# here and wrong as an apt argument on the images this workflow runs. The
+# installable name is stable across those releases; the provider is not.
+PKG_CONFIG_TOOL = "pkg-config"
+
+
+@functools.lru_cache(maxsize=1)
+def _metadata() -> dict:
+    """The resolved build graph, at `--all-features`.
+
+    All features because the question is what any lane may demand, and a lane
+    that turns a feature on must not be the first thing to discover the library
+    is missing.
+    """
+    proc = subprocess.run(
+        [
+            "cargo", "metadata", "--all-features", "--format-version", "1",
+            "--manifest-path", str(ROOT / "crates/Cargo.toml"),
+        ],
+        capture_output=True, text=True, check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"`cargo metadata` failed (rc={proc.returncode}): {proc.stderr}")
+    return json.loads(proc.stdout)
+
+
+def probed_modules() -> dict[str, set[str]]:
+    """pkg-config module -> the crates whose build scripts ask for it."""
+    out: dict[str, set[str]] = {}
+    for pkg in _metadata()["packages"]:
+        for target in pkg["targets"]:
+            if "custom-build" not in target["kind"]:
+                continue
+            src = Path(target["src_path"])
+            if not src.is_file():
+                # An unreadable build script is a hole in the population, and a
+                # population with a hole must not report a clean shortfall.
+                raise RuntimeError(
+                    f"build script for `{pkg['name']}` is not on disk ({src}); "
+                    f"run `cargo fetch` so the graph can be read"
+                )
+            for mod in PKG_CONFIG_PROBE.findall(src.read_text(errors="replace")):
+                out.setdefault(mod, set()).add(pkg["name"])
+    return out
+
+
+def members_reaching(crates: set[str]) -> set[str]:
+    """Workspace members whose dependency closure contains any of `crates`.
+
+    Walked backwards over cargo's own `resolve` graph — every dependency kind,
+    dev included, for the reason the `cmake` arm records: `-e normal,build`
+    answers "no dependents" for a crate a test target pulls in, and acting on
+    that answer is how a needed package gets dropped.
+    """
+    meta = _metadata()
+    by_id = {p["id"]: p for p in meta["packages"]}
+    rev: dict[str, set[str]] = {}
+    for node in meta["resolve"]["nodes"]:
+        for dep in node["deps"]:
+            rev.setdefault(dep["pkg"], set()).add(node["id"])
+
+    seen = {i for i in by_id if by_id[i]["name"] in crates}
+    stack = list(seen)
+    while stack:
+        for parent in rev.get(stack.pop(), ()):
+            if parent not in seen:
+                seen.add(parent)
+                stack.append(parent)
+    return {by_id[i]["name"] for i in meta["workspace_members"] if i in seen}
+
+
+# Every apt install this tree writes, in either spelling. `apt-install.sh` is
+# the one `ci.yml` uses and the one the arms above are about; `release.yml`
+# calls `apt-get install` directly. The shortfall arm has to know both, because
+# a hole in the workflow nobody remembers is exactly where this class lives —
+# `release.yml` was carrying the same missing `libxml2-dev` when item 522 was
+# filed, and it is not reached by anything scoped to `apt-install.sh`.
+APT_INSTALL = re.compile(r"apt-install\.sh|apt-get\s+install")
+
+WORKFLOWS = ROOT / ".github/workflows"
+
+
+def linux_jobs(path: Path) -> set[str]:
+    """Job ids in `path` whose `runs-on` names ubuntu — the ones apt applies to.
+
+    Bounded to the `jobs:` block: the `on:` triggers (`push`, `pull_request`,
+    `workflow_dispatch`) sit at the same indentation and match the same job-id
+    pattern the rest of this file uses. They have no `runs-on`, so they fall out
+    here — but only because this asks for one.
+
+    A job on a non-ubuntu runner is OUT OF SUBJECT, not exempt: `portability`
+    builds the same crates on macOS and Windows and gets libxml2 from vcpkg,
+    which this gate has nothing to say about.
+    """
+    out: set[str] = set()
+    job = None
+    in_jobs = False
+    for line in path.read_text().splitlines():
+        if re.match(r"^jobs:\s*$", line):
+            in_jobs = True
+            continue
+        if not in_jobs:
+            continue
+        m = re.match(r"^  ([A-Za-z0-9_-]+):\s*$", line)
+        if m:
+            job = m.group(1)
+        elif job and re.match(r"^    runs-on:.*ubuntu", line):
+            out.add(job)
+    return out
+
+
+def apt_sites(path: Path) -> dict[str, set[str]]:
+    """job id -> the packages its apt steps install, in either spelling."""
+    lines = path.read_text().splitlines()
+    job = None
+    out: dict[str, set[str]] = {}
+    for i, line in enumerate(lines):
+        m = re.match(r"^  ([A-Za-z0-9_-]+):\s*$", line)
+        if m:
+            job = m.group(1)
+        if line.strip().startswith("#") or not APT_INSTALL.search(line):
+            continue
+        if job is None:
+            continue
+        text = APT_INSTALL.split(line, 1)[1]
+        j = i
+        while lines[j].rstrip().endswith("\\"):
+            j += 1
+            text += " " + lines[j]
+        pkgs = {w for w in text.replace("\\", " ").split() if w and not w.startswith("-")}
+        out.setdefault(job, set()).update(pkgs)
+    return out
+
+
+def _module_owner(module: str) -> str | None:
+    """The Debian package providing `module`'s `.pc`, or None if not resolvable.
+
+    None means "this machine cannot answer" — pkg-config or dpkg absent, or the
+    library simply not installed — which is a fact about the machine and not a
+    verdict about the row. The caller says so rather than turning it into one.
+    """
+    if shutil.which("pkg-config") is None or shutil.which("dpkg") is None:
+        return None
+    where = subprocess.run(
+        ["pkg-config", "--variable=pcfiledir", module],
+        capture_output=True, text=True, check=False,
+    )
+    if where.returncode != 0 or not where.stdout.strip():
+        return None
+    owner = subprocess.run(
+        ["dpkg", "-S", f"{where.stdout.strip()}/{module}.pc"],
+        capture_output=True, text=True, check=False,
+    )
+    if owner.returncode != 0 or ":" not in owner.stdout:
+        return None
+    # `libxml2-dev:amd64: /usr/lib/.../libxml-2.0.pc` -> `libxml2-dev`
+    return owner.stdout.split(":", 1)[0].strip()
+
+
+def shortfall() -> list[str]:
+    """Every (workflow, job, package) the build demands and no apt step installs."""
+    probed = probed_modules()
+    if not probed:
+        # `cargo metadata` resolved, every build script was read, and not one of
+        # them probes for anything. That is possible in principle and false
+        # today; either way an empty population must not print a clean line.
+        return [
+            "SHORTFALL population is EMPTY: no build script in the resolved "
+            "graph probes pkg-config. Either the probe pattern has drifted from "
+            "what the pkg-config crate offers, or this arm just asserted nothing."
+        ]
+
+    findings: list[str] = []
+    for module in sorted(MODULE_APT.keys() - probed.keys()):
+        findings.append(
+            f"MODULE_APT maps `{module}`, which no build script in the resolved "
+            f"graph probes for. A mapping that outlives its consumer is open-debt "
+            f"item 47's shape — delete the row."
+        )
+
+    workflows = sorted(WORKFLOWS.glob("*.yml"))
+    if not workflows:
+        return [f"no workflow file under {WORKFLOWS} — the shortfall arm has no subject"]
+
+    for module, crates in sorted(probed.items()):
+        pkg = MODULE_APT.get(module)
+        if pkg is None:
+            findings.append(
+                f"crate(s) {', '.join(sorted(crates))} probe pkg-config for "
+                f"`{module}` and MODULE_APT does not say which Debian package "
+                f"provides it. Add the row; a build that asks for a library no "
+                f"workflow installs runs only where the runner image happens to "
+                f"carry it."
+            )
+            continue
+
+        owner = _module_owner(module)
+        if owner is not None and owner != pkg:
+            findings.append(
+                f"MODULE_APT says `{module}` comes from `{pkg}`, but dpkg on this "
+                f"machine says `{owner}` owns its .pc file. Fix the row."
+            )
+
+        members = members_reaching(crates)
+        for wf in workflows:
+            sites = apt_sites(wf)
+            reach = job_reachable_text(wf)
+            for job in sorted(linux_jobs(wf)):
+                text = reach.get(job, "")
+                if "--workspace" not in text and not any(m in text for m in members):
+                    continue
+                for want, what in ((pkg, f"the library `{module}` resolves to"),
+                                   (PKG_CONFIG_TOOL, "the tool the probe itself runs")):
+                    if want in sites.get(job, set()):
+                        continue
+                    findings.append(
+                        f"{wf.name} job `{job}` builds a member that reaches "
+                        f"{'/'.join(sorted(crates))}, whose build script probes "
+                        f"pkg-config for `{module}` — and it never installs "
+                        f"`{want}`, {what}. It passes today only because the "
+                        f"runner image happens to carry it; nothing declares "
+                        f"that, and nothing would notice its removal. Add "
+                        f"`{want}` to that job's apt install line."
+                    )
+    return findings
+
+
 def main() -> int:
     try:
         sites = ci_sites()
@@ -471,14 +830,29 @@ def main() -> int:
             file=sys.stderr,
         )
 
+    # The SHORTFALL arm. Runs even when the arms above have already failed, so
+    # one round sees the whole picture instead of two.
+    try:
+        missing = shortfall()
+    except (OSError, RuntimeError, json.JSONDecodeError) as e:
+        print(f"  apt-packages FAIL: the shortfall arm could not read its input: {e}",
+              file=sys.stderr)
+        return 1
+    for finding in missing:
+        failed = True
+        print(f"  apt-packages FAIL: {finding}", file=sys.stderr)
+
     if failed:
         return 1
 
     derived = len([j for j, pkgs in sites.items() if "cmake" in pkgs])
+    modules = probed_modules()
     print(
         f"  apt-packages: {len(found)} (job, package) pair(s) across "
         f"{len(sites)} job(s), every one adjudicated; {derived} cmake site(s) "
-        f"derived against {'/'.join(CMAKE_CRATES)} rather than believed"
+        f"derived against {'/'.join(CMAKE_CRATES)} rather than believed; "
+        f"{len(modules)} pkg-config module(s) the build demands "
+        f"({', '.join(sorted(modules))}) installed everywhere they are reached"
     )
     return 0
 

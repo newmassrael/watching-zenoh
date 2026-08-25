@@ -59,11 +59,21 @@ jobs:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
       - name: Install system dependencies
+        # R2104 (open-debt item 522) — `libxml2-dev` and `pkg-config` are here
+        # because this job runs `cargo test --workspace`, which compiles
+        # `sce-forge-runtime`'s build script -> `sce-build` -> the `libxml`
+        # crate, whose own build script probes pkg-config for `libxml-2.0` and
+        # PANICS when it is absent. This step had neither for as long as it has
+        # existed and passed anyway, because the ubuntu runner image carries
+        # libxml2. `scripts/lib/apt_package_census.py`'s shortfall arm reads
+        # this file too and reds if either goes missing again.
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             cmake \
             libclang-dev \
+            libxml2-dev \
+            pkg-config \
             clang \
             perl \
             python3-yaml \
