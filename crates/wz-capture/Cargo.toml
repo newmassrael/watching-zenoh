@@ -98,6 +98,18 @@ network-codecs = [
     "wz-session-core/codec-declare",
 ]
 
+# R2107 (open-debt item 527) — the FIRST bench target in this workspace, and it
+# exists because there were none: measured 2026-08-25, zero `[[bench]]` targets
+# and zero `benches/` directories anywhere in `crates/`, so a downstream claim
+# about this decoder's per-byte cost could be neither reproduced nor refuted
+# here. `harness = false` because the deliverable is a FIT (fixed ns/packet
+# separated from ns/byte, against a memcpy baseline measured in the same
+# process), which libtest's bench harness has no shape for -- and because that
+# harness is nightly-only, while this toolchain is pinned stable.
+[[bench]]
+name = "decode_cost"
+harness = false
+
 [dependencies]
 wz-session-core = { path = "../wz-session-core", default-features = false, features = [
     "alloc",
@@ -168,6 +180,16 @@ wz-session-core = { path = "../wz-session-core", default-features = false, featu
 # no dependencies of its own, so it adds nothing to any graph it enters.
 [dev-dependencies.wz-packet-fixtures]
 path = "../wz-packet-fixtures"
+
+# R2107 (open-debt item 527) — `wire_const::T_MID_KEEP_ALIVE`, so the decode
+# bench's payload is REAL zenoh session traffic rather than filler. Its first
+# version pushed `0x5a` bytes, the message layer never ran, and the sweep timed
+# reassembly while reporting decode. A dev-dependency on a crate this one
+# already depends on for real: it costs no production graph and names where the
+# constant comes from instead of copying the byte.
+[dev-dependencies.wz-session-core]
+path = "../wz-session-core"
+default-features = false
 
 # R311y605 — the JOIN test fixture is built by the CODEC's own encode rather
 # than by a hand-laid byte string, so a walker or a decode that disagrees with
