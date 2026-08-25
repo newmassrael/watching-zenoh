@@ -39,6 +39,39 @@ cannot talk itself out of, and a number one command prints is that.
    text says "nobody has decided whether to" is not work a loop can finish, and
    counting it would make the completion condition unreachable.
 
+## The PRIORITY queue (R2101) -- a claim the next round cannot walk past
+
+The roster answers "how many are left". It does NOT answer "which one next",
+and until R2101 nothing did: the loop picked, and a pick is a judgement made
+once and forgotten. When the owner names an item to take FIRST -- as happened
+on 2026-08-25 for item 524 -- that instruction had nowhere to live except
+prose, and prose is what this whole file exists to replace.
+
+So the roster block carries an ORDERED `priority` line, and its head is the
+claim on the next round. Three properties make it a claim rather than a note:
+
+* It is printed FIRST, above the count. A reader who runs this sees what to
+  take before seeing how much is left.
+* A standing claim EXITS 3. Not 0, because a queue with work in it is not a
+  clean state; not 1, because the register is not broken. Two verdicts, two
+  codes, so "you owe a pick" can never be misread as "the roster is damaged".
+* The head STAYS the head until the item is closed. There is no way to
+  discharge a claim except by closing the item it names, which is the ratchet
+  that makes "pick it first" enforceable rather than advisory.
+
+`WZ_DEBT_PRIORITY_ACK=<n>` is how a round declares it is taking the claim,
+and it is checked against the HEAD specifically. Acking a different open item
+FAILS and names the head -- otherwise the ack would be a way to acknowledge
+the queue while working on something else, which is exactly the move it
+exists to prevent.
+
+Priority is a SEPARATE AXIS from the roster and deliberately not a subset of
+it: three of the four items filed on 2026-08-25 are analyzer-plane `밖`
+(a missing SONAME, an undeclared apt dependency, an argv default) and are
+still work the owner can put at the front. What priority DOES require is that
+the item was judged (`<= swept_through`) and is not held for an owner
+decision -- a queue cannot order a round to take something nobody decided.
+
 ## What it deliberately does NOT do
 
 It does not judge. Nothing here decides whether an item is analyzer-plane -- the
@@ -64,6 +97,7 @@ import os
 import pathlib
 import re
 import sys
+import typing
 
 DEFAULT_REGISTER = (
     pathlib.Path.home()
@@ -112,8 +146,22 @@ def is_open(title: str) -> bool:
     return "✅" not in title and "CLOSED" not in title
 
 
-def roster(text: str) -> tuple[set[int], set[int], int]:
-    """The rostered target set, the owner-decision set, and `swept_through`."""
+class Roster(typing.NamedTuple):
+    """What the roster block declares, as four independent facts.
+
+    A tuple rather than four returns, because R2101 added the fourth and a
+    positional 4-tuple is how a caller silently reads `priority` as `swept`.
+    """
+
+    target: set[int]
+    owner: set[int]
+    swept: int
+    priority: list[int]
+
+
+def roster(text: str) -> Roster:
+    """The rostered target set, the owner-decision set, `swept_through`, and
+    the ORDERED priority queue."""
     try:
         block = text.split(BEGIN, 1)[1].split(END, 1)[0]
     except IndexError:
@@ -125,17 +173,23 @@ def roster(text: str) -> tuple[set[int], set[int], int]:
     target: set[int] = set()
     owner: set[int] = set()
     swept: int | None = None
+    # A LIST, not a set: the head is the claim, so order is the whole content
+    # of this line. Reading it into a set would leave the queue looking right
+    # and pointing at whichever number happened to sort first.
+    priority: list[int] = []
     for line in block.splitlines():
         line = line.strip()
         if line.startswith("plane:analyzer-owner-decision"):
             owner |= {int(n) for n in re.findall(r"\d{1,3}", line.split("=", 1)[1])}
         elif line.startswith("plane:analyzer"):
             target |= {int(n) for n in re.findall(r"\d{1,3}", line.split("=", 1)[1])}
+        elif line.startswith("priority"):
+            priority += [int(n) for n in re.findall(r"\d{1,3}", line.split("=", 1)[1])]
         elif line.startswith("swept_through"):
             swept = int(line.split("=", 1)[1].strip())
     if swept is None:
         raise SystemExit("debt-plane-census: FAIL -- the roster names no `swept_through`")
-    return target, owner, swept
+    return Roster(target, owner, swept, priority)
 
 
 def unclosed_folds(text: str) -> list[int]:
@@ -172,7 +226,92 @@ def unclosed_folds(text: str) -> list[int]:
     return opened
 
 
+SELFTEST_ROSTER = """\
+- **10. an open analyzer item.**
+- **11. another open one.**
+- **12. ✅ CLOSED -- a discharged item.**
+- **13. an open item nobody put on any list.**
+
+{begin}
+plane:analyzer = 10 11
+plane:analyzer-owner-decision = 13
+priority = {priority}
+swept_through = {swept}
+{end}
+"""
+
+
+def selftest() -> int:
+    """R2101 -- drive every PRIORITY arm against fixtures, because a gate whose
+    arms are never executed cannot be told apart from one that always passes.
+
+    This is the objection Layer C0g raised against `apt-install.sh` and Layer
+    C0i against `append-round.sh`, answered the same way. The census itself
+    cannot be a CI layer -- its input is an agent-memory register no runner
+    carries -- but THIS function's input is a fixture string, so the logic is
+    gradable even where the register is absent. That split is the point: the
+    reader stays local, the RULES it enforces do not.
+    """
+    import subprocess
+    import tempfile
+
+    cases: list[tuple[str, dict[str, str], int, str]] = [
+        # (label, roster fields, expected exit, a substring the output must carry)
+        ("head is named first", {"priority": "10 11"}, 3, "take item 10 next"),
+        ("ack of the head clears it", {"priority": "10 11"}, 0, "acknowledged"),
+        ("ack of a NON-head fails", {"priority": "10 11"}, 1, "does not name the head"),
+        ("empty queue says so", {"priority": ""}, 0, "queue empty"),
+        ("a CLOSED item on the queue fails", {"priority": "12"}, 1, "is CLOSED and still"),
+        ("an ABSENT item on the queue fails", {"priority": "99"}, 1, "no such item"),
+        ("a DUPLICATE on the queue fails", {"priority": "10 10"}, 1, "appears twice"),
+        ("an UNJUDGED item on the queue fails", {"priority": "10", "swept": "9"}, 1, "past `swept_through"),
+        ("an OWNER-DECISION item on the queue fails", {"priority": "13"}, 1, "held for an OWNER DECISION"),
+    ]
+    env_for = {
+        "ack of the head clears it": {"WZ_DEBT_PRIORITY_ACK": "10"},
+        "ack of a NON-head fails": {"WZ_DEBT_PRIORITY_ACK": "11"},
+    }
+
+    failures = 0
+    for label, fields, want_rc, want_text in cases:
+        body = SELFTEST_ROSTER.format(
+            begin=BEGIN,
+            end=END,
+            priority=fields.get("priority", ""),
+            swept=fields.get("swept", "20"),
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as fh:
+            fh.write(body)
+            fixture = fh.name
+        env = dict(os.environ)
+        env.pop("WZ_DEBT_PRIORITY_ACK", None)
+        env["WZ_DEBT_REGISTER"] = fixture
+        env.update(env_for.get(label, {}))
+        run = subprocess.run(
+            [sys.executable, __file__],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        got = run.stdout + run.stderr
+        ok = run.returncode == want_rc and want_text in got
+        if not ok:
+            failures += 1
+            print(f"  FAIL  {label}")
+            print(f"        want rc={want_rc} and {want_text!r}; got rc={run.returncode}")
+            for line in got.splitlines():
+                print(f"        | {line}")
+        else:
+            print(f"  ok    {label}  (rc={run.returncode})")
+        pathlib.Path(fixture).unlink()
+
+    print(f"debt-plane-census selftest: {len(cases) - failures}/{len(cases)} arm(s) pass")
+    return 1 if failures else 0
+
+
 def main() -> int:
+    if "--selftest" in sys.argv:
+        return selftest()
     path = register_path()
     if not path.is_file():
         # EXIT 2, never 0. The register is machine-local, and a reader that
@@ -187,7 +326,7 @@ def main() -> int:
         return 2
     text = path.read_text(encoding="utf-8")
     found = items(text)
-    target, owner, swept = roster(text)
+    target, owner, swept, priority = roster(text)
 
     findings: list[str] = []
     for line_no in unclosed_folds(text):
@@ -221,12 +360,66 @@ def main() -> int:
             f"the marker in the same edit"
         )
 
+    # R2101 -- the priority queue, checked in the four directions that can make
+    # a claim lie about what is next.
+    seen: set[int] = set()
+    for n in priority:
+        if n in seen:
+            findings.append(
+                f"item {n} appears twice on the priority line; a queue that names "
+                f"one item twice has two heads after the first is closed"
+            )
+        seen.add(n)
+        if n not in found:
+            findings.append(f"the priority queue names item {n} and the register has no such item")
+        elif not is_open(found[n]):
+            findings.append(
+                f"item {n} is CLOSED and still on the priority queue -- a discharged "
+                f"claim left here keeps pointing the next round at finished work"
+            )
+        if n > swept:
+            findings.append(
+                f"priority item {n} is numbered past `swept_through = {swept}`; a "
+                f"queue cannot order a round to take something nothing has judged"
+            )
+        if n in owner:
+            findings.append(
+                f"priority item {n} is held for an OWNER DECISION; a queue cannot "
+                f"order a round to take work nobody has decided to do"
+            )
+
     if findings:
         print("debt-plane-census: FAIL")
         for f in findings:
             print(f"  - {f}")
         print("\n  Edit the ANALYZER-ROSTER block in the register in the same round.")
         return 1
+
+    # The claim is printed FIRST, above the count -- a reader must see what to
+    # take before seeing how much is left, or the count is what they act on.
+    ack = os.environ.get("WZ_DEBT_PRIORITY_ACK", "").strip()
+    outstanding = 0
+    if priority:
+        head = priority[0]
+        rest = " ".join(str(n) for n in priority[1:])
+        print(f"  debt-plane-census: PRIORITY -- take item {head} next.")
+        if rest:
+            print(f"    then: {rest}")
+        if ack and ack != str(head):
+            print(
+                f"    FAIL -- WZ_DEBT_PRIORITY_ACK={ack} does not name the head. "
+                f"The claim is item {head}; acking anything else would be a way "
+                f"to acknowledge the queue while working on something else."
+            )
+            return 1
+        if ack:
+            print(f"    acknowledged: this round is taking item {head}.")
+        else:
+            outstanding = 3
+    else:
+        # SAID, not silent. An empty queue is a state a reader must be able to
+        # tell apart from a queue this script failed to read.
+        print("  debt-plane-census: PRIORITY -- queue empty; pick from the roster.")
 
     remaining = sorted(n for n in target if n in found and is_open(found[n]))
     print(
@@ -235,7 +428,13 @@ def main() -> int:
     )
     if remaining:
         print(f"  remaining: {' '.join(str(n) for n in remaining)}")
-    return 0
+    if outstanding:
+        print(
+            f"  exit 3: a claim is outstanding. It is discharged by CLOSING item "
+            f"{priority[0]}, not by running this again -- set "
+            f"WZ_DEBT_PRIORITY_ACK={priority[0]} while the round is doing that."
+        )
+    return outstanding
 
 
 if __name__ == "__main__":
