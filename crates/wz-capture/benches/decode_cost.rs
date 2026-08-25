@@ -186,10 +186,13 @@ fn fit(points: &[(f64, f64)]) -> Option<(f64, f64)> {
 /// item is about; the unbounded one is the same decode with no trimming. Two
 /// numbers that differ by orders of magnitude attribute the cost to the trim
 /// rather than to the decode, and neither number alone can say that.
+/// R2110 (open-debt item 528) — `Frames` is the third, and it exists because a
+/// mutation refuted the arm that was written without it. See [`trim_growth`].
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Ceiling {
     LiveTap,
     None,
+    Frames(usize),
 }
 
 fn decode_ns_per_packet(payload_len: usize, iters: usize, ceiling: Ceiling) -> (f64, u64) {
@@ -214,6 +217,13 @@ fn decode_ns_per_packet(payload_len: usize, iters: usize, ceiling: Ceiling) -> (
     let mut d = match ceiling {
         Ceiling::LiveTap => Dissection::with_limits(DissectionLimits::for_live_tap()),
         Ceiling::None => Dissection::new(),
+        // The live-tap preset with ONE field moved, so the two runs of
+        // [`trim_growth`] differ in the ceiling and in nothing else.
+        Ceiling::Frames(cap) => {
+            let mut limits = DissectionLimits::for_live_tap();
+            limits.frames_per_flow = Some(cap);
+            Dissection::with_limits(limits)
+        }
     };
     // Warm the flow table and the allocator so the first push's one-off cost
     // is not spread across the batch.
@@ -383,14 +393,119 @@ fn measure(iters: usize) -> i32 {
         d_slope / c_slope,
         u_slope / c_slope,
     );
+    // R2110 (open-debt item 528) — the ratio, and a sentence DERIVED from it.
+    //
+    // This line used to print `{:.0}x` and then assert, unconditionally, that
+    // the gap attributes the cost to the trim. Both halves were wrong once the
+    // trim stopped dominating. `{:.0}` cannot express a ratio below 1 -- the
+    // `--quick` sweep printed the honest 0.49 as `0x` -- so the one number the
+    // register says a repair must be stated in ("not a claim, the movement of
+    // that ratio") was the number this could not say. And a conclusion printed
+    // whatever the measurement found is prose contradicting its own evidence.
+    let ratio = d_slope / u_slope;
     println!(
-        "  the bounded/unbounded ratio is {:.0}x -- a gap here attributes the \
-         per-byte cost to the CEILING's trim rather than to the decode itself.",
-        d_slope / u_slope,
+        "  the bounded/unbounded ratio is {ratio:.2}x -- {}",
+        if ratio >= 2.0 {
+            "the CEILING's trim, not the decode, is what the per-byte cost buys."
+        } else {
+            "the ceiling costs about what the decode does, so the per-byte cost \
+             is NOT the trim."
+        }
     );
     println!(
-        "  (no threshold is asserted -- see this file's module doc for why; \
-         the numbers are the output, the selftest is the gate)"
+        "  (no threshold is asserted on any timing -- see this file's module doc \
+         for why; the numbers are the output, the selftest and the trim-growth \
+         arm are the gates)"
+    );
+    0
+}
+
+/// How many times higher the second trim-cost run sets the CEILING.
+///
+/// Not a duration and not a threshold: it is the one axis that separates the
+/// two hypotheses below, and the verdict is derived from it.
+const CEILING_FACTOR: usize = 8;
+
+/// The smaller of the two ceilings. Well under the live-tap preset's, so both
+/// runs are past their own cap at the sweep's packet counts -- including
+/// `--quick`, whose 50 packets of 1400 bytes yield ~23 000 messages.
+const CEILING_SMALL: usize = 1_000;
+
+/// Does a trim cost time proportional to WHAT THE LIST HOLDS?
+///
+/// R2110 (open-debt item 528) — the gate the register asked for and could not
+/// have, because "it got faster" is a claim and this file asserts no timing.
+/// The gradable claim is a SHAPE, and it is machine-independent because it is a
+/// ratio of two runs in one process on one clock:
+///
+/// * an O(1) front trim (`VecDeque::pop_front`) predicts ~1x -- a discard costs
+///   the same whatever the list is holding;
+/// * an O(n) one (`Vec::remove(0)`, item 528's filed shape) predicts
+///   ~[`CEILING_FACTOR`]x -- each discard memmoves the survivors, and there are
+///   a ceiling's worth of them.
+///
+/// The verdict sits at the GEOMETRIC MIDPOINT of those two predictions rather
+/// than at a number somebody liked: `sqrt(CEILING_FACTOR)` is equidistant from
+/// both in the only scale a ratio has. Move the factor and the verdict moves
+/// with it, which is what keeps this from being an arbitrary threshold wearing
+/// a unit.
+///
+/// ## The axis is the CEILING, and a mutation is why
+///
+/// This arm was first written against the PACKET COUNT: push 8x the packets and
+/// watch the per-packet cost. That was wrong, and the wrongness was invisible
+/// until the O(n) trim was put back -- whereupon the arm reported `1.00x`,
+/// FLAT, and passed, while the ratio line beside it read 287x. A steady-state
+/// bounded list holds exactly `cap` messages no matter how many packets have
+/// been through it, so an O(n) discard costs O(cap): constant in the packet
+/// count and linear in the ceiling. The mutation refuted the design, which is
+/// the whole reason to run one against a gate before trusting it.
+///
+/// The population is checked first and its absence is a FAIL, not a pass: if a
+/// run never reaches its ceiling then nothing was trimmed, both numbers are the
+/// unbounded decode, and the ratio is ~1x -- the exact reading a healthy O(1)
+/// trim gives. A gate that cannot tell "flat" from "never ran" is not a gate.
+fn trim_growth(iters: usize) -> i32 {
+    let size = *SIZES.last().expect("the sweep has sizes");
+    let big = CEILING_SMALL * CEILING_FACTOR;
+
+    let (small, small_produced) = decode_ns_per_packet(size, iters, Ceiling::Frames(CEILING_SMALL));
+    let (large, large_produced) = decode_ns_per_packet(size, iters, Ceiling::Frames(big));
+
+    for (label, produced, cap) in [
+        ("small-ceiling", small_produced, CEILING_SMALL),
+        ("large-ceiling", large_produced, big),
+    ] {
+        if produced <= cap as u64 {
+            println!(
+                "decode-cost FAIL: the {label} run produced {produced} message(s) \
+                 against a {cap}-message ceiling, so it never trimmed and this arm \
+                 timed the unbounded decode twice. {iters} packet(s) of {size} \
+                 byte(s) is not past that ceiling."
+            );
+            return 1;
+        }
+    }
+
+    let growth = large / small;
+    let verdict = (CEILING_FACTOR as f64).sqrt();
+    println!(
+        "  trim cost vs ceiling: {small:.0} -> {large:.0} ns/packet as the ceiling \
+         goes {CEILING_SMALL} -> {big} ({CEILING_FACTOR}x) = {growth:.2}x"
+    );
+    if growth > verdict {
+        println!(
+            "decode-cost FAIL: the per-packet cost rose {growth:.2}x for a \
+             {CEILING_FACTOR}x ceiling, past the {verdict:.2}x midpoint between \
+             O(1) (~1x) and O(cap) (~{CEILING_FACTOR}x). The bounded list is \
+             discarding in time proportional to what it holds -- item 528's \
+             shape, back again."
+        );
+        return 1;
+    }
+    println!(
+        "  the trim is FLAT ({growth:.2}x under the {verdict:.2}x midpoint), so a \
+         discard costs the same however much the list is holding."
     );
     0
 }
@@ -409,5 +524,13 @@ fn main() {
     } else {
         ITERS
     };
-    std::process::exit(measure(iters));
+    // R2110 (item 528) — the shape arm runs with the sweep rather than behind
+    // its own flag, so the lane that already invokes this gets it without a
+    // second registration. Its packet count is the sweep's, so `--quick` pays
+    // for it in proportion to everything else here.
+    let rc = measure(iters);
+    if rc != 0 {
+        std::process::exit(rc);
+    }
+    std::process::exit(trim_growth(iters));
 }
