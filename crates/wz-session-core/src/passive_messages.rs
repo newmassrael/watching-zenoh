@@ -66,7 +66,7 @@
 //! y650, y656) before R311y713 ended the same shape for flow exits by making it
 //! a type. This is that ending, applied to the other list.
 
-use alloc::vec::Vec;
+use alloc::collections::VecDeque;
 use core::ops::{Deref, DerefMut};
 
 use crate::passive::PassiveFrame;
@@ -83,7 +83,26 @@ use crate::passive::PassiveFrame;
 /// exactly one door can make.
 #[derive(Debug, Default)]
 pub struct MessageList {
-    held: Vec<PassiveFrame>,
+    /// R2109 (open-debt item 528) — a DEQUE, and the change is a cost rather
+    /// than a taste.
+    ///
+    /// It was a `Vec`, and [`MessageList::discard_oldest`] took the front with
+    /// `remove(0)` — an O(n) memmove of the whole list per message discarded.
+    /// That is invisible until a bound bites, and then it is everything: a live
+    /// tap at its `frames_per_flow` ceiling pays list-length per incoming
+    /// message, so cost grows with the CEILING rather than with the traffic.
+    /// Measured at the ceiling before this change, one 1400-byte packet cost
+    /// 28.8 ms to decode against 67 us with no cap — 437x, and essentially all
+    /// of it here.
+    ///
+    /// The deque is kept CONTIGUOUS on purpose. Every consumer of this type
+    /// reads it as `&[PassiveFrame]` through [`Deref`], `as_slice` and
+    /// `IntoIterator`, and a slice is what a caller building an iterator chain
+    /// or indexing an anchor actually needs. `make_contiguous` after each
+    /// mutation costs a branch while the ring has not wrapped and one rotate
+    /// when it has, which is amortised O(1) — against an unconditional O(n)
+    /// before.
+    held: VecDeque<PassiveFrame>,
     /// R2102 (open-debt item 524) — messages EVER appended to this list, which
     /// is a different number from `len` the moment a bound bites.
     ///
@@ -116,14 +135,26 @@ impl MessageList {
     /// An empty list.
     pub fn new() -> Self {
         Self {
-            held: Vec::new(),
+            held: VecDeque::new(),
             produced: 0,
         }
     }
 
+    /// Restore the "one contiguous run" invariant every reader of this type
+    /// depends on.
+    ///
+    /// Called after each mutation rather than inside `as_slice`, because the
+    /// readers take `&self` and this needs `&mut`. It is a comparison while the
+    /// ring has not wrapped; the rotate it does on a wrap is paid once per
+    /// capacity's worth of removals.
+    fn keep_contiguous(&mut self) {
+        self.held.make_contiguous();
+    }
+
     /// Append one decoded message.
     pub fn push(&mut self, frame: PassiveFrame) {
-        self.held.push(frame);
+        self.held.push_back(frame);
+        self.keep_contiguous();
         self.produced += 1;
     }
 
@@ -131,6 +162,7 @@ impl MessageList {
     pub fn append(&mut self, frames: impl IntoIterator<Item = PassiveFrame>) {
         let before = self.held.len();
         self.held.extend(frames);
+        self.keep_contiguous();
         // The DIFFERENCE rather than the iterator's own count: an
         // `IntoIterator` may report a size hint it does not deliver, and the
         // vector's growth is the one measurement that cannot disagree with what
@@ -162,11 +194,13 @@ impl MessageList {
         if self.held.is_empty() {
             return None;
         }
+        let frame = self.held.pop_front();
+        self.keep_contiguous();
         Some(Discarded {
             // `produced` deliberately does NOT move here. It counts what was
             // ever appended, and a trim is the one event a consumer's watermark
             // has to be able to see across.
-            frame: Some(self.held.remove(0)),
+            frame,
         })
     }
 
@@ -176,7 +210,19 @@ impl MessageList {
     /// `&[PassiveFrame]` parameter relies on coercion and a caller building an
     /// iterator chain often cannot.
     pub fn as_slice(&self) -> &[PassiveFrame] {
-        &self.held
+        // The mutators restore contiguity, so the ring's second run is empty
+        // and the first IS the list. Asserted rather than assumed: a reader
+        // handed a short slice would silently see fewer messages than the list
+        // holds, which is the shape this workspace calls a floor reported as a
+        // total.
+        let (front, back) = self.held.as_slices();
+        debug_assert!(
+            back.is_empty(),
+            "MessageList lost its contiguity invariant: {} message(s) are in \
+             the ring's second run and every slice reader would miss them",
+            back.len()
+        );
+        front
     }
 }
 
@@ -396,7 +442,7 @@ impl Deref for MessageList {
     type Target = [PassiveFrame];
 
     fn deref(&self) -> &Self::Target {
-        &self.held
+        self.as_slice()
     }
 }
 
@@ -404,7 +450,11 @@ impl DerefMut for MessageList {
     /// A SLICE, so an in-place rewrite of a frame's coordinates works and a
     /// growth or removal does not. See the module doc.
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.held
+        // `make_contiguous` returns the whole list as one mutable slice and is
+        // the deque's own way of saying what `&mut [_]` means here. It is the
+        // same call the mutators make, so this path cannot be the one that
+        // leaves the ring wrapped.
+        self.held.make_contiguous()
     }
 }
 
@@ -413,7 +463,7 @@ impl<'a> IntoIterator for &'a MessageList {
     type IntoIter = core::slice::Iter<'a, PassiveFrame>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.held.iter()
+        self.as_slice().iter()
     }
 }
 
