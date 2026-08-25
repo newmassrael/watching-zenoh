@@ -35,8 +35,14 @@ import pathlib
 import subprocess
 import sys
 
-OLD = "LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial"
-NEW = "AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial"
+# Built by concatenation, and that is not a style choice: this file is itself
+# a TRACKED file the check walks, so a whole-literal `OLD` would match its own
+# source and the gate could never pass -- it reported exactly one straggler,
+# itself, on the relicense commit. Splitting the literal keeps this file IN
+# SCOPE (a real stale header here would still be caught) where a path-based
+# exemption would have carved it out permanently.
+OLD = "LGPL-3.0-or-later" + " OR LicenseRef-watching-zenoh-Commercial"
+NEW = "AGPL-3.0-or-later" + " OR LicenseRef-watching-zenoh-Commercial"
 
 # Skipped by PATH prefix, for the reasons in the module docstring.
 SKIP_PREFIXES = ("out/", "vendor/")
