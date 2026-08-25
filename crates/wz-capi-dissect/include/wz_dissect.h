@@ -74,10 +74,38 @@
  * revision to be about.
  *
  * The live door emits no document at all, so it is outside this scheme
- * rather than an omission from it. Its compatibility statement is the name
- * wz_dissect_record_v1: a field read by OFFSET cannot be read by name and
- * cannot tolerate an unknown one, so a layout change is a new struct and a
- * new door, never a quiet reinterpretation of this one.
+ * rather than an omission from it. A field read by OFFSET cannot be read by
+ * name and cannot tolerate an unknown one, so ONCE A LAYOUT HAS SHIPPED, a
+ * layout change is a new struct and a new door, never a quiet
+ * reinterpretation of the old one. That rule stands.
+ *
+ * R2108 (ABI 12) USED AN EXCEPTION TO IT, ONCE, AND THIS PARAGRAPH IS THE
+ * RECORD OF WHY — because an exception nobody wrote down is read by the next
+ * person as a precedent, and this one is not.
+ *
+ * The struct was called wz_dissect_record_v1 for one day. R2108 renamed it to
+ * wz_dissect_record and widened it in place rather than adding a _v2 beside
+ * it. The conditions that permitted that, all measured on 2026-08-25 rather
+ * than assumed:
+ *
+ *   - this repository has ZERO tags and ZERO releases, and its latest-release
+ *     endpoint answers 404, so no layout here has ever been published as a
+ *     release artifact;
+ *   - wz_dissect_record_v1 reached origin at 15:46 that same day;
+ *   - the only known downstream consumer's own report predates that push and
+ *     says its integration begins by moving its pin AFTER a push, so it had
+ *     not taken the struct.
+ *
+ * NONE OF THAT WILL BE TRUE OF THE NEXT LAYOUT CHANGE. If any of those three
+ * has stopped holding when you read this, the rule above applies unmodified:
+ * add a new struct and a new door.
+ *
+ * WHAT ACTUALLY CARRIES COMPATIBILITY IS THE NUMBER, not a suffix on a name.
+ * wz_dissect_abi_version() is the instrument: a consumer pinned to 11 meets 12
+ * and parts company there, which is the whole mechanism. A version suffix on
+ * the type was a SECOND marker for the same fact, and two markers for one fact
+ * are two things that can disagree — which is why the suffix is gone rather
+ * than incremented.
  */
 #ifndef WZ_DISSECT_H
 #define WZ_DISSECT_H
@@ -492,7 +520,7 @@ int wz_dissect_readable_surfaces(char **out);
  *     if (wz_dissect_live_open(WZ_DISSECT_LIMITS_LIVE_TAP, &h)) { ... }
  *     for (;;) {
  *         wz_dissect_live_push(h, link_type, ts_ns, pkt, pkt_len);
- *         wz_dissect_record_v1 buf[256];
+ *         wz_dissect_record buf[256];
  *         size_t n;
  *         while (!wz_dissect_live_drain(h, buf, 256, &n) && n) {
  *             ...                        // render buf[0..n]
@@ -518,7 +546,7 @@ typedef struct wz_dissect_live wz_dissect_live;
  * starts at zero as a tap with no clock. */
 #define WZ_DISSECT_NO_TIMESTAMP UINT64_MAX
 
-/* wz_dissect_record_v1.kind — the message kinds. Derived from the decoder's
+/* wz_dissect_record.kind — the message kinds. Derived from the decoder's
  * own variants (`InboundFrame::kind_code`), so a kind this build gained
  * appears here and in that match on the same commit.
  *
@@ -539,7 +567,7 @@ typedef struct wz_dissect_live wz_dissect_live;
 #define WZ_DISSECT_KIND_OAM 8
 #define WZ_DISSECT_KIND_UNKNOWN 255
 
-/* wz_dissect_record_v1.origin — which of a flow's message lists this came
+/* wz_dissect_record.origin — which of a flow's message lists this came
  * out of. A flow can carry several at once (a UDP conversation may hold
  * cleartext datagrams AND messages recovered from inside QUIC), and they
  * are different lists rather than one interleaved one. */
@@ -549,13 +577,13 @@ typedef struct wz_dissect_live wz_dissect_live;
 #define WZ_DISSECT_ORIGIN_QUIC_DATAGRAM 4
 #define WZ_DISSECT_ORIGIN_SERIAL 5
 
-/* wz_dissect_record_v1.anchor_space — how to read `anchor`. They are small
+/* wz_dissect_record.anchor_space — how to read `anchor`. They are small
  * numbers either way and cannot be told apart by looking, which is why the
  * record says. A PACKET index must not be added to anything. */
 #define WZ_DISSECT_ANCHOR_PACKET 0
 #define WZ_DISSECT_ANCHOR_STREAM_BYTES 1
 
-/* wz_dissect_record_v1.flags — zero for an ordinary message. */
+/* wz_dissect_record.flags — zero for an ordinary message. */
 /* The frame's wire length exceeded the batch_size its session's InitAck
  * agreed to: a protocol violation by the sender. The message still
  * decoded, and is reported rather than dropped -- dropping is what makes a
@@ -571,7 +599,7 @@ typedef struct wz_dissect_live wz_dissect_live;
 
 /* ONE decoded transport message.
  *
- * 48 bytes, 8-aligned, with every field explicitly sized. Both sides assert
+ * 56 bytes, 8-aligned, with every field explicitly sized. Both sides assert
  * that -- `the_record_layout_is_the_one_the_header_declares` in the Rust
  * crate and a sizeof/offsetof block in tests/c_abi_consumer.c -- because
  * this is the one output of this library that is raw memory rather than
@@ -581,7 +609,7 @@ typedef struct wz_dissect_live wz_dissect_live;
  * The `_v1` is the compatibility statement. A field read by OFFSET cannot
  * tolerate an unknown one, so a layout change is a new struct and a new
  * door, never a new meaning for this one. */
-typedef struct wz_dissect_record_v1 {
+typedef struct wz_dissect_record {
     /* This reader's clock AS OF this message, in nanoseconds, or
      * WZ_DISSECT_NO_TIMESTAMP if it was never set.
      *
@@ -596,13 +624,32 @@ typedef struct wz_dissect_record_v1 {
      *     That is a different fact from having no clock, and only the
      *     second reports the sentinel. */
     uint64_t ts_ns;
-    /* A number this handle assigns each flow it sees, from zero, in order of
-     * first appearance. Stable for the life of the handle, meaningless
-     * outside it. */
+    /* The CONVERSATION: a number this handle assigns each flow it sees, from
+     * zero, in order of first appearance. Stable for the life of the handle,
+     * meaningless outside it.
+     *
+     * Everything one UDP conversation carries shares this -- the cleartext
+     * messages and whatever was recovered from inside QUIC alike -- because
+     * that is what grouping by "connection" means. */
     uint64_t flow_id;
+    /* The COORDINATE SPACE: a number per message LIST, on the same counter,
+     * so a flow_id and a list_id are never the same number.
+     *
+     * TWO RECORDS' ANCHORS ARE COMPARABLE EXACTLY WHEN THIS MATCHES, and that
+     * is the whole of what the field is for. A flow can carry several lists at
+     * once, and the QUIC-stream ones are byte offsets that each start at zero
+     * -- so grouping by (flow_id, origin) would put two streams' byte 0 in one
+     * space and read two distinct messages as one. `origin` cannot express the
+     * difference, because a stream's identity is a number the wire chose.
+     *
+     * It also moves when a list is REPLACED: a flow evicted and reopened under
+     * the same 5-tuple restarts its offsets, so it gets a new id rather than
+     * inheriting coordinates that no longer mean anything. */
+    uint64_t list_id;
     /* Where the message sits. Read it according to `anchor_space`: a packet
      * INDEX (which is your own push ordinal, counting from zero) or a byte
-     * offset within one direction of this list's stream. */
+     * offset within one direction of this list's stream. Comparable only
+     * against a record carrying the same `list_id`. */
     uint64_t anchor;
     /* The length the framing unit DECLARED, in bytes. */
     uint64_t unit_len;
@@ -621,7 +668,7 @@ typedef struct wz_dissect_record_v1 {
     uint8_t kind;
     /* WZ_DISSECT_FLAG_* bits, or zero. */
     uint32_t flags;
-} wz_dissect_record_v1;
+} wz_dissect_record;
 
 /* Open a live dissection. `limits` is WZ_DISSECT_LIMITS_LIVE_TAP for a link,
  * or WZ_DISSECT_LIMITS_NONE for a bounded replay you want nothing discarded
@@ -661,7 +708,7 @@ int wz_dissect_live_push(wz_dissect_live *h, unsigned int link_type,
  * `ts_ns` if you need that -- a live reader cannot do it for you without
  * holding messages back until nothing older can arrive, and on a link that
  * moment never comes. */
-int wz_dissect_live_drain(wz_dissect_live *h, wz_dissect_record_v1 *out,
+int wz_dissect_live_drain(wz_dissect_live *h, wz_dissect_record *out,
                           size_t cap, size_t *written);
 
 /* Messages this handle decoded and then DISCARDED before you drained them,
@@ -679,6 +726,22 @@ uint64_t wz_dissect_live_lost(const wz_dissect_live *h);
  * guard of its own -- the same rule wz_dissect_string_free follows, and the
  * commonest source of a double free at an FFI seam. */
 void wz_dissect_live_close(wz_dissect_live *h);
+
+/* R2108 -- the record's layout, AS THE BUILT LIBRARY SEES IT.
+ *
+ * Fills `out` with, in order: size, align, then the offset of every field of
+ * wz_dissect_record in declaration order. Returns how many values that is. A
+ * null `out`, or a `cap` below the count, writes nothing and returns the
+ * count, so a caller sizes first and reads second.
+ *
+ * THIS IS NOT A DOOR FOR CONSUMERS. A program that includes this header
+ * already has the layout from the compiler; asking the library for it would be
+ * asking the same question twice and believing the second answer. It exists so
+ * a GATE outside both languages can read the layout out of the artifact and
+ * hold it against a pin that sits beside the ABI revision -- because the two
+ * pins that used to hold it, a Rust test and a C block, are edited by the same
+ * commit that changes the layout, and two pins that move together are one. */
+size_t wz_dissect_record_layout(size_t *out, size_t cap);
 
 #ifdef __cplusplus
 }

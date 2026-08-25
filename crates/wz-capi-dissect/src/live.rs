@@ -87,7 +87,8 @@ pub const NO_TIMESTAMP: u64 = u64::MAX;
 /// R2102 (open-debt item 524) — ONE decoded transport message, as the bytes a C
 /// consumer receives.
 ///
-/// `#[repr(C)]` with explicitly sized fields and the widest first, so the
+/// 56 bytes, 8-aligned. `#[repr(C)]` with explicitly sized fields and the
+/// widest first, so the
 /// layout is the one the header declares on every ABI this library is built
 /// for. Its size is pinned on both sides of the boundary — see
 /// `the_record_layout_is_the_one_the_header_declares` here and the matching
@@ -99,7 +100,7 @@ pub const NO_TIMESTAMP: u64 = u64::MAX;
 /// different meaning for the same one.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WzDissectRecordV1 {
+pub struct WzDissectRecord {
     /// The reader's clock AS OF this message, in nanoseconds, or
     /// [`NO_TIMESTAMP`] if it was never set.
     ///
@@ -115,11 +116,33 @@ pub struct WzDissectRecordV1 {
     ///   sentinel — see
     ///   `a_clock_that_never_moved_is_told_apart_from_one_that_stopped`.
     pub ts_ns: u64,
-    /// A number this handle assigns to each flow it sees, counting from zero in
-    /// the order they first appear. Stable for the life of the handle and
-    /// meaningless outside it.
+    /// The CONVERSATION: a number this handle assigns each flow it sees,
+    /// counting from zero in order of first appearance. Stable for the life of
+    /// the handle and meaningless outside it.
+    ///
+    /// Everything one UDP conversation carries shares this — the cleartext
+    /// messages and whatever was recovered from inside QUIC alike — because
+    /// that is what a reader grouping by "connection" means.
     pub flow_id: u64,
-    /// Where the message sits, read according to [`Self::anchor_space`].
+    /// The COORDINATE SPACE: a number per message LIST, on the same counter.
+    ///
+    /// # Why this is not [`Self::flow_id`]
+    ///
+    /// Two records' anchors are comparable exactly when this matches. A flow
+    /// can carry several lists at once, and for the QUIC-stream ones the
+    /// anchors are byte offsets that each start at zero — so a consumer
+    /// grouping by `(flow_id, origin)` would put two streams' byte 0 in one
+    /// space and read two distinct messages as one. That is the same silent
+    /// wrongness [`Self::anchor_space`] exists to prevent, one level down, and
+    /// [`origin_code`] cannot express it because the stream's identity is a
+    /// number the wire chose.
+    ///
+    /// It also moves when a list is REPLACED: a flow evicted and reopened under
+    /// the same 5-tuple starts a new stream whose offsets restart, so it gets a
+    /// new id rather than inheriting coordinates that no longer mean anything.
+    pub list_id: u64,
+    /// Where the message sits, read according to [`Self::anchor_space`], and
+    /// comparable only against another record with the same [`Self::list_id`].
     pub anchor: u64,
     /// The length the framing unit DECLARED, in bytes.
     pub unit_len: u64,
@@ -160,7 +183,7 @@ pub fn origin_code(origin: MessageListOrigin) -> u8 {
 }
 
 /// Which FLOW a list belongs to, for the purpose of handing out
-/// [`WzDissectRecordV1::flow_id`].
+/// [`WzDissectRecord::flow_id`].
 ///
 /// The QUIC lists fold into the datagram flow they were recovered from, because
 /// that is what a consumer means by "the flow": one UDP conversation, whatever
@@ -186,6 +209,13 @@ struct Mark {
     /// DISAPPEARS can still be accounted: the difference against `drained` is
     /// what went with it.
     seen: u64,
+    /// The id this list's records carry as [`WzDissectRecord::list_id`].
+    ///
+    /// Kept on the mark rather than in a map of its own because it is born and
+    /// dies with the watermark: a slot whose `produced` went backwards is a
+    /// different list, and the round that resets the watermark is exactly the
+    /// round that must hand out a new coordinate space.
+    list_id: u64,
 }
 
 /// R2102 (open-debt item 524) — a dissection that outlives the call that made
@@ -202,7 +232,12 @@ pub struct LiveDissection {
     pushes: usize,
     marks: BTreeMap<(FlowKey, MessageListOrigin), Mark>,
     flow_ids: BTreeMap<(FlowKey, u8), u64>,
-    next_flow_id: u64,
+    /// ONE counter behind BOTH [`WzDissectRecord::flow_id`] and
+    /// [`WzDissectRecord::list_id`], so the two are never the same number by
+    /// accident. Two counters would each start at zero, and a consumer that
+    /// read the wrong field would get a plausible answer for a while — which is
+    /// the failure mode worth spending a few integers to remove.
+    next_id: u64,
     lost: u64,
 }
 
@@ -214,7 +249,7 @@ impl LiveDissection {
             pushes: 0,
             marks: BTreeMap::new(),
             flow_ids: BTreeMap::new(),
-            next_flow_id: 0,
+            next_id: 0,
             lost: 0,
         }
     }
@@ -268,17 +303,17 @@ impl LiveDissection {
     ///
     /// Records come out grouped by list, and each list in produced order. They
     /// are NOT globally sorted by time — a consumer wanting that sorts by
-    /// [`WzDissectRecordV1::ts_ns`], which is on every record for that reason.
+    /// [`WzDissectRecord::ts_ns`], which is on every record for that reason.
     /// Sorting here would mean holding messages back until it was known that
     /// nothing older could still arrive, which on a live link is never.
-    pub fn drain(&mut self, out: &mut [WzDissectRecordV1]) -> usize {
+    pub fn drain(&mut self, out: &mut [WzDissectRecord]) -> usize {
         // Destructured so the walk over `dissection` and the bookkeeping in the
         // three maps are disjoint borrows rather than one borrow of `self`.
         let Self {
             dissection,
             marks,
             flow_ids,
-            next_flow_id,
+            next_id,
             lost,
             ..
         } = self;
@@ -296,19 +331,31 @@ impl LiveDissection {
             // Everything below it has been trimmed away.
             let first_held = produced - held;
 
-            let mark = marks.entry(key).or_insert(Mark {
-                drained: 0,
-                seen: 0,
+            let mark = marks.entry(key).or_insert_with(|| {
+                let id = *next_id;
+                *next_id += 1;
+                Mark {
+                    drained: 0,
+                    seen: 0,
+                    list_id: id,
+                }
             });
 
             // A `produced` that went BACKWARDS is not this list any more: the
             // flow was evicted and another opened under the same key, so the
             // successor's counter starts again. What the predecessor still
             // owed is owed by nobody now.
+            //
+            // The COORDINATE SPACE restarts with it, so the successor gets a
+            // fresh `list_id`. Inheriting the predecessor's would tell a
+            // consumer that byte 0 of a new stream is comparable with byte 0 of
+            // one that has gone, which is the merge this field exists to stop.
             if produced < mark.seen {
                 *lost += mark.seen - mark.drained;
                 mark.drained = 0;
                 mark.seen = 0;
+                mark.list_id = *next_id;
+                *next_id += 1;
             }
 
             // Messages a ceiling discarded before this consumer reached them.
@@ -321,17 +368,18 @@ impl LiveDissection {
             }
             mark.seen = produced;
 
+            let list_id = mark.list_id;
             let flow_id = *flow_ids
                 .entry((flow, flow_table(origin)))
                 .or_insert_with(|| {
-                    let id = *next_flow_id;
-                    *next_flow_id += 1;
+                    let id = *next_id;
+                    *next_id += 1;
                     id
                 });
 
             while mark.drained < produced && written < out.len() {
                 let idx = (mark.drained - first_held) as usize;
-                out[written] = record_of(&list[idx], flow_id, origin, space);
+                out[written] = record_of(&list[idx], flow_id, list_id, origin, space);
                 written += 1;
                 mark.drained += 1;
             }
@@ -370,9 +418,10 @@ impl LiveDissection {
 fn record_of(
     frame: &PassiveFrame,
     flow_id: u64,
+    list_id: u64,
     origin: MessageListOrigin,
     space: AnchorSpace,
-) -> WzDissectRecordV1 {
+) -> WzDissectRecord {
     let mut flags = 0u32;
     if frame.exceeds_negotiated_batch {
         flags |= FLAG_EXCEEDS_NEGOTIATED_BATCH;
@@ -383,7 +432,7 @@ fn record_of(
     if frame.resync.is_some() {
         flags |= FLAG_AFTER_RESYNC;
     }
-    WzDissectRecordV1 {
+    WzDissectRecord {
         ts_ns: match frame.observed_at_ms {
             // Widened back from the millisecond clock this reader keeps. The
             // caller's sub-millisecond digits are gone and the record says so
@@ -393,6 +442,7 @@ fn record_of(
             None => NO_TIMESTAMP,
         },
         flow_id,
+        list_id,
         anchor: frame.stream_offset as u64,
         unit_len: frame.unit_len as u64,
         batch_index: frame.batch_index as u32,

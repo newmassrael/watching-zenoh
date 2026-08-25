@@ -162,9 +162,10 @@ static int check_live_door(void) {
     wz_dissect_live *h = NULL;
     unsigned char frame[64];
     size_t frame_len;
-    wz_dissect_record_v1 records[8];
+    wz_dissect_record records[8];
     size_t written = 999;
     size_t i;
+    uint64_t datagram_list = 0;
     int rc;
 
     /* THE LAYOUT, computed by the C compiler from this header. The Rust side
@@ -172,19 +173,20 @@ static int check_live_door(void) {
      * to change the layout, which is the point -- this is the one output of
      * this library that is raw memory, so a field inserted or widened gives a
      * consumer plausible garbage with no error anywhere. */
-    CHECK(sizeof(wz_dissect_record_v1) == 48,
-          "the record is %zu bytes, expected 48", sizeof(wz_dissect_record_v1));
-    CHECK(offsetof(wz_dissect_record_v1, ts_ns) == 0, "ts_ns offset");
-    CHECK(offsetof(wz_dissect_record_v1, flow_id) == 8, "flow_id offset");
-    CHECK(offsetof(wz_dissect_record_v1, anchor) == 16, "anchor offset");
-    CHECK(offsetof(wz_dissect_record_v1, unit_len) == 24, "unit_len offset");
-    CHECK(offsetof(wz_dissect_record_v1, batch_index) == 32, "batch_index offset");
-    CHECK(offsetof(wz_dissect_record_v1, unit_offset) == 36, "unit_offset offset");
-    CHECK(offsetof(wz_dissect_record_v1, direction) == 40, "direction offset");
-    CHECK(offsetof(wz_dissect_record_v1, anchor_space) == 41, "anchor_space offset");
-    CHECK(offsetof(wz_dissect_record_v1, origin) == 42, "origin offset");
-    CHECK(offsetof(wz_dissect_record_v1, kind) == 43, "kind offset");
-    CHECK(offsetof(wz_dissect_record_v1, flags) == 44, "flags offset");
+    CHECK(sizeof(wz_dissect_record) == 56,
+          "the record is %zu bytes, expected 56", sizeof(wz_dissect_record));
+    CHECK(offsetof(wz_dissect_record, ts_ns) == 0, "ts_ns offset");
+    CHECK(offsetof(wz_dissect_record, flow_id) == 8, "flow_id offset");
+    CHECK(offsetof(wz_dissect_record, list_id) == 16, "list_id offset");
+    CHECK(offsetof(wz_dissect_record, anchor) == 24, "anchor offset");
+    CHECK(offsetof(wz_dissect_record, unit_len) == 32, "unit_len offset");
+    CHECK(offsetof(wz_dissect_record, batch_index) == 40, "batch_index offset");
+    CHECK(offsetof(wz_dissect_record, unit_offset) == 44, "unit_offset offset");
+    CHECK(offsetof(wz_dissect_record, direction) == 48, "direction offset");
+    CHECK(offsetof(wz_dissect_record, anchor_space) == 49, "anchor_space offset");
+    CHECK(offsetof(wz_dissect_record, origin) == 50, "origin offset");
+    CHECK(offsetof(wz_dissect_record, kind) == 51, "kind offset");
+    CHECK(offsetof(wz_dissect_record, flags) == 52, "flags offset");
 
     /* An unknown preset is REFUSED. A consumer that believes it asked for a
      * ceiling must not be handed an unbounded read of a link that never ends. */
@@ -233,7 +235,16 @@ static int check_live_door(void) {
         CHECK(records[i].flags == 0, "an ordinary KeepAlive flags nothing");
         CHECK(records[i].flow_id == records[0].flow_id,
               "one conversation must carry one flow id");
+        CHECK(records[i].list_id == records[0].list_id,
+              "and one message LIST must carry one coordinate space");
     }
+    /* The two ids come off ONE counter, so they cannot collide by accident --
+     * a consumer that read the wrong field would otherwise get a plausible
+     * answer for as long as both happened to be small. */
+    CHECK(records[0].flow_id != records[0].list_id,
+          "flow_id and list_id must never be the same number: %llu",
+          (unsigned long long)records[0].flow_id);
+    datagram_list = records[0].list_id;
 
     /* A drained message must not come back. A watermark that did not advance
      * would hand the same three over forever, which a consumer reads as the
@@ -337,6 +348,14 @@ static int check_live_door(void) {
     /* The 2-byte length prefix framed one message of one byte. */
     CHECK(records[0].unit_len == 1, "unit_len=%llu, expected 1",
           (unsigned long long)records[0].unit_len);
+    /* A DIFFERENT LIST MUST NOT SHARE A COORDINATE SPACE. This stream's
+     * anchors are byte offsets starting at zero and the datagram list's are
+     * packet indices starting at zero; a consumer that grouped the two would
+     * read two distinct messages as one. `anchor_space` says they are read
+     * differently and `list_id` is what says they may not be compared at all. */
+    CHECK(records[0].list_id != datagram_list,
+          "the stream list took the datagram list's id (%llu)",
+          (unsigned long long)datagram_list);
     wz_dissect_live_close(h);
 
     /* A CEILING THAT BITES IS COUNTED, through the shipped preset rather than a
@@ -391,8 +410,13 @@ int main(void) {
      * the rule: five wz_dissect_live_* symbols, AND the memory contract, which
      * now admits exactly one handle that outlives its call. The second half is
      * why the number is the right place to publish it -- a consumer that
-     * refuses a library whose memory rules moved has nothing else to ask. */
-    CHECK(wz_dissect_abi_version() == 11, "abi version is %d, expected 11",
+     * refuses a library whose memory rules moved has nothing else to ask.
+     * R2108 -- 12, for a THIRD reason: the record's LAYOUT changed. `list_id`
+     * widened it 48 -> 56 and moved every field after `flow_id`. A consumer
+     * reading by offset cannot notice that, which is why the revision is where
+     * it is published -- and why the sizeof/offsetof block above is a pin on
+     * THIS side of the boundary rather than a restatement of the Rust one. */
+    CHECK(wz_dissect_abi_version() == 12, "abi version is %d, expected 12",
           wz_dissect_abi_version());
 
     /* A KeepAlive: one header byte, the smallest complete transport message,

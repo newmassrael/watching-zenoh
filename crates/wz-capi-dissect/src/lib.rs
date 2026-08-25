@@ -75,7 +75,7 @@ use wz_session_core::dissect::{dissect_transport_message, to_json};
 
 pub mod live;
 
-pub use live::WzDissectRecordV1;
+pub use live::WzDissectRecord;
 
 /// Success.
 pub const WZ_DISSECT_OK: c_int = 0;
@@ -199,7 +199,59 @@ pub const WZ_DISSECT_NO_TIMESTAMP: u64 = live::NO_TIMESTAMP;
 /// None; takes no arguments and touches no memory.
 #[no_mangle]
 pub extern "C" fn wz_dissect_abi_version() -> c_int {
-    11
+    12
+}
+
+/// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
+///
+/// Fills `out` with `size, align, offset(ts_ns), offset(flow_id),
+/// offset(list_id), offset(anchor), offset(unit_len), offset(batch_index),
+/// offset(unit_offset), offset(direction), offset(anchor_space),
+/// offset(origin), offset(kind), offset(flags)` and returns how many values
+/// the layout has. A null `out` (or a `cap` below that count) writes nothing
+/// and returns the count, so a caller sizes first and reads second.
+///
+/// # Why this exists, and it is not for consumers
+///
+/// The layout was pinned in two places — a Rust `size_of`/`offset_of` test and
+/// a C `sizeof`/`offsetof` block — and BOTH are edited by the same commit that
+/// changes the layout. Two pins that move together are one pin. A round could
+/// therefore widen the struct, update both, and the tree would agree with
+/// itself while the ABI number stayed where it was; that is precisely how the
+/// change item 525 reverted got as far as it did.
+///
+/// This door makes the layout a fact the ARTIFACT reports, which
+/// `scripts/lib/capi_abi_pin.py` reads through ctypes and holds against a pin
+/// that lives beside `EXPECTED_VERSION`. Changing the layout now reds a file
+/// whose next line is the revision number, so the two facts are edited in one
+/// place or not at all.
+///
+/// # Safety
+/// `out` must be null, or writable for `cap` `size_t` values.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_record_layout(out: *mut usize, cap: usize) -> usize {
+    let layout: [usize; 14] = [
+        core::mem::size_of::<live::WzDissectRecord>(),
+        core::mem::align_of::<live::WzDissectRecord>(),
+        core::mem::offset_of!(live::WzDissectRecord, ts_ns),
+        core::mem::offset_of!(live::WzDissectRecord, flow_id),
+        core::mem::offset_of!(live::WzDissectRecord, list_id),
+        core::mem::offset_of!(live::WzDissectRecord, anchor),
+        core::mem::offset_of!(live::WzDissectRecord, unit_len),
+        core::mem::offset_of!(live::WzDissectRecord, batch_index),
+        core::mem::offset_of!(live::WzDissectRecord, unit_offset),
+        core::mem::offset_of!(live::WzDissectRecord, direction),
+        core::mem::offset_of!(live::WzDissectRecord, anchor_space),
+        core::mem::offset_of!(live::WzDissectRecord, origin),
+        core::mem::offset_of!(live::WzDissectRecord, kind),
+        core::mem::offset_of!(live::WzDissectRecord, flags),
+    ];
+    if !out.is_null() && cap >= layout.len() {
+        // SAFETY: the caller promises `out` is writable for `cap` values and
+        // `cap` is at least the length just checked.
+        unsafe { core::ptr::copy_nonoverlapping(layout.as_ptr(), out, layout.len()) };
+    }
+    layout.len()
 }
 
 /// R311y913 (unregistered item 435) — WHAT THIS BUILD CAN READ, as a document.
@@ -1349,12 +1401,12 @@ pub unsafe extern "C" fn wz_dissect_live_push(
 ///
 /// # Safety
 /// `handle` must be a live handle, `out` must point to at least `cap` writable
-/// [`WzDissectRecordV1`], and `written` must be a writable `size_t`. None may be
+/// [`WzDissectRecord`], and `written` must be a writable `size_t`. None may be
 /// null.
 #[no_mangle]
 pub unsafe extern "C" fn wz_dissect_live_drain(
     handle: *mut live::LiveDissection,
-    out: *mut WzDissectRecordV1,
+    out: *mut WzDissectRecord,
     cap: usize,
     written: *mut usize,
 ) -> c_int {
@@ -3427,7 +3479,15 @@ mod tests {
         // second half is the reason this number is the right place to publish
         // the change — a consumer that refuses a library whose memory rules
         // moved has no other way to ask.
-        assert_eq!(wz_dissect_abi_version(), 11);
+        //
+        // R2108 (open-debt item 525) — 12, and for a THIRD reason the two
+        // above do not cover: the record's LAYOUT changed. `list_id` widened
+        // it from 48 bytes to 56 and moved every field after `flow_id`. A
+        // field read by offset cannot notice that, so the revision is the only
+        // place a consumer can be told; `wz_dissect_record_layout` joined the
+        // symbol set in the same change so a gate outside both languages can
+        // hold the layout against a pin that sits beside the revision.
+        assert_eq!(wz_dissect_abi_version(), 12);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -4254,11 +4314,12 @@ mod tests {
     }
 
     /// Drain into a buffer of `cap`, through the ABI.
-    fn drain_live(handle: *mut live::LiveDissection, cap: usize) -> Vec<WzDissectRecordV1> {
+    fn drain_live(handle: *mut live::LiveDissection, cap: usize) -> Vec<WzDissectRecord> {
         let mut buffer = vec![
-            WzDissectRecordV1 {
+            WzDissectRecord {
                 ts_ns: 0,
                 flow_id: 0,
+                list_id: 0,
                 anchor: 0,
                 unit_len: 0,
                 batch_index: 0,
@@ -4293,19 +4354,20 @@ mod tests {
     /// change the layout, which is the point.
     #[test]
     fn the_record_layout_is_the_one_the_header_declares() {
-        assert_eq!(core::mem::size_of::<WzDissectRecordV1>(), 48, "size");
-        assert_eq!(core::mem::align_of::<WzDissectRecordV1>(), 8, "alignment");
-        assert_eq!(core::mem::offset_of!(WzDissectRecordV1, ts_ns), 0);
-        assert_eq!(core::mem::offset_of!(WzDissectRecordV1, flow_id), 8);
-        assert_eq!(core::mem::offset_of!(WzDissectRecordV1, anchor), 16);
-        assert_eq!(core::mem::offset_of!(WzDissectRecordV1, unit_len), 24);
-        assert_eq!(core::mem::offset_of!(WzDissectRecordV1, batch_index), 32);
-        assert_eq!(core::mem::offset_of!(WzDissectRecordV1, unit_offset), 36);
-        assert_eq!(core::mem::offset_of!(WzDissectRecordV1, direction), 40);
-        assert_eq!(core::mem::offset_of!(WzDissectRecordV1, anchor_space), 41);
-        assert_eq!(core::mem::offset_of!(WzDissectRecordV1, origin), 42);
-        assert_eq!(core::mem::offset_of!(WzDissectRecordV1, kind), 43);
-        assert_eq!(core::mem::offset_of!(WzDissectRecordV1, flags), 44);
+        assert_eq!(core::mem::size_of::<WzDissectRecord>(), 56, "size");
+        assert_eq!(core::mem::align_of::<WzDissectRecord>(), 8, "alignment");
+        assert_eq!(core::mem::offset_of!(WzDissectRecord, ts_ns), 0);
+        assert_eq!(core::mem::offset_of!(WzDissectRecord, flow_id), 8);
+        assert_eq!(core::mem::offset_of!(WzDissectRecord, list_id), 16);
+        assert_eq!(core::mem::offset_of!(WzDissectRecord, anchor), 24);
+        assert_eq!(core::mem::offset_of!(WzDissectRecord, unit_len), 32);
+        assert_eq!(core::mem::offset_of!(WzDissectRecord, batch_index), 40);
+        assert_eq!(core::mem::offset_of!(WzDissectRecord, unit_offset), 44);
+        assert_eq!(core::mem::offset_of!(WzDissectRecord, direction), 48);
+        assert_eq!(core::mem::offset_of!(WzDissectRecord, anchor_space), 49);
+        assert_eq!(core::mem::offset_of!(WzDissectRecord, origin), 50);
+        assert_eq!(core::mem::offset_of!(WzDissectRecord, kind), 51);
+        assert_eq!(core::mem::offset_of!(WzDissectRecord, flags), 52);
     }
 
     /// R2102 — THE HANDLE OUTLIVES THE CALL, WHICH IS THE WHOLE POINT: three
@@ -4519,9 +4581,10 @@ mod tests {
             handle.push(LINKTYPE_ETHERNET, WZ_DISSECT_NO_TIMESTAMP, &packet);
         }
 
-        let mut buffer = [WzDissectRecordV1 {
+        let mut buffer = [WzDissectRecord {
             ts_ns: 0,
             flow_id: 0,
+            list_id: 0,
             anchor: 0,
             unit_len: 0,
             batch_index: 0,

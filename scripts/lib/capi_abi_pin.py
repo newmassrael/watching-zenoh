@@ -50,7 +50,30 @@ import subprocess
 import sys
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 11
+EXPECTED_VERSION = 12
+
+# R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
+# the artifact through `wz_dissect_record_layout`.
+#
+# `size, align, offset(ts_ns), offset(flow_id), offset(list_id),
+# offset(anchor), offset(unit_len), offset(batch_index), offset(unit_offset),
+# offset(direction), offset(anchor_space), offset(origin), offset(kind),
+# offset(flags)`.
+#
+# ## Why the layout is pinned in this file and not only in the two tests
+#
+# It WAS pinned twice already: a Rust `size_of`/`offset_of` test and a C
+# `sizeof`/`offsetof` block. Both live in the crate, and both are edited by the
+# same commit that changes the struct -- so a round could widen the record,
+# update both, and leave the ABI revision where it stood, with the whole tree
+# agreeing with itself. That is not a hypothetical: the change item 525
+# reverted did exactly that, and what caught it was a person reading the
+# header, which is the detector this workspace has learned not to rely on.
+#
+# Two pins that move together are one pin. This third one is different in the
+# only way that matters -- it sits three lines from EXPECTED_VERSION, so the
+# layout and the revision are edited in one place or the gate reds.
+EXPECTED_LAYOUT = (56, 8, 0, 8, 16, 24, 32, 40, 44, 48, 49, 50, 51, 52)
 EXPECTED_SYMBOLS = {
     "wz_dissect_abi_version",
     # R2102 (open-debt item 524) — THE LIVE DOOR. Five symbols, and the first
@@ -70,6 +93,11 @@ EXPECTED_SYMBOLS = {
     "wz_dissect_live_drain",
     "wz_dissect_live_lost",
     "wz_dissect_live_close",
+    # R2108 (open-debt item 525) — the layout door. Exported so THIS gate can
+    # read the record's shape out of the artifact; it is not a door a consumer
+    # has any use for, since a program that includes the header already has the
+    # layout from its own compiler.
+    "wz_dissect_record_layout",
     # R311y913 (unregistered item 435) — what this build can READ, with no
     # capture. The command line had answered it in `--help` for a while and the
     # linked surface could not answer it at all; R311y912 gave
@@ -139,6 +167,30 @@ def revision(cdylib: pathlib.Path) -> int:
     return int(lib.wz_dissect_abi_version())
 
 
+def layout(cdylib: pathlib.Path) -> tuple[int, ...]:
+    """The record layout the BUILT library reports, sized first then read.
+
+    Two calls on purpose: the door answers its own length when handed a null,
+    so the reader never has to hold a copy of the count -- which would be a
+    fourth place the layout is written down, and the point of this arm is that
+    there are already too many.
+    """
+    lib = ctypes.CDLL(str(cdylib))
+    lib.wz_dissect_record_layout.restype = ctypes.c_size_t
+    lib.wz_dissect_record_layout.argtypes = [
+        ctypes.POINTER(ctypes.c_size_t),
+        ctypes.c_size_t,
+    ]
+    count = int(lib.wz_dissect_record_layout(None, 0))
+    if count == 0:
+        return ()
+    buf = (ctypes.c_size_t * count)()
+    written = int(lib.wz_dissect_record_layout(buf, count))
+    if written != count:
+        return ()
+    return tuple(int(v) for v in buf)
+
+
 def main() -> int:
     if not CDYLIB.is_file():
         # A gate that cannot read its input must not report green. The lane
@@ -163,12 +215,40 @@ def main() -> int:
         return 1
 
     version = revision(CDYLIB)
+    shape = layout(CDYLIB)
+    if not shape:
+        print(
+            "capi-abi-pin: FAIL -- `wz_dissect_record_layout` reported no "
+            "layout. An empty answer here reads exactly like agreement, so it "
+            "cannot pass.",
+            file=sys.stderr,
+        )
+        return 1
     added = sorted(symbols - EXPECTED_SYMBOLS)
     removed = sorted(EXPECTED_SYMBOLS - symbols)
     moved = version != EXPECTED_VERSION
+    reshaped = shape != EXPECTED_LAYOUT
 
-    if added or removed or moved:
+    if added or removed or moved or reshaped:
         print("capi-abi-pin: FAIL", file=sys.stderr)
+        if reshaped:
+            print(
+                f"  - record layout is {shape}, pinned at {EXPECTED_LAYOUT}\n"
+                f"    (size, align, then every field offset in declaration "
+                f"order)",
+                file=sys.stderr,
+            )
+            if not moved:
+                print(
+                    "\n  THE LAYOUT MOVED AND THE REVISION DID NOT. A field "
+                    "read by OFFSET cannot notice that; a consumer built "
+                    f"against {EXPECTED_VERSION} would read the new bytes at "
+                    "the old positions and get plausible garbage with no error "
+                    "anywhere. This is the one arm the crate's own two pins "
+                    "cannot raise, because the commit that moves the layout "
+                    "moves them too.",
+                    file=sys.stderr,
+                )
         for s in added:
             print(f"  - exported but not pinned: {s}", file=sys.stderr)
         for s in removed:
@@ -203,7 +283,9 @@ def main() -> int:
 
     print(
         f"  capi-abi-pin: ABI {version}, {len(symbols)} exported symbol(s), "
-        f"set unchanged"
+        f"set unchanged; record is {shape[0]} byte(s) / align {shape[1]} with "
+        f"{len(shape) - 2} field offset(s), read from the artifact and pinned "
+        f"beside the revision"
     )
     return 0
 
