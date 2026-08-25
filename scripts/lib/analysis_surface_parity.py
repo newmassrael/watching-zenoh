@@ -283,6 +283,20 @@ ONLY_CAPI = {
         "wz_dissect_string_free",
         "The memory contract. Not an analysis capability.",
     ),
+    # R2108 (open-debt item 525) — filed here by the round that read the red
+    # this omission caused. The rename round added the symbol and did not name
+    # it, and Layer C0 refused the NEXT push rather than that one, which is the
+    # lag this table's own header calls out.
+    "asking the library where the record's fields are": (
+        "wz_dissect_record_layout",
+        "Not an analysis capability -- it is the record's LAYOUT, and it exists "
+        "because the two pins that used to hold that layout (a Rust test and a "
+        "C `offsetof` block) are edited by the same commit that changes it, so "
+        "two pins that move together are one. A consumer asks the library "
+        "instead. A command line reads fields by NAME out of a document and "
+        "has no offset to be wrong about, so there is nothing here for it to "
+        "have a counterpart of.",
+    ),
     # R2102 (open-debt item 524) — the rest of the live family. The `push` half
     # is in BOTH above, because reading a link a packet at a time is a
     # capability both surfaces have; these four are the shape a LINKING consumer
