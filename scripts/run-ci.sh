@@ -8691,6 +8691,33 @@ layer_c1bn_passive_dissection_features() {
     grep -qE '^test result: ok\. [1-9][0-9]* passed' <<<"$out" || {
         echo "  C1bn FAIL: wz-capture ran no tests"; echo "$out"; return 1; }
 
+    # R2107 (open-debt item 527) — the DECODE-COST instrument, both arms.
+    #
+    # `--selftest` grades the arithmetic between the clock and the report: it
+    # recovers known coefficients from synthetic data and refuses a degenerate
+    # fit. That half is deterministic and is what a lane can honestly assert.
+    #
+    # `--quick` then RUNS the sweep, and its value is the POPULATION check
+    # rather than any timing: every size above one message's width must decode
+    # at least one message per packet. That guard caught two wrong sweeps while
+    # this was being written -- a junk payload the message layer never looked
+    # at, and a fixed TCP `seq` that made 19 999 of 20 000 packets
+    # retransmissions -- both of which produced confident, meaningless numbers.
+    #
+    # NO THRESHOLD IS ASSERTED on the timings. A wall-clock ceiling on a shared
+    # runner is a flake generator, and an arbitrary one is a population of zero
+    # wearing a unit. The numbers land in the log for a person.
+    out="$(cd crates && cargo bench -p wz-capture --bench decode_cost --quiet -- --selftest 2>&1)" \
+        || { echo "$out"; return 1; }
+    grep -qE 'decode-cost selftest: ([0-9]+)/\1 arm\(s\) pass' <<<"$out" || {
+        echo "  C1bn FAIL: the decode-cost selftest did not pass every arm"
+        echo "$out"; return 1; }
+    out="$(cd crates && cargo bench -p wz-capture --bench decode_cost --quiet -- --quick 2>&1)" \
+        || { echo "$out"; return 1; }
+    grep -q 'bounded (live tap): fixed' <<<"$out" || {
+        echo "  C1bn FAIL: the decode-cost sweep produced no fit"; echo "$out"; return 1; }
+    echo "$out"
+
     # R2054 (open-debt item 384) — the BSD address-family table, ARMED.
     #
     # `wz_capture::link`'s `BSD_AF_INET6` was decided once by hand against

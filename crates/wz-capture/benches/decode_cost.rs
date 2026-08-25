@@ -75,7 +75,14 @@ const SIZES: &[usize] = &[0, 64, 256, 512, 1024, 1400];
 /// needs the noise down. Neither number is a threshold — they set how long the
 /// clock is open, not what it is allowed to say.
 const ITERS: usize = 2_000;
-const ITERS_QUICK: usize = 100;
+const ITERS_QUICK: usize = 50;
+
+/// Wire bytes per KeepAlive: `len_lo, len_hi, T_MID_KEEP_ALIVE`.
+///
+/// Named because the population floor is DERIVED from it — `iters * size /
+/// UNIT_LEN` messages must come out of the sweep — so it is one fact rather
+/// than a `3` in the payload builder and another `3` in the check.
+const UNIT_LEN: usize = 3;
 
 /// `payload_len` bytes of REAL zenoh session traffic: back-to-back
 /// length-prefixed KeepAlives, truncated to length.
@@ -92,6 +99,7 @@ const ITERS_QUICK: usize = 100;
 /// per-message decode a live tap actually pays.
 fn zenoh_payload(payload_len: usize) -> Vec<u8> {
     let unit = [1u8, 0, wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+    debug_assert_eq!(unit.len(), UNIT_LEN);
     let mut out = Vec::with_capacity(payload_len);
     while out.len() < payload_len {
         let take = unit.len().min(payload_len - out.len());
@@ -331,21 +339,26 @@ fn measure(iters: usize) -> i32 {
         let c = copy_ns_per_packet(size, iters);
         println!("  {size:>7}   {d:>14.1}   {u:>16.1}   {c:>13.1}   {produced:>8}");
         unbounded.push((size as f64, u));
-        // A payload too short to hold one 3-byte KeepAlive legitimately decodes
-        // nothing. Above that, EVERY packet carries at least one message, so
-        // the counter must clear `iters` — not merely exceed zero, which is the
-        // bar the retransmission bug sailed over with one packet's worth of
-        // messages standing in for twenty thousand packets'.
-        if size >= 3 && produced < iters as u64 {
-            starved.push((size, produced));
+        // THE FLOOR IS DERIVED FROM THE PAYLOAD, not picked. Every byte pushed
+        // belongs to a 3-byte KeepAlive, so `iters * size / 3` messages must
+        // come out; the slack is one per packet, for the unit straddling a
+        // packet boundary that only completes with the next one.
+        //
+        // `produced > 0` was the first form of this and it was too weak: the
+        // retransmission bug delivered ONE packet's 466 messages, which cleared
+        // zero easily and even cleared `iters` at the larger sizes. A floor that
+        // does not scale with the sweep is a floor the sweep can walk under.
+        let expected = (iters * size / UNIT_LEN) as u64;
+        if expected > 0 && produced + (iters as u64) < expected {
+            starved.push((size, produced, expected));
         }
         decode.push((size as f64, d));
         copy.push((size as f64, c));
     }
     if !starved.is_empty() {
         println!(
-            "decode-cost FAIL: (size, messages) {starved:?} decoded fewer than \
-             {iters} message(s), one per packet being the floor. The sweep \
+            "decode-cost FAIL: (size, decoded, expected) {starved:?}. Every \
+             byte pushed belongs to a {UNIT_LEN}-byte message, so the sweep \
              timed something other than decode -- duplicate detection, a \
              rejected checksum, or a flow that never opened."
         );
