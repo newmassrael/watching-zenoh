@@ -6589,7 +6589,7 @@ mod router_hat_quic_cert_tests {
             quic_key: Some(key_path.clone()),
         };
         let result = run_router_hat_until(
-            "quic/127.0.0.1:0",
+            std::slice::from_ref(&"quic/127.0.0.1:0".to_string()),
             &[],
             None,
             None,
@@ -6645,7 +6645,7 @@ mod router_hat_failfast_tests {
         let listen = format!("unixpipe/{base}");
         // R311y406 — cert-free unixpipe: the AcceptCertPaths quartet is all-None.
         let err = run_router_hat(
-            &listen,
+            std::slice::from_ref(&listen),
             &[],
             None,
             None,
@@ -6746,7 +6746,7 @@ mod peer_quic_cert_tests {
         };
 
         let result = run_peer_until(
-            "quic/127.0.0.1:0",
+            std::slice::from_ref(&"quic/127.0.0.1:0".to_string()),
             &[],
             &opts,
             &interceptors,
@@ -6846,7 +6846,7 @@ mod peer_failfast_tests {
 
         let listen = format!("unixpipe/{base}");
         let err = run_peer(
-            &listen,
+            std::slice::from_ref(&listen),
             &[],
             &opts,
             &interceptors,
