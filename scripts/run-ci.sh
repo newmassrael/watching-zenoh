@@ -1982,6 +1982,15 @@ PY
     # leave un-updated, failing in BOTH directions, with a REASON on every row
     # that only one surface reaches. Enforcement MEASURED both ways this round
     # (a stale symbol row, and a flag the table did not name).
+    #
+    # R2113 (open-debt item 531) — it now carries a FOURTH axis, and that one is
+    # not about capabilities: every row names the requirement NUMBERS it feeds,
+    # and every number of the gated delivery tranche must be reached by a row
+    # whose handle is still live or be declared unreached with its reason. The
+    # question "how far has the delivered scope come" had no instrument at all
+    # and was answered in prose, which was measured wrong in two places on the
+    # day the item was filed. Numbers only, by design: nothing else of the
+    # delivery document is carried, and the axis works without it.
     python3 scripts/lib/analysis_surface_parity.py || return 1
     # R311y887 (open-debt item 361) — and what a bounded read's OUTPUT must
     # contain, which is the gate above one layer in.

@@ -35,11 +35,25 @@ directions.
 5. R311y912 (unregistered item 409) — every ALL-CAPS SELF-REPORT SECTION in
    `USAGE` is named in `SELF_REPORT`, and every declared section is still
    there.
+6. R2113 (open-debt item 531) — DELIVERY SCOPE against surface. Every row
+   carries the requirement NUMBERS the capability feeds, and every number of
+   the gated delivery tranche must be reached by at least one row whose handle
+   is still live, or be declared unreached with its reason.
 
 (3), (4) and (5) are the half that matters. A new capability added to ONE
 surface now has to be written down here, and writing it down is where somebody
 has to answer "and the other surface?" -- in prose, at the row, where the next
 reader finds it.
+
+(6) is the axis that is not about capabilities at all. The five above ask
+`capability x surface` and none of them can answer "how far has the delivered
+SCOPE come", which was therefore answered in prose -- and the prose rotted
+unwatched, in two places at once, which is the item that put this here. A
+requirement number appears on the row of the capability that feeds it, so the
+question is asked where the next reader already is, and the answer is derived:
+a row credits its number only while its flag is still in `USAGE` and its symbol
+still in the ABI's source. A first-tranche number that no live row names and no
+declaration excuses is a FAILURE, so silence cannot be green.
 
 (5) exists because a capability the command line delivers as a SECTION rather
 than as a flag was in NEITHER of the two populations above. `LINK TYPES READ`
@@ -80,36 +94,45 @@ CAPI = ROOT / "crates" / "wz-capi-dissect" / "src" / "lib.rs"
 #
 # BOTH surfaces reach these.
 BOTH = {
-    "keyexpr plane": ("--throughput", "wz_dissect_pcap_census"),
-    "query plane": ("--exchanges", "wz_dissect_pcap_census"),
-    "node plane": ("--nodes", "wz_dissect_pcap_census"),
+    "keyexpr plane": ("--throughput", "wz_dissect_pcap_census", (8, 16, 17)),
+    "query plane": ("--exchanges", "wz_dissect_pcap_census", (19,)),
+    "node plane": ("--nodes", "wz_dissect_pcap_census", (12,)),
     # R311y869 — the INTEREST plane, on BOTH surfaces from the round it landed,
     # which is the point of this table existing before the capability did. It is
     # a census plane, so the ABI reaches it through the same door the other four
     # use; the CLI needs its own flag because `--census` is the RECORD planes and
     # this one folds the control plane (the same split `--nodes` carries).
-    "interest plane": ("--interests", "wz_dissect_pcap_census"),
-    "payload plane": ("--payloads", "wz_dissect_pcap_census"),
-    "all planes at once": ("--census", "wz_dissect_pcap_census"),
-    "selector over the planes": ("--select", "wz_dissect_pcap_census_where"),
-    "flow listing": ("--flows", "wz_dissect_pcap_summary"),
-    "a machine-readable document": ("--json", "wz_dissect_pcap_census"),
+    "interest plane": ("--interests", "wz_dissect_pcap_census", ()),
+    "payload plane": ("--payloads", "wz_dissect_pcap_census", (15,)),
+    # R2113 — the UNION row carries no requirement number ON PURPOSE. `--census`
+    # reaches every plane above, so restating their numbers here would credit a
+    # requirement twice and leave the scope axis green after the plane's own
+    # flag was deleted. A member's number lives at the member.
+    "all planes at once": ("--census", "wz_dissect_pcap_census", ()),
+    "selector over the planes": ("--select", "wz_dissect_pcap_census_where", (11,)),
+    "flow listing": ("--flows", "wz_dissect_pcap_summary", ()),
+    "a machine-readable document": ("--json", "wz_dissect_pcap_census", ()),
     # R311y855 — moved here from ONLY_CLI. The ABI now walks the messages
     # itself, which is the only shape that could work: a stream message's bytes
     # live in the reassembled per-direction stream, so no caller holding the
     # capture file can slice one out.
-    "field spans over a capture": ("--fields", "wz_dissect_pcap_fields"),
-    "message listing": ("--messages", "wz_dissect_pcap_fields"),
-    "bound on messages listed": ("--max-messages", "wz_dissect_pcap_fields"),
+    "field spans over a capture": ("--fields", "wz_dissect_pcap_fields", (5, 8, 10)),
+    "message listing": ("--messages", "wz_dissect_pcap_fields", (9,)),
+    "bound on messages listed": ("--max-messages", "wz_dissect_pcap_fields", ()),
     # R311y856 — moved here from ONLY_CLI, where the reason was an OPEN DEBT.
     # The built-in decoders and the declaration dialect lived in `wz-analyze`,
     # which the cdylib must not depend on (it carries `wz-tls-record`, and
     # through it `ring`), so the seam this table named as public had nothing on
     # the ABI side able to build one. Both moved beside the map.
-    "payload format decoding": ("--payload-format", "wz_dissect_pcap_fields_with_payloads"),
+    "payload format decoding": (
+        "--payload-format",
+        "wz_dissect_pcap_fields_with_payloads",
+        (15,),
+    ),
     "naming a decoded payload field": (
         "--payload-name",
         "wz_dissect_pcap_fields_with_payloads",
+        (15,),
     ),
     # R311y857 — moved here from ONLY_CAPI, where it was the last OPEN DEBT.
     #
@@ -122,7 +145,13 @@ BOTH = {
     # VERIFIED or were ABSENT (a failure count with no denominator). `--health`
     # reaches both and renders `wz-capture`'s own grouping, byte for byte the
     # document the ABI embeds.
-    "loss and health counters": ("--health", "wz_dissect_pcap_summary"),
+    # R2113 — this row is the named reach path for FOUR requirement numbers, and
+    # two of them are first-tranche. `--health` is the only door that renders the
+    # fragment CHAIN group, and the sequence group beside it carries
+    # `sn_without_resolution` (`crates/wz-capture/src/lib.rs:2954`), which is how
+    # a consumer learns that no handshake was observed and therefore that the
+    # negotiated values were never injected into this dissection.
+    "loss and health counters": ("--health", "wz_dissect_pcap_summary", (6, 7, 18, 20)),
     # R311y884 (open-debt item 234) — reading a capture under the LIVE-TAP
     # ceilings. The ABI had this from R311y748 and the command line did not, so
     # `dropped_by_limits` -- the group that says what the ceilings cost -- was
@@ -144,7 +173,11 @@ BOTH = {
     #
     # The gap the false residue was pointing at is real and is one document
     # over: the CENSUS was unbounded and silent. That is the row below.
-    "reading under the live-tap bounds": ("--bounded", "wz_dissect_pcap_summary_bounded"),
+    "reading under the live-tap bounds": (
+        "--bounded",
+        "wz_dissect_pcap_summary_bounded",
+        (),
+    ),
     # R311y885 — the ANALYSIS planes under those same ceilings, which is a
     # SECOND capability and not the row above restated. The row above is the
     # TRANSPORT document; this is the one a live tap actually reads, and until
@@ -157,14 +190,22 @@ BOTH = {
     # That asymmetry is a property of the two surfaces rather than a gap in
     # either, and it is written here so the next reader does not read the
     # repeated flag as a copy-paste.
-    "bounded read of the analysis planes": ("--bounded", "wz_dissect_pcap_census_bounded"),
+    "bounded read of the analysis planes": (
+        "--bounded",
+        "wz_dissect_pcap_census_bounded",
+        (),
+    ),
     # R311y887 — a NARROWED census under a ceiling. On the command line it is
     # `--select` and `--bounded` in the same argv, which needed nothing new;
     # on the ABI it needed a door, and the door takes the preset as an ARGUMENT
     # rather than being a fourth twin. `--select` is the flag named here because
     # it is the half that was missing from the ABI's bounded reach, and the
     # `--bounded` rows above already carry the other half.
-    "a narrowed census under a ceiling": ("--select", "wz_dissect_pcap_census_where_limited"),
+    "a narrowed census under a ceiling": (
+        "--select",
+        "wz_dissect_pcap_census_where_limited",
+        (11,),
+    ),
     # R311y917 (unregistered item 366) — the FIELD LAYER under a ceiling, which
     # is the plane that walks every message in the capture and was the last one
     # the ABI could only read unbounded. On the command line it is `--fields`
@@ -174,7 +215,11 @@ BOTH = {
     # fourth field twin. `--fields` is the flag named here for the reason the
     # census row names `--select`: it is the half that was missing from the
     # ABI's bounded reach.
-    "the field layer under a ceiling": ("--fields", "wz_dissect_pcap_fields_limited"),
+    "the field layer under a ceiling": (
+        "--fields",
+        "wz_dissect_pcap_fields_limited",
+        (5,),
+    ),
     # R2102 (open-debt item 524) — READING A LINK INCREMENTALLY, which is a
     # capability and not a transport detail: a dissection that survives between
     # packets is the difference between watching a system and re-reading a
@@ -189,7 +234,7 @@ BOTH = {
     # cut the stream into windows and lose every message that straddles a cut.
     # What was true is the half about SOCKETS -- see the row that kept, in
     # ONLY_CLI, with that half of the reason and nothing else.
-    "incremental read of a link": ("--interface", "wz_dissect_live_push"),
+    "incremental read of a link": ("--interface", "wz_dissect_live_push", ()),
 }
 
 # Reachable ONLY from the command line, each with the reason it is not on the
@@ -203,6 +248,7 @@ ONLY_CLI = {
         "Decryption Secrets Blocks are already used by every door here. Widening "
         "the ABI to take key material is a decision about handling secrets across "
         "an FFI boundary, not an omission.",
+        (),
     ),
     "declaring a UDP port to be QUIC": (
         "--quic",
@@ -210,14 +256,17 @@ ONLY_CLI = {
         "that begins mid-connection, and the report says which flows were declared "
         "rather than recognised. A C consumer wanting it would want a whole "
         "declaration struct, which this ABI's design refuses (see its module doc).",
+        (),
     ),
     "the short-header connection id length": (
         "--quic-cid-len",
         "Rides the row above; it is meaningless without a QUIC declaration.",
+        (),
     ),
     "declaring a link type to be raw serial": (
         "--serial",
         "DELIBERATE, on the same argument as the QUIC declaration above.",
+        (),
     ),
     "OPENING a live tap": (
         "--interface",
@@ -229,6 +278,7 @@ ONLY_CLI = {
         "packets, and since R2102 it has one: see `incremental read of a link` "
         "in BOTH. The reason this row used to carry claimed that door already "
         "existed, and it did not. Round 1999 (item 470), corrected by item 524.",
+        (),
     ),
     "a census plane as CSV rows": (
         "--csv",
@@ -240,12 +290,14 @@ ONLY_CLI = {
         "`wz_capture::census_csv` reads the same typed tables `census_json` "
         "does, so an ABI symbol is one call away if a consumer ever wants the "
         "bytes rather than the fields. Round 2001 (item 473).",
+        (22,),
     ),
     "bounding a live read": (
         "--for",
         "Rides the row above; a bound is meaningless without a tap to bound, "
         "and the parser refuses it alone for that reason. A C consumer driving "
         "its own tap owns its own stop rule.",
+        (),
     ),
 }
 
@@ -256,16 +308,19 @@ ONLY_CAPI = {
         "DELIBERATE. A cap is a statement about the CALLER's memory, and the "
         "command line reads a file, which ends. `DissectionLimits::for_live_tap` "
         "exists for a tap, not for a terminal.",
+        (),
     ),
     "one message's field tree": (
         "wz_dissect_transport_message",
         "The CLI walks messages it found itself (`--fields`); this takes bytes the "
         "CALLER holds. Two different questions rather than one missing flag.",
+        (5,),
     ),
     "diagnosing a selector without a capture": (
         "wz_dissect_selector_diagnose",
         "DELIBERATE. It answers 'is this expression valid, and if not where' while "
         "it is being TYPED. A command line finds that out by running.",
+        (11,),
     ),
     "diagnosing a declaration text without a capture": (
         "wz_dissect_declarations_diagnose",
@@ -273,15 +328,18 @@ ONLY_CAPI = {
         "second text a person types. The command line refuses a bad declaration at "
         "parse time and names the flag, which is the same answer delivered by "
         "running; a UI needs it before there is anything to run.",
+        (15,),
     ),
     "the ABI revision": (
         "wz_dissect_abi_version",
         "Not an analysis capability -- it is how a consumer refuses a library whose "
         "memory rules moved. A command line has no such question.",
+        (),
     ),
     "releasing a returned string": (
         "wz_dissect_string_free",
         "The memory contract. Not an analysis capability.",
+        (),
     ),
     # R2108 (open-debt item 525) — filed here by the round that read the red
     # this omission caused. The rename round added the symbol and did not name
@@ -296,6 +354,7 @@ ONLY_CAPI = {
         "instead. A command line reads fields by NAME out of a document and "
         "has no offset to be wrong about, so there is nothing here for it to "
         "have a counterpart of.",
+        (),
     ),
     # R2102 (open-debt item 524) — the rest of the live family. The `push` half
     # is in BOTH above, because reading a link a packet at a time is a
@@ -308,6 +367,7 @@ ONLY_CAPI = {
         "and none to give back. This is also the ONE exception to this ABI's "
         "memory rule, which is why it is a symbol a consumer can see rather "
         "than a property it has to infer.",
+        (),
     ),
     "decoded messages as BINARY records": (
         "wz_dissect_live_drain",
@@ -318,6 +378,7 @@ ONLY_CAPI = {
         "round trip per message is work proportional to the traffic for fields "
         "that never vary. Records into a CALLER's buffer and not a callback is "
         "what keeps `no callbacks run` true (see item 237).",
+        (),
     ),
     "what a live ceiling discarded before the CONSUMER took it": (
         "wz_dissect_live_lost",
@@ -327,16 +388,87 @@ ONLY_CAPI = {
         "consumer drained it, which is a number that can only exist where "
         "there is a consumer draining incrementally. A terminal reading a file "
         "has no such gap to fall into.",
+        (),
     ),
     "releasing a live handle": (
         "wz_dissect_live_close",
         "The other half of the memory contract, like `wz_dissect_string_free`. "
         "Not an analysis capability.",
+        (),
     ),
 }
 
 # CLI flags that are not capabilities of the analysis surface at all.
 NOT_A_CAPABILITY = {"-h, --help"}
+
+
+# R2113 (open-debt item 531) — the FOURTH axis: DELIVERY SCOPE against surface.
+#
+# The three axes above are all `capability x surface`. None of them says a word
+# about the delivered SCOPE, so "how far has the first tranche come" was
+# answerable only in prose -- and the prose rotted, which is the whole reason
+# this axis exists. The agent-side note that used to answer it was measured
+# wrong in two separate places on the day this was filed: it counted the C
+# doors at a figure the source refutes, and it called two capabilities absent
+# from both surfaces that are today present on one. Nothing aged either
+# sentence and nothing caught it. A gate ages.
+#
+# The scope is a numbering and nothing else here. Requirement numbers are the
+# ONLY thing this file may carry from the delivery document -- no wording, no
+# titles, no groupings -- and the axis is designed so that numbers alone are
+# enough for it to work.
+#
+# The tranche membership is a CONTRACT rather than a measurement, so it is
+# declared. What is derived is everything a declaration can get wrong on its
+# own:
+#
+#   * the numbering must be a PARTITION -- contiguous from 1, every number in
+#     exactly one tranche. A number quietly dropped from the scope leaves a
+#     hole and the hole fails, so shrinking the scope cannot be done by
+#     deleting a line.
+#   * a number's REACH is computed from the live parse of the two surfaces,
+#     not from this table: a row credits its number only while the flag is
+#     still in `USAGE` and the symbol still in the ABI's source. A row that
+#     goes stale takes its number red with it.
+#   * an empty population FAILS, in three places -- no tranche, no annotated
+#     row, no numbering.
+DELIVERY_TRANCHES = {
+    1: (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11),
+    2: (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26),
+}
+
+# The tranche this axis GATES. The second is declared above so that the
+# partition check has something to be a partition OF -- a row may name one of
+# its numbers and the membership check will accept it -- but it is not gated,
+# because a half-annotated second tranche would print a coverage figure that
+# under-reports, and a confident under-report is what this item was filed
+# about.
+GATED_TRANCHE = 1
+
+# First-tranche numbers NO capability of either surface reaches, each with the
+# reason. This is the half that makes silence impossible: a number with no row
+# and no entry here FAILS, so "nobody wrote it down" cannot read as green.
+#
+# It fails in the other direction too. The moment a row starts naming one of
+# these numbers, the entry here is a contradiction and the gate says so --
+# which is what keeps a decision from outliving the fact under it.
+NO_REACH_PATH = {
+    1: "OUT OF SURFACE. No capability of either consumption surface feeds this "
+    "number: nothing in it is a dissection of captured bytes, so there is no "
+    "flag for it to be asked for by and no symbol for it to be linked "
+    "through. The entry exists so that the absence is a statement.",
+    2: "OUT OF SURFACE, and reached elsewhere in this tree rather than nowhere. "
+    "What feeds it is configuration EMISSION -- "
+    "`crates/wz-runtime-tokio/src/zenoh_config.rs` -- which neither of these "
+    "two surfaces reads or writes; they take capture bytes and hand back "
+    "documents. Its own instrument is `scripts/lib/deepenable_audit.py`, and "
+    "answering for it here would put one fact under two labels.",
+    3: "OUT OF SURFACE, on the same argument as the number above. What feeds it "
+    "is the deployment manifest and its checker (`deploy/*.yaml`, "
+    "`scripts/validate-deploy.sh`), which is not a dissection either.",
+    4: "OUT OF SURFACE. Same as the first number here: not decode work, so "
+    "neither a flag nor a symbol is the shape it would arrive in.",
+}
 
 
 def cli_flags() -> set[str]:
@@ -389,6 +521,7 @@ SELF_REPORT = {
         "An unread capture reports `messages decoded: 0`, and so does a capture "
         "with no zenoh traffic, so a consumer that cannot ask which link types "
         "this build decodes cannot tell its operator to re-capture.",
+        (26,),
     ),
     "EXT BODIES READ:": (
         "wz_dissect_readable_surfaces",
@@ -396,6 +529,7 @@ SELF_REPORT = {
         "rendered as `value`, which reads exactly like `there was no structure "
         "here`. Both surfaces now answer which ones it opens, from the same "
         "dispatch-driven renderer.",
+        (10,),
     ),
 }
 
@@ -415,6 +549,153 @@ def cli_self_report_headings() -> set[str]:
     return set(re.findall(r"^([A-Z][A-Z /]*:)$", block.group(1), re.M))
 
 
+# R2113 (open-debt item 531) — the scope axis's machinery.
+#
+# Every row of the four tables above, flattened to the two handles a consumer
+# can reach it by and the requirement numbers it feeds. A self-report row's CLI
+# handle is its SECTION HEADING, which is exactly what a consumer reads it by,
+# so it credits reach on the same terms a flag does.
+def rows() -> list[tuple[str, str | None, str | None, tuple[int, ...]]]:
+    out: list[tuple[str, str | None, str | None, tuple[int, ...]]] = []
+    for name, (flag, symbol, scope) in BOTH.items():
+        out.append((name, flag, symbol, scope))
+    for name, (flag, _reason, scope) in ONLY_CLI.items():
+        out.append((name, flag, None, scope))
+    for name, (symbol, _reason, scope) in ONLY_CAPI.items():
+        out.append((name, None, symbol, scope))
+    for heading, (symbol, _reason, scope) in SELF_REPORT.items():
+        out.append((heading, heading, symbol, scope))
+    return out
+
+
+def annotated_rows() -> int:
+    """How many rows name at least one requirement number."""
+    return sum(1 for _, _, _, scope in rows() if scope)
+
+
+def req(number: int) -> str:
+    """A requirement's NUMBER, which is the only thing this file carries of it.
+
+    The prefix is THIS repository's, deliberately, and the confidentiality gate
+    is what settled that: the numbering scheme's own name is protected
+    vocabulary, so writing it here would have made this file unpushable. The
+    number is the whole of what crosses over, and the axis was designed to work
+    on nothing else -- which is what let the rename cost one line.
+    """
+    return f"REQ-{number:03d}"
+
+
+def scope_axis(
+    flags: set[str], symbols: set[str], headings: set[str]
+) -> tuple[list[str], int, int, int]:
+    """Delivery scope against surface, measured in BOTH directions.
+
+    Returns the findings and, for the banner, how many requirements the gated
+    tranche holds, how many are reached by a named path, and how many are
+    declared unreached.
+    """
+    findings: list[str] = []
+
+    # (a) The numbering must be a PARTITION. This is what stops the declaration
+    #     being quietly shrunk: a number removed from a tranche leaves a hole in
+    #     a contiguous range, and the hole is what fails.
+    numbering: list[int] = []
+    for tranche, nums in sorted(DELIVERY_TRANCHES.items()):
+        if not nums:
+            findings.append(
+                f"delivery tranche {tranche} is declared with no requirement in "
+                f"it, so whatever it was meant to hold is now unmeasured"
+            )
+        numbering.extend(nums)
+    space = set(numbering)
+    duplicated = sorted(n for n in space if numbering.count(n) > 1)
+    if duplicated:
+        findings.append(
+            f"requirement(s) {', '.join(req(n) for n in duplicated)} are in more "
+            f"than one delivery tranche, so which tranche is gated depends on "
+            f"reading order"
+        )
+    if not space:
+        findings.append(
+            "no requirement number is declared at all, so this axis would be "
+            "green over an empty set -- which is indistinguishable from every "
+            "requirement being reached"
+        )
+    else:
+        hole = sorted(set(range(1, max(space) + 1)) - space)
+        if hole:
+            findings.append(
+                f"the delivery numbering has a hole at "
+                f"{', '.join(req(n) for n in hole)}. The scope is contiguous, so "
+                f"a missing number is a requirement that was dropped from this "
+                f"table rather than from the delivery -- a scope cannot be shrunk "
+                f"by deleting a line"
+            )
+
+    # (b) Each number's REACH, derived from the live parse of the two surfaces
+    #     rather than from this table. A row credits its number only while the
+    #     handle it names is still there.
+    reach: dict[int, list[str]] = {}
+    for name, cli_handle, capi_handle, scope in rows():
+        for number in scope:
+            if number not in space:
+                findings.append(
+                    f"row `{name}` names {req(number)} and no delivery tranche "
+                    f"declares that number -- either the scope moved or this is "
+                    f"a typo, and both are answered here"
+                )
+                continue
+            if cli_handle and (cli_handle in flags or cli_handle in headings):
+                reach.setdefault(number, []).append(f"CLI `{cli_handle}` ({name})")
+            if capi_handle and capi_handle in symbols:
+                reach.setdefault(number, []).append(f"ABI `{capi_handle}` ({name})")
+
+    if not annotated_rows():
+        findings.append(
+            "not one row names a requirement number, so every requirement below "
+            "would be reported unreached for a reason that is about this file "
+            "rather than about the surfaces"
+        )
+
+    # (c) The gated tranche, in both directions.
+    gated = tuple(DELIVERY_TRANCHES.get(GATED_TRANCHE, ()))
+    if not gated:
+        findings.append(
+            f"delivery tranche {GATED_TRANCHE} is the one this axis gates and it "
+            f"holds no requirement, so the axis would pass over an empty "
+            f"population"
+        )
+    reached = declared = 0
+    for number in sorted(gated):
+        paths = sorted(set(reach.get(number, [])))
+        note = NO_REACH_PATH.get(number)
+        if paths and note:
+            findings.append(
+                f"{req(number)} is declared to have no reach path and it HAS "
+                f"one: {'; '.join(paths)}. The declaration has outlived the fact "
+                f"under it -- drop the entry from NO_REACH_PATH"
+            )
+        elif paths:
+            reached += 1
+        elif note:
+            declared += 1
+        else:
+            findings.append(
+                f"{req(number)} is in delivery tranche {GATED_TRANCHE} and no row "
+                f"names it with a live handle, nor does NO_REACH_PATH say why "
+                f"none does. Name it on the row of the capability that feeds it, "
+                f"or declare it -- a requirement nobody wrote down reads exactly "
+                f"like one that is delivered"
+            )
+    for number in sorted(set(NO_REACH_PATH) - set(gated)):
+        findings.append(
+            f"NO_REACH_PATH declares {req(number)}, which delivery tranche "
+            f"{GATED_TRANCHE} does not hold. A declaration about a number this "
+            f"axis does not gate is prose wearing a table's clothes"
+        )
+    return findings, len(gated), reached, declared
+
+
 def main() -> int:
     flags = cli_flags()
     symbols = capi_symbols()
@@ -427,15 +708,15 @@ def main() -> int:
         )
         return 1
 
-    named_flags = {f for f, _ in BOTH.values() if f} | set(NOT_A_CAPABILITY)
-    named_flags |= {f for f, _ in ONLY_CLI.values()}
-    named_symbols = {s for _, s in BOTH.values() if s}
-    named_symbols |= {s for s, _ in ONLY_CAPI.values()}
+    named_flags = {f for f, _, _ in BOTH.values() if f} | set(NOT_A_CAPABILITY)
+    named_flags |= {f for f, _, _ in ONLY_CLI.values()}
+    named_symbols = {s for _, s, _ in BOTH.values() if s}
+    named_symbols |= {s for s, _, _ in ONLY_CAPI.values()}
     # R311y913 — a self-report row's symbol is a NAMED symbol like any other.
     # Measured by leaving it out for one run: the symbol axis then reported
     # `wz_dissect_readable_surfaces` as unnamed while the section axis reported
     # it as answered, which is two halves of one table disagreeing.
-    named_symbols |= {s for s, _ in SELF_REPORT.values() if s}
+    named_symbols |= {s for s, _, _ in SELF_REPORT.values() if s}
 
     findings: list[str] = []
     for flag in sorted(named_flags - flags):
@@ -481,12 +762,17 @@ def main() -> int:
             f"is none -- a section is a capability a consumer reads, and until "
             f"this axis existed neither of the two here was ever asked about"
         )
-    for symbol, _ in SELF_REPORT.values():
+    for symbol, _, _ in SELF_REPORT.values():
         if symbol and symbol not in symbols:
             findings.append(
                 f"SELF_REPORT names C symbol `{symbol}` and wz-capi-dissect does "
                 f"not export it -- the row is stale"
             )
+
+    # R2113 (open-debt item 531) — the SCOPE axis, run beside the three above so
+    # that one run answers both questions a consumer has.
+    scope_findings, gated, reached, declared = scope_axis(flags, symbols, headings)
+    findings.extend(scope_findings)
 
     if findings:
         print("analysis-surface-parity: FAIL", file=sys.stderr)
@@ -515,9 +801,15 @@ def main() -> int:
     one_sided = (
         list(ONLY_CLI.values()) + list(ONLY_CAPI.values()) + list(SELF_REPORT.values())
     )
+    # R2113 — the scope axis's own declarations answer to the SAME rule. A
+    # first-tranche number whose reason argues it is open without leading with
+    # the tag would be counted as a settled decision, which is the one error
+    # this whole block exists to refuse.
+    tagged_reasons = [reason for _, reason, _ in one_sided]
+    tagged_reasons += list(NO_REACH_PATH.values())
     mis_tagged = [
         reason
-        for _, reason in one_sided
+        for reason in tagged_reasons
         if "OPEN DEBT" in reason and not reason.startswith("OPEN DEBT")
     ]
     if mis_tagged:
@@ -529,13 +821,19 @@ def main() -> int:
                 file=sys.stderr,
             )
         return 1
-    open_debt = sum(1 for _, reason in one_sided if reason.startswith("OPEN DEBT"))
+    open_debt = sum(1 for reason in tagged_reasons if reason.startswith("OPEN DEBT"))
     print(
         f"  analysis-surface-parity: {len(BOTH)} capability(ies) on both surfaces, "
         f"{len(ONLY_CLI)} CLI-only, {len(ONLY_CAPI)} ABI-only, "
         f"{len(SELF_REPORT)} self-report section(s), {open_debt} of those "
         f"an OPEN DEBT; {len(flags)} flag(s), {len(symbols)} symbol(s) and "
         f"{len(headings)} section(s) accounted for"
+    )
+    print(
+        f"  analysis-surface-scope: delivery tranche {GATED_TRANCHE} is "
+        f"{gated} requirement(s), {reached} reached by a named path on at "
+        f"least one surface, {declared} declared unreached; "
+        f"{annotated_rows()} row(s) carry a requirement number"
     )
     return 0
 
