@@ -96,7 +96,20 @@
 
 use core::fmt::Write as _;
 
-use wz_codecs::whatami::WhatAmI;
+// `pub use`, not a private import: the two `autoconnect` fields below are typed
+// with these, so a consumer of this module has to be able to NAME them —
+// R311y428's rule (a public constructor whose parameter type is unnameable
+// through the facade cannot be called there).
+pub use wz_codecs::whatami::{WhatAmI, WhatAmIMatcher};
+// R2141 (open-debt item 223) — the policy types the two `autoconnect` keys
+// resolve INTO, imported rather than mirrored here. A second two-spelling
+// vocabulary in the reader is exactly the drift this module removes elsewhere
+// (`mode` is matched against `WhatAmI::to_str` "so the two directions cannot
+// disagree about a spelling"), and the reader's whole job is to produce the
+// typed value a consumer installs. `wz-routing-graph` is a leaf crate over
+// `wz-codecs`, so the `zenoh-config-emit` feature pulling it adds no cycle; no
+// footprint preset carries that feature.
+pub use wz_routing_graph::{AutoConnectStrategies, AutoConnectStrategy};
 use wz_session_core::json::escape_into;
 use wz_session_core::json5::{number_as_u64, Json5Value};
 // R2070b (open-debt item 486) — the topology pass compares endpoints, and the
@@ -906,6 +919,37 @@ pub struct ZenohNodeConfig {
     /// this key to `null`, so defaulting it here would make an unmentioned key
     /// indistinguishable from a stated one at the expansion boundary.
     pub scout_multicast_listen: Option<bool>,
+    /// R2141 (open-debt item 223) — `scouting/multicast/autoconnect`: WHICH ROLES
+    /// this node opens a session to when it discovers them on the group.
+    ///
+    /// The third direction, and the one that makes the other two do something.
+    /// `address` / `interface` / `ttl` say where to look; `listen` says whether
+    /// to be findable; this says what to DO about a node that answers. Until this
+    /// round wz did nothing at all — a wz node could be findable and could
+    /// resolve one dial target for a one-shot session (`--scout`), but had no
+    /// counterpart to zenoh's `Runtime::autoconnect_all`, so the key sat in
+    /// `UNHONOURED_UPSTREAM_CONFIG_KEYS` beside `_strategy` below.
+    ///
+    /// A [`WhatAmIMatcher`] and not a `Vec<WhatAmI>`, because that is what
+    /// upstream's value IS once its mode row is selected
+    /// (`ModeDependentValue<WhatAmIMatcher>`), and because an EMPTY set is a real
+    /// instruction — `autoconnect: []` is what a stock ROUTER's config resolves
+    /// to, and it means "dial nobody". `Some(empty)` and `None` are therefore
+    /// different answers and the type keeps them apart.
+    pub scout_multicast_autoconnect: Option<WhatAmIMatcher>,
+    /// R2141 (open-debt item 223) — `scouting/multicast/autoconnect_strategy`:
+    /// the tie-break applied once a discovered node's role is admitted, PER
+    /// TARGET ROLE.
+    ///
+    /// This key is why item 223 was a design round and not the wiring round it
+    /// claimed to be. Its value is
+    /// `ModeDependentValue<TargetDependentValue<AutoConnectStrategy>>`: the outer
+    /// layer is selected by THIS node's mode (resolved here, at read time), the
+    /// inner by the DISCOVERED node's role (resolvable only at use time). wz's
+    /// `AutoConnect` carried a single `AutoConnectStrategy` and could not
+    /// represent the inner table at all, so honouring the key meant changing the
+    /// type — see `wz_routing_graph::AutoConnectStrategies`.
+    pub scout_multicast_autoconnect_strategy: Option<AutoConnectStrategies>,
     /// R311y849 — `connect/retry`: how long a refused dial waits before the next
     /// attempt, and how that wait grows
     /// (`period_init_ms` / `period_max_ms` / `period_increase_factor`).
@@ -985,6 +1029,12 @@ impl Default for ZenohNodeConfig {
             scout_multicast_interface: None,
             scout_multicast_ttl: None,
             scout_multicast_listen: None,
+            // R2141 — `None` is "the document said nothing", which a running
+            // zenohd renders as `null`; `Some(empty matcher)` is the different
+            // and real instruction "dial nobody". The default cannot be the
+            // second without inventing an instruction.
+            scout_multicast_autoconnect: None,
+            scout_multicast_autoconnect_strategy: None,
             // R311y849 — `None` and NOT `RetryPolicy::ZENOH_DEFAULT`, even though
             // that is the schedule an unset key produces. The two are the same
             // BEHAVIOUR and different FACTS: `None` is "the file said nothing",
@@ -1223,6 +1273,55 @@ impl ZenohNodeConfig {
         if let Some(listen) = self.scout_multicast_listen {
             let _ = write!(out, ", \"listen\": {listen}");
         }
+        // R2141 — the two autoconnect keys, in UPSTREAM's own spelling: the role
+        // set is a LIST of role names (`["router", "peer"]`, the only shape
+        // `WhatAmIMatcherVisitor` accepts — it implements `visit_seq` and nothing
+        // else), and the strategy is either a bare kebab-case name or a
+        // `{ to_router: .., to_peer: .. }` table. Rendering the matcher as a
+        // string, or the strategy in wz's own `to_router=always` flag spelling,
+        // would emit a document a real zenohd refuses to start on.
+        if let Some(matcher) = self.scout_multicast_autoconnect {
+            out.push_str(", \"autoconnect\": [");
+            let mut first = true;
+            for role in [WhatAmI::Router, WhatAmI::Peer, WhatAmI::Client] {
+                if matcher.matches(role) {
+                    if !first {
+                        out.push_str(", ");
+                    }
+                    first = false;
+                    escape_into(role.to_str(), &mut out);
+                }
+            }
+            out.push(']');
+        }
+        if let Some(strategy) = self.scout_multicast_autoconnect_strategy {
+            out.push_str(", \"autoconnect_strategy\": ");
+            match strategy {
+                AutoConnectStrategies::Unique(s) => escape_into(s.to_config_str(), &mut out),
+                AutoConnectStrategies::PerTarget {
+                    to_router,
+                    to_peer,
+                    to_client,
+                } => {
+                    out.push('{');
+                    let mut first = true;
+                    for (role, set) in [
+                        (WhatAmI::Router, to_router),
+                        (WhatAmI::Peer, to_peer),
+                        (WhatAmI::Client, to_client),
+                    ] {
+                        let Some(s) = set else { continue };
+                        if !first {
+                            out.push(',');
+                        }
+                        first = false;
+                        let _ = write!(out, " \"to_{}\": ", role.to_str());
+                        escape_into(s.to_config_str(), &mut out);
+                    }
+                    out.push_str(" }");
+                }
+            }
+        }
         out.push_str(" }");
         if let Some(ms) = self.scouting_timeout_ms {
             let _ = write!(out, ", \"timeout\": {ms}");
@@ -1364,6 +1463,18 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     // for rounds and its `--help` CITES this key by name (`usage.rs:128`), so
     // an operator reading that line and putting it in their file got nothing.
     "routing/peer/mode",
+    // R2141 (open-debt item 223) — the two keys that made the multicast plane
+    // DIAL. Item 223 filed them as a wiring round on the strength of wz already
+    // having an `AutoConnect`; both halves of that had to be corrected before
+    // they could move. Upstream's `responder` does not dial either (the item's
+    // stated reason), so what was missing is the separate `autoconnect_all`
+    // shape; and `_strategy`'s value is target-dependent, which wz's flattened
+    // policy could not represent — see `wz_routing_graph::AutoConnectStrategies`.
+    //
+    // Surface total unchanged: both are resolved leaves of a real zenohd either
+    // way, and all that moved is which half of the partition they sit in.
+    "scouting/multicast/autoconnect",
+    "scouting/multicast/autoconnect_strategy",
 ];
 
 /// R311y849 — the leaves that live INSIDE a honoured key which is a subtree
@@ -1450,8 +1561,11 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     "scouting/gossip/enabled",
     "scouting/gossip/multihop",
     "scouting/gossip/target",
-    "scouting/multicast/autoconnect",
-    "scouting/multicast/autoconnect_strategy",
+    // R2141 (open-debt item 223) — `scouting/multicast/autoconnect` and
+    // `_strategy` MOVED OUT of here, into `HONOURED_CONFIG_KEYS`. Their gossip
+    // twins two lines up stay: the gossip plane's policy is installed from the
+    // command line (`--autoconnect`), not from the file, and moving those keys
+    // is a different seam with a different witness.
     "timestamping/drop_future_timestamp",
     "transport/auth/pubkey/key_size",
     "transport/auth/pubkey/known_keys_file",
@@ -1839,6 +1953,12 @@ fn honoured<'a>(doc: &'a Json5Value, path: &str) -> Option<&'a Json5Value> {
 pub const MODE_DEPENDENT_CONFIG_KEYS: &[&str] = &[
     "connect/endpoints",
     "listen/endpoints",
+    // R2141 — both new keys are declared mode-dependent upstream, and their
+    // DEFAULTS differ per mode, which is what makes the table spelling ordinary
+    // rather than exotic here: `autoconnect` is `[]` for a router, `["router",
+    // "peer"]` for a peer and `["router"]` for a client (`DEFAULT_CONFIG.json5`).
+    "scouting/multicast/autoconnect",
+    "scouting/multicast/autoconnect_strategy",
     "scouting/multicast/listen",
     "timestamping/enabled",
 ];
@@ -2152,6 +2272,156 @@ fn want_endpoints(
     }
 }
 
+/// R2141 — `scouting/multicast/autoconnect`'s value: a LIST of role names.
+///
+/// Upstream accepts only a sequence here — `WhatAmIMatcher`'s `Deserialize` calls
+/// `deserialize_seq` and its visitor implements `visit_seq` alone
+/// (`commons/zenoh-protocol/src/core/whatami.rs`), so `"router|peer"` is not a
+/// spelling a real zenohd reads and must not be one wz reads either. An EMPTY
+/// list is valid and means the empty matcher — a stock router's own default.
+///
+/// A name outside the three roles is an ERROR rather than a skipped entry: it is
+/// the same class as `mode: "rooter"`, and silently dropping it would leave the
+/// operator with a policy narrower than the one they wrote.
+fn matcher_of(value: &Json5Value, path: &'static str) -> Result<WhatAmIMatcher, ConfigIngestError> {
+    let Json5Value::Array(items) = value else {
+        return Err(ConfigIngestError::WrongType {
+            path,
+            expected: "a list of role names (\"router\" / \"peer\" / \"client\")",
+        });
+    };
+    let mut matcher = WhatAmIMatcher::empty();
+    for item in items {
+        let Json5Value::String(name) = item else {
+            return Err(ConfigIngestError::WrongType {
+                path,
+                expected: "a list of role names (\"router\" / \"peer\" / \"client\")",
+            });
+        };
+        // Matched against `to_str`, the same way `mode` is, so the two directions
+        // cannot disagree about a spelling.
+        matcher = match [WhatAmI::Router, WhatAmI::Peer, WhatAmI::Client]
+            .into_iter()
+            .find(|w| w.to_str() == name)
+        {
+            Some(WhatAmI::Router) => matcher.router(),
+            Some(WhatAmI::Peer) => matcher.peer(),
+            Some(WhatAmI::Client) => matcher.client(),
+            None => {
+                return Err(ConfigIngestError::UnknownMode {
+                    value: name.clone(),
+                })
+            }
+        };
+    }
+    Ok(matcher)
+}
+
+/// [`matcher_of`] for the key upstream declares
+/// `ModeDependentValue<WhatAmIMatcher>`.
+fn want_matcher_for_mode(
+    doc: &Json5Value,
+    path: &'static str,
+    mode: WhatAmI,
+) -> Result<ModeRead<WhatAmIMatcher>, ConfigIngestError> {
+    let Some(value) = honoured(doc, path) else {
+        return Ok(ModeRead::Absent);
+    };
+    match for_this_mode(value, mode, path)? {
+        None => Ok(ModeRead::ForOtherModes),
+        Some(v) => matcher_of(v, path).map(ModeRead::Value),
+    }
+}
+
+/// R2141 — `scouting/multicast/autoconnect_strategy`'s value, AFTER its mode row
+/// has been selected: either a bare strategy name or a
+/// `{ to_router, to_peer, to_client }` table.
+///
+/// The two `to_`-prefixed field sets are what make the outer resolution
+/// unambiguous, and this is where that pays off: `for_this_mode` refuses an
+/// object whose fields are not all mode names, so the caller must try the TARGET
+/// reading for exactly the objects it rejects — which is upstream's own
+/// precedence (`ModeValues` first, `TargetDependentValue` as the fallback,
+/// `mode_dependent.rs`). `ModeValues` carries `deny_unknown_fields` there, and
+/// `for_this_mode`'s all-fields-are-mode-names check is wz's form of it.
+fn strategies_of(
+    value: &Json5Value,
+    path: &'static str,
+) -> Result<AutoConnectStrategies, ConfigIngestError> {
+    match value {
+        Json5Value::String(name) => AutoConnectStrategy::from_config_str(name)
+            .map(AutoConnectStrategies::Unique)
+            .ok_or(ConfigIngestError::WrongType {
+                path,
+                expected: "\"always\" or \"greater-zid\"",
+            }),
+        Json5Value::Object(fields) => {
+            let mut to_router = None;
+            let mut to_peer = None;
+            let mut to_client = None;
+            for (name, v) in fields {
+                let slot = match name.as_str() {
+                    "to_router" => &mut to_router,
+                    "to_peer" => &mut to_peer,
+                    "to_client" => &mut to_client,
+                    _ => {
+                        return Err(ConfigIngestError::WrongType {
+                            path,
+                            expected: "a { to_router, to_peer, to_client } table",
+                        })
+                    }
+                };
+                let Json5Value::String(spelling) = v else {
+                    return Err(ConfigIngestError::WrongType {
+                        path,
+                        expected: "\"always\" or \"greater-zid\"",
+                    });
+                };
+                *slot = Some(AutoConnectStrategy::from_config_str(spelling).ok_or(
+                    ConfigIngestError::WrongType {
+                        path,
+                        expected: "\"always\" or \"greater-zid\"",
+                    },
+                )?);
+            }
+            Ok(AutoConnectStrategies::PerTarget {
+                to_router,
+                to_peer,
+                to_client,
+            })
+        }
+        _ => Err(ConfigIngestError::WrongType {
+            path,
+            expected: "\"always\" or \"greater-zid\", or a { to_router, .. } table",
+        }),
+    }
+}
+
+/// [`strategies_of`] under the MODE layer — the doubly-dependent key.
+///
+/// Order matters and is upstream's: a `{ router: .. }` object is a MODE table and
+/// a `{ to_router: .. }` object is a TARGET table, and only the field names tell
+/// them apart. So the mode reading is attempted first and its refusal of a
+/// non-mode object is what selects the target reading; a document that is neither
+/// fails inside [`strategies_of`], naming the shape it expected.
+fn want_strategies_for_mode(
+    doc: &Json5Value,
+    path: &'static str,
+    mode: WhatAmI,
+) -> Result<ModeRead<AutoConnectStrategies>, ConfigIngestError> {
+    let Some(value) = honoured(doc, path) else {
+        return Ok(ModeRead::Absent);
+    };
+    match for_this_mode(value, mode, path) {
+        Ok(None) => Ok(ModeRead::ForOtherModes),
+        Ok(Some(v)) => strategies_of(v, path).map(ModeRead::Value),
+        // Not a mode table -> read the whole value as a TARGET table. The error
+        // is DISCARDED rather than propagated because it was the answer to a
+        // different question; if this reading fails too, its own error stands.
+        Err(_) => strategies_of(value, path).map(ModeRead::Value),
+    }
+}
+
 impl ZenohNodeConfig {
     /// Read the config a stock zenoh node would have been started with.
     ///
@@ -2317,6 +2587,26 @@ impl ZenohNodeConfig {
                 named.push("scouting/multicast/listen");
             }
             ModeRead::ForOtherModes => other_modes.push("scouting/multicast/listen"),
+            ModeRead::Absent => {}
+        }
+        // R2141 (open-debt item 223) — the two autoconnect keys, read AFTER
+        // `mode` for the reason every mode-dependent key is: the table is
+        // resolved with this node's own role, exactly as upstream's
+        // `.get(whatami)` does.
+        match want_matcher_for_mode(&doc, "scouting/multicast/autoconnect", out.mode)? {
+            ModeRead::Value(v) => {
+                out.scout_multicast_autoconnect = Some(v);
+                named.push("scouting/multicast/autoconnect");
+            }
+            ModeRead::ForOtherModes => other_modes.push("scouting/multicast/autoconnect"),
+            ModeRead::Absent => {}
+        }
+        match want_strategies_for_mode(&doc, "scouting/multicast/autoconnect_strategy", out.mode)? {
+            ModeRead::Value(v) => {
+                out.scout_multicast_autoconnect_strategy = Some(v);
+                named.push("scouting/multicast/autoconnect_strategy");
+            }
+            ModeRead::ForOtherModes => other_modes.push("scouting/multicast/autoconnect_strategy"),
             ModeRead::Absent => {}
         }
         match want_bool_for_mode(&doc, "timestamping/enabled", out.mode)? {
@@ -3350,6 +3640,27 @@ mod tests {
                 "routing/peer/mode",
                 r#"{ "routing": { "peer": { "mode": "peer-to-peer" } } }"#,
             ),
+            // R2141 (open-debt item 223) — the two keys that make the multicast
+            // plane DIAL. Each is driven off the default a document that says
+            // nothing resolves to for THIS reader's default mode (`peer`):
+            // `["router", "peer"]` and `Unique(Always)`.
+            //
+            // The matcher fixture is `["client"]` — a set the peer default does
+            // NOT contain in either direction, so a reader that ignored the list
+            // and installed the default fails here. The strategy fixture is the
+            // TARGET TABLE, which is the shape that could not be represented at
+            // all before this round: a reader that flattened it to one strategy
+            // would parse the document and store a value that answers every
+            // target alike.
+            (
+                "scouting/multicast/autoconnect",
+                r#"{ "scouting": { "multicast": { "autoconnect": ["client"] } } }"#,
+            ),
+            (
+                "scouting/multicast/autoconnect_strategy",
+                r#"{ "scouting": { "multicast": { "autoconnect_strategy":
+                     { "to_router": "always", "to_peer": "greater-zid" } } } }"#,
+            ),
         ];
         // The case list IS the table, so a key added to one and not the other
         // fails here rather than going unmeasured.
@@ -3942,6 +4253,10 @@ mod tests {
             );
             let value = match *key {
                 "connect/endpoints" | "listen/endpoints" => "[\"tcp/10.0.0.1:7447\"]",
+                // R2141 — the two autoconnect keys are the first mode-dependent
+                // ones whose value is neither a bool nor an endpoint list.
+                "scouting/multicast/autoconnect" => "[\"router\", \"peer\"]",
+                "scouting/multicast/autoconnect_strategy" => "\"greater-zid\"",
                 _ => "true",
             };
             let plain = doc_with(key, value);
@@ -3950,6 +4265,47 @@ mod tests {
             let table = doc_with(key, &format!("{{ router: {value} }}"));
             ZenohNodeConfig::from_json5(&table)
                 .unwrap_or_else(|e| panic!("{key} table spelling: {e:?}\n{table}"));
+        }
+
+        // R2141 — `autoconnect_strategy` is the one key with a THIRD spelling:
+        // its value nests a TARGET table under the mode layer, so all three of
+        // `"always"`, `{ router: .. }` and `{ to_router: .. }` are documents a
+        // real zenohd starts on (`ModeDependentValue<TargetDependentValue<..>>`,
+        // `mode_dependent.rs`). The sweep above cannot reach the third, because
+        // it is written against keys whose two layers are one.
+        //
+        // The pair below is what makes the ambiguity resolution testable at all:
+        // both objects are `{ <name>: <strategy> }` and only the FIELD NAME says
+        // which layer it belongs to.
+        const STRATEGY: &str = "scouting/multicast/autoconnect_strategy";
+        for (spelling, want) in [
+            (
+                "{ to_router: \"always\", to_peer: \"greater-zid\" }",
+                AutoConnectStrategies::PerTarget {
+                    to_router: Some(AutoConnectStrategy::Always),
+                    to_peer: Some(AutoConnectStrategy::GreaterZid),
+                    to_client: None,
+                },
+            ),
+            (
+                // A MODE table whose row for `router` is itself a TARGET table —
+                // the doubly-nested shape `DEFAULT_CONFIG.json5` itself writes.
+                "{ router: { to_peer: \"greater-zid\" } }",
+                AutoConnectStrategies::PerTarget {
+                    to_router: None,
+                    to_peer: Some(AutoConnectStrategy::GreaterZid),
+                    to_client: None,
+                },
+            ),
+        ] {
+            let doc = doc_with(STRATEGY, spelling);
+            let ingest = ZenohNodeConfig::from_json5(&doc)
+                .unwrap_or_else(|e| panic!("{STRATEGY} {spelling}: {e:?}\n{doc}"));
+            assert_eq!(
+                ingest.config.scout_multicast_autoconnect_strategy,
+                Some(want),
+                "{spelling}"
+            );
         }
     }
 

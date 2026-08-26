@@ -210,13 +210,42 @@ pub struct Face {
     pub qos_link: wz_session_core::extqos::QosLinkState,
 }
 
-/// A request from the topology forwarder to the accept loop: dial a peer that
-/// gossip DISCOVERED and the autoconnect policy admitted. The sync ingest path
-/// cannot open an outbound link itself — it is not the async task that owns the
-/// in-flight-open [`FuturesUnordered`] — so it hands the loop this intent over an
-/// unbounded channel and the loop turns it into a `dial_face` (A5c). The wz
-/// analogue of the `(zid, locators)` pair zenoh's gossip passes to
-/// `runtime.connect_peer` (`hat/p2p_peer/gossip.rs:455`), minus the per-dial task
+/// WHICH DISCOVERY PLANE produced a [`DialIntent`].
+///
+/// R2141 (open-debt item 223) — the multicast-scouting plane learned to
+/// autoconnect this round, and it emits its intents into the SAME channel the
+/// gossip plane does, because the loop that dials is the same loop. Upstream
+/// keeps the two planes' policies separate for exactly this reason
+/// (`AutoConnect::multicast` and `AutoConnect::gossip`, `net/common.rs`, read
+/// from two different config subtrees) while both end at `connect_peer`.
+///
+/// The tag is NOT decoration. [`AcceptLoopSummary::gossip_dialed`] was built by
+/// R311y423 as a DISCRIMINATOR: it is bumped in the one `Step::Dial` arm, which
+/// at the time was reachable only through a gossip-discovered peer, and
+/// `wz_gossip_autoconnect_zenohd_interop` asserts on it. Feeding a second
+/// producer into that channel untagged would have quietly turned it into "any
+/// intent dial" and left that test crediting the gossip atom for a multicast
+/// discovery. So the counter splits by origin instead, and each plane keeps a
+/// witness only its own discovery can move.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DialIntentOrigin {
+    /// A peer learned off a link-state / gossip flood — zenoh
+    /// `hat/p2p_peer/gossip.rs`, wz `linkstate_forward`'s discovery emit.
+    Gossip,
+    /// A node that answered this one's multicast Scout with a Hello — zenoh
+    /// `Runtime::autoconnect_all`, wz `scouting_autoconnect`.
+    MulticastScout,
+}
+
+/// A request from a discovery plane to the accept loop: dial a peer it
+/// DISCOVERED and whose role + zid the autoconnect policy admitted. A discovery
+/// path cannot open an outbound link itself — the gossip one is a sync ingest,
+/// the scouting one is a task that owns a UDP socket, and neither is the async
+/// task that owns the in-flight-open [`FuturesUnordered`] — so it hands the loop
+/// this intent over an unbounded channel and the loop turns it into a `dial_face`
+/// (A5c). The wz analogue of the `(zid, locators)` pair zenoh passes to
+/// `runtime.connect_peer` (`hat/p2p_peer/gossip.rs:455` for gossip,
+/// `orchestrator.rs`'s `autoconnect_all` for multicast), minus the per-dial task
 /// spawn — wz routes the dial back to its single drive task instead.
 ///
 /// `zid` is the trimmed wire bytes (the SAME representation as [`Face::peer_zid`],
@@ -229,9 +258,13 @@ pub struct DialIntent {
     /// The discovered peer's zid (trimmed wire bytes) — so the loop can skip a
     /// peer it already holds a face to rather than open a redundant second link.
     pub zid: Vec<u8>,
-    /// The dial addresses the peer advertised in its link-state (its locators);
-    /// the loop (A5c) parses one into a socket address to connect to.
+    /// The dial addresses the peer advertised (its link-state locators, or the
+    /// locators its Hello carried); the loop (A5c) parses one into a socket
+    /// address to connect to.
     pub locators: Vec<String>,
+    /// R2141 — which plane discovered it, so the loop's counters stay
+    /// discriminating with two producers on one channel.
+    pub origin: DialIntentOrigin,
 }
 
 /// The forwarder's sending end of the dial-intent channel — held inside the
@@ -520,7 +553,24 @@ pub struct AcceptLoopSummary {
     /// convergence tick is handshake-satisfiable), and `scouting-autoconnect` is
     /// exactly the atom a hollow witness would falsely credit — its whole content
     /// is "a peer learned off the link-state flood got dialed".
+    ///
+    /// R2141 — and it counts only [`DialIntentOrigin::Gossip`] intents now. The
+    /// arm it is bumped in gained a second producer this round, so the origin tag
+    /// is what keeps the sentence above true; see [`DialIntentOrigin`].
     pub gossip_dialed: usize,
+    /// R2141 (open-debt item 223) — of [`dialed`](Self::dialed), the subset
+    /// dialed because a node ANSWERED this one's multicast Scout and the
+    /// `scouting/multicast/autoconnect` policy admitted its role + zid
+    /// ([`DialIntentOrigin::MulticastScout`]).
+    ///
+    /// The multicast twin of [`gossip_dialed`](Self::gossip_dialed) and a
+    /// separate counter for the same reason: `dialed` is bumped by the static
+    /// `--connect` seed, by reconcile, and by BOTH discovery planes, so it cannot
+    /// say which one moved. This one is reachable through exactly one path — a
+    /// Hello decoded off the scouting group, past
+    /// `AutoConnect::should_autoconnect` — so a run that raises it has done the
+    /// thing item 223 says wz never did.
+    pub scout_dialed: usize,
 }
 
 /// The tagged result of one face-open attempt — the `opening`
@@ -2198,10 +2248,11 @@ where
             }
 
             Step::Dial(intent) => {
-                // A gossip-discovered, policy-admitted peer (the forwarder applied
-                // the autoconnect role + zid gate at emit, A5b). Dial it as an
-                // outbound face unless a face to it is already held (dedup) or no
-                // locator is TCP-dialable. A dialed face flows through the SAME
+                // A DISCOVERED, policy-admitted peer — the producing plane applied
+                // the autoconnect role + zid gate at emit (the forwarder for
+                // gossip, A5b; the scouting task for a Hello, R2141). Dial it as
+                // an outbound face unless a face to it is already held (dedup) or
+                // no locator is TCP-dialable. A dialed face flows through the SAME
                 // `opening` -> `Step::Opened` path as a static dial, so it is
                 // registered + held + zid-tracked identically.
                 match dial_decision(&faces, &intent) {
@@ -2209,13 +2260,20 @@ where
                         let id = FaceId(next_id);
                         next_id += 1;
                         summary.dialed += 1;
-                        // R311y423 — the gossip-only counter. This arm is reached
-                        // ONLY via a DialIntent, which the forwarder emits only
-                        // after the autoconnect policy admits a peer discovered in
-                        // a link-state flood, so incrementing here (and nowhere
-                        // else) makes the counter a true discriminator for
-                        // scouting-autoconnect.
-                        summary.gossip_dialed += 1;
+                        // R311y423 — the discovery-only counters. This arm is
+                        // reached ONLY via a DialIntent, which a plane emits only
+                        // after its autoconnect policy admits a node it
+                        // discovered, so incrementing here (and nowhere else)
+                        // makes the pair true discriminators.
+                        //
+                        // R2141 — split by ORIGIN. There are two producers on this
+                        // channel now, and a single counter would credit whichever
+                        // atom the reader happened to be asking about; see
+                        // `DialIntentOrigin`.
+                        match intent.origin {
+                            DialIntentOrigin::Gossip => summary.gossip_dialed += 1,
+                            DialIntentOrigin::MulticastScout => summary.scout_dialed += 1,
+                        }
                         // Index the gossip dial so a reconcile does not re-dial the
                         // same address (and vice-versa).
                         #[cfg(feature = "router-connect-reconcile")]
@@ -2885,6 +2943,7 @@ mod tests {
         let acc = || DialIntent {
             zid: vec![0xAA; 4],
             locators: vec!["tcp/127.0.0.1:7447".into()],
+            origin: DialIntentOrigin::Gossip,
         };
         // No held face + a tcp locator -> dial that address.
         let empty: BTreeMap<FaceId, Option<Vec<u8>>> = BTreeMap::new();
@@ -2907,6 +2966,7 @@ mod tests {
         let no_tcp = DialIntent {
             zid: vec![0xBB; 4],
             locators: vec!["tls/127.0.0.1:7447".into(), "nonsense".into()],
+            origin: DialIntentOrigin::Gossip,
         };
         assert!(matches!(
             dial_decision(&empty, &no_tcp),
@@ -4101,9 +4161,12 @@ mod tests {
         // counter that merely mirrored `dialed` would satisfy the positive
         // assertion in the autoconnect test and credit scouting-autoconnect to a
         // node autoconnect never moved.
+        // R2141 — BOTH discovery counters, because there are two now and a static
+        // dial is neither.
         assert_eq!(
-            summary.gossip_dialed, 0,
-            "a configured --connect dial is not a gossip dial"
+            (summary.gossip_dialed, summary.scout_dialed),
+            (0, 0),
+            "a configured --connect dial is not a discovery dial on either plane"
         );
         assert_eq!(summary.accepted, 0, "no inbound peer connected");
         assert_eq!(
@@ -4118,9 +4181,25 @@ mod tests {
     /// static `dial_targets`. Inject one intent (as the forwarder's emit would,
     /// A5b) carrying the acceptor's `tcp/<addr>` locator; the loop parses it,
     /// dials, and holds the resulting face exactly like a static dial.
+    ///
+    /// R2141 — swept over BOTH [`DialIntentOrigin`]s, and the assertion is that
+    /// the origin's OWN counter rose and the other stayed at zero. With two
+    /// producers on one channel that pair is the whole discriminator: a loop that
+    /// ignored the tag and bumped one counter for every intent passes the `dialed`
+    /// half and fails here, which is the direction that would have silently
+    /// credited the gossip atom for a multicast discovery.
     #[cfg(feature = "routing-peer")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn an_autoconnect_dial_intent_dials_the_discovered_peer() {
+        for origin in [DialIntentOrigin::Gossip, DialIntentOrigin::MulticastScout] {
+            one_autoconnect_dial_intent_is_attributed_to_its_own_plane(origin).await;
+        }
+    }
+
+    /// One leg of the sweep above — factored out so the `for` reads as the
+    /// population and not as a copy.
+    #[cfg(feature = "routing-peer")]
+    async fn one_autoconnect_dial_intent_is_attributed_to_its_own_plane(origin: DialIntentOrigin) {
         let (acc_listener, acc_addr) = bind_loopback().await;
         let (peer_listener, _peer_addr) = bind_loopback().await;
 
@@ -4146,6 +4225,7 @@ mod tests {
             .send(DialIntent {
                 zid: vec![0xAA; 4],
                 locators: vec![format!("tcp/{acc_addr}")],
+                origin,
             })
             .expect("buffer the dial-intent");
 
@@ -4187,15 +4267,24 @@ mod tests {
 
         assert_eq!(
             summary.dialed, 1,
-            "the dial-intent triggered one outbound dial"
+            "the dial-intent triggered one outbound dial ({origin:?})"
         );
-        // R311y423 — and it must be counted as a GOSSIP dial. Paired with the
-        // static-dial test (which asserts this stays 0), this is what makes
-        // `gossip_dialed` a discriminator rather than a second name for `dialed`:
-        // only the DialIntent path moves it.
+        // R311y423 — and it must be counted as a DISCOVERY dial. Paired with the
+        // static-dial test (which asserts these stay 0), this is what makes the
+        // counters discriminators rather than second names for `dialed`: only the
+        // DialIntent path moves them.
+        //
+        // R2141 — and it must land on the ORIGIN'S OWN counter, with the other
+        // plane's untouched. `expected` is derived from `origin` rather than
+        // written per leg, so a third plane cannot be added without this failing.
+        let (want_gossip, want_scout) = match origin {
+            DialIntentOrigin::Gossip => (1, 0),
+            DialIntentOrigin::MulticastScout => (0, 1),
+        };
         assert_eq!(
-            summary.gossip_dialed, 1,
-            "the autoconnect dial must be attributed to gossip"
+            (summary.gossip_dialed, summary.scout_dialed),
+            (want_gossip, want_scout),
+            "a {origin:?} dial must be attributed to its own plane and to no other"
         );
         assert_eq!(summary.accepted, 0, "no inbound peer connected");
         assert_eq!(

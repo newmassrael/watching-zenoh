@@ -145,7 +145,9 @@ use wz_session_core::wireexpr_resolve::{resolve_wireexpr, wireexpr_is_empty};
 
 use wz_routing_graph::{Changes, LinkId, LinkstateNetwork};
 
-use crate::accept_loop::{DialIntent, DialIntentReceiver, DialIntentSender, FaceForwarder, FaceId};
+use crate::accept_loop::{
+    DialIntent, DialIntentOrigin, DialIntentReceiver, DialIntentSender, FaceForwarder, FaceId,
+};
 use crate::future_interest::{FutureQablStore, FutureSubStore};
 #[cfg(feature = "routing-interceptor-hotreload")]
 use crate::interceptor::InterceptorKeyexprCache;
@@ -162,7 +164,14 @@ use crate::session_glue::{IterationEvent, SessionLinkActions};
 /// opting into autoconnect builds its policy from [`default_autoconnect_matcher`]
 /// (this module) + these re-exports, so the `router|peer` matcher is never
 /// re-typed at the call site.
-pub use wz_routing_graph::{AutoConnect, AutoConnectStrategy, WhatAmI, Zid};
+/// R2141 — [`AutoConnectStrategies`] and [`WhatAmIMatcher`] join them, because
+/// the multicast plane's policy is built from a CONFIG rather than from a fixed
+/// per-role default: `scouting/multicast/autoconnect` names its own matcher and
+/// `_strategy` its own per-target table, and a caller that could not name those
+/// two types would have to re-type them at the call site — which is the drift
+/// this re-export exists to prevent.
+pub use wz_codecs::whatami::WhatAmIMatcher;
+pub use wz_routing_graph::{AutoConnect, AutoConnectStrategies, AutoConnectStrategy, WhatAmI, Zid};
 // R311tt — re-export the §5.16 access-control policy-construction surface
 // beside `set_interceptors`, so a deploy builds an `AclPolicy` from one facade
 // path (`wz::runtime_tokio::linkstate_forward::{AclPolicy, ..}`) — the same
@@ -203,8 +212,9 @@ pub use crate::interceptor::InterceptorFlow;
 // and it must spell them the way upstream's config does (`from_config_str`).
 pub use wz_session_core::link::{InterceptorLink, LinkSubject};
 // The gossip-target role set lives in the codec layer beside `WhatAmI`; the
-// forwarder consumes it to gate which faces a link-state flood reaches.
-use wz_codecs::whatami::WhatAmIMatcher;
+// forwarder consumes it to gate which faces a link-state flood reaches. R2141
+// made it a `pub use` beside the `AutoConnect` re-exports (a config-built policy
+// has to be nameable by the caller), and that re-export is this import too.
 
 /// A [`FaceForwarder`] that maintains the [`LinkstateNetwork`] topology
 /// graph from the face lifecycle + inbound `OAM_LINKSTATE` messages. The
@@ -1013,9 +1023,26 @@ impl LinkstateForwarder {
     /// single drive task over this channel instead of spawning it.
     pub fn enable_autoconnect(&self, policy: AutoConnect) -> DialIntentReceiver {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        self.enable_autoconnect_into(policy, tx);
+        rx
+    }
+
+    /// R2141 (open-debt item 223) — [`enable_autoconnect`](Self::enable_autoconnect)
+    /// against a channel the CALLER already owns.
+    ///
+    /// The multicast-scouting plane is a second producer of
+    /// [`DialIntent`]s (`crate::scouting_autoconnect`), and the accept loop drains
+    /// ONE receiver, so a deploy running both planes has to hand them the two ends
+    /// of one channel. That is the caller's decision to make — which is why the
+    /// convenience constructor above stays: a deploy with only the gossip plane
+    /// should not have to build a channel to say so.
+    ///
+    /// The two producers stay distinguishable downstream through
+    /// [`crate::accept_loop::DialIntentOrigin`], which this
+    /// forwarder stamps `Gossip` at its emit.
+    pub fn enable_autoconnect_into(&self, policy: AutoConnect, tx: DialIntentSender) {
         self.autoconnect.set(policy);
         *self.dial_tx.borrow_mut() = Some(tx);
-        rx
     }
 
     /// Install the full §5.16 interceptor configuration — the SINGLE config seam,
@@ -1315,6 +1342,11 @@ impl LinkstateForwarder {
                     let _ = tx.send(DialIntent {
                         zid: zid.as_slice().to_vec(),
                         locators: locators.to_vec(),
+                        // R2141 — the GOSSIP plane. Tagged at the only place this
+                        // plane emits, so the loop's `gossip_dialed` stays a
+                        // gossip discriminator now that the scouting plane shares
+                        // the channel.
+                        origin: DialIntentOrigin::Gossip,
                     });
                 }
             }

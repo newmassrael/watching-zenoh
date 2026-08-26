@@ -821,6 +821,20 @@ pub mod scouting_glue;
 #[cfg(feature = "scouting-responder")]
 pub mod scouting_responder;
 
+// R2141 (open-debt item 223) — the DIALLING half of multicast scouting: scout the
+// group and open a session to each responder the `scouting/multicast/autoconnect`
+// policy admits. zenoh's `Runtime::autoconnect_all`, which wz had no counterpart
+// for; `scouting_glue` resolves ONE locator for a one-shot session and
+// `scouting_responder` answers without dialling, so neither of them is this.
+//
+// Gated on `scouting-active` (it scouts) AND `routing-peer` (it posts a
+// `DialIntent`, which only the peer mesh loop drains, and it reads the
+// `AutoConnect` policy out of the routing-graph crate that feature pulls). A
+// build with the first and not the second could scout but would have nowhere to
+// send an intent, so composing it there would be the half-a-pair shape.
+#[cfg(all(feature = "scouting-active", feature = "routing-peer"))]
+pub mod scouting_autoconnect;
+
 /// Round C — multicast transport drive loop (the AP host loop that drives
 /// the `wz-session-core` `MulticastDispatcher` over a UDP-multicast link:
 /// periodic JOIN beacon, RX classify -> dispatch, lease sweep). Gated on

@@ -92,11 +92,18 @@ use wz_codecs::locator::{LocatorOwned, MAX_LOCATORS_PER_NODE, MAX_LOCATOR_LEN};
 pub use wz_codecs::whatami::WhatAmI;
 
 mod autoconnect;
-/// The gossip autoconnect policy ([`AutoConnect`] / [`AutoConnectStrategy`]) —
-/// the role + zid tie-break a discovering peer consults before dialing a node
-/// it learned off a gossip flood. The driver (`linkstate_forward`) holds an
+/// The autoconnect policy ([`AutoConnect`] / [`AutoConnectStrategy`]) — the
+/// role matcher and zid tie-break a discovering node consults before dialing one
+/// it just learned about. The gossip driver (`linkstate_forward`) holds an
 /// instance and applies the gate at its discovery emit; the accept-loop dials.
-pub use autoconnect::{AutoConnect, AutoConnectStrategy};
+///
+/// R2141 — and [`AutoConnectStrategies`], the per-TARGET tie-break table
+/// `scouting/{multicast,gossip}/autoconnect_strategy` resolves to, which the
+/// multicast-scouting plane needed and a single [`AutoConnectStrategy`] could
+/// not express.
+pub use autoconnect::{
+    AutoConnect, AutoConnectStrategies, AutoConnectStrategiesError, AutoConnectStrategy,
+};
 
 /// Maximum zid length in bytes (zenoh `ZenohIdProto::MAX_SIZE`). zenoh
 /// rejects an oversized zid at DECODE (the zid codec caps at this); the wz

@@ -830,6 +830,178 @@ pub(crate) async fn spawn_scouting_responder(
     Ok(())
 }
 
+/// R2141 (open-debt item 223) — `--scout-autoconnect`: keep scouting the group,
+/// and post a dial-intent for every responder the policy admits.
+///
+/// zenoh's `Runtime::autoconnect_all` (`net/runtime/orchestrator.rs`), which is
+/// the half of multicast scouting this demo did not have. The other two are
+/// beside it: [`scout_for_peer_locator`] RESOLVES one locator and returns, and
+/// [`spawn_scouting_responder`] ANSWERS without dialling. This one never returns
+/// a value — it makes the node keep finding peers for the process's life.
+///
+/// # The socket is the SENDING half, not the group-port one
+///
+/// `UdpDriver::bind_multicast_tx_v4` — an ephemeral local port, no join. That
+/// is upstream's `ucast_sock`, the socket its scout sends from and receives the
+/// unicast Hello replies on, kept distinct from the wildcard-bound `mcast_sock`
+/// its responder reads. Here the split earns something concrete: a peer running
+/// `--scout-listen` in the SAME process already holds the group port, and a
+/// second socket on it would make which of the two receives a unicast Hello a
+/// question about `SO_REUSEPORT` hashing.
+///
+/// Returns once the socket is bound; the scouting runs on a spawned task. A bind
+/// failure is propagated rather than warned, for the reason the responder's is: a
+/// node told to autoconnect that silently never scouts has no downstream symptom
+/// that names the cause.
+#[cfg(all(feature = "scouting-active", feature = "routing-peer"))]
+async fn spawn_scouting_autoconnect(
+    args: &ScoutAutoconnectArgs,
+    zid: &[u8],
+    dial_tx: wz::runtime_tokio::accept_loop::DialIntentSender,
+) -> io::Result<()> {
+    use wz::runtime_tokio::linkstate_forward::{AutoConnect, Zid};
+    use wz::runtime_tokio::scouting_autoconnect::{
+        serve_autoconnect, AutoconnectPlan, AutoconnectStep,
+    };
+    use wz::runtime_tokio::scouting_glue::{new_scouting_engine, ScoutParams, ScoutingActions};
+    use wz::runtime_tokio::UdpDriver;
+
+    let (group, port) = args.socket.group_and_port(SCOUT_GROUP, SCOUT_PORT);
+    let mut driver = UdpDriver::bind_multicast_tx_v4(
+        group,
+        port,
+        wz::runtime_tokio::McastSocketConfig {
+            iface: args.socket.interface.as_deref(),
+            ttl: args.socket.ttl,
+            extra_joins: &[],
+        },
+    )
+    .await
+    .map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!(
+                "wz-ap-demo: --scout-autoconnect could not open a scouting sender \
+                 for {group}:{port}: {e}"
+            ),
+        )
+    })?;
+
+    let policy = AutoConnect::with_strategies(Zid::from_slice(zid), args.matcher, args.strategy);
+    let actions = ScoutingActions::new(ScoutParams {
+        version: DEMO_PROTO_VERSION,
+        // The Scout asks for exactly the roles the policy would dial —
+        // `autoconnect.matcher()` is what upstream passes as `Runtime::scout`'s
+        // `what` here. Asking for roles this node would refuse anyway is traffic
+        // with no consequence, and asking for fewer would hide a peer the policy
+        // admits.
+        what: role_bits(args.matcher),
+        zid: zid.to_vec(),
+        timeout_ms: SCOUT_CYCLE_MS,
+        // SURVEY mode. `--scout` sets this because it wants ONE dial target;
+        // this plane must see every responder in the window, which is the arm
+        // upstream's callback runs in (it returns `Loop::Continue` always).
+        exit_on_first: false,
+    });
+    let mut engine = new_scouting_engine(&actions);
+
+    // The policy this node ACTUALLY installed, not the default — the R311y845
+    // discipline. An operator reads this line to find out what their
+    // `autoconnect` / `autoconnect_strategy` resolved to for THIS node's mode.
+    log::info!(
+        "wz-ap-demo: SCOUT AUTOCONNECT on {group}:{port} \
+         (roles {}, strategy {}{})",
+        role_names(args.matcher),
+        args.strategy.to_config_str(),
+        if args.strategy.is_target_dependent() {
+            ", per-target"
+        } else {
+            ""
+        }
+    );
+
+    tokio::spawn(async move {
+        serve_autoconnect(
+            &mut driver,
+            &actions,
+            &mut engine,
+            &TokioTime::new(),
+            AutoconnectPlan {
+                policy: &policy,
+                dial_tx: &dial_tx,
+                // Production is unbounded: the window itself ends each cycle, so
+                // an unbounded loop cannot spin.
+                max_cycles: None,
+                tick_interval_ms: SCOUT_TICK_MS,
+            },
+            |step: AutoconnectStep| match step {
+                AutoconnectStep::Dialing { zid, locators } => {
+                    // THE WITNESS LINE. A locator here was decoded out of a
+                    // responder's Hello; nothing else in this binary can produce
+                    // one, so it cannot be printed by a run that merely parsed
+                    // the flag.
+                    log::info!(
+                        "wz-ap-demo: SCOUT AUTOCONNECT dialing zid {} at {locators:?}",
+                        zid.iter().map(|b| format!("{b:02x}")).collect::<String>()
+                    );
+                }
+                // At debug: a busy group carries a Hello from every neighbour on
+                // every cycle, and most of them are roles this node's policy does
+                // not admit. Kept rather than dropped because "it answered and I
+                // refused it" is the diagnosis a node that connects to nobody
+                // needs.
+                AutoconnectStep::Skipped { zid, why } => {
+                    log::debug!(
+                        "wz-ap-demo: scout autoconnect skipped zid {}: {why:?}",
+                        zid.iter().map(|b| format!("{b:02x}")).collect::<String>()
+                    );
+                }
+                AutoconnectStep::Cycle { outcome, peers } => {
+                    log::debug!("wz-ap-demo: scout autoconnect cycle {outcome:?}, {peers} peer(s)");
+                }
+                AutoconnectStep::LinkLost => {
+                    log::warn!("wz-ap-demo: SCOUT AUTOCONNECT link lost; no longer discovering");
+                }
+            },
+        )
+        .await;
+    });
+    Ok(())
+}
+
+/// The Scout `what` bitmask for a role matcher — the API-form bits
+/// (`Router=1 | Peer=2 | Client=4`) the Scout body carries.
+///
+/// Derived from the matcher rather than fixed, so `--scout-autoconnect router`
+/// asks the group for routers and nothing else. `WhatAmIMatcher` has no
+/// bits accessor (it answers `matches`), so the bits are rebuilt through the
+/// same `to_api` bytes the matcher is built from.
+#[cfg(all(feature = "scouting-active", feature = "routing-peer"))]
+fn role_bits(matcher: wz::runtime_tokio::linkstate_forward::WhatAmIMatcher) -> u8 {
+    use wz::runtime_tokio::linkstate_forward::WhatAmI;
+    [WhatAmI::Router, WhatAmI::Peer, WhatAmI::Client]
+        .into_iter()
+        .filter(|w| matcher.matches(*w))
+        .fold(0u8, |bits, w| bits | w.to_api())
+}
+
+/// The matcher as the operator spelled it, for the banner. `none` for the empty
+/// set — the same spelling the flag accepts, so the line can be pasted back.
+#[cfg(all(feature = "scouting-active", feature = "routing-peer"))]
+fn role_names(matcher: wz::runtime_tokio::linkstate_forward::WhatAmIMatcher) -> String {
+    use wz::runtime_tokio::linkstate_forward::WhatAmI;
+    let names: Vec<&str> = [WhatAmI::Router, WhatAmI::Peer, WhatAmI::Client]
+        .into_iter()
+        .filter(|w| matcher.matches(*w))
+        .map(|w| w.to_str())
+        .collect();
+    if names.is_empty() {
+        String::from("none")
+    } else {
+        names.join(",")
+    }
+}
+
 async fn establish_link(role: &Role) -> io::Result<DialedLink> {
     match role {
         Role::Acceptor {
@@ -3065,6 +3237,31 @@ impl PublishBand {
 #[cfg(feature = "routing-peer")]
 pub(crate) use wz::runtime_tokio::linkstate_forward::AutoConnectStrategy;
 
+/// R2141 (open-debt item 223) — the MULTICAST-scouting autoconnect policy as the
+/// argv parser and the config expansion both produce it: a role matcher and a
+/// per-TARGET tie-break table.
+///
+/// The two travel together for the reason [`PeerOpts::autoconnect`] folds its
+/// opt-in and its strategy into one field: a strategy without a matcher is a
+/// tie-break for a policy that admits nobody, and letting that be constructed
+/// would make an unusable state representable. `Option<ScoutAutoconnectArgs>` is
+/// the opt-in; the empty matcher inside it is the operator's own `none`.
+#[cfg(all(feature = "routing-peer", feature = "scouting-active"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ScoutAutoconnectArgs {
+    /// The scouting socket this plane scouts on — carried here for the reason
+    /// [`PeerOpts::scout_listen`] carries one: `--scout-addr` / `--scout-iface` /
+    /// `--scout-ttl` mean the same thing for dialling as for asking and
+    /// answering, and a network that moved its group moved it for all three.
+    pub socket: crate::args::ScoutSocketArgs,
+    /// Which discovered roles are dial candidates — zenoh
+    /// `scouting/multicast/autoconnect`, already resolved for THIS node's mode.
+    pub matcher: wz::runtime_tokio::linkstate_forward::WhatAmIMatcher,
+    /// The per-target tie-break — zenoh
+    /// `scouting/multicast/autoconnect_strategy`, likewise mode-resolved.
+    pub strategy: wz::runtime_tokio::linkstate_forward::AutoConnectStrategies,
+}
+
 #[cfg(feature = "routing-peer")]
 pub(crate) struct PeerOpts {
     pub publish_key: Option<String>,
@@ -3078,6 +3275,21 @@ pub(crate) struct PeerOpts {
     /// separate `bool` + strategy pair would let "off, but with a strategy"
     /// be constructed; this shape makes that unrepresentable.
     pub autoconnect: Option<AutoConnectStrategy>,
+    /// R2141 (open-debt item 223) — the MULTICAST-scouting autoconnect policy
+    /// (`--scout-autoconnect` + `--scout-autoconnect-strategy`, zenoh
+    /// `scouting/multicast/autoconnect{,_strategy}`).
+    ///
+    /// Deliberately a SECOND field beside [`autoconnect`](Self::autoconnect) and
+    /// not a widening of it. Upstream keeps the two planes' policies apart —
+    /// `AutoConnect::multicast` and `AutoConnect::gossip` read two different
+    /// config subtrees (`net/common.rs`) — and a deploy routinely wants one
+    /// alone: a peer on a discoverable LAN wants the multicast one, a peer
+    /// attached to a router mesh wants the gossip one.
+    ///
+    /// `None` = this run does no multicast autoconnect, which is the behaviour
+    /// before R2141 exactly.
+    #[cfg(feature = "scouting-active")]
+    pub scout_autoconnect: Option<ScoutAutoconnectArgs>,
     /// zenoh `routing.peer.mode` as zenoh itself represents it internally: `true`
     /// = `"linkstate"`, `false` = zenoh's default `"peer_to_peer"` gossip. Set
     /// from `--peer-mode`. It is a SUBSYSTEM-wide setting — every peer AND router
@@ -4006,21 +4218,60 @@ async fn run_peer_until(
     // admitted discovered peer, and the loop dials it. Absent the flag,
     // `dial_intents` is `None` and the peer dials only its static `--connect`
     // targets (the prior behaviour exactly).
-    let dial_intents = autoconnect.map(|strategy| {
+    //
+    // R2141 (open-debt item 223) — the channel is built HERE now, because there
+    // are two producers that can fill it: the forwarder's gossip emit and the
+    // multicast-scouting task below. It exists when EITHER plane is on, and the
+    // `dial_tx` clone each takes keeps it open for as long as its producer runs.
+    let (dial_tx, dial_intents) = match (
+        autoconnect.is_some(),
+        #[cfg(feature = "scouting-active")]
+        opts.scout_autoconnect.is_some(),
+        #[cfg(not(feature = "scouting-active"))]
+        false,
+    ) {
+        (false, false) => (None, None),
+        _ => {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            (Some(tx), Some(rx))
+        }
+    };
+    if let Some(strategy) = autoconnect {
         log::info!(
             "wz-ap-demo peer: gossip-autoconnect enabled (--autoconnect, strategy {})",
-            match strategy {
-                AutoConnectStrategy::Always => "always",
-                AutoConnectStrategy::GreaterZid => "greater-zid",
-            }
+            strategy.to_config_str()
         );
         let policy = AutoConnect::new(
             Zid::from_slice(&params.zid),
             default_autoconnect_matcher(WhatAmI::Peer),
             strategy,
         );
-        forwarder.enable_autoconnect(policy)
-    });
+        forwarder.enable_autoconnect_into(
+            policy,
+            dial_tx
+                .clone()
+                .expect("the channel exists when a plane is on"),
+        );
+    }
+    // R2141 — `--scout-autoconnect`: the MULTICAST plane. zenoh's
+    // `Runtime::autoconnect_all` — scout the group, and dial every responder the
+    // policy admits. Spawned rather than composed into the drive loop for the
+    // reason the responder is: it owns a UDP socket and a clock of its own, and
+    // the loop that dials owns neither.
+    #[cfg(feature = "scouting-active")]
+    if let Some(policy_args) = opts.scout_autoconnect.as_ref() {
+        spawn_scouting_autoconnect(
+            policy_args,
+            &params.zid,
+            dial_tx
+                .clone()
+                .expect("the channel exists when a plane is on"),
+        )
+        .await?;
+    }
+    // The demo's own end is dropped so the channel closes when every producer is
+    // gone; each producer holds its own clone.
+    drop(dial_tx);
 
     let loop_fut = peer_loop(
         FaceSources {
@@ -6787,6 +7038,13 @@ mod peer_quic_cert_tests {
             interest_timeout_ms: None,
             #[cfg(feature = "scouting-responder")]
             scout_listen: None,
+            // R2141 — the third fixture field in three rounds (R2095's `offer`,
+            // R2112's `timestamping`, now this), and it takes the same default
+            // for the same reason: `None` is "the operator asked for no multicast
+            // autoconnect", which is the pre-R2141 behaviour exactly, so these
+            // two tests keep measuring what they were written for.
+            #[cfg(all(feature = "scouting-active", feature = "routing-peer"))]
+            scout_autoconnect: None,
             connect_retry: wz::runtime_tokio::retry_period::RetryPolicy::ZENOH_DEFAULT,
             // R2133 — R2112 added `PeerOpts.timestamping` and did not reach
             // these two fixtures either, exactly as R2095 did with `offer` six
@@ -6893,6 +7151,13 @@ mod peer_failfast_tests {
             interest_timeout_ms: None,
             #[cfg(feature = "scouting-responder")]
             scout_listen: None,
+            // R2141 — the third fixture field in three rounds (R2095's `offer`,
+            // R2112's `timestamping`, now this), and it takes the same default
+            // for the same reason: `None` is "the operator asked for no multicast
+            // autoconnect", which is the pre-R2141 behaviour exactly, so these
+            // two tests keep measuring what they were written for.
+            #[cfg(all(feature = "scouting-active", feature = "routing-peer"))]
+            scout_autoconnect: None,
             connect_retry: wz::runtime_tokio::retry_period::RetryPolicy::ZENOH_DEFAULT,
             // R2133 — R2112 added `PeerOpts.timestamping` and did not reach
             // these two fixtures either, exactly as R2095 did with `offer` six

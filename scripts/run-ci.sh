@@ -4274,9 +4274,22 @@ layer_c1ay_cargo_test_router_hat() {
     # subject is compiled in, and the count is 40 rather than 34 because five
     # other cases in the module are gated the same way.
     # R2140 — 40 -> 41, the same new case seen from the other feature set.
+    # R2141 (open-debt item 223) — `scouting-active` JOINS the list, and the
+    # count does NOT move (MEASURED: 41 passed, 10 filtered out, on this exact
+    # command). It is not a test that needed the feature; it is a RULE that did.
+    # R2140's argv-precondition gate derives `<flag> requires <flag>` out of the
+    # binary's own source and checks it against every argv the expansion emits,
+    # and `--scout-autoconnect-strategy requires --scout-autoconnect` is a rule
+    # whose flags exist only where `scouting-active` + `routing-peer` do:
+    # without the feature the two keys land in `config_keys_the_demo_drops()`,
+    # no shape emits either flag, and the gate reported the rule under
+    # `skip -- no shape emits it`. MEASURED both ways on this command:
+    # 11 rule(s) / 34 check(s) without the feature and the rule SKIPPED,
+    # 11 rule(s) / 37 check(s) with it and the rule CHECKED. A skip reads like
+    # coverage, which is the one thing this gate must not do.
     _runci_guarded_test "C1AY stock_config_tests role-parity 41" 41 \
         cargo test -p wz-ap-demo \
-        --features zenoh-config,scouting-responder,routing-peer,router-hat-router \
+        --features zenoh-config,scouting-responder,routing-peer,router-hat-router,scouting-active \
         stock_config_tests --quiet || return 1
     # R2072 (open-debt item 496) — and the seam the module above structurally
     # cannot reach: argv -> exit status. Every unit witness for `check_topology`
@@ -11764,6 +11777,30 @@ PY
     # gate-skew argument as the scouting-active clippy above.
     (cd crates && cargo clippy -p wz-runtime-tokio --all-targets \
         --features scouting-responder --quiet -- -D warnings) || return 1
+    # R2141 (open-debt item 223) — the DIALLING half, which is the one wz did not
+    # have: a wz node scouts the group, a wz responder answers, and the scouter
+    # OPENS A SESSION to the node that answered — gated by
+    # `scouting/multicast/autoconnect`. Both legs run against the same responder
+    # and differ only in the policy's matcher, so the control cannot pass by
+    # finding a network the positive leg could not use.
+    #
+    # Its own invocation because it is the first thing here to need THREE
+    # features at once: `scouting-active` to scout, `scouting-responder` for the
+    # wz node that answers it, and `routing-peer` for the `peer_loop` that turns
+    # an intent into a dial and reports `scout_dialed`. KEEP ON ONE LINE for the
+    # `feature_closure.py` reason the demo build below states.
+    #
+    # Count-guarded at 2 for the reason the responder leg above is: this selects a
+    # whole binary and the binary is `#![cfg(all(..))]`-gated, so a build that
+    # lost one of the three features would compile an EMPTY target and `cargo
+    # test` would exit 0 having run nothing.
+    _runci_guarded_test "M scout autoconnect dials what answered" 2 \
+        cargo test -p wz-runtime-tokio --features scouting-active,scouting-responder,routing-peer \
+        --test scouting_autoconnect_loopback -- --ignored || return 1
+    # Clippy over that combination, which no other lane builds — the same
+    # gate-skew argument as the two clippy legs above.
+    (cd crates && cargo clippy -p wz-runtime-tokio --all-targets \
+        --features scouting-active,scouting-responder,routing-peer --quiet -- -D warnings) || return 1
     # R2089 (open-debt item 222) — the RUN-MODE half of the same subsystem: a wz
     # `--router-hat` answers a Scout, and the Hello says `router`. y846 wired the
     # responder into `run_peer` alone, so the one role a stock client's

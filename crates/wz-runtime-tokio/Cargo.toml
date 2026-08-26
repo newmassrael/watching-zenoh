@@ -1149,7 +1149,15 @@ config-mutate-runtime = ["routing-peer"]
 # `transport-multilink` / `transport-qos` fields are carried from `WzConfig`
 # only on a build that HAS them, so this feature does not silently widen the
 # transport surface to obtain a number to emit.
-zenoh-config-emit = []
+#
+# R2141 (open-debt item 223) — `dep:wz-routing-graph`. The reader honours
+# `scouting/multicast/autoconnect{,_strategy}` now, and those keys resolve into
+# `AutoConnect`'s own types (`AutoConnectStrategies` / `AutoConnectStrategy`).
+# The alternative was a second copy of a two-spelling vocabulary inside the
+# reader, which is the drift this module removes elsewhere. The crate is a leaf
+# over wz-codecs (plus petgraph), so this adds no cycle, and no footprint preset
+# carries `zenoh-config-emit` — measured, not assumed.
+zenoh-config-emit = ["dep:wz-routing-graph"]
 # R311y579 (G9) — `transport-link-raweth`: the raweth (L2) link. Forwards to
 # wz-session-core's framing half and pulls `dep:libc` for the AF_PACKET socket
 # (`socket`/`ioctl(SIOCGIFINDEX)`/`bind`/`recvfrom`), the same reason

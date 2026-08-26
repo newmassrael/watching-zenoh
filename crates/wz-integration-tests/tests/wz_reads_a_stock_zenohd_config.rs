@@ -1962,6 +1962,16 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
   // fixture exists to keep measuring. Values are upstream's own defaults, and
   // `listen: false` matches the `enabled: false` above: a client that dials an
   // endpoint is not on the group in either direction.
+  // R2141 (open-debt item 223) — `autoconnect` and `autoconnect_strategy` join
+  // the same list, for the same reason and with the same requirement: they must
+  // reach NOTHING here. Their precondition is a run mode that both scouts and
+  // owns a dial-intent stream, which is `--peer`; this node is a client that
+  // dials one endpoint, so an expansion emitting `--scout-autoconnect` would
+  // hand a valid operator config to a binary that exits(2) on it.
+  //
+  // The values are upstream's own CLIENT defaults (`autoconnect: ["router"]`,
+  // `autoconnect_strategy: "always"`, `DEFAULT_CONFIG.json5`), so this fixture
+  // stays a file an operator could plausibly have.
   scouting: {{
     multicast: {{
       enabled: false,
@@ -1969,6 +1979,8 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
       interface: "auto",
       ttl: 1,
       listen: false,
+      autoconnect: ["router"],
+      autoconnect_strategy: "always",
     }},
     timeout: 2500,
   }},

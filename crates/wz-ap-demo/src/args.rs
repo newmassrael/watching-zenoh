@@ -922,7 +922,91 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
     // node that is scouting, and the demo rejects it otherwise. R311y846 widened
     // "is scouting" to include the answering direction, which joins the same
     // socket.
-    let scouting = exp.typed("--scout") || exp.typed("--scout-listen") || listen_expanded;
+    // R2141 (open-debt item 223) — `scouting/multicast/autoconnect` and its
+    // `_strategy`. Decided BEFORE the socket keys for the reason `listen` is: this
+    // is a third direction that joins the same group, so a document carrying
+    // `autoconnect` alongside `address:` must expand to both flags or to neither.
+    //
+    // Its precondition is `--peer`, and ONLY `--peer` — narrower than
+    // `--scout-listen`'s `--peer` OR `--router-hat`. That is upstream's own shape
+    // rather than an omission: a router's `scouting.multicast.autoconnect`
+    // default is the EMPTY set (`DEFAULT_CONFIG.json5`: `router: []`), and wz's
+    // `--router-hat` passes `dial_intents: None` for the matching reason, so the
+    // flag would reach a run mode with nowhere to post an intent.
+    //
+    // Checked against `rest` AND `added`, which is R311y849's rule and the whole
+    // drop-in case: the file supplies the role for `wz-ap-demo --config
+    // their.json5`, and that `--peer` never appears on the command line.
+    let role_dials_discoveries = exp
+        .rest
+        .iter()
+        .chain(exp.added.iter())
+        .any(|a| a == "--peer");
+    let autoconnect_blocked = no_sink("scouting/multicast/autoconnect").or_else(|| {
+        (!role_dials_discoveries).then_some(KeyEffect::WithheldFromThisRun(
+            "this run's mode dials no discovered node",
+        ))
+    });
+    let autoconnect_expanded = named("scouting/multicast/autoconnect")
+        && match cfg.scout_multicast_autoconnect {
+            Some(matcher) => {
+                exp.pair(
+                    "scouting/multicast/autoconnect",
+                    "--scout-autoconnect",
+                    // `none` is the flag's spelling of the EMPTY set, which is a
+                    // real instruction (`autoconnect: []`) and not an absent key.
+                    // Rendered through the same role names the parser matches, so
+                    // the two directions cannot disagree about a spelling.
+                    render_autoconnect_roles(matcher),
+                    autoconnect_blocked,
+                ) == KeyEffect::Expanded
+            }
+            // A key named with no value asks for nothing, and asking for nothing
+            // is what this node already does.
+            None => {
+                exp.record(
+                    "scouting/multicast/autoconnect",
+                    KeyEffect::AlreadyTheBehaviour,
+                );
+                false
+            }
+        };
+    if named("scouting/multicast/autoconnect_strategy") {
+        // The strategy's precondition is the MATCHER's flag, not the run mode:
+        // `main` refuses `--scout-autoconnect-strategy` without
+        // `--scout-autoconnect`, because a tie-break for a policy that admits
+        // nobody selects nothing. So a document naming only `_strategy` — which a
+        // stock file routinely does, since upstream defaults both — expands to
+        // nothing rather than to a refusal.
+        let blocked = no_sink("scouting/multicast/autoconnect_strategy").or_else(|| {
+            (!autoconnect_expanded).then_some(KeyEffect::WithheldFromThisRun(
+                "this run installs no multicast autoconnect policy",
+            ))
+        });
+        match cfg.scout_multicast_autoconnect_strategy {
+            Some(strategy) => {
+                exp.pair(
+                    "scouting/multicast/autoconnect_strategy",
+                    "--scout-autoconnect-strategy",
+                    // Rendered in the flag's OWN spelling and re-parsed by
+                    // `parse_scout_autoconnect` downstream on purpose, the
+                    // `--connect-retry` discipline: that parser is the single
+                    // place the acceptance policy lives.
+                    strategy.to_config_str(),
+                    blocked,
+                );
+            }
+            None => exp.record(
+                "scouting/multicast/autoconnect_strategy",
+                KeyEffect::AlreadyTheBehaviour,
+            ),
+        }
+    }
+    let scouting = exp.typed("--scout")
+        || exp.typed("--scout-listen")
+        || exp.typed("--scout-autoconnect")
+        || listen_expanded
+        || autoconnect_expanded;
     const NO_SCOUT_SOCKET: &str = "this run neither asks for nor answers scouts";
     for (key, flag, value) in [
         (
@@ -1716,6 +1800,31 @@ pub(crate) fn check_topology_for_build(
     }
 }
 
+/// R2141 (open-debt item 223) — `scouting/multicast/autoconnect`'s value in the
+/// flag's own spelling: a comma-separated role list, or `none` for the empty set.
+///
+/// `none` and not an empty string: `autoconnect: []` is a REAL instruction
+/// upstream (it is what a stock router's config resolves to), and an empty argv
+/// value is not something the operator can type unambiguously — nor something
+/// `parse_pair` could hand back distinguishably from an absent flag.
+///
+/// The names come from `WhatAmI::to_str`, which is what the parser matches
+/// against, so the two directions cannot disagree about a spelling.
+#[cfg(feature = "zenoh-config")]
+fn render_autoconnect_roles(matcher: wz::runtime_tokio::zenoh_config::WhatAmIMatcher) -> String {
+    use wz::runtime_tokio::zenoh_config::WhatAmI;
+    let names: Vec<&str> = [WhatAmI::Router, WhatAmI::Peer, WhatAmI::Client]
+        .into_iter()
+        .filter(|w| matcher.matches(*w))
+        .map(|w| w.to_str())
+        .collect();
+    if names.is_empty() {
+        String::from("none")
+    } else {
+        names.join(",")
+    }
+}
+
 /// Keys the reader ingests that reach NO behaviour in this binary.
 ///
 /// Empty is the goal and not the invariant — a key with no sink is a legitimate
@@ -1761,6 +1870,14 @@ pub(crate) fn config_keys_the_demo_drops() -> Vec<&'static str> {
     // has no sink to expand into.
     if !cfg!(any(feature = "routing-peer", feature = "router-hat-router")) {
         out.push("connect/retry");
+    }
+    // R2141 — the multicast autoconnect plane needs BOTH features: `--peer` (the
+    // only run mode that owns a dial-intent stream) and the scouting FSM that
+    // fills it. A build missing either has no sink to expand into, and its flag
+    // exits(2) naming the feature — the R311y844 rule.
+    if !cfg!(all(feature = "scouting-active", feature = "routing-peer")) {
+        out.push("scouting/multicast/autoconnect");
+        out.push("scouting/multicast/autoconnect_strategy");
     }
     out
 }
@@ -2427,6 +2544,14 @@ mod stock_config_tests {
             // `--scout` is a one-shot Initiator that exits on its first
             // discovery, which has nothing to answer with.
             "scouting/multicast/listen" => &["--config", "z.json5", "--peer", "tcp/127.0.0.1:0"],
+            // R2141 — the DIALLING direction's precondition is `--peer` alone,
+            // narrower than the answering one's `--peer` OR `--router-hat`: only
+            // the peer mesh loop owns a dial-intent stream to post into, which is
+            // upstream's shape too (a router's multicast `autoconnect` default is
+            // the empty set).
+            "scouting/multicast/autoconnect" | "scouting/multicast/autoconnect_strategy" => {
+                &["--config", "z.json5", "--peer", "tcp/127.0.0.1:0"]
+            }
             // R311y849 — the re-dial schedule's precondition is a run mode that
             // owns a connect LIST. `--peer` is used here rather than
             // `--router-hat` because it is the arm this round WIRED: the
@@ -2649,6 +2774,35 @@ mod stock_config_tests {
                 r#"{ mode: "peer", connect: { endpoints: ["tcp/r:7447"],
                      retry: { period_init_ms: 250, period_max_ms: 9000,
                               period_increase_factor: 1.5 } } }"#,
+            ),
+            // R2141 (open-debt item 223) — the two keys that make the multicast
+            // plane DIAL. Both controls state the key at a value that is what the
+            // absent flag already means, so the delta is the VALUE and not the
+            // key's presence — the `scouting/multicast/listen` discipline four
+            // rows up. For the matcher that value is `[]` (dial nobody, which is
+            // exactly a run with no `--scout-autoconnect`); for the strategy it is
+            // `"always"`, upstream's own default and the one `parse_scout_
+            // autoconnect` installs when the flag is absent.
+            (
+                "scouting/multicast/autoconnect",
+                r#"{ mode: "peer", scouting: { multicast: { autoconnect: [] } } }"#,
+                r#"{ mode: "peer", scouting: { multicast:
+                     { autoconnect: ["router", "peer"] } } }"#,
+            ),
+            // The strategy's control carries the MATCHER at the variant's value
+            // too, so the delta stays the one key: without it the control would
+            // emit no `--scout-autoconnect` at all, the variant's strategy flag
+            // would be withheld for want of its precondition, and the row would
+            // compare two nothings.
+            (
+                "scouting/multicast/autoconnect_strategy",
+                r#"{ mode: "peer", scouting: { multicast:
+                     { autoconnect: ["router", "peer"],
+                       autoconnect_strategy: "always" } } }"#,
+                r#"{ mode: "peer", scouting: { multicast:
+                     { autoconnect: ["router", "peer"],
+                       autoconnect_strategy:
+                         { to_router: "always", to_peer: "greater-zid" } } } }"#,
             ),
         ]
     }
@@ -2924,13 +3078,25 @@ mod stock_config_tests {
     ///
     /// # What this derives, and from where
     ///
-    /// The refusals are `main`'s own, read out of `main.rs` with `include_str!`
+    /// The refusals are read out of the binary's OWN SOURCE with `include_str!`
     /// — the idiom the `--help` sweep in this module already uses — so a new
     /// `X requires Y` arrives inside this gate instead of beside it. ⚠ THE
     /// MESSAGES SPAN LINES: `--query-timeout-ms requires --query` is written as
     /// a `\`-continued literal, and a line-at-a-time reader finds four of these
     /// where there are more. `string_literals` returns the whole literal, and
     /// the continuation is flattened here.
+    ///
+    /// ⚠ R2141 — TWO files, and the second is this round's correction. R2140
+    /// read `main.rs` alone and its doc said "the refusals are `main`'s own",
+    /// which was true of the refusals that existed and is not a property of the
+    /// program: a flag PAIR validated inside its own parser refuses in `args.rs`
+    /// and is printed by `main`, and the gate could not see it. Measured when
+    /// `--scout-autoconnect-strategy requires --scout-autoconnect` landed here:
+    /// the derivation still reported 10 rules and skipped the new flag as
+    /// unreached, so the rule that existed was enforced against nothing. The
+    /// population is "every refusal the BINARY makes", so the reader takes both
+    /// files. Moving the refusal into `main.rs` instead would have split one
+    /// parser's validation across two files to suit its auditor.
     ///
     /// FEATURE preconditions (`--peer requires the \`routing-peer\` feature`)
     /// are counted and skipped: they are facts about the build, not about the
@@ -2946,7 +3112,8 @@ mod stock_config_tests {
     /// them is checked in that one.
     #[test]
     fn every_flag_the_expansion_emits_carries_the_precondition_main_refuses_without() {
-        const MAIN: &str = include_str!("main.rs");
+        // R2141 — both files the binary refuses from; see the doc above.
+        const REFUSAL_SOURCES: &[&str] = &[include_str!("main.rs"), include_str!("args.rs")];
 
         /// A refusal literal with its `\`-continuations flattened.
         fn flatten(lit: &str) -> String {
@@ -2982,11 +3149,15 @@ mod stock_config_tests {
 
         let mut pairs: Vec<(String, String)> = Vec::new();
         let mut feature_gated: Vec<String> = Vec::new();
-        for lit in string_literals(MAIN) {
+        for lit in REFUSAL_SOURCES.iter().flat_map(|s| string_literals(s)) {
             let flat = flatten(lit);
-            let Some(body) = flat.strip_prefix("wz-ap-demo: ") else {
-                continue;
-            };
+            // R2141 — the `wz-ap-demo: ` prefix is OPTIONAL. `main` carries it in
+            // its own refusals and ADDS it to the ones a parser in `args.rs`
+            // hands back (`eprintln!("wz-ap-demo: {msg}")`), so requiring it here
+            // is requiring the refusal to live in one particular file. The
+            // filters below are what keep this tight: a literal with no `--`
+            // before ` requires ` produces no rule.
+            let body = flat.strip_prefix("wz-ap-demo: ").unwrap_or(flat.as_str());
             let Some((before, after)) = body.split_once(" requires ") else {
                 continue;
             };
@@ -3010,9 +3181,9 @@ mod stock_config_tests {
         // over an empty set of rules.
         assert!(
             !pairs.is_empty(),
-            "no `<flag> requires <flag>` refusal was derived from main.rs, so \
-             this gate has no rules to enforce. Either the messages were \
-             reworded or this reader broke."
+            "no `<flag> requires <flag>` refusal was derived from the binary's \
+             own source, so this gate has no rules to enforce. Either the \
+             messages were reworded or this reader broke."
         );
 
         // THE SHAPES. `cli_for` meets the row's own precondition; the other two
@@ -3084,8 +3255,8 @@ mod stock_config_tests {
             .map(|(f, _)| f.as_str())
             .collect();
         eprintln!(
-            "argv-precondition: {} rule(s) derived from main.rs, {} check(s) \
-             over {} row(s) x 3 shape(s); {} flag(s) emitted in total",
+            "argv-precondition: {} rule(s) derived from the binary's own source, \
+             {} check(s) over {} row(s) x 3 shape(s); {} flag(s) emitted in total",
             pairs.len(),
             checked.len(),
             honoured_key_fixtures().len(),
@@ -4820,6 +4991,76 @@ pub(crate) fn parse_scout_socket(args: &[String]) -> Result<ScoutSocketArgs, Str
         interface,
         ttl,
     })
+}
+
+/// R2141 (open-debt item 223) — parse `--scout-autoconnect <roles>` and
+/// `--scout-autoconnect-strategy <spec>` into the policy the multicast plane
+/// installs.
+///
+/// `roles` is a comma-separated list of `router` / `peer` / `client`, and `none`
+/// is the spelling of the EMPTY set — `autoconnect: []` is a real instruction
+/// upstream (it is what a stock router resolves to) and an empty argv value is
+/// not a thing an operator can type unambiguously. `strategy` is the spelling
+/// `AutoConnectStrategies` renders and parses, so it accepts both `always` and
+/// `to_router=always,to_peer=greater-zid`.
+///
+/// `Ok(None)` is "the operator did not ask for multicast autoconnect", which is
+/// distinct from `Ok(Some(empty))`. A malformed value ABORTS, for the reason
+/// `--scout-addr` aborts: a node that silently narrowed the policy it was given
+/// dials fewer peers than the operator asked for and nothing downstream names
+/// the cause.
+///
+/// The STRATEGY without the matcher is refused rather than ignored — the
+/// discipline `--scout-timeout-ms requires --scout` set, and the same one this
+/// module applies to the three socket flags. A tie-break for a policy that does
+/// not exist is an instruction with no subject.
+#[cfg(all(feature = "scouting-active", feature = "routing-peer"))]
+pub(crate) fn parse_scout_autoconnect(
+    args: &[String],
+) -> Result<Option<crate::runner::ScoutAutoconnectArgs>, String> {
+    use wz::runtime_tokio::linkstate_forward::{AutoConnectStrategies, WhatAmI, WhatAmIMatcher};
+
+    let Some(roles) = parse_pair(args, "--scout-autoconnect") else {
+        if parse_pair(args, "--scout-autoconnect-strategy").is_some() {
+            return Err(String::from(
+                "--scout-autoconnect-strategy requires --scout-autoconnect (a \
+                 tie-break with no policy to break selects nothing)",
+            ));
+        }
+        return Ok(None);
+    };
+    let mut matcher = WhatAmIMatcher::empty();
+    if roles != "none" {
+        for name in roles.split(',') {
+            // Matched against `to_str`, the same way the config reader and the
+            // `mode` key match, so the spellings cannot disagree.
+            matcher = match [WhatAmI::Router, WhatAmI::Peer, WhatAmI::Client]
+                .into_iter()
+                .find(|w| w.to_str() == name)
+            {
+                Some(WhatAmI::Router) => matcher.router(),
+                Some(WhatAmI::Peer) => matcher.peer(),
+                Some(WhatAmI::Client) => matcher.client(),
+                None => {
+                    return Err(format!(
+                        "--scout-autoconnect: `{name}` is not a role; expected a \
+                         comma-separated list of `router` / `peer` / `client`, \
+                         or `none`"
+                    ))
+                }
+            };
+        }
+    }
+    let strategy = match parse_pair(args, "--scout-autoconnect-strategy") {
+        None => AutoConnectStrategies::default(),
+        Some(spec) => AutoConnectStrategies::from_config_str(&spec)
+            .map_err(|e| format!("--scout-autoconnect-strategy: `{spec}` {e}"))?,
+    };
+    Ok(Some(crate::runner::ScoutAutoconnectArgs {
+        socket: parse_scout_socket(args)?,
+        matcher,
+        strategy,
+    }))
 }
 
 /// R311y506 (session-extqos) — parse `--qos-band START-END` and `--qos-rel 0|1`

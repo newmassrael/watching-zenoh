@@ -608,7 +608,14 @@ fn main() -> ExitCode {
                 // requires --scout` set. In peer mode `--scout` itself is not a
                 // role, so `--scout-listen` is the only thing they can qualify.
                 match crate::args::parse_scout_socket(rest) {
-                    Ok(v) if v != crate::args::ScoutSocketArgs::default() => {
+                    // R2141 — `--scout-autoconnect` is the SECOND direction that
+                    // joins this socket, so it qualifies the three flags exactly
+                    // as `--scout-listen` does. Before this round `--scout-listen`
+                    // was the only one, and the sentence below said so.
+                    Ok(v)
+                        if v != crate::args::ScoutSocketArgs::default()
+                            && !rest.iter().any(|a| a == "--scout-autoconnect") =>
+                    {
                         eprintln!(
                             "wz-ap-demo: --scout-addr / --scout-iface / --scout-ttl \
                              require --scout-listen in --peer mode"
@@ -622,6 +629,33 @@ fn main() -> ExitCode {
                     }
                 }
             };
+            // R2141 (open-debt item 223) — `--scout-autoconnect <roles>` and its
+            // `--scout-autoconnect-strategy <spec>`: keep scouting the group and
+            // dial every responder the policy admits (zenoh
+            // `scouting/multicast/autoconnect{,_strategy}`).
+            //
+            // Parsed in THIS arm and nowhere else, for the reason `--scout-listen`
+            // is: the plane posts dial-intents, and `--peer` is the only run mode
+            // that owns a stream to post them into (`--router-hat` passes
+            // `dial_intents: None`, mirroring zenoh, whose router-mode autoconnect
+            // default is the empty set).
+            #[cfg(all(feature = "scouting-active", feature = "routing-peer"))]
+            let scout_autoconnect = match crate::args::parse_scout_autoconnect(rest) {
+                Ok(v) => v,
+                Err(msg) => {
+                    eprintln!("wz-ap-demo: {msg}");
+                    return ExitCode::from(2);
+                }
+            };
+            #[cfg(not(all(feature = "scouting-active", feature = "routing-peer")))]
+            if rest.iter().any(|a| a == "--scout-autoconnect") {
+                eprintln!(
+                    "wz-ap-demo: --scout-autoconnect requires the `scouting-active` \
+                     build feature (build: cargo build -p wz-ap-demo --features \
+                     scouting-active)"
+                );
+                return ExitCode::from(2);
+            }
             #[cfg(not(feature = "scouting-responder"))]
             if rest.iter().any(|a| a == "--scout-listen") {
                 eprintln!(
@@ -716,6 +750,8 @@ fn main() -> ExitCode {
                     interest_timeout_ms,
                     #[cfg(feature = "scouting-responder")]
                     scout_listen,
+                    #[cfg(all(feature = "scouting-active", feature = "routing-peer"))]
+                    scout_autoconnect,
                     connect_retry: peer_connect_retry,
                     offer: peer_offer,
                     // R2112 (open-debt items 102 + 210) — zenoh
