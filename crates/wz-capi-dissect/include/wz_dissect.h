@@ -209,7 +209,14 @@ int wz_dissect_pcap_summary_bounded(const unsigned char *bytes, size_t len,
  * `exchanges` and `payloads` are `null` — not an empty table — in a build
  * whose decoder cannot see the records they correlate. A plane that cannot
  * be fed is absent rather than empty, and `{"rows":[]}` would tell you this
- * capture had no queries in it. */
+ * capture had no queries in it.
+ *
+ * SUBSUMED BY wz_dissect_pcap_census_where_limited -- that door takes the
+ * selector and the limit preset as ARGUMENTS, so it answers this question and
+ * two more. This symbol is kept, not withdrawn: a published symbol is one a
+ * consumer already links. New code should reach for the current shape.
+ * (R2116, open-debt item 466 -- checked against the library's own `doors`
+ * axis, so this line cannot go stale unnoticed.) */
 int wz_dissect_pcap_census(const unsigned char *bytes, size_t len, char **out);
 
 /* R311y885 (ABI 7) — the same planes, read under BOUNDED memory.
@@ -231,7 +238,11 @@ int wz_dissect_pcap_census(const unsigned char *bytes, size_t len, char **out);
  * non-zero.
  *
  * wz_dissect_pcap_census_where stays unbounded. Bounding a narrowed census
- * is a separate decision and is not improvised here. */
+ * is a separate decision and is not improvised here.
+ *
+ * SUBSUMED BY wz_dissect_pcap_census_where_limited -- the preset this door
+ * hard-codes is an argument there, which is what stopped a `_bounded` twin
+ * being added per document. Kept and still linkable. (R2116, item 466.) */
 int wz_dissect_pcap_census_bounded(const unsigned char *bytes, size_t len,
                                    char **out);
 
@@ -255,7 +266,11 @@ int wz_dissect_pcap_census_bounded(const unsigned char *bytes, size_t len,
  * it a short total reads as a whole one.
  *
  * A selector that does not compile returns WZ_DISSECT_ERR_SELECTOR and no
- * string. For the position, call wz_dissect_selector_diagnose. */
+ * string. For the position, call wz_dissect_selector_diagnose.
+ *
+ * SUBSUMED BY wz_dissect_pcap_census_where_limited -- same selector, plus the
+ * ceiling this door cannot take. A narrowed census over a link that does not
+ * end is the case this one leaves unserved. (R2116, item 466.) */
 int wz_dissect_pcap_census_where(const unsigned char *bytes, size_t len,
                                  const char *selector, char **out);
 
@@ -326,7 +341,12 @@ int wz_dissect_selector_diagnose(const char *selector, char **out);
  * bound if you have a screen to fill. Each flow reports `shown` and
  * `omitted`, so a held-back listing is never mistaken for a capture that
  * ended. `capture_reread` reports whether the datagram half could read the
- * file a second time, which it must do to reach a datagram message's bytes. */
+ * file a second time, which it must do to reach a datagram message's bytes.
+ *
+ * SUBSUMED BY wz_dissect_pcap_fields_limited -- that door takes the DISSECTION
+ * ceiling as an argument, which this one has no way to state: the bound here
+ * trims the listing after the whole walk is already built. Kept and still
+ * linkable. (R2116, item 466.) */
 int wz_dissect_pcap_fields(const unsigned char *bytes, size_t len,
                            size_t max_messages_per_flow, char **out);
 
@@ -466,7 +486,11 @@ int wz_dissect_pcap_fields(const unsigned char *bytes, size_t len,
  *
  * Always present, empty array when nothing refused, and bounded by the same
  * walk: `payload_mapping_counts_exact` covers BOTH tallies, because being a
- * floor is a property of the walk rather than of either finding. */
+ * floor is a property of the walk rather than of either finding.
+ *
+ * SUBSUMED BY wz_dissect_pcap_fields_limited -- that door takes the same
+ * declarations text AND the dissection ceiling, so it is this call with the
+ * one thing it cannot say. Kept and still linkable. (R2116, item 466.) */
 int wz_dissect_pcap_fields_with_payloads(const unsigned char *bytes, size_t len,
                                          size_t max_messages_per_flow,
                                          const char *declarations, char **out);

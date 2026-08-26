@@ -8393,6 +8393,22 @@ layer_c1bo_dissect_c_abi() {
     command -v nm >/dev/null 2>&1 || {
         echo "  C1bo FAIL: nm is absent, so the ABI symbol set cannot be read"; return 1; }
     python3 scripts/lib/capi_abi_pin.py || return 1
+
+    # R2116 (open-debt item 466) — and what the HEADER says about those same
+    # symbols, held against what the library answers.
+    #
+    # The gate above pins WHICH symbols ship. This asks whether a person
+    # reading the header can tell a current door from an older one, which
+    # R311y932 made askable at runtime (`doors`) and left unsaid in the file a
+    # linking consumer actually reads. Measured before it was written: the
+    # header said nothing about subsumption at all.
+    #
+    # Beside `capi_abi_pin.py` on purpose -- both read the RELEASE cdylib this
+    # lane just built, and this one calls `wz_dissect_readable_surfaces`
+    # through ctypes rather than parsing the Rust `Door` walk, so the header is
+    # compared with the artifact instead of with another file in the same
+    # commit.
+    python3 scripts/lib/capi_header_subsumption.py || return 1
     return 0
 }
 
