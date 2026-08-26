@@ -264,12 +264,13 @@ impl Reserved {
     }
 
     /// This form's segment, with `body` after the letter.
-    pub(crate) fn segment(self, body: &str) -> String {
-        let mut out = String::with_capacity(2 + body.len());
-        out.push(CBOR_PATH_ESCAPE);
-        out.push(self.letter());
-        out.push_str(body);
-        out
+    ///
+    /// R2125 (open-debt item 463) — returns a [`Segment`], which is the only
+    /// thing a path accepts. The construction moved into `path_builder` so
+    /// that this is a door into the reserved namespace rather than one way of
+    /// spelling it.
+    fn segment(self, body: &str) -> Segment {
+        Segment::reserved(self, body)
     }
 
     /// The variant after this one, so the set can be WALKED rather than
@@ -302,10 +303,119 @@ impl Reserved {
     }
 }
 
+/// R2125 (open-debt item 463) — THE PATH, WHICH ONLY A [`Segment`] MAY ENTER.
+///
+/// # What this closes, and why it is a type and not a lint
+///
+/// R311y925 routed all seven producers through [`Reserved`] and said so in its
+/// own doc: "it does not make a raw `\"\\\\q\"` literal impossible. Catching
+/// that needs a source lint over escape literals, which is the shape item 400
+/// warns decays." Item 463 is that residue, and the lint it describes needs an
+/// exclusion list -- `segment()` itself, the test expectations -- which is
+/// exactly the filter item 400 says is statically bound to nothing.
+///
+/// So the bypass is made UNWRITABLE instead of watched. The inner `String` is
+/// private to `path_builder`, so no code in this module -- not the walker, not
+/// a future arm -- can push bytes into a path. The only doors are
+/// [`Segment::reserved`], whose letter comes from the enum, and
+/// [`Segment::text`], which ESCAPES its input: `Segment::text("\\q")` yields a
+/// text segment spelling a backslash, never the reserved form. A new reserved
+/// shape has to go through [`Reserved`], where declaring it is what makes it
+/// writable.
+///
+/// MEASURED before this existed: a `push_str("\\q")` sitting in shipping code,
+/// behind a condition `PATH_CORPUS` never satisfies, left 605 tests green.
+/// That is item 463's claim exactly -- the corpus gate is the only judge, and
+/// a producer the corpus does not reach is invisible to it in both directions.
+mod path_builder {
+    use super::{Reserved, CBOR_PATH_ESCAPE, CBOR_PATH_SEP};
+    use alloc::string::String;
+
+    /// One path segment, already in its final spelling.
+    ///
+    /// Constructible ONLY by the two functions below, which is the whole of the
+    /// enforcement: a `&str` is not a `Segment`, so a literal cannot be pushed.
+    /// `Ord` so item 441's duplicate-key set can hold segments: §5.6 equality
+    /// is decided on the SEGMENT, which is derived from the value, not on the
+    /// encoding.
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    pub(super) struct Segment(String);
+
+    impl Segment {
+        /// A reserved segment: the escape, the form's declared letter, `body`.
+        ///
+        /// The letter is [`Reserved::letter`] and cannot be anything else,
+        /// which is why this door needs no validation.
+        pub(super) fn reserved(form: Reserved, body: &str) -> Self {
+            let mut out = String::with_capacity(2 + body.len());
+            out.push(CBOR_PATH_ESCAPE);
+            out.push(form.letter());
+            out.push_str(body);
+            Self(out)
+        }
+
+        /// A segment from TEXT, escaped by R311y910's rule.
+        ///
+        /// The escaping is what makes this door safe rather than merely
+        /// convenient: text that begins `\q` comes out as a segment spelling a
+        /// literal backslash, so the reserved namespace cannot be entered
+        /// through here by accident or on purpose.
+        pub(super) fn text(s: &str) -> Self {
+            let mut out = String::new();
+            for c in s.chars() {
+                if c == CBOR_PATH_SEP || c == CBOR_PATH_ESCAPE {
+                    out.push(CBOR_PATH_ESCAPE);
+                }
+                out.push(c);
+            }
+            Self(out)
+        }
+
+        #[cfg(test)]
+        pub(super) fn as_str(&self) -> &str {
+            &self.0
+        }
+    }
+
+    /// A path under construction. Grows only by [`Segment`], shrinks only to a
+    /// mark it handed out.
+    #[derive(Debug, Default, Clone)]
+    pub(super) struct Path(String);
+
+    impl Path {
+        pub(super) fn len(&self) -> usize {
+            self.0.len()
+        }
+
+        pub(super) fn push(&mut self, segment: &Segment) {
+            self.0.push(CBOR_PATH_SEP);
+            self.0.push_str(&segment.0);
+        }
+
+        pub(super) fn truncate(&mut self, mark: usize) {
+            self.0.truncate(mark);
+        }
+
+        pub(super) fn as_str(&self) -> &str {
+            &self.0
+        }
+    }
+
+    impl From<&str> for Path {
+        /// The ROOT only. A path starts as `$` and every later byte arrives as
+        /// a segment.
+        fn from(root: &str) -> Self {
+            Self(String::from(root))
+        }
+    }
+}
+
+use path_builder::{Path, Segment};
+
 /// The rows a walk is building, or `None` when it is only validating.
 struct Emit {
     fields: Vec<PayloadField>,
-    path: String,
+    path: Path,
 }
 
 /// How a data item would render as a MAP KEY.
@@ -355,7 +465,7 @@ pub(crate) fn scan_cbor(bytes: &[u8]) -> Result<CborSummary, CborErr> {
 pub(crate) fn walk_cbor(bytes: &[u8]) -> Result<Vec<PayloadField>, CborErr> {
     let emit = Emit {
         fields: Vec::new(),
-        path: String::from(CBOR_ROOT_PATH),
+        path: Path::from(CBOR_ROOT_PATH),
     };
     let (_, emit) = scan(bytes, Some(emit))?;
     Ok(emit.expect("the walk was handed an emitter").fields)
@@ -492,7 +602,7 @@ impl<'a> Walk<'a> {
         let end = self.i;
         let Some(e) = self.emit.as_mut() else { return };
         e.fields[slot] = PayloadField {
-            path: e.path.clone(),
+            path: String::from(e.path.as_str()),
             name: None,
             value,
             start,
@@ -501,11 +611,10 @@ impl<'a> Walk<'a> {
     }
 
     /// Extend the path by one segment, returning the mark to truncate back to.
-    fn push(&mut self, segment: &str) -> Option<usize> {
+    fn push(&mut self, segment: &Segment) -> Option<usize> {
         let e = self.emit.as_mut()?;
         let mark = e.path.len();
-        e.path.push(CBOR_PATH_SEP);
-        e.path.push_str(segment);
+        e.path.push(segment);
         Some(mark)
     }
 
@@ -651,7 +760,7 @@ impl<'a> Walk<'a> {
                 if self.at_break()? {
                     break;
                 }
-                let mark = self.push(&format!("{n}"));
+                let mark = self.push(&Segment::text(&format!("{n}")));
                 let r = self.item();
                 self.pop(mark);
                 r?;
@@ -661,7 +770,7 @@ impl<'a> Walk<'a> {
             let count =
                 usize::try_from(h.arg).map_err(|_| (start, "a count wider than this host"))?;
             while n < count {
-                let mark = self.push(&format!("{n}"));
+                let mark = self.push(&Segment::text(&format!("{n}")));
                 let r = self.item();
                 self.pop(mark);
                 r?;
@@ -820,7 +929,7 @@ impl<'a> Walk<'a> {
     /// where an item was expected.
     fn note(&mut self, start: usize, end: usize, value: String) {
         let Some(e) = self.emit.as_mut() else { return };
-        let path = e.path.clone();
+        let path = String::from(e.path.as_str());
         e.fields.push(PayloadField {
             path,
             name: None,
@@ -895,7 +1004,7 @@ impl<'a> Walk<'a> {
 
     /// Walk a map key without emitting a row for it, and render it as a path
     /// segment. See the module doc for why each form looks the way it does.
-    fn key_segment(&mut self) -> Result<String, CborErr> {
+    fn key_segment(&mut self) -> Result<Segment, CborErr> {
         let at = self.i;
         // The emitter is set aside rather than branched on: a key is validated
         // exactly as any other item, and suppressing the row here is what keeps
@@ -906,7 +1015,7 @@ impl<'a> Walk<'a> {
         self.emit = saved;
         let (_, form) = walked?;
         Ok(match form {
-            KeyForm::Text(s) => escape_segment(s),
+            KeyForm::Text(s) => Segment::text(s),
             KeyForm::Int(v) => Reserved::Int.segment(&alloc::format!("{v}")),
             KeyForm::Bytes(raw) => {
                 let mut hex = String::new();
@@ -1240,6 +1349,91 @@ fn f16_to_f64(bits: u16) -> f64 {
 mod tests {
     use super::*;
     use alloc::vec;
+
+    /// R2125 (open-debt item 463) — THE TEXT DOOR CANNOT ENTER THE RESERVED
+    /// NAMESPACE, WHATEVER TEXT GOES THROUGH IT.
+    ///
+    /// # Why this rather than a lint over escape literals
+    ///
+    /// Item 463 is R311y925's own stated residue: routing the seven producers
+    /// through [`Reserved`] made the registered road easy and left
+    /// `push_str("\\q")` writable. Its candidate was a source sweep for escape
+    /// literals with `segment()` and the test expectations excluded -- and item
+    /// 448 had already noted that the exclusion list is exactly the filter item
+    /// 400 warns is bound to nothing.
+    ///
+    /// MEASURED before the change: a `push_str("\\q")` in the walker, behind a
+    /// condition `PATH_CORPUS` never satisfies, left 605 tests green. So the
+    /// corpus gate is the only judge and it cannot see a producer it does not
+    /// reach -- in either direction, which is item 448's finding restated.
+    ///
+    /// The bypass is now UNWRITABLE: `Path` holds a private `String` in a child
+    /// module, so nothing in this file can push bytes into a path, and the only
+    /// two doors are the enum's and this one. THAT half is held by the
+    /// compiler. What this test holds is the other half -- that the text door
+    /// escapes rather than admits.
+    ///
+    /// # The population is derived, and it includes a letter nobody declared
+    ///
+    /// The declared letters come from [`Reserved::letters`]. An UNDECLARED one
+    /// is added, because the interesting input is the form a future round
+    /// invents: if `text` admitted it, the namespace would be enterable by a
+    /// shape no gate is watching for.
+    #[test]
+    fn the_text_door_cannot_enter_the_reserved_namespace() {
+        let declared = Reserved::letters();
+        assert!(
+            !declared.is_empty(),
+            "no reserved letters at all; the population is empty and nothing \
+             below is measuring anything"
+        );
+        let undeclared = ('a'..='z')
+            .find(|c| !declared.contains(c))
+            .expect("the alphabet is wider than the reserved set");
+
+        let mut probes = declared.clone();
+        probes.push(undeclared);
+        for letter in probes {
+            let raw = alloc::format!("{CBOR_PATH_ESCAPE}{letter}body");
+            let through_text = Segment::text(&raw);
+            assert_ne!(
+                through_text.as_str(),
+                raw,
+                "text beginning `\\{letter}` came out of the text door \
+                 unescaped, so a caller can spell a reserved segment with a \
+                 string -- which is the bypass item 463 is about"
+            );
+            let doubled = alloc::format!("{CBOR_PATH_ESCAPE}{CBOR_PATH_ESCAPE}");
+            assert!(
+                through_text.as_str().starts_with(&doubled),
+                "the text door must escape a leading escape: {:?}",
+                through_text.as_str()
+            );
+        }
+
+        // THE CONTROL, in this same test. Without it a `text` that escaped
+        // everything into oblivion would satisfy every assertion above while
+        // the reserved namespace had become unreachable by ANY door.
+        let mut cursor = Some(Reserved::Bytes);
+        let mut reached = 0usize;
+        while let Some(form) = cursor {
+            let seg = form.segment("body");
+            assert!(
+                seg.as_str()
+                    .starts_with(&alloc::format!("{CBOR_PATH_ESCAPE}{}", form.letter())),
+                "the reserved door must still produce {form:?}'s form: {:?}",
+                seg.as_str()
+            );
+            reached += 1;
+            cursor = form.next();
+        }
+        assert_eq!(
+            reached,
+            declared.len(),
+            "the control walked {reached} form(s) and the set declares {}",
+            declared.len()
+        );
+    }
 
     /// R311y914 — EVERY APPENDIX A VECTOR IS WELL-FORMED, and its top-level kind
     /// is the one the RFC's own diagnostic notation says.
