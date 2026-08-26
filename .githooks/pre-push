@@ -588,5 +588,37 @@ if ! bash scripts/lib/nondefault-features-gate.sh "${pkgs[@]}"; then
     exit 1
 fi
 
-echo "pre-push: changed-crate tests + doc links + reduced + non-default features passed; full validation continues on hosted CI."
+# ─── gate 8 — the WORKSPACE still TYPE-CHECKS (R2134) ───────────────
+# Unregistered item 475, and the one blind spot none of the gates above can
+# cover by construction: every one of them is scoped to the crates the push
+# CHANGED, and this class breaks a crate the push did not touch. Widen a public
+# struct in a core crate and the initializer in a dependent stops compiling.
+#
+# Measured twice on the same struct: R311y857 added a field to
+# `wz_analyze::Request` and left `wz-replay` behind, and R2001 did it again with
+# `csv` — hosted Layer C1 died on `error[E0063]` both times. The second session
+# was reading a paragraph inside that very initializer which explained the first
+# occurrence. A comment is not a gate.
+#
+# `check`, not `test`: the failure shape is a COMPILE error, so the instrument
+# measures the same thing that breaks — and this is why the gate does not
+# contradict R311y386's ratification of pre-push as a fast gate rather than a CI
+# mirror. That ratification is about not running the test suite.
+#
+# Cost, measured: 41s clean on the build machine. The four exclusions are READ
+# out of Layer C1 rather than copied, so this cannot go stale when that list
+# moves — item 475 itself cited a `run-ci.sh` line range that had already
+# drifted to a different layer by the time it was repaid.
+echo "pre-push: workspace type-check (open-debt item 475)"
+if ! bash scripts/lib/workspace-check-gate.sh; then
+    echo "" >&2
+    echo "pre-push: the workspace no longer type-checks — a crate this push" >&2
+    echo "          did NOT change has stopped compiling. Every other gate" >&2
+    echo "          here is scoped to the changed crates and structurally" >&2
+    echo "          cannot see this." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+
+echo "pre-push: changed-crate tests + doc links + reduced + non-default features + workspace check passed; full validation continues on hosted CI."
 exit 0
