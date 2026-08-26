@@ -1944,6 +1944,16 @@ PY
     # measured this round: two were wrong to count a comment and now strip, and
     # this one is right to and now says so in an assertion rather than in a
     # comment nobody would notice going stale.
+    # R2132 (unregistered open-debt item 405) — INVARIANT 4: the REASONS are
+    # adjudicated now, not only the names they excuse. Exit 0 used to mean the
+    # name had been DECLARED and said nothing about whether the sentence
+    # declaring it was still true; R311y898 had one row asserting there was no
+    # adjudicator for a name while the same round put one behind it. Every
+    # backticked identifier in a reason must now resolve to a live name -- a
+    # walker's, a codec's, or an `ext_name` row's -- or be declared a non-name,
+    # and that declaration reds when it BECOMES a name. Note the ext_name sweep
+    # STRIPS comments where the census above deliberately does not: this one
+    # excuses citations, and over-collection is unsafe in that direction.
     python3 scripts/lib/rust_comments.py || return 1
     python3 scripts/lib/dissect_name_census.py --selftest || return 1
     python3 scripts/lib/dissect_name_census.py || return 1

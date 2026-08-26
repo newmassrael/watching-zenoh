@@ -26,14 +26,18 @@ A census inverts that. A new walker does not red it — the census DEMANDS the n
 accidental rename reds it, because the name stops matching the codec. And a gap
 (`linkstate`) is carried by name with a reason rather than being invisible.
 
-## The three invariants
+## The four invariants
 
     1. every WALKER name is a codec field, or declared protocol vocabulary,
        or declared OWN vocabulary                      -- a new invention must be decided
     2. every CODEC field is emitted by a walker, or declared as awaiting one
     3. no declared entry is STALE                      -- a gap that closed must be removed
+    4. every identifier a REASON cites is a live name  -- an excuse is adjudicated too
 
 Rule 3 is what keeps the allowlists from becoming the thing they were meant to prevent.
+Rule 4 keeps the REASONS from becoming it, and it arrived last: for most of this file's
+life exit 0 said the name had been DECLARED and said nothing about whether the sentence
+declaring it was still true of this tree. See [`reason_citations`].
 
 ## What it does NOT check
 
@@ -48,8 +52,13 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import rust_comments  # noqa: E402  -- after the path insert that finds it
+
 ROOT = Path(__file__).resolve().parents[2]
 DISSECT = ROOT / "crates" / "wz-session-core" / "src" / "dissect.rs"
+EXT_NAME = ROOT / "crates" / "wz-session-core" / "src" / "ext_name.rs"
 CODECS = ROOT / "out" / "wz-codecs"
 
 # ── Declared vocabulary ──────────────────────────────────────────────────────
@@ -265,6 +274,28 @@ AWAITING_WALKER = {
     "walker surfaces those bits individually instead",
 }
 
+# NON-NAMES: identifiers a reason backticks that are deliberately NOT names on
+# this surface, each with what it is instead. Invariant 4 resolves every other
+# backticked identifier against the two LIVE namespaces; this table is what is
+# left over, and writing it down is what makes that sweep total rather than
+# best-effort. It is checked in BOTH staleness directions on rule 3's own logic:
+# an entry that BECOMES a name fails, and an entry no reason cites any more
+# fails. The first of those is the shape that actually fired -- see
+# [`reason_citations`].
+REASON_NON_NAMES = {
+    "challenge_ct": "the wz-side VARIABLE the record is built from. The reason "
+    "names it so a reader can find the producer; the FIELD is `challenge`",
+    "ext_target": "upstream's own field name, which the `target` row takes its "
+    "name from. Not adjudicable here: it belongs to a checkout this repository "
+    "deliberately records no path for, and a gate reading it would SKIP on "
+    "every clone that has none -- green on an input it never opened",
+    "label": "a `FieldValue` RENDER KIND. That reason says how the value is "
+    "SHOWN, not what the field is called",
+    "text": "the sibling render kind, cited in the same contrast as `label`",
+    "walk_wireexpr": "a walker FUNCTION. The reason cites it to say which "
+    "walker does NOT read this body",
+}
+
 
 def walker_sites(src: str) -> dict[str, list[int]]:
     """Every field name the walkers emit, and the LINES it was read from.
@@ -465,6 +496,118 @@ def ext_zbuf_arms_from_the_table(src: str) -> list[str]:
     return out
 
 
+ROW_NAME_CONST = re.compile(r'\bconst\s+([A-Z][A-Z0-9_]*)\s*:\s*&str\s*=\s*"([a-z0-9_]+)"')
+ROW_TUPLE = re.compile(r"\(\s*0x[0-9A-Fa-f]+\s*,\s*\w+\s*,\s*\w+\s*,\s*([^)]+?)\s*\)")
+
+
+def ext_name_rows(src: str) -> set[str]:
+    """Every row name of `ext_name`'s per-carrier tables -- the SECOND live
+    namespace on this surface.
+
+    Invariant 4 needs it because a reason citing `budget` or `attachment` is
+    citing a real name that `walker_sites` structurally cannot see. Those are
+    the names `z64_body_walker` dispatches on, and its group name is DISCARDED
+    at the walk site (`let (_, walker) = z64_body_walker(..)?`), so no field is
+    ever constructed from one. Without this set, five true citations would read
+    as inventions and the repair would be to write down a lie.
+
+    ⚠ COMMENTS ARE STRIPPED, and that is the OPPOSITE of what `walker_sites`
+    does one screen up -- same class, different answer, which R2131 measured
+    across three sweeps in a single round. There, over-collection is safe
+    because a claimed literal must then be DECLARED, so claiming a comment costs
+    a line of prose. Here the set EXCUSES citations, so a name picked up out of
+    a commented-out row would silently license a reason that argues about
+    nothing. Measured when this was written: stripping changes the answer by
+    zero rows today. It is the ratchet that matters, not the delta.
+
+    Half the tuples spell the name as a CONSTANT rather than a literal, so a
+    sweep of literals alone under-reports -- the one direction a gate must not
+    have. An unresolved fourth element is therefore a hard failure and not a
+    skipped row: a namespace that quietly shrinks makes invariant 4 demand a
+    declaration for a name that is perfectly live.
+    """
+    stripped = rust_comments.strip_comments(src)
+    consts = dict(ROW_NAME_CONST.findall(stripped))
+    names: set[str] = set()
+    unresolved: set[str] = set()
+    for raw in ROW_TUPLE.findall(stripped):
+        item = raw.strip()
+        if item.startswith('"') and item.endswith('"'):
+            names.add(item[1:-1])
+        elif item in consts:
+            names.add(consts[item])
+        else:
+            unresolved.add(item)
+    if unresolved:
+        raise SystemExit(
+            "dissect-name-census: ext_name row name(s) "
+            + ", ".join(sorted(unresolved))
+            + " resolve to neither a literal nor a `const _: &str` in "
+            "ext_name.rs -- the second namespace would be short by that many "
+            "and invariant 4 would demand a declaration for a live name"
+        )
+    if not names:
+        raise SystemExit(
+            "dissect-name-census: ext_name declares no rows -- the second "
+            "namespace is dead, and every citation of one would read as an "
+            "invention"
+        )
+    return names
+
+
+REASON_BACKTICK = re.compile(r"`([^`]+)`")
+REASON_IDENT = re.compile(r"[a-z][a-z0-9_]*")
+
+
+def reason_citations(*tables: dict[str, str]) -> dict[str, list[str]]:
+    """Every backticked PLAIN IDENTIFIER in a reason, and which rows cite it.
+
+    ## The class this exists for
+
+    R311y898 found the `priority` row asserting that a name there "would be a
+    table with no adjudicator behind it" while the SAME round put
+    `crate::qos::Priority::name` behind it. The census said nothing: its exit 0
+    only ever meant the name had been declared. A human opened that table
+    because six unrelated new names were REJECTED -- the discovery path was an
+    accident, which is another way of saying there was none.
+
+    ## Why the backtick is the population
+
+    A reason is an argument, and an argument is not checkable. What IS checkable
+    is where the argument stops and NAMES something, and in these reasons that
+    place is marked: it is inside backticks. R2130 found the same thing one gate
+    over, which is why this is the second instrument of the shape rather than
+    the first.
+
+    ## Why the token SHAPE is the discriminator
+
+    A reason's backticks hold three kinds of thing and only one is adjudicable
+    HERE. Names on this surface (`locator`, `budget`) are; upstream types and
+    expressions (`QoSType::is_express`, `ext.value as u8`) and file paths
+    (`network/request.rs`) are not -- they live in a checkout this repository
+    records no path for. A bare lowercase identifier is exactly the first kind's
+    shape, so anything carrying `::`, an uppercase letter, whitespace, a dot or
+    a slash is left alone. That boundary is stated here rather than discovered
+    later, and R2131 is why it is stated at all: one round found one sweep right
+    to over-collect and two wrong to, so "over-inclusion is safe" is false for
+    any sweep whose output EXCUSES something.
+
+    Backticks are PAIRED first and the shape test applied second, rather than
+    folded into one pattern. A lone `(?:[a-z][a-z0-9_]*)` between backticks
+    would also match across a CLOSING backtick and the next OPENING one, so an
+    identifier sitting between two quoted things would be claimed as if it had
+    been quoted itself. Both readings agree on this tree's 47 citations; they
+    would not agree on the first reason that puts two quotations side by side.
+    """
+    out: dict[str, list[str]] = {}
+    for table in tables:
+        for row, reason in table.items():
+            for quoted in REASON_BACKTICK.findall(reason):
+                if REASON_IDENT.fullmatch(quoted):
+                    out.setdefault(quoted, []).append(row)
+    return out
+
+
 def codec_fields() -> dict[str, list[str]]:
     """Every `pub <field>:` of every generated codec, and which codec declares it."""
     out: dict[str, list[str]] = {}
@@ -526,13 +669,74 @@ def selftest() -> int:
         bad.append("the fourth form stopped claiming a REAL call's literal")
     if "wz_absent" in sites:
         bad.append("a name in no call at all was claimed")
+
+    # ── invariant 4's two derivations (R2132, open-debt item 405) ────────
+    #
+    # Fixture-driven because NEITHER can be exercised against this tree.
+    # `ext_name_rows` strips comments and the real table holds no
+    # commented-out row -- measured, the delta is zero today -- and both of
+    # its refusals are unreachable while that table is well-formed. A branch
+    # nothing has ever been seen to take is a branch nobody has checked is
+    # right, and the stripping arm in particular is the OPPOSITE decision to
+    # the one asserted above, so leaving it unprobed would leave the file
+    # asserting one answer and silently relying on the other.
+    rows = ext_name_rows(
+        'pub const AUTH: &str = "auth";\n'
+        "const T: &[Row] = &[\n"
+        '    (0x1, OPT, EXT_ENC_UNIT, "qos"),\n'
+        "    (0x3, OPT, EXT_ENC_ZBUF, AUTH),\n"
+        '    // (0x9, OPT, EXT_ENC_UNIT, "wz_commented_row"),\n'
+        "];\n"
+    )
+    if rows != {"qos", "auth"}:
+        bad.append(
+            f"ext_name_rows read {sorted(rows)} from a fixture holding a "
+            "literal row, a CONST row and a commented-out one -- expected the "
+            "first two and only those"
+        )
+
+    def refuses(src: str, needle: str, why: str) -> None:
+        try:
+            ext_name_rows(src)
+        except SystemExit as exc:
+            if needle not in str(exc):
+                bad.append(f"ext_name_rows refused {why}, but said: {exc}")
+            return
+        bad.append(f"ext_name_rows ACCEPTED {why} instead of refusing")
+
+    refuses(
+        'pub const AUTH: &str = "auth";\n'
+        "const T: &[Row] = &[(0x1, OPT, EXT_ENC_UNIT, WZ_UNRESOLVED)];\n",
+        "resolve to neither",
+        "a row whose name resolves to nothing",
+    )
+    refuses("// every row commented out\n", "declares no rows", "an empty table")
+
+    # The token SHAPE, both directions in one fixture: a bare identifier is a
+    # claim about a name HERE, and a path, a type, an expression or a file is
+    # a claim about a checkout this repository records no path for.
+    cites = reason_citations(
+        {
+            "row": "cites `locator` and `budget`; `QoSType::is_express`, "
+            "`ext.value as u8`, `network/request.rs` and `OpenSyn { user }` "
+            "belong to upstream and are not adjudicable here"
+        }
+    )
+    if sorted(cites) != ["budget", "locator"]:
+        bad.append(
+            f"the citation sweep claimed {sorted(cites)} -- expected the two "
+            "bare identifiers and none of the four upstream tokens"
+        )
+
     for line in bad:
         print(f"  dissect-name-census FAIL -- {line}")
     if bad:
         return 1
     print(
         f"  dissect-name-census: selftest ok -- the fourth form claims a "
-        f"comment's literals on purpose ({len(sites)} name(s) in the fixture)"
+        f"comment's literals on purpose ({len(sites)} name(s) in the fixture); "
+        f"the ext_name sweep does NOT, and refuses both an unresolved row and "
+        f"an empty table"
     )
     return 0
 
@@ -550,6 +754,9 @@ def main() -> int:
         return 1
     if not CODECS.is_dir():
         print(f"dissect-name-census: cannot read {CODECS}", file=sys.stderr)
+        return 1
+    if not EXT_NAME.is_file():
+        print(f"dissect-name-census: cannot read {EXT_NAME}", file=sys.stderr)
         return 1
 
     src = dissect.read_text(encoding="utf-8")
@@ -615,11 +822,57 @@ def main() -> int:
             "delete the OWN_VOCABULARY entry"
         )
 
+    # Invariant 4 (R2132, unregistered open-debt item 405): the REASONS are
+    # adjudicated too, and not only the names they excuse.
+    ext_rows = ext_name_rows(EXT_NAME.read_text(encoding="utf-8"))
+    live = walkers | set(codecs) | declared | set(AWAITING_WALKER) | ext_rows
+    cited = reason_citations(OWN_VOCABULARY, AWAITING_WALKER)
+    if not cited:
+        failures.append(
+            "no reason cites a single backticked identifier -- either the "
+            "vocabulary lost every cross-reference it had or this sweep stopped "
+            "seeing them, and reporting success over an empty population is the "
+            "way this invariant would be worst wrong"
+        )
+    for token in sorted(cited):
+        if token in live or token in REASON_NON_NAMES:
+            continue
+        rows = ", ".join(sorted(set(cited[token])))
+        failures.append(
+            f"the reason for {rows} cites `{token}`, which is neither a name on "
+            "this surface nor an `ext_name` row -- if that name went away the "
+            "reason now argues about nothing, and if it never was one, declare "
+            "it in REASON_NON_NAMES with what it is instead"
+        )
+    for token in sorted(REASON_NON_NAMES):
+        if token in live:
+            failures.append(
+                f"`{token}` is declared in REASON_NON_NAMES as not a name on "
+                "this surface, and it IS one now -- every reason citing it is "
+                "arguing against a state of the tree that has moved. This is "
+                "the exact shape R311y898 found in the `priority` row"
+            )
+        if token not in cited:
+            failures.append(
+                f"`{token}` is declared in REASON_NON_NAMES but no reason cites "
+                "it any more -- delete the entry (rule 3)"
+            )
+
     matched = len(walkers & set(codecs))
     print(
         f"dissect-name-census: {len(walkers)} walker name(s), {len(codecs)} codec "
         f"field(s), {matched} shared; {len(OWN_VOCABULARY)} own vocabulary, "
         f"{len(AWAITING_WALKER)} awaiting a walker"
+    )
+    # And what invariant 4 actually weighed. A sweep that prints only its verdict
+    # cannot be told from one whose population collapsed, and this one's
+    # population is PROSE -- the single easiest thing in the file to empty out
+    # without anyone noticing.
+    print(
+        f"  reasons adjudicated: {sum(len(v) for v in cited.values())} citation(s) "
+        f"of {len(cited)} identifier(s), against {len(live)} live name(s) "
+        f"({len(ext_rows)} of them ext_name rows); "
+        f"{len(REASON_NON_NAMES)} declared non-name(s)"
     )
     # Round 2036 (item 327) — AND WHICH CONSTRUCTORS THIS SWEEP WAS BUILT FROM.
     # R2012's lesson on item 253, one gate over: a sweep that narrows must
