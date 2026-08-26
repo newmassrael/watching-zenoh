@@ -375,8 +375,16 @@ fn zenohd_refuses_every_topology_the_validator_rejects() {
     drop(listener_guard);
 
     // (a) ListenEndpointCollision — two nodes claiming one address.
+    //
+    // `localhost` and NOT `127.0.0.1`, and that is the validator's rule rather
+    // than a preference: `EndpointFace::pins_one_machine` returns false for a
+    // loopback LITERAL, because `127.0.0.1:7447` on two machines is two
+    // separate working binds and a set of configs may describe two machines.
+    // A NAME resolves to one host, so it is a claim only one node can win --
+    // which is also what makes it bindable twice HERE, where there is one
+    // machine. The obvious `127.0.0.1` fixture reports no defect at all.
     let taken = PortReservation::pick();
-    let shared = format!("tcp/127.0.0.1:{}", taken.port());
+    let shared = format!("tcp/localhost:{}", taken.port());
     let first = ZenohNodeConfig::default()
         .listening_on(&shared)
         .with_multicast_scouting(false);
@@ -407,12 +415,13 @@ fn zenohd_refuses_every_topology_the_validator_rejects() {
     let mut alone = ZenohNodeConfig::default().with_multicast_scouting(false);
     alone.mode = WhatAmI::Client;
 
+    // A node with no `id` is named by its slice position, spelled `node[N]`.
     let collision = TopologyDefect::ListenEndpointCollision {
         endpoint: shared.clone(),
-        nodes: vec![String::from("0"), String::from("1")],
+        nodes: vec![String::from("node[0]"), String::from("node[1]")],
     };
     let dangling = TopologyDefect::DanglingConnectTarget {
-        node: String::from("0"),
+        node: String::from("node[0]"),
         endpoint: dead_endpoint.clone(),
     };
 
