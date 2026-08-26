@@ -1088,34 +1088,12 @@ impl<'a> CaptureReport<'a> {
         // capture, so a consumer's field lookup never depends on whether this
         // particular file happened to have that kind of damage.
         let f = d.framing_health();
-        s.push_str(&format!(
-            ",\"framing\":{{\"gaps_forced\":{},\"gap_bytes_missing\":{},\
-             \"desyncs\":{},\"recoveries\":{},\"resync_skipped_bytes\":{},\
-             \"ws_desyncs\":{},\"ws_recoveries\":{},\"ws_resync_skipped_bytes\":{},\
-             \"reserved_headers\":{},\"undefined_mandatory_exts\":{},\
-             \"unaccounted_batch_bytes\":{}}}",
-            f.gaps_forced,
-            f.gap_bytes_missing,
-            f.desyncs,
-            f.recoveries,
-            f.resync_skipped_bytes,
-            f.ws_desyncs,
-            f.ws_recoveries,
-            f.ws_resync_skipped_bytes,
-            f.reserved_headers,
-            f.undefined_mandatory_exts,
-            f.unaccounted_batch_bytes
-        ));
-        s.push_str(&format!(
-            ",\"sequence\":{{\"frames\":{},\"missing\":{},\"gaps\":{},\
-             \"duplicates\":{},\"out_of_window\":{},\"without_resolution\":{}}}",
-            f.sn_frames,
-            f.sn_missing,
-            f.sn_gaps,
-            f.sn_duplicates,
-            f.sn_out_of_window,
-            f.sn_without_resolution
-        ));
+        // R2122 (open-debt item 238) — SHARED with `health_json`, so the two
+        // documents cannot carry different selections of one fact.
+        s.push_str(",\"framing\":");
+        framing_json(&f, s);
+        s.push_str(",\"sequence\":");
+        sequence_json(&f, s);
         // R311y624 — the pre-session namespace. Counted rather than listed: a
         // scouting message advances no session, so it belongs beside the flow
         // counts and not in any plane.
@@ -2893,6 +2871,80 @@ fn quote_into(value: &str, out: &mut String) {
 /// nine fields is a reader who will be short by one the next time a reason is
 /// added, and [`crate::SkipCensus::total`] is the figure the dissection already
 /// cross-checks against `packets_skipped`.
+/// The groups both documents carry, each from ONE emitter.
+///
+/// R2122 (open-debt item 238) — this list exists because the gate that checks
+/// the two documents agree derives its population from their INTERSECTION, and
+/// an intersection is a population that can shrink silently: rename
+/// `health_json`'s `framing` group and the gate stops watching it and reports
+/// agreement. So presence is asserted against this list and agreement against
+/// the intersection, which are different questions and fail differently.
+///
+/// A group belongs here when a single function writes it into both documents.
+/// Adding one without adding it here is the only way to go unwatched, and that
+/// edit has to be made in this file, beside the emitters it names.
+///
+/// `cfg(test)` because only the gate reads it and this crate denies warnings:
+/// it is a declaration ABOUT the emitters rather than something they consume,
+/// and pretending otherwise would mean giving it a fake runtime use.
+#[cfg(test)]
+const SHARED_GROUPS: &[&str] = &["framing", "sequence", "skips"];
+
+/// R2122 (open-debt item 238) — the FRAMING witnesses as JSON, written ONCE.
+///
+/// `skips_json` below carries the doc for why a shared group is one emitter
+/// and not two selections; this is that argument applied to the group next to
+/// it, which R311y859 left behind. Measured when this was written: the two
+/// renderings had already drifted, the capture report carrying
+/// `undefined_mandatory_exts` and `unaccounted_batch_bytes` and the health
+/// document carrying neither — so a linked C consumer, which reaches
+/// [`health_json`] and not [`CaptureReport::json_fields`], could not see two
+/// counters a command-line reader could.
+///
+/// The key ORDER here is the capture report's. It is a rendering detail and
+/// the pins compare SETS, which is exactly why one emitter may impose one
+/// order on both.
+fn framing_json(fr: &crate::FramingHealth, s: &mut String) {
+    s.push_str(&format!(
+        "{{\"gaps_forced\":{},\"gap_bytes_missing\":{},\
+         \"desyncs\":{},\"recoveries\":{},\"resync_skipped_bytes\":{},\
+         \"ws_desyncs\":{},\"ws_recoveries\":{},\"ws_resync_skipped_bytes\":{},\
+         \"reserved_headers\":{},\"undefined_mandatory_exts\":{},\
+         \"unaccounted_batch_bytes\":{}}}",
+        fr.gaps_forced,
+        fr.gap_bytes_missing,
+        fr.desyncs,
+        fr.recoveries,
+        fr.resync_skipped_bytes,
+        fr.ws_desyncs,
+        fr.ws_recoveries,
+        fr.ws_resync_skipped_bytes,
+        fr.reserved_headers,
+        fr.undefined_mandatory_exts,
+        fr.unaccounted_batch_bytes
+    ));
+}
+
+/// R2122 (open-debt item 238) — the SEQUENCE witnesses as JSON, written ONCE.
+///
+/// This group had NOT drifted when the gate first ran, and is shared anyway.
+/// The item's own history is the argument: R311y859 shared `skips` because it
+/// had already gone wrong, and left its neighbours alone, which is how
+/// `framing` went wrong next. Sharing the one that agrees today is what stops
+/// this being the same repair a third time.
+fn sequence_json(fr: &crate::FramingHealth, s: &mut String) {
+    s.push_str(&format!(
+        "{{\"frames\":{},\"missing\":{},\"gaps\":{},\
+         \"duplicates\":{},\"out_of_window\":{},\"without_resolution\":{}}}",
+        fr.sn_frames,
+        fr.sn_missing,
+        fr.sn_gaps,
+        fr.sn_duplicates,
+        fr.sn_out_of_window,
+        fr.sn_without_resolution
+    ));
+}
+
 fn skips_json(sk: &crate::SkipCensus, s: &mut String) {
     // R2121 (open-debt item 460) — the counters that CANNOT move, named.
     //
@@ -3453,14 +3505,7 @@ pub fn health_json(d: &crate::Dissection) -> String {
          \"transport_checksum_valid\":{},\"transport_checksum_invalid\":{},\
          \"transport_checksum_absent\":{},\
          \"tunnel_checksum_valid\":{},\"tunnel_checksum_invalid\":{},\
-         \"tunnel_checksum_absent\":{}}},\
-         \"framing\":{{\"gaps_forced\":{},\"gap_bytes_missing\":{},\
-         \"desyncs\":{},\"recoveries\":{},\"resync_skipped_bytes\":{},\
-         \"reserved_headers\":{},\
-         \"ws_desyncs\":{},\"ws_recoveries\":{},\"ws_resync_skipped_bytes\":{}}},\
-         \"sequence\":{{\"frames\":{},\"missing\":{},\"gaps\":{},\
-         \"duplicates\":{},\"out_of_window\":{},\"without_resolution\":{}}},\
-         \"skips\":",
+         \"tunnel_checksum_absent\":{}}}",
         f.pieces,
         f.completed,
         f.expired,
@@ -3495,22 +3540,16 @@ pub fn health_json(d: &crate::Dissection) -> String {
         h.tunnel_checksum_valid,
         h.tunnel_checksum_invalid,
         h.tunnel_checksum_absent,
-        fr.gaps_forced,
-        fr.gap_bytes_missing,
-        fr.desyncs,
-        fr.recoveries,
-        fr.resync_skipped_bytes,
-        fr.reserved_headers,
-        fr.ws_desyncs,
-        fr.ws_recoveries,
-        fr.ws_resync_skipped_bytes,
-        fr.sn_frames,
-        fr.sn_missing,
-        fr.sn_gaps,
-        fr.sn_duplicates,
-        fr.sn_out_of_window,
-        fr.sn_without_resolution,
     );
+    // R2122 (open-debt item 238) — the three groups both documents carry come
+    // from ONE emitter each. `framing` is why: it had drifted by two keys and
+    // nothing measured it, so the C ABI's reader saw nine where the command
+    // line saw eleven.
+    out.push_str(",\"framing\":");
+    framing_json(&fr, &mut out);
+    out.push_str(",\"sequence\":");
+    sequence_json(&fr, &mut out);
+    out.push_str(",\"skips\":");
     skips_json(d.skip_census(), &mut out);
     // Round 2041 (item 356) — the same finding the page carries, as a key a
     // program can branch on. ALWAYS rendered, empty array or not: R311y720's
@@ -6894,6 +6933,147 @@ mod tests {
     }
 
     /// A bare IPv4 packet (no link header) carrying `body` under `proto`.
+    /// R2122 (open-debt item 238) — A GROUP THAT BOTH DOCUMENTS CARRY MUST
+    /// CARRY THE SAME KEYS IN BOTH.
+    ///
+    /// # What item 238 recorded, and what was actually there
+    ///
+    /// The item says `--health` prints counters the capture report already
+    /// prints, and calls that a DECIDED TRADE rather than a mistake — the
+    /// alternatives were a flag emitting an odd subset, or a second rendering
+    /// of the same facts in `wz-analyze`. Round 2003 re-confirmed it by
+    /// READING that sentence, and recorded that the item had no code claim to
+    /// probe.
+    ///
+    /// It had one. Duplication is the trade; the two bundles AGREEING is not
+    /// part of it, and nothing measured that. Measured here for the first
+    /// time, the `framing` groups had already drifted: the capture report
+    /// carried eleven keys and the health document nine, missing
+    /// `undefined_mandatory_exts` and `unaccounted_batch_bytes`. Neither name
+    /// appears in any pinned key set, so the two counters were visible from
+    /// the command line and invisible through the C ABI, which reaches
+    /// [`health_json`] and not [`CaptureReport::json_fields`].
+    ///
+    /// That is the SAME failure `skips_json`'s doc records above — "how the
+    /// health surface came to omit all nine in the first place" — recurring in
+    /// the group next to it, because R311y859 fixed the instance and not the
+    /// class.
+    ///
+    /// # Why the population is derived
+    ///
+    /// The groups are not listed here. They are the object-valued keys the two
+    /// documents have IN COMMON, computed from the documents themselves, so a
+    /// group added to both later arrives already checked and a group that
+    /// stops being shared drops out without an edit. A hand list is the thing
+    /// that was wrong on the day it was written in R2119's measurement, and a
+    /// population of zero fails below rather than reading as agreement.
+    #[test]
+    fn a_group_both_documents_carry_agrees_in_both() {
+        let d = {
+            let mut d = crate::Dissection::new();
+            let ip = ipv4_packet(17, [10, 0, 0, 1], [10, 0, 0, 2], &zenoh_udp(4));
+            d.push_packet(crate::link::LINKTYPE_ETHERNET, 0, &eth(&ip));
+            d.finish();
+            d
+        };
+        let report = CaptureReport::of(&d).to_json();
+        let health = health_json(&d);
+
+        // PRESENCE first, against the declared list. The intersection below is
+        // a population that can shrink silently -- rename one document's group
+        // and it simply stops being checked -- so what must be shared is
+        // asserted separately from what agrees.
+        let missing: alloc::vec::Vec<&str> = SHARED_GROUPS
+            .iter()
+            .copied()
+            .filter(|g| object_body(&report, g).is_none() || object_body(&health, g).is_none())
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "{missing:?} come from one emitter and must appear in BOTH documents. \
+             A group that quietly stops being shared is a group this gate stops \
+             watching, which reads as agreement.\nreport: {report}\nhealth: {health}"
+        );
+
+        let shared: alloc::vec::Vec<&str> = object_keys(&report)
+            .into_iter()
+            .filter(|g| object_body(&health, g).is_some())
+            .collect();
+        assert!(
+            !shared.is_empty(),
+            "the two documents share no object-valued group at all. That is a \
+             dead probe, not agreement: one of the renderings changed shape and \
+             this test stopped looking at anything.\nreport: {report}\nhealth: {health}"
+        );
+
+        let mut drift: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
+        for group in &shared {
+            let a = crate::doc_revision::key_set(object_body(&report, group).expect("shared"));
+            let b = crate::doc_revision::key_set(object_body(&health, group).expect("shared"));
+            if a != b {
+                let only_report: alloc::vec::Vec<_> = a.iter().filter(|k| !b.contains(k)).collect();
+                let only_health: alloc::vec::Vec<_> = b.iter().filter(|k| !a.contains(k)).collect();
+                drift.push(alloc::format!(
+                    "`{group}` differs: only in the capture report {only_report:?}, \
+                     only in the health document {only_health:?}"
+                ));
+            }
+        }
+        assert!(
+            drift.is_empty(),
+            "{} shared group(s) checked and these disagree. Two renderings of one \
+             fact must come from ONE emitter, the way `skips_json` and \
+             `dropped_by_limits_json` already do — a second `format!` naming the \
+             fields it happened to think mattered is how the health surface came \
+             to omit nine of them.\n{drift:#?}",
+            shared.len()
+        );
+    }
+
+    /// The immediate keys of `doc` whose value is an OBJECT.
+    ///
+    /// Top level only, and that is the point: a group is something a reader
+    /// addresses by name at the document's own level, not any nested brace.
+    fn object_keys(doc: &str) -> alloc::vec::Vec<&str> {
+        let mut out = alloc::vec::Vec::new();
+        for key in crate::doc_revision::json_keys(doc) {
+            if object_body(doc, key).is_some() {
+                out.push(key);
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// The body of the object at top-level key `key`, braces included.
+    ///
+    /// Brace counting that IGNORES braces inside strings — a keyexpr arrives
+    /// from the wire and may contain one, which is the same hazard
+    /// `json_keys`' escape handling exists for.
+    fn object_body<'a>(doc: &'a str, key: &str) -> Option<&'a str> {
+        let needle = alloc::format!("\"{key}\":{{");
+        let start = doc.find(&needle)? + needle.len() - 1;
+        let b = doc.as_bytes();
+        let (mut depth, mut i, mut in_string) = (0usize, start, false);
+        while i < b.len() {
+            match b[i] {
+                b'\\' if in_string => i += 1,
+                b'"' => in_string = !in_string,
+                b'{' if !in_string => depth += 1,
+                b'}' if !in_string => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(&doc[start..=i]);
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        None
+    }
+
     fn ipv4_packet(proto: u8, src: [u8; 4], dst: [u8; 4], body: &[u8]) -> alloc::vec::Vec<u8> {
         let mut ip = alloc::vec::Vec::new();
         ip.push(0x45);

@@ -846,7 +846,17 @@ int main(void) {
     rc = wz_dissect_pcap_census(pcap, sizeof pcap, &revisioned[0].doc);
     CHECK(rc == WZ_DISSECT_OK, "census rc=%d", rc);
     revisioned[1].name = "summary";
-    revisioned[1].revision = 1;
+    /* R2121 (item 460) -- 2 when the skip census gained `inert_counters`.
+     * R2122 (item 238) -- 3 when the health document's `framing` group stopped
+     * disagreeing with the capture report's and gained the two counters the
+     * report had carried since R311y624.
+     *
+     * THIS LITERAL IS THE CONSUMER'S OWN, and that is why it is not derived
+     * from the Rust table: a check that read the number out of the thing it is
+     * checking would agree with any value. The cost is that a revision bump
+     * must be written here too, and R2121 did not -- it moved the summary to 2,
+     * ran the crate tests, and left this at 1, which only this lane can see. */
+    revisioned[1].revision = 3;
     revisioned[1].doc = NULL;
     rc = wz_dissect_pcap_summary(pcap, sizeof pcap, &revisioned[1].doc);
     CHECK(rc == WZ_DISSECT_OK, "summary rc=%d", rc);

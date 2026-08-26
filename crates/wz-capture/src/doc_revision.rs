@@ -161,6 +161,20 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         keys: SUMMARY_R2_KEYS,
         retiring: &[],
     },
+    // R2122 (open-debt item 238) — revision 3 ADDS `undefined_mandatory_exts`
+    // and `unaccounted_batch_bytes`, and retires nothing.
+    //
+    // Not a new measurement: the capture report has carried both since
+    // R311y624 and this document had not, because the `framing` group was
+    // written twice by hand. They arrive here because the two renderings now
+    // come from ONE emitter, which is the repair `skips_json` already was and
+    // the class R311y859 left open.
+    DocumentShape {
+        document: SUMMARY,
+        revision: 3,
+        keys: SUMMARY_R3_KEYS,
+        retiring: &[],
+    },
     DocumentShape {
         document: READABLE_SURFACES,
         revision: 1,
@@ -624,6 +638,106 @@ pub const SUMMARY_R2_KEYS: &[&str] = &[
     "ws_resync_skipped_bytes",
 ];
 
+/// The summary document's key set at revision 3 — revision 2 plus
+/// `undefined_mandatory_exts` and `unaccounted_batch_bytes` (R2122, open-debt
+/// item 238).
+///
+/// Those two were never NEW: the capture report had carried them since
+/// R311y624 and the health document, which is what this door hands back, had
+/// not. Sharing one emitter for the `framing` group is what brought them here,
+/// so this revision records a document that stopped disagreeing with its
+/// sibling rather than one that grew.
+///
+/// MEASURED, like every set here: the pin in `wz-capi-dissect` printed what
+/// the document emits and this was filled from that printout.
+pub const SUMMARY_R3_KEYS: &[&str] = &[
+    "bytes_absent",
+    "caps",
+    "capture_reported_drops",
+    "completed",
+    "datagram_flows",
+    "desyncs",
+    "document",
+    "dropped_by_limits",
+    "duplicates",
+    "encapsulation_depth_bound",
+    "encapsulation_too_deep",
+    "encapsulations",
+    "evicted",
+    "expired",
+    "flows",
+    "fragments",
+    "frames",
+    "frames_per_flow",
+    "framing",
+    "gap_bytes_missing",
+    "gaps",
+    "gaps_forced",
+    "gre_payload",
+    "gre_payloads",
+    "health",
+    "held",
+    "inert_counters",
+    "ip_checksum_absent",
+    "ip_checksum_invalid",
+    "ip_checksum_valid",
+    "ip_fragment_pending",
+    "ipv4_fragment",
+    "ipv6_extension_chain",
+    "ipv6_fragment",
+    "link_types",
+    "malformed",
+    "max_flows_per_table",
+    "max_scout_askers",
+    "missing",
+    "name",
+    "not_ip",
+    "not_this_protocol",
+    "not_transport",
+    "not_transport_protos",
+    "open",
+    "out_of_order",
+    "out_of_window",
+    "overlapping",
+    "partial_overlaps",
+    "pieces",
+    "recoveries",
+    "reserved_headers",
+    "resync_skipped_bytes",
+    "retransmits",
+    "revision",
+    "scout_askers",
+    "sequence",
+    "skipped",
+    "skipped_packets",
+    "skips",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "streams",
+    "tcp_flows",
+    "too_deep_protos",
+    "total",
+    "transport_checksum_absent",
+    "transport_checksum_invalid",
+    "transport_checksum_valid",
+    "truncated",
+    "tunnel_checksum_absent",
+    "tunnel_checksum_invalid",
+    "tunnel_checksum_valid",
+    "unaccounted_batch_bytes",
+    "uncorroborated_layers",
+    "undefined_mandatory_exts",
+    "unfinished",
+    "unfinished_bytes",
+    "unsupported_link_type",
+    "unwalked_encapsulation",
+    "vsock_non_payload",
+    "without_resolution",
+    "ws_desyncs",
+    "ws_recoveries",
+    "ws_resync_skipped_bytes",
+];
+
 /// The readable-surfaces document's key set at revision 1.
 pub const READABLE_SURFACES_R1_KEYS: &[&str] = &[
     "document",
@@ -969,8 +1083,9 @@ mod tests {
             (CENSUS, 2u32),
             (FIELDS, 1),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
-            // gained `inert_counters`.
-            (SUMMARY, 2),
+            // gained `inert_counters`; R2122 (item 238) to 3 when its
+            // `framing` group stopped disagreeing with the capture report's.
+            (SUMMARY, 3),
             (READABLE_SURFACES, 2),
             (SELECTOR_DIAGNOSE, 1),
             (DECLARATIONS_DIAGNOSE, 1),
