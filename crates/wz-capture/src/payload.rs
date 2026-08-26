@@ -2597,11 +2597,17 @@ mod format_definition_tests {
     /// flags into groups before it builds a map, so a text whose definition sat
     /// last would install on one surface and fail on the other. One rule, both
     /// surfaces.
+    ///
+    /// The rule here is a plain key, not `demo/**`: what this measures is the
+    /// ORDER the two lines are written in, and a wildcard would tie that to
+    /// `filter-wildcards` — which the `--no-default-features` lane does not
+    /// build, so the property would go unmeasured in exactly the build most
+    /// likely to break it. Wildcard matching has its own test below, gated.
     #[test]
     fn a_definition_binds_whichever_side_of_its_rule_it_is_written_on() {
         for text in [
-            "#profile=a:u8\ndemo/**=profile",
-            "demo/**=profile\n#profile=a:u8",
+            "#profile=a:u8\ndemo/a=profile",
+            "demo/a=profile\n#profile=a:u8",
         ] {
             let mut map = FormatMap::new();
             assert_eq!(
@@ -2667,12 +2673,16 @@ mod format_definition_tests {
 
     /// R2114 (open-debt item 237) — the definition a rule resolved THROUGH has
     /// a handle, so a run's ledger can mark it used.
+    ///
+    /// Plain keys rather than `demo/**` for the same reason as the
+    /// order-independence test above: the handle is what is being measured, and
+    /// a wildcard would make the measurement need `filter-wildcards`.
     #[test]
     fn a_rule_points_back_at_the_definition_it_resolved_through() {
         let mut map = FormatMap::new();
         map.declare("#p=a:u8").expect("a definition");
-        map.declare("demo/**=p").expect("a rule on it");
-        map.declare("other/**=json").expect("a rule on a built-in");
+        map.declare("demo/a=p").expect("a rule on it");
+        map.declare("other/a=json").expect("a rule on a built-in");
         let (described, _) = map.for_keyexpr("demo/a").expect("covered");
         let (shipped, _) = map.for_keyexpr("other/a").expect("covered");
         let definition = map
