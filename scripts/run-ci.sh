@@ -1939,6 +1939,13 @@ PY
     # reflex update, which is exactly how an accidental rename would slip past
     # (one already happened: `locator` -> `locator_entry`, R311y585). This
     # DEMANDS the name instead, and carries the linkstate gap by name.
+    # R2131 (unregistered open-debt item 402) — the shared stripper first, then
+    # the census's own decision to IGNORE it. Three sweeps of this shape were
+    # measured this round: two were wrong to count a comment and now strip, and
+    # this one is right to and now says so in an assertion rather than in a
+    # comment nobody would notice going stale.
+    python3 scripts/lib/rust_comments.py || return 1
+    python3 scripts/lib/dissect_name_census.py --selftest || return 1
     python3 scripts/lib/dissect_name_census.py || return 1
     # R311y605 — the DISSECT FEATURE CENSUS, the name census's sibling one level
     # up. `dissect`'s doc says it selects the whole codec-* MID space so "an

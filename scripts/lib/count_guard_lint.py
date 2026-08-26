@@ -43,6 +43,10 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import rust_comments  # noqa: E402  -- after the path insert that finds it
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUNCI = REPO_ROOT / "scripts" / "run-ci.sh"
 CRATES = REPO_ROOT / "crates"
@@ -103,7 +107,15 @@ def test_fn_census(path: Path) -> tuple[int, int, bool]:
     function of the feature flags and this file cannot say what it is without
     resolving them.
     """
-    lines = path.read_text().split("\n")
+    # R2131 (unregistered open-debt item 402) — COMMENTS ARE NOT ATTRIBUTES.
+    # `TEST_ATTR_RE` searches anywhere in a line, so a doc comment carrying
+    # `#[test] #[ignore]` on one line -- the shape a file uses to SHOW the
+    # attribute it is about -- was counted as a test. MEASURED on
+    # `close_scope_zenohd_witness.rs`: one such line turned "1 #[ignore]d" into
+    # 2 and made this lint accuse `run-ci.sh` of a stale guard, which was false.
+    # Over-counting is the direction no floor can catch, and here it is not the
+    # safe direction either: it publishes a wrong number as a measurement.
+    lines = rust_comments.strip_comments(path.read_text()).split("\n")
     plain = ignored = 0
     conditional = any(re.match(r"\s*#\[cfg\(.*\)\]\s*$", ln) for ln in lines)
     for i, line in enumerate(lines):

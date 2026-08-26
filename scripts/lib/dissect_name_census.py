@@ -476,11 +476,74 @@ def codec_fields() -> dict[str, list[str]]:
     return out
 
 
+def selftest() -> int:
+    """R2131 (unregistered open-debt item 402) — the OVER-INCLUSION is a
+    decision, so it is asserted rather than only described.
+
+    Item 402's first complaint is that the fourth producing form's boundary --
+    `(c,` to the next `)?`, which takes any literal in between -- is stated in
+    one comment and nowhere else, so nothing would notice if it silently
+    changed. Two other sweeps of this shape were measured this round and BOTH
+    were wrong to count a comment (`count_guard_lint.py` published a false test
+    count, `analysis_surface_parity.py` resolved a claim against prose), which
+    makes it worth pinning that this one is right to.
+
+    It is right to because of what happens next: a literal claimed here must be
+    DECLARED, and declaring one costs a line. Over-collecting cannot hide a name
+    that reached the wire, which is the failure this census exists for.
+    """
+    # A constructor is part of the fixture because the constructor arm DERIVES
+    # its own alternation and refuses a source with none -- its population-zero
+    # guard, which fired the first time this selftest was run against a fixture
+    # that had only calls in it.
+    fixture = (
+        "fn flag(name: &'static str, at: usize) -> Field {\n"
+        "    Field::new(name, at)\n"
+        "}\n"
+        "fn probe(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {\n"
+        '    // read_zbuf_field(c, "wz_probe_len", "wz_probe", &mut out)?;\n'
+        '    read_zbuf_field(c, "real_len", "real", &mut out)?;\n'
+        "    Ok(out)\n"
+        "}\n"
+    )
+    sites = walker_sites(fixture)
+    bad: list[str] = []
+    for name in ("wz_probe", "wz_probe_len"):
+        if name not in sites:
+            bad.append(
+                f"the fourth form stopped claiming {name!r} from a comment -- "
+                f"if that is now deliberate, this selftest is the place to say so"
+            )
+    if sites.get("wz_probe") != [5]:
+        bad.append(
+            f"a comment's literal must report the COMMENT's line, not a "
+            f"walker's: got {sites.get('wz_probe')}"
+        )
+    # THE CONTROL: the same fixture's real call is claimed too, so the
+    # assertions above are not satisfied by a sweep that claims everything, and
+    # a name that is in no call at all is not claimed.
+    if "real" not in sites:
+        bad.append("the fourth form stopped claiming a REAL call's literal")
+    if "wz_absent" in sites:
+        bad.append("a name in no call at all was claimed")
+    for line in bad:
+        print(f"  dissect-name-census FAIL -- {line}")
+    if bad:
+        return 1
+    print(
+        f"  dissect-name-census: selftest ok -- the fourth form claims a "
+        f"comment's literals on purpose ({len(sites)} name(s) in the fixture)"
+    )
+    return 0
+
+
 def main() -> int:
     # An optional path, so a fixture can drive the arms below. R311y924 wanted
     # to SHOW that a name read out of a doc comment reports the comment's line
     # rather than an imaginary walker, and a gate whose message cannot be
     # exercised is a message nobody has read.
+    if len(sys.argv) > 1 and sys.argv[1] == "--selftest":
+        return selftest()
     dissect = Path(sys.argv[1]) if len(sys.argv) > 1 else DISSECT
     if not dissect.is_file():
         print(f"dissect-name-census: cannot read {dissect}", file=sys.stderr)

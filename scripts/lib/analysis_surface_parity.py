@@ -87,6 +87,10 @@ import re
 import subprocess
 import sys
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+
+import rust_comments  # noqa: E402  -- after the path insert that finds it
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 CLI = ROOT / "crates" / "wz-analyze" / "src" / "lib.rs"
 CAPI = ROOT / "crates" / "wz-capi-dissect" / "src" / "lib.rs"
@@ -483,12 +487,20 @@ NO_REACH_PATH = {
 }
 
 
-def source_blobs() -> dict[str, str]:
-    """Every tracked Rust/C source under `crates/`, by path.
+def source_blobs() -> dict[str, tuple[str, str]]:
+    """Every tracked Rust/C source under `crates/`: (code, whole file).
 
     Read from `git ls-files` rather than a directory walk so a build artifact
     that happens to be lying in the tree cannot resolve a claim for a file
     nobody committed.
+
+    R2131 (unregistered open-debt item 402) — TWO texts per file, because the
+    two kinds of claim answer to different artifacts. `code` has its comments
+    stripped, and it is what an IDENTIFIER must be found in: R2130's resolver
+    searched whole files, so a reason could name something that exists nowhere
+    but prose and still resolve -- measured, an invented token inserted as a
+    comment resolved. The whole file stays for a PHRASE, which is a claim about
+    what the documentation SAYS and can only be satisfied there.
     """
     listed = subprocess.run(
         ["git", "ls-files", "crates"],
@@ -497,14 +509,15 @@ def source_blobs() -> dict[str, str]:
         text=True,
         check=True,
     ).stdout.split()
-    out: dict[str, str] = {}
+    out: dict[str, tuple[str, str]] = {}
     for name in listed:
         if name.rsplit(".", 1)[-1] not in ("rs", "c", "h"):
             continue
         try:
-            out[name] = (ROOT / name).read_text()
+            raw = (ROOT / name).read_text()
         except (OSError, UnicodeDecodeError):
             continue
+        out[name] = (rust_comments.strip_comments(raw), raw)
     return out
 
 
@@ -525,7 +538,9 @@ def reason_claims() -> list[tuple[str, str, str]]:
     return out
 
 
-def resolve_claim(token: str, flags: set[str], symbols: set[str], blobs: dict[str, str]) -> str | None:
+def resolve_claim(
+    token: str, flags: set[str], symbols: set[str], blobs: dict[str, tuple[str, str]]
+) -> str | None:
     """Where this token still exists, or None if it resolves nowhere.
 
     TYPED, in the order the token's own shape names a surface: a `--flag` is a
@@ -542,9 +557,18 @@ def resolve_claim(token: str, flags: set[str], symbols: set[str], blobs: dict[st
         return "ABI exports" if token in symbols else None
     if token in BOTH or token in ONLY_CLI or token in ONLY_CAPI:
         return "this table"
+    # R2131 (item 402) — an IDENTIFIER answers to the code and a PHRASE answers
+    # to the prose, and the token's own shape says which it is. A name with a
+    # space in it is not something a compiler ever sees, so requiring it in
+    # stripped code would refuse a true claim; a name without one is, so
+    # accepting it from a comment would let a reason cite something that exists
+    # only in the sentence citing it. MEASURED: of eleven claims, ten resolve in
+    # stripped code and exactly one -- `no callbacks run`, the C header's stated
+    # contract -- resolves only in prose, which is where that claim belongs.
+    phrase = " " in token
     needle = token.split("::")[-1]
-    for name, text in blobs.items():
-        if needle in text:
+    for name, (code, whole) in blobs.items():
+        if needle in (whole if phrase else code):
             return name
     return None
 
