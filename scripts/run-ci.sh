@@ -2122,6 +2122,23 @@ PY
     # is not a mechanism. The floor is PER SPELLING, so a parser that stopped
     # recognising the helper cannot hide behind the bare guards' coverage.
     python3 scripts/lib/count_guard_lint.py || return 1
+    # R2138 (unregistered open-debt item 224) — the CONFIG-KEY-to-FIXTURE gate.
+    # `HONOURED_CONFIG_KEYS` lives in `wz-runtime-tokio`; the drop-in leg of
+    # `wz_reads_a_stock_zenohd_config.rs` carries a hand-written JSON5 config and
+    # asserts it names EVERY honoured key. So honouring a key edits a fixture in
+    # ANOTHER CRATE, and three things conspired to keep that quiet: the leg is
+    # `#[ignore]`d behind zenohd + a `--features zenoh-config` demo, so only
+    # hosted Layer Z runs it; pre-push runs the CHANGED crates' tests and the two
+    # sides are in different crates; and the unit tests that do run read the same
+    # key list while knowing nothing about any fixture. R311y845 paid for that
+    # (hosted red, run 32097227053) and y846 was one push from paying again.
+    #
+    # It belongs here for the same reason the count-guard gate does: BOTH SIDES
+    # ARE ON DISK. The key set is a `&[&str]`, the fixture is a `format!`
+    # literal, and comparing them costs ~1s with nothing built. It also runs in
+    # `.githooks/pre-push`, which is what makes it the LOCAL gate item 224 asks
+    # for -- this lane is the hosted half.
+    python3 scripts/lib/config_key_fixture_gate.py || return 1
     # 2026-08-25 — the RELICENSE gate. The free tier moved from
     # `LGPL-3.0-or-later` to `AGPL-3.0-or-later` across 1032 tracked files in
     # one substitution, and the failure mode of that operation is not a crash:

@@ -312,6 +312,38 @@ if ! wz_previous_run_gate "$prev_sha" 'pre-push'; then
     exit 1
 fi
 
+# ─── gate 2d — config key set vs its drop-in fixture (R2138) ────────
+# Open-debt item 224, and the LOCAL half of the gate this hook exists to be.
+# `HONOURED_CONFIG_KEYS` is in `wz-runtime-tokio`; the drop-in leg of
+# `wz_reads_a_stock_zenohd_config.rs` carries a hand-written JSON5 config and
+# asserts that it names EVERY honoured key. Honouring a key therefore edits a
+# fixture in ANOTHER CRATE, and nothing local said so:
+#
+#   * that leg is `#[ignore]`d behind `target/zenohd/zenohd` and a
+#     `--features zenoh-config` demo, so only hosted Layer Z ever runs it;
+#   * gate 3 below runs the CHANGED crates' tests, and the two sides live in
+#     different crates — so the crate that moved is never the crate that fails;
+#   * the unit tests that DO run read the same key list and know nothing about
+#     any fixture.
+#
+# R311y845 moved three keys and redded hosted Layer Z (run 32097227053); y846
+# added a fourth and would have redded the same assertion for a second reason.
+#
+# UNCONDITIONAL, unlike gate 2b. That gate scopes itself because it costs ~6s;
+# this one reads two files and costs ~1s, and a scope predicate is one more thing
+# that can be silently wrong — a wrong "this push does not touch it" reads
+# exactly like a pass. Cheap enough that the ordinary push pays nothing worth
+# scoping for.
+if ! python3 scripts/lib/config_key_fixture_gate.py; then
+    echo "" >&2
+    echo "pre-push: config-key/fixture gate FAILED — a honoured key and the" >&2
+    echo "          drop-in JSON5 fixture that must name it have drifted." >&2
+    echo "          Hosted Layer Z is the only other thing that checks this," >&2
+    echo "          and it needs zenohd built." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+
 # ─── housekeeping (NOT a gate) — toolchain-scoped target GC ─────────
 #
 # R311y445. Deliberately NOT a gate: it never fails the push, and an absent

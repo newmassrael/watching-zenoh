@@ -206,7 +206,19 @@ git config core.hooksPath .githooks
   class was paid for twice (R311y787, R311y790) before it got a gate;
   a count ABOVE budget is a link the push added (fix the link, never
   the budget), a count BELOW it is one the push removed (lower the
-  budget in that same commit). The FULL validation surface — the feature-subset
+  budget in that same commit). R2138 adds (5) **the config-key /
+  fixture gate** (`scripts/lib/config_key_fixture_gate.py`, open-debt
+  item 224) — honouring an upstream config key means editing a JSON5
+  fixture in a DIFFERENT crate, behind `#[ignore]`, so gate (3) can
+  never see it: the crate that moved is not the crate that fails.
+  ~1s, unconditional, and Layer C0 runs the same script hosted.
+  ⚠ The word "only" above is a policy statement, not an inventory:
+  this hook also carries gates 0 / 0b / 0c (confidential vocabulary,
+  home-directory paths, published identities), 2b (the cross-impl
+  proof audit, scoped to pushes that move a claim) and 2c (the
+  PREVIOUS push's hosted verdict). Read `.githooks/pre-push` for the
+  list; this paragraph is about the POLICY — fast, not a mirror.
+  The FULL validation surface — the feature-subset
   matrix, C2 clippy, Layers B/B2 codegen, F/G/Q/Z footprint /
   cross-compile / interop, every non-default combo — is the HOSTED
   CI's job: it runs on every push to main and is the single full
