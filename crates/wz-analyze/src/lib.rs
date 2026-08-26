@@ -8175,6 +8175,273 @@ mod packet_and_note_tests {
         );
     }
 
+    /// One realistic instance of EVERY `FieldNote` kind, for measuring.
+    ///
+    /// The variable halves are produced by the same APIs the real producers
+    /// call rather than typed out here: the refusal's `why` is what
+    /// `FormatMap::declare` actually returns for a rule it rejects, and the
+    /// `NotDecrypted` sentence is the one `decrypted_coordinates` builds. A
+    /// sentence invented for a measurement measures the invention.
+    fn one_of_every_note_kind() -> Vec<FieldNote> {
+        use wz_capture::payload::formats::{DeclarationKind, FormatMap};
+        let flow = sample_flow();
+        let mut map = FormatMap::new();
+        let refused = "demo/**=nosuchformat";
+        let why = map
+            .declare(refused)
+            .expect_err("the fixture must name a format the map refuses")
+            .to_string();
+        vec![
+            FieldNote::NotDecrypted {
+                flow,
+                why: "this flow's messages were decrypted, so their coordinates name the \
+                      ciphertext record they came out of and the plaintext they were decoded \
+                      from is not retained"
+                    .to_string(),
+            },
+            FieldNote::NothingWalkable { flow },
+            FieldNote::CaptureNotReread,
+            FieldNote::PayloadRuleRefused {
+                rule: refused.to_owned(),
+                why,
+            },
+            FieldNote::PayloadDeclarationUnbound {
+                declaration: "demo/**=json".to_owned(),
+                kind: DeclarationKind::FormatRule,
+            },
+            FieldNote::Omitted { flow, count: 12 },
+            FieldNote::Disagreement {
+                flow,
+                count: 3,
+                named: vec![Disagreed {
+                    at: 7,
+                    why: Disagreement::Absent,
+                }],
+            },
+        ]
+    }
+
+    /// R2129 (unregistered open-debt item 480) — EVERY note kind is in the
+    /// measurement, and the compiler is what says so.
+    ///
+    /// The numbers themselves are in
+    /// [`ten_times_the_traffic_is_the_same_field_notes_and_almost_the_same_bytes`],
+    /// beside the denominator that makes them affordable. What this holds is the
+    /// POPULATION: an eighth variant makes the match below non-exhaustive and
+    /// the crate stops building, so a note kind cannot arrive unmeasured the way
+    /// `FieldNote` itself arrived unmeasured beside item 302's two.
+    #[test]
+    fn the_field_note_prose_is_measured_and_every_kind_is_in_the_measurement() {
+        let sample = one_of_every_note_kind();
+
+        // THE POPULATION IS HELD BY THE COMPILER, not by this list's length. An
+        // eighth variant makes this match non-exhaustive and the crate stops
+        // building, which is a stronger verdict than any count asserted here.
+        fn kind_of(note: &FieldNote) -> &'static str {
+            match note {
+                FieldNote::NotDecrypted { .. } => "not_decrypted",
+                FieldNote::NothingWalkable { .. } => "nothing_walkable",
+                FieldNote::CaptureNotReread => "capture_not_reread",
+                FieldNote::PayloadRuleRefused { .. } => "payload_rule_refused",
+                FieldNote::PayloadDeclarationUnbound { .. } => "payload_declaration_unbound",
+                FieldNote::Omitted { .. } => "omitted",
+                FieldNote::Disagreement { .. } => "disagreement",
+            }
+        }
+        let covered: std::collections::BTreeSet<&str> = sample.iter().map(kind_of).collect();
+        assert_eq!(
+            covered.len(),
+            sample.len(),
+            "one instance per kind, no kind twice: {covered:?}"
+        );
+
+        for note in &sample {
+            let json = note.to_json();
+            let sentence = note.sentence();
+            // ANTI-VACUITY: a note that rendered nothing would satisfy any
+            // ratio below by being zero on both sides.
+            assert!(
+                json.len() > sentence.len() && !sentence.is_empty(),
+                "{}: the JSON carries the sentence and more: {json}",
+                kind_of(note)
+            );
+            // The sentence is carried VERBATIM, so the note key is not a second
+            // spelling of the fields beside it -- the property item 302 found
+            // the refusal row breaking, where `example` appeared twice.
+            assert!(
+                json.contains(&sentence.replace('\\', "\\\\")) || sentence.contains('"'),
+                "{}: the JSON note key is the sentence itself: {json}",
+                kind_of(note)
+            );
+        }
+
+        // THE SENTENCE THIS PLANE'S DOC COMMENT WRITES, AS AN ASSERTION.
+        //
+        // Item 480 expected item 302's finding to repeat -- both of 302's row
+        // kinds sat at a steady 63% prose -- and the measurement says it does
+        // not. Left as prose, "16% to 76%" is a number that rots the first time
+        // a sentence is reworded, which is the class open-debt item 530 is open
+        // for. The SPREAD is what the finding actually is, so the spread is what
+        // is held here: a plane whose kinds converged on one ratio would fail
+        // this, and so would a doc comment that kept claiming they had not.
+        let percents: Vec<usize> = sample
+            .iter()
+            .map(|n| n.sentence().len() * 100 / n.to_json().len())
+            .collect();
+        let low = *percents.iter().min().expect("a non-empty population");
+        let high = *percents.iter().max().expect("a non-empty population");
+        assert!(
+            low < 25 && high > 70,
+            "the kinds do NOT share one ratio -- a count-only sentence is cheap \
+             and a remedy-bearing one is dear ({low}%..{high}%): {percents:?}"
+        );
+    }
+
+    /// The `field_notes` array of a rendered JSON analysis, by bracket depth.
+    ///
+    /// Sliced rather than parsed because what is being measured is the BYTES
+    /// this plane costs a consumer, and a parse would hand back a value whose
+    /// length is a property of the parser.
+    fn field_notes_plane(rendered: &str) -> &str {
+        let key = "\"field_notes\":[";
+        let start = rendered
+            .find(key)
+            .expect("a JSON analysis carries a field_notes plane")
+            + key.len()
+            - 1;
+        let mut depth = 0usize;
+        for (i, c) in rendered[start..].char_indices() {
+            match c {
+                '[' => depth += 1,
+                ']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &rendered[start..start + i + 1];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("the field_notes array is not closed");
+    }
+
+    /// One flow carrying `messages` copies of the same zenoh datagram.
+    fn one_flow_carrying(messages: usize) -> Vec<u8> {
+        let packet = udp(&[0x01, 0x09, 0x3B, 0x11, 0x22, 0x33, 0x44]);
+        let packets: Vec<_> = (0..messages)
+            .map(|i| (0, 1_000_000 + i as u64, packet.as_slice()))
+            .collect();
+        wz_capture::pcapng::write(&[(wz_capture::link::LINKTYPE_ETHERNET, 6)], &packets)
+    }
+
+    fn field_notes_of(capture: &[u8], limit: usize) -> String {
+        let (rendered, _) = analyze_request(&Request {
+            capture,
+            keylog: None,
+            format: Format::Json,
+            per_flow: true,
+            per_message: true,
+            messages_per_flow: Some(limit),
+            quic_ports: &[],
+            quic_cid_len: None,
+            payload_rules: &[],
+            payload_field_names: &[],
+            serial_linktypes: &[],
+            census: Census::default(),
+            // The plane does not exist without this flag, and a run that forgot
+            // it measures an EMPTY array without saying so -- the first draft of
+            // this gate did exactly that and reported zero notes twice.
+            per_field: true,
+            bounded: false,
+            health: false,
+            select: None,
+            csv: None,
+        })
+        .expect("the fixture reads");
+        field_notes_plane(&rendered).to_owned()
+    }
+
+    /// R2129 (unregistered open-debt item 480) — THE `FieldNote` PLANE IS
+    /// BOUNDED BY THE FLOW, NOT BY THE TRAFFIC.
+    ///
+    /// # The measurement this holds in place
+    ///
+    /// Item 480 asked what the `FieldNote` sentence costs and answered
+    /// "unmeasured", as the sibling of item 302's two row kinds. Measured this
+    /// round through the real renderers, one realistic instance per kind, as
+    /// JSON bytes and the sentence inside them:
+    ///
+    /// ```text
+    ///                not_decrypted: 257 / 171 (66%)
+    ///             nothing_walkable: 158 /  69 (43%)
+    ///           capture_not_reread: 108 /  69 (63%)
+    ///         payload_rule_refused: 173 / 132 (76%)
+    ///  payload_declaration_unbound: 161 / 120 (74%)
+    ///                      omitted: 109 /  18 (16%)
+    ///                 disagreement: 227 /  95 (41%)
+    /// ```
+    ///
+    /// 1193 bytes carrying 674 of prose, 56% over the plane. Item 480 expected
+    /// 302's shape to repeat and it does NOT: 302 found both its row kinds at a
+    /// steady 63%, while these run from 16% to 76%. The cheap ones are cheap
+    /// because their sentence is a count (`omitted`, 18 bytes) and the dear ones
+    /// are dear because their sentence is the only place the remedy is written
+    /// (`payload_rule_refused`). A single ratio would describe none of them.
+    ///
+    /// The rows are also SMALLER than 302's -- 108..257 against 326..400 -- so
+    /// the plane is cheaper per row as well as narrower.
+    ///
+    /// # What makes it affordable, and what this gate catches
+    ///
+    /// The same thing 302 found: the DENOMINATOR. Every note is pushed once per
+    /// flow, once per capture, or once per declaration the caller typed --
+    /// never once per message. So ten times the traffic on one flow is the same
+    /// note, and the plane may grow only by the digits of its counts: MEASURED,
+    /// 3 messages against 30 on one flow is 109 bytes against 111, one note
+    /// either way. That is asserted below end to end through `analyze_request`
+    /// rather than on a hand-built value, because where a note is PUSHED is the
+    /// property at risk and a constructed note cannot show it.
+    ///
+    /// The one variant that carries a per-message list, `Disagreement.named`,
+    /// takes the same `--max-messages` bound as the rows; R311y681's test below
+    /// is what holds that, and this gate is the other half.
+    #[test]
+    fn ten_times_the_traffic_is_the_same_field_notes_and_almost_the_same_bytes() {
+        let small = field_notes_of(&one_flow_carrying(3), 1);
+        let large = field_notes_of(&one_flow_carrying(30), 1);
+
+        // ANTI-VACUITY, in the shape this round needed twice: the first draft
+        // of this gate left `per_field` off and both sides were `[]`, which
+        // satisfies every equality below. A population of zero is a dead probe
+        // and an exit code cannot tell it from a negative result.
+        let rows = small.matches("\"kind\":").count();
+        assert!(rows >= 1, "the fixture must produce a note at all: {small}");
+        assert!(
+            small.contains("\"kind\":\"omitted\"") && small.contains("\"count\":2"),
+            "and it must be the bound's own note, with the exact count: {small}"
+        );
+        assert!(
+            large.contains("\"count\":29"),
+            "ten times the traffic is ten times the omission: {large}"
+        );
+
+        assert_eq!(
+            large.matches("\"kind\":").count(),
+            rows,
+            "ten times the traffic on ONE flow is the SAME note -- a note keyed \
+             on anything per-message would render ten times the rows here: \
+             {large}"
+        );
+        let grew = large.len() - small.len();
+        assert!(
+            grew <= 4 * rows,
+            "the plane may grow only by the digits of its counts ({} -> {} is \
+             +{grew} for {rows} note(s)): {large}",
+            small.len(),
+            large.len()
+        );
+    }
+
     /// R311y681 (§1.1n) — the per-message detail takes the same bound as the
     /// rows, and the COUNT never does.
     ///
