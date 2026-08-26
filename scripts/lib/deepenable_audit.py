@@ -63,6 +63,10 @@ import pathlib
 import re
 import subprocess
 import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+
+import rust_comments  # noqa: E402  -- after the path insert that finds it
 import tempfile
 import time
 
@@ -98,9 +102,12 @@ def rust_const(name: str) -> list[str]:
     m = re.search(r"(?:pub )?const " + name + r": &\[&str\] = &\[(.*?)\n\];", src, re.S)
     if not m:
         raise SystemExit(f"deepenable-audit: FAIL -- {name} not found in {SOURCE}")
-    body = "\n".join(
-        line for line in m.group(1).splitlines() if not line.strip().startswith("//")
-    )
+    # R2131 (unregistered open-debt item 402) — the stripping moved to
+    # `rust_comments`, which two other sweeps measured this round now share. It
+    # BLANKS a comment rather than dropping its line, which is stricter than the
+    # whole-line test this used to do: a trailing `// "phrase"` after a real
+    # entry was never covered by "the line starts with //".
+    body = rust_comments.strip_comments(m.group(1))
     return re.findall(r'"([^"]+)"', body)
 
 
