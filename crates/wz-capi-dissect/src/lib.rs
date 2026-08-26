@@ -759,7 +759,7 @@ pub unsafe extern "C" fn wz_dissect_pcap_census_bounded(
 /// confident tree about bytes nobody asked for. Bytes trimmed by a bounded read
 /// decline the same way.
 ///
-/// # `max_messages_per_flow`
+/// # `max_messages_shown_per_flow`
 ///
 /// 0 means UNBOUNDED, matching the command line's default. That is the shape
 /// that works for a test and fails for a session — a capture holds an unbounded
@@ -774,7 +774,7 @@ pub unsafe extern "C" fn wz_dissect_pcap_census_bounded(
 pub unsafe extern "C" fn wz_dissect_pcap_fields(
     bytes: *const u8,
     len: usize,
-    max_messages_per_flow: usize,
+    max_messages_shown_per_flow: usize,
     out: *mut *mut c_char,
 ) -> c_int {
     if bytes.is_null() || out.is_null() {
@@ -786,7 +786,7 @@ pub unsafe extern "C" fn wz_dissect_pcap_fields(
         Ok(d) => d,
         Err(_) => return WZ_DISSECT_ERR_BAD_CAPTURE,
     };
-    let cap = (max_messages_per_flow > 0).then_some(max_messages_per_flow);
+    let cap = (max_messages_shown_per_flow > 0).then_some(max_messages_shown_per_flow);
     write_string(
         wz_capture::fields_json::fields_json(&dissection, input, cap, None),
         out,
@@ -871,7 +871,7 @@ pub unsafe extern "C" fn wz_dissect_pcap_fields(
 /// own bytes refute the declaration and the rule was applied over it. `note`
 /// carries the same sentence the command line prints. Always present, empty
 /// when nothing is misbound. The tally counts the messages this listing WALKED,
-/// so `max_messages_per_flow` bounds it too and each flow's `omitted` is what
+/// so `max_messages_shown_per_flow` bounds it too and each flow's `omitted` is what
 /// makes that legible; see `wz_capture::payload_decode::Declarations`.
 ///
 /// # Safety
@@ -882,7 +882,7 @@ pub unsafe extern "C" fn wz_dissect_pcap_fields(
 pub unsafe extern "C" fn wz_dissect_pcap_fields_with_payloads(
     bytes: *const u8,
     len: usize,
-    max_messages_per_flow: usize,
+    max_messages_shown_per_flow: usize,
     declarations: *const c_char,
     out: *mut *mut c_char,
 ) -> c_int {
@@ -906,7 +906,7 @@ pub unsafe extern "C" fn wz_dissect_pcap_fields_with_payloads(
         Ok(d) => d,
         Err(_) => return WZ_DISSECT_ERR_BAD_CAPTURE,
     };
-    let cap = (max_messages_per_flow > 0).then_some(max_messages_per_flow);
+    let cap = (max_messages_shown_per_flow > 0).then_some(max_messages_shown_per_flow);
     let declared = wz_capture::payload_decode::Declarations::new(&map);
     write_string(
         wz_capture::fields_json::fields_json(&dissection, input, cap, Some(&declared)),
@@ -922,7 +922,7 @@ pub unsafe extern "C" fn wz_dissect_pcap_fields_with_payloads(
 /// The summary has had a bounded form since R311y748 and the census since
 /// R311y885, and the field layer had none — which is the plane that walks
 /// EVERY MESSAGE of the capture, so it is the one a live tap can least afford
-/// unbounded. `max_messages_per_flow` looks like a ceiling and is not one: it
+/// unbounded. `max_messages_shown_per_flow` looks like a ceiling and is not one: it
 /// trims the OUTPUT after a full dissection has already been built, so a
 /// caller asking for ten messages still pays for the whole file.
 ///
@@ -958,7 +958,7 @@ pub unsafe extern "C" fn wz_dissect_pcap_fields_with_payloads(
 pub unsafe extern "C" fn wz_dissect_pcap_fields_limited(
     bytes: *const u8,
     len: usize,
-    max_messages_per_flow: usize,
+    max_messages_shown_per_flow: usize,
     declarations: *const c_char,
     limits: c_int,
     out: *mut *mut c_char,
@@ -992,7 +992,7 @@ pub unsafe extern "C" fn wz_dissect_pcap_fields_limited(
         Ok(d) => d,
         Err(_) => return WZ_DISSECT_ERR_BAD_CAPTURE,
     };
-    let cap = (max_messages_per_flow > 0).then_some(max_messages_per_flow);
+    let cap = (max_messages_shown_per_flow > 0).then_some(max_messages_shown_per_flow);
     let declared = wz_capture::payload_decode::Declarations::new(&map);
     write_string(
         wz_capture::fields_json::fields_json(&dissection, input, cap, Some(&declared)),
@@ -2974,7 +2974,7 @@ mod tests {
     ///
     /// # What the two arms separate
     ///
-    /// `max_messages_per_flow` was never a ceiling: it trims the OUTPUT after
+    /// `max_messages_shown_per_flow` was never a ceiling: it trims the OUTPUT after
     /// the whole dissection is built. So a test that only checked the listing
     /// got shorter would pass on a door that ignored `limits` entirely. The
     /// discriminator is `dropped_by_limits`, which counts what the DISSECTION
@@ -3011,7 +3011,7 @@ mod tests {
     /// # The sentence nothing was checking
     ///
     /// `wz_dissect_pcap_fields_limited` takes both, side by side, and only one
-    /// of them is a statement about memory. `max_messages_per_flow` trims each
+    /// of them is a statement about memory. `max_messages_shown_per_flow` trims each
     /// flow's OUTPUT after the whole dissection is built, so a caller asking
     /// for ten messages still pays for the file; `limits` is a preset the walk
     /// itself reads. The header and the Rust doc both say so and item 450 is

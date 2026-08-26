@@ -8419,6 +8419,25 @@ layer_c1bo_dissect_c_abi() {
     # compared with the artifact instead of with another file in the same
     # commit.
     python3 scripts/lib/capi_header_subsumption.py || return 1
+
+    # R2120 (open-debt item 467) — and what the header's PARAMETER NAMES
+    # promise, held to the discipline the header declares for each.
+    #
+    # `max_messages_per_flow` read like a ceiling and only ever trimmed the
+    # OUTPUT after the whole walk was paid for. Item 450 diagnosed that,
+    # R311y933 made the behaviour checkable and left the name, on the belief
+    # that renaming it broke a published signature -- which C has no way to
+    # do, since a prototype's parameter name is documentation and not ABI.
+    # `capi_abi_pin.py` two calls up is the standing proof: it pins the symbol
+    # set and the revision and reads neither name.
+    #
+    # Beside the other two rather than in its own lane because the SUBJECT is
+    # the same header, and unlike them it needs no cdylib: its certifier is a
+    # C COMPILER. `gcc -aux-info` re-emits every prototype it parsed with full
+    # types and no names, so the gate's own extraction is refused unless it
+    # agrees with GCC function for function -- and the names it then reads
+    # come from a declaration a compiler has already bounded.
+    python3 scripts/lib/capi_bound_names.py || return 1
     return 0
 }
 

@@ -65,7 +65,7 @@ use crate::payload_decode::{decode_payload, push_decoding, Declarations, Keyexpr
 /// Every message in `capture`, dissected into fields.
 ///
 /// `capture` is the same bytes `d` was built from; the datagram half needs them
-/// again (see the module doc). `max_messages_per_flow` bounds each flow's
+/// again (see the module doc). `max_messages_shown_per_flow` bounds each flow's
 /// listing — `None` is unbounded, which is the shape that works for a test and
 /// fails for a session, so a caller with a screen to fill should pass a bound.
 ///
@@ -77,7 +77,7 @@ use crate::payload_decode::{decode_payload, push_decoding, Declarations, Keyexpr
 pub fn fields_json(
     d: &crate::Dissection,
     capture: &[u8],
-    max_messages_per_flow: Option<usize>,
+    max_messages_shown_per_flow: Option<usize>,
     declarations: Option<&Declarations<'_>>,
 ) -> String {
     // A map with no rules answers `NoRules` for every message, so it renders
@@ -93,7 +93,7 @@ pub fn fields_json(
         if i > 0 {
             out.push(',');
         }
-        push_stream_flow(flow, max_messages_per_flow, declarations, &mut out);
+        push_stream_flow(flow, max_messages_shown_per_flow, declarations, &mut out);
     }
     out.push_str("],\"datagram_flows\":[");
     let reread = Reread::of(capture);
@@ -104,7 +104,7 @@ pub fn fields_json(
         push_datagram_flow(
             flow,
             reread.as_ref(),
-            max_messages_per_flow,
+            max_messages_shown_per_flow,
             declarations,
             &mut out,
         );

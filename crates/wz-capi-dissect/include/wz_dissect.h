@@ -305,7 +305,10 @@ int wz_dissect_pcap_census_where(const unsigned char *bytes, size_t len,
  * made short by an evicted flow says so instead of reading as a quiet network.
  *
  * A bad selector is WZ_DISSECT_ERR_SELECTOR; an unknown preset is
- * WZ_DISSECT_ERR_INVALID_ARG. Neither hands back a string. */
+ * WZ_DISSECT_ERR_INVALID_ARG. Neither hands back a string.
+ *
+ * @bound limits work-ceiling -- it bounds the WALK, and what the walk
+ * dropped is reported in dropped_by_limits. */
 int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
                                          const char *selector, int limits,
                                          char **out);
@@ -348,7 +351,7 @@ int wz_dissect_selector_diagnose(const char *selector, char **out);
  * a confident tree about other bytes. Bytes a bounded read trimmed decline
  * the same way.
  *
- * max_messages_per_flow: 0 is UNBOUNDED, matching the command line's
+ * max_messages_shown_per_flow: 0 is UNBOUNDED, matching the command line's
  * default, and a capture holds an unbounded number of messages -- pass a
  * bound if you have a screen to fill. Each flow reports `shown` and
  * `omitted`, so a held-back listing is never mistaken for a capture that
@@ -358,9 +361,14 @@ int wz_dissect_selector_diagnose(const char *selector, char **out);
  * SUBSUMED BY wz_dissect_pcap_fields_limited -- that door takes the DISSECTION
  * ceiling as an argument, which this one has no way to state: the bound here
  * trims the listing after the whole walk is already built. Kept and still
- * linkable. (R2116, item 466.) */
+ * linkable. (R2116, item 466.)
+ *
+ * @bound max_messages_shown_per_flow trims-output -- the whole walk is paid
+ * for and only the DOCUMENT is shortened; each flow's `shown` and `omitted`
+ * report the trim. (R2120, item 467: the old spelling promised a ceiling
+ * this argument has never enforced.) */
 int wz_dissect_pcap_fields(const unsigned char *bytes, size_t len,
-                           size_t max_messages_per_flow, char **out);
+                           size_t max_messages_shown_per_flow, char **out);
 
 /* R311y856 (ABI 6) — THE FIELD LAYER WITH THE APPLICATION PAYLOADS DECODED,
  * under a mapping you declare.
@@ -502,9 +510,13 @@ int wz_dissect_pcap_fields(const unsigned char *bytes, size_t len,
  *
  * SUBSUMED BY wz_dissect_pcap_fields_limited -- that door takes the same
  * declarations text AND the dissection ceiling, so it is this call with the
- * one thing it cannot say. Kept and still linkable. (R2116, item 466.) */
+ * one thing it cannot say. Kept and still linkable. (R2116, item 466.)
+ *
+ * @bound max_messages_shown_per_flow trims-output -- as above: the walk is
+ * paid for in full and `shown`/`omitted` report what the document left
+ * out. */
 int wz_dissect_pcap_fields_with_payloads(const unsigned char *bytes, size_t len,
-                                         size_t max_messages_per_flow,
+                                         size_t max_messages_shown_per_flow,
                                          const char *declarations, char **out);
 
 /* R311y917 (ABI 10) — THE FIELD LAYER UNDER A CEILING, with both of its
@@ -513,7 +525,7 @@ int wz_dissect_pcap_fields_with_payloads(const unsigned char *bytes, size_t len,
  * The summary has had a bounded form since ABI 2 and the census since ABI 7.
  * The field layer had none, and it is the plane that walks EVERY MESSAGE of
  * the capture -- so it is the one a live tap can least afford unbounded.
- * max_messages_per_flow is not a ceiling: it trims the OUTPUT after the whole
+ * max_messages_shown_per_flow is not a ceiling: it trims the OUTPUT after the whole
  * dissection has been built, so asking for ten messages still costs you the
  * whole file.
  *
@@ -531,9 +543,17 @@ int wz_dissect_pcap_fields_with_payloads(const unsigned char *bytes, size_t len,
  * five counters the summary's health object and the census document carry --
  * so a listing made short by an evicted flow says so instead of reading like
  * a capture that ended. Present with every counter zero when no ceiling was
- * asked for, so "no caps" and "caps that did not bite" are distinguishable. */
+ * asked for, so "no caps" and "caps that did not bite" are distinguishable.
+ *
+ * THE TWO BOUNDS ON THIS DOOR ARE NOT THE SAME KIND, which is the whole
+ * reason it takes both:
+ *
+ * @bound max_messages_shown_per_flow trims-output -- the DOCUMENT is
+ * shortened after the walk; `shown`/`omitted` report it.
+ * @bound limits work-ceiling -- the WALK is bounded; dropped_by_limits
+ * reports it. */
 int wz_dissect_pcap_fields_limited(const unsigned char *bytes, size_t len,
-                                   size_t max_messages_per_flow,
+                                   size_t max_messages_shown_per_flow,
                                    const char *declarations, int limits,
                                    char **out);
 
@@ -749,7 +769,10 @@ typedef struct wz_dissect_record {
  * believes it asked for a ceiling must not be given none.
  *
  * On WZ_DISSECT_OK, `*out` is a handle to be released exactly once with
- * wz_dissect_live_close. */
+ * wz_dissect_live_close.
+ *
+ * @bound limits work-ceiling -- it bounds what the handle RETAINS between
+ * packets, and wz_dissect_live_lost is what it discarded. */
 int wz_dissect_live_open(int limits, wz_dissect_live **out);
 
 /* Feed one captured packet. `link_type` is its pcap link type -- the same
@@ -779,7 +802,11 @@ int wz_dissect_live_push(wz_dissect_live *h, unsigned int link_type,
  * the order it decoded them. They are NOT globally sorted by time. Sort on
  * `ts_ns` if you need that -- a live reader cannot do it for you without
  * holding messages back until nothing older can arrive, and on a link that
- * moment never comes. */
+ * moment never comes.
+ *
+ * @bound cap buffer-capacity -- it is the size of YOUR array. This library
+ * imposes nothing by it and discards nothing for it: what does not fit
+ * stays, and `*written` says what did. */
 int wz_dissect_live_drain(wz_dissect_live *h, wz_dissect_record *out,
                           size_t cap, size_t *written);
 
@@ -812,7 +839,10 @@ void wz_dissect_live_close(wz_dissect_live *h);
  * a GATE outside both languages can read the layout out of the artifact and
  * hold it against a pin that sits beside the ABI revision -- because the two
  * pins that used to hold it, a Rust test and a C block, are edited by the same
- * commit that changes the layout, and two pins that move together are one. */
+ * commit that changes the layout, and two pins that move together are one.
+ *
+ * @bound cap buffer-capacity -- the size of YOUR array. Below the count it
+ * writes nothing and still RETURNS the count, so it never truncates. */
 size_t wz_dissect_record_layout(size_t *out, size_t cap);
 
 #ifdef __cplusplus

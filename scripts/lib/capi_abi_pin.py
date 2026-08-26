@@ -117,7 +117,7 @@ EXPECTED_SYMBOLS = {
     "wz_dissect_pcap_fields_with_payloads",
     # R311y917 (unregistered item 366) — the field layer under a CEILING. The
     # one read plane with no bounded form, and the one that walks every message
-    # in the capture; `max_messages_per_flow` trims the output after the whole
+    # in the capture; `max_messages_shown_per_flow` trims the output after the whole
     # dissection is already built, so it was never the bound it looks like. One
     # symbol on R311y887's pattern rather than a `_bounded` twin for each of the
     # two existing field doors, which would have made four.
