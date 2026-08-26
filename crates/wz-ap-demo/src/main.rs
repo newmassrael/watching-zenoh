@@ -190,52 +190,24 @@ fn main() -> ExitCode {
             // not-applied half names WHY for each key — "no sink in this build"
             // is one reason among several, and it is no longer the only one the
             // report can express.
-            let applied = exp.applied();
-            let read_only = exp.read_but_not_applied_with_reasons();
-            eprintln!("wz-ap-demo: --config {}: READ {:?}", exp.path, exp.named);
-            eprintln!("wz-ap-demo: --config {}: APPLIED {applied:?}", exp.path);
-            if !read_only.is_empty() {
-                eprintln!(
-                    "wz-ap-demo: --config {}: READ BUT NOT APPLIED {read_only:?}",
-                    exp.path
-                );
+            // R2124 (open-debt item 504) — THE REPORT IS DATA, AND THIS LOOP IS
+            // THE WHOLE OF IT.
+            //
+            // What stood here was one hand-written `eprintln!` per axis, so a
+            // fifth axis on the reader reached an operator only if somebody
+            // remembered to add a sixth line. MEASURED before the change:
+            // deleting the READ line — which is the report of WHICH honoured
+            // keys the file named — reded nothing across 41 tests. The one
+            // thing that ever caught it was `dead_code`, and only for a field
+            // whose LAST reader was the line being deleted.
+            //
+            // `report_lines` is where the axes live now, beside the struct that
+            // holds them, and `every_axis_the_reader_hands_over_reaches_a_line`
+            // is what refuses a field that reaches neither a line nor a stated
+            // reason for not being one.
+            for (label, body) in exp.report_lines() {
+                eprintln!("wz-ap-demo: --config {}: {label} {body}", exp.path);
             }
-            // R2109 (open-debt item 514) — the answer none of the three lines
-            // above can carry, because all three enumerate keys the FILE WROTE.
-            // A document that names no `mode` at all produced a report in which
-            // the word never appeared, while the run-mode it silently selected
-            // sat on the `argv +=` line below as a bare flag. That silence is
-            // read one way by the zenoh library and the OTHER way by zenohd, so
-            // a mode-less file that used to deploy a router deploys a peer here
-            // — the line says so rather than leaving it to be found on the wire.
-            if let Some(unstated) = exp.mode_unstated {
-                eprintln!(
-                    "wz-ap-demo: --config {}: MODE UNSTATED - {unstated}",
-                    exp.path
-                );
-            }
-            // R2081 (open-debt item 500) — the third answer. A key the file
-            // states as a `{ router, peer, client }` table that names no row for
-            // this node's mode is neither honoured nor ignored, and until this
-            // round no line carried it: the operator's file spoke, and it did not
-            // speak to this node.
-            if !exp.stated_for_other_modes.is_empty() {
-                eprintln!(
-                    "wz-ap-demo: --config {}: STATED FOR OTHER MODES {:?} \
-                     (this node is {})",
-                    exp.path,
-                    exp.stated_for_other_modes,
-                    exp.mode.to_str()
-                );
-            }
-            // Said out loud rather than swallowed: the operator's file is full
-            // of keys wz has no opinion about, and a reader that applies what
-            // it knows in silence lets a TLS root-CA path look like it took
-            // effect. See `zenoh_config::ZenohConfigIngest`.
-            for key in &exp.ignored {
-                eprintln!("wz-ap-demo: --config {}: IGNORED {key}", exp.path);
-            }
-            eprintln!("wz-ap-demo: --config {}: argv += {:?}", exp.path, exp.added);
             expanded = exp.argv;
             &expanded[..]
         }

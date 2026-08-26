@@ -1216,6 +1216,70 @@ pub(crate) struct StockConfigExpansion {
 
 #[cfg(feature = "zenoh-config")]
 impl StockConfigExpansion {
+    /// R2124 (open-debt item 504) — EVERY AXIS THIS EXPANSION CARRIES, AS
+    /// LABELLED LINES, so the demo prints the report instead of composing it.
+    ///
+    /// # The gap this closes
+    ///
+    /// The reader's partition grew three times — `stated_for_other_modes`
+    /// (item 500), the per-key verdicts (item 508), `mode_unstated` (item 514)
+    /// — and each time an operator saw the new axis only because somebody
+    /// remembered to add an `eprintln!` in `main`. Nothing bound the two.
+    /// MEASURED before this existed: deleting the READ line reded nothing
+    /// across 41 tests, and the only thing that ever caught a deletion was
+    /// `dead_code`, which fires just when the deleted line was a field's LAST
+    /// reader.
+    ///
+    /// # Why a list and not a `Display`
+    ///
+    /// The label is the half a test can hold. `every_axis_the_reader_hands_over
+    /// _reaches_a_line` destructures this struct — so a new field does not
+    /// compile until it is judged — and then checks that each REPORTING field's
+    /// value actually reaches the rendered text. A single formatted blob would
+    /// pass the second check by accident the moment any field's value appeared
+    /// anywhere in it.
+    ///
+    /// The rendering is byte-for-byte what the six hand-written lines produced,
+    /// because operators and the deploy leg both read these strings.
+    pub(crate) fn report_lines(&self) -> Vec<(&'static str, String)> {
+        let mut out: Vec<(&'static str, String)> = Vec::new();
+        out.push(("READ", format!("{:?}", self.named)));
+        out.push(("APPLIED", format!("{:?}", self.applied())));
+        let read_only = self.read_but_not_applied_with_reasons();
+        if !read_only.is_empty() {
+            out.push(("READ BUT NOT APPLIED", format!("{read_only:?}")));
+        }
+        // R2109 (open-debt item 514) — the answer the three above cannot carry,
+        // because all three enumerate keys the FILE WROTE. A document naming no
+        // `mode` produced a report in which the word never appeared, while the
+        // run-mode it silently selected sat on the `argv +=` line as a bare
+        // flag — read one way by the zenoh library and the other by zenohd.
+        if let Some(unstated) = &self.mode_unstated {
+            out.push(("MODE UNSTATED", format!("- {unstated}")));
+        }
+        // R2081 (open-debt item 500) — a key the file states as a
+        // `{ router, peer, client }` table naming no row for this node's mode
+        // is neither honoured nor ignored: the operator's file spoke, and it
+        // did not speak to this node.
+        if !self.stated_for_other_modes.is_empty() {
+            out.push((
+                "STATED FOR OTHER MODES",
+                format!(
+                    "{:?} (this node is {})",
+                    self.stated_for_other_modes,
+                    self.mode.to_str()
+                ),
+            ));
+        }
+        // Said out loud rather than swallowed: a reader that applies what it
+        // knows in silence lets a TLS root-CA path look like it took effect.
+        for key in &self.ignored {
+            out.push(("IGNORED", key.clone()));
+        }
+        out.push(("argv +=", format!("{:?}", self.added)));
+        out
+    }
+
     /// The honoured keys that reach a flag in THIS build.
     ///
     /// R2081 (open-debt item 208) — the split lives HERE and not at the print
@@ -2106,6 +2170,149 @@ mod stock_config_tests {
         .unwrap();
         assert_eq!(out.ignored, vec!["plugins", "transport/link/tx/threads"]);
         assert_eq!(out.named, vec!["mode", "connect/endpoints"]);
+    }
+
+    /// R2124 (open-debt item 504) — EVERY AXIS THE READER HANDS OVER REACHES A
+    /// REPORT LINE, OR SAYS WHY IT IS NOT ONE.
+    ///
+    /// # What was unbound
+    ///
+    /// `ZenohConfigIngest` grew a third partition (item 500), per-key verdicts
+    /// (item 508) and a fourth answer about silence (item 514). Each reached an
+    /// operator because a person added an `eprintln!` to `main`, and nothing
+    /// would have noticed if they had not. MEASURED on the tree before this
+    /// round: deleting the READ line left 41 tests green. The only thing that
+    /// ever objected was `dead_code`, and only when the deleted line happened
+    /// to be a field's LAST reader — which the READ line was not.
+    ///
+    /// # The two halves, and why neither alone is enough
+    ///
+    /// The DESTRUCTURE makes the population the struct rather than a list: a
+    /// field added to `StockConfigExpansion` fails to compile here until
+    /// someone puts it in one of the two classes below. That is item 400's
+    /// prescription -- a hand list is wrong on the day it is written.
+    ///
+    /// The CONTENT CHECK is what stops the classification from being a label
+    /// nobody honours: for a fixture where every axis has something in it,
+    /// each REPORTING field's own value must appear in the rendered lines. A
+    /// field classified as reported and then dropped from `report_lines` fails
+    /// here even though the destructure is satisfied.
+    #[test]
+    fn every_axis_the_reader_hands_over_reaches_a_line() {
+        // A file that lights up every axis at once: honoured keys that reach a
+        // flag and ones that do not, an unhonoured key, a key stated only for
+        // other modes, and no `mode` at all so the silence axis fires too.
+        let out = expand(
+            &["--config", "z.json5"],
+            // No `mode`, so the silence axis fires and this node reads as
+            // `peer`; `timestamping/enabled` then names a row for ROUTER only,
+            // which is the axis that is neither honoured-here nor unreadable.
+            r#"{ connect: { endpoints: ["tcp/r:7447"] },
+                 timestamping: { enabled: { router: true } },
+                 transport: { link: { tx: { threads: 8 } } },
+                 plugins: {} }"#,
+        )
+        .unwrap();
+
+        // Each REPORTING field, with a string drawn from ITS OWN value that
+        // must survive into the rendered report. Drawn from the value rather
+        // than written here, so the witness cannot drift from what the fixture
+        // actually produced.
+        #[allow(clippy::type_complexity)]
+        let reporting: &[(&str, &str, fn(&StockConfigExpansion) -> Option<String>)] = &[
+            ("named", "READ", |e| {
+                e.named.first().map(|k| (*k).to_string())
+            }),
+            ("effects", "APPLIED", |e| {
+                e.effects.first().map(|(k, _)| (*k).to_string())
+            }),
+            ("ignored", "IGNORED", |e| e.ignored.first().cloned()),
+            ("stated_for_other_modes", "STATED FOR OTHER MODES", |e| {
+                e.stated_for_other_modes.first().map(|k| (*k).to_string())
+            }),
+            ("mode_unstated", "MODE UNSTATED", |e| {
+                e.mode_unstated.as_ref().map(|u| u.to_string())
+            }),
+            ("added", "argv +=", |e| e.added.first().cloned()),
+            ("mode", "STATED FOR OTHER MODES", |e| {
+                Some(e.mode.to_str().to_string())
+            }),
+        ];
+
+        // NOT report axes, each with the reason it is not one. A field here is
+        // a deliberate answer, which is the whole difference between this and
+        // silence.
+        let not_reported: &[(&str, &str)] = &[
+            ("path", "the subject of every line, printed by the caller"),
+            (
+                "argv",
+                "the OUTPUT of the expansion, not a statement about it",
+            ),
+        ];
+
+        let lines = out.report_lines();
+        assert!(
+            !lines.is_empty(),
+            "the fixture produced no report at all, so nothing below is measuring anything"
+        );
+        let rendered: String = lines
+            .iter()
+            .map(|(label, body)| format!("{label} {body}\n"))
+            .collect();
+
+        let mut missing: Vec<String> = Vec::new();
+        for (field, label, witness) in reporting {
+            let Some(w) = witness(&out) else {
+                missing.push(format!(
+                    "{field} is classified as reported and the fixture left it \
+                     empty, so this test cannot tell whether it reaches a line"
+                ));
+                continue;
+            };
+            // The line with THIS label, not the report as a whole. See the
+            // doc: `applied()` is derived from `named`, so a check that any
+            // line may satisfy let the READ line be deleted in silence.
+            let bodies: Vec<&str> = lines
+                .iter()
+                .filter(|(l, _)| l == label)
+                .map(|(_, body)| body.as_str())
+                .collect();
+            if bodies.is_empty() {
+                missing.push(format!(
+                    "{field} is reported under {label:?} and the report has no \
+                     such line at all; the reader knows something the operator \
+                     is never told"
+                ));
+            } else if !bodies.iter().any(|body| body.contains(&w)) {
+                missing.push(format!(
+                    "{field} carries {w:?} and the {label:?} line(s) {bodies:?} \
+                     do not; the axis is labelled and empty of its own value"
+                ));
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "{missing:#?}\n--- report ---\n{rendered}"
+        );
+        assert!(
+            !not_reported.is_empty(),
+            "the non-reporting class is empty; if that became true the \
+             destructure below is the only thing left holding the population"
+        );
+
+        // The destructure. A field added to `StockConfigExpansion` does not
+        // compile until it is listed above as one or the other.
+        let StockConfigExpansion {
+            path: _,
+            argv: _,
+            added: _,
+            effects: _,
+            named: _,
+            ignored: _,
+            stated_for_other_modes: _,
+            mode: _,
+            mode_unstated: _,
+        } = out;
     }
 
     /// R311y843 — every key wz REPORTS as honoured, paired with whether the
