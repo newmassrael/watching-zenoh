@@ -69,16 +69,27 @@
  * were not written against.
  *
  * R2119 — THE FIRST RENAME TO USE THAT NOTICE, so the paragraph above is now
- * a description of something that happened rather than a promise. The census
- * document is at REVISION 2 and its node rows carry two keys for one value:
+ * a description of something that happened rather than a promise. At census
+ * REVISION 2 the node rows carried two keys for one value:
  *
  *     "offset_space":"stream_byte","first_anchor":43,"first_packet":43
  *
- * `first_packet` is the old name and it was WRONG on a stream link, where the
- * value is a byte offset — `offset_space` beside it has said so since the
+ * `first_packet` was the old name and it was WRONG on a stream link, where
+ * the value is a byte offset — `offset_space` beside it has said so since the
  * revision before. `first_anchor` is the name, and it is the one the
- * throughput rows already used. Read `first_anchor`; `first_packet` is
- * emitted for this revision only and the next one drops it.
+ * throughput rows already used.
+ *
+ * R2123 — AND REVISION 3 DROPPED IT, which is the whole dance run once end to
+ * end: announced where a consumer could see it, then removed a revision later.
+ * A program written against revision 1 or 2 that reads `first_packet` gets
+ * nothing from revision 3, which is what the notice was for. Read
+ * `first_anchor`.
+ *
+ * Revision 3 also ADDS `anchor_intervals` to each throughput row — one extent
+ * per coordinate space that contributed, with the record count in each. A row
+ * folds every flow and both directions, so `anchors_exact:false` says the
+ * pair covers only part of it; the intervals say which parts there are and
+ * how much of the row each holds.
  *
  * wz_dissect_transport_message is the one door with no such revision, and
  * deliberately: its document is a FIELD TREE whose keys are the walkers' own

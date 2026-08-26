@@ -460,18 +460,17 @@ pub fn nodes_json(c: &NodeCensus) -> String {
             // because over a stream the OLD name is wrong and this is the only
             // thing that says so.
             //
-            // R2119 (open-debt item 455) — and the rename is now under way.
-            // BOTH keys are emitted here, carrying ONE value read from one
-            // field: `first_anchor` is the name, `first_packet` is what a
-            // consumer written against census revision 1 still reads. The old
-            // key is announced in this revision's `retiring` list, and the
-            // NEXT revision drops it. That two-step is the only expressible
-            // shape (`doc_revision::audit` refuses a key that vanishes without
-            // having been announced), and it is what item 509 existed to make
-            // possible — 455 was blocked on it and is now an ordinary edit.
+            // R2119 (open-debt item 455) emitted BOTH keys for one value:
+            // `first_anchor` is the name and `first_packet` was what a
+            // consumer written against census revision 1 still read. R2123
+            // IS THE NEXT REVISION, and this is it dropping the old one —
+            // the second step of the dance, taken on the schedule the field's
+            // own doc states ("going away in the next revision") rather than
+            // left to linger, which is what open-debt item 534 records nothing
+            // enforces.
             //
             // Two keys for one fact is exactly the smell this tree distrusts,
-            // and it is bounded on purpose: one revision wide, with the
+            // and it was bounded on purpose: one revision wide, with the
             // expiry written into the table rather than into a comment.
             //
             // R311y920 — AND THIS COMMENT WAS INSIDE THE FORMAT STRING. A
@@ -486,7 +485,7 @@ pub fn nodes_json(c: &NodeCensus) -> String {
             // 380 stated as an accident instead of a sentence.
             ",\"evidence\":{{\"init\":{},\"join\":{},\"hello\":{},\"scout\":{},\
              \"inadmissible\":{},\"admissible\":{}}},\"offset_space\":\"{}\",\
-             \"first_anchor\":{},\"first_packet\":{},\"wire_bytes\":{}",
+             \"first_anchor\":{},\"wire_bytes\":{}",
             e.init,
             e.join,
             e.hello,
@@ -494,7 +493,6 @@ pub fn nodes_json(c: &NodeCensus) -> String {
             e.inadmissible,
             e.admissible(),
             node.anchors.name(),
-            node.first_anchor,
             node.first_anchor,
             node.wire_bytes,
         );
@@ -687,12 +685,37 @@ fn push_row(row: &KeyexprRow, t: &ThroughputTable, out: &mut String) {
     let _ = write!(
         out,
         ",\"offset_space\":\"{}\",\"first_anchor\":{},\"last_anchor\":{},\
-         \"anchors_exact\":{}}}",
+         \"anchors_exact\":{}",
         row.anchors.name(),
         row.first_anchor,
         row.last_anchor,
         row.anchors_exact
     );
+    // R2123 (open-debt item 453) — and one extent PER SPACE, so `false` above
+    // stops being the whole answer. `anchors_exact` says the pair covers part
+    // of the row; this says which parts there are, how far each reaches and
+    // how many records are in it, and the counts sum to the row's own message
+    // total. A reader who could not tell one stray record from a thousand can
+    // now decide what to do about it.
+    //
+    // STRUCTURAL, like `anchors_exact` beside it: always present, one entry on
+    // the ordinary single-space row, so a consumer never reads an absent key
+    // as "there was only one".
+    out.push_str(",\"anchor_intervals\":[");
+    for (i, interval) in row.anchor_intervals.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        let _ = write!(
+            out,
+            "{{\"offset_space\":\"{}\",\"first\":{},\"last\":{},\"records\":{}}}",
+            interval.anchors.name(),
+            interval.first,
+            interval.last,
+            interval.records
+        );
+    }
+    out.push_str("]}");
 }
 
 fn push_counts(c: &KeyexprCounts, out: &mut String) {
@@ -1306,7 +1329,18 @@ pub(crate) mod fed_tests {
         //
         // MEASURED, not transcribed, at both addresses: this test printed the
         // set it saw and the table was filled from that printout.
-        let expected: Vec<&str> = crate::doc_revision::CENSUS_R1_KEYS.to_vec();
+        //
+        // R2123 (open-debt item 453) — against the NEWEST revision rather than
+        // `CENSUS_R1_KEYS` by name. That name was right while revision 2 was
+        // an alias of revision 1, and it silently became a pin on a shape the
+        // library had stopped emitting the moment a revision changed the set.
+        // `newest` is what the four documents in `wz-capi-dissect` already
+        // compare against, and the reason is the same: the consumer reads the
+        // revision the document declares, not the first one that ever existed.
+        let expected: Vec<&str> = crate::doc_revision::newest(crate::doc_revision::CENSUS)
+            .expect("the census document has a revision")
+            .keys
+            .to_vec();
         assert_eq!(
             seen, expected,
             "the census document's key set moved; if that is deliberate, APPEND a \
@@ -1491,17 +1525,16 @@ pub(crate) mod fed_tests {
         // somewhere would let ONE labelled plane stand for four, which is the
         // failure this whole item is about -- a number that reads as answered
         // because its neighbour was.
-        // R2119 (open-debt item 455) — the node plane emits TWO anchor keys
-        // for one value while `first_packet` is retiring, so what follows its
-        // `offset_space` is the pair. Spelled as the pair rather than loosened
-        // to "somewhere after", because the run that drops the old key has to
-        // come back here and delete half of a literal — which is a smaller,
-        // louder edit than relaxing an assertion would leave behind.
+        // R2123 (open-debt item 453) — and the rename is DONE. R2119 spelled
+        // the node plane's needle as the pair `first_anchor:0,first_packet:0`
+        // specifically so the round that drops the old key would have to come
+        // back and delete half of a literal, which is a smaller and louder
+        // edit than relaxing an assertion. This is that edit.
         for anchor in [
-            "\"first_anchor\"",                      // the throughput rows
-            "\"first_anchor\":0,\"first_packet\":0", // the node census, mid-rename
-            "\"declared_at\"",                       // the interest declarations
-            "\"asked_at\"",                          // the interest requests
+            "\"first_anchor\"",                  // the throughput rows
+            "\"first_anchor\":0,\"wire_bytes\"", // the node census, renamed
+            "\"declared_at\"",                   // the interest declarations
+            "\"asked_at\"",                      // the interest requests
         ] {
             assert!(
                 over_tcp.contains(anchor),
@@ -1514,12 +1547,13 @@ pub(crate) mod fed_tests {
                  reader cannot tell a byte offset from a packet index: {over_tcp}"
             );
         }
-        // And the two node keys carry ONE value read from one field. Two keys
-        // that could disagree would be the "two renderings" debt this rename
-        // exists to end rather than to create.
+        // And the retired key is GONE, not merely unmentioned. Asserting its
+        // absence is what makes the second step of the dance a checked event
+        // rather than an edit someone believes they made.
         assert!(
-            over_tcp.contains("\"first_anchor\":0,\"first_packet\":0"),
-            "the retiring key must mirror its successor exactly: {over_tcp}"
+            !over_tcp.contains("first_packet"),
+            "`first_packet` was announced as retiring in census revision 2 and \
+             this revision drops it; it is still in the document: {over_tcp}"
         );
         assert!(
             !over_tcp.contains("\"offset_space\":\"packet\""),

@@ -131,6 +131,25 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         keys: CENSUS_R2_KEYS,
         retiring: &["first_packet"],
     },
+    // R2123 (open-debt item 453) — revision 3 does two things and they are
+    // separable on purpose.
+    //
+    // It DROPS `first_packet`, which revision 2 announced. That is the second
+    // step of R2119's dance, taken on the schedule `retiring`'s own doc states
+    // rather than deferred; nothing would have refused a revision that kept it
+    // (open-debt item 534), which is exactly why it is done here rather than
+    // left to whichever round noticed.
+    //
+    // And it ADDS `anchor_intervals` with its `first` / `last` / `records`,
+    // so `anchors_exact: false` stops being the whole answer: the row now says
+    // how far each contributing space reaches and how many of its records are
+    // in each, instead of saying only that the pair covers part of it.
+    DocumentShape {
+        document: CENSUS,
+        revision: 3,
+        keys: CENSUS_R3_KEYS,
+        retiring: &[],
+    },
     DocumentShape {
         document: FIELDS,
         revision: 1,
@@ -410,6 +429,169 @@ pub const CENSUS_R1_KEYS: &[&str] = &[
 /// measured, on the first draft of this very constant, which came out 71 names
 /// long and disagreed with its predecessor in both directions.
 pub const CENSUS_R2_KEYS: &[&str] = CENSUS_R1_KEYS;
+
+/// The census document's key set at revision 3 (R2123, open-debt item 453).
+///
+/// Revision 2 MINUS `first_packet`, which it announced, PLUS
+/// `anchor_intervals` and the `first` / `last` / `records` its entries carry.
+///
+/// Written out and NOT aliased, unlike revision 2: an alias cannot express a
+/// removal, and the removal is the half a consumer reading by name breaks on.
+/// [`audit`] compares consecutive rows as sets precisely so that diff is
+/// visible in the source rather than inferred.
+///
+/// MEASURED, like every set here: `the_census_documents_key_set_is_pinned`
+/// printed what the document emits and this was filled from that printout.
+pub const CENSUS_R3_KEYS: &[&str] = &[
+    "a",
+    "a_to_b",
+    "addr",
+    "admissible",
+    "aggregate",
+    "anchor_intervals",
+    "anchors_exact",
+    "answers",
+    "answers_in_scope",
+    "asked_at",
+    "asker",
+    "asks",
+    "at_most_bytes",
+    "attributed_bytes",
+    "b",
+    "b_to_a",
+    "by_kind",
+    "bytes",
+    "cancelled_at",
+    "caps",
+    "children",
+    "closed_at",
+    "completed",
+    "completion",
+    "consistent",
+    "contradictions",
+    "count",
+    "declaration",
+    "declarations",
+    "declared",
+    "declared_at",
+    "declarer",
+    "declarer_zid",
+    "dels",
+    "descriptors",
+    "document",
+    "dropped_by_limits",
+    "elsewhere",
+    "errs",
+    "evidence",
+    "exchanges",
+    "first",
+    "first_anchor",
+    "first_reply",
+    "flow",
+    "flows",
+    "frames",
+    "frames_per_flow",
+    "gaps",
+    "halted_batches",
+    "hello",
+    "high",
+    "id",
+    "inadmissible",
+    "init",
+    "interests",
+    "join",
+    "judged",
+    "keyexpr",
+    "keyexprs",
+    "keys",
+    "kind",
+    "last",
+    "last_anchor",
+    "links",
+    "liveliness_token",
+    "locators",
+    "low",
+    "matched",
+    "max_flows_per_table",
+    "max_ms",
+    "max_scout_askers",
+    "mean_ms",
+    "messages",
+    "min_ms",
+    "mismatched",
+    "mode",
+    "name",
+    "narrowed_by_selector",
+    "nodes",
+    "non_monotonic",
+    "not_as_declared",
+    "offset_space",
+    "orphan_answers",
+    "orphan_responses",
+    "orphan_withdrawals",
+    "payload_bytes",
+    "payload_bytes_ceiling",
+    "payloads",
+    "port",
+    "prefix",
+    "puts",
+    "queries",
+    "queryable",
+    "queryables",
+    "records",
+    "rejected",
+    "replies",
+    "requests",
+    "restricted",
+    "revision",
+    "rows",
+    "scout",
+    "scout_askers",
+    "selection",
+    "share_bp",
+    "silent",
+    "skipped",
+    "skipped_packets",
+    "solicited_by",
+    "source_ahead_of_observer",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "subscriber",
+    "subscribers",
+    "subtrees",
+    "tokens",
+    "total_ms",
+    "total_payload_bytes",
+    "totals",
+    "unanswered",
+    "unattributed_bytes",
+    "unattributed_records",
+    "unattributed_requests",
+    "unclaimed",
+    "unclaimed_exact",
+    "unclosed",
+    "undecidable",
+    "undecided",
+    "undeclarations",
+    "undecompressible_batches",
+    "unjudged_answers",
+    "unknown_ids",
+    "unlocatable_records",
+    "unmeasured_payloads",
+    "unparsed_bytes",
+    "unread",
+    "unresolvable_fragments",
+    "unresolved",
+    "unresolved_declarations",
+    "unresolved_records",
+    "unsized_payloads",
+    "unstamped",
+    "walked_records",
+    "whatami",
+    "wire_bytes",
+    "withdrawn_at",
+    "zid",
+];
 /// The field document's key set at revision 1.
 ///
 /// Taken over `census_json::fed_tests::four_plane_capture_with_file` — the
@@ -1026,35 +1208,62 @@ mod tests {
     /// round deletes, and then the notice a consumer was promised was never
     /// given.
     ///
-    /// So the pair is pinned: while `first_packet` is still emitted, the
-    /// newest census revision announces it AND emits its successor. The round
-    /// that drops the key deletes this test with the key, which is the edit
-    /// that should be loud.
+    /// R2123 (open-debt item 453) — AND THE DANCE COMPLETED, which is the half
+    /// R2119 could not assert because it had not happened yet.
+    ///
+    /// This test was written to pin the IN-FLIGHT state and to be deleted with
+    /// the key. Deleting it outright would have thrown away the only record
+    /// that the notice was ever given, so what it asserts moved rather than
+    /// went: revision 2 announced `first_packet` and emitted it beside its
+    /// successor, and revision 3 -- this one -- does not emit it at all.
+    ///
+    /// Both halves, because either alone is satisfiable by an accident. A
+    /// document that never emitted the key would pass "it is gone"; a
+    /// document that never dropped it would pass "it was announced".
+    ///
+    /// NOT the general rule. "An announced key must actually leave in the next
+    /// revision" is what [`audit`] still does not enforce, and it is open-debt
+    /// item 534; this asserts one completed rename, not that the machinery
+    /// makes completion happen.
     #[test]
-    fn a_key_being_retired_is_announced_while_it_is_still_emitted() {
+    fn the_retired_census_key_was_announced_and_then_actually_left() {
+        let rows: Vec<&DocumentShape> = DOCUMENT_HISTORY
+            .iter()
+            .filter(|row| row.document == CENSUS)
+            .collect();
+        let announced = rows
+            .iter()
+            .find(|row| row.retiring.contains(&"first_packet"))
+            .expect(
+                "census revision 2 announced `first_packet`; without that row a \
+                 consumer was never given notice and the drop below is a break",
+            );
+        assert!(
+            announced.keys.contains(&"first_packet"),
+            "the revision that announced the retirement must still emit the key, \
+             or the notice and the removal were the same event"
+        );
+        assert!(
+            announced.keys.contains(&"first_anchor"),
+            "and the successor beside it, because a retirement with nothing to \
+             move to is a removal wearing a notice"
+        );
+
         let newest = newest(CENSUS).expect("the census document has a revision");
         assert!(
-            newest.retiring.contains(&"first_packet"),
-            "`first_packet` is still emitted and its retirement is what gives a \
-             consumer notice; revision {} announces {:?}",
-            newest.revision,
-            newest.retiring
+            newest.revision > announced.revision,
+            "the announcement is only kept by a LATER revision existing"
         );
-        // An announcement about a key the document does not emit tells nobody
-        // anything -- the rule `DocumentShape::retiring` states, asserted on
-        // the one row that exercises it.
-        for name in newest.retiring {
-            assert!(
-                newest.keys.contains(name),
-                "revision {} announces `{name}` and does not emit it",
-                newest.revision
-            );
-        }
-        // And the successor is there, because a retirement with nothing to
-        // move to is a removal wearing a notice.
+        assert!(
+            !newest.keys.contains(&"first_packet"),
+            "revision {} still emits `first_packet`, which revision {} said was \
+             going away in the next revision",
+            newest.revision,
+            announced.revision
+        );
         assert!(
             newest.keys.contains(&"first_anchor"),
-            "the successor must be emitted in the same revision as the notice"
+            "and the successor outlives it"
         );
     }
 
@@ -1079,8 +1288,9 @@ mod tests {
         // described-format type list.
         for (name, expected) in [
             // R2119 (open-debt item 455) — the census moved to 2 when
-            // `first_packet`'s retirement was announced.
-            (CENSUS, 2u32),
+            // `first_packet`'s retirement was announced; R2123 (item 453) to 3
+            // when that key actually left and `anchor_intervals` arrived.
+            (CENSUS, 3u32),
             (FIELDS, 1),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its

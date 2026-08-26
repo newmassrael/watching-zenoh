@@ -378,6 +378,31 @@ fn split_segment(keyexpr: &str) -> Option<(&str, Option<&str>)> {
     })
 }
 
+/// R2123 (open-debt item 453) — one coordinate space's extent inside a row,
+/// and how many of the row's records are in it.
+///
+/// `records` is what makes the set of these an ANSWER rather than a longer
+/// way of saying "partial": the counts sum to the row's own message total, so
+/// a reader can see that the interval they were given covers three records of
+/// four hundred without having to trust the word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnchorInterval {
+    /// Which coordinate space this extent is in, as a document spells it.
+    pub anchors: crate::AnchorSpace,
+    /// Lowest anchor seen in this space for this row.
+    pub first: usize,
+    /// Highest anchor seen in this space for this row.
+    pub last: usize,
+    /// Records of this row that landed in this space.
+    pub records: usize,
+    /// The internal token this extent belongs to.
+    ///
+    /// `pub(crate)` for [`KeyexprRow::space`]'s reason: it is a small integer
+    /// with no meaning outside this crate's walk, and what a document gets is
+    /// the KIND beside it.
+    pub(crate) token: usize,
+}
+
 /// One resolved keyexpr's row in the table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyexprRow {
@@ -427,6 +452,24 @@ pub struct KeyexprRow {
     /// a packet index. The field layer has named its own since R311y855; this
     /// is the same word, from [`crate::AnchorSpace::name`].
     pub anchors: crate::AnchorSpace,
+    /// R2123 (open-debt item 453) — ONE INTERVAL PER COORDINATE SPACE THAT
+    /// CONTRIBUTED, so "partial" stops being the whole answer.
+    ///
+    /// [`Self::anchors_exact`] says the pair covers part of the row. It does
+    /// not say how much is outside it, or where that part lives, and a reader
+    /// who cannot tell one stray record from a thousand cannot decide what to
+    /// do next. R311y918 made the pair honest by refusing to absorb foreign
+    /// anchors; this is where the absorbed-and-then-discarded ones went.
+    ///
+    /// One entry per space TOKEN and not per [`crate::AnchorSpace`] kind. Two
+    /// directions of one stream are two spaces wearing one name, and merging
+    /// them by kind would rebuild the `[419, 0]` interval this whole axis
+    /// exists to stop reporting.
+    ///
+    /// Ordered by first appearance, so entry zero is the interval
+    /// [`Self::first_anchor`] and [`Self::last_anchor`] repeat. Those two stay
+    /// for the consumer that already reads them.
+    pub anchor_intervals: Vec<AnchorInterval>,
     /// The space token [`Self::first_anchor`] is in, as composed by
     /// [`ThroughputTable::observe_flow_where`].
     ///
@@ -999,13 +1042,15 @@ impl ThroughputTable {
         match resolved {
             Ok(keyexpr) => {
                 let space = self.anchor_space;
+                let kind = self.anchor_kind;
                 let row = self.rows.entry(keyexpr.clone()).or_insert(KeyexprRow {
                     keyexpr,
                     per_direction: [KeyexprCounts::default(); 2],
                     first_anchor: anchor,
                     last_anchor: anchor,
                     anchors_exact: true,
-                    anchors: self.anchor_kind,
+                    anchors: kind,
+                    anchor_intervals: Vec::new(),
                     space,
                 });
                 row.per_direction[dir_index(direction)].add(&counts);
@@ -1018,6 +1063,29 @@ impl ThroughputTable {
                     row.last_anchor = anchor;
                 } else {
                     row.anchors_exact = false;
+                }
+                // R2123 (open-debt item 453) — and the foreign record's anchor
+                // is KEPT, in its own space's extent, instead of being dropped
+                // on the floor once it had made the flag false. Every record
+                // this row folds is in exactly one of these, which is what lets
+                // their counts be checked against the row's own total.
+                match row
+                    .anchor_intervals
+                    .iter_mut()
+                    .find(|interval| interval.token == space)
+                {
+                    Some(interval) => {
+                        interval.first = interval.first.min(anchor);
+                        interval.last = interval.last.max(anchor);
+                        interval.records += 1;
+                    }
+                    None => row.anchor_intervals.push(AnchorInterval {
+                        anchors: kind,
+                        first: anchor,
+                        last: anchor,
+                        records: 1,
+                        token: space,
+                    }),
                 }
             }
             Err((space, id)) => {
@@ -3543,6 +3611,118 @@ pub(crate) mod tests {
         assert!(
             single.anchors_exact,
             "a row every record of which came from one space is exact"
+        );
+    }
+
+    /// R2123 (open-debt item 453) — A PARTIAL INTERVAL SAYS HOW MUCH IS
+    /// OUTSIDE IT AND WHERE THAT PART LIVES.
+    ///
+    /// # What `anchors_exact: false` did not say
+    ///
+    /// R311y918 stopped the row reporting `[419, 0]` by giving the pair to the
+    /// space that opened it and refusing foreign anchors. That is honest and
+    /// it is half an answer: the reader is told the interval covers part of the
+    /// row and cannot tell whether the rest is one record or a thousand, or
+    /// which coordinate space it is in. A measurement a reader cannot act on
+    /// has not finished being a measurement, which is the owner's ruling on
+    /// this item and the reason "how many spaces contributed" was refused as a
+    /// compromise — it answers half of "how much" and none of "where".
+    ///
+    /// # Why the record counts are the load-bearing part
+    ///
+    /// The extents alone would still be a claim this crate makes about itself.
+    /// The counts are cross-checked against `totals().messages()`, which is
+    /// accumulated on a DIFFERENT path — the five per-kind counters — so a
+    /// record dropped from every extent, which is exactly what the old walk did
+    /// to foreign anchors, fails here rather than being invisible.
+    #[test]
+    fn every_record_of_a_row_is_inside_one_of_its_anchor_intervals() {
+        fn framed(records: &[Vec<u8>]) -> Vec<u8> {
+            let mut out = Vec::new();
+            for record in records {
+                let wire = crate::datagram_tests::frame_carrying(record);
+                out.extend_from_slice(&(wire.len() as u16).to_le_bytes());
+                out.extend_from_slice(&wire);
+            }
+            out
+        }
+        let mut d = Dissection::new();
+        // Direction A carries `shared/topic` TWICE after padding, so its extent
+        // is a real span and not a point -- a one-record space would let a
+        // build that reported `first == last` unconditionally pass.
+        let a = framed(&[
+            push(sender_space(0, Some("pad/topic")), &[0u8; 400]),
+            push(sender_space(0, Some("shared/topic")), &[0u8; 8]),
+            push(sender_space(0, Some("shared/topic")), &[0u8; 8]),
+        ]);
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            0,
+            &crate::datagram_tests::tcp_packet(1000, &a),
+        );
+        let b = framed(&[push(sender_space(0, Some("shared/topic")), &[0u8; 8])]);
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            1,
+            &crate::datagram_tests::tcp_packet_reverse(1000, &b),
+        );
+
+        let table = aggregate(&d);
+        let row = table
+            .row("shared/topic")
+            .expect("both directions fold here");
+        assert!(
+            !row.anchors_exact,
+            "the fixture must actually straddle two spaces, or this proves nothing"
+        );
+        assert_eq!(
+            row.anchor_intervals.len(),
+            2,
+            "two spaces contributed and the row must offer an extent for each: {:?}",
+            row.anchor_intervals
+        );
+
+        // THE CROSS-CHECK. `messages()` is the five per-kind counters; the
+        // extents are the anchor walk. Two accumulations of one population.
+        let counted: usize = row.anchor_intervals.iter().map(|i| i.records).sum();
+        assert_eq!(
+            counted,
+            row.totals().messages(),
+            "every record this row folded must be inside exactly one extent; \
+             {} are accounted for and the row counted {}. A record in none of \
+             them is the old walk's foreign anchor, dropped after it had made \
+             the flag false.",
+            counted,
+            row.totals().messages()
+        );
+        for interval in &row.anchor_intervals {
+            assert!(
+                interval.first <= interval.last,
+                "an extent is an interval in ONE space: {interval:?}"
+            );
+            assert!(
+                interval.records > 0,
+                "an extent nothing landed in is not an extent: {interval:?}"
+            );
+        }
+        // Entry zero repeats the pair, which is what lets the two coexist.
+        assert_eq!(row.anchor_intervals[0].first, row.first_anchor);
+        assert_eq!(row.anchor_intervals[0].last, row.last_anchor);
+
+        // The control arm, in this same test: an ordinary single-space row
+        // carries exactly ONE extent and it accounts for everything. Without
+        // it a build that emitted an extent per RECORD would satisfy the sum
+        // above and say nothing about spaces.
+        let single = table.row("pad/topic").expect("one direction only");
+        assert_eq!(
+            single.anchor_intervals.len(),
+            1,
+            "one space contributed, so there is one extent: {:?}",
+            single.anchor_intervals
+        );
+        assert_eq!(
+            single.anchor_intervals[0].records,
+            single.totals().messages()
         );
     }
 
