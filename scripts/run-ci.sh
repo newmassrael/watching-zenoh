@@ -2098,8 +2098,8 @@ PY
     # number is right for both, so the lever is BYTES, and nothing was looking
     # at them because the package lists were copy-pasted and unowned.
     python3 scripts/lib/apt_package_census.py || return 1
-    # R311y569 — the COUNT-GUARD-to-binary gate. `run-ci.sh` carries 53 bare
-    # `| grep -qE '^test result: ok\. N passed'` guards, and NOTHING tied N to
+    # R311y569 — the COUNT-GUARD-to-binary gate. `run-ci.sh` carries a bare
+    # `| grep -qE '^test result: ok\. N passed'` shape, and NOTHING tied N to
     # the binary it guards: rename a test, delete one, or add one, and the guard
     # is simply wrong until some lane happens to run. The debt ledger ranked it
     # #5 on the frontier and noted the check is DERIVABLE, which is the whole
@@ -2110,6 +2110,17 @@ PY
     # test set) rather than passing over it, and FAILS when its in-scope set is
     # empty — a version that quietly analysed nothing would exit 0 forever and
     # read as coverage. Enforcement MEASURED by renaming a guarded test fn.
+    #
+    # R2137 (unregistered open-debt item 126) — the `_runci_guarded_test`
+    # spelling is in the population too, and it is the larger half: 235 sites to
+    # the bare shape's 51. It was excluded on the reasoning that the helper fails
+    # LEGIBLY, which is true and beside the point — legible or not, the failure
+    # arrives on the next hosted run of that lane, and the number is written by
+    # hand at the one moment nothing local reads it. The class leaked three times
+    # on 2026-08-26 alone (R2112, R2124, `2020dd71`) with the reason already
+    # written into a comment beside one of them, which is what settles it: a memo
+    # is not a mechanism. The floor is PER SPELLING, so a parser that stopped
+    # recognising the helper cannot hide behind the bare guards' coverage.
     python3 scripts/lib/count_guard_lint.py || return 1
     # 2026-08-25 — the RELICENSE gate. The free tier moved from
     # `LGPL-3.0-or-later` to `AGPL-3.0-or-later` across 1032 tracked files in
@@ -4379,12 +4390,15 @@ layer_c1af_cargo_test_shm() {
     # it discriminates, which is the same accident the 17 above documents.
     #
     # NOTHING COULD HAVE CAUGHT THIS STATICALLY, and that is the point worth
-    # writing down. `scripts/lib/count_guard_lint.py` reads only the BARE
-    # `grep -qE '^test result: ok. N passed'` shape and excludes any invocation
-    # that applies a name filter, so a filtered `_runci_guarded_test` like this
-    # one is outside its population BY DESIGN — it was run and reported clean
-    # while this number was already wrong. The only defence is running the
-    # filter against the names being added, before the push (open-debt 400).
+    # writing down. `scripts/lib/count_guard_lint.py` now reads BOTH spellings
+    # (R2137 put `_runci_guarded_test` in its population — the exclusion this
+    # comment used to record was retired there), but a `--lib <filter>` site is
+    # still out of scope and says so by name: a substring filter over a whole
+    # crate's `src/` would need libtest's matching re-implemented, over modules
+    # whose `#[cfg]` gates decide what exists. This site is one of the 134 skips
+    # counted under that reason — it was run and reported clean while this number
+    # was already wrong. The only defence remains running the filter against the
+    # names being added, before the push (open-debt 400).
     # The 17 leg above was RE-RUN and did NOT move: it selects no `dissect`, so
     # the test is not compiled there at all.
     _runci_guarded_test C1af 27 cargo test -p wz-session-core --features session-extshm,dissect --lib shm --quiet \
