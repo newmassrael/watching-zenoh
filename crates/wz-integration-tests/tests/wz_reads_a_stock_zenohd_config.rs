@@ -1281,6 +1281,26 @@ enum RunMode {
 /// `handshake_encode::encode_init`, wz's own production encoder. That keeps the
 /// instrument made of this tree's codec at BOTH ends, adds no public surface,
 /// and leaves the thing under judgement where it was — the bytes the demo sent.
+/// R2118 (open-debt item 507) — the stalled message, and its witness, live in
+/// this crate's LIBRARY.
+///
+/// They were written here first and moved for a reason worth keeping: Layer C0
+/// requires every test in a binary-dep fixture to carry the ignore attribute,
+/// because `cargo test --workspace` on a fresh checkout has no `wz-ap-demo` to
+/// spawn. An ignored witness runs only under a `--ignored` sweep — and this one
+/// needs no process, no socket and no daemon, so ignoring it would have put a
+/// pure-function assertion in no ordinary run at all.
+///
+/// ⚠ This paragraph deliberately spells neither attribute out. Layer C0's
+/// skip-token check is LEXICAL: it treats any line carrying the test attribute
+/// as opening a test and demands a token from the next function it sees, so
+/// prose naming that attribute adopts whatever helper follows it. Measured
+/// here, on the first draft of this very comment.
+///
+/// See `wz_integration_tests::common::still_running_reason` for what the
+/// message says and why it says it that way.
+use wz_integration_tests::common::still_running_reason;
+
 fn handshake_field_from_a_config(
     key: &str,
     fragment: &str,
@@ -1421,11 +1441,8 @@ fn handshake_field_from_a_config(
                 }
                 assert!(
                     std::time::Instant::now() < deadline,
-                    "the demo never dialled the acceptor, and it is still \
-                     running. Built without `zenoh-config` it exits on \
-                     `--config` and never connects, which is what this deadline \
-                     exists to say out loud\n{}\n{source}",
-                    drained()
+                    "{}\n{source}",
+                    still_running_reason(&drained())
                 );
                 std::thread::sleep(Duration::from_millis(20));
             }

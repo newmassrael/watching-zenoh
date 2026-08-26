@@ -8817,6 +8817,22 @@ layer_c1bn_passive_dissection_features() {
         echo "  C1bn FAIL: the IP protocol furniture split did not run"
         echo "$out"; return 1; }
 
+    # R2118 (open-debt item 507) — what a deadline SAYS when the process it
+    # spawned stalls, asserted where nothing has to be provisioned.
+    #
+    # Pinned BY NAME and in the crate's LIBRARY target. The twelve legs in
+    # `wz_reads_a_stock_zenohd_config` are `#[ignore]`d — Layer C0 requires that
+    # of every test in a binary-dep file — and Layer Z runs them with
+    # `-- --ignored`, which selects an un-ignored one NEVER. A witness in no
+    # lane is item 479's class, so the message and its assertion moved to the
+    # lib, where they need no zenohd, no demo and no socket.
+    out="$(cd crates && cargo test -p wz-integration-tests --lib \
+        the_stalled_message_offers_hypotheses_rather_than_a_verdict \
+        --quiet 2>&1)" || { echo "$out"; return 1; }
+    grep -qE '^test result: ok\. 1 passed' <<<"$out" || {
+        echo "  C1bn FAIL: the stalled-message witness did not run"
+        echo "$out"; return 1; }
+
     # R311y645 — the tests that need BOTH `reassembly` and `network-codecs`, so
     # C1bt's arms cannot see them: its network arm has no reassembly and its
     # default-off arm has neither. This is the only lane that builds the pair,

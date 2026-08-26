@@ -1544,6 +1544,64 @@ pub mod common {
         hex
     }
 
+    /// R2118 (open-debt item 507) — what a deadline SAYS when the process it
+    /// spawned is still running and has not dialled.
+    ///
+    /// # The sentence this replaces, and why it was the worst part of 507
+    ///
+    /// `wz_reads_a_stock_zenohd_config`'s wire leg used to read: "Built without
+    /// `zenoh-config` it exits on `--config` and never connects, which is what
+    /// this deadline exists to say out loud". Three things were wrong with it,
+    /// and the third is the one that cost a round.
+    ///
+    /// It stated a HYPOTHESIS in the indicative. R2086 met that leg failing,
+    /// followed the sentence to the build, and the build was fine: the demo was
+    /// refusing `qos` beside `lowlatency` and exiting 2. A message that sends
+    /// the diagnosis somewhere else is worse than one that says nothing — the
+    /// same shape R311y774 paid for with a stale guard.
+    ///
+    /// It explained an EXIT on the branch where the child is still ALIVE. The
+    /// `try_wait` arm owns the exited case and prints the status; by the time
+    /// this text renders, "it exits on `--config`" cannot be what happened. The
+    /// two arms had one explanation between them and it belonged to the other.
+    ///
+    /// And the cause it named is unreachable from here: a build without
+    /// `zenoh-config` refuses `--config` and EXITS, so it lands in that arm.
+    ///
+    /// # Why a function with a witness rather than a better sentence
+    ///
+    /// Because "write a better sentence" is what the round before also
+    /// intended. The FORM is the checkable part — a cause is offered as one of
+    /// several under a marker, never as the reason — and
+    /// `the_stalled_message_offers_hypotheses_rather_than_a_verdict` asserts
+    /// that shape. Open-debt item 530 is why this is a form and not a banned
+    /// phrase: a grep for the old wording would pass the next confidently wrong
+    /// sentence.
+    ///
+    /// # Why it lives in the LIBRARY
+    ///
+    /// Layer C0 requires every `#[test]` in a binary-dep test file to carry
+    /// `#[ignore]`, because `cargo test --workspace` on a fresh checkout has no
+    /// `wz-ap-demo` to spawn. An ignored witness runs only under a `--ignored`
+    /// sweep, and this one needs no process, no socket and no daemon — leaving
+    /// it there would have put a pure-function assertion in no ordinary run.
+    pub fn still_running_reason(stderr: &str) -> String {
+        format!(
+            "the demo never dialled the acceptor within the deadline, and it is \
+             STILL RUNNING (so it did not refuse its argv and exit -- that case \
+             is reported by the other arm, with the exit status).\n\
+             possible causes:\n\
+             1. the document was accepted but selected a run-mode that dials \
+             nothing, or dials somewhere else;\n\
+             2. the demo is waiting on something else -- scouting, a second \
+             endpoint, a retry backoff -- and the deadline was not enough;\n\
+             3. the acceptor's port is not the one the document names.\n\
+             Read the demo's own stderr below before choosing one; if it is \
+             empty, the demo got far enough to say nothing, which rules out 1.\n\
+             --- the demo's stderr ---\n{stderr}"
+        )
+    }
+
     pub fn read_captured(file: &mut File) -> String {
         use std::os::unix::fs::FileExt;
         let mut bytes = Vec::new();
@@ -4115,9 +4173,56 @@ pub mod common {
 mod tests {
     use super::common::{
         configured_zid_value, face_zid_value, hello_zid_value, line_with,
-        parse_zenoh_admin_sessions, wait_for_tcp_accept_alive, ChildGuard, ZenohSession,
-        ZENOHD_TCP_ACCEPT_BUDGET,
+        parse_zenoh_admin_sessions, still_running_reason, wait_for_tcp_accept_alive, ChildGuard,
+        ZenohSession, ZENOHD_TCP_ACCEPT_BUDGET,
     };
+
+    /// R2118 (open-debt item 507) — the stalled message offers HYPOTHESES and
+    /// reaches no verdict.
+    ///
+    /// The property item 507 is about, asserted rather than intended. A message
+    /// that names one cause as THE reason is what sent R2086's diagnosis to the
+    /// build while the demo was exiting 2 over its own argv, and the fix for
+    /// that is not a better sentence — it is a shape a test can hold down.
+    ///
+    /// Runs with no process, no socket and no daemon: the message is a function
+    /// of its input, which is what makes it assertable at all, and why it is
+    /// here rather than beside the leg that renders it.
+    #[test]
+    fn the_stalled_message_offers_hypotheses_rather_than_a_verdict() {
+        let text = still_running_reason("qos and lowlatency are mutually exclusive");
+
+        // The marker, and MORE THAN ONE cause under it. A single numbered line
+        // is a verdict wearing a list's clothes.
+        assert!(text.contains("possible causes:"), "{text}");
+        let numbered = (1..=9)
+            .filter(|n| text.contains(&format!("\n{n}. ")))
+            .count();
+        assert!(
+            numbered >= 2,
+            "a single hypothesis under the marker is still a verdict: {text}"
+        );
+
+        // It says the child is ALIVE, so the reader is not sent looking for an
+        // exit that the other arm would have reported with its status.
+        assert!(text.contains("STILL RUNNING"), "{text}");
+
+        // And the child's own words are carried through, which is the half that
+        // ends the guessing: this is the line R2086 needed and had to get by
+        // running the demo by hand.
+        assert!(
+            text.contains("qos and lowlatency are mutually exclusive"),
+            "the child's own stderr must reach the message: {text}"
+        );
+
+        // CONTROL — an EMPTY stderr still produces the marker and the causes,
+        // so the message does not degrade to nothing on the run where the child
+        // said nothing. That run is a finding too, and the text says which
+        // hypothesis it rules out.
+        let quiet = still_running_reason("");
+        assert!(quiet.contains("possible causes:"), "{quiet}");
+        assert!(quiet.contains("rules out 1"), "{quiet}");
+    }
 
     /// R2059 (open-debt item 421) — the recorded e2e zid widths are the widths
     /// the helper actually produces, and the record is the whole roster.
