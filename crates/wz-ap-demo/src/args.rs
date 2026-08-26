@@ -2705,6 +2705,206 @@ mod stock_config_tests {
         );
     }
 
+    /// R2139 (unregistered open-debt item 227) — A ROLE THE FILE SUPPLIES MUST
+    /// HONOUR EVERY KEY A TYPED ROLE DOES.
+    ///
+    /// # The defect, and why every existing test was blind to it
+    ///
+    /// The expansion checks a flag's preconditions before emitting it —
+    /// `--connect-retry` needs a run mode that owns a connect list,
+    /// `--scout-listen` needs one that answers scouts — and it reads the run
+    /// mode off the command line. But the expansion ITSELF puts `--peer` /
+    /// `--router-hat` into `added` when the file carries `mode:`, and `added` is
+    /// not the command line. A precondition that consults only what was TYPED
+    /// therefore gets the answer exactly backwards: it works for an operator who
+    /// spelled the role out, and fails for `wz-ap-demo --config their.json5`,
+    /// which is the only invocation the config path exists for.
+    ///
+    /// R311y849 measured two instances, and one of them —
+    /// `scouting/multicast/listen` — HAD SHIPPED BROKEN since R311y846: the
+    /// round that made a wz node findable by stock zenoh left it invisible on
+    /// precisely the path it was written to serve. Nothing caught it because
+    /// `cli_for` TYPES the role for exactly the rows whose keys have a role
+    /// precondition, so the whole fixture table asks the easy half of the
+    /// question.
+    ///
+    /// # What this derives rather than lists
+    ///
+    /// The population is `honoured_key_fixtures()`, which the test above pins
+    /// equal to `HONOURED_CONFIG_KEYS` in BOTH directions — so a new honoured
+    /// key cannot arrive without a row here, and cannot arrive without this
+    /// sweep seeing it. The roles come from `RUN_MODE_ROLES`, not from a list
+    /// written here.
+    ///
+    /// A row is IN SCOPE when, with its typed role stripped, the file still
+    /// supplies a role — which is MEASURED per row rather than decided by
+    /// classifying flags. `--scout` is a role the expansion never emits, so a
+    /// row that types it drops out by that measurement instead of by a rule
+    /// someone has to maintain. Every out-of-scope row is counted WITH ITS
+    /// REASON, and an empty in-scope set fails: a sweep of nothing would pass
+    /// forever and read as coverage.
+    ///
+    /// # Why the comparison needs no per-key knowledge
+    ///
+    /// THE DELTA CANCELS THE ROLE. Each row is expanded twice per invocation —
+    /// control and variant — and the role's own flags appear in both, so
+    /// `variant.added − control.added` contains the key's effect and nothing
+    /// else. Comparing that delta between "role typed" and "role from the file"
+    /// is therefore a question about the key, not about the role, and it needs
+    /// no table saying which flag each key should produce.
+    ///
+    /// # Why this is `#[cfg]`-gated, and how that was measured
+    ///
+    /// The two role-gated keys are the two whose sinks are feature-gated:
+    /// `config_keys_the_demo_drops` DROPS `scouting/multicast/listen` without
+    /// `scouting-responder`, and `connect/retry` without `routing-peer` or
+    /// `router-hat-router`. On a build lacking them both in-scope rows expand to
+    /// NOTHING in both invocations, the deltas match trivially, and this test
+    /// passes having proved nothing — MEASURED: on `--features zenoh-config`
+    /// alone it reported "2 row(s) checked" and stayed green with y849's fix
+    /// reverted. That is the empty population wearing a disguise, and the
+    /// in-scope floor could not see it because the rows were present.
+    ///
+    /// So the test exists only where its subject does, and a row whose typed
+    /// invocation reaches nothing is DERIVED as either a no-sink skip (the key
+    /// is in `config_keys_the_demo_drops`) or a FAILURE (it is not, so the row
+    /// has stopped testing what it claims).
+    #[cfg(all(
+        feature = "scouting-responder",
+        any(feature = "routing-peer", feature = "router-hat-router")
+    ))]
+    #[test]
+    fn a_role_the_file_supplies_honours_every_key_a_typed_role_does() {
+        /// `variant.added` minus `control.added`, which is the key's own effect.
+        fn delta(base: &StockConfigExpansion, with: &StockConfigExpansion) -> Vec<String> {
+            with.added
+                .iter()
+                .filter(|a| !base.added.contains(a))
+                .cloned()
+                .collect()
+        }
+
+        let roles: Vec<&str> = RUN_MODE_ROLES.iter().map(|(flag, _)| *flag).collect();
+        let mut checked: Vec<&str> = Vec::new();
+        let mut skipped: Vec<(&str, &str)> = Vec::new();
+
+        for (key, control, variant) in honoured_key_fixtures() {
+            let typed = cli_for(key);
+            let typed_roles: Vec<&str> = typed
+                .iter()
+                .copied()
+                .filter(|a| roles.contains(a))
+                .collect();
+            if typed_roles.is_empty() {
+                skipped.push((key, "this row types no run-mode role"));
+                continue;
+            }
+            // Drop the role flag AND its value: `--peer tcp/127.0.0.1:0` is one
+            // argument pair, and leaving the locator behind would hand the
+            // parser a bare positional.
+            let mut stripped: Vec<&str> = Vec::new();
+            let mut skip_value = false;
+            for arg in typed {
+                if skip_value {
+                    skip_value = false;
+                    continue;
+                }
+                if roles.contains(arg) {
+                    skip_value = true;
+                    continue;
+                }
+                stripped.push(arg);
+            }
+
+            let base_dropped = expand_as_a_build_with_every_link(&stripped, control)
+                .unwrap_or_else(|e| panic!("{key}: control, role dropped: {e}"));
+            let with_dropped = expand_as_a_build_with_every_link(&stripped, variant)
+                .unwrap_or_else(|e| panic!("{key}: variant, role dropped: {e}"));
+
+            // MEASURED, not classified: does the file supply THE SAME role that
+            // was typed? "Some role" is not enough, and the first cut of this
+            // test proved it by manufacturing a defect. `scouting/timeout` types
+            // `--scout` while its file carries `mode: "peer"`, so dropping the
+            // flag turns a scouting one-shot into a peer — a DIFFERENT NODE,
+            // whose withholding of a scout timeout is correct. Requiring the
+            // same role also retires the rule the class memory states by hand
+            // (`--scout` is a role the expansion never emits, so only a typed
+            // one can exist): that now falls out of the measurement instead of
+            // being maintained beside it.
+            let supplied_same = typed_roles
+                .iter()
+                .all(|r| with_dropped.added.iter().any(|a| a == r));
+            if !supplied_same {
+                skipped.push((
+                    key,
+                    "the file supplies no role, or a different one than the row \
+                     types, so the two invocations are different nodes",
+                ));
+                continue;
+            }
+
+            let base_typed = expand_as_a_build_with_every_link(typed, control)
+                .unwrap_or_else(|e| panic!("{key}: control, role typed: {e}"));
+            let with_typed = expand_as_a_build_with_every_link(typed, variant)
+                .unwrap_or_else(|e| panic!("{key}: variant, role typed: {e}"));
+
+            // VACUITY, derived. A row whose TYPED invocation emits nothing has
+            // no behaviour for the dropped one to differ from, so comparing the
+            // two proves nothing — and it compares EQUAL, which is the direction
+            // that reads as coverage. Whether that is legitimate is not a
+            // judgement call: the build either has a sink for this key or it
+            // does not, and `config_keys_the_demo_drops` is the answer.
+            if delta(&base_typed, &with_typed).is_empty() {
+                assert!(
+                    config_keys_the_demo_drops().contains(&key),
+                    "{key}: the TYPED invocation emits nothing, so this row \
+                     compares two empty deltas and proves nothing — yet the key \
+                     is not one this build drops. Either the fixture stopped \
+                     naming the key or its sink went away silently."
+                );
+                skipped.push((key, "this build has no sink for the key"));
+                continue;
+            }
+
+            assert_eq!(
+                delta(&base_typed, &with_typed),
+                delta(&base_dropped, &with_dropped),
+                "{key}: the key reaches different behaviour depending on whether \
+                 the ROLE was typed or supplied by the file's `mode:`. The \
+                 expansion puts a file-supplied role in `added`, so a \
+                 precondition that reads only the typed command line withholds \
+                 this key from `wz-ap-demo --config <file>` — the one invocation \
+                 the config path exists for. Check the precondition with \
+                 `rest.iter().chain(exp.added.iter())`.\n\
+                 typed argv   = {typed:?}\n\
+                 dropped argv = {stripped:?}"
+            );
+            checked.push(key);
+        }
+
+        // A sweep of nothing passes forever. This one has to be looking at
+        // something, and the count is printed so a shrinking population is
+        // visible rather than silent.
+        assert!(
+            !checked.is_empty(),
+            "no fixture row types a run-mode role that the file can also \
+             supply, so this test checked NOTHING. Either `cli_for` stopped \
+             typing roles or `honoured_key_fixtures` lost its role-gated rows — \
+             say which, in the round that did it."
+        );
+        // Every out-of-scope row, with its reason. A lumped count is how a
+        // shortfall stops being auditable.
+        eprintln!(
+            "role-parity: {} row(s) checked ({}), {} out of scope",
+            checked.len(),
+            checked.join(", "),
+            skipped.len()
+        );
+        for (key, why) in &skipped {
+            eprintln!("  skip {key} — {why}");
+        }
+    }
+
     /// R2063 (open-debt item 214) — EVERY UPSTREAM KEY THIS DEMO'S `--help`
     /// CITES IS ONE THE READER HONOURS.
     ///

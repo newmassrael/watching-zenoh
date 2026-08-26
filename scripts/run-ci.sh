@@ -4248,6 +4248,30 @@ layer_c1ay_cargo_test_router_hat() {
     # cannot see it because it runs the changed crates' tests, not the lanes.
     _runci_guarded_test "C1AY stock_config_tests 34" 34 \
         cargo test -p wz-ap-demo --features zenoh-config stock_config_tests --quiet || return 1
+    # R2139 (unregistered open-debt item 227) — THE SAME MODULE WITH THE SINKS
+    # PRESENT, and it is not a duplicate of the leg above.
+    #
+    # Item 227: the expansion reads a run mode off the command line to decide a
+    # flag's preconditions, but it PUTS the mode into `added` itself when the
+    # file carries `mode:`. A precondition consulting only what was typed
+    # therefore works for an operator who spelled the role out and fails for
+    # `wz-ap-demo --config their.json5`, which is the only invocation the config
+    # path exists for. R311y849 found two instances and one of them --
+    # `scouting/multicast/listen` -- HAD SHIPPED that way since R311y846.
+    #
+    # `a_role_the_file_supplies_honours_every_key_a_typed_role_does` sweeps the
+    # honoured-key fixture table for it. The two rows it can check are exactly
+    # the two keys y849 found broken, and both are FEATURE-GATED SINKS:
+    # `scouting/multicast/listen` needs `scouting-responder` and `connect/retry`
+    # needs a peer or router-hat arm. On `--features zenoh-config` alone the test
+    # is `#[cfg]`-ed out entirely -- MEASURED: with y849's fix reverted, the leg
+    # above stays green. So this leg exists to give that test a build where its
+    # subject is compiled in, and the count is 40 rather than 34 because five
+    # other cases in the module are gated the same way.
+    _runci_guarded_test "C1AY stock_config_tests role-parity 40" 40 \
+        cargo test -p wz-ap-demo \
+        --features zenoh-config,scouting-responder,routing-peer,router-hat-router \
+        stock_config_tests --quiet || return 1
     # R2072 (open-debt item 496) — and the seam the module above structurally
     # cannot reach: argv -> exit status. Every unit witness for `check_topology`
     # would still pass if `main` never called it, which is item 479's class one
