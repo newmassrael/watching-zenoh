@@ -1554,10 +1554,24 @@ pub(crate) fn check_topology_for_build(
     mut read_file: impl FnMut(&str) -> Result<String, String>,
     compiled_in_schemes: &[&str],
 ) -> Option<Result<String, String>> {
-    use wz::runtime_tokio::zenoh_config::{validate_topology, ZenohNodeConfig};
+    use wz::runtime_tokio::zenoh_config::{validate_topology_with_external, ZenohNodeConfig};
 
     let paths = parse_repeated(rest, "--check-topology");
+    // R2117 (open-debt item 498) — the listeners this deployment does NOT
+    // manage, named by the operator.
+    let external = parse_repeated(rest, "--check-topology-external");
     if paths.is_empty() {
+        // A flag that silently does nothing is the refusal this file already
+        // makes for `--payload-format` without `--fields`: an operator who
+        // typed the widening and no set to widen has asked a question with no
+        // subject, and answering `None` here would exit as if they had asked
+        // for the demo instead.
+        if !external.is_empty() {
+            return Some(Err(String::from(
+                "--check-topology-external names a listener outside the set and \
+                 there is no set: give --check-topology <file> too",
+            )));
+        }
         return None;
     }
 
@@ -1605,9 +1619,24 @@ pub(crate) fn check_topology_for_build(
             defects.push_str(&format!("  {path}: {defect}\n"));
         }
     }
-    for defect in validate_topology(&configs) {
+    let verdict = validate_topology_with_external(&configs, &external);
+    for defect in &verdict.defects {
         count += 1;
         defects.push_str(&format!("  {defect}\n"));
+    }
+
+    // R2117 (open-debt item 498) — the ASSUMPTIONS the verdict rests on, said
+    // whichever way it goes. A fragment that checks out does so because the
+    // operator named an outside listener, and a report that swallowed that
+    // would read exactly like a closed deployment answering for itself. Said
+    // on the failure path too: a set with one real dangling dial and three
+    // externally answered ones is a different thing to go and look at.
+    for answered in &verdict.externally_answered {
+        notes.push_str(&format!(
+            "--check-topology: EXTERNAL {} -> {:?} answered by a declared \
+             outside listener, not by a node in this set\n",
+            answered.node, answered.endpoint
+        ));
     }
 
     if count == 0 {

@@ -4188,7 +4188,13 @@ layer_c1ay_cargo_test_router_hat() {
     # out), and the OLD pattern was re-run against the same log to confirm it no
     # longer matches — a count moved on a different measurement than the one that
     # checks it is a count nobody can reason about.
-    _runci_guarded_test "C1AY stock_config_tests 32" 32 \
+    # R2117 — 32 -> 33, and this one is NOT this round's test. R2112
+    # (`1c119ac2`, `--timestamping`) added a `stock_config_tests` case and left
+    # the count here at 32, so this lane has been red on main since that
+    # commit and nothing ran it: pre-push runs the CHANGED crates' tests, not
+    # the lanes. Found by running the lane while adding the leg below, fixed
+    # here rather than left for a hosted red to report a second time.
+    _runci_guarded_test "C1AY stock_config_tests 33" 33 \
         cargo test -p wz-ap-demo --features zenoh-config stock_config_tests --quiet || return 1
     # R2072 (open-debt item 496) — and the seam the module above structurally
     # cannot reach: argv -> exit status. Every unit witness for `check_topology`
@@ -4196,7 +4202,11 @@ layer_c1ay_cargo_test_router_hat() {
     # layer up; only running the binary shows the flag is wired. Its own lane
     # because it is its own test TARGET — the module filter above selects by
     # name and would never reach it.
-    _runci_guarded_test "C1AY check_topology_binary 2" 2 \
+    # R2117 (open-debt item 498) — 2 -> 4: the FRAGMENT reaches the binary too,
+    # and so does the refusal of a widening with no set to widen. The count is
+    # pinned rather than loose for the reason it was pinned at 2: a test that
+    # stops being compiled leaves a green run behind it.
+    _runci_guarded_test "C1AY check_topology_binary 4" 4 \
         cargo test -p wz-ap-demo --features zenoh-config --test check_topology_binary --quiet || return 1
     # R2087 (open-debt item 506) — the same argv -> exit status seam, for the qos
     # x lowlatency exclusivity that wiring `--qos` into `initiator_offer` made

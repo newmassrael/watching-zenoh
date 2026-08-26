@@ -297,6 +297,76 @@ pub enum TopologyDefect {
     /// scouting only, and binds no listener), so a set of them has nothing
     /// to attach to.
     NoNodeAccepts,
+    /// R2117 (open-debt item 498) — an endpoint DECLARED to be listened on by
+    /// a node outside this set, that no node in the set dials.
+    ///
+    /// The control that makes declaring one safe. Widening the listener set
+    /// from argv can only ever silence a `DanglingConnectTarget`, so without
+    /// this a careless `--check-topology-external` would turn a real typo
+    /// quiet -- the false-positive direction inverting, which is what the
+    /// register item flagged as not-for-one-round. Every declaration has to
+    /// EARN its place by answering something, so over-declaring is reported
+    /// rather than free.
+    UnusedExternalListener {
+        /// The endpoint as declared.
+        endpoint: String,
+    },
+    /// R2117 (open-debt item 498) — an endpoint declared external that a node
+    /// IN the set already listens on.
+    ///
+    /// Not silenced and not merely redundant: the operator has said the set is
+    /// a fragment at a point where it is not, so the report would credit an
+    /// outside node for a dial this deployment answers itself. A reader acting
+    /// on that goes looking for a machine that has nothing to do with it.
+    ExternalShadowsListener {
+        /// The endpoint as declared.
+        endpoint: String,
+        /// The node in the set that already answers it.
+        node: String,
+    },
+    /// R2117 (open-debt item 498) — a declared external endpoint that does not
+    /// parse as one.
+    ///
+    /// Reported HERE, unlike a malformed endpoint inside a config: that one is
+    /// `ZenohNodeConfig::validate`'s to name and saying it twice would make one
+    /// typo look like two faults. A string typed at argv has no per-node pass
+    /// to be named by, so silence would be the only alternative -- and a
+    /// declaration this pass cannot read is one that widens nothing while the
+    /// operator believes it did.
+    MalformedExternalListener {
+        /// The endpoint as declared.
+        endpoint: String,
+    },
+}
+
+/// R2117 (open-debt item 498) — one dial that a DECLARED EXTERNAL listener
+/// answered rather than a node in the set.
+///
+/// Not a defect and not nothing. A green verdict over a fragment rests on an
+/// assumption the operator supplied at argv, and a report that swallowed it
+/// would read exactly like a closed deployment that checks out on its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternallyAnswered {
+    /// Which node dials it.
+    pub node: String,
+    /// The connect endpoint as given.
+    pub endpoint: String,
+}
+
+/// R2117 (open-debt item 498) — what a set verdict says when the set is a
+/// FRAGMENT: the defects, and the assumptions the answer rests on.
+///
+/// Two fields rather than one list, because they are read differently: a
+/// defect stops the deployment and an assumption is shown beside a verdict
+/// that passed. Folding the second into the first would fail a deployment for
+/// being a fragment, which is the state this whole axis exists to make
+/// checkable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TopologyVerdict {
+    /// Every reason the set cannot form its network.
+    pub defects: Vec<TopologyDefect>,
+    /// Every dial an external declaration answered, in slice order.
+    pub externally_answered: Vec<ExternallyAnswered>,
 }
 
 impl core::fmt::Display for TopologyDefect {
@@ -314,6 +384,21 @@ impl core::fmt::Display for TopologyDefect {
             TopologyDefect::NoNodeAccepts => write!(
                 f,
                 "every node is a client, and a zenoh client never listens"
+            ),
+            TopologyDefect::UnusedExternalListener { endpoint } => write!(
+                f,
+                "{endpoint:?} was declared external and no node here dials it, \
+                 so it widens the set without answering anything"
+            ),
+            TopologyDefect::ExternalShadowsListener { endpoint, node } => write!(
+                f,
+                "{endpoint:?} was declared external and {node} in this set \
+                 already listens on it"
+            ),
+            TopologyDefect::MalformedExternalListener { endpoint } => write!(
+                f,
+                "{endpoint:?} was declared external and is not an endpoint this \
+                 reader can parse"
             ),
         }
     }
@@ -462,6 +547,48 @@ impl EndpointFace {
 /// [`ZenohNodeConfig::validate`] already names it per node, and saying it
 /// twice would make one typo look like two faults.
 pub fn validate_topology(nodes: &[ZenohNodeConfig]) -> Vec<TopologyDefect> {
+    validate_topology_with_external(nodes, &[]).defects
+}
+
+/// R2117 (open-debt item 498) — the same question asked of a FRAGMENT: a set
+/// of nodes that attaches to one or more listeners this deployment does not
+/// manage.
+///
+/// # Why the closed reading needed a widening rather than a softening
+///
+/// [`validate_topology`]'s contract is a closed deployment, and that is the
+/// right default: "no node listens on it" naming no node *here* is what makes
+/// a dangling dial findable at all. But the shape this project is measured
+/// against -- a set of wz nodes attached to a stock zenohd somebody else runs
+/// -- is a fragment, and against it every outward dial came back a defect. The
+/// verdict was correct and the surface was unusable for the common case.
+///
+/// So the operator NAMES the outside listeners, and the set is widened by
+/// exactly what they named. Nothing is resolved or probed: an external
+/// endpoint is compared by the same `EndpointFace` rules a listener inside
+/// the set is, so the verdict stays a property of the documents plus the argv.
+///
+/// # Why declaring one is not free
+///
+/// Widening the listener set can only silence a defect, so a careless
+/// declaration turns a real typo quiet -- the false-positive direction
+/// inverting, which is the trade the register item said one round must not
+/// make alone. It is not made here either: the widening is BIDIRECTIONAL.
+/// A declaration that answers no dial is [`TopologyDefect::UnusedExternalListener`],
+/// one the set already answers is [`TopologyDefect::ExternalShadowsListener`],
+/// and one that does not parse is [`TopologyDefect::MalformedExternalListener`].
+/// Every dial an external declaration DID answer comes back in
+/// [`TopologyVerdict::externally_answered`], so a green verdict shows the
+/// assumption it rests on instead of reading like a closed deployment.
+///
+/// [`TopologyDefect::NoNodeAccepts`] is also conditioned on it, and has to be:
+/// a set of clients attached to an external router is the single most ordinary
+/// fragment there is, and reporting "every node is a client" at it would fail
+/// the very deployment this widening exists to serve.
+pub fn validate_topology_with_external(
+    nodes: &[ZenohNodeConfig],
+    external: &[String],
+) -> TopologyVerdict {
     // The node's name is built ONCE, here, so every defect below spells the
     // same node the same way. Two call sites deriving it independently is two
     // places for the identity to drift from the row it labels.
@@ -485,17 +612,88 @@ pub fn validate_topology(nodes: &[ZenohNodeConfig]) -> Vec<TopologyDefect> {
 
     let mut out = Vec::new();
 
+    // R2117 (open-debt item 498) — the declared outside listeners, parsed by
+    // the SAME reader the set's own listen endpoints go through. A string that
+    // does not parse is named rather than dropped: dropping it would widen
+    // nothing while the operator believes it did.
+    let mut outside: Vec<(String, EndpointFace)> = Vec::new();
+    for endpoint in external {
+        match EndpointFace::of(endpoint) {
+            Some(face) => outside.push((endpoint.clone(), face)),
+            None => out.push(TopologyDefect::MalformedExternalListener {
+                endpoint: endpoint.clone(),
+            }),
+        }
+    }
+    // A declaration the set already answers is reported against the node that
+    // answers it, so the reader is sent to the config that makes the
+    // declaration wrong rather than to the machine it names.
+    for (endpoint, face) in &outside {
+        if let Some((name, _)) = named.iter().find(|(_, node)| {
+            node.listen.iter().any(|l| {
+                EndpointFace::of(l).is_some_and(|listener| face.could_be_answered_by(&listener))
+            })
+        }) {
+            out.push(TopologyDefect::ExternalShadowsListener {
+                endpoint: endpoint.clone(),
+                node: name.clone(),
+            });
+        }
+    }
+
+    let mut externally_answered = Vec::new();
+    // "Accounted for", not "used". A declaration the set already answers is
+    // reported as a SHADOW and must not also be reported as unused: the dial
+    // it covers is satisfied internally, so it never reaches the outside pass.
+    // Two findings for one mistake is the shape this file refuses one pass
+    // over -- a malformed endpoint is named per node OR here, never both --
+    // and the shadow is the more specific of the two, because it names the
+    // config that makes the declaration wrong.
+    let mut answered_something: Vec<bool> = outside
+        .iter()
+        .map(|(endpoint, _)| {
+            out.iter().any(|d| {
+                matches!(d, TopologyDefect::ExternalShadowsListener { endpoint: e, .. } if e == endpoint)
+            })
+        })
+        .collect();
     for (name, node) in &named {
         for endpoint in &node.connect {
             let Some(face) = EndpointFace::of(endpoint) else {
                 continue;
             };
-            if !listeners.iter().any(|l| face.could_be_answered_by(l)) {
+            if listeners.iter().any(|l| face.could_be_answered_by(l)) {
+                continue;
+            }
+            // Not answered here. Every external declaration that could answer
+            // it is marked used -- all of them, not the first: two declarations
+            // that both cover a dial are two claims about the deployment, and
+            // crediting one would leave the other looking unused.
+            let mut reached = false;
+            for (at, (_, outside_face)) in outside.iter().enumerate() {
+                if face.could_be_answered_by(outside_face) {
+                    answered_something[at] = true;
+                    reached = true;
+                }
+            }
+            if reached {
+                externally_answered.push(ExternallyAnswered {
+                    node: name.clone(),
+                    endpoint: endpoint.clone(),
+                });
+            } else {
                 out.push(TopologyDefect::DanglingConnectTarget {
                     node: name.clone(),
                     endpoint: endpoint.clone(),
                 });
             }
+        }
+    }
+    for (at, (endpoint, _)) in outside.iter().enumerate() {
+        if !answered_something[at] {
+            out.push(TopologyDefect::UnusedExternalListener {
+                endpoint: endpoint.clone(),
+            });
         }
     }
 
@@ -542,11 +740,24 @@ pub fn validate_topology(nodes: &[ZenohNodeConfig]) -> Vec<TopologyDefect> {
     // router and no peer has nobody to attach to. An EMPTY set is not this
     // defect: it describes no deployment, and answering it would be answering
     // a question nobody asked.
-    if !named.is_empty() && named.iter().all(|(_, node)| node.mode == WhatAmI::Client) {
+    //
+    // R2117 (open-debt item 498) — and NOT when an outside listener was
+    // declared. A set of clients attached to a router somebody else runs is
+    // the most ordinary fragment there is; reporting "every node is a client"
+    // at it would fail the exact deployment this widening exists to serve. The
+    // declaration is what makes the difference, and an empty one leaves the
+    // closed reading exactly as it was.
+    if outside.is_empty()
+        && !named.is_empty()
+        && named.iter().all(|(_, node)| node.mode == WhatAmI::Client)
+    {
         out.push(TopologyDefect::NoNodeAccepts);
     }
 
-    out
+    TopologyVerdict {
+        defects: out,
+        externally_answered,
+    }
 }
 
 /// Admin-space exposure of the emitted node.
@@ -2527,6 +2738,145 @@ mod tests {
             id: Some(String::from(id)),
             multicast_scouting: false,
             ..Default::default()
+        }
+    }
+
+    // R2117 (open-debt item 498) — the FRAGMENT. Every case below is stated as
+    // a pair for the reason the closed-deployment cases above are: widening a
+    // listener set can only ever silence a defect, so each control is the
+    // shape that must stay red.
+    #[test]
+    fn a_fragment_attached_to_a_declared_outside_listener_checks_out() {
+        // The ordinary shape this project is measured against: wz clients
+        // attached to a stock zenohd somebody else runs.
+        let a = node(WhatAmI::Client, "A").connecting_to("tcp/10.0.0.9:7447");
+        let b = node(WhatAmI::Client, "B").connecting_to("tcp/10.0.0.9:7447");
+        let set = [a, b];
+
+        // CONTROL — read as CLOSED, this is two defects and a third: both
+        // dials dangle and nothing accepts. That is the state item 498 filed.
+        let closed = validate_topology(&set);
+        assert_eq!(
+            closed.len(),
+            3,
+            "the closed reading must still refuse a fragment: {closed:?}"
+        );
+        assert!(closed.contains(&TopologyDefect::NoNodeAccepts));
+
+        // Declared, it is a working deployment, and the report SAYS what it
+        // assumed rather than reading like a set that answers for itself.
+        let verdict = validate_topology_with_external(&set, &[String::from("tcp/10.0.0.9:7447")]);
+        assert!(
+            verdict.defects.is_empty(),
+            "a declared outside listener must answer these dials: {:?}",
+            verdict.defects
+        );
+        assert_eq!(
+            verdict.externally_answered,
+            vec![
+                ExternallyAnswered {
+                    node: String::from("A"),
+                    endpoint: String::from("tcp/10.0.0.9:7447"),
+                },
+                ExternallyAnswered {
+                    node: String::from("B"),
+                    endpoint: String::from("tcp/10.0.0.9:7447"),
+                },
+            ],
+            "a green verdict over a fragment must name the assumption it rests on"
+        );
+    }
+
+    #[test]
+    fn a_declaration_that_answers_nothing_is_reported_rather_than_free() {
+        // The whole reason widening is safe: it costs something. A stray
+        // declaration cannot sit there quietly silencing the next typo.
+        let a = node(WhatAmI::Client, "A").connecting_to("tcp/10.0.0.9:7447");
+        let verdict = validate_topology_with_external(
+            std::slice::from_ref(&a),
+            &[
+                String::from("tcp/10.0.0.9:7447"),
+                String::from("tcp/10.0.0.8:7447"),
+            ],
+        );
+        assert_eq!(
+            verdict.defects,
+            vec![TopologyDefect::UnusedExternalListener {
+                endpoint: String::from("tcp/10.0.0.8:7447"),
+            }],
+            "an external declaration nothing dials must be named: {:?}",
+            verdict.defects
+        );
+
+        // CONTROL — the declaration that DID answer is not reported, so the
+        // check is about being unused rather than about being declared.
+        let verdict = validate_topology_with_external(&[a], &[String::from("tcp/10.0.0.9:7447")]);
+        assert!(verdict.defects.is_empty(), "{:?}", verdict.defects);
+    }
+
+    #[test]
+    fn a_declaration_the_set_already_answers_is_named_against_the_node_that_answers_it() {
+        let dialer = node(WhatAmI::Client, "A").connecting_to("tcp/10.0.0.5:7447");
+        let listener = node(WhatAmI::Router, "R").listening_on("tcp/10.0.0.5:7447");
+        let verdict = validate_topology_with_external(
+            &[dialer, listener],
+            &[String::from("tcp/10.0.0.5:7447")],
+        );
+        assert_eq!(
+            verdict.defects,
+            vec![TopologyDefect::ExternalShadowsListener {
+                endpoint: String::from("tcp/10.0.0.5:7447"),
+                node: String::from("R"),
+            }],
+            "the reader must be sent to the config that makes the declaration \
+             wrong: {:?}",
+            verdict.defects
+        );
+        // And the dial is NOT credited to the outside, because the set answers
+        // it -- crediting it would send someone to a machine that has nothing
+        // to do with this deployment.
+        assert!(verdict.externally_answered.is_empty());
+    }
+
+    #[test]
+    fn a_declaration_this_reader_cannot_parse_is_named_rather_than_dropped() {
+        // Dropping it would widen nothing while the operator believes it did,
+        // and the dial would come back dangling with no hint that the typo is
+        // in their own argv.
+        let a = node(WhatAmI::Client, "A").connecting_to("tcp/10.0.0.9:7447");
+        let verdict = validate_topology_with_external(&[a], &[String::from("not-an-endpoint")]);
+        assert!(
+            verdict
+                .defects
+                .contains(&TopologyDefect::MalformedExternalListener {
+                    endpoint: String::from("not-an-endpoint"),
+                }),
+            "an unparseable declaration must be named: {:?}",
+            verdict.defects
+        );
+        // And the dial it failed to cover is still dangling, so the operator
+        // gets both halves of what went wrong.
+        assert!(verdict
+            .defects
+            .contains(&TopologyDefect::DanglingConnectTarget {
+                node: String::from("A"),
+                endpoint: String::from("tcp/10.0.0.9:7447"),
+            }));
+    }
+
+    #[test]
+    fn an_empty_declaration_leaves_the_closed_reading_exactly_as_it_was() {
+        // The property every existing caller depends on: `validate_topology`
+        // is this function with no declarations, and a set of clients with no
+        // outside listener is still `NoNodeAccepts`.
+        let a = node(WhatAmI::Client, "A").connecting_to("tcp/10.0.0.9:7447");
+        let listener = node(WhatAmI::Router, "R").listening_on("tcp/10.0.0.5:7447");
+        for set in [vec![a.clone()], vec![a, listener]] {
+            assert_eq!(
+                validate_topology(&set),
+                validate_topology_with_external(&set, &[]).defects,
+                "the closed reading must be the widened one over an empty set"
+            );
         }
     }
 

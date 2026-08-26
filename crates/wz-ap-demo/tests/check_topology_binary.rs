@@ -60,9 +60,18 @@ impl Drop for Fixture {
 }
 
 fn run(paths: &[&Path]) -> Output {
+    run_with_external(paths, &[])
+}
+
+/// R2117 (open-debt item 498) — the same run, plus the listeners this
+/// deployment does not manage.
+fn run_with_external(paths: &[&Path], external: &[&str]) -> Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_wz-ap-demo"));
     for path in paths {
         cmd.arg("--check-topology").arg(path);
+    }
+    for endpoint in external {
+        cmd.arg("--check-topology-external").arg(endpoint);
     }
     cmd.output().expect("the demo binary runs")
 }
@@ -129,4 +138,79 @@ fn the_binary_names_a_file_it_cannot_open_rather_than_judging_the_rest() {
         !stderr.contains("which no node here listens on"),
         "the set was judged without a file that could not be read: {stderr}"
     );
+}
+
+/// R2117 (open-debt item 498) — THE FRAGMENT REACHES THE BINARY, AND SO DOES
+/// THE PRICE OF DECLARING ONE.
+///
+/// # Why this is a process test too
+///
+/// The unit witnesses in `zenoh_config` judge `validate_topology_with_external`
+/// and would all still pass if `main`'s argv never carried the flag to it —
+/// item 479's class, and the reason item 496 needed this file in the first
+/// place. The seam is argv -> exit status.
+///
+/// # Why one test and not three
+///
+/// The three assertions are one claim: widening is USABLE and it is not FREE.
+/// Split apart, a build that accepted the flag and ignored it would pass the
+/// first, and one that reported every declaration would pass the third.
+#[test]
+fn the_binary_takes_a_declared_outside_listener_and_charges_for_a_stray_one() {
+    let fixture = Fixture::new("external");
+    // A peer dialling a router that is NOT among these files. Read as closed,
+    // this is the state item 498 filed: a working deployment reported broken.
+    let edge = fixture.write("edge.json5", EDGE_TO_RTR);
+
+    let out = run(&[&edge]);
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "the closed reading must still refuse a bare fragment: {stderr}"
+    );
+
+    // Declared, the same files are a deployment that works -- and the report
+    // SAYS what it assumed rather than reading like a closed set.
+    let out = run_with_external(&[&edge], &["tcp/10.0.0.9:7447"]);
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        out.status.success(),
+        "a declared outside listener answers this dial: {stderr}"
+    );
+    assert!(
+        stderr.contains("EXTERNAL edge -> \"tcp/10.0.0.9:7447\""),
+        "a green verdict over a fragment must name its assumption: {stderr}"
+    );
+
+    // And a declaration nothing dials is charged for, so widening cannot
+    // quietly silence the next typo.
+    let out = run_with_external(&[&edge], &["tcp/10.0.0.9:7447", "tcp/10.0.0.7:7447"]);
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(out.status.code(), Some(2), "{stderr}");
+    assert!(
+        stderr.contains(r#""tcp/10.0.0.7:7447" was declared external"#),
+        "the stray declaration must be named: {stderr}"
+    );
+}
+
+/// R2117 (open-debt item 498) — the widening with no set to widen is refused
+/// rather than ignored.
+///
+/// The rule this file's sibling flags already follow: an operator who typed a
+/// flag and got the demo's ordinary startup instead has been told nothing.
+#[test]
+fn the_binary_refuses_a_declared_listener_with_no_deployment_to_check() {
+    let out = Command::new(env!("CARGO_BIN_EXE_wz-ap-demo"))
+        .arg("--check-topology-external")
+        .arg("tcp/10.0.0.9:7447")
+        .output()
+        .expect("the demo binary runs");
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(out.status.code(), Some(2), "{stderr}");
+    assert!(
+        stderr.contains("there is no set"),
+        "the refusal must say what is missing: {stderr}"
+    );
+    assert!(!stderr.contains("Established"), "{stderr}");
 }
