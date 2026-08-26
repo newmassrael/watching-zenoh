@@ -1693,9 +1693,25 @@ pub mod common {
         budget: Duration,
     ) -> Result<(), String> {
         use std::net::TcpStream;
+        // A listener reached by NAME can land on either loopback family. An
+        // endpoint written `tcp/localhost:P` binds wherever the resolver puts
+        // `localhost` FIRST, and a host whose /etc/hosts says `::1 localhost`
+        // -- which the hosted runners do and this developer machine does not --
+        // puts it on `[::1]`, where a `127.0.0.1` probe never arrives. The
+        // child stays alive the whole time, so the timeout read
+        // "genuinely slow to bind or hung" when nothing was slow and nothing
+        // hung: measured on `zenohd_refuses_every_topology_the_validator_rejects`,
+        // green here and red on every hosted run since R2112.
+        //
+        // Loopback is a closed set of two, so probe both rather than making all
+        // 77 call sites spell out which family their endpoint resolved to.
+        const LOOPBACK: [&str; 2] = ["127.0.0.1", "::1"];
         let deadline = Instant::now() + budget;
         loop {
-            if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            if LOOPBACK
+                .iter()
+                .any(|host| TcpStream::connect((*host, port)).is_ok())
+            {
                 return Ok(());
             }
             match child.try_wait() {
@@ -1714,7 +1730,8 @@ pub mod common {
             }
             if Instant::now() >= deadline {
                 return Err(format!(
-                    "did not start accepting tcp on 127.0.0.1:{port} within {budget:?} \
+                    "did not start accepting tcp on either loopback family \
+                     (127.0.0.1:{port} nor [::1]:{port}) within {budget:?} \
                      (process still alive — genuinely slow to bind or hung)"
                 ));
             }

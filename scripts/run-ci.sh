@@ -12419,7 +12419,12 @@ layer_z_zenohd_interop() {
     # the round that wrote it. Measured, not inferred: `grep` over run-ci.sh and
     # ci.yml finds the file nowhere. It passes (2 legs), so the fix is the line
     # below rather than a debt item.
-    _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+    # 2 -> 3: `2020dd71` added `zenohd_refuses_every_topology_the_validator_rejects`
+    # and left the count at 2. MEASURED on this exact command: 3 passed. Same
+    # shape as the C1AY guard above -- a count that does not move with the test
+    # that moved it, and pre-push cannot see it because it runs the changed
+    # crates' tests, not the lanes.
+    _runci_guarded_test Z 3 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test zenoh_config_emit_zenohd_interop -- --ignored --quiet --test-threads=1 \
         || return 1
     # The READ direction, which is the one that bears on replacement: an operator
