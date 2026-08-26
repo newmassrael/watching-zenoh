@@ -9026,6 +9026,22 @@ layer_c1bn_passive_dissection_features() {
         --features alloc,codec-scout --all-targets --quiet -- -D warnings) || return 1
     (cd crates && cargo clippy -p wz-session-core --no-default-features \
         --features alloc,codec-hello --all-targets --quiet -- -D warnings) || return 1
+
+    # R2115 (open-debt item 239) — and what a CONSUMER is told when it reaches
+    # for one of these gated paths without the feature.
+    #
+    # Every arm above asks whether a feature set COMPILES. This asks the other
+    # half: a person outside this workspace typing `wz_capture::fields_json`
+    # against a default build gets a resolution error, and the question is
+    # whether anything in it names `dissect`. Measured on rustc 1.97, it does --
+    # the item's premise had gone stale under a toolchain that grew the note --
+    # and nothing held that property down. This does, by building a real
+    # consumer and reading rustc rather than by asserting it in prose.
+    #
+    # It rides C1bn because this is the lane that already builds `wz-capture`
+    # at both feature sets, so the probe's dependencies are warm: measured 33s
+    # cold and 1s warm, against a probe that would otherwise pay for 75 crates.
+    python3 scripts/lib/feature_gate_diagnostic.py || return 1
 }
 
 # ─── Layer C1bg — storage-backend-filesystem: durable fs Volume/Storage ─
