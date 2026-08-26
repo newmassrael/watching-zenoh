@@ -4211,7 +4211,14 @@ layer_c1ay_cargo_test_router_hat() {
     # commit and nothing ran it: pre-push runs the CHANGED crates' tests, not
     # the lanes. Found by running the lane while adding the leg below, fixed
     # here rather than left for a hosted red to report a second time.
-    _runci_guarded_test "C1AY stock_config_tests 33" 33 \
+    # 33 -> 34, and the SAME shape a third time: R2124 (`fda06748`, the config
+    # report derived rather than remembered) added
+    # `every_axis_the_reader_hands_over_reaches_a_line` and left the count at
+    # 33. MEASURED on this exact command: 34 passed, 2 filtered out. That this
+    # recurs after R2117 wrote the reason down says the note is not the fix --
+    # nothing makes a count move with the test that moved it, and pre-push
+    # cannot see it because it runs the changed crates' tests, not the lanes.
+    _runci_guarded_test "C1AY stock_config_tests 34" 34 \
         cargo test -p wz-ap-demo --features zenoh-config stock_config_tests --quiet || return 1
     # R2072 (open-debt item 496) — and the seam the module above structurally
     # cannot reach: argv -> exit status. Every unit witness for `check_topology`
