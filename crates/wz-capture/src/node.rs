@@ -97,15 +97,21 @@ pub struct ObservedNode {
     /// Capture anchor of the first message that named it.
     ///
     /// R311y919 (open-debt item 452) — THE NAME IS WRONG OVER A STREAM AND IS
-    /// KEPT ANYWAY. The value is `PassiveFrame::stream_offset`, which is a
-    /// packet index on a datagram link and a BYTE OFFSET on a stream one, so
-    /// over TCP this field has always reported an offset under a name that says
-    /// packet. Renaming it would break a consumer reading the census document
-    /// by key, which the C ABI's own contract permits only for ADDED keys — so
-    /// [`Self::anchors`] arrives beside it and the misnomer is registered
-    /// rather than fixed by a break.
-    pub first_packet: usize,
-    /// R311y919 (open-debt item 452) — which space [`Self::first_packet`] is
+    /// RENAMED (R2119, open-debt item 455). The value is
+    /// `PassiveFrame::stream_offset`, which is a packet index on a datagram
+    /// link and a BYTE OFFSET on a stream one, so under the old name
+    /// `first_packet` this field reported an offset while saying packet. A
+    /// wrong name is charged to every reader, and R311y919 could only put
+    /// [`Self::anchors`] beside it because a rename of an emitted key was not
+    /// expressible then.
+    ///
+    /// It is now. Item 509 gave every document its own revision and made a
+    /// rename an ordinary two-step edit, so the Rust field carries the right
+    /// name from here and the census document emits BOTH keys for one
+    /// revision — `first_packet` announced as retiring — before the next
+    /// revision drops it. See `crate::doc_revision`.
+    pub first_anchor: usize,
+    /// R311y919 (open-debt item 452) — which space [`Self::first_anchor`] is
     /// in. Read this before reading that.
     pub anchors: crate::AnchorSpace,
     /// Flows this zid was named on, in first-appearance order.
@@ -410,7 +416,7 @@ impl NodeCensus {
         &mut self,
         zid: &[u8],
         whatami: Option<u8>,
-        first_packet: usize,
+        first_anchor: usize,
         flow: &FlowKey,
     ) -> usize {
         let idx = match self.nodes.iter().position(|n| n.zid == zid) {
@@ -420,7 +426,7 @@ impl NodeCensus {
                     zid: zid.to_vec(),
                     whatami,
                     evidence: NodeEvidence::default(),
-                    first_packet,
+                    first_anchor,
                     anchors: self.anchors,
                     flows: Vec::new(),
                     wire_bytes: 0,

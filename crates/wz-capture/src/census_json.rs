@@ -456,11 +456,23 @@ pub fn nodes_json(c: &NodeCensus) -> String {
         let e = &node.evidence;
         let _ = write!(
             out,
-            // R311y919 (item 452) — `offset_space` BEFORE `first_packet`,
-            // because over a stream that name is wrong and this is the only
-            // thing that says so. The field is not renamed: a consumer reads
-            // this document by key and an added key is the widening the
-            // contract permits, while a rename is a break.
+            // R311y919 (item 452) — `offset_space` BEFORE the anchor keys,
+            // because over a stream the OLD name is wrong and this is the only
+            // thing that says so.
+            //
+            // R2119 (open-debt item 455) — and the rename is now under way.
+            // BOTH keys are emitted here, carrying ONE value read from one
+            // field: `first_anchor` is the name, `first_packet` is what a
+            // consumer written against census revision 1 still reads. The old
+            // key is announced in this revision's `retiring` list, and the
+            // NEXT revision drops it. That two-step is the only expressible
+            // shape (`doc_revision::audit` refuses a key that vanishes without
+            // having been announced), and it is what item 509 existed to make
+            // possible — 455 was blocked on it and is now an ordinary edit.
+            //
+            // Two keys for one fact is exactly the smell this tree distrusts,
+            // and it is bounded on purpose: one revision wide, with the
+            // expiry written into the table rather than into a comment.
             //
             // R311y920 — AND THIS COMMENT WAS INSIDE THE FORMAT STRING. A
             // line-continuation `\` at the end of a string literal swallows the
@@ -474,7 +486,7 @@ pub fn nodes_json(c: &NodeCensus) -> String {
             // 380 stated as an accident instead of a sentence.
             ",\"evidence\":{{\"init\":{},\"join\":{},\"hello\":{},\"scout\":{},\
              \"inadmissible\":{},\"admissible\":{}}},\"offset_space\":\"{}\",\
-             \"first_packet\":{},\"wire_bytes\":{}",
+             \"first_anchor\":{},\"first_packet\":{},\"wire_bytes\":{}",
             e.init,
             e.join,
             e.hello,
@@ -482,7 +494,8 @@ pub fn nodes_json(c: &NodeCensus) -> String {
             e.inadmissible,
             e.admissible(),
             node.anchors.name(),
-            node.first_packet,
+            node.first_anchor,
+            node.first_anchor,
             node.wire_bytes,
         );
         match c.share_bp(i) {
@@ -1478,11 +1491,17 @@ pub(crate) mod fed_tests {
         // somewhere would let ONE labelled plane stand for four, which is the
         // failure this whole item is about -- a number that reads as answered
         // because its neighbour was.
+        // R2119 (open-debt item 455) — the node plane emits TWO anchor keys
+        // for one value while `first_packet` is retiring, so what follows its
+        // `offset_space` is the pair. Spelled as the pair rather than loosened
+        // to "somewhere after", because the run that drops the old key has to
+        // come back here and delete half of a literal — which is a smaller,
+        // louder edit than relaxing an assertion would leave behind.
         for anchor in [
-            "\"first_anchor\"", // the throughput rows
-            "\"first_packet\"", // the node census
-            "\"declared_at\"",  // the interest declarations
-            "\"asked_at\"",     // the interest requests
+            "\"first_anchor\"",                      // the throughput rows
+            "\"first_anchor\":0,\"first_packet\":0", // the node census, mid-rename
+            "\"declared_at\"",                       // the interest declarations
+            "\"asked_at\"",                          // the interest requests
         ] {
             assert!(
                 over_tcp.contains(anchor),
@@ -1495,6 +1514,13 @@ pub(crate) mod fed_tests {
                  reader cannot tell a byte offset from a packet index: {over_tcp}"
             );
         }
+        // And the two node keys carry ONE value read from one field. Two keys
+        // that could disagree would be the "two renderings" debt this rename
+        // exists to end rather than to create.
+        assert!(
+            over_tcp.contains("\"first_anchor\":0,\"first_packet\":0"),
+            "the retiring key must mirror its successor exactly: {over_tcp}"
+        );
         assert!(
             !over_tcp.contains("\"offset_space\":\"packet\""),
             "and over TCP none of them is a packet index: {over_tcp}"

@@ -115,6 +115,22 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         keys: CENSUS_R1_KEYS,
         retiring: &[],
     },
+    // R2119 (open-debt item 455) — the RENAME this table was built for, used
+    // for the first time. `first_packet` reports a byte offset over a stream
+    // link, so the name has been wrong for every reader of a TCP capture;
+    // `first_anchor` is the name, and it joins the `AnchorSpace` vocabulary
+    // rather than starting a second one.
+    //
+    // Both keys are emitted at this revision and the old one is ANNOUNCED
+    // here. The next revision drops it, and `audit` is what makes that the
+    // only writable path: a key that vanishes without an announcement in the
+    // previous row is an error, so the break cannot be taken silently.
+    DocumentShape {
+        document: CENSUS,
+        revision: 2,
+        keys: CENSUS_R2_KEYS,
+        retiring: &["first_packet"],
+    },
     DocumentShape {
         document: FIELDS,
         revision: 1,
@@ -347,6 +363,21 @@ pub const CENSUS_R1_KEYS: &[&str] = &[
     "withdrawn_at",
     "zid",
 ];
+/// R2119 (open-debt item 455) — the census document's key set at revision 2,
+/// which is revision 1's set EXACTLY.
+///
+/// A revision that adds no key is the surprise here, and it is the honest
+/// answer: `first_anchor` was already a key of this document — the throughput
+/// plane has emitted it since R311y919 — so putting it on the node row spends
+/// no new name. What revision 2 carries is the ANNOUNCEMENT: `first_packet` is
+/// listed in that row's `retiring`, which is what lets the next revision drop
+/// it at all.
+///
+/// Aliased rather than copied, and that is the whole point. A second
+/// hand-written list of 146 names would be wrong on the day it was written —
+/// measured, on the first draft of this very constant, which came out 71 names
+/// long and disagreed with its predecessor in both directions.
+pub const CENSUS_R2_KEYS: &[&str] = CENSUS_R1_KEYS;
 /// The field document's key set at revision 1.
 ///
 /// Taken over `census_json::fed_tests::four_plane_capture_with_file` — the
@@ -754,6 +785,54 @@ mod tests {
         }
     }
 
+    /// R2119 (open-debt item 455) — a retirement IN FLIGHT is announced where
+    /// the announcement does something.
+    ///
+    /// # Why this test exists at all
+    ///
+    /// [`audit`] enforces the rule at the moment a key LEAVES: a name absent
+    /// from a row and from the previous row's `retiring` is an error. It says
+    /// nothing while the key is still being emitted, which is the entire span
+    /// during which the announcement is the only thing a consumer has.
+    ///
+    /// MEASURED: emptying the census row's `retiring` while this test did not
+    /// exist changed no verdict anywhere — the announcement was decorative for
+    /// exactly as long as it mattered. A line nothing reads is a line the next
+    /// round deletes, and then the notice a consumer was promised was never
+    /// given.
+    ///
+    /// So the pair is pinned: while `first_packet` is still emitted, the
+    /// newest census revision announces it AND emits its successor. The round
+    /// that drops the key deletes this test with the key, which is the edit
+    /// that should be loud.
+    #[test]
+    fn a_key_being_retired_is_announced_while_it_is_still_emitted() {
+        let newest = newest(CENSUS).expect("the census document has a revision");
+        assert!(
+            newest.retiring.contains(&"first_packet"),
+            "`first_packet` is still emitted and its retirement is what gives a \
+             consumer notice; revision {} announces {:?}",
+            newest.revision,
+            newest.retiring
+        );
+        // An announcement about a key the document does not emit tells nobody
+        // anything -- the rule `DocumentShape::retiring` states, asserted on
+        // the one row that exercises it.
+        for name in newest.retiring {
+            assert!(
+                newest.keys.contains(name),
+                "revision {} announces `{name}` and does not emit it",
+                newest.revision
+            );
+        }
+        // And the successor is there, because a retirement with nothing to
+        // move to is a removal wearing a notice.
+        assert!(
+            newest.keys.contains(&"first_anchor"),
+            "the successor must be emitted in the same revision as the notice"
+        );
+    }
+
     /// The real table obeys its own rules.
     #[test]
     fn the_shipped_history_passes_its_own_audit() {
@@ -774,7 +853,9 @@ mod tests {
         // that stops noticing. `readable_surfaces` is at 2 because it grew the
         // described-format type list.
         for (name, expected) in [
-            (CENSUS, 1u32),
+            // R2119 (open-debt item 455) — the census moved to 2 when
+            // `first_packet`'s retirement was announced.
+            (CENSUS, 2u32),
             (FIELDS, 1),
             (SUMMARY, 1),
             (READABLE_SURFACES, 2),

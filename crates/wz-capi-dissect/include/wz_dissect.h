@@ -68,6 +68,18 @@
  * revision's notice: read the revision, and refuse — or re-check — a value you
  * were not written against.
  *
+ * R2119 — THE FIRST RENAME TO USE THAT NOTICE, so the paragraph above is now
+ * a description of something that happened rather than a promise. The census
+ * document is at REVISION 2 and its node rows carry two keys for one value:
+ *
+ *     "offset_space":"stream_byte","first_anchor":43,"first_packet":43
+ *
+ * `first_packet` is the old name and it was WRONG on a stream link, where the
+ * value is a byte offset — `offset_space` beside it has said so since the
+ * revision before. `first_anchor` is the name, and it is the one the
+ * throughput rows already used. Read `first_anchor`; `first_packet` is
+ * emitted for this revision only and the next one drops it.
+ *
  * wz_dissect_transport_message is the one door with no such revision, and
  * deliberately: its document is a FIELD TREE whose keys are the walkers' own
  * names, generated per protocol element, so there is no fixed key set for a

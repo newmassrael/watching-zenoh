@@ -837,7 +837,11 @@ int main(void) {
         char *doc;
     } revisioned[4];
     revisioned[0].name = "census";
-    revisioned[0].revision = 1;
+    /* R2119 (open-debt item 455) -- 2: the census announced `first_packet`'s
+     * retirement beside its successor `first_anchor`. A consumer reading this
+     * document by key gets BOTH for this revision and only the new one after
+     * the next. */
+    revisioned[0].revision = 2;
     revisioned[0].doc = NULL;
     rc = wz_dissect_pcap_census(pcap, sizeof pcap, &revisioned[0].doc);
     CHECK(rc == WZ_DISSECT_OK, "census rc=%d", rc);
