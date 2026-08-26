@@ -4246,7 +4246,12 @@ layer_c1ay_cargo_test_router_hat() {
     # recurs after R2117 wrote the reason down says the note is not the fix --
     # nothing makes a count move with the test that moved it, and pre-push
     # cannot see it because it runs the changed crates' tests, not the lanes.
-    _runci_guarded_test "C1AY stock_config_tests 34" 34 \
+    # R2140 (unregistered open-debt item 219) — 34 -> 35. The new case is
+    # `every_flag_the_expansion_emits_carries_the_precondition_main_refuses_without`,
+    # which is NOT feature-gated: its rules come from `main.rs` and its shapes
+    # from the fixture table, so it means something on every build. MEASURED on
+    # this exact command: 35 passed, 2 filtered out.
+    _runci_guarded_test "C1AY stock_config_tests 35" 35 \
         cargo test -p wz-ap-demo --features zenoh-config stock_config_tests --quiet || return 1
     # R2139 (unregistered open-debt item 227) — THE SAME MODULE WITH THE SINKS
     # PRESENT, and it is not a duplicate of the leg above.
@@ -4268,7 +4273,8 @@ layer_c1ay_cargo_test_router_hat() {
     # above stays green. So this leg exists to give that test a build where its
     # subject is compiled in, and the count is 40 rather than 34 because five
     # other cases in the module are gated the same way.
-    _runci_guarded_test "C1AY stock_config_tests role-parity 40" 40 \
+    # R2140 — 40 -> 41, the same new case seen from the other feature set.
+    _runci_guarded_test "C1AY stock_config_tests role-parity 41" 41 \
         cargo test -p wz-ap-demo \
         --features zenoh-config,scouting-responder,routing-peer,router-hat-router \
         stock_config_tests --quiet || return 1

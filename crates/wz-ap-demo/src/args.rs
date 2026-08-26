@@ -2905,6 +2905,203 @@ mod stock_config_tests {
         }
     }
 
+    /// R2140 (unregistered open-debt item 219) — WHEN A FLAG IS EMITTED, THE
+    /// ARGV CARRIES THE PRECONDITION `main` WILL REFUSE IT WITHOUT.
+    ///
+    /// # The gap, in the item's own words
+    ///
+    /// The drop-in e2e leg covers ONE INVOCATION: a tcp-connecting client with
+    /// `--publish`. Keys that apply only to a listening node, a `tls/` link,
+    /// `--query` or `--scout` are NAMED by its fixture and their flags are
+    /// WITHHELD, so that leg proves "withholding does not break the node" and
+    /// says nothing about "when emitted, the flag is right". The census unit
+    /// fixtures do supply those preconditions — but they read the argv STRING
+    /// and never ask what the binary would do with it.
+    ///
+    /// R311y844 measured the failure this leaves open: an expansion that emitted
+    /// `--scout-timeout-ms` unconditionally turned a VALID stock config into a
+    /// node that exits(2) with `--scout-timeout-ms requires --scout`.
+    ///
+    /// # What this derives, and from where
+    ///
+    /// The refusals are `main`'s own, read out of `main.rs` with `include_str!`
+    /// — the idiom the `--help` sweep in this module already uses — so a new
+    /// `X requires Y` arrives inside this gate instead of beside it. ⚠ THE
+    /// MESSAGES SPAN LINES: `--query-timeout-ms requires --query` is written as
+    /// a `\`-continued literal, and a line-at-a-time reader finds four of these
+    /// where there are more. `string_literals` returns the whole literal, and
+    /// the continuation is flattened here.
+    ///
+    /// FEATURE preconditions (`--peer requires the \`routing-peer\` feature`)
+    /// are counted and skipped: they are facts about the build, not about the
+    /// argv, and the expansion already answers them through `cfg!` and
+    /// `config_keys_the_demo_drops`.
+    ///
+    /// # Why the SHAPES are a set and not one
+    ///
+    /// That is the whole of item 219. Each fixture row is expanded in three
+    /// shapes — the one `cli_for` builds to meet that key's own precondition,
+    /// the bare drop-in (`--config` and nothing else), and the drop-in the e2e
+    /// leg actually performs (`--publish`/`--value`). A flag emitted in any of
+    /// them is checked in that one.
+    #[test]
+    fn every_flag_the_expansion_emits_carries_the_precondition_main_refuses_without() {
+        const MAIN: &str = include_str!("main.rs");
+
+        /// A refusal literal with its `\`-continuations flattened.
+        fn flatten(lit: &str) -> String {
+            let mut out = String::new();
+            let mut chars = lit.chars().peekable();
+            while let Some(c) = chars.next() {
+                if c != '\\' {
+                    out.push(c);
+                    continue;
+                }
+                // A `\` before whitespace is a line continuation; anything else
+                // is an ordinary escape and is kept as written.
+                if chars.peek().is_some_and(|n| n.is_whitespace()) {
+                    while chars.peek().is_some_and(|n| n.is_whitespace()) {
+                        chars.next();
+                    }
+                    out.push(' ');
+                } else {
+                    out.push(c);
+                }
+            }
+            out
+        }
+
+        fn first_flag(text: &str) -> Option<String> {
+            let at = text.find("--")?;
+            let token: String = text[at..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                .collect();
+            (token.len() > 2).then_some(token)
+        }
+
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        let mut feature_gated: Vec<String> = Vec::new();
+        for lit in string_literals(MAIN) {
+            let flat = flatten(lit);
+            let Some(body) = flat.strip_prefix("wz-ap-demo: ") else {
+                continue;
+            };
+            let Some((before, after)) = body.split_once(" requires ") else {
+                continue;
+            };
+            let Some(flag) = first_flag(before) else {
+                continue;
+            };
+            if after.contains("feature") && !after.trim_start().starts_with("--") {
+                feature_gated.push(flag);
+                continue;
+            }
+            let Some(needs) = first_flag(after) else {
+                continue;
+            };
+            if !pairs.iter().any(|(f, n)| *f == flag && *n == needs) {
+                pairs.push((flag, needs));
+            }
+        }
+
+        // The derivation must have found something. A parser that silently
+        // stopped recognising these messages would make every sweep below pass
+        // over an empty set of rules.
+        assert!(
+            !pairs.is_empty(),
+            "no `<flag> requires <flag>` refusal was derived from main.rs, so \
+             this gate has no rules to enforce. Either the messages were \
+             reworded or this reader broke."
+        );
+
+        // THE SHAPES. `cli_for` meets the row's own precondition; the other two
+        // are the drop-in invocations, one of them the one the e2e leg performs.
+        const DROP_IN: &[&str] = &["--config", "z.json5"];
+        const DROP_IN_PUBLISH: &[&str] = &[
+            "--config",
+            "z.json5",
+            "--publish",
+            "demo/x",
+            "--value",
+            "hi",
+        ];
+
+        let mut checked: Vec<String> = Vec::new();
+        let mut violations: Vec<String> = Vec::new();
+        let mut emitted_seen: Vec<String> = Vec::new();
+
+        for (key, _control, variant) in honoured_key_fixtures() {
+            for shape in [cli_for(key), DROP_IN, DROP_IN_PUBLISH] {
+                let Ok(out) = expand_as_a_build_with_every_link(shape, variant) else {
+                    // A shape this row's config cannot be read in is not a
+                    // finding here; the coverage test above owns readability.
+                    continue;
+                };
+                let argv: Vec<&str> = out.argv.iter().map(String::as_str).collect();
+                for flag in &out.added {
+                    if !emitted_seen.contains(flag) {
+                        emitted_seen.push(flag.clone());
+                    }
+                }
+                for (flag, needs) in &pairs {
+                    if !argv.contains(&flag.as_str()) {
+                        continue;
+                    }
+                    checked.push(format!("{key}/{flag}"));
+                    if !argv.contains(&needs.as_str()) {
+                        violations.push(format!(
+                            "{key} in shape {shape:?}: the argv carries `{flag}` \
+                             without `{needs}`, and main refuses exactly that \
+                             pair — a valid stock config would expand into a \
+                             node that exits(2). argv = {argv:?}"
+                        ));
+                    }
+                }
+            }
+        }
+
+        assert!(violations.is_empty(), "{}", violations.join("\n"));
+
+        // A sweep of nothing passes forever. At least one row/shape must have
+        // actually put a refusable flag in front of the rules.
+        assert!(
+            !checked.is_empty(),
+            "no fixture row in any shape produced an argv carrying a flag main \
+             can refuse, so this gate checked NOTHING. The rules exist ({} \
+             pair(s)) and {} distinct flag(s) were emitted, so either the \
+             shapes stopped reaching them or the emissions changed.",
+            pairs.len(),
+            emitted_seen.len()
+        );
+
+        // The breakdown, because a total is not auditable. Named skips only:
+        // a rule whose flag no shape ever emits, and the feature rules that are
+        // about the build rather than the argv.
+        let unreached: Vec<&str> = pairs
+            .iter()
+            .filter(|(f, _)| !checked.iter().any(|c| c.ends_with(f.as_str())))
+            .map(|(f, _)| f.as_str())
+            .collect();
+        eprintln!(
+            "argv-precondition: {} rule(s) derived from main.rs, {} check(s) \
+             over {} row(s) x 3 shape(s); {} flag(s) emitted in total",
+            pairs.len(),
+            checked.len(),
+            honoured_key_fixtures().len(),
+            emitted_seen.len()
+        );
+        for (flag, needs) in &pairs {
+            eprintln!("  rule {flag} requires {needs}");
+        }
+        for flag in &unreached {
+            eprintln!("  skip {flag} — no shape emits it, so no argv here can break the rule");
+        }
+        for flag in &feature_gated {
+            eprintln!("  skip {flag} — its precondition is a cargo feature, not an argv flag");
+        }
+    }
+
     /// R2063 (open-debt item 214) — EVERY UPSTREAM KEY THIS DEMO'S `--help`
     /// CITES IS ONE THE READER HONOURS.
     ///
