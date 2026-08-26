@@ -606,6 +606,16 @@ jobs:
         # only in their TEST targets, and three of those are checked lib-only.
         run: bash scripts/run-ci.sh --layer C1cf
 
+      - name: Layer C1cn — every crate compiles its non-default code
+        # R2133 — C1cf's mirror. That lane asks whether a crate survives its
+        # defaults being OFF; nothing asked whether the code behind a feature
+        # that is off BY DEFAULT reaches rustc at all. It does not: pre-push
+        # builds default features, so non-default modules are never compiled.
+        # Its first sweep found a live break R2112 had left in wz-ap-demo.
+        # Measured cost: 19 of 20 crates with a non-default feature, ~126s;
+        # `wz` is tier 3 because a vendored dep refuses an all-features build.
+        run: bash scripts/run-ci.sh --layer C1cn
+
       - name: Layer C1i — scouting-active glue unit tests
         # R311ep — scouting-active is off by default, so Layer C1's
         # `cargo test --workspace` never builds the scouting glue. This

@@ -453,13 +453,25 @@ DELIVERY_TRANCHES = {
     2: (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26),
 }
 
-# The tranche this axis GATES. The second is declared above so that the
-# partition check has something to be a partition OF -- a row may name one of
-# its numbers and the membership check will accept it -- but it is not gated,
-# because a half-annotated second tranche would print a coverage figure that
-# under-reports, and a confident under-report is what this item was filed
-# about.
-GATED_TRANCHE = 1
+# The tranches this axis GATES -- a SET, and the eligibility to be in it is
+# DERIVED rather than asserted (R2135, unregistered open-debt item 533).
+#
+# It was a single number, and the reason it could not simply become two was
+# recorded in prose: a half-annotated tranche would print a coverage figure
+# that under-reports, and a confident under-report is what this axis exists to
+# prevent. That reasoning was correct and it is still correct. The defect was
+# WHERE IT LIVED -- in a comment here and in a closed debt item's body, neither
+# of which any census counts. Ask "how far has delivery scope come" and the
+# only machine answer was tranche 1's, with nothing saying a tranche 2 existed
+# or why it was silent.
+#
+# So the rule is now enforced instead of described: a tranche may be gated only
+# when EVERY number in it is accounted for -- reached by a live handle, or
+# declared in `NO_REACH_PATH` with a reason. Naming a half-annotated tranche
+# here FAILS and says which numbers are missing; it cannot quietly widen the
+# denominator. And `scope_axis` reports EVERY tranche, gated or not, so the
+# un-gated ones are visible in the output rather than only in prose.
+GATED_TRANCHES = frozenset({1})
 
 # First-tranche numbers NO capability of either surface reaches, each with the
 # reason. This is the half that makes silence impossible: a number with no row
@@ -705,14 +717,43 @@ def req(number: int) -> str:
     return f"REQ-{number:03d}"
 
 
+def tranche_accounting(
+    reach: dict[int, list[str]],
+) -> dict[int, tuple[int, int, tuple[int, ...]]]:
+    """Per tranche: reached by a live handle, declared unreached, UNACCOUNTED.
+
+    The third element is what makes a tranche's eligibility a measurement
+    rather than a claim. A number is accounted for when the surfaces actually
+    carry it or when `NO_REACH_PATH` says why they do not; anything else is a
+    requirement nobody has written down, and a tranche holding one of those
+    cannot be gated without publishing a coverage figure that under-reports.
+
+    Computed for EVERY declared tranche, including the un-gated ones, because
+    the un-gated ones are exactly what item 533 found nobody counting.
+    """
+    out: dict[int, tuple[int, int, tuple[int, ...]]] = {}
+    for tranche, nums in DELIVERY_TRANCHES.items():
+        reached = declared = 0
+        unaccounted: list[int] = []
+        for number in sorted(nums):
+            if reach.get(number):
+                reached += 1
+            elif number in NO_REACH_PATH:
+                declared += 1
+            else:
+                unaccounted.append(number)
+        out[tranche] = (reached, declared, tuple(unaccounted))
+    return out
+
+
 def scope_axis(
     flags: set[str], symbols: set[str], headings: set[str]
-) -> tuple[list[str], int, int, int]:
+) -> tuple[list[str], dict[int, tuple[int, int, tuple[int, ...]]]]:
     """Delivery scope against surface, measured in BOTH directions.
 
-    Returns the findings and, for the banner, how many requirements the gated
-    tranche holds, how many are reached by a named path, and how many are
-    declared unreached.
+    Returns the findings and the per-tranche accounting for the banner --
+    every tranche, so that a tranche this axis does not gate is still a
+    number in the output rather than a sentence in a closed debt item.
     """
     findings: list[str] = []
 
@@ -777,43 +818,63 @@ def scope_axis(
             "rather than about the surfaces"
         )
 
-    # (c) The gated tranche, in both directions.
-    gated = tuple(DELIVERY_TRANCHES.get(GATED_TRANCHE, ()))
-    if not gated:
-        findings.append(
-            f"delivery tranche {GATED_TRANCHE} is the one this axis gates and it "
-            f"holds no requirement, so the axis would pass over an empty "
-            f"population"
-        )
-    reached = declared = 0
-    for number in sorted(gated):
+    # (c) ACCOUNTING, computed for EVERY tranche and not only the gated ones.
+    #     This is the half item 533 was filed about: the second tranche's
+    #     silence was a scoping decision, and a decision that lives only in
+    #     prose is one no census counts.
+    #
+    #     A declaration that has outlived its fact is checked over the whole
+    #     numbering rather than over the gated part alone -- a NO_REACH_PATH
+    #     entry going stale is wrong wherever it sits, and confining that check
+    #     to the gated tranche is how it would be missed in the one that is
+    #     being annotated toward eligibility.
+    for number in sorted(set(NO_REACH_PATH) & space):
         paths = sorted(set(reach.get(number, [])))
-        note = NO_REACH_PATH.get(number)
-        if paths and note:
+        if paths:
             findings.append(
                 f"{req(number)} is declared to have no reach path and it HAS "
                 f"one: {'; '.join(paths)}. The declaration has outlived the fact "
                 f"under it -- drop the entry from NO_REACH_PATH"
             )
-        elif paths:
-            reached += 1
-        elif note:
-            declared += 1
-        else:
-            findings.append(
-                f"{req(number)} is in delivery tranche {GATED_TRANCHE} and no row "
-                f"names it with a live handle, nor does NO_REACH_PATH say why "
-                f"none does. Name it on the row of the capability that feeds it, "
-                f"or declare it -- a requirement nobody wrote down reads exactly "
-                f"like one that is delivered"
-            )
-    for number in sorted(set(NO_REACH_PATH) - set(gated)):
+    for number in sorted(set(NO_REACH_PATH) - space):
         findings.append(
-            f"NO_REACH_PATH declares {req(number)}, which delivery tranche "
-            f"{GATED_TRANCHE} does not hold. A declaration about a number this "
-            f"axis does not gate is prose wearing a table's clothes"
+            f"NO_REACH_PATH declares {req(number)}, which no delivery tranche "
+            f"holds. A declaration about a number outside the scope entirely is "
+            f"prose wearing a table's clothes"
         )
-    return findings, len(gated), reached, declared
+
+    accounting = tranche_accounting(reach)
+
+    # (d) Only a FULLY accounted tranche may be gated, and the gate says so
+    #     rather than widening its denominator over a half-annotated one.
+    if not GATED_TRANCHES:
+        findings.append(
+            "no delivery tranche is gated at all, so this axis would pass over "
+            "an empty population -- which is the state item 533 was filed to "
+            "make impossible"
+        )
+    for tranche in sorted(GATED_TRANCHES):
+        if tranche not in DELIVERY_TRANCHES:
+            findings.append(
+                f"delivery tranche {tranche} is named as gated and no such "
+                f"tranche is declared"
+            )
+            continue
+        reached, declared, unaccounted = accounting[tranche]
+        if not DELIVERY_TRANCHES[tranche]:
+            findings.append(
+                f"delivery tranche {tranche} is gated and holds no requirement, "
+                f"so the axis would pass over an empty population"
+            )
+        for number in unaccounted:
+            findings.append(
+                f"{req(number)} is in gated delivery tranche {tranche} and no "
+                f"row names it with a live handle, nor does NO_REACH_PATH say "
+                f"why none does. Name it on the row of the capability that "
+                f"feeds it, or declare it -- a requirement nobody wrote down "
+                f"reads exactly like one that is delivered"
+            )
+    return findings, accounting
 
 
 def main() -> int:
@@ -891,7 +952,7 @@ def main() -> int:
 
     # R2113 (open-debt item 531) — the SCOPE axis, run beside the three above so
     # that one run answers both questions a consumer has.
-    scope_findings, gated, reached, declared = scope_axis(flags, symbols, headings)
+    scope_findings, accounting = scope_axis(flags, symbols, headings)
     findings.extend(scope_findings)
 
     if findings:
@@ -1012,11 +1073,32 @@ def main() -> int:
         f"{len({(t, r) for t, r, _ in claims})} one-sided reason(s) still "
         f"resolve to a flag, a symbol, a row or a source file"
     )
+    # EVERY tranche, gated or not. The un-gated line is the whole repayment of
+    # item 533: before it, a tranche this axis does not cover was invisible
+    # here and its absence was explained only in prose, so "how far has
+    # delivery scope come" had a machine answer that silently meant "tranche 1".
+    for tranche in sorted(DELIVERY_TRANCHES):
+        reached, declared, unaccounted = accounting[tranche]
+        total = len(DELIVERY_TRANCHES[tranche])
+        if tranche in GATED_TRANCHES:
+            print(
+                f"  analysis-surface-scope: delivery tranche {tranche} GATED -- "
+                f"{total} requirement(s), {reached} reached by a named path on "
+                f"at least one surface, {declared} declared unreached"
+            )
+        else:
+            print(
+                f"  analysis-surface-scope: delivery tranche {tranche} NOT gated "
+                f"-- {total} requirement(s), {reached} already reached, "
+                f"{len(unaccounted)} not yet written down "
+                f"({', '.join(req(n) for n in unaccounted)}). It becomes "
+                f"gateable when that count is zero and it is added to "
+                f"GATED_TRANCHES"
+            )
     print(
-        f"  analysis-surface-scope: delivery tranche {GATED_TRANCHE} is "
-        f"{gated} requirement(s), {reached} reached by a named path on at "
-        f"least one surface, {declared} declared unreached; "
-        f"{annotated_rows()} row(s) carry a requirement number"
+        f"  analysis-surface-scope: {annotated_rows()} row(s) carry a "
+        f"requirement number; {len(GATED_TRANCHES)} of "
+        f"{len(DELIVERY_TRANCHES)} tranche(s) gated"
     )
     return 0
 
