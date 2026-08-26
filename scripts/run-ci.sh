@@ -6694,6 +6694,30 @@ layer_c1cf_reduced_features() {
     bash scripts/lib/reduced-features-gate.sh || return 1
 }
 
+# ─── Layer C1cn — every crate COMPILES the code behind its non-default ──
+#                 features
+#
+# R2133, unregistered open-debt item 176. C1cf's mirror: that lane asks whether
+# a crate survives its defaults being turned OFF, and nothing asked whether the
+# code behind a feature that is off BY DEFAULT is handed to rustc at all. It is
+# not — pre-push gate 3 is `cargo test -p <pkg>` with default features — so a
+# crate's non-default modules are not merely untested, they are never compiled.
+#
+# The class has now fired THREE times at the same shape, twice at the same two
+# fixtures in `wz-ap-demo`:
+#   R2095 added `PeerOpts.offer` and missed the `cfg(all(test, routing-peer,
+#         quic))` fixtures; R2096 repaired it after the fact.
+#   R2112 added `PeerOpts.timestamping` and missed the SAME two; it was still
+#         broken when this lane was written, and this lane is what found it.
+#   y839  is the instance item 176 was filed on — a probe reported green
+#         because the dissector was never compiled.
+#
+# Like C1cf it is a LANE and not only a pre-push arm, for the same reason: a
+# changed-crate filter cannot see a crate broken by a change elsewhere.
+layer_c1cn_nondefault_features() {
+    bash scripts/lib/nondefault-features-gate.sh || return 1
+}
+
 layer_c1i_cargo_test_scouting() {
     _runci_guarded_test C1i 12 \
         cargo test -p wz-runtime-tokio --features scouting-active --lib scouting_glue --quiet
@@ -15060,6 +15084,7 @@ run_layer C1ca layer_c1ca_cargo_test_derived_initial_sn || overall=1
 run_layer C1cb layer_c1cb_cargo_test_init_ack_admission || overall=1
 run_layer C1cg layer_c1cg_cargo_test_runtime_partition || overall=1
 run_layer C1cf layer_c1cf_reduced_features || overall=1
+run_layer C1cn layer_c1cn_nondefault_features || overall=1
 run_layer C1i layer_c1i_cargo_test_scouting || overall=1
 run_layer C1k layer_c1k_cargo_test_scouting_static || overall=1
 run_layer C1l layer_c1l_reassembly || overall=1

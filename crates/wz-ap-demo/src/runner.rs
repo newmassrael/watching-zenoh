@@ -6788,6 +6788,13 @@ mod peer_quic_cert_tests {
             #[cfg(feature = "scouting-responder")]
             scout_listen: None,
             connect_retry: wz::runtime_tokio::retry_period::RetryPolicy::ZENOH_DEFAULT,
+            // R2133 — R2112 added `PeerOpts.timestamping` and did not reach
+            // these two fixtures either, exactly as R2095 did with `offer` six
+            // lines up. The default is the OPERATOR SAID NOTHING (`stated:
+            // None`), which is what `from_argv` resolves for an absent
+            // `--timestamping` and what these BIND witnesses mean: they never
+            // relay a Put, so no stamping policy is under test here.
+            timestamping: crate::args::NodeTimestamping::default(),
         };
         let interceptors = InterceptorOpts {
             acl_deny: None,
@@ -6887,6 +6894,13 @@ mod peer_failfast_tests {
             #[cfg(feature = "scouting-responder")]
             scout_listen: None,
             connect_retry: wz::runtime_tokio::retry_period::RetryPolicy::ZENOH_DEFAULT,
+            // R2133 — R2112 added `PeerOpts.timestamping` and did not reach
+            // these two fixtures either, exactly as R2095 did with `offer` six
+            // lines up. The default is the OPERATOR SAID NOTHING (`stated:
+            // None`), which is what `from_argv` resolves for an absent
+            // `--timestamping` and what these BIND witnesses mean: they never
+            // relay a Put, so no stamping policy is under test here.
+            timestamping: crate::args::NodeTimestamping::default(),
         };
         let interceptors = InterceptorOpts {
             acl_deny: None,

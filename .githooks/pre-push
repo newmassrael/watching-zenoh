@@ -561,5 +561,32 @@ if ! bash scripts/lib/reduced-features-gate.sh "${pkgs[@]}"; then
     exit 1
 fi
 
-echo "pre-push: changed-crate tests + doc links + reduced features passed; full validation continues on hosted CI."
+# ─── gate 7 — changed-crate NON-DEFAULT FEATURE COMPILATION (R2133) ──
+# The mirror of gate 6, and the one that closes unregistered item 176. Gate 6
+# asks whether a changed crate survives its defaults being OFF; nothing asked
+# whether the code behind a feature that is off BY DEFAULT reaches rustc at
+# all. It does not: gate 3 above is `cargo test -p <pkg>` with default
+# features, so a crate's non-default modules are never compiled locally.
+#
+# This gate belongs at PUSH time specifically, because that is where the class
+# has landed every time. R2095 added a `PeerOpts` field and missed two
+# `cfg(all(test, routing-peer, quic))` fixtures; R2112 added another field and
+# missed the SAME two, and that break was still in the tree when R2133 wrote
+# this — found by the sweep, not by a person. Both reached origin.
+#
+# Cost, measured rather than assumed: the full sweep is ~126s over 19 crates,
+# so a push touching one is seconds. Crates with no non-default feature are
+# skipped by the script's own derivation and cost nothing.
+echo "pre-push: non-default feature compilation (Layer C1cn, subset): ${pkgs[*]}"
+if ! bash scripts/lib/nondefault-features-gate.sh "${pkgs[@]}"; then
+    echo "" >&2
+    echo "pre-push: a changed crate does not COMPILE with its non-default" >&2
+    echo "          features on — this is code no other local gate hands to" >&2
+    echo "          rustc, so fix it, or place the crate in a named tier in" >&2
+    echo "          scripts/lib/nondefault-features-gate.sh and say why." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+
+echo "pre-push: changed-crate tests + doc links + reduced + non-default features passed; full validation continues on hosted CI."
 exit 0
