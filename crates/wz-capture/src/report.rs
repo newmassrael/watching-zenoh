@@ -2894,8 +2894,27 @@ fn quote_into(value: &str, out: &mut String) {
 /// added, and [`crate::SkipCensus::total`] is the figure the dissection already
 /// cross-checks against `packets_skipped`.
 fn skips_json(sk: &crate::SkipCensus, s: &mut String) {
+    // R2121 (open-debt item 460) — the counters that CANNOT move, named.
+    //
+    // A count of zero says two different things and the document could only
+    // spell one of them: "nothing happened" and "nothing here ever could".
+    // A reader of `"ipv4_fragment": 0` on a capture full of fragments takes
+    // the first and is wrong. Membership is
+    // `crate::INERT_SKIP_COUNTERS`, whose own doc says what holds it.
+    //
+    // A LIST rather than a flag per counter, which is what item 460 called a
+    // design decision no single round should make: the decision disappears
+    // once the marker is membership in a class instead of a name beside each
+    // count. A class needs no name invented for it, and it costs one key
+    // however many counters go inert later.
+    let inert = crate::INERT_SKIP_COUNTERS
+        .iter()
+        .map(|c| alloc::format!("\"{c}\""))
+        .collect::<alloc::vec::Vec<_>>()
+        .join(",");
     s.push_str(&format!(
         "{{\"total\":{},\"bytes_absent\":{},\"not_this_protocol\":{},\"held\":{},\
+         \"inert_counters\":[{inert}],\
          \"unsupported_link_type\":{},\"truncated\":{},\
          \"not_ip\":{},\"not_transport\":{},\"ipv4_fragment\":{},\
          \"ip_fragment_pending\":{},\"vsock_non_payload\":{},\

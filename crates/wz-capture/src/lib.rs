@@ -252,6 +252,49 @@ use crate::tcp::StreamAssembler;
 /// census folded from it would be silently short on exactly the large captures
 /// that need one. These counters are incremented where the skip is decided,
 /// which is the only place the total is known.
+/// R2121 (open-debt item 460) — the skip counters this build CANNOT move,
+/// whatever the capture holds.
+///
+/// # The misreading this exists to end
+///
+/// `"ipv4_fragment": 0` in a document is read as "there were no fragments".
+/// On a capture of nothing but fragments it still reads zero, because
+/// R311y606 made `decapsulate` report every piece as
+/// [`link::Transport::IpFragment`] and left reassembly to the consumer, and
+/// this crate's consumer always reassembles — `frag` is not behind a feature.
+/// What actually moves is [`SkipCensus::ip_fragment_pending`].
+///
+/// R311y924 pinned that state with a test, which tells the AUTHOR and reaches
+/// no consumer at all. Item 460 is the half that reaches one: a reader holding
+/// the document can now tell a count that stayed at zero from a count that
+/// could never have been anything else.
+///
+/// # Why a declared class and not a removal
+///
+/// Not because a removal is forbidden — item 460 recorded that it was, and
+/// that was WRONG twice over. [`doc_revision::audit`] makes a removal an
+/// ordinary two-step edit (announce in `retiring`, drop in the next revision),
+/// which is exactly what R2119 built. But the dance takes TWO revisions by
+/// design, so that a consumer pinned to the first one has a window to migrate;
+/// spending both in a single round would satisfy the machinery and defeat the
+/// reason it exists.
+///
+/// An ADDED key needs no window. It is in contract on the day it ships, it
+/// breaks no reader, and it answers the question the counters were being
+/// misread for. That the counters also become removable later is a separate
+/// edit, and this one does not spend its window.
+///
+/// # What membership means, and what holds it
+///
+/// A member is a counter with NO PRODUCER: nothing in this build constructs
+/// the [`link::SkipReason`] variant that increments it. That is a claim about
+/// behaviour, so behaviour holds it — see
+/// `every_inert_counter_is_driven_by_a_capture_that_would_move_it`, which
+/// drives each member's own path and asserts the counter stayed at zero while
+/// the counter that really moved did move. A member with no such driver does
+/// not compile.
+pub const INERT_SKIP_COUNTERS: &[&str] = &["ipv4_fragment", "ipv6_fragment"];
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SkipCensus {
     /// The capture's link type is not decapsulated by this build.
@@ -8185,6 +8228,176 @@ mod datagram_tests {
              is not: this capture is a fragment and the counter is zero"
         );
         assert_eq!(sk.ipv6_fragment, 0, "and its v6 twin cannot move either");
+    }
+
+    /// R2121 (open-debt item 460) — EVERY COUNTER THE DOCUMENT CALLS INERT IS
+    /// DRIVEN BY A CAPTURE THAT WOULD HAVE MOVED IT.
+    ///
+    /// # Why the list needs this and not a reader's trust
+    ///
+    /// [`crate::INERT_SKIP_COUNTERS`] is published in the summary document, so
+    /// a consumer now acts on it: a counter named there is one they will stop
+    /// reading. A list like that is worth exactly what checks it, and a list
+    /// checked by nothing is worse than no list — it converts a misreading a
+    /// careful reader could catch into one the document invited.
+    ///
+    /// So each member is driven HERE, by the capture that would produce it,
+    /// with the counter that really moves asserted FIRST. Without that
+    /// discriminator a build that dropped the packet for some other reason
+    /// entirely would satisfy the zero and prove nothing — the failure
+    /// R311y924 wrote down and the one this test inherits.
+    ///
+    /// # Why the destructure
+    ///
+    /// A counter added to [`SkipCensus`] fails to compile below until someone
+    /// says which class it is in. The population is the struct, not the list:
+    /// a list that only ever grows by hand is one that silently stops covering
+    /// the thing it names, which is item 400's prescription and R2119's
+    /// measured cost — a key list written by hand was wrong in BOTH directions.
+    #[test]
+    fn every_inert_counter_is_driven_by_a_capture_that_would_move_it() {
+        // Each inert counter, with a capture that exercises ITS path and the
+        // counter that moves instead. A member with no row here is a claim
+        // nothing drives, and the assertion below refuses it.
+        #[allow(clippy::type_complexity)]
+        let drivers: &[(&str, fn() -> (SkipCensus, usize))] = &[
+            ("ipv4_fragment", || {
+                let mut d = Dissection::new();
+                d.push_packet(LINKTYPE_ETHERNET, 0, &ipv4_fragment_probe());
+                let sk = d.skip_census().clone();
+                let moved = sk.ip_fragment_pending;
+                (sk, moved)
+            }),
+            ("ipv6_fragment", || {
+                let mut d = Dissection::new();
+                d.push_packet(LINKTYPE_ETHERNET, 0, &ipv6_fragment_probe());
+                let sk = d.skip_census().clone();
+                let moved = sk.ip_fragment_pending;
+                (sk, moved)
+            }),
+        ];
+
+        // Reading a counter BY NAME off the census, so the driver table and
+        // the published list speak the same vocabulary the document does.
+        let read = |sk: &SkipCensus, name: &str| -> usize {
+            match name {
+                "ipv4_fragment" => sk.ipv4_fragment,
+                "ipv6_fragment" => sk.ipv6_fragment,
+                other => panic!("no reader for the inert counter {other:?}"),
+            }
+        };
+
+        let mut failures: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
+        for name in crate::INERT_SKIP_COUNTERS {
+            let Some((_, drive)) = drivers.iter().find(|(n, _)| n == name) else {
+                failures.push(alloc::format!(
+                    "{name} is published as inert and no capture here drives it"
+                ));
+                continue;
+            };
+            let (sk, moved) = drive();
+            if moved == 0 {
+                failures.push(alloc::format!(
+                    "{name}: the fixture never reached the path, so its zero proves nothing"
+                ));
+            }
+            let seen = read(&sk, name);
+            if seen != 0 {
+                failures.push(alloc::format!(
+                    "{name} is published as inert and this capture moved it to {seen}. \
+                     Something now produces it: take it out of \
+                     `INERT_SKIP_COUNTERS` and decide what the counter means."
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+
+        // Every driver must be claimed by the published list, or the table
+        // grows rows for counters nobody calls inert.
+        for (name, _) in drivers {
+            assert!(
+                crate::INERT_SKIP_COUNTERS.contains(name),
+                "{name} is driven here but is not published as inert"
+            );
+        }
+
+        // The destructure: a field added to `SkipCensus` fails to compile
+        // until it is listed, and listing it is where someone answers whether
+        // this build can move it.
+        let SkipCensus {
+            unsupported_link_type: _,
+            unsupported_link_types: _,
+            truncated: _,
+            not_ip: _,
+            not_transport: _,
+            not_transport_protos: _,
+            // The two members of the class, and the only two.
+            ipv4_fragment: _,
+            ipv6_fragment: _,
+            ip_fragment_pending: _,
+            vsock_non_payload: _,
+            ipv6_extension_chain: _,
+            unwalked_encapsulation: _,
+            unwalked_encapsulations: _,
+            encapsulation_too_deep: _,
+            encapsulation_too_deep_protos: _,
+            gre_payload: _,
+            gre_payloads: _,
+        } = SkipCensus::default();
+    }
+
+    /// One IPv4 fragment: the first piece of a datagram whose rest never
+    /// arrives, which is what leaves the reassembler holding it.
+    fn ipv4_fragment_probe() -> alloc::vec::Vec<u8> {
+        let mut msg = alloc::vec![wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        msg.extend_from_slice(&[0u8; 47]);
+        let mut udp = alloc::vec![0u8; 4];
+        udp.extend_from_slice(&((8 + msg.len()) as u16).to_be_bytes());
+        udp.extend_from_slice(&0u16.to_be_bytes());
+        udp.extend_from_slice(&msg);
+        ipv4_fragment(
+            [10, 0, 0, 1],
+            [10, 0, 0, 2],
+            0x4242,
+            17,
+            0,
+            true,
+            &udp[..24],
+        )
+    }
+
+    /// The v6 twin: the first piece of a datagram carried under IPv6's
+    /// Fragment extension header (next header 44), whose rest never arrives.
+    fn ipv6_fragment_probe() -> alloc::vec::Vec<u8> {
+        let mut msg = alloc::vec![wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        msg.extend_from_slice(&[0u8; 47]);
+        let mut udp = alloc::vec![0u8; 4];
+        udp.extend_from_slice(&((8 + msg.len()) as u16).to_be_bytes());
+        udp.extend_from_slice(&0u16.to_be_bytes());
+        udp.extend_from_slice(&msg);
+        let piece = &udp[..24];
+
+        // The Fragment header: next header, reserved, then offset<<3 with the
+        // MORE bit in the low bit, then the identification.
+        let mut frag = alloc::vec![17u8, 0];
+        frag.extend_from_slice(&0x0001u16.to_be_bytes());
+        frag.extend_from_slice(&0x4242_4242u32.to_be_bytes());
+        frag.extend_from_slice(piece);
+
+        let mut ip = alloc::vec![0x60u8, 0, 0, 0];
+        ip.extend_from_slice(&(frag.len() as u16).to_be_bytes());
+        ip.extend_from_slice(&[44, 64]);
+        ip.extend_from_slice(&[0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        ip.extend_from_slice(&[0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
+        ip.extend_from_slice(&frag);
+
+        let mut eth = alloc::vec![0u8; 12];
+        eth.extend_from_slice(&[0x86, 0xDD]);
+        eth.extend_from_slice(&ip);
+        while eth.len() < 60 {
+            eth.push(0);
+        }
+        eth
     }
 
     /// The NEGATIVE arm: the same bytes delivered as one unfragmented datagram

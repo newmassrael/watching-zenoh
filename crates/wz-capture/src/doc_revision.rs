@@ -143,6 +143,24 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         keys: SUMMARY_R1_KEYS,
         retiring: &[],
     },
+    // R2121 (open-debt item 460) — revision 2 ADDS `inert_counters` and
+    // retires nothing. Two skip counters cannot move in this build whatever
+    // the capture holds, and the document had no way to say so: a reader of
+    // `"ipv4_fragment": 0` on a capture of nothing but fragments concluded
+    // there were none.
+    //
+    // An ADDITION on purpose. Item 460 recorded that removing the two keys
+    // needed a contract break, which was wrong — `audit` above makes a removal
+    // an ordinary announce-then-drop — but the dance costs TWO revisions by
+    // design, so a consumer pinned to the first has a window. Spending both in
+    // one round would honour the machinery and defeat it. A key that only ever
+    // ADDS needs no window at all.
+    DocumentShape {
+        document: SUMMARY,
+        revision: 2,
+        keys: SUMMARY_R2_KEYS,
+        retiring: &[],
+    },
     DocumentShape {
         document: READABLE_SURFACES,
         revision: 1,
@@ -513,6 +531,99 @@ pub const SUMMARY_R1_KEYS: &[&str] = &[
     "ws_recoveries",
     "ws_resync_skipped_bytes",
 ];
+/// The summary document's key set at revision 2 — revision 1 plus
+/// `inert_counters` (R2121, open-debt item 460).
+///
+/// MEASURED, like every set here: the pin test in `wz-capi-dissect` printed
+/// what the document emits and this was filled from that printout. A
+/// hand-extended copy of the 83 names above is the edit R2119 measured going
+/// wrong in BOTH directions on a smaller list.
+pub const SUMMARY_R2_KEYS: &[&str] = &[
+    "bytes_absent",
+    "caps",
+    "capture_reported_drops",
+    "completed",
+    "datagram_flows",
+    "desyncs",
+    "document",
+    "dropped_by_limits",
+    "duplicates",
+    "encapsulation_depth_bound",
+    "encapsulation_too_deep",
+    "encapsulations",
+    "evicted",
+    "expired",
+    "flows",
+    "fragments",
+    "frames",
+    "frames_per_flow",
+    "framing",
+    "gap_bytes_missing",
+    "gaps",
+    "gaps_forced",
+    "gre_payload",
+    "gre_payloads",
+    "health",
+    "held",
+    "inert_counters",
+    "ip_checksum_absent",
+    "ip_checksum_invalid",
+    "ip_checksum_valid",
+    "ip_fragment_pending",
+    "ipv4_fragment",
+    "ipv6_extension_chain",
+    "ipv6_fragment",
+    "link_types",
+    "malformed",
+    "max_flows_per_table",
+    "max_scout_askers",
+    "missing",
+    "name",
+    "not_ip",
+    "not_this_protocol",
+    "not_transport",
+    "not_transport_protos",
+    "open",
+    "out_of_order",
+    "out_of_window",
+    "overlapping",
+    "partial_overlaps",
+    "pieces",
+    "recoveries",
+    "reserved_headers",
+    "resync_skipped_bytes",
+    "retransmits",
+    "revision",
+    "scout_askers",
+    "sequence",
+    "skipped",
+    "skipped_packets",
+    "skips",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "streams",
+    "tcp_flows",
+    "too_deep_protos",
+    "total",
+    "transport_checksum_absent",
+    "transport_checksum_invalid",
+    "transport_checksum_valid",
+    "truncated",
+    "tunnel_checksum_absent",
+    "tunnel_checksum_invalid",
+    "tunnel_checksum_valid",
+    "uncorroborated_layers",
+    "unfinished",
+    "unfinished_bytes",
+    "unsupported_link_type",
+    "unwalked_encapsulation",
+    "vsock_non_payload",
+    "without_resolution",
+    "ws_desyncs",
+    "ws_recoveries",
+    "ws_resync_skipped_bytes",
+];
+
 /// The readable-surfaces document's key set at revision 1.
 pub const READABLE_SURFACES_R1_KEYS: &[&str] = &[
     "document",
@@ -857,7 +968,9 @@ mod tests {
             // `first_packet`'s retirement was announced.
             (CENSUS, 2u32),
             (FIELDS, 1),
-            (SUMMARY, 1),
+            // R2121 (open-debt item 460) — the summary moved to 2 when it
+            // gained `inert_counters`.
+            (SUMMARY, 2),
             (READABLE_SURFACES, 2),
             (SELECTOR_DIAGNOSE, 1),
             (DECLARATIONS_DIAGNOSE, 1),
