@@ -819,9 +819,13 @@ impl<'a> Walk<'a> {
                 None if self.at_break()? => break,
                 _ => {}
             }
-            let segment = self.key_segment()?;
+            let (segment, key_id) = self.key_segment()?;
             if let Some(seen) = seen.as_mut() {
-                if !seen.insert(segment.clone()) {
+                // R2126 (open-debt item 447) — the IDENTITY, not the segment.
+                // An unnamed key's segment is a locator and two locators never
+                // collide, which is why the container-key half of §5.6 was
+                // structurally uncountable.
+                if !seen.insert(key_id) {
                     dup += 1;
                 }
             }
@@ -1003,18 +1007,60 @@ impl<'a> Walk<'a> {
     }
 
     /// Walk a map key without emitting a row for it, and render it as a path
-    /// segment. See the module doc for why each form looks the way it does.
-    fn key_segment(&mut self) -> Result<Segment, CborErr> {
+    /// segment AND as the identity §5.6 compares it by.
+    ///
+    /// # Why the two are not the same string (R2126, open-debt item 447)
+    ///
+    /// The SEGMENT has to locate: two rows may not be told apart by anything
+    /// else, so an unnamed key gets `\x<offset>` and an offset is unique by
+    /// construction. The IDENTITY has to compare: §2's data model calls
+    /// `{[]: 1, []: 2}` one key twice, and a locator can never say so.
+    ///
+    /// Item 441 built the check on the segment, which is right for every named
+    /// form -- the segment is derived from the VALUE, so the immediate `1` and
+    /// the one-byte `1` land on one string, which byte comparison would have
+    /// got wrong. It is exactly wrong for the unnamed forms, and item 447 is
+    /// that gap.
+    ///
+    /// # The identity for an unnamed key is walked, not re-encoded
+    ///
+    /// The obvious fix is to compare the key item's BYTES. That is what item
+    /// 447 proposed and it is a worse answer than it looks: bytes make
+    /// `[1]` and `(_ 1)` different keys, which §2 says they are not, so the
+    /// check would trade one wrong answer for another. Canonicalising the
+    /// bytes instead means writing a second CBOR encoder beside this decoder,
+    /// which is the "second opinion about what CBOR is" this module refuses on
+    /// the same grounds `json_keys` refuses a second parser.
+    ///
+    /// So the identity is produced by THIS walk: the key is walked into a
+    /// SCRATCH emitter and the rows it produces -- paths and renderings, both
+    /// already value-derived -- are the description compared. `, indefinite`
+    /// is stripped, because it is a wire fact and §2 equality is not about the
+    /// wire.
+    ///
+    /// The scratch emitter is installed only when rows are being emitted at
+    /// all, so `scan_cbor` -- the path every payload in a capture runs through
+    /// -- still allocates nothing here, which is the cost item 441 named.
+    fn key_segment(&mut self) -> Result<(Segment, KeyId), CborErr> {
         let at = self.i;
-        // The emitter is set aside rather than branched on: a key is validated
-        // exactly as any other item, and suppressing the row here is what keeps
-        // `item` free of a "am I a key" parameter it would have to thread
-        // through every arm.
+        // The real emitter is set aside rather than branched on: a key is
+        // validated exactly as any other item, and suppressing its row here is
+        // what keeps `item` free of a "am I a key" parameter it would have to
+        // thread through every arm.
         let saved = self.emit.take();
+        let scratch = saved.as_ref().map(|_| Emit {
+            fields: Vec::new(),
+            path: Path::from(""),
+        });
+        let describing = scratch.is_some();
+        self.emit = scratch;
         let walked = self.item();
+        let scratch = self.emit.take();
         self.emit = saved;
         let (_, form) = walked?;
-        Ok(match form {
+
+        let id = |segment: &Segment| KeyId::Named(segment.clone());
+        let segment = match form {
             KeyForm::Text(s) => Segment::text(s),
             KeyForm::Int(v) => Reserved::Int.segment(&alloc::format!("{v}")),
             KeyForm::Bytes(raw) => {
@@ -1034,7 +1080,16 @@ impl<'a> Walk<'a> {
             KeyForm::Simple(word) => Reserved::Simple.segment(word),
             KeyForm::SimpleOther(n) => Reserved::Simple.segment(&alloc::format!("{n}")),
             KeyForm::Opaque => Reserved::Opaque.segment(&alloc::format!("{at}")),
-        })
+        };
+        let key_id = match form {
+            // The unnamed forms: identity is the DESCRIPTION, never the
+            // locator. Without a scratch emitter there is no dup set either,
+            // so the locator stands in and is never compared.
+            KeyForm::Opaque if describing => KeyId::Described(describe(scratch)),
+            KeyForm::Opaque => KeyId::Named(segment.clone()),
+            _ => id(&segment),
+        };
+        Ok((segment, key_id))
     }
 
     /// Is the next byte a break? Consumes it when it is.
@@ -1063,6 +1118,49 @@ impl<'a> Walk<'a> {
     fn leave(&mut self) {
         self.depth -= 1;
     }
+}
+
+/// R2126 (open-debt item 447) — what §5.6 compares two map keys BY.
+///
+/// Two variants because the two kinds of key are identified by different
+/// things and pretending otherwise is the defect item 447 records: a named
+/// key's path segment is already derived from its value, and an unnamed key's
+/// segment is a LOCATOR that is unique by construction and can therefore never
+/// equal another.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum KeyId {
+    /// A key whose segment renders its value: the segment IS the identity.
+    Named(Segment),
+    /// A container, tag or indefinite string: the walk's own description of
+    /// it, which is value-derived where the segment was positional.
+    Described(String),
+}
+
+/// The rows a scratch walk produced, rendered as one comparable description.
+///
+/// R2126 (open-debt item 447) — `, indefinite` is STRIPPED. It is a wire fact
+/// the document carries on purpose, and §2's data model does not know about
+/// it: `[]` and `(_ )` are one key, so an identity that kept the note would
+/// call them two and item 447 would be half-closed with a new wrong answer in
+/// the other half.
+///
+/// The separator is a control character no path or rendering contains, so two
+/// different row lists cannot collide by concatenation.
+fn describe(scratch: Option<Emit>) -> String {
+    let mut out = String::new();
+    let Some(scratch) = scratch else {
+        return out;
+    };
+    for field in &scratch.fields {
+        out.push('\u{1}');
+        out.push_str(field.path.as_str());
+        out.push('\u{2}');
+        out.push_str(match field.value.strip_suffix(indef_note(true)) {
+            Some(stripped) => stripped,
+            None => field.value.as_str(),
+        });
+    }
+    out
 }
 
 /// `, indefinite` when it was, and nothing when it was not — a wire fact a
@@ -1650,22 +1748,78 @@ mod tests {
         );
     }
 
-    /// R311y916 (item 441) — WHAT THIS CHECK CANNOT SEE, pinned rather than
-    /// left to be discovered.
+    /// R2126 (open-debt item 447) — A CONTAINER KEY REPEATED IS A DUPLICATE,
+    /// which is the assertion this test used to make in the other direction.
     ///
-    /// A key with no name gets a `\x<offset>` segment, and an offset is unique
-    /// by construction — so two IDENTICAL container keys are two different
-    /// segments and this check does not count them. That is a real gap in
-    /// §5.6 coverage and it is asserted here so a later reader finds it stated
-    /// instead of assuming the check is total.
+    /// # What it said before, and why inverting it is the landing signal
+    ///
+    /// Item 441 built §5.6 on path-segment equality, which is right for every
+    /// NAMED key and structurally blind for the rest: an unnamed key gets a
+    /// `\x<offset>` locator, an offset is unique by construction, so two
+    /// identical container keys were two different segments and could never be
+    /// counted. R311y916 pinned that gap here rather than leave it to be
+    /// discovered, and item 447 recorded that inverting this test is what
+    /// landing the fix looks like.
+    ///
+    /// The identity is now the walk's own description of the key rather than
+    /// its position -- see `key_segment`.
+    ///
+    /// # Every arm, because the fix has two ways to be wrong
+    ///
+    /// It could count keys that are NOT equal, which is worse than the silence
+    /// it replaces: item 434's whole subject is that a false "invalid" on a
+    /// well-formed publisher's traffic costs more than a missed one. So the
+    /// distinct-container arm is here, and so is the arm that pairs a
+    /// container key with a scalar one.
     #[test]
-    fn duplicate_container_keys_are_not_counted_and_that_is_pinned() {
+    fn a_container_key_repeated_is_counted_as_a_duplicate() {
         // {[]: 1, []: 2} -- the same key twice, by §2's data model.
         let body = &[0xa2, 0x80, 0x01, 0x80, 0x02];
         let fields = walk_cbor(body).expect("a two-pair map");
         assert_eq!(
+            fields[0].value, "map 2 pair(s), 1 duplicate key(s)",
+            "`[]` twice is one key twice, whatever offset each copy sits at"
+        );
+
+        // {[]: 1, [1]: 2} -- two DIFFERENT container keys.
+        let distinct = &[0xa2, 0x80, 0x01, 0x81, 0x01, 0x02];
+        let fields = walk_cbor(distinct).expect("a two-pair map");
+        assert_eq!(
             fields[0].value, "map 2 pair(s)",
-            "a locator-keyed pair is outside what segment equality can compare"
+            "`[]` and `[1]` are different keys and must not be counted"
+        );
+
+        // {[]: 1, 0: 2} -- a container key beside a scalar one. Neither may
+        // be mistaken for the other, and the identity of one must not be the
+        // empty description that would match anything.
+        let mixed = &[0xa2, 0x80, 0x01, 0x00, 0x02];
+        let fields = walk_cbor(mixed).expect("a two-pair map");
+        assert_eq!(
+            fields[0].value, "map 2 pair(s)",
+            "an array key and an integer key are different keys"
+        );
+    }
+
+    /// R2126 (open-debt item 447) — AND THE COMPARISON IS BY VALUE, so the
+    /// wire's choice of encoding does not invent or hide a duplicate.
+    ///
+    /// # Why bytes were the wrong answer
+    ///
+    /// Item 447 proposed comparing the key item's byte span. That would make
+    /// `[1]` and `(_ 1)` different keys, which §2 says they are not -- trading
+    /// item 441's missed duplicates for false ones. This asserts the direction
+    /// bytes would get wrong, which is the only reason the identity is walked
+    /// rather than sliced.
+    #[test]
+    fn two_encodings_of_one_container_key_are_one_key() {
+        // {[1]: 1, (_ 1): 2} -- a definite array and an indefinite one
+        // carrying the same element. One key by §2, two byte spans on the wire.
+        let body = &[0xa2, 0x81, 0x01, 0x01, 0x9f, 0x01, 0xff, 0x02];
+        let fields = walk_cbor(body).expect("a two-pair map");
+        assert_eq!(
+            fields[0].value, "map 2 pair(s), 1 duplicate key(s)",
+            "the definite and indefinite spellings of `[1]` are one key, and a \
+             byte comparison would have called them two"
         );
     }
 
