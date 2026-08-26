@@ -263,6 +263,18 @@ fn main() -> ExitCode {
         }
     };
 
+    // R2112 (open-debt items 102 + 210) — `--timestamping <true|false>`, read
+    // ONCE beside the tuning above and for the same reason: it is a NODE-scoped
+    // policy, so every run mode must resolve one answer, and a malformed value
+    // must stop the node rather than start it under the other policy.
+    let timestamping = match crate::args::NodeTimestamping::from_argv(rest) {
+        Ok(t) => t,
+        Err(message) => {
+            eprintln!("wz-ap-demo: {message}");
+            return ExitCode::from(2);
+        }
+    };
+
     // R311qa — `--router <addr>` selects the multi-peer router mode (bind once,
     // HOLD N concurrent peer faces — the routing-router foundation), handled
     // before the single-session role parse below (which requires exactly one of
@@ -734,6 +746,10 @@ fn main() -> ExitCode {
                     scout_listen,
                     connect_retry: peer_connect_retry,
                     offer: peer_offer,
+                    // R2112 (open-debt items 102 + 210) — zenoh
+                    // `timestamping.enabled`, resolved by the forwarder against
+                    // the `WhatAmI::Peer` this run-mode announces.
+                    timestamping,
                 },
                 InterceptorOpts {
                     acl_deny,
@@ -938,6 +954,10 @@ fn main() -> ExitCode {
                     // `autoconnect: ["router"]` default reach a wz node at all.
                     scout_listen,
                     offer,
+                    // R2112 (open-debt items 102 + 210) — zenoh
+                    // `timestamping.enabled`, resolved by the forwarder against
+                    // the `WhatAmI::Router` this run-mode announces.
+                    timestamping,
                 },
             );
         }
@@ -2226,6 +2246,7 @@ fn main() -> ExitCode {
             reply_log_spec,
             zid_override,
             tuning,
+            timestamping,
         )
         .await
     });

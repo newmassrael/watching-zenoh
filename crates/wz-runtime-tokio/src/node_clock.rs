@@ -112,6 +112,38 @@ impl TimestampingEnabled {
         }
     }
 
+    /// The map with ONE role's entry replaced — what a config document that
+    /// states `timestamping/enabled` for this node's run-mode means.
+    ///
+    /// R2112 (open-debt items 102 + 210) — a stock zenoh document resolves this
+    /// key against the reading node's own `whatami`
+    /// (`config.timestamping().enabled().get(whatami)`), so what a host learns
+    /// from its file is ONE role's boolean, not a whole map. Overriding just
+    /// that entry keeps the other two at zenoh's shipped values instead of
+    /// flattening all three to the one the file happened to answer for — which
+    /// [`Self::all`] would do, and which would be a claim the document never
+    /// made.
+    ///
+    /// The resolved role is the one the node PLAYS, so a router-hat host writes
+    /// [`WhatAmI::Router`] and the entry it overrides is the entry
+    /// [`Self::get`] will read back.
+    pub const fn with_role(self, whatami: WhatAmI, enabled: bool) -> Self {
+        match whatami {
+            WhatAmI::Router => Self {
+                router: enabled,
+                ..self
+            },
+            WhatAmI::Peer => Self {
+                peer: enabled,
+                ..self
+            },
+            WhatAmI::Client => Self {
+                client: enabled,
+                ..self
+            },
+        }
+    }
+
     /// Resolve the map against THIS node's role — zenoh's
     /// `config.timestamping().enabled().get(whatami)`.
     pub const fn get(self, whatami: WhatAmI) -> bool {

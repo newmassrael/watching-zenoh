@@ -1779,6 +1779,38 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         session
     }
 
+    /// Rebuild this session's node clock against the `timestamping.enabled` map
+    /// a HOST read out of its config document.
+    ///
+    /// R2112 (open-debt item 102) — [`Self::new`] derives the clock from
+    /// zenoh's shipped map LITERALLY, and that was the only reachable spelling:
+    /// wz's config reader parsed `timestamping/enabled` into
+    /// `ZenohNodeConfig::timestamping` and the value had nowhere to go, so the
+    /// key was honoured by the reader and ignored by the node. The item's own
+    /// note is why this is a BUILDER rather than a parameter on `new` — that
+    /// ctor has over a hundred call sites, and every one of them wants exactly
+    /// the default this method exists to displace.
+    ///
+    /// The role and identity are NOT re-supplied: they are already this
+    /// session's handshake facts (`actions.params.whatami` / `.zid`), the same
+    /// two `new` derived the clock from. Passing them again would be a second
+    /// assertion of a fact the session already holds, and the two could drift.
+    ///
+    /// Chain it onto the ctor, as the other session builders are chained:
+    ///
+    /// ```text
+    /// let session = TokioSession::new(actions, observer, clock)
+    ///     .with_timestamping(TimestampingEnabled::default().with_role(role, on));
+    /// ```
+    pub fn with_timestamping(mut self, enabled: crate::node_clock::TimestampingEnabled) -> Self {
+        self.node_hlc = crate::node_clock::NodeHlc::for_node(
+            &self.transport.params.zid,
+            self.transport.params.whatami,
+            enabled,
+        );
+        self
+    }
+
     /// Borrow the outbound action handle. Useful when the caller
     /// needs to invoke non-publish methods like `send_declare_*` or
     /// `send_request_query` directly on the actions surface.

@@ -2035,6 +2035,7 @@ pub(crate) async fn run_demo(
     reply_log_spec: ReplyConsumerSpec,
     zid_override: Option<Vec<u8>>,
     tuning: TransportTuning,
+    timestamping: crate::args::NodeTimestamping,
 ) -> io::Result<()> {
     let QueryRoleSpec {
         queryable: queryable_spec,
@@ -2062,6 +2063,12 @@ pub(crate) async fn run_demo(
     // loop, and sweep_task (TokioTime is Copy, so every copy is the same epoch).
     let session_clock = TokioTime::new();
     let mut params = demo_session_init_params(role.node_kind(), tuning)?;
+    // R2112 (open-debt items 102 + 210) — the role this node ANNOUNCES, read
+    // off the params BEFORE they are moved into whichever open path this
+    // lifecycle mode takes. It is the role `timestamping.enabled` resolves
+    // against, and reading it here rather than restating `role.node_kind()`'s
+    // mapping keeps one answer: `demo_session_init_params` owns that mapping.
+    let node_whatami = params.whatami;
     // `--zid <hex>` override: give this session node a DISTINCT identity so it can
     // coexist with another session node inside a router mesh (the mesh graph keys
     // on zid; the hardcoded demo zid would collide). No override -> the default.
@@ -2326,7 +2333,19 @@ pub(crate) async fn run_demo(
     // R311cw — Session::new takes `Arc<T>` clock; wrapping the shared
     // `session_clock` keeps the monotonic epoch load-bearing for the R261
     // register-time deadline_ms vs sweep-time now_ms comparison.
-    let session = TokioSession::new(actions.clone(), observer.clone(), Arc::new(session_clock));
+    // R2112 (open-debt items 102 + 210) — the node clock this session hands to
+    // its auto-stamp consumers is built from the OPERATOR's
+    // `timestamping.enabled` map, not from zenoh's shipped one literally. The
+    // live consumer in this binary is `--advanced-publish`: `AdvancedPublisher`
+    // borrows `session.node_hlc()` for its `FallbackStamp`, so a document that
+    // enables timestamping for this node's role is what decides whether its
+    // cached puts carry an HLC stamp or a bare wall clock.
+    //
+    // The role is `node_whatami`, read off the same `params` the handshake
+    // announced, so this session and its wire role cannot disagree about which
+    // entry of the map applies.
+    let session = TokioSession::new(actions.clone(), observer.clone(), Arc::new(session_clock))
+        .with_timestamping(timestamping.map_for(node_whatami));
 
     // Read the matching knob BEFORE `publisher_spec` moves into spawn_tasks.
     let matching_publisher_keyexpr: Option<&str> = publisher_spec
@@ -3176,6 +3195,15 @@ pub(crate) struct PeerOpts {
     /// failure mode that looks healthy, which is the whole argument for
     /// `parse_connect_retry` returning `Result`.
     pub connect_retry: wz::runtime_tokio::retry_period::RetryPolicy,
+    /// R2112 (open-debt items 102 + 210) — `--timestamping` (zenoh
+    /// `timestamping.enabled`): whether this PEER stamps the un-timestamped Puts
+    /// it relays.
+    ///
+    /// The direction this field opens is the one wz could not express at all:
+    /// zenoh's shipped map disables a peer, so absent the flag nothing changes,
+    /// and `timestamping: { enabled: { peer: true } }` — a document a real zenoh
+    /// peer answers by stamping — reached no behaviour here.
+    pub timestamping: crate::args::NodeTimestamping,
 }
 
 #[cfg(feature = "routing-peer")]
@@ -3365,7 +3393,15 @@ async fn run_peer_until(
     // infallible `Zid::from_slice` is the right boundary ctor (a wire zid would
     // use the validating `Zid::try_from`). Borrows `params.zid`, leaving it owned
     // by `params` to pass on to peer_loop below.
-    let forwarder = LinkstateForwarder::new(Zid::from_slice(&params.zid), WhatAmI::Peer);
+    // R2112 (open-debt items 102 + 210) — the `timestamping.enabled` map this
+    // node runs with, resolved against the role it ANNOUNCES. The forwarder is
+    // seeded with `WhatAmI::Peer` and resolves the same map against that same
+    // role, so the two cannot disagree about which entry applies.
+    let forwarder = LinkstateForwarder::with_timestamping(
+        Zid::from_slice(&params.zid),
+        WhatAmI::Peer,
+        opts.timestamping.map_for(WhatAmI::Peer),
+    );
     // `--peer-mode` (zenoh `routing.peer.mode`). Set BEFORE any face registers,
     // because the mode governs how the very first inbound flood is ingested; a
     // node that learned one flood in the wrong mode has already mis-shaped its
@@ -4582,6 +4618,14 @@ pub(crate) struct RouterHatOpts {
     /// words `--peer` reads. The item named `--peer` AND `--router-hat`, because
     /// both dial through `peer_loop` and neither built a [`SessionOffer`].
     pub offer: SessionOffer,
+    /// R2112 (open-debt items 102 + 210) — `--timestamping` (zenoh
+    /// `timestamping.enabled`): whether this ROUTER stamps the un-timestamped
+    /// Puts it relays. `Default` is the operator saying nothing, which resolves
+    /// to zenoh's shipped map — and for a router that map says `true`, so the
+    /// SHIPPED router keeps stamping without any flag. The flag exists to make
+    /// the OFF policy reachable, which until this round it was not: the wz
+    /// router stamped whatever the operator's document said.
+    pub timestamping: crate::args::NodeTimestamping,
 }
 
 #[cfg(feature = "router-hat-router")]
@@ -4777,7 +4821,16 @@ async fn run_router_hat_until(
     // validating `Zid::try_from`). No set_self_locators (a pure router advertises
     // no dial hint — topology still converges over the accepted/dialed faces), no
     // interceptors (admit-all), no autoconnect (dial only the configured set).
-    let forwarder = RouterForwarder::new(Zid::from_slice(&params.zid));
+    // R2112 (open-debt items 102 + 210) — the `timestamping.enabled` map this
+    // node runs with, resolved against the role it ANNOUNCES. A router-hat is a
+    // `WhatAmI::Router` on the wire (`demo_session_init_params(NodeKind::RouterHat, ..)`),
+    // and the map is resolved against that same role inside the forwarder, so
+    // the two cannot disagree about which entry applies.
+    let node_timestamping = opts
+        .timestamping
+        .map_for(wz::runtime_tokio::session_glue::WhatAmI::Router);
+    let forwarder =
+        RouterForwarder::with_timestamping(Zid::from_slice(&params.zid), node_timestamping);
 
     // R311y188 — router-multicast-faces slice 3: the EGRESS run-mode host. A
     // router built with `router-multicast-faces` attaches a data-plane multicast

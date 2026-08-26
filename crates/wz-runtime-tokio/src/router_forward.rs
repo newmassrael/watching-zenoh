@@ -954,11 +954,54 @@ impl RouterForwarder {
         Self::with_clock(self_zid, Box::new(Instant::now))
     }
 
+    /// As [`new`](Self::new), but with the `timestamping.enabled` map a HOST
+    /// read out of its config document rather than zenoh's shipped default.
+    ///
+    /// R2112 (open-debt item 102) — until this round every construction path
+    /// here passed
+    /// [`TimestampingEnabled::default`](crate::node_clock::TimestampingEnabled::default)
+    /// literally, so the one key
+    /// upstream consults to decide whether a router stamps
+    /// (`config.timestamping().enabled().get(whatami)`,
+    /// `zenoh/src/net/runtime/mod.rs:147`) could be READ by wz's config reader
+    /// and then had nowhere to go. A document saying `timestamping: { enabled:
+    /// false }` — an ordinary operator choice when the publishers already stamp
+    /// — produced a wz router that stamped anyway, which is a
+    /// foreign-observable divergence: a pico subscriber prints `with timestamp:`
+    /// for a sample a real zenohd would have relayed bare.
+    ///
+    /// The map is taken WHOLE rather than as the resolved boolean because the
+    /// gate is evaluated against this forwarder's own role, and that role is
+    /// [`WhatAmI::Router`] by construction (both nets are seeded with it). A
+    /// host that resolved the boolean itself would be asserting the role a
+    /// second time, and the two assertions could drift.
+    pub fn with_timestamping(
+        self_zid: Zid,
+        timestamping: crate::node_clock::TimestampingEnabled,
+    ) -> Self {
+        Self::build(self_zid, Box::new(Instant::now), timestamping)
+    }
+
     /// As [`new`](Self::new), but with an INJECTED monotonic clock — the dependency
     /// injection a deterministic pending-query-timeout test uses to advance "now"
     /// across a deadline (the router twin of
     /// [`LinkstateForwarder::with_clock`](crate::linkstate_forward::LinkstateForwarder::with_clock)).
     pub fn with_clock(self_zid: Zid, clock: Box<dyn Fn() -> Instant>) -> Self {
+        Self::build(
+            self_zid,
+            clock,
+            crate::node_clock::TimestampingEnabled::default(),
+        )
+    }
+
+    /// The inner constructor every public constructor funnels through, so the
+    /// field initialiser lives ONCE (only the monotonic clock and the
+    /// `timestamping.enabled` map vary).
+    fn build(
+        self_zid: Zid,
+        clock: Box<dyn Fn() -> Instant>,
+        timestamping: crate::node_clock::TimestampingEnabled,
+    ) -> Self {
         Self {
             routers_net: Rc::new(RefCell::new(LinkstateNetwork::new(
                 self_zid,
@@ -971,11 +1014,15 @@ impl RouterForwarder {
             // R311y450 — this router's §5.18 clock, over the SAME `WhatAmI::Router`
             // both nets above are seeded with, so the timestamping gate cannot
             // disagree with the role. Router is the one role zenoh's shipped map
-            // enables, which is why the stamp is live on this forwarder.
+            // enables, which is why the stamp is live on this forwarder by
+            // default.
+            // R2112 (open-debt item 102) — and the map is now the HOST's, so a
+            // config document that says otherwise reaches the gate instead of
+            // stopping at the reader.
             node_hlc: crate::node_clock::NodeHlc::for_node(
                 self_zid.as_slice(),
                 WhatAmI::Router,
-                crate::node_clock::TimestampingEnabled::default(),
+                timestamping,
             ),
             faces: RefCell::new(HashMap::new()),
             #[cfg(feature = "transport-multicast")]
@@ -8699,6 +8746,93 @@ mod tests {
             Some(NetworkMessage::Push(p)) => (**p).clone(),
             other => panic!("expected a forwarded Push, got {other:?}"),
         }
+    }
+
+    /// Relay one bare Put through a router-role forwarder built with `map`, and
+    /// answer with the timestamp the EGRESSED copy carries.
+    ///
+    /// R2112 (open-debt items 102 + 210) — the two arms of the test below differ
+    /// in the `timestamping.enabled` map and in nothing else: same topology,
+    /// same subscription, same bare Put. It reads the WIRE bytes the subscriber
+    /// face received rather than the forwarder's own `node_hlc`, because "this
+    /// node holds a clock" and "the relayed sample carries a stamp" are
+    /// different claims and only the second is what a foreign subscriber sees.
+    #[cfg(feature = "time-hlc")]
+    fn relay_bare_put_through_router(
+        map: crate::node_clock::TimestampingEnabled,
+    ) -> Option<wz_session_core::sample::TimestampHint> {
+        let fwd = RouterForwarder::with_timestamping(zid(0x01), map);
+        let (client, _sc) = face(zid(0xAA), WIRE_CLIENT);
+        let (peer_sub, sink_peer) = face(zid(0xBB), WIRE_PEER);
+        fwd.register(FaceId(0), &client);
+        fwd.register(FaceId(1), &peer_sub);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xBB, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(1), declare_sub("demo/data"));
+        sink_peer.reset();
+        let push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
+            .expect("build push");
+        assert_eq!(
+            wz_session_core::push_build::read_push_timestamp(&push),
+            None,
+            "the Put must enter this router BARE, or the stamp under test is the \
+             publisher's rather than the node's",
+        );
+        forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push)));
+        assert_eq!(
+            sink_peer.frame_count(),
+            1,
+            "the subscribing face must receive the relayed Put in both arms — a \
+             dropped Put would read as `no timestamp` for the wrong reason",
+        );
+        wz_session_core::push_build::read_push_timestamp(&forwarded_push(&sink_peer.frame_bytes(0)))
+    }
+
+    /// R2112 (open-debt item 102) — a router whose config document turns
+    /// `timestamping/enabled` OFF relays a Put BARE, and the SAME node under
+    /// zenoh's shipped map stamps it.
+    ///
+    /// This is the direction that was a live divergence rather than a missing
+    /// feature. `timestamping: { enabled: false }` is an ordinary operator
+    /// choice — the publishers already stamp, so the router must not re-stamp —
+    /// and a real zenohd honours it (`config.timestamping().enabled().get(whatami)`,
+    /// `zenoh/src/net/runtime/mod.rs:147`). wz's reader parsed the key into
+    /// `ZenohNodeConfig::timestamping` and every construction path here then
+    /// passed `TimestampingEnabled::default()` literally, so the wz router
+    /// stamped anyway and a pico subscriber printed `with timestamp:` for a
+    /// sample a stock router would have relayed untouched.
+    ///
+    /// Both arms live in ONE test because presence alone does not discriminate:
+    /// an assertion that the shipped map stamps passes equally well on a node
+    /// that stamps unconditionally, which is precisely the defect. What is
+    /// asserted is that the map DECIDES.
+    #[cfg(feature = "time-hlc")]
+    #[test]
+    fn the_config_map_decides_whether_a_relaying_router_stamps() {
+        use crate::node_clock::TimestampingEnabled;
+
+        let shipped = relay_bare_put_through_router(TimestampingEnabled::default());
+        let stamp = shipped.expect(
+            "zenoh's shipped map enables a ROUTER, so the relayed Put leaves \
+             stamped — this is the pre-existing behaviour the OFF arm must be \
+             measured against",
+        );
+        assert_eq!(
+            stamp.zid,
+            zid(0x01).as_slice(),
+            "the stamp carries THIS node's zid — zenoh's `uhlc::ID` is the node \
+             zid, so a stamp bearing anything else came from the wrong clock",
+        );
+
+        let disabled = relay_bare_put_through_router(
+            TimestampingEnabled::default().with_role(WhatAmI::Router, false),
+        );
+        assert!(
+            disabled.is_none(),
+            "a document that disables timestamping for this node's role must \
+             reach the forward-path gate — a stamp here is wz stamping where a \
+             stock zenohd would relay bare",
+        );
     }
 
     #[test]

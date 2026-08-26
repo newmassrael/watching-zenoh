@@ -1042,25 +1042,69 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             None,
         );
     }
-    // The two keys this binary models NOWHERE, said out loud rather than
-    // quietly folded into the applied half.
+    // R2112 (open-debt items 102 + 210) — `timestamping/enabled` reaches the
+    // node that stamps.
+    //
+    // Emitted only when the file's answer DIFFERS from what this node's role
+    // already does, on the `routing/peer/mode` rule above: an added flag is a
+    // DIFFERENCE the file asked for, and a file that states zenoh's own default
+    // is already-the-behaviour. The comparison is against the SHIPPED map
+    // resolved for the run-mode this expansion selected, because that is the
+    // map the node will run with absent a flag — `{ router: true, peer: false,
+    // client: false }` (`DEFAULT_CONFIG.json5:206`), so the same document says
+    // something different to a `--router-hat` than to a `--peer`.
+    if named("timestamping/enabled") {
+        // The role this node will ANNOUNCE: what the operator typed, else what
+        // the endpoints selected. Not `cfg.mode` — that is the role the FILE
+        // claims, and the two come apart exactly where `mode`'s own verdict
+        // above reports `OverriddenOnTheCommandLine`.
+        let run_role = typed_role.map(|(_, r)| r).or(selected.map(|s| s.role));
+        match run_role {
+            // The file resolved its per-role table for a role this run does not
+            // play, so the boolean in `cfg.timestamping` answers a question
+            // nobody asked. Withheld rather than expanded: emitting it would
+            // hand the node the OTHER role's policy.
+            Some(role) if role != cfg.mode => exp.record(
+                "timestamping/enabled",
+                KeyEffect::WithheldFromThisRun(
+                    "the document resolves this key for a role this run does not announce",
+                ),
+            ),
+            Some(role) => {
+                let shipped =
+                    wz::runtime_tokio::node_clock::TimestampingEnabled::default().get(role);
+                if cfg.timestamping == shipped {
+                    exp.record("timestamping/enabled", KeyEffect::AlreadyTheBehaviour);
+                } else {
+                    exp.pair(
+                        "timestamping/enabled",
+                        "--timestamping",
+                        cfg.timestamping.to_string(),
+                        None,
+                    );
+                }
+            }
+            None => exp.record(
+                "timestamping/enabled",
+                KeyEffect::WithheldFromThisRun("this run selects no run-mode to stamp on"),
+            ),
+        };
+    }
+    // The one key this binary models NOWHERE, said out loud rather than quietly
+    // folded into the applied half.
     //
     // `scouting/multicast/enabled` is reachability, not a role: it says whether
     // to LISTEN for a scout beacon, and the demo's `--scout` says to discover
     // INSTEAD of dialling, which is a different sentence — mapping one onto the
-    // other would rewrite the operator's topology. And nothing on the demo's
-    // push path stamps a source timestamp (`Timestamp` does not occur anywhere
-    // under `wz-ap-demo/src/`), so `timestamping/enabled` has no flag either.
+    // other would rewrite the operator's topology.
     //
-    // Both are UNCONDITIONAL members of `config_keys_the_demo_drops()` — there
-    // is no build in which they gain a flag — so their verdict is written here
-    // rather than derived from `no_sink`, and
+    // It is an UNCONDITIONAL member of `config_keys_the_demo_drops()` — there is
+    // no build in which it gains a flag — so its verdict is written here rather
+    // than derived from `no_sink`, and
     // `every_key_this_build_drops_is_told_so_by_the_site_that_decides_it` is
     // what refuses the two lists coming apart.
-    for key in ["scouting/multicast/enabled", "timestamping/enabled"] {
-        if named(key) {
-            exp.record(key, KeyEffect::NoSinkInThisBuild);
-        }
+    if named("scouting/multicast/enabled") {
+        exp.record("scouting/multicast/enabled", KeyEffect::NoSinkInThisBuild);
     }
     // The adminspace block, whose three upstream keys expand to four wz flags.
     // Keyed on the BLOCK rather than on `adminspace/enabled`, because a
@@ -1586,8 +1630,8 @@ pub(crate) fn check_topology_for_build(
 /// that calls it honoured.
 ///
 /// R311y844 made this BUILD-DEPENDENT, and the two kinds inside it are worth
-/// telling apart. The first two rows are keys with no sink at all in this
-/// binary. The `cfg!` rows are keys whose sink exists but is compiled out here:
+/// telling apart. The first row is a key with no sink at all in this binary.
+/// The `cfg!` rows are keys whose sink exists but is compiled out here:
 /// their flags exit(2) when the feature is absent, so expanding into one would
 /// turn a valid stock config into a node that refuses to start — which is what
 /// the round measured its own first cut doing.
@@ -1606,11 +1650,6 @@ pub(crate) fn config_keys_the_demo_drops() -> Vec<&'static str> {
         // INSTEAD of dialling, which is a different sentence. Mapping one onto
         // the other would rewrite the operator's topology.
         "scouting/multicast/enabled",
-        // No sink in this binary: nothing on the demo's push path stamps a
-        // source timestamp — `Timestamp` does not occur anywhere under
-        // `wz-ap-demo/src/` — so there is no flag to expand into and honouring
-        // it would be a claim about a plane that does not exist yet.
-        "timestamping/enabled",
     ];
     if !cfg!(feature = "routing-interest-pending-gc") {
         out.push("routing/interests/timeout");
@@ -3556,29 +3595,37 @@ mod stock_config_tests {
     ///
     /// R2081 (open-debt item 208) — the old report printed one list and called it
     /// "honoured", so an operator asking "did my setting take effect" had to diff
-    /// it against the `argv +=` line themselves. `timestamping/enabled` is the
-    /// sharp case: the reader honours it and this binary has no sink for it at
-    /// all, so it belongs in READ and must NOT appear in APPLIED.
+    /// it against the `argv +=` line themselves. `scouting/multicast/enabled` is
+    /// the sharp case: the reader honours it and this binary has no sink for it
+    /// at all, so it belongs in READ and must NOT appear in APPLIED.
+    ///
+    /// R2112 (open-debt items 102 + 210) — this test USED to name
+    /// `timestamping/enabled` here, and that key moved: it now reaches
+    /// `--timestamping` and therefore lands in APPLIED. Rewriting the fixture
+    /// rather than deleting the test is the point — the split it measures is
+    /// still real, only the key that has no sink has changed, and the one that
+    /// moved is now this test's CONTROL below.
     #[test]
     fn a_key_that_is_read_while_reaching_nothing_is_not_reported_as_applied() {
         let exp = expand(
             &["--config", "z.json5", "--listen", "tcp/127.0.0.1:1"],
-            r#"{ mode: "peer", timestamping: { enabled: true } }"#,
+            r#"{ mode: "peer", scouting: { multicast: { enabled: true } } }"#,
         )
         .expect("the fixture is readable");
 
         assert!(
-            exp.named.contains(&"timestamping/enabled"),
+            exp.named.contains(&"scouting/multicast/enabled"),
             "{:?}",
             exp.named
         );
         assert!(
-            exp.read_but_not_applied().contains(&"timestamping/enabled"),
+            exp.read_but_not_applied()
+                .contains(&"scouting/multicast/enabled"),
             "{:?}",
             exp.read_but_not_applied()
         );
         assert!(
-            !exp.applied().contains(&"timestamping/enabled"),
+            !exp.applied().contains(&"scouting/multicast/enabled"),
             "a key with no sink in this build was reported as applied: {:?}",
             exp.applied()
         );
@@ -3606,6 +3653,90 @@ mod stock_config_tests {
             named.sort_unstable();
             assert_eq!(both, named, "the report's two halves are not a partition");
         }
+    }
+
+    /// R2112 (open-debt item 210) — `timestamping/enabled` reaches an argv flag,
+    /// and the flag it reaches carries the value the DOCUMENT resolved for this
+    /// node's role.
+    ///
+    /// Three arms, because the key is MODE-DEPENDENT and a single arm cannot
+    /// tell "the expansion honours the key" from "the expansion emits a
+    /// constant":
+    ///
+    /// 1. A PEER asking to stamp. Upstream's shipped map disables a peer
+    ///    (`{ router: true, peer: false, client: false }`,
+    ///    `DEFAULT_CONFIG.json5:206`), so `true` is a difference the file asked
+    ///    for and the flag carries it.
+    /// 2. A ROUTER asking NOT to stamp. Same key, opposite value, and the flag
+    ///    carries THAT — this is the arm that fails if the expansion hard-codes
+    ///    a side.
+    /// 3. A ROUTER stating the shipped default. No flag: an added argument must
+    ///    be a DIFFERENCE, which is this expansion's rule for every other key
+    ///    (see the `routing/peer/mode` arm), and a redundant `--timestamping
+    ///    true` would report as Expanded while changing nothing.
+    #[test]
+    fn the_timestamping_key_reaches_the_flag_that_carries_it() {
+        let stamping_peer = expand(
+            &["--config", "z.json5"],
+            r#"{ mode: "peer", listen: { endpoints: ["tcp/127.0.0.1:0"] },
+                 timestamping: { enabled: true } }"#,
+        )
+        .expect("the fixture is readable");
+        assert!(
+            stamping_peer.applied().contains(&"timestamping/enabled"),
+            "a peer that asked to stamp must report the key APPLIED: {:?}",
+            stamping_peer.applied()
+        );
+        assert!(
+            argv_pair(&stamping_peer.added, "--timestamping") == Some("true"),
+            "the flag must carry the document's value: {:?}",
+            stamping_peer.added
+        );
+
+        let quiet_router = expand(
+            &["--config", "z.json5"],
+            r#"{ mode: "router", listen: { endpoints: ["tcp/127.0.0.1:0"] },
+                 timestamping: { enabled: false } }"#,
+        )
+        .expect("the fixture is readable");
+        assert!(
+            quiet_router.applied().contains(&"timestamping/enabled"),
+            "a router that asked NOT to stamp must report the key APPLIED: {:?}",
+            quiet_router.applied()
+        );
+        assert!(
+            argv_pair(&quiet_router.added, "--timestamping") == Some("false"),
+            "the flag must carry the document's value, not a constant: {:?}",
+            quiet_router.added
+        );
+
+        let default_router = expand(
+            &["--config", "z.json5"],
+            r#"{ mode: "router", listen: { endpoints: ["tcp/127.0.0.1:0"] },
+                 timestamping: { enabled: true } }"#,
+        )
+        .expect("the fixture is readable");
+        assert!(
+            argv_pair(&default_router.added, "--timestamping").is_none(),
+            "a file stating zenoh's own default for this role must add no flag: {:?}",
+            default_router.added
+        );
+        assert!(
+            default_router.applied().contains(&"timestamping/enabled"),
+            "no flag is needed, but the node DOES what the file says, so the key \
+             is applied and not a key that reached nothing: {:?}",
+            default_router.applied()
+        );
+    }
+
+    /// The value an emitted `<flag> <value>` pair carries, or `None` when the
+    /// flag was not emitted at all.
+    fn argv_pair<'a>(added: &'a [String], flag: &str) -> Option<&'a str> {
+        added
+            .iter()
+            .position(|a| a == flag)
+            .and_then(|i| added.get(i + 1))
+            .map(String::as_str)
     }
 
     /// The expansion carries the other-modes axis and the node's own role out to
@@ -4338,6 +4469,66 @@ impl TransportTuning {
             }
         }
         Ok(out)
+    }
+}
+
+/// R2112 (open-debt items 102 + 210) — `--timestamping <true|false>`: whether
+/// THIS node timestamps the data messages it relays that arrive without one.
+///
+/// The argv shape `timestamping/enabled` expands into, and — like
+/// [`TransportTuning`] — equally usable by hand: the config expansion reaches
+/// the command line and stops there, so nothing in this binary has two ways to
+/// learn the same fact.
+///
+/// `None` means the operator said nothing, which is NOT the same as `false`:
+/// zenoh's shipped map is per-role (`{ router: true, peer: false, client:
+/// false }`, `DEFAULT_CONFIG.json5:206`), so silence resolves differently for a
+/// `--router-hat` than for a `--peer` and only [`Self::map_for`] knows which.
+/// Collapsing the silence to a boolean here would make a router stop stamping
+/// the moment anyone passed the struct around.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct NodeTimestamping {
+    /// The operator's answer for the role this node plays, or `None` when they
+    /// gave none.
+    stated: Option<bool>,
+}
+
+impl NodeTimestamping {
+    /// Read `--timestamping <true|false>` off the command line.
+    ///
+    /// A malformed value is an ERROR rather than a silent fallback, for
+    /// [`TransportTuning::from_argv`]'s reason: the operator asked for a
+    /// specific stamping policy, and quietly running the other one is exactly
+    /// the failure the config expansion exists to remove. `true` / `false` are
+    /// the only spellings, because they are the two json5 spellings the key
+    /// itself has.
+    pub(crate) fn from_argv(rest: &[String]) -> Result<Self, String> {
+        match parse_pair(rest, "--timestamping") {
+            None => Ok(Self::default()),
+            Some(v) if v == "true" => Ok(Self { stated: Some(true) }),
+            Some(v) if v == "false" => Ok(Self {
+                stated: Some(false),
+            }),
+            Some(v) => Err(format!("--timestamping expects true or false, got '{v}'")),
+        }
+    }
+
+    /// The `timestamping.enabled` map a node of role `whatami` should run with.
+    ///
+    /// Silence yields zenoh's shipped map verbatim; a stated value overrides
+    /// only THIS role's entry, so the other two keep upstream's answer — the
+    /// document resolved its key against one role and made no claim about the
+    /// rest (see
+    /// [`TimestampingEnabled::with_role`](wz::runtime_tokio::node_clock::TimestampingEnabled::with_role)).
+    pub(crate) fn map_for(
+        self,
+        whatami: WhatAmI,
+    ) -> wz::runtime_tokio::node_clock::TimestampingEnabled {
+        let shipped = wz::runtime_tokio::node_clock::TimestampingEnabled::default();
+        match self.stated {
+            Some(on) => shipped.with_role(whatami, on),
+            None => shipped,
+        }
     }
 }
 

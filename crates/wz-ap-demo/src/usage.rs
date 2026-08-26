@@ -101,6 +101,10 @@ pub(crate) fn print_usage() {
     eprintln!("                             default 65535). zenoh transport/link/tx/batch_size");
     eprintln!("    --lease-ms <ms>          OpenSyn session lease announced to the peer");
     eprintln!("                             (default 10000). zenoh transport/link/tx/lease");
+    eprintln!("    --timestamping <bool>    whether THIS node stamps the un-timestamped data");
+    eprintln!("                             it relays. zenoh timestamping/enabled, which is a");
+    eprintln!("                             PER-ROLE default: a router stamps, a peer and a");
+    eprintln!("                             client do not. Absent = that shipped default");
     eprintln!("    --scout                  initiator mode with a DISCOVERED locator: emit a");
     eprintln!("                             multicast Scout on 224.0.0.224:7446 and dial the");
     eprintln!("                             locator the first peer Hello advertises. Mutually");

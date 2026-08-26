@@ -2102,24 +2102,41 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
             "the demo's report is missing its `{line}` line\n{seen}"
         );
     }
-    // And the split is a real partition, not a relabelling: `timestamping/enabled`
-    // has no sink in this binary, so it must appear on the READ-BUT-NOT-APPLIED
-    // line and NOT on the APPLIED one. Read off the lines themselves, because a
-    // report that printed the same list twice would satisfy the check above.
+    // And the split is a real partition, not a relabelling:
+    // `scouting/multicast/enabled` has no sink in this binary, so it must appear
+    // on the READ-BUT-NOT-APPLIED line and NOT on the APPLIED one. Read off the
+    // lines themselves, because a report that printed the same list twice would
+    // satisfy the check above.
+    //
+    // R2112 (open-debt items 102 + 210) — this pair USED to name
+    // `timestamping/enabled`, and that key moved: it now reaches
+    // `--timestamping`, so it is the APPLIED example below rather than the
+    // unapplied one here. Both halves are kept, over one key each, because the
+    // partition is what this leg measures and a single-sided check would pass on
+    // a report that had simply stopped printing one of the lists.
     let applied_line = seen
         .lines()
         .find(|l| l.contains("APPLIED [") && !l.contains("NOT APPLIED"))
         .unwrap_or_else(|| panic!("no APPLIED line in the demo's report\n{seen}"));
     assert!(
-        !applied_line.contains("timestamping/enabled"),
+        !applied_line.contains("scouting/multicast/enabled"),
         "a key with no sink in this build was reported as applied\n{applied_line}"
+    );
+    // The key that DOES reach a flag, asserted on the SHIPPING binary's own
+    // words. The unit tests read the argv the expansion builds; this reads what
+    // the binary printed after being handed the file, which is the only place
+    // the two can be seen to agree.
+    assert!(
+        applied_line.contains("timestamping/enabled"),
+        "`timestamping/enabled` reaches `--timestamping` on this build, so the \
+         shipping binary must report it applied\n{applied_line}"
     );
     let not_applied_line = seen
         .lines()
         .find(|l| l.contains("READ BUT NOT APPLIED"))
         .expect("checked above");
     assert!(
-        not_applied_line.contains("timestamping/enabled"),
+        not_applied_line.contains("scouting/multicast/enabled"),
         "the key with no sink is not named as unapplied\n{not_applied_line}"
     );
     // R311y843 — the SHIPPING binary's own account of what the file became.

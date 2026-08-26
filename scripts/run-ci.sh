@@ -13953,6 +13953,16 @@ layer_e8t_router_hat_hlc_stamp_pico() {
         --test wz_router_hlc_stamp_to_pico_zsub -- --ignored --quiet --test-threads=1 \
         --exact wz_router_hat_hlc_stamps_a_bare_put_for_pico_zsub_attachment 2>&1 \
         | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+    # R2112 (open-debt items 102 + 210) — the CONFIG twin, on the SAME build as
+    # leg 1 and deliberately so: it varies an ARGV WORD, not a cargo feature, so
+    # a rebuild between the two would confound the axis it exists to isolate. It
+    # is the only leg that covers the demo's own wiring from `--timestamping` to
+    # the forwarder's map; the library unit tests construct the forwarder
+    # directly and stay green if the runner drops the value in between.
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_router_hlc_stamp_to_pico_zsub -- --ignored --quiet --test-threads=1 \
+        --exact wz_router_hat_told_not_to_timestamp_relays_a_bare_put_unstamped 2>&1 \
+        | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
     # The negative twin, on its OWN build (no time-hlc).
     (cd crates && cargo build -p wz-ap-demo --features router-hat-router --quiet) || return 1
     (cd crates && cargo test -p wz-integration-tests \

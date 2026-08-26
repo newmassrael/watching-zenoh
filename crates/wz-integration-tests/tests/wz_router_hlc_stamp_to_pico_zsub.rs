@@ -105,15 +105,28 @@ struct RelayOutcome {
 /// running the same topology both ways is what makes the positive result
 /// attributable to the stamp rather than to the topology.
 fn relay_a_bare_put() -> RelayOutcome {
+    relay_a_bare_put_with(&[])
+}
+
+/// [`relay_a_bare_put`] with EXTRA argv words on the router-hat.
+///
+/// R2112 (open-debt items 102 + 210) — the third leg needs the same topology on
+/// the SAME build with one flag added, so the router's argv is the parameter and
+/// nothing else moves. Everything downstream — the pico client, the barrier, the
+/// publisher, the witnesses — is shared, which is what makes a difference in the
+/// outcome attributable to the flag.
+fn relay_a_bare_put_with(router_extra: &[&str]) -> RelayOutcome {
     let demo = wz_ap_demo_binary();
     let z_sub = zenoh_pico_cli_binary("z_sub_attachment");
 
     // The wz router-hat binds first so the pico client + the wz publisher can dial
     // its ephemeral port.
+    let mut router_argv: Vec<&str> = vec!["--router-hat", "127.0.0.1:0"];
+    router_argv.extend_from_slice(router_extra);
     let router_stderr = tempfile::tempfile().expect("tempfile for router stderr");
     let (mut r_guard, mut r_reader, port) = spawn_on_ephemeral_port(
         &demo,
-        &["--router-hat", "127.0.0.1:0"],
+        &router_argv,
         "router-hat: listening on 127.0.0.1:",
         "router-hat",
         router_stderr,
@@ -232,6 +245,59 @@ fn wz_router_hat_hlc_stamps_a_bare_put_for_pico_zsub_attachment() {
          router-hat relayed the sample WITHOUT adding a node-HLC timestamp, so the \
          §5.18 forward-path stamp did not reach the foreign wire\n--- pico stdout \
          ---\n{}\n--- router-hat stderr ---\n{}",
+        outcome.pico_stdout,
+        outcome.router_stderr
+    );
+}
+
+/// R2112 (open-debt items 102 + 210) — the CONFIG twin: the SAME build, the SAME
+/// topology, and a router-hat told `--timestamping false` must deliver the Put
+/// and print NO timestamp line.
+///
+/// ## What this proves that the build twin below does not
+///
+/// The `time-hlc` twin varies a CARGO FEATURE, so it answers "is the clock
+/// compiled in". This one varies an ARGV WORD on the identical binary, which is
+/// the question an operator actually asks: `timestamping: { enabled: false }` in
+/// a stock zenoh document is an ordinary choice — the publishers already stamp,
+/// so the router must not re-stamp — and a real zenohd honours it
+/// (`config.timestamping().enabled().get(whatami)`,
+/// `zenoh/src/net/runtime/mod.rs:147`). Until R2112 wz's reader parsed the key
+/// and every construction path passed `TimestampingEnabled::default()` literally,
+/// so the wz router stamped anyway and this witness printed the line.
+///
+/// It is also the only leg that binds the DEMO's wiring rather than the library's:
+/// the unit tests in `router_forward` / `linkstate_forward` construct the
+/// forwarder directly, so they would stay green if `run_router_hat_until` dropped
+/// the map on the floor between the flag and the constructor. This one spawns the
+/// shipped binary and reads a FOREIGN decoder's stdout, so every hop from argv to
+/// wire is inside the assertion.
+///
+/// The positive leg above is what makes it attributable: same binary, same
+/// topology, one flag, opposite outcome.
+// wz-proves: none -- the CONFIG-AXIS attribution half of the positive leg above.
+// It asserts the ABSENCE of a timestamp on a build whose clock IS compiled in,
+// which witnesses no atom (nothing was exercised on the wire), so claiming one
+// here would inflate the proof count with a test that proves code is NOT running.
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo --features router-hat-router,time-hlc + zenoh-pico z_sub_attachment); Layer E8t runs via --ignored"]
+fn wz_router_hat_told_not_to_timestamp_relays_a_bare_put_unstamped() {
+    let outcome = relay_a_bare_put_with(&["--timestamping", "false"]);
+
+    assert!(
+        outcome.saw_sample,
+        "pico z_sub_attachment never logged '{RECEIVED_WITNESS}' within 15s — the \
+         config twin must still ROUTE the Put, otherwise its absent timestamp \
+         proves nothing about the config key\n--- pico stdout ---\n{}\n--- \
+         router-hat stderr ---\n{}",
+        outcome.pico_stdout, outcome.router_stderr
+    );
+    assert!(
+        !outcome.pico_stdout.contains(TIMESTAMP_WITNESS),
+        "a router-hat told `--timestamping false` printed a '{TIMESTAMP_WITNESS}' \
+         line at the pico end — zenoh's `timestamping.enabled` did not reach the \
+         forward-path gate, so wz stamps where a stock zenohd would relay \
+         bare\n--- pico stdout ---\n{}\n--- router-hat stderr ---\n{}",
         outcome.pico_stdout,
         outcome.router_stderr
     );

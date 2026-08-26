@@ -786,13 +786,43 @@ impl LinkstateForwarder {
         Self::with_trees_delay(self_zid, self_whatami, Self::DEFAULT_TREES_DELAY)
     }
 
+    /// As [`new`](Self::new), but with the `timestamping.enabled` map a HOST
+    /// read out of its config document rather than zenoh's shipped default.
+    ///
+    /// R2112 (open-debt item 102) — the direction this constructor opens is the
+    /// one wz could not express at all: zenoh's shipped map is
+    /// `{ router: true, peer: false, client: false }`, so under the default this
+    /// forwarder never stamps, and a document saying `timestamping: { enabled:
+    /// { peer: true } }` made a real peer stamp its relayed Puts while wz's
+    /// stayed bare. The gate resolves against `self_whatami`, so the same map
+    /// answers correctly for whichever role this forwarder was seeded with.
+    pub fn with_timestamping(
+        self_zid: Zid,
+        self_whatami: WhatAmI,
+        timestamping: crate::node_clock::TimestampingEnabled,
+    ) -> Self {
+        Self::build(
+            self_zid,
+            self_whatami,
+            Self::DEFAULT_TREES_DELAY,
+            Box::new(Instant::now),
+            timestamping,
+        )
+    }
+
     /// As [`new`](Self::new), but with an explicit spanning-tree recompute
     /// coalescing window (the SPF-throttle delay D2c debounces topology changes
     /// by). A shorter window converges faster at the cost of more frequent
     /// recomputes under churn; a longer one coalesces a heavier burst. This tunes
     /// the single coalescing path — it does not turn coalescing off.
     pub fn with_trees_delay(self_zid: Zid, self_whatami: WhatAmI, trees_delay: Duration) -> Self {
-        Self::build(self_zid, self_whatami, trees_delay, Box::new(Instant::now))
+        Self::build(
+            self_zid,
+            self_whatami,
+            trees_delay,
+            Box::new(Instant::now),
+            crate::node_clock::TimestampingEnabled::default(),
+        )
     }
 
     /// Construct with an INJECTED monotonic clock (dependency injection for
@@ -805,26 +835,36 @@ impl LinkstateForwarder {
         self_whatami: WhatAmI,
         clock: Box<dyn Fn() -> Instant>,
     ) -> Self {
-        Self::build(self_zid, self_whatami, Self::DEFAULT_TREES_DELAY, clock)
+        Self::build(
+            self_zid,
+            self_whatami,
+            Self::DEFAULT_TREES_DELAY,
+            clock,
+            crate::node_clock::TimestampingEnabled::default(),
+        )
     }
 
     /// The inner constructor every public constructor funnels through, so the
-    /// field initialiser lives ONCE (only the recompute delay + the clock vary).
+    /// field initialiser lives ONCE (only the recompute delay, the clock and the
+    /// `timestamping.enabled` map vary).
     fn build(
         self_zid: Zid,
         self_whatami: WhatAmI,
         trees_delay: Duration,
         clock: Box<dyn Fn() -> Instant>,
+        timestamping: crate::node_clock::TimestampingEnabled,
     ) -> Self {
         Self {
             net: Rc::new(RefCell::new(LinkstateNetwork::new(self_zid, self_whatami))),
             // R311y450 — this node's §5.18 clock, derived from the SAME identity
             // and role the net above is seeded with, so the timestamping gate can
             // never disagree with the role this forwarder actually plays.
+            // R2112 (open-debt item 102) — the MAP is the host's now; only the
+            // role stays this forwarder's own fact.
             node_hlc: crate::node_clock::NodeHlc::for_node(
                 self_zid.as_slice(),
                 self_whatami,
-                crate::node_clock::TimestampingEnabled::default(),
+                timestamping,
             ),
             faces: RefCell::new(HashMap::new()),
             ingested: Cell::new(0),
@@ -11056,6 +11096,118 @@ mod tests {
     /// Push in a recorded wire frame — proves the budget landed ON THE WIRE (the
     /// wz-proprietary `0x0a` ext survived the codec), the c3c-3 D1 twin of
     /// [`forwarded_source`]. `None` when the forwarded Push carried no hop ext.
+    /// The §5.18 source timestamp a forwarded frame's Push carries, or `None`
+    /// when it left this node bare.
+    ///
+    /// R2112 (open-debt items 102 + 210) — the sibling of
+    /// [`forwarded_hoplimit`], reading the OTHER extension `forward_push`
+    /// applies at its head. It reads the EGRESSED BYTES rather than the
+    /// forwarder's own `node_hlc`, because "this node holds a clock" and "the
+    /// relayed sample carries a stamp" are different claims and only the second
+    /// one is what a foreign subscriber sees.
+    #[cfg(feature = "time-hlc")]
+    fn forwarded_timestamp(frame: &[u8]) -> Option<wz_session_core::sample::TimestampHint> {
+        use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
+        let InboundFrame::Frame { payload, .. } =
+            parse_inbound(frame).expect("parse forwarded frame")
+        else {
+            panic!("forwarded bytes are not a Frame");
+        };
+        let msgs = parse_frame_payload(&payload).expect("parse frame payload");
+        match msgs.first() {
+            Some(NetworkMessage::Push(p)) => wz_session_core::push_build::read_push_timestamp(p),
+            other => panic!("expected a forwarded Push, got {other:?}"),
+        }
+    }
+
+    /// Relay one bare Put through a peer-role forwarder built with `map`, and
+    /// answer with the timestamp the EGRESSED copy carries.
+    ///
+    /// R2112 — the two arms below differ in the `timestamping.enabled` map and
+    /// in nothing else, which is what makes the pair a discriminator rather than
+    /// two observations: same topology, same interest, same bare Put.
+    #[cfg(feature = "time-hlc")]
+    fn relay_bare_put_through_peer(
+        map: crate::node_clock::TimestampingEnabled,
+    ) -> Option<wz_session_core::sample::TimestampHint> {
+        let fwd = LinkstateForwarder::with_timestamping(zid(0x05), WhatAmI::Peer, map);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        let (face_b, sink_b) = peer_face(zid(0x0B));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05);
+        declare_interest(&fwd, FaceId(1), "demo/data");
+        sink_a.reset();
+        sink_b.reset();
+
+        let push = data_push();
+        assert_eq!(
+            wz_session_core::push_build::read_push_timestamp(&push),
+            None,
+            "the Put must enter this node BARE, or the stamp under test is the \
+             publisher's rather than the node's",
+        );
+        fwd.forward_push(
+            FaceId(0),
+            true,
+            wz_session_core::qos::Priority::DEFAULT,
+            &push,
+        );
+        assert_eq!(
+            sink_b.frame_count(),
+            1,
+            "the interested face must receive the relayed Put in both arms — a \
+             dropped Put would read as `no timestamp` for the wrong reason",
+        );
+        forwarded_timestamp(&sink_b.frame_bytes(0))
+    }
+
+    /// R2112 (open-debt item 102) — a peer whose config document turns
+    /// `timestamping/enabled` ON stamps the Puts it relays, and the SAME node
+    /// under zenoh's shipped map does not.
+    ///
+    /// Upstream resolves the key against the reading node's own role
+    /// (`config.timestamping().enabled().get(whatami)`,
+    /// `zenoh/src/net/runtime/mod.rs:147`) and ships
+    /// `{ router: true, peer: false, client: false }`
+    /// (`DEFAULT_CONFIG.json5:206`), so `timestamping: { enabled: { peer: true } }`
+    /// is a document a real zenoh peer answers by stamping. Until this round wz
+    /// could not express it AT ALL: every construction path here passed the
+    /// default map literally, so the value wz's reader parsed out of the file
+    /// stopped at the reader.
+    ///
+    /// The control arm is in the SAME test on purpose. A single ON assertion
+    /// would pass just as well if the node stamped unconditionally, which is the
+    /// defect in the opposite direction — so exclusivity is what is asserted,
+    /// not presence.
+    #[cfg(feature = "time-hlc")]
+    #[test]
+    fn the_config_map_decides_whether_a_relaying_peer_stamps() {
+        use crate::node_clock::TimestampingEnabled;
+
+        let shipped = relay_bare_put_through_peer(TimestampingEnabled::default());
+        assert!(
+            shipped.is_none(),
+            "zenoh's shipped map disables a PEER, so the relayed Put must leave \
+             bare — a stamp here is wz stamping where a real peer would not",
+        );
+
+        let enabled = relay_bare_put_through_peer(
+            TimestampingEnabled::default().with_role(WhatAmI::Peer, true),
+        );
+        let stamp = enabled.expect(
+            "a document that enables timestamping for this node's role must \
+             reach the forward-path stamp",
+        );
+        assert_eq!(
+            stamp.zid,
+            zid(0x05).as_slice(),
+            "the stamp carries THIS node's zid — zenoh's `uhlc::ID` is the node \
+             zid, so a stamp bearing anything else came from the wrong clock",
+        );
+    }
+
     fn forwarded_hoplimit(frame: &[u8]) -> Option<u16> {
         use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
         let InboundFrame::Frame { payload, .. } =
