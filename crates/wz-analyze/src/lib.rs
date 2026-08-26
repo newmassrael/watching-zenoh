@@ -120,16 +120,24 @@ pub struct Options {
     /// the bytes; see
     /// [`Dissection::from_capture_declaring_quic`](wz_capture::Dissection::from_capture_declaring_quic).
     pub quic_ports: Vec<u16>,
-    /// R311y699 ([REDACTED-REQ]) — payload format rules, as `(keyexpr pattern, format
-    /// name)` in the order they were typed. First match wins.
-    pub payload_formats: Vec<(String, String)>,
-    /// R311y720 (PF4) — declared field names, as `(keyexpr pattern, field
-    /// path, name)` in the order they were typed. First match wins.
+    /// R311y699 ([REDACTED-REQ]) — payload format declarations, as the LINES
+    /// they were typed, in order. First matching rule wins.
+    ///
+    /// R2114 (open-debt item 237) — lines and not parsed halves. The halves
+    /// come back from `parse_declaration` in the QUOTED spelling and
+    /// `wz_capture::payload::formats::FormatMap::declare` is the boundary that
+    /// reads them back, so splitting here and installing there skipped it: a
+    /// pattern with an escaped separator arrived at the map with its
+    /// backslashes intact and matched nothing. Holding the line means both
+    /// consumption surfaces cross that boundary exactly once.
+    pub payload_formats: Vec<String>,
+    /// R311y720 (PF4) — declared field names, as the LINES they were typed, in
+    /// order. First match wins.
     ///
     /// The analyzer never derives these. See
     /// `wz_capture::payload::formats::FormatMap::name_field` for why a name
     /// that did not come from the deployment would be invented.
-    pub payload_field_names: Vec<(String, String, String)>,
+    pub payload_field_names: Vec<String>,
     /// R311y720 (§D M3) — link types the caller declared as carrying raw zenoh
     /// SERIAL bytes. See `wz_capture::serial` for why they are declared.
     pub serial_linktypes: Vec<u32>,
@@ -453,6 +461,18 @@ OPTIONS:
                       finding is also TOTALLED per topic under the listing,
                       so a rule that is wrong for a whole topic reads as one
                       line and not as one per message.
+                      Also DEFINES a format this build does not ship, as
+                      `#<name>=<layout>` -- e.g.
+                      `#profile=counter:u16be,flags:u8,tail:rest` -- which a
+                      rule then names like any other format. A definition
+                      may be written before or after the rule that uses it.
+                      The layout is a fixed record: `<name>:<type>` items,
+                      comma-separated, with an optional `rest` last for a
+                      variable tail. Bytes the layout does not account for
+                      are a finding, not a quiet success. See PAYLOAD FIELD
+                      TYPES below for the spellings.
+                      A topic whose own name carries `:` or `=` is written
+                      with a backslash: `demo/temp\\:c=profile`.
                       Needs --fields.
                       PAYLOAD FORMATS: cbor, json, protobuf
                       PAYLOAD MISBOUND: rule, publisher
@@ -541,6 +561,16 @@ OPTIONS:
                       figures that say whether this capture is usable at all
     -h, --help        print this and exit
 
+PAYLOAD FIELD TYPES:
+    u8, i8, u16le, u16be, i16le, i16be, u32le, u32be, i32le, i32be, u64le, u64be, i64le, i64be, f32le, f32be, f64le, f64be, rest
+    Plus `bytesN` for exactly N raw bytes, rendered as hex, for any N above
+    zero. These are the spellings a `#<name>=<layout>` definition may use --
+    see --payload-format. `rest` takes every byte left and is only legal as
+    the LAST field.
+    Ask here rather than reading this reader's source: a deployment writing
+    its own record layout needs the spellings before it has anything to run,
+    and a list copied into its own notes ages the moment this one grows.
+
 LINK TYPES READ:
     DECAPSULATED -- the link header is stripped and what is under it decoded:
     0 NULL, 1 ETHERNET, 101 RAW, 108 LOOP, 113 LINUX_SLL, 228 IPV4, 229 IPV6,
@@ -601,8 +631,8 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
     let mut per_message = false;
     let mut quic_ports: Vec<u16> = Vec::new();
     let mut quic_cid_len: Option<usize> = None;
-    let mut payload_formats: Vec<(String, String)> = Vec::new();
-    let mut payload_field_names: Vec<(String, String, String)> = Vec::new();
+    let mut payload_formats: Vec<String> = Vec::new();
+    let mut payload_field_names: Vec<String> = Vec::new();
     let mut serial_linktypes: Vec<u32> = Vec::new();
     let mut max_messages: Option<usize> = None;
     let mut census = Census::default();
@@ -660,14 +690,27 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
                 // one text; the dialect itself is written down once, in
                 // `wz-capture`, so a rule a person tried here and then moved
                 // into a config file is not re-spelled by a second reader.
+                // R2114 (open-debt item 237) — the flag now takes a DEFINITION
+                // too (`#<name>=<layout>`), which is how a deployment gets its
+                // own format across without building this workspace. The
+                // format-name check moved BELOW the argv loop, because a rule
+                // may name a format a later flag defines and a check made here
+                // would refuse the deployment's own format for being written
+                // second.
+                //
+                // The RAW line is what is kept, not the parsed halves. Keeping
+                // the halves is what made this surface disagree with the other
+                // one: `parse_declaration` answers in the QUOTED spelling and
+                // `FormatMap::declare` is the boundary that unquotes it, so a
+                // pattern handed straight to `insert` arrived with its
+                // backslashes still in it and matched no topic at all.
                 let declaration = payload_formats::parse_declaration(raw).map_err(|_| bad())?;
-                let payload_formats::DeclarationText::Rule { pattern, format } = declaration else {
-                    return Err(bad());
-                };
-                if payload_formats::builtin(format).is_none() {
-                    return Err(bad());
+                match declaration {
+                    payload_formats::DeclarationText::Rule { .. }
+                    | payload_formats::DeclarationText::Definition { .. } => {}
+                    payload_formats::DeclarationText::Name { .. } => return Err(bad()),
                 }
-                payload_formats.push((pattern.to_string(), format.to_string()));
+                payload_formats.push(raw.clone());
             }
             // R311y720 (PF4) — `<keyexpr>:<path>=<name>`. Refused at parse
             // time when any of the three is empty, for the reason
@@ -683,15 +726,14 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
                 // R311y856 — the same shared parser the sibling flag uses; see
                 // there for why the dialect is written down once.
                 let declaration = payload_formats::parse_declaration(raw).map_err(|_| bad())?;
-                let payload_formats::DeclarationText::Name {
-                    pattern,
-                    path,
-                    name,
-                } = declaration
-                else {
+                let payload_formats::DeclarationText::Name { .. } = declaration else {
                     return Err(bad());
                 };
-                payload_field_names.push((pattern.to_string(), path.to_string(), name.to_string()));
+                // R2114 (open-debt item 237) — the RAW line, for the reason the
+                // sibling flag above records: the parsed halves are the QUOTED
+                // spelling, and handing them to `name_field` skipped the one
+                // boundary that reads them back.
+                payload_field_names.push(raw.clone());
             }
             // R311y720 (§D M3) — the link type a serial capture was written
             // with. DECLARED and never sniffed: `LINKTYPE_RTAC_SERIAL` (250)
@@ -810,6 +852,35 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
         }
         if !payload_field_names.is_empty() {
             return Err(UsageError::PayloadWithoutFields("--payload-name"));
+        }
+    }
+    // R2114 (open-debt item 237) — the format name a RULE points at, resolved
+    // against this build's decoders plus the formats THIS argv described.
+    //
+    // Here rather than at the flag, because a definition may be written after
+    // the rule that uses it -- the same order-independence `FormatMap::
+    // declare_all` gives the other surface, which is a property the two must
+    // share or a config file that works through the ABI fails here. Still a
+    // parse-time refusal, because a rule naming a decoder that does not exist
+    // is a mistake a reader wants before the run rather than a note inside a
+    // report they are already reading.
+    {
+        let mut defined: Vec<&str> = Vec::new();
+        for raw in &payload_formats {
+            if let Ok(payload_formats::DeclarationText::Definition { name, .. }) =
+                payload_formats::parse_declaration(raw)
+            {
+                defined.push(name);
+            }
+        }
+        for raw in &payload_formats {
+            if let Ok(payload_formats::DeclarationText::Rule { format, .. }) =
+                payload_formats::parse_declaration(raw)
+            {
+                if payload_formats::builtin(format).is_none() && !defined.contains(&format) {
+                    return Err(UsageError::BadValue("--payload-format", raw.clone()));
+                }
+            }
         }
     }
     // Round 1999 (item 470) — the live source's three refusals, in the order
@@ -1029,13 +1100,17 @@ pub struct Request<'a> {
     /// R311y709 (Y2) — the short-header connection id length a mid-connection
     /// capture cannot supply from its own bytes.
     pub quic_cid_len: Option<usize>,
-    /// R311y699 ([REDACTED-REQ]) — payload format rules as `(keyexpr pattern, format
-    /// name)`. Applied to the field layer, so they need `per_field`.
-    pub payload_rules: &'a [(String, String)],
-    /// R311y720 (PF4) — declared field names, as `(keyexpr pattern, field
-    /// path, name)`. Applied to the decoded payload fields, so like
+    /// R311y699 ([REDACTED-REQ]) — payload format declarations, as the LINES a
+    /// reader wrote. Applied to the field layer, so they need `per_field`.
+    ///
+    /// R2114 (open-debt item 237) — a line may be a RULE (`<keyexpr>=<format>`)
+    /// or a DEFINITION (`#<format>=<layout>`), which is how a deployment
+    /// describes a format this build does not ship.
+    pub payload_rules: &'a [String],
+    /// R311y720 (PF4) — declared field names, as the LINES a reader wrote.
+    /// Applied to the decoded payload fields, so like
     /// [`Self::payload_rules`] they need `per_field`.
-    pub payload_field_names: &'a [(String, String, String)],
+    pub payload_field_names: &'a [String],
     /// R311y720 (§D M3) — declared serial link types.
     pub serial_linktypes: &'a [u32],
     /// Which observer planes to build. See [`Census`].
@@ -1123,7 +1198,7 @@ pub fn analyze_dissection(
     // root: `wz-capture` owns the mapping and never a format, so this is the
     // one place the two meet. A pattern the map refuses is a hard failure
     // rather than a rule silently dropped.
-    let mut payload_formats = wz_capture::payload::formats::FormatMap::new();
+    let mut payload_map = wz_capture::payload::formats::FormatMap::new();
     let mut payload_refusals: Vec<FieldNote> = Vec::new();
     // R311y884 — the refusal names the declaration in the ONE spelling
     // `wz-capture` owns (`payload::formats::declaration_text`, the mirror of
@@ -1131,51 +1206,53 @@ pub fn analyze_dissection(
     // the third of three spellings open-debt item 235 names, and the one that
     // happened to be right — which is exactly why nobody noticed the render was
     // not.
-    let rule_text = |pattern: &str, format: &str| {
-        wz_capture::payload::formats::declaration_text(
-            &wz_capture::payload::formats::DeclarationText::Rule { pattern, format },
-        )
-    };
-    let name_text = |pattern: &str, path: &str, name: &str| {
-        wz_capture::payload::formats::declaration_text(
-            &wz_capture::payload::formats::DeclarationText::Name {
-                pattern,
-                path,
-                name,
-            },
-        )
-    };
-    for (pattern, name) in payload_rules {
-        match payload_formats::builtin(name) {
-            None => payload_refusals.push(FieldNote::PayloadRuleRefused {
-                rule: rule_text(pattern, name),
-                why: format!(
-                    "this build has no decoder named `{name}` (it has: {})",
-                    payload_formats::BUILTIN_NAMES.join(", ")
-                ),
-            }),
-            Some(format) => {
-                if let Err(err) = payload_formats.insert(pattern, format) {
-                    payload_refusals.push(FieldNote::PayloadRuleRefused {
-                        rule: rule_text(pattern, name),
-                        why: err.to_string(),
-                    });
-                }
+    // R2114 (open-debt item 237) — every declaration goes through
+    // `FormatMap::declare`, the SAME entry point the C ABI's text door uses.
+    //
+    // What stood here resolved the format name itself, spelled the refusal
+    // itself, and handed `insert` the quoted halves — three second opinions
+    // about a grammar `wz-capture` owns, and the third was measurably wrong
+    // (item 462's quoting never reached this surface). The refusal now quotes
+    // the reader's own LINE, which is what `Declaration::text` means by "how
+    // the reader wrote it" and needs no second speller to stay true.
+    //
+    // Definitions first, so a rule may name a format defined by a later flag —
+    // the order-independence `declare_all` gives the other surface.
+    //
+    // The whole install sits in a BLOCK so the closure's borrow of the refusals
+    // ends with it, rather than being ended by a `drop` of something that
+    // implements no `Drop` -- which clippy refuses, and is right to: it reads
+    // as a resource being released and is only a scope being cut short.
+    {
+        let is_definition = |line: &str| {
+            matches!(
+                payload_formats::parse_declaration(line),
+                Ok(payload_formats::DeclarationText::Definition { .. })
+            )
+        };
+        let mut declare = |line: &str| {
+            if let Err(err) = payload_map.declare(line) {
+                payload_refusals.push(FieldNote::PayloadRuleRefused {
+                    rule: line.to_owned(),
+                    why: err.to_string(),
+                });
             }
+        };
+        for line in payload_rules.iter().filter(|l| is_definition(l)) {
+            declare(line);
+        }
+        for line in payload_rules.iter().filter(|l| !is_definition(l)) {
+            declare(line);
+        }
+        // R311y720 (PF4) — the DECLARED names, installed into the same map and
+        // refused the same way. A declaration that names a path under a pattern
+        // no rule decodes is not an error: the reader may be declaring ahead of
+        // the traffic, and the field simply renders unnamed until it appears.
+        for line in payload_field_names {
+            declare(line);
         }
     }
-    // R311y720 (PF4) — the DECLARED names, installed into the same map and
-    // refused the same way. A declaration that names a path under a pattern no
-    // rule decodes is not an error: the reader may be declaring ahead of the
-    // traffic, and the field simply renders unnamed until it appears.
-    for (pattern, path, name) in payload_field_names {
-        if let Err(err) = payload_formats.name_field(pattern, path, name) {
-            payload_refusals.push(FieldNote::PayloadRuleRefused {
-                rule: name_text(pattern, path, name),
-                why: err.to_string(),
-            });
-        }
-    }
+    let payload_formats = payload_map;
     // R311y726 — the map is COMPLETE from here on, and this run's ledger of
     // which declarations applied is a separate value that borrows it. Declared
     // at the point the map stops changing, because a ledger over a map still
@@ -2518,6 +2595,11 @@ fn declaration_flag(kind: wz_capture::payload::formats::DeclarationKind) -> &'st
     match kind {
         wz_capture::payload::formats::DeclarationKind::FormatRule => "--payload-format",
         wz_capture::payload::formats::DeclarationKind::FieldName => "--payload-name",
+        // R2114 (open-debt item 237) — a DEFINITION is typed at the same flag
+        // as the rule that uses it. One flag and not a fourth, because the two
+        // are one subject: a reader saying which decoder reads which topic, and
+        // saying what that decoder is when this build does not already know.
+        wz_capture::payload::formats::DeclarationKind::FormatDefinition => "--payload-format",
     }
 }
 
@@ -2528,6 +2610,10 @@ fn declaration_note_kind(kind: wz_capture::payload::formats::DeclarationKind) ->
     match kind {
         wz_capture::payload::formats::DeclarationKind::FormatRule => "payload_rule_unbound",
         wz_capture::payload::formats::DeclarationKind::FieldName => "payload_name_unbound",
+        // Its OWN kind, because the remedy differs: an unbound rule is a
+        // pattern that missed, and an unbound definition is a format nothing
+        // referred to at all.
+        wz_capture::payload::formats::DeclarationKind::FormatDefinition => "payload_format_unused",
     }
 }
 
@@ -2541,6 +2627,9 @@ fn declaration_remedy(kind: wz_capture::payload::formats::DeclarationKind) -> &'
         }
         wz_capture::payload::formats::DeclarationKind::FieldName => {
             "no field this reader decoded sat at that path under a matching key expression"
+        }
+        wz_capture::payload::formats::DeclarationKind::FormatDefinition => {
+            "no rule named this format, so nothing was decoded with it"
         }
     }
 }
@@ -5613,11 +5702,16 @@ mod tests {
                 .split(heading)
                 .nth(1)
                 .unwrap_or_else(|| panic!("the help must carry `{heading}`"));
-            let line = after.lines().next().expect("a line follows the heading");
-            assert!(
-                !line.trim().is_empty(),
-                "`{heading}` must be followed by its list on the same line"
-            );
+            // R2114 (open-debt item 237) — the FIRST NON-EMPTY line, not the
+            // first. An inline heading (`PAYLOAD FORMATS: cbor, ...`) leaves
+            // its list on the remainder of the heading's own line; a SECTION
+            // heading leaves an empty remainder and puts the list on the line
+            // below. One helper reads both, so the fourth population did not
+            // need a second reader that could disagree with this one.
+            let line = after
+                .lines()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or_else(|| panic!("`{heading}` must be followed by its list"));
             line.split(',')
                 .map(str::trim)
                 .filter(|e| !e.is_empty())
@@ -5627,10 +5721,19 @@ mod tests {
         let formats: Vec<&str> = wz_capture::payload::formats::BUILTIN_NAMES.to_vec();
         let misbound = wz_capture::payload_decode::Misbound::names();
         let refused = wz_capture::payload_decode::RefusedUnder::names();
+        // R2114 (open-debt item 237) — the DESCRIBED-format field types, held
+        // to the same rule. The help lists them for a deployment that has to
+        // write a layout, and a hand-kept list is exactly what this test class
+        // exists to stop.
+        let field_types: Vec<&str> = wz_capture::payload::formats::TYPES
+            .iter()
+            .map(|(name, _)| *name)
+            .collect();
         for (heading, shipped) in [
             ("PAYLOAD FORMATS: ", &formats),
             ("PAYLOAD MISBOUND: ", &misbound),
             ("PAYLOAD REFUSED UNDER: ", &refused),
+            ("PAYLOAD FIELD TYPES:", &field_types),
         ] {
             let listed = block(heading);
             // ANTI-VACUITY: an empty population makes both directions true.
@@ -5927,12 +6030,8 @@ mod tests {
             .map(|p| (0u32, 1_000_000u64, p.as_slice()))
             .collect();
         let capture = wz_capture::pcapng::write(&[(wz_capture::link::LINKTYPE_ETHERNET, 6)], &refs);
-        let rules = [(String::from("demo/**"), String::from("json"))];
-        let names = [(
-            String::from("demo/**"),
-            String::from("$.temp"),
-            String::from("celsius"),
-        )];
+        let rules = [String::from("demo/**=json")];
+        let names = [String::from("demo/**:$.temp=celsius")];
 
         let text = analyze_request(&Request {
             capture: &capture,
@@ -6023,12 +6122,8 @@ mod tests {
             .map(|p| (0u32, 1_000_000u64, p.as_slice()))
             .collect();
         let capture = wz_capture::pcapng::write(&[(wz_capture::link::LINKTYPE_ETHERNET, 6)], &refs);
-        let rules = [(String::from("demo/**"), String::from("cbor"))];
-        let names = [(
-            String::from("demo/**"),
-            String::from("$.t"),
-            String::from("celsius"),
-        )];
+        let rules = [String::from("demo/**=cbor")];
+        let names = [String::from("demo/**:$.t=celsius")];
 
         let text = analyze_request(&Request {
             capture: &capture,
@@ -6089,6 +6184,104 @@ mod tests {
         );
     }
 
+    /// R2114 (open-debt item 237) — A DEPLOYMENT'S OWN FORMAT, DESCRIBED IN
+    /// TEXT, DECODING A CAPTURE THROUGH THE COMMAND LINE.
+    ///
+    /// # What it proves that nothing else did
+    ///
+    /// Two things at once, because one fixture reaches both and neither had a
+    /// witness on this surface.
+    ///
+    /// The first is the item: this build ships three decoders and knows nothing
+    /// about the record below. It decodes because a LINE said what the record
+    /// is. No code crossed a boundary and no callback ran, which is the whole
+    /// argument for closing the item this way rather than with a function
+    /// pointer the ABI's memory rule forbids.
+    ///
+    /// The second is a divergence found while closing it. The topic carries a
+    /// COLON, so the rule's pattern is quoted -- and until this round the
+    /// command line handed `FormatMap::insert` the halves `parse_declaration`
+    /// returns, which are the QUOTED spelling. The backslash went into the
+    /// pattern, the pattern matched no topic, and the rule silently decoded
+    /// nothing. The C ABI never had the bug because it goes through
+    /// `FormatMap::declare`, which unquotes; this surface now goes through the
+    /// same door. Item 462 made this pattern expressible and only one of the
+    /// two surfaces could express it.
+    #[test]
+    fn a_described_format_decodes_a_topic_whose_name_needs_quoting() {
+        // A profile record this tree has never seen: a big-endian counter, a
+        // flag byte, and a tail. 0x012c is 300.
+        const RECORD: &[u8] = &[0x01, 0x2c, 0x07, 0xde, 0xad];
+        const BYTES: u32 = 0;
+        let packets = [udp_from_zenoh_port(&frame_carrying(&put_declaring(
+            "demo/temp:c",
+            BYTES,
+            RECORD,
+        )))];
+        let refs: Vec<(u32, u64, &[u8])> = packets
+            .iter()
+            .map(|p| (0u32, 1_000_000u64, p.as_slice()))
+            .collect();
+        let capture = wz_capture::pcapng::write(&[(wz_capture::link::LINKTYPE_ETHERNET, 6)], &refs);
+        // The DEFINITION is written after the rule that uses it, on purpose:
+        // both surfaces resolve names before rules, and a config file whose
+        // definition sits at the bottom must work here too.
+        let rules = [
+            String::from("demo/temp\\:c=profile"),
+            String::from("#profile=counter:u16be,flags:u8,tail:rest"),
+        ];
+        let text = analyze_request(&Request {
+            capture: &capture,
+            keylog: None,
+            format: Format::Text,
+            per_flow: true,
+            per_message: true,
+            messages_per_flow: None,
+            quic_ports: &[],
+            quic_cid_len: None,
+            payload_rules: &rules,
+            payload_field_names: &[],
+            serial_linktypes: &[],
+            census: Census::default(),
+            per_field: true,
+            bounded: false,
+            health: false,
+            select: None,
+            csv: None,
+        })
+        .expect("the capture reads")
+        .0;
+        // ANTI-VACUITY: the message really decoded, so an empty listing cannot
+        // pass this by having been handed nothing.
+        assert!(
+            text.contains("messages decoded: 1"),
+            "the fixture must decode: {text}"
+        );
+        // The declared field names are the PATHS, and the values are read from
+        // the layout's own endianness rather than the host's.
+        assert!(
+            text.contains("counter"),
+            "the described field is named: {text}"
+        );
+        assert!(
+            text.contains("300"),
+            "0x012c is 300 read big-endian, and 11265 read the other way: {text}"
+        );
+        assert!(text.contains("dead"), "the tail is accounted for: {text}");
+        // And NOTHING is reported unbound -- neither the rule nor the
+        // definition. The rule's half is the quoting: a pattern that reached
+        // the map still quoted matches no topic and is reported unbound. The
+        // definition's half is a second ledger the first run of this test
+        // caught: a described format whose rule fired was still being reported
+        // as "installed and BOUND NOTHING", beside the fields it had just
+        // produced, because only the rule's handle was being marked.
+        assert!(
+            !text.contains("BOUND NOTHING"),
+            "the quoted pattern must reach the map unquoted, and a definition \
+             whose rule fired has been used: {text}"
+        );
+    }
+
     #[test]
     fn the_encoding_findings_and_their_tally_reach_the_terminal() {
         const JSON: u32 = 5;
@@ -6108,7 +6301,7 @@ mod tests {
             .map(|(i, p)| (0u32, 1_000_000 + i as u64 * 100, p.as_slice()))
             .collect();
         let capture = wz_capture::pcapng::write(&[(wz_capture::link::LINKTYPE_ETHERNET, 6)], &refs);
-        let rules = [(String::from("demo/**"), String::from("protobuf"))];
+        let rules = [String::from("demo/**=protobuf")];
 
         let run = |format: Format| {
             analyze_request(&Request {
@@ -6260,7 +6453,7 @@ mod tests {
             .map(|(i, p)| (0u32, 1_000_000 + i as u64 * 100, p.as_slice()))
             .collect();
         let capture = wz_capture::pcapng::write(&[(wz_capture::link::LINKTYPE_ETHERNET, 6)], &refs);
-        let rules = [(String::from("demo/**"), String::from("protobuf"))];
+        let rules = [String::from("demo/**=protobuf")];
 
         let text = analyze_request(&Request {
             capture: &capture,
@@ -6350,7 +6543,7 @@ mod tests {
             .map(|(i, p)| (0u32, 1_000_000 + i as u64 * 100, p.as_slice()))
             .collect();
         let capture = wz_capture::pcapng::write(&[(wz_capture::link::LINKTYPE_ETHERNET, 6)], &refs);
-        let rules = [(String::from("demo/**"), String::from("json"))];
+        let rules = [String::from("demo/**=json")];
 
         let run = |format: Format| {
             analyze_request(&Request {

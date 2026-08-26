@@ -325,7 +325,19 @@ pub unsafe extern "C" fn wz_dissect_readable_surfaces(out: *mut *mut c_char) -> 
         ),
         &mut s,
     );
-    s.push_str("},\"doors\":[");
+    s.push('}');
+    // R2114 (open-debt item 237) — the third surface a consumer has to ask
+    // about, and the only one it needs BEFORE it writes anything: which field
+    // types a DESCRIBED format may use. A deployment declaring its own record
+    // layout through the declarations door would otherwise have to read this
+    // library's source to learn the spellings, which is the barrier that item
+    // was about.
+    s.push_str(",\"payload_field_types\":");
+    wz_session_core::json::escape_into(
+        &wz_capture::payload::formats::readable_field_types_line(),
+        &mut s,
+    );
+    s.push_str(",\"doors\":[");
     let mut first = true;
     let mut door = Some(Door::FIRST);
     while let Some(d) = door {
@@ -3548,11 +3560,25 @@ mod tests {
         // R2100 (open-debt item 509) — every document now opens with its
         // revision, so the OPENING this asserts is the envelope; the
         // link-types line is what follows it.
+        // R2114 (open-debt item 237) — revision 2, because the document grew
+        // `payload_field_types`. Asserted as the literal it is: the number is
+        // the contract a consumer branches on, so a test that accepted "some
+        // revision" would let the shape move without anyone announcing it.
         assert!(
             doc.starts_with(
-                "{\"document\":{\"name\":\"readable_surfaces\",\"revision\":1},\"link_types\":\""
+                "{\"document\":{\"name\":\"readable_surfaces\",\"revision\":2},\"link_types\":\""
             ),
             "the document is one JSON object opening with its revision: {doc}"
+        );
+        // And the third surface is IN it, derived from the same table the help
+        // text is held to, so a consumer can learn the spellings before it
+        // writes a layout.
+        assert!(
+            doc.contains(&format!(
+                "\"payload_field_types\":\"{}\"",
+                wz_capture::payload::formats::readable_field_types_line()
+            )),
+            "the described-format field types must be reported: {doc}"
         );
         // R311y932 (item 451) — the doors axis is IN the document, and the
         // subsumption is what a C consumer could not learn anywhere else.
@@ -3872,6 +3898,67 @@ mod tests {
         assert!(
             undeclared.contains("\"payload_mapping\":[]"),
             "a caller that declared no rule must get the key too: {undeclared}"
+        );
+    }
+
+    /// R2114 (open-debt item 237) — A FORMAT THIS BUILD DOES NOT SHIP,
+    /// DECODING A CAPTURE THROUGH THE C ABI, WITH NO NEW SYMBOL AND NO
+    /// CALLBACK.
+    ///
+    /// # Why this test is the item
+    ///
+    /// The item was that a C consumer could not register a decoder: to see its
+    /// own format it had to build this workspace. What crosses here is the
+    /// declarations TEXT the door already took — so the memory rule at the top
+    /// of `wz_dissect.h` is untouched, and `no callbacks run` is still true.
+    ///
+    /// # Why the SAME bytes protobuf reads
+    ///
+    /// `protobuf_capture` carries `08 96 01`, which the built-in walks as field
+    /// 1, varint 150. Described as `tag:u8,value:u16le` the same three bytes
+    /// are 8 and 406. Two different answers over one payload is what makes this
+    /// unfakeable: a run that quietly fell back to the built-in, or one that
+    /// decoded nothing and rendered bytes, cannot produce 406.
+    #[test]
+    fn a_described_format_decodes_through_the_abi_with_no_new_symbol() {
+        let doc = call_fields_with_payloads(
+            &protobuf_capture(),
+            0,
+            "#profile=tag:u8,value:u16le\ndemo/sensor=profile",
+        )
+        .expect("the capture reads");
+        assert!(
+            doc.contains("\"value\"") && doc.contains("406"),
+            "the DESCRIBED layout must be what read these bytes: {doc}"
+        );
+        // The control: the built-in over the same capture answers differently,
+        // so neither number can be coming from somewhere both share.
+        let builtin = call_fields_with_payloads(&protobuf_capture(), 0, "demo/sensor=protobuf")
+            .expect("the capture reads");
+        assert!(
+            builtin.contains("150") && !builtin.contains("406"),
+            "the control must read the same bytes the other way: {builtin}"
+        );
+        // And the diagnostic door validates a definition with no capture at
+        // all, which is what a UI needs while an operator is still typing.
+        let ok = call_declarations_diagnose("#profile=tag:u8,value:u16le\ndemo/sensor=profile");
+        assert!(
+            ok.contains("\"ok\":true") && ok.contains("\"installed\":2"),
+            "both lines install, sight unseen: {ok}"
+        );
+        // A layout that cannot be read is refused BY LINE, like any other bad
+        // declaration -- the deployment finds out where, not just that.
+        let bad = call_declarations_diagnose("#profile=tag:u24le");
+        assert!(
+            bad.contains("\"ok\":false") && bad.contains("u24le"),
+            "an unreadable layout is refused and names the type: {bad}"
+        );
+        // And a definition may not take a name this build already ships, which
+        // would change what every other config file's rules mean.
+        let taken = call_declarations_diagnose("#json=a:u8");
+        assert!(
+            taken.contains("\"ok\":false") && taken.contains("already a format name"),
+            "a shipped name may not be redefined: {taken}"
         );
     }
 
@@ -4280,10 +4367,12 @@ mod tests {
 
         // The other refusal a reader meets, and it is a DIFFERENT message: the
         // line parsed and named a decoder this build does not carry.
+        // R2114 (open-debt item 237) — the message says AVAILABLE rather than
+        // "this build has", because the set is no longer this build's alone:
+        // it is what ships plus what the very text being diagnosed described.
         let unknown = call_declarations_diagnose("demo/**=protobufff");
         assert!(
-            unknown.contains("this build has no decoder named `protobufff`")
-                && unknown.contains("protobuf"),
+            unknown.contains("no decoder is named `protobufff`") && unknown.contains("protobuf"),
             "an unknown format must be told apart from a malformed line, and \
              say what IS available: {unknown}"
         );

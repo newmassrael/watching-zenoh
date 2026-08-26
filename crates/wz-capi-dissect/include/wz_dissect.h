@@ -345,6 +345,35 @@ int wz_dissect_pcap_fields(const unsigned char *bytes, size_t len,
  *     demo/temp:1=temperature    a field name: protobuf's wire format
  *                                carries none, so a deployment that has a
  *                                schema declares it
+ *     #profile=c:u16be,f:u8      R2114 -- a format DEFINITION: a record this
+ *                                library does not ship, described so a rule
+ *                                can name it like any other format
+ *
+ * THE DEFINITION IS WHY THIS DOOR TAKES TEXT AND NOT A FUNCTION POINTER.
+ * A deployment with its own profile table used to have to build this
+ * workspace to see its own payloads; the obvious remedy -- register a decoder
+ * callback -- would have voided the memory rule at the top of this header,
+ * which says no callbacks run. Data can be versioned, diagnosed before there
+ * is a capture, and refused by line. Code cannot.
+ *
+ * A layout is `<name>:<type>` items separated by commas, read in order from
+ * byte zero. Types are fixed-width integers and floats with their endianness
+ * in the spelling, `bytesN` for N raw bytes, and `rest` -- legal only last --
+ * for a variable tail. Ask wz_dissect_readable_surfaces for the spellings
+ * this build reads rather than copying a list into your own notes. A field's
+ * declared NAME is the path it is reported under.
+ *
+ * Bytes the layout does not account for are a FINDING and not a quiet
+ * success: a short description over a long record decodes every field it
+ * names and none of them are wrong, which is the worst way to be looking at
+ * the wrong record.
+ *
+ * A definition may appear before or after the rules that use it, and it may
+ * not take a name this build already ships -- redefining one would change
+ * what every other config file's rules mean on this run alone.
+ *
+ * A topic whose own name carries `:` or `=` (or a leading `#`) is written
+ * with a backslash before it.
  *
  * Patterns are zenoh's own keyexpr dialect, so a wildcard chunk covers a
  * subtree -- deliberately not spelled here, because that token cannot be
@@ -489,7 +518,14 @@ int wz_dissect_declarations_diagnose(const char *declarations, char **out);
 /* R311y913 (ABI 9) — what this build can READ, without a capture.
  *
  * Writes {"link_types":"0 NULL, 1 ETHERNET, …",
- *         "ext_bodies":{"zbuf":"Auth/pubkey, …","z64":"Declare/node_id, …"}}
+ *         "ext_bodies":{"zbuf":"Auth/pubkey, …","z64":"Declare/node_id, …"},
+ *         "payload_field_types":"u8, i8, u16le, …"}
+ *
+ * R2114 -- the document is at REVISION 2 and the third key is why. A consumer
+ * writing a format DEFINITION (see the declarations door above) needs the
+ * type spellings before it has a capture to try them on, and a list copied
+ * into its own notes ages the moment this table grows. Read the revision off
+ * the envelope rather than assuming the key is there.
  *
  * Two questions `wz-analyze --help` has answered for a while and this surface
  * could not. Both matter for the same reason: an unread capture reports

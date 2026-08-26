@@ -1708,7 +1708,18 @@ pub mod formats {
         /// the map so that EVERY surface makes it. A fallback to "render the
         /// bytes" would leave a reader who typed `protobufff` believing their
         /// rule was live.
-        NoSuchFormat(String),
+        ///
+        /// R2114 (open-debt item 237) — it carries the names that WERE
+        /// available, because that set is no longer a constant: it is what this
+        /// build ships plus what this run described, and a message naming only
+        /// the first half would tell a deployment its own format does not exist.
+        NoSuchFormat(String, Vec<String>),
+        /// R2114 (open-debt item 237) — a definition of a name already taken,
+        /// by a built-in or by an earlier definition.
+        FormatNameTaken(String),
+        /// R2114 (open-debt item 237) — a definition whose LAYOUT could not be
+        /// read, with the reason from the layout grammar.
+        BadLayout(String, crate::payload_described::LayoutError),
     }
 
     impl core::fmt::Display for FormatMapError {
@@ -1734,13 +1745,25 @@ pub mod formats {
                 Self::NotADeclaration(line) => write!(
                     f,
                     "`{line}` is not a declaration -- expected \
-                     `<keyexpr>=<format>` or `<keyexpr>:<path>=<name>`"
+                     `<keyexpr>=<format>`, `<keyexpr>:<path>=<name>` or \
+                     `#<format>=<layout>`"
                 ),
-                Self::NoSuchFormat(name) => write!(
+                Self::NoSuchFormat(name, available) => write!(
                     f,
-                    "this build has no decoder named `{name}` (it has: {})",
-                    BUILTIN_NAMES.join(", ")
+                    "no decoder is named `{name}` (available: {})",
+                    available.join(", ")
                 ),
+                Self::FormatNameTaken(name) => write!(
+                    f,
+                    "`{name}` is already a format name here, so a definition of \
+                     it would change what every rule using that name means"
+                ),
+                Self::BadLayout(name, why) => {
+                    write!(
+                        f,
+                        "the layout described for `{name}` is not readable: {why}"
+                    )
+                }
             }
         }
     }
@@ -1752,13 +1775,28 @@ pub mod formats {
     /// subtree. Stated because the alternative — longest-pattern-wins — is the
     /// other reasonable rule and a reader must not have to guess which one this
     /// is.
+    /// R2114 (open-debt item 237) — what a rule points AT.
+    ///
+    /// A format this build ships is borrowed for `'a` (they are all
+    /// `&'static`); one the deployment DESCRIBED is owned by the map, because
+    /// it did not exist until a line of text was read. An index and not a
+    /// reference: a map holding a reference into its own `Vec` is
+    /// self-referential, and the index keeps every rule the same size.
+    enum RuleTarget<'a> {
+        Builtin(&'a dyn PayloadFormat),
+        Described(usize),
+    }
+
     #[derive(Default)]
     pub struct FormatMap<'a> {
-        rules: Vec<(String, &'a dyn PayloadFormat)>,
+        rules: Vec<(String, RuleTarget<'a>)>,
         /// R311y720 (PF4) — declared field names: (keyexpr pattern, field
         /// path, name). See [`FormatMap::name_field`] for why they are
         /// declared rather than derived.
         names: Vec<(String, String, String)>,
+        /// R2114 (open-debt item 237) — the formats this run DESCRIBED, owned
+        /// here because nothing else outlives them.
+        described: Vec<crate::payload_described::DescribedFormat>,
     }
 
     /// R311y726 — a handle to ONE declaration installed in a [`FormatMap`].
@@ -1796,6 +1834,13 @@ pub mod formats {
         FormatRule,
         /// A field path under a keyexpr pattern given a name.
         FieldName,
+        /// R2114 (open-debt item 237) — a format the DEPLOYMENT described.
+        ///
+        /// A third kind and not a rule, because it binds nothing to traffic: it
+        /// can be declared and never referenced, which is a finding a rule
+        /// cannot have. That is why it carries a handle of its own — see
+        /// [`FormatMap::declarations`].
+        FormatDefinition,
     }
 
     /// R311y726 — one installed declaration, as a reader would have to see it
@@ -1822,6 +1867,7 @@ pub mod formats {
             Self {
                 rules: Vec::new(),
                 names: Vec::new(),
+                described: Vec::new(),
             }
         }
 
@@ -1845,8 +1891,11 @@ pub mod formats {
             // as a different declaration, which is the round-trip contract
             // `parse_declaration(&declaration_text(d)) == d` broken by the very
             // patterns this round makes expressible.
-            for (at, (pattern, format)) in self.rules.iter().enumerate() {
-                let (pattern, format) = (escape_field(pattern), escape_field(format.name()));
+            for (at, (pattern, target)) in self.rules.iter().enumerate() {
+                let (pattern, format) = (
+                    escape_field(pattern),
+                    escape_field(self.target_format(target).name()),
+                );
                 out.push(Declaration {
                     id: DeclarationId(at),
                     kind: DeclarationKind::FormatRule,
@@ -1872,7 +1921,87 @@ pub mod formats {
                     }),
                 });
             }
+            // R2114 (open-debt item 237) — the DEFINITIONS, last so the two id
+            // ranges above are unchanged by this axis existing. A definition
+            // gets a handle for a reason the other two kinds do not have: it
+            // can be written and never referenced, and "you described a format
+            // and no rule uses it" is exactly the finding this ledger is for.
+            for (at, described) in self.described.iter().enumerate() {
+                let (name, layout) = (escape_field(described.name()), described.layout_text());
+                out.push(Declaration {
+                    id: DeclarationId(self.rules.len() + self.names.len() + at),
+                    kind: DeclarationKind::FormatDefinition,
+                    text: declaration_text(&DeclarationText::Definition {
+                        name: &name,
+                        layout: &layout,
+                    }),
+                });
+            }
             out
+        }
+
+        /// The format one rule points at, whether shipped or described.
+        fn target_format<'s>(&'s self, target: &'s RuleTarget<'a>) -> &'s dyn PayloadFormat {
+            match target {
+                RuleTarget::Builtin(f) => *f,
+                RuleTarget::Described(at) => &self.described[*at],
+            }
+        }
+
+        /// R2114 (open-debt item 237) — DEFINE a format from a layout the
+        /// deployment wrote.
+        ///
+        /// A name this build already ships is REFUSED rather than shadowed. A
+        /// deployment that redefined `json` would make every rule in every
+        /// other config file mean something else on this run only, and the
+        /// reader of a report would have no way to tell which `json` decoded
+        /// their bytes.
+        pub fn define(&mut self, name: &str, layout: &str) -> Result<(), FormatMapError> {
+            if name.is_empty() {
+                return Err(FormatMapError::NotADeclaration(name.to_owned()));
+            }
+            if builtin(name).is_some() {
+                return Err(FormatMapError::FormatNameTaken(name.to_owned()));
+            }
+            if self.described.iter().any(|d| d.name() == name) {
+                return Err(FormatMapError::FormatNameTaken(name.to_owned()));
+            }
+            let described = crate::payload_described::DescribedFormat::parse(name, layout)
+                .map_err(|why| FormatMapError::BadLayout(name.to_owned(), why))?;
+            self.described.push(described);
+            Ok(())
+        }
+
+        /// R2114 (open-debt item 237) — every format name a rule may use on
+        /// this map: what this build ships, plus what this run described.
+        ///
+        /// DERIVED from the two populations rather than kept as a third list,
+        /// so a refusal that says "it has: ..." cannot go stale.
+        pub fn format_names(&self) -> Vec<String> {
+            let mut out: Vec<String> = BUILTIN_NAMES.iter().map(|n| (*n).into()).collect();
+            out.extend(self.described.iter().map(|d| d.name().into()));
+            out
+        }
+
+        /// Map every keyexpr matching `pattern` to a format by NAME, resolved
+        /// against [`FormatMap::format_names`].
+        ///
+        /// The one entry point that can reach a described format, because a
+        /// caller cannot hold a reference to one -- the map owns it.
+        pub fn insert_named(&mut self, pattern: &str, format: &str) -> Result<(), FormatMapError> {
+            let target = match self.described.iter().position(|d| d.name() == format) {
+                Some(at) => RuleTarget::Described(at),
+                None => match builtin(format) {
+                    Some(f) => RuleTarget::Builtin(f),
+                    None => {
+                        return Err(FormatMapError::NoSuchFormat(
+                            format.to_owned(),
+                            self.format_names(),
+                        ))
+                    }
+                },
+            };
+            self.push_rule(pattern, target)
         }
 
         /// Map every keyexpr matching `pattern` to `format`.
@@ -1880,6 +2009,15 @@ pub mod formats {
             &mut self,
             pattern: &str,
             format: &'a dyn PayloadFormat,
+        ) -> Result<(), FormatMapError> {
+            self.push_rule(pattern, RuleTarget::Builtin(format))
+        }
+
+        /// The pattern checks both entry points share.
+        fn push_rule(
+            &mut self,
+            pattern: &str,
+            target: RuleTarget<'a>,
         ) -> Result<(), FormatMapError> {
             if pattern.is_empty() || pattern.starts_with('/') || pattern.ends_with('/') {
                 return Err(FormatMapError::NotAKeyexpr(pattern.to_owned()));
@@ -1896,7 +2034,7 @@ pub mod formats {
             // expression, so a wz that cannot declare a format for
             // `demo/temp:c` is a replacement with a hole. Quoting closes it,
             // and `declarations()` writes the pattern back quoted.
-            self.rules.push((pattern.to_owned(), format));
+            self.rules.push((pattern.to_owned(), target));
             Ok(())
         }
 
@@ -1908,20 +2046,48 @@ pub mod formats {
         /// [`crate::filter`] already makes for the selector language.
         /// R311y726 — the handle rides along, so a caller that wants to know
         /// which rules applied records it instead of asking a second time.
-        pub fn for_keyexpr(&self, keyexpr: &str) -> Option<(DeclarationId, &'a dyn PayloadFormat)> {
+        ///
+        /// R2114 (open-debt item 237) — the returned reference is tied to
+        /// `&self` and no longer to `'a`, because a DESCRIBED format lives in
+        /// the map. Callers hold a `&'a FormatMap<'a>`, so at every one of them
+        /// the two lifetimes are the same and nothing had to change.
+        pub fn for_keyexpr(&self, keyexpr: &str) -> Option<(DeclarationId, &dyn PayloadFormat)> {
             let at = self.rules.iter().position(|(pattern, _)| {
                 // The matcher takes CHUNKS, which is the same split
                 // `filter::compile_pattern` performs for the same function.
                 let chunks: Vec<&str> = pattern.split('/').collect();
                 wz_session_core::keyexpr_match::keyexpr_pattern_matches(&chunks, keyexpr)
             })?;
-            Some((DeclarationId(at), self.rules[at].1))
+            Some((DeclarationId(at), self.target_format(&self.rules[at].1)))
         }
 
-        /// Whether any rule was installed. A caller renders nothing for an
+        /// R2114 (open-debt item 237) — the DEFINITION one rule was resolved
+        /// through, if it was resolved through one.
+        ///
+        /// So that a run's ledger of what applied marks the definition too: a
+        /// described format whose rule fired has been used, and reporting it as
+        /// unused would send a reader to delete the thing that decoded their
+        /// payload.
+        pub fn definition_of(&self, rule: DeclarationId) -> Option<DeclarationId> {
+            match self.rules.get(rule.0)?.1 {
+                RuleTarget::Described(at) => {
+                    Some(DeclarationId(self.rules.len() + self.names.len() + at))
+                }
+                RuleTarget::Builtin(_) => None,
+            }
+        }
+
+        /// Whether anything was DECLARED. A caller renders nothing for an
         /// empty map rather than a heading with no rows under it.
+        ///
+        /// R2114 (open-debt item 237) — a lone DEFINITION counts. It decodes
+        /// nothing on its own, so the tempting reading is that an empty rule
+        /// list means nothing to render; but a deployment that described a
+        /// format and forgot the rule has made exactly the mistake this run's
+        /// "declared and never used" ledger exists to report, and skipping the
+        /// render would take that finding away at the one moment it is true.
         pub fn is_empty(&self) -> bool {
-            self.rules.is_empty()
+            self.rules.is_empty() && self.described.is_empty()
         }
 
         /// The patterns, in the order they are tried.
@@ -2006,6 +2172,13 @@ pub mod formats {
     // them so a caller reads one module. See `crate::payload_builtin` for why
     // they moved out of `wz-analyze`.
     pub use crate::payload_builtin::{builtin, Cbor, Json, Protobuf, BUILTIN_NAMES};
+    // R2114 (open-debt item 237) — the DESCRIBED format, re-exported the same
+    // way and for the same reason: one module a caller reads. `TYPES` is public
+    // because the usage text and the header both list the spellings, and a
+    // second list would be a second opinion.
+    pub use crate::payload_described::{
+        readable_field_types_line, DescribedFormat, Kind, LayoutError, TYPES,
+    };
 
     /// R311y856 — ONE SPELLING for a declaration, read here rather than by each
     /// surface that accepts one.
@@ -2049,6 +2222,20 @@ pub mod formats {
             /// The name to render for that path.
             name: &'a str,
         },
+        /// R2114 (open-debt item 237) — `#<name>=<layout>`, a format this
+        /// DEPLOYMENT describes rather than one this build ships.
+        ///
+        /// It defines a name; a [`DeclarationText::Rule`] is still what binds
+        /// that name to traffic. Two lines and not one because a profile is
+        /// normally read by several topics, and folding them would make a
+        /// deployment repeat its record layout once per rule.
+        Definition {
+            /// The name rules refer to it by, which may not be one this build
+            /// already ships.
+            name: &'a str,
+            /// The record layout, in `crate::payload_described`'s grammar.
+            layout: &'a str,
+        },
     }
 
     impl DeclarationText<'_> {
@@ -2057,6 +2244,7 @@ pub mod formats {
             match self {
                 Self::Rule { .. } => DeclarationKind::FormatRule,
                 Self::Name { .. } => DeclarationKind::FieldName,
+                Self::Definition { .. } => DeclarationKind::FormatDefinition,
             }
         }
     }
@@ -2084,6 +2272,9 @@ pub mod formats {
                 path,
                 name,
             } => alloc::format!("{pattern}:{path}={name}"),
+            DeclarationText::Definition { name, layout } => {
+                alloc::format!("{DEFINE}{name}={layout}")
+            }
         }
     }
 
@@ -2105,16 +2296,30 @@ pub mod formats {
     /// any character to be unavailable.
     const ESCAPE: char = '\\';
 
+    /// R2114 (open-debt item 237) — the character that marks a DEFINITION, at
+    /// the head of a line and nowhere else.
+    ///
+    /// Quotable like every other reserved character, and that is the point: the
+    /// note on [`ESCAPE`] rules out picking a discriminator for being one
+    /// canon rejects, and a new spelling must not reintroduce that bet. `#`
+    /// happens to be a character upstream refuses inside a chunk TODAY, so no
+    /// declaration already written changes meaning; if canon widens tomorrow,
+    /// `\#topic=cbor` is the rule about a topic named `#topic` and nothing
+    /// breaks. The marker is read at position 0 only, so a `#` anywhere else
+    /// needs no quoting to be itself.
+    const DEFINE: char = '#';
+
     /// Write `s` so [`unescape_field`] reads it back, whatever it contains.
     ///
-    /// All three of [`ESCAPE`], `:` and `=` are quoted, not just the one a
-    /// given position needs. The alternative is a per-field rule ("`:` matters
-    /// in a scope, `=` matters everywhere") and a reader would then have to
-    /// know which field it is looking at to know what a backslash meant.
+    /// All four of [`ESCAPE`], `:`, `=` and [`DEFINE`] are quoted, not just the
+    /// one a given position needs. The alternative is a per-field rule ("`:`
+    /// matters in a scope, `#` matters at the head of a line") and a reader
+    /// would then have to know which field it is looking at to know what a
+    /// backslash meant.
     fn escape_field(s: &str) -> String {
         let mut out = String::with_capacity(s.len());
         for c in s.chars() {
-            if c == ESCAPE || c == ':' || c == '=' {
+            if c == ESCAPE || c == ':' || c == '=' || c == DEFINE {
                 out.push(ESCAPE);
             }
             out.push(c);
@@ -2124,7 +2329,7 @@ pub mod formats {
 
     /// Read a quoted field back. `None` when the quoting is malformed.
     ///
-    /// A trailing lone [`ESCAPE`] and a quote of anything other than the three
+    /// A trailing lone [`ESCAPE`] and a quote of anything other than the four
     /// reserved characters are both REFUSED rather than passed through. Passing
     /// them through would make `a\b` and `ab` the same declaration, so a
     /// pattern an operator typed would silently match a different topic — the
@@ -2138,7 +2343,7 @@ pub mod formats {
                 continue;
             }
             match chars.next() {
-                Some(q) if q == ESCAPE || q == ':' || q == '=' => out.push(q),
+                Some(q) if q == ESCAPE || q == ':' || q == '=' || q == DEFINE => out.push(q),
                 _ => return None,
             }
         }
@@ -2173,6 +2378,19 @@ pub mod formats {
     /// reader who typed it.
     pub fn parse_declaration(line: &str) -> Result<DeclarationText<'_>, FormatMapError> {
         let bad = || FormatMapError::NotADeclaration(line.to_owned());
+        // R2114 (open-debt item 237) — a DEFINITION, read before the two
+        // spellings below because its marker is at position 0 and theirs are
+        // separators anywhere. A quoted head (`\#a=cbor`) is not a definition,
+        // and falls through to the rule branch with the quote intact for
+        // `FormatMap::declare` to strip -- which is why this looks at the raw
+        // line rather than at an unquoted one.
+        if let Some(rest) = line.strip_prefix(DEFINE) {
+            let (name, layout) = rsplit_once_unescaped(rest, '=').ok_or_else(bad)?;
+            if name.is_empty() || layout.is_empty() {
+                return Err(bad());
+            }
+            return Ok(DeclarationText::Definition { name, layout });
+        }
         // R2111 (open-debt item 462) — the LAST UNQUOTED separator, at both
         // levels. `demo/temp\:c=cbor` is now a rule about the topic
         // `demo/temp:c`, which no spelling of this grammar could express
@@ -2250,10 +2468,17 @@ pub mod formats {
             match parse_declaration(line)? {
                 DeclarationText::Rule { pattern, format } => {
                     let (pattern, format) = (unquote(pattern)?, unquote(format)?);
-                    let decoder = builtin(&format)
-                        .ok_or_else(|| FormatMapError::NoSuchFormat(format.clone()))?;
-                    self.insert(&pattern, decoder)?;
+                    // R2114 (open-debt item 237) — resolved by NAME against the
+                    // map, which is the only thing that can see a described
+                    // format. `builtin` alone stood here, and that is precisely
+                    // the door a deployment could not get through.
+                    self.insert_named(&pattern, &format)?;
                     Ok(DeclarationKind::FormatRule)
+                }
+                DeclarationText::Definition { name, layout } => {
+                    let name = unquote(name)?;
+                    self.define(&name, layout)?;
+                    Ok(DeclarationKind::FormatDefinition)
                 }
                 DeclarationText::Name {
                     pattern,
@@ -2275,21 +2500,220 @@ pub mod formats {
         /// alternative is a map quietly smaller than the text that built it --
         /// which is the same silence [`FormatMap::declare`] refuses one
         /// declaration at a time.
+        /// R2114 (open-debt item 237) — TWO PASSES, definitions first.
+        ///
+        /// So that a definition may sit anywhere in the text. The alternative
+        /// is line order, and line order would have made the two consumption
+        /// surfaces disagree: the command line collects its flags into groups
+        /// before it builds a map, so a config file whose definition happens to
+        /// be at the bottom would install there and fail here. One rule, both
+        /// surfaces -- which is the property `analysis_surface_parity.py`
+        /// exists to hold.
         pub fn declare_all(&mut self, text: &str) -> Result<usize, DeclarationError> {
             let mut installed = 0usize;
-            for (at, line) in text.lines().enumerate() {
-                if line.is_empty() {
-                    continue;
+            for definitions_pass in [true, false] {
+                for (at, line) in text.lines().enumerate() {
+                    if line.is_empty() {
+                        continue;
+                    }
+                    let bad = |error| DeclarationError {
+                        line: at,
+                        text: line.to_owned(),
+                        error,
+                    };
+                    // A line that is not a declaration at all is refused on the
+                    // FIRST pass, so the diagnostic points at the first bad
+                    // line rather than at the first bad line that is not a
+                    // definition.
+                    let is_definition = matches!(
+                        parse_declaration(line).map_err(bad)?,
+                        DeclarationText::Definition { .. }
+                    );
+                    if is_definition != definitions_pass {
+                        continue;
+                    }
+                    self.declare(line).map_err(bad)?;
+                    installed += 1;
                 }
-                self.declare(line).map_err(|error| DeclarationError {
-                    line: at,
-                    text: line.to_owned(),
-                    error,
-                })?;
-                installed += 1;
             }
             Ok(installed)
         }
+    }
+}
+
+#[cfg(test)]
+mod format_definition_tests {
+    use super::formats::*;
+    use alloc::string::{String, ToString};
+
+    /// R2114 (open-debt item 237) — THE ROUND TRIP REACHES THE THIRD SPELLING.
+    ///
+    /// `parse_declaration(&declaration_text(d)) == d` is the contract the other
+    /// two answer to, and a spelling added without it is one the map can render
+    /// into a line that reads back as something else -- which is what item 462
+    /// spent a round paying for.
+    #[test]
+    fn a_definition_reads_back_as_itself() {
+        for line in [
+            "#profile=a:u8",
+            "#e2e-1=crc:u16be,counter:u8,data:rest",
+            // A name carrying every character the grammar reserves, quoted.
+            "#odd\\:name=a:u8",
+            "#odd\\=name=a:u8",
+            "#odd\\#name=a:u8",
+            "#odd\\\\name=a:u8",
+        ] {
+            let parsed = parse_declaration(line).unwrap_or_else(|e| panic!("{line}: {e}"));
+            assert!(
+                matches!(parsed, DeclarationText::Definition { .. }),
+                "{line} must read as a definition"
+            );
+            assert_eq!(declaration_text(&parsed), line, "{line} must write back");
+        }
+    }
+
+    /// R2114 (open-debt item 237) — A QUOTED HEAD IS A TOPIC, NOT A DEFINITION.
+    ///
+    /// The marker is at position 0 and quotable, which is the property that
+    /// keeps this grammar off the bet item 462 refused: `#` is a character
+    /// upstream's keyexpr canon rejects TODAY, and if it ever admits one, a
+    /// rule about that topic is still writable.
+    #[test]
+    fn a_quoted_marker_is_a_rule_about_a_topic_that_starts_with_it() {
+        let parsed = parse_declaration("\\#topic=cbor").expect("a declaration");
+        match parsed {
+            DeclarationText::Rule { pattern, format } => {
+                assert_eq!(pattern, "\\#topic");
+                assert_eq!(format, "cbor");
+            }
+            other => panic!("expected a rule, got {other:?}"),
+        }
+    }
+
+    /// R2114 (open-debt item 237) — A DEFINITION IS RESOLVED BY A RULE, AND THE
+    /// TWO MAY BE WRITTEN IN EITHER ORDER.
+    ///
+    /// Order-independence is not a convenience: the command line collects its
+    /// flags into groups before it builds a map, so a text whose definition sat
+    /// last would install on one surface and fail on the other. One rule, both
+    /// surfaces.
+    #[test]
+    fn a_definition_binds_whichever_side_of_its_rule_it_is_written_on() {
+        for text in [
+            "#profile=a:u8\ndemo/**=profile",
+            "demo/**=profile\n#profile=a:u8",
+        ] {
+            let mut map = FormatMap::new();
+            assert_eq!(
+                map.declare_all(text).map_err(|e| e.to_string()),
+                Ok(2),
+                "{text}"
+            );
+            let (_, format) = map.for_keyexpr("demo/a").expect("the rule covers it");
+            assert_eq!(format.name(), "profile", "{text}");
+        }
+    }
+
+    /// R2114 (open-debt item 237) — the refusals, each with the reason a reader
+    /// acts on.
+    #[test]
+    fn a_definition_is_refused_for_reasons_a_reader_can_act_on() {
+        let mut map = FormatMap::new();
+        // A name this build already ships.
+        let taken = map.declare("#json=a:u8").expect_err("a shipped name");
+        assert!(
+            taken.to_string().contains("already a format name"),
+            "{taken}"
+        );
+        // The same name twice.
+        map.declare("#p=a:u8").expect("the first");
+        let again = map.declare("#p=b:u8").expect_err("a second definition");
+        assert!(
+            again.to_string().contains("already a format name"),
+            "{again}"
+        );
+        // A layout the grammar cannot read, named with the format it was for.
+        let bad = map.declare("#q=a:u24le").expect_err("an unknown type");
+        assert!(
+            bad.to_string().contains("`q`") && bad.to_string().contains("u24le"),
+            "{bad}"
+        );
+        // And a rule naming nothing, whose message must list the DESCRIBED
+        // names beside the shipped ones -- a deployment told only about the
+        // built-ins would read it as "your format does not exist".
+        let missing = map.declare("demo/**=nope").expect_err("an unknown format");
+        assert!(
+            missing.to_string().contains("available:") && missing.to_string().contains("p"),
+            "the refusal must name what this RUN has: {missing}"
+        );
+    }
+
+    /// R2114 (open-debt item 237) — a lone definition is not an EMPTY map.
+    ///
+    /// A deployment that described a format and forgot the rule has made
+    /// exactly the mistake the "declared and never used" ledger reports, and a
+    /// map that called itself empty would take the finding away at the one
+    /// moment it is true.
+    #[test]
+    fn a_definition_with_no_rule_is_still_something_declared() {
+        let mut map = FormatMap::new();
+        map.declare("#p=a:u8").expect("a definition");
+        assert!(!map.is_empty(), "a described format is a declaration");
+        let declarations = map.declarations();
+        assert_eq!(declarations.len(), 1);
+        assert_eq!(declarations[0].kind, DeclarationKind::FormatDefinition);
+        assert_eq!(declarations[0].text, "#p=a:u8");
+    }
+
+    /// R2114 (open-debt item 237) — the definition a rule resolved THROUGH has
+    /// a handle, so a run's ledger can mark it used.
+    #[test]
+    fn a_rule_points_back_at_the_definition_it_resolved_through() {
+        let mut map = FormatMap::new();
+        map.declare("#p=a:u8").expect("a definition");
+        map.declare("demo/**=p").expect("a rule on it");
+        map.declare("other/**=json").expect("a rule on a built-in");
+        let (described, _) = map.for_keyexpr("demo/a").expect("covered");
+        let (shipped, _) = map.for_keyexpr("other/a").expect("covered");
+        let definition = map
+            .definition_of(described)
+            .expect("a described rule names its definition");
+        assert!(
+            map.definition_of(shipped).is_none(),
+            "a built-in rule has no definition to name"
+        );
+        // And the handle is the DEFINITION's, so a ledger marking it lines up
+        // with what `declarations()` reports.
+        let listed = map.declarations();
+        let row = listed
+            .iter()
+            .find(|d| d.id == definition)
+            .expect("the handle is one of the reported declarations");
+        assert_eq!(row.kind, DeclarationKind::FormatDefinition);
+    }
+
+    /// R2114 (open-debt item 237) — a described format DECODES through the map,
+    /// with the pattern unquoted at the one boundary that unquotes.
+    #[test]
+    fn the_map_decodes_a_colon_bearing_topic_with_a_described_format() {
+        let mut map = FormatMap::new();
+        map.declare("#profile=counter:u16be,tail:rest")
+            .expect("a definition");
+        map.declare("demo/temp\\:c=profile").expect("a quoted rule");
+        let (_, format) = map
+            .for_keyexpr("demo/temp:c")
+            .expect("the unquoted pattern covers the topic");
+        let fields = format.decode(&[0x01, 0x2c, 0xff]).expect("a record");
+        assert_eq!(fields[0].path, "counter");
+        assert_eq!(fields[0].value, "300");
+        assert_eq!(fields[1].value, "ff");
+        // Round trip: what the map reports reads back as the same rule.
+        let texts: alloc::vec::Vec<String> =
+            map.declarations().into_iter().map(|d| d.text).collect();
+        assert!(
+            texts.contains(&String::from("demo/temp\\:c=profile")),
+            "the rule is written back quoted: {texts:?}"
+        );
     }
 }
 

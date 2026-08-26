@@ -190,6 +190,15 @@ impl<'a> Declarations<'a> {
     pub fn for_keyexpr(&self, keyexpr: &str) -> Option<&'a dyn PayloadFormat> {
         let (id, format) = self.map.for_keyexpr(keyexpr)?;
         self.used.borrow_mut().insert(id);
+        // R2114 (open-debt item 237) — and the DEFINITION the rule resolved
+        // through, where there was one. Marking only the rule was measurably
+        // wrong: the first capture decoded by a described format reported the
+        // definition as "installed and BOUND NOTHING" in the same breath as the
+        // fields it had just produced, which sends a reader to delete the thing
+        // that decoded their payload.
+        if let Some(definition) = self.map.definition_of(id) {
+            self.used.borrow_mut().insert(definition);
+        }
         Some(format)
     }
 

@@ -182,6 +182,13 @@ mod payload_cbor;
 /// walker.
 #[cfg(feature = "dissect")]
 pub mod payload_decode;
+/// R2114 (open-debt item 237) — a payload format a deployment DESCRIBES in the
+/// declaration dialect rather than implements in Rust.
+///
+/// Private for the same reason [`payload_builtin`] is, and re-exported through
+/// [`payload::formats`] where the trait, the map and the dialect are. A caller
+/// reads one module.
+mod payload_described;
 pub mod pcap;
 pub mod pcapng;
 /// R311y615 (§1.1f) — the EXPORT plane: the analysis tables rendered for

@@ -134,6 +134,17 @@ BOTH = {
         "wz_dissect_pcap_fields_with_payloads",
         (15,),
     ),
+    # R2114 (open-debt item 237) — DESCRIBING a format this build does not
+    # ship, which is a capability and not a spelling of the row above. That one
+    # picks a decoder; this one supplies the decoder, as DATA, through the door
+    # that already takes declaration text. It is on both surfaces with no new
+    # symbol and no new flag, which is what let the ABI gain it without
+    # breaking the memory rule that forbids a callback.
+    "describing a payload format": (
+        "--payload-format",
+        "wz_dissect_pcap_fields_with_payloads",
+        (15,),
+    ),
     # R311y857 — moved here from ONLY_CAPI, where it was the last OPEN DEBT.
     #
     # The reason there was OVERSTATED and this is where the correction lives:
@@ -530,6 +541,24 @@ SELF_REPORT = {
         "here`. Both surfaces now answer which ones it opens, from the same "
         "dispatch-driven renderer.",
         (10,),
+    ),
+    # R2114 (open-debt item 237) — the third self-report, and the only one a
+    # consumer needs BEFORE it has anything to run. A deployment that describes
+    # its own record layout has to know which type spellings this build reads,
+    # and the alternative to asking is reading this reader's source -- which is
+    # the barrier the item was about. Both surfaces answer from
+    # `readable_field_types_line`, derived from the type table, so the help
+    # text, the ABI's catalogue and every refusal are one fact.
+    "PAYLOAD FIELD TYPES:": (
+        "wz_dissect_readable_surfaces",
+        "A layout is written before there is a capture to run it against, so a "
+        "consumer that cannot ask which field types exist has to guess, and a "
+        "guessed spelling is refused at the moment it is least useful. The "
+        "door reports it beside the link types and the extension bodies "
+        "because they are one question -- what can you read? -- and the "
+        "document's revision moved to 2 rather than the key being added "
+        "silently.",
+        (15,),
     ),
 }
 

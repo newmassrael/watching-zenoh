@@ -133,6 +133,17 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         keys: READABLE_SURFACES_R1_KEYS,
         retiring: &[],
     },
+    // R2114 (open-debt item 237) — revision 2 ADDS `payload_field_types` and
+    // retires nothing. A deployment that describes its own record has to know
+    // which type spellings this build reads before it can write one, and the
+    // alternative to asking the library is a list copied into a header that
+    // ages the moment the table grows.
+    DocumentShape {
+        document: READABLE_SURFACES,
+        revision: 2,
+        keys: READABLE_SURFACES_R2_KEYS,
+        retiring: &[],
+    },
     DocumentShape {
         document: SELECTOR_DIAGNOSE,
         revision: 1,
@@ -483,6 +494,24 @@ pub const READABLE_SURFACES_R1_KEYS: &[&str] = &[
     "z64",
     "zbuf",
 ];
+/// The readable-surfaces document's key set at revision 2.
+///
+/// R2114 (open-debt item 237) — revision 1 plus `payload_field_types`. Written
+/// out rather than built from the row above, because a key set derived from
+/// its predecessor cannot express a removal, and [`audit`] compares the two as
+/// SETS: the whole point of the pin is that the diff is visible in the source.
+pub const READABLE_SURFACES_R2_KEYS: &[&str] = &[
+    "document",
+    "doors",
+    "ext_bodies",
+    "link_types",
+    "name",
+    "payload_field_types",
+    "revision",
+    "subsumed_by",
+    "z64",
+    "zbuf",
+];
 /// The selector verdict's key set at revision 1, over BOTH branches.
 ///
 /// The UNION of `{ok:true}` and `{ok:false,at,message}`: a pin over one branch
@@ -739,18 +768,23 @@ mod tests {
     /// revision nobody can read.
     #[test]
     fn every_document_name_resolves_to_a_revision() {
-        for name in [
-            CENSUS,
-            FIELDS,
-            SUMMARY,
-            READABLE_SURFACES,
-            SELECTOR_DIAGNOSE,
-            DECLARATIONS_DIAGNOSE,
+        // R2114 (open-debt item 237) — the expected revision is a PAIR now,
+        // and it has to be: the first document to move past 1 would otherwise
+        // have had to weaken this to "some revision", which is the assertion
+        // that stops noticing. `readable_surfaces` is at 2 because it grew the
+        // described-format type list.
+        for (name, expected) in [
+            (CENSUS, 1u32),
+            (FIELDS, 1),
+            (SUMMARY, 1),
+            (READABLE_SURFACES, 2),
+            (SELECTOR_DIAGNOSE, 1),
+            (DECLARATIONS_DIAGNOSE, 1),
         ] {
-            assert_eq!(revision(name), Some(1), "{name}");
+            assert_eq!(revision(name), Some(expected), "{name}");
             assert_eq!(
                 envelope(name),
-                alloc::format!("\"document\":{{\"name\":\"{name}\",\"revision\":1}}")
+                alloc::format!("\"document\":{{\"name\":\"{name}\",\"revision\":{expected}}}")
             );
         }
         // A name this library does not emit renders revision 0, which the

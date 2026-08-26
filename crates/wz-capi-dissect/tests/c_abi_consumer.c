@@ -825,23 +825,34 @@ int main(void) {
      *
      * Asserted HERE and not only in Rust because that is the whole claim: a
      * revision a linking product cannot read is not a signal to a consumer. */
+    /* R2114 (open-debt item 237) -- the expected revision is PER DOCUMENT now,
+     * because `readable_surfaces` moved to 2 when it grew
+     * `payload_field_types`. A single literal 1 across the table would have
+     * had to become "any number" the first time one moved, and "any number" is
+     * the assertion that stops noticing -- which is the whole point of a
+     * consumer pinning the shape it was written against. */
     struct {
         const char *name;
+        unsigned revision;
         char *doc;
     } revisioned[4];
     revisioned[0].name = "census";
+    revisioned[0].revision = 1;
     revisioned[0].doc = NULL;
     rc = wz_dissect_pcap_census(pcap, sizeof pcap, &revisioned[0].doc);
     CHECK(rc == WZ_DISSECT_OK, "census rc=%d", rc);
     revisioned[1].name = "summary";
+    revisioned[1].revision = 1;
     revisioned[1].doc = NULL;
     rc = wz_dissect_pcap_summary(pcap, sizeof pcap, &revisioned[1].doc);
     CHECK(rc == WZ_DISSECT_OK, "summary rc=%d", rc);
     revisioned[2].name = "fields";
+    revisioned[2].revision = 1;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);
     revisioned[3].name = "readable_surfaces";
+    revisioned[3].revision = 2;
     revisioned[3].doc = NULL;
     rc = wz_dissect_readable_surfaces(&revisioned[3].doc);
     CHECK(rc == WZ_DISSECT_OK, "surfaces rc=%d", rc);
@@ -849,13 +860,55 @@ int main(void) {
     for (size_t i = 0; i < sizeof revisioned / sizeof revisioned[0]; i++) {
         char want[128];
         snprintf(want, sizeof want,
-                 "{\"document\":{\"name\":\"%s\",\"revision\":1}",
-                 revisioned[i].name);
+                 "{\"document\":{\"name\":\"%s\",\"revision\":%u}",
+                 revisioned[i].name, revisioned[i].revision);
         CHECK(strncmp(revisioned[i].doc, want, strlen(want)) == 0,
               "the %s document must OPEN with its own revision so a consumer "
               "reads it before parsing the body: %s",
               revisioned[i].name, revisioned[i].doc);
         wz_dissect_string_free(revisioned[i].doc);
+    }
+
+    /* R2114 (open-debt item 237) -- A FORMAT THIS LIBRARY DOES NOT SHIP,
+     * SUPPLIED FROM C AS TEXT.
+     *
+     * The division of labour is the one this file already keeps for the
+     * payload seam above: the Rust side owns the claim that a described layout
+     * decodes real bytes, because that needs a capture with a payload in it,
+     * and this file owns that a LINKING consumer can get the description
+     * across at all -- accepted here, refused by line when it is unreadable,
+     * and diagnosed with no capture. No new symbol appears for any of it,
+     * which is the point: the record crossed as data through a door that was
+     * already there, so the header's "no callbacks run" is untouched. */
+    {
+        char *described = NULL;
+        rc = wz_dissect_pcap_fields_with_payloads(
+            pcap, sizeof pcap, 0,
+            "#profile=tag:u8,rest_of_it:rest\ndemo/temp=profile", &described);
+        CHECK(rc == WZ_DISSECT_OK, "described fields rc=%d", rc);
+        CHECK(described != NULL, "OK came back with no string");
+        wz_dissect_string_free(described);
+
+        /* An unreadable layout is a DECLARATION refusal, not a bad capture --
+         * the same code an unknown format name gets, because both are the
+         * caller's text rather than the traffic. */
+        described = NULL;
+        rc = wz_dissect_pcap_fields_with_payloads(pcap, sizeof pcap, 0,
+                                                  "#profile=tag:u24le",
+                                                  &described);
+        CHECK(rc == WZ_DISSECT_ERR_DECLARATION,
+              "an unreadable layout must be its own refusal, got rc=%d", rc);
+        CHECK(described == NULL, "a refused declaration handed back a string");
+
+        /* And the diagnostic names WHICH line and WHY, sight unseen, which is
+         * what a UI needs while an operator is still typing a layout. */
+        char *verdict = NULL;
+        rc = wz_dissect_declarations_diagnose("#profile=tag:u24le", &verdict);
+        CHECK(rc == WZ_DISSECT_OK, "diagnose rc=%d", rc);
+        CHECK(strstr(verdict, "\"ok\":false") != NULL &&
+                  strstr(verdict, "u24le") != NULL,
+              "a bad layout must be refused and named: %s", verdict);
+        wz_dissect_string_free(verdict);
     }
 
     /* R2102 (ABI 11) -- the LIVE door, which is the one capability in this
