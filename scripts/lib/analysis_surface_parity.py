@@ -84,6 +84,7 @@ from __future__ import annotations
 
 import pathlib
 import re
+import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -482,6 +483,72 @@ NO_REACH_PATH = {
 }
 
 
+def source_blobs() -> dict[str, str]:
+    """Every tracked Rust/C source under `crates/`, by path.
+
+    Read from `git ls-files` rather than a directory walk so a build artifact
+    that happens to be lying in the tree cannot resolve a claim for a file
+    nobody committed.
+    """
+    listed = subprocess.run(
+        ["git", "ls-files", "crates"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+    out: dict[str, str] = {}
+    for name in listed:
+        if name.rsplit(".", 1)[-1] not in ("rs", "c", "h"):
+            continue
+        try:
+            out[name] = (ROOT / name).read_text()
+        except (OSError, UnicodeDecodeError):
+            continue
+    return out
+
+
+def reason_claims() -> list[tuple[str, str, str]]:
+    """(table, row, token) for every BACKTICKED token in a one-sided reason.
+
+    Backticks are what makes a claim a claim. The prose around them argues; the
+    thing inside them is asserted to EXIST, and this is the population that
+    assertion is checked over. Derived from the table rather than listed, so a
+    reason rewritten to name something new is measured on the round that
+    rewrites it.
+    """
+    out: list[tuple[str, str, str]] = []
+    for table, rows_ in (("ONLY_CLI", ONLY_CLI), ("ONLY_CAPI", ONLY_CAPI)):
+        for row, (_handle, reason, _reqs) in rows_.items():
+            for token in re.findall(r"`([^`]+)`", reason):
+                out.append((table, row, token))
+    return out
+
+
+def resolve_claim(token: str, flags: set[str], symbols: set[str], blobs: dict[str, str]) -> str | None:
+    """Where this token still exists, or None if it resolves nowhere.
+
+    TYPED, in the order the token's own shape names a surface: a `--flag` is a
+    claim about the command line's USAGE, a `wz_dissect_*` name is a claim about
+    the ABI's exports, a name equal to a row key is a claim about this table,
+    and anything else is a claim about the source. A token that satisfies none
+    of them is an unfalsifiable claim, and those are what this axis refuses --
+    a reason may argue in prose, but it may not ASSERT something no artifact
+    knows about.
+    """
+    if token.startswith("-"):
+        return "USAGE" if any(token in flag for flag in flags) else None
+    if token.startswith("wz_dissect_"):
+        return "ABI exports" if token in symbols else None
+    if token in BOTH or token in ONLY_CLI or token in ONLY_CAPI:
+        return "this table"
+    needle = token.split("::")[-1]
+    for name, text in blobs.items():
+        if needle in text:
+            return name
+    return None
+
+
 def cli_flags() -> set[str]:
     """Every option `wz-analyze --help` prints, read from the USAGE constant."""
     src = CLI.read_text()
@@ -850,6 +917,64 @@ def main() -> int:
                 file=sys.stderr,
             )
         return 1
+    # R2130 (unregistered open-debt item 242) — A REASON MAY NOT ASSERT
+    # SOMETHING NO ARTIFACT KNOWS ABOUT.
+    #
+    # Item 242 is open-debt item 47 sitting in this gate's own table: the rows
+    # are checked, the REASONS beside them are not, and one of them was measured
+    # wrong. The item proposed a slice -- a reason naming a JSON key could be
+    # made to assert the key is absent from the other surface -- and warned that
+    # its population might be zero. MEASURED before building it: it is zero.
+    # Across all 18 one-sided rows there are 11 backticked tokens and not one of
+    # them asserts a key's ABSENCE, so that gate would have been green over
+    # nothing, which is this workspace's most expensive recurring defect.
+    #
+    # What IS live is the naming. Backticks are where a reason stops arguing and
+    # starts asserting, and every one of those 11 names something that either
+    # exists or does not: a flag in USAGE, a symbol in the exports, a row in this
+    # table, an identifier in the source. That is the half of item 47 a machine
+    # can hold -- a reason outliving the code it names.
+    #
+    # ⚠ WHAT THIS DOES NOT CATCH, stated rather than implied: both defects on
+    # record were OVERSTATEMENTS whose vocabulary all resolved. R311y857's
+    # health row said the CLI lacked counters it printed; R2102's live-tap row
+    # said the ABI could feed a tap it could not. No resolver sees either, and
+    # the item says so itself -- general mechanisation is not available here.
+    # This closes the nameable half and leaves the semantic half to review.
+    claims = reason_claims()
+    if not claims:
+        print(
+            "analysis-surface-parity: FAIL -- no reason names anything at all. "
+            "The population is derived from the table's own backticks; zero of "
+            "them means this axis is checking nothing and reporting green.",
+            file=sys.stderr,
+        )
+        return 1
+    blobs = source_blobs()
+    if not blobs:
+        print(
+            "analysis-surface-parity: FAIL -- no tracked source was read, so "
+            "every claim below would resolve nowhere for the wrong reason.",
+            file=sys.stderr,
+        )
+        return 1
+    unresolved = [
+        (table, row, token)
+        for table, row, token in claims
+        if resolve_claim(token, flags, symbols, blobs) is None
+    ]
+    if unresolved:
+        print("analysis-surface-parity: FAIL", file=sys.stderr)
+        for table, row, token in unresolved:
+            print(
+                f"  - {table}[{row!r}] gives a reason naming `{token}`, and "
+                f"nothing on that surface has that name any more. Either the "
+                f"reason is describing code that moved, or it is asserting "
+                f"something unfalsifiable -- if it is prose, drop the backticks.",
+                file=sys.stderr,
+            )
+        return 1
+
     open_debt = sum(1 for reason in tagged_reasons if reason.startswith("OPEN DEBT"))
     print(
         f"  analysis-surface-parity: {len(BOTH)} capability(ies) on both surfaces, "
@@ -857,6 +982,11 @@ def main() -> int:
         f"{len(SELF_REPORT)} self-report section(s), {open_debt} of those "
         f"an OPEN DEBT; {len(flags)} flag(s), {len(symbols)} symbol(s) and "
         f"{len(headings)} section(s) accounted for"
+    )
+    print(
+        f"  analysis-surface-reasons: {len(claims)} claim(s) named by "
+        f"{len({(t, r) for t, r, _ in claims})} one-sided reason(s) still "
+        f"resolve to a flag, a symbol, a row or a source file"
     )
     print(
         f"  analysis-surface-scope: delivery tranche {GATED_TRANCHE} is "
