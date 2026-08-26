@@ -41,11 +41,14 @@ use std::time::Duration;
 
 use tempfile::NamedTempFile;
 
+use wz_codecs::whatami::WhatAmI;
 use wz_integration_tests::common::{
     read_captured, wait_for_exit, wait_for_substring, wait_for_tcp_accept_alive, zenohd_binary,
     ChildGuard, PortReservation, ZENOHD_TCP_ACCEPT_BUDGET,
 };
-use wz_runtime_tokio::zenoh_config::{ConfigDefect, ZenohNodeConfig};
+use wz_runtime_tokio::zenoh_config::{
+    validate_topology, ConfigDefect, TopologyDefect, ZenohNodeConfig,
+};
 
 /// zenohd prints its resolved config on this line before doing anything else.
 const RESOLVED_CONF_MARKER: &str = "Initial conf:";
@@ -281,5 +284,196 @@ fn zenohd_refuses_every_config_the_validator_rejects() {
                 || captured.contains("not supported"),
             "{label}: zenohd exited ({status:?}) but not for the reason wz predicted\n{captured}"
         );
+    }
+}
+
+// wz-proves: none -- the same registration gap as the legs above. The subject
+// is wz's TOPOLOGY validator, and the claim is that a real zenohd refuses each
+// set it rejects, which no atom in the inventory names.
+//
+/// R2127 (open-debt item 497) — A FOREIGN WITNESS FOR EACH TOPOLOGY VERDICT.
+///
+/// # What item 497 measured, and the half of it that was wrong
+///
+/// R2071 read upstream's `connect_peers_single_link` and found that on the
+/// retry path it calls `peer_connector_retry` and returns `Ok(())` — so a node
+/// with nowhere to attach retries for ever and never exits. It concluded that
+/// all three topology verdicts had only a timeout NEGATIVE as their
+/// observable, and that a foreign witness would need a non-default
+/// `connect/retry/timeout_ms = 0` fixture to force an exit.
+///
+/// That is right about the branch and wrong about which nodes take it, because
+/// the timeouts deciding it are MODE-DEPENDENT. Read this round at the pinned
+/// rev, in `commons/zenoh-config/src/defaults.rs`:
+///
+///   * `connect::timeout_ms` is `{ router: -1, peer: -1, client: 0 }`, and
+///     `ms_to_duration` maps a negative to `Duration::MAX` and `0` to zero. So
+///     `get_global_connect_timeout()` is ZERO for a client, a client takes the
+///     `is_zero()` branch, and its failed dial falls through the loop to
+///     `Err`. A CLIENT already exits; the router and the peer are what retry
+///     for ever.
+///   * `connect::exit_on_failure` is `{ router: false, peer: false, client: true }`.
+///   * `listen::timeout_ms` is `Unique(0)` and `listen::exit_on_failure` is
+///     `Unique(true)` — every mode. A listen collision already exits.
+///
+/// So two of the three verdicts had a foreign witness at stock config all
+/// along, and the third needs only a client. The non-default fixture item 497
+/// proposed is not used here, and that matters beyond tidiness: a witness that
+/// had to bend the config would be evidence about the bent config rather than
+/// about a deployment anyone runs.
+///
+/// # Which node exits is the content of the test
+///
+///   * `ListenEndpointCollision` — the SECOND binder. The first holds the
+///     address, so the set's defect is observable only once one of them is up.
+///   * `DanglingConnectTarget` — the dialling client, in a set that has a
+///     listener elsewhere so the verdict is this one and not `NoNodeAccepts`.
+///   * `NoNodeAccepts` — the only node there is, refused with `No peer
+///     specified and multicast scouting deactivated!` before any dial happens.
+#[test]
+#[ignore = "binary-dep e2e: needs target/zenohd/zenohd (scripts/build-zenohd.sh)"]
+fn zenohd_refuses_every_topology_the_validator_rejects() {
+    // THE POSITIVE CONTROL, and for a topology it has to be a real PAIR: a
+    // peer that listens and a client that dials it. Without it, "the client
+    // exited" below would be as well explained by "a client always exits".
+    let control_port = PortReservation::pick();
+    let control_endpoint = format!("tcp/127.0.0.1:{}", control_port.port());
+    let listener = ZenohNodeConfig::default()
+        .listening_on(&control_endpoint)
+        .with_multicast_scouting(false);
+    let mut dialer = ZenohNodeConfig::default()
+        .connecting_to(&control_endpoint)
+        .with_multicast_scouting(false);
+    dialer.mode = WhatAmI::Client;
+    assert!(
+        validate_topology(&[listener.clone(), dialer.clone()]).is_empty(),
+        "the control topology must be one the validator accepts, or it controls nothing"
+    );
+    let control_bind = control_port.port();
+    drop(control_port);
+    let listener_file = staged_config(&listener.to_json5());
+    let (mut listener_guard, _listener_capture) =
+        spawn_on_config("zenohd (control listener)", listener_file.path());
+    if let Err(e) = wait_for_tcp_accept_alive(
+        listener_guard.child_mut(),
+        control_bind,
+        ZENOHD_TCP_ACCEPT_BUDGET,
+    ) {
+        panic!("the control listener never came up, so this test can prove nothing: {e}");
+    }
+    let dialer_file = staged_config(&dialer.to_json5());
+    let (mut dialer_guard, mut dialer_capture) =
+        spawn_on_config("zenohd (control dialer)", dialer_file.path());
+    if wait_for_exit(dialer_guard.child_mut(), STARTUP_BUDGET).is_ok() {
+        panic!(
+            "the control CLIENT exited against a listener that WAS up, so an exit \
+             below would say nothing about the defect\n{}",
+            read_captured(&mut dialer_capture)
+        );
+    }
+    drop(dialer_guard);
+    drop(listener_guard);
+
+    // (a) ListenEndpointCollision — two nodes claiming one address.
+    let taken = PortReservation::pick();
+    let shared = format!("tcp/127.0.0.1:{}", taken.port());
+    let first = ZenohNodeConfig::default()
+        .listening_on(&shared)
+        .with_multicast_scouting(false);
+    let second = ZenohNodeConfig::default()
+        .listening_on(&shared)
+        .with_multicast_scouting(false);
+    let shared_bind = taken.port();
+    drop(taken);
+
+    // (b) DanglingConnectTarget — a client dialling an endpoint nobody in the
+    // set listens on, with a listener elsewhere so the verdict is this one
+    // rather than `NoNodeAccepts`.
+    let dead = PortReservation::pick();
+    let dead_endpoint = format!("tcp/127.0.0.1:{}", dead.port());
+    drop(dead);
+    let elsewhere = PortReservation::pick();
+    let elsewhere_endpoint = format!("tcp/127.0.0.1:{}", elsewhere.port());
+    drop(elsewhere);
+    let mut stranded = ZenohNodeConfig::default()
+        .connecting_to(&dead_endpoint)
+        .with_multicast_scouting(false);
+    stranded.mode = WhatAmI::Client;
+    let bystander = ZenohNodeConfig::default()
+        .listening_on(&elsewhere_endpoint)
+        .with_multicast_scouting(false);
+
+    // (c) NoNodeAccepts — a set that is all clients.
+    let mut alone = ZenohNodeConfig::default().with_multicast_scouting(false);
+    alone.mode = WhatAmI::Client;
+
+    let collision = TopologyDefect::ListenEndpointCollision {
+        endpoint: shared.clone(),
+        nodes: vec![String::from("0"), String::from("1")],
+    };
+    let dangling = TopologyDefect::DanglingConnectTarget {
+        node: String::from("0"),
+        endpoint: dead_endpoint.clone(),
+    };
+
+    for (label, nodes, expected, refused) in [
+        (
+            "listen collision",
+            vec![first, second.clone()],
+            collision,
+            second,
+        ),
+        (
+            "dangling connect target",
+            vec![stranded.clone(), bystander],
+            dangling,
+            stranded,
+        ),
+        (
+            "no node accepts",
+            vec![alone.clone()],
+            TopologyDefect::NoNodeAccepts,
+            alone,
+        ),
+    ] {
+        let defects = validate_topology(&nodes);
+        assert!(
+            defects.contains(&expected),
+            "{label}: the validator did not report {expected:?}, only {defects:?}"
+        );
+
+        // The collision arm needs its FIRST binder up, because the defect is
+        // that two nodes want one address and the second is refused by the
+        // first holding it. Held for the whole arm.
+        let held = if label == "listen collision" {
+            let file = staged_config(&nodes[0].to_json5());
+            let (mut guard, _capture) = spawn_on_config("zenohd (first binder)", file.path());
+            if let Err(e) =
+                wait_for_tcp_accept_alive(guard.child_mut(), shared_bind, ZENOHD_TCP_ACCEPT_BUDGET)
+            {
+                panic!("{label}: the first binder never took the address: {e}");
+            }
+            Some((guard, file))
+        } else {
+            None
+        };
+
+        let json5 = refused.to_json5();
+        let file = staged_config(&json5);
+        let (mut guard, mut capture) = spawn_on_config("zenohd (rejected topology)", file.path());
+        let status = wait_for_exit(guard.child_mut(), STARTUP_BUDGET).unwrap_or_else(|e| {
+            panic!("{label}: zenohd kept running in a topology wz calls invalid: {e}\n{json5}")
+        });
+        // The exit is the observable; the message is read back so an arm
+        // cannot pass on an unrelated crash -- a bad path or a missing binary
+        // exits too.
+        let captured = read_captured(&mut capture);
+        assert!(
+            captured.contains("Exiting")
+                || captured.contains("Unable to")
+                || captured.contains("No peer specified"),
+            "{label}: zenohd exited ({status:?}) but not for the reason wz predicted\n{captured}"
+        );
+        drop(held);
     }
 }
