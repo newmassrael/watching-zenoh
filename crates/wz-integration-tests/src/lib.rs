@@ -19,7 +19,7 @@ pub mod common {
     //! the flake background.
 
     use std::fs::File;
-    use std::net::{Ipv4Addr, TcpListener, TcpStream};
+    use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, Stdio};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1733,6 +1733,88 @@ pub mod common {
                     "did not start accepting tcp on either loopback family \
                      (127.0.0.1:{port} nor [::1]:{port}) within {budget:?} \
                      (process still alive — genuinely slow to bind or hung)"
+                ));
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Every socket address `name:port` names, in the resolver's own order.
+    ///
+    /// R2136 — a NAME pins one HOST, not one ADDRESS, and the difference is
+    /// what a listen-collision fixture stands on. `tcp/localhost:P` is ONE
+    /// endpoint string that this developer machine resolves to one address and
+    /// a host whose `/etc/hosts` carries `::1 localhost` resolves to two; a
+    /// second zenohd handed the same endpoint then binds the family the first
+    /// one left, and BOTH run. Measured, not inferred, by running the very
+    /// binary under test under each resolver: `[::1]:P` for the first binder
+    /// and `127.0.0.1:P` for the second, read out of `/proc/net/tcp{,6}`.
+    ///
+    /// So a caller that needs an endpoint to be genuinely exhausted must size
+    /// its fixture from THIS, never from the one address a developer machine
+    /// happens to show. An empty resolution is an `Err`, not an empty vector:
+    /// a population of zero would let every derived assertion pass vacuously.
+    pub fn resolve_endpoint_addrs(name: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
+        use std::net::ToSocketAddrs;
+        let addrs: Vec<SocketAddr> = (name, port)
+            .to_socket_addrs()
+            .map_err(|e| format!("resolving {name}:{port} failed: {e}"))?
+            .collect();
+        if addrs.is_empty() {
+            return Err(format!(
+                "{name}:{port} resolved to NO address — a fixture sized from an \
+                 empty set proves nothing"
+            ));
+        }
+        Ok(addrs)
+    }
+
+    /// Poll until EVERY address in `addrs` accepts TCP, while `children` live.
+    ///
+    /// The sibling of [`wait_for_tcp_accept_alive`] for the case that one
+    /// address answering is not enough. That function returns as soon as
+    /// either loopback family accepts, which is right when one child owns the
+    /// port and wrong when several do: the first child up would satisfy the
+    /// gate for all of them, and the fixture would race the one still binding.
+    ///
+    /// `Err` names the addresses still silent, so a timeout says which family
+    /// never came up rather than only that something did not.
+    pub fn wait_for_every_addr_accept_alive(
+        children: &mut [&mut Child],
+        addrs: &[SocketAddr],
+        budget: Duration,
+    ) -> Result<(), String> {
+        use std::net::TcpStream;
+        let deadline = Instant::now() + budget;
+        loop {
+            let silent: Vec<String> = addrs
+                .iter()
+                .filter(|a| TcpStream::connect(*a).is_err())
+                .map(|a| a.to_string())
+                .collect();
+            if silent.is_empty() {
+                return Ok(());
+            }
+            for (i, child) in children.iter_mut().enumerate() {
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        return Err(format!(
+                            "child #{i} exited before every address accepted \
+                             (status: {status}); still silent: {}",
+                            silent.join(", ")
+                        ));
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        return Err(format!("try_wait on child #{i} failed: {e}"));
+                    }
+                }
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "these addresses never started accepting within {budget:?} \
+                     (every child still alive): {}",
+                    silent.join(", ")
                 ));
             }
             thread::sleep(Duration::from_millis(50));

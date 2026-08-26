@@ -43,8 +43,9 @@ use tempfile::NamedTempFile;
 
 use wz_codecs::whatami::WhatAmI;
 use wz_integration_tests::common::{
-    read_captured, wait_for_exit, wait_for_substring, wait_for_tcp_accept_alive, zenohd_binary,
-    ChildGuard, PortReservation, ZENOHD_TCP_ACCEPT_BUDGET,
+    read_captured, resolve_endpoint_addrs, wait_for_every_addr_accept_alive, wait_for_exit,
+    wait_for_substring, wait_for_tcp_accept_alive, zenohd_binary, ChildGuard, PortReservation,
+    ZENOHD_TCP_ACCEPT_BUDGET,
 };
 use wz_runtime_tokio::zenoh_config::{
     validate_topology, ConfigDefect, TopologyDefect, ZenohNodeConfig,
@@ -374,24 +375,47 @@ fn zenohd_refuses_every_topology_the_validator_rejects() {
     drop(dialer_guard);
     drop(listener_guard);
 
-    // (a) ListenEndpointCollision — two nodes claiming one address.
+    // (a) ListenEndpointCollision — a set of nodes claiming one endpoint, one
+    // more of them than the endpoint has addresses to give.
     //
     // `localhost` and NOT `127.0.0.1`, and that is the validator's rule rather
     // than a preference: `EndpointFace::pins_one_machine` returns false for a
     // loopback LITERAL, because `127.0.0.1:7447` on two machines is two
     // separate working binds and a set of configs may describe two machines.
-    // A NAME resolves to one host, so it is a claim only one node can win --
-    // which is also what makes it bindable twice HERE, where there is one
-    // machine. The obvious `127.0.0.1` fixture reports no defect at all.
+    // A NAME resolves to one host, so it is a claim only one node can win.
+    // The obvious `127.0.0.1` fixture reports no defect at all.
+    //
+    // R2136 — but a name pins one HOST, not one ADDRESS, and the fixture used
+    // to be sized as if those were the same thing. Two nodes on one name were
+    // taken to mean the second must lose; measured on a host whose
+    // `/etc/hosts` carries `::1 localhost`, the first binder takes `[::1]:P`,
+    // the second takes `127.0.0.1:P`, and BOTH run. That is not a flake and
+    // not a slow bind: it is one address per node, and there were two of each.
+    // The lane was red on every hosted run for it while every machine this
+    // repository is developed on resolves `localhost` to a single address and
+    // so cannot show it.
+    //
+    // So the count comes from the RESOLVER: one node per address, plus the one
+    // that must find nothing left. `resolve_endpoint_addrs` refuses an empty
+    // resolution, so the set can never collapse to a single node whose
+    // "collision" no one contests.
     let taken = PortReservation::pick();
-    let shared = format!("tcp/localhost:{}", taken.port());
-    let first = ZenohNodeConfig::default()
-        .listening_on(&shared)
-        .with_multicast_scouting(false);
-    let second = ZenohNodeConfig::default()
-        .listening_on(&shared)
-        .with_multicast_scouting(false);
     let shared_bind = taken.port();
+    let shared = format!("tcp/localhost:{shared_bind}");
+    let shared_addrs = resolve_endpoint_addrs("localhost", shared_bind)
+        .unwrap_or_else(|e| panic!("the collision fixture cannot be sized: {e}"));
+    let claimants: Vec<ZenohNodeConfig> = (0..shared_addrs.len() + 1)
+        .map(|_| {
+            ZenohNodeConfig::default()
+                .listening_on(&shared)
+                .with_multicast_scouting(false)
+        })
+        .collect();
+    let collision_nodes: Vec<String> = (0..claimants.len()).map(|i| format!("node[{i}]")).collect();
+    let last_claimant = claimants
+        .last()
+        .expect("resolve_endpoint_addrs guarantees at least one address, so at least two nodes")
+        .clone();
     drop(taken);
 
     // (b) DanglingConnectTarget — a client dialling an endpoint nobody in the
@@ -418,7 +442,7 @@ fn zenohd_refuses_every_topology_the_validator_rejects() {
     // A node with no `id` is named by its slice position, spelled `node[N]`.
     let collision = TopologyDefect::ListenEndpointCollision {
         endpoint: shared.clone(),
-        nodes: vec![String::from("node[0]"), String::from("node[1]")],
+        nodes: collision_nodes,
     };
     let dangling = TopologyDefect::DanglingConnectTarget {
         node: String::from("node[0]"),
@@ -426,12 +450,7 @@ fn zenohd_refuses_every_topology_the_validator_rejects() {
     };
 
     for (label, nodes, expected, refused) in [
-        (
-            "listen collision",
-            vec![first, second.clone()],
-            collision,
-            second,
-        ),
+        ("listen collision", claimants, collision, last_claimant),
         (
             "dangling connect target",
             vec![stranded.clone(), bystander],
@@ -451,21 +470,38 @@ fn zenohd_refuses_every_topology_the_validator_rejects() {
             "{label}: the validator did not report {expected:?}, only {defects:?}"
         );
 
-        // The collision arm needs its FIRST binder up, because the defect is
-        // that two nodes want one address and the second is refused by the
-        // first holding it. Held for the whole arm.
-        let held = if label == "listen collision" {
-            let file = staged_config(&nodes[0].to_json5());
-            let (mut guard, _capture) = spawn_on_config("zenohd (first binder)", file.path());
-            if let Err(e) =
-                wait_for_tcp_accept_alive(guard.child_mut(), shared_bind, ZENOHD_TCP_ACCEPT_BUDGET)
-            {
-                panic!("{label}: the first binder never took the address: {e}");
+        // The collision arm needs every binder but the last one up, because the
+        // defect is that the set wants one endpoint and the last node is
+        // refused by the others holding every address it resolves to. Held for
+        // the whole arm.
+        //
+        // R2136 — waiting on `wait_for_tcp_accept_alive` per child would be the
+        // bug this fixture was sized against, one layer down: it returns as
+        // soon as EITHER loopback family answers, so binder #2 would be
+        // declared up the moment binder #1 bound, and the last claimant could
+        // then race a family nobody had taken yet. The gate is every resolved
+        // address accepting, which is the same set the count came from.
+        let mut held: Vec<(_, _)> = Vec::new();
+        if label == "listen collision" {
+            for node in nodes.iter().take(nodes.len() - 1) {
+                let file = staged_config(&node.to_json5());
+                let (guard, _capture) = spawn_on_config("zenohd (held binder)", file.path());
+                held.push((guard, file));
             }
-            Some((guard, file))
-        } else {
-            None
-        };
+            let mut children: Vec<&mut std::process::Child> =
+                held.iter_mut().map(|(g, _)| g.child_mut()).collect();
+            if let Err(e) = wait_for_every_addr_accept_alive(
+                &mut children,
+                &shared_addrs,
+                ZENOHD_TCP_ACCEPT_BUDGET,
+            ) {
+                panic!(
+                    "{label}: {} binder(s) did not take all {} address(es) of {shared}: {e}",
+                    nodes.len() - 1,
+                    shared_addrs.len()
+                );
+            }
+        }
 
         let json5 = refused.to_json5();
         let file = staged_config(&json5);
