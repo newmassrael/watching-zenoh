@@ -7722,6 +7722,28 @@ layer_c1bw_analyze_cli() {
     done
     [[ $missing -eq 0 ]] || return 1
 
+    # R2128 (unregistered open-debt item 479) — and which of the dissection's
+    # ACCESSORS no shipped surface asks. `analysis_surface_parity.py` one layer
+    # down asks `capability x surface`; this asks it one level lower, of the
+    # `&self` methods a consumer is handed, where the answer had never been
+    # counted at all. R2041 and R2042 each tripped over a member of the class
+    # by accident, in consecutive rounds, which is what filed the item.
+    #
+    # The lane is HERE because the artifact this reads is the one this layer
+    # already builds. Reach is a SYMBOL in the shipped binary and the shipped
+    # cdylib -- the item prescribed a name sweep, and the sweep under-reports:
+    # `Dissection::flow`'s only `.flow(` call site in the tree is a call to a
+    # private `FieldNote::flow` on another type in another crate. Mangling
+    # writes the impl type next to the method, so nothing here can be confused
+    # for a namesake.
+    # It builds its own inputs rather than taking `--no-build` here: the
+    # population is read from rustdoc, which no layer produces for this crate,
+    # and cargo decides freshness by CONTENT. An mtime guard would let a stale
+    # binary answer, and a lane that assumed the layer above it had built the
+    # right thing is how a gate ends up reading last week's artifact.
+    python3 scripts/lib/accessor_reach_census.py --selftest || return 1
+    python3 scripts/lib/accessor_reach_census.py || return 1
+
     echo "  C1bw: the analyzer builds as a program and its command line is gated"
 }
 
