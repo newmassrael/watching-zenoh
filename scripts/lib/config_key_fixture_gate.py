@@ -114,6 +114,79 @@ EXCEPTION_RE = re.compile(
 JSON5_TOKEN = re.compile(r'"[^"]*"|[A-Za-z_][A-Za-z0-9_]*|[{}\[\]:,]|[^\s{}\[\]:,"]+')
 
 
+# ── the SECOND site in the same file (R2142, open-debt item 225's red) ──
+#
+# The drop-in fixture is not the only thing a honoured key obliges. The same
+# file's `the_defaults_each_implementation_falls_back_to_are_pinned_against_a_
+# real_zenohd` partitions EVERY honoured key into four classes and asserts the
+# union is exactly `HONOURED_CONFIG_KEYS`. R2141 moved two keys into that list,
+# updated the fixture this gate already covered, and did not class them — so
+# this gate went green and hosted Layer Z went red (run 33022841480).
+#
+# That is the same defect shape this file was built for, one assertion over. It
+# is settled here for the same reason: both sides are on disk, and the lane that
+# would otherwise catch it needs a built zenohd and only runs hosted.
+DEFAULT_CLASS_CONSTS = (
+    "STATED",
+    "THE_TREE_ANSWERS_NULL",
+    "A_BLOCK_ON_ONE_SIDE_AND_LEAVES_ON_THE_OTHER",
+)
+# The fourth class is a `Vec` of (key, expected) pairs rather than a `&[&str]`,
+# so it is anchored on its own binding and only the tuple's FIRST position is
+# read. Anchoring on the binding keeps a `("…", …)` tuple elsewhere in this
+# 2700-line file from being mistaken for a class member.
+CLAIMS_RE = re.compile(
+    r"let claims: Vec<\(&str, String\)> = vec!\[(.*?)\n    \];", re.S
+)
+
+
+def local_const(src: str, name: str) -> list[str] | None:
+    """A `const NAME: &[&str] = &[…]` declared INSIDE a function body.
+
+    `deepenable_audit.rust_const` reads the reader's own source at module
+    scope; these live inside the test fn, so they need their own anchor. Same
+    comment-stripping discipline, and for the same measured reason: these arrays
+    carry `//` rationales that quote key-shaped phrases.
+    """
+    # Non-greedy to the FIRST `];`, and deliberately NOT requiring a newline
+    # before it: `STATED` is declared on ONE line, and a newline-anchored form
+    # ran past it into the next array — which this gate's own duplicate check
+    # caught, reporting 17 keys in two classes (R2142, measured).
+    m = re.search(r"const " + name + r": &\[&str\] = &\[(.*?)\];", src, re.S)
+    if not m:
+        return None
+    return re.findall(r'"([^"]+)"', rust_comments.strip_comments(m.group(1)))
+
+
+def default_class_keys(src: str) -> tuple[dict[str, list[str]], list[str]]:
+    """Every honoured key's class in the defaults leg, plus anchor failures."""
+    classes: dict[str, list[str]] = {}
+    problems: list[str] = []
+    for name in DEFAULT_CLASS_CONSTS:
+        found = local_const(src, name)
+        if found is None:
+            problems.append(
+                f"could not anchor `const {name}: &[&str]` in "
+                f"{rel(FIXTURE_TEST)} — the defaults leg's classes moved or "
+                f"were renamed; re-anchor this gate rather than dropping the "
+                f"check"
+            )
+            continue
+        classes[name] = found
+    m = CLAIMS_RE.search(src)
+    if not m:
+        problems.append(
+            "could not anchor the defaults leg's `let claims: Vec<(&str, "
+            "String)> = vec![…]` — the compared class is where a key with a "
+            "real wz-side default lives, so this gate cannot account for the "
+            "surface without it"
+        )
+    else:
+        body = rust_comments.strip_comments(m.group(1))
+        classes["claims"] = re.findall(r'\(\s*"([^"]+)"\s*,', body)
+    return classes, problems
+
+
 def rel(path: Path) -> str:
     """`path` relative to the repo when it is inside it, else as given.
 
@@ -311,6 +384,42 @@ def main() -> int:
             f"outlived its fact still narrows the check."
         )
 
+    # ── the SECOND site: the defaults leg's four-class accounting ────
+    classes, class_problems = default_class_keys(test_src)
+    failures.extend(class_problems)
+    accounted: list[str] = []
+    for members in classes.values():
+        accounted.extend(members)
+    if not class_problems:
+        if not accounted:
+            failures.append(
+                "the defaults leg's four classes read as EMPTY — an accounting "
+                "of nothing passes every comparison below, which is the one "
+                "direction this gate must never report as clean."
+            )
+        dupes = sorted({k for k in accounted if accounted.count(k) > 1})
+        if dupes:
+            failures.append(
+                f"the defaults leg classes {', '.join(dupes)} twice — a key in "
+                f"two classes is two different decisions about one silence."
+            )
+        unclassed = [k for k in honoured if k not in set(accounted)]
+        if unclassed:
+            failures.append(
+                f"the defaults leg does not class {', '.join(unclassed)}. Every "
+                f"honoured key needs a decision about what wz falls back to when "
+                f"the file is silent — compared, or named as one the tree cannot "
+                f"answer. This is what redded hosted Layer Z after R2141, and "
+                f"only a built zenohd would otherwise say so."
+            )
+        orphaned = [k for k in set(accounted) if k not in honoured]
+        if orphaned:
+            failures.append(
+                f"the defaults leg classes {', '.join(sorted(orphaned))}, which "
+                f"HONOURED_CONFIG_KEYS no longer contains — a class that has "
+                f"outlived its key."
+            )
+
     if args.verbose:
         for f, ln, name, _ig, used in ignored:
             print(f"  guard {f}:{ln} {name} <- {','.join(used)}")
@@ -337,6 +446,14 @@ def main() -> int:
         f"statically; the other {len(others)} judge wz against a RUNNING zenohd, "
         f"which no static read can stand in for"
     )
+    if classes:
+        breakdown = ", ".join(
+            f"{name}={len(members)}" for name, members in sorted(classes.items())
+        )
+        print(
+            f"  defaults leg: {len(set(accounted))} honoured key(s) classed "
+            f"({breakdown})"
+        )
 
     if failures:
         print("config-key-fixture FAIL:", file=sys.stderr)

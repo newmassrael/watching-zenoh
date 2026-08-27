@@ -476,6 +476,18 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         "scouting/multicast/interface",
         "scouting/multicast/ttl",
         "scouting/multicast/listen",
+        // R2142 — R2141 moved these two into `HONOURED_CONFIG_KEYS` and did not
+        // class them here, which is what redded hosted Layer Z (run
+        // 33022841480). MEASURED rather than assumed, the way this leg's doc
+        // requires: a real zenohd on the silent census config resolves BOTH to
+        // `null` (upstream's declared defaults are per-whatami --
+        // `autoconnect: { router: [], peer: ["router","peer"], client:
+        // ["router"] }` and `autoconnect_strategy: { peer: { to_router:
+        // "always", to_peer: "always" } }`, DEFAULT_CONFIG.json5:149/:162), so
+        // the resolved tree cannot show them and this leg must not pretend to
+        // compare them.
+        "scouting/multicast/autoconnect",
+        "scouting/multicast/autoconnect_strategy",
         "connect/retry",
         // The two where wz DOES carry a flat default and upstream's is a
         // function of `mode`. See this leg's doc: not a gap in the fixture, a
