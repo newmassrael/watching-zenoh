@@ -237,8 +237,13 @@ git config core.hooksPath .githooks
   (`cargo check --all-features`) and compiling is not running, which
   is what let four measured red-first probes pass this hook while
   dying at exit 101. Layer C1bn calls that same script, so the lane
-  and the hook cannot disagree about what the leg is. Measured cost
-  of adding it: 77s -> 79s on this tree, warm.
+  and the hook cannot disagree about what the leg is. Measured cost,
+  whole hook, same stdin: 77.2s before; 92.3s on the FIRST run after
+  (cargo building a second feature set — gate 3 is default features,
+  2h is `zenoh-config-emit`); 73.9s on the next, both warm. So the
+  standing cost is inside this tree's run-to-run spread and the
+  visible price is a one-time ~15s build, not a per-push tax. Do not
+  quote the leg's own 1s as the delta either — it is neither.
   STILL NOT covered locally (all on hosted CI): every feature-gated
   lane that table does NOT name — a candidate sweep finds 15 crates
   carrying a `#[test]` beside a feature `cfg`, and that is a count
