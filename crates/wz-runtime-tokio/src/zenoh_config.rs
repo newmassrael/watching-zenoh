@@ -1631,8 +1631,19 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
 /// needs:
 ///
 /// * `access_control/*` — a policy engine (subjects, rules, permissions).
-/// * `aggregation/*`, `downsampling`, `low_pass_filter`, `qos/*` — an
-///   interceptor chain configured from the same file.
+/// * `aggregation/*`, `qos/*` — an interceptor kind wz's chain does not carry.
+///   R2150 (open-debt item 539) SPLIT this group. It used to read
+///   "`aggregation/*`, `downsampling`, `low_pass_filter`, `qos/*` — an
+///   interceptor chain configured from the same file", and that sentence was
+///   FALSE for two of its four members: wz has the composable
+///   `InterceptorChain`, and two of the three interceptors standing on it ARE
+///   these keys' behaviours, so `downsampling` and `low_pass_filter` moved to
+///   [`UNHONOURED_READER_GAP`]. What is genuinely absent is a DECLARATION
+///   aggregation strategy and a QoS-OVERWRITE interceptor —
+///   `interceptor/` holds `access_control`, `downsampling` and `low_pass`, and
+///   nothing else. A group rationale is a claim about EVERY member, so one
+///   false member is not a rounding error: it is the whole group asking to be
+///   re-read.
 /// * `plugins`, `plugins_loading/*` — a plugin host. `wz-ap-demo/src/args.rs`
 ///   names `plugins` as one the demo "genuinely cannot" honour, beside
 ///   `transport/link/tx/threads`.
@@ -1642,9 +1653,17 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
 ///   socket or session table wz does not expose: `transport/link/tx/threads` is
 ///   the named example, and the `queue/*` family is upstream's priority-queue
 ///   sizing, which wz has no configurable counterpart for.
-/// * `connect/*`, `listen/*`, `scouting/delay`, `open/return_conditions/*`,
-///   `timestamping/drop_future_timestamp`, `routing/*` — behaviours wz's
-///   session-open and routing paths do not implement at all.
+/// * `connect/exit_on_failure`, `listen/*`, `scouting/delay`,
+///   `open/return_conditions/*`, `timestamping/drop_future_timestamp`,
+///   `routing/*` — behaviours wz's session-open and routing paths do not
+///   implement at all. R2150 narrowed `connect/*` to the one member for which
+///   that is still true: `connect/timeout_ms` IS implemented, by
+///   `StaticConnectRetry::timeout_ms`, which spells the key in its own doc and
+///   carries upstream's three-way `-1` / `0` / positive reading — so it moved
+///   to [`UNHONOURED_READER_GAP`] too. R2148 read the same site and drew the
+///   opposite conclusion because it stopped at the `get_global_connect_timeout`
+///   citation two lines up: an upstream symbol named in prose does not make the
+///   surrounding capability upstream's.
 /// * `metadata` — free-form operator annotation upstream never reads either;
 ///   there is nothing for wz to act on.
 /// * `scouting/gossip/enabled` — ⚠ the one judgement call in this list. wz HAS
@@ -1660,12 +1679,9 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     "aggregation/publishers",
     "aggregation/subscribers",
     "connect/exit_on_failure",
-    "connect/timeout_ms",
-    "downsampling",
     "listen/exit_on_failure",
     "listen/retry",
     "listen/timeout_ms",
-    "low_pass_filter",
     "metadata",
     "open/return_conditions/connect_scouted",
     "open/return_conditions/declares",
@@ -1752,16 +1768,165 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
 ///   and the `AutoConnectStrategies` R2141 built for the MULTICAST twins of these
 ///   two keys, which are honoured. The demo exposes `--autoconnect` and
 ///   `--autoconnect-strategy` for the gossip plane specifically.
+/// * `connect/timeout_ms` — `StaticConnectRetry::timeout_ms`, the bound on the
+///   WHOLE static dial, carrying upstream's `-1` (infinite) / `0` (no retry) /
+///   positive reading. R2150 moved it: it sat under a group sentence saying
+///   wz's session-open path implements no `connect/*` behaviour at all, beside
+///   `connect/retry`, which wz HONOURS.
+/// * `downsampling` — `DownsamplingRule` on the composable `InterceptorChain`,
+///   driven today by `--downsample` / `--downsample-freq` (upstream's Hertz
+///   unit) / `--downsample-link-protocol` / `--downsample-interface`.
+/// * `low_pass_filter` — `LowPassRule` on the same chain, driven by
+///   `--max-payload`. R2150 moved both: the group sentence that held them
+///   claimed wz needed an interceptor chain, and wz has one.
 ///
 /// ⚠ Being here is NOT a claim that the move is mechanical. R311y844's ten were
 /// moved one at a time, and `scouting/multicast/autoconnect` needed R2141 to
 /// build a strategy representation first. This list says the capability EXISTS,
 /// not that the reader change is free.
 pub const UNHONOURED_READER_GAP: &[&str] = &[
+    "connect/timeout_ms",
+    "downsampling",
+    "low_pass_filter",
     "scouting/gossip/autoconnect",
     "scouting/gossip/autoconnect_strategy",
     "scouting/gossip/multihop",
     "scouting/gossip/target",
+];
+
+/// The legal KINDS a [`UNHONOURED_CITATION_LEDGER`] row may carry, and the one
+/// place a new one is added.
+///
+/// Kept as data rather than as a Rust `enum` because the gate that evaluates
+/// each kind's evidence is a static reader outside this crate, and the R2138
+/// rule for that shape is that the gate DERIVES its vocabulary from the source
+/// instead of carrying a copy. A typo'd kind is then a red in
+/// `every_unhonoured_citation_row_is_legal_and_matches_its_list`, not a row the
+/// gate silently skips.
+///
+/// R2150 deliberately ships FOUR, each with at least one row. A fifth,
+/// `upstream-only` (the doc names a symbol that exists only upstream), was
+/// drafted and DROPPED: after the sweep every candidate for it turned out to be
+/// one of the four below, and item 539's own example of that kind —
+/// `get_global_connect_timeout` beside `connect/timeout_ms` — turned out to be a
+/// misclassified `wz-has-it`. A branch with no population is a branch nobody
+/// has ever run.
+pub const UNHONOURED_CITATION_KINDS: &[&str] = &[
+    "asserted-ignored",
+    "foreign-node-config",
+    "not-this-key",
+    "wz-has-it",
+];
+
+/// WHY wz's own source spells an upstream key wz does not honour — one row per
+/// such key, `(key, kind, anchor)`.
+///
+/// R2150 (open-debt item 539) — the sibling of the split R2148 made. That round
+/// divided [`UNHONOURED_UPSTREAM_CONFIG_KEYS`] into "wz cannot" and "the reader
+/// was never told", and
+/// `every_unhonoured_key_says_which_kind_of_unhonoured_it_is` forces the
+/// division to be TOTAL, DISJOINT, un-orphaned and to sum. None of those four
+/// asks whether a row's kind is RIGHT. A `UNHONOURED_BEYOND_WZ` row that
+/// becomes a reader gap — because wz grows the capability — reds nothing, and
+/// that is the worse half of the class: an operator's file that states the key
+/// looks like it works and does nothing.
+///
+/// # The rule item 539 pre-refuted, and why this is not it
+///
+/// "wz's source names the key, therefore wz honours it" is FALSE, and the item
+/// measured three counter-reasons before filing. The sweep this ledger answers
+/// to found a fourth and a fifth, so the answer is not a single predicate but a
+/// DECLARED kind per row, each with its own machine-checked anchor:
+///
+/// * `wz-has-it` — the citation IS the capability. The row must sit in
+///   [`UNHONOURED_READER_GAP`], and `anchor` names a wz symbol that must EXIST
+///   in wz's code (not merely in its prose).
+/// * `not-this-key` — a DIFFERENT wz mechanism is what the citing site is
+///   about. `transport/unicast/accept_timeout` is item 539's own example: the
+///   citing doc is a unixpipe-only `HANDSHAKE_TIMEOUT` that happens to match
+///   the key's default, over a listener upstream gives no bound at all.
+///   `anchor` names that other mechanism, and it must EXIST.
+/// * `asserted-ignored` — the citing line is wz's own test asserting the key is
+///   IGNORED. The strongest citation there is, and it says the opposite of
+///   "honoured". `anchor` is the word that must appear on the citing line.
+/// * `foreign-node-config` — wz spells the key to configure the OTHER
+///   implementation. Every interop leg that launches a stock `zenohd` with
+///   `transport/auth/...` is this. `anchor` is the marker every citing FILE
+///   must carry.
+///
+/// # What this cannot do, stated rather than hidden
+///
+/// The population is derived from a text sweep, so it is exactly the keys wz
+/// NAMES — not the capabilities wz HAS. A capability wz grows under a spelling
+/// of its own produces no citation and no row: `low_pass_filter` was such a
+/// case until this round, and it took reading a group sentence, not the sweep,
+/// to find it. The residue is open-debt item 540. What the ledger does buy is
+/// that a wrong kind now costs a symbol that must exist and a list the row must
+/// sit in, instead of a sentence.
+pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
+    ("access_control/enabled", "asserted-ignored", "ignored"),
+    ("connect/timeout_ms", "wz-has-it", "StaticConnectRetry"),
+    ("downsampling", "wz-has-it", "DownsamplingRule"),
+    ("low_pass_filter", "wz-has-it", "LowPassRule"),
+    ("metadata", "not-this-key", "AdminLocalData"),
+    ("plugins", "asserted-ignored", "ignored"),
+    (
+        "scouting/gossip/autoconnect",
+        "wz-has-it",
+        "should_autoconnect",
+    ),
+    (
+        "scouting/gossip/autoconnect_strategy",
+        "wz-has-it",
+        "AutoConnectStrategies",
+    ),
+    (
+        "scouting/gossip/multihop",
+        "wz-has-it",
+        "set_gossip_multihop",
+    ),
+    ("scouting/gossip/target", "wz-has-it", "set_gossip_target"),
+    (
+        "transport/auth/pubkey/known_keys_file",
+        "foreign-node-config",
+        "zenohd",
+    ),
+    (
+        "transport/auth/pubkey/private_key_file",
+        "foreign-node-config",
+        "zenohd",
+    ),
+    (
+        "transport/auth/pubkey/public_key_file",
+        "foreign-node-config",
+        "zenohd",
+    ),
+    (
+        "transport/auth/usrpwd/dictionary_file",
+        "foreign-node-config",
+        "zenohd",
+    ),
+    (
+        "transport/auth/usrpwd/password",
+        "foreign-node-config",
+        "zenohd",
+    ),
+    (
+        "transport/auth/usrpwd/user",
+        "foreign-node-config",
+        "zenohd",
+    ),
+    ("transport/link/tx/threads", "asserted-ignored", "ignored"),
+    (
+        "transport/multicast/join_interval",
+        "foreign-node-config",
+        "zenohd",
+    ),
+    (
+        "transport/unicast/accept_timeout",
+        "not-this-key",
+        "HANDSHAKE_TIMEOUT",
+    ),
 ];
 
 /// Is `path` a key stock zenoh knows — itself, or under a subtree it knows?
@@ -4717,6 +4882,117 @@ mod tests {
             UNHONOURED_READER_GAP.len(),
             UNHONOURED_READER_GAP
         );
+    }
+
+    /// A citation row is legal, unique, and sits in the list its KIND claims.
+    ///
+    /// R2150 (open-debt item 539) — the half of the evidence rule a unit test
+    /// can answer without reading the tree. The other half — that the key is
+    /// actually cited somewhere, and that the anchor names something that does
+    /// or does not exist in wz's code — needs a sweep over every tracked `.rs`
+    /// file and lives in `scripts/lib/unhonoured_kind_evidence_gate.py`. The
+    /// split is deliberate rather than tidy: a predicate written in two places
+    /// is two things to get wrong (R2147 wrote one three times and two of the
+    /// three were missing a guard), so the LIST SHAPE is owned here and the
+    /// TREE EVIDENCE is owned there, with no overlap.
+    ///
+    /// `wz-has-it` is checked in BOTH directions on purpose. One direction
+    /// ("a `wz-has-it` row must be a reader gap") catches a row moved out of
+    /// [`UNHONOURED_READER_GAP`] with its kind left behind; the other ("a
+    /// reader gap must have a `wz-has-it` row") catches a key moved IN without
+    /// evidence, which is the misclassification item 539 is named for.
+    #[test]
+    fn every_unhonoured_citation_row_is_legal_and_matches_its_list() {
+        assert!(
+            !UNHONOURED_CITATION_LEDGER.is_empty(),
+            "an empty ledger passes every check below — a gate whose population \
+             is zero reports green about nothing"
+        );
+
+        let bad_kind: Vec<&(&str, &str, &str)> = UNHONOURED_CITATION_LEDGER
+            .iter()
+            .filter(|(_, kind, _)| !UNHONOURED_CITATION_KINDS.contains(kind))
+            .collect();
+        assert!(
+            bad_kind.is_empty(),
+            "kind not in UNHONOURED_CITATION_KINDS: {bad_kind:?} — the static \
+             gate dispatches on this word, and a word it does not know is a row \
+             it would skip"
+        );
+
+        let mut seen: Vec<&str> = UNHONOURED_CITATION_LEDGER
+            .iter()
+            .map(|(k, ..)| *k)
+            .collect();
+        let before = seen.len();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(
+            before,
+            seen.len(),
+            "a key carries two citation rows — two answers to one question, \
+             which is the shape the two-list split exists to refuse"
+        );
+
+        let not_unhonoured: Vec<&str> = UNHONOURED_CITATION_LEDGER
+            .iter()
+            .map(|(k, ..)| *k)
+            .filter(|k| !UNHONOURED_UPSTREAM_CONFIG_KEYS.contains(k))
+            .collect();
+        assert!(
+            not_unhonoured.is_empty(),
+            "citation row for a key that is not unhonoured: {not_unhonoured:?} \
+             — if it became honoured, drop its row in the round that moved it"
+        );
+
+        let misplaced: Vec<&(&str, &str, &str)> = UNHONOURED_CITATION_LEDGER
+            .iter()
+            .filter(|(key, kind, _)| {
+                let claims_capability = *kind == "wz-has-it";
+                claims_capability != UNHONOURED_READER_GAP.contains(key)
+            })
+            .collect();
+        assert!(
+            misplaced.is_empty(),
+            "kind and list disagree: {misplaced:?}. `wz-has-it` means wz ALREADY \
+             ACTS ON the key, which is what UNHONOURED_READER_GAP is; every \
+             other kind means the citation is about something else, which is \
+             UNHONOURED_BEYOND_WZ. Moving a row between the lists without \
+             moving its kind is exactly the un-caught misclassification item \
+             539 names."
+        );
+
+        let unevidenced: Vec<&&str> = UNHONOURED_READER_GAP
+            .iter()
+            .filter(|k| {
+                !UNHONOURED_CITATION_LEDGER
+                    .iter()
+                    .any(|(key, kind, _)| key == *k && *kind == "wz-has-it")
+            })
+            .collect();
+        assert!(
+            unevidenced.is_empty(),
+            "reader gap with no `wz-has-it` row: {unevidenced:?} — the list's \
+             own doc says every entry is evidenced by wz's source naming the \
+             key, and until this row exists that sentence is prose"
+        );
+
+        // The breakdown, per kind, and a floor on each: a kind with no rows is
+        // a branch of the static gate nobody has ever run, and "19 rows" reads
+        // the same whether that is true or not.
+        for kind in UNHONOURED_CITATION_KINDS {
+            let rows: Vec<&str> = UNHONOURED_CITATION_LEDGER
+                .iter()
+                .filter(|(_, k, _)| k == kind)
+                .map(|(key, ..)| *key)
+                .collect();
+            assert!(
+                !rows.is_empty(),
+                "citation kind `{kind}` has no rows — drop the kind or find its \
+                 member; an unexercised branch is not coverage"
+            );
+            println!("citation kind {kind}: {} row(s) {rows:?}", rows.len());
+        }
     }
 
     /// Whether `path` names something strictly INSIDE `key`.

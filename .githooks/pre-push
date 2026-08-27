@@ -402,6 +402,32 @@ if ! python3 scripts/lib/flag_precondition_gate.py > /dev/null; then
     exit 1
 fi
 
+# ─── gate 2g — the KIND of unhonoured, evidenced (R2150, item 539) ──
+#
+# R2148 split the unhonoured config keys into "wz genuinely cannot act on this"
+# and "wz ALREADY DOES and the reader was never taught the key". Four checks
+# guard that split — total, disjoint, un-orphaned, sums — and not one of them
+# asks whether a row is in the RIGHT list. Measured on this gate's first run:
+# THREE of seventy-five `BEYOND` rows were already reader gaps.
+#
+# Here for gate 2d's reasons, and for gate 2f's specifically: both sides are on
+# disk and it reads them in seconds, and the thing it catches cannot be caught
+# by the changed-crates tests. `zenoh_config` is
+# `#[cfg(feature = "zenoh-config-emit")]`, which is NOT default, so gate 3's
+# run does not compile the Rust half of the rule either — a key moved between
+# the two lists reaches origin with no local signal at all otherwise.
+if ! python3 scripts/lib/unhonoured_kind_evidence_gate.py > /dev/null; then
+    echo "" >&2
+    echo "pre-push: unhonoured-kind evidence gate FAILED — a key's KIND of" >&2
+    echo "          unhonoured is unevidenced: wz's source names a key no" >&2
+    echo "          citation row explains, a row explains a key nothing names," >&2
+    echo "          or a row's anchor is not in wz's code." >&2
+    echo "          Run \`python3 scripts/lib/unhonoured_kind_evidence_gate.py\`" >&2
+    echo "          for the per-key breakdown (\`--verbose\` for the sites)." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+
 # ─── housekeeping (NOT a gate) — toolchain-scoped target GC ─────────
 #
 # R311y445. Deliberately NOT a gate: it never fails the push, and an absent

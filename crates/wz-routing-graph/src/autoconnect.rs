@@ -133,6 +133,15 @@ impl AutoConnectStrategy {
 /// represent at all before R2141, which is the finding that turned item 223 from
 /// a wiring round into a design one.
 ///
+/// WHICH KEYS THIS ANSWERS. Upstream spells this table twice — once per
+/// discovery plane — as `scouting.multicast.autoconnect_strategy` and
+/// `scouting.gossip.autoconnect_strategy`. wz's config reader honours the
+/// multicast one and does not yet read the gossip one, so the gossip key is
+/// carried in `UNHONOURED_READER_GAP` rather than among the keys wz cannot act
+/// on: the capability is HERE, and what is missing is the reader. R2150 added
+/// this sentence because that classification was asserted only in the reader's
+/// own doc, which made it a claim with no witness at the capability.
+///
 /// A target with no entry falls back to [`AutoConnectStrategy::default`], NOT to
 /// "do not dial": upstream reads it as
 /// `self.strategy.get(what).copied().unwrap_or_default()`, so an unnamed target

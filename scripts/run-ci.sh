@@ -2263,6 +2263,22 @@ PY
     # replay live path, the MCU acceptor) while the OS-entropy constructor that
     # should have been called sat unused since R69.
     bash scripts/lib/literal-key-gate.sh . || return 1
+    # R2150 (unregistered open-debt item 539) — the KIND of unhonoured. R2148
+    # split `UNHONOURED_UPSTREAM_CONFIG_KEYS` into "wz cannot" and "the reader
+    # was never told", and the test guarding that split makes it total,
+    # disjoint, un-orphaned and summing — none of which asks whether a row is in
+    # the RIGHT list. A `BEYOND` row that becomes a reader gap (wz grows the
+    # capability) reds nothing, and that is the worse half: an operator's file
+    # states the key, looks like it works, and does nothing.
+    #
+    # Static because both sides are on disk — the lists are `&[&str]` and the
+    # evidence is wz's own source naming the key — and because the RUST half of
+    # the rule lives behind `#[cfg(feature = "zenoh-config-emit")]`, which is
+    # non-default: `cargo test -p wz-runtime-tokio` does not compile it, so the
+    # crate's own suite cannot stand in for this. The selftest runs FIRST; its
+    # twelve arms are the only place the failure branches are exercised.
+    python3 scripts/lib/unhonoured_kind_evidence_gate.py --selftest || return 1
+    python3 scripts/lib/unhonoured_kind_evidence_gate.py || return 1
     return 0
 }
 

@@ -16,6 +16,15 @@
 //! interceptor kind on the composable chain beside the ACL enforcer and the
 //! downsampler.
 //!
+//! WHICH KEY THIS ANSWERS. Upstream configures it under the top-level
+//! `low_pass_filter` key (a list of `LowPassFilterConf`). wz's config reader
+//! does not read that key, so it is carried in `UNHONOURED_READER_GAP` — the
+//! capability is HERE, driven today by the demo's `--max-payload`, and what is
+//! missing is the reader. R2150 moved the key there and added this sentence:
+//! until then it sat among the keys wz "genuinely cannot act on", under a group
+//! sentence saying wz would need an interceptor chain, which is the chain this
+//! rule already stands on.
+//!
 //! # What a rule governs (R311y451)
 //!
 //! A rule carries the four axes zenoh's `LowPassFilterConf` carries and wz can
