@@ -1955,11 +1955,23 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
   mode: "client",
   // R311y849 — `retry` sits beside the endpoints it paces, and like the four
   // multicast leaves below it is named here BECAUSE it must reach nothing in
-  // this invocation. Its precondition is a run mode that owns a connect LIST
-  // (`--peer` / `--router-hat`); a client dials one endpoint through `--connect`
-  // and its reconnect supervisor is a different substrate with a different
-  // declared parity target, so an expansion that emitted `--connect-retry` here
-  // would hand a valid stock config to a binary with no parse for it.
+  // this invocation.
+  //
+  // R2158 (open-debt item 230) — THE VERDICT IS UNCHANGED AND ITS REASON IS
+  // NOT, so the reason is rewritten here rather than left to read as still
+  // true. y849 said the precondition is a run mode that owns a connect LIST,
+  // and that a client's reconnect supervisor is a different substrate with a
+  // different declared parity target, so the flag would reach a binary with no
+  // parse for it. Both halves have stopped holding: `parse_connect_retry` is
+  // ungated and every build parses the flag, and the supervisor now HONOURS
+  // `connect/retry` — pico's constant turned out to be a point in zenoh's
+  // parameter space rather than a rival schedule, so the surface is zenoh's and
+  // only the DEFAULT is pico's.
+  //
+  // What survives is the precondition itself, restated as what it always
+  // measured: the run must RE-DIAL. This invocation is a one-shot client — it
+  // types no `--reconnect` — so it dials once, and a re-dial schedule would
+  // pace nothing. That is why the key still reaches nothing here.
   connect: {{
     endpoints: ["tcp/127.0.0.1:{port}"],
     retry: {{ period_init_ms: 1000, period_max_ms: 4000, period_increase_factor: 2 }},

@@ -2165,6 +2165,125 @@ async fn open_initiator_with_offer(
         .await
 }
 
+/// R2158 (open-debt item 230) — the CLIENT reconnect supervisor's re-dial
+/// schedule: zenoh's `connect/retry` SURFACE over pico's constant DEFAULT.
+///
+/// # Item 230's verdict, and why it was wrong
+///
+/// The item called this a DIVERGENCE decision rather than a fix: `retry_period`
+/// declares this supervisor's parity target to be pico's CONSTANT delay, while
+/// `connect/retry` is zenoh's exponential backoff, so feeding the key here would
+/// be choosing one upstream over the other and must not happen quietly.
+///
+/// Both premises are true and the conclusion does not follow. Pico's constant is
+/// not a different SCHEDULE from zenoh's — it is a POINT in zenoh's parameter
+/// space. Upstream's `ConnectionRetryConf` is three fields
+/// (`commons/zenoh-config/src/connection_retry.rs:31-37`), and pico's literal
+/// `_z_fut_fn_result_wake_up_after(1000)` (`src/net/session.c`
+/// `_z_client_reopen_task_fn`) is `{ period_init_ms: 1000, period_max_ms: 0,
+/// period_increase_factor: 1.0 }` — which is exactly
+/// [`RetryPolicy::constant(1000)`](wz::runtime_tokio::retry_period::RetryPolicy::constant),
+/// pinned as code by `the_pico_constant_is_a_point_in_zenohs_parameter_space`
+/// below. `retry_period`'s own module doc had already written the rule this
+/// follows: the two DEFAULTS differ, the SCHEDULE is one implementation.
+///
+/// So there is no parity to trade. The SURFACE is zenoh's and the DEFAULT is
+/// pico's, and a node that replaces both implementations gets a knob either one
+/// of them has.
+///
+/// # The narrow question the item left, and its answer
+///
+/// What a document that OMITS the section means for a client is a real decision,
+/// and it is decided by what the node replaces: this supervisor's atom is
+/// `Z_FEATURE_AUTO_RECONNECT`, so its unconfigured behaviour stays pico's
+/// constant. A configured schedule wins; an absent one changes nothing. That is
+/// the whole of it, and it is here as a function with a control pair rather than
+/// as a sentence, because a sentence is not a gate (open-debt item 530).
+///
+/// `max_attempts` is carried from [`ReconnectPolicy::default`] rather than
+/// restated, so pico's unbounded shape has ONE home. Upstream's FOURTH retry
+/// field, `exit_on_failure`, is deliberately not read: it is a process-lifecycle
+/// decision (open-debt item 229), which is the same reason `RetryPolicy` itself
+/// excludes it.
+pub(crate) fn client_reconnect_policy(
+    configured: Option<wz::runtime_tokio::retry_period::RetryPolicy>,
+) -> ReconnectPolicy {
+    match configured {
+        Some(retry) => ReconnectPolicy {
+            retry_delay_ms: retry.period_init_ms,
+            period_max_ms: retry.period_max_ms,
+            period_increase_factor: retry.period_increase_factor,
+            ..ReconnectPolicy::default()
+        },
+        None => ReconnectPolicy::default(),
+    }
+}
+
+/// The prefix of the line [`describe_reconnect_schedule`] renders, pinned as a
+/// constant because the binary test greps for it: an absent line and a renamed
+/// one look identical to a `contains`.
+pub(crate) const RECONNECT_SCHEDULE_LINE: &str = "RECONNECT SCHEDULE";
+
+/// R2158 (open-debt item 230) — DERIVE, ANNOUNCE, SUPERVISE, in that order and
+/// in one place.
+///
+/// A free function rather than three lines inside `run_demo`'s reconnect arm,
+/// and the reason is what watches it: the binary leg
+/// (`tests/reconnect_retry_schedule_binary.rs`) reads the ANNOUNCE and infers
+/// what the supervisor was handed. That inference is sound exactly while the
+/// two read ONE binding with no other policy value in scope, which is what this
+/// body guarantees and a longer arm could not.
+async fn supervise_reconnect(
+    connect: &str,
+    params: SessionInitParams,
+    dial_config: DialConfig,
+    clock: TokioTime,
+    connect_retry: Option<wz::runtime_tokio::retry_period::RetryPolicy>,
+) -> Result<ReconnectingSession, OpenError> {
+    let policy = client_reconnect_policy(connect_retry);
+    log::info!(
+        "wz-ap-demo: {}",
+        describe_reconnect_schedule(policy, connect_retry.is_some())
+    );
+    reconnect_endpoint(
+        connect,
+        params,
+        dial_config,
+        clock,
+        policy,
+        // Production passes no per-connection iteration cap: the supervised
+        // client runs until the shutdown signal cancels the drive future.
+        None,
+        DEFAULT_OPEN_TICK_MS,
+    )
+    .await
+}
+
+/// R2158 — the line that makes a silently-defaulted schedule impossible to
+/// mistake for a configured one.
+///
+/// `parse_connect_retry`'s own doc names the failure this closes: "the node
+/// runs, dials, reconnects, and paces itself by a cadence the operator did not
+/// ask for and no log line contradicts". This is that log line, and it names the
+/// SOURCE as well as the numbers — the two runs it has to separate differ in
+/// where the schedule came from, not only in its digits.
+///
+/// Rendered from the RESOLVED policy, so it reports what the supervisor is
+/// handed rather than what the file said.
+pub(crate) fn describe_reconnect_schedule(policy: ReconnectPolicy, configured: bool) -> String {
+    format!(
+        "{RECONNECT_SCHEDULE_LINE} init={}ms max={}ms factor={} source={}",
+        policy.retry_delay_ms,
+        policy.period_max_ms,
+        policy.period_increase_factor,
+        if configured {
+            "connect/retry"
+        } else {
+            "pico-default"
+        }
+    )
+}
+
 /// Demo orchestration entry point. Invoked by `fn main` after argv
 /// parsing has been validated and the spec bundles
 /// ([`DeclareEmitSpec`], [`RemoteLogSpec`], [`ReplyConsumerSpec`],
@@ -2208,6 +2327,17 @@ pub(crate) async fn run_demo(
     zid_override: Option<Vec<u8>>,
     tuning: TransportTuning,
     timestamping: crate::args::NodeTimestamping,
+    // R2158 (open-debt item 230) — `--connect-retry` / the file's
+    // `connect/retry`, for the `--reconnect` supervisor. `Option` and not a
+    // resolved `RetryPolicy`, because "the operator said nothing" and "the
+    // operator asked for zenoh's defaults" are DIFFERENT here and only this
+    // type can tell them apart: the first resolves to pico's constant
+    // ([`client_reconnect_policy`]), the second to what it names. The
+    // `--peer` / `--router-hat` arms in `main` collapse the same `Option` to
+    // `RetryPolicy::ZENOH_DEFAULT` instead, which is the right answer THERE
+    // for the mirrored reason -- their parity target is zenoh's
+    // `peer_connector_retry`.
+    connect_retry: Option<wz::runtime_tokio::retry_period::RetryPolicy>,
 ) -> io::Result<()> {
     let QueryRoleSpec {
         queryable: queryable_spec,
@@ -2308,14 +2438,19 @@ pub(crate) async fn run_demo(
                     connect.len() - 1
                 );
             }
-            let recon = reconnect_endpoint(
+            // R2158 (open-debt item 230) — the schedule reaches the supervisor.
+            // Until this round this call read `ReconnectPolicy::default()` and
+            // the whole `connect/retry` surface stopped at the `--peer` /
+            // `--router-hat` arms, so a client's re-dial cadence was the one
+            // thing in this binary a config file could not reach. Resolution
+            // and announce live in `supervise_reconnect`, which is where they
+            // are watchable.
+            let recon = supervise_reconnect(
                 primary,
                 params,
                 DialConfig::default(),
                 session_clock,
-                ReconnectPolicy::default(),
-                None,
-                DEFAULT_OPEN_TICK_MS,
+                connect_retry,
             )
             .await
             .map_err(|e| {
@@ -6603,6 +6738,137 @@ pub(crate) async fn run_storage_host(
 /// binary. Here the shipping seam already HAS its binary witness; what has no
 /// route from argv is this branch, so a unit test is the only thing that can
 /// reach it at all.
+/// R2158 (open-debt item 230) — the CONTROL PAIR for the client reconnect
+/// supervisor's schedule, in both directions.
+///
+/// Item 230's claim was that this supervisor has no config input at all, and
+/// that giving it one would be a divergence between the two upstreams wz
+/// replaces. The first half was true until this round; the second is refuted
+/// here as CODE rather than in prose, because a sentence is not a gate (open
+/// debt item 530):
+///
+///   * `the_pico_constant_is_a_point_in_zenohs_parameter_space` — pico's literal
+///     1s re-arm and zenoh's three-field `ConnectionRetryConf` are not two
+///     schedules, so honouring the key costs no parity;
+///   * `a_configured_schedule_reaches_the_supervisor_unswapped` — the ①
+///     direction: the file's three numbers are the three the supervisor walks,
+///     in the right slots. Removing the wiring at the call site removes this
+///     function's only caller, and the binary leg
+///     (`tests/reconnect_retry_schedule_binary.rs`) is what watches THAT.
+///   * `an_absent_schedule_leaves_pico_s_constant_in_place` — the ② direction,
+///     and the one that a "fix" would break first: resolving `None` to zenoh's
+///     `ZENOH_DEFAULT` would give a pico-parity atom a growing wait it has never
+///     had, and every other test here would stay green.
+#[cfg(test)]
+mod client_reconnect_schedule_tests {
+    use super::{client_reconnect_policy, describe_reconnect_schedule, ReconnectPolicy};
+    use wz::runtime_tokio::retry_period::RetryPolicy;
+
+    /// The refutation of item 230's verdict, as an equality rather than an
+    /// argument: `RetryPolicy::constant(1000)` — the transcription of pico's
+    /// `_z_fut_fn_result_wake_up_after(1000)` — IS a `ConnectionRetryConf`
+    /// value, so zenoh's surface can express pico's behaviour exactly and
+    /// honouring `connect/retry` trades nothing away.
+    ///
+    /// Asserted through `client_reconnect_policy(None)` and not against the
+    /// constant alone, so the claim is about the DEFAULT this node runs and not
+    /// merely about a constructor nobody calls.
+    #[test]
+    fn the_pico_constant_is_a_point_in_zenohs_parameter_space() {
+        let pico = RetryPolicy::constant(1000);
+        let unconfigured = client_reconnect_policy(None);
+        assert_eq!(unconfigured.retry_delay_ms, pico.period_init_ms);
+        assert_eq!(unconfigured.period_max_ms, pico.period_max_ms);
+        assert_eq!(
+            unconfigured.period_increase_factor,
+            pico.period_increase_factor
+        );
+        assert!(
+            !pico.grows(),
+            "pico's shape is the FLAT point of that space, and a growing one \
+             would not be parity"
+        );
+    }
+
+    /// ① — a document that names the schedule gets it, field for field.
+    ///
+    /// The three numbers are deliberately unlike each other and unlike both
+    /// defaults: with `init == max` or a factor of 2 against a power-of-two
+    /// ceiling, a swapped pair still produces a plausible sequence. The SEQUENCE
+    /// is asserted rather than the fields alone, because what the supervisor
+    /// does with the policy is the claim — `250 -> 375 -> 562 -> 843` is
+    /// reachable from no other assignment of these three.
+    #[test]
+    fn a_configured_schedule_reaches_the_supervisor_unswapped() {
+        let policy = client_reconnect_policy(Some(RetryPolicy {
+            period_init_ms: 250,
+            period_max_ms: 9000,
+            period_increase_factor: 1.5,
+        }));
+        assert_eq!(policy.retry_delay_ms, 250);
+        assert_eq!(policy.period_max_ms, 9000);
+        assert_eq!(policy.period_increase_factor, 1.5);
+        assert_eq!(
+            policy.max_attempts,
+            ReconnectPolicy::default().max_attempts,
+            "the attempt cap is pico's and this key does not carry one"
+        );
+        let mut period = policy.period();
+        assert_eq!(
+            (0..4).map(|_| period.next_ms()).collect::<Vec<_>>(),
+            vec![250, 375, 562, 843],
+        );
+    }
+
+    /// ② — a document that omits the section changes nothing, and what "nothing"
+    /// means here is pico's constant and not zenoh's growth.
+    ///
+    /// The flat sequence is the assertion, not the field values: zenoh's default
+    /// `1000 / 4000 / 2.0` shares its FIRST wait with pico's, so a test that
+    /// looked only at `retry_delay_ms` would pass against exactly the mistake
+    /// this pins.
+    #[test]
+    fn an_absent_schedule_leaves_pico_s_constant_in_place() {
+        let policy = client_reconnect_policy(None);
+        assert_eq!(policy.retry_delay_ms, 1000);
+        let mut period = policy.period();
+        assert_eq!(
+            (0..5).map(|_| period.next_ms()).collect::<Vec<_>>(),
+            vec![1000, 1000, 1000, 1000, 1000],
+            "the client supervisor's parity target is pico's constant re-arm; \
+             zenoh's default would read 1000, 2000, 4000, 4000, 4000"
+        );
+        assert_ne!(
+            policy.period_increase_factor,
+            RetryPolicy::ZENOH_DEFAULT.period_increase_factor,
+            "the two upstreams' DEFAULTS differ even though their surface does \
+             not, and this node replaces the pico one"
+        );
+    }
+
+    /// The announced line reports the RESOLVED policy and names where it came
+    /// from. Both halves matter to the binary leg that greps it: the numbers
+    /// separate a configured run from a defaulted one only when they differ, and
+    /// `source=` separates them even when an operator configures exactly the
+    /// default.
+    #[test]
+    fn the_announced_line_names_the_numbers_and_their_source() {
+        let configured = client_reconnect_policy(Some(RetryPolicy {
+            period_init_ms: 250,
+            period_max_ms: 9000,
+            period_increase_factor: 1.5,
+        }));
+        assert_eq!(
+            describe_reconnect_schedule(configured, true),
+            "RECONNECT SCHEDULE init=250ms max=9000ms factor=1.5 source=connect/retry"
+        );
+        assert_eq!(
+            describe_reconnect_schedule(client_reconnect_policy(None), false),
+            "RECONNECT SCHEDULE init=1000ms max=0ms factor=1 source=pico-default"
+        );
+    }
+}
+
 #[cfg(test)]
 mod exclusive_mode_seam_tests {
     use super::{exclusive_modes, initiator_offer};

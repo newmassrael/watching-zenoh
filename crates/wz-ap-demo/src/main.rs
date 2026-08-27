@@ -247,6 +247,29 @@ fn main() -> ExitCode {
         }
     };
 
+    // R2158 (open-debt item 230) — `--connect-retry <init_ms>,<max_ms>,<factor>`
+    // (the argv shape `connect/retry` expands into), read ONCE here beside the
+    // two above and for the identical reason: it is a NODE-scoped policy whose
+    // malformed value must stop the node rather than start it on a cadence
+    // nobody asked for. Until this round each DIALLING arm ran its own copy of
+    // this block and the single-session arm ran none, which is why the CLIENT
+    // `--reconnect` supervisor had no config input at all — item 230.
+    //
+    // The `Option` is carried UNRESOLVED past this point on purpose. Absent
+    // means different things to the two parity targets downstream: the mesh
+    // arms (`--peer` / `--router-hat`) mirror zenoh's `peer_connector_retry`
+    // and resolve it to `RetryPolicy::ZENOH_DEFAULT`, the client `--reconnect`
+    // supervisor mirrors pico's `_z_client_reopen_task_fn` and resolves it to
+    // that constant (`runner::client_reconnect_policy`). Collapsing here would
+    // pick one of them for both.
+    let connect_retry = match crate::args::parse_connect_retry(rest) {
+        Ok(parsed) => parsed,
+        Err(message) => {
+            eprintln!("wz-ap-demo: {message}");
+            return ExitCode::from(2);
+        }
+    };
+
     // R311qa — `--router <addr>` selects the multi-peer router mode (bind once,
     // HOLD N concurrent peer faces — the routing-router foundation), handled
     // before the single-session role parse below (which requires exactly one of
@@ -666,21 +689,21 @@ fn main() -> ExitCode {
                 return ExitCode::from(2);
             }
             // R311y849 — `--connect-retry <init_ms>,<max_ms>,<factor>`, the same
-            // parse the `--router-hat` arm below runs and for the same reason: a
-            // peer mesh dials every `--connect` and re-dials a refused one on
-            // this schedule. A malformed value ABORTS here too; until this round
-            // the peer arm never called the parser, so `--connect-retry banana`
-            // started a node that paced itself by a cadence nobody asked for and
-            // said nothing about it.
-            let peer_connect_retry = match crate::args::parse_connect_retry(rest) {
-                Ok(parsed) => {
-                    parsed.unwrap_or(wz::runtime_tokio::retry_period::RetryPolicy::ZENOH_DEFAULT)
-                }
-                Err(msg) => {
-                    eprintln!("wz-ap-demo: {msg}");
-                    return ExitCode::from(2);
-                }
-            };
+            // schedule the `--router-hat` arm below resolves and for the same
+            // reason: a peer mesh dials every `--connect` and re-dials a refused
+            // one on it. A malformed value ABORTS; until R311y849 the peer arm
+            // never called the parser, so `--connect-retry banana` started a
+            // node that paced itself by a cadence nobody asked for and said
+            // nothing about it.
+            //
+            // R2158 (open-debt item 230) — the PARSE (and its refusal) moved up
+            // to the one node-scoped read; what stays here is the RESOLUTION of
+            // an absent schedule, which is this arm's own answer:
+            // `RetryPolicy::ZENOH_DEFAULT`, because a peer mesh's parity target
+            // is zenoh's `peer_connector_retry`. The client supervisor resolves
+            // the same `None` to pico's constant instead.
+            let peer_connect_retry = connect_retry
+                .unwrap_or(wz::runtime_tokio::retry_period::RetryPolicy::ZENOH_DEFAULT);
             // R2095 (open-debt item 513) — the capability offer this peer puts on
             // every handshake it opens, dialled or accepted. Read off the SAME
             // argv words the single-session initiator reads, and refused loudly
@@ -856,15 +879,15 @@ fn main() -> ExitCode {
             // value ABORTS: the alternative is a node that paces its re-dials by a
             // schedule the operator did not ask for, which nothing downstream
             // contradicts (the shape `--qos-band` also refuses).
-            let connect_retry = match crate::args::parse_connect_retry(rest) {
-                Ok(parsed) => {
-                    parsed.unwrap_or(wz::runtime_tokio::retry_period::RetryPolicy::ZENOH_DEFAULT)
-                }
-                Err(msg) => {
-                    eprintln!("wz-ap-demo: {msg}");
-                    return ExitCode::from(2);
-                }
-            };
+            //
+            // R2158 (open-debt item 230) — the PARSE moved to the one
+            // node-scoped read above; this is the RESOLUTION, and it is zenoh's
+            // default because a router hat federates by dialling its peer
+            // routers, which is `peer_connector_retry`'s own shape. Named
+            // separately from the peer arm's identical line rather than shared,
+            // because the two arms `return` from different blocks.
+            let connect_retry = connect_retry
+                .unwrap_or(wz::runtime_tokio::retry_period::RetryPolicy::ZENOH_DEFAULT);
             // R2089 (open-debt item 222) — `--scout-listen` on the ROUTER. Parsed
             // here rather than beside `--scout` further down for the reason the
             // `--peer` arm gives: that block is downstream of this mode's `return`,
@@ -2255,6 +2278,7 @@ fn main() -> ExitCode {
             zid_override,
             tuning,
             timestamping,
+            connect_retry,
         )
         .await
     });

@@ -119,7 +119,14 @@ impl ReconnectPolicy {
     /// transcription there would have been the shape that lets the two drift.
     /// What stays HERE is the DEFAULT — a constant delay, because this atom's
     /// parity target is pico, not zenoh.
-    fn period(&self) -> RetryPeriod {
+    ///
+    /// R2158 (open-debt item 230) made this `pub`. A supervisor's own cadence is
+    /// a thing its host legitimately asks for — wz-ap-demo now ANNOUNCES the
+    /// schedule a `--reconnect` run will re-dial on, and the alternative was for
+    /// the host to rebuild a `RetryPolicy` out of these three fields itself,
+    /// which is a second transcription of exactly the mapping this method
+    /// exists to be the only copy of.
+    pub fn period(&self) -> RetryPeriod {
         RetryPolicy {
             period_init_ms: self.retry_delay_ms,
             period_max_ms: self.period_max_ms,

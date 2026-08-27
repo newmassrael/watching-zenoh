@@ -4292,7 +4292,18 @@ layer_c1ay_cargo_test_router_hat() {
     # which is NOT feature-gated: its rules come from `main.rs` and its shapes
     # from the fixture table, so it means something on every build. MEASURED on
     # this exact command: 35 passed, 2 filtered out.
-    _runci_guarded_test "C1AY stock_config_tests 35" 35 \
+    # R2158 (unregistered open-debt item 230) — 35 -> 37, and BOTH are cases
+    # that already existed and were `#[cfg]`-ed out of this feature set. The
+    # round gave `connect/retry` a sink that is in every build (the client
+    # `--reconnect` supervisor), which removed the feature gate from
+    # `the_retry_schedule_reaches_only_the_modes_that_own_a_connect_list` and
+    # the second half of the gate on
+    # `a_role_the_file_supplies_honours_every_key_a_typed_role_does` — the
+    # latter existed BECAUSE both role-gated keys had feature-gated sinks, and
+    # one of them no longer does. MEASURED on this exact command: 37 passed,
+    # 11 filtered out. The leg below stays at 42 because both cases were
+    # already compiled there.
+    _runci_guarded_test "C1AY stock_config_tests 37" 37 \
         cargo test -p wz-ap-demo --features zenoh-config stock_config_tests --quiet || return 1
     # R2139 (unregistered open-debt item 227) — THE SAME MODULE WITH THE SINKS
     # PRESENT, and it is not a duplicate of the leg above.
@@ -4402,6 +4413,27 @@ layer_c1ay_cargo_test_router_hat() {
         cargo test -p wz-ap-demo \
         --features zenoh-config,routing-peer,router-hat-router,scouting-responder \
         --test config_listen_endpoints_binary --quiet || return 1
+    # R2158 (unregistered open-debt item 230) — the CLIENT `--reconnect`
+    # supervisor's re-dial schedule comes from `connect/retry`, and its default
+    # when the document omits the section stays pico's constant.
+    #
+    # The same argv -> behaviour seam the three legs above exist for, and the
+    # same reason a unit test cannot stand in: `zenoh_config` proves the file
+    # parses, `stock_config_tests` proves the argv carries the flag, and
+    # `runner::client_reconnect_schedule_tests` proves the mapping keeps pico's
+    # default — and ALL THREE pass with `run_demo` still handing the supervisor
+    # `ReconnectPolicy::default()`, which is the state item 230 found. Only the
+    # process shows the join.
+    #
+    # `zenoh-config` is the ONLY feature named, and that is the finding rather
+    # than an economy: the client supervisor is ungated, so this is the first
+    # `connect/retry` sink that needs no run-mode feature at all. The two argv
+    # arms compile without it too and run under `pre-push`'s changed-crate
+    # tests; the two `--config` arms are what this lane adds. 4 rather than 2
+    # for that reason.
+    _runci_guarded_test "C1AY reconnect_retry_schedule_binary 4" 4 \
+        cargo test -p wz-ap-demo --features zenoh-config \
+        --test reconnect_retry_schedule_binary --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features routing-router-hat --quiet -- -D warnings \

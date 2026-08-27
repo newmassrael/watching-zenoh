@@ -21,7 +21,8 @@
 // R311y849 — the UNION of `parse_connect_retry`'s consumers, kept in step with
 // the function's own gate below. Widening one and not the other is the same
 // mistake in a smaller place: the arm compiles in and its type does not.
-#[cfg(any(feature = "router-hat-router", feature = "routing-peer"))]
+// R2158 (open-debt item 230) — that union became UNCONDITIONAL when the client
+// `--reconnect` supervisor joined it, so the `cfg` went with the function's.
 use wz::runtime_tokio::retry_period::RetryPolicy;
 use wz::runtime_tokio::session_glue::{OsEntropy, SessionInitParams, SigningKey, WhatAmI};
 
@@ -1087,33 +1088,43 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
     }
     // R311y849 — `connect/retry` -> `--connect-retry <init>,<max>,<factor>`.
     //
-    // The precondition is a run mode that DIALS, which is `--peer` or
-    // `--router-hat`: those two own a connect list, and they are the only arms
-    // that read the flag. A node with neither exits(2) on an argument it has no
-    // parse for, so a stock config carrying `connect.retry` alongside a
-    // `--listen` invocation must expand to nothing rather than to a refusal.
+    // The precondition is a run mode that RE-DIALS. Two of the three own a
+    // connect list unconditionally — `--peer` and `--router-hat` both re-dial a
+    // refused member on this schedule — and R2158 adds the third, which is not
+    // a mode but a LIFECYCLE: a `--connect` client re-dials only under
+    // `--reconnect`, whose supervisor R2158 wired to this same key (open-debt
+    // item 230). A one-shot `--connect` client is deliberately still excluded:
+    // it dials once and never again, so the flag would be a word that changes
+    // nothing, and R311y844's rule for this expansion is that an added flag is a
+    // DIFFERENCE the file asked for.
     //
-    // The `cfg!` guard is the R311y844 rule and it is the UNION of the two arms'
-    // features, matching the parser's own gate: a build with neither compiled in
-    // has no sink, and expanding into it would turn a valid stock config into a
-    // node that will not start.
+    // The `cfg!` guard R311y849 wrote here is GONE with the parser's own: the
+    // client supervisor is ungated, so every build has a sink and there is no
+    // longer a feature set this key must be dropped for.
     // The precondition is checked against the command line AND `added`, and the
     // second half is the whole drop-in case: when the operator names no role the
-    // FILE supplies one, and that `--peer` is pushed into `added` above — it
-    // never appears in `rest`. A test that looked only at what was typed would
-    // withhold the flag from `wz-ap-demo --config their.json5` and nothing else,
-    // which is the single invocation this path exists for. Measured, by a test
-    // written before the fix: the config-only expansion came out
-    // `["--peer", …, "--connect", …]` with no schedule at all.
-    let dials = exp
-        .rest
-        .iter()
-        .chain(exp.added.iter())
-        .any(|a| a == "--peer" || a == "--router-hat");
+    // FILE supplies one, and that `--peer` / `--connect` is pushed into `added`
+    // above — it never appears in `rest`. A test that looked only at what was
+    // typed would withhold the flag from `wz-ap-demo --config their.json5` and
+    // nothing else, which is the single invocation this path exists for.
+    // Measured, by a test written before the fix: the config-only expansion came
+    // out `["--peer", …, "--connect", …]` with no schedule at all.
+    //
+    // `--reconnect` itself is read from `rest` ALONE and not from `added`, and
+    // that is a fact rather than an oversight: it is an application lifecycle
+    // flag with no zenoh config key behind it, so this expansion has no site
+    // that emits it and never will. `flag_precondition_gate.py` derives exactly
+    // that and reports it as `no site`.
+    let re_dials = |a: &String| {
+        a == "--peer"
+            || a == "--router-hat"
+            || (a == "--connect" && exp.rest.iter().any(|t| t == "--reconnect"))
+    };
+    let dials = exp.rest.iter().chain(exp.added.iter()).any(re_dials);
     if named("connect/retry") {
         let blocked = no_sink("connect/retry").or_else(|| {
             (!dials).then_some(KeyEffect::WithheldFromThisRun(
-                "this run's mode owns no connect list",
+                "this run's mode never re-dials",
             ))
         });
         match cfg.connect_retry {
@@ -1919,12 +1930,17 @@ pub(crate) fn config_keys_the_demo_drops() -> Vec<&'static str> {
     if !cfg!(feature = "scouting-responder") {
         out.push("scouting/multicast/listen");
     }
-    // R311y849 — `--connect-retry` is parsed by the `--peer` and `--router-hat`
-    // arms only, and neither exists without its feature, so a build with neither
-    // has no sink to expand into.
-    if !cfg!(any(feature = "routing-peer", feature = "router-hat-router")) {
-        out.push("connect/retry");
-    }
+    // R311y849 listed `connect/retry` here: `--connect-retry` was parsed by the
+    // `--peer` and `--router-hat` arms only, and neither exists without its
+    // feature, so a build with neither had no sink to expand into.
+    //
+    // R2158 (open-debt item 230) STRUCK that row rather than narrowing it. The
+    // key's third sink — the client `--reconnect` supervisor — is in every
+    // build, so there is no feature set left that drops it, and a row claiming
+    // otherwise would be this list's own lie. The fixture the sweep drives moved
+    // with it: `cli_for("connect/retry")` now names the invocation that has a
+    // sink EVERYWHERE, which is what this list and that table have to agree
+    // about.
     // R2141 — the multicast autoconnect plane needs BOTH features: `--peer` (the
     // only run mode that owns a dial-intent stream) and the scouting FSM that
     // fills it. A build missing either has no sink to expand into, and its flag
@@ -2610,13 +2626,34 @@ mod stock_config_tests {
             "scouting/multicast/autoconnect" | "scouting/multicast/autoconnect_strategy" => {
                 &["--config", "z.json5", "--peer", "tcp/127.0.0.1:0"]
             }
-            // R311y849 — the re-dial schedule's precondition is a run mode that
-            // owns a connect LIST. `--peer` is used here rather than
-            // `--router-hat` because it is the arm this round WIRED: the
-            // `--router-hat` arm had read the flag since R311y786 and the peer
-            // arm accepted and dropped it, so a fixture pointed at the router
-            // would have passed against the defect.
-            "connect/retry" => &["--config", "z.json5", "--peer", "tcp/127.0.0.1:0"],
+            // R311y849 — the re-dial schedule's precondition is a run that
+            // RE-DIALS. It named `--peer` here, because that was the arm y849
+            // WIRED (the `--router-hat` arm had read the flag since R311y786 and
+            // the peer arm accepted and dropped it, so a fixture pointed at the
+            // router would have passed against the defect).
+            //
+            // R2158 (open-debt item 230) moves it to the CLIENT lifecycle, and
+            // the reason is this table's contract with
+            // `config_keys_the_demo_drops`: a row whose invocation reaches
+            // nothing must be a key that list names, and after this round the
+            // list names none. `--peer` is a sink only where `routing-peer` is
+            // compiled, so a row pointed at it would report "reaches nothing" on
+            // `--features zenoh-config` alone while the client supervisor — the
+            // sink that IS in that build — sat untested. The peer and
+            // router-hat halves keep their own witness in
+            // `the_retry_schedule_reaches_only_the_modes_that_own_a_connect_list`,
+            // which types both roles and covers the drop-in case for each.
+            //
+            // `--reconnect` rides along because it is the lifecycle the schedule
+            // belongs to: without it the client dials once, and a flag pacing a
+            // re-dial that never happens is exactly what the expansion withholds.
+            "connect/retry" => &[
+                "--config",
+                "z.json5",
+                "--connect",
+                "tcp/r:7447",
+                "--reconnect",
+            ],
             _ => &["--config", "z.json5"],
         }
     }
@@ -2834,10 +2871,16 @@ mod stock_config_tests {
             // control carrying `1000,4000,2` would differ from the variant only
             // in digits and would pass against an expansion that emitted the
             // flag unconditionally.
+            // R2158 (open-debt item 230) — `mode: "client"`, matching `cli_for`'s
+            // move to the client lifecycle. The role must be the SAME one the
+            // row types, or `a_role_the_file_supplies_honours_every_key_a_typed_
+            // role_does` measures the two invocations as different nodes and
+            // skips the row — the file's `mode:` is what supplies `--connect`
+            // when the typed role is stripped.
             (
                 "connect/retry",
-                r#"{ mode: "peer", connect: { endpoints: ["tcp/r:7447"] } }"#,
-                r#"{ mode: "peer", connect: { endpoints: ["tcp/r:7447"],
+                r#"{ mode: "client", connect: { endpoints: ["tcp/r:7447"] } }"#,
+                r#"{ mode: "client", connect: { endpoints: ["tcp/r:7447"],
                      retry: { period_init_ms: 250, period_max_ms: 9000,
                               period_increase_factor: 1.5 } } }"#,
             ),
@@ -2973,26 +3016,33 @@ mod stock_config_tests {
     /// is therefore a question about the key, not about the role, and it needs
     /// no table saying which flag each key should produce.
     ///
-    /// # Why this is `#[cfg]`-gated, and how that was measured
+    /// # Why this WAS `#[cfg]`-gated, and why it no longer is
     ///
-    /// The two role-gated keys are the two whose sinks are feature-gated:
-    /// `config_keys_the_demo_drops` DROPS `scouting/multicast/listen` without
-    /// `scouting-responder`, and `connect/retry` without `routing-peer` or
-    /// `router-hat-router`. On a build lacking them both in-scope rows expand to
-    /// NOTHING in both invocations, the deltas match trivially, and this test
-    /// passes having proved nothing — MEASURED: on `--features zenoh-config`
-    /// alone it reported "2 row(s) checked" and stayed green with y849's fix
-    /// reverted. That is the empty population wearing a disguise, and the
-    /// in-scope floor could not see it because the rows were present.
+    /// R2139 gated it. The two role-gated keys were the two whose sinks were
+    /// feature-gated: `config_keys_the_demo_drops` DROPS
+    /// `scouting/multicast/listen` without `scouting-responder`, and it dropped
+    /// `connect/retry` without `routing-peer` or `router-hat-router`. On a build
+    /// lacking them, both in-scope rows expanded to NOTHING in both invocations,
+    /// the deltas matched trivially, and this test passed having proved nothing
+    /// — MEASURED: on `--features zenoh-config` alone it reported "2 row(s)
+    /// checked" and stayed green with y849's fix reverted. That is the empty
+    /// population wearing a disguise, and the in-scope floor could not see it
+    /// because the rows were present.
     ///
-    /// So the test exists only where its subject does, and a row whose typed
-    /// invocation reaches nothing is DERIVED as either a no-sink skip (the key
-    /// is in `config_keys_the_demo_drops`) or a FAILURE (it is not, so the row
-    /// has stopped testing what it claims).
-    #[cfg(all(
-        feature = "scouting-responder",
-        any(feature = "routing-peer", feature = "router-hat-router")
-    ))]
+    /// R2158 (open-debt item 230) removed the second half of that gate by
+    /// removing its subject: the client `--reconnect` supervisor is an
+    /// UNGATED sink for `connect/retry`, so that row is non-vacuous in every
+    /// build and this test always has at least one. Keeping the `cfg` would be a
+    /// rule outliving the limitation it describes, which is open-debt item 47's
+    /// class, so it is paid here rather than left. The `scouting-responder` half
+    /// went with it: it was never load-bearing on its own — it named the OTHER
+    /// row, and the vacuity derivation below already handles a row whose sink
+    /// this build lacks.
+    ///
+    /// A row whose typed invocation reaches nothing is still DERIVED as either a
+    /// no-sink skip (the key is in `config_keys_the_demo_drops`) or a FAILURE
+    /// (it is not, so the row has stopped testing what it claims), and an empty
+    /// in-scope set still fails.
     #[test]
     fn a_role_the_file_supplies_honours_every_key_a_typed_role_does() {
         /// `variant.added` minus `control.added`, which is the key's own effect.
@@ -3780,7 +3830,7 @@ mod stock_config_tests {
         }
     }
 
-    /// R311y849 — `connect/retry` reaches the flag in the modes that dial and
+    /// R311y849 — `connect/retry` reaches the flag in the runs that RE-DIAL and
     /// is WITHHELD everywhere else, spelled out rather than left to the census
     /// gate above (which only shows that the argv changed).
     ///
@@ -3790,8 +3840,14 @@ mod stock_config_tests {
     /// carries a retry block for the OTHER nodes in the deployment -- into a
     /// node that will not start. That is the failure R311y844 measured for four
     /// other flags and this file exists to keep measuring.
+    ///
+    /// R2158 (open-debt item 230) — THE CLIENT HALF, in both directions, and it
+    /// is why the `cfg` came off this test. A `--connect --reconnect` run has
+    /// a re-dial supervisor and therefore a sink; a bare `--connect` run dials
+    /// once and still has none. The second is not a leftover from the old rule:
+    /// emitting a re-dial schedule into a node that never re-dials is a word on
+    /// the command line that changes nothing, which this expansion does not do.
     #[test]
-    #[cfg(any(feature = "routing-peer", feature = "router-hat-router"))]
     fn the_retry_schedule_reaches_only_the_modes_that_own_a_connect_list() {
         // A peer BINDS and dials, so the file carries both endpoint lists: the
         // role expansion produces `--peer` only from the pair, and a
@@ -3802,10 +3858,19 @@ mod stock_config_tests {
                         retry: { period_init_ms: 250, period_max_ms: 9000,
                                  period_increase_factor: 1.5 } } }"#;
 
-        // The dialing modes: the flag is emitted, in the parser's own spelling.
+        // The re-dialling runs: the flag is emitted, in the parser's own
+        // spelling. The third is R2158's -- a lifecycle rather than a mode, and
+        // the one the whole of item 230 was about.
         for mode in [
             vec!["--config", "z.json5", "--peer", "tcp/127.0.0.1:0"],
             vec!["--config", "z.json5", "--router-hat", "tcp/127.0.0.1:0"],
+            vec![
+                "--config",
+                "z.json5",
+                "--connect",
+                "tcp/r:7447",
+                "--reconnect",
+            ],
         ] {
             let out = expand(&mode, file).unwrap();
             let at = out
@@ -3826,7 +3891,9 @@ mod stock_config_tests {
             assert_eq!(policy.period_increase_factor, 1.5);
         }
 
-        // Every other mode: nothing, because the flag would be a refusal.
+        // Every other run: nothing. A `--listen` acceptor never dials at all,
+        // and a bare `--connect` client dials ONCE -- neither has a schedule to
+        // pace, so the flag would be a difference the file did not ask for.
         for mode in [
             vec!["--config", "z.json5", "--listen", "tcp/127.0.0.1:0"],
             vec!["--config", "z.json5", "--connect", "tcp/r:7447"],
@@ -3834,11 +3901,54 @@ mod stock_config_tests {
             let out = expand(&mode, file).unwrap();
             assert!(
                 !out.added.iter().any(|a| a == "--connect-retry"),
-                "{mode:?} has no parse for the flag, so emitting it would \
-                 exit(2) on a valid stock config: {:?}",
+                "{mode:?} never re-dials, so the schedule would pace nothing: \
+                 {:?}",
                 out.added
             );
         }
+
+        // R2158 — the CLIENT DROP-IN, which is the invocation item 230 named:
+        // the file supplies `mode: "client"` + its connect list and the
+        // operator types only the lifecycle. The role reaches `added`, never
+        // `rest`, so this is the same trap R2139 built a whole sweep for, asked
+        // of the arm this round wired.
+        let client_file = r#"{ mode: "client",
+             connect: { endpoints: ["tcp/r:7447"],
+                        retry: { period_init_ms: 250, period_max_ms: 9000,
+                                 period_increase_factor: 1.5 } } }"#;
+        let client_drop_in = expand(&["--config", "z.json5", "--reconnect"], client_file).unwrap();
+        assert!(
+            client_drop_in.added.iter().any(|a| a == "--connect"),
+            "the file's `mode: client` must supply the dial: {:?}",
+            client_drop_in.added
+        );
+        let at = client_drop_in
+            .added
+            .iter()
+            .position(|a| a == "--connect-retry")
+            .unwrap_or_else(|| {
+                panic!(
+                    "the client drop-in dropped the schedule: {:?}",
+                    client_drop_in.added
+                )
+            });
+        assert_eq!(client_drop_in.added[at + 1], "250,9000,1.5");
+
+        // And the SAME document without the lifecycle flag: a one-shot client,
+        // no schedule. This is the pair that makes the case above mean
+        // something -- without it, an expansion that emitted the flag for every
+        // client would pass.
+        let one_shot = expand(&["--config", "z.json5"], client_file).unwrap();
+        assert!(
+            one_shot.added.iter().any(|a| a == "--connect"),
+            "the control must still dial: {:?}",
+            one_shot.added
+        );
+        assert!(
+            !one_shot.added.iter().any(|a| a == "--connect-retry"),
+            "a one-shot client never re-dials: {:?}",
+            one_shot.added
+        );
 
         // THE DROP-IN CASE, and the one this round nearly shipped broken. When
         // the operator names no role, the file supplies one -- and the `--peer`
@@ -5006,13 +5116,20 @@ pub(crate) fn parse_pairs(args: &[String], flag: &str) -> Vec<String> {
 /// peer given `--connect-retry banana` did not refuse — the arm never reached
 /// the parser, so neither the value nor its VALIDATION applied.
 ///
-/// The union spelling is deliberate and is the R311y845 rule: cfg on the set of
-/// consumers rather than `allow(dead_code)`, so the arm that is off does not
-/// hide a caller that is on.
+/// R2158 (open-debt item 230) RETIRES the `cfg` this doc block used to carry,
+/// by the SAME R311y845 rule that put it there: cfg on the set of consumers.
+/// That set gained a THIRD member — the client `--reconnect` supervisor
+/// ([`crate::runner::client_reconnect_policy`]) — and `crate::runner::reconnect`
+/// is ungated, so the union of the consumers is now unconditional and a `cfg`
+/// spelling it would be a rule with no subject. What the schedule MEANS when the
+/// operator says nothing still differs per consumer, and that answer lives at
+/// each consumer rather than here: this function reports what was asked for, or
+/// nothing.
 ///
-/// Consequence for CI: a lane that names NEITHER feature selects ZERO of the
-/// tests below and still exits 0, so the C1ay step names one.
-#[cfg(any(feature = "router-hat-router", feature = "routing-peer"))]
+/// Consequence for CI, restated for the same reason: the tests below are no
+/// longer feature-selected either, so every lane that runs this module runs
+/// them. The C1ay step that names a feature does so for the OTHER cases in the
+/// module, not for these.
 pub(crate) fn parse_connect_retry(args: &[String]) -> Result<Option<RetryPolicy>, String> {
     let Some(spec) = parse_pair(args, "--connect-retry") else {
         return Ok(None);
@@ -6174,7 +6291,11 @@ pub(crate) struct LivelinessGetSpec {
     pub(crate) after_ms: Option<u64>,
 }
 
-#[cfg(all(test, any(feature = "router-hat-router", feature = "routing-peer")))]
+// R2158 (open-debt item 230) — the feature gate went with
+// `parse_connect_retry`'s own: its consumer set now includes an ungated one, so
+// these cases mean something on every build and no lane has to name a feature
+// to select them.
+#[cfg(test)]
 mod connect_retry_tests {
     use super::*;
 
