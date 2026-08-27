@@ -366,6 +366,35 @@ if ! python3 scripts/lib/scouting_socket_axis_census.py > /dev/null; then
     exit 1
 fi
 
+# ─── gate 2f — a flag's precondition SET, derived (R2144, item 218) ──
+#
+# R311y844 found this class by TRIPPING OVER IT: the expansion emitted
+# `--scout-timeout-ms` unconditionally, `main` refuses that flag without
+# `--scout`, and a valid stock config therefore expanded into a node that
+# exits(2). R2140 built the dynamic half — expand each fixture row in three
+# shapes, assert the argv carries the partner — and that gate is real.
+#
+# What it cannot do is judge a rule no shape stages. MEASURED: it stages 3 of
+# 11, and the other 8 come back as `skip — no shape emits it`, a sentence that
+# lumps "the expansion has no site for that flag" (7 of them, derivable) with
+# "it has one and nothing triggered it" (the hole item 218 names).
+#
+# Here for gate 2d's reasons — both sides are on disk, it reads them in
+# milliseconds, and the thing it catches cannot be caught by the changed-crates
+# tests: `stock_config_tests` is `#[cfg(feature = "zenoh-config")]`, so gate 3's
+# DEFAULT-feature run does not compile the dynamic gate at all. A 25th mapping
+# added to `args.rs` reaches origin with no local signal otherwise.
+if ! python3 scripts/lib/flag_precondition_gate.py > /dev/null; then
+    echo "" >&2
+    echo "pre-push: flag-precondition gate FAILED — the expansion emits a flag" >&2
+    echo "          the binary refuses without a partner, and the emission site" >&2
+    echo "          carries no guard; or an anchor this reader needs is gone." >&2
+    echo "          Run \`python3 scripts/lib/flag_precondition_gate.py\` for the" >&2
+    echo "          per-site breakdown (\`--verbose\` for every class)." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+
 # ─── housekeeping (NOT a gate) — toolchain-scoped target GC ─────────
 #
 # R311y445. Deliberately NOT a gate: it never fails the push, and an absent

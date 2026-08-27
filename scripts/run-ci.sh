@@ -2150,6 +2150,20 @@ PY
     # count stands still. It also refuses a population of ZERO, which is the
     # shape where a broken reader reports everything covered.
     python3 scripts/lib/scouting_socket_axis_census.py || return 1
+    # R2144 (unregistered open-debt item 218) — THE PRECONDITION SET, from both
+    # sides. R2140's `every_flag_the_expansion_emits_carries_the_precondition_...`
+    # is the DYNAMIC half and stays where it is: it expands fixture rows in three
+    # shapes and reads the resulting argv. What it cannot do is judge a rule no
+    # shape stages, and MEASURED on this tree it stages 3 of 11 — the other 8 are
+    # reported as `skip -- no shape emits it`, which lumps "the expansion has no
+    # site for this flag" together with "it has one and nothing triggered it".
+    #
+    # Here for gate 2d's reasons, and one of its own: both sides are on disk (the
+    # refusal literals, and the `Expansion::pair` / `presence` call sites), so the
+    # invariant — a flag the binary refuses without a partner is either one the
+    # expansion cannot emit or one it emits only behind a guard — is decidable by
+    # reading, with nothing built and no shape staged.
+    python3 scripts/lib/flag_precondition_gate.py || return 1
     # 2026-08-25 — the RELICENSE gate. The free tier moved from
     # `LGPL-3.0-or-later` to `AGPL-3.0-or-later` across 1032 tracked files in
     # one substitution, and the failure mode of that operation is not a crash:
