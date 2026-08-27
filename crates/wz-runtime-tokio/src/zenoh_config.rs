@@ -1804,8 +1804,19 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
 ///   default — a peer with no policy installed enforces nothing — so the reader
 ///   would not be building a switch, only choosing not to install. `policies`
 ///   is upstream's rules-by-name × subjects-by-name join, which a reader
-///   expands into wz's inline rules; `subjects` reaches only wz's zid axis,
-///   which is the partiality this list already warns about below, not absence.
+///   expands into wz's inline rules. `subjects` reaches three of upstream's
+///   five axes — `AclRule` carries `subject: SubjectSelector` (zid),
+///   `link_protocols` and `interfaces`, against upstream's `zids`,
+///   `link_protocols`, `interfaces`, `cert_common_names` and `usernames` — so
+///   the two genuinely absent are `cert_common_names` and `usernames`. That is
+///   the partiality this list warns about below, not absence.
+///
+///   ⚠ R2152 correcting R2151, which wrote "reaches only wz's zid axis" here.
+///   That sentence was measured off `SubjectSelector` alone and missed the two
+///   axes R311y453 put on `AclRule` beside it. The `access-acl` catalog atom
+///   had the right answer already and its reason says so; a doc sentence about
+///   parity that contradicts the atom grading the same thing is worth more than
+///   a typo, because this list exists to answer exactly that question.
 /// * `plugins`, `plugins_loading/enabled` — `PluginRegistry`, which loads,
 ///   starts, stops and admin-reports `DynamicPlugin`s, driven today by the
 ///   demo's repeated `--plugin`. `plugins_loading/search_dirs` stays in

@@ -264,11 +264,15 @@ pub struct AclConfig {
 // `access_control/subjects`, `access_control/policies` and
 // `access_control/enabled`. wz's config reader honours none of them, so all five
 // are carried in `UNHONOURED_READER_GAP` — the engine is HERE, and what is
-// missing is the reader. Two shape notes the reader will have to bridge:
+// missing is the reader. Three shape notes the reader will have to bridge:
 // upstream names subjects and rules and then JOINS them under `policies`, while
-// an `AclRule` here carries its `SubjectSelector` inline; and `enabled` has no
-// switch to build, because a peer with no policy installed already enforces
-// nothing. R2151 (open-debt item 540) moved the five and added this comment:
+// an `AclRule` here carries its subject axes inline; `enabled` has no switch to
+// build, because a peer with no policy installed already enforces nothing; and
+// a `subjects` entry reaches THREE of upstream's five axes here — `subject`
+// (zid), `link_protocols` and `interfaces` — so `cert_common_names` and
+// `usernames` are the two a reader cannot bridge, which is what the
+// `access-acl` catalog atom's reason has said since R311y453.
+// R2151 (open-debt item 540) moved the five and added this comment:
 // until then the classification lived only in the reader's own doc, which made
 // it a claim with no witness at the capability.
 
