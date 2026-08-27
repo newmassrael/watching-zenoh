@@ -1616,6 +1616,154 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     "transport/unicast/open_timeout",
 ];
 
+/// The unhonoured keys wz genuinely CANNOT act on — the first of the two kinds
+/// [`UNHONOURED_UPSTREAM_CONFIG_KEYS`] used to carry under one name.
+///
+/// R2148 (open-debt item 214) — that list's doc said only "wz models the
+/// topology-and-transport subset it can act on", and that sentence conflated
+/// two unrelated facts: "wz has no subsystem for this" and "wz does this
+/// already and the READER was never told the key". The difference is the whole
+/// of "what is not supported": the first is a feature nobody has built, the
+/// second is a file an operator already has that silently does nothing. R311y844
+/// moved ten keys of the second kind and left the rest unswept.
+///
+/// Every key here needs a SUBSYSTEM wz does not have, grouped by the one it
+/// needs:
+///
+/// * `access_control/*` — a policy engine (subjects, rules, permissions).
+/// * `aggregation/*`, `downsampling`, `low_pass_filter`, `qos/*` — an
+///   interceptor chain configured from the same file.
+/// * `plugins`, `plugins_loading/*` — a plugin host. `wz-ap-demo/src/args.rs`
+///   names `plugins` as one the demo "genuinely cannot" honour, beside
+///   `transport/link/tx/threads`.
+/// * `transport/auth/*` — an auth stack. wz has the WIRE half (the auth-body
+///   codec has foreign witnesses) and no credential store to configure.
+/// * `transport/link/*`, `transport/{unicast,multicast}/*` — knobs on a queue,
+///   socket or session table wz does not expose: `transport/link/tx/threads` is
+///   the named example, and the `queue/*` family is upstream's priority-queue
+///   sizing, which wz has no configurable counterpart for.
+/// * `connect/*`, `listen/*`, `scouting/delay`, `open/return_conditions/*`,
+///   `timestamping/drop_future_timestamp`, `routing/*` — behaviours wz's
+///   session-open and routing paths do not implement at all.
+/// * `metadata` — free-form operator annotation upstream never reads either;
+///   there is nothing for wz to act on.
+/// * `scouting/gossip/enabled` — ⚠ the one judgement call in this list. wz HAS
+///   the gossip plane (see [`UNHONOURED_READER_GAP`]), but no gate that turns it
+///   OFF, so honouring this key means BUILDING the switch rather than teaching
+///   the reader. If that switch is ever added, this row moves.
+pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
+    "access_control/default_permission",
+    "access_control/enabled",
+    "access_control/policies",
+    "access_control/rules",
+    "access_control/subjects",
+    "aggregation/publishers",
+    "aggregation/subscribers",
+    "connect/exit_on_failure",
+    "connect/timeout_ms",
+    "downsampling",
+    "listen/exit_on_failure",
+    "listen/retry",
+    "listen/timeout_ms",
+    "low_pass_filter",
+    "metadata",
+    "open/return_conditions/connect_scouted",
+    "open/return_conditions/declares",
+    "plugins",
+    "plugins_loading/enabled",
+    "plugins_loading/search_dirs",
+    "qos/network",
+    "qos/publication",
+    "routing/peer/linkstate/transport_weights",
+    "routing/router/linkstate/transport_weights",
+    "routing/router/peers_failover_brokering",
+    "scouting/delay",
+    "scouting/gossip/enabled",
+    "timestamping/drop_future_timestamp",
+    "transport/auth/pubkey/key_size",
+    "transport/auth/pubkey/known_keys_file",
+    "transport/auth/pubkey/private_key_file",
+    "transport/auth/pubkey/private_key_pem",
+    "transport/auth/pubkey/public_key_file",
+    "transport/auth/pubkey/public_key_pem",
+    "transport/auth/usrpwd/dictionary_file",
+    "transport/auth/usrpwd/password",
+    "transport/auth/usrpwd/user",
+    "transport/link/protocols",
+    "transport/link/rx/buffer_size",
+    "transport/link/rx/max_message_size",
+    "transport/link/tcp/so_rcvbuf",
+    "transport/link/tcp/so_sndbuf",
+    "transport/link/tls/close_link_on_expiration",
+    "transport/link/tls/connect_certificate",
+    "transport/link/tls/connect_private_key",
+    "transport/link/tls/enable_mtls",
+    "transport/link/tls/so_rcvbuf",
+    "transport/link/tls/so_sndbuf",
+    "transport/link/tls/verify_name_on_connect",
+    "transport/link/tx/keep_alive",
+    "transport/link/tx/queue/allocation/mode",
+    "transport/link/tx/queue/batching/enabled",
+    "transport/link/tx/queue/batching/time_limit",
+    "transport/link/tx/queue/congestion_control/block/wait_before_close",
+    "transport/link/tx/queue/congestion_control/drop/max_wait_before_drop_fragments",
+    "transport/link/tx/queue/congestion_control/drop/wait_before_drop",
+    "transport/link/tx/queue/size/background",
+    "transport/link/tx/queue/size/control",
+    "transport/link/tx/queue/size/data",
+    "transport/link/tx/queue/size/data_high",
+    "transport/link/tx/queue/size/data_low",
+    "transport/link/tx/queue/size/interactive_high",
+    "transport/link/tx/queue/size/interactive_low",
+    "transport/link/tx/queue/size/real_time",
+    "transport/link/tx/sequence_number_resolution",
+    "transport/link/tx/threads",
+    "transport/link/unixpipe/file_access_mask",
+    "transport/multicast/compression/enabled",
+    "transport/multicast/join_interval",
+    "transport/multicast/max_sessions",
+    "transport/shared_memory/mode",
+    "transport/unicast/accept_pending",
+    "transport/unicast/accept_timeout",
+    "transport/unicast/max_sessions",
+    "transport/unicast/open_timeout",
+];
+
+/// The unhonoured keys wz ALREADY ACTS ON and the reader was never told — the
+/// second kind, and the one that costs an operator something today.
+///
+/// R2148 (open-debt item 214). A key here is not a missing feature: the deploy
+/// can get the behaviour by hand, so a file that states it looks like it works
+/// and does nothing. That is strictly worse than an unimplemented key, which at
+/// least fails visibly.
+///
+/// EVERY ENTRY IS EVIDENCED BY wz's OWN SOURCE NAMING THE UPSTREAM KEY, which
+/// is what makes this classification a reading rather than a guess — wz asserts
+/// the mapping and the reader contradicts it:
+///
+/// * `scouting/gossip/multihop` — `wz_routing_graph::LinkstateNetwork` carries a
+///   `gossip_multihop` field with a `set_gossip_multihop` setter, and its doc
+///   cites `scouting.gossip.multihop` by name.
+/// * `scouting/gossip/target` — `linkstate_forward.rs` has `default_gossip_target`
+///   and `set_gossip_target`, and its doc calls the value "config-sourceable by
+///   a deploy" while citing the zenoh key. The knob was built FOR a config that
+///   cannot reach it.
+/// * `scouting/gossip/autoconnect` / `_strategy` — `wz_routing_graph::autoconnect`
+///   and the `AutoConnectStrategies` R2141 built for the MULTICAST twins of these
+///   two keys, which are honoured. The demo exposes `--autoconnect` and
+///   `--autoconnect-strategy` for the gossip plane specifically.
+///
+/// ⚠ Being here is NOT a claim that the move is mechanical. R311y844's ten were
+/// moved one at a time, and `scouting/multicast/autoconnect` needed R2141 to
+/// build a strategy representation first. This list says the capability EXISTS,
+/// not that the reader change is free.
+pub const UNHONOURED_READER_GAP: &[&str] = &[
+    "scouting/gossip/autoconnect",
+    "scouting/gossip/autoconnect_strategy",
+    "scouting/gossip/multihop",
+    "scouting/gossip/target",
+];
+
 /// Is `path` a key stock zenoh knows — itself, or under a subtree it knows?
 ///
 /// The DESCENDANT half is not a looseness: several upstream keys are whole
@@ -4492,6 +4640,83 @@ mod tests {
         )
         .expect("a mode table reads");
         assert!(ingest.ignored.is_empty(), "{:?}", ingest.ignored);
+    }
+
+    /// Every unhonoured key says WHICH KIND of unhonoured it is.
+    ///
+    /// R2148 (open-debt item 214) — the item's output is not a smaller number,
+    /// it is a split of the NAMES: while "wz cannot do this" and "the reader was
+    /// never told" share one list, "what is not supported" has no answer. This
+    /// test is what stops them re-merging. A key added to
+    /// [`UNHONOURED_UPSTREAM_CONFIG_KEYS`] without being classed lands in
+    /// neither list and reds here, so the decision cannot be skipped — which is
+    /// the whole reason the two lists RESTATE the keys instead of one being
+    /// derived as the other's complement. A complement would classify every
+    /// future key silently, which is exactly how this item would come back.
+    ///
+    /// The same shape the defaults leg uses for the honoured half: four classes
+    /// that must account for `HONOURED_CONFIG_KEYS` exactly.
+    #[test]
+    fn every_unhonoured_key_says_which_kind_of_unhonoured_it_is() {
+        assert!(!UNHONOURED_BEYOND_WZ.is_empty());
+        assert!(
+            !UNHONOURED_READER_GAP.is_empty(),
+            "an empty reader-gap list makes the split vacuous — every key would \
+             be 'wz cannot', which is the undivided state this test exists to \
+             end"
+        );
+
+        let both: Vec<&&str> = UNHONOURED_BEYOND_WZ
+            .iter()
+            .filter(|k| UNHONOURED_READER_GAP.contains(k))
+            .collect();
+        assert!(
+            both.is_empty(),
+            "classed as BOTH kinds: {both:?} — a key wz cannot act on and \
+             already acts on is two different answers to one question"
+        );
+
+        let unclassed: Vec<&&str> = UNHONOURED_UPSTREAM_CONFIG_KEYS
+            .iter()
+            .filter(|k| !UNHONOURED_BEYOND_WZ.contains(k) && !UNHONOURED_READER_GAP.contains(k))
+            .collect();
+        assert!(
+            unclassed.is_empty(),
+            "unhonoured and unclassed: {unclassed:?}. Every unhonoured key needs \
+             a decision about WHY it is unhonoured — a subsystem wz lacks \
+             (UNHONOURED_BEYOND_WZ), or a capability wz has whose key the reader \
+             was never told (UNHONOURED_READER_GAP). Deciding is the point; the \
+             lists are where the decision is recorded."
+        );
+
+        let orphaned: Vec<&&str> = UNHONOURED_BEYOND_WZ
+            .iter()
+            .chain(UNHONOURED_READER_GAP)
+            .filter(|k| !UNHONOURED_UPSTREAM_CONFIG_KEYS.contains(k))
+            .collect();
+        assert!(
+            orphaned.is_empty(),
+            "classed but no longer unhonoured: {orphaned:?} — a classification \
+             that outlived its key. If it became honoured, drop it from the \
+             class in the round that moved it."
+        );
+
+        assert_eq!(
+            UNHONOURED_BEYOND_WZ.len() + UNHONOURED_READER_GAP.len(),
+            UNHONOURED_UPSTREAM_CONFIG_KEYS.len(),
+            "the two kinds are disjoint and total above, so their sizes must sum \
+             — a mismatch here means a duplicate inside one of them"
+        );
+
+        // The breakdown, not the total: "79 classed" would read the same whether
+        // the reader-gap list held 4 keys or 0, and 0 is the undivided state.
+        println!(
+            "unhonoured upstream keys: {} total — {} beyond wz, {} reader gap {:?}",
+            UNHONOURED_UPSTREAM_CONFIG_KEYS.len(),
+            UNHONOURED_BEYOND_WZ.len(),
+            UNHONOURED_READER_GAP.len(),
+            UNHONOURED_READER_GAP
+        );
     }
 
     /// Whether `path` names something strictly INSIDE `key`.
