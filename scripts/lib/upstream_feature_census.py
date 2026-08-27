@@ -50,11 +50,20 @@ what upstream declares? Both directions FAIL —
   * a row or an exclusion names a feature upstream no longer declares: the
     table has outlived its subject.
 
-It runs in Layer Z, which is where the zenoh source tree already is (Layer Z
-provisions zenohd, and `deepenable_audit.py` sits beside it for the same
-reason). Without an anchor it exits 2 and names every path it tried — a gate
-that cannot read its input must not report green, which is the rule the schema
-pin and `deepenable_audit.py` already apply.
+It runs in Layer Z, beside `deepenable_audit.py`, because that is the lane whose
+oracle IS the pinned upstream. Without an anchor it exits 2 and names every path
+it tried — a gate that cannot read its input must not report green, which is the
+rule the schema pin and `deepenable_audit.py` already apply.
+
+⚠ R2164 — the input is PROVISIONED, not assumed. R2162 put this arm on Layer Z
+reasoning "the lane builds zenohd, so the source is there". The hosted lane
+restores `target/zenohd` from a cache and on a hit never runs
+`build-zenohd.sh` at all, so the source was absent on every cached run and the
+arm exited 2 for four consecutive pushes. `build-zenohd.sh` now installs
+cargo's own answer as `zenoh-cargo-metadata.json` INSIDE that cached directory,
+which is why the anchor chain below is (kind, path) rather than a list of
+manifests. The cache key hashes `build-zenohd.sh`, so changing that script is
+itself what retires every cache entry predating the artifact.
 
 ⚠ The default run PRINTS that the upstream arm was deferred, by name. A skip
 that says nothing reads exactly like coverage.
@@ -259,25 +268,53 @@ def workspace_features() -> dict[str, list[str]]:
     return owners
 
 
-def upstream_anchors() -> list[Path]:
-    """Every place a pinned zenoh source tree is looked for, in order.
+def upstream_anchors() -> list[tuple[str, Path]]:
+    """Every place the pinned zenoh feature table is looked for, in order.
+
+    Each entry is `(kind, path)`. A `manifest` is read by asking cargo; a
+    `metadata` is cargo's own answer, already recorded. Both end at the same
+    structure, and keeping the KIND explicit is what stops a reader assuming the
+    chain is homogeneous the way it was when every entry was a Cargo.toml.
 
     The chain deliberately mirrors `scripts/build-zenohd.sh`: the census and the
     reference oracle must not be able to disagree about WHICH upstream they mean.
     Absolute paths are resolved per machine and never written into a tracked
     file (the CLAUDE.md rule) -- hence an env override and $HOME-relative globs.
+
+    ORDER, and why the installed answer outranks a live checkout: an operator's
+    explicit `ZENOHD_SRC` wins, because an instruction beats a discovery. After
+    that comes the metadata installed BESIDE the zenohd this lane actually runs
+    against. A developer's cargo checkout can sit at a different revision from
+    the binary under test, and grading the table against one while the interop
+    grades against the other is the two-identities trap -- the same reason
+    R2109 installed `DEFAULT_CONFIG.json5` beside the binary rather than reading
+    it off a checkout. Version drift is still caught: `upstream_arm` refuses any
+    package whose version is not the pin.
     """
-    out: list[Path] = []
+    out: list[tuple[str, Path]] = []
     explicit = os.environ.get("ZENOHD_SRC")
     if explicit:
-        out.append(Path(explicit) / "zenoh" / "Cargo.toml")
+        out.append(("manifest", Path(explicit) / "zenoh" / "Cargo.toml"))
+    # The provisioned answer, beside the oracle it was derived from. WZ_ZENOHD_BIN
+    # is honoured because Layer Z honours it: when the lane is pointed at a
+    # zenohd elsewhere, the denominator must follow the binary, not stay here.
+    zenohd_bin = os.environ.get("WZ_ZENOHD_BIN")
+    install_dirs = [Path(zenohd_bin).parent] if zenohd_bin else []
+    install_dirs.append(ROOT / "target" / "zenohd")
+    for d in install_dirs:
+        out.append(("metadata", d / "zenoh-cargo-metadata.json"))
     # Source A2: the shallow clone build-zenohd.sh makes on a runner with no
     # cargo-git checkout.
-    out.append(ROOT / "target" / "zenohd-build" / "zenoh-src" / "zenoh" / "Cargo.toml")
+    out.append(
+        (
+            "manifest",
+            ROOT / "target" / "zenohd-build" / "zenoh-src" / "zenoh" / "Cargo.toml",
+        )
+    )
     # Source A: the cargo git checkout, hash-named, hence the glob.
     home = Path(os.environ.get("HOME", "~")).expanduser()
     out.extend(
-        Path(p)
+        ("manifest", Path(p))
         for p in sorted(
             glob.glob(str(home / ".cargo/git/checkouts/zenoh-*/*/zenoh/Cargo.toml"))
         )
@@ -285,14 +322,39 @@ def upstream_anchors() -> list[Path]:
     # Source B: what `cargo install zenohd` leaves in the registry cache.
     cargo_home = Path(os.environ.get("CARGO_HOME", home / ".cargo"))
     out.extend(
-        Path(p)
+        ("manifest", Path(p))
         for p in sorted(
             glob.glob(
                 str(cargo_home / f"registry/src/*/zenoh-{UPSTREAM_VERSION}/Cargo.toml")
             )
         )
     )
-    return out
+    # DEDUPE, order-preserving. WZ_ZENOHD_BIN normally points at exactly the
+    # default install dir -- Layer Z itself defaults it to `$PWD/target/zenohd/
+    # zenohd` -- so without this the chain names that one path twice, and the
+    # failure message then claims two places were tried when one was. A list of
+    # places-tried is a DIAGNOSTIC, and one that miscounts its own attempts is
+    # the same species of defect as this round's headline: a gate saying
+    # something other than what it did.
+    seen: set[tuple[str, Path]] = set()
+    return [a for a in out if not (a in seen or seen.add(a))]
+
+
+def _read_metadata_json(path: Path, what: str) -> dict:
+    """Read a RECORDED `cargo metadata` answer, as an INPUT rather than a verdict.
+
+    Both file-shaped denominators go through here -- the one installed beside
+    zenohd and the one `--selftest` injects -- so neither can reach the
+    comparison as a traceback. A traceback exits 1, and 1 is the code that means
+    "the table disagrees with upstream": a file this program could not read
+    would then be reported as a fact about upstream.
+    """
+    try:
+        return json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        raise InputError(
+            f"{what} {path} is not readable `cargo metadata` JSON ({e})"
+        ) from e
 
 
 def upstream_package() -> dict:
@@ -303,25 +365,61 @@ def upstream_package() -> dict:
     directions of the comparison on a machine with no zenoh checkout at all.
     """
     injected = os.environ.get("WZ_UPSTREAM_FEATURE_METADATA")
+    # WHERE the answer came from, carried alongside it. Every INPUT fault below
+    # names it, because the three sources have three different repairs and a
+    # message that omits which one was read sends the reader to re-provision a
+    # file the run never opened.
     if injected:
-        md = json.loads(Path(injected).read_text())
+        source = "the injected WZ_UPSTREAM_FEATURE_METADATA fixture"
+        md = _read_metadata_json(Path(injected), source)
     else:
         tried = upstream_anchors()
-        found = next((p for p in tried if p.is_file()), None)
+        found = next(((k, p) for k, p in tried if p.is_file()), None)
         if found is None:
             raise InputError(
-                "no pinned zenoh source tree found. Tried, in order:\n    "
-                + "\n    ".join(str(p) for p in tried)
+                "no pinned zenoh feature table found. Tried, in order:\n    "
+                + "\n    ".join(f"[{k}] {p}" for k, p in tried)
                 + "\n  Provision one with `bash scripts/build-zenohd.sh` "
                 "(ZENOHD_ALLOW_CLONE=1 on a machine with no cargo checkout), "
-                "or point ZENOHD_SRC at a clone of the pinned tag."
+                "which installs the [metadata] answer beside the zenohd it "
+                "builds, or point ZENOHD_SRC at a clone of the pinned tag."
             )
-        md = _cargo_metadata(found)
-    pkgs = [p for p in md["packages"] if p["name"] == UPSTREAM_PACKAGE]
+        kind, path = found
+        if kind == "metadata":
+            # A provisioned answer that cannot be parsed is an INPUT fault,
+            # never a verdict about upstream. Saying which file it was is the
+            # whole point -- this one is generated, so a reader has to know that
+            # re-provisioning is the fix.
+            source = f"the installed capability denominator {path}"
+            md = _read_metadata_json(path, "the installed capability denominator")
+        else:
+            source = f"`cargo metadata` on {path}"
+            md = _cargo_metadata(path)
+    # SHAPE-CHECK the denominator before indexing it. Until R2164 this line was
+    # `md["packages"]`, so a file that parsed as JSON but was not `cargo
+    # metadata` raised KeyError -- an uncaught traceback, exit 1, which the
+    # caller reads as "the table disagrees with upstream". That is this round's
+    # own headline defect (a verdict about the subject from a check that never
+    # reached it) surviving inside the path this round ADDS: the `metadata` kind
+    # reads a plain file out of a restored cache, which is exactly the artifact
+    # that can arrive truncated or overwritten. An unusable denominator is an
+    # INPUT fault in every kind.
+    packages = md.get("packages") if isinstance(md, dict) else None
+    if not isinstance(packages, list):
+        raise InputError(
+            f"{source} carries no `packages` array -- it parsed as JSON but is "
+            f"not `cargo metadata` output. Re-provision it with "
+            f"`bash scripts/build-zenohd.sh`"
+        )
+    pkgs = [
+        p
+        for p in packages
+        if isinstance(p, dict) and p.get("name") == UPSTREAM_PACKAGE
+    ]
     if len(pkgs) != 1:
         raise InputError(
-            f"expected exactly one `{UPSTREAM_PACKAGE}` package in the upstream "
-            f"metadata, found {len(pkgs)}"
+            f"expected exactly one `{UPSTREAM_PACKAGE}` package in {source}, "
+            f"found {len(pkgs)}"
         )
     return pkgs[0]
 
@@ -574,7 +672,57 @@ def selftest() -> int:
                 return 1
             passed += 1
     os.environ.pop("WZ_UPSTREAM_FEATURE_METADATA", None)
-    print(f"  upstream-feature-census: selftest {passed}/{len(cases)} case(s) pass")
+
+    # ARM TWO (R2164) -- an UNUSABLE denominator must raise InputError, which is
+    # rc=2, which the caller reports as "nothing was graded". The arm above can
+    # never see this: every fixture there is well formed by construction, so the
+    # read path it drives is the one that works.
+    #
+    # Each case below is one the previous implementation got WRONG, and that is
+    # the membership rule: it indexed `md["packages"]` directly, so all three
+    # escaped as a TRACEBACK -- exit 1, the code that means "the table disagrees
+    # with upstream". A denominator that arrived truncated would have been
+    # reported as a fact about zenoh. Cases the old code already handled
+    # (`packages: []`, two `zenoh` packages) are deliberately absent: they were
+    # green before this round and would test nothing it changed.
+    unusable: list[tuple[str, str]] = [
+        ("an empty file", ""),
+        ("JSON that is not `cargo metadata`", '{"not_packages": 1}'),
+        ("a `packages` that is not an array", '{"packages": {}}'),
+    ]
+    input_faults = 0
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "meta.json"
+        for label, text in unusable:
+            path.write_text(text)
+            os.environ["WZ_UPSTREAM_FEATURE_METADATA"] = str(path)
+            try:
+                upstream_package()
+            except InputError:
+                input_faults += 1
+                continue
+            except Exception as e:  # noqa: BLE001 -- the defect IS "some other exception"
+                print(
+                    f"  selftest FAIL [{label}]: raised {type(e).__name__}, not "
+                    f"InputError -- an unreadable denominator would exit 1 and be "
+                    f"read as a verdict about upstream",
+                    file=sys.stderr,
+                )
+                return 1
+            print(
+                f"  selftest FAIL [{label}]: ACCEPTED as a denominator",
+                file=sys.stderr,
+            )
+            return 1
+    os.environ.pop("WZ_UPSTREAM_FEATURE_METADATA", None)
+
+    # The BREAKDOWN, not the total: the two arms answer different questions, and
+    # one number lets a collapsed population hide behind the other's.
+    print(
+        f"  upstream-feature-census: selftest {passed}/{len(cases)} comparison "
+        f"case(s) + {input_faults}/{len(unusable)} unusable-denominator case(s) "
+        f"pass"
+    )
     return 0
 
 

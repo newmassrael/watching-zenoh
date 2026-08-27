@@ -1583,6 +1583,19 @@ jobs:
           # which is the same split the plugin cdylib and the examples have.
           test -f target/zenohd/DEFAULT_CONFIG.json5 \
             || { echo "::error::DEFAULT_CONFIG.json5 missing — LEG 12 has no upstream oracle to derive the library default mode from"; exit 1; }
+          # R2164 — the capability census's DENOMINATOR, provisioned the same way
+          # and asserted here for the reason this step's own header gives: a
+          # restored cache quietly becoming a missing one. This artifact is
+          # exactly that story already lived through. R2162 put the census's
+          # `--upstream` arm on Layer Z assuming the lane that builds zenohd has
+          # the zenoh source; on a cache HIT the build step is skipped entirely,
+          # so the source never existed and the arm exited 2 on four consecutive
+          # pushes. The cache key hashes scripts/build-zenohd.sh, so entries made
+          # before that script learned to install this cannot be restored -- but
+          # asserting it is what makes that reasoning checkable instead of
+          # merely believed.
+          test -f target/zenohd/zenoh-cargo-metadata.json \
+            || { echo "::error::zenoh-cargo-metadata.json missing — Layer Z's capability census has no denominator and cannot grade the feature table"; exit 1; }
 
       - name: Build zenoh-pico CLI binaries
         run: bash scripts/build-zenoh-pico-cli.sh

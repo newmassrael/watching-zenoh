@@ -184,6 +184,22 @@ if [[ -n "$ZH" ]]; then
     # Only a source tree carries it -- the published crate does not -- which is
     # the same split the plugin cdylib and the examples already have.
     DEFAULT_CONFIG_SRC="$ZH/DEFAULT_CONFIG.json5"
+    # R2164 — the same argument as the line above, for a different consumer, and
+    # it is here because a CACHE HIT made the argument load-bearing rather than
+    # tidy. `upstream_feature_census.py --upstream` grades wz's capability table
+    # against what upstream DECLARES, so its input is the pinned zenoh manifest.
+    # R2162 wired that arm into Layer Z on the premise that the lane which builds
+    # zenohd has the source; the hosted lane RESTORES $INSTALL_DIR from a cache
+    # and then never runs this script at all, so on every cache hit the source
+    # was absent and the arm could not read its denominator.
+    #
+    # So the census's input is provisioned the way the reference DOCUMENT above
+    # already is: derived from the SAME tree that produced the binary, installed
+    # BESIDE it, and therefore travelling through the cache that restores
+    # $INSTALL_DIR. That gives it ONE identity with the oracle -- grading the
+    # table against a checkout while the interop runs against a different binary
+    # is the two-identities trap R2109 avoided here first.
+    ZENOH_MANIFEST_SRC="$ZH/zenoh/Cargo.toml"
     echo "build-zenohd: building zenohd (release, +$TOOLCHAIN)${VARIANT_NAME:+ [+$VARIANT_NAME]} ..." >&2
     # shellcheck disable=SC2086  # VARIANT_FEATURE is an intentional word-split flag
     CARGO_TARGET_DIR="$BUILD_DIR" cargo "+$TOOLCHAIN" build -p zenohd --release \
@@ -289,6 +305,10 @@ else
     # Nor DEFAULT_CONFIG.json5 (R2109): it lives at the repo root, not inside
     # any published crate, so the crates.io path has no copy to install.
     DEFAULT_CONFIG_SRC=""
+    # Nor the manifest the capability census reads (R2164): the published crate
+    # carries a Cargo.toml, but not the workspace that gives `cargo metadata` the
+    # feature table this grades against.
+    ZENOH_MANIFEST_SRC=""
 fi
 
 mkdir -p "$INSTALL_DIR"
@@ -334,6 +354,33 @@ if [[ -n "$DEFAULT_CONFIG_SRC" && -f "$DEFAULT_CONFIG_SRC" ]]; then
 else
     echo "build-zenohd: DEFAULT_CONFIG.json5 NOT provisioned (source B / crates.io);" >&2
     echo "  the wz leg that grades an unstated \`mode\` against upstream cannot run." >&2
+fi
+if [[ -n "$ZENOH_MANIFEST_SRC" && -f "$ZENOH_MANIFEST_SRC" ]]; then
+    # cargo's OWN answer, stored unedited. The census asks cargo rather than
+    # parsing `zenoh/Cargo.toml` because the manifest does not mention the
+    # implicit feature cargo synthesises for an optional dependency, so a
+    # hand-shaped subset here would reintroduce exactly the denominator error
+    # that choice exists to avoid. `--no-deps` keeps it to the workspace's own
+    # packages; measured 196 KB beside a 15 MB binary, against 29 MB for the
+    # source tree it is derived from.
+    if cargo "+$TOOLCHAIN" metadata --format-version=1 --no-deps \
+        --manifest-path "$ZENOH_MANIFEST_SRC" \
+        > "$INSTALL_DIR/zenoh-cargo-metadata.json"; then
+        chmod 0644 "$INSTALL_DIR/zenoh-cargo-metadata.json"
+        echo "build-zenohd: installed -> $INSTALL_DIR/zenoh-cargo-metadata.json" >&2
+    else
+        # A partial file would be read as a denominator. Refuse loudly instead:
+        # this script's whole job is provisioning, and half-provisioning is the
+        # state every gate downstream is worst at noticing.
+        rm -f "$INSTALL_DIR/zenoh-cargo-metadata.json"
+        echo "build-zenohd: \`cargo metadata\` on $ZENOH_MANIFEST_SRC FAILED;" >&2
+        echo "  refusing to install a partial capability denominator." >&2
+        exit 1
+    fi
+else
+    echo "build-zenohd: zenoh-cargo-metadata.json NOT provisioned (source B /" >&2
+    echo "  crates.io); Layer Z's capability-feature census has no denominator" >&2
+    echo "  and will FAIL rather than grade a table it could not read." >&2
 fi
 if [[ -n "$CORE_EXAMPLES_SRC" ]]; then
     for ex in z_queryable z_get; do

@@ -12215,7 +12215,31 @@ layer_z_zenohd_interop() {
     # is. It exits 2 with every path it tried when no source tree is reachable,
     # which is a FAIL and not a skip: a census whose denominator is missing must
     # not report a numerator.
-    if ! python3 scripts/lib/upstream_feature_census.py --upstream; then
+    # R2164 — the two non-zero exits are DIFFERENT EVENTS and this branch used to
+    # cover both with one sentence. rc=2 is "the denominator could not be read";
+    # rc=1 is "it was read and the table disagrees with it". Reporting the first
+    # as the second is not a wording problem: it is a verdict about the SUBJECT
+    # issued by a check that never reached the subject, and it sent a reader
+    # looking for "which feature and which direction" among lines that cannot
+    # exist. Both still FAIL -- a gate that cannot read its input must not report
+    # green -- but they must not say the same thing.
+    #
+    # `$zenohd` is passed rather than left to the environment so the denominator
+    # CANNOT disagree with the binary this layer tests: the census resolves the
+    # installed answer beside it. Read off the ambient env it would merely happen
+    # to agree whenever the caller had exported the same override, which is a
+    # coincidence where the comment in `upstream_anchors` claims a guarantee.
+    WZ_ZENOHD_BIN="$zenohd" python3 scripts/lib/upstream_feature_census.py --upstream
+    local census_rc=$?
+    if [[ $census_rc -eq 2 ]]; then
+        echo "  Z FAIL: the capability-feature census could not READ its input," \
+             "so NOTHING was graded — this is not a claim about the table. The" \
+             "denominator is \`zenoh-cargo-metadata.json\`, installed beside" \
+             "zenohd by scripts/build-zenohd.sh; the lines above list every path" \
+             "tried. Re-provision it (a cache entry predating R2164 has the" \
+             "binary but not the answer)."
+        return 1
+    elif [[ $census_rc -ne 0 ]]; then
         echo "  Z FAIL: the upstream capability-feature table no longer matches" \
              "what the pinned zenoh declares — see the lines above for which" \
              "feature and which direction"
