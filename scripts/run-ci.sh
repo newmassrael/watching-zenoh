@@ -2273,7 +2273,7 @@ PY
     #
     # Static because both sides are on disk — the lists are `&[&str]` and the
     # evidence is wz's own source naming the key — and because the RUST half of
-    # the rule lives behind `#[cfg(feature = "zenoh-config-emit")]`, which is
+    # the rule lives behind `#[cfg(feature = "zenoh-config")]`, which is
     # non-default: `cargo test -p wz-runtime-tokio` does not compile it, so the
     # crate's own suite cannot stand in for this. The selftest runs FIRST; its
     # twelve arms are the only place the failure branches are exercised.

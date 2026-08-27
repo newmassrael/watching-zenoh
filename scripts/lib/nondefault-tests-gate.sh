@@ -19,7 +19,7 @@
 # (`#[test]`s in `wz-runtime-tokio`'s `zenoh_config`). Only the python half had a
 # local gate.
 #
-#   * `zenoh_config` is `#[cfg(feature = "zenoh-config-emit")]`, and that feature
+#   * `zenoh_config` is `#[cfg(feature = "zenoh-config")]`, and that feature
 #     is NOT in the crate's `default` set;
 #   * pre-push gate 3 is `cargo test -p <pkg>` at default features, so it does
 #     not compile the module at all;
@@ -150,7 +150,7 @@ LEGS=(
     #
     # `zenoh_config::` is the module the two instruments live in; the filter is
     # the module path so a test ADDED there is covered without touching this row.
-    "wz-runtime-tokio|hook|zenoh-config-emit|zenoh_config::"
+    "wz-runtime-tokio|hook|zenoh-config|zenoh_config::"
     # The demo's half of the same surface. Its
     # `a_key_that_is_read_while_reaching_nothing_is_not_reported_as_applied` is a
     # ZERO-POPULATION guard over the keys this build drops, which is exactly why
@@ -458,7 +458,7 @@ LEGS=(
         transport-qos,\
         transport-shm,\
         transport-stats,\
-        zenoh-config-emit\
+        zenoh-config\
         |"
 )
 

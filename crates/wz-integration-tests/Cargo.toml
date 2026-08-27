@@ -360,7 +360,7 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
     # is what puts the emitter in reach at all. Pure data (a String out of typed
     # fields), so it composes nothing and cannot change any other test's
     # behaviour under `--workspace` unification.
-    "zenoh-config-emit",
+    "zenoh-config",
     "storage-mgr-multi-storage-host",
     # R311y475 (pico cross-impl leg) — the storage HISTORY serve interop e2e
     # (tests/wz_storage_history_serves_pico_zget.rs) seeds THREE timestamped

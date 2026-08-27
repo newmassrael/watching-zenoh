@@ -22,7 +22,7 @@
 //!   `-c` flag reads, with the key paths taken from the reference's
 //!   `DEFAULT_CONFIG.json5` rather than from memory.
 //! R311y844 — the three names below are CODE SPANS, not intra-doc links. This
-//! module is `#[cfg(feature = "zenoh-config-emit")]`, and a module doc's link
+//! module is `#[cfg(feature = "zenoh-config")]`, and a module doc's link
 //! to an item of its own module does not resolve in a gated module (the same
 //! link in an ITEM doc does). Layer C1bz runs on default features, so it
 //! cannot see this file at all: the count is a hand measurement, and it was
@@ -49,7 +49,7 @@
 //! links, for the reason `json5`'s module doc records: a link from a
 //! cfg-gated module's own `//!` doc to its own item does not resolve, while
 //! the same link inside an ITEM's doc below does. Measured here under
-//! `--features zenoh-config-emit`, which is a feature set Layer C1bz never
+//! `--features zenoh-config`, which is a feature set Layer C1bz never
 //! selects, so nothing would have caught them.)
 //!
 //! ## Why the READ direction is the one that makes wz a replacement
@@ -107,7 +107,7 @@ pub use wz_codecs::whatami::{WhatAmI, WhatAmIMatcher};
 // (`mode` is matched against `WhatAmI::to_str` "so the two directions cannot
 // disagree about a spelling"), and the reader's whole job is to produce the
 // typed value a consumer installs. `wz-routing-graph` is a leaf crate over
-// `wz-codecs`, so the `zenoh-config-emit` feature pulling it adds no cycle; no
+// `wz-codecs`, so the `zenoh-config` feature pulling it adds no cycle; no
 // footprint preset carries that feature.
 pub use wz_routing_graph::{AutoConnectStrategies, AutoConnectStrategy};
 use wz_session_core::json::escape_into;
@@ -4097,9 +4097,13 @@ mod tests {
     // is prose in a const until something reads BOTH of its columns, and the
     // right reader for the second column is cargo's own manifest: a feature
     // that gets renamed (which has happened in this crate — the `zenoh-config`
-    // / `zenoh-config-emit` drift is still an open item) would otherwise leave
-    // a defect message telling an operator to enable a feature that no longer
-    // exists.
+    // / `zenoh-config-emit` divergence this comment used to log as open was
+    // settled by R2161, open-debt item 198, onto the first spelling) would
+    // otherwise leave a defect message telling an operator to enable a feature
+    // that no longer exists. That rename is precisely the event this test
+    // exists for, and it is the reason the manifest is read rather than
+    // mirrored: this round moved a feature name and the assertion below is
+    // what proves no scheme row was left pointing at the old one.
     #[test]
     fn every_scheme_names_a_cargo_feature_that_this_crate_actually_declares() {
         // The manifest is read from the SHIPPED file, not from a fixture, so

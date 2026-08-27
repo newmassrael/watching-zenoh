@@ -1141,14 +1141,25 @@ access-quota = [
 # list-key-id merge (the full engine) and the admin PUT wire (adminspace-write)
 # are deferred §5.23 layers.
 config-mutate-runtime = ["routing-peer"]
-# R311y579 (G8) — `zenoh-config-emit`: render the stringly JSON5 config a
-# STOCK zenoh node reads, and validate a topology before starting one. Pure
-# data (a `String` out of typed fields, via the `wz_session_core::json`
-# escaper SSOT), so it composes nothing and gates nothing else: a deploy that
-# never stands up a zenoh alongside itself simply does not select it. The
+# R311y579 (G8) — `zenoh-config`: the stock-zenoh JSON5 config document as an
+# object wz can WRITE, READ and CHECK. Render the config a `zenohd -c` reads,
+# ingest the one an operator already has, and validate a node or a topology
+# before anything is started. Pure data (a `String` out of typed fields, via
+# the `wz_session_core::json` escaper SSOT), so it composes nothing and gates
+# nothing else: a deploy that neither stands a zenoh up alongside itself nor
+# is handed one's config simply does not select it. The
 # `transport-multilink` / `transport-qos` fields are carried from `WzConfig`
 # only on a build that HAS them, so this feature does not silently widen the
 # transport surface to obtain a number to emit.
+#
+# R2161 (open-debt item 198) — the name was `zenoh-config-emit` until this
+# round, and named ONE of the module's four verbs (emit / validate /
+# validate_topology / ingest). R311y842 added the read half and left the name,
+# recording in the wz facade that "the feature is a surface rather than a
+# direction" — which is the argument for this spelling, not for that one. A
+# name carrying two verbs would re-arm the same trap the moment a fifth lands,
+# so the SUBJECT is what it carries: the spelling the module (`zenoh_config`),
+# the type (`ZenohNodeConfig`) and the demo's own key already used.
 #
 # R2141 (open-debt item 223) — `dep:wz-routing-graph`. The reader honours
 # `scouting/multicast/autoconnect{,_strategy}` now, and those keys resolve into
@@ -1156,8 +1167,8 @@ config-mutate-runtime = ["routing-peer"]
 # The alternative was a second copy of a two-spelling vocabulary inside the
 # reader, which is the drift this module removes elsewhere. The crate is a leaf
 # over wz-codecs (plus petgraph), so this adds no cycle, and no footprint preset
-# carries `zenoh-config-emit` — measured, not assumed.
-zenoh-config-emit = ["dep:wz-routing-graph"]
+# carries `zenoh-config` — measured, not assumed.
+zenoh-config = ["dep:wz-routing-graph"]
 # R311y579 (G9) — `transport-link-raweth`: the raweth (L2) link. Forwards to
 # wz-session-core's framing half and pulls `dep:libc` for the AF_PACKET socket
 # (`socket`/`ioctl(SIOCGIFINDEX)`/`bind`/`recvfrom`), the same reason

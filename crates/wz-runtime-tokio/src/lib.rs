@@ -612,7 +612,7 @@ pub mod startup_phase;
 /// JSON5 config a STOCK zenoh node reads, and validate a topology before
 /// starting one. `WzConfig` is how wz is configured; this is how wz configures
 /// the zenoh next to it.
-#[cfg(feature = "zenoh-config-emit")]
+#[cfg(feature = "zenoh-config")]
 pub mod zenoh_config;
 
 /// R311y579 (G9) — the raweth (L2) link's TRANSPORT: an `AF_PACKET` socket and
@@ -1203,7 +1203,7 @@ pub mod session_open;
 ///
 /// R2070 (open-debt item 487) — a caller that judges a config does not
 /// necessarily carry the session-open module (`zenoh_config` is gated on
-/// `zenoh-config-emit`, which composes no transport), and the honest answer
+/// `zenoh-config`, which composes no transport), and the honest answer
 /// for a build without it is EMPTY: with no `dial_locator` and no
 /// `bind_locator` there is no scheme it can open, not even tcp. The two arms
 /// repeat the module's own gate on purpose — that is what makes the repeat

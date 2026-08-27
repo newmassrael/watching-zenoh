@@ -413,7 +413,7 @@ fi
 # Here for gate 2d's reasons, and for gate 2f's specifically: both sides are on
 # disk and it reads them in seconds, and the thing it catches cannot be caught
 # by the changed-crates tests. `zenoh_config` is
-# `#[cfg(feature = "zenoh-config-emit")]`, which is NOT default, so gate 3's
+# `#[cfg(feature = "zenoh-config")]`, which is NOT default, so gate 3's
 # run does not compile the Rust half of the rule either — a key moved between
 # the two lists reaches origin with no local signal at all otherwise.
 if ! python3 scripts/lib/unhonoured_kind_evidence_gate.py > /dev/null; then
@@ -434,7 +434,7 @@ fi
 # built. Their RUST half — the `#[test]`s that own the list shape — had no local
 # gate at all, and that asymmetry is what item 542 measured:
 #
-#   * `zenoh_config` is `#[cfg(feature = "zenoh-config-emit")]`, which is NOT in
+#   * `zenoh_config` is `#[cfg(feature = "zenoh-config")]`, which is NOT in
 #     `wz-runtime-tokio`'s `default` set, so gate 3 does not compile it;
 #   * gate 7 (`nondefault-features-gate.sh`) is `cargo check --all-features`, so
 #     it compiles those tests and never RUNS them — compiling is not running,

@@ -291,8 +291,12 @@ preset-ap-full = [
 ]
 # R311y842 — read the JSON5 config a stock zenoh node is started with, and turn
 # it into the argv this binary would otherwise have to be given by hand. The
-# demo key gates the CLI surface; `wz/zenoh-config-emit` is the library half.
-zenoh-config = ["wz/zenoh-config-emit"]
+# demo key gates the CLI surface and `wz/zenoh-config` is the library half —
+# ONE spelling across the two since R2161 (open-debt item 198). The divergence
+# was the drift `zenoh_config.rs`'s scheme-catalogue test named as an open item
+# while it lasted; a forwarding key that renames its own subject is a second
+# vocabulary for one surface, which is what this module exists to remove.
+zenoh-config = ["wz/zenoh-config"]
 # gc-3 carry #2 — the live application machine + observer switchboard fan-out.
 # Pulls the wz-ap-demo-app crate (the app statechart + generated injector) and
 # the wz facade's switchboard feature (ApplicationLayerObserver.switchboard +

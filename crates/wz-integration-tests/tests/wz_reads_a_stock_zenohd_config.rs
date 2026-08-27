@@ -269,7 +269,7 @@ fn render_resolved(value: &Json5Value) -> String {
 }
 
 // wz-proves: none -- for the reason its emit-direction sibling
-// (zenoh_config_emit_zenohd_interop) records: `zenoh-config-emit` is not an
+// (zenoh_config_emit_zenohd_interop) records: `zenoh-config` is not an
 // inventory atom, so A4-1 would reject the name, and registering one is a round
 // with its own F=/P=/C= reason rather than a side effect of this file. zenohd
 // genuinely adjudicates wz here -- it resolves the same bytes and wz is compared

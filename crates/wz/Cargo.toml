@@ -732,9 +732,12 @@ time-hlc = ["wz-runtime-tokio?/time-hlc"]
 # `zenohd -c` reads, and READ the one an operator already has. Deliberately not
 # an inventory atom: it toggles no wire behaviour and no protocol capability,
 # it decides whether wz can be handed a deployment's own configuration. The
-# name predates the read half (R311y579 emitted only) and is kept because the
-# feature is a surface rather than a direction; the module doc says so.
-zenoh-config-emit = ["wz-runtime-tokio?/zenoh-config-emit"]
+# feature is a SURFACE rather than a direction, so it is spelled after the
+# document it carries. R2161 (open-debt item 198) finished that: this clause
+# used to state the surface reading and then keep `zenoh-config-emit`, a name
+# for one of the module's four verbs, on the grounds that the module doc said
+# so. A doc saying the name is wrong is not a substitute for the right name.
+zenoh-config = ["wz-runtime-tokio?/zenoh-config"]
 time-ntp64 = []
 time-system-clock = []
 time-timestamp-source = []

@@ -107,12 +107,12 @@ fn spawn_on_config(label: &'static str, config_path: &std::path::Path) -> (Child
 // wz-proves: none -- and the reason is a REGISTRATION gap, not an absence of
 // proof. zenohd genuinely adjudicates wz here: it parses a config wz emitted and
 // echoes back the values it resolved, which is exactly the foreign-witness shape
-// this corpus tracks. What it cannot claim is an ATOM, because `zenoh-config-emit`
+// this corpus tracks. What it cannot claim is an ATOM, because `zenoh-config`
 // is not in the inventory (A4-1 would reject the name), and REGISTERING it is not
 // a side-effect this test may take: an atom joins `built(N)` and moves the A3/A4
 // denominators that other gates pin, so it belongs to its own round with its own
 // F=/P=/C= reason. Recorded rather than papered over: the day that entry lands,
-// this line becomes `zenoh-config-emit wz->zenohd`.
+// this line becomes `zenoh-config wz->zenohd`.
 #[test]
 #[ignore = "binary-dep e2e: needs target/zenohd/zenohd (scripts/build-zenohd.sh)"]
 fn zenohd_reports_back_every_value_the_emitted_config_carried() {
