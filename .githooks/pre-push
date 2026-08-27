@@ -428,6 +428,43 @@ if ! python3 scripts/lib/unhonoured_kind_evidence_gate.py > /dev/null; then
     exit 1
 fi
 
+# ─── gate 2h — the RUST half of the static gates, RUN (R2153, item 542) ──
+#
+# Gate 2g above runs the PYTHON half of the two instruments R2150 and R2151
+# built. Their RUST half — the `#[test]`s that own the list shape — had no local
+# gate at all, and that asymmetry is what item 542 measured:
+#
+#   * `zenoh_config` is `#[cfg(feature = "zenoh-config-emit")]`, which is NOT in
+#     `wz-runtime-tokio`'s `default` set, so gate 3 does not compile it;
+#   * gate 7 (`nondefault-features-gate.sh`) is `cargo check --all-features`, so
+#     it compiles those tests and never RUNS them — compiling is not running,
+#     and that distinction is the entire item;
+#   * the only place they ran was hosted Layer C1bn.
+#
+# MEASURED: seven `#[test]` fns in that module assert on the same constants gate
+# 2g parses, and all FOUR of the Rust-half red-first probes R2150 and R2151 ran
+# died at exit 101 while passing this hook. The owner was given the two options
+# the item named — close it, or leave the asymmetry to hosted CI — and decided on
+# 2026-08-27 to close it, accepting the measured cost.
+#
+# UNCONDITIONAL rather than scoped to the changed crates, on the same decision:
+# the point is that this half always runs before a push, and a leg that runs only
+# when someone happened to touch the right crate is the shape the item is about.
+#
+# The command is NOT written here. `scripts/lib/nondefault-tests-gate.sh` owns
+# the leg table and the guard, and Layer C1bn calls the same script, so the lane
+# and the hook cannot drift apart about what the leg is or what counts as a pass.
+if ! bash scripts/lib/nondefault-tests-gate.sh; then
+    echo "" >&2
+    echo "pre-push: non-default-feature TESTS FAILED — a check that only a" >&2
+    echo "          feature build can run is red, or a leg's filter matched no" >&2
+    echo "          test. Gate 7 compiles these; this one runs them." >&2
+    echo "          Run \`bash scripts/lib/nondefault-tests-gate.sh\` for the" >&2
+    echo "          per-leg breakdown (\`--list\` names the legs)." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+
 # ─── housekeeping (NOT a gate) — toolchain-scoped target GC ─────────
 #
 # R311y445. Deliberately NOT a gate: it never fails the push, and an absent

@@ -9223,10 +9223,13 @@ layer_c1bn_passive_dissection_features() {
     grep -qE '^test result: ok\. [1-9][0-9]* passed' <<<"$out" || {
         echo "  C1bn FAIL: the raweth_socket filter matched no test"; echo "$out"; return 1; }
 
-    out="$(cd crates && cargo test -p wz-runtime-tokio --features zenoh-config-emit zenoh_config:: --quiet 2>&1)" \
-        || { echo "$out"; return 1; }
-    grep -qE '^test result: ok\. [1-9][0-9]* passed' <<<"$out" || {
-        echo "  C1bn FAIL: the zenoh_config filter matched no test"; echo "$out"; return 1; }
+    # R2153 (unregistered open-debt item 542) — this leg MOVED into
+    # `scripts/lib/nondefault-tests-gate.sh`, which pre-push gate 2h also calls.
+    # It used to be spelled here and nowhere else, and that is precisely why the
+    # hook could not run it: the command lived in a hosted lane. One spelling,
+    # two callers, and the same "a filter matching no test is a FAIL" guard now
+    # applies in both places instead of only this one.
+    bash scripts/lib/nondefault-tests-gate.sh || return 1
 
     # The keylog feature's OWN arms. Each pairs it with the link it installs the
     # sink on; a lane that never selects a feature is a lane that never lints it.

@@ -215,8 +215,10 @@ git config core.hooksPath .githooks
   ⚠ The word "only" above is a policy statement, not an inventory:
   this hook also carries gates 0 / 0b / 0c (confidential vocabulary,
   home-directory paths, published identities), 2b (the cross-impl
-  proof audit, scoped to pushes that move a claim) and 2c (the
-  PREVIOUS push's hosted verdict). Read `.githooks/pre-push` for the
+  proof audit, scoped to pushes that move a claim), 2c (the
+  PREVIOUS push's hosted verdict) and the static 2d–2h family, of
+  which 2h is the one that RUNS tests rather than reading files.
+  Read `.githooks/pre-push` for the
   list; this paragraph is about the POLICY — fast, not a mirror.
   The FULL validation surface — the feature-subset
   matrix, C2 clippy, Layers B/B2 codegen, F/G/Q/Z footprint /
@@ -226,9 +228,26 @@ git config core.hooksPath .githooks
   policy (~50s host floor, minutes with ARM / qemu / zenohd
   present). The trade is explicit: local no longer catches
   everything before push; a red hosted run is the accepted cost of
-  fast pushes. NOT covered locally (all on hosted CI): feature-gated
-  lanes, changes outside `crates/` (sources/, out/, runtime/,
-  deploy/, ci.yml), clippy / fmt / footprint. For the old full sweep
+  fast pushes — with ONE named exception since R2153, on the owner's
+  decision of 2026-08-27. Gate 2h
+  (`scripts/lib/nondefault-tests-gate.sh`) RUNS the tests only a
+  non-default feature build can reach, for the legs its own table
+  names: today exactly one, `wz-runtime-tokio --features
+  zenoh-config-emit zenoh_config::`. Gate 7 already COMPILED those
+  (`cargo check --all-features`) and compiling is not running, which
+  is what let four measured red-first probes pass this hook while
+  dying at exit 101. Layer C1bn calls that same script, so the lane
+  and the hook cannot disagree about what the leg is. Measured cost
+  of adding it: 77s -> 79s on this tree, warm.
+  STILL NOT covered locally (all on hosted CI): every feature-gated
+  lane that table does NOT name — a candidate sweep finds 15 crates
+  carrying a `#[test]` beside a feature `cfg`, and that is a count
+  of CANDIDATES, not a measured set of unrun legs (open-debt item
+  543) — plus changes outside `crates/` (sources/, out/, deploy/,
+  ci.yml), clippy / fmt / footprint. (`runtime/` used to be listed
+  here and was struck by R2153: there is no such directory and no
+  tracked file under it, the same finding R311y794 made about the
+  SPDX list.) For the old full sweep
   on demand, run `bash scripts/run-ci.sh` by hand. Bypass the hook
   entirely with `git push --no-verify` for genuine hotfixes.
 
