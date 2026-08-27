@@ -143,6 +143,42 @@ def parse_ledger(src: str) -> list[tuple[str, str, str]]:
     )
 
 
+def parse_groups(src: str) -> list[tuple[str, str, list[str]]]:
+    """Read `UNHONOURED_BEYOND_GROUPS` as `(need, anchor, keys)`.
+
+    R2151 (open-debt item 540). The keys are a nested `&[&str]`, so the row
+    reader takes the two leading string literals and then every literal inside
+    the following `&[ ... ]` — a flat triple regex would have stopped at the
+    third string and reported one key per group, which is under-reporting, the
+    one defect a gate must not have.
+    """
+    body = _const_body(
+        src, "UNHONOURED_BEYOND_GROUPS", r"&\[\(&str, &str, &\[&str\]\)\]"
+    )
+    rows: list[tuple[str, str, list[str]]] = []
+    for m in re.finditer(
+        r'\(\s*"([^"]*)"\s*,\s*"([^"]*)"\s*,\s*&\[(.*?)\]\s*,?\s*\)', body, re.S
+    ):
+        rows.append((m.group(1), m.group(2), re.findall(r'"([^"]+)"', m.group(3))))
+    return rows
+
+
+def beyond_doc(src: str) -> str:
+    """The `///` block immediately above `pub const UNHONOURED_BEYOND_WZ`.
+
+    This is what ties the group table's anchors to the sentences a human reads.
+    An anchor that appears in the data and not in the prose is a claim nobody
+    reviewing the list would ever see.
+    """
+    m = re.search(r"((?:^///.*\n)+)pub const UNHONOURED_BEYOND_WZ:", src, re.M)
+    if not m:
+        raise SystemExit(
+            "unhonoured-kind-evidence: FAIL -- no doc comment found above "
+            "UNHONOURED_BEYOND_WZ; the anchor/prose tie cannot be checked"
+        )
+    return m.group(1)
+
+
 def enumerating_consts(src: str) -> list[str]:
     """Every `UNHONOURED_*` constant the reader defines.
 
@@ -379,11 +415,53 @@ def audit(src: str, files: dict[str, str]) -> tuple[list[str], list[str]]:
             )
         report.append(f"  {kind}: {len(members)} key(s) {members}")
 
+    # ─── the mirror: every BEYOND key names the subsystem it would need ───
+    #
+    # R2151 (open-debt item 540). The citation half above speaks only for the
+    # keys wz NAMES. This half speaks for every key in UNHONOURED_BEYOND_WZ, and
+    # its check runs the other way: the anchor a group declares must be ABSENT
+    # from wz's code, so the day wz grows that thing the group reds.
+    groups = parse_groups(src)
+    if not groups:
+        failures.append(
+            "UNHONOURED_BEYOND_GROUPS parsed EMPTY — every 'wz cannot act on "
+            "this' would then rest on nothing and this half would pass silently"
+        )
+    else:
+        doc = beyond_doc(src)
+        for need, anchor, keys in groups:
+            if not keys:
+                failures.append(f"group `{anchor}` ({need}) holds no key")
+            holders = sorted(p for p, c in code.items() if anchor in c)
+            if holders:
+                shown = ", ".join(holders[:3])
+                failures.append(
+                    f"group `{anchor}` claims wz has no {need}, and wz's CODE "
+                    f"has `{anchor}` at {len(holders)} file(s): {shown}. Either "
+                    f"wz grew the thing — in which case these {len(keys)} key(s) "
+                    f"are reader gaps, not keys wz cannot act on — or the anchor "
+                    f"names the wrong thing"
+                )
+            if anchor not in doc:
+                failures.append(
+                    f"group `{anchor}` ({need}) is not named in "
+                    f"UNHONOURED_BEYOND_WZ's own doc — the sentence a human "
+                    f"reads and the claim the gate checks would then be free to "
+                    f"disagree"
+                )
+        report.append(
+            f"  beyond-wz groups: {len(groups)} group(s) accounting for "
+            f"{sum(len(k) for _, _, k in groups)} key(s), each anchored on a name "
+            f"absent from wz's code"
+        )
+        for need, anchor, keys in groups:
+            report.append(f"    {anchor}: {len(keys)} key(s) — {need}")
+
     uncited = sorted(k for k in whole if k not in cited)
     report.append(
-        f"  {len(uncited)} unhonoured key(s) wz's source never names — this gate "
-        f"says NOTHING about those; a capability under a spelling of wz's own "
-        f"leaves no citation (open-debt item 540)"
+        f"  {len(uncited)} unhonoured key(s) wz's source never names — the "
+        f"CITATION half says nothing about those, which is why the group table "
+        f"above covers the beyond-wz side by construction instead (item 540)"
     )
     report.insert(
         0,
@@ -413,12 +491,25 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     "hh/ii",
 ];
 
+/// The keys wz cannot act on, grouped below.
+///
+/// * `cc/dd`, `ee` — a thing wz has no counterpart for (`MissingThingOne`).
+/// * `ff/gg`, `hh/ii` — another one (`MissingThingTwo`).
 pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     // "aa/bb" is quoted HERE, in a comment, to keep the reader honest.
     "cc/dd",
     "ee",
     "ff/gg",
     "hh/ii",
+];
+
+pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
+    ("a thing wz has no counterpart for", "MissingThingOne", &["cc/dd", "ee"]),
+    (
+        "another one",
+        "MissingThingTwo",
+        &["ff/gg", "hh/ii"],
+    ),
 ];
 
 pub const UNHONOURED_READER_GAP: &[&str] = &[
@@ -556,6 +647,38 @@ def _selftest() -> int:
         flags=re.S,
     )
     arms.append(("empty ledger", src, dict(_FIXTURE_FILES), "EMPTY"))
+
+    # ─── the mirror half (R2151, item 540) ───
+    #
+    # Each arm mutates the group table off the same baseline. The FIRST is the
+    # one the round was filed for: wz grows the thing a group says it lacks, and
+    # nothing noticed until this check existed.
+    f = dict(_FIXTURE_FILES)
+    f["src/grew_it.rs"] = "pub struct MissingThingOne;\n"
+    arms.append(("wz grew the thing a group says it lacks", _FIXTURE_SRC, f, "MissingThingOne"))
+
+    # The anchor survives only in a COMMENT — that is not a mechanism, and the
+    # group's claim still holds. The mirror of the `wz-has-it` prose arm above.
+    f = dict(_FIXTURE_FILES)
+    f["src/mentions.rs"] = "/// One day we may want a `MissingThingOne`.\npub fn z() {}\n"
+    arms.append(("anchor only in prose stays absent", _FIXTURE_SRC, f, None))
+
+    # Data and prose free to disagree: the doc stops naming one anchor.
+    src = _FIXTURE_SRC.replace("/// * `ff/gg`, `hh/ii` — another one (`MissingThingTwo`).\n", "")
+    arms.append(("anchor missing from the beyond doc", src, dict(_FIXTURE_FILES), "MissingThingTwo"))
+
+    # An empty table accounts for nothing while passing every per-row loop.
+    src = re.sub(
+        r"pub const UNHONOURED_BEYOND_GROUPS: &\[\(&str, &str, &\[&str\]\)\] = &\[.*?\n\];",
+        "pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[\n];",
+        _FIXTURE_SRC,
+        flags=re.S,
+    )
+    arms.append(("empty group table", src, dict(_FIXTURE_FILES), "EMPTY"))
+
+    # A group with no keys is an absence claim about nothing.
+    src = _FIXTURE_SRC.replace('&["ff/gg", "hh/ii"],', "&[],")
+    arms.append(("group with no keys", src, dict(_FIXTURE_FILES), "holds no key"))
 
     print(f"unhonoured-kind-evidence selftest: {len(arms)} arm(s)")
     passed = sum(1 for a in arms if run(*a))

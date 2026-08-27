@@ -350,6 +350,15 @@ impl DynamicPlugin {
 /// a `HashMap` would make the `plugins/**` reply set a different sequence per
 /// process, which is the kind of thing a foreign client's transcript assertion
 /// discovers the hard way.
+///
+/// WHICH KEYS THIS ANSWERS. Upstream configures the same host under `plugins`
+/// (the per-plugin config map) and `plugins_loading/enabled`. wz's config reader
+/// honours neither, so both are carried in `UNHONOURED_READER_GAP` — the host is
+/// HERE, driven today by the demo's repeated `--plugin <path>`, and what is
+/// missing is the reader. `plugins_loading/search_dirs` is NOT: wz loads by
+/// explicit path and has no discovery, so it stays among the keys wz cannot act
+/// on. R2151 (open-debt item 540) drew that line; before it, all three sat under
+/// "a plugin host [wz does not have]".
 #[derive(Default)]
 pub struct PluginRegistry {
     plugins: BTreeMap<String, DynamicPlugin>,

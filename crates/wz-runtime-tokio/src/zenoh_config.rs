@@ -1627,55 +1627,77 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
 /// second is a file an operator already has that silently does nothing. R311y844
 /// moved ten keys of the second kind and left the rest unswept.
 ///
-/// Every key here needs a SUBSYSTEM wz does not have, grouped by the one it
-/// needs:
+/// Every key here needs a SUBSYSTEM wz does not have. WHICH subsystem is no
+/// longer prose: [`UNHONOURED_BEYOND_GROUPS`] carries the same grouping as data,
+/// with a wz-code ANCHOR per group that a static gate requires to be ABSENT. The
+/// bullets below are the human half of those rows and name the same anchors —
+/// the gate checks that they do, so the two cannot drift.
 ///
-/// * `access_control/*` — a policy engine (subjects, rules, permissions).
-/// * `aggregation/*`, `qos/*` — an interceptor kind wz's chain does not carry.
-///   R2150 (open-debt item 539) SPLIT this group. It used to read
-///   "`aggregation/*`, `downsampling`, `low_pass_filter`, `qos/*` — an
-///   interceptor chain configured from the same file", and that sentence was
-///   FALSE for two of its four members: wz has the composable
-///   `InterceptorChain`, and two of the three interceptors standing on it ARE
-///   these keys' behaviours, so `downsampling` and `low_pass_filter` moved to
-///   [`UNHONOURED_READER_GAP`]. What is genuinely absent is a DECLARATION
-///   aggregation strategy and a QoS-OVERWRITE interceptor —
-///   `interceptor/` holds `access_control`, `downsampling` and `low_pass`, and
-///   nothing else. A group rationale is a claim about EVERY member, so one
-///   false member is not a rounding error: it is the whole group asking to be
-///   re-read.
-/// * `plugins`, `plugins_loading/*` — a plugin host. `wz-ap-demo/src/args.rs`
-///   names `plugins` as one the demo "genuinely cannot" honour, beside
-///   `transport/link/tx/threads`.
-/// * `transport/auth/*` — an auth stack. wz has the WIRE half (the auth-body
-///   codec has foreign witnesses) and no credential store to configure.
-/// * `transport/link/*`, `transport/{unicast,multicast}/*` — knobs on a queue,
-///   socket or session table wz does not expose: `transport/link/tx/threads` is
-///   the named example, and the `queue/*` family is upstream's priority-queue
-///   sizing, which wz has no configurable counterpart for.
-/// * `connect/exit_on_failure`, `listen/*`, `scouting/delay`,
-///   `open/return_conditions/*`, `timestamping/drop_future_timestamp`,
-///   `routing/*` — behaviours wz's session-open and routing paths do not
-///   implement at all. R2150 narrowed `connect/*` to the one member for which
-///   that is still true: `connect/timeout_ms` IS implemented, by
-///   `StaticConnectRetry::timeout_ms`, which spells the key in its own doc and
-///   carries upstream's three-way `-1` / `0` / positive reading — so it moved
-///   to [`UNHONOURED_READER_GAP`] too. R2148 read the same site and drew the
-///   opposite conclusion because it stopped at the `get_global_connect_timeout`
-///   citation two lines up: an upstream symbol named in prose does not make the
-///   surrounding capability upstream's.
-/// * `metadata` — free-form operator annotation upstream never reads either;
-///   there is nothing for wz to act on.
+/// * `aggregation/*` — a declaration-aggregation strategy (`AggregationConf`).
+/// * `qos/*` — a QoS-OVERWRITE interceptor (`QosOverwriteItemConf`). R2150 split
+///   this from `downsampling` / `low_pass_filter`, which are rules on the
+///   `InterceptorChain` wz HAS; `interceptor/` holds `access_control`,
+///   `downsampling` and `low_pass`, and no overwriter.
+/// * `plugins_loading/search_dirs` — plugin auto-discovery from a search path
+///   (`PluginSearchDirs`). wz loads a plugin by explicit path only.
+/// * `transport/auth/*` — a credential store (`CredentialStore`). wz has the
+///   WIRE half (the auth-body codec has foreign witnesses) and nothing to
+///   configure it from.
+/// * `transport/link/*` — a configurable link-TX surface (`LinkTxConf`):
+///   upstream's priority-queue sizing, batching, congestion-control waits and
+///   socket buffers, none of which wz exposes as configuration.
+/// * `transport/{unicast,multicast}/*`, `transport/shared_memory/mode` — a
+///   configurable session table (`TransportUnicastConf`): accept backlog,
+///   session caps, open/accept timeouts.
+/// * `connect/exit_on_failure`, `listen/*` — dial/listen failure policy
+///   (`ListenConfig`). R2150 narrowed `connect/*` to the one member for which
+///   this is still true: `connect/timeout_ms` IS implemented, by
+///   `StaticConnectRetry::timeout_ms`.
+/// * `open/return_conditions/*` — a session-open readiness barrier
+///   (`ReturnConditionsConf`).
+/// * `routing/*` — configurable link-state weighting and failover brokering
+///   (`RoutingConf`).
+/// * `scouting/delay` — a startup scouting delay (`ScoutingDelay`).
+/// * `timestamping/drop_future_timestamp` — a future-timestamp drop policy
+///   (`TimestampingConf`).
+/// * `metadata` — a config-metadata surface (`ConfigMetadata`). Free-form
+///   operator annotation upstream never reads either; `AdminLocalData` emits a
+///   hardcoded null where it would land.
 /// * `scouting/gossip/enabled` — ⚠ the one judgement call in this list. wz HAS
 ///   the gossip plane (see [`UNHONOURED_READER_GAP`]), but no gate that turns it
-///   OFF, so honouring this key means BUILDING the switch rather than teaching
-///   the reader. If that switch is ever added, this row moves.
+///   OFF (`set_gossip_enabled`), so honouring this key means BUILDING the switch
+///   rather than teaching the reader. If that switch is ever added, this row
+///   moves.
+///
+/// # What R2151 (open-debt item 540) moved OUT of here, and how it was found
+///
+/// Eleven rows. `access_control/*` (5) sat under "a policy engine (subjects,
+/// rules, permissions)" while `wz-access-control` IS one — `AclConfig` carries
+/// `default_permission` and an ordered `Vec<AclRule>`, each rule a subject
+/// selector, flow set, message set and permission. `plugins` and
+/// `plugins_loading/enabled` (2) sat under "a plugin host" while `PluginRegistry`
+/// loads, starts, stops and admin-reports dynamic plugins and the demo takes
+/// `--plugin`. `transport/link/tls/{connect_certificate,connect_private_key,
+/// enable_mtls,verify_name_on_connect}` (4) sat under the link-knob group while
+/// `tls_config.rs` carries `ClientAuthPem` and `ServerNameVerification`.
+///
+/// None of the three was found by a text sweep, and that is the finding item 540
+/// was filed for. Measured this round: matching each key's own leaf identifier
+/// against wz's code yields 30 of 72 candidates and is dominated by homonyms
+/// (`data` alone hits 127 sites) while still MISSING `connect_certificate`,
+/// whose wz spelling is `cert_chain_pem`; matching key segments against wz's
+/// module and crate names yields a different 30 and misses the TLS group
+/// entirely, because `tls` is a segment twelve surface keys share. Upstream's
+/// own config type names do no better: wz mirrors them when it implements
+/// (`AclConfig`, `DownsamplingRule`, `LowPassRule`) but not always
+/// (`PluginsConfig` → `PluginRegistry`, `TLSConf` → `tls_config`), so that
+/// derivation caught one of the three.
+///
+/// So there is no sweep that answers this, and the answer is the group table:
+/// EVERY key here belongs to a group, and every group states the thing wz would
+/// need as a name that must not exist in wz's code. That is a claim per row
+/// rather than per sweep, and it is what a future capability reds against.
 pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
-    "access_control/default_permission",
-    "access_control/enabled",
-    "access_control/policies",
-    "access_control/rules",
-    "access_control/subjects",
     "aggregation/publishers",
     "aggregation/subscribers",
     "connect/exit_on_failure",
@@ -1685,8 +1707,6 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     "metadata",
     "open/return_conditions/connect_scouted",
     "open/return_conditions/declares",
-    "plugins",
-    "plugins_loading/enabled",
     "plugins_loading/search_dirs",
     "qos/network",
     "qos/publication",
@@ -1711,12 +1731,8 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     "transport/link/tcp/so_rcvbuf",
     "transport/link/tcp/so_sndbuf",
     "transport/link/tls/close_link_on_expiration",
-    "transport/link/tls/connect_certificate",
-    "transport/link/tls/connect_private_key",
-    "transport/link/tls/enable_mtls",
     "transport/link/tls/so_rcvbuf",
     "transport/link/tls/so_sndbuf",
-    "transport/link/tls/verify_name_on_connect",
     "transport/link/tx/keep_alive",
     "transport/link/tx/queue/allocation/mode",
     "transport/link/tx/queue/batching/enabled",
@@ -1779,19 +1795,212 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
 /// * `low_pass_filter` — `LowPassRule` on the same chain, driven by
 ///   `--max-payload`. R2150 moved both: the group sentence that held them
 ///   claimed wz needed an interceptor chain, and wz has one.
+/// * `access_control/{default_permission,enabled,policies,rules,subjects}` —
+///   the `wz-access-control` crate. `AclConfig` carries `default_permission`
+///   and an ordered `Vec<AclRule>`; each rule carries a `SubjectSelector`, a
+///   flow set, a message set and a permission, which is upstream's rule model
+///   with the subject inlined instead of named. `enabled` is here rather than
+///   with `scouting/gossip/enabled` because wz's OFF state EXISTS and is the
+///   default — a peer with no policy installed enforces nothing — so the reader
+///   would not be building a switch, only choosing not to install. `policies`
+///   is upstream's rules-by-name × subjects-by-name join, which a reader
+///   expands into wz's inline rules; `subjects` reaches only wz's zid axis,
+///   which is the partiality this list already warns about below, not absence.
+/// * `plugins`, `plugins_loading/enabled` — `PluginRegistry`, which loads,
+///   starts, stops and admin-reports `DynamicPlugin`s, driven today by the
+///   demo's repeated `--plugin`. `plugins_loading/search_dirs` stays in
+///   [`UNHONOURED_BEYOND_WZ`]: wz loads by explicit path and has no discovery.
+/// * `transport/link/tls/{connect_certificate,connect_private_key,enable_mtls,
+///   verify_name_on_connect}` — `tls_config.rs`. `ClientAuthPem` carries the
+///   client `cert_chain_pem` + `private_key_pem` an mTLS dial presents, and
+///   `ServerNameVerification` is the `verify_name_on_connect` axis, named after
+///   `Z_CONFIG_TLS_VERIFY_NAME_ON_CONNECT` in its own doc. The C ABI already
+///   exposes both.
 ///
 /// ⚠ Being here is NOT a claim that the move is mechanical. R311y844's ten were
 /// moved one at a time, and `scouting/multicast/autoconnect` needed R2141 to
 /// build a strategy representation first. This list says the capability EXISTS,
 /// not that the reader change is free.
 pub const UNHONOURED_READER_GAP: &[&str] = &[
+    "access_control/default_permission",
+    "access_control/enabled",
+    "access_control/policies",
+    "access_control/rules",
+    "access_control/subjects",
     "connect/timeout_ms",
     "downsampling",
     "low_pass_filter",
+    "plugins",
+    "plugins_loading/enabled",
     "scouting/gossip/autoconnect",
     "scouting/gossip/autoconnect_strategy",
     "scouting/gossip/multihop",
     "scouting/gossip/target",
+    "transport/link/tls/connect_certificate",
+    "transport/link/tls/connect_private_key",
+    "transport/link/tls/enable_mtls",
+    "transport/link/tls/verify_name_on_connect",
+];
+
+/// WHICH subsystem each [`UNHONOURED_BEYOND_WZ`] key would need, as data —
+/// `(what wz would need, the wz-code anchor that must be ABSENT, the keys)`.
+///
+/// R2151 (open-debt item 540) — the mirror of [`UNHONOURED_CITATION_LEDGER`],
+/// and the half that one structurally could not reach. That ledger's population
+/// is the keys wz's source NAMES: nineteen of seventy-nine, with the other sixty
+/// reported as outside what it claims. A key wz grew a capability for under a
+/// spelling of its own leaves no citation, so it stays in
+/// [`UNHONOURED_BEYOND_WZ`] silently — and an operator's file that states it then
+/// looks like it works and does nothing.
+///
+/// # Why a table and not a sweep
+///
+/// Three derivations were measured this round and all three are FLOORS. Leaf
+/// identifiers: 30 of 72 candidates, dominated by homonyms, and it misses
+/// `connect_certificate` because wz calls it `cert_chain_pem`. Key segments
+/// against wz's module and crate names: a different 30, and it misses the whole
+/// TLS group because `tls` is a segment twelve surface keys share. Upstream's own
+/// config type names: catches `access_control` (wz mirrored `AclConfig`) and
+/// neither of the other two (`PluginsConfig` → `PluginRegistry`, `TLSConf` →
+/// `tls_config`). A sweep that finds a third of what is there, differently each
+/// time, is a candidate generator, not a gate.
+///
+/// So the obligation is per ROW instead. Every key in [`UNHONOURED_BEYOND_WZ`]
+/// belongs to exactly one group here — the gate derives that from the list, so a
+/// new key with no group reds rather than defaulting — and every group names the
+/// thing wz would need as an identifier that must NOT appear in wz's code, with
+/// comments stripped first. When wz grows that thing, the anchor appears and the
+/// group reds; that is the whole mechanism.
+///
+/// # What it cannot do, stated rather than hidden
+///
+/// An absence claim is satisfiable by naming something nobody would ever write.
+/// Nothing here stops that, and the gate's two other checks are what raise the
+/// cost: the anchor must also appear in [`UNHONOURED_BEYOND_WZ`]'s own doc, next
+/// to the sentence a human reads, and the groups must account for every key. A
+/// determined author can still sub-group a failure away ("wz lacks the X-with-Y
+/// subsystem"); what they cannot do is leave a key ungrouped or write an anchor
+/// the prose does not carry.
+pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
+    (
+        "a declaration-aggregation strategy",
+        "AggregationConf",
+        &["aggregation/publishers", "aggregation/subscribers"],
+    ),
+    (
+        "a QoS-overwrite interceptor",
+        "QosOverwriteItemConf",
+        &["qos/network", "qos/publication"],
+    ),
+    (
+        "plugin auto-discovery from a search path",
+        "PluginSearchDirs",
+        &["plugins_loading/search_dirs"],
+    ),
+    (
+        "a credential store",
+        "CredentialStore",
+        &[
+            "transport/auth/pubkey/key_size",
+            "transport/auth/pubkey/known_keys_file",
+            "transport/auth/pubkey/private_key_file",
+            "transport/auth/pubkey/private_key_pem",
+            "transport/auth/pubkey/public_key_file",
+            "transport/auth/pubkey/public_key_pem",
+            "transport/auth/usrpwd/dictionary_file",
+            "transport/auth/usrpwd/password",
+            "transport/auth/usrpwd/user",
+        ],
+    ),
+    (
+        "a configurable link-TX surface",
+        "LinkTxConf",
+        &[
+            "transport/link/protocols",
+            "transport/link/rx/buffer_size",
+            "transport/link/rx/max_message_size",
+            "transport/link/tcp/so_rcvbuf",
+            "transport/link/tcp/so_sndbuf",
+            "transport/link/tls/close_link_on_expiration",
+            "transport/link/tls/so_rcvbuf",
+            "transport/link/tls/so_sndbuf",
+            "transport/link/tx/keep_alive",
+            "transport/link/tx/queue/allocation/mode",
+            "transport/link/tx/queue/batching/enabled",
+            "transport/link/tx/queue/batching/time_limit",
+            "transport/link/tx/queue/congestion_control/block/wait_before_close",
+            "transport/link/tx/queue/congestion_control/drop/max_wait_before_drop_fragments",
+            "transport/link/tx/queue/congestion_control/drop/wait_before_drop",
+            "transport/link/tx/queue/size/background",
+            "transport/link/tx/queue/size/control",
+            "transport/link/tx/queue/size/data",
+            "transport/link/tx/queue/size/data_high",
+            "transport/link/tx/queue/size/data_low",
+            "transport/link/tx/queue/size/interactive_high",
+            "transport/link/tx/queue/size/interactive_low",
+            "transport/link/tx/queue/size/real_time",
+            "transport/link/tx/sequence_number_resolution",
+            "transport/link/tx/threads",
+            "transport/link/unixpipe/file_access_mask",
+        ],
+    ),
+    (
+        "a configurable session table",
+        "TransportUnicastConf",
+        &[
+            "transport/multicast/compression/enabled",
+            "transport/multicast/join_interval",
+            "transport/multicast/max_sessions",
+            "transport/shared_memory/mode",
+            "transport/unicast/accept_pending",
+            "transport/unicast/accept_timeout",
+            "transport/unicast/max_sessions",
+            "transport/unicast/open_timeout",
+        ],
+    ),
+    (
+        "a dial/listen failure policy",
+        "ListenConfig",
+        &[
+            "connect/exit_on_failure",
+            "listen/exit_on_failure",
+            "listen/retry",
+            "listen/timeout_ms",
+        ],
+    ),
+    (
+        "a session-open readiness barrier",
+        "ReturnConditionsConf",
+        &[
+            "open/return_conditions/connect_scouted",
+            "open/return_conditions/declares",
+        ],
+    ),
+    (
+        "configurable link-state weighting and failover brokering",
+        "RoutingConf",
+        &[
+            "routing/peer/linkstate/transport_weights",
+            "routing/router/linkstate/transport_weights",
+            "routing/router/peers_failover_brokering",
+        ],
+    ),
+    (
+        "a startup scouting delay",
+        "ScoutingDelay",
+        &["scouting/delay"],
+    ),
+    (
+        "a future-timestamp drop policy",
+        "TimestampingConf",
+        &["timestamping/drop_future_timestamp"],
+    ),
+    ("a config-metadata surface", "ConfigMetadata", &["metadata"]),
+    (
+        "a gate that turns the gossip plane off",
+        "set_gossip_enabled",
+        &["scouting/gossip/enabled"],
+    ),
 ];
 
 /// The legal KINDS a [`UNHONOURED_CITATION_LEDGER`] row may carry, and the one
@@ -1864,12 +2073,29 @@ pub const UNHONOURED_CITATION_KINDS: &[&str] = &[
 /// that a wrong kind now costs a symbol that must exist and a list the row must
 /// sit in, instead of a sentence.
 pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
-    ("access_control/enabled", "asserted-ignored", "ignored"),
+    (
+        "access_control/default_permission",
+        "wz-has-it",
+        "AclConfig",
+    ),
+    ("access_control/enabled", "wz-has-it", "AclPolicy"),
+    ("access_control/policies", "wz-has-it", "AclRule"),
+    ("access_control/rules", "wz-has-it", "AclRule"),
+    ("access_control/subjects", "wz-has-it", "SubjectSelector"),
     ("connect/timeout_ms", "wz-has-it", "StaticConnectRetry"),
     ("downsampling", "wz-has-it", "DownsamplingRule"),
     ("low_pass_filter", "wz-has-it", "LowPassRule"),
     ("metadata", "not-this-key", "AdminLocalData"),
-    ("plugins", "asserted-ignored", "ignored"),
+    ("plugins", "wz-has-it", "PluginRegistry"),
+    ("plugins_loading/enabled", "wz-has-it", "PluginRegistry"),
+    // The citing site is `PluginRegistry`'s doc, drawing the line at this key:
+    // the host is wz's, the DISCOVERY is not. A citation that says "not this
+    // one" is still a citation, and it needs a verdict like any other.
+    (
+        "plugins_loading/search_dirs",
+        "not-this-key",
+        "PluginRegistry",
+    ),
     (
         "scouting/gossip/autoconnect",
         "wz-has-it",
@@ -1915,6 +2141,26 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
         "transport/auth/usrpwd/user",
         "foreign-node-config",
         "zenohd",
+    ),
+    (
+        "transport/link/tls/connect_certificate",
+        "wz-has-it",
+        "ClientAuthPem",
+    ),
+    (
+        "transport/link/tls/connect_private_key",
+        "wz-has-it",
+        "ClientAuthPem",
+    ),
+    (
+        "transport/link/tls/enable_mtls",
+        "wz-has-it",
+        "ClientAuthPem",
+    ),
+    (
+        "transport/link/tls/verify_name_on_connect",
+        "wz-has-it",
+        "ServerNameVerification",
     ),
     ("transport/link/tx/threads", "asserted-ignored", "ignored"),
     (
@@ -4992,6 +5238,88 @@ mod tests {
                  member; an unexercised branch is not coverage"
             );
             println!("citation kind {kind}: {} row(s) {rows:?}", rows.len());
+        }
+    }
+
+    /// Every key wz CANNOT act on says which subsystem it would need.
+    ///
+    /// R2151 (open-debt item 540) — the list-shape half of the mirror, split
+    /// from the tree-evidence half the same way R2150 split the citation
+    /// ledger: this test owns TOTALITY and DISJOINTNESS, and
+    /// `unhonoured_kind_evidence_gate.py` owns "the anchor is absent from wz's
+    /// code" and "the doc names it", which need a sweep. No predicate is
+    /// written in both places.
+    ///
+    /// Totality is the load-bearing half. A key added to
+    /// [`UNHONOURED_BEYOND_WZ`] with no group is a key whose "wz cannot do
+    /// this" rests on nothing, and that is the state every one of the eleven
+    /// rows R2151 moved was in.
+    #[test]
+    fn every_key_wz_cannot_act_on_names_the_subsystem_it_would_need() {
+        assert!(
+            !UNHONOURED_BEYOND_GROUPS.is_empty(),
+            "an empty group table accounts for nothing and passes every check \
+             below by having no rows"
+        );
+
+        let mut grouped: Vec<&str> = UNHONOURED_BEYOND_GROUPS
+            .iter()
+            .flat_map(|(_, _, keys)| keys.iter().copied())
+            .collect();
+        let before = grouped.len();
+        grouped.sort_unstable();
+        grouped.dedup();
+        assert_eq!(
+            before,
+            grouped.len(),
+            "a key is in two groups — two answers to 'which subsystem does this \
+             need', which is the undivided state the table exists to end"
+        );
+
+        let ungrouped: Vec<&&str> = UNHONOURED_BEYOND_WZ
+            .iter()
+            .filter(|k| !grouped.contains(k))
+            .collect();
+        assert!(
+            ungrouped.is_empty(),
+            "beyond-wz key in no group: {ungrouped:?}. Saying wz cannot act on a \
+             key is a claim about a subsystem wz does not have; name it in \
+             UNHONOURED_BEYOND_GROUPS so the static gate can check it is still \
+             absent."
+        );
+
+        let stale: Vec<&&str> = grouped
+            .iter()
+            .filter(|k| !UNHONOURED_BEYOND_WZ.contains(k))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "grouped key that is no longer beyond wz: {stale:?} — if it became \
+             a reader gap or honoured, drop it from its group in the round that \
+             moved it"
+        );
+
+        let mut anchors: Vec<&str> = UNHONOURED_BEYOND_GROUPS
+            .iter()
+            .map(|(_, anchor, _)| *anchor)
+            .collect();
+        let n = anchors.len();
+        anchors.sort_unstable();
+        anchors.dedup();
+        assert_eq!(
+            n,
+            anchors.len(),
+            "two groups share an anchor — then they are one group, and the \
+             split is telling a reader something the data does not"
+        );
+
+        for (need, anchor, keys) in UNHONOURED_BEYOND_GROUPS {
+            assert!(
+                !keys.is_empty(),
+                "group `{need}` ({anchor}) holds no key — an absence claim about \
+                 nothing"
+            );
+            println!("beyond group {anchor}: {} key(s) — {need}", keys.len());
         }
     }
 

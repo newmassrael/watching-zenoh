@@ -259,6 +259,19 @@ pub struct AclConfig {
     pub rules: Vec<AclRule>,
 }
 
+// WHICH KEYS THIS ANSWERS. Upstream configures the same engine under
+// `access_control/default_permission`, `access_control/rules`,
+// `access_control/subjects`, `access_control/policies` and
+// `access_control/enabled`. wz's config reader honours none of them, so all five
+// are carried in `UNHONOURED_READER_GAP` — the engine is HERE, and what is
+// missing is the reader. Two shape notes the reader will have to bridge:
+// upstream names subjects and rules and then JOINS them under `policies`, while
+// an `AclRule` here carries its `SubjectSelector` inline; and `enabled` has no
+// switch to build, because a peer with no policy installed already enforces
+// nothing. R2151 (open-debt item 540) moved the five and added this comment:
+// until then the classification lived only in the reader's own doc, which made
+// it a claim with no witness at the capability.
+
 impl AclConfig {
     /// A default-deny configuration with no rules — every request denied. The
     /// strictest base a deploy adds allow-rules onto.

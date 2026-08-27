@@ -87,6 +87,19 @@ use tokio_rustls::rustls::{
 /// client side turns a one-way-TLS dial into a mutual-TLS dial (the wz analogue
 /// of pico's `CONNECT_CERTIFICATE` + `CONNECT_PRIVATE_KEY`). Borrowed: the
 /// caller owns the PEM bytes; they are parsed into owned DER inside the builder.
+///
+/// WHICH KEYS THIS ANSWERS. zenoh-rust spells the same three under
+/// `transport/link/tls/connect_certificate`,
+/// `transport/link/tls/connect_private_key` and
+/// `transport/link/tls/enable_mtls` — presenting client material IS enabling
+/// mTLS here, so the third is `Some(_)` versus `None` rather than a separate
+/// flag. wz's config reader honours none of them, so all three are carried in
+/// `UNHONOURED_READER_GAP`: the capability is HERE and the reader was never
+/// told. R2151 (open-debt item 540) moved them; before that they sat among the
+/// link knobs wz "does not expose", which was false for exactly this file. The
+/// keys are spelled out because no sweep found them — wz calls the first two
+/// `cert_chain_pem` and `private_key_pem`, so a leaf-identifier sweep looks
+/// straight past them.
 pub struct ClientAuthPem<'a> {
     /// PEM cert chain the client presents (leaf first, optional intermediates).
     pub cert_chain_pem: &'a [u8],
@@ -180,6 +193,11 @@ pub fn root_store_from_pem(ca_pem: &[u8]) -> io::Result<RootCertStore> {
 /// chain to a trusted root; this knob governs only the SAN/hostname match against
 /// the dialed [`ServerName`]. The wz analogue of pico's
 /// `Z_CONFIG_TLS_VERIFY_NAME_ON_CONNECT` and zenoh-rust's `verify_name_on_connect`.
+///
+/// WHICH KEY THIS ANSWERS. zenoh-rust spells it
+/// `transport/link/tls/verify_name_on_connect`. wz's config reader does not read
+/// it, so the key is carried in `UNHONOURED_READER_GAP` — the axis is HERE, and
+/// the two variants below are its two values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ServerNameVerification {
     /// Verify the chain to a trusted root AND that the cert SAN matches the
