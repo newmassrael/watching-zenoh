@@ -976,6 +976,37 @@ pub struct ZenohNodeConfig {
     /// keeps the two re-dial substrates from drifting. A second shape here would
     /// be a third.
     pub connect_retry: Option<crate::retry_period::RetryPolicy>,
+    /// R2159 (open-debt item 229) — `connect/timeout_ms`: how long the DIAL
+    /// phase gets before the node stops waiting for it.
+    ///
+    /// `Option` for the reason every key above is one: a running zenohd renders
+    /// an unstated `connect` as `{"endpoints":[],"exit_on_failure":null,
+    /// "retry":null,"timeout_ms":null}` (measured), so `None` here is that
+    /// `null` and NOT a resolved default. The resolved default is per-mode and
+    /// lives in [`PhasePolicy::connect_default_for`], which is where the
+    /// consumer reaches for it — carrying it here would make an unmentioned key
+    /// indistinguishable from a stated one at the expansion boundary.
+    pub connect_timeout_ms: Option<crate::startup_phase::PhaseBudget>,
+    /// R2159 (open-debt item 229) — `connect/exit_on_failure`: whether spending
+    /// that budget without a session ENDS the process.
+    pub connect_exit_on_failure: Option<bool>,
+    /// R2159 (open-debt item 229) — `listen/timeout_ms`: how long the BIND
+    /// phase gets. Upstream's default is `0` for every mode, which is not "no
+    /// time" but "do not retry the bind" — see
+    /// [`PhaseBudget::NO_RETRY`](crate::startup_phase::PhaseBudget::NO_RETRY).
+    pub listen_timeout_ms: Option<crate::startup_phase::PhaseBudget>,
+    /// R2159 (open-debt item 229) — `listen/exit_on_failure`: whether a
+    /// listener that never binds ENDS the process. Upstream's default is `true`
+    /// everywhere, and it is what wz already did.
+    pub listen_exit_on_failure: Option<bool>,
+    /// R2159 (open-debt item 229) — `listen/retry`: what paces the BIND phase's
+    /// retries, `connect/retry`'s twin and read the same way (one opaque census
+    /// leaf holding three numbers).
+    ///
+    /// It is honoured in the same round as [`Self::listen_timeout_ms`] because
+    /// the budget alone cannot pace anything: upstream's `add_listener_retry`
+    /// takes its wait from THIS block (`orchestrator.rs:534`).
+    pub listen_retry: Option<crate::retry_period::RetryPolicy>,
 }
 
 impl Default for ZenohNodeConfig {
@@ -1043,6 +1074,18 @@ impl Default for ZenohNodeConfig {
             // zenoh never resolved and hand the demo a flag the operator never
             // typed -- the exact asymmetry the five R311y844 Options exist for.
             connect_retry: None,
+            // R2159 (open-debt item 229) — `None` for the same reason, and it
+            // is sharper here than for the schedule above: the RESOLVED default
+            // of the two `connect/*` keys depends on this node's mode, so there
+            // is no single value this struct could carry that would be right
+            // for all three. The resolution lives at the consumer
+            // (`PhasePolicy::connect_default_for`), which is the only place
+            // that knows the mode.
+            connect_timeout_ms: None,
+            connect_exit_on_failure: None,
+            listen_timeout_ms: None,
+            listen_exit_on_failure: None,
+            listen_retry: None,
         }
     }
 }
@@ -1475,6 +1518,28 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     // way, and all that moved is which half of the partition they sit in.
     "scouting/multicast/autoconnect",
     "scouting/multicast/autoconnect_strategy",
+    // R2159 (open-debt item 229) — the connection-retry LIFECYCLE: the five
+    // keys that say how long the bind and the dial phase get, what paces the
+    // bind's retries, and whether spending that budget ends the process.
+    //
+    // The item's own reading was that this is a different KIND of debt from a
+    // reader that was never taught a key, and it was right: wz ran the peer
+    // column of upstream's default table (`connect: { timeout_ms: -1,
+    // exit_on_failure: false }`) and had no substrate for any other value, so
+    // the missing half was the NON-default — a bounded give-up, and a process
+    // that ends on it. `crate::startup_phase` is that substrate; these keys are
+    // what reaches it.
+    //
+    // `listen/retry` moves WITH `listen/timeout_ms` rather than in a later
+    // round, and not for tidiness: upstream's bind retry is paced by the listen
+    // retry block (`add_listener_retry(endpoint, retry_config)`,
+    // `orchestrator.rs:534`), so a `listen/timeout_ms` honoured without it
+    // would be a budget for a loop with no schedule.
+    "connect/exit_on_failure",
+    "connect/timeout_ms",
+    "listen/exit_on_failure",
+    "listen/retry",
+    "listen/timeout_ms",
 ];
 
 /// R311y849 — the leaves that live INSIDE a honoured key which is a subtree
@@ -1501,6 +1566,13 @@ const HONOURED_SUBTREE_LEAVES: &[&str] = &[
     "connect/retry/period_init_ms",
     "connect/retry/period_max_ms",
     "connect/retry/period_increase_factor",
+    // R2159 (open-debt item 229) — `listen/retry`'s three, opaque to a zenohd's
+    // resolved config for exactly the reason `connect/retry`'s are (R2079
+    // measured both), so the census surface has one leaf here and the
+    // OPERATOR's document has three.
+    "listen/retry/period_init_ms",
+    "listen/retry/period_max_ms",
+    "listen/retry/period_increase_factor",
 ];
 
 /// Every leaf key a real zenoh 1.5.0 resolves that wz does NOT honour.
@@ -1525,20 +1597,23 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     "access_control/subjects",
     "aggregation/publishers",
     "aggregation/subscribers",
-    "connect/exit_on_failure",
     // R311y849 removed `connect/retry` from here -- it moved to
-    // `HONOURED_CONFIG_KEYS`. Its two siblings STAY, and not for want of
+    // `HONOURED_CONFIG_KEYS`. Its two siblings STAYED, and not for want of
     // attention: for a peer, upstream resolves `timeout_ms` to -1 (retry
-    // forever) and `exit_on_failure` to false, which is precisely what wz does,
-    // so wz already matches the DEFAULT and what remains unhonoured is a
+    // forever) and `exit_on_failure` to false, which is precisely what wz did,
+    // so wz already matched the DEFAULT and what remained unhonoured was a
     // non-default value -- a bounded give-up and a process that exits on it.
-    // Those are lifecycle behaviours wz has no substrate for, which is a
+    // Those are lifecycle behaviours wz had no substrate for, which is a
     // different kind of debt from a reader that was never taught a key.
-    "connect/timeout_ms",
+    //
+    // R2159 (open-debt item 229) BUILT the substrate (`crate::startup_phase`)
+    // and moved all five -- `connect/{timeout_ms,exit_on_failure}` and the
+    // three `listen/*` -- to `HONOURED_CONFIG_KEYS`. The paragraph above is
+    // kept in the past tense rather than deleted because it is the reason the
+    // keys sat here for as long as they did, and the class it names ("a
+    // different kind of debt") is real: it cost a round of its own, which is
+    // what the item asked for.
     "downsampling",
-    "listen/exit_on_failure",
-    "listen/retry",
-    "listen/timeout_ms",
     "low_pass_filter",
     "metadata",
     "open/return_conditions/connect_scouted",
@@ -1649,10 +1724,6 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
 /// * `transport/{unicast,multicast}/*`, `transport/shared_memory/mode` — a
 ///   configurable session table (`TransportUnicastConf`): accept backlog,
 ///   session caps, open/accept timeouts.
-/// * `connect/exit_on_failure`, `listen/*` — dial/listen failure policy
-///   (`ListenConfig`). R2150 narrowed `connect/*` to the one member for which
-///   this is still true: `connect/timeout_ms` IS implemented, by
-///   `StaticConnectRetry::timeout_ms`.
 /// * `open/return_conditions/*` — a session-open readiness barrier
 ///   (`ReturnConditionsConf`).
 /// * `routing/*` — configurable link-state weighting and failover brokering
@@ -1700,10 +1771,12 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
 pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     "aggregation/publishers",
     "aggregation/subscribers",
-    "connect/exit_on_failure",
-    "listen/exit_on_failure",
-    "listen/retry",
-    "listen/timeout_ms",
+    // R2159 (open-debt item 229) — `connect/exit_on_failure` and the three
+    // `listen/*` LEFT here, and the `ListenConfig` group left with them: their
+    // group sentence said wz would need "a dial/listen failure policy", which
+    // was true when it was written and is what `crate::startup_phase` now is.
+    // That is the group table working as designed — a capability wz grows reds
+    // its own row.
     "metadata",
     "open/return_conditions/connect_scouted",
     "open/return_conditions/declares",
@@ -1784,11 +1857,6 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
 ///   and the `AutoConnectStrategies` R2141 built for the MULTICAST twins of these
 ///   two keys, which are honoured. The demo exposes `--autoconnect` and
 ///   `--autoconnect-strategy` for the gossip plane specifically.
-/// * `connect/timeout_ms` — `StaticConnectRetry::timeout_ms`, the bound on the
-///   WHOLE static dial, carrying upstream's `-1` (infinite) / `0` (no retry) /
-///   positive reading. R2150 moved it: it sat under a group sentence saying
-///   wz's session-open path implements no `connect/*` behaviour at all, beside
-///   `connect/retry`, which wz HONOURS.
 /// * `downsampling` — `DownsamplingRule` on the composable `InterceptorChain`,
 ///   driven today by `--downsample` / `--downsample-freq` (upstream's Hertz
 ///   unit) / `--downsample-link-protocol` / `--downsample-interface`.
@@ -1838,7 +1906,12 @@ pub const UNHONOURED_READER_GAP: &[&str] = &[
     "access_control/policies",
     "access_control/rules",
     "access_control/subjects",
-    "connect/timeout_ms",
+    // R2159 (open-debt item 229) — `connect/timeout_ms` LEFT this list for
+    // `HONOURED_CONFIG_KEYS`, and it is the one member of item 229's four that
+    // WAS a reader gap: R2150 had already found `StaticConnectRetry::timeout_ms`
+    // implementing it. Its three siblings were in `UNHONOURED_BEYOND_WZ`, so the
+    // item's four keys were never in one state; what made them one ROUND is that
+    // they are one seam, not one classification.
     "downsampling",
     "low_pass_filter",
     "plugins",
@@ -1969,16 +2042,13 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
             "transport/unicast/open_timeout",
         ],
     ),
-    (
-        "a dial/listen failure policy",
-        "ListenConfig",
-        &[
-            "connect/exit_on_failure",
-            "listen/exit_on_failure",
-            "listen/retry",
-            "listen/timeout_ms",
-        ],
-    ),
+    // R2159 (open-debt item 229) — the `ListenConfig` group ("a dial/listen
+    // failure policy") STOOD HERE with four keys and is GONE, because wz grew
+    // the thing it named. `crate::startup_phase` carries the budget, the
+    // exit-on-failure decision and upstream's four-arm fork, and the two mesh
+    // run-modes drive both phases through it. This is the outcome R2151 built
+    // the table FOR: the day wz grows a capability, its group reds rather than
+    // going quietly stale.
     (
         "a session-open readiness barrier",
         "ReturnConditionsConf",
@@ -2030,7 +2100,9 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
 /// one of the four below, and item 539's own example of that kind —
 /// `get_global_connect_timeout` beside `connect/timeout_ms` — turned out to be a
 /// misclassified `wz-has-it`. A branch with no population is a branch nobody
-/// has ever run.
+/// has ever run. (R2159 then HONOURED `connect/timeout_ms`, so it is no longer
+/// in this ledger's population at all; the sentence is R2150's reasoning about
+/// a kind that was dropped, not a live classification.)
 pub const UNHONOURED_CITATION_KINDS: &[&str] = &[
     "asserted-ignored",
     "foreign-node-config",
@@ -2125,7 +2197,12 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
     ("access_control/policies", "wz-has-it", "AclRule"),
     ("access_control/rules", "wz-has-it", "AclRule"),
     ("access_control/subjects", "wz-has-it", "SubjectSelector"),
-    ("connect/timeout_ms", "wz-has-it", "StaticConnectRetry"),
+    // R2159 (open-debt item 229) — the `connect/timeout_ms` / `wz-has-it` /
+    // `StaticConnectRetry` row is GONE, because the key is honoured now and
+    // this ledger's population is the UNHONOURED keys wz's source names. Check
+    // 2 of `unhonoured_kind_evidence_gate.py` is what forces the deletion: a
+    // verdict about a key no longer in the population is "a verdict about
+    // evidence that is gone".
     ("downsampling", "wz-has-it", "DownsamplingRule"),
     ("low_pass_filter", "wz-has-it", "LowPassRule"),
     ("metadata", "not-this-key", "AdminLocalData"),
@@ -2554,7 +2631,19 @@ fn honoured<'a>(doc: &'a Json5Value, path: &str) -> Option<&'a Json5Value> {
 /// node must fall back to the same default a zenohd would.
 pub const MODE_DEPENDENT_CONFIG_KEYS: &[&str] = &[
     "connect/endpoints",
+    // R2159 (open-debt item 229) — all four scalars of the connection-retry
+    // lifecycle are `ModeDependentValue` upstream (`lib.rs:453-472`), and for
+    // `connect/*` the DEFAULTS differ per mode, which is what makes the table
+    // spelling ordinary here rather than exotic: `timeout_ms` is `-1` for a
+    // router and peer and `0` for a client, `exit_on_failure` `false` and
+    // `false` against `true` (`defaults.rs:35-48`). `listen/*` are declared with
+    // the same type and a `Unique` default, so the table spelling is legal there
+    // too and a document may well carry it.
+    "connect/exit_on_failure",
+    "connect/timeout_ms",
     "listen/endpoints",
+    "listen/exit_on_failure",
+    "listen/timeout_ms",
     // R2141 — both new keys are declared mode-dependent upstream, and their
     // DEFAULTS differ per mode, which is what makes the table spelling ordinary
     // rather than exotic here: `autoconnect` is `[]` for a router, `["router",
@@ -2772,6 +2861,39 @@ fn want_bool_for_mode(
         None => Ok(ModeRead::ForOtherModes),
         Some(v) => bool_of(v, path).map(ModeRead::Value),
     }
+}
+
+/// R2159 (open-debt item 229) — a honoured key upstream types
+/// `ModeDependentValue<i64>`, where the SIGN is part of the value.
+///
+/// Separate from [`want_u64`] and not a widening of it: `timeout_ms` is the one
+/// place in this reader where a negative is not a range error but a meaning
+/// (`-1` = never give up), so the two cannot share a parser without one of them
+/// accepting what the other must refuse. `-1` reaching `want_u64` is
+/// `OutOfRange`, which is the correct answer for every key that uses it.
+fn want_i64_for_mode(
+    doc: &Json5Value,
+    path: &'static str,
+    mode: WhatAmI,
+) -> Result<ModeRead<i64>, ConfigIngestError> {
+    let Some(value) = honoured(doc, path) else {
+        return Ok(ModeRead::Absent);
+    };
+    let Some(v) = for_this_mode(value, mode, path)? else {
+        return Ok(ModeRead::ForOtherModes);
+    };
+    let Json5Value::Number(text) = v else {
+        return Err(ConfigIngestError::WrongType {
+            path,
+            expected: "an integer",
+        });
+    };
+    text.parse::<i64>()
+        .map(ModeRead::Value)
+        .map_err(|_| ConfigIngestError::OutOfRange {
+            path,
+            value: text.clone(),
+        })
 }
 
 fn want_u64(doc: &Json5Value, path: &'static str) -> Result<Option<u64>, ConfigIngestError> {
@@ -3111,12 +3233,66 @@ impl ZenohNodeConfig {
                 named.push("connect/retry");
             }
         }
+        // R2159 (open-debt item 229) — `connect`'s two LIFECYCLE scalars, read
+        // beside the schedule they bound. Both are mode-dependent upstream and
+        // both are read AFTER `mode`, on R2075's ordering rule: the table is
+        // resolved with this node's own mode, exactly as `.get(whatami)` does.
+        match want_i64_for_mode(&doc, "connect/timeout_ms", out.mode)? {
+            ModeRead::Value(ms) => {
+                out.connect_timeout_ms = Some(crate::startup_phase::PhaseBudget::from_ms(ms));
+                named.push("connect/timeout_ms");
+            }
+            ModeRead::ForOtherModes => other_modes.push("connect/timeout_ms"),
+            ModeRead::Absent => {}
+        }
+        match want_bool_for_mode(&doc, "connect/exit_on_failure", out.mode)? {
+            ModeRead::Value(v) => {
+                out.connect_exit_on_failure = Some(v);
+                named.push("connect/exit_on_failure");
+            }
+            ModeRead::ForOtherModes => other_modes.push("connect/exit_on_failure"),
+            ModeRead::Absent => {}
+        }
         match want_endpoints(&doc, "listen/endpoints", out.mode)? {
             ModeRead::Value(v) => {
                 out.listen = v;
                 named.push("listen/endpoints");
             }
             ModeRead::ForOtherModes => other_modes.push("listen/endpoints"),
+            ModeRead::Absent => {}
+        }
+        // R2159 (open-debt item 229) — `listen`'s three, the exact mirror of
+        // `connect`'s above. The subtree is ONE census leaf here too, so a
+        // document stating any one of its fields NAMES `listen/retry` once and
+        // the other two fall back to zenoh's own resolved values.
+        {
+            let init = want_u64(&doc, "listen/retry/period_init_ms")?;
+            let max = want_u64(&doc, "listen/retry/period_max_ms")?;
+            let factor = want_f64(&doc, "listen/retry/period_increase_factor")?;
+            if init.is_some() || max.is_some() || factor.is_some() {
+                let base = crate::retry_period::RetryPolicy::ZENOH_DEFAULT;
+                out.listen_retry = Some(crate::retry_period::RetryPolicy {
+                    period_init_ms: init.unwrap_or(base.period_init_ms),
+                    period_max_ms: max.unwrap_or(base.period_max_ms),
+                    period_increase_factor: factor.unwrap_or(base.period_increase_factor),
+                });
+                named.push("listen/retry");
+            }
+        }
+        match want_i64_for_mode(&doc, "listen/timeout_ms", out.mode)? {
+            ModeRead::Value(ms) => {
+                out.listen_timeout_ms = Some(crate::startup_phase::PhaseBudget::from_ms(ms));
+                named.push("listen/timeout_ms");
+            }
+            ModeRead::ForOtherModes => other_modes.push("listen/timeout_ms"),
+            ModeRead::Absent => {}
+        }
+        match want_bool_for_mode(&doc, "listen/exit_on_failure", out.mode)? {
+            ModeRead::Value(v) => {
+                out.listen_exit_on_failure = Some(v);
+                named.push("listen/exit_on_failure");
+            }
+            ModeRead::ForOtherModes => other_modes.push("listen/exit_on_failure"),
             ModeRead::Absent => {}
         }
         // R2063 (open-debt item 214) — `routing/peer/mode`, which this demo's
@@ -4263,6 +4439,45 @@ mod tests {
                 r#"{ "scouting": { "multicast": { "autoconnect_strategy":
                      { "to_router": "always", "to_peer": "greater-zid" } } } }"#,
             ),
+            // R2159 (open-debt item 229) — the connection-retry LIFECYCLE. Every
+            // fixture here is a NON-default for this reader's default mode
+            // (`peer`), which is what this gate requires of them and is also the
+            // whole of what item 229 was: the defaults were parity already.
+            //
+            // `true` against a peer's `false`. A reader that hardcoded either
+            // answer fails on one of the two `exit_on_failure` rows here.
+            (
+                "connect/exit_on_failure",
+                r#"{ "connect": { "exit_on_failure": true } }"#,
+            ),
+            // `5000` against a peer's `-1`, and deliberately a POSITIVE number
+            // rather than another negative: the three readings of this integer
+            // are `< 0`, `== 0` and `> 0`, and only the third produces a
+            // deadline a host can spend.
+            (
+                "connect/timeout_ms",
+                r#"{ "connect": { "timeout_ms": 5000 } }"#,
+            ),
+            // `false` against every mode's `true`, so the two `exit_on_failure`
+            // rows here push in OPPOSITE directions.
+            (
+                "listen/exit_on_failure",
+                r#"{ "listen": { "exit_on_failure": false } }"#,
+            ),
+            // The bind pacing, driven off zenoh's `1000 / 4000 / 2` on all
+            // three fields, with the factor given as `1.5` for `connect/retry`'s
+            // reason: an integer-only reader would round it and still report the
+            // key honoured.
+            (
+                "listen/retry",
+                r#"{ "listen": { "retry": { "period_init_ms": 250,
+                                           "period_max_ms": 9000,
+                                           "period_increase_factor": 1.5 } } }"#,
+            ),
+            (
+                "listen/timeout_ms",
+                r#"{ "listen": { "timeout_ms": 1500 } }"#,
+            ),
         ];
         // The case list IS the table, so a key added to one and not the other
         // fails here rather than going unmeasured.
@@ -4859,6 +5074,13 @@ mod tests {
                 // ones whose value is neither a bool nor an endpoint list.
                 "scouting/multicast/autoconnect" => "[\"router\", \"peer\"]",
                 "scouting/multicast/autoconnect_strategy" => "\"greater-zid\"",
+                // R2159 (open-debt item 229) — the two `timeout_ms` keys are
+                // the first mode-dependent INTEGERS, and `-1` rather than a
+                // positive: it is the one value of this key that a reader
+                // reaching for `want_u64` (every other integer key in this
+                // file) would refuse outright, so the sweep asks for the
+                // spelling that separates the two parsers.
+                "connect/timeout_ms" | "listen/timeout_ms" => "-1",
                 _ => "true",
             };
             let plain = doc_with(key, value);

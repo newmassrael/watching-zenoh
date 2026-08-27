@@ -4434,6 +4434,30 @@ layer_c1ay_cargo_test_router_hat() {
     _runci_guarded_test "C1AY reconnect_retry_schedule_binary 4" 4 \
         cargo test -p wz-ap-demo --features zenoh-config \
         --test reconnect_retry_schedule_binary --quiet || return 1
+    # R2159 (unregistered open-debt item 229) — the connection-retry LIFECYCLE:
+    # a node told to give up finitely GIVES UP, and a node told nothing keeps
+    # running.
+    #
+    # The seam every leg above exists for, at the one place it is a PROCESS
+    # question rather than an argv one. `zenoh_config` proves the five keys
+    # parse, `stock_config_tests` proves they reach flags, `startup_phase`'s own
+    # unit tests prove the policy resolves to upstream's arm — and all of them
+    # pass on a build where the flags reach nothing, which is the state item 229
+    # recorded. Only running the binary shows whether the node stops.
+    #
+    # `routing-peer` is named because the MESH run-modes are the wz hosts that
+    # own a bind phase and a dial phase together: `exit_on_failure: false` means
+    # "come up anyway", which is only an instruction on a node with a listener
+    # to come up as. `zenoh-config` adds the two `--config` arms — the
+    # invocation the item is actually about.
+    #
+    # 7 rather than 5: three arms are CONTROLS asserting a node is still
+    # running, and they carry as much of this round as the fatal ones do. wz's
+    # behaviour before it IS upstream's default column, so a change that made an
+    # unconfigured node give up would be a regression no fatal arm could see.
+    _runci_guarded_test "C1AY startup_phase_lifecycle_binary 7" 7 \
+        cargo test -p wz-ap-demo --features zenoh-config,routing-peer \
+        --test startup_phase_lifecycle_binary --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features routing-router-hat --quiet -- -D warnings \

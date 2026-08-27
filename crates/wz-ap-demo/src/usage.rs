@@ -161,6 +161,33 @@ pub(crate) fn print_usage() {
     eprintln!("                             switches the DISCOVERY plane so wz can learn and");
     eprintln!("                             gossip-autoconnect in a stock zenoh mesh. Requires");
     eprintln!("                             --peer.");
+    eprintln!("    --connect-retry <i,m,f>  zenoh connect.retry — the re-dial schedule, as");
+    eprintln!("                             <init_ms>,<max_ms>,<factor>. Default 1000,4000,2 for");
+    eprintln!("                             a mesh node; a --reconnect client keeps pico's flat");
+    eprintln!("                             1000,0,1 unless this says otherwise. max 0 = no");
+    eprintln!("                             ceiling; factor 1 = a constant delay.");
+    eprintln!("    --connect-timeout <ms>   zenoh connect.timeout_ms — how long the DIAL phase");
+    eprintln!("                             gets. -1 (the mesh default) never gives up, 0 means");
+    eprintln!("                             one attempt, N gives up after N ms. Requires --peer");
+    eprintln!("                             or --router-hat.");
+    eprintln!("    --connect-exit-on-failure <bool>");
+    eprintln!("                             zenoh connect.exit_on_failure — whether spending that");
+    eprintln!("                             budget with no session ENDS the process (exit 3).");
+    eprintln!("                             Default false: a mesh node keeps its listener and");
+    eprintln!("                             keeps re-dialing. Requires --peer or --router-hat.");
+    eprintln!(
+        "    --listen-timeout <ms>    zenoh listen.timeout_ms — the same budget for the BIND"
+    );
+    eprintln!("                             phase. Default 0: bind once, never retry.");
+    eprintln!("    --listen-exit-on-failure <bool>");
+    eprintln!(
+        "                             zenoh listen.exit_on_failure — whether an address that"
+    );
+    eprintln!("                             never binds ENDS the process (exit 3). Default true;");
+    eprintln!("                             false comes up on whichever addresses did bind.");
+    eprintln!("    --listen-retry <i,m,f>   zenoh listen.retry — what paces the bind retries when");
+    eprintln!("                             --listen-timeout allows any. Same triple as");
+    eprintln!("                             --connect-retry; default 1000,4000,2.");
     eprintln!("    --zid <hex>              PIN this node's routing zid (else it is derived from");
     eprintln!("                             the listen port). REQUIRED for a non-IP listen, which");
     eprintln!("                             has no port to derive a distinct mesh id from.");

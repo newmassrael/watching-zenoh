@@ -600,6 +600,14 @@ pub mod config;
 /// zenoh's exponential) because their parity sources differ.
 pub mod retry_period;
 
+/// R2159 (open-debt item 229) — the connection-retry LIFECYCLE, which is the
+/// half [`retry_period`] deliberately excludes: zenoh's
+/// `{connect,listen}.timeout_ms` (how long the phase gets) and
+/// `.exit_on_failure` (what the host does when it runs out). The schedule says
+/// how to wait; this says when to stop waiting and whether that ends the
+/// process.
+pub mod startup_phase;
+
 /// R311y579 (G8) — the OTHER direction of the same seam: emit the stringly
 /// JSON5 config a STOCK zenoh node reads, and validate a topology before
 /// starting one. `WzConfig` is how wz is configured; this is how wz configures

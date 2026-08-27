@@ -94,6 +94,15 @@ use wz::runtime_tokio::session_open::{
 // no `bind_all_endpoints`, and an ungated import would then be unused.
 #[cfg(any(feature = "routing-peer", feature = "router-hat-router"))]
 use wz::runtime_tokio::session_open::{bind_endpoint_with_config, BoundListener};
+// R2159 (open-debt item 229) — the startup-phase substrate, on the gate its
+// consumer set has: the two MESH run-modes are the wz hosts that own a bind
+// phase and a dial phase, and `PeerOpts` / `RouterHatOpts` ride the same gate.
+// The demo's rule is cfg on the set of consumers, not on the feature that
+// happens to be nearest.
+#[cfg(any(feature = "routing-peer", feature = "router-hat-router"))]
+use wz::runtime_tokio::retry_period::RetryPolicy;
+#[cfg(any(feature = "routing-peer", feature = "router-hat-router"))]
+use wz::runtime_tokio::startup_phase::{drive_phase, PhaseArm, PhasePolicy};
 use wz::runtime_tokio::sync::Mutex;
 
 #[cfg(any(feature = "scouting-active", feature = "scouting-responder"))]
@@ -307,11 +316,30 @@ fn apply_tls_ca(cfg: DialConfig, _tls_ca: &Option<String>) -> io::Result<DialCon
 /// Gated on the two run-modes that call it, because a build carrying neither
 /// compiles no binding host at all and an ungated helper would be `dead_code`
 /// there — the `-D warnings` arm that caught the first cut of this function.
+///
+/// # R2159 (open-debt item 229) — the fail-fast above is now a POLICY
+///
+/// `phase` and `schedule` are `listen/{timeout_ms,exit_on_failure}` and
+/// `listen/retry`. Passing [`PhasePolicy::LISTEN_DEFAULT`] with any schedule
+/// reproduces the behaviour this function had, which is upstream's default and
+/// was the only thing it could do; the point of the parameters is the other
+/// three arms.
+///
+/// ⚠ The residue, stated rather than hidden: `exit_on_failure: false` lets this
+/// node come up on the SUBSET of its endpoints that bound, which is upstream's
+/// behaviour, but a run where NONE bound still fails. Both mesh run-modes derive
+/// their routing zid and their advertised self-locator from the first bound
+/// listener, so a wz mesh node with no address is not a node these run-modes can
+/// bring up — where a zenohd can. That failure carries its own diagnostic and is
+/// NOT the exit-on-failure status, because the operator did ask for the node to
+/// carry on and it could not.
 #[cfg(any(feature = "routing-peer", feature = "router-hat-router"))]
 async fn bind_all_endpoints(
     listen: &[String],
     accept_cfg: &AcceptConfig,
     run_mode: &str,
+    phase: PhasePolicy,
+    schedule: RetryPolicy,
 ) -> io::Result<Vec<BoundListener>> {
     if listen.is_empty() {
         return Err(io::Error::new(
@@ -319,9 +347,44 @@ async fn bind_all_endpoints(
             format!("wz-ap-demo {run_mode}: no listen endpoint given"),
         ));
     }
+    log::info!(
+        "wz-ap-demo {run_mode}: {}",
+        describe_phase("LISTEN", phase, schedule)
+    );
     let mut bound = Vec::with_capacity(listen.len());
+    let mut skipped: Vec<&str> = Vec::new();
     for (index, endpoint) in listen.iter().enumerate() {
-        let listener = bind_endpoint_with_config(endpoint, accept_cfg).await?;
+        let listener = match drive_phase(phase, schedule, |attempt| async move {
+            if attempt > 1 {
+                log::info!("wz-ap-demo {run_mode}: re-binding {endpoint} (attempt {attempt})");
+            }
+            bind_endpoint_with_config(endpoint, accept_cfg).await
+        })
+        .await
+        {
+            Ok(listener) => listener,
+            Err(failed) => {
+                // The arm decides, and it is the arm the POLICY chose — not a
+                // rule this function carries. `ends_startup` is
+                // `exit_on_failure` resolved against the budget, so the two
+                // cannot be read differently here than they were in `arm()`.
+                if failed.ends_startup {
+                    return Err(startup_phase_gave_up(
+                        "listen",
+                        format!("{endpoint}: {failed}"),
+                    ));
+                }
+                log::warn!(
+                    "wz-ap-demo {run_mode}: LISTEN ENDPOINT {}/{} {endpoint} did not bind \
+                     ({failed}); listen/exit_on_failure is false, so this node comes up \
+                     without it",
+                    index + 1,
+                    listen.len(),
+                );
+                skipped.push(endpoint);
+                continue;
+            }
+        };
         // ONE line per BOUND address, emitted HERE rather than in each run-mode
         // host, so a future binding run-mode gets the witness structurally instead
         // of by remembering to copy a log line. This is the observable half of the
@@ -340,7 +403,238 @@ async fn bind_all_endpoints(
         );
         bound.push(listener);
     }
+    // R2159 — the residue named in this function's doc, made a DIAGNOSTIC rather
+    // than a panic in `listeners[0]` one screen later.
+    if bound.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::AddrNotAvailable,
+            format!(
+                "wz-ap-demo {run_mode}: none of the {} listen endpoint(s) bound ({}). \
+                 listen/exit_on_failure is false, but this run-mode derives its routing \
+                 identity and its advertised locator from a bound address, so it cannot \
+                 come up without one",
+                listen.len(),
+                skipped.join(", "),
+            ),
+        ));
+    }
+    if !skipped.is_empty() {
+        log::warn!(
+            "wz-ap-demo {run_mode}: came up on {} of {} listen endpoint(s); NOT bound: {}",
+            bound.len(),
+            listen.len(),
+            skipped.join(", "),
+        );
+    }
     Ok(bound)
+}
+
+/// R2159 (open-debt item 229) — the line that makes a startup phase's resolved
+/// policy readable, and the one the binary leg greps.
+///
+/// `describe_reconnect_schedule`'s sibling and written for the same reason: a
+/// node that gives up at a moment nobody configured, or never gives up when
+/// somebody did, is otherwise something an operator can only infer from
+/// behaviour. It renders the RESOLVED policy, so it reports what the host will
+/// act on rather than what the file said.
+#[cfg(any(feature = "routing-peer", feature = "router-hat-router"))]
+pub(crate) fn describe_phase(phase: &str, policy: PhasePolicy, schedule: RetryPolicy) -> String {
+    format!(
+        "{PHASE_POLICY_LINE} {phase} timeout_ms={} exit_on_failure={} arm={:?} \
+         retry={}ms/{}ms/x{}",
+        policy.budget.as_ms(),
+        policy.exit_on_failure,
+        policy.arm(schedule),
+        schedule.period_init_ms,
+        schedule.period_max_ms,
+        schedule.period_increase_factor,
+    )
+}
+
+/// The prefix [`describe_phase`] renders, pinned as a constant because the
+/// binary leg greps for it: an absent line and a renamed one look identical to
+/// a `contains`.
+#[cfg(any(feature = "routing-peer", feature = "router-hat-router"))]
+pub(crate) const PHASE_POLICY_LINE: &str = "STARTUP PHASE";
+
+/// R2159 (open-debt item 229) — resolve one phase's two scalars against the
+/// default column this run-mode belongs to.
+///
+/// ONE site for the fallback, called by both mesh arms in `main`, because
+/// "what an absent key means" is per-KEY and per-MODE and writing it twice is
+/// how the two arms start to disagree. The `default` is passed in rather than
+/// derived here: this function knows which key was stated, the caller knows
+/// which column it is in.
+#[cfg(any(feature = "routing-peer", feature = "router-hat-router"))]
+pub(crate) fn resolve_phase(
+    timeout: Option<wz::runtime_tokio::startup_phase::PhaseBudget>,
+    exit_on_failure: Option<bool>,
+    default: PhasePolicy,
+) -> PhasePolicy {
+    PhasePolicy {
+        budget: timeout.unwrap_or(default.budget),
+        exit_on_failure: exit_on_failure.unwrap_or(default.exit_on_failure),
+    }
+}
+
+/// R2159 (open-debt item 229) — the process status a node exits with when a
+/// STARTUP PHASE gave up and `exit_on_failure` said to exit.
+///
+/// DISTINCT from the `1` every other run failure carries, and that is the whole
+/// of its job: "the node died" and "the node gave up on the budget you set, as
+/// you asked it to" are different events, and an operator's supervisor has to be
+/// able to tell them apart — the second is a deployment answer, the first is a
+/// fault. `2` is taken by argv refusals.
+#[cfg(any(feature = "routing-peer", feature = "router-hat-router"))]
+pub(crate) const STARTUP_PHASE_EXIT_CODE: u8 = 3;
+
+/// The error a host returns when a startup phase gave up under
+/// `exit_on_failure: true`.
+///
+/// A typed payload inside the `io::Error` rather than a recognisable message,
+/// so [`is_startup_phase_give_up`] is a `downcast_ref` and not a string match:
+/// every caller of these run-modes is already in `io::Result`, and a sentinel
+/// message would make the exit status depend on prose.
+#[cfg(any(feature = "routing-peer", feature = "router-hat-router"))]
+#[derive(Debug)]
+pub(crate) struct StartupPhaseGaveUp {
+    /// `"listen"` or `"connect"` — which phase, in the config key's own word.
+    pub phase: &'static str,
+    /// What the phase was doing and why it stopped.
+    pub detail: String,
+}
+
+#[cfg(any(feature = "routing-peer", feature = "router-hat-router"))]
+impl std::fmt::Display for StartupPhaseGaveUp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} phase gave up and {}/exit_on_failure is true: {}",
+            self.phase, self.phase, self.detail
+        )
+    }
+}
+
+#[cfg(any(feature = "routing-peer", feature = "router-hat-router"))]
+impl std::error::Error for StartupPhaseGaveUp {}
+
+/// Build the error above as the `io::Error` every mesh run-mode returns.
+#[cfg(any(feature = "routing-peer", feature = "router-hat-router"))]
+pub(crate) fn startup_phase_gave_up(phase: &'static str, detail: String) -> io::Error {
+    io::Error::other(StartupPhaseGaveUp { phase, detail })
+}
+
+/// Is this failure a startup phase giving up as configured, rather than a fault?
+///
+/// Read by `main`'s two mesh arms to choose [`STARTUP_PHASE_EXIT_CODE`] over the
+/// generic `1`.
+#[cfg(any(feature = "routing-peer", feature = "router-hat-router"))]
+pub(crate) fn is_startup_phase_give_up(e: &io::Error) -> bool {
+    e.get_ref()
+        .is_some_and(|inner| inner.is::<StartupPhaseGaveUp>())
+}
+
+/// R2159 (open-debt item 229) — the CONNECT phase's budget, watched over a loop
+/// that owns the dial.
+///
+/// # Why a watchdog and not a `drive_phase`
+///
+/// The BIND phase is a call this host makes, so it drives it directly. The DIAL
+/// phase is not: `peer_loop` owns the connect list, the re-dial schedule and the
+/// accept side in ONE loop, where upstream runs `connect_peers` as a startup
+/// step before the runtime's steady state. Reaching into that loop to bound it
+/// would mean threading a budget through `FaceSources` and every re-dial
+/// substrate behind it.
+///
+/// So the budget is applied where upstream applies it — around the phase, as a
+/// wall-clock — and the phase's SUCCESS is observed from the loop's own event
+/// stream. That is the same `tokio::time::timeout` shape
+/// (`orchestrator.rs:318-335`) expressed over a loop that does not stop when the
+/// phase ends.
+///
+/// # The approximation, stated rather than hidden
+///
+/// The witness is `AcceptEvent::FaceUp`, which fires for an ACCEPTED face as
+/// well as a dialed one, where upstream's `connect_peers` counts only the
+/// outbound dial. `Face` carries no direction, so telling them apart here would
+/// mean matching resolved addresses against the connect list — and the
+/// difference is only reachable by a node whose own dials are all failing while
+/// a peer dials IN within the budget. Such a node HAS a mesh session, which is
+/// the state `exit_on_failure` is asking about, so the approximation errs toward
+/// letting a connected node live rather than killing one.
+#[cfg(any(feature = "routing-peer", feature = "router-hat-router"))]
+struct ConnectPhaseWatch {
+    policy: PhasePolicy,
+    arm: PhaseArm,
+    /// Bumped by the loop's own event closure on every `FaceUp`.
+    faces_up: std::rc::Rc<std::cell::Cell<usize>>,
+    /// `None` when this run has no bounded dial phase to watch — either the
+    /// budget is `UNBOUNDED` / `NO_RETRY`, or the node was given no dial target
+    /// at all, which is upstream's own guard (`connect_peers` on an empty list
+    /// does nothing, `orchestrator.rs:346`).
+    deadline: Option<tokio::time::Instant>,
+    fired: bool,
+}
+
+#[cfg(any(feature = "routing-peer", feature = "router-hat-router"))]
+impl ConnectPhaseWatch {
+    fn new(policy: PhasePolicy, schedule: RetryPolicy, dial_targets: usize) -> Self {
+        Self {
+            policy,
+            arm: policy.arm(schedule),
+            faces_up: std::rc::Rc::new(std::cell::Cell::new(0)),
+            deadline: (dial_targets > 0)
+                .then(|| policy.budget.deadline())
+                .flatten()
+                .map(|d| tokio::time::Instant::now() + d),
+            fired: false,
+        }
+    }
+
+    /// The counter the loop's event closure bumps. Cloned rather than borrowed
+    /// because that closure is `move` and outlives this borrow.
+    fn witness(&self) -> std::rc::Rc<std::cell::Cell<usize>> {
+        self.faces_up.clone()
+    }
+
+    /// Resolves ONCE, when the budget is spent; pends forever otherwise.
+    ///
+    /// Cancel-safe by construction: the timer is an ABSOLUTE instant rebuilt on
+    /// each poll, so a `select!` that drops it and comes back waits for the same
+    /// moment rather than restarting a duration.
+    async fn elapsed(&mut self) {
+        match self.deadline {
+            Some(at) if !self.fired => tokio::time::sleep_until(at).await,
+            _ => std::future::pending().await,
+        }
+        self.fired = true;
+    }
+
+    /// What the host does now that the budget is spent: `None` to carry on, or
+    /// the error that ends the process.
+    fn verdict(&self, run_mode: &str) -> Option<io::Error> {
+        let seen = self.faces_up.get();
+        let budget_ms = self.policy.budget.as_ms();
+        if seen > 0 {
+            log::info!(
+                "wz-ap-demo {run_mode}: connect phase satisfied within {budget_ms}ms \
+                 ({seen} face(s) up)"
+            );
+            return None;
+        }
+        if !self.arm.ends_startup() {
+            log::warn!(
+                "wz-ap-demo {run_mode}: connect phase spent its {budget_ms}ms budget with no \
+                 session; connect/exit_on_failure is false, so this node keeps running and \
+                 keeps re-dialing"
+            );
+            return None;
+        }
+        Some(startup_phase_gave_up(
+            "connect",
+            format!("no session established within {budget_ms}ms"),
+        ))
+    }
 }
 
 /// R311y406 — the four `--<scheme>-cert` / `--<scheme>-key` PEM paths a mesh listen
@@ -3542,6 +3836,24 @@ pub(crate) struct PeerOpts {
     /// failure mode that looks healthy, which is the whole argument for
     /// `parse_connect_retry` returning `Result`.
     pub connect_retry: wz::runtime_tokio::retry_period::RetryPolicy,
+    /// R2159 (open-debt item 229) — `connect/{timeout_ms,exit_on_failure}`, the
+    /// LIFECYCLE half of the field above: how long the dial phase gets, and
+    /// whether spending it without a session ends the process.
+    ///
+    /// RESOLVED, not `Option`, for [`Self::connect_retry`]'s reason and one
+    /// more: what an absent key resolves to depends on this node's MODE
+    /// (`PhasePolicy::connect_default_for`), and the caller is where the mode
+    /// is known. A malformed value must still ABORT rather than degrade to the
+    /// default, which is why the parse stays in `main`.
+    pub connect_phase: PhasePolicy,
+    /// R2159 (open-debt item 229) — `listen/{timeout_ms,exit_on_failure}`: the
+    /// same decision for the BIND phase, whose upstream default (`0` / `true`)
+    /// is one attempt and a fatal failure.
+    pub listen_phase: PhasePolicy,
+    /// R2159 (open-debt item 229) — `listen/retry`: what paces the bind phase's
+    /// retries when [`Self::listen_phase`]'s budget permits any. Defaults to
+    /// zenoh's shipped 1s/4s/x2, exactly as [`Self::connect_retry`] does.
+    pub listen_retry: wz::runtime_tokio::retry_period::RetryPolicy,
     /// R2112 (open-debt items 102 + 210) — `--timestamping` (zenoh
     /// `timestamping.enabled`): whether this PEER stamps the un-timestamped Puts
     /// it relays.
@@ -3614,6 +3926,28 @@ async fn run_peer_until(
     let qos_link = opts.qos_link;
     #[cfg(feature = "transport-qos")]
     let publish_band = opts.publish_band;
+    // R2159 (open-debt item 229) — the DIAL phase's budget, armed here so its
+    // wall-clock starts where the node's own startup does, and composed into the
+    // shutdown the loop is given: a phase that gives up ends the node through
+    // the SAME graceful path a signal does, so teardown still runs and the
+    // summary is still printed. A second exit route would be a second set of
+    // teardown semantics.
+    let mut connect_watch =
+        ConnectPhaseWatch::new(opts.connect_phase, opts.connect_retry, dial_targets.len());
+    let connect_faces_up = connect_watch.witness();
+    log::info!(
+        "wz-ap-demo peer: {}",
+        describe_phase("CONNECT", opts.connect_phase, opts.connect_retry)
+    );
+    let (phase_tx, phase_rx) = tokio::sync::oneshot::channel::<()>();
+    let mut phase_tx = Some(phase_tx);
+    let mut phase_give_up: Option<io::Error> = None;
+    let shutdown = async move {
+        tokio::select! {
+            _ = shutdown => {}
+            _ = phase_rx => {}
+        }
+    };
     use crate::args::NodeKind;
     use std::time::Duration;
     use wz::runtime_tokio::accept_loop::{peer_loop, AcceptEvent, FaceSources};
@@ -3649,7 +3983,14 @@ async fn run_peer_until(
         &opts.quic_key,
     )?;
     // R2099 (item 512) — bind EVERY member of `listen/endpoints`, not the first.
-    let listeners = bind_all_endpoints(listen, &accept_cfg, "peer").await?;
+    let listeners = bind_all_endpoints(
+        listen,
+        &accept_cfg,
+        "peer",
+        opts.listen_phase,
+        opts.listen_retry,
+    )
+    .await?;
     // Non-IP-safe addressing (R311y397, mirroring run_router_hat's R311y396 seam):
     // the "listening on" log + the self dial locator render from the per-variant
     // display (`local_addr_display`, total over every transport), and the
@@ -4478,11 +4819,20 @@ async fn run_peer_until(
             // race.
             let admin_sessions_ev = admin_sessions.clone();
             let forwarder_ev = &forwarder;
+            // R2159 (open-debt item 229) — the CONNECT phase's witness rides the
+            // event stream this closure already sees, rather than a second
+            // observer: the loop reports a face reaching Established exactly
+            // once, here, so counting anywhere else would be counting a
+            // different thing.
+            let faces_up_ev = connect_faces_up;
             move |event: &AcceptEvent| {
                 {
                     let mut buf = admin_sessions_ev.borrow_mut();
                     buf.clear();
                     buf.extend(forwarder_ev.admin_sessions());
+                }
+                if matches!(event, AcceptEvent::FaceUp(_)) {
+                    faces_up_ev.set(faces_up_ev.get() + 1);
                 }
                 log_face_event("peer", event)
             }
@@ -4553,6 +4903,20 @@ async fn run_peer_until(
     let summary = loop {
         tokio::select! {
             done = &mut loop_fut => break done,
+            // R2159 (open-debt item 229) — the DIAL phase's budget elapsing. It
+            // fires at most once (`ConnectPhaseWatch::elapsed` pends forever
+            // afterwards), and when the verdict is fatal it asks for the SAME
+            // graceful shutdown a signal would: the loop tears its faces down,
+            // the summary below is printed, and the error is returned at the end.
+            _ = connect_watch.elapsed() => {
+                if let Some(e) = connect_watch.verdict("peer") {
+                    log::error!("wz-ap-demo peer: {e}");
+                    phase_give_up = Some(e);
+                    if let Some(tx) = phase_tx.take() {
+                        let _ = tx.send(());
+                    }
+                }
+            }
             _ = app_tick.tick() => {
                 peak_nodes = peak_nodes.max(forwarder.node_count());
                 peak_edges = peak_edges.max(forwarder.edge_count());
@@ -4914,7 +5278,13 @@ async fn run_peer_until(
             forwarder.interceptor_dropped()
         );
     }
-    Ok(())
+    // R2159 (open-debt item 229) — reported AFTER the witnesses above, not
+    // instead of them: this node ran, and what it did while it ran is what those
+    // lines say. The give-up is why it STOPPED.
+    match phase_give_up {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 /// P4 §5.21 ACTIVATION — router-hat MODE (`--router-hat <listen>`): the first wz
@@ -4984,6 +5354,16 @@ pub(crate) struct RouterHatOpts {
     /// to let an e2e drive the growth on a sub-second cadence), not to opt into a
     /// behaviour nothing would otherwise exercise.
     pub connect_retry: wz::runtime_tokio::retry_period::RetryPolicy,
+    /// R2159 (open-debt item 229) — `connect/{timeout_ms,exit_on_failure}` for
+    /// the router-hat's dial phase. The peer twin's doc has the reasoning; both
+    /// mesh run-modes take the same bundle because both own the same two
+    /// phases, which is upstream's own arrangement (`bind_listeners` and
+    /// `connect_peers` are one shape with two verbs).
+    pub connect_phase: PhasePolicy,
+    /// R2159 (open-debt item 229) — `listen/{timeout_ms,exit_on_failure}`.
+    pub listen_phase: PhasePolicy,
+    /// R2159 (open-debt item 229) — `listen/retry`.
+    pub listen_retry: wz::runtime_tokio::retry_period::RetryPolicy,
     /// R2089 (open-debt item 222) — `--scout-listen`: ANSWER Scouts, so a foreign
     /// node discovers this ROUTER without being reconfigured.
     ///
@@ -5059,6 +5439,26 @@ async fn run_router_hat_until(
     opts: &RouterHatOpts,
     shutdown: impl std::future::Future<Output = ()>,
 ) -> io::Result<()> {
+    // R2159 (open-debt item 229) — the peer twin's arrangement, verbatim: arm
+    // the DIAL phase's budget at startup and compose its give-up into the
+    // shutdown the loop is given, so one graceful path ends this node however it
+    // is asked to stop.
+    let mut connect_watch =
+        ConnectPhaseWatch::new(opts.connect_phase, opts.connect_retry, dial_targets.len());
+    let connect_faces_up = connect_watch.witness();
+    log::info!(
+        "wz-ap-demo router-hat: {}",
+        describe_phase("CONNECT", opts.connect_phase, opts.connect_retry)
+    );
+    let (phase_tx, phase_rx) = tokio::sync::oneshot::channel::<()>();
+    let mut phase_tx = Some(phase_tx);
+    let mut phase_give_up: Option<io::Error> = None;
+    let shutdown = async move {
+        tokio::select! {
+            _ = shutdown => {}
+            _ = phase_rx => {}
+        }
+    };
     use crate::args::NodeKind;
     // The multicast knobs are consumed only by the `router-multicast-faces`
     // egress/ingress spawns, so a build without that face has neither a group to
@@ -5107,7 +5507,14 @@ async fn run_router_hat_until(
     // / `--router-hat quic/` presents its cert (was bind_endpoint's cert-free default).
     let accept_cfg = cert_paths.build()?;
     // R2099 (item 512) — bind EVERY member of `listen/endpoints`, not the first.
-    let listeners = bind_all_endpoints(listen, &accept_cfg, "router-hat").await?;
+    let listeners = bind_all_endpoints(
+        listen,
+        &accept_cfg,
+        "router-hat",
+        opts.listen_phase,
+        opts.listen_retry,
+    )
+    .await?;
     // Non-IP-safe addressing (R311y396): the log line + the adminspace `local_data`
     // dial locator render from the per-variant display (`local_addr_display`, total
     // over every transport), and the port-derived zid fallback applies ONLY when the
@@ -5597,7 +6004,17 @@ async fn run_router_hat_until(
         TokioTime::new(),
         DEFAULT_OPEN_TICK_MS,
         shutdown,
-        |event: &AcceptEvent| log_face_event("router-hat", event),
+        {
+            // R2159 (open-debt item 229) — the CONNECT phase's witness, on the
+            // event stream the loop already reports through. See the peer twin.
+            let faces_up_ev = connect_faces_up;
+            move |event: &AcceptEvent| {
+                if matches!(event, AcceptEvent::FaceUp(_)) {
+                    faces_up_ev.set(faces_up_ev.get() + 1);
+                }
+                log_face_event("router-hat", event)
+            }
+        },
         &forwarder,
     );
     tokio::pin!(loop_fut);
@@ -5651,6 +6068,17 @@ async fn run_router_hat_until(
     let summary = loop {
         tokio::select! {
             done = &mut loop_fut => break done,
+            // R2159 (open-debt item 229) — the DIAL phase's budget elapsing; the
+            // peer twin's arm, verbatim.
+            _ = connect_watch.elapsed() => {
+                if let Some(e) = connect_watch.verdict("router-hat") {
+                    log::error!("wz-ap-demo router-hat: {e}");
+                    phase_give_up = Some(e);
+                    if let Some(tx) = phase_tx.take() {
+                        let _ = tx.send(());
+                    }
+                }
+            }
             _ = app_tick.tick() => {
                 // `--connect-after` reconcile fire: once the deadline elapses, send
                 // the NEW full desired connect-set on the reconcile channel; the loop
@@ -5934,7 +6362,12 @@ async fn run_router_hat_until(
             log::info!("wz-ap-demo router-hat: suppressed a mcast-ingress federation (not DR)");
         }
     }
-    Ok(())
+    // R2159 (open-debt item 229) — the peer twin's ending: the witnesses above
+    // say what this node did, this says why it stopped.
+    match phase_give_up {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 /// R311y282 — the `volume_id` the storage-host maps its hosted storages onto,
@@ -7312,6 +7745,23 @@ mod peer_quic_cert_tests {
             #[cfg(all(feature = "scouting-active", feature = "routing-peer"))]
             scout_autoconnect: None,
             connect_retry: wz::runtime_tokio::retry_period::RetryPolicy::ZENOH_DEFAULT,
+            // R2159 — the startup-phase policies, at the SHIPPED column for a
+            // peer rather than at `PhasePolicy::default()`: these are BIND
+            // witnesses, and `listen`'s shipped answer (one attempt, fatal) is
+            // the behaviour they are written against. `default()` is deliberately
+            // the permissive policy, so using it here would make a failed bind
+            // non-fatal and quietly change what the fixture measures.
+            //
+            // ⚠ The FOURTH field addition in a row to miss these two literals —
+            // R2095's `offer`, R2112's `timestamping`, R2141's
+            // `scout_autoconnect` (whose own note two fields up says "the third
+            // fixture field in three rounds"), and now this. They sit behind a
+            // feature set no ordinary `cargo check` reaches, so what caught it
+            // is pre-push gate 2h, which R2153 added for exactly the gap
+            // between compiling a test and running it.
+            connect_phase: wz::runtime_tokio::startup_phase::PhasePolicy::CONNECT_MESH_DEFAULT,
+            listen_phase: wz::runtime_tokio::startup_phase::PhasePolicy::LISTEN_DEFAULT,
+            listen_retry: wz::runtime_tokio::retry_period::RetryPolicy::ZENOH_DEFAULT,
             // R2133 — R2112 added `PeerOpts.timestamping` and did not reach
             // these two fixtures either, exactly as R2095 did with `offer` six
             // lines up. The default is the OPERATOR SAID NOTHING (`stated:
@@ -7425,6 +7875,23 @@ mod peer_failfast_tests {
             #[cfg(all(feature = "scouting-active", feature = "routing-peer"))]
             scout_autoconnect: None,
             connect_retry: wz::runtime_tokio::retry_period::RetryPolicy::ZENOH_DEFAULT,
+            // R2159 — the startup-phase policies, at the SHIPPED column for a
+            // peer rather than at `PhasePolicy::default()`: these are BIND
+            // witnesses, and `listen`'s shipped answer (one attempt, fatal) is
+            // the behaviour they are written against. `default()` is deliberately
+            // the permissive policy, so using it here would make a failed bind
+            // non-fatal and quietly change what the fixture measures.
+            //
+            // ⚠ The FOURTH field addition in a row to miss these two literals —
+            // R2095's `offer`, R2112's `timestamping`, R2141's
+            // `scout_autoconnect` (whose own note two fields up says "the third
+            // fixture field in three rounds"), and now this. They sit behind a
+            // feature set no ordinary `cargo check` reaches, so what caught it
+            // is pre-push gate 2h, which R2153 added for exactly the gap
+            // between compiling a test and running it.
+            connect_phase: wz::runtime_tokio::startup_phase::PhasePolicy::CONNECT_MESH_DEFAULT,
+            listen_phase: wz::runtime_tokio::startup_phase::PhasePolicy::LISTEN_DEFAULT,
+            listen_retry: wz::runtime_tokio::retry_period::RetryPolicy::ZENOH_DEFAULT,
             // R2133 — R2112 added `PeerOpts.timestamping` and did not reach
             // these two fixtures either, exactly as R2095 did with `offer` six
             // lines up. The default is the OPERATOR SAID NOTHING (`stated:

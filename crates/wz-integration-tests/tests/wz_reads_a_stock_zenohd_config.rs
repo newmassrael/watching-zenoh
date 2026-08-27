@@ -489,6 +489,23 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         "scouting/multicast/autoconnect",
         "scouting/multicast/autoconnect_strategy",
         "connect/retry",
+        // R2159 (open-debt item 229) — MEASURED this round on the census
+        // fixture, the way this leg's doc requires rather than inferred from
+        // `connect/retry` sitting above them: a real zenohd resolves
+        //   connect = {"endpoints":[],"exit_on_failure":null,"retry":null,
+        //              "timeout_ms":null}
+        //   listen  = {"endpoints":["tcp/127.0.0.1:PORT"],"exit_on_failure":null,
+        //              "retry":null,"timeout_ms":null}
+        // so all five answer `null` and the tree has nothing to compare. Their
+        // upstream defaults live in the config crate instead
+        // (`defaults.rs:35-58`), and for the two `connect/*` scalars they are
+        // per-whatami, which is the same blind spot `timestamping/enabled`
+        // below names.
+        "connect/exit_on_failure",
+        "connect/timeout_ms",
+        "listen/exit_on_failure",
+        "listen/retry",
+        "listen/timeout_ms",
         // The two where wz DOES carry a flat default and upstream's is a
         // function of `mode`. See this leg's doc: not a gap in the fixture, a
         // limit of the oracle.
@@ -1972,9 +1989,35 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
   // measured: the run must RE-DIAL. This invocation is a one-shot client — it
   // types no `--reconnect` — so it dials once, and a re-dial schedule would
   // pace nothing. That is why the key still reaches nothing here.
+  //
+  // R2159 (open-debt item 229) — `timeout_ms` and `exit_on_failure` join it in
+  // the same block and in the same state: NAMED here because they must reach
+  // nothing in this invocation. Their sinks are the two MESH run-modes, which
+  // are the wz hosts that own a bind phase and a dial phase together; a
+  // one-shot client has neither a listener to survive a refused dial nor a
+  // second attempt to bound. The values are upstream's own CLIENT column
+  // (`timeout_ms: 0`, `exit_on_failure: true`, `defaults.rs:38-48`), so this
+  // stays a file an operator could plausibly have — and it is the column wz
+  // already behaves as, which is why the expansion withholding them here is
+  // the honest answer rather than a shortfall.
   connect: {{
     endpoints: ["tcp/127.0.0.1:{port}"],
     retry: {{ period_init_ms: 1000, period_max_ms: 4000, period_increase_factor: 2 }},
+    timeout_ms: 0,
+    exit_on_failure: true,
+  }},
+  // R2159 (open-debt item 229) — the BIND phase's three, named for the sharpest
+  // version of the reason above: this node is a client, and `listen/endpoints`
+  // is the one honoured key this leg's role FORBIDS (see the exception below).
+  // A node that binds nothing has no bind phase, so all three must reach
+  // nothing, and an expansion that emitted a `--listen-*` flag here would be
+  // configuring a phase that does not run. Values are upstream's own defaults
+  // for every mode (`timeout_ms: 0`, `exit_on_failure: true`, and the shipped
+  // 1000/4000/2 schedule).
+  listen: {{
+    retry: {{ period_init_ms: 1000, period_max_ms: 4000, period_increase_factor: 2 }},
+    timeout_ms: 0,
+    exit_on_failure: true,
   }},
   // R311y846 — the four `multicast` leaves are named here BECAUSE they must
   // reach nothing in this invocation, which is the half the unit tests cannot

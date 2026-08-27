@@ -1147,6 +1147,103 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             None => exp.record("connect/retry", KeyEffect::AlreadyTheBehaviour),
         }
     }
+    // R2159 (open-debt item 229) — the connection-retry LIFECYCLE reaches the
+    // two MESH run-modes, which are the wz hosts that own a bind phase and a
+    // dial phase together.
+    //
+    // The precondition is NARROWER than `connect/retry`'s above, and the
+    // narrowing is the honest half of this round rather than a shortfall left
+    // unsaid. `exit_on_failure: false` means "come up anyway", which is only an
+    // instruction on a node that has something else to come up as — upstream's
+    // own reason for the asymmetric defaults (`crate::startup_phase`'s module
+    // doc has the table). A one-shot `--connect` client has no listener to
+    // survive a refused dial, and a `--connect --reconnect` client's supervisor
+    // governs re-dials AFTER an established link is lost rather than a startup
+    // phase. Both already behave as upstream's CLIENT column, so what is
+    // withheld here is a flag that would change nothing, not a behaviour the
+    // file asked for and did not get.
+    let has_phases = |a: &String| a == "--peer" || a == "--router-hat";
+    let mesh = exp.rest.iter().chain(exp.added.iter()).any(has_phases);
+    let not_a_mesh_run = (!mesh).then_some(KeyEffect::WithheldFromThisRun(
+        "this run's mode has no startup phase to bound",
+    ));
+    if named("connect/timeout_ms") {
+        let blocked = no_sink("connect/timeout_ms").or(not_a_mesh_run);
+        match cfg.connect_timeout_ms {
+            Some(budget) => {
+                exp.pair(
+                    "connect/timeout_ms",
+                    "--connect-timeout",
+                    budget.as_ms().to_string(),
+                    blocked,
+                );
+            }
+            None => exp.record("connect/timeout_ms", KeyEffect::AlreadyTheBehaviour),
+        }
+    }
+    if named("connect/exit_on_failure") {
+        let blocked = no_sink("connect/exit_on_failure").or(not_a_mesh_run);
+        match cfg.connect_exit_on_failure {
+            Some(exit) => {
+                exp.pair(
+                    "connect/exit_on_failure",
+                    "--connect-exit-on-failure",
+                    exit.to_string(),
+                    blocked,
+                );
+            }
+            None => exp.record("connect/exit_on_failure", KeyEffect::AlreadyTheBehaviour),
+        }
+    }
+    if named("listen/retry") {
+        let blocked = no_sink("listen/retry").or(not_a_mesh_run);
+        match cfg.listen_retry {
+            // Rendered in the flag's own spelling and re-parsed downstream, for
+            // `connect/retry`'s reason: `parse_retry_schedule` is the single
+            // place the acceptance POLICY lives, so a file reaches the same
+            // boundary a command line does.
+            Some(retry) => {
+                exp.pair(
+                    "listen/retry",
+                    "--listen-retry",
+                    format!(
+                        "{},{},{}",
+                        retry.period_init_ms, retry.period_max_ms, retry.period_increase_factor
+                    ),
+                    blocked,
+                );
+            }
+            None => exp.record("listen/retry", KeyEffect::AlreadyTheBehaviour),
+        }
+    }
+    if named("listen/timeout_ms") {
+        let blocked = no_sink("listen/timeout_ms").or(not_a_mesh_run);
+        match cfg.listen_timeout_ms {
+            Some(budget) => {
+                exp.pair(
+                    "listen/timeout_ms",
+                    "--listen-timeout",
+                    budget.as_ms().to_string(),
+                    blocked,
+                );
+            }
+            None => exp.record("listen/timeout_ms", KeyEffect::AlreadyTheBehaviour),
+        }
+    }
+    if named("listen/exit_on_failure") {
+        let blocked = no_sink("listen/exit_on_failure").or(not_a_mesh_run);
+        match cfg.listen_exit_on_failure {
+            Some(exit) => {
+                exp.pair(
+                    "listen/exit_on_failure",
+                    "--listen-exit-on-failure",
+                    exit.to_string(),
+                    blocked,
+                );
+            }
+            None => exp.record("listen/exit_on_failure", KeyEffect::AlreadyTheBehaviour),
+        }
+    }
     // R2063 (open-debt item 214) — `routing/peer/mode` reaches the flag that
     // implements it.
     //
@@ -1949,6 +2046,18 @@ pub(crate) fn config_keys_the_demo_drops() -> Vec<&'static str> {
         out.push("scouting/multicast/autoconnect");
         out.push("scouting/multicast/autoconnect_strategy");
     }
+    // R2159 (open-debt item 229) — the five connection-retry LIFECYCLE keys.
+    // Their sinks are the `--peer` and `--router-hat` run-modes, so a build
+    // carrying NEITHER feature compiles no startup-phase host at all and both
+    // flags exit(2) naming the build — the R311y844 rule. A build with either
+    // one has a sink, which is why this is a disjunction and not two rows.
+    if !cfg!(any(feature = "routing-peer", feature = "router-hat-router")) {
+        out.push("connect/timeout_ms");
+        out.push("connect/exit_on_failure");
+        out.push("listen/retry");
+        out.push("listen/timeout_ms");
+        out.push("listen/exit_on_failure");
+    }
     out
 }
 
@@ -2654,6 +2763,23 @@ mod stock_config_tests {
                 "tcp/r:7447",
                 "--reconnect",
             ],
+            // R2159 (open-debt item 229) — the LIFECYCLE five, whose
+            // precondition is a run-mode with a startup PHASE to bound, which is
+            // `--peer` or `--router-hat`. `--peer` is named for the reason the
+            // rows above name it: these builds compile it, and a row pointed at
+            // the arm this table cannot reach would report "reaches nothing"
+            // against a sink that exists.
+            //
+            // ⚠ On a build with NEITHER mesh feature these five are exactly the
+            // rows `config_keys_the_demo_drops` names, and the assertion that
+            // "reaches nothing" equals that list is what forces the two to agree
+            // — the contract `connect/retry`'s note above describes, now with a
+            // live population again.
+            "connect/timeout_ms"
+            | "connect/exit_on_failure"
+            | "listen/retry"
+            | "listen/timeout_ms"
+            | "listen/exit_on_failure" => &["--config", "z.json5", "--peer", "tcp/127.0.0.1:0"],
             _ => &["--config", "z.json5"],
         }
     }
@@ -2912,6 +3038,56 @@ mod stock_config_tests {
                      { autoconnect: ["router", "peer"],
                        autoconnect_strategy:
                          { to_router: "always", to_peer: "greater-zid" } } } }"#,
+            ),
+            // R2159 (open-debt item 229) — the connection-retry LIFECYCLE.
+            //
+            // Every control STATES the key at upstream's own resolved value for
+            // this mode, so the delta is the VALUE and not the key's presence —
+            // the `scouting/multicast/listen` discipline. That matters more here
+            // than anywhere above, because these keys' defaults are what wz
+            // already did: a control that merely omitted the key would differ
+            // from the variant in whether a flag appeared at all, and would pass
+            // against an expansion that emitted it unconditionally.
+            //
+            // Each control also names `listen`, because `mode: "peer"` selects
+            // the binding run-mode and the endpoint is what the expansion needs
+            // to emit it.
+            (
+                "connect/timeout_ms",
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/127.0.0.1:0"] },
+                     connect: { timeout_ms: -1 } }"#,
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/127.0.0.1:0"] },
+                     connect: { timeout_ms: 5000 } }"#,
+            ),
+            (
+                "connect/exit_on_failure",
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/127.0.0.1:0"] },
+                     connect: { exit_on_failure: false } }"#,
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/127.0.0.1:0"] },
+                     connect: { exit_on_failure: true } }"#,
+            ),
+            (
+                "listen/retry",
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/127.0.0.1:0"],
+                     retry: { period_init_ms: 1000, period_max_ms: 4000,
+                              period_increase_factor: 2 } } }"#,
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/127.0.0.1:0"],
+                     retry: { period_init_ms: 250, period_max_ms: 9000,
+                              period_increase_factor: 1.5 } } }"#,
+            ),
+            (
+                "listen/timeout_ms",
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/127.0.0.1:0"],
+                     timeout_ms: 0 } }"#,
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/127.0.0.1:0"],
+                     timeout_ms: 1500 } }"#,
+            ),
+            (
+                "listen/exit_on_failure",
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/127.0.0.1:0"],
+                     exit_on_failure: true } }"#,
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/127.0.0.1:0"],
+                     exit_on_failure: false } }"#,
             ),
         ]
     }
@@ -3656,7 +3832,11 @@ mod stock_config_tests {
             "config-writable",
             "config-write-permit",
             "connect-after",
-            "connect-retry",
+            // R2159 (open-debt item 229) — `connect-retry` LEFT this list, and
+            // the ratchet is what asked: R2158 made the flag ungated and gave it
+            // a third sink in every build, so "it only paces a mesh arm nobody
+            // types" had stopped being true, and this round's own `--listen-retry`
+            // could not be documented without naming its twin.
             "declare-id",
             "downsample",
             "downsample-freq",
@@ -5131,28 +5311,50 @@ pub(crate) fn parse_pairs(args: &[String], flag: &str) -> Vec<String> {
 /// them. The C1ay step that names a feature does so for the OTHER cases in the
 /// module, not for these.
 pub(crate) fn parse_connect_retry(args: &[String]) -> Result<Option<RetryPolicy>, String> {
-    let Some(spec) = parse_pair(args, "--connect-retry") else {
+    parse_retry_schedule(args, "--connect-retry")
+}
+
+/// R2159 (open-debt item 229) — `--listen-retry <init_ms>,<max_ms>,<factor>`,
+/// the BIND phase's schedule (zenoh's `listen.retry`).
+///
+/// A second flag rather than a widening of `--connect-retry`, because upstream
+/// keeps two blocks and a deploy routinely wants one of them: a node whose
+/// router boots slowly widens its DIAL pacing, a node racing a departing
+/// process for a port widens its BIND pacing, and neither implies the other.
+pub(crate) fn parse_listen_retry(args: &[String]) -> Result<Option<RetryPolicy>, String> {
+    parse_retry_schedule(args, "--listen-retry")
+}
+
+/// The acceptance POLICY for a retry schedule, in ONE place for both flags.
+///
+/// R2159 extracted it rather than copying the body: a factor below 1.0 is
+/// refused here and nowhere else (see [`parse_connect_retry`]'s doc), and the
+/// config expansion routes a file's block through the flag precisely so that a
+/// document reaches the same boundary a command line does. Two copies would be
+/// two boundaries, which is the one thing this arrangement exists to prevent.
+fn parse_retry_schedule(args: &[String], flag: &str) -> Result<Option<RetryPolicy>, String> {
+    let Some(spec) = parse_pair(args, flag) else {
         return Ok(None);
     };
     let parts: Vec<&str> = spec.split(',').map(str::trim).collect();
     let [init, max, factor] = parts.as_slice() else {
         return Err(format!(
-            "--connect-retry: `{spec}` is not a schedule; expected \
+            "{flag}: `{spec}` is not a schedule; expected \
              <init_ms>,<max_ms>,<factor> (e.g. 1000,4000,2)"
         ));
     };
     let period_init_ms: u64 = init
         .parse()
-        .map_err(|e| format!("--connect-retry: init `{init}` is not a millisecond count ({e})"))?;
+        .map_err(|e| format!("{flag}: init `{init}` is not a millisecond count ({e})"))?;
     let period_max_ms: u64 = max
         .parse()
-        .map_err(|e| format!("--connect-retry: max `{max}` is not a millisecond count ({e})"))?;
+        .map_err(|e| format!("{flag}: max `{max}` is not a millisecond count ({e})"))?;
     let period_increase_factor: f64 = factor
         .parse()
-        .map_err(|e| format!("--connect-retry: factor `{factor}` is not a number ({e})"))?;
+        .map_err(|e| format!("{flag}: factor `{factor}` is not a number ({e})"))?;
     if !period_increase_factor.is_finite() || period_increase_factor < 1.0 {
         return Err(format!(
-            "--connect-retry: factor `{factor}` must be finite and >= 1.0 (1 = a \
+            "{flag}: factor `{factor}` must be finite and >= 1.0 (1 = a \
              constant delay, 2 = zenoh's default doubling)"
         ));
     }
@@ -5162,7 +5364,7 @@ pub(crate) fn parse_connect_retry(args: &[String]) -> Result<Option<RetryPolicy>
     // here — where there is still someone to tell.
     if period_max_ms > 0 && period_max_ms < period_init_ms {
         return Err(format!(
-            "--connect-retry: max {period_max_ms}ms is below init {period_init_ms}ms; \
+            "{flag}: max {period_max_ms}ms is below init {period_init_ms}ms; \
              use 0 for no ceiling"
         ));
     }
@@ -5171,6 +5373,59 @@ pub(crate) fn parse_connect_retry(args: &[String]) -> Result<Option<RetryPolicy>
         period_max_ms,
         period_increase_factor,
     }))
+}
+
+/// R2159 (open-debt item 229) — `--connect-timeout <ms>` / `--listen-timeout
+/// <ms>`, the argv shape `{connect,listen}/timeout_ms` expands into.
+///
+/// SIGNED, and that is the whole reason this is not `parse_pair` + `u64::parse`
+/// at each site: `-1` is upstream's "never give up" and the router and peer
+/// default for `connect`, so a parser that refused a negative would make the
+/// default itself unspellable on the command line. `0` is upstream's "do not
+/// retry" — a third meaning, not a zero-length budget — and
+/// [`PhaseBudget::from_ms`](wz::runtime_tokio::startup_phase::PhaseBudget::from_ms)
+/// is where all three are read, so the demo does not re-decide them.
+///
+/// A malformed value is an ERROR rather than a silent fallback, on
+/// [`parse_connect_retry`]'s rule: a node that runs on a budget the operator
+/// did not ask for, with no log line contradicting it, is the failure this key
+/// exists to prevent.
+pub(crate) fn parse_phase_timeout(
+    args: &[String],
+    flag: &str,
+) -> Result<Option<wz::runtime_tokio::startup_phase::PhaseBudget>, String> {
+    let Some(spec) = parse_pair(args, flag) else {
+        return Ok(None);
+    };
+    let ms: i64 = spec.trim().parse().map_err(|e| {
+        format!(
+            "{flag}: `{spec}` is not a millisecond count ({e}); \
+             -1 = never give up, 0 = one attempt, N = give up after N ms"
+        )
+    })?;
+    Ok(Some(
+        wz::runtime_tokio::startup_phase::PhaseBudget::from_ms(ms),
+    ))
+}
+
+/// R2159 (open-debt item 229) — `--connect-exit-on-failure <true|false>` /
+/// `--listen-exit-on-failure <true|false>`.
+///
+/// A VALUE and not a bare switch, for [`NodeTimestamping`]'s reason: the
+/// defaults differ (`false` for a mesh dial, `true` for every bind), so a flag
+/// that could only turn the behaviour ON would leave one of the two
+/// non-defaults unspellable. `true` / `false` are the only spellings, because
+/// they are the two the json5 key itself has.
+pub(crate) fn parse_phase_exit_on_failure(
+    args: &[String],
+    flag: &str,
+) -> Result<Option<bool>, String> {
+    match parse_pair(args, flag) {
+        None => Ok(None),
+        Some(v) if v == "true" => Ok(Some(true)),
+        Some(v) if v == "false" => Ok(Some(false)),
+        Some(v) => Err(format!("{flag} expects true or false, got '{v}'")),
+    }
 }
 
 /// R311y845 — WHERE `--scout` looks for its peers: zenoh's

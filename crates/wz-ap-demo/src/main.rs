@@ -270,6 +270,48 @@ fn main() -> ExitCode {
         }
     };
 
+    // R2159 (open-debt item 229) — the connection-retry LIFECYCLE, read ONCE
+    // here beside the schedule and for the identical reason: these are
+    // NODE-scoped policies whose malformed value must stop the node rather than
+    // start it on a budget nobody asked for.
+    //
+    // Carried UNRESOLVED past this point, again for the schedule's reason: what
+    // an absent `connect/*` key means depends on this node's MODE (`-1`/`false`
+    // for a router and peer, `0`/`true` for a client), so collapsing it here
+    // would pick one column for every run-mode. The two mesh arms below resolve
+    // it against `PhasePolicy::CONNECT_MESH_DEFAULT`, which is the column they
+    // announce.
+    let phase_parse = (|| {
+        Ok::<_, String>((
+            crate::args::parse_phase_timeout(rest, "--connect-timeout")?,
+            crate::args::parse_phase_exit_on_failure(rest, "--connect-exit-on-failure")?,
+            crate::args::parse_phase_timeout(rest, "--listen-timeout")?,
+            crate::args::parse_phase_exit_on_failure(rest, "--listen-exit-on-failure")?,
+            crate::args::parse_listen_retry(rest)?,
+        ))
+    })();
+    let (connect_timeout, connect_exit, listen_timeout, listen_exit, listen_retry) =
+        match phase_parse {
+            Ok(parsed) => parsed,
+            Err(message) => {
+                eprintln!("wz-ap-demo: {message}");
+                return ExitCode::from(2);
+            }
+        };
+    // The five above are consumed by the two MESH run-modes only — they are the
+    // wz hosts that own a bind phase and a dial phase. A build with neither
+    // still PARSES them, because this file's rule is that a flag's refusal does
+    // not depend on the build, so the values are discarded HERE rather than the
+    // parse being compiled away.
+    #[cfg(not(any(feature = "routing-peer", feature = "router-hat-router")))]
+    let _ = (
+        connect_timeout,
+        connect_exit,
+        listen_timeout,
+        listen_exit,
+        listen_retry,
+    );
+
     // R311qa — `--router <addr>` selects the multi-peer router mode (bind once,
     // HOLD N concurrent peer faces — the routing-router foundation), handled
     // before the single-session role parse below (which requires exactly one of
@@ -776,6 +818,23 @@ fn main() -> ExitCode {
                     #[cfg(all(feature = "scouting-active", feature = "routing-peer"))]
                     scout_autoconnect,
                     connect_retry: peer_connect_retry,
+                    // R2159 (open-debt item 229) — the LIFECYCLE half, resolved
+                    // against the column a PEER announces: `connect` is
+                    // unbounded and non-fatal (this node has its own listener to
+                    // be), `listen` is one attempt and fatal (the address is
+                    // this node's identity to everyone else).
+                    connect_phase: crate::runner::resolve_phase(
+                        connect_timeout,
+                        connect_exit,
+                        wz::runtime_tokio::startup_phase::PhasePolicy::CONNECT_MESH_DEFAULT,
+                    ),
+                    listen_phase: crate::runner::resolve_phase(
+                        listen_timeout,
+                        listen_exit,
+                        wz::runtime_tokio::startup_phase::PhasePolicy::LISTEN_DEFAULT,
+                    ),
+                    listen_retry: listen_retry
+                        .unwrap_or(wz::runtime_tokio::retry_period::RetryPolicy::ZENOH_DEFAULT),
                     offer: peer_offer,
                     // R2112 (open-debt items 102 + 210) — zenoh
                     // `timestamping.enabled`, resolved by the forwarder against
@@ -980,6 +1039,24 @@ fn main() -> ExitCode {
                     // one spelling means one thing across run-modes.
                     no_admin_read: rest.iter().any(|a| a == "--no-admin-read"),
                     connect_retry,
+                    // R2159 (open-debt item 229) — resolved against the same
+                    // column the peer arm uses: upstream's `connect` defaults
+                    // are identical for `router` and `peer`
+                    // (`defaults.rs:38-48`), which is what
+                    // `CONNECT_MESH_DEFAULT` names, and `listen`'s are `Unique`
+                    // across all three modes.
+                    connect_phase: crate::runner::resolve_phase(
+                        connect_timeout,
+                        connect_exit,
+                        wz::runtime_tokio::startup_phase::PhasePolicy::CONNECT_MESH_DEFAULT,
+                    ),
+                    listen_phase: crate::runner::resolve_phase(
+                        listen_timeout,
+                        listen_exit,
+                        wz::runtime_tokio::startup_phase::PhasePolicy::LISTEN_DEFAULT,
+                    ),
+                    listen_retry: listen_retry
+                        .unwrap_or(wz::runtime_tokio::retry_period::RetryPolicy::ZENOH_DEFAULT),
                     tuning,
                     // R2089 (open-debt item 222) — what makes a stock client's
                     // `autoconnect: ["router"]` default reach a wz node at all.
@@ -2500,17 +2577,33 @@ fn run_peer_mode(
             return ExitCode::from(1);
         }
     };
-    match runtime.block_on(crate::runner::run_peer(
+    mesh_exit_code(runtime.block_on(crate::runner::run_peer(
         &listen,
         &dial_targets,
         &opts,
         &interceptors,
         tuning,
-    )) {
+    )))
+}
+
+/// R2159 (open-debt item 229) — the exit status a MESH run-mode reports.
+///
+/// The one place the startup-phase status is chosen, so the two mesh arms
+/// cannot answer differently. A phase that gave up as CONFIGURED is not a fault
+/// and does not read as one: the operator asked for a bounded budget and for the
+/// node to end when it was spent, and an exit status that says so is the whole
+/// observable difference between honouring `exit_on_failure` and dying.
+#[cfg(any(feature = "routing-peer", feature = "router-hat-router"))]
+fn mesh_exit_code(outcome: std::io::Result<()>) -> ExitCode {
+    match outcome {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("wz-ap-demo: {e}");
-            ExitCode::from(1)
+            if crate::runner::is_startup_phase_give_up(&e) {
+                ExitCode::from(crate::runner::STARTUP_PHASE_EXIT_CODE)
+            } else {
+                ExitCode::from(1)
+            }
         }
     }
 }
@@ -2583,18 +2676,12 @@ fn run_router_hat_mode(
             return ExitCode::from(1);
         }
     };
-    match runtime.block_on(crate::runner::run_router_hat(
+    mesh_exit_code(runtime.block_on(crate::runner::run_router_hat(
         &listen,
         &dial_targets,
         connect_after,
         zid_override,
         &cert_paths,
         &opts,
-    )) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("wz-ap-demo: {e}");
-            ExitCode::from(1)
-        }
-    }
+    )))
 }
