@@ -1162,6 +1162,49 @@ pub fn audit(rows: &[DocumentShape]) -> Result<(), String> {
                     ));
                 }
             }
+            // R2146 (unregistered open-debt item 534) — AND THE PROMISE BINDS.
+            //
+            // The rule above is one-directional: it refuses a key that LEAVES
+            // unannounced, and says nothing about a key ANNOUNCED and then kept.
+            // So `retiring` could promise a departure that never came, and
+            // nothing would notice -- a promise nobody measures is decoration,
+            // not a contract. Item 534 is that half. R2123 dropped
+            // `first_packet` on the schedule `retiring`'s own doc states and
+            // wrote in its comment that nothing would have refused a revision
+            // keeping it; this is what would have.
+            //
+            // CANCELLATION IS STILL POSSIBLE, and deliberately so. Keeping a key
+            // is the SAFE direction for a consumer -- someone who read the
+            // announcement and prepared for the departure is not broken by its
+            // absence -- so a rule that forced every announcement to completion
+            // would compel a pointless removal. The way to cancel is to edit the
+            // announcing row's `retiring` in the same commit that adds the
+            // successor: the promise and its withdrawal then land together,
+            // which is a visible act rather than a silent lapse. What is refused
+            // is the third thing: a successor that neither honours the promise
+            // nor withdraws it.
+            //
+            // An announcement in the NEWEST revision has no successor yet and is
+            // in flight, which is legal and unbounded here on purpose: no rule
+            // over this table can force the next revision to be written. That
+            // residue is named rather than gated, and
+            // `every_announcement_in_the_shipped_history_is_accounted_for`
+            // prints the in-flight ones by name so they cannot go quiet.
+            for going in before.retiring {
+                if after.keys.contains(going) {
+                    return Err(alloc::format!(
+                        "{name} r{} announced {going:?} as retiring and r{} still \
+                         emits it; an announcement the next revision does not keep \
+                         is decoration. Drop the key in r{}, or withdraw the \
+                         announcement from r{} in the commit that adds r{}",
+                        before.revision,
+                        after.revision,
+                        after.revision,
+                        before.revision,
+                        after.revision
+                    ));
+                }
+            }
         }
     }
     Ok(())
@@ -1271,6 +1314,91 @@ mod tests {
     #[test]
     fn the_shipped_history_passes_its_own_audit() {
         audit(DOCUMENT_HISTORY).expect("the shipped document history");
+    }
+
+    /// R2146 (unregistered open-debt item 534) — AN ANNOUNCEMENT THE NEXT
+    /// REVISION KEEPS IS REFUSED, AND CANCELLING IT IS NOT.
+    ///
+    /// Three shapes, because the rule has three outcomes and a test that drove
+    /// only the failing one would not show that the other two remain writable:
+    /// the promise KEPT (the successor drops the key), the promise BROKEN (the
+    /// successor keeps it), and the promise WITHDRAWN (the announcement is
+    /// edited away in the same commit that adds the successor).
+    #[test]
+    fn an_announcement_the_next_revision_keeps_is_refused() {
+        // KEPT — the rename dance, which is what `retiring` is for.
+        audit(&[row(1, A, &["beta"]), row(2, A_DROPPED, &[])])
+            .expect("a promise the successor honours is the whole point");
+
+        // BROKEN — announced, and the successor still emits it.
+        let err = audit(&[row(1, A, &["beta"]), row(2, A_RENAMED, &[])])
+            .expect_err("an announcement the successor keeps is decoration");
+        assert!(
+            err.contains("\"beta\"") && err.contains("still"),
+            "the refusal must name the key and say what went wrong: {err}"
+        );
+
+        // WITHDRAWN — the announcing row no longer announces, so the successor
+        // keeping the key is an ordinary revision. This is the escape the rule
+        // deliberately leaves open; without it, every announcement would compel
+        // a removal a consumer never needed.
+        audit(&[row(1, A, &[]), row(2, A_RENAMED, &[])])
+            .expect("withdrawing the announcement is a legal way out");
+    }
+
+    /// R2146 (open-debt item 534) — every announcement the SHIPPED table has
+    /// ever made, and what became of it.
+    ///
+    /// The population is DERIVED from `DOCUMENT_HISTORY` rather than listed, and
+    /// an empty one fails: a rule about announcements that has no announcement
+    /// to judge is measuring nothing, and would pass forever.
+    ///
+    /// In-flight announcements are printed BY NAME. `audit` cannot bound how
+    /// long one lives — no rule over this table can force the next revision to
+    /// be written — so the residue item 534 names is made visible here instead
+    /// of being left silent.
+    #[test]
+    fn every_announcement_in_the_shipped_history_is_accounted_for() {
+        let mut honoured: vec::Vec<alloc::string::String> = vec::Vec::new();
+        let mut in_flight: vec::Vec<alloc::string::String> = vec::Vec::new();
+
+        for row in DOCUMENT_HISTORY {
+            for going in row.retiring {
+                let successor = DOCUMENT_HISTORY
+                    .iter()
+                    .find(|r| r.document == row.document && r.revision == row.revision + 1);
+                match successor {
+                    // `audit` already refuses a successor that keeps the key, so
+                    // reaching here means the promise was kept.
+                    Some(_) => honoured.push(alloc::format!(
+                        "{} r{} -> {going:?} gone by r{}",
+                        row.document,
+                        row.revision,
+                        row.revision + 1
+                    )),
+                    None => in_flight.push(alloc::format!(
+                        "{} r{} -> {going:?} (no successor revision yet)",
+                        row.document,
+                        row.revision
+                    )),
+                }
+            }
+        }
+
+        assert!(
+            !(honoured.is_empty() && in_flight.is_empty()),
+            "no revision in DOCUMENT_HISTORY announces a retirement, so this test \
+             and the rule it guards are judging an empty set. If the table \
+             genuinely carries no announcement any more, that is news: say so in \
+             the round that removed the last one."
+        );
+
+        for line in &honoured {
+            std::eprintln!("doc-revision announcement HONOURED: {line}");
+        }
+        for line in &in_flight {
+            std::eprintln!("doc-revision announcement IN FLIGHT: {line}");
+        }
     }
 
     /// Every door this library exports names a document here, and every
