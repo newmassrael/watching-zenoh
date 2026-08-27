@@ -119,6 +119,25 @@ if [[ ${#with_nondefault[@]} -eq 0 ]]; then
     exit 1
 fi
 
+# R2156 (open-debt item 543) — hand the derived set out instead of letting a
+# second reader copy the derivation. `nondefault-tests-gate.sh --census` needs
+# exactly this list, and a copy of `derive_py` over there would be one more
+# thing to keep in step with cargo's metadata. Tier-3 members are printed with
+# their exclusion so the caller sees what this gate does NOT check rather than
+# silently inheriting the gap.
+if [[ "${1:-}" == "--list-members" ]]; then
+    for pkg in "${with_nondefault[@]}"; do
+        if [[ " $excluded " == *" $pkg "* ]]; then
+            echo "$pkg excluded"
+        elif [[ " $lib_only " == *" $pkg "* ]]; then
+            echo "$pkg lib-only"
+        else
+            echo "$pkg all-targets"
+        fi
+    done
+    exit 0
+fi
+
 if [[ $# -gt 0 ]]; then
     # The pre-push shape: intersect the caller's changed crates with the
     # derived set, so naming a crate that has no non-default feature is a

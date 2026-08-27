@@ -6846,6 +6846,21 @@ layer_c1cf_reduced_features() {
 # changed-crate filter cannot see a crate broken by a change elsewhere.
 layer_c1cn_nondefault_features() {
     bash scripts/lib/nondefault-features-gate.sh || return 1
+    # R2156 (unregistered open-debt item 543) — the CENSUS half. The gate above
+    # asks whether feature-gated code COMPILES; this asks whether anything RUNS
+    # it, and refuses a test that only a feature build reaches when no leg runs
+    # it and no SKIPS row excuses it by name.
+    #
+    # It lives here rather than in pre-push because it builds every crate twice
+    # (`-- --list` at default features and again at `--all-features`), which is
+    # the cost this lane is already paying on the check side.
+    #
+    # Its FIRST run put a number on what item 542 shipped without: 2519 tests in
+    # 11 crates that only a feature build reaches, of which the table then ran
+    # 84. That gap is what item 543 was, and closing it is what the widened LEGS
+    # table does -- so this line is now the thing that keeps it closed, not a
+    # report on how open it is.
+    bash scripts/lib/nondefault-tests-gate.sh --census || return 1
 }
 
 layer_c1i_cargo_test_scouting() {
@@ -9229,7 +9244,13 @@ layer_c1bn_passive_dissection_features() {
     # hook could not run it: the command lived in a hosted lane. One spelling,
     # two callers, and the same "a filter matching no test is a FAIL" guard now
     # applies in both places instead of only this one.
-    bash scripts/lib/nondefault-tests-gate.sh || return 1
+    #
+    # R2156 (item 543) — `--all-legs`, which is what makes the hook/lane split in
+    # that table honest. The hook runs the legs marked `hook`; this lane runs
+    # EVERY leg, so a leg deferred for being slow is still a leg that RUNS. Drop
+    # this flag and the `lane` rows would be covered on paper and executed
+    # nowhere, which is the exact shape item 543 was filed about.
+    bash scripts/lib/nondefault-tests-gate.sh --all-legs || return 1
 
     # The keylog feature's OWN arms. Each pairs it with the link it installs the
     # sink on; a lane that never selects a feature is a lane that never lints it.

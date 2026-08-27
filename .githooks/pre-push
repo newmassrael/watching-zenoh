@@ -454,6 +454,14 @@ fi
 # The command is NOT written here. `scripts/lib/nondefault-tests-gate.sh` owns
 # the leg table and the guard, and Layer C1bn calls the same script, so the lane
 # and the hook cannot drift apart about what the leg is or what counts as a pass.
+#
+# R2156 (item 543) WIDENED that table from one leg to thirteen, and gave each row
+# a `hook`/`lane` scope. This call takes the default -- the `hook` legs only --
+# while C1bn passes `--all-legs`. The split is the per-leg answer to item 543's
+# "safe AND QUICK on a developer's machine" test, it is decided by measurement
+# per row, and the script PRINTS what it deferred so a leg missing from this gate
+# can never read as a leg nobody runs. `--census` (Layer C1cn) is the thing that
+# refuses a feature-only test claimed by neither scope.
 if ! bash scripts/lib/nondefault-tests-gate.sh; then
     echo "" >&2
     echo "pre-push: non-default-feature TESTS FAILED — a check that only a" >&2

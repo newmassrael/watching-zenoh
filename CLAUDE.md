@@ -232,23 +232,37 @@ git config core.hooksPath .githooks
   decision of 2026-08-27. Gate 2h
   (`scripts/lib/nondefault-tests-gate.sh`) RUNS the tests only a
   non-default feature build can reach, for the legs its own table
-  names: today exactly one, `wz-runtime-tokio --features
-  zenoh-config-emit zenoh_config::`. Gate 7 already COMPILED those
-  (`cargo check --all-features`) and compiling is not running, which
-  is what let four measured red-first probes pass this hook while
-  dying at exit 101. Layer C1bn calls that same script, so the lane
-  and the hook cannot disagree about what the leg is. Measured cost,
-  whole hook, same stdin: 77.2s before; 92.3s on the FIRST run after
-  (cargo building a second feature set — gate 3 is default features,
-  2h is `zenoh-config-emit`); 73.9s on the next, both warm. So the
-  standing cost is inside this tree's run-to-run spread and the
-  visible price is a one-time ~15s build, not a per-push tax. Do not
-  quote the leg's own 1s as the delta either — it is neither.
-  STILL NOT covered locally (all on hosted CI): every feature-gated
-  lane that table does NOT name — a candidate sweep finds 15 crates
-  carrying a `#[test]` beside a feature `cfg`, and that is a count
-  of CANDIDATES, not a measured set of unrun legs (open-debt item
-  543) — plus changes outside `crates/` (sources/, out/, deploy/,
+  marks `hook`. R2156 (item 543) widened that table from ONE leg to
+  THIRTEEN across eleven crates and gave every row a `hook`/`lane`
+  scope — the per-leg answer to item 543's "safe AND QUICK on a
+  developer's machine". This hook runs the twelve `hook` rows, Layer
+  C1bn runs all thirteen via `--all-legs`, and the script PRINTS the
+  ones it deferred, so an omission can never read as coverage. Gate
+  7 already COMPILED these (`cargo check --all-features`) and
+  compiling is not running, which is what let four measured
+  red-first probes pass this hook while dying at exit 101.
+  ⛔ A leg NAMES its features, one per source line, and
+  `--all-features` is refused BY NAME. The `--census` population is
+  DEFINED as "what all-features lists minus what default lists", so
+  an all-features leg would cover that set by construction and the
+  check could never fail again — the "a population of zero reports
+  green" trap, with the population supplied by the check's own
+  definition. `wz-ap-demo` is the proof this is not theoretical: at
+  `--all-features` it is RED, and correctly so, because a
+  zero-population guard there loses its subject.
+  MEASURED — the GATE's own cost, warm, and NOT a whole-hook delta
+  (R2154's lesson): 12 hook legs 34s; all 13 legs 68s; `--census`
+  19s. The 77.2 / 92.3 / 73.9s whole-hook figures R2153 recorded
+  were taken when this table held ONE leg and no longer describe
+  this hook; re-measure before quoting a hook total.
+  STILL NOT covered locally (all on hosted CI): feature
+  COMBINATIONS (open-debt item 374, still without an instrument);
+  the `wz` facade, which gate 7 excludes from all-features
+  entirely; the single `lane`-scoped leg; and the three tests named
+  in that table's SKIPS, each carrying its measured reason — one of
+  them is open-debt item 544, an intermittent hang that this
+  widening FOUND by running a test no gate had ever run — plus
+  changes outside `crates/` (sources/, out/, deploy/,
   ci.yml), clippy / fmt / footprint. (`runtime/` used to be listed
   here and was struck by R2153: there is no such directory and no
   tracked file under it, the same finding R311y794 made about the
