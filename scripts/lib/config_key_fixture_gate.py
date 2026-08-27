@@ -53,6 +53,20 @@ Every anchor is a HARD FAIL when it does not match. A gate that cannot find its
 subject must not report on it — and a silently empty population is the shape
 this file's sibling (`count_guard_lint.py`) had to be taught to refuse.
 
+## The three sites, and why they accumulate here
+
+Each is a different obligation the SAME pair of files carries, and each was
+added by the round that found it. They share this gate because they share the
+reason a static read is the only local answer: both sides are on disk, and the
+leg that would otherwise notice needs a built zenohd and runs only hosted.
+
+  * the DROP-IN fixture must name every honoured key (R2138, item 224);
+  * the DEFAULTS leg must CLASS every honoured key (R2142, item 225's red —
+    the round that moved two keys updated the first site and not this one, so
+    this gate went green while hosted Layer Z went red);
+  * the CENSUS fixture must fill NO key that would move the denominator
+    (R2147, item 217).
+
 Usage:
     python3 scripts/lib/config_key_fixture_gate.py [--verbose]
 """
@@ -104,6 +118,7 @@ TEST_ATTR_RE = re.compile(r"#\[(?:tokio::)?test\b")
 FIXTURE_RE = re.compile(
     r"let client_source = format!\(\s*r#\"(.*?)\"#\s*,?\s*\)", re.S
 )
+
 # The test's own exception list, anchored to the iteration it belongs to so that
 # a `!=` comparison anywhere else in this 2700-line file cannot be mistaken for
 # one.
@@ -244,6 +259,22 @@ def dependent_tests() -> list[tuple[str, int, str, bool, list[str]]]:
                 )
             )
     return rows
+
+
+def fixture_fn_literal(src: str, name: str) -> str | None:
+    """The JSON5 literal a `fn <name>(port: u16) -> String` returns.
+
+    The two config-building fns are anchored on their SIGNATURE rather than on a
+    `let`, because they are free functions rather than bindings inside a test.
+    Same close as `FIXTURE_RE` and for the same measured reason — no trailing
+    argument, so no comma to require.
+    """
+    m = re.search(
+        r"fn " + name + r"\(port: u16\) -> String \{\s*format!\(\s*r#\"(.*?)\"#\s*,?\s*\)",
+        src,
+        re.S,
+    )
+    return m.group(1) if m else None
 
 
 def fixture_key_paths(literal: str) -> list[str]:
@@ -420,6 +451,87 @@ def main() -> int:
                 f"outlived its key."
             )
 
+    # ── the THIRD site: the CENSUS fixture (R2147, open-debt item 217) ───
+    #
+    # The census leg's denominator is whatever a running zenohd resolves from
+    # `census_config`, and several upstream keys are OPAQUE SUBTREES that
+    # serialise as one leaf when unset and as their own contents when filled.
+    # So a fixture that fills one of them makes the census measure the FIXTURE:
+    # measured (R311y842), the same run against `operator_config` reported
+    # `metadata/name` where the canonical surface has `metadata`.
+    #
+    # That reason lived only in the fixture's doc comment. The constants half of
+    # it is now a unit test in `zenoh_config.rs`
+    # (`the_census_denominator_is_the_surface_of_a_document_that_fills_nothing`);
+    # this is the FIXTURE half, and it is here for the same reason the two sites
+    # above are — the fixture is in `wz-integration-tests`, the deepenable list
+    # is in `wz-runtime-tokio`, and the leg that would notice needs a built
+    # zenohd and runs only on hosted Layer Z.
+    deepenable = deepenable_audit.rust_const("DEEPENABLE_UPSTREAM_KEYS")
+    if not deepenable:
+        print(
+            "config-key-fixture FAIL: DEEPENABLE_UPSTREAM_KEYS read as empty, so "
+            "no path can sit below one and the census check below would pass on "
+            "any fixture at all.",
+            file=sys.stderr,
+        )
+        return 1
+
+    def below_a_deepenable_key(path: str) -> str | None:
+        for key in deepenable:
+            if path.startswith(key + "/"):
+                return key
+        return None
+
+    census_literal = fixture_fn_literal(test_src, "census_config")
+    control_literal = fixture_fn_literal(test_src, "operator_config")
+    census_filled: list[tuple[str, str]] = []
+    control_filled: list[tuple[str, str]] = []
+    if census_literal is None or control_literal is None:
+        missing_fn = "census_config" if census_literal is None else "operator_config"
+        failures.append(
+            f"could not anchor `fn {missing_fn}(port: u16) -> String` in "
+            f"{rel(FIXTURE_TEST)}. The census denominator comes from that "
+            f"fixture, so this gate cannot say whether it fills a subtree — "
+            f"re-anchor it rather than dropping the check."
+        )
+    else:
+        census_filled = [
+            (p, k)
+            for p in fixture_key_paths(census_literal)
+            if (k := below_a_deepenable_key(p)) is not None
+        ]
+        # The POSITIVE CONTROL, and it is not decoration. This check can only be
+        # trusted if it can SEE the shape it forbids, and the file already
+        # contains one: `operator_config` fills `metadata`. A control that stops
+        # finding it means the walk broke, and a broken walk reports every
+        # fixture clean.
+        control_filled = [
+            (p, k)
+            for p in fixture_key_paths(control_literal)
+            if (k := below_a_deepenable_key(p)) is not None
+        ]
+        if census_filled:
+            failures.append(
+                "the census fixture fills "
+                + ", ".join(f"`{p}` (below `{k}`)" for p, k in census_filled)
+                + f" in {rel(FIXTURE_TEST)}. Those are subtrees a real zenohd "
+                f"resolves as ONE leaf when unset, so the census would report "
+                f"the fixture's surface as the upstream denominator. Keep "
+                f"`census_config` filling nothing optional; put the shape in "
+                f"`operator_config`, which is not what the denominator is taken "
+                f"from."
+            )
+        if not control_filled:
+            failures.append(
+                f"the positive control found NO filled subtree in "
+                f"`operator_config` ({rel(FIXTURE_TEST)}). That fixture is "
+                f"supposed to look like a real operator's file, and the census "
+                f"check above is only meaningful if this walk can see the shape "
+                f"it forbids — an empty control means the walk broke, not that "
+                f"the tree is clean."
+            )
+
     if args.verbose:
         for f, ln, name, _ig, used in ignored:
             print(f"  guard {f}:{ln} {name} <- {','.join(used)}")
@@ -453,6 +565,15 @@ def main() -> int:
         print(
             f"  defaults leg: {len(set(accounted))} honoured key(s) classed "
             f"({breakdown})"
+        )
+    if census_literal is not None and control_literal is not None:
+        # The control's finding is printed rather than merely asserted: it is
+        # the evidence that a clean census line means something.
+        print(
+            f"  census fixture: {len(deepenable)} denominator-shifting key(s), "
+            f"{len(census_filled)} filled by `census_config`; control "
+            f"`operator_config` fills "
+            + ", ".join(f"{p}" for p, _ in control_filled)
         )
 
     if failures:

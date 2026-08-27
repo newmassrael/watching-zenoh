@@ -4493,4 +4493,306 @@ mod tests {
         .expect("a mode table reads");
         assert!(ingest.ignored.is_empty(), "{:?}", ingest.ignored);
     }
+
+    /// Whether `path` names something strictly INSIDE `key`.
+    ///
+    /// The length guard is not decoration: `path == key` would index one byte
+    /// past the end of `path`. `upstream_knows` spells the same predicate the
+    /// same way, and the three tests below share this one rather than each
+    /// restating it — a partition rule written three times is three things to
+    /// get wrong, and two of the three drafts here were missing the guard.
+    fn strictly_below(path: &str, key: &str) -> bool {
+        path.len() > key.len() && path.starts_with(key) && path.as_bytes()[key.len()] == b'/'
+    }
+
+    /// Which side claims the leaves a document can put BELOW a surface key.
+    ///
+    /// R2147 (open-debt items 215 and 217) — the population is
+    /// [`DEEPENABLE_UPSTREAM_KEYS`], and it is not a list of interesting cases:
+    /// it is DEFINED as the keys below which a real zenohd accepts leaves this
+    /// tree's census surface does not list, one zenohd run per entry. So it is
+    /// exactly the set of places where the census DENOMINATOR is a function of
+    /// what the operator's file fills in, which is the sentence both items are
+    /// about. Deriving it rather than naming cases is the whole method here: a
+    /// key that becomes deepenable joins this population by joining that list.
+    ///
+    /// Each member must be claimed by exactly one mechanism, and WHICH one is
+    /// forced by whether wz honours the key:
+    ///
+    /// * MODE — the key is in [`MODE_DEPENDENT_CONFIG_KEYS`], so its deeper
+    ///   leaves are the `{ router, peer, client }` table wz just resolved and
+    ///   `inside_a_mode_table` keeps them out of the ignored partition;
+    /// * SUBTREE — the key has entries in [`HONOURED_SUBTREE_LEAVES`], so the
+    ///   named fields of a honoured block are claimed one by one;
+    /// * OPAQUE — nothing claims them, so they fall into `ignored`.
+    ///
+    /// A HONOURED key that is OPAQUE is item 215's defect: wz would apply the
+    /// block and report its own fields as "wz does not honour this" in the same
+    /// breath. Nothing caught that before this test — R2141 moved three
+    /// deepenable keys into the honoured half and got it right by hand, and
+    /// R311y849 added [`HONOURED_SUBTREE_LEAVES`] for `connect/retry` by hand.
+    /// So this is a ratchet over a population that is currently clean, not a fix
+    /// for a live defect, and saying so is part of the claim.
+    #[test]
+    fn every_denominator_shifting_key_is_claimed_by_the_side_that_honours_it() {
+        assert!(
+            !DEEPENABLE_UPSTREAM_KEYS.is_empty(),
+            "the population is empty, so every rule below is vacuous"
+        );
+
+        let mut mode = Vec::new();
+        let mut subtree = Vec::new();
+        let mut opaque = Vec::new();
+        for key in DEEPENABLE_UPSTREAM_KEYS {
+            let honoured = HONOURED_CONFIG_KEYS.contains(key);
+            let claimed_by_table = MODE_DEPENDENT_CONFIG_KEYS.contains(key);
+            let claimed_by_fields = HONOURED_SUBTREE_LEAVES
+                .iter()
+                .any(|leaf| strictly_below(leaf, key));
+            assert!(
+                !(claimed_by_table && claimed_by_fields),
+                "{key} is claimed twice: a mode table and named subtree fields \
+                 are two different readings of the same leaves"
+            );
+
+            if claimed_by_table {
+                mode.push(*key);
+            } else if claimed_by_fields {
+                subtree.push(*key);
+            } else {
+                opaque.push(*key);
+            }
+
+            if honoured {
+                assert!(
+                    claimed_by_table || claimed_by_fields,
+                    "{key} is HONOURED and its deeper leaves are claimed by \
+                     nothing, so a file that fills the block gets it applied and \
+                     its own fields reported as unhonoured. Add the fields to \
+                     HONOURED_SUBTREE_LEAVES, or the key to \
+                     MODE_DEPENDENT_CONFIG_KEYS if upstream spells it \
+                     `ModeDependentValue`."
+                );
+            } else {
+                assert!(
+                    !claimed_by_fields,
+                    "{key} is NOT honoured yet has entries in \
+                     HONOURED_SUBTREE_LEAVES — claiming leaves under a key wz \
+                     does not apply hides them from the operator"
+                );
+            }
+        }
+
+        // The breakdown, not the total: a floor on the sum would be met by one
+        // bucket growing while another emptied, and an empty bucket is a rule
+        // that stopped being exercised.
+        println!(
+            "denominator-shifting keys: {} total — {} mode-table {mode:?}, \
+             {} named-subtree {subtree:?}, {} opaque {opaque:?}",
+            DEEPENABLE_UPSTREAM_KEYS.len(),
+            mode.len(),
+            subtree.len(),
+            opaque.len()
+        );
+        assert!(!mode.is_empty(), "the mode-table bucket emptied");
+        assert!(!subtree.is_empty(), "the named-subtree bucket emptied");
+        assert!(!opaque.is_empty(), "the opaque bucket emptied");
+    }
+
+    /// The census denominator is the surface of a document that fills NOTHING.
+    ///
+    /// R2147 (open-debt item 217) — `wz_reads_a_stock_zenohd_config`'s census
+    /// leg takes its denominator from a running zenohd handed `census_config`,
+    /// and that fixture's doc comment says why it fills nothing: measured, the
+    /// same census run against the OPERATOR fixture reported `metadata/name`
+    /// where the canonical surface has `metadata`, because that fixture fills
+    /// the subtree in. Until this test the reason lived only in that prose.
+    ///
+    /// The checkable form of it is here, in the constants, because that is
+    /// where a violation has to surface. Filling a deepenable key in the fixture
+    /// swaps `metadata` for `metadata/name` in the resolved surface, so the
+    /// census leg's exact set comparison against
+    /// [`UNHONOURED_UPSTREAM_CONFIG_KEYS`] REDS — and the only way to make it
+    /// green again is to put the deeper leaf into a surface constant, which is
+    /// what this test refuses. The fixture is guarded through the constants it
+    /// would have to move, which is why this needs no zenohd and runs in every
+    /// lane that compiles the crate; the census leg itself is `#[ignore]`d and
+    /// only hosted Layer Z reaches it.
+    #[test]
+    fn the_census_denominator_is_the_surface_of_a_document_that_fills_nothing() {
+        let below_a_deepenable_key = |path: &str| {
+            DEEPENABLE_UPSTREAM_KEYS
+                .iter()
+                .any(|key| strictly_below(path, key))
+        };
+
+        let mut checked = 0usize;
+        for key in HONOURED_CONFIG_KEYS
+            .iter()
+            .chain(UNHONOURED_UPSTREAM_CONFIG_KEYS)
+        {
+            assert!(
+                !below_a_deepenable_key(key),
+                "{key} sits BELOW a deepenable key, so the surface it belongs to \
+                 was resolved from a document that FILLED that subtree. The \
+                 denominator would then be the fixture's surface rather than \
+                 upstream's, and the honoured fraction would silently start \
+                 counting something else."
+            );
+            checked += 1;
+        }
+        assert_eq!(
+            checked,
+            HONOURED_CONFIG_KEYS.len() + UNHONOURED_UPSTREAM_CONFIG_KEYS.len(),
+            "the sweep did not reach the whole surface"
+        );
+
+        // The other direction: the fields of a honoured subtree are claimed for
+        // the `ignored` report and must NOT be in the surface, or one census
+        // leaf would be counted as several and the denominator would inflate
+        // without any fixture changing at all.
+        assert!(!HONOURED_SUBTREE_LEAVES.is_empty());
+        for leaf in HONOURED_SUBTREE_LEAVES {
+            assert!(
+                !HONOURED_CONFIG_KEYS.contains(leaf)
+                    && !UNHONOURED_UPSTREAM_CONFIG_KEYS.contains(leaf),
+                "{leaf} is a subtree FIELD and also a surface key — a real \
+                 zenohd resolves one leaf there, so the surface must carry the \
+                 subtree and not its contents"
+            );
+            let owner = leaf.rsplit_once('/').expect("a field has a parent").0;
+            assert!(
+                HONOURED_CONFIG_KEYS.contains(&owner),
+                "{leaf} names fields under {owner}, which wz does not honour"
+            );
+            assert!(
+                DEEPENABLE_UPSTREAM_KEYS.contains(&owner),
+                "{leaf} names fields under {owner}, which a real zenohd does not \
+                 accept a deeper shape at — measured by `deepenable_audit.py`"
+            );
+        }
+        println!(
+            "census denominator: {} surface key(s), none below any of the {} \
+             denominator-shifting keys; {} honoured subtree field(s) held OUT of \
+             the surface",
+            checked,
+            DEEPENABLE_UPSTREAM_KEYS.len(),
+            HONOURED_SUBTREE_LEAVES.len()
+        );
+    }
+
+    /// What the reader ACTUALLY does with a leaf below each of those keys.
+    ///
+    /// R2147 (open-debt items 215 and 217) — the test above is set arithmetic
+    /// over four constants, and set arithmetic can agree with itself while the
+    /// reader does something else. This drives every member of the same derived
+    /// population through `from_json5` and asserts which partition the deeper
+    /// leaf lands in, which is the thing an operator sees.
+    ///
+    /// No per-key value knowledge is needed, and that is deliberate — a table of
+    /// values would be a copy of the reader's own type expectations:
+    ///
+    /// * the mode-table probe names `router` while the document says
+    ///   `mode: "peer"`, so `for_this_mode` returns "no instruction for this
+    ///   node" WITHOUT ever inspecting the value;
+    /// * the subtree probe uses an integer, which
+    ///   `a_partial_connect_retry_block_fills_the_rest_from_zenoh_defaults`
+    ///   measured reads as a float too, so one literal covers both field types;
+    /// * the opaque probe's value is never read by anything.
+    #[test]
+    fn every_denominator_shifting_key_puts_its_deeper_leaves_in_the_right_partition() {
+        let (mut mode_n, mut subtree_n, mut opaque_n) = (0usize, 0usize, 0usize);
+
+        for key in DEEPENABLE_UPSTREAM_KEYS {
+            let fields: Vec<&&str> = HONOURED_SUBTREE_LEAVES
+                .iter()
+                .filter(|leaf| strictly_below(leaf, key))
+                .collect();
+
+            if MODE_DEPENDENT_CONFIG_KEYS.contains(key) {
+                let doc = nested(key, "{ router: 1 }");
+                let ingest = ZenohNodeConfig::from_json5(&doc)
+                    .unwrap_or_else(|e| panic!("{key}: a mode table was refused: {e:?}\n{doc}"));
+                let leaf = format!("{key}/router");
+                assert!(
+                    !ingest.ignored.contains(&leaf),
+                    "{key}: `{leaf}` was reported as a key wz does not honour, \
+                     but it is a row of a mode table wz just resolved\n{:?}",
+                    ingest.ignored
+                );
+                assert!(
+                    ingest.stated_for_other_modes.contains(key),
+                    "{key}: a table naming only `router` says nothing to a peer, \
+                     so the operator has to be told it was stated for another \
+                     mode\n{:?}",
+                    ingest.stated_for_other_modes
+                );
+                mode_n += 1;
+            } else if !fields.is_empty() {
+                for field in &fields {
+                    let doc = nested(field, "1");
+                    let ingest = ZenohNodeConfig::from_json5(&doc).unwrap_or_else(|e| {
+                        panic!("{field}: a honoured subtree field was refused: {e:?}\n{doc}")
+                    });
+                    assert!(
+                        !ingest.ignored.iter().any(|p| p == **field),
+                        "{key}: `{field}` was reported unhonoured while wz \
+                         applied the block it belongs to\n{:?}",
+                        ingest.ignored
+                    );
+                    assert!(
+                        ingest.named.contains(key),
+                        "{key}: a stated field must name the subtree once\n{:?}",
+                        ingest.named
+                    );
+                }
+                // And a field the list does NOT name is still reported: the
+                // acceptance boundary lets it through (a real zenohd starts on
+                // it) and wz's answer to that is to REPORT it, which is the one
+                // thing upstream does not do for the operator.
+                let stray = format!("{key}/zzz_probe_leaf");
+                let doc = nested(&stray, "1");
+                let ingest = ZenohNodeConfig::from_json5(&doc)
+                    .unwrap_or_else(|e| panic!("{stray}: refused: {e:?}\n{doc}"));
+                assert!(
+                    ingest.ignored.contains(&stray),
+                    "{key}: `{stray}` is not one of the block's fields and was \
+                     swallowed silently\n{:?}",
+                    ingest.ignored
+                );
+                subtree_n += 1;
+            } else {
+                let stray = format!("{key}/zzz_probe_leaf");
+                let doc = nested(&stray, "1");
+                let ingest = ZenohNodeConfig::from_json5(&doc)
+                    .unwrap_or_else(|e| panic!("{stray}: refused: {e:?}\n{doc}"));
+                assert!(
+                    ingest.ignored.contains(&stray),
+                    "{key}: an opaque subtree's contents must be REPORTED, or an \
+                     operator believes a block took effect that wz never read\n{:?}",
+                    ingest.ignored
+                );
+                assert!(
+                    !ingest.named.contains(key),
+                    "{key}: wz does not honour this key, so nothing under it may \
+                     name it\n{:?}",
+                    ingest.named
+                );
+                opaque_n += 1;
+            }
+        }
+
+        println!(
+            "deeper-leaf partitions driven: {mode_n} mode-table, {subtree_n} \
+             named-subtree, {opaque_n} opaque"
+        );
+        assert_eq!(
+            mode_n + subtree_n + opaque_n,
+            DEEPENABLE_UPSTREAM_KEYS.len(),
+            "a member of the population was driven through no probe at all"
+        );
+        // Per-bucket floors. A total floor would let the opaque bucket carry a
+        // shrinking mode bucket, and the mode arm is the one R2141 grew.
+        assert!(mode_n > 0 && subtree_n > 0 && opaque_n > 0);
+    }
 }

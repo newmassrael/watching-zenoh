@@ -312,7 +312,13 @@ if ! wz_previous_run_gate "$prev_sha" 'pre-push'; then
     exit 1
 fi
 
-# ─── gate 2d — config key set vs its drop-in fixture (R2138) ────────
+# ─── gate 2d — the config key set vs the fixtures that owe it ───────
+#
+# THREE sites now, each added by the round that found it: the drop-in fixture
+# must NAME every honoured key (R2138, item 224); the defaults leg must CLASS
+# every honoured key (R2142, item 225's red); and the census fixture must FILL
+# no key that would move the census denominator (R2147, item 217). They share
+# one gate because they share one reason, which the next paragraph gives.
 # Open-debt item 224, and the LOCAL half of the gate this hook exists to be.
 # `HONOURED_CONFIG_KEYS` is in `wz-runtime-tokio`; the drop-in leg of
 # `wz_reads_a_stock_zenohd_config.rs` carries a hand-written JSON5 config and
@@ -336,8 +342,9 @@ fi
 # scoping for.
 if ! python3 scripts/lib/config_key_fixture_gate.py; then
     echo "" >&2
-    echo "pre-push: config-key/fixture gate FAILED — a honoured key and the" >&2
-    echo "          drop-in JSON5 fixture that must name it have drifted." >&2
+    echo "pre-push: config-key/fixture gate FAILED — the key set and a" >&2
+    echo "          fixture that owes it have drifted. The line above says" >&2
+    echo "          WHICH of the three sites; do not assume the drop-in one." >&2
     echo "          Hosted Layer Z is the only other thing that checks this," >&2
     echo "          and it needs zenohd built." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
