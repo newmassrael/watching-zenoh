@@ -25,7 +25,8 @@
 //! verb (`net/runtime/orchestrator.rs:497-541` and `:318-400`): wrap the whole
 //! phase in the phase's `timeout_ms`, and fork per endpoint on
 //! `(does this retry, does a failure end startup)`. That fork is
-//! [`PhaseArm`], and it is why [`PhasePolicy`] is not two types.
+//! [`PhaseArm`](crate::startup_phase::PhaseArm), and it is why
+//! [`PhasePolicy`](crate::startup_phase::PhasePolicy) is not two types.
 //!
 //! # What the DEFAULTS are, and why they are not symmetric
 //!

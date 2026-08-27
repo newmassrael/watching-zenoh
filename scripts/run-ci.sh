@@ -8326,9 +8326,26 @@ layer_c1bz_docs_resolve() {
     # pre-push subset could not see it -- it says so itself, "the
     # stale-budget-line check needs the full lane" -- so this is a shape only
     # hosted catches. Annotate ABOVE the quote, never inside it.
+    #
+    # Round 2160: wz-ap-demo 27 -> 26, and the route there is the point, because
+    # NO DOC TEXT WAS DELETED. R2159's link multiset over this crate is a strict
+    # SUPERSET of its parent's (207 -> 218 links, zero removed), so the downward
+    # arm fired on a change of SCOPE rather than of prose. The finding that went
+    # is `unresolved link to RetryPolicy::ZENOH_DEFAULT`, measured by rebuilding
+    # this crate's docs from the parent's sources against the same dependency
+    # tree: 27 there, 26 here, one line of difference.
+    #
+    # R2159 needed `RetryPolicy` as a VALUE in runner.rs and imported it at
+    # module scope (`runner.rs:103`). The name had been imported only inside that
+    # file's `mod tests` before, so a bare `[`RetryPolicy::ZENOH_DEFAULT`]`
+    # written in a doc comment further down the same file had never resolved --
+    # while the identical link in args.rs always had, because args.rs carries the
+    # import at module scope. A `use` added for the compiler's benefit is
+    # therefore a doc-link edit too, which is the shape this arm exists to catch:
+    # nothing in R2159's diff LOOKS like a doc change, and the count still moved.
     budget="
         wz:2
-        wz-ap-demo:27
+        wz-ap-demo:26
         wz-capi-c:45
         wz-capi-core:7
         wz-capi-pico:45

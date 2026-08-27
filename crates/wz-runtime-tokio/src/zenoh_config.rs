@@ -983,7 +983,9 @@ pub struct ZenohNodeConfig {
     /// an unstated `connect` as `{"endpoints":[],"exit_on_failure":null,
     /// "retry":null,"timeout_ms":null}` (measured), so `None` here is that
     /// `null` and NOT a resolved default. The resolved default is per-mode and
-    /// lives in [`PhasePolicy::connect_default_for`], which is where the
+    /// lives in
+    /// [`PhasePolicy::connect_default_for`](crate::startup_phase::PhasePolicy::connect_default_for),
+    /// which is where the
     /// consumer reaches for it — carrying it here would make an unmentioned key
     /// indistinguishable from a stated one at the expansion boundary.
     pub connect_timeout_ms: Option<crate::startup_phase::PhaseBudget>,
