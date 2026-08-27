@@ -606,15 +606,10 @@ jobs:
         # only in their TEST targets, and three of those are checked lib-only.
         run: bash scripts/run-ci.sh --layer C1cf
 
-      - name: Layer C1cn — every crate compiles its non-default code
-        # R2133 — C1cf's mirror. That lane asks whether a crate survives its
-        # defaults being OFF; nothing asked whether the code behind a feature
-        # that is off BY DEFAULT reaches rustc at all. It does not: pre-push
-        # builds default features, so non-default modules are never compiled.
-        # Its first sweep found a live break R2112 had left in wz-ap-demo.
-        # Measured cost: 19 of 20 crates with a non-default feature, ~126s;
-        # `wz` is tier 3 because a vendored dep refuses an all-features build.
-        run: bash scripts/run-ci.sh --layer C1cn
+      # R2163 — Layer C1cn MOVED OUT of this job, to `nondefault` below. It was
+      # 562s of the 1790s that tripped `job-budget-margin.sh` at 99%, every lane
+      # green; see that job's header for the measurement and for why a split
+      # rather than a bigger `timeout-minutes`.
 
       - name: Layer C1i — scouting-active glue unit tests
         # R311ep — scouting-active is off by default, so Layer C1's
@@ -1131,6 +1126,120 @@ jobs:
         # It mutates `report.rs` in place and restores it byte for byte on
         # every exit path; a hosted runner's checkout is discarded either way.
         run: bash scripts/run-ci.sh --layer C0mut
+
+  # ─────────────────────────────────────────────────────────────────
+  # R2163 — the NON-DEFAULT job. Layer C1cn peeled off `ci`.
+  #
+  # WHAT FIRED. Runs 33059064203 and 33059199683 both ended
+  # `job-budget-margin: elapsed 1790s of 1800s budget (99%)` on `validate +
+  # verify + test`, with EVERY lane above it green. The margin was the failure,
+  # which is exactly what that guard exists to say while there is still room to
+  # act on it.
+  #
+  # WHERE THE TIME WENT, measured off run 33059064203's own job log rather than
+  # estimated — the per-layer durations, largest first:
+  #
+  #     Layer C1cn    562s      <- this job
+  #     Layer C1cf    254s
+  #     Layer C1      229s
+  #     Layer C1bv    105s
+  #     Layer C4       80s
+  #     Layer C1h      79s
+  #     ...every other lane <60s each
+  #
+  # C1cn is the largest single entry and by a factor of two. It is also the
+  # NEWEST: R2135 added it to this workflow (it had been in `run-ci.sh` and in
+  # no job, so hosted had never run it), and R2156 then put a second half on it
+  # — `nondefault-tests-gate.sh --census`, which builds every crate twice to
+  # list its tests. So the lane roughly doubled in the two rounds before the
+  # ceiling was hit, which is the shape the y865 note predicts: cost grows
+  # monotonically in atom count, and the growth lands on whichever job holds the
+  # lane.
+  #
+  # WHY SPLIT RATHER THAN RAISE `timeout-minutes`. The guard's own prescription,
+  # and this file's precedent three times over (`interop`, `footprint`,
+  # `verdict-legs`): a bigger number buys one atom's worth of time and re-arms
+  # the same failure, because the growth is monotonic. Splitting changes the
+  # SLOPE — C1cn's growth is now charged to its own budget instead of to the
+  # gate every other layer shares. Predicted landing for `ci`: ~1228s, 68% of
+  # 1800s, back inside the band the y865 note measured.
+  #
+  # WHAT THIS JOB NEEDS. `cmake` is NOT in its list, and that is derived rather
+  # than trimmed by taste: `apt_package_census.py` decides cmake from
+  # `cargo tree -i cmake`, whose one consumer is `zenoh-pico-sys` — a crate
+  # reached only by a `--workspace` command or by being named, and this lane's
+  # two gates iterate members individually. No `fetch-depth: 0` either: this
+  # lane reads no history.
+  nondefault:
+    name: non-default feature compile + census (Layer C1cn)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Budget stamp — start this job's own clock
+        # Same reason the `ci` job stamps: `timeout-minutes` measures from when
+        # the job is CREATED, and the margin gate needs elapsed RUN time.
+        run: date +%s > "$RUNNER_TEMP/wz_job_start"
+
+      - name: Checkout (with submodules)
+        # `submodules: recursive` is load-bearing: the members this lane
+        # compiles resolve through vendor/sce path deps.
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Restore apt archives (R311y882 — keep the mirror off the path)
+        # See the `verdict-legs` copy for the measurement and for why RESTORE
+        # and SAVE are split.
+        id: apt-archives
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            apt-${{ runner.os }}-${{ github.job }}-
+
+      - name: Install system dependencies
+        run: |
+          bash scripts/lib/apt-install.sh libclang-dev libxml2-dev clang perl pkg-config
+
+      - name: Save apt archives
+        if: always() && env.WZ_APT_CACHE_DIRTY == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        run: rustup show
+
+      - name: Cache Cargo registry + build artifacts
+        # Its OWN key, for the reason footprint, interop and verdict-legs carry
+        # one: parallel jobs must not race a single cache save.
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates -> target
+          key: nondefault
+
+      - name: Layer C1cn — every crate compiles its non-default code
+        # R2133 — C1cf's mirror. That lane asks whether a crate survives its
+        # defaults being OFF; nothing asked whether the code behind a feature
+        # that is off BY DEFAULT reaches rustc at all. It does not: pre-push
+        # builds default features, so non-default modules are never compiled.
+        # Its first sweep found a live break R2112 had left in wz-ap-demo.
+        # Measured cost: 19 of 20 crates with a non-default feature, ~126s;
+        # `wz` is tier 3 because a vendored dep refuses an all-features build.
+        #
+        # R2156 added its second half — `nondefault-tests-gate.sh --census`,
+        # which asks whether anything RUNS the code the half above compiles.
+        run: bash scripts/run-ci.sh --layer C1cn
+
+      - name: Budget margin — this job's own clock
+        # The floor is 20, not `ci`'s 30: a job holding ONE lane is exactly the
+        # case the floor exists to catch, and if C1cn ever shrinks back under a
+        # fifth of the budget it should hand the budget back rather than sit on
+        # it. The alarm stays 90 for the reason the `ci` copy gives.
+        if: always()
+        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1800 90 20 '${{ job.status }}'
 
   # ─────────────────────────────────────────────────────────────────
   # R311y351 — the CODEC-FOOTPRINT job. Layer F ran as the `ci` job's last

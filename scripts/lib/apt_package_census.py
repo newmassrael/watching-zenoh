@@ -153,6 +153,12 @@ _add(
         "ci",
         "validate-codegen",
         "verdict-legs",
+        # R2163 — Layer C1cn's own job, peeled off `ci` for its budget. It
+        # compiles EVERY member at its non-default features, so every reason on
+        # this row that reaches a member reaches it. No `cmake`: that one is
+        # DERIVED below, and this lane names members individually rather than
+        # running a `--workspace` command, so it never reaches zenoh-pico-sys.
+        "nondefault",
         "footprint",
         "interop",
         "cross-mcu",
@@ -173,6 +179,12 @@ _add(
         "ci",
         "validate-codegen",
         "verdict-legs",
+        # R2163 — Layer C1cn's own job, peeled off `ci` for its budget. It
+        # compiles EVERY member at its non-default features, so every reason on
+        # this row that reaches a member reaches it. No `cmake`: that one is
+        # DERIVED below, and this lane names members individually rather than
+        # running a `--workspace` command, so it never reaches zenoh-pico-sys.
+        "nondefault",
         "footprint",
         "interop",
         "cross-mcu",
@@ -196,6 +208,12 @@ _add(
         "ci",
         "validate-codegen",
         "verdict-legs",
+        # R2163 — Layer C1cn's own job, peeled off `ci` for its budget. It
+        # compiles EVERY member at its non-default features, so every reason on
+        # this row that reaches a member reaches it. No `cmake`: that one is
+        # DERIVED below, and this lane names members individually rather than
+        # running a `--workspace` command, so it never reaches zenoh-pico-sys.
+        "nondefault",
         "footprint",
         "feature-gates",
         "routing-adminspace",
@@ -303,6 +321,12 @@ _add(
         "ci",
         "validate-codegen",
         "verdict-legs",
+        # R2163 — Layer C1cn's own job, peeled off `ci` for its budget. It
+        # compiles EVERY member at its non-default features, so every reason on
+        # this row that reaches a member reaches it. No `cmake`: that one is
+        # DERIVED below, and this lane names members individually rather than
+        # running a `--workspace` command, so it never reaches zenoh-pico-sys.
+        "nondefault",
         "footprint",
         "interop",
         "cross-mcu",
@@ -332,6 +356,12 @@ _add(
         "ci",
         "validate-codegen",
         "verdict-legs",
+        # R2163 — Layer C1cn's own job, peeled off `ci` for its budget. It
+        # compiles EVERY member at its non-default features, so every reason on
+        # this row that reaches a member reaches it. No `cmake`: that one is
+        # DERIVED below, and this lane names members individually rather than
+        # running a `--workspace` command, so it never reaches zenoh-pico-sys.
+        "nondefault",
         "footprint",
         "interop",
         "cross-mcu",

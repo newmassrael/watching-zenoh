@@ -746,6 +746,60 @@ want_all=0
 [[ "${1:-}" == "--all-legs" ]] && want_all=1
 
 rc=0
+
+# ── R2163: PROVISION what a leg's features need, before running any leg ──
+#
+# `runtime-tokio-uring`'s registering tests pin the whole reassembly pool and
+# the kernel charges those pages to RLIMIT_MEMLOCK. That precondition used to
+# live only inside Layer C1br, so this gate -- which names the feature in its
+# wide `wz-runtime-tokio` leg -- ran the same two tests with the limit a stock
+# runner grants. MEASURED, hosted run 33059064203, ONE job: C1br `pass (41s)`,
+# and this gate `1318 passed; 2 failed`, both `uring::tests::`, at
+# `soft=8388608 hard=8388608`. The two lanes disagreed about the same tests on
+# the same machine, and provisioning was the whole difference.
+#
+# ⚠ It runs in THIS shell, unconditionally on whether any leg is selected, and
+# both of those are deliberate. `ulimit` is inherited by children, so a raise in
+# a subshell would raise nothing the cargo runs below can see; and probing even
+# when no uring leg is selected keeps the report the same on every invocation
+# instead of appearing only in the mode that fails.
+#
+# ⛔ NOT a silent skip on failure. The verdict below mirrors Layer C1br's,
+# because it is the same host capability being judged: an errno that is not
+# ENOMEM is a DEFECT and fails everywhere; a genuine absence fails hosted (or
+# under `WZ_URING_REQUIRE=1`) and is reported by name locally.
+uring_legs=()
+for leg in "${LEGS[@]}"; do
+    IFS='|' read -r _p _s _f _r _h <<<"$leg"
+    [[ "${_f//[[:space:]]/}" == *"runtime-tokio-uring"* ]] || continue
+    [[ $want_all -eq 1 || "$_s" == "hook" ]] || continue
+    uring_legs+=("$_p")
+done
+if [[ ${#uring_legs[@]} -gt 0 ]]; then
+    # shellcheck source=scripts/lib/uring-memlock.sh
+    source "$here/uring-memlock.sh"
+    uring_memlock_provision "$repo"
+    uring_rc=$?
+    if (( uring_rc != 0 )); then
+        echo "nondefault-tests: ${uring_legs[*]} names runtime-tokio-uring, whose" >&2
+        echo "  registering tests pin the reassembly pool: $URING_MEMLOCK_WHY" >&2
+        if (( uring_rc == 4 )); then
+            echo "nondefault-tests: FAIL -- that errno is a DEFECT, not provisioning." >&2
+            exit 1
+        fi
+        if [[ "${WZ_URING_REQUIRE:-0}" == "1" || "${GITHUB_ACTIONS:-}" == "true" ]]; then
+            echo "nondefault-tests: FAIL -- WZ_URING_REQUIRE/GITHUB_ACTIONS is set," >&2
+            echo "  so a host that cannot register is a verdict, not a condition." >&2
+            exit 1
+        fi
+        echo "nondefault-tests: the two uring::tests:: registrations will FAIL on" >&2
+        echo "  this host for that reason. Raise RLIMIT_MEMLOCK (ulimit -l, or" >&2
+        echo "  prlimit --memlock) and re-run; the leg is NOT being skipped." >&2
+    else
+        echo "  provisioned for runtime-tokio-uring: $URING_MEMLOCK_WHY"
+    fi
+fi
+
 deferred=()
 for leg in "${LEGS[@]}"; do
     IFS='|' read -r pkg scope feats filter handoff <<<"$leg"

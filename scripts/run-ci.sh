@@ -7682,117 +7682,26 @@ layer_c1bf_cargo_clippy_all_features() {
 # Only after both does an absence become a verdict, and the three exit codes keep
 # "no io_uring" (provisioning) apart from "ENOMEM" (provisioning) and apart from
 # any other errno (a defect, which is a FAIL everywhere and never a SKIP).
-# `ulimit` speaks KIBIBYTES and the requirement is in BYTES. Converting at the
-# one place that reads the limit — the first version of this lane printed a soft
-# limit in bytes beside a hard limit in KiB, in the same sentence.
-_c1br_soft_memlock_bytes() { _c1br_memlock_bytes -Sl; }
-_c1br_hard_memlock_bytes() { _c1br_memlock_bytes -Hl; }
-_c1br_memlock_bytes() {
-    local s
-    s="$(ulimit "$1")"
-    if [[ "$s" == "unlimited" ]]; then echo "-1"; else echo "$(( s * 1024 ))"; fi
-}
-
-# Raise this shell's RLIMIT_MEMLOCK toward `$1` bytes, by the two routes an
-# unprivileged process has. Best-effort throughout: every failure here is
-# reported by the probe that follows, so a silent `|| true` cannot hide one.
-_c1br_raise_memlock() {
-    local need="$1" hard soft
-    hard="$(ulimit -Hl)"
-    if [[ "$hard" == "unlimited" ]]; then
-        ulimit -l unlimited 2>/dev/null || true
-    else
-        ulimit -l "$hard" 2>/dev/null || true
-    fi
-    soft="$(_c1br_soft_memlock_bytes)"
-    if [[ "$soft" != "-1" ]] && (( soft < need )) && sudo -n true 2>/dev/null; then
-        # Raising the HARD limit needs privilege. A CI runner is precisely where
-        # that is available, and `prlimit` on our own pid is the narrowest form
-        # of it — no test runs as root.
-        #
-        # UNLIMITED, not `need`. Provisioning exactly one registration's worth is
-        # what the first version did, and it produced a second failure that took
-        # a bisect to read: io_uring context teardown is DEFERRED, so a binary
-        # that registers the pool in several tests still holds the earlier
-        # charges when the next one registers, even run single-threaded. The
-        # minimum is the PROBE's business (below); what a host should grant a
-        # lane that pins memory is as much as it will.
-        sudo -n prlimit --memlock=unlimited:unlimited --pid $$ 2>/dev/null \
-            || sudo -n prlimit "--memlock=${need}:${need}" --pid $$ 2>/dev/null || true
-        ulimit -l unlimited 2>/dev/null \
-            || ulimit -l "$(( (need + 1023) / 1024 ))" 2>/dev/null || true
-    fi
-}
+# R2163 — the raising, the dims and the probe MOVED to
+# `scripts/lib/uring-memlock.sh`, unchanged in behaviour, because this lane
+# stopped being their only caller: `nondefault-tests-gate.sh`'s wide
+# `wz-runtime-tokio` leg names `runtime-tokio-uring` too, and ran the same two
+# registering tests with none of this provisioning. That file's header carries
+# the measurement. What stays here is this lane's own VERDICT POLICY, which is
+# the part that is genuinely C1br's.
+# shellcheck source=scripts/lib/uring-memlock.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/uring-memlock.sh"
 
 layer_c1br_uring_fixed_buffers() {
-    local out need rc soft hard count size pool_bytes page
+    local out rc why
 
-    # The requirement is READ from the generated pool, never written down here.
-    # The same fact reached by two paths always drifts (R311y589's own lesson),
-    # and this one moves whenever `sources/network/reassembly_pool_ap.scxml`
-    # does — a resized pool must not leave a stale number in a provisioning gate.
-    read -r count size < <(python3 - <<'PY'
-import re, sys
-src = open("out/wz-runtime-tokio/reassembly_pool_ap.rs", encoding="utf-8").read()
-def const(name):
-    m = re.search(r"pub const %s: usize = (\d+);" % name, src)
-    if not m:
-        sys.exit("C1br: cannot read %s from the generated pool" % name)
-    return int(m.group(1))
-print(const("SLOT_COUNT"), const("SLOT_SIZE"))
-PY
-    ) || { echo "  C1br FAIL: could not derive the locked-byte requirement" >&2; return 1; }
-    [[ -n "$count" && -n "$size" ]] || {
-        echo "  C1br FAIL: the pool dims did not parse" >&2; return 1; }
-
-    # The kernel charges WHOLE PAGES per registered region, and the pool's slots
-    # are not page-aligned, so each of the `count` regions can straddle one extra
-    # page. Provisioning the bare pool size is what the first version of this
-    # lane did, and the kernel refused at exactly the limit. One page per region
-    # plus one is the worst case, stated rather than fudged.
-    pool_bytes=$(( count * size ))
-    page="$(getconf PAGESIZE 2>/dev/null || echo 4096)"
-    need=$(( pool_bytes + count * page + page ))
-
-    _c1br_raise_memlock "$need"
-    soft="$(_c1br_soft_memlock_bytes)"
-    hard="$(_c1br_hard_memlock_bytes)"
-
-    # The probe registers the SAME SHAPE the adapter does — `count` separate
-    # regions of `size`, not one big one — because the page-straddle above is a
-    # property of the shape. A single-region probe would pass while the real
-    # registration of the same total failed.
-    python3 - "$count" "$size" <<'PY'
-import ctypes, os, sys
-count, size = int(sys.argv[1]), int(sys.argv[2])
-libc = ctypes.CDLL(None, use_errno=True)
-class P(ctypes.Structure):
-    _fields_ = [("sq_entries", ctypes.c_uint32), ("cq_entries", ctypes.c_uint32),
-                ("flags", ctypes.c_uint32), ("sq_thread_cpu", ctypes.c_uint32),
-                ("sq_thread_idle", ctypes.c_uint32), ("features", ctypes.c_uint32),
-                ("wq_fd", ctypes.c_uint32), ("resv", ctypes.c_uint32 * 3),
-                ("sq_off", ctypes.c_uint64 * 10), ("cq_off", ctypes.c_uint64 * 10)]
-class IoVec(ctypes.Structure):
-    _fields_ = [("iov_base", ctypes.c_void_p), ("iov_len", ctypes.c_size_t)]
-p = P()
-fd = libc.syscall(425, 8, ctypes.byref(p))        # io_uring_setup
-if fd < 0:
-    sys.exit(2)
-bufs = [ctypes.create_string_buffer(size) for _ in range(count)]
-iovs = (IoVec * count)(*[IoVec(ctypes.cast(b, ctypes.c_void_p), size) for b in bufs])
-rc = libc.syscall(427, fd, 0, ctypes.byref(iovs), count)  # io_uring_register, BUFFERS
-err = ctypes.get_errno()
-os.close(fd)
-sys.exit(0 if rc >= 0 else (3 if err == 12 else 4))
-PY
+    # ⚠ Provision in THIS shell: `ulimit` is a property of the process and its
+    # children, so the cargo runs below inherit it only because they are started
+    # from here.
+    uring_memlock_provision "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
     rc=$?
     if (( rc != 0 )); then
-        local why
-        case "$rc" in
-            2) why="io_uring_setup refused by this kernel" ;;
-            3) why="io_uring_register refused ${count}x${size} locked bytes with ENOMEM (needed ${need} incl. page headroom; RLIMIT_MEMLOCK after raising: soft=${soft} hard=${hard} bytes, -1 = unlimited)" ;;
-            *) why="the io_uring capability probe failed with an errno that is NOT ENOMEM (rc=${rc}) — that is a defect, not provisioning" ;;
-        esac
+        why="$URING_MEMLOCK_WHY"
         if (( rc == 4 )); then
             echo "  C1br FAIL: ${why}" >&2
             return 1
