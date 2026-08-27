@@ -2279,6 +2279,26 @@ PY
     # twelve arms are the only place the failure branches are exercised.
     python3 scripts/lib/unhonoured_kind_evidence_gate.py --selftest || return 1
     python3 scripts/lib/unhonoured_kind_evidence_gate.py || return 1
+    # R2162 (unregistered open-debt item 199) — the upstream zenoh CAPABILITY
+    # FEATURE surface as a denominator. Item 199 recorded "18 of 19 have a wz
+    # atom" as a hand measurement and nothing re-derived it afterwards, so a
+    # capability upstream GREW would have been invisible while the fraction
+    # still read as full coverage.
+    #
+    # This is the SHAPE arm: the table's own well-formedness plus the anchor
+    # check — every wz cargo feature a row names must really be declared by a
+    # workspace member, which is cargo's own view and needs nothing built. The
+    # UPSTREAM arm (does the table still equal what upstream declares) needs a
+    # zenoh source tree and runs in Layer Z beside `deepenable_audit.py`; the
+    # default run PRINTS that deferral rather than leaving the reader to take a
+    # green shape arm for a graded surface.
+    #
+    # The selftest runs FIRST, and it is load-bearing here for a reason the
+    # other gates on this layer do not have: the upstream arm is the half NO
+    # machine without a zenoh checkout exercises, so without it that arm's
+    # failure branches would have a population of zero on most runs.
+    python3 scripts/lib/upstream_feature_census.py --selftest || return 1
+    python3 scripts/lib/upstream_feature_census.py || return 1
     return 0
 }
 
@@ -12272,6 +12292,24 @@ layer_z_zenohd_interop() {
         echo "  Z FAIL: the acceptance boundary's exception list no longer matches" \
              "what a real zenohd accepts — see the lines above for which key and" \
              "which direction"
+        return 1
+    fi
+    # R2162 (unregistered open-debt item 199) — the UPSTREAM arm of the
+    # capability-feature census. It belongs on this layer for the same reason
+    # the audit above does: this is the layer that already provisions a pinned
+    # zenoh, so the anchor is here and nowhere else. Layer C0 runs the SHAPE arm
+    # of the same script with nothing built.
+    #
+    # Cost is milliseconds — one `cargo metadata --no-deps` against the pinned
+    # tree, no build, no network — so unlike the 117s audit above this is not
+    # here to keep a slow thing off the fast path. It is here because the input
+    # is. It exits 2 with every path it tried when no source tree is reachable,
+    # which is a FAIL and not a skip: a census whose denominator is missing must
+    # not report a numerator.
+    if ! python3 scripts/lib/upstream_feature_census.py --upstream; then
+        echo "  Z FAIL: the upstream capability-feature table no longer matches" \
+             "what the pinned zenoh declares — see the lines above for which" \
+             "feature and which direction"
         return 1
     fi
     # R311y839 — the CLOSE SCOPE witness, run HERE: above every pico-CLI check
