@@ -12145,9 +12145,16 @@ layer_z_zenohd_interop() {
     # Item 503 filed this as "no lane runs it" on the premise that the oracle is
     # untracked. That premise was WRONG and re-checking it is what closed the
     # item: this lane already provisions zenohd. The real cost is wall clock,
-    # MEASURED at 219s for 116 keys — 111 of them refusals, each paying zenohd's
-    # own ~2s startup, which is not ours to shorten. Hosted-only: pre-push never
-    # runs Layer Z, so this does not slow a push.
+    # RE-MEASURED in R2149 at 117s for 111 keys — 95 of them refusals, each
+    # paying zenohd's own startup, which is not ours to shorten. Hosted-only:
+    # pre-push never runs Layer Z, so this does not slow a push.
+    #
+    # The figures above were "219s for 116 keys — 111 of them refusals" until
+    # R2149. Both had gone stale as the surface moved under them, which is the
+    # ordinary fate of a measurement written as prose beside the thing it
+    # measures; they are restated rather than quietly replaced so the next
+    # reader can see the drift is expected here and re-measure instead of
+    # quoting.
     if ! WZ_ZENOHD_BIN="$zenohd" python3 scripts/lib/deepenable_audit.py; then
         echo "  Z FAIL: the acceptance boundary's exception list no longer matches" \
              "what a real zenohd accepts — see the lines above for which key and" \

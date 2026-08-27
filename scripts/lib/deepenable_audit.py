@@ -44,12 +44,51 @@ excused: `plugins` answers `plugins.zzz_not_a_mode must be object` -- a complain
 about the VALUE, not about the name -- while `plugins: { rest: { zzz: 1 } }`
 starts. It is reported as UNDECIDED so the reader is told, not told nothing.
 
-## Why this is NOT wired into a CI layer
+## The SECOND question, added in R2149 (open-debt item 538)
 
-Its oracle is `target/zenohd/zenohd`, which no clone and no CI runner has (the
-same reason `debt_plane_census.py` stays local). A gate whose input is absent
-must FAIL rather than skip, so hosting it would red every run. It exits 2 when
-the binary is missing, and is a LOCAL instrument until that changes.
+The classification above already separates a mode table from an opaque subtree,
+and until R2149 the file threw that apart away -- both folded into one `accepts`
+set, the distinction surviving only in `--verbose` output and compared against
+nothing. So `MODE_DEPENDENT_CONFIG_KEYS` was never asked of upstream at all,
+while every existing gate over it checks wz's constants against wz's OWN reader.
+A wz that is wrong about upstream and self-consistent passes all of them.
+
+It matters because that constant decides whether `inside_a_mode_table` lifts
+every leaf under a key OUT of the ignored report. A key wrongly on it makes wz
+read an operator's typo as a row of a table it honours: not applied, not
+reported, silent.
+
+⛔ THE TWO DIRECTIONS ARE ASYMMETRIC, AND THAT ASYMMETRY IS THE DESIGN. A
+declared key is refuted only by REFUSED. OPAQUE does NOT refute one: measured,
+a real zenohd answers OPAQUE for `scouting/multicast/autoconnect_strategy`,
+which belongs on the list -- upstream declares it
+`ModeDependentValue<TargetDependentValue<AutoConnectStrategy>>` and the inner
+`Dependent` arm accepts any object, so this probe's value parses and the node
+starts. OPAQUE is a fact about THE PROBE's reach, not about the key, so those
+keys are printed by name and folded into no pass. The other direction needs no
+such care and carries the worse consequence: a HONOURED key upstream resolves as
+a mode table which wz has not declared is a spelling wz refuses and zenohd
+accepts, so the node does not start on a file zenohd runs.
+
+## Where this runs
+
+Layer Z (`scripts/run-ci.sh`), which the hosted `interop` job runs with
+`WZ_Z_REQUIRE=1` after BUILDING zenohd -- so the oracle is provisioned there
+rather than absent. That lane SKIPs on a machine which has not built zenohd and
+FAILs under `WZ_Z_REQUIRE`; this script still exits 2 on a missing binary, for
+the same reason in the smaller. A gate whose input is absent must not report
+green.
+
+pre-push never runs Layer Z, so none of this slows a push. Wall clock is why it
+sits there and not in a fast lane: one zenohd startup per key, measured at 117s
+for the 111-key surface in R2149 -- the same figure `run-ci.sh` carries beside
+the call, deliberately, because two numbers for one measurement is how the pair
+this round had to correct went stale in the first place.
+
+⚠ Until R2149 this section was titled "Why this is NOT wired into a CI layer"
+and said the oracle is one "no CI runner has". That had been false since R2080
+wired it into Layer Z, and a reader who believed it would have taken every
+check below for a local convenience nothing enforces.
 
 Usage:
     python3 scripts/lib/deepenable_audit.py [--verbose]
@@ -203,10 +242,12 @@ def main() -> int:
 
     accepts: set[str] = set()
     undecided: set[str] = set()
+    verdicts: dict[str, str] = {}
     with tempfile.TemporaryDirectory() as tmp:
         workdir = pathlib.Path(tmp)
         for key in surface:
             verdict = verdict_for(key, workdir)
+            verdicts[key] = verdict
             if key in UNDECIDABLE_BY_THIS_PROBE:
                 undecided.add(key)
             elif verdict in ("OPAQUE", "MODE_TABLE"):
@@ -233,11 +274,155 @@ def main() -> int:
             f"for it, not its shape. Judge it by hand."
         )
 
+    # ── the MODE-TABLE cross-check (R2149, open-debt item 538) ──────────
+    #
+    # This probe already SEPARATES a mode table from an opaque subtree -- the
+    # message says which -- and until now it threw that apart away, folding both
+    # into `accepts`. Nothing anywhere compared it to
+    # `MODE_DEPENDENT_CONFIG_KEYS`, which is the constant deciding whether
+    # `inside_a_mode_table` lifts every leaf under a key OUT of the ignored
+    # report. A key wrongly in that list makes wz read an operator's typo as a
+    # row of a table it honours: not applied, not reported, silent.
+    #
+    # ⚠ WHAT THIS ADDS AND WHAT IT DOES NOT, MEASURED IN R2149 RATHER THAN
+    # CLAIMED. Item 538 said the two existing gates pass both wrong directions
+    # green. They do not. Driven with the whole `zenoh_config::` module under
+    # three constant mutations -- a declared key removed, an undeclared key
+    # added, and a mode table re-modelled as named subtree fields -- each one
+    # reds a PRE-EXISTING test in `zenoh_config.rs` (47 tests: 45, 45 and 46
+    # passing). A constant edit alone always breaks wz's internal agreement
+    # first, so nothing below is a new catch for an ordinary slip.
+    #
+    # What is new is the QUESTION. Every one of those gates checks wz's
+    # constants against wz's OWN reader, and the `missing`/`stale` pair above
+    # asks upstream only whether a key takes a deeper shape AT ALL -- which is
+    # precisely the question that conflates a mode table with an opaque
+    # subtree. A wz that is wrong about upstream and self-consistent passes all
+    # of them: R2141 moved three keys onto this list on a hand reading of
+    # upstream's types and nothing re-asked zenohd. This re-asks, once per key,
+    # against a running node.
+    #
+    # ⛔ THE OBVIOUS COMPARISON IS WRONG, AND IT WAS MEASURED WRONG BEFORE THIS
+    # SHIPPED. Item 538 prescribed comparing the MODE_TABLE set against the
+    # constant in BOTH directions. Run that way, a real zenohd answers OPAQUE
+    # for `scouting/multicast/autoconnect_strategy`, which IS in the constant and
+    # belongs there -- upstream declares it
+    # `ModeDependentValue<TargetDependentValue<AutoConnectStrategy>>`, and the
+    # inner `TargetDependentValue::Dependent` arm accepts any object, so this
+    # probe's `{ zzz_not_a_mode: 1 }` parses and the node starts. The verdict is
+    # a fact about THE PROBE's reach, not about the key. So:
+    #
+    #   * a declared key is refuted only by REFUSED -- zenohd rejecting the
+    #     deeper shape outright. OPAQUE is "this probe cannot tell", and those
+    #     keys are printed BY NAME rather than folded into a pass;
+    #   * the other direction needs no such care and is the dangerous one: a
+    #     HONOURED key a real zenohd answers MODE_TABLE for, which wz has not
+    #     declared, is a table spelling wz REFUSES and zenohd accepts -- the node
+    #     does not start. Scoped to honoured keys because the constant is
+    #     documented as the honoured ones; the unhonoured mode-dependent keys
+    #     (`scouting/gossip/*`, the `connect`/`listen` timeouts) are correctly
+    #     absent.
+    mode_dependent = set(rust_const("MODE_DEPENDENT_CONFIG_KEYS"))
+    honoured = set(rust_const("HONOURED_CONFIG_KEYS"))
+    if not mode_dependent:
+        raise SystemExit(
+            "deepenable-audit: FAIL -- MODE_DEPENDENT_CONFIG_KEYS read as empty, "
+            "so both directions below compare against nothing and pass."
+        )
+    upstream_tables = {k for k, v in verdicts.items() if v == "MODE_TABLE"}
+    if not upstream_tables:
+        raise SystemExit(
+            "deepenable-audit: FAIL -- no key on the whole surface answered "
+            "MODE_TABLE. The marker no longer matches what zenohd prints, so "
+            "this cross-check is measuring nothing."
+        )
+
+    # A declared key that is not on the surface at all would make BOTH checks
+    # below pass by absence -- `verdicts.get` answers None, which is neither
+    # REFUSED nor MODE_TABLE. That is this file's own "a population of zero is
+    # green" shape, one level in, so it is a FAIL rather than a silence. It
+    # cannot happen while the Rust side holds MODE_DEPENDENT ⊆ DEEPENABLE ⊆
+    # surface; this is here for when that stops being true.
+    offsurface = sorted(k for k in mode_dependent if k not in verdicts)
+    if offsurface:
+        raise SystemExit(
+            "deepenable-audit: FAIL -- "
+            + ", ".join(offsurface)
+            + " is declared mode-dependent and is not on the measured surface, "
+            "so nothing below judges it."
+        )
+
+    # A KNOWN DEAD PROBE MUST NOT REFUTE A DECLARATION. `plugins` answers a
+    # complaint about the VALUE rather than the name, so it lands in REFUSED
+    # while saying nothing about whether the key takes a deeper shape -- which is
+    # the whole reason this file names it rather than excusing it silently. Were
+    # it ever declared mode-dependent, the check below would red on the strength
+    # of a broken probe, and "an exit code cannot tell a negative result from a
+    # broken probe" is this file's own doctrine. So an undecidable key is treated
+    # exactly like OPAQUE: printed by name, refuting nothing. Measured today the
+    # two sets do not intersect, so this is a ratchet and not a fix.
+    refuted = sorted(
+        k
+        for k in mode_dependent
+        if verdicts.get(k) == "REFUSED" and k not in UNDECIDABLE_BY_THIS_PROBE
+    )
+    unreached = sorted(
+        k
+        for k in mode_dependent
+        if verdicts.get(k) == "OPAQUE" or k in UNDECIDABLE_BY_THIS_PROBE
+    )
+    undeclared = sorted((upstream_tables & honoured) - mode_dependent)
+
+    for key in refuted:
+        print(
+            f"  deepenable-audit: {key} is in MODE_DEPENDENT_CONFIG_KEYS and a "
+            f"real zenohd REFUSES a deeper shape at it. wz lifts every leaf "
+            f"under it out of the ignored report, so an operator's typo there is "
+            f"neither applied nor reported."
+        )
+    for key in undeclared:
+        print(
+            f"  deepenable-audit: {key} is honoured and a real zenohd resolves it "
+            f"as a {{ router, peer, client }} table, but wz has not declared it "
+            f"mode-dependent. wz REFUSES the table spelling zenohd accepts, so "
+            f"the node does not start on a file zenohd runs."
+        )
+
     print(
         f"  deepenable-audit: surface {len(surface)}, declared {len(declared)}, "
         f"measured accepting {len(accepts)}, undecided {len(undecided)}"
     )
-    return 1 if missing or stale else 0
+    print(
+        f"  deepenable-audit: mode tables — {len(upstream_tables)} measured, "
+        f"{len(mode_dependent)} declared by wz, "
+        f"{len(upstream_tables & honoured)} of the measured are honoured"
+    )
+    if unreached:
+        # Named, never a count folded into the pass: these are the keys whose
+        # value type swallows the probe, so the audit is SILENT about them
+        # rather than agreeing with wz.
+        print(
+            "  deepenable-audit: this probe cannot decide mode-dependence for "
+            + ", ".join(unreached)
+            + " (their value type accepts the probe's object, so the node "
+            "starts); wz's declaration stands on upstream's own type."
+        )
+    outside = sorted(upstream_tables - honoured)
+    if outside:
+        # The `undeclared` direction is SCOPED to honoured keys, and a scope is a
+        # claim like any other -- one that reads as coverage while it is really
+        # an exclusion. So the excluded keys are printed BY NAME rather than left
+        # as the arithmetic between the two counts above. Each is a real mode
+        # table upstream which wz does not honour, so the constant is right to
+        # omit it TODAY; each also becomes a FAIL the moment its key joins
+        # HONOURED_CONFIG_KEYS without joining MODE_DEPENDENT_CONFIG_KEYS, which
+        # is the transition this list exists to make visible before it happens.
+        print(
+            "  deepenable-audit: mode tables upstream that wz does not honour, "
+            "so the constant omits them and the check above does not reach "
+            "them: " + ", ".join(outside)
+        )
+    return 1 if missing or stale or refuted or undeclared else 0
 
 
 if __name__ == "__main__":
