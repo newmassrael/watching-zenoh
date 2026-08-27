@@ -899,21 +899,58 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
     // config met this precondition in NO invocation at all: the sentence that
     // used to stand here said `--router-hat` is only ever typed, and that was
     // true because `mode: "router"` mapped to `--router`.
+    // R2145 (open-debt item 209) — THE MASTER SWITCH, which upstream reads
+    // BEFORE any of the three directions below.
+    //
+    // `scouting/multicast/enabled` was the one key in
+    // `config_keys_the_demo_drops` with no sink AT ALL — not a sink compiled
+    // out, a sink that was never written. The reason recorded there was that
+    // the demo's `--scout` is a ROLE ("discover instead of dialling") while the
+    // key is about REACHABILITY, and mapping one onto the other would rewrite
+    // the operator's topology. That reasoning is right about `--scout` and it
+    // does not reach the keys the FILE asks for, which is where upstream puts
+    // the switch: `zenoh/src/net/runtime/orchestrator.rs:213` calls
+    // `start_scout(listen, autoconnect, addr, ifaces)` only `if scouting`,
+    // where `scouting` is this key (`:197`). So upstream's `listen`,
+    // `autoconnect`, `address` and `interface` are INERT under
+    // `enabled: false`, and wz expanded them anyway: a stock document carrying
+    // `enabled: false` beside `listen: true` produced a node that joined the
+    // group and answered beacons. That is a parity defect, not a missing
+    // convenience.
+    //
+    // It withholds what the FILE asks for and never what the operator TYPED.
+    // A typed `--scout` stays a role this expansion does not touch, and the
+    // socket keys below follow `scouting`, which counts a typed flag as well as
+    // an expanded one — so an operator who asks for discovery still gets their
+    // own group rather than a silently defaulted one.
+    let multicast_scouting_off = (!cfg.multicast_scouting).then_some(
+        KeyEffect::WithheldFromThisRun("this document disables multicast scouting"),
+    );
     let role_answers_scouts = exp
         .rest
         .iter()
         .chain(exp.added.iter())
         .any(|a| a == "--peer" || a == "--router-hat");
-    let listen_blocked = no_sink("scouting/multicast/listen").or_else(|| {
-        (!role_answers_scouts).then_some(KeyEffect::WithheldFromThisRun(
-            "this run's mode answers no scouts",
-        ))
-    });
+    // The switch withholds a direction that ASKS for something. `listen: false`
+    // asks for nothing -- it is what the absent flag already means -- and
+    // reporting it as withheld would answer a question the operator did not
+    // ask, on a document where they were precise. Measured on the drop-in
+    // fixture, which carries `enabled: false` and `listen: false` together:
+    // without this filter the key's verdict moved from `AlreadyTheBehaviour`
+    // into the unapplied half, which is a worse report, not a better one.
+    let listen_wanted = cfg.scout_multicast_listen == Some(true);
+    let listen_blocked = no_sink("scouting/multicast/listen")
+        .or(multicast_scouting_off.filter(|_| listen_wanted))
+        .or_else(|| {
+            (!role_answers_scouts).then_some(KeyEffect::WithheldFromThisRun(
+                "this run's mode answers no scouts",
+            ))
+        });
     let listen_expanded = named("scouting/multicast/listen")
         && exp.presence(
             "scouting/multicast/listen",
             "--scout-listen",
-            cfg.scout_multicast_listen == Some(true),
+            listen_wanted,
             listen_blocked,
         ) == KeyEffect::Expanded;
     // R311y845 — WHERE the node looks for its peers. Same precondition as
@@ -942,11 +979,13 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
         .iter()
         .chain(exp.added.iter())
         .any(|a| a == "--peer");
-    let autoconnect_blocked = no_sink("scouting/multicast/autoconnect").or_else(|| {
-        (!role_dials_discoveries).then_some(KeyEffect::WithheldFromThisRun(
-            "this run's mode dials no discovered node",
-        ))
-    });
+    let autoconnect_blocked = no_sink("scouting/multicast/autoconnect")
+        .or(multicast_scouting_off)
+        .or_else(|| {
+            (!role_dials_discoveries).then_some(KeyEffect::WithheldFromThisRun(
+                "this run's mode dials no discovered node",
+            ))
+        });
     let autoconnect_expanded = named("scouting/multicast/autoconnect")
         && match cfg.scout_multicast_autoconnect {
             Some(matcher) => {
@@ -978,11 +1017,13 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
         // nobody selects nothing. So a document naming only `_strategy` — which a
         // stock file routinely does, since upstream defaults both — expands to
         // nothing rather than to a refusal.
-        let blocked = no_sink("scouting/multicast/autoconnect_strategy").or_else(|| {
-            (!autoconnect_expanded).then_some(KeyEffect::WithheldFromThisRun(
-                "this run installs no multicast autoconnect policy",
-            ))
-        });
+        let blocked = no_sink("scouting/multicast/autoconnect_strategy")
+            .or(multicast_scouting_off)
+            .or_else(|| {
+                (!autoconnect_expanded).then_some(KeyEffect::WithheldFromThisRun(
+                    "this run installs no multicast autoconnect policy",
+                ))
+            });
         match cfg.scout_multicast_autoconnect_strategy {
             Some(strategy) => {
                 exp.pair(
@@ -1028,8 +1069,16 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
         if named(key) {
             match value {
                 Some(value) => {
-                    let blocked =
-                        (!scouting).then_some(KeyEffect::WithheldFromThisRun(NO_SCOUT_SOCKET));
+                    // R2145 (item 209) — the master switch reaches the socket
+                    // keys too, and upstream is why: all four arguments of
+                    // `start_scout(listen, autoconnect, addr, ifaces)` are
+                    // behind the same `if scouting`. A document that says
+                    // `enabled: false` and then names an address is asking for
+                    // a group it has just refused, and emitting the flag would
+                    // join it.
+                    let blocked = multicast_scouting_off.or_else(|| {
+                        (!scouting).then_some(KeyEffect::WithheldFromThisRun(NO_SCOUT_SOCKET))
+                    });
                     exp.pair(key, flag, value, blocked);
                 }
                 None => exp.record(key, KeyEffect::AlreadyTheBehaviour),
@@ -1174,21 +1223,25 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             ),
         };
     }
-    // The one key this binary models NOWHERE, said out loud rather than quietly
-    // folded into the applied half.
+    // R2145 (unregistered open-debt item 209) — the switch's own line, and it
+    // is no longer `NoSinkInThisBuild`.
     //
-    // `scouting/multicast/enabled` is reachability, not a role: it says whether
-    // to LISTEN for a scout beacon, and the demo's `--scout` says to discover
-    // INSTEAD of dialling, which is a different sentence — mapping one onto the
-    // other would rewrite the operator's topology.
+    // What stood here said this key is reachability rather than a role, that
+    // the demo's `--scout` is a role, and that mapping one onto the other would
+    // rewrite the operator's topology. All three sentences are true and none of
+    // them is about the keys the FILE asks for, which is where upstream puts
+    // the switch: `orchestrator.rs:213` calls `start_scout(listen, autoconnect,
+    // addr, ifaces)` only `if scouting`. The four directions above now read it,
+    // so the key reaches behaviour in EVERY build and the verdict here is what
+    // that behaviour amounts to for the key itself.
     //
-    // It is an UNCONDITIONAL member of `config_keys_the_demo_drops()` — there is
-    // no build in which it gains a flag — so its verdict is written here rather
-    // than derived from `no_sink`, and
-    // `every_key_this_build_drops_is_told_so_by_the_site_that_decides_it` is
-    // what refuses the two lists coming apart.
+    // `AlreadyTheBehaviour` and not `Expanded`: it carries no flag in either
+    // direction. `true` is what this binary does when a direction asks, and
+    // `false` is what it does with those directions withheld -- which is why
+    // this line was a lie before the withholding existed, and is a measurement
+    // now.
     if named("scouting/multicast/enabled") {
-        exp.record("scouting/multicast/enabled", KeyEffect::NoSinkInThisBuild);
+        exp.record("scouting/multicast/enabled", KeyEffect::AlreadyTheBehaviour);
     }
     // The adminspace block, whose three upstream keys expand to four wz flags.
     // Keyed on the BLOCK rather than on `adminspace/enabled`, because a
@@ -1846,13 +1899,14 @@ fn render_autoconnect_roles(matcher: wz::runtime_tokio::zenoh_config::WhatAmIMat
 /// take effect"; one copy, read by both, is the point of the move.
 #[cfg(feature = "zenoh-config")]
 pub(crate) fn config_keys_the_demo_drops() -> Vec<&'static str> {
-    let mut out = vec![
-        // Reachability, not a role: `scouting/multicast/enabled` says whether to
-        // LISTEN for a scout beacon, and the demo's `--scout` says to discover
-        // INSTEAD of dialling, which is a different sentence. Mapping one onto
-        // the other would rewrite the operator's topology.
-        "scouting/multicast/enabled",
-    ];
+    // R2145 (open-debt item 209) — `scouting/multicast/enabled` LEFT this list.
+    // It was the only row here naming a key with no sink at all rather than a
+    // sink this build compiles out, and the sentence that kept it -- the demo's
+    // `--scout` is a role, the key is reachability -- is true of `--scout` and
+    // says nothing about the keys the FILE asks for. Upstream gates exactly
+    // those on it (`orchestrator.rs:213`), so it now withholds them; see the
+    // master switch in `expand_stock_zenoh_config`.
+    let mut out: Vec<&'static str> = Vec::new();
     if !cfg!(feature = "routing-interest-pending-gc") {
         out.push("routing/interests/timeout");
     }
@@ -2535,10 +2589,14 @@ mod stock_config_tests {
             // reason the round had to measure rather than assume: without it
             // the demo exits(2), so an expansion that emitted them anyway would
             // turn a valid stock config into a node that refuses to start.
+            // R2145 (item 209) — `scouting/multicast/enabled` joins them, and
+            // for the same reason: the switch's effect is what the socket keys
+            // do, so its fixture needs the run that lets them speak.
             "scouting/timeout"
             | "scouting/multicast/address"
             | "scouting/multicast/interface"
-            | "scouting/multicast/ttl" => &["--config", "z.json5", "--scout"],
+            | "scouting/multicast/ttl"
+            | "scouting/multicast/enabled" => &["--config", "z.json5", "--scout"],
             // R311y846 — the answering direction's precondition is `--peer`,
             // not `--scout`: the responder is spawned from `run_peer`, and
             // `--scout` is a one-shot Initiator that exits on its first
@@ -2584,11 +2642,19 @@ mod stock_config_tests {
                 r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      connect: { endpoints: ["tcp/r:7447"] } }"#,
             ),
+            // R2145 (open-debt item 209) — the control NAMES the direction the
+            // variant refuses. The switch carries no flag of its own, so a
+            // control with nothing to withhold leaves the two expansions
+            // identical and the key derives as reaching nothing --
+            // `every_key_the_reader_calls_honoured_reaches_the_demo_or_is_named_as_dropped`
+            // measured exactly that against this row, and it was right.
             (
                 "scouting/multicast/enabled",
-                LISTEN_ONLY,
                 r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
-                     scouting: { multicast: { enabled: false } } }"#,
+                     scouting: { multicast: { address: "224.0.0.99:7999" } } }"#,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     scouting: { multicast: { enabled: false,
+                                              address: "224.0.0.99:7999" } } }"#,
             ),
             (
                 "timestamping/enabled",
@@ -3270,6 +3336,102 @@ mod stock_config_tests {
         }
         for flag in &feature_gated {
             eprintln!("  skip {flag} — its precondition is a cargo feature, not an argv flag");
+        }
+    }
+
+    /// R2145 (unregistered open-debt item 209) — A DOCUMENT THAT DISABLES
+    /// MULTICAST SCOUTING EXPANDS NONE OF THE DIRECTIONS IT ALSO NAMES.
+    ///
+    /// # Upstream, cited rather than assumed
+    ///
+    /// `zenoh/src/net/runtime/orchestrator.rs:197` reads
+    /// `scouting/multicast/enabled` into a local `scouting`, and `:213` calls
+    /// `start_scout(listen, autoconnect, addr, ifaces)` only `if scouting`. So
+    /// `listen`, `autoconnect`, `address` and `interface` are INERT upstream
+    /// under `enabled: false`, whatever they say.
+    ///
+    /// # What this binary did before
+    ///
+    /// The key was the one row in `config_keys_the_demo_drops` naming a key with
+    /// no sink AT ALL rather than a sink this build compiles out, so the same
+    /// document expanded to `--scout-listen` and the socket flags: a node that
+    /// joined the group and answered beacons on the group it had just been told
+    /// not to use. Item 209 filed that as "reaches no sink"; it is also a parity
+    /// defect, which is why the fix is a withholding and not a new flag.
+    ///
+    /// # Why `--scout` is not in the list
+    ///
+    /// It is a ROLE the operator types and this expansion never emits.
+    /// Withholding what the operator typed is the topology rewrite item 209
+    /// warned against; the switch withholds what the FILE asks for.
+    #[test]
+    #[cfg(all(feature = "scouting-responder", feature = "routing-peer"))]
+    fn a_document_that_disables_multicast_scouting_expands_none_of_its_directions() {
+        const DIRECTIONS: [&str; 4] = [
+            "--scout-listen",
+            "--scout-addr",
+            "--scout-iface",
+            "--scout-ttl",
+        ];
+        fn body(enabled: bool) -> String {
+            format!(
+                r#"{{ mode: "peer", listen: {{ endpoints: ["tcp/127.0.0.1:0"] }},
+                   scouting: {{ multicast: {{ enabled: {enabled}, listen: true,
+                                            address: "224.0.0.99:7999",
+                                            interface: "lo", ttl: 1 }} }} }}"#
+            )
+        }
+
+        // THE CONTROL FIRST, and inside this test rather than beside it: without
+        // it, a case that passes because the expansion emits NOTHING would read
+        // as coverage. Same document, one word different.
+        let on = expand(&["--config", "z.json5"], &body(true)).unwrap();
+        for flag in DIRECTIONS {
+            assert!(
+                on.added.iter().any(|a| a == flag),
+                "the control stopped emitting {flag}, so the case below proves \
+                 nothing: {:?}",
+                on.added
+            );
+        }
+
+        let off = expand(&["--config", "z.json5"], &body(false)).unwrap();
+        for flag in DIRECTIONS {
+            assert!(
+                !off.added.iter().any(|a| a == flag),
+                "the document disables multicast scouting and the expansion \
+                 emitted {flag} anyway -- the node joins the group it was told \
+                 not to use: {:?}",
+                off.added
+            );
+        }
+
+        // AND THE OPERATOR IS TOLD WHICH SWITCH DID IT. Each direction has a
+        // precondition of its own, so a report naming one of those would send
+        // the reader to the wrong key.
+        let reasons = off.read_but_not_applied_with_reasons();
+        let listen = reasons
+            .iter()
+            .find(|line| line.starts_with("scouting/multicast/listen ("))
+            .unwrap_or_else(|| panic!("the withheld key is in neither half: {reasons:?}"));
+        assert!(
+            listen.contains("disables multicast scouting"),
+            "{listen}: the reason must name the switch that did it"
+        );
+
+        // The switch's OWN line, in both directions. `AlreadyTheBehaviour` is
+        // true of `false` only BECAUSE of the withholding above -- before it,
+        // the same line was a lie.
+        for exp in [&on, &off] {
+            let effect = exp
+                .effects
+                .iter()
+                .find(|(k, _)| *k == "scouting/multicast/enabled")
+                .map(|(_, e)| *e)
+                .unwrap_or_else(|| {
+                    panic!("no decision site spoke for the switch: {:?}", exp.effects)
+                });
+            assert_eq!(effect, KeyEffect::AlreadyTheBehaviour);
         }
     }
 
@@ -4399,9 +4561,9 @@ mod stock_config_tests {
     ///
     /// R2081 (open-debt item 208) — the old report printed one list and called it
     /// "honoured", so an operator asking "did my setting take effect" had to diff
-    /// it against the `argv +=` line themselves. `scouting/multicast/enabled` is
-    /// the sharp case: the reader honours it and this binary has no sink for it
-    /// at all, so it belongs in READ and must NOT appear in APPLIED.
+    /// it against the `argv +=` line themselves. A key the reader honours while
+    /// this build has no sink for it is the sharp case: it belongs in READ and
+    /// must NOT appear in APPLIED.
     ///
     /// R2112 (open-debt items 102 + 210) — this test USED to name
     /// `timestamping/enabled` here, and that key moved: it now reaches
@@ -4409,28 +4571,42 @@ mod stock_config_tests {
     /// rather than deleting the test is the point — the split it measures is
     /// still real, only the key that has no sink has changed, and the one that
     /// moved is now this test's CONTROL below.
+    ///
+    /// R2145 (open-debt item 209) — and it happened a SECOND time, to
+    /// `scouting/multicast/enabled`, the key the doc above calls the sharp case.
+    /// Twice is a pattern: a hardcoded example of "the key with no sink" rots
+    /// every time this demo learns one, and the rot arrives looking like a
+    /// failure of this test rather than like progress. So the subject is now
+    /// DERIVED from the build-dependent set the binary already computes, with
+    /// its own fixture document, and an empty set is a failure rather than a
+    /// quiet pass.
     #[test]
     fn a_key_that_is_read_while_reaching_nothing_is_not_reported_as_applied() {
-        let exp = expand(
-            &["--config", "z.json5", "--listen", "tcp/127.0.0.1:1"],
-            r#"{ mode: "peer", scouting: { multicast: { enabled: true } } }"#,
-        )
-        .expect("the fixture is readable");
+        let dropped = config_keys_the_demo_drops();
+        let key = *dropped.first().unwrap_or_else(|| {
+            panic!(
+                "no key in this build reaches nothing, so this test has no \
+                 subject and would pass by measuring nothing. If that is \
+                 genuinely true it is news, and this is where to read it."
+            )
+        });
+        let variant = honoured_key_fixtures()
+            .into_iter()
+            .find(|(k, _, _)| *k == key)
+            .map(|(_, _, variant)| variant)
+            .unwrap_or_else(|| panic!("{key}: no fixture row names it"));
+        let exp = expand(cli_for(key), variant).expect("the fixture is readable");
 
+        assert!(exp.named.contains(&key), "{key}: {:?}", exp.named);
         assert!(
-            exp.named.contains(&"scouting/multicast/enabled"),
-            "{:?}",
-            exp.named
-        );
-        assert!(
-            exp.read_but_not_applied()
-                .contains(&"scouting/multicast/enabled"),
-            "{:?}",
+            exp.read_but_not_applied().contains(&key),
+            "{key}: {:?}",
             exp.read_but_not_applied()
         );
         assert!(
-            !exp.applied().contains(&"scouting/multicast/enabled"),
-            "a key with no sink in this build was reported as applied: {:?}",
+            !exp.applied().contains(&key),
+            "{key}: a key with no sink in this build was reported as applied: \
+             {:?}",
             exp.applied()
         );
 

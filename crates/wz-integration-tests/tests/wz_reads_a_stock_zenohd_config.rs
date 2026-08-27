@@ -2143,11 +2143,10 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
             "the demo's report is missing its `{line}` line\n{seen}"
         );
     }
-    // And the split is a real partition, not a relabelling:
-    // `scouting/multicast/enabled` has no sink in this binary, so it must appear
-    // on the READ-BUT-NOT-APPLIED line and NOT on the APPLIED one. Read off the
-    // lines themselves, because a report that printed the same list twice would
-    // satisfy the check above.
+    // And the split is a real partition, not a relabelling: each half must be
+    // non-empty, read off the lines themselves, because a report that printed
+    // the same list twice -- or stopped printing one of them -- would satisfy
+    // the check above.
     //
     // R2112 (open-debt items 102 + 210) — this pair USED to name
     // `timestamping/enabled`, and that key moved: it now reaches
@@ -2159,10 +2158,6 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
         .lines()
         .find(|l| l.contains("APPLIED [") && !l.contains("NOT APPLIED"))
         .unwrap_or_else(|| panic!("no APPLIED line in the demo's report\n{seen}"));
-    assert!(
-        !applied_line.contains("scouting/multicast/enabled"),
-        "a key with no sink in this build was reported as applied\n{applied_line}"
-    );
     // The key that DOES reach a flag, asserted on the SHIPPING binary's own
     // words. The unit tests read the argv the expansion builds; this reads what
     // the binary printed after being handed the file, which is the only place
@@ -2176,9 +2171,23 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
         .lines()
         .find(|l| l.contains("READ BUT NOT APPLIED"))
         .expect("checked above");
+    // R2145 (unregistered open-debt item 209) — the unapplied half is asserted
+    // NON-EMPTY rather than by naming a key, and the naming is what had to go.
+    //
+    // This pair has now been re-pointed twice at whichever key currently has no
+    // sink: R2112 when `timestamping/enabled` gained `--timestamping`, and this
+    // round when `scouting/multicast/enabled` gained a withholding of its own.
+    // A hardcoded example of "the key with no sink" rots every time the demo
+    // learns one, and it rots as a RED that reads like a regression rather than
+    // like progress. What this leg is for is the PARTITION -- a report that had
+    // stopped printing one of the two lists, or that printed the same list
+    // twice -- and a non-empty check on each side refuses both of those without
+    // pinning a key that is expected to move.
     assert!(
-        not_applied_line.contains("scouting/multicast/enabled"),
-        "the key with no sink is not named as unapplied\n{not_applied_line}"
+        not_applied_line.contains('"'),
+        "the unapplied half is empty, so the split above proves nothing: a \
+         report that stopped printing this list would pass every other check \
+         in this leg\n{not_applied_line}"
     );
     // R311y843 — the SHIPPING binary's own account of what the file became.
     // The `argv +=` line is where a dropped key is visibly absent. Asserted here

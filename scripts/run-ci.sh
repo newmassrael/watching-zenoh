@@ -4312,7 +4312,15 @@ layer_c1ay_cargo_test_router_hat() {
     # 11 rule(s) / 34 check(s) without the feature and the rule SKIPPED,
     # 11 rule(s) / 37 check(s) with it and the rule CHECKED. A skip reads like
     # coverage, which is the one thing this gate must not do.
-    _runci_guarded_test "C1AY stock_config_tests role-parity 41" 41 \
+    # R2145 (unregistered open-debt item 209) — 41 -> 42. The new case is
+    # `a_document_that_disables_multicast_scouting_expands_none_of_its_directions`,
+    # and it is `#[cfg(all(feature = "scouting-responder", feature =
+    # "routing-peer"))]` because its subject is: `--scout-listen` needs a sink
+    # for the control half to emit anything, and a control that emits nothing
+    # would make the case pass by measuring nothing. MEASURED on this exact
+    # command (42 passed, 10 filtered out) and on the leg above, which stays at
+    # 35 for the same reason — there the test is not compiled.
+    _runci_guarded_test "C1AY stock_config_tests role-parity 42" 42 \
         cargo test -p wz-ap-demo \
         --features zenoh-config,scouting-responder,routing-peer,router-hat-router,scouting-active \
         stock_config_tests --quiet || return 1
