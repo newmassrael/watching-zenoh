@@ -225,6 +225,30 @@ def _boundary_ok(text: str, i: int, j: int) -> bool:
     return True
 
 
+# R2155 (open-debt item 541) — the literal a `not-this-key` row's mechanism must
+# carry, followed by the key it disclaims.
+DISCLAIMER = "NOT-THIS-KEY:"
+
+
+def _disclaimer(text: str, key: str) -> bool:
+    """Does `text` disclaim exactly `key`, as a whole token?
+
+    The boundary test is the whole check. `NOT-THIS-KEY: plugins_loading/search_dirs`
+    CONTAINS `NOT-THIS-KEY: plugins`, so a substring match would let the
+    disclaimer for one key silently satisfy the claim for its prefix — which is
+    precisely the pair this tree has.
+    """
+    needle = f"{DISCLAIMER} {key}"
+    pos = text.find(needle)
+    while pos >= 0:
+        after = pos + len(needle)
+        nxt = text[after] if after < len(text) else " "
+        if not _WORD_OR_SEP.match(nxt):
+            return True
+        pos = text.find(needle, pos + 1)
+    return False
+
+
 def _token_hit(line: str, form: str) -> bool:
     """Is `form` present in `line` as a whole path token?"""
     pos = line.find(form)
@@ -384,6 +408,33 @@ def audit(src: str, files: dict[str, str]) -> tuple[list[str], list[str]]:
                     f"that survives only in a comment is the shape this row is "
                     f"supposed to rule out"
                 )
+            elif kind == "not-this-key":
+                # R2155 (open-debt item 541). `wz-has-it` and `not-this-key` both
+                # require their anchor PRESENT, so the same symbol satisfies two
+                # OPPOSITE claims and nothing compared them — measured: a reader
+                # gap was re-hidden in two edits with both halves green. The
+                # discriminator is not a ban (`PluginRegistry` legitimately
+                # carries both kinds today) but a DISCLAIMER, and it must sit
+                # where the mechanism and the key meet: a file that holds the
+                # anchor in code AND cites the key. Putting it anywhere else
+                # would let the claim be made where nothing contradicts it.
+                citing_files = {p for p, _, _ in cited[key]}
+                meeting = sorted(set(holders) & citing_files)
+                if not meeting:
+                    failures.append(
+                        f"{key}: kind `not-this-key` names `{anchor}`, and no "
+                        f"single file both holds that anchor in code and cites "
+                        f"the key. The disclaimer has nowhere to live where it "
+                        f"could be judged, which means the row cannot be checked"
+                    )
+                elif not any(_disclaimer(swept[p], key) for p in meeting):
+                    failures.append(
+                        f"{key}: kind `not-this-key` claims `{anchor}` is about "
+                        f"something else, and none of {meeting} says so. Write "
+                        f"`{DISCLAIMER} {key}` beside the mechanism — the claim "
+                        f"has to be made where the code that would honour the "
+                        f"key is, not only in the reader's own table"
+                    )
         elif kind == "asserted-ignored":
             lines = [
                 f"{p}:{n}" for p, n, line in cited[key] if anchor.lower() in line.lower()
@@ -550,9 +601,11 @@ _FIXTURE_FILES = {
         "/// reader learns it.\n"
         "pub fn set_aa_bb() {}\n"
     ),
-    # A different mechanism that happens to match the key's default.
+    # A different mechanism that happens to match the key's default, disclaiming
+    # the key where the mechanism and the key meet (R2155).
     "src/other.rs": (
         "/// Matches zenoh's `cc.dd` default, by a mechanism of our own.\n"
+        "/// NOT-THIS-KEY: cc/dd\n"
         "pub struct OtherThing;\n"
     ),
     # wz's own test asserting the key is ignored.
@@ -647,6 +700,39 @@ def _selftest() -> int:
         flags=re.S,
     )
     arms.append(("empty ledger", src, dict(_FIXTURE_FILES), "EMPTY"))
+
+    # ─── the disclaimer (R2155, item 541) ───
+    #
+    # `wz-has-it` and `not-this-key` both want their anchor PRESENT, so the same
+    # symbol satisfies two opposite claims. These arms cover the discriminator:
+    # the disclaimer must exist, must sit where the mechanism and the key meet,
+    # and must name the key as a WHOLE token.
+    f = dict(_FIXTURE_FILES)
+    f["src/other.rs"] = (
+        "/// Matches zenoh's `cc.dd` default, by a mechanism of our own.\n"
+        "pub struct OtherThing;\n"
+    )
+    arms.append(("not-this-key with no disclaimer", _FIXTURE_SRC, f, "cc/dd"))
+
+    # The disclaimer exists but not beside the mechanism — a claim made where
+    # nothing contradicts it.
+    f = dict(_FIXTURE_FILES)
+    f["src/other.rs"] = (
+        "/// Matches zenoh's `cc.dd` default, by a mechanism of our own.\n"
+        "pub struct OtherThing;\n"
+    )
+    f["src/elsewhere.rs"] = "// NOT-THIS-KEY: cc/dd\npub fn unrelated() {}\n"
+    arms.append(("disclaimer away from the mechanism", _FIXTURE_SRC, f, "cc/dd"))
+
+    # The substring trap, which is the whole reason for the boundary test: a
+    # disclaimer for a LONGER key must not satisfy the claim for its prefix.
+    f = dict(_FIXTURE_FILES)
+    f["src/other.rs"] = (
+        "/// Matches zenoh's `cc.dd` default, by a mechanism of our own.\n"
+        "/// NOT-THIS-KEY: cc/ddd\n"
+        "pub struct OtherThing;\n"
+    )
+    arms.append(("disclaimer names a longer key", _FIXTURE_SRC, f, "cc/dd"))
 
     # ─── the mirror half (R2151, item 540) ───
     #

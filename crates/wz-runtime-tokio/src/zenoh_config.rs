@@ -2065,7 +2065,39 @@ pub const UNHONOURED_CITATION_KINDS: &[&str] = &[
 ///   about. `transport/unicast/accept_timeout` is item 539's own example: the
 ///   citing doc is a unixpipe-only `HANDSHAKE_TIMEOUT` that happens to match
 ///   the key's default, over a listener upstream gives no bound at all.
-///   `anchor` names that other mechanism, and it must EXIST.
+///   `anchor` names that other mechanism, and it must EXIST — AND the mechanism
+///   must DISCLAIM the key where the two meet. See below.
+///
+/// # The disclaimer, and the hole it closes (R2155, open-debt item 541)
+///
+/// `wz-has-it` and `not-this-key` both require their anchor PRESENT in wz's
+/// code, so one symbol satisfies two OPPOSITE claims and nothing compared them.
+/// R2152 measured the consequence: `plugins` — a key R2151 had just PROVEN wz
+/// acts on — went back into [`UNHONOURED_BEYOND_WZ`] in two edits, both halves
+/// green. Re-kind its row to `not-this-key` keeping the same anchor, then give
+/// it a one-key group with an invented absent anchor.
+///
+/// The three repairs item 541 recorded were all measured and all rejected.
+/// Banning a shared anchor reds this tree today, because `PluginRegistry`
+/// legitimately carries both kinds (`plugins` has it, `plugins_loading/search_dirs`
+/// only neighbours it). Restricting group anchors to names wz's prose already
+/// uses would red TWELVE of the thirteen groups — measured, and worse than the
+/// item guessed. "A one-key group moved from another group" needs history a
+/// static reader of one tree does not have.
+///
+/// So the discriminator is not a ban but an OBLIGATION, and its whole force is
+/// WHERE it must be discharged: a `not-this-key` row's mechanism must carry
+/// `NOT-THIS-KEY: <key>` in a file that both holds the anchor in code and cites
+/// the key. Re-kinding `plugins` now demands writing "PluginRegistry is not what
+/// honours `plugins`" into `plugin.rs`, beside the registry that loads, starts
+/// and stops plugins. The gate cannot prove that false; a person reading the
+/// file cannot miss that it is.
+///
+/// ⚠ Stated rather than hidden: this raises the cost of the lie, it does not
+/// make it impossible. Nothing here can decide whether a mechanism truly serves
+/// a key — 539, 540 and this round each measured a different sweep failing to,
+/// and the honest move was to put the claim where it is most visible instead of
+/// pretending to derive it.
 /// * `asserted-ignored` — the citing line is wz's own test asserting the key is
 ///   IGNORED. The strongest citation there is, and it says the opposite of
 ///   "honoured". `anchor` is the word that must appear on the citing line.

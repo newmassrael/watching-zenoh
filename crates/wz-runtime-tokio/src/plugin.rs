@@ -359,6 +359,15 @@ impl DynamicPlugin {
 /// explicit path and has no discovery, so it stays among the keys wz cannot act
 /// on. R2151 (open-debt item 540) drew that line; before it, all three sat under
 /// "a plugin host [wz does not have]".
+///
+/// NOT-THIS-KEY: plugins_loading/search_dirs
+///
+/// R2155 (open-debt item 541) — the marker is what makes the line above a
+/// checkable claim rather than a sentence. This type is cited beside all three
+/// keys; for two of them it IS the capability, and for `search_dirs` it is
+/// merely the neighbour. Saying which is which HERE, where the mechanism and the
+/// key meet, is the only place the statement can be read against the code that
+/// would have to implement it.
 #[derive(Default)]
 pub struct PluginRegistry {
     plugins: BTreeMap<String, DynamicPlugin>,

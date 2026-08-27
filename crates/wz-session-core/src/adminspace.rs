@@ -270,6 +270,14 @@ fn push_plugins_object(plugins: &[AdminPlugin], out: &mut String) {
 /// original byte-behavior) and, WITH the feature, the started-plugins object
 /// [`push_plugins_object`] builds from [`Self::plugins`] (surface A); the key set
 /// is preserved so a zenoh admin client parses the same shape either way.
+///
+/// NOT-THIS-KEY: metadata
+///
+/// R2155 (open-debt item 541) — the word `metadata` is everywhere in this tree
+/// as wz's own vocabulary, and this view is the one place upstream's CONFIG key
+/// of that name would land. It lands as the hardcoded null above, so this type
+/// is not what honours it. The disclaimer sits here rather than in the config
+/// reader's doc because a claim about a mechanism belongs beside the mechanism.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AdminLocalData {
     /// This node's zid in zenoh `ZenohId` Display form.

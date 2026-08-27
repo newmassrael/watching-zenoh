@@ -103,6 +103,15 @@ const DEDICATE_TRIES: usize = 100;
 /// forever. Matches zenoh's `transport.unicast.accept_timeout` default (10000ms);
 /// zenoh's `UnicastPipeListener` loop has NO such bound (serial + unbounded), so the
 /// timeout wrapper in [`unixpipe_acceptor_task`] is a SUPERSET hardening.
+///
+/// NOT-THIS-KEY: transport/unicast/accept_timeout
+///
+/// R2155 (open-debt item 541) — that marker is load-bearing, not decoration. The
+/// key is cited two lines up because this constant MATCHES its default, and a
+/// reader could take the citation for "wz honours it". It does not: this is a
+/// unixpipe-only bound over a listener upstream gives no bound at all. The
+/// disclaimer sits HERE, where the mechanism and the key meet, because that is
+/// the one place the claim can be judged against the surrounding code.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 // ---------------------------------------------------------------------------
