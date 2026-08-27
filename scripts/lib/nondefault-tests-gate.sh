@@ -650,8 +650,8 @@ if [[ "${1:-}" == "--census" ]]; then
             : > "$tmp/legskip"
             cat "$tmp/gskip" >> "$tmp/legskip"
             if [[ -n "$lhand" ]]; then
-                tr ',' '\n' <<<"$(echo "${lhand//[[:space:]]/}")" >> "$tmp/legskip"
-                tr ',' '\n' <<<"$(echo "${lhand//[[:space:]]/}")" >> "$tmp/handed"
+                tr ',' '\n' <<<"${lhand//[[:space:]]/}" >> "$tmp/legskip"
+                tr ',' '\n' <<<"${lhand//[[:space:]]/}" >> "$tmp/handed"
             fi
             grep -v '^$' "$tmp/legskip" | sort -u > "$tmp/legskip.s"
             comm -23 "$tmp/leg" "$tmp/legskip.s" > "$tmp/legruns"
