@@ -344,6 +344,28 @@ if ! python3 scripts/lib/config_key_fixture_gate.py; then
     exit 1
 fi
 
+# ─── gate 2e — the scouting socket's movable axes (R2142, item 225) ──
+#
+# Which axes of the scouting socket config can move, and which are witnessed
+# BOTH-ENDED. Derived from the socket's own surface: the scalar parameters of
+# `bind_multicast_v4` plus the `pub` fields of `McastSocketConfig`.
+#
+# Here for gate 2d's reasons exactly — it reads one file, costs milliseconds, and
+# the thing it catches cannot be caught by the changed-crates tests: adding a
+# field to that struct compiles everywhere and reds nothing, while silently
+# widening the population this repository claims coverage over. UNCONDITIONAL for
+# the same reason too: a scope predicate that is wrong reads exactly like a pass.
+if ! python3 scripts/lib/scouting_socket_axis_census.py > /dev/null; then
+    echo "" >&2
+    echo "pre-push: scouting-socket axis census FAILED — a movable axis is" >&2
+    echo "          unjudged, a witness it names no longer exists, or the" >&2
+    echo "          derivation read an EMPTY population." >&2
+    echo "          Run \`python3 scripts/lib/scouting_socket_axis_census.py\`" >&2
+    echo "          to see the per-axis breakdown." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+
 # ─── housekeeping (NOT a gate) — toolchain-scoped target GC ─────────
 #
 # R311y445. Deliberately NOT a gate: it never fails the push, and an absent

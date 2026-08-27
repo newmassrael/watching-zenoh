@@ -2139,6 +2139,17 @@ PY
     # `.githooks/pre-push`, which is what makes it the LOCAL gate item 224 asks
     # for -- this lane is the hosted half.
     python3 scripts/lib/config_key_fixture_gate.py || return 1
+    # R2142 (open-debt item 225) — WHICH axes of the scouting socket config can
+    # move, and which are witnessed BOTH-ENDED. Here for the same reason as the
+    # gate above: the whole population is on disk — the scalar parameters of
+    # `bind_multicast_v4` and the `pub` fields of `McastSocketConfig` — so it is
+    # derived by reading, in milliseconds, with nothing built.
+    #
+    # Its ratchet is the point: a new field on that struct arrives UNJUDGED and
+    # reds this, rather than quietly widening the denominator while the covered
+    # count stands still. It also refuses a population of ZERO, which is the
+    # shape where a broken reader reports everything covered.
+    python3 scripts/lib/scouting_socket_axis_census.py || return 1
     # 2026-08-25 — the RELICENSE gate. The free tier moved from
     # `LGPL-3.0-or-later` to `AGPL-3.0-or-later` across 1032 tracked files in
     # one substitution, and the failure mode of that operation is not a crash:
@@ -11801,6 +11812,33 @@ PY
     # gate-skew argument as the two clippy legs above.
     (cd crates && cargo clippy -p wz-runtime-tokio --all-targets \
         --features scouting-active,scouting-responder,routing-peer --quiet -- -D warnings) || return 1
+    # R2142 (open-debt item 225) — the MOVED scouting socket, witnessed from BOTH
+    # ends. The three lanes that already touch `scouting/multicast/address` each
+    # drive ONE wz node and hand-roll the other side, so "we moved the group on
+    # both boxes, do they still find each other?" had no witness. Here both the
+    # asker and the answerer are real wz.
+    #
+    # The second test in the binary is a TEST-DESIGN pin, not a wz behaviour: on
+    # Linux a group-only move does NOT isolate a wildcard-bound socket when a
+    # co-joiner holds the other group (`IP_MULTICAST_ALL`, ip(7)), so a control
+    # built on the group alone passes on a node that honoured nothing. wz binds
+    # wildcard and so does zenoh (`multicast.rs:308-312`), neither clears the
+    # option, so this is upstream-faithful and the fix is NOT to diverge.
+    #
+    # No separate clippy leg: this file is `#![cfg(all(scouting-active,
+    # scouting-responder))]`, a subset of the combination the `--all-targets`
+    # clippy directly above already builds.
+    #
+    # The third test pays this round's same-seam residue: the `#join=` axis,
+    # whose refusal path had a unit test and whose DELIVERY had no witness.
+    #
+    # Count-guarded at 3 for the reason its siblings are: this selects a whole
+    # binary and the binary is `#![cfg(all(..))]`-gated, so a build that lost a
+    # feature would compile an EMPTY target and `cargo test` would exit 0 having
+    # run nothing.
+    _runci_guarded_test "M moved scouting socket, both ends" 3 \
+        cargo test -p wz-runtime-tokio --features scouting-active,scouting-responder \
+        --test scouting_socket_move_loopback -- --ignored || return 1
     # R2089 (open-debt item 222) — the RUN-MODE half of the same subsystem: a wz
     # `--router-hat` answers a Scout, and the Hello says `router`. y846 wired the
     # responder into `run_peer` alone, so the one role a stock client's
