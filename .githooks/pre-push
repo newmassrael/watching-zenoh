@@ -695,6 +695,43 @@ if ! WZ_C1BZ_ONLY="${doc_pkgs[*]}" bash scripts/run-ci.sh --layer C1bz; then
     exit 1
 fi
 
+# ─── gate 4b — the COUNT GUARDS this push's test set moves (R2167) ───
+# Gate 4's argument, applied to a different constant. `run-ci.sh` asserts an
+# exact `test result: ok. N passed` for 291 commands, and the number is written
+# by hand at the moment a test is added — the one moment nothing local reads it.
+#
+# `count_guard_lint.py` reads the derivable ones off disk and has since
+# R311y569. It declares 189 of the 291 OUT OF SCOPE with a reason each, because
+# a count that depends on `#[cfg]` is not derivable without a build. That list
+# is honest and it is also the hole: `C1AY stock_config_tests` sits in it and
+# has now leaked THREE TIMES — R2112 (red until R2117 found it doing something
+# else), R2124 (cost R2129 a round), and R2166, which redded run 33132637389 on
+# the same push and cost this one. Each round wrote the reason into a comment
+# beside the guard; R2124's comment quotes R2117's. A memo is not a mechanism.
+#
+# So this RUNS them, and pays only when the push could have moved a count:
+# the package must be one gate 3 already tested, the diff must add or remove an
+# attribute or `mod` line that changes which tests EXIST (a body edit cannot),
+# the guard's selection must reach a changed file, and its filter must occur in
+# one. MEASURED on R2166's own commit: 3 of the 17 guards naming `wz-ap-demo`,
+# where the whole C1ay lane is 175s.
+#
+# It reuses `count_guard_lint`'s parser rather than carrying a second one, for
+# the reason gate 4 reuses the lane: two readings of one table drift the day
+# either moves, which is this gate's own subject one level up.
+echo "pre-push: checking the count guards this push's test set moves (gate 4b)"
+if ! BX="${BX:-}" python3 scripts/lib/guarded_count_gate.py \
+    --range "$diff_base..$local_sha"; then
+    echo "" >&2
+    echo "pre-push: a run-ci count guard disagrees with the tests this push" >&2
+    echo "          leaves behind. Move the constant IN THIS COMMIT, to what" >&2
+    echo "          the command PRINTED — the module's other cases are" >&2
+    echo "          \`#[cfg]\`-gated, so counting the diff has produced the" >&2
+    echo "          wrong number before." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+
 # ─── gate 6 — changed-crate REDUCED FEATURE COMBINATION (R311y821) ──
 # The rule this encodes: a round that edits a crate owes the SHRUNKEN build of
 # it, not only the default one. `cargo clippy --all-features` cannot see a

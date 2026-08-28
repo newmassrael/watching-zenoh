@@ -2122,6 +2122,17 @@ PY
     # is not a mechanism. The floor is PER SPELLING, so a parser that stopped
     # recognising the helper cannot hide behind the bare guards' coverage.
     python3 scripts/lib/count_guard_lint.py || return 1
+    # R2167 (no register item) — the SELFTEST of the gate that covers what the
+    # line above declares out of scope. `count_guard_lint` skips 189 of 291
+    # guards because a `#[cfg]`-gated count is not derivable without a build,
+    # and `guarded_count_gate.py` RUNS those, in `pre-push`, scoped to the
+    # guards a push actually reaches. Its dynamic half has no place on hosted
+    # CI — the lanes themselves are that answer — but its SELECTION LOGIC does:
+    # every arm below is a case an obvious implementation gets wrong, including
+    # R2166's own (the filter matches the enclosing MODULE, never the added
+    # function's name) and R2158's (a count moved by REMOVING a `#[cfg]`, with
+    # no `#[test]` line in the diff at all).
+    python3 scripts/lib/guarded_count_gate.py --selftest >/dev/null || return 1
     # R2138 (unregistered open-debt item 224) — the CONFIG-KEY-to-FIXTURE gate.
     # `HONOURED_CONFIG_KEYS` lives in `wz-runtime-tokio`; the drop-in leg of
     # `wz_reads_a_stock_zenohd_config.rs` carries a hand-written JSON5 config and
@@ -4323,7 +4334,17 @@ layer_c1ay_cargo_test_router_hat() {
     # one of them no longer does. MEASURED on this exact command: 37 passed,
     # 11 filtered out. The leg below stays at 42 because both cases were
     # already compiled there.
-    _runci_guarded_test "C1AY stock_config_tests 37" 37 \
+    # R2167 — 37 -> 38, and the SAME SHAPE A THIRD TIME AS A LEAK (R2112,
+    # R2124, now R2166). R2166 (`4bf43166`, the argv-only kind ledger) added
+    # `every_argv_only_key_says_which_kind_of_unproven_it_is`, which carries no
+    # `#[cfg]` of its own inside a module already gated on `zenoh-config`, so
+    # BOTH legs of this lane compile it and NEITHER number moved. Hosted went
+    # red on that same push (run 33132637389, job `routing + adminspace
+    # lanes`). MEASURED on this exact command: 38 passed, 11 filtered out.
+    # The note R2117 wrote is now a GATE — `scripts/lib/guarded_count_gate.py`,
+    # pre-push gate 2i — so the next round that moves a test set under a
+    # guard's filter is told by its own push, not by a hosted run afterwards.
+    _runci_guarded_test "C1AY stock_config_tests 38" 38 \
         cargo test -p wz-ap-demo --features zenoh-config stock_config_tests --quiet || return 1
     # R2139 (unregistered open-debt item 227) — THE SAME MODULE WITH THE SINKS
     # PRESENT, and it is not a duplicate of the leg above.
@@ -4367,7 +4388,12 @@ layer_c1ay_cargo_test_router_hat() {
     # would make the case pass by measuring nothing. MEASURED on this exact
     # command (42 passed, 10 filtered out) and on the leg above, which stays at
     # 35 for the same reason — there the test is not compiled.
-    _runci_guarded_test "C1AY stock_config_tests role-parity 42" 42 \
+    # R2167 — 42 -> 43, the same R2166 case seen from the other feature set:
+    # it is unconditional inside `stock_config_tests`, so it lands in every
+    # build the module itself compiles in, and this leg was never a second
+    # opinion about that. MEASURED on this exact command: 43 passed, 14
+    # filtered out.
+    _runci_guarded_test "C1AY stock_config_tests role-parity 43" 43 \
         cargo test -p wz-ap-demo \
         --features zenoh-config,scouting-responder,routing-peer,router-hat-router,scouting-active \
         stock_config_tests --quiet || return 1
