@@ -1242,6 +1242,132 @@ jobs:
         run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1800 90 20 '${{ job.status }}'
 
   # ─────────────────────────────────────────────────────────────────
+  # R2165 — the PASSIVE-DISSECTION job, peeled off `feature-gates` when that
+  # job's margin step fired at 97% of 2700s on run 33087340444.
+  #
+  # WHY THIS LANE AND NOT ANOTHER, in the numbers the red job's own log gives.
+  # Its 37 lanes (derived from that job's `--layer` steps, not from what the
+  # log printed -- both sets are 37 and neither has a member the other lacks)
+  # cost 2547s of a 2634s job. C1bn is 688s of that: 26.1% of the job, and
+  # 3.28x the next lane, C1j at 210s. Peeling it lands `feature-gates` at
+  # 1946s = 72.1% of its 2700s budget. The next four together (C1j 210 + C1z
+  # 194 + C1bl 188 + C1bi 153 = 745s) would land it at 70.0% -- 2.1 points
+  # better for four times the lanes moved.
+  #
+  # AND C1bn IS THE ONE THAT CARRIES PROVISIONING. The other 36 lanes there
+  # are plain cargo. C1bn arms three adjudicators on the presence of external
+  # data -- WZ_TCPDUMP_REQUIRE, WZ_DLT_HEADER_REQUIRE, WZ_PROTO_REGISTRY_
+  # REQUIRE -- and each of the three test binaries behind them is invoked
+  # exactly once in scripts/run-ci.sh, all three inside C1bn. So moving this
+  # lane lets its three packages move WITH it, which is what their rows in
+  # apt_package_census.py already asked for in words: "ONE job only, and the
+  # smallest one that owns wz-capture's default-feature tests". Peeling any
+  # other lane would have left them behind on a job that no longer runs the
+  # gate that justifies them.
+  #
+  # NOT `timeout-minutes`, for the reason job-budget-margin.sh states about
+  # itself: a bigger number buys one atom's worth of time and re-arms the same
+  # failure, because the cost grows monotonically in atom count. The precedent
+  # is this file's `verdict-legs` (y791), `footprint` (y351) and `nondefault`
+  # (R2163); this job is shaped after the last of those.
+  #
+  # PREDICTED LANDING, recorded so the next run can judge it: 84s of setup
+  # (this job's prep is `nondefault`'s, and that is what `feature-gates`
+  # measured from its budget stamp to its first lane) + 688s = 772s, or 42.9%
+  # of the 1800s budget below. Above the 20% floor, so the job is not sitting
+  # on a budget it does not use. The FIRST run will exceed that: its
+  # rust-cache key is new and therefore cold.
+  dissect:
+    name: passive-dissection feature set (Layer C1bn)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Budget stamp — start this job's own clock
+        # Same reason the `ci` and `nondefault` jobs stamp: `timeout-minutes`
+        # measures from when the job is CREATED, and the margin gate needs
+        # elapsed RUN time.
+        run: date +%s > "$RUNNER_TEMP/wz_job_start"
+
+      - name: Checkout (with submodules)
+        # `recursive` for the reason `feature-gates` gave when it held this
+        # lane: wz-integration-tests reaches sce_forge_runtime from vendor/sce
+        # through wz-session-core, and does not build without it.
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Restore apt archives (R311y882 — keep the mirror off the path)
+        # See the `verdict-legs` copy for the measurement and for why RESTORE
+        # and SAVE are split. Keyed per job, and this job's package list is
+        # deliberately not `feature-gates`' any more.
+        id: apt-archives
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            apt-${{ runner.os }}-${{ github.job }}-
+
+      - name: Install system dependencies
+        run: |
+          # The three below arrived here WITH Layer C1bn in R2165; the reasons
+          # are the ones the rounds that added them wrote, carried over intact
+          # rather than re-summarised.
+          #
+          # R2054 (open-debt item 384) — `tcpdump` is the ADJUDICATOR for
+          # `wz_capture::link`'s BSD address-family table, which was decided once
+          # by hand in a session with no reproducer. Layer C1bn runs that
+          # adjudicator with `WZ_TCPDUMP_REQUIRE=1`, so the tool has to be here:
+          # the test SKIPS where it is absent, and a skip prints `ok`. Installed
+          # explicitly rather than relied on from the runner image, because
+          # "the image happens to carry it" is not a thing this file states.
+          # R2055 (open-debt item 391) — `libpcap-dev` puts `pcap/dlt.h` on the
+          # runner, and that header is the ADJUDICATOR for
+          # `LINK_TYPE_SWEEP_CEILING`: it is where libpcap states
+          # `DLT_MATCHING_MAX`, the highest link type a capture file can name.
+          # Layer C1bn runs that adjudicator with `WZ_DLT_HEADER_REQUIRE=1`, so
+          # the header has to be here for the same reason `tcpdump` does.
+          # R2058 (open-debt item 250) — `netbase` ships `/etc/protocols`, one of
+          # the two sources the IP-protocol furniture split reads. It is
+          # Priority: important and so already on the image; named anyway,
+          # because "the image happens to carry it" is not a thing this file
+          # states and the leg arms on its absence.
+          bash scripts/lib/apt-install.sh cmake libclang-dev libxml2-dev clang perl pkg-config tcpdump \
+            libpcap-dev netbase
+
+      - name: Save apt archives
+        if: always() && env.WZ_APT_CACHE_DIRTY == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        run: rustup show
+
+      - name: Cache Cargo registry + build artifacts
+        # Its OWN key, for the reason footprint, interop, verdict-legs and
+        # nondefault carry one: parallel jobs must not race a single cache save.
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates -> target
+          key: dissect
+
+      - name: Layer C1bn — passive-dissection feature set, RUN (R311y579)
+        # Created by R311y579, the round that closed the "no lane at all" debt
+        # for this feature set; wired into CI by R311y581; moved here by R2165
+        # for the budget reason above. The lane itself is unchanged.
+        run: bash scripts/run-ci.sh --layer C1bn
+
+      - name: Budget margin — this job's own clock
+        # Floor 20, alarm 90 — the `nondefault` settings, and for its stated
+        # reason: a job holding ONE lane is exactly the case the floor exists
+        # to catch, so if C1bn ever shrinks under a fifth of this budget it
+        # should hand the budget back rather than sit on it.
+        if: always()
+        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1800 90 20 '${{ job.status }}'
+
+  # ─────────────────────────────────────────────────────────────────
   # R311y351 — the CODEC-FOOTPRINT job. Layer F ran as the `ci` job's last
   # step from R311pt until run 29571213015 killed that job at 30m03s INSIDE
   # Layer F. Every gate through E5 passed; no wz gate failed. Same shape as
@@ -2523,13 +2649,38 @@ jobs:
     # job was in when run 31711867852 was cancelled. The margin step at the
     # bottom of this job is therefore not decoration; it is expected to fire.
     #
-    # WHEN IT FIRES, THE REMEDY IS A SPLIT, and the shape is already measured:
-    # this job has NO hot step (the largest, C1ay, is 227s of 2216s = 10%), so
-    # it is a long tail of 54 lanes rather than one lane to peel. That makes it
-    # the footprint job's problem, not the `ci` job's, and the footprint job's
-    # answer -- a `shard` matrix over the lane list -- is the one that fits.
-    # Peeling the five heaviest (C1ay 227s, C1y 189s, C1am 150s, C1j 142s,
-    # C1z 137s = 845s, 38%) into a sibling is the cheaper interim.
+    # IT FIRED on run 33087340444: 2634s of 2700s, 97%. Every lane passed;
+    # what failed is the MARGIN.
+    #
+    # R2165 — THE SHAPE THE y792 TEXT PREDICTED IS NOT THE SHAPE IT HAS, and
+    # the paragraph that stood here said so wrongly in three ways at once. It
+    # read: "this job has NO hot step (the largest, C1ay, is 227s of 2216s =
+    # 10%), so it is a long tail of 54 lanes rather than one lane to peel",
+    # and prescribed the footprint job's `shard` matrix. Re-derived from the
+    # red job's own log, the lane set taken from THIS job's `--layer` steps
+    # rather than from what the log happened to print (37 declared, 37 timed,
+    # neither set carrying a lane the other lacks):
+    #
+    #   * there ARE 37 lanes here, not 54;
+    #   * C1ay, C1y and C1am are not among them at all -- R311y793 moved them
+    #     to `routing-adminspace` one round after y792 measured them, so the
+    #     five it named as the interim peel are four-fifths gone;
+    #   * there IS a hot step: C1bn at 688s is 26.1% of the job and 3.28x the
+    #     next lane (C1j, 210s). A shard matrix is what you reach for when no
+    #     single lane dominates, and one does.
+    #
+    # So the remedy taken is the one `job-budget-margin.sh` itself prescribes
+    # -- peel the lane into its own job -- and NOT `timeout-minutes`, for the
+    # reason that script states: a bigger number buys one atom's worth of time
+    # and re-arms the same failure. Peeling C1bn alone lands this job at 1946s
+    # = 72.1% of 2700. Peeling instead the next four (C1j + C1z + C1bl + C1bi
+    # = 745s) would land it at 70.0% -- 2.1 points better for four times the
+    # lanes moved, and it would strand the three packages, because C1bn is the
+    # only lane here with provisioning of its own.
+    #
+    # NOTE the cost is newly VISIBLE, not newly INCURRED: before R2163 this
+    # job died early on C1bn's two uring tests (ENOMEM), so every percentage
+    # measured before that ran is of a job that stopped partway.
     timeout-minutes: 45
     steps:
       - name: Budget stamp — start this job's own clock
@@ -2577,27 +2728,13 @@ jobs:
             apt-${{ runner.os }}-${{ github.job }}-
 
       - name: Install system dependencies
+        # R2165 — `tcpdump`, `libpcap-dev` and `netbase` are NO LONGER here.
+        # Each was justified by an adjudicator Layer C1bn arms on, and C1bn
+        # moved to the `dissect` job; the packages moved with it rather than
+        # being left behind for a lane that no longer runs here. Their reasons
+        # travelled too, and are stated in full on that job's own install step.
         run: |
-          # R2054 (open-debt item 384) — `tcpdump` is the ADJUDICATOR for
-          # `wz_capture::link`'s BSD address-family table, which was decided once
-          # by hand in a session with no reproducer. Layer C1bn below runs that
-          # adjudicator with `WZ_TCPDUMP_REQUIRE=1`, so the tool has to be here:
-          # the test SKIPS where it is absent, and a skip prints `ok`. Installed
-          # explicitly rather than relied on from the runner image, because
-          # "the image happens to carry it" is not a thing this file states.
-          # R2055 (open-debt item 391) — `libpcap-dev` puts `pcap/dlt.h` on the
-          # runner, and that header is the ADJUDICATOR for
-          # `LINK_TYPE_SWEEP_CEILING`: it is where libpcap states
-          # `DLT_MATCHING_MAX`, the highest link type a capture file can name.
-          # Layer C1bn runs that adjudicator with `WZ_DLT_HEADER_REQUIRE=1`, so
-          # the header has to be here for the same reason `tcpdump` does.
-          # R2058 (open-debt item 250) — `netbase` ships `/etc/protocols`, one of
-          # the two sources the IP-protocol furniture split reads. It is
-          # Priority: important and so already on the image; named anyway,
-          # because "the image happens to carry it" is not a thing this file
-          # states and the leg below arms on its absence.
-          bash scripts/lib/apt-install.sh cmake libclang-dev libxml2-dev clang perl pkg-config tcpdump \
-            libpcap-dev netbase
+          bash scripts/lib/apt-install.sh cmake libclang-dev libxml2-dev clang perl pkg-config
 
       - name: Save apt archives
         # `always()`: the job this exists for is the one a slow mirror REDS, and
@@ -2911,10 +3048,15 @@ jobs:
       # them, C1bn, was created by R311y579, the round that CLOSED the "no lane
       # at all" debt for the same feature set. Closing one hole while opening
       # another is not closing it, so `scripts/lib/unwired_lane_lint.py` now
-      # gates the diff in Layer C0. All five below are plain cargo (no
+      # gates the diff in Layer C0. The four below are plain cargo (no
       # provisioning) and were measured green locally before being wired.
-      - name: Layer C1bn — passive-dissection feature set, RUN (R311y579)
-        run: bash scripts/run-ci.sh --layer C1bn
+      #
+      # R2165 — C1bn is no longer one of them: it MOVED to the `dissect` job,
+      # and it was the ONE lane in this group that did need provisioning. The
+      # three packages armed for it (tcpdump, libpcap-dev, netbase) moved with
+      # it, which is what their census rows already asked for in words: "ONE
+      # job only, and the smallest one that owns wz-capture's default-feature
+      # tests". After this split, that job is `dissect` and not this one.
       # R311y587 — the dissection C ABI, driven from a real C translation unit.
       # The Rust tests cover the functions; only C covers what is true ONLY
       # across the boundary (header compiles, symbols export under the names it

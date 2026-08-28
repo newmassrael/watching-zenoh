@@ -169,6 +169,7 @@ _add(
         "isolated-crates",
         "capi-c-arms",
         "e2e-demo",
+        "dissect",
     ],
 )
 _add(
@@ -195,6 +196,7 @@ _add(
         "isolated-crates",
         "capi-c-arms",
         "e2e-demo",
+        "dissect",
     ],
 )
 # `ring`, reached through quinn / rustls / tokio-rustls wherever a TLS or QUIC
@@ -221,6 +223,7 @@ _add(
         "isolated-crates",
         "capi-c-arms",
         "e2e-demo",
+        "dissect",
     ],
 )
 # R2054 (open-debt item 384) — the ADJUDICATOR for `wz_capture::link`'s BSD
@@ -237,7 +240,7 @@ _add(
     "the adjudicator Layer C1bn holds wz_capture::link's BSD address-family "
     "table against (item 384); armed with WZ_TCPDUMP_REQUIRE so its absence "
     "reds instead of skipping.",
-    ["feature-gates"],
+    ["dissect"],
 )
 # R2055 (open-debt item 391) — the ADJUDICATOR for `LINK_TYPE_SWEEP_CEILING`.
 # The link-type sweep claims to cover every type a capture file can name, which
@@ -261,14 +264,14 @@ _add(
     "/etc/protocols, which Layer C1bn holds the IP protocol furniture class "
     "against (item 250); armed with WZ_PROTO_REGISTRY_REQUIRE so its absence "
     "reds instead of skipping.",
-    ["feature-gates"],
+    ["dissect"],
 )
 _add(
     "libpcap-dev",
     "pcap/dlt.h, which Layer C1bn holds LINK_TYPE_SWEEP_CEILING against via "
     "DLT_MATCHING_MAX (item 391); armed with WZ_DLT_HEADER_REQUIRE so its "
     "absence reds instead of skipping.",
-    ["feature-gates"],
+    ["dissect"],
 )
 # The `cmake` rows are DERIVED below as well as listed here; the list is what
 # makes an unjustified site fail by name, the derivation is what stops this
@@ -279,7 +282,7 @@ _add(
     "workspace), reached directly or through wz-integration-tests' "
     "dev-dependency on it. DERIVED below, not believed.",
     ["ci", "validate-codegen", "interop", "feature-gates", "transport-modes",
-     "isolated-crates", "capi-c-arms", "e2e-demo"],
+     "isolated-crates", "capi-c-arms", "e2e-demo", "dissect"],
 )
 _add(
     "cmake",
@@ -337,6 +340,7 @@ _add(
         "isolated-crates",
         "capi-c-arms",
         "e2e-demo",
+        "dissect",
     ],
 )
 _add("python3-yaml", "the workflow-shape lints Layer C0 runs on ci.yml.", ["ci"])
@@ -372,6 +376,7 @@ _add(
         "isolated-crates",
         "capi-c-arms",
         "e2e-demo",
+        "dissect",
     ],
 )
 _add(
