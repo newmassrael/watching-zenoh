@@ -837,8 +837,15 @@ pub unsafe extern "C" fn wz_dissect_pcap_fields(
 /// # Reading the result
 ///
 /// Every walked row gains `payload_decode`, an object whose `state` is one of
-/// `decoded`, `refused`, `encoding_mismatch`, `no_rule`, `keyexpr_unresolved`
-/// or `no_payload`. The last three are ANSWERS and not omissions: a rule that
+/// `decoded`, `refused`, `encoding_mismatch`, `no_rule`, `keyexpr_unresolved`,
+/// `not_on_the_wire` or `no_payload`. R2170 (open-debt item 546) added
+/// `not_on_the_wire`, and it exists because `no_payload` was being returned in
+/// its place — a false statement about a record whose payload slot holds an SHM
+/// descriptor, so the data was shared out of band and this capture never held
+/// it. That state additionally carries `descriptor_bytes`, the descriptor's own
+/// length, and it is reported whether or not the reader declared any format,
+/// because the fact does not depend on the rules.
+/// The last three are ANSWERS and not omissions: a rule that
 /// never fired and a rule that fired and found nothing send a reader to
 /// opposite places, and `keyexpr_unresolved` is the ordinary shape of a capture
 /// that began after the declarations went past. A `decoded` field's `start` /

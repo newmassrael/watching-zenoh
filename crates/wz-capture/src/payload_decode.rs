@@ -984,6 +984,42 @@ pub enum PayloadDecoding {
         /// What it said.
         why: String,
     },
+    /// R2170 (open-debt item 546) — THE PAYLOAD SLOT HELD AN SHM DESCRIPTOR, so
+    /// the data this record refers to never crossed this wire.
+    ///
+    /// # Why this is a state and not a silence
+    ///
+    /// Before this variant the answer was [`Self::NoPayload`], which is FALSE
+    /// about such a record: it carries a payload slot, and what the slot holds
+    /// is a reference to memory shared out of band. `payload.rs`'s
+    /// `Verdict::NotOnTheWire` doc already forbade exactly that answer, calling
+    /// it worse than silence because it is confident — and the field layer was
+    /// giving it anyway, because its finder looked for a field NAMED `payload`
+    /// holding `Bytes` while the dissector names this one `shm_descriptor` and
+    /// makes it `Opaque`.
+    ///
+    /// # Why it is answered before the rules are consulted
+    ///
+    /// This fact does not depend on the reader's declarations, so
+    /// [`decode_payload`] answers it BEFORE its empty-map return. A reader who
+    /// declared no format still learns that a record's data was elsewhere,
+    /// which is the difference between adding a word to a vocabulary and
+    /// letting a fact out from behind a gate it never belonged behind.
+    ///
+    /// # What it does NOT claim
+    ///
+    /// Nothing about the data. This plane never saw it, so there is no decode,
+    /// no corroboration and no refutation to report — only the length of the
+    /// descriptor, which is what the capture DOES hold.
+    NotOnTheWire {
+        /// The descriptor's own length in bytes, from the walked field's SPAN.
+        ///
+        /// The span and not the value: the dissector builds this slot with
+        /// `SpanCursor::opaque`, so the `Field` carries `FieldValue::Opaque`
+        /// and holds no bytes at all. A reader wanting the descriptor's bytes
+        /// has the span to fetch them with.
+        descriptor_bytes: usize,
+    },
 }
 
 impl PayloadDecoding {
@@ -1011,6 +1047,7 @@ impl PayloadDecoding {
             Self::EncodingMismatch { .. } => 4,
             Self::Refused { .. } => 5,
             Self::Decoded { .. } => 6,
+            Self::NotOnTheWire { .. } => 7,
         }]
     }
 
@@ -1030,7 +1067,7 @@ impl PayloadDecoding {
     /// variant at an EXISTING index gets two variants sharing one word and no
     /// compiler complains. That is a narrower hole than the one it replaces,
     /// and it is a deliberate act rather than an omission.
-    pub const STATES: [&'static str; 7] = [
+    pub const STATES: [&'static str; 8] = [
         "no_rules",
         "no_payload",
         "keyexpr_unresolved",
@@ -1038,6 +1075,11 @@ impl PayloadDecoding {
         "encoding_mismatch",
         "refused",
         "decoded",
+        // R2170 (open-debt item 546) — the eighth word. The array's LENGTH is
+        // in the type, so this line and the `state` arm above could not move
+        // apart, which is the property that doc paragraph claims and this is
+        // the first round to exercise it.
+        "not_on_the_wire",
     ];
 
     /// R311y926 (open-debt item 283) — the NEXT variant, so a test can visit
@@ -1085,7 +1127,14 @@ impl PayloadDecoding {
                 fields: Vec::new(),
                 despite_encoding: None,
             },
-            Self::Decoded { .. } => return None,
+            // R2170 (open-debt item 546) — the chain grew by one, and it had
+            // to: the walk's length is compared against `STATES`, so an eighth
+            // word with a seven-long walk reds. That is the residue the doc
+            // above names being held.
+            Self::Decoded { .. } => Self::NotOnTheWire {
+                descriptor_bytes: 0,
+            },
+            Self::NotOnTheWire { .. } => return None,
         })
     }
 
@@ -1444,8 +1493,47 @@ fn judge_claim(
     }
 }
 
+/// The SHM DESCRIPTOR slot anywhere under `field`, if the walk built one.
+///
+/// R2170 (open-debt item 546) — a sibling of [`subtree_payload_bytes`] rather
+/// than a widening of it, because the two find different things and only one of
+/// them is something a format decodes. That function's contract is "the payload
+/// BYTES", and a descriptor is not bytes this capture holds; folding the two
+/// would have made every caller of the older one start receiving a field whose
+/// value it cannot read.
+///
+/// Matches on BOTH halves the dissector sets, because the old finder missed on
+/// both: `payload_or_shm_descriptor` names this slot `shm_descriptor` (not
+/// `payload`) and builds it with `SpanCursor::opaque`, so its value is
+/// `FieldValue::Opaque` (not `Bytes`).
+pub fn subtree_shm_descriptor(field: &Field) -> Option<&Field> {
+    if field.name == "shm_descriptor" && matches!(field.value, FieldValue::Opaque) {
+        return Some(field);
+    }
+    if let FieldValue::Nested(children) = &field.value {
+        return children.iter().find_map(subtree_shm_descriptor);
+    }
+    None
+}
+
 /// Apply the mapping to one walked message.
 pub fn decode_payload(field: &Field, map: &Declarations<'_>, at: KeyexprAt<'_>) -> PayloadDecoding {
+    // R2170 (open-debt item 546) — ASKED BEFORE THE RULES, and the ORDER is the
+    // fix rather than the new state word.
+    //
+    // Whether a record's data crossed this wire has nothing to do with what
+    // formats the reader declared. Below this line the function returns
+    // `NoRules` for an empty map, so a fact that was independent of the
+    // declarations had been trapped behind them: adding an eighth word alone
+    // would have left a reader who declared nothing exactly as misinformed as
+    // the `no_payload` answer left everyone else. Two tests hold this ordering
+    // — one with a rule and one with an empty map — and swapping these blocks
+    // reds the second.
+    if let Some(descriptor) = subtree_shm_descriptor(field) {
+        return PayloadDecoding::NotOnTheWire {
+            descriptor_bytes: descriptor.span.end.saturating_sub(descriptor.span.start),
+        };
+    }
     if map.is_empty() {
         return PayloadDecoding::NoRules;
     }
@@ -1600,6 +1688,19 @@ pub fn push_decoding(decoding: &PayloadDecoding, out: &mut String) {
             open(out);
             out.push('}');
         }
+        // R2170 (open-debt item 546) — RENDERED, with the one number this plane
+        // actually holds. The compiler required this arm, which is the property
+        // the vocabulary doc claims: an eighth word cannot reach a consumer
+        // without a rendering. `descriptor_bytes` is an ADDED KEY, which this
+        // ABI's contract permits, and it is what tells a reader the difference
+        // between "no payload" and "the payload is somewhere this capture
+        // cannot see".
+        PayloadDecoding::NotOnTheWire { descriptor_bytes } => {
+            open(out);
+            out.push_str(",\"descriptor_bytes\":");
+            out.push_str(&descriptor_bytes.to_string());
+            out.push('}');
+        }
         PayloadDecoding::NoRule(keyexpr) => {
             open(out);
             out.push_str(",\"keyexpr\":");
@@ -1735,6 +1836,54 @@ mod tests {
         )
     }
 
+    /// The same walked `MsgPut`, except its payload slot is the one the
+    /// dissector builds when the extension chain carried an SHM marker.
+    ///
+    /// Shaped from `wz_session_core::dissect::payload_or_shm_descriptor` rather
+    /// than invented: on the SHM side that function calls `SpanCursor::opaque`,
+    /// so the field is named `shm_descriptor` and its value is
+    /// `FieldValue::Opaque` — NOT `Bytes`. Both halves matter to item 546,
+    /// because the field-layer finder missed on both: it looked for the name
+    /// `payload` AND for a `Bytes` value. The descriptor's length is carried by
+    /// the SPAN, because an opaque field holds no bytes at all.
+    fn put_with_shm_descriptor(encoding_id: u16, descriptor_len: usize) -> Field {
+        use wz_session_core::dissect::Span;
+        let f = |name: &'static str, value: FieldValue| Field {
+            name: name.into(),
+            span: Span { start: 0, end: 0 },
+            value,
+        };
+        f(
+            "msg_put",
+            FieldValue::Nested(vec![
+                f(
+                    "keyexpr",
+                    FieldValue::Nested(vec![
+                        f("id", FieldValue::Uint(0)),
+                        f("mapping", FieldValue::Bits(1)),
+                        f("suffix", FieldValue::Text(String::from("demo/a"))),
+                    ]),
+                ),
+                f(
+                    "encoding",
+                    FieldValue::Nested(vec![
+                        f("packed_id", FieldValue::Uint(u64::from(encoding_id) << 1)),
+                        f("has_schema", FieldValue::Flag(false)),
+                        f("id", FieldValue::Bits(u64::from(encoding_id))),
+                    ]),
+                ),
+                Field {
+                    name: "shm_descriptor".into(),
+                    span: Span {
+                        start: 0,
+                        end: descriptor_len,
+                    },
+                    value: FieldValue::Opaque,
+                },
+            ]),
+        )
+    }
+
     /// The three encoding ids this test file names, by their table position in
     /// `wz_codecs::encoding_ids::ENCODING_ID_TO_STR`. Asserted rather than
     /// hard-coded blind: an upstream insertion that shifted the table would
@@ -1743,6 +1892,157 @@ mod tests {
     const ENC_TEXT_PLAIN: u16 = 4;
     const ENC_JSON: u16 = 5;
     const ENC_PROTOBUF: u16 = 13;
+
+    /// R2170 (open-debt item 546) — A RECORD CARRYING AN SHM DESCRIPTOR IS NOT
+    /// A RECORD WITH NO PAYLOAD.
+    ///
+    /// The door existed and gave the wrong answer, which the `NotOnTheWire`
+    /// doc in `payload.rs` calls out by name as worse than silence because it
+    /// is confident. `subtree_payload_bytes` looked for a field named `payload`
+    /// holding `Bytes`; the dissector names the SHM slot `shm_descriptor` and
+    /// makes it `Opaque`, so the finder missed and `decode_payload` reported
+    /// `no_payload` — of a record whose payload is precisely what was elsewhere.
+    #[test]
+    fn a_record_carrying_an_shm_descriptor_is_not_called_no_payload() {
+        let mut map = FormatMap::new();
+        map.declare("demo/**=json").expect("a keyexpr pattern");
+        let run = Declarations::new(&map);
+        let spaces = KeyexprSpaces::new();
+        let at = KeyexprAt::new(Direction::A, &spaces);
+
+        let shm = put_with_shm_descriptor(ENC_JSON, 24);
+        let got = decode_payload(&shm, &run, at);
+        assert_ne!(
+            got.state(),
+            "no_payload",
+            "the record carries a descriptor, so `no payload` is a false \
+             statement about it, not a silence"
+        );
+        assert_eq!(
+            got.state(),
+            "not_on_the_wire",
+            "and the answer has to NAME what happened: the data was not on \
+             this wire"
+        );
+        assert_eq!(
+            got,
+            PayloadDecoding::NotOnTheWire {
+                descriptor_bytes: 24
+            },
+            "the descriptor's length comes from the SPAN, because an opaque \
+             field holds no bytes"
+        );
+    }
+
+    /// R2170 (open-debt item 546) — AND A CONSUMER WHO DECLARED NO RULES IS
+    /// TOLD, because the fact does not depend on their declaration.
+    ///
+    /// This is the seam the item names: `decode_payload` returns `NoRules` on
+    /// its first line when the map is empty, so a fact that has nothing to do
+    /// with rules was trapped behind the rules. Adding a state word alone would
+    /// have left this reader exactly as uninformed. The SHM question is
+    /// therefore asked BEFORE the empty-map return, and this test is what holds
+    /// that ordering in place — reorder those two and it reds.
+    #[test]
+    fn an_shm_descriptor_reaches_a_consumer_that_declared_no_rules() {
+        let map = FormatMap::new();
+        let run = Declarations::new(&map);
+        let spaces = KeyexprSpaces::new();
+        let at = KeyexprAt::new(Direction::A, &spaces);
+        assert!(run.is_empty(), "the point of this test is an empty map");
+
+        let shm = put_with_shm_descriptor(ENC_JSON, 8);
+        assert_eq!(
+            decode_payload(&shm, &run, at).state(),
+            "not_on_the_wire",
+            "a reader who declared nothing still learns the data was not here"
+        );
+
+        // The CONTRAST that keeps the line above from being vacuous: with no
+        // rules and no descriptor, `NoRules` is still the right answer. A fix
+        // that answered `NotOnTheWire` for everything would pass the assertion
+        // above and be wrong.
+        let ordinary = put_declaring(ENC_JSON, br#"{"a":1}"#);
+        assert_eq!(
+            decode_payload(&ordinary, &run, at),
+            PayloadDecoding::NoRules,
+            "and a reader who declared nothing is still not lectured about an \
+             ordinary payload"
+        );
+    }
+
+    /// R2170 (open-debt item 546) — THE `NotOnTheWire` ARM IN [`judge_claim`] IS
+    /// DEAD, and that is now a MEASUREMENT rather than a comment.
+    ///
+    /// # Why the arm is kept rather than deleted
+    ///
+    /// `judge_claim` matches the result of [`crate::payload::inspect`], and
+    /// `inspect` does not construct `NotOnTheWire` — the only place that does is
+    /// the capture plane's own `if shm` branch, which never calls `judge_claim`.
+    /// So the arm cannot be reached today. Deleting it would send that verdict
+    /// to the `_` arm, which returns `Claim::Vetoes(name, true)` — a MEASURED
+    /// finding against a publisher who did nothing wrong, which is precisely
+    /// the confident wrong answer `Verdict::NotOnTheWire`'s own doc is written
+    /// against. Keeping it costs nothing and is correct if it ever becomes
+    /// reachable.
+    ///
+    /// # Why this is a test and not that paragraph
+    ///
+    /// A comment claiming "unreachable" is a claim nobody re-measures, and this
+    /// file has just paid for one of those. This test derives the population and
+    /// asserts the claim, so the day `inspect` gains that verdict, THIS fails
+    /// and the arm's status becomes a decision again instead of a stale note.
+    #[test]
+    fn inspect_never_yields_not_on_the_wire_so_that_claim_arm_stays_dead() {
+        use wz_codecs::encoding_ids::ENCODING_ID_TO_STR;
+
+        // The bodies are DECLARED here, one per shape `inspect` can take, so
+        // the population is derived from the two axes rather than from whatever
+        // a loop happened to visit. `Empty` is included because `inspect`
+        // returns it before looking at the encoding at all.
+        let bodies: [&[u8]; 6] = [
+            b"",
+            br#"{"a":1}"#,
+            &[0xa1, 0x61, 0x61, 0x01],
+            b"plain text",
+            &[0x00, 0x01, 0x02, 0xff],
+            &[0xff, 0xfe, 0xfd],
+        ];
+
+        let mut calls = 0usize;
+        let mut not_on_the_wire = 0usize;
+        for id in 0..ENCODING_ID_TO_STR.len() {
+            // `packed_id` is the WIRE word, so the id is shifted left by one --
+            // the same shape `payload.rs` passes and the reason its own tests
+            // write `5 << 1` rather than `5`.
+            let enc = crate::payload::Encoding::from_packed((id as u32) << 1, None);
+            for body in bodies {
+                calls += 1;
+                if matches!(
+                    crate::payload::inspect(enc, body),
+                    crate::payload::Verdict::NotOnTheWire { .. }
+                ) {
+                    not_on_the_wire += 1;
+                }
+            }
+        }
+
+        // POPULATION FIRST. Zero calls would make the assertion below pass
+        // while measuring nothing, which is this repository's most-repeated
+        // failure and the one the item's own text warns about.
+        assert_eq!(
+            calls,
+            ENCODING_ID_TO_STR.len() * bodies.len(),
+            "the population is the two axes multiplied, and it is not zero"
+        );
+        assert!(calls > 0, "a zero population would report green");
+        assert_eq!(
+            not_on_the_wire, 0,
+            "`inspect` produced NotOnTheWire {not_on_the_wire} time(s) out of \
+             {calls}: the arm in judge_claim is reachable now, so decide what \
+             it should do instead of leaving this test asserting it cannot be"
+        );
+    }
 
     #[test]
     fn the_encoding_ids_this_file_names_are_the_ones_upstream_holds() {

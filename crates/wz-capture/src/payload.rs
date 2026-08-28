@@ -3134,6 +3134,64 @@ mod census_tests {
     /// `descriptors()` is the answer that replaces it. The row's `consistent`
     /// column is asserted at zero for the same reason from the other side:
     /// nothing was verified either.
+    /// R2170 (open-debt item 546, the same seam) — WHAT `descriptors` CANNOT
+    /// SAY, asserted rather than described in a comment.
+    ///
+    /// This plane counts descriptors per declared-encoding ROW and for the run.
+    /// Both counts are honest AS COUNTS and neither can name a MESSAGE: a row
+    /// reading `payloads 2, descriptors 1` leaves both of its records equally
+    /// suspected. That is why rendering the number beside a row as though it
+    /// identified one would be a false statement, and it is the residue item
+    /// 546 named — the same seam as the field-layer lie, because both come from
+    /// an aggregate answer standing in for a per-message one.
+    ///
+    /// The boundary is EXHIBITED here rather than asserted about: the test
+    /// builds exactly that ambiguous row, then shows the per-message door
+    /// telling the two records apart. A round that later tried to attribute the
+    /// count to one record would have to delete this test to do it.
+    #[test]
+    fn the_descriptor_count_is_a_row_total_and_cannot_name_which_record() {
+        let c = census(&[
+            (
+                true,
+                tests_support::push_declaring("shm/topic", ID_JSON, br#"{"a":1}"#),
+            ),
+            (
+                true,
+                tests_support::push_with_shm_descriptor("shm/topic", ID_JSON, &[0x01, 0x00, 0x2A]),
+            ),
+        ]);
+
+        assert_eq!(c.payloads(), 2, "two records were read");
+        let rows = c.rows();
+        let row = rows
+            .iter()
+            .find(|r| r.declared == "application/json")
+            .expect("both records declared json, so they share one row");
+        assert_eq!(row.payloads, 2, "and they landed on the SAME row");
+        assert_eq!(
+            row.descriptors, 1,
+            "exactly one of the two was a descriptor"
+        );
+
+        // THE BOUNDARY, stated as the thing the row does NOT determine: from
+        // `payloads 2, descriptors 1` alone, either record could have been the
+        // descriptor. The row is consistent with both attributions, which is
+        // precisely why it must not be read as naming one.
+        assert!(
+            row.descriptors < row.payloads,
+            "the count is strictly inside the row, so it selects a SUBSET and \
+             names no member: attributing it to a record needs the per-message \
+             plane, which is `payload_decode::decode_payload`"
+        );
+        assert_eq!(
+            c.descriptors(),
+            row.descriptors,
+            "the run total is the same aggregate one level up, with the same \
+             limit"
+        );
+    }
+
     #[test]
     fn a_payload_the_capture_does_not_hold_is_named_rather_than_judged() {
         let c = census(&[(

@@ -440,12 +440,28 @@ int wz_dissect_pcap_fields(const unsigned char *bytes, size_t len,
  * blaming the traffic for their own rule.
  *
  * Every walked row gains `payload_decode`, an object whose `state` is
- * `decoded`, `refused`, `encoding_mismatch`, `no_rule`, `keyexpr_unresolved`
- * or `no_payload`. The last three are ANSWERS, not omissions: a rule that
+ * `decoded`, `refused`, `encoding_mismatch`, `no_rule`, `keyexpr_unresolved`,
+ * `not_on_the_wire` or `no_payload`. The last three are ANSWERS, not
+ * omissions: a rule that
  * never fired and a rule that fired and found nothing send you to opposite
  * places, and `keyexpr_unresolved` is the ordinary shape of a capture that
  * began after the declarations went past. A decoded field's start/end are in
  * the MESSAGE's coordinate space, like every other span on the row.
+ *
+ * R2170 (open-debt item 546) -- `not_on_the_wire` is the eighth state, and it
+ * exists because the seventh was giving a FALSE answer in its place. A record
+ * whose payload slot holds an SHM descriptor refers to data shared out of
+ * band, so this capture never held it; that used to be reported as
+ * `no_payload`, which is not a silence but a confident wrong statement about a
+ * record that does carry a payload slot. It additionally carries
+ * `descriptor_bytes`, an integer: the descriptor's own length, which is the
+ * one quantity this plane genuinely has. Nothing is claimed about the data --
+ * no decode, no corroboration, no refutation -- because it was never seen.
+ *
+ * It is reported whether or not the reader declared any format. The fact does
+ * not depend on the rules, so it is not gated behind them: a consumer that
+ * passed no `--payload` mapping still gets this state, where every other
+ * non-`decoded` state above presupposes a rule.
  *
  * R311y873 -- `encoding_mismatch` is the sample's OWN declared encoding
  * disagreeing with the rule, and it carries `declared` rather than `why`.
