@@ -232,8 +232,28 @@ fn main() {
     // arm-none-eabi gcc compile of the same headers — a silent ABI
     // mismatch that surfaces as memory corruption at runtime. Pass
     // the rustc TARGET through so bindgen and cc see the same triple.
+    //
+    // R2169 — `--target` ALONE IS NOT ENOUGH, and the half it was missing is
+    // the half that says there is no libc. A `-none-eabi` triple does not by
+    // itself make clang compile freestanding: `__STDC_HOSTED__` stays 1, so
+    // clang's own `stdint.h` runs its `#include_next <stdint.h>` and lands on
+    // the HOST's glibc header, which cannot serve a bare-metal ARM target.
+    // What surfaced was seven `unknown type name 'uint8_t' ... 'uintptr_t'`
+    // errors against `vendor/lwip/src/include/lwip/arch.h` -- a header that is
+    // entirely correct, doing `#include <stdint.h>` and using what it asks for.
+    //
+    // MEASURED 2026-08-28, `cargo build -p lwip-sys --target
+    // thumbv7m-none-eabi`, default libclang (`/usr/lib/llvm-22/lib/
+    // libclang-22.so.1`, established with `LD_DEBUG=libs` rather than inferred
+    // from filenames): 101 without this flag, 0 with it, nothing else changed.
+    // The `cc::Build` half never showed it because that half runs
+    // `arm-none-eabi-gcc`, which brings newlib's headers with it -- so the two
+    // halves of this build script disagreed about what a bare-metal target is,
+    // and only the bindgen half was wrong.
     if is_cross_bare_metal {
-        bindgen_builder = bindgen_builder.clang_arg(format!("--target={}", target));
+        bindgen_builder = bindgen_builder
+            .clang_arg(format!("--target={}", target))
+            .clang_arg("-ffreestanding");
     }
 
     let bindings = bindgen_builder
@@ -284,8 +304,60 @@ fn main() {
         .allowlist_type("netif")
         .allowlist_type("err_t")
         .allowlist_type("err_enum_t")
-        .generate()
-        .expect("bindgen lwIP headers");
+        .generate();
+
+    // R2169 — a bindgen failure must not accuse lwIP of a defect that is this
+    // BUILD SCRIPT's. `.expect("bindgen lwIP headers")` printed seven
+    // `unknown type name 'uint8_t'` errors against
+    // `vendor/lwip/src/include/lwip/arch.h`, and that header is correct: it
+    // does `#include <stdint.h>` and uses what it asked for. The missing
+    // `-ffreestanding` above is what made those types absent, and reading the
+    // panic cost a round of auditing headers that had nothing wrong with them.
+    //
+    // ⚠ THE FIRST DIAGNOSIS WRITTEN HERE WAS WRONG, and it is worth saying so
+    // where the next reader is: it blamed a libclang installed without its own
+    // freestanding headers, on the strength of a control/treatment pair where
+    // `LIBCLANG_PATH=/usr/lib/llvm-19/lib` turned 101 into 0. That directory
+    // contains NO libclang at all -- the treatment arm silently fell through to
+    // a different library, so the experiment moved a term nobody had named.
+    // `LD_DEBUG=libs` then said the default arm loads llvm-22's, whose
+    // freestanding headers are present. A pair of runs that differ is not an
+    // attribution until the thing that differs has been READ rather than
+    // assumed.
+    //
+    // So the check below is a backstop for the same SYMPTOM arriving from a
+    // genuinely broken toolchain, and it states what it does not know.
+    let bindings = match bindings {
+        Ok(b) => b,
+        Err(e) => {
+            let msg = e.to_string();
+            let missing_c_types = ["uint8_t", "uintptr_t", "size_t", "stddef.h", "stdint.h"]
+                .iter()
+                .any(|needle| msg.contains(needle));
+            if missing_c_types {
+                panic!(
+                    "bindgen could not parse the lwIP headers, and the errors are \
+                     about C's own fixed-width types.\n\
+                     \n\
+                     THIS IS NOT AN lwIP OR PORT PROBLEM. Under `--target={target}` \
+                     there is no libc, so `<stdint.h>` has to come from the \
+                     libclang's own freestanding include directory. This crate \
+                     already passes `-ffreestanding` for that reason, so if you are \
+                     reading this the flag is not reaching clang or that directory \
+                     is not there.\n\
+                     \n\
+                     Check both, in that order: that the `-ffreestanding` above is \
+                     still on the cross branch, and that the library `clang-sys` \
+                     LOADED -- not the one its filename suggests, run with \
+                     `LD_DEBUG=libs` to see it -- has a `lib/clang/<version>/\
+                     include/stdint.h` beside it.\n\
+                     \n\
+                     bindgen's own diagnostics follow.\n{msg}"
+                );
+            }
+            panic!("bindgen lwIP headers: {msg}");
+        }
+    };
 
     bindings
         .write_to_file(out_dir.join("bindings.rs"))
