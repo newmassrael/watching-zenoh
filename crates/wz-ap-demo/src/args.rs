@@ -2005,6 +2005,296 @@ fn render_autoconnect_roles(matcher: wz::runtime_tokio::zenoh_config::WhatAmIMat
 /// it, so an operator had to diff it against the `argv +=` line beside it by
 /// hand. Two copies of this list would have been two answers to "did my setting
 /// take effect"; one copy, read by both, is the point of the move.
+/// WHY each `argv only` key is still `argv only`, one row per key.
+///
+/// R2165b (open-debt item 220) — the item had carried, in its own words, "the
+/// three kinds of the remaining ones: (1) carried on the wire but not yet read
+/// (2) not carried on the wire (3) already judged in some form by a session
+/// leg — THESE THREE ARE NOT YET SEPARATED". While they are one undivided
+/// blob, nothing can say which key the NEXT round should pick up, because
+/// "wire it and it becomes wire-proven" and "no frame will ever carry this"
+/// look identical from inside `argv only`.
+///
+/// Each row is `(key, kind, evidence)`, and the evidence is the point: a kind
+/// asserted without one is the prose this project keeps having to unlearn.
+/// The three kinds and what each row's evidence must NAME:
+///
+/// * `not-yet-read` — a frame DOES carry the effect, and no leg reads it yet.
+///   Evidence names the upstream field or extension, so the claim can be
+///   checked against `zenoh-protocol` rather than believed. Moving a key from
+///   here to `CONFIG_KEYS_PROVEN_ON_THE_WIRE` is the work item 220 is asking
+///   for; this kind is therefore the round-to-round queue.
+/// * `off-wire` — no frame field carries it. Evidence names the flag the
+///   expansion emits and WHERE the effect is instead visible (a socket
+///   option, a timer, a file), plus the search that found no protocol field.
+///   These will never leave via a dissector fixture, so counting them as
+///   pending wire-work overstates the debt.
+/// * `leg-judged` — a leg already observes the effect. Evidence names the
+///   test function, so the claim dies if that function is renamed away.
+///
+/// ⛔ RESEMBLANCE IS NOT EVIDENCE. `transport/unicast/max_links` sits in the
+/// same `transport/unicast/*` family as three keys already wire-proven, and
+/// that is NOT why it is `not-yet-read`: it is there because upstream gates
+/// the MultiLink extension on `max_links > 1` at two measured sites, so a
+/// fixture pair of 1 and 3 shows the extension absent and present.
+///
+/// `#[cfg(test)]`, not merely feature-gated: this ledger is read by the gate
+/// below and by nothing the shipped binary runs, and a `pub(crate)` const the
+/// bin target never touches is dead code there — which this crate's lint
+/// settings correctly refuse. Measured: the feature-gated form compiled under
+/// `--bins <one test>` and failed the crate's own suite, because that builds
+/// the binary WITHOUT `cfg(test)` as well.
+#[cfg(all(test, feature = "zenoh-config"))]
+pub(crate) const KIND_NOT_YET_READ: &str = "not-yet-read";
+/// See `KIND_NOT_YET_READ`.
+#[cfg(all(test, feature = "zenoh-config"))]
+pub(crate) const KIND_OFF_WIRE: &str = "off-wire";
+/// See `KIND_NOT_YET_READ`.
+#[cfg(all(test, feature = "zenoh-config"))]
+pub(crate) const KIND_LEG_JUDGED: &str = "leg-judged";
+
+/// The split itself. See `KIND_NOT_YET_READ` for what an evidence must name.
+#[cfg(all(test, feature = "zenoh-config"))]
+pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
+    // ── (1) the wire carries it; nothing here reads it yet ──────────────
+    (
+        "mode",
+        KIND_NOT_YET_READ,
+        "whatami is a FIELD of InitSyn (zenoh-protocol init.rs:122) and of \
+         InitAck (:234), so a frame read already carries this key's effect. \
+         The register excluded `mode` from this kind on args.rs:397 — that \
+         with no `listen` the expansion emits only `--connect` whatever the \
+         mode is — but that measures whether TWO DIALLING RUNS differ in \
+         their ARGV, and a wire class is proven by reading the FRAME, not by \
+         diffing the expansion. The two are different questions and only the \
+         second was asked.",
+    ),
+    (
+        "transport/unicast/max_links",
+        KIND_NOT_YET_READ,
+        "upstream gates the MultiLink extension on `max_links > 1`, measured \
+         at establishment/open.rs:620 (`.open(manager.config.unicast\
+         .max_links > 1)`) and manager.rs:290 (`MultiLink::make(prng, \
+         config.max_links > 1)`). The extension itself is init.rs:131 \
+         (InitSyn/InitAck) and open.rs:94 (OpenSyn). So a FIXTURES pair of 1 \
+         and 3 shows ext_mlink absent then present. NOTE the frame carries \
+         the CAPABILITY, not the number: this leaves `> 1` provable and the \
+         exact count not.",
+    ),
+    (
+        "timestamping/enabled",
+        KIND_NOT_YET_READ,
+        "the timestamp is a field of the Put message — zenoh-protocol \
+         put.rs:50 (`pub timestamp: Option<Timestamp>`) behind the T flag at \
+         put.rs:43. So the wire carries it, but in a DATA message, whereas \
+         this tree's FIXTURES mechanism reads handshake frames only \
+         (HandshakeFrame is InitSyn | OpenSyn). This row is the one that \
+         needs the MECHANISM widened rather than just another fixture, and \
+         saying so is the difference between a queue and a wish.",
+    ),
+    (
+        "transport/multicast/qos/enabled",
+        KIND_NOT_YET_READ,
+        "the exact multicast analogue of `transport/unicast/qos/enabled`, \
+         which is already wire-proven — and it is here on its own evidence, \
+         not on that resemblance: the multicast Join message carries \
+         `ext_qos: Option<ext::QoSType>` at zenoh-protocol join.rs:103. So a \
+         frame read proves it, on the Join rather than on InitSyn/OpenSyn, \
+         which means it shares `timestamping/enabled`'s need for the FIXTURES \
+         mechanism to read a frame it does not read today.",
+    ),
+    // ── (2) no frame field carries it ───────────────────────────────────
+    (
+        "connect/timeout_ms",
+        KIND_OFF_WIRE,
+        "expands to `--connect-timeout`. A local dial deadline: it decides how \
+         long THIS node waits before giving up, and a peer that never saw the \
+         attempt cannot carry it. A handshake that succeeds looks the same at \
+         any timeout.",
+    ),
+    (
+        "connect/exit_on_failure",
+        KIND_OFF_WIRE,
+        "expands to `--connect-exit-on-failure`. A local policy about what the \
+         PROCESS does when dialling fails; its effect is an exit status, \
+         observed by whoever started the node and by no frame.",
+    ),
+    (
+        "listen/timeout_ms",
+        KIND_OFF_WIRE,
+        "expands to `--listen-timeout`. The listen-side mirror of \
+         `connect/timeout_ms`: a local deadline on binding, visible as whether \
+         the socket came up in time.",
+    ),
+    (
+        "listen/retry",
+        KIND_OFF_WIRE,
+        "expands to `--listen-retry`. How often binding is re-attempted; like \
+         `connect/retry`, a bind that eventually succeeds is \
+         indistinguishable from one that succeeded first time.",
+    ),
+    (
+        "listen/exit_on_failure",
+        KIND_OFF_WIRE,
+        "expands to `--listen-exit-on-failure`. The listen-side mirror of \
+         `connect/exit_on_failure`: an exit status, not a field.",
+    ),
+    (
+        "routing/interests/timeout",
+        KIND_OFF_WIRE,
+        "expands to `--interest-timeout`. A local timer bounding how long a \
+         pending interest is kept before collection. What a peer sees is the \
+         interest itself; when this node gives up on one is its own \
+         bookkeeping.",
+    ),
+    (
+        "scouting/multicast/listen",
+        KIND_OFF_WIRE,
+        "expands to `--scout-listen`. Whether this node ANSWERS scouts, so \
+         its effect is the presence or absence of a reply on the multicast \
+         socket — a different socket from the unicast session the handshake \
+         fixtures read, and an absence rather than a value.",
+    ),
+    (
+        "scouting/multicast/autoconnect",
+        KIND_OFF_WIRE,
+        "expands to `--scout-autoconnect`. Which discovered roles this node \
+         dials; the same shape as `connect/endpoints`, deciding WHETHER a \
+         link is attempted, so a frame reader sees a connection or no \
+         connection and never the setting.",
+    ),
+    (
+        "scouting/multicast/autoconnect_strategy",
+        KIND_OFF_WIRE,
+        "expands to `--scout-autoconnect-strategy`. How those dials are \
+         ordered and retried — again a property of which links exist rather \
+         than of what any link carries.",
+    ),
+    (
+        "connect/endpoints",
+        KIND_OFF_WIRE,
+        "expands to `--connect`. It decides WHICH peer is dialled, so its \
+         effect is the existence of a link rather than a value inside one; a \
+         dissector reading a frame cannot see a connection that was never \
+         attempted.",
+    ),
+    (
+        "listen/endpoints",
+        KIND_OFF_WIRE,
+        "expands to `--listen`. Same shape as `connect/endpoints`: it decides \
+         which socket is bound, which is observable as a reachable address \
+         and not as a field.",
+    ),
+    (
+        "scouting/multicast/enabled",
+        KIND_OFF_WIRE,
+        "expands to `--scout`, the master switch. Its effect is whether \
+         multicast scouting happens at all, on a different socket from the \
+         unicast session the handshake fixtures read.",
+    ),
+    (
+        "scouting/multicast/address",
+        KIND_OFF_WIRE,
+        "expands to `--scout-addr`. A multicast GROUP address is a property \
+         of the socket the datagram is sent to, not a field inside any zenoh \
+         frame.",
+    ),
+    (
+        "scouting/multicast/interface",
+        KIND_OFF_WIRE,
+        "expands to `--scout-iface`. Which local interface the multicast \
+         socket binds is visible in the host's routing, never in a frame.",
+    ),
+    (
+        "scouting/multicast/ttl",
+        KIND_OFF_WIRE,
+        "expands to `--scout-ttl`. The TTL is an IP HEADER field set on the \
+         socket, one layer below anything zenoh's own dissector names.",
+    ),
+    (
+        "scouting/timeout",
+        KIND_OFF_WIRE,
+        "expands to `--scout-timeout-ms`. A local timer bounding how long \
+         scouting waits; its effect is when the node gives up, which no peer \
+         is told.",
+    ),
+    (
+        "queries_default_timeout",
+        KIND_OFF_WIRE,
+        "expands to `--query-timeout-ms`. A local timer on the querier side. \
+         The register already noted this key is witnessed only as far as the \
+         argv string, and the reason it stops there is that nothing on the \
+         wire states it.",
+    ),
+    (
+        "connect/retry",
+        KIND_OFF_WIRE,
+        "expands to `--connect-retry`. Retry timing changes WHEN a dial is \
+         re-attempted; a successful handshake looks identical whether it was \
+         the first attempt or the fourth.",
+    ),
+    (
+        "transport/link/tls/root_ca_certificate",
+        KIND_OFF_WIRE,
+        "expands to `--tls-ca`. A trust store consulted BENEATH zenoh, during \
+         the TLS handshake; its effect is whether a zenoh frame is exchanged \
+         at all, not what any frame contains.",
+    ),
+    (
+        "transport/link/tls/listen_certificate",
+        KIND_OFF_WIRE,
+        "expands to `--tls-cert`. Same layer as `--tls-ca`: the certificate \
+         travels in the TLS handshake, which is not a zenoh frame and is not \
+         what this tree's dissector reads.",
+    ),
+    (
+        "transport/link/tls/listen_private_key",
+        KIND_OFF_WIRE,
+        "expands to `--tls-key`. A private key is by construction never on \
+         any wire; its effect is whether the TLS handshake completes.",
+    ),
+    (
+        "namespace",
+        KIND_OFF_WIRE,
+        "expands to `--namespace`. MEASURED, and this is a search result \
+         rather than a deduction: no field in commons/zenoh-protocol names a \
+         namespace. A future round that finds the prefix inside the key \
+         expressions a node emits should MOVE this row rather than argue with \
+         it — the evidence names the search so it can be overturned.",
+    ),
+    (
+        "routing/peer/mode",
+        KIND_OFF_WIRE,
+        "expands to `--peer-mode`. MEASURED the same way: no PeerMode or \
+         linkstate spelling occurs anywhere in commons/zenoh-protocol, so \
+         the routing strategy is a local behaviour and not an announced one. \
+         Overturn by naming the field, not by asserting one exists.",
+    ),
+    // ── (3) a leg already observes the effect ───────────────────────────
+    (
+        "adminspace/enabled",
+        KIND_LEG_JUDGED,
+        "apfull_adminspace_plane_decoded_by_a_real_pico_z_get, in \
+         wz-integration-tests/tests/apfull_adminspace_pico_interop.rs, drives \
+         the adminspace with a REAL pico z_get and decodes the reply, which \
+         is the effect of the key rather than its value.",
+    ),
+    (
+        "adminspace/permissions/read",
+        KIND_LEG_JUDGED,
+        "apfull_adminspace_read_gate_denies_every_leg_to_a_real_pico_z_get, \
+         same file: the deny direction is exercised against a real pico, so \
+         the key's effect is observed by its refusal.",
+    ),
+    (
+        "adminspace/permissions/write",
+        KIND_LEG_JUDGED,
+        "two legs in that file, one per direction: \
+         apfull_adminspace_write_applied_and_observed_by_a_real_pico and \
+         apfull_adminspace_write_gate_refuses_an_unpermitted_pico_put.",
+    ),
+];
+
 #[cfg(feature = "zenoh-config")]
 pub(crate) fn config_keys_the_demo_drops() -> Vec<&'static str> {
     // R2145 (open-debt item 209) — `scouting/multicast/enabled` LEFT this list.
@@ -4844,6 +5134,148 @@ mod stock_config_tests {
             "no key is argv-only any more — open debt 220 is closed, and closing \
              it is a decision to record rather than a state to discover here"
         );
+    }
+
+    /// Every `argv only` key says WHY it is still one, in a kind that names its
+    /// own evidence.
+    ///
+    /// R2165b (open-debt item 220) — the test above partitions the honoured
+    /// surface into `wire` / `no sink` / `argv only` and counts the third. That
+    /// count is a single number over a blob, and the item's own last sentence
+    /// said the blob holds three different situations that "are not yet
+    /// separated". Undivided, it cannot answer the only question a next round
+    /// asks: which key is one wiring away from `wire`, and which will never get
+    /// there? This test is that division, and it is a GATE rather than a note
+    /// because a kind kept in prose is the class this project has paid for
+    /// repeatedly — prose does not fail when the tree moves under it.
+    #[test]
+    fn every_argv_only_key_says_which_kind_of_unproven_it_is() {
+        let no_sink = config_keys_the_demo_drops();
+        let wire: Vec<&str> = CONFIG_KEYS_PROVEN_ON_THE_WIRE.to_vec();
+        let mut argv_only: Vec<&str> = HONOURED_CONFIG_KEYS
+            .iter()
+            .copied()
+            .filter(|k| !wire.contains(k) && !no_sink.contains(k))
+            .collect();
+        argv_only.sort_unstable();
+
+        let mut ledgered: Vec<&str> = ARGV_ONLY_KIND_LEDGER.iter().map(|(k, ..)| *k).collect();
+        ledgered.sort_unstable();
+
+        // THE LEDGER'S POPULATION IS `honoured MINUS wire`, NOT `argv only`,
+        // and the difference is the whole correctness of this gate.
+        //
+        // `argv only` is BUILD-DEPENDENT: `config_keys_the_demo_drops` answers
+        // per `cfg!(feature = ..)`, so a key with no sink in a narrow build has
+        // one in a wide build and crosses into `argv only` there. MEASURED, and
+        // it is why this assertion is shaped the way it is: at `--features
+        // zenoh-config` the class is 20 keys, and at the 44-feature build the
+        // pre-push hook runs it is 30 -- the ten that differ are exactly the
+        // ones the narrow build drops. A ledger held EQUAL to `argv only` is
+        // therefore a gate that can only pass under one build, which is not a
+        // property this file gets to have.
+        //
+        // Both source lists here are plain consts, so `honoured - wire` is the
+        // same set under every build, and holding the ledger to it keeps both
+        // directions that matter:
+        //
+        //  * nothing LEAKS -- a new honoured key without a row fails, in every
+        //    build rather than only the wide one;
+        //  * a row RETIRES when its key moves to `wire`, which is the whole
+        //    point of item 220, so the gate fires on the debt being PAID and
+        //    not merely on regression.
+        let mut expected: Vec<&str> = HONOURED_CONFIG_KEYS
+            .iter()
+            .copied()
+            .filter(|k| !wire.contains(k))
+            .collect();
+        expected.sort_unstable();
+        assert_eq!(
+            ledgered, expected,
+            "the kind ledger must name every honoured key that is not yet \
+             wire-proven — no more (retire a row when its key reaches `wire`) \
+             and no fewer (a new key must arrive with its kind)"
+        );
+
+        // And the build-dependent class must be COVERED by it. This is implied
+        // by the equality above, and asserted anyway because it is the property
+        // a reader of this test actually wants: whatever this build calls
+        // `argv only`, every one of those keys says which kind it is.
+        for key in &argv_only {
+            assert!(
+                ledgered.contains(key),
+                "{key} is argv-only in this build and has no kind row"
+            );
+        }
+
+        // One row per key: a duplicate would let two kinds be claimed at once
+        // and the partition above would still pass.
+        let mut seen = ledgered.clone();
+        seen.dedup();
+        assert_eq!(seen.len(), ledgered.len(), "a key is ledgered twice");
+
+        let kinds = [KIND_NOT_YET_READ, KIND_OFF_WIRE, KIND_LEG_JUDGED];
+        for (key, kind, evidence) in ARGV_ONLY_KIND_LEDGER {
+            assert!(
+                kinds.contains(kind),
+                "{key} claims kind {kind:?}, which is not one of the three"
+            );
+            // An evidence has to CITE. The three kinds cite different things --
+            // an upstream file, a flag, a test function -- so the check is for
+            // a citation's shape rather than for any one vocabulary: a bare
+            // "it is obvious" cannot satisfy it, which is the failure this
+            // gate exists to make impossible.
+            assert!(
+                evidence.len() >= 60,
+                "{key}: evidence is too short to be one: {evidence:?}"
+            );
+            let cites = evidence.contains(".rs:")
+                || evidence.contains("--")
+                || evidence.contains("apfull_");
+            assert!(
+                cites,
+                "{key}: evidence names nothing checkable (want an upstream \
+                 file:line, the flag it expands to, or a test function): \
+                 {evidence:?}"
+            );
+        }
+
+        // ANTI-VACUITY, per kind and in both directions -- the same discipline
+        // the partition test applies to `wire` and `argv only`, applied to the
+        // split. An empty kind is never silently fine:
+        //
+        // * `not-yet-read` empty means either the queue is exhausted (a
+        //   DECISION to record) or, far likelier, rows were mis-sorted into
+        //   `off-wire` and 220 now looks smaller than it is;
+        // * `off-wire` empty means every remaining key is reachable by a
+        //   fixture, which would be news;
+        // * `leg-judged` empty means the adminspace legs stopped being
+        //   counted, i.e. this ledger drifted from the tests it cites.
+        for kind in kinds {
+            let n = ARGV_ONLY_KIND_LEDGER
+                .iter()
+                .filter(|(_, k, _)| *k == kind)
+                .count();
+            assert!(
+                n > 0,
+                "kind {kind:?} is empty — that is a decision to record, not a \
+                 state to arrive at by a list going quiet"
+            );
+        }
+
+        // The per-kind tally, PRINTED not asserted, for the same reason the
+        // partition above prints its own: it is build-dependent, and a count
+        // guard over a build-dependent set is a shape this project has paid
+        // for twice. A round moving a key should read these numbers rather
+        // than re-derive them.
+        for kind in kinds {
+            let members: Vec<&str> = ARGV_ONLY_KIND_LEDGER
+                .iter()
+                .filter(|(_, k, _)| *k == kind)
+                .map(|(key, ..)| *key)
+                .collect();
+            eprintln!("argv-only kind {} ({}): {members:?}", kind, members.len());
+        }
     }
 
     /// READ and APPLIED are different sets, and a key that is read while
