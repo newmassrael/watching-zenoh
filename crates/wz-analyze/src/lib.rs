@@ -4357,6 +4357,21 @@ fn payload_block(
             "    payload: this message names its keyexpr by id only, so no \
              --payload-format rule can be tested against it\n",
         ),
+        // R2170 (open-debt item 546) — the THIRD consumer of the vocabulary,
+        // and the compiler is what found it: this is the TEXT surface, and the
+        // arm is required because the match is exhaustive. Worth stating
+        // because the round had already satisfied the JSON emit and both
+        // vocabulary documents and still was not done -- a person reading a
+        // terminal is a consumer too, and `no_payload` was lying to them in
+        // exactly the same way.
+        //
+        // The number is the DESCRIPTOR's length, not the payload's, and the
+        // sentence says where the data went rather than implying it is missing.
+        PayloadDecoding::NotOnTheWire { descriptor_bytes } => format!(
+            "    payload: not on this wire — the slot holds a {descriptor_bytes}-byte \
+             SHM descriptor, so the data was shared out of band and this \
+             capture never carried it\n"
+        ),
         PayloadDecoding::NoRule(keyexpr) => {
             format!("    payload: no --payload-format rule covers `{keyexpr}`\n")
         }
