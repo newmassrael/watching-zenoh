@@ -853,6 +853,54 @@ uint64_t wz_dissect_live_lost(const wz_dissect_live *h);
  * commonest source of a double free at an FFI seam. */
 void wz_dissect_live_close(wz_dissect_live *h);
 
+/* ── R2171 (ABI 13) — THE DOOR BETWEEN THE TWO HALVES ────────────────────
+ *
+ * Read a whole capture FILE and hand back a LIVE HANDLE, so the records above
+ * can be taken from a capture that has already been written down.
+ *
+ * Until this existed the header had two halves and nothing joining them. The
+ * pcap doors take a whole file and return a JSON document; the live family
+ * takes packets one at a time and fills wz_dissect_record. A FROZEN capture --
+ * the one input a regression test can hold still, and what an operator hands
+ * over when something went wrong -- could reach the document doors and could
+ * not reach the record door at all. A consumer wanting both had to open the
+ * container itself and drive wz_dissect_live_push per packet, which puts a
+ * SECOND reader of the pcap format in the system; the two then disagree, and
+ * the one that disagrees silently is the one outside this library.
+ *
+ * The paragraph on WZ_DISSECT_LIMITS_NONE at wz_dissect_live_open already
+ * described the caller this is for -- "a bounded replay you want nothing
+ * discarded from". That sentence had no door to name. This is it.
+ *
+ *     wz_dissect_live *h;
+ *     if (wz_dissect_pcap_replay(bytes, len, WZ_DISSECT_LIMITS_NONE, &h)) {...}
+ *     wz_dissect_record buf[256];
+ *     size_t n;
+ *     while (!wz_dissect_live_drain(h, buf, 256, &n) && n) { ... }
+ *     wz_dissect_live_close(h);
+ *
+ * EITHER FORMAT, chosen by the file's magic, through the same reader every
+ * document door here uses -- so a pcapng's per-interface link types, its
+ * Decryption Secrets Blocks and its Interface Statistics all reach the
+ * dissection exactly as they do for wz_dissect_pcap_summary. That is the whole
+ * reason this is a door rather than advice to loop over the packets yourself.
+ *
+ * The handle is an ORDINARY live handle: release it with
+ * wz_dissect_live_close, read what a ceiling took with wz_dissect_live_lost,
+ * and keep pushing with wz_dissect_live_push if a live source continues where
+ * the file stopped. The packet coordinates CONTINUE across that seam -- a push
+ * after an N-packet replay anchors at N -- because a counter that restarted
+ * would put a live packet at a file packet's index and a consumer would read
+ * two distinct messages as one.
+ *
+ * On WZ_DISSECT_OK, `*out` is a handle to be released exactly once. A capture
+ * that does not parse is WZ_DISSECT_ERR_BAD_CAPTURE and hands back no handle.
+ *
+ * @bound limits work-ceiling -- it bounds what the dissection RETAINS while
+ * the file is read, and wz_dissect_live_lost is what it discarded. */
+int wz_dissect_pcap_replay(const unsigned char *bytes, size_t len, int limits,
+                           wz_dissect_live **out);
+
 /* R2108 -- the record's layout, AS THE BUILT LIBRARY SEES IT.
  *
  * Fills `out` with, in order: size, align, then the offset of every field of

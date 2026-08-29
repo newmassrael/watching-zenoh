@@ -50,7 +50,7 @@ import subprocess
 import sys
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 12
+EXPECTED_VERSION = 13
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -93,6 +93,11 @@ EXPECTED_SYMBOLS = {
     "wz_dissect_live_drain",
     "wz_dissect_live_lost",
     "wz_dissect_live_close",
+    # R2171 (open-debt item 547) — the door BETWEEN the two families above and
+    # the nine document doors below. It hands back the same opaque handle
+    # `wz_dissect_live_open` does, so the memory rule does not move with it:
+    # what moves is the symbol set, which is this pin's own subject.
+    "wz_dissect_pcap_replay",
     # R2108 (open-debt item 525) — the layout door. Exported so THIS gate can
     # read the record's shape out of the artifact; it is not a door a consumer
     # has any use for, since a program that includes the header already has the

@@ -2431,6 +2431,10 @@ mod message_list_census {
             dropped_frames: _,
             chain_bytes_lost: _,
             decryption_secrets: _,
+            // R2171 — a COORDINATE, not a list: one past the highest packet
+            // index fed in, so a caller resuming after a capture file knows
+            // where the file stopped. Nothing decoded is held here.
+            next_packet_index: _,
         } = &d;
 
         // AND THE THREE ARE THE ENUMERATION. Without this the pattern above
@@ -3256,6 +3260,26 @@ pub struct Dissection {
     /// only have fixed it by parsing the file a second time itself, which is a
     /// second reader of the same bytes and the drift this crate keeps closing.
     decryption_secrets: Vec<pcapng::DecryptionSecrets>,
+    /// R2171 (open-debt item 547) — one past the highest `packet_index` any
+    /// push has carried, and zero for a dissection nothing was fed.
+    ///
+    /// ## Why the dissection has to hold this
+    ///
+    /// The coordinate is the CALLER's: every `push_packet_*` takes it as an
+    /// argument, because a file reader has packet ordinals to hand and a live
+    /// tap has its own push count. That worked while a dissection was fed by
+    /// exactly one of the two. It stops working the moment a caller feeds a
+    /// FILE and then keeps pushing — which is what `wz_dissect_pcap_replay`
+    /// made possible — because the second caller has no way to learn where the
+    /// first one stopped, and a counter restarted at zero puts a live packet at
+    /// a file packet's index. A datagram message anchors to that index, so two
+    /// distinct messages would come back to a consumer as one.
+    ///
+    /// The MAXIMUM rather than a count of pushes: a pcapng can present packets
+    /// out of order (see [`Self::capture_origin_ms`] for the same fact about
+    /// time), and what the next caller needs is a coordinate nothing already
+    /// read can collide with.
+    next_packet_index: usize,
 }
 
 /// Hand-written for ONE field: `gap_patience` defaults to
@@ -3290,6 +3314,7 @@ impl Default for Dissection {
             dropped_frames: DroppedFrameCensus::default(),
             chain_bytes_lost: 0,
             decryption_secrets: Vec::new(),
+            next_packet_index: 0,
         }
     }
 }
@@ -3298,6 +3323,17 @@ impl Dissection {
     /// An empty dissection whose chains never expire.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// R2171 (open-debt item 547) — the `packet_index` a NEXT push must carry
+    /// so it cannot land on a coordinate this dissection has already read.
+    ///
+    /// One past the highest index seen, and `0` for a dissection nothing was
+    /// fed. See the field for why the dissection is what has to know this: a
+    /// caller that reads a capture FILE and then keeps pushing is two callers,
+    /// and only the dissection saw both.
+    pub fn next_packet_index(&self) -> usize {
+        self.next_packet_index
     }
 
     /// R311y609 — how long each flow's assembler waits on a gap before
@@ -4607,6 +4643,10 @@ impl Dissection {
         ts_millis: Option<u64>,
         bytes: &[u8],
     ) {
+        // R2171 (item 547) — FIRST, and on every path: the serial branch below
+        // returns early, and a coordinate the serial reader consumed is just as
+        // spent as one the transport reader did.
+        self.next_packet_index = self.next_packet_index.max(packet_index + 1);
         // BEFORE decapsulation, because a declared serial link type has no link
         // header for `decapsulate` to strip -- the bytes ARE the serial stream.
         // Declared and never sniffed: see `serial`'s module doc for why a
@@ -13842,5 +13882,58 @@ mod tls_flow_tests {
         );
         assert_eq!(d.decryption_secrets()[0].secrets_type, TLSK);
         assert_eq!(d.decryption_secrets()[0].secrets, log);
+    }
+
+    /// R2171 (open-debt item 547) — a dissection knows the packet coordinate a
+    /// NEXT push must carry, whichever caller fed it.
+    ///
+    /// # Why the two arms are one test
+    ///
+    /// The number exists for the seam BETWEEN them: `wz_dissect_pcap_replay`
+    /// reads a file and hands back a handle a caller may keep pushing to, and
+    /// the pushing caller has no other way to learn where the file stopped. An
+    /// arm that only fed a file would leave the resumption untested, and an arm
+    /// that only pushed would assert what a private counter already knew.
+    #[test]
+    fn a_dissection_says_which_packet_coordinate_comes_next() {
+        let empty = Dissection::new();
+        assert_eq!(
+            empty.next_packet_index(),
+            0,
+            "a dissection nothing was fed starts at the first coordinate"
+        );
+
+        let packet = [0u8; 4];
+        let file = crate::pcapng::write(
+            &[(LINKTYPE_ETHERNET, 6)],
+            &[
+                (0, 1_000, &packet),
+                (0, 2_000, &packet),
+                (0, 3_000, &packet),
+            ],
+        );
+        let mut d = Dissection::from_pcapng(&file).expect("the file parses");
+        assert_eq!(
+            d.next_packet_index(),
+            3,
+            "three packets were read, so the next coordinate is 3 -- this is \
+             what a caller resuming after the file has no other way to learn"
+        );
+
+        // And a push CONTINUES it rather than restarting: a coordinate the
+        // file spent must not be handed out twice.
+        d.push_packet_at(LINKTYPE_ETHERNET, d.next_packet_index(), Some(4), &packet);
+        assert_eq!(d.next_packet_index(), 4);
+
+        // The MAXIMUM and not a push count, because a pcapng may present its
+        // packets out of order: what a resuming caller needs is a coordinate
+        // nothing already read can collide with.
+        d.push_packet_at(LINKTYPE_ETHERNET, 1, Some(5), &packet);
+        assert_eq!(
+            d.next_packet_index(),
+            4,
+            "an out-of-order packet must not walk the next coordinate BACK \
+             onto one already spent"
+        );
     }
 }

@@ -195,11 +195,24 @@ pub const WZ_DISSECT_NO_TIMESTAMP: u64 = live::NO_TIMESTAMP;
 /// consumer's runs inside this library. See the crate doc for the revision in
 /// full.
 ///
+/// R2171 (open-debt item 547) — 12 → 13, ADDING [`wz_dissect_pcap_replay`]. A
+/// new symbol, so the revision moves under the rule this doc has stated since
+/// R311y748; the memory rule is untouched, since the handle it hands back is
+/// the one [`wz_dissect_live_open`] already made and
+/// [`wz_dissect_live_close`] already releases.
+///
+/// What the symbol answers is a question the header could not: this ABI had a
+/// FILE half that emits documents and a LIVE half that emits binary records,
+/// and no door between them. A frozen capture — the one input a regression can
+/// hold still — reached the documents and could not reach the records at all.
+/// A consumer wanting both had to open the pcap container itself, which puts a
+/// second reader of that format in the system.
+///
 /// # Safety
 /// None; takes no arguments and touches no memory.
 #[no_mangle]
 pub extern "C" fn wz_dissect_abi_version() -> c_int {
-    12
+    13
 }
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
@@ -398,6 +411,16 @@ enum Door {
     Fields,
     FieldsWithPayloads,
     FieldsLimited,
+    /// R2171 (open-debt item 547) — the one pcap door that hands back a HANDLE
+    /// rather than a document, so a frozen capture reaches the record family.
+    ///
+    /// It is in this walk because the walk's population is DERIVED: the test
+    /// beside it reads every `wz_dissect_pcap_*` token out of the header and
+    /// refuses a disagreement in either direction. A door that emits no
+    /// document is still a door a consumer picks between, and leaving it out
+    /// would have meant either a silent hole in `doors` or a name chosen to
+    /// dodge the check.
+    Replay,
 }
 
 impl Door {
@@ -416,6 +439,7 @@ impl Door {
             Door::Fields => "wz_dissect_pcap_fields",
             Door::FieldsWithPayloads => "wz_dissect_pcap_fields_with_payloads",
             Door::FieldsLimited => "wz_dissect_pcap_fields_limited",
+            Door::Replay => "wz_dissect_pcap_replay",
         }
     }
 
@@ -431,10 +455,16 @@ impl Door {
                 Some(Door::CensusWhereLimited)
             }
             Door::Fields | Door::FieldsWithPayloads => Some(Door::FieldsLimited),
+            // `Replay` answers `None` and joins nothing: it emits no document
+            // at all, so it is not the newer shape of a door that does. The
+            // count assertion beside this match is what keeps that honest --
+            // item 451 counted five subsumed doors, and a tenth door arriving
+            // as a sixth would have to be argued for there.
             Door::Summary
             | Door::SummaryBounded
             | Door::CensusWhereLimited
-            | Door::FieldsLimited => None,
+            | Door::FieldsLimited
+            | Door::Replay => None,
         }
     }
 
@@ -449,7 +479,8 @@ impl Door {
             Door::CensusWhereLimited => Some(Door::Fields),
             Door::Fields => Some(Door::FieldsWithPayloads),
             Door::FieldsWithPayloads => Some(Door::FieldsLimited),
-            Door::FieldsLimited => None,
+            Door::FieldsLimited => Some(Door::Replay),
+            Door::Replay => None,
         }
     }
 }
@@ -1326,10 +1357,8 @@ pub unsafe extern "C" fn wz_dissect_live_open(
     if out.is_null() {
         return WZ_DISSECT_ERR_INVALID_ARG;
     }
-    let preset = match limits {
-        WZ_DISSECT_LIMITS_NONE => wz_capture::DissectionLimits::default(),
-        WZ_DISSECT_LIMITS_LIVE_TAP => wz_capture::DissectionLimits::for_live_tap(),
-        _ => return WZ_DISSECT_ERR_INVALID_ARG,
+    let Some(preset) = preset_limits(limits) else {
+        return WZ_DISSECT_ERR_INVALID_ARG;
     };
     let handle = Box::new(live::LiveDissection::new(preset));
     // SAFETY: null-checked above.
@@ -1489,6 +1518,88 @@ pub unsafe extern "C" fn wz_dissect_live_close(handle: *mut live::LiveDissection
     // SAFETY: caller contract above — the pointer came from `Box::into_raw` in
     // `wz_dissect_live_open` and is retaken exactly once.
     drop(unsafe { Box::from_raw(handle) });
+}
+
+/// R2171 (open-debt item 547) — the preset an `int` argument names, or `None`
+/// for a value this build does not know.
+///
+/// One function and not a `match` per door: two doors take this argument, and
+/// an UNKNOWN value falling quietly back to unbounded is the failure both of
+/// their docs promise against. Written twice it would be one edit away from
+/// being true in only one of them.
+fn preset_limits(limits: c_int) -> Option<wz_capture::DissectionLimits> {
+    match limits {
+        WZ_DISSECT_LIMITS_NONE => Some(wz_capture::DissectionLimits::default()),
+        WZ_DISSECT_LIMITS_LIVE_TAP => Some(wz_capture::DissectionLimits::for_live_tap()),
+        _ => None,
+    }
+}
+
+/// R2171 (open-debt item 547) — READ A WHOLE CAPTURE INTO A LIVE HANDLE, which
+/// is the door this ABI's two halves had no way to reach each other through.
+///
+/// # The gap this closes
+///
+/// Nine doors here take a capture file and hand back a JSON document. Five take
+/// packets one at a time and fill [`live::WzDissectRecord`]. Nothing joined
+/// them, so a FROZEN capture — a file, which is what a regression test can hold
+/// still and what an operator sends when something went wrong — could reach the
+/// documents and could not reach the records at all.
+///
+/// The binary records are where a consuming UI's message list stands, so this
+/// was the half that could not be tested against a fixture: every claim about
+/// them had to be made by synthesising packets in the consumer's own code. A
+/// consumer that wanted the file arm anyway had to open the pcap container
+/// ITSELF and drive [`wz_dissect_live_push`] per packet, which puts a second
+/// reader of that format in the system, in the consumer, where nothing here
+/// can gate it.
+///
+/// # Why it reads through the same reader the document doors use
+///
+/// `Dissection::from_capture_bounded` dispatches on the magic and is where the
+/// facts only a FILE carries live: a pcapng's per-interface link types, its
+/// Decryption Secrets Blocks, its Interface Statistics, and the `finish()` that
+/// spends the gap patience the end of a capture makes final. A loop over
+/// [`wz_dissect_live_push`] reaches none of those, so it would answer
+/// differently from [`wz_dissect_pcap_summary`] about the same bytes. See
+/// [`live::LiveDissection::from_capture`].
+///
+/// # The handle is an ORDINARY live handle
+///
+/// Drained by [`wz_dissect_live_drain`], read by [`wz_dissect_live_lost`],
+/// released by [`wz_dissect_live_close`], and it may be pushed to: a live
+/// source continuing where the file stopped is the same dissection. The packet
+/// COORDINATES continue across that seam (`Dissection::next_packet_index`),
+/// because a counter that restarted would anchor a live packet onto a file
+/// packet's index and hand a consumer two distinct messages as one.
+///
+/// # Safety
+/// `bytes` must point to at least `len` readable bytes and `out` must be a
+/// writable pointer to a `*mut wz_dissect_live`. Neither may be null. On
+/// success `*out` is a handle to be released exactly once with
+/// [`wz_dissect_live_close`].
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_pcap_replay(
+    bytes: *const u8,
+    len: usize,
+    limits: c_int,
+    out: *mut *mut live::LiveDissection,
+) -> c_int {
+    if bytes.is_null() || out.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    let Some(preset) = preset_limits(limits) else {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    };
+    // SAFETY: caller contract above.
+    let input = unsafe { core::slice::from_raw_parts(bytes, len) };
+    let handle = match live::LiveDissection::from_capture(input, preset) {
+        Ok(h) => Box::new(h),
+        Err(_) => return WZ_DISSECT_ERR_BAD_CAPTURE,
+    };
+    // SAFETY: null-checked above.
+    unsafe { *out = Box::into_raw(handle) };
+    WZ_DISSECT_OK
 }
 
 /// The summary shape. Hand-rolled rather than via serde for the same reason
@@ -3506,7 +3617,15 @@ mod tests {
         // place a consumer can be told; `wz_dissect_record_layout` joined the
         // symbol set in the same change so a gate outside both languages can
         // hold the layout against a pin that sits beside the revision.
-        assert_eq!(wz_dissect_abi_version(), 12);
+        //
+        // R2171 (open-debt item 547) — 13, and back to the plain half of the
+        // rule: `wz_dissect_pcap_replay` is one new symbol and nothing else
+        // moved. Neither the memory contract (the handle it returns is the one
+        // `wz_dissect_live_close` already took back) nor the record layout.
+        // What it added is the door between this ABI's two halves — a capture
+        // FILE read into the LIVE handle, so a frozen capture can drive the
+        // binary record family, which until now took packets only.
+        assert_eq!(wz_dissect_abi_version(), 13);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -4789,5 +4908,199 @@ mod tests {
             "and it produces no records"
         );
         unsafe { wz_dissect_live_close(handle) };
+    }
+
+    /// One replay handle over `bytes`, or the error code.
+    fn replay(bytes: &[u8], limits: c_int) -> Result<*mut live::LiveDissection, c_int> {
+        let mut handle: *mut live::LiveDissection = core::ptr::null_mut();
+        let rc =
+            unsafe { wz_dissect_pcap_replay(bytes.as_ptr(), bytes.len(), limits, &mut handle) };
+        if rc != WZ_DISSECT_OK {
+            assert!(handle.is_null(), "a refused replay handed back a handle");
+            return Err(rc);
+        }
+        assert!(!handle.is_null(), "OK came back with no handle");
+        Ok(handle)
+    }
+
+    /// R2171 (open-debt item 547) — A pcapng's PER-INTERFACE LINK TYPES survive
+    /// the replay, and that is the discriminator for how this door is built.
+    ///
+    /// # Why this test is the one that matters
+    ///
+    /// The obvious implementation of [`wz_dissect_pcap_replay`] is to open the
+    /// container and call [`wz_dissect_live_push`] per packet. That door takes
+    /// ONE `link_type` per call and the handle behind it reaches only
+    /// `push_packet_at`, so such an implementation must pick a single link type
+    /// for the whole file — and a `dumpcap -i any` capture carries interfaces
+    /// with different link layers.
+    ///
+    /// The fixture is exactly that file: the SAME zenoh KeepAlive on two
+    /// interfaces, one Ethernet-framed and one bare IPv4 as a tun yields. Under
+    /// a single link type at most one of the two can decode — read the raw
+    /// packet as Ethernet and 14 bytes are stripped off its IP header; read the
+    /// Ethernet frame as raw IP and its first byte is not a version nibble. So
+    /// TWO records is a claim a push loop cannot satisfy, which is what makes
+    /// this an assertion about the construction rather than about the count.
+    #[test]
+    fn a_replay_reads_each_pcapng_interface_under_its_own_link_type() {
+        /// `LINKTYPE_RAW` — bare IP, no link header.
+        const LINKTYPE_RAW: u32 = 101;
+        let ethernet = udp_packet([10, 0, 0, 1], 7447, [10, 0, 0, 2], 7447, &KEEPALIVE);
+        // The same datagram off a tun interface: everything but the 14-byte
+        // Ethernet header.
+        let raw = ethernet[14..].to_vec();
+        let file = wz_capture::pcapng::write(
+            &[(LINKTYPE_ETHERNET, 6), (LINKTYPE_RAW, 6)],
+            &[(0, 1_000, &ethernet), (1, 2_000, &raw)],
+        );
+
+        let handle = replay(&file, WZ_DISSECT_LIMITS_NONE).expect("the capture reads");
+        let records = drain_live(handle, 8);
+        assert_eq!(
+            records.len(),
+            2,
+            "each interface must be read under ITS OWN link type; a single \
+             link type applied to the whole file decodes at most one of these \
+             two packets"
+        );
+        for (i, record) in records.iter().enumerate() {
+            assert_eq!(record.kind, KIND_KEEPALIVE, "record {i} is not a KeepAlive");
+        }
+        assert_eq!(
+            unsafe { wz_dissect_live_lost(handle) },
+            0,
+            "nothing was discarded"
+        );
+        unsafe { wz_dissect_live_close(handle) };
+    }
+
+    /// R2171 (open-debt item 547) — the replayed handle's packet COORDINATES
+    /// continue, so a live source resuming after the file cannot collide with
+    /// it.
+    ///
+    /// A datagram message anchors to its packet index. A replay that left the
+    /// counter at zero would give the push below the anchor the file's first
+    /// packet already has, and a consumer comparing anchors within one list
+    /// would read two distinct messages as one — the merge `list_id` exists to
+    /// prevent, arriving through the other coordinate.
+    #[test]
+    fn a_push_after_a_replay_resumes_the_captures_own_packet_coordinates() {
+        let packet = udp_packet([10, 0, 0, 1], 7447, [10, 0, 0, 2], 7447, &KEEPALIVE);
+        let file = wz_capture::pcapng::write(
+            &[(LINKTYPE_ETHERNET, 6)],
+            &[
+                (0, 1_000, &packet),
+                (0, 2_000, &packet),
+                (0, 3_000, &packet),
+            ],
+        );
+
+        let handle = replay(&file, WZ_DISSECT_LIMITS_NONE).expect("the capture reads");
+        let from_file = drain_live(handle, 8);
+        assert_eq!(from_file.len(), 3, "a three-packet capture, three records");
+        assert_eq!(
+            from_file.iter().map(|r| r.anchor).collect::<Vec<_>>(),
+            vec![0, 1, 2],
+            "the file's own packet ordinals are the anchors"
+        );
+
+        assert_eq!(
+            unsafe {
+                wz_dissect_live_push(
+                    handle,
+                    LINKTYPE_ETHERNET,
+                    9_000_000,
+                    packet.as_ptr(),
+                    packet.len(),
+                )
+            },
+            WZ_DISSECT_OK
+        );
+        let resumed = drain_live(handle, 8);
+        assert_eq!(resumed.len(), 1, "one push is one record");
+        assert_eq!(
+            resumed[0].anchor, 3,
+            "a push after a three-packet replay must anchor at 3, not back at \
+             a coordinate the file already spent"
+        );
+        unsafe { wz_dissect_live_close(handle) };
+    }
+
+    /// R2171 (open-debt item 547) — the replay and the DOCUMENT doors read the
+    /// same bytes through the same reader, so they cannot disagree about a
+    /// capture.
+    ///
+    /// The whole reason this door exists rather than a documented loop: a
+    /// consumer opening the container itself is a second reader of the format,
+    /// and the two drift. Held here by giving both doors one file and requiring
+    /// the message count the census reports to be the number of records the
+    /// replay hands out.
+    #[test]
+    fn the_replay_and_the_document_doors_agree_about_one_capture() {
+        let packet = udp_packet([10, 0, 0, 1], 7447, [10, 0, 0, 2], 7447, &KEEPALIVE);
+        let file = wz_capture::pcapng::write(
+            &[(LINKTYPE_ETHERNET, 6)],
+            &[(0, 1_000, &packet), (0, 2_000, &packet)],
+        );
+
+        let handle = replay(&file, WZ_DISSECT_LIMITS_NONE).expect("the capture reads");
+        let records = drain_live(handle, 8);
+        unsafe { wz_dissect_live_close(handle) };
+        assert_eq!(records.len(), 2, "the record door read two messages");
+
+        let dissection = Dissection::from_capture(&file).expect("the document door reads it too");
+        let decoded: usize = dissection
+            .message_lists_with_origin()
+            .map(|(_, _, _, list)| list.len())
+            .sum();
+        assert_eq!(
+            decoded,
+            records.len(),
+            "the two doors read the same file and must find the same messages"
+        );
+    }
+
+    /// R2171 (open-debt item 547) — a capture that does not parse is a CODE,
+    /// and an unknown preset is refused rather than quietly read unbounded.
+    #[test]
+    fn a_replay_refuses_a_bad_capture_and_an_unknown_preset() {
+        let packet = udp_packet([10, 0, 0, 1], 7447, [10, 0, 0, 2], 7447, &KEEPALIVE);
+        let file = wz_capture::pcapng::write(&[(LINKTYPE_ETHERNET, 6)], &[(0, 1_000, &packet)]);
+
+        // The pcapng magic and nothing after it.
+        let truncated = [0x0Au8, 0x0D, 0x0D, 0x0A, 0, 0, 0, 0];
+        assert_eq!(
+            replay(&truncated, WZ_DISSECT_LIMITS_NONE).unwrap_err(),
+            WZ_DISSECT_ERR_BAD_CAPTURE
+        );
+        // A whole file under a preset this build does not know. The capture is
+        // GOOD here on purpose: the refusal must come from the preset, and a
+        // damaged file would let BAD_CAPTURE stand in for it.
+        assert_eq!(
+            replay(&file, 9).unwrap_err(),
+            WZ_DISSECT_ERR_INVALID_ARG,
+            "a caller that believes it asked for a ceiling must not be given \
+             none"
+        );
+
+        let mut handle: *mut live::LiveDissection = core::ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                wz_dissect_pcap_replay(core::ptr::null(), 0, WZ_DISSECT_LIMITS_NONE, &mut handle)
+            },
+            WZ_DISSECT_ERR_INVALID_ARG
+        );
+        assert_eq!(
+            unsafe {
+                wz_dissect_pcap_replay(
+                    file.as_ptr(),
+                    file.len(),
+                    WZ_DISSECT_LIMITS_NONE,
+                    core::ptr::null_mut(),
+                )
+            },
+            WZ_DISSECT_ERR_INVALID_ARG
+        );
     }
 }

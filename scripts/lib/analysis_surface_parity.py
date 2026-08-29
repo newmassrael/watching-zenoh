@@ -412,6 +412,25 @@ ONLY_CAPI = {
         "Not an analysis capability.",
         (),
     ),
+    # R2171 (open-debt item 547) — the door between the file half and the
+    # record half. Filed in the round that added the symbol, which is where
+    # this table's own header says the answering belongs.
+    "a FROZEN capture read into binary records": (
+        "wz_dissect_pcap_replay",
+        "DELIBERATE, and it rides `decoded messages as BINARY records` above. "
+        "The command line already reads a capture file -- that is nearly every "
+        "flag it has -- so what is missing on its side is not the FILE, it is "
+        "the record: a terminal renders for a person, and `--json` is the "
+        "machine-readable form of the same walk. There is no flag that would "
+        "hand a person 56-byte structs. What this symbol changes is on the ABI "
+        "side only, and it is a gap the CLI never had: a linking consumer "
+        "could reach the records solely by synthesising packets in its own "
+        "code, because the record door took packets and the capture doors "
+        "returned documents. A frozen capture is what a regression test holds "
+        "still, and until this door existed it could not drive the binary "
+        "half at all.",
+        (),
+    ),
 }
 
 # CLI flags that are not capabilities of the analysis surface at all.

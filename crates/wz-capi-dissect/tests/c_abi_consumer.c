@@ -394,6 +394,174 @@ static int check_live_door(void) {
     return 0;
 }
 
+/* R2171 -- a classic pcap holding `n` copies of `frame`, laid out by hand in
+ * the same 24 + 16 form the summary fixture in main uses, little-endian
+ * throughout because the magic is written that way.
+ *
+ * Packet `i` is stamped `(i + 1)` MILLISECONDS, which is what makes the file
+ * comparable with the live arm: a live push of the same frames at the same
+ * instants must produce the same records, and a fixture whose clock did not
+ * line up would leave that comparison untestable. Returns the file length. */
+static size_t pcap_of_frames(unsigned char *out, const unsigned char *frame,
+                             size_t frame_len, size_t n) {
+    static const unsigned char head[24] = {
+        0xD4, 0xC3, 0xB2, 0xA1, 0x02, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00};
+    size_t at = sizeof head;
+    size_t i;
+    memcpy(out, head, sizeof head);
+    for (i = 0; i < n; i++) {
+        unsigned long usec = (unsigned long)(i + 1) * 1000u;
+        memset(out + at, 0, 4); /* ts_sec */
+        out[at + 4] = (unsigned char)(usec & 0xFF);
+        out[at + 5] = (unsigned char)((usec >> 8) & 0xFF);
+        out[at + 6] = (unsigned char)((usec >> 16) & 0xFF);
+        out[at + 7] = (unsigned char)((usec >> 24) & 0xFF);
+        out[at + 8] = (unsigned char)(frame_len & 0xFF);
+        out[at + 9] = (unsigned char)((frame_len >> 8) & 0xFF);
+        out[at + 10] = 0;
+        out[at + 11] = 0;
+        out[at + 12] = out[at + 8]; /* origlen == caplen: nothing was snapped */
+        out[at + 13] = out[at + 9];
+        out[at + 14] = 0;
+        out[at + 15] = 0;
+        memcpy(out + at + 16, frame, frame_len);
+        at += 16 + frame_len;
+    }
+    return at;
+}
+
+/* R2171 (open-debt item 547) -- THE DOOR BETWEEN THE TWO HALVES, driven from C.
+ *
+ * Every pcap door in this header takes a whole capture and hands back a JSON
+ * document; the live family takes packets one at a time and hands back binary
+ * records. Nothing joined them, so a FROZEN capture -- the one input a
+ * regression test can hold still -- could not reach the record door at all.
+ *
+ * What this asserts is not that the symbol exists. It is that the file arm and
+ * the live arm answer THE SAME RECORDS for the same frames at the same
+ * instants, which is the whole claim: a replay that read the container its own
+ * way would be a second reader of the same bytes, and the two would drift. */
+static int check_replay_door(void) {
+    wz_dissect_live *h = NULL;
+    wz_dissect_live *live = NULL;
+    unsigned char frame[64];
+    unsigned char file[24 + 3 * (16 + 64)];
+    unsigned char truncated[8] = {0x0A, 0x0D, 0x0D, 0x0A, 0, 0, 0, 0};
+    wz_dissect_record from_file[8];
+    wz_dissect_record from_live[8];
+    size_t frame_len;
+    size_t file_len;
+    size_t written = 999;
+    size_t i;
+    int rc;
+
+    frame_len = udp_keepalive_frame(frame);
+    file_len = pcap_of_frames(file, frame, frame_len, 3);
+
+    /* An unknown preset is REFUSED here for the same reason it is at
+     * wz_dissect_live_open: the handle this hands back is the same handle, and
+     * a caller that believes it asked for a ceiling must not be given none. */
+    rc = wz_dissect_pcap_replay(file, file_len, 9, &h);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "unknown preset rc=%d", rc);
+    CHECK(h == NULL, "a refused replay handed back a handle");
+
+    rc = wz_dissect_pcap_replay(file, file_len, WZ_DISSECT_LIMITS_NONE, &h);
+    CHECK(rc == WZ_DISSECT_OK, "pcap_replay rc=%d", rc);
+    CHECK(h != NULL, "OK came back with no handle");
+
+    written = 999;
+    rc = wz_dissect_live_drain(h, from_file, 8, &written);
+    CHECK(rc == WZ_DISSECT_OK, "replay drain rc=%d", rc);
+    /* THE POPULATION. A replay that parsed the file and pushed nothing would
+     * drain zero records and every comparison below would hold vacuously --
+     * which is the shape this workspace refuses to call green. */
+    CHECK(written == 3, "expected 3 records from a 3-packet capture, got %zu",
+          written);
+
+    /* The same three frames, at the same instants, through the door that was
+     * already there. */
+    rc = wz_dissect_live_open(WZ_DISSECT_LIMITS_NONE, &live);
+    CHECK(rc == WZ_DISSECT_OK, "control live_open rc=%d", rc);
+    for (i = 0; i < 3; i++) {
+        rc = wz_dissect_live_push(live, 1 /* ETHERNET */,
+                                  (uint64_t)(i + 1) * 1000000u, frame, frame_len);
+        CHECK(rc == WZ_DISSECT_OK, "control push %zu rc=%d", i, rc);
+    }
+    written = 999;
+    rc = wz_dissect_live_drain(live, from_live, 8, &written);
+    CHECK(rc == WZ_DISSECT_OK, "control drain rc=%d", rc);
+    CHECK(written == 3, "the control arm must decode 3 too, got %zu", written);
+
+    /* FIELD FOR FIELD. `flow_id` and `list_id` are the two a handle assigns
+     * from its own counter, so they are compared across the arms rather than
+     * to a constant -- two handles that saw the same one conversation must
+     * have numbered it the same way. */
+    for (i = 0; i < 3; i++) {
+        CHECK(from_file[i].kind == WZ_DISSECT_KIND_KEEPALIVE,
+              "record %zu kind=%u, expected KEEPALIVE", i,
+              (unsigned)from_file[i].kind);
+        CHECK(from_file[i].origin == WZ_DISSECT_ORIGIN_DATAGRAM,
+              "record %zu origin=%u, expected DATAGRAM", i,
+              (unsigned)from_file[i].origin);
+        CHECK(from_file[i].anchor_space == WZ_DISSECT_ANCHOR_PACKET,
+              "a datagram message anchors to a packet index");
+        /* The FILE's packet ordinal is the anchor, exactly as a push ordinal
+         * is on a live handle. */
+        CHECK(from_file[i].anchor == (uint64_t)i, "record %zu anchor=%llu", i,
+              (unsigned long long)from_file[i].anchor);
+        CHECK(from_file[i].ts_ns == (uint64_t)(i + 1) * 1000000u,
+              "record %zu ts_ns=%llu, the capture's own instant", i,
+              (unsigned long long)from_file[i].ts_ns);
+        CHECK(from_file[i].ts_ns == from_live[i].ts_ns &&
+                  from_file[i].flow_id == from_live[i].flow_id &&
+                  from_file[i].list_id == from_live[i].list_id &&
+                  from_file[i].anchor == from_live[i].anchor &&
+                  from_file[i].unit_len == from_live[i].unit_len &&
+                  from_file[i].batch_index == from_live[i].batch_index &&
+                  from_file[i].unit_offset == from_live[i].unit_offset &&
+                  from_file[i].direction == from_live[i].direction &&
+                  from_file[i].anchor_space == from_live[i].anchor_space &&
+                  from_file[i].origin == from_live[i].origin &&
+                  from_file[i].kind == from_live[i].kind &&
+                  from_file[i].flags == from_live[i].flags,
+              "record %zu differs between the file arm and the live arm", i);
+    }
+    wz_dissect_live_close(live);
+
+    /* THE HANDLE IS AN ORDINARY LIVE HANDLE, and its coordinates CONTINUE. A
+     * replay that left the packet counter at zero would anchor this push onto
+     * the file's own packet 0, and a consumer would read two distinct messages
+     * as one -- the exact merge `list_id` exists to prevent, arriving through
+     * the other coordinate instead. */
+    rc = wz_dissect_live_push(h, 1, 9000000u, frame, frame_len);
+    CHECK(rc == WZ_DISSECT_OK, "push onto a replayed handle rc=%d", rc);
+    written = 999;
+    rc = wz_dissect_live_drain(h, from_file, 8, &written);
+    CHECK(rc == WZ_DISSECT_OK, "post-replay drain rc=%d", rc);
+    CHECK(written == 1, "one push is one record, got %zu", written);
+    CHECK(from_file[0].anchor == 3,
+          "a push after a 3-packet replay anchors at 3, got %llu",
+          (unsigned long long)from_file[0].anchor);
+    CHECK(wz_dissect_live_lost(h) == 0, "nothing was discarded, got %llu",
+          (unsigned long long)wz_dissect_live_lost(h));
+    wz_dissect_live_close(h);
+
+    /* A DAMAGED capture is a CODE, not a crash and not an empty handle. */
+    h = NULL;
+    rc = wz_dissect_pcap_replay(truncated, sizeof truncated,
+                                WZ_DISSECT_LIMITS_NONE, &h);
+    CHECK(rc == WZ_DISSECT_ERR_BAD_CAPTURE, "truncated replay rc=%d", rc);
+    CHECK(h == NULL, "a bad capture handed back a handle");
+
+    /* Nulls are refused before anything is dereferenced. */
+    rc = wz_dissect_pcap_replay(NULL, 0, WZ_DISSECT_LIMITS_NONE, &h);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null bytes replay rc=%d", rc);
+    rc = wz_dissect_pcap_replay(file, file_len, WZ_DISSECT_LIMITS_NONE, NULL);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null out replay rc=%d", rc);
+    return 0;
+}
+
 int main(void) {
     /* The symbol/memory-contract revision. A consumer refuses a library whose
      * memory rules moved; this asserts the value the header was written for. */
@@ -415,8 +583,13 @@ int main(void) {
      * widened it 48 -> 56 and moved every field after `flow_id`. A consumer
      * reading by offset cannot notice that, which is why the revision is where
      * it is published -- and why the sizeof/offsetof block above is a pin on
-     * THIS side of the boundary rather than a restatement of the Rust one. */
-    CHECK(wz_dissect_abi_version() == 12, "abi version is %d, expected 12",
+     * THIS side of the boundary rather than a restatement of the Rust one.
+     * R2171 -- 13 since wz_dissect_pcap_replay joined the set: the door that
+     * reads a capture FILE into the LIVE handle, which is what let a frozen
+     * capture drive the binary record family at all. A symbol, so the number
+     * moves; the memory rule does not, because the handle it returns is the
+     * one wz_dissect_live_close already took back. */
+    CHECK(wz_dissect_abi_version() == 13, "abi version is %d, expected 13",
           wz_dissect_abi_version());
 
     /* A KeepAlive: one header byte, the smallest complete transport message,
@@ -930,6 +1103,12 @@ int main(void) {
     /* R2102 (ABI 11) -- the LIVE door, which is the one capability in this
      * header that is not a call over a buffer the caller already holds whole. */
     if (check_live_door() != 0) {
+        return 1;
+    }
+
+    /* R2171 (ABI 13) -- and the door that joins the two halves, so a FROZEN
+     * capture can drive the record door a live tap uses. */
+    if (check_replay_door() != 0) {
         return 1;
     }
 

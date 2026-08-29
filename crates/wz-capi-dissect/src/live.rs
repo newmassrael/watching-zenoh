@@ -60,7 +60,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use wz_capture::link::FlowKey;
-use wz_capture::{AnchorSpace, Dissection, DissectionLimits, MessageListOrigin};
+use wz_capture::{AnchorSpace, CaptureError, Dissection, DissectionLimits, MessageListOrigin};
 use wz_session_core::passive::{Direction, PassiveFrame};
 
 /// R2102 — a message this reader could not decode. Not a variant of
@@ -225,11 +225,6 @@ struct Mark {
 /// See the module doc for why it exists and what makes its bookmarks sound.
 pub struct LiveDissection {
     dissection: Dissection,
-    /// Packets pushed so far. This is the `packet_index` every datagram
-    /// message anchors to, so a consumer's own push ordinal IS the coordinate —
-    /// which is the only anchor a live tap can be given, there being no file to
-    /// count positions in.
-    pushes: usize,
     marks: BTreeMap<(FlowKey, MessageListOrigin), Mark>,
     flow_ids: BTreeMap<(FlowKey, u8), u64>,
     /// ONE counter behind BOTH [`WzDissectRecord::flow_id`] and
@@ -244,9 +239,37 @@ pub struct LiveDissection {
 impl LiveDissection {
     /// A handle reading under `limits`.
     pub fn new(limits: DissectionLimits) -> Self {
+        Self::over(Dissection::with_limits(limits))
+    }
+
+    /// R2171 (open-debt item 547) — a handle over a capture FILE already read.
+    ///
+    /// # Why this reads the file through `Dissection` rather than per packet
+    ///
+    /// The obvious shape is to open the container here and call [`Self::push`]
+    /// per packet, and it is wrong in a way that is silent. `from_capture_*`
+    /// dispatches on the magic and carries what only the FILE knows: a pcapng's
+    /// per-interface link types (`push_packet_on`, which this type's `push` has
+    /// no way to reach), its Decryption Secrets Blocks, its Interface
+    /// Statistics, and the `finish()` that spends the gap patience a file's end
+    /// makes final. A loop here would drop all four, so a frozen capture would
+    /// read one way through the document doors and another way through this
+    /// one — which is the second reader of the same bytes that this crate keeps
+    /// removing, arriving inside it.
+    ///
+    /// So the file is read by the reader every other door uses, and this type
+    /// wraps the result. What it inherits with it is the packet coordinate:
+    /// `Dissection::next_packet_index` is where a later [`Self::push`] resumes,
+    /// so a live source continuing after the file cannot land on a coordinate
+    /// the file already spent.
+    pub fn from_capture(bytes: &[u8], limits: DissectionLimits) -> Result<Self, CaptureError> {
+        Ok(Self::over(Dissection::from_capture_bounded(bytes, limits)?))
+    }
+
+    /// The one constructor both of the above go through.
+    fn over(dissection: Dissection) -> Self {
         Self {
-            dissection: Dissection::with_limits(limits),
-            pushes: 0,
+            dissection,
             marks: BTreeMap::new(),
             flow_ids: BTreeMap::new(),
             next_id: 0,
@@ -266,15 +289,21 @@ impl LiveDissection {
         } else {
             Some(ts_ns / 1_000_000)
         };
+        let at = self.dissection.next_packet_index();
         self.dissection
-            .push_packet_at(link_type, self.pushes, ts_millis, bytes);
-        self.pushes += 1;
+            .push_packet_at(link_type, at, ts_millis, bytes);
     }
 
-    /// Packets fed so far, which is also the packet index the NEXT push will
-    /// anchor its messages to.
+    /// The packet index the NEXT push will anchor its messages to, which on a
+    /// handle fed only by [`Self::push`] is also the number of pushes.
+    ///
+    /// R2171 — read off the dissection rather than counted here. A second
+    /// counter beside the engine's own was the same fact in two places, and
+    /// [`Self::from_capture`] is where the two would have parted: the file
+    /// reader advances the engine's coordinate and could not touch a private
+    /// field of this type.
     pub fn pushes(&self) -> usize {
-        self.pushes
+        self.dissection.next_packet_index()
     }
 
     /// Messages that were decoded and then discarded — by a ceiling trimming a
