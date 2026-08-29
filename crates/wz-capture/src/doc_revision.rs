@@ -101,6 +101,63 @@ pub struct DocumentShape {
     /// R2175 (open-debt item 552) — the axis [`Self::keys`] cannot see. See
     /// [`ValueFamily`].
     pub families: &'static [ValueFamily],
+    /// Every TOP-LEVEL key of this document that is a PLANE at this revision —
+    /// SORTED, and empty for a document that has none.
+    ///
+    /// # The hole this fills, and why neither of the axes above could
+    ///
+    /// R2180 (open-debt item 554). A plane that this build cannot FEED is
+    /// emitted as `null` rather than as an empty table, on the rule
+    /// `census_json`'s module doc states: an absent plane and an empty one are
+    /// different answers about the capture. A consumer therefore has to tell
+    /// "this key is a plane and this build has none of it" from "this key is
+    /// simply not a plane" — and a `null` carries no keys, so there is nothing
+    /// in it to tell them apart with.
+    ///
+    /// What a consumer had instead was a STRUCTURAL rule read off
+    /// `census_json_where`'s doc: a plane carries `narrowed_by_selector`, so a
+    /// top-level object holding that key is one. That rule is right for every
+    /// plane this build can feed and says nothing at all about a `null`. The
+    /// consumer that reported this filed it precisely: it was reading "a
+    /// top-level `null` is an absent plane", which is TRUE of this library
+    /// today and is not a contract anything promised.
+    ///
+    /// [`Self::keys`] cannot answer it — `exchanges` is in the key set whether
+    /// it arrives as a table or as `null`, which is the point of pinning a
+    /// SHAPE. [`Self::families`] cannot either: a plane's absence is not a word
+    /// drawn from a vocabulary, it is the whole value going away.
+    ///
+    /// # Emitted, not merely recorded
+    ///
+    /// [`envelope_into`] writes this list into the document itself, so the
+    /// answer travels WITH the census rather than beside it. The alternative
+    /// considered was a second axis on `wz_dissect_readable_surfaces`, beside
+    /// `value_families`, and it was rejected on one measured property: that
+    /// door is a statement about the LIBRARY, and the census crosses the ABI as
+    /// an owned heap string the caller may store, forward or compare against
+    /// one it took earlier. A plane list fetched separately can therefore be
+    /// paired with a document from a different build, and nothing in either
+    /// would say so. In the envelope the list and the revision travel together.
+    ///
+    /// ⚠ What this does NOT rest on: R2180 checked whether `wz-analyze` writes
+    /// this document and it does NOT — `--json` renders the CLI's own report
+    /// (see `debt-census-emit-two-renderings`), and the census document reaches
+    /// a consumer only through `wz-capi-dissect`. The argument above is about
+    /// the owned string that door hands back, which is a fact of this ABI
+    /// rather than of a second surface.
+    ///
+    /// # Why documents with no planes stay silent
+    ///
+    /// A document declaring `planes: []` would move its revision, and this
+    /// module's own argument against a library-wide number applies: the only
+    /// safe response to a number that moved is to re-check, so moving five
+    /// revisions to say "nothing here" costs five audits that buy nothing.
+    /// Silence is unambiguous because it is CHECKED —
+    /// `every_top_level_null_is_a_declared_plane` refuses a top-level `null` in
+    /// any document that has not declared it, so a document with no `planes`
+    /// key is one a consumer has been shown can never hand it an undeclared
+    /// `null`.
+    pub planes: &'static [&'static str],
 }
 
 /// One key whose value is drawn from a CLOSED SET this library owns, at one
@@ -181,6 +238,7 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         keys: CENSUS_R1_KEYS,
         retiring: &[],
         families: &[],
+        planes: &[],
     },
     // R2119 (open-debt item 455) — the RENAME this table was built for, used
     // for the first time. `first_packet` reports a byte offset over a stream
@@ -198,6 +256,7 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         keys: CENSUS_R2_KEYS,
         retiring: &["first_packet"],
         families: &[],
+        planes: &[],
     },
     // R2123 (open-debt item 453) — revision 3 does two things and they are
     // separable on purpose.
@@ -218,6 +277,7 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         keys: CENSUS_R3_KEYS,
         retiring: &[],
         families: &[],
+        planes: &[],
     },
     // R2175 (open-debt item 552) — revision 4 changes NO KEY and declares five
     // VALUE FAMILIES, which is the first revision in this table to move for a
@@ -234,6 +294,30 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         keys: CENSUS_R4_KEYS,
         retiring: &[],
         families: CENSUS_R4_FAMILIES,
+        planes: &[],
+    },
+    // R2180 (open-debt item 554) — revision 5 ADDS `planes` and retires
+    // nothing, and it is the first revision in this table to move for a
+    // statement about the document's OWN keys rather than about a capture.
+    //
+    // Three of this document's five planes are emitted as `null` in a build
+    // without the network codecs, and a `null` carries nothing a consumer can
+    // read a plane's identity off. So `exchanges: null` was distinguishable
+    // from a non-plane key only by knowing which keys are planes, which this
+    // library had written down in prose and in three hand-copied test literals
+    // — and the prose was already stale, saying "the two keys" over three of
+    // them. See `DocumentShape::planes`.
+    //
+    // An ADDITION, so a consumer pinned to revision 4 loses nothing; what it
+    // gains is the ability to read the plane set off the document it already
+    // has, instead of off a rule that happens to hold today.
+    DocumentShape {
+        document: CENSUS,
+        revision: 5,
+        keys: CENSUS_R5_KEYS,
+        retiring: &[],
+        families: CENSUS_R5_FAMILIES,
+        planes: CENSUS_R5_PLANES,
     },
     DocumentShape {
         document: FIELDS,
@@ -241,6 +325,7 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         keys: FIELDS_R1_KEYS,
         retiring: &[],
         families: &[],
+        planes: &[],
     },
     // R2175 (open-debt item 552) — revision 2 does two things, and the second
     // is what the item is about.
@@ -262,6 +347,7 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         keys: FIELDS_R2_KEYS,
         retiring: &[],
         families: FIELDS_R2_FAMILIES,
+        planes: &[],
     },
     DocumentShape {
         document: SUMMARY,
@@ -269,6 +355,7 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         keys: SUMMARY_R1_KEYS,
         retiring: &[],
         families: &[],
+        planes: &[],
     },
     // R2121 (open-debt item 460) — revision 2 ADDS `inert_counters` and
     // retires nothing. Two skip counters cannot move in this build whatever
@@ -288,6 +375,7 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         keys: SUMMARY_R2_KEYS,
         retiring: &[],
         families: &[],
+        planes: &[],
     },
     // R2122 (open-debt item 238) — revision 3 ADDS `undefined_mandatory_exts`
     // and `unaccounted_batch_bytes`, and retires nothing.
@@ -303,6 +391,7 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         keys: SUMMARY_R3_KEYS,
         retiring: &[],
         families: &[],
+        planes: &[],
     },
     DocumentShape {
         document: READABLE_SURFACES,
@@ -310,6 +399,7 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         keys: READABLE_SURFACES_R1_KEYS,
         retiring: &[],
         families: &[],
+        planes: &[],
     },
     // R2114 (open-debt item 237) — revision 2 ADDS `payload_field_types` and
     // retires nothing. A deployment that describes its own record has to know
@@ -322,6 +412,7 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         keys: READABLE_SURFACES_R2_KEYS,
         retiring: &[],
         families: &[],
+        planes: &[],
     },
     // R2175 (open-debt item 552) — revision 3 ADDS `value_families` and its two
     // row keys, and retires nothing. An ADDITION, so a consumer pinned to
@@ -334,6 +425,7 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         keys: READABLE_SURFACES_R3_KEYS,
         retiring: &[],
         families: &[],
+        planes: &[],
     },
     DocumentShape {
         document: SELECTOR_DIAGNOSE,
@@ -341,6 +433,7 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         keys: SELECTOR_DIAGNOSE_R1_KEYS,
         retiring: &[],
         families: &[],
+        planes: &[],
     },
     DocumentShape {
         document: DECLARATIONS_DIAGNOSE,
@@ -348,6 +441,7 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         keys: DECLARATIONS_DIAGNOSE_R1_KEYS,
         retiring: &[],
         families: &[],
+        planes: &[],
     },
 ];
 
@@ -720,7 +814,7 @@ pub const CENSUS_R3_KEYS: &[&str] = &[
 ];
 /// The field document's key set at revision 1.
 ///
-/// Taken over `census_json::fed_tests::four_plane_capture_with_file` — the
+/// Taken over `census_json::fed_tests::every_plane_capture_with_file` — the
 /// RICH fixture, so the row renderers are reached rather than one KeepAlive's
 /// worth of them. `declarations: None`: a payload map is the operator's input
 /// rather than the capture's, so the keys it adds belong to a revision that
@@ -834,6 +928,193 @@ pub const ANCHOR_SPACE_R4: &[&str] = &["packet", "stream_byte"];
 /// A flow endpoint, at census revision 4. `asker`, `declarer`, `direction` and
 /// `space` all carry it.
 pub const DIRECTION_R4: &[&str] = &["a", "b"];
+
+/// The census document's key set at revision 5 — revision 4's, plus `planes`.
+///
+/// Written out rather than aliased, because the set MOVED: the envelope now
+/// carries the plane list, so `planes` is a key of this document. MEASURED like
+/// every other set here — `the_census_documents_key_set_is_pinned` printed what
+/// it saw and this was filled from that printout, which is item 400's
+/// prescription and the reason no list in this file is a transcription.
+pub const CENSUS_R5_KEYS: &[&str] = &[
+    "a",
+    "a_to_b",
+    "addr",
+    "admissible",
+    "aggregate",
+    "anchor_intervals",
+    "anchors_exact",
+    "answers",
+    "answers_in_scope",
+    "asked_at",
+    "asker",
+    "asks",
+    "at_most_bytes",
+    "attributed_bytes",
+    "b",
+    "b_to_a",
+    "by_kind",
+    "bytes",
+    "cancelled_at",
+    "caps",
+    "children",
+    "closed_at",
+    "completed",
+    "completion",
+    "consistent",
+    "contradictions",
+    "count",
+    "declaration",
+    "declarations",
+    "declared",
+    "declared_at",
+    "declarer",
+    "declarer_zid",
+    "dels",
+    "descriptors",
+    "document",
+    "dropped_by_limits",
+    "elsewhere",
+    "errs",
+    "evidence",
+    "exchanges",
+    "first",
+    "first_anchor",
+    "first_reply",
+    "flow",
+    "flows",
+    "frames",
+    "frames_per_flow",
+    "gaps",
+    "halted_batches",
+    "hello",
+    "high",
+    "id",
+    "inadmissible",
+    "init",
+    "interests",
+    "join",
+    "judged",
+    "keyexpr",
+    "keyexprs",
+    "keys",
+    "kind",
+    "last",
+    "last_anchor",
+    "links",
+    "liveliness_token",
+    "locators",
+    "low",
+    "matched",
+    "max_flows_per_table",
+    "max_ms",
+    "max_scout_askers",
+    "mean_ms",
+    "messages",
+    "min_ms",
+    "mismatched",
+    "mode",
+    "name",
+    "narrowed_by_selector",
+    "nodes",
+    "non_monotonic",
+    "not_as_declared",
+    "offset_space",
+    "orphan_answers",
+    "orphan_responses",
+    "orphan_withdrawals",
+    "payload_bytes",
+    "payload_bytes_ceiling",
+    "payloads",
+    "planes",
+    "port",
+    "prefix",
+    "puts",
+    "queries",
+    "queryable",
+    "queryables",
+    "records",
+    "rejected",
+    "replies",
+    "requests",
+    "restricted",
+    "revision",
+    "rows",
+    "scout",
+    "scout_askers",
+    "selection",
+    "share_bp",
+    "silent",
+    "skipped",
+    "skipped_packets",
+    "solicited_by",
+    "source_ahead_of_observer",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "subscriber",
+    "subscribers",
+    "subtrees",
+    "tokens",
+    "total_ms",
+    "total_payload_bytes",
+    "totals",
+    "unanswered",
+    "unattributed_bytes",
+    "unattributed_records",
+    "unattributed_requests",
+    "unclaimed",
+    "unclaimed_exact",
+    "unclosed",
+    "undecidable",
+    "undecided",
+    "undeclarations",
+    "undecompressible_batches",
+    "unjudged_answers",
+    "unknown_ids",
+    "unlocatable_records",
+    "unmeasured_payloads",
+    "unparsed_bytes",
+    "unread",
+    "unresolvable_fragments",
+    "unresolved",
+    "unresolved_declarations",
+    "unresolved_records",
+    "unsized_payloads",
+    "unstamped",
+    "walked_records",
+    "whatami",
+    "wire_bytes",
+    "withdrawn_at",
+    "zid",
+];
+
+/// The value families the census document declares at revision 5 — revision
+/// 4's, unchanged.
+///
+/// An ALIAS: revision 5 moves for a KEY, and a copy of an unmoved vocabulary
+/// would be a second place for it to drift. Same argument `CENSUS_R2_KEYS` made
+/// one axis over.
+pub const CENSUS_R5_FAMILIES: &[ValueFamily] = CENSUS_R4_FAMILIES;
+
+/// The census document's PLANES at revision 5 — sorted.
+///
+/// R2180 (open-debt item 554). Five, and the slice is the count: R2176 struck a
+/// cardinal written beside a list in this file for exactly the reason this list
+/// exists, and repeating one here would be the same defect one row down.
+///
+/// SORTED rather than in the order the document emits them, which is the
+/// invariant every other list in this table holds and for the same reason
+/// [`audit`] gives about the key set: a comparison between two revisions must
+/// not depend on the order someone typed them in.
+///
+/// ⚠ NOT a hand-picked list, and that distinction is the whole of item 554.
+/// `the_declared_planes_are_the_planes_the_document_emits` derives the plane set
+/// from an EMITTED census — the top-level keys that carry `narrowed_by_selector`
+/// or arrive as `null` — and requires it to equal this one, in a build that
+/// feeds every plane and in a build that feeds none. A sixth plane added
+/// without this row moving is a red, and so is a name here the document does not
+/// emit.
+pub const CENSUS_R5_PLANES: &[&str] = &["exchanges", "interests", "keyexprs", "nodes", "payloads"];
 
 /// The field document's key set at revision 2.
 ///
@@ -1372,7 +1653,28 @@ pub fn revision(document: &str) -> Option<u32> {
 pub fn envelope_into(document: &str, out: &mut String) {
     out.push_str("\"document\":{\"name\":\"");
     out.push_str(document);
-    let _ = write!(out, "\",\"revision\":{}}}", revision(document).unwrap_or(0));
+    let _ = write!(out, "\",\"revision\":{}", revision(document).unwrap_or(0));
+    // R2180 (open-debt item 554) — WHICH OF THIS DOCUMENT'S TOP-LEVEL KEYS ARE
+    // PLANES, written into the document rather than answered by a second door,
+    // so the list cannot be paired with a document from a different build.
+    //
+    // Omitted entirely for a document that declares none, and that silence is
+    // not the ambiguity this key exists to remove: a document with no planes
+    // has no top-level `null` to be ambiguous ABOUT, and
+    // `every_top_level_null_is_a_declared_plane` is what holds that true rather
+    // than the observation that it happens to be today.
+    let planes = newest(document).map(|s| s.planes).unwrap_or(&[]);
+    if !planes.is_empty() {
+        out.push_str(",\"planes\":[");
+        for (i, plane) in planes.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            let _ = write!(out, "\"{plane}\"");
+        }
+        out.push(']');
+    }
+    out.push('}');
 }
 
 /// The whole envelope as its own string, for a caller building a document with
@@ -1554,6 +1856,111 @@ pub fn key_set(doc: &str) -> Vec<&str> {
     keys
 }
 
+/// Every TOP-LEVEL entry of `doc`: its key, and the RAW slice of its value.
+///
+/// R2180 (open-debt item 554) — the population every plane claim in this module
+/// is DERIVED from, rather than listed, for the reason that item was filed
+/// about. A checker handed a written-down list of the census document's planes
+/// would be a second copy of the thing it is meant to check, and a copy of that
+/// list is exactly what went stale: this file's own neighbour said "the two
+/// keys" over three of them for as long as the third had existed.
+///
+/// [`json_keys`] cannot answer this. It collects every key at every depth, so
+/// `flow` and `totals` and `a_to_b` arrive beside `keyexprs` and the top level
+/// is not recoverable from its output. That is not a defect there — a key-set
+/// pin wants the whole tree — it is a different question, and this is the
+/// function that asks it.
+///
+/// Deliberately not a parser, on the argument [`json_keys`] already makes: it
+/// tracks nesting depth and string state and nothing else, so a value comes
+/// back as the bytes between its colon and whatever ends it. A caller wanting
+/// the top level of a nested object calls this again on that slice, which is
+/// how a plane's own marker key is looked for at the plane's OWN depth instead
+/// of anywhere inside it.
+///
+/// Returns empty for a document that does not open with `{`.
+pub fn top_level_entries(doc: &str) -> Vec<(&str, &str)> {
+    let b = doc.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < b.len() && b[i] != b'{' {
+        i += 1;
+    }
+    if i >= b.len() {
+        return out;
+    }
+    i += 1;
+    loop {
+        while i < b.len() && (b[i] == b' ' || b[i] == b',' || b[i] == b'\n') {
+            i += 1;
+        }
+        if i >= b.len() || b[i] != b'"' {
+            break;
+        }
+        let kstart = i + 1;
+        let mut j = kstart;
+        while j < b.len() && b[j] != b'"' {
+            j += if b[j] == b'\\' { 2 } else { 1 };
+        }
+        if j >= b.len() {
+            break;
+        }
+        let key = &doc[kstart..j];
+        i = j + 1;
+        while i < b.len() && b[i] == b' ' {
+            i += 1;
+        }
+        if i >= b.len() || b[i] != b':' {
+            break;
+        }
+        i += 1;
+        while i < b.len() && b[i] == b' ' {
+            i += 1;
+        }
+        let vstart = i;
+        let mut depth = 0usize;
+        let mut in_str = false;
+        while i < b.len() {
+            let c = b[i];
+            if in_str {
+                if c == b'\\' {
+                    i += 2;
+                    continue;
+                }
+                if c == b'"' {
+                    in_str = false;
+                }
+                i += 1;
+                continue;
+            }
+            match c {
+                b'"' => {
+                    in_str = true;
+                    i += 1;
+                }
+                b'{' | b'[' => {
+                    depth += 1;
+                    i += 1;
+                }
+                b'}' | b']' => {
+                    if depth == 0 {
+                        break;
+                    }
+                    depth -= 1;
+                    i += 1;
+                }
+                b',' if depth == 0 => break,
+                _ => i += 1,
+            }
+        }
+        if vstart >= i {
+            break;
+        }
+        out.push((key, doc[vstart..i].trim()));
+    }
+    out
+}
+
 /// Check a revision history for the rules that make a rename expressible and a
 /// silent break impossible.
 ///
@@ -1627,6 +2034,56 @@ pub fn audit(rows: &[DocumentShape]) -> Result<(), String> {
                         row.revision
                     ));
                 }
+            }
+            // R2180 (open-debt item 554) — THE PLANES.
+            //
+            // Three rules, and every one is a rule the key set and the families
+            // already carry, applied to the third list. Note what is NOT here:
+            // no `retiring` for planes either. A plane that goes away takes its
+            // KEY with it, so the announcement it needs is the one the key set
+            // already demands; a key that stops being a plane while staying a
+            // key would be a different change, and this table has never seen
+            // one.
+            let mut planes: Vec<&str> = row.planes.to_vec();
+            let unsorted = planes.clone();
+            planes.sort_unstable();
+            if planes != unsorted {
+                return Err(alloc::format!(
+                    "{name} r{}: the planes are not sorted, so comparing two \
+                     revisions would depend on typing order",
+                    row.revision
+                ));
+            }
+            planes.dedup();
+            if planes.len() != row.planes.len() {
+                return Err(alloc::format!(
+                    "{name} r{}: the plane list repeats a key",
+                    row.revision
+                ));
+            }
+            for plane in row.planes {
+                // The same rule item 550 paid for, and the families carry one
+                // sentence up: a plane named over a key this revision does not
+                // emit is proof the list was never checked against a document.
+                if !row.keys.contains(plane) {
+                    return Err(alloc::format!(
+                        "{name} r{}: {plane:?} is declared a plane, which this \
+                         revision does not emit",
+                        row.revision
+                    ));
+                }
+            }
+            // A revision that declares planes EMITS them, because
+            // `envelope_into` writes the list under `planes`. A key set without
+            // that name describes a document a consumer cannot read the plane
+            // list off, which is the state item 554 was filed about.
+            if !row.planes.is_empty() && !row.keys.contains(&"planes") {
+                return Err(alloc::format!(
+                    "{name} r{}: planes are declared but the key set is missing \
+                     \"planes\", so this revision describes a document that does \
+                     not carry the list the envelope writes into it",
+                    row.revision
+                ));
             }
             // R2175 (open-debt item 552) — THE VALUE FAMILIES.
             //
@@ -1791,12 +2248,27 @@ mod tests {
         retiring: &'static [&'static str],
         families: &'static [ValueFamily],
     ) -> DocumentShape {
+        with_planes(revision, keys, retiring, families, &[])
+    }
+
+    /// R2180 (open-debt item 554) — a row carrying PLANES, for the reason
+    /// `with_families` gives one axis over: the real table satisfies the plane
+    /// rules by construction, so a checker only ever run against it would be a
+    /// guard nobody had seen fire.
+    fn with_planes(
+        revision: u32,
+        keys: &'static [&'static str],
+        retiring: &'static [&'static str],
+        families: &'static [ValueFamily],
+        planes: &'static [&'static str],
+    ) -> DocumentShape {
         DocumentShape {
             document: "d",
             revision,
             keys,
             retiring,
             families,
+            planes,
         }
     }
 
@@ -1985,7 +2457,11 @@ mod tests {
             // when that key actually left and `anchor_intervals` arrived.
             // R2175 (item 552) — to 4 for a reason no earlier revision had: it
             // declares five VALUE FAMILIES and changes no key.
-            (CENSUS, 4u32),
+            // R2180 (item 554) — to 5 for a reason no earlier revision had
+            // either: it declares which of its top-level keys are PLANES, and
+            // the envelope carries that list, so a consumer reads it off the
+            // document instead of inferring it from a `null`.
+            (CENSUS, 5u32),
             // R2175 (open-debt item 552) — the field document moved to 2 when
             // its PAYLOAD PLANE joined the pin (fifteen keys revision 1 had
             // never covered) and its first three value families were declared.
@@ -2001,10 +2477,27 @@ mod tests {
             (DECLARATIONS_DIAGNOSE, 1),
         ] {
             assert_eq!(revision(name), Some(expected), "{name}");
-            assert_eq!(
-                envelope(name),
-                alloc::format!("\"document\":{{\"name\":\"{name}\",\"revision\":{expected}}}")
-            );
+            // R2180 (open-debt item 554) — the envelope is asserted in BOTH
+            // shapes, because it now has two. A document that declares no plane
+            // renders exactly what it always did; one that declares planes adds
+            // the list, and asserting only the first shape would have made the
+            // new key impossible to add rather than checked.
+            let planes = newest(name).expect("a document with a revision").planes;
+            let head = alloc::format!("\"document\":{{\"name\":\"{name}\",\"revision\":{expected}");
+            if planes.is_empty() {
+                assert_eq!(envelope(name), alloc::format!("{head}}}"), "{name}");
+            } else {
+                let mut want = head;
+                want.push_str(",\"planes\":[");
+                for (i, plane) in planes.iter().enumerate() {
+                    if i > 0 {
+                        want.push(',');
+                    }
+                    let _ = write!(want, "\"{plane}\"");
+                }
+                want.push_str("]}");
+                assert_eq!(envelope(name), want, "{name}");
+            }
         }
         // A name this library does not emit renders revision 0, which the
         // audit refuses — so a typo is loud rather than a document that
@@ -2084,5 +2577,51 @@ mod tests {
         assert!(err.contains("not sorted"), "{err}");
         let err = audit(&[row(1, REPEATED, &[])]).expect_err("a repeated key");
         assert!(err.contains("repeats a key"), "{err}");
+    }
+
+    /// R2180 (open-debt item 554) — THE PLANE RULES, driven over histories the
+    /// shipped table does not contain.
+    ///
+    /// [`audit`]'s own doc gives the reason this is written as four synthetic
+    /// rows rather than as a pass over [`DOCUMENT_HISTORY`]: the real table
+    /// satisfies every rule by construction, so a checker only ever run against
+    /// it is a guard nobody has seen fire. Each arm here is a history a future
+    /// round could plausibly write.
+    #[test]
+    fn a_plane_is_declared_over_a_key_this_revision_emits_and_carries_the_list() {
+        const WITH_PLANES: &[&str] = &["alpha", "beta", "document", "name", "planes", "revision"];
+
+        // A plane named over a key the revision does not emit — the rule item
+        // 550 paid for, applied to the third list.
+        let err = audit(&[with_planes(1, WITH_PLANES, &[], &[], &["gamma"])])
+            .expect_err("a plane over an absent key");
+        assert!(err.contains("is declared a plane"), "{err}");
+
+        // Unsorted, so two revisions cannot be compared without knowing the
+        // order someone typed them in.
+        let err = audit(&[with_planes(1, WITH_PLANES, &[], &[], &["beta", "alpha"])])
+            .expect_err("unsorted planes");
+        assert!(err.contains("planes are not sorted"), "{err}");
+
+        // Repeated.
+        let err = audit(&[with_planes(1, WITH_PLANES, &[], &[], &["alpha", "alpha"])])
+            .expect_err("a repeated plane");
+        assert!(err.contains("plane list repeats"), "{err}");
+
+        // Declared but not carried: the envelope writes the list under
+        // `planes`, so a revision whose key set lacks that name describes a
+        // document a consumer cannot read the list off — which is the state
+        // item 554 was filed about, reached from the other side.
+        const NO_LIST: &[&str] = &["alpha", "beta", "document", "name", "revision"];
+        let err = audit(&[with_planes(1, NO_LIST, &[], &[], &["alpha"])])
+            .expect_err("planes declared and not carried");
+        assert!(err.contains("missing \"planes\""), "{err}");
+
+        // And the control: the same rows with the plane declared over an
+        // emitted key, sorted, unique and carried, pass. Without this arm every
+        // assertion above would be satisfied by an `audit` that refused
+        // everything.
+        audit(&[with_planes(1, WITH_PLANES, &[], &[], &["alpha", "beta"])])
+            .expect("a well-formed plane declaration");
     }
 }

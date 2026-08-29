@@ -647,7 +647,7 @@ pub unsafe extern "C" fn wz_dissect_pcap_summary_bounded(
     write_string(summary_json(&dissection), out)
 }
 
-/// R311y851 — the four ANALYSIS PLANES, which this ABI could not reach at all.
+/// R311y851 — the ANALYSIS PLANES, which this ABI could not reach at all.
 ///
 /// # The gap, and it was a gap between SURFACES
 ///
@@ -659,12 +659,19 @@ pub unsafe extern "C" fn wz_dissect_pcap_summary_bounded(
 /// this ABI, the surface a framework LINKS, a consumer got a per-flow frame
 /// count and the health counters, and nothing above the transport.
 ///
-/// They were not missing. `wz-capture` is this crate's dependency, so all four
-/// were compiled into every build of this library and had no symbol — the same
+/// They were not missing. `wz-capture` is this crate's dependency, so every one
+/// was compiled into every build of this library and had no symbol — the same
 /// class as a capability compiled into a preset with no flag to reach it. What
 /// let it stand is that nothing compares the two surfaces to each other.
 ///
-/// # Why one call and not four
+/// ⚠ R2180 (open-debt item 554) — the cardinals are struck from this doc. It
+/// said "the four ANALYSIS PLANES" and counted four walks; R311y869 added the
+/// interest plane and reached neither sentence. The document answers instead:
+/// its envelope carries `planes`, and
+/// `the_header_and_the_library_agree_about_every_plane` binds that list to the
+/// header's `@planes` markers in both directions.
+///
+/// # Why one call and not one per plane
 ///
 /// A consumer that wanted three planes would otherwise read the capture three
 /// times, and the three answers would be about three walks rather than one. The
@@ -674,8 +681,9 @@ pub unsafe extern "C" fn wz_dissect_pcap_summary_bounded(
 ///
 /// # What it costs, said plainly
 ///
-/// Four walks of every frame, which is what the command line's `--census` pays
-/// and why that flag exists rather than the planes always being built. Call
+/// One walk of every frame PER PLANE, which is what the command line's
+/// `--census` pays and why that flag exists rather than the planes always
+/// being built. Call
 /// [`wz_dissect_pcap_summary`] when the transport-level answer is what is
 /// wanted; this is the analysis one.
 ///
@@ -3059,8 +3067,14 @@ mod tests {
         wz_capture::pcap::write(1, &[(0, 0, a.as_slice()), (0, 9_000, b.as_slice())])
     }
 
-    /// R311y851 — THE FOUR ANALYSIS PLANES CROSS THIS BOUNDARY, AND THE SUMMARY
+    /// R311y851 — THE ANALYSIS PLANES CROSS THIS BOUNDARY, AND THE SUMMARY
     /// DOOR DOES NOT CARRY THEM.
+    ///
+    /// ⚠ R2180 (open-debt item 554) — the cardinal is gone from that line. It
+    /// read "THE FOUR ANALYSIS PLANES" while the body below already called the
+    /// interest plane "the FIFTH", which is the same stale-copy defect that
+    /// item is about, in the smallest form it takes: a number written beside
+    /// the list it counts, with nothing joining the two.
     ///
     /// The pair is the point, and both arms are driven off ONE capture for that
     /// reason. Before this round every plane `wz-capture` computes was
@@ -4329,11 +4343,17 @@ mod tests {
             let want = rev::revision(name).expect("a document this crate emits has a revision");
             let mut union: Vec<&str> = Vec::new();
             for doc in docs {
-                let envelope = format!("\"document\":{{\"name\":\"{name}\",\"revision\":{want}}}");
+                // R2180 (open-debt item 554) — BUILT by the emitter rather than
+                // spelled here. The envelope gained a conditional key (`planes`)
+                // and a transcription of its shape would have to be edited in
+                // step with it, which is the second-copy defect that item is
+                // about. `envelope` is the same function every document opens
+                // with, so this compares a document against its own writer.
+                let envelope = rev::envelope(name);
                 if !doc.contains(&envelope) {
                     failures.push(format!(
                         "{name}: the document does not open with its own revision \
-                         ({envelope} not found).\n{doc}"
+                         (r{want}; {envelope} not found).\n{doc}"
                     ));
                 }
                 union.extend(rev::key_set(doc));
@@ -4368,8 +4388,7 @@ mod tests {
                 call_fields(&stream, 0).expect("the fields door"),
             ),
         ] {
-            let want = rev::revision(name).expect("a revision");
-            let envelope = format!("\"document\":{{\"name\":\"{name}\",\"revision\":{want}}}");
+            let envelope = rev::envelope(name);
             if !doc.contains(&envelope) {
                 failures.push(format!(
                     "{name}: the document crossed the ABI without its revision \
@@ -4377,6 +4396,218 @@ mod tests {
                 ));
             }
         }
+        assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    }
+
+    /// R2180 (open-debt item 554) — THE HEADER AND THE LIBRARY AGREE ABOUT
+    /// WHICH TOP-LEVEL KEYS ARE PLANES, IN BOTH DIRECTIONS.
+    ///
+    /// The `@values` gate's shape, one axis over, and for the same reason: a
+    /// plane the library declares with no `@planes` marker is a key whose
+    /// `null` a C consumer has no contract for, and a marker with no plane
+    /// behind it is an entry for something that cannot occur — the failure item
+    /// 550 paid for, which is proof a list was never checked.
+    ///
+    /// The library side is read from the ARTIFACT: the `planes` array the
+    /// census document actually crosses the ABI carrying, not the Rust table
+    /// behind it. A gate reading the table would assert that a constant equals
+    /// itself, and item 554's own filing recorded three source-regex probes
+    /// that miscounted this population.
+    ///
+    /// ⚠ Both tokens of a marker must be lowercase identifiers, which is what
+    /// keeps the paragraph DOCUMENTING the marker from being read as one —
+    /// `<document>` is not an identifier. Inherited from the `@values` gate,
+    /// where that case was measured on its first run.
+    #[test]
+    fn the_header_and_the_library_agree_about_every_plane() {
+        use wz_capture::doc_revision as rev;
+        const HEADER: &str = include_str!("../include/wz_dissect.h");
+
+        let ident =
+            |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_lowercase() || b == b'_');
+        let mut marked: Vec<(String, String)> = HEADER
+            .lines()
+            .filter_map(|l| l.split("@planes ").nth(1))
+            .filter_map(|rest| {
+                let mut parts = rest.split_whitespace();
+                let document = parts.next()?;
+                let key = parts.next()?;
+                (ident(document) && ident(key)).then(|| (document.to_string(), key.to_string()))
+            })
+            .collect();
+        marked.sort();
+        marked.dedup();
+
+        // EMITTED: read out of the documents this ABI hands back, one per
+        // door group, so a plane list that never reached a consumer is absent
+        // here whatever the table says.
+        let stream = wz_capture::pcap::write(1, &[(0, 0, &[0u8; 4])]);
+        let documents: Vec<(&str, String)> = vec![
+            (
+                rev::SUMMARY,
+                call_summary(&stream).expect("the summary door reads a pcap"),
+            ),
+            (rev::READABLE_SURFACES, call_readable_surfaces()),
+            (rev::SELECTOR_DIAGNOSE, call_selector_diagnose("")),
+            (rev::DECLARATIONS_DIAGNOSE, call_declarations_diagnose("")),
+            (rev::CENSUS, call_census(&stream).expect("the census door")),
+            (
+                rev::FIELDS,
+                call_fields(&stream, 0).expect("the fields door"),
+            ),
+        ];
+        let mut emitted: Vec<(String, String)> = Vec::new();
+        for (name, doc) in &documents {
+            let Some(list) = doc.split("\"planes\":[").nth(1) else {
+                continue;
+            };
+            let list = list.split(']').next().expect("the plane list closes");
+            for plane in list.split(',') {
+                emitted.push((name.to_string(), plane.trim_matches('"').to_string()));
+            }
+        }
+        emitted.sort();
+
+        // A population of zero would make the comparison below trivially true,
+        // which is this workspace's most expensive recurring defect.
+        assert!(
+            !emitted.is_empty(),
+            "no document this ABI hands back carries a plane list, so the \
+             comparison below would pass by having nothing to compare"
+        );
+        assert_eq!(
+            emitted, marked,
+            "the header's `@planes` markers and the plane lists this library \
+             emits disagree. A plane with no marker is a key whose `null` a C \
+             consumer has no contract for; a marker with no plane is an entry \
+             for something that cannot occur."
+        );
+    }
+
+    /// R2180 (open-debt item 554) — NO DOCUMENT THIS ABI HANDS BACK CARRIES A
+    /// TOP-LEVEL `null` IT HAS NOT DECLARED A PLANE.
+    ///
+    /// # The rule, and which half of it each build can see
+    ///
+    /// A plane this build cannot feed is emitted as `null` rather than as an
+    /// empty table, and a `null` holds no keys — so nothing inside it says
+    /// whether it is a plane at all. `document.planes` is the answer, and it is
+    /// omitted entirely by a document that has none. THIS test is what makes
+    /// that omission safe to read: a document with no `planes` key is one that
+    /// has been shown it can never hand a consumer an undeclared `null`.
+    ///
+    /// ⚠ The `null` arm has a population of ZERO in this crate, and saying so is
+    /// the point rather than an apology. `wz-capi-dissect` depends on
+    /// `wz-capture` with the network codecs on, so every plane is fed here and
+    /// no document emits a top-level `null` today. The arm that DOES have a
+    /// population is `census_json`'s
+    /// `a_build_that_cannot_feed_a_plane_reports_it_absent_rather_than_empty`,
+    /// which runs at `--no-default-features` in Layer C1bt over three real
+    /// nulls. What this test carries that the other cannot is the OTHER SIX
+    /// documents: the rule has to hold for a summary and a verdict too, and
+    /// only this crate can build one.
+    ///
+    /// The two arms below have a population in EVERY build, and they are the
+    /// ones that fail if the declaration and the document drift: a declared
+    /// plane the document does not emit, and a plane list that never reaches
+    /// the document a consumer reads.
+    #[test]
+    fn every_top_level_null_is_a_declared_plane() {
+        use wz_capture::doc_revision as rev;
+
+        let stream = wz_capture::pcap::write(1, &[(0, 0, &[0u8; 4])]);
+        // Both polarities of the two verdicts, for the reason the key-set pin
+        // above gives: their key sets differ by branch, so a single polarity
+        // leaves the other's top level unwatched.
+        let documents: Vec<(&str, Vec<String>)> = vec![
+            (
+                rev::SUMMARY,
+                vec![call_summary(&stream).expect("the summary door reads a pcap")],
+            ),
+            (rev::READABLE_SURFACES, vec![call_readable_surfaces()]),
+            (
+                rev::SELECTOR_DIAGNOSE,
+                vec![call_selector_diagnose(""), call_selector_diagnose("key ==")],
+            ),
+            (
+                rev::DECLARATIONS_DIAGNOSE,
+                vec![
+                    call_declarations_diagnose(""),
+                    call_declarations_diagnose("not a declaration"),
+                ],
+            ),
+            (
+                rev::CENSUS,
+                vec![call_census(&stream).expect("the census door")],
+            ),
+            (
+                rev::FIELDS,
+                vec![call_fields(&stream, 0).expect("the fields door")],
+            ),
+        ];
+        assert_eq!(
+            documents.len(),
+            6,
+            "this ABI hands back six documents; a seventh must join the table above"
+        );
+
+        let mut failures: Vec<String> = Vec::new();
+        // The signal is the number of top-level KEYS reached, not the number of
+        // documents: a door that started answering `{}` would leave every
+        // assertion below with nothing to look at while the table above still
+        // named six.
+        let mut examined = 0usize;
+        for (name, docs) in &documents {
+            let declared = rev::newest(name).expect("a document this ABI emits").planes;
+            for doc in docs {
+                let entries = rev::top_level_entries(doc);
+                if entries.is_empty() {
+                    failures.push(format!("{name}: no top-level key at all.\n{doc}"));
+                    continue;
+                }
+                examined += entries.len();
+                let top: Vec<&str> = entries.iter().map(|(k, _)| *k).collect();
+                for (key, value) in &entries {
+                    if *value == "null" && !declared.contains(key) {
+                        failures.push(format!(
+                            "{name}: {key:?} arrives as null and is not a declared \
+                             plane, so a consumer cannot tell an absent plane from a \
+                             key that never was one.\n{doc}"
+                        ));
+                    }
+                }
+                for plane in declared {
+                    if !top.contains(plane) {
+                        failures.push(format!(
+                            "{name}: {plane:?} is declared a plane and is not a \
+                             top-level key of the document.\n{doc}"
+                        ));
+                    }
+                }
+                // The declaration has to REACH the document, or it is a fact
+                // this repository holds and a consumer cannot.
+                if !declared.is_empty() {
+                    let mut rendered = String::from("\"planes\":[");
+                    for (i, plane) in declared.iter().enumerate() {
+                        if i > 0 {
+                            rendered.push(',');
+                        }
+                        rendered.push_str(&format!("\"{plane}\""));
+                    }
+                    rendered.push(']');
+                    if !doc.contains(&rendered) {
+                        failures.push(format!(
+                            "{name}: the document crossed the ABI without its plane \
+                             list ({rendered} not found).\n{doc}"
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(
+            examined > 0,
+            "no top-level key was reached, so this test asserts nothing"
+        );
         assert!(failures.is_empty(), "{}", failures.join("\n\n"));
     }
 

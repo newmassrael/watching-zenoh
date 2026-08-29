@@ -465,7 +465,7 @@ mod tests {
     ///
     /// # The fixture is the RICH one, on purpose
     ///
-    /// `census_json::tests::four_plane_capture_with_file` carries declares,
+    /// `census_json::tests::every_plane_capture_with_file` carries declares,
     /// interests, a Put, a Query and its closing Reply — so the document it
     /// produces reaches the row renderers rather than one KeepAlive's worth of
     /// them. A pin taken over a thin capture silently stops covering every key
@@ -503,7 +503,7 @@ mod tests {
         use crate::payload::formats::FormatMap;
         use crate::payload_decode::Declarations;
         let (d, file) =
-            crate::census_json::fed_tests::four_plane_capture_with_file("demo/temp", None, false);
+            crate::census_json::fed_tests::every_plane_capture_with_file("demo/temp", None, false);
         let mut map = FormatMap::new();
         map.declare("demo/**=json").expect("a keyexpr pattern");
         let run = Declarations::new(&map);
@@ -579,7 +579,7 @@ mod tests {
         };
 
         let (d, file) =
-            crate::census_json::fed_tests::four_plane_capture_with_file("demo/temp", None, false);
+            crate::census_json::fed_tests::every_plane_capture_with_file("demo/temp", None, false);
         let mut map = FormatMap::new();
         map.declare("demo/**=json").expect("a keyexpr pattern");
         let run = Declarations::new(&map);

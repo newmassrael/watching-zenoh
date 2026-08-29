@@ -52,9 +52,14 @@
  * EVERY DOCUMENT SAYS ITS OWN REVISION, and that is a different number from
  * the one above. Each one OPENS with
  *
- *     {"document":{"name":"census","revision":1}, ...}
+ *     {"document":{"name":"census","revision":<N>}, ...}
  *
- * so a consumer reads it before parsing the body. The names are "census",
+ * so a consumer reads it before parsing the body. R2180 struck a literal `1`
+ * from that line: the census had been at revision 4 for two rounds and this
+ * example still showed the number it shipped with, which is the same defect
+ * open-debt item 554 is about one paragraph long. ASK the document; the number
+ * here would only ever be a copy. (The envelope carries one more key for a
+ * document that declares planes -- see R2180 below.) The names are "census",
  * "fields", "summary", "readable_surfaces", "selector_diagnose" and
  * "declarations_diagnose" — one per door group, because a consumer calls the
  * door it wants and a single library-wide number would tell a reader of the
@@ -126,6 +131,56 @@
  *
  * @values fields offset_space
  * @values fields direction
+ *
+ * R2180 — AND A DOCUMENT SAYS WHICH OF ITS TOP-LEVEL KEYS ARE PLANES, which is
+ * a third question neither number above can answer. A PLANE is an independent
+ * fold over the capture that this build may be unable to feed at all; when it
+ * cannot, the key is emitted as
+ *
+ *     "exchanges":null
+ *
+ * rather than as an empty table, because `{"rows":[]}` would say the CAPTURE
+ * held no queries when the truth is that this BUILD cannot see one. Read the
+ * two apart: `null` means "no answer", an empty table means "the answer is
+ * none".
+ *
+ * ⚠ THE TRAP THIS CLOSES, and a consumer had already fallen into it: `null`
+ * carries no keys, so nothing inside an absent plane says it is one. Every
+ * plane this build CAN feed carries `narrowed_by_selector`, and reading that as
+ * "the mark of a plane" works right up to the build that cannot feed it. What
+ * was left was the guess "a top-level null is an absent plane" — true of this
+ * library, promised by nothing, and it would stop being true the day a
+ * non-plane key went null.
+ *
+ * SO THE DOCUMENT CARRIES THE LIST. Its envelope reads
+ *
+ *     {"document":{"name":"census","revision":5,
+ *                  "planes":["exchanges","interests","keyexprs","nodes",
+ *                            "payloads"]}, ...}
+ *
+ * A key in that list is a plane: `null` means this build cannot feed it. A key
+ * NOT in it is not a plane and is NEVER null. In the document rather than
+ * behind a second door on purpose — what this door hands you is an owned
+ * string you may store, forward or compare against one you took earlier, and a
+ * plane list fetched separately could be paired with a document from another
+ * build with nothing able to notice. Here the list and the revision travel
+ * together.
+ *
+ * A document that declares no plane OMITS the key rather than carrying an empty
+ * list, and that silence is safe to read for the same reason: no document may
+ * emit a top-level `null` it has not declared, so a document with no `planes`
+ * key can never hand you an ambiguous one.
+ * `every_top_level_null_is_a_declared_plane` holds that over all six.
+ *
+ * @planes census exchanges
+ * @planes census interests
+ * @planes census keyexprs
+ * @planes census nodes
+ * @planes census payloads
+ *
+ * `the_header_and_the_library_agree_about_every_plane` holds both directions,
+ * so a plane added later cannot arrive unmarked and a marker cannot outlive the
+ * plane it names.
  *
  * R2119 — THE FIRST RENAME TO USE THAT NOTICE, so the paragraph above is now
  * a description of something that happened rather than a promise. At census
@@ -334,16 +389,20 @@ int wz_dissect_pcap_summary(const unsigned char *bytes, size_t len, char **out);
 int wz_dissect_pcap_summary_bounded(const unsigned char *bytes, size_t len,
                                     char **out);
 
-/* R311y851 (ABI 3) — the four ANALYSIS planes, which this ABI could not
+/* R311y851 (ABI 3) — the ANALYSIS planes, which this ABI could not
  * reach at all: the keyexpr plane (which keys carry the traffic, with
  * subtree rollups and the declarations still unresolved), the node plane
  * (the capture keyed by zid, and the links where both ends named
  * themselves), the query plane (requests matched to their replies, with the
  * first-reply delay and the ones never answered), and the payload plane
- * (what the samples carry, judged against their own declaration).
+ * (what the samples carry, judged against their own declaration). R311y869
+ * added the INTEREST plane (who declared what, and what their declarations
+ * cover) and did not reach this paragraph, which is why R2180 struck the
+ * cardinal that stood here: ask the document, whose envelope carries the
+ * plane list under `planes`.
  *
  * They were never missing from the library — wz-capture is this library's
- * own dependency, so all four were compiled in and had no symbol. What was
+ * own dependency, so every one was compiled in and had no symbol. What was
  * missing is the door, and a capability a consumer cannot call is one it
  * does not have.
  *

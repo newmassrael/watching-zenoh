@@ -3913,13 +3913,20 @@ impl Dissection {
     ///
     /// # Why the census planes walk this and name no table
     ///
-    /// Four planes census the decoded messages — throughput (`agg`), exchanges
-    /// (`exchange`), payloads (`payload`) and nodes (`node`) — and each used to
-    /// name the tables it knew about. That makes every new producer reach
-    /// whichever plane its author remembered, and this workspace has shipped
-    /// that omission five times (R311y668, y678, y699, y700, and R311y720's own
+    /// The census planes walk the decoded messages through THIS door —
+    /// throughput (`agg`), exchanges (`exchange`), payloads (`payload`), nodes
+    /// (`node`) and declarations (`interest`) — and each used to name the
+    /// tables it knew about. That makes every new producer reach whichever
+    /// plane its author remembered, and this workspace has shipped that
+    /// omission five times (R311y668, y678, y699, y700, and R311y720's own
     /// carry, which recorded a whole serial line reaching the flow listing and
     /// none of the planes).
+    ///
+    /// ⚠ R2180 (open-debt item 554) — this sentence opened "Four planes" and
+    /// named four, having missed `interest` since R311y869. The paragraph is
+    /// about a list going stale and its own list had; the cardinal is struck
+    /// rather than corrected, on R2176's rule that a number beside the list it
+    /// counts is a second copy with nothing joining it to the first.
     ///
     /// [`DatagramDissection::frame_lists`] fixed it INSIDE the datagram table
     /// and the fifth instance walked straight past it, because a serial line is

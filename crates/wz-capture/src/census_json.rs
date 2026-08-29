@@ -1,7 +1,18 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! R311y851 (§1.1f) — the four ANALYSIS planes as ONE self-describing document.
+//! R311y851 (§1.1f) — the ANALYSIS planes as ONE self-describing document.
+//!
+//! ⚠ R2180 — THE CARDINAL IS GONE FROM THIS LINE ON PURPOSE, and from the two
+//! paragraphs below it. It read "the four ANALYSIS planes" and was true when
+//! R311y851 wrote it; R311y869 added the interest plane and left every sentence
+//! that counted them. R2176 struck a cardinal in `doc_revision` for this exact
+//! reason one axis over — a number written beside the list it counts is a
+//! second copy with nothing joining it to the first — and open-debt item 554
+//! is the bill for the same defect here. The DECLARATION is the count:
+//! `doc_revision::CENSUS_R5_PLANES`, which the document itself carries and
+//! which `the_declared_planes_are_the_planes_the_document_emits` derives from
+//! an emitted census rather than reading back.
 //!
 //! ## The gap this closes, and it is a gap between SURFACES rather than in a
 //! plane
@@ -11,8 +22,11 @@
 //! and [`crate::payload`] were reachable ONLY from `wz-analyze`, the command
 //! line — a person at a terminal. `wz-capi-dissect`, the C ABI a framework
 //! links, could reach a per-flow frame count and the health counters and
-//! nothing else: the four planes were compiled into its dependency graph (this
-//! crate is its dependency) and had no symbol.
+//! nothing else: the four NAMED ABOVE were compiled into its dependency graph
+//! (this crate is its dependency) and had no symbol. Four is what there were
+//! THEN — `crate::interest` joined at R311y869 — and the cardinal is kept here
+//! only because this paragraph is an account of R311y851 and names its own
+//! four. Nowhere below does it describe today.
 //!
 //! That is the same class as an atom compiled into a preset with no flag to
 //! reach it — the capability ships and the consumer cannot call it — and the
@@ -34,17 +48,27 @@
 //!
 //! ## `null` is a different answer from an empty plane
 //!
-//! `exchanges_json` and `payloads_json` — code spans and NOT intra-doc links.
-//! Written as links they came back unresolved from `cargo doc` even in the
-//! build where both items exist, and Layer C1bz counted them; the mechanism is
-//! not established here and is deliberately not guessed at in a comment. What
-//! is established is the measurement. They need the network codecs to have any
-//! record to correlate at all, and this crate can be built without them. In
-//! that build the two keys are emitted as `null` rather than omitted or emitted
-//! as an empty table: `exchange`'s own doc states the rule this follows — a
-//! plane that cannot be fed is ABSENT rather than empty — and a consumer that
-//! saw `{"rows":[]}` would read "this capture had no queries" off a build that
+//! Some of the planes below need the network codecs to have any record to
+//! correlate at all, and this crate can be built without them. In that build
+//! their keys are emitted as `null` rather than omitted or emitted as an empty
+//! table: `exchange`'s own doc states the rule this follows — a plane that
+//! cannot be fed is ABSENT rather than empty — and a consumer that saw
+//! `{"rows":[]}` would read "this capture had no queries" off a build that
 //! could not have seen one.
+//!
+//! WHICH keys those are is not said here, and that is the repair rather than an
+//! omission. This paragraph used to name two of them and call them "the two
+//! keys" while three were emitted that way, which is open-debt item 554's own
+//! evidence: a list kept in prose is a copy, and this one was stale for as long
+//! as the third had existed. The document says it instead — `document.planes`
+//! — and the emitters below are gated on the same feature the plane list is
+//! checked against.
+//!
+//! ⚠ `exchanges_json` and the emitters beside it are written as CODE SPANS and
+//! NOT as intra-doc links. Written as links they came back unresolved from
+//! `cargo doc` even in the build where the items exist, and Layer C1bz counted
+//! them; the mechanism is not established here and is deliberately not guessed
+//! at in a comment. What is established is the measurement.
 //!
 //! ## The shape is NOT frozen
 //!
@@ -76,15 +100,37 @@ pub fn census_json(d: &crate::Dissection) -> String {
 
 /// R311y854 — the same census, narrowed to the records `filter` matches.
 ///
-/// # The node plane is NOT narrowed, and the document says so
+/// # Two planes are NOT narrowed, and the document says so
 ///
-/// Three of the four planes take a selector; [`crate::node`] has no `_where`
-/// entry point, so it is built whole here. That is not an omission this
-/// function could quietly fix — a node is not a record the selector's terms
-/// (`key`, `kind`, `bytes`, `delay`, …) describe — and it is the same choice
-/// the command line makes. What would be a defect is leaving a consumer to
-/// infer it: each plane carries `narrowed_by_selector`, so "this table was
-/// filtered" is read off the document rather than assumed from the call.
+/// [`crate::node`] and `interest` have no `_where` entry point, so they are
+/// built whole here. That is not an omission this function could quietly fix —
+/// neither a node nor a declaration is a record the selector's terms (`key`,
+/// `kind`, `bytes`, `delay`, …) describe — and it is the same choice the
+/// command line makes. What would be a defect is leaving a consumer to infer
+/// it: each plane carries `narrowed_by_selector`, so "this table was filtered"
+/// is read off the document rather than assumed from the call.
+///
+/// ⚠ R2180 — this heading read "The node plane is NOT narrowed" over "Three of
+/// the four planes take a selector", and BOTH halves had gone stale: R311y869
+/// added a fifth plane and a second unnarrowed one, and said so in this
+/// function's body while its doc kept counting. `interest` is a code span and
+/// not a link on this module's own measured rule — the gated modules come back
+/// unresolved from `cargo doc` and Layer C1bz counts them.
+///
+/// # WHICH top-level keys are planes, and why that needed saying
+///
+/// R2180 (open-debt item 554). The sentence above put `narrowed_by_selector` to
+/// a second use it could not carry: a consumer read it as the MARK OF A PLANE,
+/// so a top-level object holding it was one. That works for every plane this
+/// build can feed and fails for the rest — a plane with no decoder behind it is
+/// emitted as `null`, and a `null` holds no keys at all. The consumer was
+/// therefore reading "a top-level `null` is an absent plane", which was true of
+/// this library and was promised by nothing.
+///
+/// So the envelope carries `planes`: the top-level keys that ARE planes, from
+/// `doc_revision::DocumentShape::planes`, travelling with the document rather
+/// than answerable only by a second door. A key in that list and `null` is an
+/// absent plane; a key not in it is not a plane, whatever its value.
 ///
 /// Each narrowed plane also carries its `selection` — matched / rejected /
 /// UNDECIDED. The third is the one that matters and the reason it is emitted
@@ -891,8 +937,8 @@ mod tests {
     use crate::link::LINKTYPE_ETHERNET;
     use crate::Dissection;
 
-    /// R311y851 — the document names every plane in a build that cannot FEED
-    /// two of them, and says which two by answering `null`.
+    /// R311y851 — the document reports a plane it cannot FEED by answering
+    /// `null`, and it reports EVERY such plane that way.
     ///
     /// The claim the module doc makes and nothing tested until this: an absent
     /// plane and an empty one are different answers. Without the network
@@ -900,8 +946,18 @@ mod tests {
     /// would tell a reader this capture held no queries — a statement about the
     /// capture made on the evidence of the build.
     ///
+    /// # R2180 (open-debt item 554) — the names are DERIVED, not listed
+    ///
+    /// This test used to spell three keys out. That literal was a copy of the
+    /// plane list, it sat one screen from the module doc that called the same
+    /// set "the two keys", and a fourth undecodable plane could have joined
+    /// them without either moving. So the population comes from the DOCUMENT:
+    /// every top-level key that arrives as `null`, checked against the declared
+    /// plane set. A plane that stops being null and a null that is not a plane
+    /// are both red, and neither needs a name written here.
+    ///
     /// Gated to the arm where it is TRUE rather than written once and made
-    /// vague: the fed arm below asserts the same two keys carry tables.
+    /// vague: the fed arm below asserts those same keys carry tables.
     #[cfg(not(feature = "network-codecs"))]
     #[test]
     fn a_build_that_cannot_feed_a_plane_reports_it_absent_rather_than_empty() {
@@ -910,17 +966,31 @@ mod tests {
         d.finish();
 
         let json = census_json(&d);
+        let absent: Vec<&str> = crate::doc_revision::top_level_entries(&json)
+            .into_iter()
+            .filter(|(_, v)| *v == "null")
+            .map(|(k, _)| k)
+            .collect();
+        // A build with no codecs that reported no absent plane would pass every
+        // assertion below by having nothing to assert about, which is the
+        // population-of-zero failure this workspace keeps paying for.
         assert!(
-            json.contains("\"exchanges\":null")
-                && json.contains("\"payloads\":null")
-                // R311y869 — the interest plane joins them, and for a sharper
-                // reason than either: its entire input is the `Declare`
-                // message, so a build that cannot decode one would answer
-                // "this capture declared nothing" about every capture there is.
-                && json.contains("\"interests\":null"),
-            "a plane with no decoder behind it must be null, not an empty \
-             table: {json}"
+            !absent.is_empty(),
+            "a build without the network codecs cannot feed every plane, so at \
+             least one must be null: {json}"
         );
+        let declared = crate::doc_revision::newest(crate::doc_revision::CENSUS)
+            .expect("the census document has a revision")
+            .planes;
+        for key in &absent {
+            assert!(
+                declared.contains(key),
+                "{key:?} is emitted as null, so a consumer cannot tell an absent \
+                 plane from a key that is not one. Declare it in \
+                 `doc_revision::CENSUS_R5_PLANES` — or stop emitting null for it: \
+                 {json}"
+            );
+        }
     }
 
     /// R311y851 — every plane key is present whatever the capture held.
@@ -929,6 +999,10 @@ mod tests {
     /// these keys, and one that is absent for an IDLE capture crashes on the
     /// quietest network rather than on the busiest — so the shape must not
     /// depend on the traffic.
+    ///
+    /// R2180 (open-debt item 554) — the five names it spelled out were the
+    /// SECOND copy of the plane list in this module and the third in this
+    /// crate. Read from the declaration now, which the document itself carries.
     #[test]
     fn an_empty_capture_still_names_every_plane() {
         let mut d = Dissection::new();
@@ -936,21 +1010,137 @@ mod tests {
         d.finish();
 
         let json = census_json(&d);
-        for key in [
-            "\"keyexprs\":",
-            "\"nodes\":",
-            "\"exchanges\":",
-            "\"payloads\":",
-            "\"interests\":",
-        ] {
+        let declared = crate::doc_revision::newest(crate::doc_revision::CENSUS)
+            .expect("the census document has a revision")
+            .planes;
+        assert!(
+            !declared.is_empty(),
+            "the census declares no plane, so this test asserts nothing"
+        );
+        let top: Vec<&str> = crate::doc_revision::top_level_entries(&json)
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        for key in declared {
             assert!(
-                json.contains(key),
+                top.contains(key),
                 "{key} missing from an empty census: {json}"
             );
         }
         assert!(
             json.contains("\"rows\":[]"),
             "an empty plane must be an empty table rather than absent: {json}"
+        );
+    }
+
+    /// R2180 (open-debt item 554) — THE DECLARED PLANES ARE THE PLANES THE
+    /// DOCUMENT EMITS, in a build that feeds them all and in a build that feeds
+    /// none.
+    ///
+    /// # What a consumer could not do, and why the obvious fix is not one
+    ///
+    /// The consumption surface that filed this reads the census and has to
+    /// partition its top-level keys into planes and everything else. It
+    /// deliberately keeps no list of plane names of its own — such a list is a
+    /// copy of this library's, and this library's grew from four to five when
+    /// the interest plane landed. What it used instead was the structural rule
+    /// `census_json_where`'s doc states: a plane carries `narrowed_by_selector`.
+    /// That rule is exactly right for a plane this build can feed, and a plane
+    /// it cannot is `null` — which holds no keys, so there is nothing in it to
+    /// recognise. The consumer was left reading "a top-level null is an absent
+    /// plane": true here, promised by nothing, and it wrote that distinction
+    /// down itself rather than pretend otherwise.
+    ///
+    /// # Why the population is DERIVED
+    ///
+    /// A test comparing the declaration against a list written in this file
+    /// would be checking a copy against a copy. So the plane set is taken from
+    /// an EMITTED census: a top-level key is a plane when it carries the
+    /// marker, or when it is `null`. Those two rules cover the same set from
+    /// opposite sides of the feature flag — five marked and none null with the
+    /// codecs, two marked and three null without — so the SAME assertion runs
+    /// in both builds and neither can pass by having nothing to look at.
+    ///
+    /// Item 554's own filing recorded that a regex over this crate's source had
+    /// miscounted the population three times. This reads the document.
+    ///
+    /// # The direction that closes the item
+    ///
+    /// The last assertion is the one a consumer acts on: a top-level key that
+    /// is NOT declared a plane is never `null`. With it, "no `planes` key here
+    /// and a null there" stops being a state a consumer has to guess about,
+    /// because it cannot be reached.
+    #[test]
+    fn the_declared_planes_are_the_planes_the_document_emits() {
+        let mut d = Dissection::new();
+        d.push_packet(LINKTYPE_ETHERNET, 0, &tcp_packet(1000, &[1, 0, 0x04]));
+        d.finish();
+        let json = census_json(&d);
+
+        let entries = crate::doc_revision::top_level_entries(&json);
+        assert!(
+            !entries.is_empty(),
+            "the census document has no top-level key, so nothing below is \
+             measuring anything: {json}"
+        );
+        let mut derived: Vec<&str> = entries
+            .iter()
+            .filter(|(_, v)| {
+                *v == "null"
+                    || crate::doc_revision::top_level_entries(v)
+                        .iter()
+                        .any(|(ik, _)| *ik == "narrowed_by_selector")
+            })
+            .map(|(k, _)| *k)
+            .collect();
+        derived.sort_unstable();
+        assert!(
+            !derived.is_empty(),
+            "no top-level key of the census looks like a plane, so the \
+             comparison below would hold over an empty set: {json}"
+        );
+
+        let declared = crate::doc_revision::newest(crate::doc_revision::CENSUS)
+            .expect("the census document has a revision")
+            .planes;
+        assert_eq!(
+            derived,
+            declared.to_vec(),
+            "the census document's PLANES moved. The document carries this list \
+             in its envelope, so a consumer reads it rather than inferring one; \
+             if the change is deliberate, APPEND a revision to \
+             `doc_revision::DOCUMENT_HISTORY` carrying the new plane set.\n{json}"
+        );
+
+        // The half a consumer acts on: an undeclared top-level key is never
+        // null, so `null` and "not a plane" cannot arrive together.
+        for (key, value) in &entries {
+            if declared.contains(key) {
+                continue;
+            }
+            assert_ne!(
+                *value, "null",
+                "{key:?} is not a declared plane and arrived as null, which \
+                 leaves a consumer unable to tell an absent plane from a key \
+                 that never was one — the state open-debt item 554 was filed \
+                 about: {json}"
+            );
+        }
+
+        // And the declaration actually REACHES the document. A list a consumer
+        // cannot read is the state before this round, spelled differently.
+        let mut rendered = String::from("\"planes\":[");
+        for (i, plane) in declared.iter().enumerate() {
+            if i > 0 {
+                rendered.push(',');
+            }
+            let _ = write!(rendered, "\"{plane}\"");
+        }
+        rendered.push(']');
+        assert!(
+            json.contains(&rendered),
+            "the census document does not carry its own plane list \
+             ({rendered} not found): {json}"
         );
     }
 
@@ -1029,14 +1219,22 @@ pub(crate) mod fed_tests {
         out
     }
 
-    /// A capture that gives all four planes something to say: two nodes that
-    /// named themselves across one flow, a Put on a literal keyexpr, and a
-    /// query answered and closed.
+    /// A capture that gives EVERY plane something to say: two nodes that named
+    /// themselves across one flow, a Put on a literal keyexpr, a query answered
+    /// and closed, and a declaration for the interest plane to fold.
     ///
-    /// One capture rather than four, on purpose. Each plane is a separate walk
-    /// of the same frames, and a fixture per plane would let a document that
-    /// renders one plane off the WRONG walk pass — the planes have to be seen
-    /// disagreeing or agreeing about one capture.
+    /// ONE capture rather than one per plane, on purpose. Each plane is a
+    /// separate walk of the same frames, and a fixture per plane would let a
+    /// document that renders one plane off the WRONG walk pass — the planes
+    /// have to be seen disagreeing or agreeing about one capture.
+    ///
+    /// ⚠ R2180 (open-debt item 554) — this was `four_plane_capture` and gave
+    /// five planes something to say. A cardinal in an IDENTIFIER is the same
+    /// stale copy as one in prose and is read by every author who writes a test
+    /// against it, so the name says the property (`every`) rather than the
+    /// count. The plane set itself is declared once, in
+    /// `doc_revision::CENSUS_R5_PLANES`, and derived from the document by
+    /// `the_declared_planes_are_the_planes_the_document_emits`.
     /// R311y927 (item 456) — the fixture above, plus the CAPTURE FILE those
     /// same packets make and an optional scouting pair carrying `locator`.
     ///
@@ -1048,10 +1246,12 @@ pub(crate) mod fed_tests {
     /// says nothing about this one, which a probe confirmed by deleting the
     /// census locator escaper and watching the well-formedness guard pass.
     ///
-    /// `locator` is an Option so the six callers of [`four_plane_capture`] see
-    /// a byte-identical capture: passing `None` adds no packets, and the
-    /// key-set pin and the plane assertions are measuring what they were.
-    pub(crate) fn four_plane_capture_with_file(
+    /// `locator` is an Option so every caller of [`every_plane_capture`] sees a
+    /// byte-identical capture: passing `None` adds no packets, and the key-set
+    /// pin and the plane assertions are measuring what they were. (R2180 struck
+    /// "the six callers" from that sentence — there were more than six, and a
+    /// count of callers is a copy nothing joins to the callers.)
+    pub(crate) fn every_plane_capture_with_file(
         keyexpr: &'static str,
         locator: Option<&str>,
         contradicting: bool,
@@ -1127,8 +1327,8 @@ pub(crate) mod fed_tests {
         wire
     }
 
-    fn four_plane_capture(keyexpr: &'static str) -> Dissection {
-        four_plane_capture_with_file(keyexpr, None, false).0
+    fn every_plane_capture(keyexpr: &'static str) -> Dissection {
+        every_plane_capture_with_file(keyexpr, None, false).0
     }
 
     /// Round 2001 (item 473) — THE THIRD RENDERING IS THE SAME ROWS.
@@ -1148,7 +1348,7 @@ pub(crate) mod fed_tests {
     /// and reordering is exactly what a second sort would introduce.
     #[test]
     fn the_csv_rendering_is_the_json_rendering_row_for_row() {
-        let d = four_plane_capture("demo/a");
+        let d = every_plane_capture("demo/a");
         let table = crate::agg::aggregate(&d);
         let csv = crate::census_csv::keyexprs_csv(&table);
         let lines: Vec<&str> = csv.lines().collect();
@@ -1349,7 +1549,7 @@ pub(crate) mod fed_tests {
     #[test]
     fn the_census_documents_key_set_is_pinned() {
         let doc = census_json_where(
-            &four_plane_capture("demo/temp"),
+            &every_plane_capture("demo/temp"),
             &crate::filter::Filter::any(),
         );
         let mut seen = json_keys(&doc);
@@ -1433,7 +1633,7 @@ pub(crate) mod fed_tests {
         // `file` is read only by the field-document arm below, which is behind
         // `dissect`; underscored rather than cfg'd so the fixture call reads
         // the same in both builds.
-        let (d, _file) = four_plane_capture_with_file(HOSTILE, Some(HOSTILE_LOCATOR), false);
+        let (d, _file) = every_plane_capture_with_file(HOSTILE, Some(HOSTILE_LOCATOR), false);
 
         let census = census_json_where(&d, &crate::filter::Filter::any());
         crate::payload::json_wellformed(census.as_bytes()).unwrap_or_else(|e| {
@@ -1553,7 +1753,7 @@ pub(crate) mod fed_tests {
     #[test]
     fn every_anchor_this_document_emits_names_its_coordinate_space() {
         let over_tcp = census_json_where(
-            &four_plane_capture("demo/temp"),
+            &every_plane_capture("demo/temp"),
             &crate::filter::Filter::any(),
         );
         // PER PLANE, by adjacency. Asserting only that the word appears
@@ -1677,7 +1877,7 @@ pub(crate) mod fed_tests {
 
     #[test]
     fn every_plane_carries_what_the_capture_named() {
-        let json = census_json(&four_plane_capture("demo/temp"));
+        let json = census_json(&every_plane_capture("demo/temp"));
 
         // The keyexpr plane: the literal, and the bytes under it.
         let keyexprs = plane(&json, ",\"keyexprs\":");
@@ -1838,7 +2038,7 @@ pub(crate) mod fed_tests {
     /// because of one publisher.
     #[test]
     fn a_keyexpr_a_peer_chose_cannot_break_the_document() {
-        let json = census_json(&four_plane_capture("demo/a\"b"));
+        let json = census_json(&every_plane_capture("demo/a\"b"));
         assert!(
             json.contains(r#""keyexpr":"demo/a\"b""#),
             "the quote must be escaped, not emitted raw: {json}"
@@ -1865,7 +2065,7 @@ pub(crate) mod fed_tests {
     /// stopped reporting `demo/q` would pass.
     #[test]
     fn a_selector_narrows_three_planes_and_leaves_the_node_plane_whole() {
-        let d = four_plane_capture("demo/temp");
+        let d = every_plane_capture("demo/temp");
         let whole = census_json(&d);
         assert!(
             plane(&whole, ",\"keyexprs\":").contains("\"keyexpr\":\"demo/q\""),
@@ -1921,7 +2121,7 @@ pub(crate) mod fed_tests {
     /// emitter that answered `null` unconditionally would satisfy it.
     #[test]
     fn a_build_that_can_feed_a_plane_reports_a_table() {
-        let json = census_json(&four_plane_capture("demo/temp"));
+        let json = census_json(&every_plane_capture("demo/temp"));
         assert!(
             !json.contains("\"exchanges\":null") && !json.contains("\"payloads\":null"),
             "a plane this build CAN feed must not report itself absent: {json}"
@@ -1994,14 +2194,14 @@ pub(crate) mod fed_tests {
     #[test]
     fn every_key_this_module_can_write_is_observed_or_declared_unreached() {
         let doc = census_json_where(
-            &four_plane_capture("demo/temp"),
+            &every_plane_capture("demo/temp"),
             &crate::filter::Filter::any(),
         );
         // R311y930 (item 465) — a SECOND capture that carries contradictions,
         // so the payload finding clause runs at all. Its keys join the observed
         // set rather than replacing it: the plain capture is what every other
         // assertion in this module measures and it stays untouched.
-        let (contradicting, _) = four_plane_capture_with_file("demo/temp", None, true);
+        let (contradicting, _) = every_plane_capture_with_file("demo/temp", None, true);
         let finding = census_json_where(&contradicting, &crate::filter::Filter::any());
         // MEASURED: both records report `not_json`. The bytes that are not
         // UTF-8 do NOT reach `Mismatch::NotUtf8` here -- the JSON scanner
