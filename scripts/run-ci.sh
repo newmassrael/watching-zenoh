@@ -1957,6 +1957,25 @@ PY
     python3 scripts/lib/rust_comments.py || return 1
     python3 scripts/lib/dissect_name_census.py --selftest || return 1
     python3 scripts/lib/dissect_name_census.py || return 1
+    # R2186 (no register item) — A LIST WRITTEN IN THE SOURCE MUST NOT BE
+    # CHECKED AGAINST ITS OWN LENGTH.
+    #
+    # R2185 repaired five of these in one file pair and closed by naming the
+    # rest of the tree as a DIRECTION rather than a finding, because a keyword
+    # sweep cannot tell `documents.len() == 6` over a hand-written table from
+    # `census.nodes().len() == 3` over a product. This is the discriminator
+    # that closes it: the population is every binding whose initialiser is a
+    # collection literal, which is total by construction, and a finding is one
+    # of those compared against an integer literal.
+    #
+    # The selftest runs FIRST and is not decoration: it holds the scanner to
+    # five shapes at once — a product left alone, a literal caught, one alias
+    # hop, a name shadowed later in the same file, and a doc comment QUOTING
+    # the defect left alone. Four of the five were written after the scanner
+    # got them wrong, and the shadowing case is why: a file-wide lookup
+    # reported seven findings that were one mistake.
+    python3 scripts/lib/self_counted_table_gate.py --selftest || return 1
+    python3 scripts/lib/self_counted_table_gate.py --check || return 1
     # R311y605 — the DISSECT FEATURE CENSUS, the name census's sibling one level
     # up. `dissect`'s doc says it selects the whole codec-* MID space so "an
     # observer reads every message it sees", and the claim had been wrong THREE

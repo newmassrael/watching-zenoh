@@ -142,18 +142,68 @@ const OPT: bool = false;
 /// `true` spelled out — see [`OPT`].
 const MAND: bool = true;
 
-/// Which chain an extension entry was read from.
+/// R2186 — THE CARRIER VOCABULARY AND THE SWEEP LIST, WRITTEN ONCE.
 ///
-/// CLOSED-FORM: one variant per carrier that zenoh gives its own `ext` module,
-/// plus the two `Declare` sub-bodies that carry their own. A carrier with no
-/// extensions upstream (`Close`, `KeepAlive`, `zenoh::Reply`) still gets a
-/// variant, because a chain can APPEAR on one — `Reply` decodes into
-/// `ext_unknown` (`zenoh/reply.rs`) — and the honest answer for every id there
-/// is "not a named extension of this carrier", which is what an empty row set
-/// says.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[non_exhaustive]
-pub enum ExtCarrier {
+/// # Why a macro, measured
+///
+/// [`ALL_CARRIERS`] claims to hold EVERY variant, and until this round the
+/// only thing holding it to that was `assert_eq!(CARRIERS.len(), 22)` in this
+/// module's own tests — a list compared against its own length. The only edit
+/// that moves the left side is the edit that moves the right, so the case the
+/// assertion was written for, a variant added and not listed, moved neither.
+/// Its own doc said it was "counted against the table's own arity rather than
+/// a literal", which is the opposite of what it did.
+///
+/// Stable Rust cannot enumerate an enum, and this type derives nothing that
+/// names its variants — so R2183's move of asking a derive is not available
+/// here. What IS available is to stop the two lists being two: the enum and
+/// the sweep list are emitted from one invocation, so a variant that is not in
+/// [`ALL_CARRIERS`] cannot be written down. `rows`' exhaustive `match` already
+/// forces a new variant to HAVE rows; this forces it to be SWEPT.
+///
+/// The per-variant docs travel with the variants, so rustdoc reads exactly as
+/// it did.
+macro_rules! ext_carriers {
+    ($( $(#[$meta:meta])* $variant:ident ),* $(,)?) => {
+        /// Which chain an extension entry was read from.
+        ///
+        /// CLOSED-FORM: one variant per carrier that zenoh gives its own `ext`
+        /// module, plus the two `Declare` sub-bodies that carry their own. A
+        /// carrier with no extensions upstream (`Close`, `KeepAlive`,
+        /// `zenoh::Reply`) still gets a variant, because a chain can APPEAR on
+        /// one — `Reply` decodes into `ext_unknown` (`zenoh/reply.rs`) — and
+        /// the honest answer for every id there is "not a named extension of
+        /// this carrier", which is what an empty row set says.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[non_exhaustive]
+        pub enum ExtCarrier {
+            $( $(#[$meta])* $variant, )*
+        }
+
+        /// Every [`ExtCarrier`] variant, so a consumer can sweep the whole
+        /// vocabulary rather than the carriers it happened to think of.
+        ///
+        /// PUBLIC since R311y896 and for a measured reason: this list used to
+        /// be a private `const` in this module's own test, so the only sweep it
+        /// could serve was this module's. The `dissect` gate that decides what
+        /// happens to each ZBuf body has to iterate the same set, and a second
+        /// copy of a list whose whole job is completeness is the defect it
+        /// exists to catch. `rows` is public for the same reason one step down.
+        ///
+        /// R2186 — and it is no longer a second copy of the VARIANT list
+        /// either: both are written by `ext_carriers!` from one invocation, so
+        /// completeness is a property of the declaration rather than of a
+        /// count somebody has to remember to move.
+        ///
+        /// A code span rather than a link, on the rule R2183 recorded one
+        /// module over: the macro is not exported, so rustdoc has no item to
+        /// resolve and this crate's `warnings = "deny"` turns the attempt into
+        /// a broken link Layer C1bz counts (538 -> 539 on the first run here).
+        pub const ALL_CARRIERS: &[ExtCarrier] = &[ $( ExtCarrier::$variant, )* ];
+    };
+}
+
+ext_carriers! {
     // ── transport space ────────────────────────────────────────────────
     /// `transport::init::ext` — the Init handshake.
     Init,
@@ -410,39 +460,9 @@ pub fn rows(carrier: ExtCarrier) -> &'static [(u8, bool, u8, &'static str)] {
     }
 }
 
-/// Every [`ExtCarrier`] variant, so a consumer can sweep the whole vocabulary
-/// rather than the carriers it happened to think of.
-///
-/// PUBLIC since R311y896 and for a measured reason: this list used to be a
-/// private `const` in this module's own test, so the only sweep it could serve
-/// was this module's. The `dissect` gate that decides what happens to each
-/// ZBuf body has to iterate the same set, and a second copy of a list whose
-/// whole job is completeness is the defect it exists to catch. `rows` is public
-/// for the same reason one step down.
-pub const ALL_CARRIERS: &[ExtCarrier] = &[
-    ExtCarrier::Init,
-    ExtCarrier::Open,
-    ExtCarrier::Join,
-    ExtCarrier::Frame,
-    ExtCarrier::Fragment,
-    ExtCarrier::TransportOam,
-    ExtCarrier::TransportPlain,
-    ExtCarrier::Push,
-    ExtCarrier::Request,
-    ExtCarrier::Response,
-    ExtCarrier::ResponseFinal,
-    ExtCarrier::Declare,
-    ExtCarrier::Interest,
-    ExtCarrier::NetworkOam,
-    ExtCarrier::DeclareCommon,
-    ExtCarrier::DeclareQueryable,
-    ExtCarrier::Put,
-    ExtCarrier::Del,
-    ExtCarrier::Query,
-    ExtCarrier::Err,
-    ExtCarrier::Reply,
-    ExtCarrier::Auth,
-];
+// R2186 — `ALL_CARRIERS` used to be spelled out here, a second copy of the
+// variant list held to it by a literal count. It is now emitted beside the
+// enum by `ext_carriers!`, so the two cannot disagree.
 
 /// Round 2034 (item 320) — THE CARRIERS WHOSE ROW SET IS EMPTY ON PURPOSE, and
 /// what makes each one empty.
@@ -744,21 +764,38 @@ mod tests {
     /// sweeps below reading as they did.
     const CARRIERS: &[ExtCarrier] = ALL_CARRIERS;
 
-    /// The carrier list above must hold EVERY variant. Counted against the
-    /// table's own arity rather than a literal, so the two cannot drift: a
-    /// variant added to `rows` and not to `CARRIERS` leaves the sweeps blind,
-    /// and nothing else would say so.
+    /// The carrier list is DISTINCT, and every variant is in it BY
+    /// CONSTRUCTION.
+    ///
+    /// ⚠ R2186 — this used to close with `assert_eq!(CARRIERS.len(), 22)`, and
+    /// its own doc said the count was taken "against the table's own arity
+    /// rather than a literal". It was a literal, and the two sentences were
+    /// opposites. What it actually did was compare a list against its own
+    /// length: the only edit that moves `CARRIERS.len()` is the edit that must
+    /// move the `22`, so the case it named — a variant added to `rows` and not
+    /// to the sweeps — moved neither and passed.
+    ///
+    /// Completeness is not asserted here any more because it is no longer
+    /// assertable-or-not: `ext_carriers!` emits the enum and [`ALL_CARRIERS`]
+    /// from one invocation, so a variant outside the list cannot be written
+    /// down. `scripts/lib/self_counted_table_gate.py` is what keeps the shape
+    /// from coming back, here or anywhere else in the tree.
+    ///
+    /// What remains is what the declaration does NOT give: a repeat would be a
+    /// duplicate enum variant and fail to compile, but the POPULATION guard
+    /// does not follow from that — a sweep over an empty list is green, and
+    /// this is the only place that says so.
     #[test]
-    fn the_carrier_list_holds_every_variant() {
+    fn the_carrier_list_is_distinct_and_not_empty() {
+        assert!(
+            !CARRIERS.is_empty(),
+            "every sweep in this module iterates this list; an empty one reports \
+             green over nothing"
+        );
         for (i, a) in CARRIERS.iter().enumerate() {
             for b in &CARRIERS[i + 1..] {
                 assert!(a != b, "CARRIERS repeats {a:?}");
             }
         }
-        assert_eq!(
-            CARRIERS.len(),
-            22,
-            "a carrier was added to `rows` without joining the sweeps",
-        );
     }
 }
