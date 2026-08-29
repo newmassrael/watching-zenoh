@@ -773,7 +773,12 @@ mod tests {
             (rev::CENSUS, "mode", crate::interest::InterestMode::names()),
             (rev::CENSUS, "offset_space", crate::AnchorSpace::names()),
         ];
+        // R2185 — what this table ACTUALLY held, collected as it is walked
+        // rather than counted afterwards, so the closing comparison cannot
+        // disagree with the loop that fed it.
+        let mut names_checked: Vec<(&str, &str)> = Vec::new();
         for (document, key, words) in live {
+            names_checked.push((document, key));
             // A walk that came back empty would make the comparison below
             // trivially true, which is this workspace's most expensive
             // recurring defect in its smallest form.
@@ -799,22 +804,42 @@ mod tests {
         // The `asker` / `declarer` pair carries the endpoint vocabulary too and
         // is checked here rather than in the table above, because listing one
         // walk under three keys would make the count read as three
-        // independent facts. What IS asserted is that no family in either
-        // document escaped the table: every declared family is either checked
-        // above or shares a vocabulary constant with one that is.
-        let census = rev::newest(rev::CENSUS).expect("a revision");
-        let fields = rev::newest(rev::FIELDS).expect("a revision");
+        // independent facts.
         let endpoints = sorted(crate::census_json::direction_names());
         for key in ["asker", "declarer"] {
             let (_, declared) = vocabulary(rev::CENSUS, key);
             assert_eq!(declared, endpoints, "census.{key}");
         }
+
+        // AND NO FAMILY ESCAPED THIS GATE — the population DERIVED rather than
+        // counted.
+        //
+        // ⚠ R2185 — this was `census.families.len() + fields.families.len() ==
+        // 11`, which is two defects in one line and both are recorded classes.
+        // It is a CARDINAL beside the list it counts (R2176 struck one of these
+        // in `doc_revision` for the same reason), and it names the two
+        // documents by hand, so a family on a THIRD was invisible to it.
+        // PROBED on 2026-08-30: a family declared on the SUMMARY document
+        // passed this whole crate at exit 0, and three hand-written lines in
+        // `wz_dissect.h` then satisfied the two gates that had caught it — a
+        // vocabulary joined to no walk, shipped.
+        //
+        // The set is compared, not its size, and the declared side comes from
+        // `declared_families`, which reads the newest revision of EVERY
+        // document. A family anywhere that this test does not name fails here.
+        let mut held: Vec<(&str, &str)> = names_checked;
+        for key in ["asker", "declarer"] {
+            held.push((rev::CENSUS, key));
+        }
+        held.sort_unstable();
+        held.dedup();
         assert_eq!(
-            census.families.len() + fields.families.len(),
-            11,
-            "a family was declared without joining this gate; every family in \
-             either document must be held to a walk, or the one that is not is \
-             a vocabulary that can widen in silence again"
+            held,
+            rev::declared_families(),
+            "a family was declared without joining this gate. Every family this \
+             library emits today must be held to a WALK, whichever document it \
+             is on; the one that is not is a vocabulary that can widen in \
+             silence again, which is item 552 happening a second time"
         );
     }
 
@@ -1061,12 +1086,39 @@ mod tests {
             ),
         ];
 
+        // ⚠ R2185 — THE DOCUMENTS THIS GATE RENDERS ARE THE DOCUMENTS THAT
+        // DECLARE FAMILIES, and that is asserted rather than assumed.
+        //
+        // The table above names two documents by hand. PROBED on 2026-08-30: a
+        // family plus a `carries` row added to the SUMMARY document passed this
+        // whole crate at exit 0 — this loop never looked at it, because it
+        // iterates the table and not the declaration. `wz_dissect.h`'s two
+        // marker gates did catch it, and three hand-written header lines then
+        // silenced them, so the verdict shipped derived from no document at
+        // all. That is `DocumentShape::planes`' own history one axis over, and
+        // the repair is R2181's: derive the population.
+        let rendered: Vec<&str> = docs.iter().map(|(name, _)| *name).collect();
+        let mut sorted_rendered = rendered.clone();
+        sorted_rendered.sort_unstable();
+        assert_eq!(
+            sorted_rendered,
+            rev::documents_declaring_families(),
+            "this gate renders {rendered:?} and the library declares families on \
+             {:?}. A document whose families this gate does not render has a \
+             carries verdict nothing derives; render it here, or it is a claim \
+             with no measurement behind it",
+            rev::documents_declaring_families()
+        );
+
         let mut failures: Vec<String> = Vec::new();
         // The two verdicts, counted SEPARATELY. R2181's lesson, and it bites
         // exactly here: three families are discriminants and eight are
         // passengers, so a single total stays at eleven while either arm could
         // be holding over an empty set.
         let (mut discriminants, mut passengers) = (0usize, 0usize);
+        // R2185 — and every family CLASSIFIED, collected as the loop runs, so
+        // the closing comparison is over what actually happened.
+        let mut classified: Vec<(&str, &str)> = Vec::new();
         for (name, rendered) in docs {
             let shape = rev::newest(name).expect("a revision");
             for family in shape.families {
@@ -1153,6 +1205,7 @@ mod tests {
                 match (declared, derived_discriminant) {
                     (rev::CarriesShape::Discriminant(rows), true) => {
                         discriminants += 1;
+                        classified.push((name, family.key));
                         // EVERY declared word rendered, each with exactly the
                         // shapes the table names. A word the population never
                         // reached is not a pass: it is a row of the declaration
@@ -1189,7 +1242,10 @@ mod tests {
                             }
                         }
                     }
-                    (rev::CarriesShape::Passenger, false) => passengers += 1,
+                    (rev::CarriesShape::Passenger, false) => {
+                        passengers += 1;
+                        classified.push((name, family.key));
+                    }
                     (declared, _) => failures.push(alloc::format!(
                         "{name}.{} is declared {} and these emitters render {}: {seen:?}. \
                          A key one word ALWAYS brings and another NEVER does is what makes \
@@ -1216,6 +1272,19 @@ mod tests {
              {passengers} passenger(s); an axis where every family answers the same \
              way says nothing the key set did not already say, and a count of zero \
              on either arm means that arm held over an empty set"
+        );
+        // R2185 — AND EVERY DECLARED FAMILY REACHED A VERDICT HERE. The
+        // document-level assertion above cannot say this on its own: a document
+        // may be rendered and a family on it still slip past, because the loop
+        // walks `shape.families` and the verdict arms are not the only exits.
+        classified.sort_unstable();
+        assert_eq!(
+            classified,
+            rev::declared_families(),
+            "the carries axis classified {classified:?} and the library declares \
+             {:?}. A declared verdict that no rendering reached is a claim with \
+             nothing behind it, which is the state this axis was added to abolish",
+            rev::declared_families()
         );
     }
 

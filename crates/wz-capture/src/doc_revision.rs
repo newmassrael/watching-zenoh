@@ -2380,6 +2380,70 @@ pub fn value_families_into(out: &mut String) {
     }
 }
 
+/// Every DOCUMENT this library emits, sorted — the population any gate that
+/// walks "all of them" must measure itself against.
+///
+/// R2185. PROBED on 2026-08-30: a seventh row added to [`DOCUMENT_HISTORY`]
+/// passed BOTH crates at exit 0. Four gates walk "the six documents" and each
+/// held its own hand-written table against the literal `6`, which compares a
+/// table to its own length and can never see a document the table omits. The
+/// intent was always right — `every_top_level_null_is_a_declared_plane` says in
+/// its own message that "a seventh must join the table above" — and nothing
+/// enforced it.
+pub fn documents() -> Vec<&'static str> {
+    let mut out: Vec<&str> = DOCUMENT_HISTORY.iter().map(|r| r.document).collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// Every `(document, family key)` this library declares TODAY — the newest
+/// revision of EVERY document in [`DOCUMENT_HISTORY`], sorted.
+///
+/// R2185. The POPULATION every gate over the family axes must measure itself
+/// against, derived here once rather than listed by each of them.
+///
+/// # Why this exists, measured rather than argued
+///
+/// Both gates over these axes enumerated the documents BY HAND — one as a
+/// two-row table of rendered documents, the other as `census.families.len() +
+/// fields.families.len() == 11`. Neither could see a family on a third
+/// document, and PROBED on 2026-08-30: a `ValueFamily` plus a [`KeyCarries`]
+/// row added to the SUMMARY document passed the whole `wz-capture` suite at
+/// exit 0. `wz-capi-dissect`'s two header gates did catch it — they read the
+/// emitted artifact — but what they ask for is a `@values` and a `@carries`
+/// line, so three hand-written header lines made the tree fully green with the
+/// vocabulary joined to no walk and the verdict derived from no document.
+///
+/// That is [`DocumentShape::planes`]' own history one axis over: a claim
+/// stated wider than the arm behind it. The repair is the same one R2181
+/// applied there — derive the population instead of naming it.
+///
+/// NEWEST ONLY, because that is what the library emits: an older revision's
+/// families are history a consumer reads by pinning, and holding them to
+/// today's walks would refuse a vocabulary that has legitimately widened.
+pub fn declared_families() -> Vec<(&'static str, &'static str)> {
+    let mut out = Vec::new();
+    for name in documents() {
+        let Some(shape) = newest(name) else { continue };
+        for family in shape.families {
+            out.push((shape.document, family.key));
+        }
+    }
+    out.sort_unstable();
+    out
+}
+
+/// Every DOCUMENT that declares at least one family today, sorted.
+///
+/// R2185 — the same population as [`declared_families`], asked the way a gate
+/// that has to RENDER each one asks it.
+pub fn documents_declaring_families() -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = declared_families().into_iter().map(|(d, _)| d).collect();
+    out.dedup();
+    out
+}
+
 /// Every KEY in a JSON document, in order of appearance, duplicates included.
 ///
 /// A string is a key when the next non-space character after it is a colon.
@@ -3447,6 +3511,11 @@ mod tests {
         // have had to weaken this to "some revision", which is the assertion
         // that stops noticing. `readable_surfaces` is at 2 because it grew the
         // described-format type list.
+        // R2185 — collected as the table is walked, and compared against
+        // `documents()` below. PROBED: a seventh row in `DOCUMENT_HISTORY`
+        // passed this test, because a hand-written table checked against a
+        // literal count is a table compared to its own length.
+        let mut named: Vec<&str> = Vec::new();
         for (name, expected) in [
             // R2119 (open-debt item 455) — the census moved to 2 when
             // `first_packet`'s retirement was announced; R2123 (item 453) to 3
@@ -3487,6 +3556,7 @@ mod tests {
             (SELECTOR_DIAGNOSE, 1),
             (DECLARATIONS_DIAGNOSE, 1),
         ] {
+            named.push(name);
             assert_eq!(revision(name), Some(expected), "{name}");
             // R2180 (open-debt item 554) — the envelope is asserted in BOTH
             // shapes, because it now has two. A document that declares no plane
@@ -3510,6 +3580,18 @@ mod tests {
                 assert_eq!(envelope(name), want, "{name}");
             }
         }
+        // R2185 — AND THE TABLE ABOVE IS EVERY DOCUMENT, derived rather than
+        // counted. Without this a document added to `DOCUMENT_HISTORY` has no
+        // pinned revision and no asserted envelope, and nothing says so.
+        named.sort_unstable();
+        assert_eq!(
+            named,
+            documents(),
+            "this test pins the revision and the envelope of {named:?} and the \
+             library emits {:?}. A document missing here ships with its revision \
+             asserted by nobody",
+            documents()
+        );
         // A name this library does not emit renders revision 0, which the
         // audit refuses — so a typo is loud rather than a document that
         // quietly claims a shape.

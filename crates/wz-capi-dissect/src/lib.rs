@@ -4499,11 +4499,13 @@ mod tests {
                 ));
             }
         }
-        assert_eq!(
-            documents.len(),
-            4,
-            "this crate builds four documents; a fifth must join the table above"
-        );
+        // R2185 — the two tables in this test cover the document population
+        // BETWEEN them, and that is now derived instead of split across a `== 4`
+        // literal here and a silent assumption below. PROBED on 2026-08-30: a
+        // seventh row in `DOCUMENT_HISTORY` passed this crate at exit 0, because
+        // a hand-written table checked against a literal count is a table
+        // compared against its own length.
+        let mut covered: Vec<&str> = documents.iter().map(|(name, _)| *name).collect();
 
         // The other two documents are BUILT in `wz-capture` and their key sets
         // are pinned there — but they reach a consumer THROUGH these doors, and
@@ -4517,6 +4519,7 @@ mod tests {
                 call_fields(&stream, 0).expect("the fields door"),
             ),
         ] {
+            covered.push(name);
             let envelope = rev::envelope(name);
             if !doc.contains(&envelope) {
                 failures.push(format!(
@@ -4526,6 +4529,16 @@ mod tests {
             }
         }
         assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+        covered.sort_unstable();
+        covered.dedup();
+        assert_eq!(
+            covered,
+            rev::documents(),
+            "this test reaches {covered:?} and the library emits {:?}. A document \
+             neither table names crosses this ABI with its revision asserted by \
+             nobody",
+            rev::documents()
+        );
     }
 
     /// R2180 (open-debt item 554) — THE HEADER AND THE LIBRARY AGREE ABOUT
@@ -4585,6 +4598,18 @@ mod tests {
                 call_fields(&stream, 0).expect("the fields door"),
             ),
         ];
+        // R2185 — this table too is held to the derived population. A document
+        // it omits contributes no `@planes` marker on the library side, so a
+        // marker for it would look like a marker with no plane behind it and the
+        // fix would be to DELETE the marker, which is the wrong repair.
+        let mut covered: Vec<&str> = documents.iter().map(|(name, _)| *name).collect();
+        covered.sort_unstable();
+        assert_eq!(
+            covered,
+            rev::documents(),
+            "this gate reads planes off {covered:?} and the library emits {:?}",
+            rev::documents()
+        );
         let mut emitted: Vec<(String, String)> = Vec::new();
         for (name, doc) in &documents {
             let Some(list) = doc.split("\"planes\":[").nth(1) else {
@@ -4689,10 +4714,20 @@ mod tests {
                 vec![call_fields(&stream, 0).expect("the fields door")],
             ),
         ];
+        // R2185 — the SET, not its size. This assertion's own message has said
+        // "a seventh must join the table above" since R2180 and nothing enforced
+        // it: `documents.len() == 6` compares a hand-written table against its
+        // own length, so a seventh row in `DOCUMENT_HISTORY` was invisible here.
+        // PROBED on 2026-08-30, exit 0 across both crates.
+        let mut covered: Vec<&str> = documents.iter().map(|(name, _)| *name).collect();
+        covered.sort_unstable();
         assert_eq!(
-            documents.len(),
-            6,
-            "this ABI hands back six documents; a seventh must join the table above"
+            covered,
+            rev::documents(),
+            "this test renders {covered:?} and the library emits {:?}; a seventh \
+             document must join the table above, or its top level is watched by \
+             nobody",
+            rev::documents()
         );
 
         let mut failures: Vec<String> = Vec::new();
