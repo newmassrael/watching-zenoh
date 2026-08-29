@@ -774,11 +774,18 @@ pub const CENSUS_R4_KEYS: &[&str] = CENSUS_R3_KEYS;
 
 /// The value families the census document declares at revision 4.
 ///
-/// Five, and every one is joined to a compiler-bound walk by
+/// Every one is joined to a compiler-bound walk by
 /// `the_declared_value_families_match_the_librarys_own_vocabularies`:
 /// [`INTEREST_KIND_R4`] to `InterestKind::names`, [`INTEREST_MODE_R4`] to
 /// `InterestMode::names`, [`ANCHOR_SPACE_R4`] to `AnchorSpace::names`, and both
 /// endpoint keys to `census_json::direction_names`.
+///
+/// ⚠ R2176 — THE CARDINAL IS GONE FROM THIS PARAGRAPH ON PURPOSE. It read
+/// "Five, and every one is joined ..." and was true; the same sentence one
+/// constant down read "Three" over a five-element slice, because R2175 widened
+/// that list and left its prose. A number written beside the list it counts is
+/// a second copy with nothing joining it to the first, and this one was correct
+/// only by luck of not having moved yet. The slice IS the count.
 ///
 /// ⚠ `kind` IS NOT THE SAME FAMILY AS THE FIELD DOCUMENT'S `kind`, which is why
 /// families are declared per DOCUMENT rather than globally: here it is the sort
@@ -894,11 +901,24 @@ pub const FIELDS_R2_KEYS: &[&str] = &[
 
 /// The value families the field document declares at revision 2.
 ///
-/// Three, and they are the payload plane's: [`PAYLOAD_STATE_R2`],
-/// [`REFUSED_UNDER_R2`] and [`MISBOUND_R2`]. Each is pinned against the
-/// library's own compiler-bound walk by
+/// Every one is joined to a compiler-bound walk by
 /// `the_declared_value_families_match_the_librarys_own_vocabularies`, so a word
-/// added to a walk cannot ship until a revision here carries it.
+/// added to a walk cannot ship until a revision here carries it:
+/// [`PAYLOAD_STATE_R2`] to `PayloadDecoding::STATES`, [`REFUSED_UNDER_R2`] to
+/// `RefusedUnder::names`, [`MISBOUND_R2`] to `Misbound::names`,
+/// [`ANCHOR_SPACE_FIELDS_R2`] to `AnchorSpace::names` and
+/// [`DIRECTION_FIELDS_R2`] to `census_json::direction_names`.
+///
+/// ⚠ R2176 — THIS PARAGRAPH WAS WRONG FROM THE ROUND THAT WROTE IT. It said
+/// "Three, and they are the payload plane's", naming only the first three
+/// constants above, while the slice below it has held FIVE since that same
+/// commit: R2175 added `direction` and `offset_space` here for the same-seam
+/// residue and moved the list without moving the sentence. Both halves of the
+/// error are the same shape — a count and a membership restated in prose beside
+/// the thing that defines them. Nothing in this workspace measures either, which
+/// is open-debt item 530; what is done instead is to stop writing the count at
+/// all and to keep the membership as the JOINT it actually is, one constant to
+/// one walk, so a family added without a walk has no sentence to hide in.
 pub const FIELDS_R2_FAMILIES: &[ValueFamily] = &[
     ValueFamily {
         key: "direction",

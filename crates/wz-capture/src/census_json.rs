@@ -849,7 +849,18 @@ pub(crate) fn dir_name(d: Direction) -> &'static str {
     }
 }
 
-/// Every word [`dir_name`] can return, WALKED rather than written down.
+/// Every word `dir_name` can return, WALKED rather than written down.
+///
+/// ⚠ R2176 — `dir_name` IS NAMED WITHOUT BEING LINKED, and that is the fix
+/// rather than the omission it looks like. It is `pub(crate)`, so a link from
+/// this PUBLIC item's documentation is `rustdoc::private_intra_doc_links`,
+/// which Layer C1bz spends a zero budget on for this crate — R2175 wrote the
+/// link, every crate test passed, and the push was refused by the doc lane.
+/// The two repairs this workspace refuses are also worth naming: an
+/// `#[allow(..)]` here would be an escape hatch disabling the lane at exactly
+/// the site it fired on, and making `dir_name` public would widen the API for
+/// the benefit of a hyperlink. The word stays crate-private; the vocabulary is
+/// public through this function, which is the whole point of it existing.
 ///
 /// R2175 (open-debt item 552) — `asker`, `declarer`, `direction` and `space`
 /// all carry this vocabulary, and the documents that emit them now DECLARE it
