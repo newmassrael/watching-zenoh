@@ -168,9 +168,14 @@
  *
  * A document that declares no plane OMITS the key rather than carrying an empty
  * list, and that silence is safe to read for the same reason: no document may
- * emit a top-level `null` it has not declared, so a document with no `planes`
- * key can never hand you an ambiguous one.
+ * emit a PLANE it has not declared, in either shape you would recognise one by
+ * — a top-level `null`, or a top-level object carrying `narrowed_by_selector`
+ * — so a document with no `planes` key can never hand you an ambiguous one.
  * `every_top_level_null_is_a_declared_plane` holds that over all six.
+ *
+ * R2181 widened this sentence and the arm behind it in the same change. It read
+ * "may emit a top-level `null`", which is the narrower of the two shapes, so
+ * the contract promised more than the gate checked.
  *
  * @planes census exchanges
  * @planes census interests

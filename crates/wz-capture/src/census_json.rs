@@ -1064,6 +1064,11 @@ mod tests {
     /// Item 554's own filing recorded that a regex over this crate's source had
     /// miscounted the population three times. This reads the document.
     ///
+    /// R2181 — the derivation is `doc_revision::emitted_planes` and no longer
+    /// lives inline here. It gained a second caller (the C ABI's gate, over all
+    /// six documents rather than this one), and two copies of the plane rule is
+    /// the defect item 554 is about, one level up from the document.
+    ///
     /// # The direction that closes the item
     ///
     /// The last assertion is the one a consumer acts on: a top-level key that
@@ -1083,17 +1088,7 @@ mod tests {
             "the census document has no top-level key, so nothing below is \
              measuring anything: {json}"
         );
-        let mut derived: Vec<&str> = entries
-            .iter()
-            .filter(|(_, v)| {
-                *v == "null"
-                    || crate::doc_revision::top_level_entries(v)
-                        .iter()
-                        .any(|(ik, _)| *ik == "narrowed_by_selector")
-            })
-            .map(|(k, _)| *k)
-            .collect();
-        derived.sort_unstable();
+        let derived = crate::doc_revision::emitted_planes(&json);
         assert!(
             !derived.is_empty(),
             "no top-level key of the census looks like a plane, so the \

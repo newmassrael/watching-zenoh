@@ -1660,9 +1660,15 @@ pub fn envelope_into(document: &str, out: &mut String) {
     //
     // Omitted entirely for a document that declares none, and that silence is
     // not the ambiguity this key exists to remove: a document with no planes
-    // has no top-level `null` to be ambiguous ABOUT, and
+    // has no plane to be ambiguous ABOUT, and
     // `every_top_level_null_is_a_declared_plane` is what holds that true rather
     // than the observation that it happens to be today.
+    //
+    // ⚠ R2181 — that sentence was written when the gate behind it checked only
+    // the `null` shape, so the justification reached further than the gate did:
+    // a silent document could have grown a `narrowed_by_selector` key and no
+    // arm would have looked. The gate now derives every plane shape over all
+    // six documents (`emitted_planes`), which is what the silence rests on.
     let planes = newest(document).map(|s| s.planes).unwrap_or(&[]);
     if !planes.is_empty() {
         out.push_str(",\"planes\":[");
@@ -1959,6 +1965,48 @@ pub fn top_level_entries(doc: &str) -> Vec<(&str, &str)> {
         out.push((key, doc[vstart..i].trim()));
     }
     out
+}
+
+/// The planes `doc` EMITS, sorted, derived by the rule a CONSUMER applies.
+///
+/// R2181 (open-debt item 554's own contract, over the population its gate left
+/// out). `census_json_where`'s doc fixes what a plane looks like from outside:
+/// a top-level key carrying `narrowed_by_selector`. A plane a build cannot feed
+/// arrives as `null` instead, which carries no marker, so both shapes are the
+/// derivation — and `null` is why the declaration had to exist at all.
+///
+/// ONE definition, and that is the point rather than tidiness. R2180 closed item
+/// 554 by making the census document carry its own plane list, and wrote this
+/// derivation inline in the one test that compared the two. A second caller
+/// copying those six lines would be a second copy of the plane rule, which is
+/// the defect the item was filed about, one level up.
+///
+/// ⚠ TOP LEVEL on both sides. The marker is looked for at the plane's OWN depth
+/// — `top_level_entries` applied to the value — rather than anywhere inside it.
+/// A scan that does not bound the depth it counts at answers with a plane's
+/// CHILDREN, and that failure is measured rather than hypothetical: a probe
+/// written for this item on 2026-08-29 counted 26 planes where there are five,
+/// by not bounding its scope, and the item's own filing says not to quote that
+/// number for anything. `a_plane_is_a_marker_or_a_null_at_the_top_level_and_nothing_else`
+/// is the arm that holds the bound here, and it is the only one a depth-blind
+/// rewrite of this function fails.
+///
+/// Returns empty for a document with no plane, which is most of them — the
+/// answer `DocumentShape::planes` gives as `&[]` and, until R2181, the half of
+/// that claim nothing checked.
+pub fn emitted_planes(doc: &str) -> Vec<&str> {
+    let mut planes: Vec<&str> = top_level_entries(doc)
+        .into_iter()
+        .filter(|(_, value)| {
+            *value == "null"
+                || top_level_entries(value)
+                    .iter()
+                    .any(|(inner, _)| *inner == "narrowed_by_selector")
+        })
+        .map(|(key, _)| key)
+        .collect();
+    planes.sort_unstable();
+    planes
 }
 
 /// Check a revision history for the rules that make a rename expressible and a
@@ -2351,6 +2399,53 @@ mod tests {
     #[test]
     fn the_shipped_history_passes_its_own_audit() {
         audit(DOCUMENT_HISTORY).expect("the shipped document history");
+    }
+
+    /// R2181 — THE DERIVATION, DRIVEN BY DOCUMENTS THIS TREE DOES NOT EMIT.
+    ///
+    /// [`emitted_planes`] runs over the real documents in two crates, and over
+    /// every one of them today it answers either the census plane set or
+    /// nothing. That makes the LIVE population a check of the tree and no check
+    /// of the rule: the shapes that would break it — a plane in a document that
+    /// declares none, a marker nested where a plane's own `selection` object
+    /// puts it — do not occur, so nothing there says what the function would do
+    /// if they did. Synthetic documents are how the rule gets a population, the
+    /// same argument [`audit`] makes about taking its rows as a parameter.
+    ///
+    /// Both polarities, and the CONTROL is the third case rather than an
+    /// afterthought: a checker that answered "plane" to everything would pass
+    /// the first two arms and is refused only by the arm that must stay silent.
+    #[test]
+    fn a_plane_is_a_marker_or_a_null_at_the_top_level_and_nothing_else() {
+        // Positive: the two shapes a plane arrives in.
+        assert_eq!(
+            emitted_planes("{\"a\":{\"narrowed_by_selector\":false,\"rows\":[]},\"b\":null}"),
+            vec!["a", "b"],
+            "a marker-carrying object and a null are both planes"
+        );
+
+        // Negative: an ordinary key is not one, whatever it carries.
+        assert!(
+            emitted_planes("{\"document\":{\"name\":\"x\",\"revision\":1},\"n\":3}").is_empty(),
+            "a document with no plane derives none"
+        );
+
+        // CONTROL: the marker one level too deep. A plane's `selection` object
+        // carries the same word, and a depth-blind scan reported the plane's
+        // CHILDREN as planes -- measured on 2026-08-29, 26 where there are 5.
+        assert!(
+            emitted_planes("{\"totals\":{\"flow\":{\"narrowed_by_selector\":true}}}").is_empty(),
+            "a marker below a plane's own depth does not make its parent's \
+             children planes"
+        );
+
+        // And sorted, so a comparison against a declaration cannot depend on
+        // the order the document happens to render.
+        assert_eq!(
+            emitted_planes("{\"z\":null,\"a\":null}"),
+            vec!["a", "z"],
+            "the derivation sorts"
+        );
     }
 
     /// R2146 (unregistered open-debt item 534) — AN ANNOUNCEMENT THE NEXT

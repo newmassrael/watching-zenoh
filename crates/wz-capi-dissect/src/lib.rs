@@ -4494,7 +4494,18 @@ mod tests {
     /// whether it is a plane at all. `document.planes` is the answer, and it is
     /// omitted entirely by a document that has none. THIS test is what makes
     /// that omission safe to read: a document with no `planes` key is one that
-    /// has been shown it can never hand a consumer an undeclared `null`.
+    /// has been shown it can never hand a consumer an undeclared plane.
+    ///
+    /// ⚠ R2181 — "undeclared plane", not "undeclared `null`", and the widening
+    /// is the repair of a claim this test used to make with a narrower arm than
+    /// the claim needed. `null` is one of the two shapes a consumer reads as a
+    /// plane; the other is the `narrowed_by_selector` marker, and until R2181
+    /// nothing outside the census document was checked for it. A document
+    /// declaring `planes: &[]` — fourteen rows of the table do — could have
+    /// grown a marker-carrying key and stayed green, which is item 554's own
+    /// defect one document over. The third arm below closes it, and the
+    /// derivation it uses is `doc_revision::emitted_planes`, one definition
+    /// rather than a copy per caller.
     ///
     /// ⚠ The `null` arm has a population of ZERO in this crate, and saying so is
     /// the point rather than an apology. `wz-capi-dissect` depends on
@@ -4507,10 +4518,14 @@ mod tests {
     /// documents: the rule has to hold for a summary and a verdict too, and
     /// only this crate can build one.
     ///
-    /// The two arms below have a population in EVERY build, and they are the
+    /// The three arms below have a population in EVERY build, and they are the
     /// ones that fail if the declaration and the document drift: a declared
-    /// plane the document does not emit, and a plane list that never reaches
-    /// the document a consumer reads.
+    /// plane the document does not emit, a plane list that never reaches the
+    /// document a consumer reads, and a document emitting a plane it does not
+    /// declare. The third has a floor of its OWN rather than sharing
+    /// `examined` with the first two: five of the six documents derive no
+    /// plane, so a shared total would stay large while that arm held over an
+    /// empty set.
     #[test]
     fn every_top_level_null_is_a_declared_plane() {
         use wz_capture::doc_revision as rev;
@@ -4557,6 +4572,11 @@ mod tests {
         // assertion below with nothing to look at while the table above still
         // named six.
         let mut examined = 0usize;
+        // R2181 — a SEPARATE floor for the arm added below, and separate on the
+        // lesson R2137 paid for: a total is not a breakdown. Every document but
+        // one derives no plane, so `examined` stays large while the derivation
+        // itself could be answering nothing, and a skip would read as coverage.
+        let mut derived = 0usize;
         for (name, docs) in &documents {
             let declared = rev::newest(name).expect("a document this ABI emits").planes;
             for doc in docs {
@@ -4584,6 +4604,27 @@ mod tests {
                         ));
                     }
                 }
+                // R2181 — THE OTHER DIRECTION, over every document rather than
+                // the census alone. The two arms above ask whether what is
+                // DECLARED reaches the document; this one asks whether what the
+                // document EMITS as a plane was declared, which is the half a
+                // silent document had nobody to answer. `envelope_into` omits
+                // `planes` for a document that declares none, and the reason it
+                // may is that a document with no plane has no plane to hide --
+                // a claim `planes: &[]` makes fourteen times in the table and
+                // that, until this arm, only the census was ever checked for.
+                let emitted = rev::emitted_planes(doc);
+                derived += emitted.len();
+                if emitted != declared.to_vec() {
+                    failures.push(format!(
+                        "{name}: the document emits planes {emitted:?} and declares \
+                         {declared:?}. A plane a consumer can see and the document \
+                         does not name is the state open-debt item 554 was filed \
+                         about, one document over; a declared plane the document \
+                         does not emit as one is a list that was never checked \
+                         against a document.\n{doc}"
+                    ));
+                }
                 // The declaration has to REACH the document, or it is a fact
                 // this repository holds and a consumer cannot.
                 if !declared.is_empty() {
@@ -4607,6 +4648,12 @@ mod tests {
         assert!(
             examined > 0,
             "no top-level key was reached, so this test asserts nothing"
+        );
+        assert!(
+            derived > 0,
+            "no document handed back by this ABI emits a key the plane \
+             derivation recognises, so the arm comparing emitted planes against \
+             declared ones held over an empty set in every document"
         );
         assert!(failures.is_empty(), "{}", failures.join("\n\n"));
     }
