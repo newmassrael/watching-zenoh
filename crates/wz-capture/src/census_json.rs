@@ -849,6 +849,30 @@ pub(crate) fn dir_name(d: Direction) -> &'static str {
     }
 }
 
+/// Every word [`dir_name`] can return, WALKED rather than written down.
+///
+/// R2175 (open-debt item 552) — `asker`, `declarer`, `direction` and `space`
+/// all carry this vocabulary, and the documents that emit them now DECLARE it
+/// per revision. The declaration is joined to a walk over the enum so it cannot
+/// be a second opinion about what a direction is called.
+///
+/// ⚠ THE WORDS ARE ONE CHARACTER LONG, which is why the header gate that holds
+/// each word to a mention searches for the BACKTICKED spelling: `HEADER
+/// .contains("a")` is true of any English prose, so the plain form would be a
+/// check that cannot fail.
+pub fn direction_names() -> Vec<&'static str> {
+    let mut out = Vec::new();
+    let mut cur = Some(Direction::A);
+    while let Some(d) = cur {
+        out.push(dir_name(d));
+        cur = match d {
+            Direction::A => Some(Direction::B),
+            Direction::B => None,
+        };
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

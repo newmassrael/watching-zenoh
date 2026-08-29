@@ -1140,8 +1140,15 @@ impl PayloadDecoding {
 
     /// Every variant, walked rather than listed. The ORDER is not a contract,
     /// only the completeness.
+    ///
+    /// R2175 (open-debt item 552) — `pub(crate)`, because the document pin in
+    /// `fields_json` builds its key set and its value vocabulary by RENDERING
+    /// every variant rather than by hoping a capture reaches them. Measured
+    /// there: the fixture the pin used reached two of the eight states, so six
+    /// arms' keys — `descriptor_bytes` among them — were emitted to consumers
+    /// and pinned by nothing.
     #[cfg(test)]
-    fn all() -> Vec<Self> {
+    pub(crate) fn all() -> Vec<Self> {
         let mut out = Vec::new();
         let mut cur = Some(Self::NoRules);
         while let Some(v) = cur {

@@ -166,6 +166,32 @@ impl InterestKind {
             Self::LivelinessToken => "liveliness_token",
         }
     }
+
+    /// Every word [`Self::name`] can return, WALKED rather than written down.
+    ///
+    /// R2175 (open-debt item 552) — the shape `RefusedUnder::names` arrived at,
+    /// applied here because the census document now DECLARES this vocabulary
+    /// per revision and the declaration has to be joined to something a
+    /// compiler holds. A shipping caller for the chain, so an arm added later
+    /// is forced at `cargo build` and not only at `cargo test`.
+    pub fn names() -> alloc::vec::Vec<&'static str> {
+        let mut out = alloc::vec::Vec::new();
+        let mut cur = Some(Self::Subscriber);
+        while let Some(v) = cur {
+            out.push(v.name());
+            cur = v.next();
+        }
+        out
+    }
+
+    /// The next kind, so the walk above visits every arm without a list.
+    fn next(self) -> Option<Self> {
+        Some(match self {
+            Self::Subscriber => Self::Queryable,
+            Self::Queryable => Self::LivelinessToken,
+            Self::LivelinessToken => return None,
+        })
+    }
 }
 
 /// The mode an `Interest` was asked in.
@@ -209,6 +235,28 @@ impl InterestMode {
             Self::Future => "future",
             Self::CurrentFuture => "current_future",
         }
+    }
+
+    /// Every word [`Self::name`] can return, WALKED — [`InterestKind::names`]'
+    /// reason, and the census document declares this vocabulary too.
+    pub fn names() -> alloc::vec::Vec<&'static str> {
+        let mut out = alloc::vec::Vec::new();
+        let mut cur = Some(Self::Final);
+        while let Some(v) = cur {
+            out.push(v.name());
+            cur = v.next_mode();
+        }
+        out
+    }
+
+    /// The next mode, so the walk above visits every arm without a list.
+    fn next_mode(self) -> Option<Self> {
+        Some(match self {
+            Self::Final => Self::Current,
+            Self::Current => Self::Future,
+            Self::Future => Self::CurrentFuture,
+            Self::CurrentFuture => return None,
+        })
     }
 
     /// Whether this mode asks for a CURRENT dump, which is the half a

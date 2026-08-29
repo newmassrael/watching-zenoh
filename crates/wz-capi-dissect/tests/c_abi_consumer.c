@@ -1015,8 +1015,13 @@ int main(void) {
      * R2123 (open-debt item 453) -- 3: that key is now GONE, and the row gained
      * `anchor_intervals`. A consumer written against revision 1 or 2 that reads
      * `first_packet` gets nothing here, which is exactly what the revision
-     * number exists to let it notice before parsing. */
-    revisioned[0].revision = 3;
+     * number exists to let it notice before parsing.
+     * R2175 (item 552) -- 4, and NO KEY MOVED. This revision declares the five
+     * keys on these rows whose VALUE comes from a closed set -- `kind`, `mode`,
+     * `offset_space`, `asker`, `declarer` -- so a word joining one of them
+     * costs a revision from now on. Ask wz_dissect_readable_surfaces for the
+     * words. */
+    revisioned[0].revision = 4;
     revisioned[0].doc = NULL;
     rc = wz_dissect_pcap_census(pcap, sizeof pcap, &revisioned[0].doc);
     CHECK(rc == WZ_DISSECT_OK, "census rc=%d", rc);
@@ -1036,12 +1041,20 @@ int main(void) {
     rc = wz_dissect_pcap_summary(pcap, sizeof pcap, &revisioned[1].doc);
     CHECK(rc == WZ_DISSECT_OK, "summary rc=%d", rc);
     revisioned[2].name = "fields";
-    revisioned[2].revision = 1;
+    /* R2175 (item 552) -- 2 when the PAYLOAD PLANE joined the pin. Revision 1
+     * covered the document as emitted with no mapping declared, so
+     * `payload_decode` and its fifteen keys shipped to consumers under no
+     * revision at all, and its `state` vocabulary widened at R2170 with nothing
+     * to say so. */
+    revisioned[2].revision = 2;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);
     revisioned[3].name = "readable_surfaces";
-    revisioned[3].revision = 2;
+    /* R2175 (item 552) -- 3 when it gained `value_families`: which keys carry a
+     * closed vocabulary and what it is, so a consumer can ASK rather than
+     * discover a widened set as a switch fallthrough. */
+    revisioned[3].revision = 3;
     revisioned[3].doc = NULL;
     rc = wz_dissect_readable_surfaces(&revisioned[3].doc);
     CHECK(rc == WZ_DISSECT_OK, "surfaces rc=%d", rc);

@@ -472,9 +472,26 @@ mod tests {
     /// that capture never reaches, which is a gate that reads green while the
     /// keys it was written for go unwatched.
     ///
-    /// The declarations argument stays `None`: a payload map is the operator's
-    /// input, not the capture's, and the keys it adds belong to a revision that
-    /// declares them rather than to whichever fixture happened to pass one.
+    /// ⚠ R2175 (open-debt item 552) — THE `declarations: None` READING WAS
+    /// WRONG, and it is corrected here rather than argued with.
+    ///
+    /// This test used to drive the mapping argument as `None`, on the note that
+    /// "a payload map is the operator's input, not the capture's, and the keys
+    /// it adds belong to a revision that declares them". The first half is
+    /// true; the second described something that had not happened. MEASURED:
+    /// with a mapping supplied the document gains fifteen keys —
+    /// `payload_decode`, `state`, `descriptor_bytes`, `under`, `wrong` and the
+    /// rest — and revision 1 declared not one of them. So the subtree was
+    /// emitted to consumers, pinned by nothing, and two rounds (R2025 item 285,
+    /// R2170 item 546) added keys to it with no number moving. The pin's own
+    /// paragraph above — "a pin taken over a thin capture silently stops
+    /// covering every key that capture never reaches" — was true of this test.
+    ///
+    /// Both branches now, which is `wz-capi-dissect`'s ruling for the two
+    /// verdict documents applied here: a pin over one branch leaves the other's
+    /// keys unwatched, and that is a gate reading green over half a contract.
+    /// The union is compared against `newest`, not against `FIELDS_R1_KEYS` by
+    /// name — R2123's correction on the census, which this test had not had.
     ///
     /// Gated on `network-codecs` because the fixture is: without the decoders a
     /// Push inside a frame is an unknown MID, so the document would be pinned
@@ -483,17 +500,308 @@ mod tests {
     #[cfg(feature = "network-codecs")]
     #[test]
     fn the_field_documents_key_set_is_pinned() {
+        use crate::payload::formats::FormatMap;
+        use crate::payload_decode::Declarations;
         let (d, file) =
             crate::census_json::fed_tests::four_plane_capture_with_file("demo/temp", None, false);
-        let doc = fields_json(&d, &file, None, None);
-        let seen = crate::doc_revision::key_set(&doc);
-        let expected: Vec<&str> = crate::doc_revision::FIELDS_R1_KEYS.to_vec();
+        let mut map = FormatMap::new();
+        map.declare("demo/**=json").expect("a keyexpr pattern");
+        let run = Declarations::new(&map);
+
+        let mut seen: Vec<&str> = Vec::new();
+        let with = fields_json(&d, &file, None, Some(&run));
+        let without = fields_json(&d, &file, None, None);
+        for doc in [&with, &without] {
+            seen.extend(crate::doc_revision::key_set(doc));
+        }
+        seen.sort_unstable();
+        seen.dedup();
+        // A SUBSET, and the sibling test is what makes that sound: this fixture
+        // reaches two of the eight decode states, so the arms it does not take
+        // are pinned by `the_field_documents_payload_plane_is_pinned_over_every_arm`
+        // instead. Asserting equality here would force this capture to produce
+        // every arm, which is the fixture nobody can keep whole.
+        let pinned: Vec<&str> = crate::doc_revision::newest(crate::doc_revision::FIELDS)
+            .expect("the field document has a revision")
+            .keys
+            .to_vec();
+        let stray: Vec<&&str> = seen.iter().filter(|k| !pinned.contains(k)).collect();
+        assert!(
+            stray.is_empty(),
+            "the field document emits {stray:?}, which no revision declares; if that \
+             is deliberate, APPEND a revision to `doc_revision::DOCUMENT_HISTORY` \
+             carrying the new set — and if a key is going away, announce it in the \
+             previous revision's `retiring` first"
+        );
+        assert!(
+            seen.len() >= crate::doc_revision::FIELDS_R1_KEYS.len(),
+            "this fixture reached {} keys, fewer than revision 1's own set; a pin \
+             over a capture that stopped rendering is a gate measuring nothing",
+            seen.len()
+        );
+    }
+
+    /// R2175 (open-debt item 552) — THE PAYLOAD PLANE OF THIS DOCUMENT,
+    /// RENDERED FROM ITS OWN TYPES RATHER THAN FROM WHATEVER A CAPTURE REACHED.
+    ///
+    /// # What the pin above could not see, measured
+    ///
+    /// `the_field_documents_key_set_is_pinned` drives `declarations: None`, on
+    /// the reading that "a payload map is the operator's input, not the
+    /// capture's". The consequence was not stated and is this: with a mapping
+    /// supplied the document gains FIFTEEN keys — `payload_decode`, `state`,
+    /// `descriptor_bytes` and the rest — and revision 1 pins none of them. So
+    /// R2170 added `descriptor_bytes` to a shipped document and no revision
+    /// moved, because no revision had ever covered the subtree it landed in.
+    ///
+    /// # Why the renderers and not a richer capture
+    ///
+    /// Eight `PayloadDecoding` states, three `RefusedUnder` and two `Misbound`
+    /// are reachable by rendering the TYPE; making one capture produce all
+    /// thirteen would be a fixture nobody can keep whole, and a fixture that
+    /// stopped reaching an arm would take the arm's keys out of the pin
+    /// silently — which is the failure this test exists to end. The walks
+    /// (`PayloadDecoding::all`, `RefusedUnder::names`, `Misbound::names`) are
+    /// each bound to an exhaustive match, so a variant added later joins this
+    /// population at `cargo build` rather than when someone remembers.
+    ///
+    /// The union of the document AND the renderings, because neither alone is
+    /// the document a consumer reads: the capture supplies the surrounding
+    /// rows, the renderings supply the arms it did not take.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn the_field_documents_payload_plane_is_pinned_over_every_arm() {
+        use crate::doc_revision as rev;
+        use crate::payload::formats::FormatMap;
+        use crate::payload_decode::{
+            push_decoding, push_misbinding, push_refusal, Declarations, Misbinding, Misbound,
+            PayloadDecoding, RefusedUnder,
+        };
+
+        let (d, file) =
+            crate::census_json::fed_tests::four_plane_capture_with_file("demo/temp", None, false);
+        let mut map = FormatMap::new();
+        map.declare("demo/**=json").expect("a keyexpr pattern");
+        let run = Declarations::new(&map);
+
+        let mut rendered = alloc::vec![fields_json(&d, &file, None, Some(&run))];
+        let states = PayloadDecoding::all();
+        assert_eq!(
+            states.len(),
+            PayloadDecoding::STATES.len(),
+            "the variant walk and the word list must stay the same length, or this \
+             population is short by however many arms the walk stopped at"
+        );
+        for state in &states {
+            let mut out = String::new();
+            push_decoding(state, &mut out);
+            rendered.push(out);
+        }
+        // THE ONE SHAPE THE WALK CANNOT SUPPLY, and it is a discriminant walk's
+        // structural limit rather than an omission. `PayloadDecoding::next`
+        // builds each variant with EMPTY payloads — its own doc says the data
+        // is furniture there — so the `Decoded` arm it yields carries no
+        // decoded field, and `fields[]`'s own object never opens. `path` is
+        // emitted only from inside it. Measured: without this the union is 51
+        // keys and `path` is not one of them, so a key a consumer receives
+        // would have been pinned by nothing for the second time in one
+        // document.
+        rendered.push({
+            let mut out = String::new();
+            push_decoding(
+                &PayloadDecoding::Decoded {
+                    keyexpr: String::from("demo/**"),
+                    format: String::from("json"),
+                    fields: alloc::vec![crate::payload::formats::PayloadField {
+                        path: String::from("$.a"),
+                        name: None,
+                        value: String::from("1"),
+                        start: 0,
+                        end: 1,
+                    }],
+                    despite_encoding: None,
+                },
+                &mut out,
+            );
+            out
+        });
+
+        // Constructed rather than captured, for the reason the doc gives: the
+        // WALK is the population, and each variant only has to be RENDERED for
+        // its keys and its word to join the pin.
+        for under in [
+            RefusedUnder::Corroborated,
+            RefusedUnder::Unclaimed,
+            RefusedUnder::Refuted,
+        ] {
+            let mut out = String::new();
+            push_refusal(
+                &crate::payload_decode::Refusal {
+                    keyexpr: String::from("demo/**"),
+                    format: String::from("json"),
+                    under,
+                    samples: 1,
+                    example: String::from("byte 0"),
+                },
+                &mut out,
+            );
+            rendered.push(out);
+        }
+        for wrong in [Misbound::Rule, Misbound::Publisher] {
+            let mut out = String::new();
+            push_misbinding(
+                &Misbinding {
+                    keyexpr: String::from("demo/**"),
+                    format: String::from("json"),
+                    declared: String::from("text/plain"),
+                    wrong,
+                    publisher: None,
+                    samples: 1,
+                },
+                &mut out,
+            );
+            rendered.push(out);
+        }
+        // The two arms above are written out, so the count is asserted against
+        // the walks that ARE compiler-bound: a fourth `RefusedUnder` or a third
+        // `Misbound` fails here rather than quietly leaving its word unpinned.
+        assert_eq!(
+            RefusedUnder::names().len(),
+            3,
+            "a RefusedUnder arm was added"
+        );
+        assert_eq!(Misbound::names().len(), 2, "a Misbound arm was added");
+
+        let mut seen: Vec<&str> = Vec::new();
+        for doc in &rendered {
+            seen.extend(rev::key_set(doc));
+        }
+        seen.sort_unstable();
+        seen.dedup();
+        let expected: Vec<&str> = rev::newest(rev::FIELDS)
+            .expect("the field document has a revision")
+            .keys
+            .to_vec();
         assert_eq!(
             seen, expected,
-            "the field document's key set moved; if that is deliberate, APPEND a \
-             revision to `doc_revision::DOCUMENT_HISTORY` carrying the new set — and \
-             if a key is going away, announce it in the previous revision's \
-             `retiring` first"
+            "the field document's key set moved once the payload plane is counted; \
+             if that is deliberate, APPEND a revision to \
+             `doc_revision::DOCUMENT_HISTORY` carrying the new set"
+        );
+    }
+
+    /// R2175 (open-debt item 552) — A DECLARED VOCABULARY IS THE LIBRARY'S OWN,
+    /// AND WIDENING ONE COSTS A REVISION.
+    ///
+    /// # The defect, restated as the thing this asserts
+    ///
+    /// R2170 added `not_on_the_wire` as an eighth `payload_decode.state` and
+    /// the header says it REPLACES what used to be reported as `no_payload`.
+    /// Same key, same document revision, a different answer about the same
+    /// record. Nothing moved, and nothing could have: the key-set pin sees keys,
+    /// and a consumer's `switch` reads the string inside one. The consuming
+    /// surface that reported this found it while moving its own pin, not from
+    /// any signal wz sent.
+    ///
+    /// # Why this compares against the WALK and not against a second list
+    ///
+    /// `PayloadDecoding::STATES`, `RefusedUnder::names` and `Misbound::names`
+    /// are each bound to an exhaustive match, so they are what the library
+    /// actually emits. The `DOCUMENT_HISTORY` row is a SNAPSHOT of that, written
+    /// out per revision — see [`crate::doc_revision::ValueFamily::values`] for
+    /// why it must not simply point at the constant. This test is the joint: a
+    /// word added to a walk fails here, and the only way to pass is to append a
+    /// revision that carries it, which is exactly the notice a consumer needs.
+    ///
+    /// The three arms are COLLECTED rather than asserted where they are read: an
+    /// arm that panics leaves the later ones unmeasured, and unmeasured must not
+    /// read as passed.
+    #[test]
+    fn the_declared_value_families_match_the_librarys_own_vocabularies() {
+        use crate::doc_revision as rev;
+        use crate::payload_decode::{Misbound, PayloadDecoding, RefusedUnder};
+
+        let vocabulary = |document: &str, key: &str| -> (u32, Vec<&'static str>) {
+            let newest = rev::newest(document).expect("the document has a revision");
+            let family = newest
+                .families
+                .iter()
+                .find(|f| f.key == key)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "the {document} document declares no family for {key:?}; a key \
+                         a consumer switches on with no declared vocabulary is the \
+                         whole of item 552"
+                    )
+                });
+            (newest.revision, family.values.to_vec())
+        };
+        let sorted = |mut v: Vec<&'static str>| {
+            v.sort_unstable();
+            v
+        };
+
+        // Every family in the table, against the walk that produces its words.
+        // BOTH documents, because the census carries five of the eight and a
+        // gate over one document would leave the other's unwatched — the
+        // half-a-contract shape `wz-capi-dissect`'s verdict pins already name.
+        let mut failures: Vec<String> = Vec::new();
+        let live: [(&str, &str, Vec<&'static str>); 8] = [
+            (rev::FIELDS, "state", PayloadDecoding::STATES.to_vec()),
+            (rev::FIELDS, "under", RefusedUnder::names()),
+            (rev::FIELDS, "wrong", Misbound::names()),
+            (rev::FIELDS, "offset_space", crate::AnchorSpace::names()),
+            (
+                rev::FIELDS,
+                "direction",
+                crate::census_json::direction_names(),
+            ),
+            (rev::CENSUS, "kind", crate::interest::InterestKind::names()),
+            (rev::CENSUS, "mode", crate::interest::InterestMode::names()),
+            (rev::CENSUS, "offset_space", crate::AnchorSpace::names()),
+        ];
+        for (document, key, words) in live {
+            // A walk that came back empty would make the comparison below
+            // trivially true, which is this workspace's most expensive
+            // recurring defect in its smallest form.
+            assert!(
+                !words.is_empty(),
+                "the walk for {document}.{key:?} produced no words"
+            );
+            let (revision, declared) = vocabulary(document, key);
+            if declared != sorted(words.clone()) {
+                failures.push(alloc::format!(
+                    "{document}.{key}: the library emits {:?} and revision {revision} \
+                     declares {declared:?}. A value vocabulary that widened without a \
+                     revision is item 552 happening again: APPEND a revision to \
+                     `doc_revision::DOCUMENT_HISTORY` carrying the new set, so a \
+                     consumer pinned to the old one is told its switch is no longer \
+                     exhaustive.",
+                    sorted(words),
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+
+        // The `asker` / `declarer` pair carries the endpoint vocabulary too and
+        // is checked here rather than in the table above, because listing one
+        // walk under three keys would make the count read as three
+        // independent facts. What IS asserted is that no family in either
+        // document escaped the table: every declared family is either checked
+        // above or shares a vocabulary constant with one that is.
+        let census = rev::newest(rev::CENSUS).expect("a revision");
+        let fields = rev::newest(rev::FIELDS).expect("a revision");
+        let endpoints = sorted(crate::census_json::direction_names());
+        for key in ["asker", "declarer"] {
+            let (_, declared) = vocabulary(rev::CENSUS, key);
+            assert_eq!(declared, endpoints, "census.{key}");
+        }
+        assert_eq!(
+            census.families.len() + fields.families.len(),
+            10,
+            "a family was declared without joining this gate; every family in \
+             either document must be held to a walk, or the one that is not is \
+             a vocabulary that can widen in silence again"
         );
     }
 

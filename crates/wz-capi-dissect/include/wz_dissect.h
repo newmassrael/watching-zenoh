@@ -68,6 +68,65 @@
  * revision's notice: read the revision, and refuse — or re-check — a value you
  * were not written against.
  *
+ * R2175 — AND IT MOVES FOR A WIDENED VALUE VOCABULARY, which is a second break
+ * the two rules above left with no number. Some keys carry a string drawn from
+ * a CLOSED SET this library owns, and a consumer switches on it. When that set
+ * gains a word, no key is renamed and none is removed, so every rule above is
+ * satisfied while the switch falls through to its own default — on a record the
+ * library described perfectly well. Measured: R2170 added `not_on_the_wire` as
+ * an eighth `payload_decode.state`, REPLACING what had been reported as
+ * `no_payload` for SHM records, and nothing moved.
+ *
+ * ⚠ THE ASYMMETRY IS THE OPPOSITE OF THE KEY SET'S, and reading it the other
+ * way round is the mistake to avoid. For KEYS the dangerous direction is
+ * removal and an addition is safe. For VALUES the dangerous direction is
+ * ADDITION — a word that leaves only makes one of your arms unvisited, while a
+ * word that arrives is one your switch has no arm for. So there is no
+ * announce-then-drop dance for values: the revision itself IS the notice, and
+ * it moves in the round the word is added.
+ *
+ * WHICH KEYS THOSE ARE IS A QUESTION YOU CAN ASK. Every such key carries
+ *
+ *     @values <document> <key>
+ *
+ * in its own comment block here, and wz_dissect_readable_surfaces reports the
+ * same set AT RUNTIME under `value_families`, with the words. A list copied
+ * into your own switch ages the moment this one grows, which is the argument
+ * `payload_field_types` already makes one surface over; comparing what you were
+ * written against with what this build reports is how a program says "there is
+ * a state I do not know" instead of discovering it as a fallthrough.
+ * `the_header_and_the_library_agree_about_every_value_family` holds both
+ * directions, so a family added later cannot arrive undeclared and a marker
+ * cannot outlive the family it names.
+ *
+ * THE CENSUS DOCUMENT'S FIVE, at revision 4 -- which moved for these and for no
+ * key, the first revision in this ABI to do so:
+ *
+ *     `kind`          on an interest row: `subscriber`, `queryable` or
+ *                     `liveliness_token`
+ *     `mode`          the mode an Interest was asked in: `final`, `current`,
+ *                     `future` or `current_future`
+ *     `offset_space`  which coordinate the anchors on this row are in:
+ *                     `packet` (an index into the file) or `stream_byte` (an
+ *                     offset into one direction's reassembled stream). SWITCH
+ *                     on it -- the two are not the same number and adding a
+ *                     span to the wrong one is silent.
+ *     `asker`,        which end of the flow: `a` or `b`
+ *     `declarer`
+ *
+ * @values census kind
+ * @values census mode
+ * @values census offset_space
+ * @values census asker
+ * @values census declarer
+ *
+ * The field document carries `offset_space` and `direction` with the same two
+ * vocabularies, and they are declared SEPARATELY there -- a consumer pins the
+ * two documents separately, so each says its own words at its own revision.
+ *
+ * @values fields offset_space
+ * @values fields direction
+ *
  * R2119 — THE FIRST RENAME TO USE THAT NOTICE, so the paragraph above is now
  * a description of something that happened rather than a promise. At census
  * REVISION 2 the node rows carried two keys for one value:
@@ -526,6 +585,8 @@ int wz_dissect_pcap_fields(const unsigned char *bytes, size_t len,
  * passed no `--payload` mapping still gets this state, where every other
  * non-`decoded` state above presupposes a rule.
  *
+ * @values fields state
+ *
  * R311y873 -- `encoding_mismatch` is the sample's OWN declared encoding
  * disagreeing with the rule, and it carries `declared` rather than `why`.
  * Told apart from `refused` because the two send you to opposite places:
@@ -568,6 +629,8 @@ int wz_dissect_pcap_fields(const unsigned char *bytes, size_t len,
  *                    refute the declaration, so the rule won, the fields are
  *                    good, and the topic is mislabelled
  *
+ * @values fields wrong
+ *
  * `note` carries the same sentence the command line prints, so a consumer
  * that only forwards findings does not have to compose one. Always present,
  * empty array when nothing is misbound -- the same rule despite_encoding
@@ -593,6 +656,8 @@ int wz_dissect_pcap_fields(const unsigned char *bytes, size_t len,
  *     `refuted`       the publisher declared something its own bytes refute,
  *                     your rule was applied over that label, and it refused
  *                     too -- both are wrong about this traffic
+ *
+ * @values fields under
  *
  * Always present, empty array when nothing refused, and bounded by the same
  * walk: `payload_mapping_counts_exact` covers BOTH tallies, because being a
@@ -667,11 +732,25 @@ int wz_dissect_declarations_diagnose(const char *declarations, char **out);
  *         "ext_bodies":{"zbuf":"Auth/pubkey, …","z64":"Declare/node_id, …"},
  *         "payload_field_types":"u8, i8, u16le, …"}
  *
- * R2114 -- the document is at REVISION 2 and the third key is why. A consumer
+ * R2114 -- the third key is why the document moved to revision 2. A consumer
  * writing a format DEFINITION (see the declarations door above) needs the
  * type spellings before it has a capture to try them on, and a list copied
  * into its own notes ages the moment this table grows. Read the revision off
  * the envelope rather than assuming the key is there.
+ *
+ * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
+ *
+ *     "value_families":[{"name":"fields","revision":2,"key":"state",
+ *                        "values":["decoded","encoding_mismatch",…]}, …]
+ *
+ * every key in every document whose VALUE this build draws from a closed set,
+ * with that set. `name` and `revision` say which document and which revision of
+ * it the words belong to. It is the same argument as the key above, one axis
+ * over: a consumer that switches on `payload_decode.state` has that vocabulary
+ * copied into its own switch, and R2170 widened it under a key that did not
+ * move. Compare what you were written against with what this reports and you
+ * can SAY there is a word you do not know, instead of meeting it as a
+ * fallthrough. See "EVERY DOCUMENT SAYS ITS OWN REVISION" at the top.
  *
  * Two questions `wz-analyze --help` has answered for a while and this surface
  * could not. Both matter for the same reason: an unread capture reports

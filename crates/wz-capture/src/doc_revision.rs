@@ -95,6 +95,72 @@ pub struct DocumentShape {
     /// [`Self::keys`] — announcing the retirement of a key the document does
     /// not emit says nothing to anyone.
     pub retiring: &'static [&'static str],
+    /// Every key whose VALUE this revision draws from a closed set, with that
+    /// set written out.
+    ///
+    /// R2175 (open-debt item 552) — the axis [`Self::keys`] cannot see. See
+    /// [`ValueFamily`].
+    pub families: &'static [ValueFamily],
+}
+
+/// One key whose value is drawn from a CLOSED SET this library owns, at one
+/// revision of one document.
+///
+/// # The hole this fills, and why the key set could not
+///
+/// [`DocumentShape::keys`] pins the SHAPE. A consumer reading by name is safe
+/// against an added key and is told about a removed one, and that is the whole
+/// of what item 509 built. What it never covered is the consumer that reads a
+/// key it already knows and SWITCHES ON THE STRING INSIDE IT.
+///
+/// Measured, and it is why this type exists: R2170 added `not_on_the_wire` as
+/// an eighth `payload_decode.state`, and the header says in its own words that
+/// it REPLACES what used to be reported as `no_payload`. Same key, same
+/// revision, a different answer about the same record — and no number moved,
+/// because no key had been renamed or removed. The contract was satisfied and a
+/// consumer's `switch` fell through to its default.
+///
+/// # The ASYMMETRY, which is the opposite of the key set's
+///
+/// For KEYS the dangerous direction is REMOVAL: a name-reader breaks when a key
+/// it reads stops arriving, while an added key it does not know is exactly what
+/// "tolerate unknown keys" covers. So `keys` needs [`DocumentShape::retiring`],
+/// a one-revision notice before a departure.
+///
+/// For VALUES it is the other way round. A value that DISAPPEARS leaves a
+/// consumer's arm unvisited, which is a quiet result and not a wrong one. A
+/// value that APPEARS falls through a `switch` that was exhaustive when it was
+/// written — and a default arm reached by a value that has a meaning is how a
+/// consumer reports "nothing to say" about a record the library described. So
+/// there is no `retiring` here: the notice a new value needs is the REVISION
+/// ITSELF, and the pin is what forces one.
+///
+/// # The residue, stated rather than hidden
+///
+/// A value whose MEANING narrows without the word changing is invisible to
+/// this, and R2170 is that case too: `no_payload` still exists and still means
+/// what it says — it simply stopped being said about SHM records. No
+/// machine-readable form of "this word now covers less" is proposed here, and
+/// pretending the vocabulary pin catches it would be the confident wrong
+/// answer this workspace refuses harder than silence.
+pub struct ValueFamily {
+    /// The key the value sits under, as it appears in the document.
+    ///
+    /// A KEY and not a path, because that is what [`json_string_values`]
+    /// reports and a second opinion about addressing would be a second
+    /// walker. The consequence is stated where it bites: a key reused at two
+    /// depths carries the UNION of both vocabularies, and
+    /// `readable_surfaces.name` is the live example.
+    pub key: &'static str,
+    /// Every value the key can carry at this revision, sorted and deduped.
+    ///
+    /// WRITTEN OUT per revision rather than pointing at the live constant, and
+    /// that is the whole mechanism: a table that read `PayloadDecode::STATES`
+    /// would widen the moment the array did and the revision would never have
+    /// to move. It is the same argument [`CENSUS_R3_KEYS`] makes about being
+    /// spelled out rather than built from its predecessor — a pin that follows
+    /// its subject is not a pin.
+    pub values: &'static [&'static str],
 }
 
 /// Every document this library hands a consumer, at every revision it has had.
@@ -114,6 +180,7 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         revision: 1,
         keys: CENSUS_R1_KEYS,
         retiring: &[],
+        families: &[],
     },
     // R2119 (open-debt item 455) — the RENAME this table was built for, used
     // for the first time. `first_packet` reports a byte offset over a stream
@@ -130,6 +197,7 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         revision: 2,
         keys: CENSUS_R2_KEYS,
         retiring: &["first_packet"],
+        families: &[],
     },
     // R2123 (open-debt item 453) — revision 3 does two things and they are
     // separable on purpose.
@@ -149,18 +217,58 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         revision: 3,
         keys: CENSUS_R3_KEYS,
         retiring: &[],
+        families: &[],
+    },
+    // R2175 (open-debt item 552) — revision 4 changes NO KEY and declares five
+    // VALUE FAMILIES, which is the first revision in this table to move for a
+    // reason the key set cannot express. That is the point: `kind`, `mode`,
+    // `offset_space`, `asker` and `declarer` are all keys a consumer switches
+    // on, and until this row a word could join any of them in silence.
+    //
+    // An unchanged key set is not a new shape here — revision 2 was already an
+    // alias of revision 1's — and `CENSUS_R4_KEYS` is spelled as that alias for
+    // the same reason.
+    DocumentShape {
+        document: CENSUS,
+        revision: 4,
+        keys: CENSUS_R4_KEYS,
+        retiring: &[],
+        families: CENSUS_R4_FAMILIES,
     },
     DocumentShape {
         document: FIELDS,
         revision: 1,
         keys: FIELDS_R1_KEYS,
         retiring: &[],
+        families: &[],
+    },
+    // R2175 (open-debt item 552) — revision 2 does two things, and the second
+    // is what the item is about.
+    //
+    // It ADDS the fifteen keys of the PAYLOAD PLANE. Revision 1 pinned the
+    // document as emitted with `declarations: None`, so `payload_decode` and
+    // everything under it — `state`, `descriptor_bytes`, `under`, `wrong` and
+    // the rest — shipped to consumers covered by no revision at all. That is
+    // how R2170 added `descriptor_bytes` to this document without any number
+    // moving: not because the rule was skipped, but because the rule had never
+    // reached the subtree.
+    //
+    // And it DECLARES the first three value families. Nothing retires: every
+    // key here is new, which is the side of `wz_dissect.h`'s line a linking
+    // consumer may ignore.
+    DocumentShape {
+        document: FIELDS,
+        revision: 2,
+        keys: FIELDS_R2_KEYS,
+        retiring: &[],
+        families: FIELDS_R2_FAMILIES,
     },
     DocumentShape {
         document: SUMMARY,
         revision: 1,
         keys: SUMMARY_R1_KEYS,
         retiring: &[],
+        families: &[],
     },
     // R2121 (open-debt item 460) — revision 2 ADDS `inert_counters` and
     // retires nothing. Two skip counters cannot move in this build whatever
@@ -179,6 +287,7 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         revision: 2,
         keys: SUMMARY_R2_KEYS,
         retiring: &[],
+        families: &[],
     },
     // R2122 (open-debt item 238) — revision 3 ADDS `undefined_mandatory_exts`
     // and `unaccounted_batch_bytes`, and retires nothing.
@@ -193,12 +302,14 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         revision: 3,
         keys: SUMMARY_R3_KEYS,
         retiring: &[],
+        families: &[],
     },
     DocumentShape {
         document: READABLE_SURFACES,
         revision: 1,
         keys: READABLE_SURFACES_R1_KEYS,
         retiring: &[],
+        families: &[],
     },
     // R2114 (open-debt item 237) — revision 2 ADDS `payload_field_types` and
     // retires nothing. A deployment that describes its own record has to know
@@ -210,18 +321,33 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         revision: 2,
         keys: READABLE_SURFACES_R2_KEYS,
         retiring: &[],
+        families: &[],
+    },
+    // R2175 (open-debt item 552) — revision 3 ADDS `value_families` and its two
+    // row keys, and retires nothing. An ADDITION, so a consumer pinned to
+    // revision 2 loses nothing; what it gains is the ability to ASK which words
+    // this build can put in each switchable key, instead of learning it when a
+    // switch falls through.
+    DocumentShape {
+        document: READABLE_SURFACES,
+        revision: 3,
+        keys: READABLE_SURFACES_R3_KEYS,
+        retiring: &[],
+        families: &[],
     },
     DocumentShape {
         document: SELECTOR_DIAGNOSE,
         revision: 1,
         keys: SELECTOR_DIAGNOSE_R1_KEYS,
         retiring: &[],
+        families: &[],
     },
     DocumentShape {
         document: DECLARATIONS_DIAGNOSE,
         revision: 1,
         keys: DECLARATIONS_DIAGNOSE_R1_KEYS,
         retiring: &[],
+        families: &[],
     },
 ];
 
@@ -638,6 +764,205 @@ pub const FIELDS_R1_KEYS: &[&str] = &[
     "stream_flows",
     "value",
 ];
+/// The census document's key set at revision 4 — revision 3's, unchanged.
+///
+/// An ALIAS, the way `CENSUS_R2_KEYS` was an alias of revision 1's: revision 4
+/// moves for the VALUE FAMILIES it declares, not for a key. Spelled as an alias
+/// rather than copied, because a copy of an unchanged set is a second place for
+/// it to drift.
+pub const CENSUS_R4_KEYS: &[&str] = CENSUS_R3_KEYS;
+
+/// The value families the census document declares at revision 4.
+///
+/// Five, and every one is joined to a compiler-bound walk by
+/// `the_declared_value_families_match_the_librarys_own_vocabularies`:
+/// [`INTEREST_KIND_R4`] to `InterestKind::names`, [`INTEREST_MODE_R4`] to
+/// `InterestMode::names`, [`ANCHOR_SPACE_R4`] to `AnchorSpace::names`, and both
+/// endpoint keys to `census_json::direction_names`.
+///
+/// ⚠ `kind` IS NOT THE SAME FAMILY AS THE FIELD DOCUMENT'S `kind`, which is why
+/// families are declared per DOCUMENT rather than globally: here it is the sort
+/// of declaration a row describes, there it is the sort of value a walked field
+/// holds. One key name, two closed sets, two documents.
+pub const CENSUS_R4_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "asker",
+        values: DIRECTION_R4,
+    },
+    ValueFamily {
+        key: "declarer",
+        values: DIRECTION_R4,
+    },
+    ValueFamily {
+        key: "kind",
+        values: INTEREST_KIND_R4,
+    },
+    ValueFamily {
+        key: "mode",
+        values: INTEREST_MODE_R4,
+    },
+    ValueFamily {
+        key: "offset_space",
+        values: ANCHOR_SPACE_R4,
+    },
+];
+
+/// `kind` on an interest row, at census revision 4 — SORTED.
+///
+/// ⚠ Note what the fixtures never produce: `liveliness_token`. A vocabulary
+/// taken from what a capture reaches would have declared two words and left the
+/// third to arrive unannounced, which is the consumer-goldens failure item 552
+/// is about. It is declared because the ENUM has it.
+pub const INTEREST_KIND_R4: &[&str] = &["liveliness_token", "queryable", "subscriber"];
+
+/// `mode` on an interest row, at census revision 4 — all four, though the
+/// fixtures reach only `current`.
+pub const INTEREST_MODE_R4: &[&str] = &["current", "current_future", "final", "future"];
+
+/// `offset_space`, at census revision 4. Which coordinate the anchors are in,
+/// and the reason a consumer must switch rather than add: one is a packet index
+/// and the other a byte offset.
+pub const ANCHOR_SPACE_R4: &[&str] = &["packet", "stream_byte"];
+
+/// A flow endpoint, at census revision 4. `asker`, `declarer`, `direction` and
+/// `space` all carry it.
+pub const DIRECTION_R4: &[&str] = &["a", "b"];
+
+/// The field document's key set at revision 2.
+///
+/// MEASURED, never transcribed — item 400's prescription, and here it had to be
+/// taken from a population that no single capture produces:
+/// `the_field_documents_payload_plane_is_pinned_over_every_arm` renders every
+/// `PayloadDecoding`, `RefusedUnder` and `Misbound` arm and prints the union it
+/// sees, and this list was filled from that printout.
+pub const FIELDS_R2_KEYS: &[&str] = &[
+    "addr",
+    "caps",
+    "capture_reread",
+    "datagram_flows",
+    // R2025 (item 285) and R2170 (item 546) both added a key HERE and neither
+    // moved a number, because revision 1 had never covered this subtree.
+    "declaration_checked",
+    "declared",
+    "descriptor_bytes",
+    "despite_encoding",
+    "direction",
+    "document",
+    "dropped_by_limits",
+    "end",
+    "example",
+    "fields",
+    "flow",
+    "flows",
+    "format",
+    "frames",
+    "frames_per_flow",
+    "high",
+    "keyexpr",
+    "kind",
+    "low",
+    "max_flows_per_table",
+    "max_scout_askers",
+    "message_at",
+    "messages",
+    "name",
+    "note",
+    "offset_space",
+    "omitted",
+    "path",
+    "payload_decode",
+    "payload_mapping",
+    "payload_mapping_counts_exact",
+    "payload_refusals",
+    "port",
+    "revision",
+    "samples",
+    "scout_askers",
+    "shown",
+    "skipped",
+    "skipped_packets",
+    "start",
+    "state",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "stream_flows",
+    "under",
+    "value",
+    "why",
+    "wrong",
+];
+
+/// The value families the field document declares at revision 2.
+///
+/// Three, and they are the payload plane's: [`PAYLOAD_STATE_R2`],
+/// [`REFUSED_UNDER_R2`] and [`MISBOUND_R2`]. Each is pinned against the
+/// library's own compiler-bound walk by
+/// `the_declared_value_families_match_the_librarys_own_vocabularies`, so a word
+/// added to a walk cannot ship until a revision here carries it.
+pub const FIELDS_R2_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "direction",
+        values: DIRECTION_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "offset_space",
+        values: ANCHOR_SPACE_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "state",
+        values: PAYLOAD_STATE_R2,
+    },
+    ValueFamily {
+        key: "under",
+        values: REFUSED_UNDER_R2,
+    },
+    ValueFamily {
+        key: "wrong",
+        values: MISBOUND_R2,
+    },
+];
+
+/// `payload_decode.state` at field-document revision 2 — SORTED, which is why
+/// it does not read in `PayloadDecoding::STATES`' order.
+///
+/// The eight words R2170 left at eight. Written out rather than pointing at
+/// `PayloadDecoding::STATES`: a table that read the constant would widen with
+/// it, and then the revision would never have to move — which is precisely the
+/// state item 552 measured.
+pub const PAYLOAD_STATE_R2: &[&str] = &[
+    "decoded",
+    "encoding_mismatch",
+    "keyexpr_unresolved",
+    "no_payload",
+    "no_rule",
+    "no_rules",
+    "not_on_the_wire",
+    "refused",
+];
+
+/// `payload_refusals[].under` at field-document revision 2.
+pub const REFUSED_UNDER_R2: &[&str] = &["corroborated", "refuted", "unclaimed"];
+
+/// `offset_space` at FIELD-document revision 2.
+///
+/// ⚠ SPELLED OUT AGAIN rather than aliasing [`ANCHOR_SPACE_R4`], and the
+/// duplication is the mechanism rather than an oversight. Two documents emit
+/// this key and a consumer pins them SEPARATELY — that is the whole reason
+/// item 509 chose a revision per document over one library-wide number. If both
+/// rows pointed at one constant, teaching `AnchorSpace` a third word would
+/// widen both vocabularies in one edit and neither revision would have to move:
+/// the pin would follow its subject, which is the defect this table exists to
+/// stop. Duplicated, a widening costs two edits and two revision bumps, which
+/// is two notices to two sets of readers.
+pub const ANCHOR_SPACE_FIELDS_R2: &[&str] = &["packet", "stream_byte"];
+
+/// A flow endpoint at FIELD-document revision 2 — spelled out again, for the
+/// reason [`ANCHOR_SPACE_FIELDS_R2`] gives.
+pub const DIRECTION_FIELDS_R2: &[&str] = &["a", "b"];
+
+/// `payload_mapping[].wrong` at field-document revision 2.
+pub const MISBOUND_R2: &[&str] = &["publisher", "rule"];
+
 /// The summary document's key set at revision 1.
 ///
 /// The largest of the six, because `report::health_json` rides inside it: the
@@ -950,6 +1275,29 @@ pub const READABLE_SURFACES_R2_KEYS: &[&str] = &[
     "z64",
     "zbuf",
 ];
+/// The readable-surfaces document's key set at revision 3.
+///
+/// R2175 (open-debt item 552) — revision 2 plus `value_families` and the two
+/// keys its rows carry, `key` and `values`. The rows also carry `name` and
+/// `revision`, which this document already emits: reused deliberately, the way
+/// `doors[]` already reuses `name`, so a reader learns one spelling for "which
+/// document" and one for "which revision of it".
+pub const READABLE_SURFACES_R3_KEYS: &[&str] = &[
+    "document",
+    "doors",
+    "ext_bodies",
+    "key",
+    "link_types",
+    "name",
+    "payload_field_types",
+    "revision",
+    "subsumed_by",
+    "value_families",
+    "values",
+    "z64",
+    "zbuf",
+];
+
 /// The selector verdict's key set at revision 1, over BOTH branches.
 ///
 /// The UNION of `{ok:true}` and `{ok:false,at,message}`: a pin over one branch
@@ -1015,6 +1363,50 @@ pub fn envelope(document: &str) -> String {
     out
 }
 
+/// Every value family this library emits today, as the rows of a JSON array —
+/// WITHOUT the surrounding brackets, so a caller places it under whatever key
+/// its own document uses.
+///
+/// R2175 (open-debt item 552) — the third half of the answer, and the one a
+/// consumer can act on without redeploying. The revision pin tells a reader
+/// pinned to an old shape THAT something moved; this tells a reader at runtime
+/// WHAT the vocabulary is, so a program can compare the words it was written
+/// against with the words this build emits and say which ones it does not know.
+/// That is the `payload_field_types` argument (R2114, item 237) one axis over:
+/// a list copied into a consumer's own switch ages the moment this one grows,
+/// and the alternative to asking the library is reading its source.
+///
+/// Rendered from [`DOCUMENT_HISTORY`]'s NEWEST row per document, because that is
+/// what the library emits; the older rows are history a consumer reads by
+/// pinning, not by asking.
+pub fn value_families_into(out: &mut String) {
+    let mut names: Vec<&str> = DOCUMENT_HISTORY.iter().map(|r| r.document).collect();
+    names.sort_unstable();
+    names.dedup();
+    let mut first = true;
+    for name in names {
+        let Some(shape) = newest(name) else { continue };
+        for family in shape.families {
+            if !first {
+                out.push(',');
+            }
+            first = false;
+            let _ = write!(
+                out,
+                "{{\"name\":\"{name}\",\"revision\":{},\"key\":\"{}\",\"values\":[",
+                shape.revision, family.key
+            );
+            for (i, value) in family.values.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                let _ = write!(out, "\"{value}\"");
+            }
+            out.push_str("]}");
+        }
+    }
+}
+
 /// Every KEY in a JSON document, in order of appearance, duplicates included.
 ///
 /// A string is a key when the next non-space character after it is a colon.
@@ -1054,6 +1446,77 @@ pub fn json_keys(doc: &str) -> Vec<&str> {
             out.push(&doc[start..j]);
         }
         i = j + 1;
+    }
+    out
+}
+
+/// Every `key: "value"` pair in a JSON document where the value is a STRING
+/// SCALAR, in order of appearance, duplicates included.
+///
+/// R2175 (open-debt item 552) — the sibling of [`json_keys`], and the reason it
+/// is a sibling rather than a second walker is the argument that function's own
+/// doc makes: one opinion about what a key is. This one adds the other half of
+/// the pair, because a consumer switches on VALUES and the key-set pin above
+/// cannot see them.
+///
+/// # What it deliberately does not collect
+///
+/// An ARRAY element is not the value of any key, so `"doors":["a","b"]` yields
+/// nothing here. That is not an oversight: a catalogue a consumer ITERATES is
+/// not a family it SWITCHES on, and folding the two together would put every
+/// keyexpr this library ever printed into the population of things a switch
+/// could fall through. [`ValueFamily`] is about the scalar a `switch` reads.
+///
+/// Escapes are stepped over the same way [`json_keys`] steps over them, so a
+/// value containing a quote does not end the scan early.
+pub fn json_string_values(doc: &str) -> Vec<(&str, &str)> {
+    let b = doc.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    // The end of the string that most recently turned out to be a KEY, so the
+    // value scan starts from the colon rather than re-finding it.
+    while i < b.len() {
+        if b[i] != b'"' {
+            i += 1;
+            continue;
+        }
+        let start = i + 1;
+        let mut j = start;
+        while j < b.len() && b[j] != b'"' {
+            j += if b[j] == b'\\' { 2 } else { 1 };
+        }
+        if j >= b.len() {
+            break;
+        }
+        let mut k = j + 1;
+        while k < b.len() && b[k] == b' ' {
+            k += 1;
+        }
+        if k >= b.len() || b[k] != b':' {
+            i = j + 1;
+            continue;
+        }
+        // Past the colon, to whatever the value opens with.
+        let mut v = k + 1;
+        while v < b.len() && b[v] == b' ' {
+            v += 1;
+        }
+        if v >= b.len() || b[v] != b'"' {
+            // A number, an object, an array or a literal. Not a family.
+            i = j + 1;
+            continue;
+        }
+        let vstart = v + 1;
+        let mut vend = vstart;
+        while vend < b.len() && b[vend] != b'"' {
+            vend += if b[vend] == b'\\' { 2 } else { 1 };
+        }
+        if vend >= b.len() {
+            break;
+        }
+        out.push((&doc[start..j], &doc[vstart..vend]));
+        // Resume AFTER the value, so its own bytes are never re-read as a key.
+        i = vend + 1;
     }
     out
 }
@@ -1145,6 +1608,73 @@ pub fn audit(rows: &[DocumentShape]) -> Result<(), String> {
                     ));
                 }
             }
+            // R2175 (open-debt item 552) — THE VALUE FAMILIES.
+            //
+            // Three rules, and each is the value-side twin of one the key set
+            // already has. Note what is NOT here: no `retiring` for values. See
+            // `ValueFamily`'s doc for the asymmetry — a value that ARRIVES is
+            // the break, and the revision this row carries IS its notice.
+            let mut family_keys: Vec<&str> = row.families.iter().map(|f| f.key).collect();
+            let unsorted = family_keys.clone();
+            family_keys.sort_unstable();
+            if family_keys != unsorted {
+                return Err(alloc::format!(
+                    "{name} r{}: the families are not sorted by key",
+                    row.revision
+                ));
+            }
+            family_keys.dedup();
+            if family_keys.len() != row.families.len() {
+                return Err(alloc::format!(
+                    "{name} r{}: two families claim one key; a key has one \
+                     vocabulary or none",
+                    row.revision
+                ));
+            }
+            for family in row.families {
+                // The rule item 550 paid for, one document over: an entry for
+                // something that cannot occur is proof the list was never
+                // checked. A family under a key this revision does not emit
+                // pins a vocabulary no consumer can ever read.
+                if !row.keys.contains(&family.key) {
+                    return Err(alloc::format!(
+                        "{name} r{}: a value family is declared for {:?}, which this \
+                         revision does not emit",
+                        row.revision,
+                        family.key
+                    ));
+                }
+                // A family with no values is the population-of-zero failure in
+                // its smallest form: it would report green about a key whose
+                // vocabulary nobody had written down.
+                if family.values.is_empty() {
+                    return Err(alloc::format!(
+                        "{name} r{}: the family for {:?} declares no values, so it \
+                         asserts nothing about the key it names",
+                        row.revision,
+                        family.key
+                    ));
+                }
+                let mut sorted: Vec<&str> = family.values.to_vec();
+                sorted.sort_unstable();
+                if sorted != family.values {
+                    return Err(alloc::format!(
+                        "{name} r{}: the vocabulary for {:?} is not sorted, so \
+                         comparing two revisions would depend on typing order",
+                        row.revision,
+                        family.key
+                    ));
+                }
+                let mut deduped = sorted.clone();
+                deduped.dedup();
+                if deduped.len() != sorted.len() {
+                    return Err(alloc::format!(
+                        "{name} r{}: the vocabulary for {:?} repeats a value",
+                        row.revision,
+                        family.key
+                    ));
+                }
+            }
         }
         // THE RULE ITEM 509 EXISTS FOR: a key may only leave after the
         // revision before it said so. That is what turns a rename into
@@ -1227,11 +1757,26 @@ mod tests {
         keys: &'static [&'static str],
         retiring: &'static [&'static str],
     ) -> DocumentShape {
+        with_families(revision, keys, retiring, &[])
+    }
+
+    /// R2175 (open-debt item 552) — a row carrying value families, so the
+    /// family rules have a population that is not [`DOCUMENT_HISTORY`]. Same
+    /// argument [`audit`]'s own doc makes: over the real table every rule holds
+    /// by construction, and a checker only ever run against it is a guard
+    /// nobody has seen fire.
+    fn with_families(
+        revision: u32,
+        keys: &'static [&'static str],
+        retiring: &'static [&'static str],
+        families: &'static [ValueFamily],
+    ) -> DocumentShape {
         DocumentShape {
             document: "d",
             revision,
             keys,
             retiring,
+            families,
         }
     }
 
@@ -1418,13 +1963,20 @@ mod tests {
             // R2119 (open-debt item 455) — the census moved to 2 when
             // `first_packet`'s retirement was announced; R2123 (item 453) to 3
             // when that key actually left and `anchor_intervals` arrived.
-            (CENSUS, 3u32),
-            (FIELDS, 1),
+            // R2175 (item 552) — to 4 for a reason no earlier revision had: it
+            // declares five VALUE FAMILIES and changes no key.
+            (CENSUS, 4u32),
+            // R2175 (open-debt item 552) — the field document moved to 2 when
+            // its PAYLOAD PLANE joined the pin (fifteen keys revision 1 had
+            // never covered) and its first three value families were declared.
+            (FIELDS, 2),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.
             (SUMMARY, 3),
-            (READABLE_SURFACES, 2),
+            // R2175 (open-debt item 552) — to 3 when it gained
+            // `value_families`, the catalogue of every switchable key's words.
+            (READABLE_SURFACES, 3),
             (SELECTOR_DIAGNOSE, 1),
             (DECLARATIONS_DIAGNOSE, 1),
         ] {

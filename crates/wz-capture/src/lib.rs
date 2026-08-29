@@ -691,6 +691,31 @@ impl AnchorSpace {
             Self::StreamBytes => "stream_byte",
         }
     }
+
+    /// Every word [`Self::name`] can return, WALKED rather than written down.
+    ///
+    /// R2175 (open-debt item 552) — `offset_space` is a key a consumer
+    /// SWITCHES on (a packet index and a byte offset must not be added to the
+    /// same thing), so the census and field documents declare its vocabulary
+    /// per revision, and that declaration is joined to this walk. A third space
+    /// added later is forced at `cargo build` rather than at review.
+    pub fn names() -> alloc::vec::Vec<&'static str> {
+        let mut out = alloc::vec::Vec::new();
+        let mut cur = Some(Self::PacketIndex);
+        while let Some(v) = cur {
+            out.push(v.name());
+            cur = v.next();
+        }
+        out
+    }
+
+    /// The next space, so the walk above visits every arm without a list.
+    fn next(self) -> Option<Self> {
+        Some(match self {
+            Self::PacketIndex => Self::StreamBytes,
+            Self::StreamBytes => return None,
+        })
+    }
 }
 
 /// R2102 (open-debt item 524) — WHICH list of decoded messages this is, as a

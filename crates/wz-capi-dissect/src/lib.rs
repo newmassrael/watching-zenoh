@@ -350,6 +350,16 @@ pub unsafe extern "C" fn wz_dissect_readable_surfaces(out: *mut *mut c_char) -> 
         &wz_capture::payload::formats::readable_field_types_line(),
         &mut s,
     );
+    // R2175 (open-debt item 552) — the fourth surface, and the one that is
+    // about the documents rather than about the wire: every key whose VALUE
+    // this build draws from a closed set, with that set. A consumer switches on
+    // those strings, and until this round the only way to learn one had widened
+    // was for the switch to fall through in production — the revision moves for
+    // a renamed or removed KEY and R2170 widened a vocabulary under a key that
+    // did not move. See `wz_capture::doc_revision::ValueFamily`.
+    s.push_str(",\"value_families\":[");
+    wz_capture::doc_revision::value_families_into(&mut s);
+    s.push(']');
     s.push_str(",\"doors\":[");
     let mut first = true;
     let mut door = Some(Door::FIRST);
@@ -1734,6 +1744,148 @@ mod tests {
                  library emits -- a C consumer branching on the header's list \
                  would fall through on traffic that produces it"
             );
+        }
+    }
+
+    /// R2175 (open-debt item 552) — THE HEADER AND THE LIBRARY AGREE ABOUT
+    /// WHICH KEYS ARE SWITCHABLE, IN BOTH DIRECTIONS.
+    ///
+    /// # What the sibling above covers and this does not
+    ///
+    /// `the_header_names_every_payload_decode_state` asserts the header names
+    /// each WORD of one family. It cannot say the family EXISTS as a declared
+    /// thing, and it knows about exactly one — so a second vocabulary (`under`
+    /// arrived at Round 2031, `wrong` at R311y875) was never held to anything.
+    /// Item 552 is what that costs: a consumer switches on a string, the set
+    /// widens, and the only two gates that could have said so are a key-set pin
+    /// that sees keys and a consumer's goldens that see only what their own
+    /// capture exercises.
+    ///
+    /// # Both directions, and neither is decoration
+    ///
+    /// A family the library emits with NO `@values` marker is a key a consumer
+    /// switches on that the published contract never points at. A marker with
+    /// no family behind it is the failure item 550 paid for one document over:
+    /// an entry for something that cannot occur is proof the list was never
+    /// checked, and that probe named two exclusions its own regex could not
+    /// see.
+    ///
+    /// The library side is read from the ARTIFACT — the `value_families` rows
+    /// `wz_dissect_readable_surfaces` actually emits — and not from the Rust
+    /// table behind it. A gate that read the table would be asserting that a
+    /// constant equals itself; what a consumer receives is the document.
+    #[test]
+    fn the_header_and_the_library_agree_about_every_value_family() {
+        const HEADER: &str = include_str!("../include/wz_dissect.h");
+
+        // MARKED: `@values <document> <key>`, one per line, as the header's own
+        // paragraph documents. Parsed off the marker rather than searched for
+        // by name, so a family cannot be "found" in unrelated prose.
+        //
+        // BOTH TOKENS MUST BE LOWERCASE IDENTIFIERS, which is `@unknown`'s rule
+        // (`capi_unknown_value_policy.py`: `[A-Z0-9]+`) transposed. It is what
+        // keeps the paragraph that DOCUMENTS the marker from being read as one:
+        // `<document>` is not an identifier. Measured on this gate's first run,
+        // where the syntax line came back as a fourth family — which is the
+        // gate doing its job to its own author.
+        let ident =
+            |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_lowercase() || b == b'_');
+        let mut marked: Vec<(String, String)> = HEADER
+            .lines()
+            .filter_map(|l| l.split("@values ").nth(1))
+            .filter_map(|rest| {
+                let mut parts = rest.split_whitespace();
+                let document = parts.next()?;
+                let key = parts.next()?;
+                (ident(document) && ident(key)).then(|| (document.to_string(), key.to_string()))
+            })
+            .collect();
+        marked.sort();
+        marked.dedup();
+
+        // EMITTED: the rows the catalogue door hands a consumer.
+        let catalogue = call_readable_surfaces();
+        let rows = catalogue
+            .split("\"value_families\":[")
+            .nth(1)
+            .expect("the catalogue carries the value_families array")
+            .split("],\"doors\"")
+            .next()
+            .expect("the array is followed by the doors array");
+        let mut emitted: Vec<(String, String)> = Vec::new();
+        let mut words: Vec<(String, Vec<String>)> = Vec::new();
+        for row in rows.split("},{") {
+            let field = |key: &str| -> String {
+                row.split(&format!("\"{key}\":\""))
+                    .nth(1)
+                    .unwrap_or_else(|| panic!("a value_families row with no {key}: {row}"))
+                    .split('"')
+                    .next()
+                    .expect("a quoted value closes")
+                    .to_string()
+            };
+            let name = field("name");
+            let key = field("key");
+            let values: Vec<String> = row
+                .split("\"values\":[")
+                .nth(1)
+                .expect("a row carries its words")
+                .split(']')
+                .next()
+                .expect("the word list closes")
+                .split(',')
+                .map(|w| w.trim_matches('"').to_string())
+                .collect();
+            words.push((key.clone(), values));
+            emitted.push((name, key));
+        }
+        emitted.sort();
+
+        // A population of zero here would make both comparisons below trivially
+        // true, which is this workspace's most expensive recurring defect.
+        assert!(
+            !emitted.is_empty(),
+            "the catalogue reported no value families at all; every comparison \
+             below would then pass by having nothing to compare"
+        );
+        assert_eq!(
+            emitted, marked,
+            "the header's `@values` markers and the families this library emits \
+             disagree. A family with no marker is a key a consumer switches on \
+             that the contract never points at; a marker with no family is an \
+             entry for something that cannot occur, which is proof the list was \
+             never checked."
+        );
+
+        // And every WORD is named in the header, which generalises
+        // `the_header_names_every_payload_decode_state` to the families it did
+        // not know about. The one held exclusion keeps its justification.
+        //
+        // ⚠ THE BACKTICKED SPELLING, not the bare word, and that is not style.
+        // The endpoint vocabulary is `a` and `b` — one character each — so
+        // `HEADER.contains("a")` is true of any English sentence and this
+        // assertion could not fail. Requiring the form the header actually
+        // writes vocabularies in makes it mean something for a one-letter word,
+        // and removes the accidental substring hit for a longer one: `rule`
+        // occurs in this header's prose dozens of times without ever being the
+        // `wrong` family's value.
+        for (key, values) in words {
+            assert!(
+                !values.is_empty(),
+                "the family for {key:?} reported no words"
+            );
+            for word in values {
+                if word == NEVER_EMITTED {
+                    continue;
+                }
+                assert!(
+                    HEADER.contains(&format!("`{word}`")),
+                    "wz_dissect.h never names `{word}` in the backticked form it \
+                     writes vocabularies in, and it is a value of the `{key}` \
+                     family this library emits -- a C consumer branching on the \
+                     header's list would fall through on traffic that produces it"
+                );
+            }
         }
     }
 
@@ -3690,9 +3842,12 @@ mod tests {
         // `payload_field_types`. Asserted as the literal it is: the number is
         // the contract a consumer branches on, so a test that accepted "some
         // revision" would let the shape move without anyone announcing it.
+        // R2175 (open-debt item 552) — revision 3, because it grew
+        // `value_families`: which keys carry a closed vocabulary, and what it
+        // is. The literal moves with it, on the same reasoning.
         assert!(
             doc.starts_with(
-                "{\"document\":{\"name\":\"readable_surfaces\",\"revision\":2},\"link_types\":\""
+                "{\"document\":{\"name\":\"readable_surfaces\",\"revision\":3},\"link_types\":\""
             ),
             "the document is one JSON object opening with its revision: {doc}"
         );
