@@ -52,6 +52,30 @@ Comparing a source-written list against another DERIVED value
 defect, so only an integer literal on the right counts. And a product's count
 is left alone entirely: `run.misbindings().len() == 2` pins what the code
 DID, which is the ordinary business of a test.
+
+## The blind spots, MEASURED rather than merely named
+
+R2186 shipped this file naming four shapes it does not see. R2187 measured all
+four over the same population instead of leaving them as a direction:
+
+* an inline literal with no binding (`assert_eq!([a, b, c].len(), 3)`) — ZERO;
+* a source list counted by `.count()` rather than `.len()` — ZERO;
+* a list reached through TWO alias hops — ZERO;
+* a trailing `//` comment quoting an assertion, which whole-line blanking does
+  not remove and which would be a false POSITIVE — ZERO (three apparent hits
+  were doc-comment lines, which are blanked).
+
+Two further spellings were probed and JUDGED NOT to be this class, which is
+why they are named here rather than fixed:
+
+* `const X: [T; 22] = [ ...22 items... ]` — 117 sites. The length is in the
+  TYPE and the compiler checks it against the initialiser, so an added element
+  fails to build. That is a real check, not a list compared to itself.
+* `assert!(x.len() > 32)` over `linkstate_oam`'s `list_wire` — the `32` is the
+  ext-ZBuf cap the test exercises, not the list's length.
+
+That second one is how the `let mut` defect below was found: the classifier
+called `list_wire` a source list when its length is the loop's.
 """
 
 from __future__ import annotations
@@ -71,10 +95,22 @@ CRATES = ROOT / "crates"
 # file deliberately is not (`doc_revision`'s walkers make the same argument).
 BINDING = re.compile(
     r"^[ \t]*(?:pub(?:\([^)]*\))?\s+)?"
-    r"(let)\s+(?:mut\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*(?::[^=\n]*)?=\s*([^\n]*)$"
+    r"let(\s+mut)?\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?::[^=\n]*)?=\s*([^\n]*)$"
     r"|^[ \t]*(?:pub(?:\([^)]*\))?\s+)?"
     r"(const|static)\s+(?:mut\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*:[^=\n]*=\s*([^\n]*)$",
     re.M,
+)
+# The methods that change a collection's LENGTH. A closed set on purpose, and
+# the direction it errs in is the safe one: a spelling this does not know
+# leaves the binding classified as a source list, so an unrecognised mutation
+# OVER-reports rather than hiding a defect.
+#
+# ⚠ Length-changing only. `sort` and `dedup`-free reorderings leave the count
+# exactly what the literal wrote, so a binding that is only sorted is still
+# checked against its own length and must stay in the population.
+GROWS = re.compile(
+    r"\.\s*(?:push|push_str|extend|extend_from_slice|insert|append|clear"
+    r"|truncate|remove|retain|pop|drain|resize|dedup|split_off)\s*\("
 )
 LITERAL = re.compile(r"^&?\s*(?:alloc::)?(?:vec!\[|\[)")
 # An alias: the initialiser is a bare path to another binding.
@@ -115,20 +151,25 @@ def without_line_comments(text: str) -> str:
 
 
 def bindings_of(text: str) -> list[tuple[int, str, str, str]]:
-    """Every binding as `(position, kind, name, initialiser)`, in file order."""
+    """Every binding as `(position, kind, name, initialiser)`, in file order.
+
+    `kind` is `let`, `let mut`, `const` or `static`; only `let mut` can be
+    grown after it is written, which is what [`in_force`] has to know.
+    """
     out = []
     for m in BINDING.finditer(text):
-        if m.group(1):
-            out.append((m.start(), "let", m.group(2), m.group(3).strip()))
+        if m.group(2):
+            kind = "let mut" if m.group(1) else "let"
+            out.append((m.start(), kind, m.group(2), m.group(3).strip()))
         else:
             out.append((m.start(), m.group(4), m.group(5), m.group(6).strip()))
     return out
 
 
-def initialiser(
+def in_force(
     name: str, at: int, bindings: list[tuple[int, str, str, str]]
-) -> str | None:
-    """The initialiser in force for `name` at byte offset `at`.
+) -> tuple[int, str, str, str] | None:
+    """The binding in force for `name` at byte offset `at`.
 
     ⚠ NEAREST PRECEDING for a `let`, and FILE-WIDE for a `const` / `static`,
     and the split is not pedantry -- it is the defect this function was
@@ -140,23 +181,72 @@ def initialiser(
     definition, which is how `const CARRIERS = ALL_CARRIERS` reads.
     """
     best = None
-    for pos, kind, ident, init in bindings:
+    for row in bindings:
+        pos, kind, ident, _ = row
         if ident != name:
             continue
-        if kind == "let":
+        if kind.startswith("let"):
             if pos < at and (best is None or pos > best[0]):
-                best = (pos, init)
-        else:
-            if best is None or best[1] is None:
-                best = (pos, init)
-    return best[1] if best else None
+                best = row
+        elif best is None or not best[1].startswith("let"):
+            best = row
+    return best
+
+
+def shadow(name: str, pos: int, bindings: list[tuple[int, str, str, str]]) -> int:
+    """Where `name`'s binding at `pos` stops being the one in force.
+
+    The next `let` of that name, or the end. WITHOUT this bound a growth
+    search runs to the end of the FILE and finds an unrelated `let mut out`
+    three functions down: measured 2026-08-30, that over-excluded 407 of 1557
+    lists where only 87 are grown. Over-exclusion is the direction that loses
+    detection, which is the one failure this gate must not have.
+    """
+    after = [p for p, k, ident, _ in bindings if ident == name and k.startswith("let") and p > pos]
+    return min(after) if after else -1
+
+
+def grown_before(
+    name: str,
+    pos: int,
+    end: int,
+    bindings: list[tuple[int, str, str, str]],
+    text: str,
+) -> bool:
+    """`true` when `name` is LENGTHENED between `pos` and `end` (`-1` = EOF)."""
+    grown = re.compile(r"(?<![A-Za-z0-9_])" + re.escape(name) + r"\s*" + GROWS.pattern)
+    return bool(grown.search(text, pos, len(text) if end < 0 else end))
 
 
 def is_source_literal(
-    name: str, at: int, bindings: list[tuple[int, str, str, str]], depth: int = 0
+    name: str,
+    at: int,
+    bindings: list[tuple[int, str, str, str]],
+    text: str = "",
+    depth: int = 0,
 ) -> bool:
-    init = initialiser(name, at, bindings)
-    if init is None:
+    row = in_force(name, at, bindings)
+    if row is None:
+        return False
+    pos, kind, _, init = row
+    # A LITERAL THAT IS THEN GROWN IS A PRODUCT, and its length is not the
+    # length anybody wrote down.
+    #
+    # MEASURED on 2026-08-30 while re-measuring this gate's own closure: 584
+    # `let mut` bindings in this tree open with a collection literal and 400 of
+    # them are lengthened afterwards. `linkstate_oam`'s `list_wire` is the
+    # shape -- `vec![0x0A]` then ten `extend_from_slice` calls, asserted
+    # against the ext-ZBuf `<32>` cap. None of the 400 carries a `.len() == N`
+    # assertion today, so nothing was being MIS-reported; what was wrong was
+    # the classification, and an assertion added to any of them tomorrow would
+    # have been called a defect it is not.
+    #
+    # ⚠ THOSE TWO NUMBERS ARE THE READER'S OWN. A scratch probe written for
+    # this measurement said 92 and 87, and it was wrong: its regex wanted the
+    # whole initialiser on one line with no `pub` and no trailing `;`. The
+    # count that means anything is the one this file's own `bindings_of`
+    # produces, which is why it is quoted from here rather than from beside it.
+    if kind == "let mut" and grown_before(name, pos, at, bindings, text):
         return False
     if LITERAL.match(init):
         return True
@@ -165,7 +255,7 @@ def is_source_literal(
     alias = ALIAS.match(init)
     if alias and depth == 0:
         return is_source_literal(
-            alias.group(1).rsplit("::", 1)[-1], at, bindings, 1
+            alias.group(1).rsplit("::", 1)[-1], at, bindings, text, 1
         )
     return False
 
@@ -179,11 +269,20 @@ def scan(root: pathlib.Path) -> tuple[int, list[str]]:
             path.read_text(encoding="utf-8", errors="replace")
         )
         bindings = bindings_of(text)
-        examined += sum(1 for _, _, _, init in bindings if LITERAL.match(init))
+        # The POPULATION is the lists still standing as written at the END of
+        # the file: a `let mut` that is grown is a product from the growth on,
+        # so counting it here would inflate the number this gate reports as
+        # what it looked at.
+        for pos, kind, name, init in bindings:
+            if not LITERAL.match(init):
+                continue
+            if kind == "let mut" and grown_before(name, pos, shadow(name, pos, bindings), bindings, text):
+                continue
+            examined += 1
         for m in COUNTED.finditer(text):
             name = m.group(1) or m.group(3)
             count = m.group(2) or m.group(4)
-            if not is_source_literal(name, m.start(), bindings):
+            if not is_source_literal(name, m.start(), bindings, text):
                 continue
             line = text[: m.start()].count("\n") + 1
             rel = path.relative_to(ROOT) if path.is_relative_to(ROOT) else path
@@ -231,6 +330,20 @@ fn a_name_reused_later_in_the_file_answers_for_itself() {
 fn the_later_binding_of_that_name() {
     let bytes = [0x00, 0xAB, 0xCD, 0xEF];
     assert_eq!(bytes.len(), 4, "and THIS one is the defect");  // EXPECT-FINDING
+}
+fn a_literal_that_is_then_grown_is_a_product() {
+    // THE CASE THE SECOND IMPLEMENTATION GOT WRONG. 400 of this tree's 584
+    // `let mut` literal bindings are lengthened after they are written, and
+    // the count asserted of them is the loop's, not the literal's.
+    let mut wire = vec![0x0A];
+    for _ in 0..10 {
+        wire.extend_from_slice(&[0x00]);
+    }
+    assert_eq!(wire.len(), 11, "the loop's count, not the literal's");
+}
+fn a_let_mut_that_is_never_grown_is_still_a_list() {
+    let mut table = vec!["a", "b"];
+    assert_eq!(table.len(), 2, "mut and untouched is still written down");  // EXPECT-FINDING
 }
 /// A DOC COMMENT THAT QUOTES THE DEFECT IS NOT THE DEFECT. The round that
 /// repaired the first real finding explained itself by writing
