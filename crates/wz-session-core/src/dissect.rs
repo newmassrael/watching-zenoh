@@ -196,7 +196,18 @@ impl FieldValue {
     /// The population `wz-capture`'s `doc_revision` declares the `fields.kind`
     /// family from, and the reason it is a walk: a list would widen only when
     /// someone remembered, and a vocabulary that widens in silence is the whole
-    /// of item 552. A variant added later joins this at `cargo build`.
+    /// of item 552.
+    ///
+    /// ⚠ R2182 — this used to end "a variant added later joins this at
+    /// `cargo build`", and that was wrong in the direction that costs: the
+    /// exhaustive match below forces a new variant to HAVE a successor and
+    /// forces nothing to have it AS one, so a variant nobody chains to is
+    /// simply not walked. Measured, with a ninth variant carrying only the
+    /// arms the compiler demands: 1644 tests here and 653 in `wz-capture`
+    /// stayed green while this reported eight words for a nine-word type.
+    /// What holds the walk to the type is the test
+    /// `the_kind_walk_reaches_every_variant_the_derive_knows`, which compares
+    /// it against the variant list `serde`'s derive writes.
     pub fn kind_words() -> Vec<&'static str> {
         let mut out = Vec::new();
         let mut cursor = Some(FieldValue::Bits(0));
@@ -210,10 +221,16 @@ impl FieldValue {
     /// One representative of the variant after this one, in a fixed order.
     ///
     /// Exhaustive on purpose: a new [`FieldValue`] variant does not compile
-    /// until it is given a successor here, which is what makes
-    /// [`Self::kind_words`] a walk over the type rather than over a list. The
-    /// payloads are FURNITURE — only the discriminant is read — so the cheapest
-    /// value of each shape is handed in.
+    /// until it is given a successor here. That is HALF of what
+    /// [`Self::kind_words`] needs, and R2182 found it had been mistaken for
+    /// all of it — the arm the compiler demands makes the new variant a SOURCE
+    /// of the chain and never a destination, so one nothing points at is left
+    /// out of the walk in silence. The other half is supplied by
+    /// `the_kind_walk_reaches_every_variant_the_derive_knows`: a variant added
+    /// here needs a PREDECESSOR before it is in the vocabulary at all, and the
+    /// compiler will not ask for one. The payloads are FURNITURE
+    /// — only the discriminant is read — so the cheapest value of each shape is
+    /// handed in.
     fn next_kind(&self) -> Option<Self> {
         Some(match self {
             FieldValue::Bits(_) => FieldValue::Flag(true),
@@ -8128,6 +8145,97 @@ mod tests {
             distinct.len(),
             walked.len(),
             "two variants share a kind word, so a consumer cannot tell them apart: {walked:?}",
+        );
+    }
+
+    /// R2182 (open-debt item 555, same seam) — THE WALK REACHES EVERY VARIANT,
+    /// held against a population A DERIVE produced rather than one this file
+    /// wrote down.
+    ///
+    /// # The hole this closes, measured before it was written
+    ///
+    /// `FieldValue::next_kind` is an exhaustive match, so a new variant cannot
+    /// compile without being GIVEN a successor. Its doc read that as "a walk
+    /// over the type", and `kind_words`' doc as "a variant added later joins
+    /// this at `cargo build`". Both were wrong in the one direction that
+    /// matters: the compiler forces a new variant to HAVE a successor and
+    /// forces nothing to POINT AT it, so a variant reachable from nowhere is
+    /// simply absent from the chain.
+    ///
+    /// MEASURED on 2026-08-29, before this test existed: a ninth variant
+    /// carrying only the three arms the compiler demands — `kind_word`,
+    /// `next_kind`, `push_json` — left 1644 `wz-session-core` tests and 653
+    /// `wz-capture` tests green while the declared `fields.kind` family named
+    /// eight words for a type that had nine. That is item 555's own failure
+    /// reappearing one layer beneath the fix for it, which is why it is paid
+    /// here rather than filed.
+    ///
+    /// # Where the population comes from, and why it must not be a list
+    ///
+    /// From `serde`'s derive. An externally tagged enum's `Deserialize` refuses
+    /// an unknown variant with a message that NAMES every variant it would have
+    /// accepted, and the derive macro writes that list off the enum itself: it
+    /// cannot omit one, and it widens at `cargo build` — the property the walk's
+    /// doc claimed and did not have. `Debug`, derived likewise, is what names
+    /// the variant each walked representative IS.
+    ///
+    /// So neither side of the comparison below is written by a person. A gate
+    /// whose expected side were a hand-written list would be a third copy of
+    /// this vocabulary and the second one able to go stale in silence.
+    ///
+    /// # Failure directions, including the one that reads as success
+    ///
+    /// A variant the walk never reaches fails here. So does a message this
+    /// cannot read: the derived set is checked for plausibility BEFORE it is
+    /// compared, because a population this failed to parse would arrive empty
+    /// and an empty expected set makes any walk correct — the "a population of
+    /// zero reports green" trap, which is the one failure a gate must not have.
+    #[cfg(feature = "dissect-serde")]
+    #[test]
+    fn the_kind_walk_reaches_every_variant_the_derive_knows() {
+        use alloc::string::ToString as _;
+
+        let raw = serde_json::from_str::<FieldValue>(r#"{"NotAVariantOfThisEnum":null}"#)
+            .expect_err("an unknown variant must not deserialize")
+            .to_string();
+        // `unknown variant `X`, expected one of `Bits`, `Flag`, … at line 1 column N`
+        let listed = raw
+            .split("expected one of ")
+            .nth(1)
+            .unwrap_or_else(|| panic!("serde no longer names the variants it expected: {raw}"));
+        let listed = listed.split(" at line ").next().unwrap_or(listed);
+        let declared: alloc::collections::BTreeSet<String> = listed
+            .split(',')
+            .map(|s| s.trim().trim_matches('`').to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        assert!(
+            declared.len() > 1,
+            "the derive was read as naming {declared:?}. A population that small \
+             is this test failing to parse serde's message, not an enum with one \
+             variant, and comparing against it would pass by having nothing to \
+             compare: {raw}"
+        );
+
+        let walked: alloc::collections::BTreeSet<String> = field_value_representatives()
+            .iter()
+            .map(|v| {
+                let shown = alloc::format!("{v:?}");
+                shown
+                    .split(['(', ' ', '{'])
+                    .next()
+                    .unwrap_or(&shown)
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            walked, declared,
+            "the `kind` walk does not cover `FieldValue`. A variant the derive \
+             knows and `next_kind` chains to nobody is a word `kind_words` never \
+             reports, so `doc_revision` declares a family missing it and a \
+             consumer switching on `fields[].kind` meets it with no arm — item \
+             555 exactly. Give the new variant a PREDECESSOR in `next_kind`; \
+             giving it a successor is what the compiler already made you do",
         );
     }
 
