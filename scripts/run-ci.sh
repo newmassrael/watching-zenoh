@@ -3031,12 +3031,29 @@ EOF
     # the string this means is a COMMAND — so a line whose first non-space
     # character is `#` is skipped, in YAML and in the shell inside `run:` blocks
     # alike, since `#` opens a comment in both.
+    #
+    # ⚠ R2189 (open-debt item 529) — THE POPULATION IS DERIVED, NOT NAMED. This
+    # scan read `.github/workflows/ci.yml` and the banner said "0 calling
+    # apt-get directly", which was true of the file it named and false of the
+    # repository: `release.yml` called `sudo apt-get update` + `sudo apt-get
+    # install` raw for as long as it had existed, so the ceiling, the bounded
+    # update and the cacheable archive reached none of the release path. A gate
+    # whose subject is "every apt step in this repository" cannot take its
+    # population from one filename, and the file it was missing is the only
+    # other workflow there is.
+    local -a workflows
+    mapfile -t workflows < <(find .github/workflows -maxdepth 1 -name '*.yml' | sort)
+    if [[ "${#workflows[@]}" -lt 1 ]]; then
+        echo "  Layer C0g FAIL: no workflow file under .github/workflows, so the" \
+            "two arms below would pass over an empty population" >&2
+        return 1
+    fi
     local raw
-    raw="$(grep -n 'apt-get' .github/workflows/ci.yml | grep -v ':[[:space:]]*#' || true)"
+    raw="$(grep -n 'apt-get' "${workflows[@]}" | grep -v ':[[:space:]]*#' || true)"
     if [[ -n "${raw}" ]]; then
-        echo "  Layer C0g FAIL: ci.yml calls apt-get directly, so these steps are" \
-            "OUTSIDE the ceiling and a mirror outage still spends their job's whole" \
-            "budget:" >&2
+        echo "  Layer C0g FAIL: a workflow calls apt-get directly, so these steps" \
+            "are OUTSIDE the ceiling and a mirror outage still spends their job's" \
+            "whole budget:" >&2
         echo "${raw}" >&2
         echo "  Route them through scripts/lib/apt-install.sh." >&2
         return 1
@@ -3045,21 +3062,36 @@ EOF
     # is meant to be CALLS. Counting mentions made it read 17 against 14 real
     # ones the moment the split's notes started naming the script.
     local routed
-    routed="$(grep 'apt-install.sh' .github/workflows/ci.yml | grep -vc ':\?[[:space:]]*#' || true)"
+    routed="$(grep -h 'apt-install.sh' "${workflows[@]}" | grep -vc ':\?[[:space:]]*#' || true)"
     if [[ "${routed}" -lt 1 ]]; then
-        echo "  Layer C0g FAIL: no step in ci.yml routes through the ceiling at all." \
+        echo "  Layer C0g FAIL: no workflow step routes through the ceiling at all." \
             "The arm above passes trivially when the population is zero, which is" \
             "the green this workspace has been burned by" >&2
         return 1
     fi
+    # R2189 — AND THE BANNER NAMES EACH FILE WITH ITS COUNT, because a total is
+    # what hid item 529 for as long as it was hidden: `ci.yml` routed fourteen
+    # times and `release.yml` zero, and one number said fourteen.
+    #
+    # A PER-FILE FLOOR was written here first and removed: a workflow that
+    # installs no packages at all must not be required to route, and the first
+    # arm already bans the only other spelling there is, so "neither" is the
+    # correct state for such a file. An arm whose own message has to say "if it
+    # installs nothing that is fine" is prose wearing a gate's clothes.
+    local scope="" n
+    for wf in "${workflows[@]}"; do
+        n="$(grep -c 'apt-install.sh' "${wf}" || true)"
+        scope+="$(basename "${wf}")=${n} "
+    done
 
     _runci_free_port_gate || return 1
 
     echo "  apt ceiling gate: OK (passes a prompt command, kills a hung one in" \
         "${elapsed}s against a 2s deadline -- bounded on BOTH sides, so an arm that" \
         "never hung fails too -- installs past a failed update and still fails on a" \
-        "failed install, refuses an empty package list, and ${routed} ci.yml" \
-        "step(s) route through it with 0 calling apt-get directly)"
+        "failed install, refuses an empty package list, and ${routed} step(s)" \
+        "across ${#workflows[@]} workflow(s) route through it with 0 calling" \
+        "apt-get directly: ${scope% })"
     return 0
 }
 

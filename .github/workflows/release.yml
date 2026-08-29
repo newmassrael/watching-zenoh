@@ -58,6 +58,29 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.inputs.tag || github.ref }}
 
+      - name: Restore apt archives
+        # R2189 (open-debt item 529) — the THIRD thing the raw `apt-get` block
+        # was not getting. `apt-install.sh` points apt's `Dir::Cache::archives`
+        # at `~/.cache/wz-apt`, so a cold run downloads the .debs and every run
+        # after it finds them present; without a cache step that directory is
+        # thrown away with the runner and the download is paid every release.
+        #
+        # Keyed on THIS file's hash, not `ci.yml`'s: the key must change when
+        # the package list changes, and the list that matters here is the one
+        # below. The `ci.yml` jobs key on `ci.yml` for the same reason.
+        #
+        # RESTORE and SAVE split, and the save `if: always()`, on the reasoning
+        # `ci.yml`'s first copy records: the run this helps is the one a slow
+        # mirror reds, so a red run has to leave its partial archive behind or
+        # the cache never warms.
+        id: apt-archives
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/release.yml') }}
+          restore-keys: |
+            apt-${{ runner.os }}-${{ github.job }}-
+
       - name: Install system dependencies
         # R2104 (open-debt item 522) — `libxml2-dev` and `pkg-config` are here
         # because this job runs `cargo test --workspace`, which compiles
@@ -67,17 +90,34 @@ jobs:
         # existed and passed anyway, because the ubuntu runner image carries
         # libxml2. `scripts/lib/apt_package_census.py`'s shortfall arm reads
         # this file too and reds if either goes missing again.
+        #
+        # R2189 (open-debt item 529) — THROUGH THE CEILING, like every step in
+        # `ci.yml`. This step called `apt-get` raw for as long as it has
+        # existed, so nothing R311y865..y882 built reached the release path: no
+        # wall-clock ceiling (a mirror outage spends the whole job's budget and
+        # reports it as the job being slow), no bounded `update`, and no
+        # cacheable archive directory. Layer C0g asserted "0 calling apt-get
+        # directly" and was telling the truth about `ci.yml`, which was the only
+        # file its scan named; that scan is derived over every workflow now, so
+        # this line cannot come back unremarked.
+        #
+        # No `sudo` here on purpose: the script composes
+        # `sudo timeout ... apt-get` itself, because `timeout` must be the CHILD
+        # of `sudo` rather than its parent for the signal to land on apt.
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            cmake \
-            libclang-dev \
-            libxml2-dev \
-            pkg-config \
-            clang \
-            perl \
-            python3-yaml \
-            protobuf-compiler
+          bash scripts/lib/apt-install.sh \
+            cmake libclang-dev libxml2-dev pkg-config clang perl \
+            python3-yaml protobuf-compiler
+
+      - name: Save apt archives
+        # `WZ_APT_CACHE_DIRTY` is set by `apt-install.sh` when it actually
+        # downloaded something, so a warm run does not re-save an unchanged
+        # directory under a new key.
+        if: always() && env.WZ_APT_CACHE_DIRTY == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
