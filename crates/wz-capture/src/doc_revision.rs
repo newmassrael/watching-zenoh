@@ -349,6 +349,27 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         families: FIELDS_R2_FAMILIES,
         planes: &[],
     },
+    // R2182 (open-debt item 555) — revision 3 changes NO KEY and declares the
+    // family for `kind`, the discriminant of the FIELD TREE itself.
+    //
+    // The one key in this document a consumer switches on that revision 2 left
+    // undeclared, and the consuming surface that reported it had lost a word to
+    // exactly that: it read seven of the eight and never saw `opaque`, which is
+    // the arm no capture in this tree produces. That is worth stating as the
+    // reason a walk and not a capture is the population — MEASURED here, the
+    // every-plane fixture reaches seven of these eight words, so a vocabulary
+    // derived from an artifact alone would have shipped with the same hole the
+    // consumer had.
+    //
+    // An ADDITION, so a consumer pinned to revision 2 loses nothing.
+    DocumentShape {
+        document: FIELDS,
+        revision: 3,
+        keys: FIELDS_R3_KEYS,
+        retiring: &[],
+        families: FIELDS_R3_FAMILIES,
+        planes: &[],
+    },
     DocumentShape {
         document: SUMMARY,
         revision: 1,
@@ -1221,6 +1242,68 @@ pub const FIELDS_R2_FAMILIES: &[ValueFamily] = &[
         key: "wrong",
         values: MISBOUND_R2,
     },
+];
+
+/// The field document's key set at revision 3 — revision 2's, unchanged.
+///
+/// An ALIAS, the way [`CENSUS_R4_KEYS`] is one: revision 3 moves for the value
+/// family it declares, not for a key. `kind` has been in this set since
+/// revision 1 — which is the whole of item 555, one sentence: the KEY was
+/// pinned from the beginning and the closed set of words inside it was declared
+/// by nothing.
+pub const FIELDS_R3_KEYS: &[&str] = FIELDS_R2_KEYS;
+
+/// The value families the field document declares at revision 3.
+///
+/// Revision 2's five plus `kind`, joined to `FieldValue::kind_words` by
+/// `the_declared_value_families_match_the_librarys_own_vocabularies` like every
+/// other row here. Sorted by key, which [`audit`] refuses to take on trust.
+pub const FIELDS_R3_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "direction",
+        values: DIRECTION_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "kind",
+        values: FIELD_VALUE_KIND_R3,
+    },
+    ValueFamily {
+        key: "offset_space",
+        values: ANCHOR_SPACE_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "state",
+        values: PAYLOAD_STATE_R2,
+    },
+    ValueFamily {
+        key: "under",
+        values: REFUSED_UNDER_R2,
+    },
+    ValueFamily {
+        key: "wrong",
+        values: MISBOUND_R2,
+    },
+];
+
+/// `fields[].kind` at field-document revision 3 — SORTED, which is why it does
+/// not read in `FieldValue::kind_words`' walk order.
+///
+/// R2182 (open-debt item 555). The discriminant of the field TREE, and the one
+/// switchable key in this document that shipped with no vocabulary behind it.
+///
+/// ⚠ NOT THE SAME FAMILY AS THE CENSUS DOCUMENT'S `kind`, which is why families
+/// are declared per document: there it is the sort of declaration an interest
+/// row describes ([`INTEREST_KIND_R4`]), here it is the sort of VALUE a walked
+/// field holds. One key name, two closed sets, two documents — and a third
+/// spelling that is neither, `InboundFrame::kind_name`, which travels under
+/// `name` rather than `kind`. Three near-namesakes were what made this item's
+/// own filing miscount twice before it was written.
+///
+/// Written out rather than pointing at the walk, for the reason
+/// [`ValueFamily::values`] gives: a table that read the walk would widen with
+/// it, and then the revision would never have to move.
+pub const FIELD_VALUE_KIND_R3: &[&str] = &[
+    "bits", "bytes", "flag", "label", "nested", "opaque", "text", "uint",
 ];
 
 /// `payload_decode.state` at field-document revision 2 — SORTED, which is why
@@ -2560,7 +2643,11 @@ mod tests {
             // R2175 (open-debt item 552) — the field document moved to 2 when
             // its PAYLOAD PLANE joined the pin (fifteen keys revision 1 had
             // never covered) and its first three value families were declared.
-            (FIELDS, 2),
+            // R2182 (item 555) — to 3 when `fields[].kind`, the field tree's
+            // own discriminant, gained the sixth family. No key moved: `kind`
+            // had been pinned since revision 1 and the eight words inside it
+            // were declared by nothing.
+            (FIELDS, 3),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.

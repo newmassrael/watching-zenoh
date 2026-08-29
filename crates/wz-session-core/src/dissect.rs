@@ -157,6 +157,75 @@ impl FieldValue {
             FieldValue::Bits(_) | FieldValue::Flag(_) | FieldValue::Label(_)
         )
     }
+
+    /// The word [`to_json`] writes as this value's `kind`, written ONCE.
+    ///
+    /// R2182 (open-debt item 555). Literals in an exhaustive match, which is
+    /// `RefusedUnder::name`'s shape one crate over and for the reason that one
+    /// gives: a variant added with someone else's word compiles, ships, and
+    /// silently shares it.
+    ///
+    /// THE EMITTER CALLS THIS, so the word on the wire and the word in the
+    /// walk below are one thing rather than two that agree. Before this round
+    /// they were two: the arms of `push_json` spelled the words and the only
+    /// walk that collected them lived inside `mod tests`, where no consumer
+    /// surface could reach it — so `fields[].kind` shipped as a closed set
+    /// nothing declared, and the consuming surface that switches on it was
+    /// missing `opaque` outright.
+    pub fn kind_word(&self) -> &'static str {
+        match self {
+            FieldValue::Bits(_) => "bits",
+            FieldValue::Flag(_) => "flag",
+            FieldValue::Uint(_) => "uint",
+            FieldValue::Bytes(_) => "bytes",
+            FieldValue::Text(_) => "text",
+            FieldValue::Opaque => "opaque",
+            FieldValue::Label(_) => "label",
+            FieldValue::Nested(_) => "nested",
+        }
+    }
+
+    /// Every word [`Self::kind_word`] can return, WALKED rather than written
+    /// down, in the order `next_kind` chains them.
+    ///
+    /// A code span rather than a link, because that successor is private: the
+    /// walk is the public fact and the chain is how it is built. Rendering it
+    /// as a link makes the doc build FAIL on this crate's `warnings = "deny"`,
+    /// which Layer C1bz counts (538 -> 539 on the first run of this round).
+    ///
+    /// The population `wz-capture`'s `doc_revision` declares the `fields.kind`
+    /// family from, and the reason it is a walk: a list would widen only when
+    /// someone remembered, and a vocabulary that widens in silence is the whole
+    /// of item 552. A variant added later joins this at `cargo build`.
+    pub fn kind_words() -> Vec<&'static str> {
+        let mut out = Vec::new();
+        let mut cursor = Some(FieldValue::Bits(0));
+        while let Some(value) = cursor {
+            out.push(value.kind_word());
+            cursor = value.next_kind();
+        }
+        out
+    }
+
+    /// One representative of the variant after this one, in a fixed order.
+    ///
+    /// Exhaustive on purpose: a new [`FieldValue`] variant does not compile
+    /// until it is given a successor here, which is what makes
+    /// [`Self::kind_words`] a walk over the type rather than over a list. The
+    /// payloads are FURNITURE — only the discriminant is read — so the cheapest
+    /// value of each shape is handed in.
+    fn next_kind(&self) -> Option<Self> {
+        Some(match self {
+            FieldValue::Bits(_) => FieldValue::Flag(true),
+            FieldValue::Flag(_) => FieldValue::Uint(0),
+            FieldValue::Uint(_) => FieldValue::Bytes(Vec::new()),
+            FieldValue::Bytes(_) => FieldValue::Text(String::new()),
+            FieldValue::Text(_) => FieldValue::Opaque,
+            FieldValue::Opaque => FieldValue::Label(Cow::Borrowed("")),
+            FieldValue::Label(_) => FieldValue::Nested(Vec::new()),
+            FieldValue::Nested(_) => return None,
+        })
+    }
 }
 
 /// One named field of a dissected message, with the bytes it came from.
@@ -164,8 +233,21 @@ impl FieldValue {
 /// # The field-name vocabulary, and where each name comes from
 ///
 /// R311y595. A consumer that RENDERS the tree needs none of this — the JSON
-/// shape (`name` / `start` / `end` / `kind` / `value`, recursively) is closed and
-/// a new walker cannot change it. A consumer that LOOKS A NAME UP does, because
+/// shape is closed and a new walker cannot change it: `name`, `start`, `end`,
+/// `kind`, and then AT MOST ONE further key chosen by the `kind` word —
+/// `value` for the six scalar words, `fields` for `nested`, and none at all for
+/// `opaque`, whose span is the whole answer.
+///
+/// ⚠ R2182 (open-debt item 555) — that sentence used to read "`name` / `start`
+/// / `end` / `kind` / `value`, recursively", which is what an author sees on
+/// seven of the eight arms. It was wrong about `nested` and wrong about
+/// `opaque`, and the consuming surface that reads this tree was missing
+/// `opaque` outright. It is now held by
+/// `the_field_object_carries_one_key_per_kind_word`, which DERIVES the map by
+/// rendering every arm rather than reading it here — the arms are what this
+/// paragraph is a summary of, and a summary nothing measures is how the old
+/// one stayed wrong. A consumer that LOOKS A NAME UP needs more than the shape,
+/// because
 /// then it is depending on a specific string, and the three sources those
 /// strings come from have very different stability:
 ///
@@ -3097,36 +3179,49 @@ fn push_json(field: &Field, out: &mut String) {
         ",\"start\":{},\"end\":{},",
         field.span.start, field.span.end
     );
+    // R2182 (open-debt item 555) — THE WORD COMES FROM THE VOCABULARY WALK,
+    // written once here rather than once per arm. Eight arms each spelling
+    // their own literal is eight places for the emitted word to differ from the
+    // one `FieldValue::kind_words` reports, and the family `doc_revision`
+    // declares is only worth anything while the two cannot differ.
+    //
+    // What each arm still owns is the COMPANION KEY, which is a function of the
+    // word and not the same fact: `opaque` has none — its span is the whole
+    // answer — `nested` carries `fields`, and the other six carry `value`. That
+    // map is pinned by `the_field_object_carries_one_key_per_kind_word`; see
+    // its doc for why this round declares the WORDS to a consumer and files the
+    // per-word key map as its own item rather than declaring half an axis.
+    out.push_str("\"kind\":\"");
+    out.push_str(field.value.kind_word());
+    out.push('"');
     match &field.value {
         FieldValue::Bits(v) => {
-            let _ = write!(out, "\"kind\":\"bits\",\"value\":{v}");
+            let _ = write!(out, ",\"value\":{v}");
         }
         FieldValue::Flag(b) => {
-            let _ = write!(out, "\"kind\":\"flag\",\"value\":{b}");
+            let _ = write!(out, ",\"value\":{b}");
         }
         FieldValue::Uint(v) => {
-            let _ = write!(out, "\"kind\":\"uint\",\"value\":{v}");
+            let _ = write!(out, ",\"value\":{v}");
         }
         FieldValue::Bytes(b) => {
-            out.push_str("\"kind\":\"bytes\",\"value\":\"");
+            out.push_str(",\"value\":\"");
             for byte in b {
                 let _ = write!(out, "{byte:02x}");
             }
             out.push('"');
         }
         FieldValue::Text(s) => {
-            out.push_str("\"kind\":\"text\",\"value\":");
+            out.push_str(",\"value\":");
             crate::json::escape_into(s, out);
         }
-        FieldValue::Opaque => {
-            out.push_str("\"kind\":\"opaque\"");
-        }
+        FieldValue::Opaque => {}
         FieldValue::Label(s) => {
-            out.push_str("\"kind\":\"label\",\"value\":");
+            out.push_str(",\"value\":");
             crate::json::escape_into(s, out);
         }
         FieldValue::Nested(children) => {
-            out.push_str("\"kind\":\"nested\",\"fields\":[");
+            out.push_str(",\"fields\":[");
             for (i, child) in children.iter().enumerate() {
                 if i > 0 {
                     out.push(',');
@@ -7965,24 +8060,6 @@ mod tests {
         rest[..end].to_string()
     }
 
-    /// One representative of the variant after `value`, in a fixed order.
-    /// Exhaustive on purpose: a new [`FieldValue`] variant does not compile
-    /// until it is given a successor here, and it does not pass until it is
-    /// named in [`FIELD_VALUE_KINDS`] too. Two layers, because either alone
-    /// can be satisfied while the other is quietly skipped.
-    fn next_field_value(value: &FieldValue) -> Option<FieldValue> {
-        match value {
-            FieldValue::Bits(_) => Some(FieldValue::Flag(true)),
-            FieldValue::Flag(_) => Some(FieldValue::Uint(7)),
-            FieldValue::Uint(_) => Some(FieldValue::Bytes(Vec::from([0xab_u8]))),
-            FieldValue::Bytes(_) => Some(FieldValue::Text("t".into())),
-            FieldValue::Text(_) => Some(FieldValue::Opaque),
-            FieldValue::Opaque => Some(FieldValue::Label("l".into())),
-            FieldValue::Label(_) => Some(FieldValue::Nested(Vec::new())),
-            FieldValue::Nested(_) => None,
-        }
-    }
-
     /// The kind vocabulary as MEASURED off the wire, in walk order -- written
     /// down only after an empty table made the test print what `to_json`
     /// actually writes, so this is a record and not a wish.
@@ -7990,20 +8067,44 @@ mod tests {
         "bits", "flag", "uint", "bytes", "text", "opaque", "label", "nested",
     ];
 
+    /// One representative per variant, in the order [`FieldValue::kind_words`]
+    /// chains them, so the tests below can RENDER each arm.
+    ///
+    /// R2182 (open-debt item 555) — this used to carry its own `next_field_value`
+    /// successor chain beside the emitter's eight literals. Both moved into the
+    /// library as [`FieldValue::kind_word`] and `FieldValue::next_kind` when the
+    /// field document gained a declared `kind` family: a vocabulary a consumer
+    /// is handed cannot be walked only by a `mod tests`.
+    fn field_value_representatives() -> Vec<FieldValue> {
+        let mut out = Vec::new();
+        let mut cursor = Some(FieldValue::Bits(1));
+        while let Some(value) = cursor {
+            cursor = value.next_kind();
+            out.push(value);
+        }
+        out
+    }
+
     /// Each variant reaches the wire under a word of its own. The enum's own
     /// documentation makes this a promise -- `Label` says a consumer "is
     /// entitled to know which of the two it has" against `Bits` -- and until
     /// this test that promise was kept only by the arms happening to spell
     /// eight different words. Copying one arm onto another stayed green.
+    ///
+    /// ⚠ R2182 — `push_json` NOW CALLS [`FieldValue::kind_word`], so "off the
+    /// wire" no longer means "from a second spelling". What it still means, and
+    /// why this stays: the walk could name eight words none of which reached the
+    /// document, and the distinctness below is a property of `kind_word`'s arms
+    /// that no exhaustive match can hold. [`FIELD_VALUE_KINDS`] remains the
+    /// written-down record, so a word RENAMED in the library fails here rather
+    /// than only where a revision pin happens to be compiled in.
     #[test]
     fn every_field_value_kind_word_is_its_own() {
         use alloc::string::ToString as _;
-        let mut walked = Vec::new();
-        let mut cursor = Some(FieldValue::Bits(1));
-        while let Some(value) = cursor {
-            cursor = next_field_value(&value);
-            walked.push(kind_word_on_the_wire(value));
-        }
+        let walked: Vec<String> = field_value_representatives()
+            .into_iter()
+            .map(kind_word_on_the_wire)
+            .collect();
         assert_eq!(
             walked,
             FIELD_VALUE_KINDS
@@ -8012,12 +8113,145 @@ mod tests {
                 .collect::<Vec<_>>(),
             "the walk read {walked:?} off the wire",
         );
+        assert_eq!(
+            walked,
+            FieldValue::kind_words()
+                .iter()
+                .map(|k| k.to_string())
+                .collect::<Vec<_>>(),
+            "the vocabulary walk and the document disagree; `doc_revision` \
+             declares the family from the walk, so a word it reports that never \
+             reaches a document is one a consumer would wait for forever",
+        );
         let distinct: alloc::collections::BTreeSet<&String> = walked.iter().collect();
         assert_eq!(
             distinct.len(),
             walked.len(),
             "two variants share a kind word, so a consumer cannot tell them apart: {walked:?}",
         );
+    }
+
+    /// R2182 (open-debt item 555) — WHICH KEY ACCOMPANIES EACH `kind` WORD,
+    /// DERIVED FROM THE RENDERING AND PINNED.
+    ///
+    /// # The judgment this records, and the measurement behind it
+    ///
+    /// Item 555 asked for the `fields[].kind` vocabulary and this round declares
+    /// it. While deriving the population from the artifact a second asymmetry
+    /// was measured and it is NOT the same fact: `opaque` is the one word whose
+    /// object carries no companion at all, `nested` carries `fields`, and the
+    /// other six carry `value`. A consumer handed the eight words and no map
+    /// writes an `opaque` arm and reads `value` out of an object that has none.
+    ///
+    /// # Why it is not declared to the consumer in this round
+    ///
+    /// Because it is not a property of `opaque`, and declaring it as one would
+    /// be an exception rather than an axis. MEASURED on the same day: the field
+    /// document's OTHER discriminant family, `payload_decode.state`, has the
+    /// same shape — eight words across six distinct companion sets
+    /// (`no_rules` / `no_payload` / `keyexpr_unresolved` carry nothing,
+    /// `no_rule` carries `keyexpr`, `decoded` carries four more, and so on). So
+    /// "which keys accompany which value" is a THIRD axis of the document
+    /// contract, beside the key set and the vocabulary, with a population of at
+    /// least two families in this document alone. It is filed as its own item
+    /// with that measurement, and generalising `ValueFamily` for one cell of it
+    /// would leave nine families carrying an empty default nothing checks —
+    /// which is exactly the hole R2181 had just finished closing on `planes`.
+    ///
+    /// # What IS held here, so the judgment is not prose
+    ///
+    /// The map, derived by rendering every arm and reading the keys the object
+    /// actually carries. An arm that gains, loses or renames a companion fails
+    /// here — including the emitter starting to write `"value":null` for
+    /// `opaque`, which would look like a tidy-up and is a contract change.
+    #[test]
+    fn the_field_object_carries_one_key_per_kind_word() {
+        use alloc::string::ToString as _;
+        /// The companion of each word, in walk order. `""` is "no companion at
+        /// all", which is `opaque`'s answer and the reason this test exists.
+        const COMPANIONS: [&str; 8] = [
+            "value", "value", "value", "value", "value", "", "value", "fields",
+        ];
+
+        let mut seen: Vec<(String, String)> = Vec::new();
+        for value in field_value_representatives() {
+            let word = value.kind_word().to_string();
+            let json = to_json(&Field {
+                name: "m".into(),
+                span: Span { start: 0, end: 1 },
+                value,
+            });
+            // The keys AFTER `kind`, which is what "companion" means: `name`,
+            // `start` and `end` are the envelope every field object carries
+            // whatever its value is.
+            let after = json
+                .split("\"kind\":")
+                .nth(1)
+                .expect("every field names its kind");
+            let companions: Vec<&str> = keys_of(after);
+            assert!(
+                companions.len() <= 1,
+                "{word} carries {companions:?}; a word with two companions is a \
+                 shape this pin cannot express, and a consumer switching on \
+                 `kind` would need to be told about both"
+            );
+            seen.push((word, companions.first().unwrap_or(&"").to_string()));
+        }
+        let expected: Vec<(String, String)> = FIELD_VALUE_KINDS
+            .iter()
+            .zip(COMPANIONS.iter())
+            .map(|(k, c)| (k.to_string(), c.to_string()))
+            .collect();
+        assert_eq!(
+            seen.len(),
+            FIELD_VALUE_KINDS.len(),
+            "the walk rendered {} arms for {} words",
+            seen.len(),
+            FIELD_VALUE_KINDS.len()
+        );
+        assert_eq!(
+            seen, expected,
+            "the key a `kind` word arrives with moved. That is a parse contract \
+             a C consumer reads by hand, because no document declares it yet \
+             (the open item this test's doc names); moving it silently is the \
+             same class of break item 555 was filed for one axis over"
+        );
+    }
+
+    /// The keys of the FIRST JSON object opening in `s`, at its top level.
+    ///
+    /// Deliberately tiny and deliberately here: `wz-capture` owns the general
+    /// scanners this crate must not grow a second opinion about, and what is
+    /// wanted is one object's own keys.
+    fn keys_of(s: &str) -> Vec<&str> {
+        let b = s.as_bytes();
+        let mut out = Vec::new();
+        let (mut i, mut depth) = (0usize, 0i32);
+        while i < b.len() {
+            match b[i] {
+                b'{' | b'[' => depth += 1,
+                b'}' | b']' => {
+                    depth -= 1;
+                    if depth < 0 {
+                        break;
+                    }
+                }
+                b'"' if depth == 0 => {
+                    let start = i + 1;
+                    let mut j = start;
+                    while j < b.len() && b[j] != b'"' {
+                        j += if b[j] == b'\\' { 2 } else { 1 };
+                    }
+                    if j < b.len() && b.get(j + 1) == Some(&b':') {
+                        out.push(&s[start..j]);
+                    }
+                    i = j;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        out
     }
 
     /// R2057 (open-debt item 437) — UPSTREAM'S TYPE PARTITION PER EXT NAME,

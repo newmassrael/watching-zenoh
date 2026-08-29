@@ -742,11 +742,24 @@ mod tests {
         };
 
         // Every family in the table, against the walk that produces its words.
-        // BOTH documents, because the census carries five of the eight and a
-        // gate over one document would leave the other's unwatched — the
-        // half-a-contract shape `wz-capi-dissect`'s verdict pins already name.
+        // BOTH documents, because a gate over one document would leave the
+        // other's unwatched — the half-a-contract shape `wz-capi-dissect`'s
+        // verdict pins already name.
+        //
+        // R2182 (open-debt item 555) — `fields.kind` joins as the first row,
+        // and it is the row that made this table's population question real:
+        // the walk behind it, `FieldValue::kind_words`, did not exist in the
+        // library at all until this round. It was a successor chain inside
+        // `wz-session-core`'s own `mod tests`, so the eight words were held
+        // against a rename and against each other and against NOTHING a
+        // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 8] = [
+        let live: [(&str, &str, Vec<&'static str>); 9] = [
+            (
+                rev::FIELDS,
+                "kind",
+                wz_session_core::dissect::FieldValue::kind_words(),
+            ),
             (rev::FIELDS, "state", PayloadDecoding::STATES.to_vec()),
             (rev::FIELDS, "under", RefusedUnder::names()),
             (rev::FIELDS, "wrong", Misbound::names()),
@@ -798,10 +811,97 @@ mod tests {
         }
         assert_eq!(
             census.families.len() + fields.families.len(),
-            10,
+            11,
             "a family was declared without joining this gate; every family in \
              either document must be held to a walk, or the one that is not is \
              a vocabulary that can widen in silence again"
+        );
+    }
+
+    /// R2182 (open-debt item 555) — AND THE WORDS REACH THE DOCUMENT, read back
+    /// off one this library actually emitted.
+    ///
+    /// # Why the sibling above is not enough on its own
+    ///
+    /// `the_declared_value_families_match_the_librarys_own_vocabularies` holds
+    /// the declaration against the WALK. Both halves of that are Rust constants
+    /// this crate compiles, and neither has been near a capture: a walk could
+    /// report a word `push_json` never writes, or write it under a key the
+    /// document does not carry, and that gate would agree with itself. What a
+    /// consumer receives is the document.
+    ///
+    /// # And why the walk is still the population, which this test MEASURES
+    ///
+    /// The check here is a SUBSET, and the number below is why it must be. The
+    /// every-plane fixture — the richest capture this crate can build — reaches
+    /// SEVEN of the eight words. The eighth is `opaque`, and it is the one the
+    /// consuming surface that filed item 555 was missing. So a vocabulary
+    /// derived from an artifact alone would have been derived with the very hole
+    /// it was meant to close, which is the population-from-observation failure
+    /// this workspace pays for repeatedly, in its exact shape.
+    ///
+    /// The floor is asserted so this cannot decay into a gate over an empty
+    /// listing: a fixture that stopped rendering rows would otherwise make the
+    /// subset trivially true.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn the_field_documents_kind_words_are_all_declared() {
+        use crate::payload::formats::FormatMap;
+        use crate::payload_decode::Declarations;
+
+        let (d, file) =
+            crate::census_json::fed_tests::every_plane_capture_with_file("demo/temp", None, false);
+        let mut map = FormatMap::new();
+        map.declare("demo/**=json").expect("a keyexpr pattern");
+        let run = Declarations::new(&map);
+
+        let declared = crate::doc_revision::newest(crate::doc_revision::FIELDS)
+            .expect("the field document has a revision")
+            .families
+            .iter()
+            .find(|f| f.key == "kind")
+            .expect("revision 3 declares the kind family")
+            .values;
+
+        let mut seen: Vec<&str> = Vec::new();
+        let with = fields_json(&d, &file, None, Some(&run));
+        let without = fields_json(&d, &file, None, None);
+        for doc in [&with, &without] {
+            seen.extend(
+                crate::doc_revision::json_string_values(doc)
+                    .into_iter()
+                    .filter(|(k, _)| *k == "kind")
+                    .map(|(_, v)| v),
+            );
+        }
+        seen.sort_unstable();
+        seen.dedup();
+
+        let stray: Vec<&&str> = seen.iter().filter(|w| !declared.contains(w)).collect();
+        assert!(
+            stray.is_empty(),
+            "the field document emits the `kind` word(s) {stray:?}, which no \
+             revision declares. A value that ARRIVES is the break — see \
+             `ValueFamily` for the asymmetry — so APPEND a revision to \
+             `doc_revision::DOCUMENT_HISTORY` carrying the widened set, which is \
+             the notice a consumer's switch needs"
+        );
+        assert_eq!(
+            seen.len(),
+            7,
+            "this fixture reached {} of the declared kind words ({seen:?}); it \
+             reached seven when the family was written, and a capture that \
+             stopped producing rows would make the subset above true by having \
+             nothing to compare",
+            seen.len()
+        );
+        assert!(
+            !seen.contains(&"opaque") && declared.contains(&"opaque"),
+            "`opaque` is declared and this capture does not produce it, which is \
+             the measurement that decides where this vocabulary comes from. If a \
+             fixture now DOES reach it, that is good news and this assertion is \
+             what should change — but the family must keep coming from \
+             `FieldValue::kind_words`, never from what a capture happened to show"
         );
     }
 

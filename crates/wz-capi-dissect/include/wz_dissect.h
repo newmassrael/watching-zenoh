@@ -132,6 +132,31 @@
  * @values fields offset_space
  * @values fields direction
  *
+ * R2182 -- AND THE FIELD TREE'S OWN DISCRIMINANT, at field-document revision 3:
+ *
+ *     `kind`          what a walked field holds, and therefore WHICH KEY comes
+ *                     with it. `bits`, `flag`, `uint`, `bytes`, `text` and
+ *                     `label` each carry `value`; `nested` carries `fields`,
+ *                     an array of further field objects; `opaque` carries
+ *                     NEITHER -- its span is the whole answer, and it means
+ *                     this build knows where the structure is and did not walk
+ *                     into it, which is not the same as there being nothing
+ *                     there.
+ *
+ * @values fields kind
+ *
+ * ⚠ READ THE COMPANION KEY OFF THE WORD, not off the seven arms that happen to
+ * share one. `opaque` is the arm no capture in the wz tree produces, so a
+ * consumer whose goldens come from real traffic meets it first in the field --
+ * which is how the surface that asked for this vocabulary came to be missing
+ * it. It is also why the words are reported from the library's own variant
+ * walk rather than from anything observed.
+ *
+ * ⚠ AND IT IS NOT THE CENSUS `kind`. Same spelling, different closed set,
+ * different document: on an interest row the word is `subscriber`, `queryable`
+ * or `liveliness_token`. A third near-namesake, the message kind on a record
+ * row, travels under `name` and is not a member of either family.
+ *
  * R2180 — AND A DOCUMENT SAYS WHICH OF ITS TOP-LEVEL KEYS ARE PLANES, which is
  * a third question neither number above can answer. A PLANE is an independent
  * fold over the capture that this build may be unable to feed at all; when it
@@ -804,7 +829,7 @@ int wz_dissect_declarations_diagnose(const char *declarations, char **out);
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":2,"key":"state",
+ *     "value_families":[{"name":"fields","revision":3,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,

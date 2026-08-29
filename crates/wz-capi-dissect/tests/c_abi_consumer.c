@@ -1020,8 +1020,12 @@ int main(void) {
      * keys on these rows whose VALUE comes from a closed set -- `kind`, `mode`,
      * `offset_space`, `asker`, `declarer` -- so a word joining one of them
      * costs a revision from now on. Ask wz_dissect_readable_surfaces for the
-     * words. */
-    revisioned[0].revision = 4;
+     * words.
+     * R2180 (item 554) -- 5, and again NO KEY MOVED for a consumer's purposes:
+     * the envelope now carries `planes`, the list of this document's top-level
+     * keys that are planes, so `exchanges: null` is readable as "a plane this
+     * build cannot feed" instead of by knowing which keys are planes. */
+    revisioned[0].revision = 5;
     revisioned[0].doc = NULL;
     rc = wz_dissect_pcap_census(pcap, sizeof pcap, &revisioned[0].doc);
     CHECK(rc == WZ_DISSECT_OK, "census rc=%d", rc);
@@ -1045,8 +1049,11 @@ int main(void) {
      * covered the document as emitted with no mapping declared, so
      * `payload_decode` and its fifteen keys shipped to consumers under no
      * revision at all, and its `state` vocabulary widened at R2170 with nothing
-     * to say so. */
-    revisioned[2].revision = 2;
+     * to say so.
+     * R2182 (item 555) -- 3 when `fields[].kind` gained a declared vocabulary.
+     * The tree's own discriminant: eight words, and the surface that reported
+     * this had seven, because `opaque` is the arm no capture produces. */
+    revisioned[2].revision = 3;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);
@@ -1059,12 +1066,33 @@ int main(void) {
     rc = wz_dissect_readable_surfaces(&revisioned[3].doc);
     CHECK(rc == WZ_DISSECT_OK, "surfaces rc=%d", rc);
 
+    /* R2182 -- THE ENVELOPE MAY CARRY MORE AFTER THE REVISION, and this loop
+     * used to forbid it by ending the expected prefix with `}`.
+     *
+     * R2180 added `planes` INSIDE the envelope object, so the census opens
+     * `{"document":{"name":"census","revision":5,"planes":[...]}` and this
+     * check failed on the comma -- Layer C1bo, and the number beside it was
+     * stale too, which is the same miss its own comment above records R2121
+     * making. Two defects in one line: a revision that had moved, and a shape
+     * that had grown a key.
+     *
+     * What is asserted instead is exactly the promise the header makes: the
+     * document OPENS with its name and its revision, before any body a consumer
+     * would have to parse to find them. The delimiter test is what keeps that
+     * strict -- without it `revision:5` is a prefix of `revision:50`, so a
+     * consumer would read a shape it has never seen as one it was written
+     * against. */
     for (size_t i = 0; i < sizeof revisioned / sizeof revisioned[0]; i++) {
         char want[128];
-        snprintf(want, sizeof want,
-                 "{\"document\":{\"name\":\"%s\",\"revision\":%u}",
-                 revisioned[i].name, revisioned[i].revision);
-        CHECK(strncmp(revisioned[i].doc, want, strlen(want)) == 0,
+        int n = snprintf(want, sizeof want,
+                         "{\"document\":{\"name\":\"%s\",\"revision\":%u",
+                         revisioned[i].name, revisioned[i].revision);
+        CHECK(n > 0 && (size_t)n < sizeof want, "the expected prefix fits");
+        /* The prefix decides FIRST: a document shorter than `want` must not be
+         * indexed at its length, which is a read past the terminator. */
+        int opens = strncmp(revisioned[i].doc, want, (size_t)n) == 0;
+        char after = opens ? revisioned[i].doc[n] : '\0';
+        CHECK(opens && (after == ',' || after == '}'),
               "the %s document must OPEN with its own revision so a consumer "
               "reads it before parsing the body: %s",
               revisioned[i].name, revisioned[i].doc);
