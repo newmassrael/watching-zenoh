@@ -905,6 +905,320 @@ mod tests {
         );
     }
 
+    /// R2184 (open-debt item 556) — WHICH KEYS ARRIVE BESIDE A VALUE, DERIVED
+    /// FROM WHAT THE EMITTERS RENDER AND HELD AGAINST WHAT THE REVISION
+    /// DECLARES.
+    ///
+    /// # The hole, and why neither sibling gate could see it
+    ///
+    /// `the_field_documents_key_set_is_pinned` pins a UNION over the whole
+    /// document, so it cannot express "sometimes absent" at all.
+    /// `the_declared_value_families_match_the_librarys_own_vocabularies` sees
+    /// the WORD and stops. The sentence a consumer needs — *if `kind` is
+    /// `opaque`, do not look for `value`* — was expressible in neither, so it
+    /// was read off today's rendering. That is item 556.
+    ///
+    /// # The classification is DERIVED, and it is a total function
+    ///
+    /// `doc_revision::companions` reports one entry per OCCURRENCE. Group them
+    /// by word and there are exactly three answers:
+    ///
+    /// * every word in ONE shape, two or more shapes overall → DISCRIMINANT;
+    /// * some word in TWO shapes, or every word in one common shape →
+    ///   PASSENGER;
+    /// * one word, one shape → UNMEASURED, which is a FAILURE and not a pass.
+    ///   Nothing in such a population could have contradicted either verdict,
+    ///   and a claim nothing could falsify is not a measurement.
+    ///
+    /// The third case is why `interest_pair_capture` exists: `census.asker` and
+    /// `census.mode` are reached by the every-plane capture with a single word
+    /// each.
+    ///
+    /// # Why per-occurrence and not per-word
+    ///
+    /// MEASURED while deriving this: a union per word reports
+    /// `fields[].direction == "a"` carrying both `packet` and `message_at`,
+    /// because `a` occurs in a datagram row and in a stream row. A union
+    /// therefore makes a PASSENGER look like a discriminant, and it destroys
+    /// the very observation — one word in two shapes — that proves passage.
+    ///
+    /// # What the population is
+    ///
+    /// The captures for the surrounding rows, and the TYPES' own arms for
+    /// everything a capture cannot reach: eight payload states, three
+    /// `RefusedUnder`, two `Misbound` and eight `FieldValue` kinds, each walk
+    /// bound to an exhaustive match. `opaque` is the word no capture in this
+    /// tree produces — item 555's measurement — and it is the one whose object
+    /// carries nothing at all, so a population taken from captures alone would
+    /// have been derived with exactly the hole this axis exists to close.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn the_declared_carries_axis_is_the_one_the_emitters_render() {
+        use crate::doc_revision as rev;
+        use crate::payload::formats::FormatMap;
+        use crate::payload_decode::{
+            push_decoding, push_misbinding, push_refusal, Declarations, Misbinding, Misbound,
+            PayloadDecoding, RefusedUnder,
+        };
+        let (d, file) =
+            crate::census_json::fed_tests::every_plane_capture_with_file("demo/temp", None, true);
+        let (dl, filel) = crate::census_json::fed_tests::every_plane_capture_with_file(
+            "demo/temp",
+            Some("tcp/127.0.0.1:7447"),
+            true,
+        );
+        let mut map = FormatMap::new();
+        map.declare("demo/**=json").expect("a keyexpr pattern");
+        let run = Declarations::new(&map);
+        let with = fields_json(&d, &file, None, Some(&run));
+        let without = fields_json(&d, &file, None, None);
+        let withl = fields_json(&dl, &filel, None, Some(&run));
+        let dgram_packet = udp_packet(
+            [10, 0, 0, 1],
+            43210,
+            [10, 0, 0, 2],
+            7447,
+            &[wz_session_core::wire_const::T_MID_KEEP_ALIVE],
+        );
+        let mut dg = Dissection::new();
+        dg.push_packet(LINKTYPE_ETHERNET, 0, &dgram_packet);
+        dg.finish();
+        let dgfile = crate::pcap::write(1, &[(0, 0, dgram_packet.as_slice())]);
+        let dgram = fields_json(&dg, &dgfile, None, None);
+        let census = crate::census_json::census_json(&d);
+        let censusl = crate::census_json::census_json(&dl);
+        let censusdg = crate::census_json::census_json(&dg);
+        // THE ARMS THE CAPTURES CANNOT REACH, rendered from their own types on
+        // the rule `the_field_documents_payload_plane_is_pinned_over_every_arm`
+        // states: making one capture produce all thirteen payload states would
+        // be a fixture nobody can keep whole, and a fixture that stopped
+        // reaching an arm would take that arm's answer out of the population in
+        // silence. Each walk is bound to an exhaustive match, so an arm added
+        // later joins this population at `cargo build`.
+        let mut arms: Vec<String> = Vec::new();
+        for state in &PayloadDecoding::all() {
+            let mut out = String::new();
+            push_decoding(state, &mut out);
+            arms.push(out);
+        }
+        for under in [
+            RefusedUnder::Corroborated,
+            RefusedUnder::Unclaimed,
+            RefusedUnder::Refuted,
+        ] {
+            let mut out = String::new();
+            push_refusal(
+                &crate::payload_decode::Refusal {
+                    keyexpr: String::from("demo/**"),
+                    format: String::from("json"),
+                    under,
+                    samples: 1,
+                    example: String::from("byte 0"),
+                },
+                &mut out,
+            );
+            arms.push(out);
+        }
+        for wrong in [Misbound::Rule, Misbound::Publisher] {
+            let mut out = String::new();
+            push_misbinding(
+                &Misbinding {
+                    keyexpr: String::from("demo/**"),
+                    format: String::from("json"),
+                    declared: String::from("text/plain"),
+                    wrong,
+                    publisher: None,
+                    samples: 1,
+                },
+                &mut out,
+            );
+            arms.push(out);
+        }
+        // `opaque` is the word no capture in this tree produces, which is the
+        // measurement item 555 recorded and the reason the population is the
+        // WALK. `kind_representatives` is that walk carrying values rather than
+        // words, so each arm can be RENDERED and its object read.
+        for value in wz_session_core::dissect::FieldValue::kind_representatives() {
+            arms.push(wz_session_core::dissect::to_json(
+                &wz_session_core::dissect::Field {
+                    name: "m".into(),
+                    span: wz_session_core::dissect::Span { start: 0, end: 1 },
+                    value,
+                },
+            ));
+        }
+        let interests = crate::census_json::census_json(
+            &crate::census_json::fed_tests::interest_pair_capture(),
+        );
+
+        let mut fields_docs: Vec<&String> = alloc::vec![&with, &without, &withl, &dgram];
+        fields_docs.extend(arms.iter());
+        let docs: [(&str, Vec<&String>); 2] = [
+            (rev::FIELDS, fields_docs),
+            (
+                rev::CENSUS,
+                alloc::vec![&census, &censusl, &censusdg, &interests],
+            ),
+        ];
+
+        let mut failures: Vec<String> = Vec::new();
+        // The two verdicts, counted SEPARATELY. R2181's lesson, and it bites
+        // exactly here: three families are discriminants and eight are
+        // passengers, so a single total stays at eleven while either arm could
+        // be holding over an empty set.
+        let (mut discriminants, mut passengers) = (0usize, 0usize);
+        for (name, rendered) in docs {
+            let shape = rev::newest(name).expect("a revision");
+            for family in shape.families {
+                // word -> the DISTINCT companion sets it was seen with, one
+                // entry per shape and not a union. See `rev::companions`: a
+                // union per word makes a passenger look like a discriminant,
+                // measured on `fields.direction`.
+                let mut seen: Vec<(String, Vec<Vec<String>>)> = Vec::new();
+                for doc in &rendered {
+                    for (word, beside) in rev::companions(doc, family.key) {
+                        let beside: Vec<String> = beside.iter().map(|s| s.to_string()).collect();
+                        let row = match seen.iter_mut().find(|(w, _)| w == word) {
+                            Some(row) => row,
+                            None => {
+                                seen.push((word.to_string(), Vec::new()));
+                                seen.last_mut().expect("just pushed")
+                            }
+                        };
+                        if !row.1.contains(&beside) {
+                            row.1.push(beside);
+                        }
+                    }
+                }
+                seen.sort();
+                let stray: Vec<&String> = seen
+                    .iter()
+                    .map(|(w, _)| w)
+                    .filter(|w| !family.values.contains(&w.as_str()))
+                    .collect();
+                if !stray.is_empty() {
+                    failures.push(alloc::format!(
+                        "{name}.{}: the documents carry the word(s) {stray:?} that no \
+                         revision declares",
+                        family.key
+                    ));
+                    continue;
+                }
+                // UNMEASURED IS A FAILURE, NOT A PASS. With fewer than two
+                // distinct words nothing observed here could have contradicted
+                // either verdict — the family would be classified on the
+                // strength of having looked at one thing. That is the
+                // population-of-one pass this axis exists to refuse, and it is
+                // why `interest_pair_capture` was built.
+                if seen.len() < 2 {
+                    failures.push(alloc::format!(
+                        "{name}.{} is UNMEASURED by this population: {seen:?}. Fewer \
+                         than two words arrived, so no observation here could have \
+                         contradicted either verdict. Widen the population",
+                        family.key
+                    ));
+                    continue;
+                }
+                // The SAME predicate the table is audited by, applied to what
+                // the emitters actually rendered. Two rules would let the
+                // declaration and the document be judged differently.
+                let derived_discriminant = seen.iter().any(|(w1, shapes1)| {
+                    let always: Vec<&String> = match shapes1.first() {
+                        Some(first) => first
+                            .iter()
+                            .filter(|k| shapes1.iter().all(|s| s.contains(k)))
+                            .collect(),
+                        None => Vec::new(),
+                    };
+                    seen.iter().any(|(w2, shapes2)| {
+                        w2 != w1
+                            && always
+                                .iter()
+                                .any(|k| !shapes2.iter().any(|s| s.contains(k)))
+                    })
+                });
+                let declared = shape
+                    .carries
+                    .iter()
+                    .find(|c| c.key == family.key)
+                    .map(|c| &c.shape);
+                let Some(declared) = declared else {
+                    failures.push(alloc::format!(
+                        "{name}.{}: the newest revision declares no carries row, which \
+                         `audit` should have refused before this test ran",
+                        family.key
+                    ));
+                    continue;
+                };
+                match (declared, derived_discriminant) {
+                    (rev::CarriesShape::Discriminant(rows), true) => {
+                        discriminants += 1;
+                        // EVERY declared word rendered, each with exactly the
+                        // shapes the table names. A word the population never
+                        // reached is not a pass: it is a row of the declaration
+                        // that nothing measured.
+                        for row in *rows {
+                            let Some((_, shapes)) = seen.iter().find(|(w, _)| w == row.word) else {
+                                failures.push(alloc::format!(
+                                    "{name}.{} declares the word {:?} and nothing in this \
+                                     population rendered it, so the shapes it declares are \
+                                     asserted by nobody",
+                                    family.key,
+                                    row.word
+                                ));
+                                continue;
+                            };
+                            let mut got: Vec<Vec<String>> = shapes.clone();
+                            got.sort();
+                            let mut want: Vec<Vec<String>> = row
+                                .shapes
+                                .iter()
+                                .map(|s| s.iter().map(|k| k.to_string()).collect())
+                                .collect();
+                            want.sort();
+                            if got != want {
+                                failures.push(alloc::format!(
+                                    "{name}.{} = {:?} arrives in the shape(s) {got:?} and \
+                                     the revision declares {want:?}. The keys a word \
+                                     brings are a parse contract a consumer writes by \
+                                     hand; APPEND a revision to \
+                                     `doc_revision::DOCUMENT_HISTORY` carrying the new map",
+                                    family.key,
+                                    row.word
+                                ));
+                            }
+                        }
+                    }
+                    (rev::CarriesShape::Passenger, false) => passengers += 1,
+                    (declared, _) => failures.push(alloc::format!(
+                        "{name}.{} is declared {} and these emitters render {}: {seen:?}. \
+                         A key one word ALWAYS brings and another NEVER does is what makes \
+                         a DISCRIMINANT; anything else is a PASSENGER, and the declaration \
+                         is what a consumer parses by",
+                        family.key,
+                        match declared {
+                            rev::CarriesShape::Passenger => "a PASSENGER",
+                            rev::CarriesShape::Discriminant(_) => "a DISCRIMINANT",
+                        },
+                        if derived_discriminant {
+                            "a discriminant"
+                        } else {
+                            "a passenger"
+                        }
+                    )),
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+        assert!(
+            discriminants >= 1 && passengers >= 1,
+            "the carries axis classified {discriminants} discriminant(s) and \
+             {passengers} passenger(s); an axis where every family answers the same \
+             way says nothing the key set did not already say, and a count of zero \
+             on either arm means that arm held over an empty set"
+        );
+    }
+
     /// One framed KeepAlive: a two-byte length prefix and the message.
     fn framed_keepalive() -> Vec<u8> {
         vec![1, 0, wz_session_core::wire_const::T_MID_KEEP_ALIVE]

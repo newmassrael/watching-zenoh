@@ -209,11 +209,32 @@ impl FieldValue {
     /// `the_kind_walk_reaches_every_variant_the_derive_knows`, which compares
     /// it against the variant list `serde`'s derive writes.
     pub fn kind_words() -> Vec<&'static str> {
+        Self::kind_representatives()
+            .iter()
+            .map(Self::kind_word)
+            .collect()
+    }
+
+    /// ONE VALUE OF EACH KIND, in the order `next_kind` chains them — the walk
+    /// [`Self::kind_words`] reports the words of.
+    ///
+    /// R2184 (open-debt item 556). The vocabulary alone is not enough for the
+    /// axis that round declares: which keys arrive BESIDE `kind` is a property
+    /// of the rendering, so deriving it needs a value to render and not only a
+    /// word. Held here rather than rebuilt by each caller for the reason the
+    /// walk above is: a second chain is a second answer about which variants
+    /// exist, and `wz-capture` — which owns the document contract — cannot see
+    /// this crate's `mod tests`.
+    ///
+    /// The payloads are FURNITURE. Only the discriminant is read, so the
+    /// cheapest value of each shape is handed back, and a caller must not
+    /// conclude anything from the numbers or the emptiness inside them.
+    pub fn kind_representatives() -> Vec<Self> {
         let mut out = Vec::new();
         let mut cursor = Some(FieldValue::Bits(0));
         while let Some(value) = cursor {
-            out.push(value.kind_word());
             cursor = value.next_kind();
+            out.push(value);
         }
         out
     }
@@ -8092,14 +8113,15 @@ mod tests {
     /// library as [`FieldValue::kind_word`] and `FieldValue::next_kind` when the
     /// field document gained a declared `kind` family: a vocabulary a consumer
     /// is handed cannot be walked only by a `mod tests`.
+    ///
+    /// ⚠ R2184 (open-debt item 556) — and the WALK moved too, for the same
+    /// reason one round later. `wz-capture` needs to RENDER each arm to derive
+    /// which keys arrive beside the word, and it cannot see this module, so it
+    /// would have had to rebuild the chain. A second walk is a second answer
+    /// about which variants exist — the defect R2183 measured on the words —
+    /// so this is now a thin alias over [`FieldValue::kind_representatives`].
     fn field_value_representatives() -> Vec<FieldValue> {
-        let mut out = Vec::new();
-        let mut cursor = Some(FieldValue::Bits(1));
-        while let Some(value) = cursor {
-            cursor = value.next_kind();
-            out.push(value);
-        }
-        out
+        FieldValue::kind_representatives()
     }
 
     /// Each variant reaches the wire under a word of its own. The enum's own

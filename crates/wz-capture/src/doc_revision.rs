@@ -158,6 +158,178 @@ pub struct DocumentShape {
     /// key is one a consumer has been shown can never hand it an undeclared
     /// `null`.
     pub planes: &'static [&'static str],
+    /// For each family this revision declares, whether the WORD decides which
+    /// keys arrive beside it — and, when it does, which keys each word brings.
+    ///
+    /// R2184 (open-debt item 556) — the THIRD axis of the document contract,
+    /// and the one the two above are each blind to for a different reason.
+    ///
+    /// # The hole this fills
+    ///
+    /// [`Self::keys`] is a UNION over the whole document, so it cannot say
+    /// "sometimes absent" at all: `value` is in the field document's key set
+    /// whether the field object that would carry it opened or not.
+    /// [`Self::families`] sees the WORD and stops there. So the sentence a
+    /// consumer actually needs — *if `kind` is `opaque`, do not look for
+    /// `value`* — was expressible in neither, and was therefore read off
+    /// today's rendering. That is a parse contract nothing declared, which is
+    /// the same shape item 554 had for planes and item 552 for vocabularies.
+    ///
+    /// # Why it hangs off the SHAPE and not off [`ValueFamily`]
+    ///
+    /// A field on `ValueFamily` would be mandatory on every row of every
+    /// revision, including the eleven rows written before this axis existed,
+    /// and the only way to fill those is to claim retroactively that revision 4
+    /// declared something it did not. Here an older revision carries `&[]`,
+    /// which is TRUE of it, and [`audit`] refuses the same emptiness on the
+    /// NEWEST revision of a document that declares families — the rule that
+    /// keeps this from becoming the unmeasured default R2181 had just finished
+    /// closing on [`Self::planes`].
+    ///
+    /// # Sorted by key, and exhaustive where it applies
+    ///
+    /// At the newest revision every declared family appears exactly once, no
+    /// more and no fewer: a family missing from this list is a key a consumer
+    /// switches on with no answer about what comes with it, and an entry naming
+    /// no family is a claim about something that cannot occur. Both are
+    /// [`audit`] errors, in both directions.
+    pub carries: &'static [KeyCarries],
+}
+
+/// What one family key's WORD decides about the object it sits in, at one
+/// revision of one document.
+///
+/// R2184 (open-debt item 556). Paired with [`DocumentShape::carries`], which is
+/// where the completeness rule lives.
+pub struct KeyCarries {
+    /// The family key this describes. Must be one [`DocumentShape::families`]
+    /// declares at the same revision.
+    pub key: &'static str,
+    /// What the word decides.
+    pub shape: CarriesShape,
+}
+
+/// The two answers a family key can give about the keys beside it.
+///
+/// R2184 (open-debt item 556). A CLOSED PAIR with no third state on purpose:
+/// "not classified" must not be expressible, because an unclassified family is
+/// exactly the silent default this axis exists to abolish. A revision that has
+/// not yet made the judgement says so by having no [`KeyCarries`] row at all,
+/// and [`audit`] permits that only where the revision is not the newest.
+///
+/// # How the two are told apart, and it is DERIVED rather than judged
+///
+/// `doc_revision::companions` reports one entry per OCCURRENCE. Group them by
+/// word:
+///
+/// * every word mapped to exactly ONE companion set, and two or more distinct
+///   sets among them — the word decides the shape, so [`Self::Discriminant`];
+/// * any word seen with TWO different sets, or every word sharing one set —
+///   something other than the word decides it, so [`Self::Passenger`].
+///
+/// MEASURED 2026-08-29 over the census and field documents: three of the eleven
+/// families are discriminants and eight are passengers. The item that filed
+/// this axis had measured two, from the two it happened to be looking at;
+/// `fields.offset_space` is the third, and it is a discriminant for a reason no
+/// `match` in the emitter shows — `packet` is written by the datagram row
+/// emitter with a `packet` index beside it and `stream_byte` by the stream one
+/// with `message_at` and `payload_decode`. A list would have missed it, which
+/// is why the population is derived.
+pub enum CarriesShape {
+    /// The word does NOT decide which keys arrive beside it: this key is a
+    /// passenger in a record whose shape something else fixes, and an
+    /// inapplicable companion arrives as `null` rather than absent.
+    Passenger,
+    /// The word DECIDES it: each word arrives with its own companion keys,
+    /// listed here for EVERY word the family declares, sorted by word.
+    Discriminant(&'static [WordCarries]),
+}
+
+/// One word of a discriminant family, and every SHAPE its own object takes.
+///
+/// R2184 (open-debt item 556).
+pub struct WordCarries {
+    /// The word, as it appears in the document. Must be one of the family's
+    /// [`ValueFamily::values`].
+    pub word: &'static str,
+    /// Every distinct key set this word's object is emitted with, BESIDE the
+    /// family key itself — each sorted and deduped, the list of them sorted,
+    /// and never empty.
+    ///
+    /// # A LIST of shapes, and not one shape, because a word does not always
+    /// fix the whole object
+    ///
+    /// MEASURED 2026-08-29, and it refuted the single-shape form this axis was
+    /// first written with: `fields[].offset_space == "stream_byte"` arrives in
+    /// TWO shapes, with `payload_decode` and without, because that plane is
+    /// present only when the caller supplied a format map. So the word decides
+    /// `message_at` — `packet` never carries it — and does NOT decide
+    /// `payload_decode`, and both facts are true of the same word at once.
+    ///
+    /// Declaring one set per word would have to choose between them: the
+    /// INTERSECTION says nothing about `payload_decode` and reads as "never",
+    /// which is the exact confusion [`DocumentShape::keys`] already causes and
+    /// this axis exists to end; the UNION says `payload_decode` always comes,
+    /// which is false. The set of shapes says both without a third state, and a
+    /// third state is what an escape hatch is.
+    ///
+    /// A word's object with nothing else beside it is `&[&[]]` — one shape,
+    /// empty — which is `fields[].kind == "opaque"`, the case this item was
+    /// filed for. `&[]` is refused by [`audit`]: a word with NO shape is one
+    /// nothing was measured about.
+    ///
+    /// The envelope keys of the enclosing object are included, because what a
+    /// consumer parses is the object it is handed and not a diff against some
+    /// other word's.
+    pub shapes: &'static [&'static [&'static str]],
+}
+
+impl WordCarries {
+    /// The keys present in EVERY shape of this word — what a consumer is
+    /// guaranteed to find beside it.
+    pub fn always(&self) -> Vec<&'static str> {
+        let Some(first) = self.shapes.first() else {
+            return Vec::new();
+        };
+        first
+            .iter()
+            .copied()
+            .filter(|k| self.shapes.iter().all(|s| s.contains(k)))
+            .collect()
+    }
+
+    /// The keys present in ANY shape of this word — what may arrive beside it.
+    pub fn ever(&self) -> Vec<&'static str> {
+        let mut out: Vec<&'static str> =
+            self.shapes.iter().flat_map(|s| s.iter().copied()).collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+}
+
+/// `true` when some key's presence is DECIDED by the word — the property that
+/// separates a discriminant from a passenger, computed the same way from a
+/// declaration and from a derivation.
+///
+/// R2184 (open-debt item 556). There is a key one word always brings and
+/// another never does: `fields[].kind` always brings `value` for `bits` and
+/// never for `opaque`, and `fields[].offset_space` always brings `message_at`
+/// for `stream_byte` and never for `packet`.
+///
+/// ⚠ ALWAYS on one side and EVER on the other, and the asymmetry is what keeps
+/// a passenger from reading as a discriminant. MEASURED: `fields[].direction`
+/// sees `message_at` with `a` in a stream row and not in a datagram one, so
+/// `message_at` is in `ever(a)` and not in `always(a)` — a comparison between
+/// two unions, or between two intersections, calls that a discriminant. It is
+/// not: what decides the row is which emitter ran, and `direction` is a
+/// passenger on it.
+pub fn decides_a_key(rows: &[WordCarries]) -> bool {
+    rows.iter().any(|w1| {
+        let always = w1.always();
+        rows.iter()
+            .any(|w2| w2.word != w1.word && always.iter().any(|k| !w2.ever().contains(k)))
+    })
 }
 
 /// One key whose value is drawn from a CLOSED SET this library owns, at one
@@ -239,6 +411,7 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         retiring: &[],
         families: &[],
         planes: &[],
+        carries: &[],
     },
     // R2119 (open-debt item 455) — the RENAME this table was built for, used
     // for the first time. `first_packet` reports a byte offset over a stream
@@ -257,6 +430,7 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         retiring: &["first_packet"],
         families: &[],
         planes: &[],
+        carries: &[],
     },
     // R2123 (open-debt item 453) — revision 3 does two things and they are
     // separable on purpose.
@@ -278,6 +452,7 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         retiring: &[],
         families: &[],
         planes: &[],
+        carries: &[],
     },
     // R2175 (open-debt item 552) — revision 4 changes NO KEY and declares five
     // VALUE FAMILIES, which is the first revision in this table to move for a
@@ -295,6 +470,7 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         retiring: &[],
         families: CENSUS_R4_FAMILIES,
         planes: &[],
+        carries: &[],
     },
     // R2180 (open-debt item 554) — revision 5 ADDS `planes` and retires
     // nothing, and it is the first revision in this table to move for a
@@ -318,6 +494,28 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         retiring: &[],
         families: CENSUS_R5_FAMILIES,
         planes: CENSUS_R5_PLANES,
+        carries: &[],
+    },
+    // R2184 (open-debt item 556) — revision 6 changes NO KEY, NO WORD and NO
+    // PLANE, and declares which of the five families' words DECIDE the keys
+    // that arrive beside them. The first revision in this table to move for the
+    // third axis, the way revision 4 moved for the second.
+    //
+    // All five are PASSENGERS here, and that is a measured verdict rather than
+    // an omission: this document's row emitters are straight-line, so an
+    // inapplicable companion arrives as `null` and never as an absent key —
+    // which is the rule `interests_json` states in its own comments six times
+    // and which nothing had ever checked. `the_declared_carries_axis_is_the_one
+    // _the_emitters_render` is what checks it, and a row emitter that started
+    // choosing keys by a word fails there rather than reaching a consumer.
+    DocumentShape {
+        document: CENSUS,
+        revision: 6,
+        keys: CENSUS_R6_KEYS,
+        retiring: &[],
+        families: CENSUS_R6_FAMILIES,
+        planes: CENSUS_R6_PLANES,
+        carries: CENSUS_R6_CARRIES,
     },
     DocumentShape {
         document: FIELDS,
@@ -326,6 +524,7 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         retiring: &[],
         families: &[],
         planes: &[],
+        carries: &[],
     },
     // R2175 (open-debt item 552) — revision 2 does two things, and the second
     // is what the item is about.
@@ -348,6 +547,7 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         retiring: &[],
         families: FIELDS_R2_FAMILIES,
         planes: &[],
+        carries: &[],
     },
     // R2182 (open-debt item 555) — revision 3 changes NO KEY and declares the
     // family for `kind`, the discriminant of the FIELD TREE itself.
@@ -369,6 +569,29 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         retiring: &[],
         families: FIELDS_R3_FAMILIES,
         planes: &[],
+        carries: &[],
+    },
+    // R2184 (open-debt item 556) — revision 4 changes no key and no word, and
+    // declares the axis for all six of this document's families. THREE of the
+    // eleven families in this table are discriminants and all three are here:
+    // `kind`, `state` and `offset_space`.
+    //
+    // The third is the one no reading of the source would have offered.
+    // `offset_space` is not a `match` anywhere — `packet` is written by
+    // `push_datagram_flow` beside a `packet` index and `stream_byte` by
+    // `push_stream_flow` beside `message_at` and `payload_decode` — so the word
+    // decides the shape through two emitters rather than two arms. Item 556
+    // filed with two discriminants measured; the derivation found three, which
+    // is the whole reason it says to derive the population instead of listing
+    // it.
+    DocumentShape {
+        document: FIELDS,
+        revision: 4,
+        keys: FIELDS_R4_KEYS,
+        retiring: &[],
+        families: FIELDS_R4_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R4_CARRIES,
     },
     DocumentShape {
         document: SUMMARY,
@@ -377,6 +600,7 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         retiring: &[],
         families: &[],
         planes: &[],
+        carries: &[],
     },
     // R2121 (open-debt item 460) — revision 2 ADDS `inert_counters` and
     // retires nothing. Two skip counters cannot move in this build whatever
@@ -397,6 +621,7 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         retiring: &[],
         families: &[],
         planes: &[],
+        carries: &[],
     },
     // R2122 (open-debt item 238) — revision 3 ADDS `undefined_mandatory_exts`
     // and `unaccounted_batch_bytes`, and retires nothing.
@@ -413,6 +638,7 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         retiring: &[],
         families: &[],
         planes: &[],
+        carries: &[],
     },
     DocumentShape {
         document: READABLE_SURFACES,
@@ -421,6 +647,7 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         retiring: &[],
         families: &[],
         planes: &[],
+        carries: &[],
     },
     // R2114 (open-debt item 237) — revision 2 ADDS `payload_field_types` and
     // retires nothing. A deployment that describes its own record has to know
@@ -434,6 +661,7 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         retiring: &[],
         families: &[],
         planes: &[],
+        carries: &[],
     },
     // R2175 (open-debt item 552) — revision 3 ADDS `value_families` and its two
     // row keys, and retires nothing. An ADDITION, so a consumer pinned to
@@ -447,6 +675,27 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         retiring: &[],
         families: &[],
         planes: &[],
+        carries: &[],
+    },
+    // R2184 (open-debt item 556) — revision 4 ADDS three keys to the
+    // `value_families` rows and retires nothing: `carries`, and the `word` /
+    // `keys` of the rows under it.
+    //
+    // This is where the third axis reaches a consumer at RUNTIME. Revision 3
+    // let a program ask which words a key can carry; this lets it ask which
+    // keys each word arrives with, which is the question it had to answer by
+    // reading a document and generalising. `carries` is `null` for a family
+    // whose word decides nothing — a value and not an absence, this
+    // document set's own rule — so "passenger" is something the door SAYS
+    // rather than something a reader infers from a missing key.
+    DocumentShape {
+        document: READABLE_SURFACES,
+        revision: 4,
+        keys: READABLE_SURFACES_R4_KEYS,
+        retiring: &[],
+        families: &[],
+        planes: &[],
+        carries: &[],
     },
     DocumentShape {
         document: SELECTOR_DIAGNOSE,
@@ -455,6 +704,7 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         retiring: &[],
         families: &[],
         planes: &[],
+        carries: &[],
     },
     DocumentShape {
         document: DECLARATIONS_DIAGNOSE,
@@ -463,6 +713,7 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         retiring: &[],
         families: &[],
         planes: &[],
+        carries: &[],
     },
 ];
 
@@ -1137,6 +1388,53 @@ pub const CENSUS_R5_FAMILIES: &[ValueFamily] = CENSUS_R4_FAMILIES;
 /// emit.
 pub const CENSUS_R5_PLANES: &[&str] = &["exchanges", "interests", "keyexprs", "nodes", "payloads"];
 
+/// The census document's key set at revision 6 — revision 5's, unchanged.
+///
+/// An ALIAS, on [`CENSUS_R4_KEYS`]' rule: revision 6 moves for the CARRIES axis
+/// and touches no key.
+pub const CENSUS_R6_KEYS: &[&str] = CENSUS_R5_KEYS;
+/// The census document's value families at revision 6 — revision 5's, unchanged.
+pub const CENSUS_R6_FAMILIES: &[ValueFamily] = CENSUS_R5_FAMILIES;
+/// The census document's planes at revision 6 — revision 5's, unchanged.
+pub const CENSUS_R6_PLANES: &[&str] = CENSUS_R5_PLANES;
+
+/// What each census family's WORD decides about the keys beside it, at
+/// revision 6.
+///
+/// R2184 (open-debt item 556). All five are [`CarriesShape::Passenger`], and
+/// the uniformity is the finding rather than a shrug: this document's planes
+/// are rendered by straight-line row emitters that write every key on every row
+/// and put `null` where a value does not apply, so no word of any of these five
+/// can remove a key. `interests_json` says so in six separate comments
+/// (`"null and not the declaration's own anchor"`, `"an empty string is a
+/// value"`, …) and until this row nothing measured it.
+///
+/// ⚠ SORTED BY KEY, which [`audit`] refuses to take on trust, and covering
+/// EVERY family revision 6 declares — a family missing here is a key a consumer
+/// switches on with no answer about what comes with it.
+pub const CENSUS_R6_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "asker",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "declarer",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "kind",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "mode",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "offset_space",
+        shape: CarriesShape::Passenger,
+    },
+];
+
 /// The field document's key set at revision 2.
 ///
 /// MEASURED, never transcribed — item 400's prescription, and here it had to be
@@ -1304,6 +1602,191 @@ pub const FIELDS_R3_FAMILIES: &[ValueFamily] = &[
 /// it, and then the revision would never have to move.
 pub const FIELD_VALUE_KIND_R3: &[&str] = &[
     "bits", "bytes", "flag", "label", "nested", "opaque", "text", "uint",
+];
+
+/// The field document's key set at revision 4 — revision 3's, unchanged.
+///
+/// An ALIAS, on [`CENSUS_R4_KEYS`]' rule: revision 4 moves for the CARRIES axis
+/// and touches no key. The keys it describes have all been in this set since
+/// revision 2; what was undeclared is which of them arrive TOGETHER.
+pub const FIELDS_R4_KEYS: &[&str] = FIELDS_R3_KEYS;
+/// The field document's value families at revision 4 — revision 3's, unchanged.
+pub const FIELDS_R4_FAMILIES: &[ValueFamily] = FIELDS_R3_FAMILIES;
+
+/// What each field-document family's WORD decides about the keys beside it, at
+/// revision 4.
+///
+/// R2184 (open-debt item 556) — the row the item was filed for, and the one
+/// that MEASURED more than the item claimed. Three discriminants, not two.
+///
+/// The key sets below are MEASURED, never transcribed, on the rule the key-set
+/// tables at the top of this file state: each was printed by
+/// `the_declared_carries_axis_is_the_one_the_emitters_render` over the arms it
+/// renders, and pasted back.
+///
+/// ⚠ The `keys` are the object's WHOLE companion set, envelope included, and
+/// not a diff against a sibling word. A consumer parses the object it is
+/// handed: `opaque` carries `end`, `name` and `start`; `bits` carries those
+/// three and `value`. Writing only the difference would make the list unusable
+/// for the reader it exists for and would hide the case that has no difference.
+pub const FIELDS_R4_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "direction",
+        shape: CarriesShape::Passenger,
+    },
+    // The discriminant of the field TREE. `opaque` is the word that carries no
+    // companion at all, and the consuming surface that filed item 555 lost it
+    // outright; a consumer handed the eight words and no map writes an `opaque`
+    // arm and reads `value` out of an object that has none.
+    KeyCarries {
+        key: "kind",
+        shape: CarriesShape::Discriminant(FIELD_VALUE_KIND_CARRIES_R4),
+    },
+    // THE THIRD DISCRIMINANT, and the one no reading of a `match` would have
+    // found: the word is chosen by which ROW EMITTER ran. A datagram row
+    // numbers its message with a `packet` INDEX and a stream row with a
+    // `message_at` BYTE OFFSET, and only the stream row carries the payload
+    // plane at all.
+    KeyCarries {
+        key: "offset_space",
+        shape: CarriesShape::Discriminant(FIELD_OFFSET_SPACE_CARRIES_R4),
+    },
+    KeyCarries {
+        key: "state",
+        shape: CarriesShape::Discriminant(PAYLOAD_STATE_CARRIES_R4),
+    },
+    KeyCarries {
+        key: "under",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "wrong",
+        shape: CarriesShape::Passenger,
+    },
+];
+
+/// Every shape each `fields[].kind` word's object takes, at field-document
+/// revision 4.
+///
+/// R2184 (open-debt item 556). `name`, `start` and `end` are the envelope every
+/// field object carries; the fourth key is the one the word decides — `value`
+/// for the six scalar words, `fields` for `nested`, and none at all for
+/// `opaque`, whose span is the whole answer.
+///
+/// One shape each: this object is written by a single `match` whose arm the
+/// word IS, so nothing else can vary it.
+pub const FIELD_VALUE_KIND_CARRIES_R4: &[WordCarries] = &[
+    WordCarries {
+        word: "bits",
+        shapes: &[&["end", "name", "start", "value"]],
+    },
+    WordCarries {
+        word: "bytes",
+        shapes: &[&["end", "name", "start", "value"]],
+    },
+    WordCarries {
+        word: "flag",
+        shapes: &[&["end", "name", "start", "value"]],
+    },
+    WordCarries {
+        word: "label",
+        shapes: &[&["end", "name", "start", "value"]],
+    },
+    WordCarries {
+        word: "nested",
+        shapes: &[&["end", "fields", "name", "start"]],
+    },
+    WordCarries {
+        word: "opaque",
+        shapes: &[&["end", "name", "start"]],
+    },
+    WordCarries {
+        word: "text",
+        shapes: &[&["end", "name", "start", "value"]],
+    },
+    WordCarries {
+        word: "uint",
+        shapes: &[&["end", "name", "start", "value"]],
+    },
+];
+
+/// Every shape each `fields[].offset_space` word's object takes, at
+/// field-document revision 4.
+///
+/// R2184 (open-debt item 556). The two ROW EMITTERS, stated as the contract a
+/// consumer reads: a `packet` row numbers its message by INDEX and never
+/// carries the payload plane, a `stream_byte` row numbers it by OFFSET and
+/// carries `message_at` always and `payload_decode` only when the caller
+/// supplied a format map.
+///
+/// TWO SHAPES on `stream_byte`, and they are why [`WordCarries::shapes`] is a
+/// list. `message_at` is decided by the word and `payload_decode` is decided by
+/// the caller, and a single set could state only one of those two facts.
+pub const FIELD_OFFSET_SPACE_CARRIES_R4: &[WordCarries] = &[
+    WordCarries {
+        word: "packet",
+        shapes: &[&["direction", "fields", "name", "packet"]],
+    },
+    WordCarries {
+        word: "stream_byte",
+        shapes: &[
+            &["direction", "fields", "message_at", "name"],
+            &[
+                "direction",
+                "fields",
+                "message_at",
+                "name",
+                "payload_decode",
+            ],
+        ],
+    },
+];
+
+/// Every shape each `payload_decode.state` word's object takes, at
+/// field-document revision 4.
+///
+/// R2184 (open-debt item 556) — eight words over six distinct shapes, which is
+/// the widest spread in either document and the measurement that made item 555
+/// file this as an axis rather than an exception for `opaque`.
+///
+/// ⚠ `encoding_mismatch` carries FOUR keys and not five. Item 556's own filing
+/// said it carries `refused`'s three plus `declared` and `declaration_checked`;
+/// the render says `why` is not among them. That is the third of this seam's
+/// prose measurements to be refuted by asking the emitter, which is why the
+/// item says to derive the population rather than list it.
+pub const PAYLOAD_STATE_CARRIES_R4: &[WordCarries] = &[
+    WordCarries {
+        word: "decoded",
+        shapes: &[&["despite_encoding", "fields", "format", "keyexpr"]],
+    },
+    WordCarries {
+        word: "encoding_mismatch",
+        shapes: &[&["declaration_checked", "declared", "format", "keyexpr"]],
+    },
+    WordCarries {
+        word: "keyexpr_unresolved",
+        shapes: &[&[]],
+    },
+    WordCarries {
+        word: "no_payload",
+        shapes: &[&[]],
+    },
+    WordCarries {
+        word: "no_rule",
+        shapes: &[&["keyexpr"]],
+    },
+    WordCarries {
+        word: "no_rules",
+        shapes: &[&[]],
+    },
+    WordCarries {
+        word: "not_on_the_wire",
+        shapes: &[&["descriptor_bytes"]],
+    },
+    WordCarries {
+        word: "refused",
+        shapes: &[&["format", "keyexpr", "why"]],
+    },
 ];
 
 /// `payload_decode.state` at field-document revision 2 — SORTED, which is why
@@ -1682,6 +2165,34 @@ pub const READABLE_SURFACES_R3_KEYS: &[&str] = &[
     "zbuf",
 ];
 
+/// The readable-surfaces catalogue's key set at revision 4.
+///
+/// R2184 (open-debt item 556) — revision 3's plus the three the CARRIES axis
+/// contributes: `carries` on every `value_families` row, and `word` / `shapes`
+/// on the rows under it.
+///
+/// Spelled out rather than built from [`READABLE_SURFACES_R3_KEYS`], on the
+/// rule [`ValueFamily::values`]' doc gives about a pin that follows its
+/// subject.
+pub const READABLE_SURFACES_R4_KEYS: &[&str] = &[
+    "carries",
+    "document",
+    "doors",
+    "ext_bodies",
+    "key",
+    "link_types",
+    "name",
+    "payload_field_types",
+    "revision",
+    "shapes",
+    "subsumed_by",
+    "value_families",
+    "values",
+    "word",
+    "z64",
+    "zbuf",
+];
+
 /// The selector verdict's key set at revision 1, over BOTH branches.
 ///
 /// The UNION of `{ok:true}` and `{ok:false,at,message}`: a pin over one branch
@@ -1813,7 +2324,58 @@ pub fn value_families_into(out: &mut String) {
                 }
                 let _ = write!(out, "\"{value}\"");
             }
-            out.push_str("]}");
+            // R2184 (open-debt item 556) — THE THIRD AXIS, beside the words it
+            // qualifies rather than in a door of its own. `null` for a family
+            // whose word decides nothing, on this document set's own rule that
+            // an inapplicable value is written and not omitted: a consumer that
+            // found no key here could not tell "this build does not answer that"
+            // from "this key is a passenger", which is item 554's shape one
+            // document over.
+            //
+            // Always emitted at this revision, so `carries` is never a key a
+            // reader has to test for. `audit` is what makes that safe to rely
+            // on: at the newest revision every declared family has a row.
+            out.push_str("],\"carries\":");
+            match shape.carries.iter().find(|c| c.key == family.key) {
+                Some(KeyCarries {
+                    shape: CarriesShape::Discriminant(rows),
+                    ..
+                }) => {
+                    out.push('[');
+                    for (i, row) in rows.iter().enumerate() {
+                        if i > 0 {
+                            out.push(',');
+                        }
+                        let _ = write!(out, "{{\"word\":\"{}\",\"shapes\":[", row.word);
+                        for (j, shape) in row.shapes.iter().enumerate() {
+                            if j > 0 {
+                                out.push(',');
+                            }
+                            out.push('[');
+                            for (k, key) in shape.iter().enumerate() {
+                                if k > 0 {
+                                    out.push(',');
+                                }
+                                let _ = write!(out, "\"{key}\"");
+                            }
+                            out.push(']');
+                        }
+                        out.push_str("]}");
+                    }
+                    out.push(']');
+                }
+                Some(KeyCarries {
+                    shape: CarriesShape::Passenger,
+                    ..
+                }) => out.push_str("null"),
+                // A family with no row is a programming error and is written as
+                // a value NEITHER shape can produce, on `envelope_into`'s rule
+                // about `revision: 0`: silence here would read as "passenger",
+                // which is a claim, and an undeclared family must not be able
+                // to make one by omission.
+                None => out.push_str("\"undeclared\""),
+            }
+            out.push('}');
         }
     }
 }
@@ -2092,6 +2654,109 @@ pub fn emitted_planes(doc: &str) -> Vec<&str> {
     planes
 }
 
+/// Every JSON OBJECT in `doc`, each as its OWN `(key, raw value)` entries.
+///
+/// R2184 (open-debt item 556) — the THIRD walker, and the reason it is a third
+/// rather than a widening of either sibling is the question it answers.
+/// [`json_keys`] flattens every depth into one list, so a key's neighbours are
+/// unrecoverable from it; [`top_level_entries`] recovers exactly one object's
+/// own entries and stops, so an array of rows yields only its first element.
+/// What "which keys accompany this value" needs is every object's OWN key set,
+/// wherever that object sits.
+///
+/// ONE opinion about what an object entry is: each scope is parsed by
+/// [`top_level_entries`] applied at the `{` that opens it, which is the same
+/// move [`emitted_planes`] makes to look inside a plane. This function's own
+/// work is only FINDING the openings — a linear scan that tracks string state
+/// so a brace inside a string never opens a scope.
+///
+/// Outermost first, in order of appearance, duplicates kept: two rows with the
+/// same shape are two observations, and collapsing them here would decide a
+/// question the caller has not asked yet.
+pub fn object_scopes(doc: &str) -> Vec<Vec<(&str, &str)>> {
+    let b = doc.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    let mut in_str = false;
+    while i < b.len() {
+        let c = b[i];
+        if in_str {
+            if c == b'\\' {
+                i += 2;
+                continue;
+            }
+            if c == b'"' {
+                in_str = false;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            b'"' => in_str = true,
+            b'{' => out.push(top_level_entries(&doc[i..])),
+            _ => {}
+        }
+        i += 1;
+    }
+    out
+}
+
+/// For `key`, ONE ENTRY PER OCCURRENCE: the word it carried there, and the
+/// keys that occurrence's own object carried beside it.
+///
+/// R2184 (open-debt item 556) — the derivation behind [`CarriesShape`], and the
+/// axis neither [`DocumentShape::keys`] nor [`ValueFamily::values`] can express.
+/// A consumer that switches on a value goes on to read the keys that value
+/// arrived with, and until this axis existed it read them off today's
+/// rendering: `fields[].kind == "opaque"` arrives with NO `value`, and
+/// `payload_decode.state` spreads eight words over six different companion
+/// sets.
+///
+/// ⚠ PER OCCURRENCE, NOT UNIONED PER WORD, and the difference is the whole
+/// classification. MEASURED on 2026-08-29 while this item was being derived: a
+/// union per word reports `fields[].direction == "a"` carrying `packet` AND
+/// `message_at` — a shape NO ROW OF THAT DOCUMENT HAS, because `a` occurs once
+/// in a datagram row and once in a stream row. Classifying from that is
+/// classifying from a set the document never emitted, and what it destroys is
+/// exactly the observation that decides the question: whether one word ever
+/// arrives in two different shapes.
+///
+/// The choice is load-bearing rather than tidy. PROBED: making this function
+/// union per word turns `census.offset_space` from a passenger into a
+/// discriminant and reds
+/// `the_declared_carries_axis_is_the_one_the_emitters_render`. `fields`
+/// survives that particular mutation because its gate renders four separate
+/// documents and keeps their answers apart, which is a second reason the
+/// caller groups and this function only observes.
+///
+/// Each occurrence's companion list is sorted and deduped, so two observations
+/// of one shape compare equal. The entries themselves keep document order.
+///
+/// Only a STRING value counts as a word, on [`json_string_values`]' rule — a
+/// number, an object or a `null` is not something a `switch` reads.
+pub fn companions<'a>(doc: &'a str, key: &str) -> Vec<(&'a str, Vec<&'a str>)> {
+    let mut out: Vec<(&str, Vec<&str>)> = Vec::new();
+    for scope in object_scopes(doc) {
+        let Some((_, raw)) = scope.iter().find(|(k, _)| *k == key) else {
+            continue;
+        };
+        let bytes = raw.as_bytes();
+        if bytes.len() < 2 || bytes[0] != b'"' || bytes[bytes.len() - 1] != b'"' {
+            continue;
+        }
+        let word = &raw[1..raw.len() - 1];
+        let mut beside: Vec<&str> = scope
+            .iter()
+            .map(|(k, _)| *k)
+            .filter(|k| *k != key)
+            .collect();
+        beside.sort_unstable();
+        beside.dedup();
+        out.push((word, beside));
+    }
+    out
+}
+
 /// Check a revision history for the rules that make a rename expressible and a
 /// silent break impossible.
 ///
@@ -2283,6 +2948,139 @@ pub fn audit(rows: &[DocumentShape]) -> Result<(), String> {
                     ));
                 }
             }
+
+            // R2184 (open-debt item 556) — THE CARRIES AXIS.
+            //
+            // Five rules. The FIRST is the one that keeps this from becoming
+            // the unmeasured default R2181 had just finished closing on
+            // `planes`: at the NEWEST revision of a document, every family it
+            // declares has a row here. An older revision may carry `&[]`,
+            // because "this revision did not declare the axis" is true of it;
+            // the newest may not, because that is what the library emits today.
+            let mut carried: Vec<&str> = row.carries.iter().map(|c| c.key).collect();
+            let unsorted = carried.clone();
+            carried.sort_unstable();
+            if carried != unsorted {
+                return Err(alloc::format!(
+                    "{name} r{}: the carries rows are not sorted by key",
+                    row.revision
+                ));
+            }
+            carried.dedup();
+            if carried.len() != row.carries.len() {
+                return Err(alloc::format!(
+                    "{name} r{}: two carries rows claim one key; a key decides \
+                     the shape beside it or it does not",
+                    row.revision
+                ));
+            }
+            for entry in row.carries {
+                let Some(family) = row.families.iter().find(|f| f.key == entry.key) else {
+                    return Err(alloc::format!(
+                        "{name} r{}: a carries row is declared for {:?}, which this \
+                         revision declares no family for; an entry for something \
+                         that cannot occur is proof the list was never checked",
+                        row.revision,
+                        entry.key
+                    ));
+                };
+                let CarriesShape::Discriminant(words) = &entry.shape else {
+                    continue;
+                };
+                let listed: Vec<&str> = words.iter().map(|w| w.word).collect();
+                if listed != family.values.to_vec() {
+                    return Err(alloc::format!(
+                        "{name} r{}: the carries rows for {:?} name {listed:?} and the \
+                         family declares {:?}. Every word gets a row, sorted the way \
+                         the vocabulary is: a word with no row is one a consumer \
+                         switches on with no answer, and a row with no word describes \
+                         something that cannot arrive",
+                        row.revision,
+                        entry.key,
+                        family.values
+                    ));
+                }
+                for word in *words {
+                    // A word with NO shape is one nothing was measured about;
+                    // a word whose object carries nothing else is one EMPTY
+                    // shape, which is `fields[].kind == "opaque"`.
+                    if word.shapes.is_empty() {
+                        return Err(alloc::format!(
+                            "{name} r{}: {:?} = {:?} declares no shape at all, so it \
+                             asserts nothing about the object it names",
+                            row.revision,
+                            entry.key,
+                            word.word
+                        ));
+                    }
+                    let mut seen: Vec<&[&str]> = Vec::new();
+                    for shape in word.shapes {
+                        let mut sorted: Vec<&str> = shape.to_vec();
+                        sorted.sort_unstable();
+                        if sorted != *shape {
+                            return Err(alloc::format!(
+                                "{name} r{}: a shape of {:?} = {:?} is not sorted, so \
+                                 comparing two revisions would depend on typing order",
+                                row.revision,
+                                entry.key,
+                                word.word
+                            ));
+                        }
+                        let mut deduped = sorted.clone();
+                        deduped.dedup();
+                        if deduped.len() != sorted.len() {
+                            return Err(alloc::format!(
+                                "{name} r{}: a shape of {:?} = {:?} repeats a key",
+                                row.revision,
+                                entry.key,
+                                word.word
+                            ));
+                        }
+                        if seen.contains(shape) {
+                            return Err(alloc::format!(
+                                "{name} r{}: {:?} = {:?} lists one shape twice",
+                                row.revision,
+                                entry.key,
+                                word.word
+                            ));
+                        }
+                        seen.push(shape);
+                    }
+                }
+                // A DISCRIMINANT WHOSE WORDS DECIDE NO KEY IS A PASSENGER,
+                // mis-declared. Without this the axis rots into "every family
+                // is a discriminant carrying one list", which says exactly what
+                // the key set already said and would let the derivation gate
+                // pass over a claim with no content. Computed by
+                // [`decides_a_key`], the SAME predicate the derivation uses, so
+                // the table and the emitters cannot be judged by two rules.
+                if !decides_a_key(words) {
+                    return Err(alloc::format!(
+                        "{name} r{}: {:?} is declared a discriminant and no key is \
+                         decided by the word — none that one word always brings and \
+                         another never does. That is what `Passenger` says",
+                        row.revision,
+                        entry.key
+                    ));
+                }
+            }
+        }
+        for row in &ordered {
+            if row.revision != ordered[ordered.len() - 1].revision {
+                continue;
+            }
+            let declared: Vec<&str> = row.families.iter().map(|f| f.key).collect();
+            let carried: Vec<&str> = row.carries.iter().map(|c| c.key).collect();
+            if declared != carried {
+                return Err(alloc::format!(
+                    "{name} r{} is the newest revision and declares families {declared:?} \
+                     against carries rows {carried:?}. Every family the library emits \
+                     today says whether its word decides the keys beside it; a family \
+                     with no row is the unmeasured default this axis was added to \
+                     abolish",
+                    row.revision
+                ));
+            }
         }
         // THE RULE ITEM 509 EXISTS FOR: a key may only leave after the
         // revision before it said so. That is what turns a rename into
@@ -2382,6 +3180,25 @@ mod tests {
         with_planes(revision, keys, retiring, families, &[])
     }
 
+    /// R2184 (open-debt item 556) — a row carrying the CARRIES axis, for the
+    /// reason `with_planes` gives one axis over.
+    fn with_carries(
+        revision: u32,
+        keys: &'static [&'static str],
+        families: &'static [ValueFamily],
+        carries: &'static [KeyCarries],
+    ) -> DocumentShape {
+        DocumentShape {
+            document: "d",
+            revision,
+            keys,
+            retiring: &[],
+            families,
+            planes: &[],
+            carries,
+        }
+    }
+
     /// R2180 (open-debt item 554) — a row carrying PLANES, for the reason
     /// `with_families` gives one axis over: the real table satisfies the plane
     /// rules by construction, so a checker only ever run against it would be a
@@ -2400,6 +3217,7 @@ mod tests {
             retiring,
             families,
             planes,
+            carries: &[],
         }
     }
 
@@ -2639,7 +3457,11 @@ mod tests {
             // either: it declares which of its top-level keys are PLANES, and
             // the envelope carries that list, so a consumer reads it off the
             // document instead of inferring it from a `null`.
-            (CENSUS, 5u32),
+            // R2184 (item 556) — to 6 for the THIRD axis: which of its
+            // families' words decide the keys that arrive beside them. All
+            // five are passengers, which is a measured verdict about
+            // straight-line row emitters and not a shrug.
+            (CENSUS, 6u32),
             // R2175 (open-debt item 552) — the field document moved to 2 when
             // its PAYLOAD PLANE joined the pin (fifteen keys revision 1 had
             // never covered) and its first three value families were declared.
@@ -2647,14 +3469,21 @@ mod tests {
             // own discriminant, gained the sixth family. No key moved: `kind`
             // had been pinned since revision 1 and the eight words inside it
             // were declared by nothing.
-            (FIELDS, 3),
+            // R2184 (item 556) — to 4 for the carries axis, which found THREE
+            // discriminants where the item that filed it had measured two:
+            // `offset_space` decides its shape through two row emitters rather
+            // than through two arms of one `match`.
+            (FIELDS, 4),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.
             (SUMMARY, 3),
             // R2175 (open-debt item 552) — to 3 when it gained
             // `value_families`, the catalogue of every switchable key's words.
-            (READABLE_SURFACES, 3),
+            // R2184 (item 556) — to 4 when the `value_families` rows gained
+            // `carries` and the `word` / `keys` under it, which is where the
+            // third axis reaches a consumer at runtime.
+            (READABLE_SURFACES, 4),
             (SELECTOR_DIAGNOSE, 1),
             (DECLARATIONS_DIAGNOSE, 1),
         ] {
@@ -2805,5 +3634,211 @@ mod tests {
         // everything.
         audit(&[with_planes(1, WITH_PLANES, &[], &[], &["alpha", "beta"])])
             .expect("a well-formed plane declaration");
+    }
+
+    /// R2184 (open-debt item 556) — THE CARRIES RULES, driven over histories
+    /// the shipped table does not contain.
+    ///
+    /// [`audit`]'s own doc gives the reason, and it applies to this axis with
+    /// more force than to the two before it: the shipped table was written
+    /// against these rules, so every one of them holds there by construction.
+    /// Each arm below is a history a future round could plausibly write.
+    ///
+    /// ⚠ THE CONTROL GROUP IS NAMED. Every arm here varies exactly one thing
+    /// against the passing row at the end — the shape, the sort, the coverage,
+    /// the key — and holds the rest FIXED: the document name, the key set, the
+    /// vocabulary, the revision number and the family list. The 2026-08-29
+    /// measurement that made this paragraph necessary is that five probe arms
+    /// all missed for one reason, and the reason was in what they had held
+    /// fixed rather than in what they varied.
+    #[test]
+    fn a_carries_row_names_a_family_and_a_discriminant_says_something() {
+        const KEYS: &[&str] = &["document", "kind", "name", "revision"];
+        const WORDS: &[&str] = &["one", "two"];
+        const FAMILIES: &[ValueFamily] = &[ValueFamily {
+            key: "kind",
+            values: WORDS,
+        }];
+        const SPLIT: &[WordCarries] = &[
+            WordCarries {
+                word: "one",
+                shapes: &[&["a"]],
+            },
+            WordCarries {
+                word: "two",
+                shapes: &[&["b"]],
+            },
+        ];
+
+        // A row for a key this revision declares no family for — the rule item
+        // 550 paid for, applied to the fourth list.
+        let err = audit(&[with_carries(
+            1,
+            KEYS,
+            FAMILIES,
+            &[KeyCarries {
+                key: "name",
+                shape: CarriesShape::Passenger,
+            }],
+        )])
+        .expect_err("a carries row over a key with no family");
+        assert!(err.contains("declares no family for"), "{err}");
+
+        // A DISCRIMINANT WHOSE WORDS ALL BRING THE SAME KEYS is a passenger,
+        // and this is the arm that keeps the axis from rotting into "every
+        // family is a discriminant carrying one list", which restates the key
+        // set and asserts nothing.
+        const FLAT: &[WordCarries] = &[
+            WordCarries {
+                word: "one",
+                shapes: &[&["a"]],
+            },
+            WordCarries {
+                word: "two",
+                shapes: &[&["a"]],
+            },
+        ];
+        let err = audit(&[with_carries(
+            1,
+            KEYS,
+            FAMILIES,
+            &[KeyCarries {
+                key: "kind",
+                shape: CarriesShape::Discriminant(FLAT),
+            }],
+        )])
+        .expect_err("a discriminant that discriminates nothing");
+        assert!(err.contains("no key is decided by the word"), "{err}");
+
+        // A word missing its row: the consumer switching on it has no answer.
+        const SHORT: &[WordCarries] = &[WordCarries {
+            word: "one",
+            shapes: &[&["a"]],
+        }];
+        let err = audit(&[with_carries(
+            1,
+            KEYS,
+            FAMILIES,
+            &[KeyCarries {
+                key: "kind",
+                shape: CarriesShape::Discriminant(SHORT),
+            }],
+        )])
+        .expect_err("a word with no carries row");
+        assert!(err.contains("Every word gets a row"), "{err}");
+
+        // Unsorted companion keys, so two revisions could not be compared
+        // without knowing the order someone typed them in.
+        const UNSORTED: &[WordCarries] = &[
+            WordCarries {
+                word: "one",
+                shapes: &[&["b", "a"]],
+            },
+            WordCarries {
+                word: "two",
+                shapes: &[&["b"]],
+            },
+        ];
+        let err = audit(&[with_carries(
+            1,
+            KEYS,
+            FAMILIES,
+            &[KeyCarries {
+                key: "kind",
+                shape: CarriesShape::Discriminant(UNSORTED),
+            }],
+        )])
+        .expect_err("unsorted companion keys");
+        assert!(err.contains("is not sorted"), "{err}");
+
+        // A word with NO shape at all, which is not the same as a word whose
+        // object carries nothing beside it — that one is a single EMPTY shape,
+        // and it is `fields[].kind == "opaque"`.
+        const SHAPELESS: &[WordCarries] = &[
+            WordCarries {
+                word: "one",
+                shapes: &[],
+            },
+            WordCarries {
+                word: "two",
+                shapes: &[&["b"]],
+            },
+        ];
+        let err = audit(&[with_carries(
+            1,
+            KEYS,
+            FAMILIES,
+            &[KeyCarries {
+                key: "kind",
+                shape: CarriesShape::Discriminant(SHAPELESS),
+            }],
+        )])
+        .expect_err("a word with no shape");
+        assert!(err.contains("declares no shape at all"), "{err}");
+
+        // THE ASYMMETRY `decides_a_key` rests on, driven from the declaration
+        // side: `one` SOMETIMES brings `a` and `two` never does. Nothing is
+        // decided by the word — a consumer told "a comes with one" would be
+        // wrong half the time — so this is a passenger however much the two
+        // lists differ. A rule comparing unions, or comparing intersections,
+        // passes this row.
+        const SOMETIMES: &[WordCarries] = &[
+            WordCarries {
+                word: "one",
+                shapes: &[&["a"], &[]],
+            },
+            WordCarries {
+                word: "two",
+                shapes: &[&[]],
+            },
+        ];
+        let err = audit(&[with_carries(
+            1,
+            KEYS,
+            FAMILIES,
+            &[KeyCarries {
+                key: "kind",
+                shape: CarriesShape::Discriminant(SOMETIMES),
+            }],
+        )])
+        .expect_err("a word that only sometimes brings its key");
+        assert!(err.contains("no key is decided by the word"), "{err}");
+
+        // THE RULE THIS AXIS EXISTS FOR: the newest revision of a document that
+        // declares a family declares its carries row too. Without it the axis
+        // is the unmeasured default R2181 had just finished closing on planes.
+        let err = audit(&[with_carries(1, KEYS, FAMILIES, &[])])
+            .expect_err("a newest revision with a family and no carries row");
+        assert!(err.contains("is the newest revision"), "{err}");
+
+        // And an OLDER revision may carry none, which is the other half of the
+        // same rule: "this revision did not declare the axis" is true of it.
+        audit(&[
+            with_carries(1, KEYS, FAMILIES, &[]),
+            with_carries(
+                2,
+                KEYS,
+                FAMILIES,
+                &[KeyCarries {
+                    key: "kind",
+                    shape: CarriesShape::Discriminant(SPLIT),
+                }],
+            ),
+        ])
+        .expect("an older revision that had not made the judgement");
+
+        // The control: one row, the family declared, the words split across two
+        // shapes, sorted. Without it every assertion above would be satisfied
+        // by an `audit` that refused everything.
+        audit(&[with_carries(
+            1,
+            KEYS,
+            FAMILIES,
+            &[KeyCarries {
+                key: "kind",
+                shape: CarriesShape::Discriminant(SPLIT),
+            }],
+        )])
+        .expect("a well-formed carries declaration");
     }
 }

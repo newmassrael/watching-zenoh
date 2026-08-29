@@ -1820,27 +1820,33 @@ mod tests {
             .split("],\"doors\"")
             .next()
             .expect("the array is followed by the doors array");
+        // ⚠ R2184 (open-debt item 556) — THE ROWS ARE WALKED, NOT SPLIT ON
+        // `"},{"`. That split was this test's own reading of the array until
+        // the `carries` axis put OBJECTS inside a row, at which point the
+        // separator occurred inside a row as often as between two. It is the
+        // same defect R2182 paid for one consumer over — a C reader matching a
+        // prefix that ended in `}` broke when R2180 put a list in the envelope
+        // — and the repair is the same: ask the walker what an object is
+        // instead of guessing from punctuation.
+        //
+        // A FAMILY ROW is one carrying `key` and `values`; the objects nested
+        // under `carries` carry `word` and `shapes` and are skipped by that
+        // test rather than by their position.
         let mut emitted: Vec<(String, String)> = Vec::new();
         let mut words: Vec<(String, Vec<String>)> = Vec::new();
-        for row in rows.split("},{") {
-            let field = |key: &str| -> String {
-                row.split(&format!("\"{key}\":\""))
-                    .nth(1)
-                    .unwrap_or_else(|| panic!("a value_families row with no {key}: {row}"))
-                    .split('"')
-                    .next()
-                    .expect("a quoted value closes")
-                    .to_string()
+        for scope in wz_capture::doc_revision::object_scopes(rows) {
+            let entry = |key: &str| -> Option<String> {
+                scope
+                    .iter()
+                    .find(|(k, _)| *k == key)
+                    .map(|(_, v)| v.trim_matches('"').to_string())
             };
-            let name = field("name");
-            let key = field("key");
-            let values: Vec<String> = row
-                .split("\"values\":[")
-                .nth(1)
-                .expect("a row carries its words")
-                .split(']')
-                .next()
-                .expect("the word list closes")
+            let (Some(key), Some(raw_values)) = (entry("key"), entry("values")) else {
+                continue;
+            };
+            let name = entry("name").expect("a family row names its document");
+            let values: Vec<String> = raw_values
+                .trim_matches(|c| c == '[' || c == ']')
                 .split(',')
                 .map(|w| w.trim_matches('"').to_string())
                 .collect();
@@ -1895,6 +1901,127 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// R2184 (open-debt item 556) — THE HEADER AND THE LIBRARY AGREE ABOUT
+    /// WHICH FAMILIES DECIDE THE KEYS BESIDE THEM.
+    ///
+    /// # Why a marker and not the paragraph
+    ///
+    /// The sibling above is the precedent and the reason: a contract stated
+    /// only in prose is one nothing measures, and this header has now been
+    /// found stale twice about lists it described in sentences. `@carries
+    /// <document> <key> <passenger|discriminant>` is a form a machine can
+    /// check, so the classification a C consumer reads and the one the library
+    /// emits cannot drift apart in silence.
+    ///
+    /// # Both directions, and the THIRD token is the one with content
+    ///
+    /// A family with no marker is a key a consumer switches on with no
+    /// published answer about what comes with it. A marker with no family is an
+    /// entry for something that cannot occur. And a marker whose VERDICT
+    /// disagrees with the document is worse than either: it tells a consumer to
+    /// read a key unconditionally that the library sometimes omits, which is
+    /// the parse contract item 556 was filed about, restated in the header.
+    ///
+    /// The library side is read from the ARTIFACT, on the sibling's rule: a
+    /// gate that read the Rust table would assert that a constant equals
+    /// itself.
+    #[test]
+    fn the_header_and_the_library_agree_about_every_carries_axis() {
+        const HEADER: &str = include_str!("../include/wz_dissect.h");
+
+        // MARKED: `@carries <document> <key> <verdict>`. All three tokens must
+        // be lowercase identifiers, which is the `@values` marker's rule and
+        // keeps the paragraph DOCUMENTING the marker from being read as one --
+        // `<document>` is not an identifier. The verdict must be one of the two
+        // words, so a typo is an unmarked family rather than a third state.
+        let ident =
+            |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_lowercase() || b == b'_');
+        let mut marked: Vec<(String, String, String)> = HEADER
+            .lines()
+            .filter_map(|l| l.split("@carries ").nth(1))
+            .filter_map(|rest| {
+                let mut parts = rest.split_whitespace();
+                let document = parts.next()?;
+                let key = parts.next()?;
+                let verdict = parts.next()?;
+                (ident(document) && ident(key) && matches!(verdict, "passenger" | "discriminant"))
+                    .then(|| (document.to_string(), key.to_string(), verdict.to_string()))
+            })
+            .collect();
+        marked.sort();
+        marked.dedup();
+
+        // EMITTED: the `carries` axis of the rows the catalogue hands back,
+        // walked rather than split on punctuation for the reason the sibling's
+        // own comment gives.
+        let catalogue = call_readable_surfaces();
+        let rows = catalogue
+            .split("\"value_families\":[")
+            .nth(1)
+            .expect("the catalogue carries the value_families array")
+            .split("],\"doors\"")
+            .next()
+            .expect("the array is followed by the doors array");
+        let mut emitted: Vec<(String, String, String)> = Vec::new();
+        for scope in wz_capture::doc_revision::object_scopes(rows) {
+            let entry = |key: &str| -> Option<String> {
+                scope
+                    .iter()
+                    .find(|(k, _)| *k == key)
+                    .map(|(_, v)| v.to_string())
+            };
+            let (Some(key), Some(carries)) = (entry("key"), entry("carries")) else {
+                continue;
+            };
+            if entry("values").is_none() {
+                continue;
+            }
+            let name = entry("name").expect("a family row names its document");
+            // `null` says PASSENGER and an array says DISCRIMINANT. Anything
+            // else is the `"undeclared"` sentinel `value_families_into` writes
+            // for a family with no row, and it must not be read as either.
+            let verdict = match carries.as_str() {
+                "null" => "passenger",
+                other if other.starts_with('[') => "discriminant",
+                other => panic!(
+                    "the catalogue reports carries {other} for {key:?}, which is neither \
+                     a passenger nor a discriminant"
+                ),
+            };
+            emitted.push((
+                name.trim_matches('"').to_string(),
+                key.trim_matches('"').to_string(),
+                verdict.to_string(),
+            ));
+        }
+        emitted.sort();
+
+        // A population of zero would make the comparison below trivially true,
+        // which is this workspace's most expensive recurring defect.
+        assert!(
+            !emitted.is_empty(),
+            "the catalogue reported no value families at all, so the comparison \
+             below would pass by having nothing to compare"
+        );
+        // A FLOOR PER VERDICT, not a total. R2181's lesson: eight of the eleven
+        // are passengers, so a single count stays large while the discriminant
+        // arm holds over an empty set.
+        assert!(
+            emitted.iter().any(|(_, _, v)| v == "discriminant")
+                && emitted.iter().any(|(_, _, v)| v == "passenger"),
+            "the catalogue reports {emitted:?}; an axis where every family answers \
+             the same way says nothing the key set did not already say"
+        );
+        assert_eq!(
+            emitted, marked,
+            "the header's `@carries` markers and the classification this library \
+             emits disagree. A family with no marker is a key a consumer switches \
+             on with no published answer about what comes with it; a marker with \
+             the wrong verdict tells a consumer to read a key unconditionally that \
+             this build sometimes omits."
+        );
     }
 
     /// ITEM 281 — AND SO DOES THIS CRATE'S OWN RUSTDOC, which is the THIRD
@@ -3859,9 +3986,11 @@ mod tests {
         // R2175 (open-debt item 552) — revision 3, because it grew
         // `value_families`: which keys carry a closed vocabulary, and what it
         // is. The literal moves with it, on the same reasoning.
+        // R2184 (open-debt item 556) — revision 4, because those rows grew
+        // `carries`: which keys arrive beside each word.
         assert!(
             doc.starts_with(
-                "{\"document\":{\"name\":\"readable_surfaces\",\"revision\":3},\"link_types\":\""
+                "{\"document\":{\"name\":\"readable_surfaces\",\"revision\":4},\"link_types\":\""
             ),
             "the document is one JSON object opening with its revision: {doc}"
         );

@@ -212,6 +212,63 @@
  * so a plane added later cannot arrive unmarked and a marker cannot outlive the
  * plane it names.
  *
+ * R2184 — AND WHICH KEYS ARRIVE BESIDE A VALUE, which is the third axis and the
+ * one the two above are each blind to.
+ *
+ * The key set is a UNION over the whole document, so it cannot say "sometimes
+ * absent": `value` is in the field document's key set whether the object that
+ * would carry it opened or not. The vocabulary sees the WORD and stops there.
+ * So the sentence you actually need -- IF `kind` IS `opaque`, DO NOT LOOK FOR
+ * `value` -- was expressible in neither, and every consumer of this ABI was
+ * reading it off whatever the rendering happened to do. One of them lost
+ * `opaque` to exactly that.
+ *
+ * Every family in `value_families` now carries a `carries` axis:
+ *
+ *     {"name":"fields","revision":4,"key":"kind","values":[...],
+ *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
+ *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
+ *
+ *     {"name":"census","revision":6,"key":"mode","values":[...],
+ *      "carries":null}
+ *
+ * `null` is a VALUE here and not an absence: it says the word is a PASSENGER --
+ * it decides nothing about the object it sits in, which is a record whose shape
+ * something else fixes, and where an inapplicable companion arrives as `null`
+ * rather than as a missing key. A list says the word is a DISCRIMINANT, and
+ * gives every SHAPE that word's object is emitted in.
+ *
+ * ⚠ A LIST OF SHAPES AND NOT ONE SHAPE, because a word does not always fix the
+ * whole object. `fields[].offset_space == "stream_byte"` arrives in two shapes,
+ * with `payload_decode` and without, because that plane is present only when
+ * you supplied a format map -- so the word decides `message_at` and does not
+ * decide `payload_decode`, and both are true at once. A key in EVERY shape of a
+ * word is one you may read unconditionally; a key in some of them is one to
+ * test for.
+ *
+ * @carries census asker passenger
+ * @carries census declarer passenger
+ * @carries census kind passenger
+ * @carries census mode passenger
+ * @carries census offset_space passenger
+ * @carries fields direction passenger
+ * @carries fields kind discriminant
+ * @carries fields offset_space discriminant
+ * @carries fields state discriminant
+ * @carries fields under passenger
+ * @carries fields wrong passenger
+ *
+ * `the_header_and_the_library_agree_about_every_carries_axis` holds both
+ * directions, so a family reclassified later cannot arrive unmarked and a
+ * marker cannot outlive the family it names.
+ *
+ * ⚠ THE CENSUS'S FIVE ARE PASSENGERS BECAUSE ITS ROW EMITTERS ARE
+ * STRAIGHT-LINE, not because nobody looked: every row writes every key and puts
+ * `null` where a value does not apply. That is a measured property of this
+ * build, held by `the_declared_carries_axis_is_the_one_the_emitters_render`
+ * over rendered documents, and a row emitter that started choosing keys by a
+ * word fails there rather than reaching you.
+ *
  * R2119 — THE FIRST RENAME TO USE THAT NOTICE, so the paragraph above is now
  * a description of something that happened rather than a promise. At census
  * REVISION 2 the node rows carried two keys for one value:

@@ -1024,8 +1024,13 @@ int main(void) {
      * R2180 (item 554) -- 5, and again NO KEY MOVED for a consumer's purposes:
      * the envelope now carries `planes`, the list of this document's top-level
      * keys that are planes, so `exchanges: null` is readable as "a plane this
-     * build cannot feed" instead of by knowing which keys are planes. */
-    revisioned[0].revision = 5;
+     * build cannot feed" instead of by knowing which keys are planes.
+     * R2184 (item 556) -- 6, and again no key: this revision says of each of
+     * those five families whether the WORD decides which keys arrive beside it.
+     * All five are passengers here -- these rows write every key and put `null`
+     * where a value does not apply -- which is a promise a consumer can now
+     * read rather than infer. */
+    revisioned[0].revision = 6;
     revisioned[0].doc = NULL;
     rc = wz_dissect_pcap_census(pcap, sizeof pcap, &revisioned[0].doc);
     CHECK(rc == WZ_DISSECT_OK, "census rc=%d", rc);
@@ -1052,16 +1057,24 @@ int main(void) {
      * to say so.
      * R2182 (item 555) -- 3 when `fields[].kind` gained a declared vocabulary.
      * The tree's own discriminant: eight words, and the surface that reported
-     * this had seven, because `opaque` is the arm no capture produces. */
-    revisioned[2].revision = 3;
+     * this had seven, because `opaque` is the arm no capture produces.
+     * R2184 (item 556) -- 4 when every family here said whether its word
+     * decides the keys beside it. THREE of the six do: `kind`, `state` and
+     * `offset_space`, the last through two row emitters rather than two arms
+     * of one match. Reading `value` off an `opaque` field is the parse this
+     * revision exists to stop. */
+    revisioned[2].revision = 4;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);
     revisioned[3].name = "readable_surfaces";
     /* R2175 (item 552) -- 3 when it gained `value_families`: which keys carry a
      * closed vocabulary and what it is, so a consumer can ASK rather than
-     * discover a widened set as a switch fallthrough. */
-    revisioned[3].revision = 3;
+     * discover a widened set as a switch fallthrough.
+     * R2184 (item 556) -- 4 when those rows gained `carries`, and `word` /
+     * `shapes` under it: which keys arrive beside each word, or `null` when the
+     * word decides none. */
+    revisioned[3].revision = 4;
     revisioned[3].doc = NULL;
     rc = wz_dissect_readable_surfaces(&revisioned[3].doc);
     CHECK(rc == WZ_DISSECT_OK, "surfaces rc=%d", rc);

@@ -1326,6 +1326,69 @@ pub(crate) mod fed_tests {
         every_plane_capture_with_file(keyexpr, None, false).0
     }
 
+    /// R2184 (open-debt item 556) — TWO INTERESTS, ONE PER DIRECTION, IN TWO
+    /// MODES, so the `requests` row is seen more than once with the word
+    /// changed.
+    ///
+    /// A fixture of its own rather than a widening of [`every_plane_capture`],
+    /// and the reason is that fixture's own doc: every caller of it sees a
+    /// byte-identical capture, and the key-set pins and the plane assertions
+    /// are taken over exactly those bytes. Adding a second interest there would
+    /// move pins that are measuring something else.
+    ///
+    /// What it exists for: the carries axis classifies a family by asking
+    /// whether the WORD decides the keys beside it, and a family observed with
+    /// ONE word cannot answer — the comparison would hold by having nothing to
+    /// compare. Three census families are reached by the every-plane capture
+    /// with a single word each: `asker` (`a`), `mode` (`current`) and
+    /// `offset_space` (`stream_byte`).
+    ///
+    /// ⚠ OVER UDP, and that is what closes the third. A datagram link has no
+    /// stream for an offset to be into, so every record it carries is anchored
+    /// by PACKET INDEX — which is the second `offset_space` word, and one no
+    /// TCP fixture in this crate can produce. The two interests then supply
+    /// `asker` and `mode` from the same rows.
+    ///
+    /// Gated exactly as its ONE caller is, and not more loosely: the carries
+    /// gate lives in `fields_json`, which the `dissect` feature selects, and is
+    /// itself `network-codecs`-gated. A fixture whose gate is wider than its
+    /// caller's is dead code in every build between the two, which is what
+    /// Layer C1bn — `cargo test -p wz-capture` at DEFAULT features, where
+    /// `dissect` is off — refuses.
+    #[cfg(all(feature = "dissect", feature = "network-codecs"))]
+    pub(crate) fn interest_pair_capture() -> Dissection {
+        let ask = |id: u64, current: bool, future: bool| {
+            crate::datagram_tests::frame_carrying(
+                &wz_session_core::interest_build::build_interest_subscribers(
+                    id,
+                    current,
+                    future,
+                    0,
+                    Some("demo/**"),
+                )
+                .expect("the production interest builder")
+                .try_as_borrowed()
+                .expect("re-borrow")
+                .encode_to_vec(),
+            )
+        };
+        const LOW: [u8; 4] = [10, 0, 0, 1];
+        const HIGH: [u8; 4] = [10, 0, 0, 2];
+        let mut d = Dissection::new();
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            0,
+            &crate::datagram_tests::udp_packet(LOW, 43210, HIGH, 7447, &ask(9, true, false)),
+        );
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            1,
+            &crate::datagram_tests::udp_packet(HIGH, 7447, LOW, 43210, &ask(10, false, true)),
+        );
+        d.finish();
+        d
+    }
+
     /// Round 2001 (item 473) — THE THIRD RENDERING IS THE SAME ROWS.
     ///
     /// `crate::census_csv` exists so a plane can reach a table tool, and the
