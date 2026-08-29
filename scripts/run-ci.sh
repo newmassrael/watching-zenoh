@@ -1976,6 +1976,22 @@ PY
     # reported seven findings that were one mistake.
     python3 scripts/lib/self_counted_table_gate.py --selftest || return 1
     python3 scripts/lib/self_counted_table_gate.py --check || return 1
+    # R2190 (open-debt item 530, NARROWED) — a cargo command written down in
+    # this tree names features that exist.
+    #
+    # Item 530's second measured case: R2161 renamed a feature, and every
+    # LOADED site was caught by something — `#[cfg]` by rustc's
+    # `unexpected_cfgs`, the manifests by cargo's resolve, the gate tables by
+    # `--census`. The COMMENTS were caught by nothing. This adjudicates the one
+    # shape of prose that has a form to adjudicate: a cargo invocation, whose
+    # package resolves from `-p` or from the crate the file lives in, against
+    # `cargo metadata`.
+    #
+    # NOT a phrase list, and item 530 measured why rather than arguing it: a
+    # gate banning the retired spelling would have redded R2161's own commit,
+    # which quoted it three times to describe the rename.
+    python3 scripts/lib/prose_feature_gate.py --selftest || return 1
+    python3 scripts/lib/prose_feature_gate.py --check || return 1
     # R311y605 — the DISSECT FEATURE CENSUS, the name census's sibling one level
     # up. `dissect`'s doc says it selects the whole codec-* MID space so "an
     # observer reads every message it sees", and the claim had been wrong THREE
