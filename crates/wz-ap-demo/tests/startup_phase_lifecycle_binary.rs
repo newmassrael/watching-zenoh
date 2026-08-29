@@ -91,8 +91,22 @@ fn give_up_code() -> i32 {
         .unwrap_or_else(|e| panic!("STARTUP_PHASE_EXIT_CODE is not a number ({e}): {digits:?}"))
 }
 
-/// A TCP port with nothing on it: bound to learn the number, then released.
-fn dead_port() -> u16 {
+/// A TCP port to DIAL that nothing is listening on: bound to learn the number,
+/// then released.
+///
+/// ⚠ R2178 (open-debt item 553) — THIS IS A DIAL TARGET AND NEVER A LISTEN
+/// ADDRESS, and the split is the repair rather than a naming preference. A
+/// released number belongs to nobody: between this call and the demo's own
+/// syscall the kernel may hand it to anyone. It did — R2175's push was refused
+/// because BOTH listen endpoints of one arm came back `Address already in use
+/// (os error 98)`, and the second of those was this port.
+///
+/// A dial target survives that window and a listen address cannot, which is
+/// why one helper could not serve both. The worst a stolen number does to a
+/// dial is let the connection SUCCEED, and no arm here reads that; for a
+/// listen address, binding IS the assertion. [`listen_arg`] is where the
+/// distinction is enforced instead of remembered.
+fn dial_target_port() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback port to learn and release");
     let port = listener.local_addr().expect("a readable address").port();
     drop(listener);
@@ -108,6 +122,40 @@ fn occupied_port() -> (TcpListener, u16) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback port to hold");
     let port = listener.local_addr().expect("a readable address").port();
     (listener, port)
+}
+
+/// How one listen endpoint gets its address — and the only two ways this
+/// binary is allowed to name one.
+///
+/// Both keep the promise a listen address makes. A number that was learned and
+/// released keeps neither, which is the whole of open-debt item 553.
+enum ListenSpec {
+    /// A port THIS PROCESS holds for the arm's duration. Nothing else can take
+    /// it and the demo cannot have it, so the bind must FAIL — deterministically,
+    /// because the holder is a socket this process owns.
+    Held(u16),
+    /// No number at all: the kernel picks a free port at bind time, so there is
+    /// no window in which the choice can go stale. The bind must SUCCEED.
+    KernelAssigned,
+}
+
+/// The `--peer` value. EVERY listen address this binary names is built here.
+///
+/// The chokepoint IS the mechanism. A rule written in a doc comment is one the
+/// next author reads only if they happen to look at this function; a rule that
+/// every `--peer` must route through here is one
+/// [`no_listen_address_is_built_from_a_released_port`] can fail on. That test
+/// reads this file's own source, in the same idiom [`give_up_code`] already
+/// uses to read `runner.rs`.
+fn listen_arg(specs: &[ListenSpec]) -> String {
+    specs
+        .iter()
+        .map(|spec| match spec {
+            ListenSpec::Held(port) => format!("tcp/127.0.0.1:{port}"),
+            ListenSpec::KernelAssigned => String::from("tcp/127.0.0.1:0"),
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Spawn the demo with `args`, stderr piped.
@@ -209,12 +257,13 @@ const APP: [&str; 2] = ["--subscribe", "demo/**"];
 /// wrote is the bound the node ran.
 #[test]
 fn a_bounded_connect_phase_gives_up_and_exits() {
-    let target = format!("tcp/127.0.0.1:{}", dead_port());
+    let target = format!("tcp/127.0.0.1:{}", dial_target_port());
+    let listen = listen_arg(&[ListenSpec::KernelAssigned]);
     let (code, elapsed, seen) = assert_exits(
         "bounded connect phase",
         &argv(&[
             "--peer",
-            "tcp/127.0.0.1:0",
+            &listen,
             "--connect",
             &target,
             "--connect-timeout",
@@ -254,10 +303,11 @@ fn a_bounded_connect_phase_gives_up_and_exits() {
 /// words the operator did or did not write.
 #[test]
 fn an_unbounded_connect_phase_keeps_the_node_running() {
-    let target = format!("tcp/127.0.0.1:{}", dead_port());
+    let target = format!("tcp/127.0.0.1:{}", dial_target_port());
+    let listen = listen_arg(&[ListenSpec::KernelAssigned]);
     let seen = assert_still_running(
         "default connect phase",
-        &argv(&["--peer", "tcp/127.0.0.1:0", "--connect", &target])
+        &argv(&["--peer", &listen, "--connect", &target])
             .into_iter()
             .chain(APP.iter().map(|s| String::from(*s)))
             .collect::<Vec<_>>(),
@@ -280,8 +330,7 @@ fn an_unbounded_connect_phase_keeps_the_node_running() {
 #[test]
 fn an_unbindable_listen_endpoint_ends_the_node() {
     let (held, occupied) = occupied_port();
-    let free = dead_port();
-    let listen = format!("tcp/127.0.0.1:{occupied},tcp/127.0.0.1:{free}");
+    let listen = listen_arg(&[ListenSpec::Held(occupied), ListenSpec::KernelAssigned]);
     let (code, _, seen) = assert_exits(
         "unbindable listen endpoint",
         &argv(&["--peer", &listen])
@@ -313,8 +362,7 @@ fn an_unbindable_listen_endpoint_ends_the_node() {
 #[test]
 fn a_non_fatal_listen_phase_comes_up_on_what_bound() {
     let (held, occupied) = occupied_port();
-    let free = dead_port();
-    let listen = format!("tcp/127.0.0.1:{occupied},tcp/127.0.0.1:{free}");
+    let listen = listen_arg(&[ListenSpec::Held(occupied), ListenSpec::KernelAssigned]);
     let seen = assert_still_running(
         "non-fatal listen phase",
         &argv(&["--peer", &listen, "--listen-exit-on-failure", "false"])
@@ -349,7 +397,7 @@ fn a_bounded_listen_phase_re_binds_before_it_gives_up() {
         "bounded listen phase",
         &argv(&[
             "--peer",
-            &format!("tcp/127.0.0.1:{occupied}"),
+            &listen_arg(&[ListenSpec::Held(occupied)]),
             "--listen-timeout",
             "1200",
             "--listen-retry",
@@ -399,7 +447,7 @@ fn a_config_file_that_says_exit_on_failure_produces_a_node_that_exits() {
                              retry: {{ period_init_ms: 200, period_max_ms: 200,
                                       period_increase_factor: 1 }} }},
                   scouting: {{ multicast: {{ enabled: false }} }} }}"#,
-            dead_port()
+            dial_target_port()
         ),
     );
     let (code, elapsed, seen) = assert_exits(
@@ -447,7 +495,7 @@ fn a_config_file_without_the_clause_leaves_the_node_running() {
                   listen: {{ endpoints: ["tcp/127.0.0.1:0"] }},
                   connect: {{ endpoints: ["tcp/127.0.0.1:{}"] }},
                   scouting: {{ multicast: {{ enabled: false }} }} }}"#,
-            dead_port()
+            dial_target_port()
         ),
     );
     let seen = assert_still_running(
@@ -495,4 +543,178 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.dir);
     }
+}
+
+// ── ⑦ the RULE item 553 bought, as a predicate rather than a paragraph ───────
+
+/// R2178 (open-debt item 553) — no listen address in this binary is built from
+/// a port that was learned and released.
+///
+/// # Why this reads source instead of running the arms
+///
+/// The defect it guards is a RACE. [`dial_target_port`] hands back a number the
+/// kernel may give to anyone before the demo binds it, so the arm that used one
+/// as a listen address failed only sometimes: R2175's push was refused by it,
+/// and re-running the same commit passed 7 of 7. A test that merely runs the
+/// arms therefore reports green on a tree that still carries the defect —
+/// the shape this workspace calls a population that cannot fail.
+///
+/// What CAN be judged on every run is the property the fix established: the
+/// address never comes from a released number at all. That is a fact about this
+/// file's text, so the text is what is read — the idiom [`give_up_code`] already
+/// uses on `runner.rs`, turned on this file.
+///
+/// # Three rules, because any two of them leave a route back in
+///
+/// Rule 1 alone accepts `&listen` by name, so a `let listen = format!(..)` would
+/// pass it. Rules 1 and 2 together still accept
+/// `ListenSpec::Held(dial_target_port())`, which is the defect exactly. Each is
+/// therefore checked and reported separately rather than folded into one sweep.
+#[test]
+fn no_listen_address_is_built_from_a_released_port() {
+    const SOURCE: &str = include_str!("startup_phase_lifecycle_binary.rs");
+
+    let mut peer_values = 0usize;
+    let mut listen_bindings = 0usize;
+    let mut held_args = 0usize;
+    let mut failures: Vec<String> = Vec::new();
+
+    let raw_lines: Vec<&str> = SOURCE.lines().collect();
+    // A token inside a COMMENT is prose about the rule, not an instance of it.
+    // Stripping comments is how this gate avoids the defect R2175 hit, where a
+    // paragraph DESCRIBING the marker syntax was parsed as a marker — and it
+    // has to be done by what the text IS, because an exclusion list keyed on a
+    // word is the escape hatch this workspace refuses. (`//` inside a string
+    // literal would be cut too; this file has none, and a future one would show
+    // up as a finding rather than as a silent skip.)
+    let lines: Vec<&str> = raw_lines
+        .iter()
+        .map(|l| match l.find("//") {
+            Some(at) => &l[..at],
+            None => *l,
+        })
+        .collect();
+
+    for (i, line) in lines.iter().enumerate() {
+        // RULE 1 — every `--peer` value is a `listen_arg` result. The value sits
+        // on the same line in the inline `argv` form and on the next line in the
+        // multi-line one; both shapes occur here, so both are resolved.
+        //
+        // An occurrence preceded by a BACKSLASH is this gate quoting the token
+        // rather than passing it, which is a fact about the character before it
+        // and not about which line it is on.
+        let quoted = line.split("\"--peer\"").next().unwrap_or("");
+        if line.contains("\"--peer\"") && !quoted.ends_with('\\') {
+            peer_values += 1;
+            let same = line.split("\"--peer\"").nth(1).unwrap_or("");
+            let value = if same.trim().len() > 1 {
+                same
+            } else {
+                lines.get(i + 1).copied().unwrap_or("")
+            };
+            if !(value.contains("&listen") || value.contains("listen_arg(")) {
+                failures.push(finding(
+                    i,
+                    "a `--peer` value that is not a `listen_arg` result",
+                    value,
+                ));
+            }
+        }
+
+        // RULE 2 — every `listen` binding comes from `listen_arg`.
+        if line.trim_start().starts_with("let listen =") {
+            listen_bindings += 1;
+            let tail = if line.trim_end().ends_with('=') {
+                lines.get(i + 1).copied().unwrap_or("")
+            } else {
+                line
+            };
+            if !tail.contains("listen_arg(") {
+                failures.push(finding(
+                    i,
+                    "a `listen` binding that is not a `listen_arg` result",
+                    tail,
+                ));
+            }
+        }
+
+        // RULE 3 — `ListenSpec::Held` carries only a port THIS PROCESS holds.
+        //
+        // Two occurrences are NOT constructions and are told apart by what they
+        // are rather than by where they sit: one preceded by a quote is a string
+        // this gate scans WITH, and one followed by `=>` is the destructuring
+        // arm inside `listen_arg` itself. Both would otherwise make the gate red
+        // on the very file it was written for, which is how it first ran.
+        let mut cursor = 0usize;
+        while let Some(at) = line[cursor..].find("ListenSpec::Held(") {
+            let start = cursor + at;
+            let after = &line[start + "ListenSpec::Held(".len()..];
+            cursor = start + "ListenSpec::Held(".len();
+            if line[..start].ends_with('"') {
+                continue;
+            }
+            let arg = after.split(')').next().unwrap_or("");
+            let tail = after
+                .split_once(')')
+                .map(|(_, t)| t.trim_start())
+                .unwrap_or("");
+            if tail.starts_with("=>") {
+                continue;
+            }
+            held_args += 1;
+            if arg.trim() != "occupied" {
+                failures.push(finding(
+                    i,
+                    "a held listen port that is not the one `occupied_port` \
+                     returns — a released number cannot keep the promise a \
+                     listen address makes",
+                    arg,
+                ));
+            }
+        }
+    }
+
+    // A shrunken population must FAIL, not pass: a rename that emptied one of
+    // these rules would otherwise read as compliance. The floors are per-rule
+    // rather than a total, because a total hides a shift between its parts.
+    //
+    // ⚠ They are COLLECTED alongside the findings rather than asserted before
+    // them, and that ordering was bought by a mutation. Asserting the floors
+    // first made this gate UNDER-REPORT: a mutation that both bypassed
+    // `listen_arg` and removed a `Held` construction reported only the floor,
+    // so the rule it actually broke went unnamed. Under-reporting is the one
+    // defect a gate in this workspace may not have.
+    let floors = [
+        (peer_values, 5usize, "`--peer` value(s)"),
+        (listen_bindings, 4, "`let listen =` binding(s)"),
+        (held_args, 3, "held-port construction(s)"),
+    ];
+    for (reached, floor, what) in floors {
+        if reached < floor {
+            failures.push(format!(
+                "  this gate reached {reached} {what} and was written against \
+                 {floor}; it has stopped reading what it names, or a skip \
+                 above swallowed one"
+            ));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "open-debt item 553 is back in this file:\n{}",
+        failures.join("\n")
+    );
+}
+
+/// One finding, with the source line that produced it.
+///
+/// Findings are COLLECTED rather than asserted where they are found: an arm
+/// that panics leaves the later rules unmeasured, and unmeasured must not read
+/// as passed.
+fn finding(index: usize, what: &str, text: &str) -> String {
+    format!(
+        "  startup_phase_lifecycle_binary.rs:{}: {what}\n    {}",
+        index + 1,
+        text.trim()
+    )
 }

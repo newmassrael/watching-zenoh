@@ -4501,7 +4501,14 @@ layer_c1ay_cargo_test_router_hat() {
     # running, and they carry as much of this round as the fatal ones do. wz's
     # behaviour before it IS upstream's default column, so a change that made an
     # unconfigured node give up would be a regression no fatal arm could see.
-    _runci_guarded_test "C1AY startup_phase_lifecycle_binary 7" 7 \
+    #
+    # 8 since R2178 (open-debt item 553). The eighth runs no node: it reads this
+    # binary's own source and refuses a listen address built from a port that
+    # was learned and released. It is counted here rather than exempted because
+    # the seven arms cannot see the defect it guards — that one failed only
+    # under a race, which is why the count and not the suite is what says the
+    # rule is still present.
+    _runci_guarded_test "C1AY startup_phase_lifecycle_binary 8" 8 \
         cargo test -p wz-ap-demo --features zenoh-config,routing-peer \
         --test startup_phase_lifecycle_binary --quiet || return 1
     (cd crates \
