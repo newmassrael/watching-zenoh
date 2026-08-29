@@ -1112,6 +1112,49 @@ int main(void) {
         return 1;
     }
 
+    /* R2174 (open-debt item 551) -- A SELECTOR CARRYING NON-ASCII IS
+     * DIAGNOSED, NOT FATAL.
+     *
+     * Here rather than only in the Rust tests because THE DIFFERENCE IS THE
+     * WHOLE DEFECT. Inside the library the fault was a panic, which
+     * `cargo test` catches and reports as a failure. Across this boundary it
+     * could not even unwind -- a downstream consumer measured `fatal runtime
+     * error: failed to initiate panic, error 5, aborting`, process exit 134,
+     * with no return code to read and nothing to catch. The claim "it answers"
+     * is only witnessed where a C caller stands.
+     *
+     * `wz_dissect_selector_diagnose` is the sharpest of the four doors that
+     * reach the lexer: its own doc names its purpose as answering WHILE AN
+     * OPERATOR IS TYPING, so in a GUI this was one keystroke killing the
+     * application. If it regresses, THIS PROGRAM DIES rather than printing a
+     * CHECK failure -- the correct shape for the fault, and why the lane reads
+     * an exit status rather than only stdout. */
+    {
+        /* An unquoted Korean word, spelled in escapes so the fixture does not
+         * depend on this file's own encoding surviving a tool: 로봇. */
+        char *verdict = NULL;
+        rc = wz_dissect_selector_diagnose("key == \xeb\xa1\x9c\xeb\xb4\x87", &verdict);
+        CHECK(rc == WZ_DISSECT_OK, "a non-ASCII selector must be diagnosed, rc=%d", rc);
+        CHECK(verdict != NULL, "OK came back with no verdict");
+        CHECK(strstr(verdict, "\"ok\":true") != NULL,
+              "an unquoted non-ASCII word is a word: %s", verdict);
+        wz_dissect_string_free(verdict);
+
+        /* A non-ASCII character that is NOT a word character (the euro sign).
+         * It died by a DIFFERENT route than the one above: its lead byte 0xE2
+         * reads as an accented 'a', which is alphanumeric, so the word scan
+         * started on a character that is not a word character at all. A fix
+         * that only rejected high bytes would have passed the case above and
+         * still mis-lexed this one, which is why both are here. */
+        verdict = NULL;
+        rc = wz_dissect_selector_diagnose("key == \xe2\x82\xac", &verdict);
+        CHECK(rc == WZ_DISSECT_OK, "a refusal is still a diagnosis, rc=%d", rc);
+        CHECK(verdict != NULL, "OK came back with no verdict");
+        CHECK(strstr(verdict, "\"ok\":false") != NULL,
+              "the euro sign is not a word character: %s", verdict);
+        wz_dissect_string_free(verdict);
+    }
+
     printf("  C1bo: C consumer linked the cdylib and read the tree\n");
     return 0;
 }

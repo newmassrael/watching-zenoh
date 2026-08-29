@@ -786,14 +786,48 @@ fn is_word_char(c: char) -> bool {
         )
 }
 
+/// R2174 (open-debt item 551) — THE WALK IS OVER CHARACTERS, AND `at` STAYS A
+/// BYTE OFFSET.
+///
+/// # What this replaced, and why it could not be patched in place
+///
+/// This function used to walk `source.as_bytes()` and turn each byte into a
+/// `char` with `as`. That is not a UTF-8 decode, it is a LATIN-1
+/// REINTERPRETATION: a UTF-8 lead byte `0xC2..=0xF4` becomes `'Â'..'ô'`, most
+/// of which `char::is_alphanumeric` accepts, so the word scan stepped INTO a
+/// multi-byte character; the continuation bytes `0x80..=0xBF` mostly are not,
+/// so it stopped one byte in; and `&source[i..j]` then sliced off a char
+/// boundary and PANICKED. Across `extern "C"` that panic could not even unwind
+/// -- a consumer measured `abort`, exit 134, from
+/// `wz_dissect_selector_diagnose`, the one door this header documents as the
+/// one to call WHILE AN OPERATOR IS TYPING.
+///
+/// No local guard fixes that class. Rejecting high bytes in `is_word_char`
+/// would have passed the reported Korean selectors and still mis-lexed `€`,
+/// whose lead byte is alphanumeric while the character is not. The cast itself
+/// is the defect, so the walk yields `char`s.
+///
+/// # `at` is unchanged, and that is a published contract
+///
+/// `wz_dissect.h` publishes `at` as a BYTE offset and a consumer places a caret
+/// from it. So `i` remains a byte index into `source` -- it is advanced by
+/// `len_utf8()` rather than by one -- and every `at` this emits still counts
+/// bytes. Switching to character counts would have made slicing safe and moved
+/// every caret in every selector containing a multi-byte character.
+///
+/// `i` is a char boundary at every iteration by construction: each arm below
+/// advances by whole characters.
 fn lex(source: &str) -> Result<Vec<Token>, FilterError> {
-    let bytes = source.as_bytes();
     let mut tokens = Vec::new();
     let mut i = 0usize;
-    while i < bytes.len() {
-        let c = bytes[i] as char;
+    while i < source.len() {
+        let c = source[i..]
+            .chars()
+            .next()
+            .expect("i is below len and on a char boundary");
+        let clen = c.len_utf8();
         if c.is_ascii_whitespace() {
-            i += 1;
+            i += clen;
             continue;
         }
         let at = i;
@@ -803,23 +837,34 @@ fn lex(source: &str) -> Result<Vec<Token>, FilterError> {
                     at,
                     kind: TokenKind::Open,
                 });
-                i += 1;
+                i += clen;
             }
             ')' => {
                 tokens.push(Token {
                     at,
                     kind: TokenKind::Close,
                 });
-                i += 1;
+                i += clen;
             }
             '"' | '\'' => {
                 let quote = c;
-                let start = i + 1;
+                let start = i + clen;
+                // The quoted arm SURVIVED the old walk by accident -- no UTF-8
+                // byte equals 0x22 or 0x27, so the byte scan happened to stop
+                // exactly on the closing quote. It is walked by characters here
+                // anyway: an accident that holds is still an accident, and the
+                // next person to touch this loop should not have to rediscover
+                // why the one above it was fatal and this one was not.
                 let mut j = start;
-                while j < bytes.len() && bytes[j] as char != quote {
-                    j += 1;
+                let mut closed = false;
+                for ch in source[start..].chars() {
+                    if ch == quote {
+                        closed = true;
+                        break;
+                    }
+                    j += ch.len_utf8();
                 }
-                if j >= bytes.len() {
+                if !closed {
                     return Err(FilterError {
                         at,
                         kind: FilterErrorKind::UnterminatedQuote,
@@ -829,7 +874,7 @@ fn lex(source: &str) -> Result<Vec<Token>, FilterError> {
                     at,
                     kind: TokenKind::Quoted(source[start..j].to_string()),
                 });
-                i = j + 1;
+                i = j + quote.len_utf8();
             }
             '=' | '!' | '<' | '>' | '&' | '|' => {
                 let two = source.get(i..i + 2).unwrap_or("");
@@ -859,8 +904,11 @@ fn lex(source: &str) -> Result<Vec<Token>, FilterError> {
             }
             c if is_word_char(c) => {
                 let mut j = i;
-                while j < bytes.len() && is_word_char(bytes[j] as char) {
-                    j += 1;
+                for ch in source[i..].chars() {
+                    if !is_word_char(ch) {
+                        break;
+                    }
+                    j += ch.len_utf8();
                 }
                 let word = &source[i..j];
                 let kind = match word {
@@ -1740,5 +1788,139 @@ mod tests {
         // build cannot answer, not to the field.
         let f = Filter::parse("key == demo/a").expect("literals still parse");
         assert_eq!(f.matches(&put(Some("demo/a"))), Truth::Yes);
+    }
+
+    /// R2174 (open-debt item 551) — PARSING ARBITRARY UTF-8 ANSWERS; IT DOES
+    /// NOT DIE.
+    ///
+    /// # Why a derived corpus and not the reported strings
+    ///
+    /// A consumer reported seven selectors that killed the process and this
+    /// crate could have pinned exactly those seven. That is a regression list,
+    /// and the item's own filing says why it is the wrong instrument: what was
+    /// broken is a PROPERTY -- `lex` walked `source.as_bytes()` and cast each
+    /// byte with `as char`, which is a Latin-1 reinterpretation, so EVERY
+    /// multi-byte character was mis-lexed and the ones that panicked were
+    /// simply the ones whose lead byte `is_alphanumeric()` happened to accept.
+    /// Seven strings cannot separate "fixed" from "fixed for these seven".
+    ///
+    /// So the population is DERIVED: characters spanning every UTF-8 length
+    /// and both sides of `is_word_char`, crossed with every POSITION the lexer
+    /// has a different code path for. A build that lost the fix fails here
+    /// whichever character it lost it for.
+    ///
+    /// # The oracle is "no panic", deliberately, and not a verdict per string
+    ///
+    /// Whether `key == 로봇` is ACCEPTED or REFUSED is a language decision the
+    /// tests below make separately. What this one asserts is the thing the ABI
+    /// promises and the defect broke: `parse` RETURNS. `Ok` and `Err` are both
+    /// answers; an unwind across `extern "C"` is not one, and the consumer that
+    /// filed this measured it as `abort`, exit 134, with no error code to read.
+    #[test]
+    fn parsing_any_utf8_answers_rather_than_dying() {
+        // One character per UTF-8 length, on both sides of `is_word_char`, so
+        // a fix that only handled the alphanumeric ones is still caught.
+        let chars = [
+            'a',         // 1 byte, word
+            '=',         // 1 byte, grammar
+            '\u{00A9}',  // 2 bytes, NOT alphanumeric  (©)
+            '\u{00E9}',  // 2 bytes, alphanumeric      (é)
+            '\u{20AC}',  // 3 bytes, NOT alphanumeric  (€)
+            '\u{AC1C}',  // 3 bytes, alphanumeric      (개)
+            '\u{1F916}', // 4 bytes, NOT alphanumeric (🤖)
+            '\u{20BB7}', // 4 bytes, alphanumeric     (a CJK ext-B ideograph)
+        ];
+        // Every shape the lexer takes a different path for. `{}` is where the
+        // character goes.
+        let shapes = [
+            "{}",
+            "{} == 1",
+            "key == {}",
+            "key == a{}b",
+            "key == {}/x",
+            "bytes > 1 and key == {}",
+            "key == \"{}\"", // quoted: the path that survives today
+            "key == '{}'",
+            "({})",
+            "key == {}",
+            "{}{}",
+            "key =={}",
+        ];
+
+        let mut cases = 0usize;
+        for c in chars {
+            for shape in shapes {
+                let selector = shape.replace("{}", &c.to_string());
+                // The ASSERTION is that this call returns at all. A panic here
+                // fails the test, which is exactly the defect's Rust-side face.
+                let _ = Filter::parse(&selector);
+                cases += 1;
+            }
+        }
+        assert!(
+            cases >= chars.len() * shapes.len(),
+            "the corpus is derived from two lists; a population of {cases} \
+             means one of them was emptied and this test measured nothing"
+        );
+    }
+
+    /// R2174 (open-debt item 551) — AN UNQUOTED WORD CHARACTER IS THE SAME
+    /// WORD, QUOTED OR NOT.
+    ///
+    /// `is_word_char` calls `char::is_alphanumeric`, not its `is_ascii_`
+    /// sibling, so admitting non-ASCII letters unquoted is what this lexer was
+    /// WRITTEN to do. It never did: `bytes[i] as char` meant the branch was
+    /// only ever handed bytes 0..255, so the Unicode arm was unreachable code
+    /// that looked live. Fixing the walk is what makes the author's own
+    /// predicate mean what it says, and this test is what pins that the two
+    /// spellings now agree rather than one of them being a second grammar.
+    #[test]
+    fn a_non_ascii_word_parses_to_the_same_filter_quoted_or_not() {
+        let bare = Filter::parse("key == 로봇").expect("an unquoted word parses");
+        let quoted = Filter::parse("key == \"로봇\"").expect("the quoted form parses");
+        let sample = put(Some("로봇"));
+        assert_eq!(bare.matches(&sample), Truth::Yes);
+        assert_eq!(
+            bare.matches(&sample),
+            quoted.matches(&sample),
+            "quoting a word must not change what it matches"
+        );
+        // And the quotes are still the escape hatch for what is NOT a word
+        // character -- the sentence `is_word_char`'s own doc makes.
+        let punctuation = Filter::parse("key == \"a b\"").expect("quoted space parses");
+        assert_eq!(punctuation.matches(&put(Some("a b"))), Truth::Yes);
+    }
+
+    /// R2174 (open-debt item 551) — A REFUSAL NAMES THE CHARACTER THE OPERATOR
+    /// TYPED, AND POINTS AT ITS FIRST BYTE.
+    ///
+    /// Two contracts in one test because a fix can satisfy either alone:
+    ///
+    ///   * the character. `bytes[i] as char` named the Latin-1 mojibake of the
+    ///     LEAD BYTE, so `key == €` would have been refused citing `'â'` -- a
+    ///     character the operator never typed and cannot find in their box;
+    ///   * the offset. `wz_dissect.h` publishes `at` as a BYTE offset and a
+    ///     consumer places a caret from it, so a fix that switched the walk to
+    ///     character COUNTS to make slicing safe would move every caret in
+    ///     every selector containing a multi-byte character.
+    #[test]
+    fn a_refusal_names_the_typed_character_at_its_byte_offset() {
+        let err = Filter::parse("key == €").expect_err("€ is not a word character");
+        assert_eq!(
+            err.kind,
+            FilterErrorKind::UnexpectedChar('€'),
+            "the refusal must name what was typed, not a byte reinterpreted"
+        );
+        assert_eq!(err.at, "key == ".len(), "`at` is a BYTE offset");
+
+        // And after a multi-byte character, so a byte offset and a character
+        // count are different numbers here -- which is the whole point.
+        let err = Filter::parse("key == 로봇 €").expect_err("still refused");
+        assert_eq!(err.kind, FilterErrorKind::UnexpectedChar('€'));
+        assert_eq!(
+            err.at,
+            "key == 로봇 ".len(),
+            "a byte offset, which is 13 here and 9 if someone counted characters"
+        );
     }
 }
