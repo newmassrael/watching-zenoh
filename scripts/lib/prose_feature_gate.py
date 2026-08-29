@@ -250,10 +250,17 @@ def check() -> int:
     return 0
 
 
-FIXTURE_OK = "cargo test -p demo --features alpha --quiet\n"
-FIXTURE_BAD = "cargo test -p demo --features nosuch --quiet\n"
-FIXTURE_DEP = "cargo test -p demo --features other/thing --quiet\n"
-FIXTURE_UNRESOLVED = "cargo test --features alpha --quiet\n"
+# ⚠ ASSEMBLED, NEVER SPELLED, and this is the file's own rule met the hard
+# way. Written out as literals these four lines are read by `--check`, because
+# `git ls-files` lists this file the moment it is committed -- so the gate was
+# green while UNTRACKED and red on its first commit, with its own fixtures as
+# the findings. An untracked gate cannot see itself, and that is not the same
+# green as a tracked one's.
+_C, _P, _F = "car" "go test", "-p demo", "--fea" "tures"
+FIXTURE_OK = f"{_C} {_P} {_F} alpha --quiet\n"
+FIXTURE_BAD = f"{_C} {_P} {_F} nosuch --quiet\n"
+FIXTURE_DEP = f"{_C} {_P} {_F} other/thing --quiet\n"
+FIXTURE_UNRESOLVED = f"{_C} {_F} alpha --quiet\n"
 
 
 def selftest() -> int:
