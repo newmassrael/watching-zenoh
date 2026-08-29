@@ -96,6 +96,14 @@ wz-capi-core = { path = "../wz-capi-core" }
 wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
     "routing-accept",
     "query-reply-err",
+    # R2172 (open-debt item 548) — `zenoh_config`, which is where
+    # `HONOURED_CONFIG_KEYS` lives. Named UNCONDITIONALLY on purpose: the door
+    # this feeds (`wz_capi_c_config_honoured`) reports which config keys wz's
+    # JSON5 reader honours, and a door that existed only in some builds would
+    # leave a consumer back where item 548 found it -- parsing the module and
+    # getting an empty set when it moves. A symbol a caller cannot rely on
+    # finding is not an answer.
+    "zenoh-config",
 ] }
 
 [dev-dependencies]

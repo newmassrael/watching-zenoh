@@ -597,6 +597,20 @@ jobs:
         # that hands every subsystem the same runtime.
         run: bash scripts/run-ci.sh --layer C1cg
 
+      - name: Layer C1ch — the linked library says which config keys it honours
+        # R2172 (open-debt item 548) — `wz_dissect_readable_surfaces` set the
+        # precedent that a build reports what it can READ out of its own
+        # dispatch; configuration had no counterpart, so a consumer asking
+        # which keys THIS build honours was left parsing
+        # `wz-runtime-tokio/src/zenoh_config.rs` — and a parser aimed at a
+        # module that MOVED does not go red, it reports an empty set.
+        #
+        # In THIS job and not the C1cc..C1ce cluster: every lane there needs
+        # the machine-local zenoh-c oracle and SKIPs without it, which would
+        # have made the one check of a wz-own door conditional on somebody
+        # else's installation. This one opens wz's own cdylib through ctypes.
+        run: bash scripts/run-ci.sh --layer C1ch
+
       - name: Layer C1cf — every crate builds with default features off
         # R311y821 — nothing local built a SHRUNKEN feature combination of a
         # changed crate, so a cfg-gated import behind an ungated signature was

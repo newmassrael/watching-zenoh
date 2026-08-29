@@ -1330,6 +1330,94 @@ pub unsafe extern "C" fn wz_capi_c_layout(out: *mut usize, cap: usize) -> usize 
     values.len()
 }
 
+/// R2172 (open-debt item 548) — HOW MANY CONFIG KEYS WZ'S JSON5 READER HONOURS.
+///
+/// # ⚠ WHOSE SURFACE THIS IS, because two live in this crate and they differ
+///
+/// It is `HONOURED_CONFIG_KEYS` — what `ZenohNodeConfig::from_json5` applies
+/// when wz reads a stock zenoh config document. It is NOT the set
+/// [`crate::session::z_open`] reads off a `z_owned_config_t`: that path takes
+/// three (`connect/endpoints`, `listen/endpoints`, `mode`) through this crate's
+/// own JSON5 parser, and says so at its own call site. Measured this round
+/// rather than assumed, because reporting one of those two under the other's
+/// name would be a confident wrong answer — the shape this repository refuses
+/// harder than silence.
+///
+/// The door is here because this is where a GATE can reach it: the primary
+/// caller is a tool in another language, exactly as [`wz_capi_c_layout`]'s doc
+/// states for itself, not a C program branching on the result.
+///
+/// # The gap this closes
+///
+/// `wz_dissect_readable_surfaces` set the precedent: a build reports what it can
+/// READ, derived from its own dispatch, so a consumer asks the artifact instead
+/// of guessing. Configuration had no counterpart, and the route that left was
+/// parsing [`wz_runtime_tokio::zenoh_config`] — which fails in the direction
+/// this repository keeps paying for. A parser aimed at a module that MOVED does
+/// not go red; it matches nothing and reports an empty set. That is the
+/// consumer-side face of "a population of zero reports green".
+///
+/// # Why this door is here and not beside its precedent
+///
+/// Measured, and it is the opposite of where item 548's own prescription
+/// pointed. `wz-capi-dissect` does not depend on `wz-runtime-tokio`, and
+/// `analysis_surface_parity.py`'s `NO_REACH_PATH[2]` already DECLARES that
+/// neither analysis surface reads or writes configuration — *"they take capture
+/// bytes and hand back documents"* — so a config symbol there would contradict a
+/// live gate rather than merely widen a crate. This crate already takes
+/// configuration (`z_config_*`, seventeen doors), already depends on
+/// `wz-runtime-tokio`, and already carries wz-own doors of this exact shape:
+/// [`wz_capi_c_layout`] beside it, whose doc gives this door's argument word for
+/// word — the alternative is a second copy of the list in the tool, which is the
+/// drift hazard the exported form was introduced to remove.
+///
+/// # Safety
+/// None; takes no arguments and touches no memory.
+#[no_mangle]
+pub extern "C" fn wz_capi_c_config_honoured_count() -> usize {
+    wz_runtime_tokio::zenoh_config::HONOURED_CONFIG_KEYS.len()
+}
+
+/// R2172 (open-debt item 548) — the NUL-terminated name of honoured config key
+/// `index`, or NULL past the end.
+///
+/// Indexed straight into `HONOURED_CONFIG_KEYS`, which is that list's SSOT and
+/// is what keeps this door from becoming its SECOND WRITER: a door that spelled
+/// its own list would answer this call happily and drift the moment a key was
+/// added. `the_config_surface_door_reports_the_constant_and_not_a_second_copy`
+/// is where that is held, and it compares against the constant as a VALUE rather
+/// than as text — a gate outside Rust cannot make that comparison without
+/// parsing the module, which is the copy this door removes.
+///
+/// NULL past the end so the end of the list is a fact a caller can FIND, not a
+/// length it has to trust — the walk [`wz_capi_c_layout_name`] already teaches.
+///
+/// The strings are NUL-terminated here rather than in the constant, so the
+/// constant itself stays readable as plain Rust and its other readers
+/// (`wz-ap-demo`'s coverage tests, `wz_reads_a_stock_zenohd_config`) are
+/// untouched by this door existing.
+///
+/// # Safety
+/// Takes no pointers; the returned pointer is `'static` and must not be freed.
+#[no_mangle]
+pub unsafe extern "C" fn wz_capi_c_config_honoured(index: usize) -> *const std::ffi::c_char {
+    use std::sync::OnceLock;
+    static NUL_TERMINATED: OnceLock<Vec<std::ffi::CString>> = OnceLock::new();
+    let table = NUL_TERMINATED.get_or_init(|| {
+        wz_runtime_tokio::zenoh_config::HONOURED_CONFIG_KEYS
+            .iter()
+            // The keys are ASCII path literals, so the only way this could fail
+            // is an embedded NUL nobody can write by accident.
+            .map(|key| {
+                std::ffi::CString::new(*key).expect("a honoured config key has no interior NUL")
+            })
+            .collect()
+    });
+    table
+        .get(index)
+        .map_or(std::ptr::null(), |key| key.as_ptr())
+}
+
 #[cfg(test)]
 mod layout_tests {
     use super::*;
@@ -1400,5 +1488,71 @@ mod layout_tests {
         );
         // SAFETY: null is the documented "count only" call.
         assert_eq!(unsafe { wz_capi_c_layout(std::ptr::null_mut(), 0) }, total);
+    }
+
+    /// R2172 (open-debt item 548) — THE CONFIG-SURFACE DOOR REPORTS THE
+    /// CONSTANT, and is not a second copy of it.
+    ///
+    /// # Why the comparison is against the constant as a VALUE
+    ///
+    /// The failure this rules out is the one `wz_dissect_readable_surfaces`'
+    /// own test names: asserting that the door "has some keys" passes just as
+    /// well against a door that spelled its own list, and such a door is
+    /// correct on the day it is written and wrong on the day a key is added.
+    /// So the door's output is held against `HONOURED_CONFIG_KEYS` itself,
+    /// element for element — which only a test INSIDE Rust can do. The gate
+    /// outside (`scripts/lib/capi_c_config_surface.py`) deliberately does not
+    /// try: reading the constant there would mean parsing the module, which is
+    /// the second copy this door exists to remove, one language over.
+    ///
+    /// # The anti-vacuity leg, which is not decoration
+    ///
+    /// A build whose constant were empty would satisfy every assertion above
+    /// vacuously — zero keys equal zero keys — while reporting a surface that
+    /// tells a consumer nothing. That is this workspace's standing "a
+    /// population of zero reports green", so the count is required to be
+    /// non-zero and every key to be non-empty.
+    #[test]
+    fn the_config_surface_door_reports_the_constant_and_not_a_second_copy() {
+        use wz_runtime_tokio::zenoh_config::HONOURED_CONFIG_KEYS;
+
+        let count = wz_capi_c_config_honoured_count();
+        assert_eq!(
+            count,
+            HONOURED_CONFIG_KEYS.len(),
+            "the door's count and the constant it reports must be one fact"
+        );
+        assert!(
+            count > 0,
+            "a build reporting an empty config surface satisfies every \
+             'the key is there' assertion vacuously"
+        );
+
+        for (index, expected) in HONOURED_CONFIG_KEYS.iter().enumerate() {
+            // SAFETY: `index` is below the reported count, and the returned
+            // pointer is `'static` and NUL-terminated by construction.
+            let got = unsafe {
+                let raw = wz_capi_c_config_honoured(index);
+                assert!(!raw.is_null(), "index {index} is NULL below the count");
+                std::ffi::CStr::from_ptr(raw)
+            };
+            assert_eq!(
+                got.to_str().expect("a config key is UTF-8"),
+                *expected,
+                "index {index} does not report the constant's key"
+            );
+            assert!(
+                !expected.is_empty(),
+                "an empty key would report a surface entry that names nothing"
+            );
+        }
+
+        // The end is FINDABLE, not merely promised by the count: a consumer
+        // walking to NULL is the shape `wz_capi_c_layout_name` teaches.
+        // SAFETY: reading one past the end is the documented terminator call.
+        assert!(
+            unsafe { wz_capi_c_config_honoured(count) }.is_null(),
+            "one past the end must be NULL so a walk can stop"
+        );
     }
 }

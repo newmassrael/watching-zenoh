@@ -6903,6 +6903,42 @@ layer_c1cg_cargo_test_runtime_partition() {
         cargo test -p wz-runtime-tokio --test runtime_partition --quiet || return 1
 }
 
+# ─── Layer C1ch — the LINKED library says which config keys it honours ──
+#
+# R2172 (open-debt item 548). `wz_dissect_readable_surfaces` set the precedent:
+# a build reports what it can READ, out of its own dispatch. Configuration had
+# no counterpart, so a consumer -- or a checker -- asking which keys THIS build
+# honours had one route left: parse
+# `crates/wz-runtime-tokio/src/zenoh_config.rs`. That fails in the direction
+# this repository keeps paying for: a parser aimed at a module that MOVED does
+# not go red, it matches nothing and reports an empty set.
+#
+# Its OWN lane and not a leg of the C1cc..C1ce api-compat-c cluster, and the
+# reason is what those lanes need: every one of them requires the machine-local
+# zenoh-c oracle (its headers, its library, its example clone) and SKIPs
+# without it. This gate needs none of that -- it opens wz's own cdylib through
+# ctypes -- so putting it there would have made the one check of a wz-own door
+# conditional on somebody else's installation, which is the "untracked oracle
+# lane SKIPs and reports pass" shape open-debt item 413 records.
+#
+# The DEV profile, for `cdylib_soname_gate.py`'s measured reason: what is under
+# test here is a symbol and the strings behind it, neither of which has a
+# profile-dependent path through the compiler, and the release artifact costs
+# minutes under this workspace's `lto = "thin"`. The release arm of this crate
+# is already built by the C1cc cluster where an oracle exists.
+layer_c1ch_capi_c_config_surface() {
+    command -v python3 >/dev/null 2>&1 || {
+        echo "  C1ch FAIL: python3 is absent, so the exported config surface"
+        echo "             cannot be read -- a gate that cannot reach its input"
+        echo "             must not report green"
+        return 1
+    }
+    (cd crates && cargo build -p wz-capi-c --quiet) || return 1
+    python3 scripts/lib/capi_c_config_surface.py \
+        crates/target/debug/libwz_capi_c.so || return 1
+    return 0
+}
+
 # ─── Layer C1cf — every crate builds with its DEFAULT FEATURES OFF ──
 #
 # Named C1cf, not C1cc: C1cc..C1ce are the §5.27 api-compat-c cluster, and
@@ -15370,6 +15406,7 @@ run_layer C1h layer_c1h_arbitrary_subset_matrix || overall=1
 run_layer C1ca layer_c1ca_cargo_test_derived_initial_sn || overall=1
 run_layer C1cb layer_c1cb_cargo_test_init_ack_admission || overall=1
 run_layer C1cg layer_c1cg_cargo_test_runtime_partition || overall=1
+run_layer C1ch layer_c1ch_capi_c_config_surface || overall=1
 run_layer C1cf layer_c1cf_reduced_features || overall=1
 run_layer C1cn layer_c1cn_nondefault_features || overall=1
 run_layer C1i layer_c1i_cargo_test_scouting || overall=1
