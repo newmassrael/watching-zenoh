@@ -2374,6 +2374,14 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
 /// the leg measured which one the InitSyn actually carries rather than reading
 /// that sentence.
 pub const CONFIG_KEYS_PROVEN_ON_THE_WIRE: &[&str] = &[
+    // R2179 (open-debt item 220) — the first key here proven by moving the ARM
+    // rather than the FILE, and the first whose effect is a FIELD of the
+    // InitSyn rather than an extension on it. `mode` selects the run-mode, the
+    // run-mode is the node's role, and the role is the two bits the InitSyn's
+    // `cbyte` carries; the leg reads all three run-modes and requires their
+    // whatami readings to differ, which is the arm-axis twin of the two-file
+    // rule every row below is held to.
+    "mode",
     "id",
     "transport/link/tx/batch_size",
     "transport/link/tx/lease",

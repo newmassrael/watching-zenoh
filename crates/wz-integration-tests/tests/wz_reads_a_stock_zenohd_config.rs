@@ -1137,18 +1137,46 @@ fn every_key_proven_on_the_wire_is_in_the_frame_a_zenohd_would_receive() {
         ),
     ];
 
+    // R2179 (open-debt item 220) — a SECOND shape of wire proof, and the
+    // population pin is what forced it to be named rather than smuggled in.
+    //
+    // Every key above is proven by holding the arm still and moving the FILE:
+    // two documents differing in one fragment, and the frame has to move with
+    // them. `mode` cannot be proven that way and the reason is structural, not
+    // a gap: this leg's document template already writes `mode: "{mode}"` from
+    // the arm itself, so a fixture fragment naming `mode` a second time is the
+    // `duplicate field` refusal R2077 met on `listen` — the same collision the
+    // `--max-links` comment below cites for riding argv.
+    //
+    // ⚠ The register's row for `mode` said it was "①" — one wiring away — and
+    // that verdict is right while its route was not. Measured here: the key is
+    // proven by holding the FILE's shape still and moving the ARM, which is the
+    // axis this leg already had and had never read a key off.
+    const ARM_VARYING: &[&str] = &["mode"];
+
     // The POPULATION is the constant, so a key declared wire-proven without a
     // fixture here reds rather than going unasked — and a fixture for a key the
     // constant no longer claims reds too.
     let mut named: Vec<&str> = FIXTURES.iter().map(|(k, ..)| *k).collect();
+    named.extend(ARM_VARYING.iter().copied());
     named.sort_unstable();
     let mut declared: Vec<&str> = CONFIG_KEYS_PROVEN_ON_THE_WIRE.to_vec();
     declared.sort_unstable();
     assert_eq!(
         named, declared,
-        "every key declared proven on the wire needs a pair of files this leg \
-         can hand the demo"
+        "every key declared proven on the wire needs either a pair of files this \
+         leg can hand the demo or a row in ARM_VARYING"
     );
+
+    // The two shapes must be DISJOINT. A key in both would be asked twice under
+    // two different contracts, and the weaker answer would decide it.
+    for key in ARM_VARYING {
+        assert!(
+            !FIXTURES.iter().any(|(k, ..)| k == key),
+            "{key} is both a fixture pair and arm-varying; one of the two is \
+             describing a different key than it thinks"
+        );
+    }
 
     // R2096 (open-debt item 516) — every fixture is asked in every ARM, and
     // every answer is COLLECTED rather than asserted where it is read.
@@ -1209,6 +1237,80 @@ fn every_key_proven_on_the_wire_is_in_the_frame_a_zenohd_would_receive() {
         FIXTURES.len() * ARMS.len() * 3,
         failures.join("\n  ")
     );
+
+    // ── R2179 (open-debt item 220) — the ARM-VARYING sweep ──────────────────
+    //
+    // `mode` is read the same way every key above is: out of the frame, by this
+    // tree's dissector, from a node the file alone configured. What differs is
+    // where the second reading comes from. A fixture pair moves the file and
+    // holds the arm; this moves the ARM — which, for this key, IS moving the
+    // file, because the arm's only expression in the document is the `mode`
+    // line the template writes.
+    //
+    // ⚠ THE EXPECTATION IS DERIVED, NEVER TYPED. `WhatAmI::to_wire` is the
+    // SSOT for the 2-bit handshake packing and says so in its own doc; a
+    // literal 0/1/2 here would be a second copy of that bijection with nothing
+    // joining it to the first, which is the defect item 530 names and R2176
+    // paid off one file over.
+    let mut mode_failures: Vec<String> = Vec::new();
+    let mut seen_whatami: Vec<(String, String)> = Vec::new();
+    for (mode, max_links) in ARMS {
+        let arm = ArmLabel(*mode, *max_links);
+        // A fragment that names nothing the template already names. `metadata`
+        // is upstream's own free-form subtree (`DEEPENABLE_UPSTREAM_KEYS`), so
+        // it cannot collide and cannot change what is under judgement.
+        let got = handshake_field_from_a_config(
+            "mode",
+            r#"metadata: { name: "wire-mode-arm" }"#,
+            *mode,
+            *max_links,
+        );
+        let want = mode.whatami().to_wire().to_string();
+        if got != want {
+            mode_failures.push(format!(
+                "{arm} mode: the InitSyn carried whatami {got} where the \
+                 document's mode asks for {want}"
+            ));
+        }
+        seen_whatami.push((format!("{arm}"), got));
+    }
+    // Printed for the same reason the fixture sweep prints its ext names: a
+    // round asking "what did this arm actually carry" reads it under
+    // `--nocapture` instead of re-deriving it.
+    eprintln!("wire mode: the InitSyn whatami per arm is {seen_whatami:?}");
+
+    // THE DISCRIMINATOR, and it is the arm-axis twin of the `got_a == got_b`
+    // rule the fixture sweep applies. It is asserted over the EXPECTATIONS, not
+    // over the readings, and the difference is what makes it a live check
+    // rather than a restatement:
+    //
+    // * over the readings it would be IMPLIED — every arm already had to equal
+    //   its own expectation, so distinct expectations force distinct readings.
+    //   A check with no path to failing is decoration, which is the verdict
+    //   R2176 recorded when it refused to split a count the same way.
+    // * over the expectations it fails on ONE edit: a `RunMode::whatami` that
+    //   answered the same role for every arm would leave every per-arm equality
+    //   satisfiable by a node that packed a constant, and this sweep would then
+    //   prove nothing about `mode` while staying green. MEASURED as a mutation,
+    //   not reasoned.
+    let distinct: std::collections::BTreeSet<u8> =
+        ARMS.iter().map(|(m, _)| m.whatami().to_wire()).collect();
+    if distinct.len() < 3 {
+        mode_failures.push(format!(
+            "the arms expect only {} distinct whatami value(s); with fewer than \
+             the three roles this sweep does not separate them and a constant \
+             would satisfy it",
+            distinct.len()
+        ));
+    }
+    assert!(
+        mode_failures.is_empty(),
+        "{} of the {} arm-varying readings disagree with the document that \
+         produced them:\n  {}",
+        mode_failures.len(),
+        ARMS.len(),
+        mode_failures.join("\n  ")
+    );
 }
 
 /// The (run-mode, `--max-links`) arms every fixture is asked in.
@@ -1233,6 +1335,23 @@ const ARMS: &[(RunMode, Option<usize>)] = &[
     (RunMode::PeerMesh, Some(2)),
     (RunMode::RouterHat, None),
 ];
+
+impl RunMode {
+    /// The role this arm's document asks for — the value the InitSyn's whatami
+    /// has to carry.
+    ///
+    /// R2179 (open-debt item 220). It is a method on the arm rather than a
+    /// table beside the sweep so that adding a run-mode cannot add an arm whose
+    /// expected role nobody wrote: the `match` is exhaustive and the compiler
+    /// is what says so.
+    fn whatami(self) -> WhatAmI {
+        match self {
+            Self::Client => WhatAmI::Client,
+            Self::PeerMesh => WhatAmI::Peer,
+            Self::RouterHat => WhatAmI::Router,
+        }
+    }
+}
 
 /// How one arm is named in a failure line: the run-mode plus its link budget.
 ///
@@ -1569,6 +1688,14 @@ fn handshake_field_from_a_config(
             lease_from_wire(in_seconds, *v).to_string()
         }
         Some(FieldValue::Uint(v)) => v.to_string(),
+        // R2179 (open-debt item 220) — a field PACKED INTO BITS of a byte, which
+        // no wire-proven key had been before `mode`. The dissector reports those
+        // as `Bits` rather than `Uint` (`dissect.rs`: `bits("whatami", ..)`),
+        // and this arm's absence is what the leg failed on first — loudly, by
+        // the `other` arm below, which printed `Some(Bits(2))` and named the
+        // gap rather than reporting the key as missing. That is the arm doing
+        // its job: an unreadable field is not an absent one.
+        Some(FieldValue::Bits(v)) => v.to_string(),
         Some(FieldValue::Bytes(b)) => b.iter().map(|byte| format!("{byte:02x}")).collect(),
         other => panic!("the frame carries no {wire_name}: {other:?}\n{field:?}"),
     }
@@ -1650,6 +1777,13 @@ fn wire_reading(key: &str) -> (HandshakeFrame, Reading) {
         // leg reported the frame's actual ext identities and it was `(2, 2)` —
         // ZBuf. Two rows in the same module, one sentence about them.
         "transport/shared_memory/enabled" => (InitSyn, Reading::Presence("shm")),
+        // R2179 (open-debt item 220) — the first ARM-VARYING key, and the first
+        // one whose effect is a FIELD of the InitSyn rather than an extension
+        // on it. `whatami` is packed into the `cbyte`'s low two bits and the
+        // dissector already names it (`dissect.rs`, the `T_MID_INIT` arm), so
+        // nothing new reads the wire here: what was missing was a sweep shape
+        // for a key whose two readings live in two ARMS instead of two files.
+        "mode" => (InitSyn, Reading::Value("whatami")),
         other => panic!("{other} is declared wire-proven and this leg cannot read it"),
     }
 }

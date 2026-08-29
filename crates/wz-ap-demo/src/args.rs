@@ -2057,18 +2057,15 @@ pub(crate) const KIND_LEG_JUDGED: &str = "leg-judged";
 #[cfg(all(test, feature = "zenoh-config"))]
 pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
     // ── (1) the wire carries it; nothing here reads it yet ──────────────
-    (
-        "mode",
-        KIND_NOT_YET_READ,
-        "whatami is a FIELD of InitSyn (zenoh-protocol init.rs:122) and of \
-         InitAck (:234), so a frame read already carries this key's effect. \
-         The register excluded `mode` from this kind on args.rs:397 — that \
-         with no `listen` the expansion emits only `--connect` whatever the \
-         mode is — but that measures whether TWO DIALLING RUNS differ in \
-         their ARGV, and a wire class is proven by reading the FRAME, not by \
-         diffing the expansion. The two are different questions and only the \
-         second was asked.",
-    ),
+    //
+    // ⚠ R2179 (open-debt item 220) RETIRED `mode` from this kind — it is
+    // `wire` now, read as the InitSyn's `whatami` by
+    // `every_key_proven_on_the_wire_is_in_the_frame_a_zenohd_would_receive`.
+    // Its row's verdict ("① — one wiring away") was right and its ROUTE was
+    // not: a fixture PAIR cannot name `mode`, because that leg's document
+    // template already writes `mode` from the arm and a second one is a
+    // `duplicate field` refusal. The leg grew an arm-varying shape instead,
+    // and the three run-modes' whatami readings are required to differ.
     (
         "transport/unicast/max_links",
         KIND_NOT_YET_READ,
