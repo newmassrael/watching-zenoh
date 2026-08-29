@@ -8710,6 +8710,30 @@ layer_c1bo_dissect_c_abi() {
     # agrees with GCC function for function -- and the names it then reads
     # come from a declaration a compiler has already bounded.
     python3 scripts/lib/capi_bound_names.py || return 1
+
+    # R2173 (open-debt item 550) — and what a value family says about a value
+    # the consumer's own build does not recognise.
+    #
+    # KIND has told two kinds of not-knowing apart for a while -- UNDECODABLE
+    # is this reader failing, UNKNOWN is a MID this build does not know -- and
+    # the header says in words that both are answers. Measured before this ran:
+    # ORIGIN, ANCHOR and FLAG said nothing of the kind, and NEITHER DID KIND
+    # for the third one, the consumer's own header being older than the library
+    # it linked. A consumer folding that into UNKNOWN reports strange traffic
+    # where there was none.
+    #
+    # Beside the other three because the SUBJECT is the same header and the
+    # certifier is the same C compiler: the population is `cc -dM -E` over the
+    # published header, not a regex. That is not a preference -- the probe that
+    # filed item 550 used a regex and silently missed two of the thirty
+    # macros, while its own exclusion list named families it had never been
+    # able to see.
+    #
+    # `--selftest` first, and it is not ceremony: it drives all eight FAIL
+    # paths through fixtures AND a clean control, so a gate that had started
+    # passing everything cannot be mistaken for a header that is in order.
+    python3 scripts/lib/capi_unknown_value_policy.py --selftest || return 1
+    python3 scripts/lib/capi_unknown_value_policy.py || return 1
     return 0
 }
 

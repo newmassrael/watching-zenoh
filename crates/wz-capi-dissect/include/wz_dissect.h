@@ -129,6 +129,45 @@
  * the type was a SECOND marker for the same fact, and two markers for one fact
  * are two things that can disagree — which is why the suffix is gone rather
  * than incremented.
+ *
+ * R2173 — THREE KINDS OF NOT-KNOWING, AND THEY ARE DIFFERENT ANSWERS.
+ *
+ * The KIND family below has said for a while that WZ_DISSECT_KIND_UNDECODABLE
+ * (this reader failed) and WZ_DISSECT_KIND_UNKNOWN (a MID this build does not
+ * recognise) are both answers and neither is the absence of one. There is a
+ * THIRD, it belongs to every family here, and until this paragraph it was
+ * nowhere:
+ *
+ *   1. THIS READER FAILED — a value the library reports because it could not
+ *      decode. `WZ_DISSECT_KIND_UNDECODABLE`. About wz.
+ *   2. THE WIRE CARRIED SOMETHING THIS BUILD DOES NOT KNOW — a value the
+ *      library reports because the traffic was strange.
+ *      `WZ_DISSECT_KIND_UNKNOWN`. About the network.
+ *   3. YOUR SWITCH FELL THROUGH TO ITS DEFAULT — the library reported a value
+ *      THIS HEADER does not list, because the library is NEWER than the header
+ *      you compiled against. About the two of us, and about nothing else.
+ *
+ * ⚠ THE THIRD MUST NOT BE FOLDED INTO THE SECOND. Reporting "the wire sent
+ * something strange" about an ordinary message whose only fault is being newer
+ * than your header is a confident wrong answer, and a confident wrong answer
+ * is worse here than silence.
+ *
+ * WHICH OF THESE APPLIES IS PER FAMILY, and each family says so in its own
+ * comment block, in a form a gate reads:
+ *
+ *     @unknown <FAMILY> <policy>
+ *
+ * with `policy` one of `newer-build`, `ignore-bits`, `caller-supplied` or
+ * `not-an-enumeration`; and, where a family ALSO reports not-knowing as a
+ * VALUE (only KIND does today),
+ *
+ *     @unknown-sentinel <FAMILY> <MEMBER>
+ *
+ * `scripts/lib/capi_unknown_value_policy.py` holds every family to a marker
+ * and every marker to its consequence -- contiguity, powers of two, a named
+ * refusal code -- so a family added later cannot arrive unclassified.
+ *
+ * @unknown H not-an-enumeration
  */
 #ifndef WZ_DISSECT_H
 #define WZ_DISSECT_H
@@ -140,7 +179,23 @@
 extern "C" {
 #endif
 
+/* Success. One value, and there is no second one to come: a door either did
+ * what it was asked or returns one of the negative codes below.
+ *
+ * @unknown OK not-an-enumeration */
 #define WZ_DISSECT_OK 0
+
+/* R2173 — THE ERROR CODES, and what a code you do not recognise means.
+ *
+ * They are contiguous downward from -1 for the same reason the KIND numbers
+ * are contiguous upward: a code added later takes the next one, so a consumer
+ * that does not know it lands on its own default rather than on a neighbour's
+ * case. A code this header does not list means the LIBRARY IS NEWER THAN THIS
+ * HEADER -- it does NOT mean the call did something exotic. Treat it exactly
+ * as you would treat a failure you do know: non-zero is a failure, and the
+ * specific codes are for telling one failure from another.
+ *
+ * @unknown ERR newer-build */
 #define WZ_DISSECT_ERR_INVALID_ARG (-1)
 #define WZ_DISSECT_ERR_BAD_CAPTURE (-2)
 #define WZ_DISSECT_ERR_DECODE (-3)
@@ -165,7 +220,15 @@ extern "C" {
  * NONE is zero so a zero-initialised argument reads a file the way every door
  * here read one before presets existed. An UNKNOWN value is
  * WZ_DISSECT_ERR_INVALID_ARG and never a quiet fall back to unbounded -- a
- * caller that believes it asked for a ceiling must not be given none. */
+ * caller that believes it asked for a ceiling must not be given none.
+ *
+ * R2173 — so this family's not-knowing runs the OTHER WAY from every other one
+ * here. You PASS these; the library does not report them. A preset this build
+ * does not know is refused with WZ_DISSECT_ERR_INVALID_ARG, and a preset YOU
+ * do not know is simply one you never pass. There is nothing for a `default`
+ * to mean.
+ *
+ * @unknown LIMITS caller-supplied */
 #define WZ_DISSECT_LIMITS_NONE 0
 #define WZ_DISSECT_LIMITS_LIVE_TAP 1
 
@@ -662,7 +725,9 @@ typedef struct wz_dissect_live wz_dissect_live;
  *
  * NOT zero, and that is the whole reason it is spelled out: zero is a legal
  * instant, and a sentinel colliding with it would report a tap whose clock
- * starts at zero as a tap with no clock. */
+ * starts at zero as a tap with no clock.
+ *
+ * @unknown NO not-an-enumeration */
 #define WZ_DISSECT_NO_TIMESTAMP UINT64_MAX
 
 /* wz_dissect_record.kind — the message kinds. Derived from the decoder's
@@ -674,7 +739,18 @@ typedef struct wz_dissect_live wz_dissect_live;
  * does not recognise, which is a fact about the wire. Both are answers, and
  * neither is the absence of one. The numbers in between are contiguous so a
  * kind added later gets the next one and a consumer's switch falls through
- * to its own default rather than onto a neighbour's case. */
+ * to its own default rather than onto a neighbour's case.
+ *
+ * R2173 — AND WHAT THAT DEFAULT MEANS, which this block used to stop short of.
+ * A kind number this header does not list is the THIRD not-knowing named at
+ * the top of this file: the library is NEWER than your header. It is NOT
+ * UNKNOWN. UNKNOWN is a fact about the WIRE that wz measured and is reporting;
+ * a default is a fact about your own build being older than the library it
+ * linked. Folding the second into the first would report strange traffic where
+ * there was none.
+ *
+ * @unknown KIND newer-build
+ * @unknown-sentinel KIND UNKNOWN */
 #define WZ_DISSECT_KIND_UNDECODABLE 0
 #define WZ_DISSECT_KIND_INIT 1
 #define WZ_DISSECT_KIND_OPEN 2
@@ -689,7 +765,15 @@ typedef struct wz_dissect_live wz_dissect_live;
 /* wz_dissect_record.origin — which of a flow's message lists this came
  * out of. A flow can carry several at once (a UDP conversation may hold
  * cleartext datagrams AND messages recovered from inside QUIC), and they
- * are different lists rather than one interleaved one. */
+ * are different lists rather than one interleaved one.
+ *
+ * R2173 — an origin this header does not list means the library is NEWER than
+ * your header; wz assigns this field from a match over its own list types and
+ * has no "I could not tell" to report, so unlike KIND there is no sentinel
+ * value here and none is missing. Group such a record under whatever your UI
+ * calls "another list of this flow" -- not under an error.
+ *
+ * @unknown ORIGIN newer-build */
 #define WZ_DISSECT_ORIGIN_STREAM 1
 #define WZ_DISSECT_ORIGIN_DATAGRAM 2
 #define WZ_DISSECT_ORIGIN_QUIC_STREAM 3
@@ -698,11 +782,31 @@ typedef struct wz_dissect_live wz_dissect_live;
 
 /* wz_dissect_record.anchor_space — how to read `anchor`. They are small
  * numbers either way and cannot be told apart by looking, which is why the
- * record says. A PACKET index must not be added to anything. */
+ * record says. A PACKET index must not be added to anything.
+ *
+ * R2173 — an anchor space this header does not list means the library is NEWER
+ * than your header. This is the family where guessing costs the most: the
+ * whole point of the field is that the two spaces cannot be told apart by
+ * looking, so a consumer that treated an unknown space as either of the two it
+ * knows would do arithmetic on a coordinate whose units it does not have. Do
+ * not compare or subtract such an anchor; show it and say the space is one
+ * this build does not know.
+ *
+ * @unknown ANCHOR newer-build */
 #define WZ_DISSECT_ANCHOR_PACKET 0
 #define WZ_DISSECT_ANCHOR_STREAM_BYTES 1
 
-/* wz_dissect_record.flags — zero for an ordinary message. */
+/* wz_dissect_record.flags — zero for an ordinary message.
+ *
+ * R2173 — and this family answers not-knowing DIFFERENTLY from the enumerated
+ * ones, which is why it gets its own policy rather than a reserved member. A
+ * flags word is a SET, not one value: a bit this header does not name is a
+ * remark the library is making that your build has no use for, and IGNORING IT
+ * is correct. Mask with the bits you know (`flags & WZ_DISSECT_FLAG_*`) rather
+ * than switching on the word. Adding a "reserved" member here would have been
+ * the wrong fix -- it would name a value, and there is no value to name.
+ *
+ * @unknown FLAG ignore-bits */
 /* The frame's wire length exceeded the batch_size its session's InitAck
  * agreed to: a protocol violation by the sender. The message still
  * decoded, and is reported rather than dropped -- dropping is what makes a
