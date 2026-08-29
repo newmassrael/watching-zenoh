@@ -76,6 +76,24 @@ why they are named here rather than fixed:
 
 That second one is how the `let mut` defect below was found: the classifier
 called `list_wire` a source list when its length is the loop's.
+
+## And the residues R2187 left, measured by R2188
+
+* IS `GROWS` COMPLETE? Derived rather than argued: every method this tree
+  calls on a source-literal `let mut` binding was collected — nineteen names
+  outside `GROWS`, and not one of them changes a length (`len`, `sort`,
+  `copy_from_slice`, `as_mut_ptr`, `iter_mut`, `windows`, …). `copy_from_slice`
+  is the one worth naming: it PANICS on a length mismatch rather than
+  resizing.
+* IS THE NAME-SCOPED WINDOW TOO WIDE? Yes, in exactly ONE place, and reading
+  it produced the two fixes above — a fixed-size `[u8; VLE_LEN]` excluded by a
+  `state.buf` in another function. The population went 1157 -> 1158, which is
+  the count the probe predicted.
+* ARE THE 117 `[T; N]` SITES REALLY OUT OF CLASS? R2187 judged that by reading
+  two of them. Derived here instead, over all 182 such bindings: 117 open with
+  an array literal and 65 with `core::array::from_fn`, a byte string, or a
+  `try_into`. EVERY one of those shapes has its length checked by the compiler
+  against the type, so none is a second copy of a number anybody wrote.
 """
 
 from __future__ import annotations
@@ -112,6 +130,18 @@ GROWS = re.compile(
     r"\.\s*(?:push|push_str|extend|extend_from_slice|insert|append|clear"
     r"|truncate|remove|retain|pop|drain|resize|dedup|split_off)\s*\("
 )
+# A function opening, at any indent -- the OTHER bound on a growth search.
+FN_OPENS = re.compile(
+    r"^[ \t]*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?"
+    r"(?:extern\s+\"[^\"]*\"\s+)?fn\s+[A-Za-z_]",
+    re.M,
+)
+# A name that is NOT preceded by `.` -- a local, not a field or a method.
+#
+# ⚠ MEASURED (R2188): without the `.` in this class, `state.buf` answered for
+# a local `buf` and excluded a `[u8; VLE_LEN]` -- a fixed-size array, which
+# cannot be grown at all.
+NOT_A_FIELD = r"(?<![A-Za-z0-9_.])"
 LITERAL = re.compile(r"^&?\s*(?:alloc::)?(?:vec!\[|\[)")
 # An alias: the initialiser is a bare path to another binding.
 ALIAS = re.compile(r"^([A-Za-z_][A-Za-z0-9_:]*)\s*;?$")
@@ -167,7 +197,7 @@ def bindings_of(text: str) -> list[tuple[int, str, str, str]]:
 
 
 def in_force(
-    name: str, at: int, bindings: list[tuple[int, str, str, str]]
+    name: str, at: int, bindings: list[tuple[int, str, str, str]], text: str = ""
 ) -> tuple[int, str, str, str] | None:
     """The binding in force for `name` at byte offset `at`.
 
@@ -186,24 +216,51 @@ def in_force(
         if ident != name:
             continue
         if kind.startswith("let"):
-            if pos < at and (best is None or pos > best[0]):
-                best = row
+            # ⚠ R2188 — A STATEMENT BINDING DOES NOT REACH PAST ITS FUNCTION.
+            # `in_force` used to take the nearest preceding `let` whatever lay
+            # between, so a `let bytes = [..]` in one function could answer for
+            # a `bytes` three functions down. That is the file-wide lookup
+            # R2186 removed, surviving at a smaller radius.
+            if pos < at and not FN_OPENS.search(text, pos + 1, at):
+                if best is None or pos > best[0]:
+                    best = row
         elif best is None or not best[1].startswith("let"):
             best = row
     return best
 
 
-def shadow(name: str, pos: int, bindings: list[tuple[int, str, str, str]]) -> int:
+def shadow(
+    name: str, pos: int, bindings: list[tuple[int, str, str, str]], text: str = ""
+) -> int:
     """Where `name`'s binding at `pos` stops being the one in force.
 
-    The next `let` of that name, or the end. WITHOUT this bound a growth
-    search runs to the end of the FILE and finds an unrelated `let mut out`
-    three functions down: measured 2026-08-30, that over-excluded 407 of 1557
-    lists where only 87 are grown. Over-exclusion is the direction that loses
-    detection, which is the one failure this gate must not have.
+    The NEXT `let` of that name, or the NEXT function opening, whichever comes
+    first; `-1` for neither. Both bounds were added by measurement and both
+    guard the same direction.
+
+    Without the name bound the growth search runs to the end of the FILE and
+    finds an unrelated `let mut out` three functions down: 407 of 1557 lists
+    excluded where 400 are grown (R2187).
+
+    Without the FUNCTION bound one case survived that: `push_zint`'s
+    `let mut buf = [0u8; VLE_LEN]` was read as grown by a
+    `state.buf.extend_from_slice` 155 lines later in a different function
+    (R2188). A fixed-size array cannot be grown at all, which is how obvious
+    that exclusion was once it was looked at.
+
+    Over-exclusion is the direction that loses detection, which is the one
+    failure this gate must not have.
     """
-    after = [p for p, k, ident, _ in bindings if ident == name and k.startswith("let") and p > pos]
-    return min(after) if after else -1
+    ends = [
+        p
+        for p, k, ident, _ in bindings
+        if ident == name and k.startswith("let") and p > pos
+    ]
+    if text:
+        nxt = FN_OPENS.search(text, pos + 1)
+        if nxt:
+            ends.append(nxt.start())
+    return min(ends) if ends else -1
 
 
 def grown_before(
@@ -214,7 +271,7 @@ def grown_before(
     text: str,
 ) -> bool:
     """`true` when `name` is LENGTHENED between `pos` and `end` (`-1` = EOF)."""
-    grown = re.compile(r"(?<![A-Za-z0-9_])" + re.escape(name) + r"\s*" + GROWS.pattern)
+    grown = re.compile(NOT_A_FIELD + re.escape(name) + r"\s*" + GROWS.pattern)
     return bool(grown.search(text, pos, len(text) if end < 0 else end))
 
 
@@ -225,7 +282,7 @@ def is_source_literal(
     text: str = "",
     depth: int = 0,
 ) -> bool:
-    row = in_force(name, at, bindings)
+    row = in_force(name, at, bindings, text)
     if row is None:
         return False
     pos, kind, _, init = row
@@ -246,8 +303,10 @@ def is_source_literal(
     # whole initialiser on one line with no `pub` and no trailing `;`. The
     # count that means anything is the one this file's own `bindings_of`
     # produces, which is why it is quoted from here rather than from beside it.
-    if kind == "let mut" and grown_before(name, pos, at, bindings, text):
-        return False
+    if kind == "let mut":
+        end = shadow(name, pos, bindings, text)
+        if grown_before(name, pos, at if end < 0 else min(end, at), bindings, text):
+            return False
     if LITERAL.match(init):
         return True
     # ONE alias hop. `const CARRIERS: &[ExtCarrier] = ALL_CARRIERS;` is how the
@@ -276,7 +335,9 @@ def scan(root: pathlib.Path) -> tuple[int, list[str]]:
         for pos, kind, name, init in bindings:
             if not LITERAL.match(init):
                 continue
-            if kind == "let mut" and grown_before(name, pos, shadow(name, pos, bindings), bindings, text):
+            if kind == "let mut" and grown_before(
+                name, pos, shadow(name, pos, bindings, text), bindings, text
+            ):
                 continue
             examined += 1
         for m in COUNTED.finditer(text):
@@ -344,6 +405,26 @@ fn a_literal_that_is_then_grown_is_a_product() {
 fn a_let_mut_that_is_never_grown_is_still_a_list() {
     let mut table = vec!["a", "b"];
     assert_eq!(table.len(), 2, "mut and untouched is still written down");  // EXPECT-FINDING
+}
+fn a_field_of_that_name_is_not_this_binding() {
+    // THE CASE THE THIRD IMPLEMENTATION GOT WRONG. `push_zint`'s
+    // `let mut buf = [0u8; VLE_LEN]` -- a fixed array, ungrowable -- was read
+    // as grown by a `state.buf.extend_from_slice`.
+    //
+    // ⚠ THE FIELD IS IN THIS FUNCTION ON PURPOSE. Written one function down
+    // it is masked by the fn bound, and the arm passes whether or not the
+    // field fix is in place -- born green, which is this workspace's most
+    // expensive fixture defect and was made once more right here.
+    let mut buf = [0u8, 0u8];
+    state.buf.extend_from_slice(&[1]);
+    assert_eq!(buf.len(), 2, "a field namesake is not this local");  // EXPECT-FINDING
+}
+fn a_binding_does_not_reach_past_its_function() {
+    let table = vec!["a", "b", "c"];
+    drop(table);
+}
+fn the_next_function_sees_a_parameter_of_that_name(table: &[u8]) {
+    assert_eq!(table.len(), 3, "a parameter, not the list one function up");
 }
 /// A DOC COMMENT THAT QUOTES THE DEFECT IS NOT THE DEFECT. The round that
 /// repaired the first real finding explained itself by writing
