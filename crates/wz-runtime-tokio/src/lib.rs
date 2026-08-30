@@ -2084,6 +2084,38 @@ impl UdpDriver {
         })
     }
 
+    /// R2219 — bind a UNICAST socket on `local`, ephemeral port, with no link
+    /// peer: one of the sockets a scouting Hello may be elected to leave from
+    /// (`ucast_sockets`, zenoh `net/runtime/orchestrator.rs:1112`).
+    ///
+    /// `peer` is deliberately `None`, which is not an omission. This socket has
+    /// no link partner — its destination is a different asker on every datagram
+    /// and arrives with the datagram — so it is reached through
+    /// [`Self::send_datagram_to`] and never through [`LinkDriver::send`]. Giving
+    /// it a peer it never sends to would make [`LinkDriver::open`] succeed on a
+    /// driver that is not a link.
+    ///
+    /// The bind is on a CONCRETE address, never the wildcard: the whole point of
+    /// the socket is that its source address is the one the elected interface
+    /// carries, and a `0.0.0.0` bind hands that choice back to the routing table.
+    ///
+    /// Upstream's `bind_ucast_port` additionally sets the multicast TTL on these
+    /// sockets (`orchestrator.rs:746`), and that is NOT mirrored, because there
+    /// it is load-bearing for a second job this socket does not have: upstream
+    /// SENDS its own Scouts to the group from the same sockets it answers from
+    /// (`Runtime::scout`, `:292-303` passing one `sockets` to both halves). wz
+    /// keeps the two apart — the asking half sends from
+    /// [`Self::bind_multicast_tx_v4`], which does set the TTL. A hop limit on a
+    /// socket that only ever unicasts is a setting with no reader.
+    #[cfg(feature = "scouting-responder")]
+    pub async fn bind_reply_unicast(local: std::net::IpAddr) -> io::Result<Self> {
+        let socket = UdpSocket::bind(SocketAddr::from((local, 0))).await?;
+        Ok(Self {
+            socket: Some(socket),
+            peer: None,
+        })
+    }
+
     /// R311y846 — write one datagram to an address OTHER than the driver's
     /// `peer`.
     ///

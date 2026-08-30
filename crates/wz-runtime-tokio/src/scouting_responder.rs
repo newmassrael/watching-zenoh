@@ -35,10 +35,12 @@
 //! would make a node that answers a Scout also dial every node that asked.
 
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use wz_session_core::link::{LinkEvent, LostCause};
-use wz_session_core::scout_responder::{answer_scout, ScoutDecision, ScoutIgnored};
+use wz_session_core::scout_responder::{
+    answer_scout, best_reply_source, ScoutDecision, ScoutIgnored,
+};
 // R311y428's rule, applied to this module's own parameter types: a consumer
 // reaches this crate through the wz facade (`wz::runtime_tokio::*`), which
 // re-exports no `wz-session-core` path of its own, so without these the
@@ -63,6 +65,8 @@ pub enum ResponderStep {
     Answered {
         /// The asker's address — the datagram source, not the group.
         to: SocketAddr,
+        /// Which of this node's sockets carried it.
+        from: ReplySource,
         /// The Hello's length on the wire.
         bytes: usize,
     },
@@ -88,6 +92,10 @@ pub enum ResponderStep {
     SendFailed {
         /// The asker the reply was for.
         to: SocketAddr,
+        /// The socket that could not carry it. An operator reading this needs
+        /// the elected source as much as the destination: a reply refused on one
+        /// interface and a reply refused on all of them are different faults.
+        from: ReplySource,
         /// The OS error.
         error: io::Error,
     },
@@ -98,9 +106,41 @@ pub enum ResponderStep {
     },
 }
 
-/// A node's answering half: one group socket plus the identity it answers with.
+/// Which of this node's sockets a Hello left from.
+///
+/// A REPORTED value rather than a silent choice, for this module's usual reason:
+/// the operator question is "why can nothing find me", and a node answering from
+/// a socket the asker cannot route back to looks, from the outside, exactly like
+/// a node that never answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplySource {
+    /// The unicast socket [`wz_session_core::scout_responder::best_reply_source`]
+    /// elected for this asker, bound at this address — upstream's
+    /// `get_best_match` outcome (zenoh `net/runtime/orchestrator.rs:1167`).
+    Elected(SocketAddr),
+    /// No configured unicast socket could carry a reply to this asker, so the
+    /// Hello left the GROUP socket the Scout arrived on.
+    ///
+    /// This is the whole behaviour of a responder built with
+    /// [`ScoutingResponder::new`], which is given no unicast sockets at all, and
+    /// it is a NAMED arm rather than a fallback branch: on a single-homed host it
+    /// is indistinguishable from the elected reply, and on a multi-homed one it
+    /// is the reply that leaves whichever interface the group bind happened to
+    /// pick. Upstream cannot reach this state — it `unwrap`s an empty socket list
+    /// (`orchestrator.rs:1167`) — so a responder that never reports anything else
+    /// is answering, but not the way a multi-homed node has to.
+    Group,
+}
+
+/// A node's answering half: one group socket, the unicast sockets a reply may
+/// leave from, and the identity it answers with.
 pub struct ScoutingResponder {
     driver: UdpDriver,
+    /// Upstream's `ucast_sockets`, paired with the address each is bound to so
+    /// the election reads one cached vector instead of a `local_addr()` syscall
+    /// per candidate per datagram.
+    reply: Vec<(UdpDriver, SocketAddr)>,
+    reply_ips: Vec<IpAddr>,
     identity: ResponderIdentity,
     answered: u64,
     ignored: u64,
@@ -116,12 +156,56 @@ impl ScoutingResponder {
     /// (`scouting/multicast/address` / `interface` / `ttl`). A responder that
     /// bound its own would answer on a group the operator did not name.
     pub fn new(driver: UdpDriver, identity: ResponderIdentity) -> Self {
+        Self::with_reply_sockets(driver, identity, Vec::new())
+    }
+
+    /// R2219 — the same, plus the unicast sockets a Hello may leave FROM.
+    ///
+    /// The group socket answers the question of where the Scout came from; it
+    /// does not answer where the reply should come from. Upstream keeps those
+    /// apart and replies from a unicast socket elected per asker
+    /// (`get_best_match`, zenoh `net/runtime/orchestrator.rs:1113-1134`), which
+    /// on a multi-homed host is what puts the Hello on the interface nearest the
+    /// asker instead of on whichever one the group bind chose.
+    ///
+    /// A socket whose `local_addr()` cannot be read is DROPPED rather than
+    /// carried, which is upstream's own `filter(|sock| sock.local_addr().is_ok())`
+    /// (`:1130`): a candidate with no address cannot be scored, and keeping it
+    /// would make the election's population disagree with the sockets it can
+    /// actually send from.
+    ///
+    /// An empty list is legal and is exactly [`Self::new`]: every reply is then
+    /// reported [`ReplySource::Group`], which is a state a reader can see rather
+    /// than a default that looks like a choice.
+    pub fn with_reply_sockets(
+        driver: UdpDriver,
+        identity: ResponderIdentity,
+        reply_sockets: Vec<UdpDriver>,
+    ) -> Self {
+        let reply: Vec<(UdpDriver, SocketAddr)> = reply_sockets
+            .into_iter()
+            .filter_map(|d| d.local_addr().ok().map(|addr| (d, addr)))
+            .collect();
+        let reply_ips = reply.iter().map(|(_, addr)| addr.ip()).collect();
         Self {
             driver,
+            reply,
+            reply_ips,
             identity,
             answered: 0,
             ignored: 0,
         }
+    }
+
+    /// The addresses a reply may be elected to leave from, in election order.
+    ///
+    /// Reported for the same reason the group socket's address is
+    /// ([`Self::local_addr`]): an operator diagnosing an undiscoverable node
+    /// needs the sockets the answer can actually use, and an empty list here is
+    /// the difference between "answers from the nearest interface" and "answers
+    /// from wherever the group bind landed".
+    pub fn reply_sources(&self) -> Vec<SocketAddr> {
+        self.reply.iter().map(|(_, addr)| *addr).collect()
     }
 
     /// The address the responder is listening on, for reporting.
@@ -172,19 +256,53 @@ impl ScoutingResponder {
                 let Some(to) = rx.src else {
                     return ResponderStep::SourceUnknown;
                 };
-                match self.driver.send_datagram_to(&hello, to).await {
+                // The election, and the ONE place the group socket is chosen: an
+                // asker no configured unicast socket can reach falls to the
+                // socket the Scout arrived on, and says so.
+                let (socket, from) = match best_reply_source(to.ip(), &self.reply_ips) {
+                    Some(index) => {
+                        let (driver, addr) = &self.reply[index];
+                        (driver, ReplySource::Elected(*addr))
+                    }
+                    None => (&self.driver, ReplySource::Group),
+                };
+                match socket.send_datagram_to(&hello, to).await {
                     Ok(()) => {
                         self.answered += 1;
                         ResponderStep::Answered {
                             to,
+                            from,
                             bytes: hello.len(),
                         }
                     }
-                    Err(error) => ResponderStep::SendFailed { to, error },
+                    Err(error) => ResponderStep::SendFailed { to, from, error },
                 }
             }
         }
     }
+}
+
+/// R2219 — bind one unicast reply socket per address in `locals`, and say which
+/// addresses refused.
+///
+/// The pair is the return value on purpose. An address can be enumerated and
+/// then be ungrabbable a moment later — the interface went down, the address was
+/// released — and a helper that quietly returned the shorter list would turn a
+/// multi-homed node into a single-homed one with nothing said. The caller logs
+/// the refusals; the election runs on what bound.
+///
+/// The counterpart is [`crate::link_interfaces::multicast_interface_addresses`],
+/// which produces `locals` the way upstream's `get_interfaces("auto")` does.
+pub async fn bind_reply_sockets(locals: &[IpAddr]) -> (Vec<UdpDriver>, Vec<(IpAddr, io::Error)>) {
+    let mut bound = Vec::new();
+    let mut refused = Vec::new();
+    for local in locals {
+        match UdpDriver::bind_reply_unicast(*local).await {
+            Ok(driver) => bound.push(driver),
+            Err(error) => refused.push((*local, error)),
+        }
+    }
+    (bound, refused)
 }
 
 /// Answer Scouts until the socket dies, reporting every turn to `observe`.

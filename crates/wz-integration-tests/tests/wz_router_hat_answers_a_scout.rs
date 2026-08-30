@@ -218,6 +218,23 @@ fn scout_datagram(what: u8) -> Vec<u8> {
     wire
 }
 
+/// R2219 — the zid a datagram carries, hex, or `None` when it is not a Hello
+/// this tree can read.
+///
+/// The same walk the assertions below use, so the datagram a run ACCEPTS and the
+/// datagram it JUDGES are identified by one reader. A pre-filter with a reader
+/// of its own would be a second opinion about what "this node's Hello" means.
+fn hello_zid_hex(datagram: &[u8]) -> Option<String> {
+    let walked = dissect_scouting_message(datagram, 0).ok()??;
+    if walked.name != "Hello" {
+        return None;
+    }
+    match walked.find("zid").map(|f| &f.value) {
+        Some(FieldValue::Bytes(b)) => Some(b.iter().map(|b| format!("{b:02x}")).collect()),
+        _ => None,
+    }
+}
+
 /// Read one named field's `Bits` value out of a walked tree.
 fn bits(field: &Field, name: &str) -> Option<u64> {
     match field.find(name).map(|f| &f.value) {
@@ -239,6 +256,7 @@ fn bits(field: &Field, name: &str) -> Option<u64> {
 fn scout_and_read_hello(
     scouter: &UdpSocket,
     arm: &Arm,
+    zid_hex: &str,
     child: &mut Child,
     capture: &mut std::fs::File,
 ) -> Result<Vec<u8>, String> {
@@ -246,24 +264,17 @@ fn scout_and_read_hello(
     let datagram = scout_datagram(WHAT_ROUTER | WHAT_PEER);
     let mut buf = vec![0u8; 2048];
     loop {
-        scouter
-            .send_to(&datagram, (arm.group, arm.port))
-            .map_err(|e| format!("could not scout {}:{}: {e}", arm.group, arm.port))?;
-        match scouter.recv_from(&mut buf) {
-            Ok((n, from)) => {
-                if from.port() != arm.port {
-                    // Not ours: another responder on this host answered from a
-                    // socket we did not ask. Reported rather than silently
-                    // accepted — a stray Hello standing in for the node under
-                    // test is the failure shape this file's port discipline
-                    // exists to prevent.
-                    continue;
-                }
-                return Ok(buf[..n].to_vec());
-            }
-            Err(e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => {}
-            Err(e) => return Err(format!("recv_from on the scouter failed: {e}")),
-        }
+        // R2219 — BOTH exits are checked at the TOP, and moving them here is a
+        // BUG FIX rather than a tidy-up. They used to sit after the `match`,
+        // which the "not ours" arm below reaches by `continue` — so a datagram
+        // that kept arriving and kept being skipped span this loop forever, past
+        // the deadline and past a node that had died. That path was unreachable
+        // while the skip condition could never be true, and the moment this
+        // round made it reachable the loop hung instead of failing. A budget a
+        // `continue` can step over is not a budget.
+        //
+        // The first iteration still runs: `deadline` is 15s away, and the child
+        // was alive a moment ago at the banner wait.
         if let Ok(Some(status)) = child.try_wait() {
             return Err(format!(
                 "the {} node exited before answering (status: {status})\n\
@@ -281,6 +292,38 @@ fn scout_and_read_hello(
                 arm.port,
                 wz_integration_tests::common::read_captured(capture)
             ));
+        }
+        scouter
+            .send_to(&datagram, (arm.group, arm.port))
+            .map_err(|e| format!("could not scout {}:{}: {e}", arm.group, arm.port))?;
+        match scouter.recv_from(&mut buf) {
+            Ok((n, _from)) => {
+                let answer = buf[..n].to_vec();
+                if hello_zid_hex(&answer).as_deref() != Some(zid_hex) {
+                    // Not ours: another responder on this host answered a Scout
+                    // we did not ask it. Skipped rather than accepted — a stray
+                    // Hello standing in for the node under test is the failure
+                    // shape this file's socket discipline exists to prevent.
+                    //
+                    // R2219 — this used to read `from.port() != arm.port`, i.e.
+                    // "it came from the group socket". That stopped being true
+                    // of a correct responder in this round: the Hello now leaves
+                    // an ELECTED unicast socket on an ephemeral port
+                    // (`get_best_match`, zenoh `orchestrator.rs:1113-1134`),
+                    // which is what upstream has always done — `bind_ucast_port`
+                    // binds port 0 (`:719`). So the source port identified the
+                    // OLD divergence rather than this node, and the per-process
+                    // zid this arm already pins is the discriminator that
+                    // survives the fix AND is stronger: it names the PROCESS,
+                    // not the socket — the whole per-process zid, so a
+                    // concurrent copy of this test is refused too, which the
+                    // port never could.
+                    continue;
+                }
+                return Ok(answer);
+            }
+            Err(e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => {}
+            Err(e) => return Err(format!("recv_from on the scouter failed: {e}")),
         }
     }
 }
@@ -423,13 +466,13 @@ fn a_wz_router_hat_answers_a_scout_with_a_hello_that_says_router() {
 
         let verdict: Verdict = match (advertised, banner) {
             (Ok(advertised), Some(banner)) => {
-                scout_and_read_hello(&scouter, arm, node.child_mut(), &mut capture).map(|hello| {
-                    Answer {
+                scout_and_read_hello(&scouter, arm, &zid_hex, node.child_mut(), &mut capture).map(
+                    |hello| Answer {
                         hello,
                         advertised,
                         banner,
-                    }
-                })
+                    },
+                )
             }
             (Ok(_), None) => Err(format!(
                 "the {} node advertised a locator but never joined the scouting \

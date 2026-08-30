@@ -12200,14 +12200,21 @@ PY
         --features scouting-active,transport-link-tls --quiet -- -D warnings) || return 1
     # R311y846 — the ANSWERING half's own loopback e2e: a foreign scouter's
     # Scout is answered with wz's Hello, UNICAST back to the asker, plus the
-    # `what`-gate control that gets no reply. Count-guarded at 2 for the reason
+    # `what`-gate control that gets no reply. Count-guarded at 3 for the reason
     # the y454 leg is guarded: this selects a whole binary, but the binary is
     # `#![cfg(feature = "scouting-responder")]`-gated, so a build that lost the
     # feature would compile an EMPTY target and `cargo test` would exit 0 having
     # run nothing.
+    #
+    # R2219 — 2 -> 3. The third is the MULTI-HOMED election: two askers on two
+    # loopback addresses reach one responder and each Hello leaves the interface
+    # nearest its asker (`get_best_match`, zenoh
+    # `net/runtime/orchestrator.rs:1113-1134`). It binds `127.0.0.2` and joins no
+    # group, so it is `#[ignore]`d for a DIFFERENT environmental reason than its
+    # two siblings and runs in the same lane.
     (cd crates && cargo test -p wz-runtime-tokio --features scouting-responder \
         --test scouting_responder_multicast -- --ignored --quiet 2>&1 \
-        | tee /dev/stderr | grep -qE '^test result: ok\. 2 passed') || return 1
+        | tee /dev/stderr | grep -qE '^test result: ok\. 3 passed') || return 1
     # And clippy over that feature, which no other lane builds — the same
     # gate-skew argument as the scouting-active clippy above.
     (cd crates && cargo clippy -p wz-runtime-tokio --all-targets \

@@ -1041,7 +1041,7 @@ pub(crate) async fn spawn_scouting_responder(
     locators: Vec<String>,
 ) -> io::Result<()> {
     use wz::runtime_tokio::scouting_responder::{
-        serve, ResponderIdentity, ResponderStep, ScoutingResponder,
+        bind_reply_sockets, serve, ResponderIdentity, ResponderStep, ScoutingResponder,
     };
     use wz::runtime_tokio::UdpDriver;
 
@@ -1095,10 +1095,64 @@ pub(crate) async fn spawn_scouting_responder(
              discovers this node still cannot dial it (bind a concrete address)"
         );
     }
-    tokio::spawn(serve(ScoutingResponder::new(driver, identity), |step| {
+    // R2219 — the sockets a Hello may LEAVE from, which are not the socket it
+    // arrives on. Upstream elects one per asker out of the unicast sockets it
+    // holds on the multicast interfaces (`get_best_match`, zenoh
+    // `net/runtime/orchestrator.rs:1113-1134`); the population here is resolved
+    // the same way its `get_interfaces` resolves one — the named interface's own
+    // addresses when `--scout-iface` names one, and every multicast-capable
+    // interface's when it does not.
+    let reply_addrs = match socket.interface.as_deref() {
+        Some(iface) => wz::runtime_tokio::link_interfaces::unicast_addresses_of_interface(iface)
+            .map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "wz-ap-demo: --scout-iface {iface} cannot carry a scouting \
+                         reply: {e}"
+                    ),
+                )
+            })?
+            .into_iter()
+            .filter(|ip| ip.is_ipv4())
+            .collect::<Vec<_>>(),
+        // `None` here is "could not determine", not "no interface qualifies",
+        // and the two must not collapse: the first leaves the reply on the group
+        // socket and says so below, the second is a host with nothing to elect.
+        None => {
+            wz::runtime_tokio::link_interfaces::multicast_interface_addresses().unwrap_or_default()
+        }
+    };
+    let (reply_sockets, refused) = bind_reply_sockets(&reply_addrs).await;
+    for (addr, error) in &refused {
+        // Not fatal: an address enumerated a moment ago can be gone by the time
+        // it is bound, and the remaining interfaces still answer. It is a WARN
+        // because the node is then answering fewer askers than the operator's
+        // interface list implies.
+        log::warn!(
+            "wz-ap-demo: --scout-listen could not hold a reply socket on \
+             {addr}: {error}"
+        );
+    }
+    let responder = ScoutingResponder::with_reply_sockets(driver, identity, reply_sockets);
+    let elected_from = responder.reply_sources();
+    if elected_from.is_empty() {
+        // The state the responder REPORTS as `ReplySource::Group` on every
+        // answer, said once here where an operator will see it: the node is
+        // findable, and every Hello leaves whichever interface the group bind
+        // landed on rather than the one nearest the asker.
+        log::warn!(
+            "wz-ap-demo: --scout-listen holds NO unicast reply socket, so every \
+             Hello leaves the group socket; on a multi-homed host that is not \
+             the interface nearest the asker"
+        );
+    } else {
+        log::info!("wz-ap-demo: SCOUT REPLY SOCKETS {elected_from:?}");
+    }
+    tokio::spawn(serve(responder, |step| {
         match step {
-            ResponderStep::Answered { to, bytes } => {
-                log::info!("wz-ap-demo: SCOUT ANSWERED {to} ({bytes} byte Hello)");
+            ResponderStep::Answered { to, from, bytes } => {
+                log::info!("wz-ap-demo: SCOUT ANSWERED {to} from {from:?} ({bytes} byte Hello)");
             }
             // At debug: a busy group carries Scouts for roles this node does not
             // have, and its own echo, on every cycle of every neighbour. The
@@ -1113,8 +1167,8 @@ pub(crate) async fn spawn_scouting_responder(
                      there is nowhere to send the Hello"
                 );
             }
-            ResponderStep::SendFailed { to, error } => {
-                log::warn!("wz-ap-demo: could not answer the scout at {to}: {error}");
+            ResponderStep::SendFailed { to, from, error } => {
+                log::warn!("wz-ap-demo: could not answer the scout at {to} from {from:?}: {error}");
             }
             ResponderStep::LinkLost { cause } => {
                 log::warn!("wz-ap-demo: SCOUT RESPONDER link lost: {cause:?}");

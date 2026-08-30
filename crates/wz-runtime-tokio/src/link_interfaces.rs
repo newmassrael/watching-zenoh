@@ -342,6 +342,97 @@ pub fn unicast_addresses_of_interface(_name: &str) -> Result<Vec<IpAddr>, IfaceR
     Err(IfaceResolveError::Undetermined)
 }
 
+/// R2219 — one IPv4 address per interface that can carry multicast: the wz
+/// counterpart of zenoh's `get_multicast_interfaces`
+/// (`commons/zenoh-util/src/net/mod.rs:131-153`).
+///
+/// Upstream's rule, kept: an interface qualifies when it is UP and RUNNING and
+/// `IFF_MULTICAST`, and it contributes its FIRST IPv4 address (`net/mod.rs:137
+/// -142`). One address per interface, not all of them — these are the addresses
+/// a node holds a scouting socket on, and a second socket on the same NIC would
+/// answer no asker the first could not.
+///
+/// Loopback is not named in the filter and does not need to be: on Linux `lo`
+/// carries `LOOPBACK,UP,LOWER_UP` and no `MULTICAST`, so the flag test already
+/// excludes it. Naming it separately would be a second rule with no subject.
+///
+/// The divergences are [`unicast_addresses_of_interface`]'s, for the same two
+/// reasons: this resolves LIVE per call rather than out of upstream's
+/// process-lifetime `lazy_static` snapshot, and it distinguishes "resolved, and
+/// no interface qualifies" (`Some(vec![])`) from "the resolution could not run"
+/// (`None`), where upstream returns an empty vec for both.
+#[cfg(unix)]
+pub fn multicast_interface_addresses() -> Option<Vec<IpAddr>> {
+    use std::ffi::CStr;
+
+    let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
+    // SAFETY: as in `interface_names_for` — `getifaddrs` allocates the list and
+    // writes its head through the out-pointer, returning 0 on success; on failure
+    // `head` is untouched and the early return never reads it.
+    if unsafe { libc::getifaddrs(&mut head) } != 0 {
+        return None;
+    }
+
+    // Interface names already answered, so the FIRST v4 address of each wins and
+    // a NIC with several contributes one — upstream's `return` out of its own
+    // per-interface loop.
+    let mut taken: Vec<String> = Vec::new();
+    let mut addrs: Vec<IpAddr> = Vec::new();
+    let mut cur = head;
+    while !cur.is_null() {
+        // SAFETY: `cur` is non-null and points at a node the successful
+        // `getifaddrs` above allocated; the list is not mutated while walked.
+        let ifa = unsafe { &*cur };
+        cur = ifa.ifa_next;
+
+        if ifa.ifa_name.is_null() {
+            continue;
+        }
+        let flags = ifa.ifa_flags as i32;
+        if flags & libc::IFF_UP == 0
+            || flags & libc::IFF_RUNNING == 0
+            || flags & libc::IFF_MULTICAST == 0
+        {
+            continue;
+        }
+        // SAFETY: `ifa_name` is a NUL-terminated C string owned by the list.
+        let name = unsafe { CStr::from_ptr(ifa.ifa_name) }
+            .to_string_lossy()
+            .into_owned();
+        if taken.contains(&name) {
+            continue;
+        }
+        match sockaddr_ip(ifa.ifa_addr) {
+            Some(ip @ IpAddr::V4(_)) if !ip.is_multicast() => {
+                taken.push(name);
+                addrs.push(ip);
+            }
+            _ => continue,
+        }
+    }
+
+    // SAFETY: `head` came from the successful `getifaddrs` above and is freed
+    // exactly once here; no node pointer outlives this call (the names and
+    // addresses are copied out by value).
+    unsafe { libc::freeifaddrs(head) };
+    Some(addrs)
+}
+
+/// Non-unix: no `getifaddrs`, so this cannot answer. `None` (could not
+/// determine) rather than `Some(vec![])`, which would claim this host has no
+/// multicast interface at all.
+///
+/// Upstream answers `vec![Ipv4Addr::UNSPECIFIED]` on windows and lets the system
+/// choose (`net/mod.rs:148-152`). That is deliberately NOT mirrored: the wildcard
+/// is not an address a reply can be ELECTED by, so handing it to
+/// [`wz_session_core::scout_responder::best_reply_source`] as a candidate would
+/// score every asker at zero and make the choice the caller thought it was
+/// making.
+#[cfg(not(unix))]
+pub fn multicast_interface_addresses() -> Option<Vec<IpAddr>> {
+    None
+}
+
 /// R311y454 — the `#iface=` value of a v4 MULTICAST locator, resolved to the
 /// interface-selector address that `IP_MULTICAST_IF` (egress) and the
 /// `imr_interface` field of `IP_ADD_MEMBERSHIP` (join) both take.

@@ -76,6 +76,7 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::net::IpAddr;
 
 use wz_codecs::hello::Hello;
 use wz_codecs::locator::Locator;
@@ -260,6 +261,79 @@ pub fn answer_scout(identity: &ResponderIdentity, datagram: &[u8]) -> ScoutDecis
         return ScoutDecision::Ignored(ScoutIgnored::WhatMismatch { what });
     }
     ScoutDecision::Answer(hello_datagram(identity))
+}
+
+/// How many LEADING octets `asker` and `local` share, or `None` when the two are
+/// not the same address family.
+///
+/// The count is upstream's: `matching_octets` zips the two octet strings and
+/// takes the position of the first that differs, or the full length when none
+/// does (zenoh `net/runtime/orchestrator.rs:1119-1127`).
+///
+/// The `None` arm is where wz DIVERGES, deliberately and in its own favour.
+/// Upstream's `zip` truncates to the shorter string, so a v4 asker scored
+/// against a v6 socket compares four octets of an IPv4 address against the first
+/// four of an IPv6 one — a number with no meaning that can nonetheless WIN the
+/// election, electing a socket that cannot carry the reply to that asker at all.
+/// A cross-family candidate is not a worse candidate here; it is not a
+/// candidate.
+fn leading_equal_octets(asker: IpAddr, local: IpAddr) -> Option<usize> {
+    fn shared(a: &[u8], b: &[u8]) -> usize {
+        a.iter().zip(b.iter()).take_while(|(x, y)| x == y).count()
+    }
+    match (asker, local) {
+        (IpAddr::V4(a), IpAddr::V4(b)) => Some(shared(&a.octets(), &b.octets())),
+        (IpAddr::V6(a), IpAddr::V6(b)) => Some(shared(&a.octets(), &b.octets())),
+        _ => None,
+    }
+}
+
+/// Which of this node's own addresses should carry the Hello back to `asker` —
+/// the index into `candidates`, or `None` when none of them can.
+///
+/// # Why the reply's SOURCE is a choice at all
+///
+/// A Hello is answered to the datagram's source, so the DESTINATION is never in
+/// doubt. The source is: a node with several interfaces holds several sockets,
+/// and the one the Scout arrived on is the group socket — bound once, on one
+/// interface's terms, before any asker existed. Upstream therefore does not
+/// reply from it. `Runtime::responder` selects among its UNICAST sockets by
+/// longest-octet match against the asker's address and sends from that one
+/// (`get_best_match`, zenoh `net/runtime/orchestrator.rs:1113-1134`, applied at
+/// `:1167`), so on a multi-homed host the Hello leaves the interface nearest the
+/// asker and carries a source address that asker can route back to.
+///
+/// # The tie rule is upstream's, not an arbitrary one
+///
+/// Two addresses can share the same prefix length with one asker, and upstream
+/// resolves that with `Iterator::max_by`, whose documented behaviour is to
+/// return the LAST of several equal maxima. This mirrors it, so an identical
+/// candidate list in an identical order elects the identical socket. A rule that
+/// merely looked tidier would be a divergence nobody could see.
+///
+/// # Pure on purpose
+///
+/// It takes ADDRESSES, not sockets: the runtime half owns the sockets and the
+/// bind order, and this owns the rule. That is the same split [`answer_scout`]
+/// documents, and it earns the same thing — a multi-homed election is testable
+/// on a host that has exactly one interface.
+pub fn best_reply_source(asker: IpAddr, candidates: &[IpAddr]) -> Option<usize> {
+    let mut best: Option<(usize, usize)> = None;
+    for (index, local) in candidates.iter().enumerate() {
+        let Some(score) = leading_equal_octets(asker, *local) else {
+            continue;
+        };
+        // `>=` and not `>`: upstream's `max_by` keeps the LAST maximum, and the
+        // tie rule is part of the behaviour being mirrored.
+        let better = match best {
+            None => true,
+            Some((_, seen)) => score >= seen,
+        };
+        if better {
+            best = Some((index, score));
+        }
+    }
+    best.map(|(index, _)| index)
 }
 
 /// Encode this node's Hello as a complete scouting datagram, header included.
@@ -564,5 +638,77 @@ mod tests {
             OUR_LOCATOR.as_bytes(),
             "the locator string is the tail"
         );
+    }
+
+    /// R2219 — the multi-homed election, and its CONTROL is the second arm: the
+    /// same candidate list answers differently for a different asker. Without
+    /// that arm a function returning a constant index passes.
+    #[test]
+    fn the_reply_leaves_the_address_nearest_the_asker() {
+        let candidates = [
+            IpAddr::from([10, 0, 0, 1]),
+            IpAddr::from([192, 168, 1, 7]),
+            IpAddr::from([172, 16, 0, 1]),
+        ];
+        assert_eq!(
+            best_reply_source(IpAddr::from([192, 168, 1, 5]), &candidates),
+            Some(1),
+            "an asker on 192.168.1/24 is answered from the address on its own subnet"
+        );
+        assert_eq!(
+            best_reply_source(IpAddr::from([10, 0, 0, 9]), &candidates),
+            Some(0),
+            "and the SAME list elects a different address for a different asker"
+        );
+    }
+
+    /// A longer shared prefix wins, and it wins from either end of the list —
+    /// the control that separates the score from the position, since the tie
+    /// rule alone would make the last candidate win every time.
+    #[test]
+    fn a_longer_shared_prefix_wins_from_either_end_of_the_list() {
+        let asker = IpAddr::from([127, 0, 0, 2]);
+        let near = IpAddr::from([127, 0, 0, 2]);
+        let far = IpAddr::from([127, 0, 0, 1]);
+        assert_eq!(best_reply_source(asker, &[far, near]), Some(1));
+        assert_eq!(best_reply_source(asker, &[near, far]), Some(0));
+    }
+
+    /// Upstream's tie rule, pinned. `Iterator::max_by` returns the LAST of
+    /// several equal maxima, so an identical candidate list in an identical
+    /// order must elect the identical address here.
+    #[test]
+    fn equal_prefixes_are_broken_the_way_upstream_breaks_them() {
+        let candidates = [IpAddr::from([10, 9, 9, 9]), IpAddr::from([10, 8, 8, 8])];
+        assert_eq!(
+            best_reply_source(IpAddr::from([10, 1, 2, 3]), &candidates),
+            Some(1),
+        );
+    }
+
+    /// THE DIVERGENCE, asserted rather than described. This v6 candidate's first
+    /// four octets ARE the asker's v4 address, so upstream's `zip` scores it a
+    /// perfect 4 and elects a socket that cannot reach the asker at all, ahead
+    /// of the v4 address that can. wz scores it not at all.
+    #[test]
+    fn a_candidate_of_another_family_cannot_win_on_a_truncated_comparison() {
+        let asker = IpAddr::from([192, 168, 1, 5]);
+        let trap = IpAddr::from([192, 168, 1, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let reachable = IpAddr::from([192, 168, 1, 7]);
+        assert_eq!(best_reply_source(asker, &[trap, reachable]), Some(1));
+        assert_eq!(
+            best_reply_source(asker, &[trap]),
+            None,
+            "a list of only unreachable candidates elects nothing, rather than \
+             electing one of them"
+        );
+    }
+
+    /// Nothing to choose from is a `None`, not a panic. Upstream `unwrap`s here
+    /// (`orchestrator.rs:1167`), which is a node that answers no Scout at all
+    /// once its socket list is empty.
+    #[test]
+    fn an_empty_candidate_list_elects_nothing() {
+        assert_eq!(best_reply_source(IpAddr::from([127, 0, 0, 1]), &[]), None);
     }
 }

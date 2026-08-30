@@ -122,7 +122,16 @@ HEAD_TAG = re.compile(r"\s*([A-Za-z][A-Za-z0-9-]*)")
 CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::(\d+))?")
 
 # R2218 — pinned at what the tree measures today. Two-directional; see header.
-PIN_REACHED = 74
+#
+# R2219 — 74 -> 73, and it is the first time this pin has moved for the reason
+# the header says it should: `scouting-responder` left PARTIAL for COMPLETE
+# because its ONE named residual was CLOSED, not relabelled. Upstream elects the
+# reply's source socket by longest-octet match against the asker
+# (`get_best_match`, zenoh `net/runtime/orchestrator.rs:1113-1134`) and wz
+# answered from the group socket it received on; it now elects, the demo binds
+# the sockets to elect from, and a Layer M leg watches two askers on two
+# addresses each get the nearer one. The total falls with it, 86 -> 85.
+PIN_REACHED = 73
 PIN_UNREACHED = 2
 PIN_NO_SYMBOL = 10
 PIN_WZ_CITATIONS = 409
