@@ -2039,6 +2039,20 @@ PY
     # (the R2161 counterexample).
     python3 scripts/lib/prose_build_closure_gate.py --selftest || return 1
     python3 scripts/lib/prose_build_closure_gate.py --check || return 1
+    # R2198 (open-debt item 545) — the surviving third of that item, after
+    # R2177 refuted its other two premises. Run-level `status` covers TWO
+    # states with ONE word: MEASURED 2026-08-30, run 33293532416 called itself
+    # `queued` while seven of its twenty jobs had already FINISHED, and a run
+    # where not one job has started says exactly the same thing. gate 2c used
+    # to render both into "still running".
+    #
+    # Only the SELFTEST runs here: the classifier is a pure function of a
+    # `gh run view --json jobs` payload, so its whole surface is offline, and
+    # the network stays in pre-push gate 2c where it belongs. Its fixture
+    # carries the two REAL payloads read that day, and both have a top-level
+    # `status` that DISAGREES with their jobs — so an implementation that
+    # reaches for the word fails here instead of passing quietly.
+    python3 scripts/lib/hosted_pending_kind.py --selftest || return 1
     # R2193 (open-debt item 532) — how many of this workspace's non-default
     # features gate a public item, DERIVED rather than estimated.
     #

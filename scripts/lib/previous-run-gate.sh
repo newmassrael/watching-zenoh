@@ -102,12 +102,17 @@ if not runs:
     print("NORUN\tno hosted run exists for this commit")
     raise SystemExit(0)
 
-pending, red, amber = [], [], []
+pending, pending_ids, red, amber = [], [], [], []
 for r in runs:
     name = r.get("workflowName") or "?"
     rid = r.get("databaseId")
     if r.get("status") != "completed":
-        pending.append("%s (%s) %s" % (name, rid, r.get("status")))
+        # The run-level word is carried for the message only. R2198 (item 545):
+        # it covers a run whose jobs are finishing and one where not a job has
+        # started with the SAME word, so the id travels with it and the KIND is
+        # derived from the job list instead.
+        pending.append("%s (%s) says %s" % (name, rid, r.get("status")))
+        pending_ids.append(str(rid))
         continue
     c = r.get("conclusion")
     if c in GREEN:
@@ -122,7 +127,7 @@ elif amber:
     # an anomaly rather than supersession, and it graded nothing either way.
     print("AMBER\t" + "\t".join(amber[:1]))
 elif pending:
-    print("PENDING\t" + "; ".join(pending))
+    print("PENDING\t" + ",".join(pending_ids) + "\t" + "; ".join(pending))
 else:
     print("GREEN\t")
 ' 2>/dev/null)"
@@ -144,7 +149,46 @@ else:
         PENDING)
             # NOT a wait. The standing rule is push-and-continue; this line
             # exists so the next push is the one that grades it.
-            echo "$context: previous hosted run for ${sha:0:12} is still running ($rest)."
+            #
+            # R2198 (open-debt item 545) — but it no longer says "still
+            # running" on the strength of the run-level word. MEASURED
+            # 2026-08-30: run 33293532416 called itself `queued` while seven
+            # of its twenty jobs had already FINISHED, and a run where not one
+            # job has started carries that same word. One word, two states, and
+            # this sentence used to render both the same way. The KIND below is
+            # derived from `--json jobs` by scripts/lib/hosted_pending_kind.py,
+            # which refuses to read the run-level word at all.
+            local pending_ids pending_text first_id jobs_json pending_kind
+            pending_ids="${rest%%$'\t'*}"
+            pending_text="${rest#*$'\t'}"
+            first_id="${pending_ids%%,*}"
+            echo "$context: previous hosted run for ${sha:0:12} has not finished ($pending_text)."
+            # The classifier's EXIT STATUS decides, not its output. A command
+            # substitution discards the status, and this file is sourced into a
+            # `set -e` hook: a bare assignment from a failing classifier would
+            # both swallow the refusal and kill the push. So the status is
+            # branched on, and an UNCLASSIFIED payload lands in the announce
+            # arm below rather than being printed as though it were a kind.
+            pending_kind=""
+            if [[ -n "$first_id" ]] \
+                && jobs_json="$(gh run view "$first_id" --json jobs 2>/dev/null)" \
+                && [[ -n "$jobs_json" ]]; then
+                if pending_kind="$(printf '%s' "$jobs_json" \
+                    | python3 scripts/lib/hosted_pending_kind.py --check 2>/dev/null)"; then
+                    :
+                else
+                    pending_kind=""
+                fi
+            fi
+            if [[ -n "$pending_kind" ]]; then
+                echo "          run ${first_id}: ${pending_kind}"
+            else
+                # A kind that could not be derived is announced, never guessed.
+                echo "          run ${first_id}: the pending KIND could not be derived" >&2
+                echo "          (no gh / no python3 / unreadable jobs payload); the" >&2
+                echo "          run-level word above does NOT distinguish a run that is" >&2
+                echo "          progressing from one where no job has started." >&2
+            fi
             echo "          Not waiting — it will be graded at the next push."
             return 0
             ;;
