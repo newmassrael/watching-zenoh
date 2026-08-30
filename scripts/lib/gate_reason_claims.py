@@ -163,6 +163,25 @@ STORE = "docs/.atomic/workspace.atomic.json"
 # that a looser shape swallowed.
 INVENTORY_GLOB = re.compile(r"^[a-z0-9-]*[*?\[\]][a-z0-9*?\[\]-]*$")
 
+# R2216 — the punctuation a RUST EXPRESSION is made of. A citation like
+# `QoSType::{D_FLAG, F_FLAG}` or `#[must_use] Discarded` is one expression and
+# no single identifier, so no arm above can answer it.
+#
+# ⛔ `/` and `-` are OUT, and that is the whole of the shape's precision.
+# MEASURED by putting them back: three of item 567's four upstream citations
+# then RESOLVE, because `network/request.rs` decomposes into `network`,
+# `request` and `rs` and every one of those lives in this tree. The budget
+# DROPS from four to one, so the live number reads like the arm got better --
+# which is why the shape control lives in the selftest and not in the count.
+# A false pass is the one direction this classifier must not fail in, and it
+# is also the one that looks like progress.
+#
+# A bare SPACE is out too, so `west build` stays budgeted: two words with no
+# punctuation are a shell command, not an expression, and an arm that swallowed
+# it would be answering a question it was not built for.
+EXPRESSION_PUNCT = frozenset(".()[]{}:,#")
+IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
 # The `re` entry points whose FIRST argument is a pattern. `split` and `sub`
 # are here and `str.split` is not, which is why the check below insists the
 # call's receiver is the `re` module by name: `_FIXTURE_SRC.split(...)` looked
@@ -183,14 +202,21 @@ BUDGET = {
     # ratchet is what made the removal compulsory rather than optional: with
     # the arm in and the row still at 3, this gate went red in the OTHER
     # direction and named the number to write.
-    # `west build` -- a shell command of the Zephyr toolchain.
+    # `west build` -- a shell command of the Zephyr toolchain. Two bare words,
+    # so the EXPRESSION arm refuses it by shape and no arm owns it yet.
     "apt_package_census.py": 1,
-    # `#[must_use] Discarded` -- an attribute and a type read as one token.
-    "discard_site_lint.py": 2,
-    # Upstream names and upstream paths: `zenoh-transport`, `WCodec`,
-    # `network/request.rs`, plus expression-shaped citations like
-    # `n.to_bytes_le()` and `QoSType::{D_FLAG, F_FLAG}`.
-    "dissect_name_census.py": 9,
+    # R2216 — `discard_site_lint.py` LEFT this table: `#[must_use] Discarded`
+    # and its sibling are Rust EXPRESSIONS, and the arm that decomposes one
+    # into identifiers resolves both.
+    #
+    # R2216 — and `dissect_name_census.py` came down from NINE to four. The
+    # five that left were expressions (`.transmute()`, both `to_bytes_le()`,
+    # `OpenSyn { user, hmac }`, `QoSType::{D_FLAG, F_FLAG}`). What remains is
+    # exactly item 567's subject: `zenoh-transport`, `WCodec`,
+    # `network/request.rs` and `unicast/establishment/ext/shm.rs` -- four
+    # citations of a codebase this tree does not hold, which R2215 measured to
+    # be uncheckable here rather than merely unchecked.
+    "dissect_name_census.py": 4,
     # R2215 — `expired_blocker_lint.py` LEFT this table. Its `IDENT` was never
     # a citation at all: it is a regex fragment CONCATENATED into
     # `ABSENCE_PATTERNS`, which a comprehension hands to `re.compile`. The
@@ -279,8 +305,37 @@ class Corpus:
             whole.append(raw)
         self.code = "\n".join(code)
         self.whole = "\n".join(whole)
+        self.per_file = whole
         self.files = len(code)
         self.inventory = _inventory_ids()
+
+    def expression_holds(self, token: str) -> bool:
+        """Whether one tracked file carries EVERY identifier of the expression.
+
+        R2216 — per FILE and not over the concatenated corpus, because an
+        expression is one thing and its parts belong together. The difference
+        is the arm's whole defence against coincidence: the invented
+        `QoSType::{D_FLAG, ZZ_NOPE}` scores zero files while its true sibling
+        scores one, and a blob search could not tell them apart if `ZZ_NOPE`
+        happened to exist somewhere unrelated.
+
+        WHOLE text, comments included, and that is deliberate: these citations
+        describe UPSTREAM idioms that wz documents rather than calls. MEASURED
+        -- `transmute` appears nowhere in this tree's comment-stripped code and
+        in three of its doc comments, because wz explains zenoh's
+        `.transmute()` and never performs one.
+        """
+        parts = IDENTIFIER.findall(token)
+        if not any(len(p) > 1 for p in parts):
+            # A one-character identifier is satisfied by any corpus of any
+            # size, so a token made only of them carries no evidence at all.
+            # Not a tunable threshold: one is the minimum an identifier can be.
+            return False
+        needles = [
+            re.compile(r"(?<![A-Za-z0-9_])" + re.escape(p) + r"(?![A-Za-z0-9_])")
+            for p in parts
+        ]
+        return any(all(n.search(text) for n in needles) for text in self.per_file)
 
     def resolve(self, token: str, siblings: frozenset[str]) -> str | None:
         if token in siblings:
@@ -298,6 +353,16 @@ class Corpus:
             if any(fnmatch.fnmatch(i, token) for i in self.inventory):
                 return "inventory ids"
             return None
+        # An expression may contain SPACES (`#[must_use] Discarded` does), so a
+        # space is tolerated -- but it cannot be the only punctuation, or
+        # `west build`, two bare words of a shell command, would be read as an
+        # expression. MEASURED: excluding the space outright dropped three TRUE
+        # expressions with it, and requiring one non-space mark keeps all of
+        # them while still refusing the shell.
+        punctuation = {c for c in token if not (c.isalnum() or c == "_")}
+        marks = punctuation - {" "}
+        if marks and punctuation <= EXPRESSION_PUNCT | {" "}:
+            return "one crates file" if self.expression_holds(token) else None
         needle = token.split("::")[-1]
         haystack = self.whole if " " in token else self.code
         return "crates source" if needle in haystack else None
@@ -727,7 +792,39 @@ def selftest() -> int:
         if INVENTORY_GLOB.match(other):
             return fail(f"{other!r} was claimed by the inventory-glob shape")
 
-    print("gate-reason-claims: selftest OK (16 derivations driven)")
+    # R2216 — the EXPRESSION arm, and its shape controls matter more than its
+    # hits. It must resolve a real expression, refuse an invented one, and
+    # above all leave the upstream citations alone: decomposing those would
+    # resolve `network/request.rs` on `network` + `request` + `rs`, every one
+    # of which lives here, and item 567 has judged them uncheckable.
+    for real in (
+        "QoSType::{D_FLAG, F_FLAG}",
+        "#[must_use] Discarded",
+        "OpenSyn { user, hmac }",
+        ".transmute()",
+    ):
+        if corpus.resolve(real, frozenset()) != "one crates file":
+            return fail(f"the real expression {real!r} did not resolve")
+    for invented in ("QoSType::{D_FLAG, ZZ_NOPE}", ".zzqqmute()", "ZzQqInvented { user }"):
+        if corpus.resolve(invented, frozenset()) is not None:
+            return fail(f"the invented expression {invented!r} resolved")
+    # A token of only ONE-CHARACTER identifiers carries no evidence: any corpus
+    # holds every single letter. Measured -- `n.x()` co-occurs in 93 files.
+    if corpus.resolve("n.x()", frozenset()) is not None:
+        return fail("an expression of single-letter identifiers resolved")
+    # THE SHAPE CONTROLS. A slash or a hyphen makes it somebody else's token,
+    # and two bare words are a shell command.
+    for outside in (
+        "network/request.rs",
+        "zenoh-transport",
+        "unicast/establishment/ext/shm.rs",
+        "west build",
+    ):
+        marks = {c for c in outside if not (c.isalnum() or c == "_")} - {" "}
+        if marks and marks <= EXPRESSION_PUNCT:
+            return fail(f"{outside!r} was claimed by the expression shape")
+
+    print("gate-reason-claims: selftest OK (24 derivations driven)")
     return 0
 
 
