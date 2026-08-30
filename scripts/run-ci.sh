@@ -2188,6 +2188,36 @@ PY
     # another file.
     python3 scripts/lib/analysis_surface_config_free.py || return 1
     python3 scripts/lib/analysis_surface_config_free.py --selftest >/dev/null || return 1
+    # R2213 (open-debt item 566) — and the same question asked of EVERY gate,
+    # not only of the one that learned to ask it.
+    #
+    # R2212 taught `analysis_surface_parity.py` to resolve the backticked
+    # tokens in all four of its reason tables and left the number that made
+    # the class visible: fifteen scripts here carry 182 such tokens inside
+    # module-level tables, and exactly one of them checked its own. A citation
+    # that rots does not go red -- it keeps reading like a fact, which is why
+    # CLAUDE.md carries a rule about paths that had gone stale unnoticed for
+    # months.
+    #
+    # Not every backtick is a citation, and item 566 named that as the hard
+    # part. It is derivable in three classes, measured this round: a REGEX
+    # table's backtick is grammar (a token-shape test, run FIRST because a
+    # pattern read only from a selftest would otherwise look like a fixture);
+    # a FIXTURE table is one every reader of which sits in the selftest's own
+    # CALL CLOSURE, followed through module-level composition; and REASON is
+    # the default, so an unrecognised shape lands on the side that must
+    # resolve.
+    #
+    # The seventeen citations that resolve nowhere are a per-file BUDGET on
+    # C1bz's contract -- above it is a citation the change added, below it is
+    # one the change repaired and the number comes down in the same commit.
+    #
+    # MEASURED red three ways this round: an invented citation added to a
+    # reason table, a budget left standing above the real count, and a fixture
+    # table given one reader outside the closure -- which turns it into a
+    # reason table and takes its seven fixture literals with it.
+    python3 scripts/lib/gate_reason_claims.py || return 1
+    python3 scripts/lib/gate_reason_claims.py --selftest >/dev/null || return 1
     # R311y887 (open-debt item 361) — and what a bounded read's OUTPUT must
     # contain, which is the gate above one layer in.
     #
