@@ -79,18 +79,67 @@ const SEGMENT_BYTES: usize = SEGMENT_ELEMS * core::mem::size_of::<u64>();
 /// (`posix_shm/segment.rs:22` `SEGMENT_DEDICATE_TRIES`).
 const SEGMENT_DEDICATE_TRIES: usize = 100;
 
-/// Per-process candidate-id source. Collisions are caught by `create_new`
-/// (`O_EXCL`) and retried, so this only needs to spread — the same discipline
-/// as `shm_provider::next_candidate_id`, and deliberately NOT `rand`, which
-/// this crate does not otherwise pull in on the SHM path.
+/// Per-process candidate-id source. Collisions BETWEEN PROCESSES are caught by
+/// `create_new` (`O_EXCL`) and retried, so this only needs to spread — the same
+/// discipline as `shm_provider::next_candidate_id`, and deliberately NOT
+/// `rand`, which this crate does not otherwise pull in on the SHM path.
+///
+/// ⚠ `create_new` does NOT cover a collision between two draws of THIS counter,
+/// which is why [`candidate_id`] must be injective in `c`. Retry only helps
+/// while the colliding id is still occupied; an id whose segment has just been
+/// unlinked is free, and a second draw then lands on it legitimately. R2201
+/// measured that window as a live red — see [`candidate_id`].
 static AUTH_ID_COUNTER: AtomicU32 = AtomicU32::new(1);
 
+/// The candidate id for counter value `c` in process `pid` — the whole of the
+/// derivation, as a pure function so its one load-bearing property can be
+/// asserted over a range this test picks rather than over whatever draws it
+/// happened to win from the atomic.
+///
+/// # The property, and what it cost to learn
+///
+/// INJECTIVE in `c`. Two different counter values must never produce the same
+/// id, and until R2201 they did — half the time.
+///
+/// The old form was `pid.wrapping_mul(K).wrapping_add(c) | 1`, where the `| 1`
+/// enforced "never 0" by flattening the low BIT. Writing `b = pid * K`, that
+/// makes `(b + c) | 1 == (b + c + 1) | 1` whenever `b + c` is even, so every
+/// other pair of CONSECUTIVE counter values collapsed onto one id. Measured
+/// over the first 64 draws (`c` from 1, as the counter starts): 33 distinct ids
+/// for pid 17730, 32 for pid 99999.
+///
+/// That is not absorbed by `create`'s retry loop. Retry answers "this id is
+/// TAKEN"; it says nothing about an id that was taken a microsecond ago and has
+/// since been unlinked. Two segments drawn back to back, the first dropped
+/// before the second is created, land on the SAME `/dev/shm/<id>.zenoh` — and
+/// a reader still holding the first id then reads the second segment's
+/// challenge. Layer C1bn caught exactly that, hosted, as
+/// `a_created_segment_is_reopenable_by_id_and_yields_its_challenge` reading
+/// `Some(42)` where it required `None`: `42` is the challenge of the test
+/// running beside it.
+///
+/// # Why the counter is SHIFTED rather than special-cased
+///
+/// "Never 0" is now structural instead of a correction. `c << 1` leaves bit 0
+/// free for the `| 1`, so the OR carries no information away: every id is odd,
+/// hence never 0, and distinct `c` still give distinct ids. Special-casing
+/// (`if v == 0 { 1 }`) would keep the full 2^32 range but re-introduce one
+/// collision pair — the values mapping to 0 and to 1 — and a rule with an
+/// exception is what this function is being repaired FOR.
+///
+/// The trade, stated rather than hidden: the period is 2^31 draws, not 2^32,
+/// and every id is odd. Both are irrelevant against a retry budget of
+/// [`SEGMENT_DEDICATE_TRIES`] and a namespace shared with foreign nodes that
+/// pick their ids independently.
+fn candidate_id(pid: u32, c: u32) -> u32 {
+    pid.wrapping_mul(0x9E37_79B1).wrapping_add(c << 1) | 1
+}
+
 fn next_candidate_id() -> u32 {
-    let pid = std::process::id();
-    let c = AUTH_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-    // Never 0: a zero id renders as the file "0.zenoh", which is legal but is
-    // also what an uninitialised value looks like on the wire.
-    pid.wrapping_mul(0x9E37_79B1).wrapping_add(c) | 1
+    candidate_id(
+        std::process::id(),
+        AUTH_ID_COUNTER.fetch_add(1, Ordering::Relaxed),
+    )
 }
 
 /// The `/dev/shm` path zenoh's `shm_open("{id}.zenoh", ..)` resolves to. This
@@ -282,6 +331,53 @@ impl ShmAuthenticator for PosixShmAuthenticator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// How many consecutive counter values the injectivity witness walks.
+    ///
+    /// Not 2: the old form collided on every OTHER consecutive pair, so a
+    /// two-draw window lands on the surviving half half the time and reports
+    /// green on the defect. Any window of three already contains a colliding
+    /// pair; 64 is far enough past that to make the failure a landslide
+    /// (measured: 33 distinct of 64 for pid 17730) rather than an off-by-one a
+    /// reader has to squint at.
+    const ID_WALK: u32 = 64;
+
+    /// R2201 (open-debt item 559) — DISTINCT counter values give DISTINCT ids.
+    ///
+    /// Over `candidate_id` rather than over `next_candidate_id`, and that is
+    /// the whole design of this test. The atomic is process-global, so a test
+    /// that drew from it would be measuring whichever values the other tests in
+    /// this binary left it — under `--test-threads > 1` its draws are not
+    /// consecutive at all, and non-consecutive draws MISS the defect (the old
+    /// form separated `c` and `c + 2` perfectly well). A witness that a
+    /// scheduler can turn green is not a witness.
+    ///
+    /// So the counter values are supplied here, the walk is TOTAL over them,
+    /// and the verdict does not depend on what any other thread is doing.
+    #[test]
+    fn consecutive_counter_values_never_share_a_segment_id() {
+        // Several pids because the collision's position depends on the parity
+        // of `pid * K`: with one pid a reader cannot tell "injective" from
+        // "this pid happens to start on the lucky side".
+        for pid in [1u32, 2, 1234, 17730, 99999, u32::MAX] {
+            let ids: Vec<u32> = (1..=ID_WALK).map(|c| candidate_id(pid, c)).collect();
+            let distinct: std::collections::BTreeSet<u32> = ids.iter().copied().collect();
+            assert_eq!(
+                distinct.len(),
+                ids.len(),
+                "pid {pid}: {} of {} consecutive counter values share an id — \
+                 a draw that follows an unlinked segment then reopens it",
+                ids.len() - distinct.len(),
+                ids.len()
+            );
+            // Never 0, and structurally so: the id names the file
+            // `/dev/shm/<id>.zenoh`, and 0 is what an uninitialised value looks
+            // like on the wire. Asserted beside injectivity because the two are
+            // one rule here — the shift is what lets `| 1` buy "never 0"
+            // without buying a collision with it.
+            assert!(ids.iter().all(|&id| id != 0), "pid {pid}: an id was 0");
+        }
+    }
 
     /// The round trip through a REAL `/dev/shm` object: create, then re-open by
     /// id through the same path a foreign peer would use and recover the
