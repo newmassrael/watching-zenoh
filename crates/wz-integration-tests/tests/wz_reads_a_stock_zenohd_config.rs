@@ -62,11 +62,13 @@ use std::time::Duration;
 
 use tempfile::NamedTempFile;
 
+use wz_capture::Dissection;
 use wz_codecs::whatami::WhatAmI;
 use wz_integration_tests::common::{
     assert_demo_binary_newer_than_sources, wait_for_substring, wz_ap_demo_binary, zenohd_binary,
     ChildGuard, PortReservation,
 };
+use wz_integration_tests::wire_tap::{synthesise_pcap, tap_proxy, Recording};
 use wz_runtime_tokio::zenoh_config::{
     default_listen_endpoint, ZenohNodeConfig, CONFIG_KEYS_PROVEN_ON_THE_WIRE, DAEMON_DEFAULT_MODE,
     DEEPENABLE_UPSTREAM_KEYS, HONOURED_CONFIG_KEYS, LIBRARY_DEFAULT_MODE,
@@ -1179,22 +1181,53 @@ fn every_key_proven_on_the_wire_is_in_the_frame_a_zenohd_would_receive() {
         "absent",
     )];
 
+    /// (key, the fragment for run A, its expected reading,
+    ///       the fragment for run B, its expected reading)
+    ///
+    /// R2203 (open-debt item 220) — a FOURTH shape, and the first whose subject
+    /// is a node with TWO links rather than a frame a lone node emits.
+    ///
+    /// `timestamping/enabled` reaches `--timestamping`, and both forwarders spend
+    /// it at exactly one site: `forward_push`, the path an INBOUND Push takes to
+    /// the other faces (`router_forward.rs`, `linkstate_forward.rs`, each citing
+    /// zenoh's own single stamp point at `dispatcher/pubsub.rs:328`). There is no
+    /// publish-side auto-stamp to read instead — on the single-session path the
+    /// key only chooses which CLOCK `FallbackStamp` borrows, and both clocks
+    /// stamp (`timestamp_source.rs`), so no frame differs. Measured, not assumed:
+    /// `node_hlc` is read in one place in each forwarder and nowhere else.
+    ///
+    /// ⚠ The two documents are `true` and `false`, and they do NOT reach the flag
+    /// symmetrically — the expansion emits `--timestamping` only where the file
+    /// DIFFERS from zenoh's shipped map (`{ router: true, peer: false, client:
+    /// false }`). So on a router `true` is the un-flagged default and `false` is
+    /// the flagged difference, and on a peer it is the other way round. Both arms
+    /// still have to answer `stamped` then `bare`, which is what makes this one
+    /// table rather than two.
+    const RELAY: &[(&str, &str, &str, &str, &str)] = &[(
+        "timestamping/enabled",
+        "timestamping: { enabled: true }",
+        "stamped",
+        "timestamping: { enabled: false }",
+        "bare",
+    )];
+
     // The POPULATION is the constant, so a key declared wire-proven without a
     // fixture here reds rather than going unasked — and a fixture for a key the
     // constant no longer claims reds too.
     let mut named: Vec<&str> = FIXTURES.iter().map(|(k, ..)| *k).collect();
     named.extend(ARM_VARYING.iter().copied());
     named.extend(BEACON.iter().map(|(k, ..)| *k));
+    named.extend(RELAY.iter().map(|(k, ..)| *k));
     named.sort_unstable();
     let mut declared: Vec<&str> = CONFIG_KEYS_PROVEN_ON_THE_WIRE.to_vec();
     declared.sort_unstable();
     assert_eq!(
         named, declared,
         "every key declared proven on the wire needs a pair of files this leg can \
-         hand the demo, a row in ARM_VARYING, or a row in BEACON"
+         hand the demo, a row in ARM_VARYING, a row in BEACON, or a row in RELAY"
     );
 
-    // The three shapes must be DISJOINT. A key in two of them would be asked
+    // The four shapes must be DISJOINT. A key in two of them would be asked
     // twice under two different contracts, and the weaker answer would decide it.
     for key in ARM_VARYING {
         assert!(
@@ -1208,6 +1241,15 @@ fn every_key_proven_on_the_wire_is_in_the_frame_a_zenohd_would_receive() {
             !FIXTURES.iter().any(|(k, ..)| k == key) && !ARM_VARYING.contains(key),
             "{key} is a beacon row and also a handshake shape; one of the two is \
              describing a different key than it thinks"
+        );
+    }
+    for (key, ..) in RELAY {
+        assert!(
+            !FIXTURES.iter().any(|(k, ..)| k == key)
+                && !ARM_VARYING.contains(key)
+                && !BEACON.iter().any(|(k, ..)| k == key),
+            "{key} is a relay row and also one of the three shapes above; one of \
+             the two is describing a different key than it thinks"
         );
     }
 
@@ -1425,6 +1467,121 @@ fn every_key_proven_on_the_wire_is_in_the_frame_a_zenohd_would_receive() {
         BEACON.len() * ARMS.len() * 2,
         beacon_failures.join("\n  ")
     );
+
+    // ── R2203 (open-debt item 220) — the RELAY sweep ────────────────────────
+    //
+    // Same two-document contract again, on a node that has to be STOOD UP rather
+    // than merely spawned: relaying needs two faces, so each run is a three-node
+    // star with a tap on each of the node's links.
+    //
+    // ⛔ THE ARM POPULATION IS DERIVED, NOT LISTED. A node with no listener has
+    // one face and cannot relay, and which run-modes listen is
+    // `default_listen_endpoint`'s answer — upstream's, not this leg's. So
+    // `RunMode::listens` selects the arms, the ones it drops are PRINTED, and a
+    // run-mode that gains a listener joins this sweep by itself. The `--max-links`
+    // axis is deduplicated away because it selects a DIAL path and every node
+    // here is dialled TO; dropping it is derived from the arms as well, not
+    // typed as a second list.
+    let mut relay_arms: Vec<RunMode> = Vec::new();
+    let mut relay_skipped: Vec<String> = Vec::new();
+    for (mode, _) in ARMS {
+        if !mode.listens() {
+            if !relay_skipped.contains(&format!("{mode:?}")) {
+                relay_skipped.push(format!("{mode:?}"));
+            }
+            continue;
+        }
+        if !relay_arms.contains(mode) {
+            relay_arms.push(*mode);
+        }
+    }
+    eprintln!(
+        "relay arms: {relay_arms:?}; not listening, so cannot relay: \
+         {relay_skipped:?}"
+    );
+    let mut relay_failures: Vec<String> = Vec::new();
+    // ANTI-VACUITY on the population itself, and it can fail: every run-mode
+    // losing its listener would empty this and leave the whole shape green.
+    if relay_arms.is_empty() {
+        relay_failures.push(String::from(
+            "no arm listens, so no node here can hold two faces and this shape \
+             measures nothing",
+        ));
+    }
+    for (key, frag_a, want_a, frag_b, want_b) in RELAY {
+        let mut relaying = 0usize;
+        for mode in &relay_arms {
+            let got_a = relay_reading_from_a_config(frag_a, *mode);
+            let got_b = relay_reading_from_a_config(frag_b, *mode);
+            eprintln!("relay {key} [{mode:?}]: {got_a:?} then {got_b:?}");
+            // NO-INBOUND IS NEVER A PASS. It is the state R2198's lesson is
+            // about: without this arm the same silence would cover "the node
+            // declined to stamp" and "the star never converged", and the second
+            // one reads as a clean partition.
+            for (reading, which) in [(got_a, "A"), (got_b, "B")] {
+                if reading == RelayReading::NoInbound {
+                    relay_failures.push(format!(
+                        "{mode:?} {key} run {which}: no Put reached the node at \
+                         all, so this run measured nothing about the key — the \
+                         three-node star did not stand up"
+                    ));
+                }
+                if reading == RelayReading::Mixed {
+                    relay_failures.push(format!(
+                        "{mode:?} {key} run {which}: some relayed Puts carried a \
+                         timestamp and some did not; zenoh stamps ONCE at the \
+                         head of the forward path, so a split is a defect"
+                    ));
+                }
+            }
+            match (got_a.as_str(), got_b.as_str()) {
+                (Some(a), Some(b)) => {
+                    relaying += 1;
+                    if a != *want_a {
+                        relay_failures.push(format!(
+                            "{mode:?} {key}: the relayed Put was {a} where the \
+                             file said {want_a}"
+                        ));
+                    }
+                    if b != *want_b {
+                        relay_failures.push(format!(
+                            "{mode:?} {key}: the relayed Put was {b} where the \
+                             file said {want_b}"
+                        ));
+                    }
+                    if a == b {
+                        relay_failures.push(format!(
+                            "{mode:?} {key}: the relayed Put did not move with \
+                             the file, so the file is not what set it"
+                        ));
+                    }
+                }
+                // NO-RELAY on both documents is a READING: this run-mode holds
+                // two faces and still does not forward. An arm that starts
+                // forwarding is judged the moment it does.
+                (None, None) => {}
+                (a, b) => relay_failures.push(format!(
+                    "{mode:?} {key}: the document decided WHETHER the node \
+                     relays at all ({a:?} then {b:?}); this key decides what a \
+                     relayed Put CARRIES"
+                )),
+            }
+        }
+        if relaying == 0 {
+            relay_failures.push(format!(
+                "{key}: no listening arm relayed a Put, so every reading above \
+                 is an absence and this row proves nothing"
+            ));
+        }
+    }
+    assert!(
+        relay_failures.is_empty(),
+        "{} of the {} relay readings disagree with the document that produced \
+         them:\n  {}",
+        relay_failures.len(),
+        RELAY.len() * relay_arms.len() * 2,
+        relay_failures.join("\n  ")
+    );
 }
 
 /// The (run-mode, `--max-links`) arms every fixture is asked in.
@@ -1451,6 +1608,31 @@ const ARMS: &[(RunMode, Option<usize>)] = &[
 ];
 
 impl RunMode {
+    /// What this arm writes on the document's `mode` line.
+    ///
+    /// R2203 (open-debt item 220) — a method rather than a literal at each
+    /// template, because a THIRD proof shape now builds a document of its own
+    /// and two spellings of the same arm would be two arms.
+    fn document_mode(self) -> &'static str {
+        match self {
+            Self::Client => "client",
+            Self::PeerMesh => "peer",
+            Self::RouterHat => "router",
+        }
+    }
+
+    /// Whether a node in this run-mode listens at all, as UPSTREAM decides it.
+    ///
+    /// R2203 (open-debt item 220) — the relay shape's arm population, DERIVED.
+    /// Relaying needs two faces, a node with no listener has one, and which
+    /// run-modes listen is `default_listen_endpoint`'s answer rather than a
+    /// list of arms this leg excuses: `WhatAmI::Client` is `None` there because
+    /// a stock zenoh client never listens. A run-mode that gains a listener
+    /// joins the relay sweep by itself.
+    fn listens(self) -> bool {
+        default_listen_endpoint(self.whatami()).is_some()
+    }
+
     /// The role this arm's document asks for — the value the InitSyn's whatami
     /// has to carry.
     ///
@@ -1629,13 +1811,10 @@ fn dial_the_demo(
     // dials. Leaving it unnamed is what lets `default_listen_endpoint(Peer)`
     // supply `tcp/[::]:0`, which is upstream's own default for the mode.
     // `RouterHat` names one for the opposite reason — see that variant's doc.
-    let (mode, listen) = match run_mode {
-        RunMode::Client => ("client", ""),
-        RunMode::PeerMesh => ("peer", ""),
-        RunMode::RouterHat => (
-            "router",
-            "  listen: { endpoints: [\"tcp/127.0.0.1:0\"] },\n",
-        ),
+    let mode = run_mode.document_mode();
+    let listen = match run_mode {
+        RunMode::Client | RunMode::PeerMesh => "",
+        RunMode::RouterHat => "  listen: { endpoints: [\"tcp/127.0.0.1:0\"] },\n",
     };
     let source = format!(
         r#"{{
@@ -1884,6 +2063,286 @@ fn beacon_reading_from_a_config(
     // than at the end of the sweep keeps at most one demo alive at a time.
     drop(demo);
     reading
+}
+
+/// What a node did with a Put it was asked to RELAY.
+///
+/// R2203 (open-debt item 220). `timestamping/enabled` is the last key in the
+/// item's `not-yet-read` queue that a fixture can reach, and its effect is on
+/// neither a handshake frame nor a beacon: both forwarders apply it at ONE site,
+/// `forward_push` (`router_forward.rs`, `linkstate_forward.rs`), which is the
+/// path an INBOUND Push takes on its way out the other faces. So the subject is
+/// a node with TWO links, and the reading is the `t` flag of the Put that came
+/// out — zenoh-protocol `put.rs:43`, whose `timestamp` field at `:50` the
+/// dissector walks as a nested `timestamp` under a `put` node.
+///
+/// Four outcomes, and the first two are the pair R2198's lesson is about: one
+/// word must not cover "this node declined to stamp" and "nothing ever reached
+/// it". The inbound half of the capture is what separates them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RelayReading {
+    /// No Put reached the node at all, so this run measured NOTHING about the
+    /// key — the topology did not stand up. Never a pass.
+    NoInbound,
+    /// A Put reached it and none left by the other face: this node does not
+    /// relay. A reading, not an excuse.
+    NoRelay,
+    /// It relayed, and every Put that came out carried a timestamp.
+    Stamped,
+    /// It relayed, and every Put that came out was bare.
+    Bare,
+    /// It relayed some stamped and some bare. zenoh stamps once, at the head of
+    /// the forward path, so a split is a defect rather than a reading.
+    Mixed,
+}
+
+impl RelayReading {
+    /// The spelling a fixture row compares against, or `None` for the outcomes
+    /// that are not a reading of the key.
+    fn as_str(self) -> Option<&'static str> {
+        match self {
+            Self::Stamped => Some("stamped"),
+            Self::Bare => Some("bare"),
+            Self::NoInbound | Self::NoRelay | Self::Mixed => None,
+        }
+    }
+}
+
+/// The synthesised ports the tap recordings are wrapped in.
+///
+/// The LISTENER's is the lesser of the two on purpose: `wz_capture` names the
+/// lesser `(addr, port)` endpoint [`Direction::A`], both endpoints here are
+/// `127.0.0.1`, and this leg reads the two halves apart. Asserted below rather
+/// than trusted.
+const TAP_LISTENER_PORT: u16 = 7447;
+/// See [`TAP_LISTENER_PORT`].
+const TAP_DIALER_PORT: u16 = 40001;
+
+/// How long the three-node star is given to converge and publish.
+///
+/// The publisher republishes every app tick, so once the mesh converges delivery
+/// is self-healing and there is no one-shot drop to race. This is therefore a
+/// CONVERGENCE budget: three processes, two of them dialling through a relay.
+const RELAY_BUDGET: Duration = Duration::from_secs(25);
+
+/// The keyexpr the star publishes on. Deliberately NOT the `--key` the relaying
+/// node is given, so the node under judgement is a transit rather than a
+/// subscriber of its own.
+const RELAY_KEYEXPR: &str = "demo/relay";
+
+/// A direct child by name.
+///
+/// ⛔ NOT `Field::find`, which is depth-first: a `put` node's `timestamp` is a
+/// nested field with children of its own, and several other messages in one
+/// frame carry a `t` flag. R2046 recorded the same trap one level up.
+fn own_child<'a>(
+    field: &'a wz_session_core::dissect::Field,
+    name: &str,
+) -> Option<&'a wz_session_core::dissect::Field> {
+    match &field.value {
+        FieldValue::Nested(children) => children.iter().find(|c| c.name == name),
+        _ => None,
+    }
+}
+
+/// Whether each `put` under `field` carried a timestamp, in wire order.
+fn put_stamps(field: &wz_session_core::dissect::Field, out: &mut Vec<bool>) {
+    if field.name == "put" {
+        out.push(matches!(
+            own_child(field, "t").map(|f| &f.value),
+            Some(FieldValue::Flag(true))
+        ));
+    }
+    if let FieldValue::Nested(children) = &field.value {
+        for child in children {
+            put_stamps(child, out);
+        }
+    }
+}
+
+/// The `put` stamps a tap recorded, split by which endpoint wrote them.
+///
+/// The recording is wrapped as a pcap and handed to `wz_capture`, the same route
+/// every other witness on this tap takes, so the TCP reassembly and the
+/// message framing are the analyzer's rather than this leg's.
+fn puts_by_side(recording: &Recording) -> (Vec<bool>, Vec<bool>) {
+    let segments = recording.lock().expect("recording lock").clone();
+    if segments.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    let pcap = synthesise_pcap(&segments, TAP_DIALER_PORT, TAP_LISTENER_PORT);
+    let Ok(dissection) = Dissection::from_pcap(&pcap) else {
+        return (Vec::new(), Vec::new());
+    };
+    let flows = dissection.flows();
+    let Some(flow) = flows.first() else {
+        return (Vec::new(), Vec::new());
+    };
+    // DERIVED, not assumed: the constants above decide which half is A, and this
+    // is where that decision is checked instead of being remembered.
+    assert_eq!(
+        (flow.flow.low.port, flow.flow.high.port),
+        (u32::from(TAP_LISTENER_PORT), u32::from(TAP_DIALER_PORT)),
+        "the synthesised ports decide which half is Direction::A"
+    );
+    let (mut from_listener, mut from_dialer) = (Vec::new(), Vec::new());
+    for frame in flow.frames.iter() {
+        let Ok(bytes) = flow.message_bytes(frame) else {
+            continue;
+        };
+        let Ok(walked) = dissect_transport_message(bytes, 0) else {
+            continue;
+        };
+        let sink = if frame.direction == wz_session_core::passive::Direction::A {
+            &mut from_listener
+        } else {
+            &mut from_dialer
+        };
+        put_stamps(&walked, sink);
+    }
+    (from_dialer, from_listener)
+}
+
+/// Spawn a demo with its stderr captured to a file a marker can be waited for.
+fn spawn_captured(
+    label: &'static str,
+    demo: &std::path::Path,
+    args: &[String],
+) -> (ChildGuard, File) {
+    let stderr = tempfile::tempfile().expect("tempfile for node stderr");
+    let writer = stderr.try_clone().expect("dup the stderr handle");
+    let child = Command::new(demo)
+        .args(args)
+        .env("RUST_LOG", "info")
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(writer))
+        .spawn()
+        .unwrap_or_else(|e| panic!("spawn {label}: {e}"));
+    (ChildGuard::wrap(label, child), stderr)
+}
+
+/// Stand up the three-node star around a node configured ONLY by a file, and
+/// read what it did to the Put it relayed.
+///
+/// ```text
+///   P2 --publish--> [tap B] --> R (the document's node) --> [tap A] --> P1 --subscribe
+/// ```
+///
+/// The two taps are the whole instrument. Tap B says a Put ARRIVED (and that it
+/// arrived BARE — the control, since the publisher's own document is not the one
+/// under judgement); tap A says what left. Neither peer is configured by the
+/// file: only R is, so a difference between two runs is the file's.
+fn relay_reading_from_a_config(fragment: &str, run_mode: RunMode) -> RelayReading {
+    let demo = wz_ap_demo_binary();
+    assert_demo_binary_newer_than_sources(&demo);
+
+    // ONE reservation: `PortReservation::pick` refuses an OVERLAPPING second on
+    // this thread (R2049), and the taps bind their own ephemeral ports.
+    let reservation = PortReservation::pick();
+    let relay_port = reservation.port();
+    let (sub_tap, sub_rec) = tap_proxy(relay_port);
+    let (pub_tap, pub_rec) = tap_proxy(relay_port);
+
+    let mode = run_mode.document_mode();
+    // The node NAMES its listen address because the two peers have to find it,
+    // and a `:0` would keep the port from this leg. That is scaffolding, the
+    // same as the acceptor port the handshake shape writes into its own
+    // template; the key under judgement is still only what `fragment` says.
+    let source = format!(
+        r#"{{
+  mode: "{mode}",
+  listen: {{ endpoints: ["tcp/127.0.0.1:{relay_port}"] }},
+  scouting: {{ multicast: {{ enabled: false }} }},
+  {fragment},
+}}
+"#
+    );
+    let config = staged_config(&source);
+
+    let (relay_guard, mut relay_err) = spawn_captured(
+        "wz-ap-demo (relay under judgement)",
+        &demo,
+        &[
+            String::from("--config"),
+            config.path().display().to_string(),
+            String::from("--key"),
+            String::from("demo/relay-transit"),
+        ],
+    );
+    // Both run-modes that reach this shape print this; waiting on it rather than
+    // on a per-mode spelling keeps the marker one string.
+    let bound = wait_for_substring(&mut relay_err, "listening on 127.0.0.1:", DEMO_BUDGET);
+    drop(reservation);
+    bound.unwrap_or_else(|c| {
+        panic!("the relay node never bound {relay_port}:\n{c}\n{source}");
+    });
+
+    let (sub_guard, mut sub_err) = spawn_captured(
+        "wz-ap-demo (relay subscriber)",
+        &demo,
+        &[
+            String::from("--peer"),
+            String::from("127.0.0.1:0"),
+            String::from("--connect"),
+            format!("127.0.0.1:{sub_tap}"),
+            String::from("--subscribe"),
+            String::from(RELAY_KEYEXPR),
+        ],
+    );
+    let (pub_guard, _pub_err) = spawn_captured(
+        "wz-ap-demo (relay publisher)",
+        &demo,
+        &[
+            String::from("--peer"),
+            String::from("127.0.0.1:0"),
+            String::from("--connect"),
+            format!("127.0.0.1:{pub_tap}"),
+            String::from("--publish"),
+            String::from(RELAY_KEYEXPR),
+        ],
+    );
+
+    // A timeout is NOT a failure here: an arm whose run-mode does not relay will
+    // never log this, and saying so is one of the four readings. What the taps
+    // recorded is the verdict.
+    let delivered = wait_for_substring(&mut sub_err, "received mesh data", RELAY_BUDGET);
+    drop(pub_guard);
+    drop(sub_guard);
+    drop(relay_guard);
+    // The pumps end when their sockets close with the children; give them the
+    // moment that takes before the recordings are read.
+    std::thread::sleep(Duration::from_millis(200));
+
+    let (inbound, _) = puts_by_side(&pub_rec);
+    let (_, outbound) = puts_by_side(&sub_rec);
+    eprintln!(
+        "relay {mode}: inbound put(s) {inbound:?}, relayed put(s) {outbound:?}, \
+         subscriber saw data: {}",
+        delivered.is_ok()
+    );
+    // THE CONTROL, and it is asserted rather than printed: the publisher is not
+    // configured by the file under judgement, so what it puts on the wire must
+    // be bare in EVERY run. A stamped inbound Put would mean the reading below
+    // is about the publisher's clock and not about this node's.
+    assert!(
+        inbound.iter().all(|stamped| !stamped),
+        "the publisher's own Put arrived STAMPED, so a stamp read downstream \
+         would not be this node's: {inbound:?}\n{source}"
+    );
+
+    if inbound.is_empty() {
+        return RelayReading::NoInbound;
+    }
+    if outbound.is_empty() {
+        return RelayReading::NoRelay;
+    }
+    if outbound.iter().all(|stamped| *stamped) {
+        RelayReading::Stamped
+    } else if outbound.iter().all(|stamped| !stamped) {
+        RelayReading::Bare
+    } else {
+        RelayReading::Mixed
+    }
 }
 
 fn handshake_field_from_a_config(

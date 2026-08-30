@@ -1294,7 +1294,17 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
     // map the node will run with absent a flag — `{ router: true, peer: false,
     // client: false }` (`DEFAULT_CONFIG.json5:206`), so the same document says
     // something different to a `--router-hat` than to a `--peer`.
-    if named("timestamping/enabled") {
+    // R2203 (open-debt item 220) — the NO-SINK verdict is taken FIRST, and it
+    // has to be: three of the four branches below emit no flag at all, and
+    // `blocked` is consulted only by the one that does. Without `time-hlc` this
+    // key reaches nothing on ANY branch — `NodeHlc` is zero-sized and
+    // `is_stamping()` is false, so neither the flagged difference nor the
+    // un-flagged default stamps — which makes `AlreadyTheBehaviour` a false
+    // verdict there rather than a milder one. See the row in
+    // `config_keys_the_demo_drops` for how that was measured.
+    if named("timestamping/enabled") && no_sink("timestamping/enabled").is_some() {
+        exp.record("timestamping/enabled", KeyEffect::NoSinkInThisBuild);
+    } else if named("timestamping/enabled") {
         // The role this node will ANNOUNCE: what the operator typed, else what
         // the endpoints selected. Not `cfg.mode` — that is the role the FILE
         // claims, and the two come apart exactly where `mode`'s own verdict
@@ -2078,17 +2088,18 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
          the CAPABILITY, not the number: this leaves `> 1` provable and the \
          exact count not.",
     ),
-    (
-        "timestamping/enabled",
-        KIND_NOT_YET_READ,
-        "the timestamp is a field of the Put message — zenoh-protocol \
-         put.rs:50 (`pub timestamp: Option<Timestamp>`) behind the T flag at \
-         put.rs:43. So the wire carries it, but in a DATA message, whereas \
-         this tree's FIXTURES mechanism reads handshake frames only \
-         (HandshakeFrame is InitSyn | OpenSyn). This row is the one that \
-         needs the MECHANISM widened rather than just another fixture, and \
-         saying so is the difference between a queue and a wish.",
-    ),
+    //
+    // ⚠ R2203 (open-debt item 220) RETIRED `timestamping/enabled` from this
+    // kind — it is `wire` now, read as the `T` flag of a RELAYED Put by
+    // `every_key_proven_on_the_wire_is_in_the_frame_a_zenohd_would_receive`.
+    // Its row was right about the field (`zenoh-protocol` put.rs:50 behind the
+    // flag at put.rs:43) and right that the mechanism had to be widened rather
+    // than fitted with another fixture. What the row did not say is WHERE the
+    // widening had to reach: not merely past the handshake, but past a node
+    // with one link. Both forwarders spend the key at `forward_push` alone —
+    // the inbound-Push path — so the subject is a three-node star and the
+    // instrument is a tap on each of the middle node's two links, with the
+    // inbound half proving a bare Put went in.
     //
     // ⚠ R2202 (open-debt item 220) RETIRED `transport/multicast/qos/enabled`
     // from this kind — it is `wire` now, read as the multicast JOIN beacon's
@@ -2308,6 +2319,31 @@ pub(crate) fn config_keys_the_demo_drops() -> Vec<&'static str> {
     }
     if !cfg!(feature = "transport-qos") {
         out.push("transport/multicast/qos/enabled");
+    }
+    // R2203 (open-debt item 220) — the first row here whose flag does NOT
+    // exit(2), and the reason it belongs anyway is what this list is actually
+    // about: the doc above says these are "keys whose sink exists but is
+    // compiled out here", and the SINK is the code that produces the effect, not
+    // the flag that reaches it.
+    //
+    // MEASURED. `--timestamping` parses in every build and threads all the way
+    // to `RouterForwarder::with_timestamping` / `LinkstateForwarder::with_
+    // timestamping`, which hand it to `NodeHlc::for_node` — and without
+    // `time-hlc` that type is ZERO-SIZED and `is_stamping()` returns `false`
+    // unconditionally (`node_clock.rs`). So the flag is honoured, reported
+    // APPLIED, and does NOTHING: the relayed Put comes out bare either way. The
+    // wire sweep in `wz_reads_a_stock_zenohd_config` is what found it, by
+    // reading `bare` for BOTH documents on a lane build that had every other
+    // feature this key needs.
+    //
+    // ⚠ A SILENT no-op is a worse shape than the exit(2) rows below, not a
+    // milder one: a refusal names the missing feature, while this reported the
+    // key as taking effect. Putting it here is what makes the classification
+    // honest in a narrow build AND what puts it under
+    // `scripts/lib/config_key_fixture_gate.py`'s lane check, which now reds if
+    // the lane that claims to read this key off the wire drops `time-hlc`.
+    if !cfg!(feature = "time-hlc") {
+        out.push("timestamping/enabled");
     }
     // R311y846 — the responder's flag exits(2) without its feature (the demo
     // says so and names the build), so a build without it must DROP the key
@@ -5404,22 +5440,40 @@ mod stock_config_tests {
     ///    be a DIFFERENCE, which is this expansion's rule for every other key
     ///    (see the `routing/peer/mode` arm), and a redundant `--timestamping
     ///    true` would report as Expanded while changing nothing.
+    ///
+    /// R2203 (open-debt item 220) — and all three arms are now BUILD-SPLIT,
+    /// because R2112's claim was only ever half true. `--timestamping` is
+    /// parsed in every build and reaches `NodeHlc::for_node`, which without
+    /// `time-hlc` is a zero-sized type whose `is_stamping()` is false: the flag
+    /// arrives and NOTHING stamps. Measured by the wire sweep, which read `bare`
+    /// for both documents on a lane that had every other feature this key needs.
+    /// So the key now sits in `config_keys_the_demo_drops` behind that cfg, and
+    /// this test asserts the OTHER side of the split rather than being narrowed
+    /// to the build that still passes it — a `#[cfg]`-ed-out arm would leave the
+    /// narrow build's behaviour unasserted, which is how the half-truth survived.
     #[test]
     fn the_timestamping_key_reaches_the_flag_that_carries_it() {
+        // The build split, stated once and read three times below.
+        let has_sink = cfg!(feature = "time-hlc");
+
         let stamping_peer = expand(
             &["--config", "z.json5"],
             r#"{ mode: "peer", listen: { endpoints: ["tcp/127.0.0.1:0"] },
                  timestamping: { enabled: true } }"#,
         )
         .expect("the fixture is readable");
-        assert!(
+        assert_eq!(
             stamping_peer.applied().contains(&"timestamping/enabled"),
-            "a peer that asked to stamp must report the key APPLIED: {:?}",
+            has_sink,
+            "a peer that asked to stamp must report the key APPLIED where this \
+             build can stamp, and READ-but-not-applied where it cannot: {:?}",
             stamping_peer.applied()
         );
-        assert!(
-            argv_pair(&stamping_peer.added, "--timestamping") == Some("true"),
-            "the flag must carry the document's value: {:?}",
+        assert_eq!(
+            argv_pair(&stamping_peer.added, "--timestamping"),
+            has_sink.then_some("true"),
+            "the flag must carry the document's value, and must be withheld \
+             entirely by a build with no clock to stamp with: {:?}",
             stamping_peer.added
         );
 
@@ -5429,13 +5483,16 @@ mod stock_config_tests {
                  timestamping: { enabled: false } }"#,
         )
         .expect("the fixture is readable");
-        assert!(
+        assert_eq!(
             quiet_router.applied().contains(&"timestamping/enabled"),
-            "a router that asked NOT to stamp must report the key APPLIED: {:?}",
+            has_sink,
+            "a router that asked NOT to stamp must report the key APPLIED where \
+             this build can stamp: {:?}",
             quiet_router.applied()
         );
-        assert!(
-            argv_pair(&quiet_router.added, "--timestamping") == Some("false"),
+        assert_eq!(
+            argv_pair(&quiet_router.added, "--timestamping"),
+            has_sink.then_some("false"),
             "the flag must carry the document's value, not a constant: {:?}",
             quiet_router.added
         );
@@ -5451,12 +5508,27 @@ mod stock_config_tests {
             "a file stating zenoh's own default for this role must add no flag: {:?}",
             default_router.added
         );
-        assert!(
+        assert_eq!(
             default_router.applied().contains(&"timestamping/enabled"),
-            "no flag is needed, but the node DOES what the file says, so the key \
-             is applied and not a key that reached nothing: {:?}",
+            has_sink,
+            "no flag is needed, but a build that CAN stamp does what the file \
+             says, so the key is applied there — and a build that cannot has \
+             reached nothing, whichever way the document leans: {:?}",
             default_router.applied()
         );
+        // ANTI-VACUITY for the split itself. Whichever build this is, the key
+        // must be in the report SOMEWHERE — `applied` on one side of the cfg and
+        // `read_but_not_applied` on the other. A key that fell out of both
+        // halves would satisfy every `assert_eq!` above by absence.
+        for exp in [&stamping_peer, &quiet_router, &default_router] {
+            let mut both = exp.applied();
+            both.extend(exp.read_but_not_applied());
+            assert!(
+                both.contains(&"timestamping/enabled"),
+                "the key left the report entirely, so the assertions above are \
+                 about nothing: {both:?}"
+            );
+        }
     }
 
     /// The value an emitted `<flag> <value>` pair carries, or `None` when the

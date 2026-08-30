@@ -12728,7 +12728,16 @@ layer_z_zenohd_interop() {
     # on. Additive like the rest: `--multicast-locator` is absent from every
     # other leg's argv here, and the router-hat legs that do not pass it keep the
     # demo's own default group. Both restatements of this line carry it.
-    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,routing-router,router-hat-router,router-connect-reconcile,router-multicast-faces,routing-token-tables,namespace,transport-qos,transport-lowlatency,session-extcompression,session-extshm,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,transport-multilink,zenoh-config --quiet) || return 1
+    # R2203 adds `time-hlc` (open-debt item 220). The wire sweep's FOURTH shape
+    # reads the `T` flag of a RELAYED Put, and without this feature `NodeHlc` is
+    # zero-sized and `is_stamping()` returns false unconditionally
+    # (`node_clock.rs`), so the flag the document reaches does NOTHING and both
+    # documents answer `bare`. MEASURED here, as that exact red, before the
+    # feature was added -- which is also why the key now sits in
+    # `config_keys_the_demo_drops` behind the same cfg. Additive:
+    # `--timestamping` is in no other leg's argv, and a build that carries the
+    # feature stamps only where a document asks. Both restatements carry it.
+    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,routing-router,router-hat-router,router-connect-reconcile,router-multicast-faces,routing-token-tables,namespace,transport-qos,time-hlc,transport-lowlatency,session-extcompression,session-extshm,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,transport-multilink,zenoh-config --quiet) || return 1
     # R311y442 review (REVIEWER 3, finding 3) added a clippy of the demo's
     # `advanced` arm right here, closing the `-D warnings` hole R311y433 closed
     # for transport-lowlatency and session-extcompression. R311y443-review
@@ -12844,7 +12853,11 @@ layer_z_zenohd_interop() {
     # third proof shape reads the multicast JOIN beacon, and without the feature
     # `run_router_hat` spawns no egress so every arm is SILENT and the sweep's
     # anti-vacuity rule reds. Both restatements carry it.
-    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,routing-router,router-hat-router,router-connect-reconcile,router-multicast-faces,routing-token-tables,namespace,transport-qos,transport-lowlatency,session-extcompression,session-extshm,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,transport-multilink,zenoh-config --quiet) || return 1
+    # R2203 adds `time-hlc` (open-debt item 220): the fourth proof shape reads a
+    # RELAYED Put's `T` flag, and without the feature `NodeHlc::is_stamping` is
+    # false unconditionally so both documents answer `bare`. Both restatements
+    # carry it.
+    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,routing-router,router-hat-router,router-connect-reconcile,router-multicast-faces,routing-token-tables,namespace,transport-qos,time-hlc,transport-lowlatency,session-extcompression,session-extshm,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,transport-multilink,zenoh-config --quiet) || return 1
     # R311y435 — wz COMPOSED lowlatency x compression cross-impl: the measurement
     # R311y434 explicitly did NOT claim ("no leg dials zenohd with both modes,
     # because the demo cannot stage both offers"). The offer-SET widening of

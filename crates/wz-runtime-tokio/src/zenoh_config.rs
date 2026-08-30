@@ -2422,6 +2422,28 @@ pub const CONFIG_KEYS_PROVEN_ON_THE_WIRE: &[&str] = &[
     // the arms did rather than reading off a list of exempt ones. An arm that
     // starts beaconing is judged the moment it does.
     "transport/multicast/qos/enabled",
+    // R2203 (open-debt item 220) — the first key here whose subject is a node
+    // with TWO links rather than a frame a lone node emits.
+    //
+    // Both forwarders spend `timestamping.enabled` at exactly ONE site:
+    // `forward_push` (`router_forward.rs`, `linkstate_forward.rs`), the path an
+    // inbound Push takes on its way out the other faces, which is zenoh's own
+    // single stamp point (`dispatcher/pubsub.rs:328`). The wire form is the Put's
+    // `T` flag and the `timestamp` behind it (`zenoh-protocol` put.rs:43 / :50).
+    // So the leg stands up a three-node star — publisher, this node, subscriber —
+    // taps BOTH of the node's links, and reads the flag off the Put that came out
+    // while the inbound half proves one went in bare.
+    //
+    // ⚠ There is no publish-side auto-stamp to read instead. On the
+    // single-session path this key only chooses which clock `FallbackStamp`
+    // borrows, and both clocks stamp (`timestamp_source.rs`), so no frame
+    // differs; `node_hlc` is read once per forwarder and nowhere else.
+    //
+    // ⚠ Its ARM SCOPE is narrower again, and DERIVED again: relaying needs two
+    // faces, so the sweep asks only the run-modes `default_listen_endpoint`
+    // gives a listener to — which is upstream's answer, not the leg's, and puts
+    // `WhatAmI::Client` out by upstream's own rule that a client never listens.
+    "timestamping/enabled",
 ];
 
 /// The only keys below which a real zenohd accepts leaves this tree's census
