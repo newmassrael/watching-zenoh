@@ -67,17 +67,26 @@ A count moves for two reasons and names neither. What is pinned is the SET of
 `(package, feature)` pairs that gate a public item and are outside the
 package's default closure. Every pair must be one of:
 
-  * PROBED           -- derived by importing `feature_gate_diagnostic`, so
-                        widening that axis moves this fraction automatically
-                        rather than needing a second edit;
-  * NO_PUBLIC_PATH   -- derived from the same module's declaration;
-  * UNPROBED         -- named here, per package, WITH the reason that package
-                        is still waiting.
+  * PROBED           -- derived by importing `feature_gate_diagnostic`, both
+                        its hand-written probes and the ones it reads off each
+                        crate root, so widening that axis moves this fraction
+                        automatically rather than needing a second edit;
+  * NO_PUBLIC_PATH   -- that module's declaration, which this file DOES NOT
+                        BELIEVE: a name declared to gate no public path and
+                        found here attached to a publicly visible item is a
+                        FINDING. Otherwise a reason-string table would be an
+                        escape hatch from the very derivation it sits beside;
+  * DEFERRED         -- that module's waiting list, for packages the axis HAS
+                        taken: gates a public item, not probed yet, reason
+                        given per feature;
+  * OFF_AXIS         -- named HERE, per package, for packages the axis has not
+                        taken at all. One reason for the whole package.
 
-A pair in none of the three is a FINDING, so the population cannot grow in
+A pair in none of the four is a FINDING, so the population cannot grow in
 silence: a feature added tomorrow that gates a public item reds this until
-somebody decides which it is. A name in UNPROBED that no longer gates a public
-item is a FINDING too.
+somebody decides which it is. A name in the waiting lists that no longer gates
+a public item is a FINDING too, and so is a package listed BOTH on the axis and
+in `OFF_AXIS` -- one fact, one place.
 
 ## What this deliberately does NOT decide
 
@@ -92,6 +101,7 @@ retirement path exists so the number can still reach zero.
 from __future__ import annotations
 
 import collections
+import functools
 import json
 import pathlib
 import re
@@ -143,12 +153,19 @@ UNCLASSIFIED_DECLARED: dict[str, str] = {
     ),
 }
 
-# package -> (why this package is still waiting, the features waiting).
+# Packages the diagnostic axis has NOT taken yet -> (why, the features that
+# gate a public item there).
 #
-# A SET, not a count. Adding a feature that gates a public item without listing
-# it FAILS; listing one that no longer does FAILS. Both directions are what
-# keeps this from being the permission slip a bare number would be.
-UNPROBED: dict[str, tuple[str, frozenset[str]]] = {
+# R2194 split the waiting list in two, because the two halves are answered by
+# different tables. Once a package JOINS the axis, every one of its non-default
+# features has to be decided over there -- probed, declared to gate no public
+# path, or deferred with a reason -- and this table must not name it any more.
+# What stays here is the packages nobody has taken.
+#
+# A SET, not a count, in both halves. A feature that gates a public item and is
+# in none of the tables FAILS; a name here that no longer gates one FAILS; and
+# a package that has joined the axis while still listed here FAILS.
+OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
     "wz": (
         "the facade: each of these re-exports a whole runtime or platform "
         "subtree, so one probe per feature is a probe of somebody else's "
@@ -203,77 +220,13 @@ UNPROBED: dict[str, tuple[str, frozenset[str]]] = {
         "half of that skeleton",
         frozenset({"alloc"}),
     ),
-    "wz-runtime-tokio": (
-        "the largest surface in the workspace and the one a real consumer "
-        "actually imports; this is where widening the axis buys the most, and "
-        "it is deliberately the next round's work rather than this one's",
-        frozenset(
-            {
-                "access-acl",
-                "access-downsampling",
-                "access-extauth-pubkey",
-                "access-quota",
-                "adminspace-config-hotreload",
-                "adminspace-core",
-                "adminspace-introspection-handlers",
-                "adminspace-plugins-handlers",
-                "ext-pubsub-advanced-cache",
-                "ext-pubsub-advanced-history",
-                "ext-pubsub-advanced-publisher",
-                "ext-pubsub-advanced-recovery",
-                "ext-pubsub-advanced-subscriber",
-                "ext-pubsub-group-membership",
-                "ext-pubsub-serde-codec",
-                "live-capture",
-                "liveliness-get",
-                "locator-iface",
-                "plugin-dynamic-loading",
-                "reassembly",
-                "router-multicast-faces",
-                "routing-accept",
-                "routing-interceptor-hotreload",
-                "routing-interest-pending-gc",
-                "routing-namespace",
-                "routing-peer",
-                "routing-router-hat",
-                "routing-routes",
-                "routing-token-tables",
-                "runtime-tokio-uring",
-                "runtime-zero-copy",
-                "scouting-active",
-                "scouting-responder",
-                "scouting-static",
-                "session-extauth",
-                "session-extcompression",
-                "session-extqos",
-                "session-extshm",
-                "storage-aligner",
-                "storage-backend",
-                "storage-backend-filesystem",
-                "storage-mgr-dynamic-volume-loading",
-                "storage-mgr-garbage-collection",
-                "storage-mgr-multi-storage-host",
-                "storage-replication",
-                "time-hlc",
-                "transport-link-quic",
-                "transport-link-quic-datagram",
-                "transport-link-raweth",
-                "transport-link-serial",
-                "transport-link-tls",
-                "transport-link-unixpipe",
-                "transport-link-unixsock",
-                "transport-link-vsock",
-                "transport-link-ws",
-                "transport-lowlatency",
-                "transport-multicast",
-                "transport-multilink",
-                "transport-qos",
-                "transport-shm",
-                "transport-stats",
-                "zenoh-config",
-            }
-        ),
-    ),
+    # `wz-runtime-tokio` used to sit here, carrying all 62 of its
+    # public-gating features. R2194 put it ON the axis, so its features are
+    # decided in `feature_gate_diagnostic`'s own tables now -- 44 probed from
+    # the crate root, 18 deferred with a reason. Listing it in both places
+    # would be the second copy of one fact that this file exists to refuse
+    # elsewhere, and the check below fails if a package on the axis reappears
+    # here.
     "wz-runtime-tokio-test-support": (
         "a test-support crate; same reason as the other one",
         frozenset({"tls-fixtures"}),
@@ -478,8 +431,24 @@ def probed_pairs() -> set[tuple[str, str]]:
     single-package constant, so adding a probe for any OTHER package moved
     nothing here and the "widening moves the fraction" claim was prose. R2193
     made that axis a per-package table for this reason.
+
+    R2194: the hand-written table is no longer the whole answer -- that axis
+    now also READS probes off each crate root, and a fraction that counted only
+    the typed ones would under-report the coverage it exists to report.
     """
-    return {(pkg, f) for pkg, feats in fgd.PROBES.items() for f in feats}
+    pairs = {(pkg, f) for pkg, feats in fgd.PROBES.items() for f in feats}
+    for pkg, crate_path in fgd.AXIS.items():
+        pairs |= {(pkg, f) for f in fgd.derived_probes(pkg, crate_path)}
+    # A crate root gates DEFAULT features too, and the axis filters those out
+    # before probing. Leaving them in here would credit coverage for probes
+    # that are never built.
+    return {(p, f) for p, f in pairs if f in nondefault_of(p)}
+
+
+@functools.lru_cache(maxsize=None)
+def nondefault_of(package: str) -> frozenset[str]:
+    _dirs, nd = workspace()
+    return frozenset(nd.get(package, ()))
 
 
 def declared_pairs() -> set[tuple[str, str]]:
@@ -487,7 +456,17 @@ def declared_pairs() -> set[tuple[str, str]]:
 
 
 def unprobed_pairs() -> set[tuple[str, str]]:
-    return {(pkg, f) for pkg, (_why, fs) in UNPROBED.items() for f in fs}
+    """The waiting list: deferred ON the axis, plus the packages not on it.
+
+    R2194 split it. A package the axis has taken keeps its per-feature reasons
+    over there, because joining forces a decision on every one of its features;
+    a package nobody has taken keeps one reason here for the whole package.
+    Listing a package in both would be the second copy of one fact that this
+    file exists to refuse elsewhere, and `check` fails on exactly that.
+    """
+    deferred = {(pkg, f) for pkg, feats in fgd.DEFERRED.items() for f in feats}
+    off = {(pkg, f) for pkg, (_why, fs) in OFF_AXIS.items() for f in fs}
+    return deferred | off
 
 
 def check() -> int:
@@ -536,14 +515,22 @@ def check() -> int:
 
     probed, declared, unprobed = probed_pairs(), declared_pairs(), unprobed_pairs()
     accounted = probed | declared | unprobed
+    for pkg in sorted(set(OFF_AXIS) & set(fgd.AXIS)):
+        findings.append(
+            f"`{pkg}` is on the diagnostic axis AND still listed as off it. "
+            f"Joining the axis forces a decision on every one of that "
+            f"package's non-default features over there, so the whole-package "
+            f"row here has to go -- one fact, one place."
+        )
     for pkg, feat in sorted(denom - accounted):
         findings.append(
             f"`{pkg}` / `{feat}` is a non-default feature gating a public item "
-            f"and nothing here says what is being done about it. Give it a "
-            f"probe in `feature_gate_diagnostic.PROBES`, an entry in that "
-            f"module's `NO_PUBLIC_PATH`, or a row under `UNPROBED` with the "
-            f"reason its package is waiting -- the population must not be able "
-            f"to grow in silence, which is the whole of item 532."
+            f"and nothing says what is being done about it. If its package is "
+            f"on the diagnostic axis, give it a probe, a `NO_PUBLIC_PATH` "
+            f"entry or a `DEFERRED` row there; if it is not, name the feature "
+            f"in this file's `OFF_AXIS` row for that package -- the population "
+            f"must not be able to grow in silence, which is the whole of item "
+            f"532."
         )
     for pkg, feat in sorted(unprobed - denom):
         findings.append(
@@ -551,6 +538,18 @@ def check() -> int:
             f"feature and no `#[cfg]` in that package attaches it to a public "
             f"item any more. Delete the name: a waiting list that keeps names "
             f"nothing is waiting for reports work that does not exist."
+        )
+    # THE OTHER DIRECTION ON `NO_PUBLIC_PATH`, and it is the one that stops a
+    # reason-string table being an escape hatch: the diagnostic axis accepts
+    # "this gates no public path" as a decision, and nothing over there can
+    # check it. Here it is a DERIVED claim, and a false one fails.
+    for pkg, feat in sorted(declared & denom):
+        findings.append(
+            f"`{pkg}` / `{feat}` is declared to gate no public path, and this "
+            f"scan finds a `#[cfg]` in that package attaching it to a publicly "
+            f"visible item. A declaration is not a decision the derivation has "
+            f"to accept: probe it, defer it with a reason, or correct the "
+            f"claim."
         )
     overlap = (probed | declared) & unprobed
     for pkg, feat in sorted(overlap):
@@ -566,13 +565,17 @@ def check() -> int:
         return 1
 
     nd_total = sum(len(v) for v in nondefault.values())
+    deferred_on_axis = {
+        (pkg, f) for pkg, feats in fgd.DEFERRED.items() for f in feats
+    }
     print(
         f"  feature-public-surface: {total_sites} `#[cfg(feature)]` site(s) all "
         f"classified; of {nd_total} non-default feature(s) in this workspace, "
         f"{len(denom)} gate a public item -- "
         f"{len(denom & probed)} probed, {len(denom & declared)} declared to "
-        f"gate no public path, {len(denom & unprobed)} unprobed across "
-        f"{len(UNPROBED)} package(s)"
+        f"gate no public path, {len(denom & deferred_on_axis)} deferred on the "
+        f"axis, {len(denom & unprobed) - len(denom & deferred_on_axis)} in "
+        f"{len(OFF_AXIS)} package(s) the axis has not taken"
     )
     for kind in (
         "public-item",
