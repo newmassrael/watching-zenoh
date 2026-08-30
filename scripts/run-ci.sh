@@ -2218,6 +2218,31 @@ PY
     # reason table and takes its seven fixture literals with it.
     python3 scripts/lib/gate_reason_claims.py || return 1
     python3 scripts/lib/gate_reason_claims.py --selftest >/dev/null || return 1
+    # R2218 (open-debt item 200) — the DEPTH axis, as numbers.
+    #
+    # Item 200's complaint is that breadth is closed and depth has no
+    # instrument: the only tool is the A3 grade, which a whole-surface
+    # re-audit would overturn and no round does one, so 86 PARTIAL is a
+    # bookkeeping convention rather than the work left.
+    #
+    # Probed before building, and the item's sharpest sentence did NOT
+    # reproduce: every PARTIAL an executing test reaches names a residual, the
+    # 409 wz-path citations in those reasons all resolve with no line past its
+    # file's end, and configuration already HAS a depth instrument. What was
+    # missing is that nobody measured any of it.
+    #
+    # So this asks `atom_test_graph` -- the derivation
+    # `audit-catalog-status.sh` already trusts for COMPLETE -- the question
+    # nobody asked of PARTIAL, and audits the citations those grades rest on.
+    # Both axes are pinned two-directionally.
+    #
+    # ⛔ A third axis was written and REMOVED: "does the reason name a
+    # residual" is a keyword sweep, and item 190 records that a sweep is a
+    # FLOOR. It flagged two atoms whose reasons are dense with state and merely
+    # spell it in other words, which is the sweep failing rather than the
+    # grades.
+    python3 scripts/lib/depth_axis_census.py || return 1
+    python3 scripts/lib/depth_axis_census.py --selftest >/dev/null || return 1
     # R311y887 (open-debt item 361) — and what a bounded read's OUTPUT must
     # contain, which is the gate above one layer in.
     #
