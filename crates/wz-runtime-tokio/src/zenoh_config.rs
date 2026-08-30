@@ -2444,6 +2444,25 @@ pub const CONFIG_KEYS_PROVEN_ON_THE_WIRE: &[&str] = &[
     // gives a listener to — which is upstream's answer, not the leg's, and puts
     // `WhatAmI::Client` out by upstream's own rule that a client never listens.
     "timestamping/enabled",
+    // R2204 (open-debt item 220) — the LAST key of that item's `not-yet-read`
+    // queue, and the one the register had written off as blocked on an RSA
+    // implementation. Re-measured, that was wrong about wz: the leg's own
+    // per-arm ext dump already showed `multi_link` on the InitSyn of the
+    // `--max-links 2` arm and on no other, so this tree ALREADY offers the
+    // extension when the aggregation budget is above one — `peer_loop` picks
+    // `dial_face_multilink`, whose establishment negotiates ext `0x4`
+    // (`accept_loop.rs`). What upstream needs an `RsaPrivateKey` for
+    // (`multilink.rs:44-56`) is the challenge's CONTENT; what this list claims
+    // is that the frame moved with the file, and the offer is what moves.
+    //
+    // ⚠ Its obstacle was never the wire. `--max-links` is an argv flag, an
+    // argv-typed flag is authoritative over the file (`args.rs`, `decide_pair`),
+    // and the leg's arms typed one — so no arm could attribute the offer to the
+    // DOCUMENT until an arm that types no number existed. The sweep derives that
+    // arm set from its own table and holds each kept arm to a THIRD, key-less
+    // document, so "this arm ignores the key" cannot be confused with "this arm
+    // aggregates whatever the file says".
+    "transport/unicast/max_links",
 ];
 
 /// The only keys below which a real zenohd accepts leaves this tree's census

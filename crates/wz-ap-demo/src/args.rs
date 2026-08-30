@@ -2076,18 +2076,19 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
     // template already writes `mode` from the arm and a second one is a
     // `duplicate field` refusal. The leg grew an arm-varying shape instead,
     // and the three run-modes' whatami readings are required to differ.
-    (
-        "transport/unicast/max_links",
-        KIND_NOT_YET_READ,
-        "upstream gates the MultiLink extension on `max_links > 1`, measured \
-         at establishment/open.rs:620 (`.open(manager.config.unicast\
-         .max_links > 1)`) and manager.rs:290 (`MultiLink::make(prng, \
-         config.max_links > 1)`). The extension itself is init.rs:131 \
-         (InitSyn/InitAck) and open.rs:94 (OpenSyn). So a FIXTURES pair of 1 \
-         and 3 shows ext_mlink absent then present. NOTE the frame carries \
-         the CAPABILITY, not the number: this leaves `> 1` provable and the \
-         exact count not.",
-    ),
+    //
+    // ⚠ R2204 (open-debt item 220) RETIRED `transport/unicast/max_links`, and
+    // with it the LAST row of this kind. It is `wire` now, read as the InitSyn's
+    // `multi_link` extension by
+    // `every_key_proven_on_the_wire_is_in_the_frame_a_zenohd_would_receive`.
+    // Its row was right that the frame carries the CAPABILITY and not the
+    // number. What the register had added on top of it — that wz would first
+    // have to implement upstream's RSA exchange — was REFUTED by the leg's own
+    // per-arm dump: `multi_link` was already on the InitSyn of the
+    // `--max-links 2` arm and of no other, because `peer_loop` picks
+    // `dial_face_multilink` above a budget of one. The obstacle was the COMMAND
+    // LINE, exactly as R2179 wrote: an argv-typed flag overrides the file, this
+    // leg's arms typed one, and the fix was an arm that types none.
     //
     // ⚠ R2203 (open-debt item 220) RETIRED `timestamping/enabled` from this
     // kind — it is `wire` now, read as the `T` flag of a RELAYED Put by
@@ -5315,11 +5316,40 @@ mod stock_config_tests {
         //   fixture, which would be news;
         // * `leg-judged` empty means the adminspace legs stopped being
         //   counted, i.e. this ledger drifted from the tests it cites.
+        //
+        // R2204 (open-debt item 220) — THE DECISION THE FIRST BULLET ASKED FOR
+        // IS RECORDED HERE: the queue IS exhausted. `not-yet-read` is empty, and
+        // it is the ONE kind that may be, because emptying it is what item 220
+        // exists to do.
+        //
+        // ⛔ That is a permission for one kind, not an exemption, and the reason
+        // it cannot be abused is STRUCTURAL rather than written down. This
+        // ledger's population is pinned to `honoured MINUS wire` by the
+        // assertion above, so a row leaves it by ONE route: its key entering
+        // `CONFIG_KEYS_PROVEN_ON_THE_WIRE`. There is nowhere else for a
+        // `not-yet-read` row to go, and the fear in the first bullet — a
+        // mis-sort into `off-wire` — does not empty this kind, it MOVES the row,
+        // which leaves the total unchanged and the row's evidence still held to
+        // naming a flag and a search. So an empty queue here means exactly nine
+        // keys reached the wire, and the wire list is what says which.
+        //
+        // The other two kinds keep the old rule unchanged: neither has a route
+        // out, so an empty one is a list gone quiet.
         for kind in kinds {
             let n = ARGV_ONLY_KIND_LEDGER
                 .iter()
                 .filter(|(_, k, _)| *k == kind)
                 .count();
+            if kind == KIND_NOT_YET_READ {
+                if n == 0 {
+                    eprintln!(
+                        "argv-only kind {kind:?} is EXHAUSTED — every key a frame \
+                         carries has been read off one; open-debt item 220's \
+                         queue is empty"
+                    );
+                }
+                continue;
+            }
             assert!(
                 n > 0,
                 "kind {kind:?} is empty — that is a decision to record, not a \

@@ -1211,6 +1211,39 @@ fn every_key_proven_on_the_wire_is_in_the_frame_a_zenohd_would_receive() {
         "bare",
     )];
 
+    /// (key, the BASELINE fragment, the fragment for run A, its expected
+    ///       reading, the fragment for run B, its expected reading)
+    ///
+    /// R2204 (open-debt item 220) — a FIFTH shape, and the only one whose reason
+    /// to exist is the COMMAND LINE rather than the wire.
+    ///
+    /// `transport/unicast/max_links` reads exactly like the four capability keys
+    /// in `FIXTURES`: a UNIT extension on the InitSyn, present or absent. It
+    /// could not live there because an argv-typed flag is authoritative — the
+    /// expansion withholds the file's value when one is present (`args.rs`,
+    /// `decide_pair`) — and two of this leg's arms TYPE `--max-links`. A row in
+    /// `FIXTURES` would therefore be asked on arms where the document is not
+    /// what set the wire, and both runs would answer alike.
+    ///
+    /// So the arm population here is `ARMS` filtered to the arms that type NO
+    /// number, which is derived from that table rather than listed: an arm that
+    /// stops typing one joins this sweep by itself.
+    ///
+    /// THE BASELINE IS THE THIRD DOCUMENT AND IT IS LOAD-BEARING. Without it,
+    /// "this arm does not read the key" and "this arm has the capability on
+    /// regardless of the file" are the same pair of equal readings. Row A asks
+    /// for the NON-default and row B for the default, so the baseline must
+    /// answer what B does — on EVERY arm, judged or not — and an arm whose two
+    /// readings both equal that baseline is inert rather than broken.
+    const ARGV_OVERRIDABLE: &[(&str, &str, &str, &str, &str, &str)] = &[(
+        "transport/unicast/max_links",
+        r#"metadata: { name: "max-links-baseline" }"#,
+        "transport: { unicast: { max_links: 3 } }",
+        "offered",
+        "transport: { unicast: { max_links: 1 } }",
+        "absent",
+    )];
+
     // The POPULATION is the constant, so a key declared wire-proven without a
     // fixture here reds rather than going unasked — and a fixture for a key the
     // constant no longer claims reds too.
@@ -1218,16 +1251,18 @@ fn every_key_proven_on_the_wire_is_in_the_frame_a_zenohd_would_receive() {
     named.extend(ARM_VARYING.iter().copied());
     named.extend(BEACON.iter().map(|(k, ..)| *k));
     named.extend(RELAY.iter().map(|(k, ..)| *k));
+    named.extend(ARGV_OVERRIDABLE.iter().map(|(k, ..)| *k));
     named.sort_unstable();
     let mut declared: Vec<&str> = CONFIG_KEYS_PROVEN_ON_THE_WIRE.to_vec();
     declared.sort_unstable();
     assert_eq!(
         named, declared,
         "every key declared proven on the wire needs a pair of files this leg can \
-         hand the demo, a row in ARM_VARYING, a row in BEACON, or a row in RELAY"
+         hand the demo, a row in ARM_VARYING, a row in BEACON, a row in RELAY, or \
+         a row in ARGV_OVERRIDABLE"
     );
 
-    // The four shapes must be DISJOINT. A key in two of them would be asked
+    // The five shapes must be DISJOINT. A key in two of them would be asked
     // twice under two different contracts, and the weaker answer would decide it.
     for key in ARM_VARYING {
         assert!(
@@ -1250,6 +1285,16 @@ fn every_key_proven_on_the_wire_is_in_the_frame_a_zenohd_would_receive() {
                 && !BEACON.iter().any(|(k, ..)| k == key),
             "{key} is a relay row and also one of the three shapes above; one of \
              the two is describing a different key than it thinks"
+        );
+    }
+    for (key, ..) in ARGV_OVERRIDABLE {
+        assert!(
+            !FIXTURES.iter().any(|(k, ..)| k == key)
+                && !ARM_VARYING.contains(key)
+                && !BEACON.iter().any(|(k, ..)| k == key)
+                && !RELAY.iter().any(|(k, ..)| k == key),
+            "{key} is an argv-overridable row and also one of the four shapes \
+             above; one of the two is describing a different key than it thinks"
         );
     }
 
@@ -1582,6 +1627,100 @@ fn every_key_proven_on_the_wire_is_in_the_frame_a_zenohd_would_receive() {
         RELAY.len() * relay_arms.len() * 2,
         relay_failures.join("\n  ")
     );
+
+    // ── R2204 (open-debt item 220) — the ARGV-OVERRIDABLE sweep ─────────────
+    //
+    // The frame and the topology are the fixture sweep's; only the ARM
+    // population differs, and it differs for a reason that lives in `args.rs`
+    // rather than on the wire: an argv-typed flag is authoritative, so on an arm
+    // that types `--max-links` the document is not what set the InitSyn and both
+    // runs answer alike. Those arms are FILTERED OUT of the judgement, and the
+    // filter is derived from `ARMS`'s own second column rather than listed here.
+    //
+    // ⛔ The filter is not an exemption, because the arms it keeps are still held
+    // to the full contract AND to a third document. The baseline is what
+    // separates "this arm does not read the key" from "this arm has the
+    // capability on whatever the file says": an inert arm answers the baseline
+    // twice, and any other pair of equal readings is a failure.
+    let overridable_arms: Vec<(RunMode, Option<usize>)> = ARMS
+        .iter()
+        .filter(|(_, max_links)| max_links.is_none())
+        .copied()
+        .collect();
+    let typed_out: Vec<String> = ARMS
+        .iter()
+        .filter(|(_, max_links)| max_links.is_some())
+        .map(|(m, ml)| format!("{}", ArmLabel(*m, *ml)))
+        .collect();
+    eprintln!(
+        "argv-overridable arms: {:?}; typing a number, so the file cannot be \
+         judged there: {typed_out:?}",
+        overridable_arms
+            .iter()
+            .map(|(m, ml)| format!("{}", ArmLabel(*m, *ml)))
+            .collect::<Vec<_>>()
+    );
+    let mut overridable_failures: Vec<String> = Vec::new();
+    // ANTI-VACUITY on the population, and it can fail: every arm typing a number
+    // would empty this and leave the whole shape green.
+    if overridable_arms.is_empty() {
+        overridable_failures.push(String::from(
+            "every arm types a number for this axis, so no arm can attribute the \
+             wire to the document and this shape measures nothing",
+        ));
+    }
+    for (key, base_frag, frag_a, want_a, frag_b, want_b) in ARGV_OVERRIDABLE {
+        let mut deciding = 0usize;
+        let mut seen: Vec<(String, String, String, String)> = Vec::new();
+        for (mode, max_links) in &overridable_arms {
+            let arm = ArmLabel(*mode, *max_links);
+            let base = handshake_field_from_a_config(key, base_frag, *mode, *max_links);
+            let got_a = handshake_field_from_a_config(key, frag_a, *mode, *max_links);
+            let got_b = handshake_field_from_a_config(key, frag_b, *mode, *max_links);
+            // THE BASELINE'S OWN CONTRACT, held on every arm including the inert
+            // ones: row B states the DEFAULT, so a document that names the key at
+            // all must not be what produces the default reading. An arm whose
+            // baseline disagrees with B has a default this fixture pair has
+            // mislabelled, and every verdict below it would be about the wrong
+            // pair.
+            if base != *want_b {
+                overridable_failures.push(format!(
+                    "{arm} {key}: a document naming nothing reads {base} where \
+                     row B calls {want_b} the default, so the pair has the \
+                     default on the wrong side"
+                ));
+            }
+            if got_a == *want_a && got_b == *want_b && got_a != got_b {
+                deciding += 1;
+            } else if got_a == base && got_b == base {
+                // INERT: the file reaches no aggregation decision on this arm.
+                // A reading, not an excuse — an arm that starts reading the key
+                // is judged the moment it does.
+            } else {
+                overridable_failures.push(format!(
+                    "{arm} {key}: baseline {base}, then {got_a} for a file asking \
+                     {want_a} and {got_b} for one asking {want_b} — neither the \
+                     full contract nor an arm that leaves the key alone"
+                ));
+            }
+            seen.push((format!("{arm}"), base, got_a, got_b));
+        }
+        eprintln!("argv-overridable {key}: per-arm (baseline, A, B) {seen:?}");
+        if deciding == 0 {
+            overridable_failures.push(format!(
+                "{key}: no arm let the DOCUMENT decide, so every reading above is \
+                 a default and this row proves nothing"
+            ));
+        }
+    }
+    assert!(
+        overridable_failures.is_empty(),
+        "{} of the {} argv-overridable readings disagree with the document that \
+         produced them:\n  {}",
+        overridable_failures.len(),
+        ARGV_OVERRIDABLE.len() * overridable_arms.len() * 3,
+        overridable_failures.join("\n  ")
+    );
 }
 
 /// The (run-mode, `--max-links`) arms every fixture is asked in.
@@ -1600,8 +1739,19 @@ fn every_key_proven_on_the_wire_is_in_the_frame_a_zenohd_would_receive() {
 /// `PeerMesh` carries BOTH numbers, and passes the flag EXPLICITLY at 1 as well
 /// as at 2 so the only difference between the control and the arm under
 /// judgement is the number itself — not whether a flag was present.
+///
+/// R2204 (open-debt item 220) adds `(PeerMesh, None)`, and it is the arm the
+/// register named as missing. An argv-typed flag is AUTHORITATIVE — the
+/// expansion withholds the file's value when one is present (`args.rs`,
+/// `decide_pair`) — so on the two arms that type `--max-links` the document
+/// cannot be what set it, and `transport/unicast/max_links` was unaskable on
+/// every arm this table had. This one types no number, so the file's
+/// `transport: { unicast: { max_links: N } }` is the only thing choosing
+/// `peer_loop`'s dial path. It is additive for every other key: the same
+/// documents are asked of one more node.
 const ARMS: &[(RunMode, Option<usize>)] = &[
     (RunMode::Client, None),
+    (RunMode::PeerMesh, None),
     (RunMode::PeerMesh, Some(1)),
     (RunMode::PeerMesh, Some(2)),
     (RunMode::RouterHat, None),
@@ -2544,6 +2694,17 @@ fn wire_reading(key: &str) -> (HandshakeFrame, Reading) {
         // nothing new reads the wire here: what was missing was a sweep shape
         // for a key whose two readings live in two ARMS instead of two files.
         "mode" => (InitSyn, Reading::Value("whatami")),
+        // R2204 (open-debt item 220) — the LAST key of the item's `not-yet-read`
+        // queue, and it reads like the four capabilities above: a UNIT extension
+        // whose PRESENCE is the whole announcement (`ext_name.rs`: `multi_link`
+        // 0x4). What made it different was never the reading — it was that an
+        // argv-typed `--max-links` overrides the file on the arms this leg used
+        // to have, so no arm could attribute the offer to the DOCUMENT.
+        //
+        // ⚠ The frame carries the CAPABILITY and not the number: `> 1` is
+        // provable here and the exact count is not, which is why the fixture
+        // pair is 3 against 1 rather than 3 against 2.
+        "transport/unicast/max_links" => (InitSyn, Reading::Presence("multi_link")),
         other => panic!("{other} is declared wire-proven and this leg cannot read it"),
     }
 }
