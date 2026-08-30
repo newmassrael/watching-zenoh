@@ -438,7 +438,19 @@ def probed_pairs() -> set[tuple[str, str]]:
     """
     pairs = {(pkg, f) for pkg, feats in fgd.PROBES.items() for f in feats}
     for pkg, crate_path in fgd.AXIS.items():
+        # BOTH derivations. R2195 added the submodule walk, and reading only
+        # the crate-root one here made this file report features as decided
+        # nowhere while the axis was probing every one of them -- the R2193
+        # dead-probe shape again, caught this time by the gate rather than by
+        # a mutation.
+        #
+        # R2197 re-ran that mutation before landing the round and it is TEN
+        # findings, not the seventeen first written here: nineteen features
+        # reach a public path through a submodule and nine of those are
+        # derivable at the crate root as well. The GUARD is this union; the
+        # count is only what the mutation printed on the day.
         pairs |= {(pkg, f) for f in fgd.derived_probes(pkg, crate_path)}
+        pairs |= {(pkg, f) for f in fgd.submodule_probes(pkg, crate_path)}
     # A crate root gates DEFAULT features too, and the axis filters those out
     # before probing. Leaving them in here would credit coverage for probes
     # that are never built.

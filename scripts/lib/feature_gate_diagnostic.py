@@ -99,7 +99,12 @@ AXIS: dict[str, str] = {
 # purpose: a path expression resolves through E0433 and an import through
 # E0432, and they are separate code paths in rustc -- a note present on one and
 # absent on the other is precisely the half-answer this axis exists to catch.
-PROBES: dict[str, dict[str, list[tuple[str, str]]]] = {
+# R2195 — each probe is `(label, body, extra features the PATH needs)`. The
+# third element exists because a public item can sit inside a module that is
+# itself feature-gated: to ask "is the consumer told about the INNER feature",
+# the OUTER one has to be ON, or rustc answers about the outer instead. Those
+# extras are DERIVED from the `pub mod` chain, never typed.
+PROBES: dict[str, dict[str, list[tuple[str, str, frozenset[str]]]]] = {
     "wz-capture": {
         "dissect": [
             (
@@ -107,11 +112,13 @@ PROBES: dict[str, dict[str, list[tuple[str, str]]]] = {
                 "pub fn reach(d: &wz_capture::Dissection, b: &[u8]) -> String {\n"
                 "    wz_capture::fields_json::fields_json(d, b, None, None)\n"
                 "}\n",
+                frozenset(),
             ),
             (
                 "an import",
                 "use wz_capture::payload_decode::Declarations;\n"
                 "pub fn hold(_d: &Declarations<'_>) {}\n",
+                frozenset(),
             ),
         ],
     },
@@ -170,65 +177,78 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
 # both on a name here that no longer gates a public item AND on a
 # public-gating feature that appears in none of the three tables. The list can
 # therefore shrink or be corrected, but it cannot grow in silence.
+#
+# R2195 emptied the SUBMODULE half of this list: `submodule_probes` now follows
+# the `pub mod` chain and names the whole path, so eighteen features that were
+# waiting on "the path is not derivable" are probed instead. What is left is
+# ONE reason, and it is a fact about rustc rather than about this workspace.
+#
+# MEASURED on rustc 1.97.0, first by widening the axis and then again when the
+# submodule walk was written: when an item is gated by a COMPOUND cfg -- an
+# `any(...)`, an `all(...)`, a target predicate -- the note reads "the item is
+# gated here" and NAMES NO FEATURE. This axis exists to hold down the property
+# that a consumer is told WHICH feature is missing, so a compound-gated item
+# cannot be its witness: the probe would fail for a reason that is not the
+# defect. Every feature below gates its only public item that way.
+#
+# `transport-link-tls` is NOT here, and the difference is the point: it has a
+# simple-cfg item too, and the derivation prefers that one.
 DEFERRED: dict[str, dict[str, str]] = {
     "wz-capture": {},
     "wz-runtime-tokio": {
-        f: (
-            "gates a public item in a SUBMODULE rather than at the crate root, "
-            "so the path a consumer types is not derivable from `lib.rs` alone "
-            "-- it needs the module-reachability question R2193 deliberately "
-            "left open, or a hand-written probe naming the path"
-        )
-        for f in (
-            "access-acl",
-            "access-downsampling",
-            "access-quota",
-            "adminspace-introspection-handlers",
-            "ext-pubsub-advanced-history",
-            "ext-pubsub-advanced-recovery",
-            "liveliness-get",
-            "locator-iface",
-            "router-multicast-faces",
-            "routing-interceptor-hotreload",
-            "routing-token-tables",
-            "scouting-static",
-            "session-extauth",
-            "session-extcompression",
-            "time-hlc",
-            "transport-lowlatency",
-            "transport-qos",
-            "transport-stats",
-        )
+        **{
+            f: (
+                "every public item it gates is behind a COMPOUND cfg, and "
+                "rustc's note for those reads 'the item is gated here' without "
+                "naming a feature -- measured on 1.97.0"
+            )
+            for f in (
+                "live-capture",
+                "plugin-dynamic-loading",
+                "storage-mgr-dynamic-volume-loading",
+                "time-hlc",
+                "transport-link-raweth",
+                "transport-link-unixpipe",
+                "transport-link-vsock",
+            )
+        },
+        # The SECOND reason, and R2195 found it by building probes for these
+        # and watching them fail with a bare E0432 and NO note: what they gate
+        # is a METHOD inside an `impl` block, spelled `Type::name` and never
+        # `module::name`. Turning the feature off removes a method, which rustc
+        # reports as E0599 -- a different diagnostic from the E0432/E0433 pair
+        # this axis is about. The census still counts them in the denominator
+        # because they ARE public surface; separating "public path" from
+        # "public method" there is the work that would retire this class.
+        **{
+            f: (
+                "it gates only METHODS inside `impl` blocks, so there is no "
+                "`module::name` path to import; removing one is an E0599, not "
+                "the E0432/E0433 this axis adjudicates"
+            )
+            for f in (
+                "adminspace-introspection-handlers",
+                "liveliness-get",
+                "router-multicast-faces",
+                "routing-interceptor-hotreload",
+                "routing-token-tables",
+                "transport-stats",
+            )
+        },
+        # The THIRD reason, and the axis found it by building the probe and
+        # watching it SUCCEED. `link_interfaces::multicast_iface_selector_v4`
+        # is declared twice -- once under the feature, once under `not` -- so
+        # turning it off swaps the body and leaves the path in place. There is
+        # nothing for a consumer to be told about, because nothing disappears.
+        # The derivation now sees such twins and declines them, and this row
+        # records the one that taught it.
+        "locator-iface": (
+            "the only path it gates has a `cfg(not(...))` twin, so the feature "
+            "swaps an implementation rather than removing a path -- there is "
+            "no resolution error for rustc to annotate"
+        ),
     },
 }
-
-# The second reason a public-gating feature cannot be probed HERE, and it is a
-# fact about rustc rather than about this workspace.
-#
-# MEASURED by widening the axis, on rustc 1.97.0: when the item is gated by a
-# COMPOUND cfg the note reads "the item is gated here" and names no feature at
-# all. These six gate their only crate-root public item that way -- behind a
-# target predicate or an `all(...)` -- so the compiler has no answer for the
-# question this axis asks, and a probe would fail for a reason that is not the
-# defect. `transport-link-tls` is NOT here: it has a simple-cfg item too, and
-# the derivation now prefers that one.
-DEFERRED["wz-runtime-tokio"].update(
-    {
-        f: (
-            "its only crate-root public item is behind a COMPOUND cfg, and "
-            "rustc's note for those reads 'the item is gated here' without "
-            "naming a feature -- measured on 1.97.0 when this axis was widened"
-        )
-        for f in (
-            "live-capture",
-            "plugin-dynamic-loading",
-            "storage-mgr-dynamic-volume-loading",
-            "transport-link-raweth",
-            "transport-link-unixpipe",
-            "transport-link-vsock",
-        )
-    }
-)
 
 # A crate-root item a `#[cfg(feature)]` is attached to, by the shape that names
 # it. `pub mod X;`, `pub mod X {`, a re-export, an aliased re-export, and the
@@ -255,6 +275,196 @@ ROOT_ITEM = [
 # reason the gate must not accept as a pass. Found by widening the axis, not by
 # reasoning about it.
 ROOT_FEATURE = re.compile(r'^#\[cfg\(feature\s*=\s*"([^"]+)"\)\]$')
+
+
+PUB_MOD = re.compile(r"^\s*pub mod ([A-Za-z_][A-Za-z0-9_]*)\s*;")
+FEATURE_NAME = re.compile(r'feature\s*=\s*"([^"]+)"')
+SIMPLE_CFG = re.compile(r'^#\[cfg\(feature\s*=\s*"([^"]+)"\)\]$')
+# The OTHER half of a two-implementation pair. R2195 measured this the
+# expensive way: `multicast_iface_selector_v4` is declared twice in the same
+# file, once under `cfg(feature = "locator-iface")` and once under
+# `cfg(not(...))`, so turning the feature OFF does not remove the path -- it
+# swaps the body. The probe compiled, which this axis correctly reports as
+# "measuring nothing". A name with a `not` twin is not a witness for path
+# disappearance, so the derivation has to see the twin.
+NEGATED_CFG = re.compile(r'^#\[cfg\(not\(feature\s*=\s*"([^"]+)"\)\)\]$')
+# Items whose name IS the last segment of a consumer's path.
+#
+# ⚠ ANCHORED AT COLUMN ZERO, and that is not tidiness. A `pub fn` INSIDE an
+# `impl` block is a METHOD: `Type::with_acl`, never `module::with_acl`. The
+# first version of this walk accepted indented items and produced five probes
+# for paths that had never existed, which rustc reported as a bare E0432 with
+# NO note at all -- correctly, since nothing was configured out. Column zero is
+# the cheap, exact test for "declared directly in this module": an inline
+# `mod X { ... }` body is indented too, and leaving it out is the
+# under-reporting direction, which the census turns into a finding rather than
+# a silence.
+PATH_ITEM = re.compile(
+    r"^pub\s+(?:async\s+|unsafe\s+|extern\s+\"[^\"]*\"\s+|const\s+|default\s+)*"
+    r"(?:fn|struct|enum|trait|type|const|static|union|mod)\s+"
+    r"([A-Za-z_][A-Za-z0-9_]*)"
+)
+
+
+def _attributes_above(lines: list[str], index: int) -> list[str]:
+    """The attribute stack an item at `index` carries, nearest last."""
+    out: list[str] = []
+    j = index - 1
+    while j >= 0:
+        s = lines[j].strip()
+        if s.startswith("#["):
+            out.insert(0, s)
+            j -= 1
+            continue
+        if s.startswith("//") or s == "":
+            j -= 1
+            continue
+        break
+    return out
+
+
+def negated_names(lines: list[str]) -> set[str]:
+    """Names declared under `cfg(not(feature = ...))` in this file.
+
+    A name that has one of these has a body for the feature-off build too, so
+    the path survives the feature going away and cannot witness its removal.
+    """
+    out: set[str] = set()
+    for i, line in enumerate(lines):
+        if not NEGATED_CFG.match(line):
+            continue
+        for j in range(i + 1, len(lines)):
+            s = lines[j].strip()
+            if s == "" or s.startswith("//") or s.startswith("#["):
+                continue
+            m = PATH_ITEM.match(lines[j])
+            if m:
+                out.add(m.group(1))
+            break
+    return out
+
+
+def _module_file(base: pathlib.Path, name: str) -> pathlib.Path | None:
+    for candidate in (base / f"{name}.rs", base / name / "mod.rs"):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def public_module_tree(
+    src: pathlib.Path,
+) -> dict[str, tuple[tuple[str, ...], frozenset[str]]]:
+    """Every file reachable from `lib.rs` through `pub mod`, with what it needs.
+
+    The second element is the set of features the CHAIN requires -- a module
+    declared under `#[cfg(feature = "x")]` puts `x` there, and everything below
+    inherits it. That is what lets a probe turn the OUTER feature on while
+    turning the inner one off, which is the only way to ask rustc about the
+    inner one at all.
+
+    For an `any(...)` chain attribute the first named feature is taken: one of
+    them suffices to make the module exist, and which one is not the question
+    being asked below.
+    """
+    tree: dict[str, tuple[tuple[str, ...], frozenset[str]]] = {}
+
+    def walk(f: pathlib.Path, chain: tuple[str, ...], need: frozenset[str]) -> None:
+        key = str(f.relative_to(src))
+        if key in tree:
+            return
+        tree[key] = (chain, need)
+        try:
+            lines = f.read_text(encoding="utf-8").split("\n")
+        except (UnicodeDecodeError, OSError):
+            return
+        base = src if f.name == "lib.rs" else (
+            f.parent if f.name == "mod.rs" else f.parent / f.stem
+        )
+        for i, line in enumerate(lines):
+            m = PUB_MOD.match(line)
+            if not m:
+                continue
+            extra: set[str] = set()
+            for attr in _attributes_above(lines, i):
+                if "cfg(" not in attr:
+                    continue
+                named = FEATURE_NAME.findall(attr)
+                if not named:
+                    continue
+                if attr.startswith("#[cfg(any("):
+                    extra.add(sorted(named)[0])
+                else:
+                    extra.update(named)
+            nxt = _module_file(base, m.group(1)) or _module_file(src, m.group(1))
+            if nxt is None:
+                continue
+            walk(nxt, chain + (m.group(1),), need | frozenset(extra))
+
+    walk(src / "lib.rs", (), frozenset())
+    return tree
+
+
+def submodule_probes(
+    package: str, crate_path: str
+) -> dict[str, list[tuple[str, str, frozenset[str]]]]:
+    """Probes for public items INSIDE the public module tree.
+
+    R2195. The crate-root derivation answers for items at the root; this one
+    follows `pub mod` down and names the whole path. The chain's own features
+    ride along as the probe's extras, so the module exists and only the item
+    under test is missing -- otherwise rustc reports the OUTER feature and the
+    probe would be asking a different question than the one it claims.
+
+    A feature that appears in its own chain is skipped: the module it would
+    have to turn on is the thing being turned off, and that item's absence is
+    already the root derivation's subject.
+    """
+    src = WORKSPACE / package / "src"
+    if not (src / "lib.rs").is_file():
+        return {}
+    found: dict[str, list[tuple[str, str, frozenset[str]]]] = {}
+    for rel, (chain, need) in sorted(public_module_tree(src).items()):
+        if not chain:
+            continue
+        try:
+            lines = (src / rel).read_text(encoding="utf-8").split("\n")
+        except (UnicodeDecodeError, OSError):
+            continue
+        twins = negated_names(lines)
+        for i, line in enumerate(lines):
+            # Column zero here too: an indented `#[cfg]` is attached to
+            # something inside a block, and the item it gates is not a path.
+            m = SIMPLE_CFG.match(line)
+            if not m:
+                continue
+            feature = m.group(1)
+            if feature in need:
+                continue
+            following = None
+            for j in range(i + 1, len(lines)):
+                s = lines[j].strip()
+                if s == "" or s.startswith("//") or s.startswith("#["):
+                    continue
+                following = lines[j]
+                break
+            if following is None:
+                continue
+            im = PATH_ITEM.match(following)
+            if not im or im.group(1) in twins:
+                continue
+            path = "::".join(chain + (im.group(1),))
+            found.setdefault(feature, []).append(
+                (
+                    f"an import of `{path}`",
+                    f"#[allow(unused_imports)]\nuse {crate_path}::{path};\n",
+                    need,
+                )
+            )
+    # One probe per feature, deterministically the shortest path then the
+    # alphabetically first -- a shorter path crosses fewer gated modules.
+    return {
+        f: [sorted(v, key=lambda e: (len(e[0]), e[0]))[0]] for f, v in found.items()
+    }
 
 
 def derived_probes(package: str, crate_path: str) -> dict[str, list[tuple[str, str]]]:
@@ -307,6 +517,7 @@ def derived_probes(package: str, crate_path: str) -> dict[str, list[tuple[str, s
             (
                 f"a crate-root import of `{sorted(n)[0]}`",
                 f"#[allow(unused_imports)]\nuse {crate_path}::{sorted(n)[0]};\n",
+                frozenset(),
             )
         ]
         for f, n in names.items()
@@ -477,11 +688,20 @@ def main() -> int:
         enabled = default_closure(features)
         optional = {f for f in features if f != "default"} - enabled
         optional_by_pkg[pkg], default_by_pkg[pkg] = optional, enabled
+        # Crate-root probes first; a submodule path only fills a feature the
+        # root could not answer for, since a shorter path crosses fewer gates.
         derived = {
             f: v
-            for f, v in derived_probes(pkg, AXIS[pkg]).items()
+            for f, v in submodule_probes(pkg, AXIS[pkg]).items()
             if f in optional
         }
+        derived.update(
+            {
+                f: v
+                for f, v in derived_probes(pkg, AXIS[pkg]).items()
+                if f in optional
+            }
+        )
         derived_count += len(derived)
         # Hand-written probes merge OVER derived ones, so a deliberate probe
         # always wins.
@@ -548,8 +768,9 @@ def main() -> int:
     for pkg in sorted(AXIS):
         optional, enabled = optional_by_pkg[pkg], default_by_pkg[pkg]
         for feature in sorted(set(all_probes.get(pkg, {})) & optional):
-            wanted = sorted(enabled - {feature})
-            for label, body in all_probes[pkg][feature]:
+            for label, body, extra in all_probes[pkg][feature]:
+                # The path's own gates ride along, minus the one under test.
+                wanted = sorted((enabled | set(extra)) - {feature})
                 rc, stderr = build_probe(
                     pkg, feature, label, body, wanted, target_dir
                 )
