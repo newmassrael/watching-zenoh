@@ -1976,6 +1976,26 @@ PY
     # reported seven findings that were one mistake.
     python3 scripts/lib/self_counted_table_gate.py --selftest || return 1
     python3 scripts/lib/self_counted_table_gate.py --check || return 1
+    # R2199 (open-debt item 557) — EVERY HANDSHAKE-NEGOTIATED AXIS IS ASSERTED.
+    #
+    # The consuming surface reported that no test measured `sn_resolution` or
+    # `patch` as NEGOTIATED values, on a probe (`grep -rn 'sn_resolution'`) that
+    # reads zero here. Re-measured, the probe is right about its string and
+    # wrong about the claim: this tree spells them `negotiated_sn_mask` and
+    # `seq_num_res`, and the tests exist. Replying with the list would settle it
+    # for one round and then rot, so the answer is this predicate instead.
+    #
+    # Both populations are DERIVED — `PeerInitCaps`' fields and the
+    # `negotiate_*_against_peer` methods' written slots — so a new negotiable
+    # parameter widens the gate by construction. UNCLASSIFIED is red: a slot
+    # this gate cannot resolve is not an axis it has cleared.
+    #
+    # The selftest's five arms include the pair the first draft could not fail:
+    # `init_ack_params` reads all three body fields, so a call to it cleared
+    # three axes at once until a SHARED accessor was made to require the field
+    # itself in the same assertion.
+    python3 scripts/lib/negotiated_axis_witness_gate.py --selftest || return 1
+    python3 scripts/lib/negotiated_axis_witness_gate.py --check || return 1
     # R2190 (open-debt item 530, NARROWED) — a cargo command written down in
     # this tree names features that exist.
     #
