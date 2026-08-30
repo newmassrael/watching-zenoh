@@ -77,37 +77,46 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 WORKSPACE = ROOT / "crates"
-PACKAGE = "wz-capture"
 
-# The crate's own library name, as a consumer spells it in a path.
-CRATE_PATH = "wz_capture"
+# The packages this axis covers, each with the library name a consumer spells
+# in a path. R2193 made this a TABLE rather than a single constant: the
+# workspace-wide denominator is derived by `feature_public_surface_census.py`
+# from this module's tables, and a single-package constant made that derivation
+# unable to follow the axis anywhere else -- which was measured, not assumed.
+AXIS: dict[str, str] = {
+    "wz-capture": "wz_capture",
+}
 
-# feature -> the probes that prove a consumer is told about it.
+# package -> feature -> the probes that prove a consumer is told about it.
 #
 # Each probe is a whole `src/lib.rs` for a throwaway consumer. TWO SHAPES on
 # purpose: a path expression resolves through E0433 and an import through
 # E0432, and they are separate code paths in rustc -- a note present on one and
 # absent on the other is precisely the half-answer this axis exists to catch.
-PROBES: dict[str, list[tuple[str, str]]] = {
-    "dissect": [
-        (
-            "a path expression",
-            f"pub fn reach(d: &{CRATE_PATH}::Dissection, b: &[u8]) -> String {{\n"
-            f"    {CRATE_PATH}::fields_json::fields_json(d, b, None, None)\n"
-            f"}}\n",
-        ),
-        (
-            "an import",
-            f"use {CRATE_PATH}::payload_decode::Declarations;\n"
-            f"pub fn hold(_d: &Declarations<'_>) {{}}\n",
-        ),
-    ],
+PROBES: dict[str, dict[str, list[tuple[str, str]]]] = {
+    "wz-capture": {
+        "dissect": [
+            (
+                "a path expression",
+                "pub fn reach(d: &wz_capture::Dissection, b: &[u8]) -> String {\n"
+                "    wz_capture::fields_json::fields_json(d, b, None, None)\n"
+                "}\n",
+            ),
+            (
+                "an import",
+                "use wz_capture::payload_decode::Declarations;\n"
+                "pub fn hold(_d: &Declarations<'_>) {}\n",
+            ),
+        ],
+    },
 }
 
-# Features that gate no public path, each with the reason. A reason is what the
-# next reader needs: the alternative is an empty list, which reads the same as
+# package -> feature -> why it gates no public path. A reason is what the next
+# reader needs: the alternative is an empty entry, which reads the same as
 # "nobody got round to it".
-NO_PUBLIC_PATH: dict[str, str] = {}
+NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
+    "wz-capture": {},
+}
 
 # The rustc note this axis is about, as a template over the feature name.
 #
@@ -166,7 +175,12 @@ def default_closure(features: dict[str, list[str]]) -> set[str]:
 
 
 def build_probe(
-    feature: str, label: str, body: str, enabled: list[str], target_dir: str
+    package: str,
+    feature: str,
+    label: str,
+    body: str,
+    enabled: list[str],
+    target_dir: str,
 ) -> tuple[int, str]:
     """Compile one throwaway consumer against a feature-OFF `wz-capture`.
 
@@ -189,7 +203,7 @@ def build_probe(
             'edition = "2021"\n'
             "publish = false\n\n"
             "[dependencies]\n"
-            f'{PACKAGE} = {{ path = "{WORKSPACE / PACKAGE}", '
+            f'{package} = {{ path = "{WORKSPACE / package}", '
             f"default-features = false, features = [{wanted}] }}\n\n"
             "[workspace]\n"
         )
@@ -219,57 +233,77 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
-    if PACKAGE not in packages:
+    if not AXIS:
         print(
-            f"feature-gate-diagnostic: FAIL -- `{PACKAGE}` is not a member of "
-            f"this workspace any more, so this axis is pointed at nothing.",
+            "feature-gate-diagnostic: FAIL -- the axis covers no package, so "
+            "every check below would pass over an empty set.",
             file=sys.stderr,
         )
         return 1
-
-    features: dict[str, list[str]] = packages[PACKAGE].get("features", {})
-    if not features:
-        print(
-            f"feature-gate-diagnostic: FAIL -- `{PACKAGE}` declares no feature, "
-            f"so this axis would pass over an empty set.",
-            file=sys.stderr,
-        )
-        return 1
-    enabled_by_default = default_closure(features)
-    optional = {f for f in features if f != "default"} - enabled_by_default
 
     findings: list[str] = []
-    if not optional:
-        findings.append(
-            f"`{PACKAGE}` has no feature outside its default set, so every path "
-            f"is reachable from a plain build and this axis has nothing to "
-            f"measure -- an empty population reads exactly like total compliance"
-        )
-    for feature in sorted(optional - set(PROBES) - set(NO_PUBLIC_PATH)):
-        findings.append(
-            f"`{PACKAGE}` declares the non-default feature `{feature}` and this "
-            f"table says nothing about it. Give it a probe naming a public path "
-            f"it gates, or an entry in NO_PUBLIC_PATH with the reason it gates "
-            f"none -- a feature nobody decided about is the silence this axis "
-            f"exists to refuse"
-        )
-    for feature in sorted(set(PROBES) & set(NO_PUBLIC_PATH)):
-        findings.append(
-            f"`{feature}` is both probed and declared to gate no public path, "
-            f"and those cannot both be true"
-        )
-    for feature in sorted((set(PROBES) | set(NO_PUBLIC_PATH)) - optional):
-        where = "a default feature" if feature in enabled_by_default else "no feature"
-        findings.append(
-            f"this table names `{feature}` and `{PACKAGE}` has {where} by that "
-            f"name -- the row is stale"
-        )
-    for feature, probes in sorted(PROBES.items()):
-        if not probes:
+    # The three tables must name the same packages: a probe for a package the
+    # axis does not claim, or a claimed package with no tables, is a row nobody
+    # would notice going stale.
+    for name, table in (("PROBES", PROBES), ("NO_PUBLIC_PATH", NO_PUBLIC_PATH)):
+        for pkg in sorted(set(table) ^ set(AXIS)):
             findings.append(
-                f"`{feature}` is listed as probed and carries no probe, which is "
-                f"a green result over nothing"
+                f"`{pkg}` appears in {name} or AXIS but not both -- the axis's "
+                f"scope and its tables have to name the same packages"
             )
+
+    optional_by_pkg: dict[str, set[str]] = {}
+    default_by_pkg: dict[str, set[str]] = {}
+    for pkg in sorted(AXIS):
+        if pkg not in packages:
+            findings.append(
+                f"`{pkg}` is not a member of this workspace any more, so this "
+                f"axis is pointed at nothing for it"
+            )
+            continue
+        features: dict[str, list[str]] = packages[pkg].get("features", {})
+        if not features:
+            findings.append(
+                f"`{pkg}` declares no feature, so this axis would pass over an "
+                f"empty set for it"
+            )
+            continue
+        enabled = default_closure(features)
+        optional = {f for f in features if f != "default"} - enabled
+        optional_by_pkg[pkg], default_by_pkg[pkg] = optional, enabled
+        probes, none_gated = PROBES.get(pkg, {}), NO_PUBLIC_PATH.get(pkg, {})
+        if not optional:
+            findings.append(
+                f"`{pkg}` has no feature outside its default set, so every path "
+                f"is reachable from a plain build and this axis has nothing to "
+                f"measure there -- an empty population reads exactly like total "
+                f"compliance"
+            )
+        for feature in sorted(optional - set(probes) - set(none_gated)):
+            findings.append(
+                f"`{pkg}` declares the non-default feature `{feature}` and its "
+                f"tables say nothing about it. Give it a probe naming a public "
+                f"path it gates, or an entry in NO_PUBLIC_PATH with the reason "
+                f"it gates none -- a feature nobody decided about is the "
+                f"silence this axis exists to refuse"
+            )
+        for feature in sorted(set(probes) & set(none_gated)):
+            findings.append(
+                f"`{pkg}` / `{feature}` is both probed and declared to gate no "
+                f"public path, and those cannot both be true"
+            )
+        for feature in sorted((set(probes) | set(none_gated)) - optional):
+            where = "a default feature" if feature in enabled else "no feature"
+            findings.append(
+                f"the tables name `{pkg}` / `{feature}` and that package has "
+                f"{where} by that name -- the row is stale"
+            )
+        for feature, entries in sorted(probes.items()):
+            if not entries:
+                findings.append(
+                    f"`{pkg}` / `{feature}` is listed as probed and carries no "
+                    f"probe, which is a green result over nothing"
+                )
 
     if findings:
         print("feature-gate-diagnostic: FAIL", file=sys.stderr)
@@ -279,29 +313,37 @@ def main() -> int:
 
     target_dir = str(WORKSPACE / "target")
     probed = 0
-    for feature in sorted(set(PROBES) & optional):
-        wanted = sorted(enabled_by_default - {feature})
-        for label, body in PROBES[feature]:
-            rc, stderr = build_probe(feature, label, body, wanted, target_dir)
-            probed += 1
-            if rc == 0:
-                findings.append(
-                    f"`{feature}` / {label}: the probe COMPILED with the feature "
-                    f"off, so the path it names is reachable without it and this "
-                    f"probe has been measuring nothing"
+    for pkg in sorted(AXIS):
+        optional, enabled = optional_by_pkg[pkg], default_by_pkg[pkg]
+        for feature in sorted(set(PROBES.get(pkg, {})) & optional):
+            wanted = sorted(enabled - {feature})
+            for label, body in PROBES[pkg][feature]:
+                rc, stderr = build_probe(
+                    pkg, feature, label, body, wanted, target_dir
                 )
-                continue
-            want = NOTE.format(feature=feature)
-            if want not in stderr:
-                findings.append(
-                    f"`{feature}` / {label}: the build failed and rustc did not "
-                    f"say `{want}`, so a consumer is left to work out that a "
-                    f"feature is what is missing. Either the gate moved off the "
-                    f"item it configures out (a `cfg_if`, a re-export, one "
-                    f"module further in), or this toolchain no longer words the "
-                    f"note this way -- the compiler's output is below"
-                )
-                findings.append("    " + "\n    ".join(stderr.strip().splitlines()[-25:]))
+                probed += 1
+                if rc == 0:
+                    findings.append(
+                        f"`{pkg}` / `{feature}` / {label}: the probe COMPILED "
+                        f"with the feature off, so the path it names is "
+                        f"reachable without it and this probe has been "
+                        f"measuring nothing"
+                    )
+                    continue
+                want = NOTE.format(feature=feature)
+                if want not in stderr:
+                    findings.append(
+                        f"`{pkg}` / `{feature}` / {label}: the build failed and "
+                        f"rustc did not say `{want}`, so a consumer is left to "
+                        f"work out that a feature is what is missing. Either "
+                        f"the gate moved off the item it configures out (a "
+                        f"`cfg_if`, a re-export, one module further in), or "
+                        f"this toolchain no longer words the note this way -- "
+                        f"the compiler's output is below"
+                    )
+                    findings.append(
+                        "    " + "\n    ".join(stderr.strip().splitlines()[-25:])
+                    )
 
     if findings:
         print("feature-gate-diagnostic: FAIL", file=sys.stderr)
@@ -316,12 +358,15 @@ def main() -> int:
         )
         return 1
 
-    others = len(packages) - 1
+    covered = sum(len(optional_by_pkg[p]) for p in AXIS if p in optional_by_pkg)
+    declared = sum(len(NO_PUBLIC_PATH.get(p, {})) for p in AXIS)
     print(
-        f"  feature-gate-diagnostic: {len(optional)} non-default feature(s) of "
-        f"{PACKAGE}, {len(NO_PUBLIC_PATH)} gating no public path, {probed} probe(s) "
-        f"told by rustc which feature was missing; {others} other workspace "
-        f"package(s) are NOT covered by this axis"
+        f"  feature-gate-diagnostic: {len(AXIS)} package(s) on this axis, "
+        f"{covered} non-default feature(s) between them, {declared} gating no "
+        f"public path, {probed} probe(s) told by rustc which feature was "
+        f"missing. How much of the WORKSPACE that is, is not this gate's to "
+        f"say and is derived by feature_public_surface_census.py from these "
+        f"same tables."
     )
     return 0
 

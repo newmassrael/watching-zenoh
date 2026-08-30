@@ -2017,6 +2017,28 @@ PY
     # green.
     python3 scripts/lib/prose_dep_graph_gate.py --selftest || return 1
     python3 scripts/lib/prose_dep_graph_gate.py --check || return 1
+    # R2193 (open-debt item 532) — how many of this workspace's non-default
+    # features gate a public item, DERIVED rather than estimated.
+    #
+    # The feature-gate diagnostic axis (Layer C1bn) makes rustc an oracle for
+    # "a consumer is told WHICH feature is missing", and it covers one package.
+    # Its banner used to end "N other workspace package(s) are NOT covered",
+    # which is an impression: nobody could say how many of the 521 non-default
+    # features carry the same trap, so nobody could size widening it.
+    #
+    # The item says the HARD half is deciding the population and that counting
+    # by hand is what must not happen. Its own suggestion needed nightly
+    # rustdoc JSON and one build PER FEATURE. The BINDING side is exact and
+    # free: rustc emits that note only when the attribute sits ON the item it
+    # configures out, so the sites that can carry the trap are the ones where
+    # such an attribute is attached to a publicly-visible item.
+    #
+    # Every attribute site is classified and UNCLASSIFIED IS RED, because the
+    # class is what decides whether the feature joins the denominator. A macro
+    # invocation counts IN: it can expand to a public item and over-reporting
+    # is the safe direction. Measured 0.2s.
+    python3 scripts/lib/feature_public_surface_census.py --selftest || return 1
+    python3 scripts/lib/feature_public_surface_census.py --check || return 1
     # R311y605 — the DISSECT FEATURE CENSUS, the name census's sibling one level
     # up. `dissect`'s doc says it selects the whole codec-* MID space so "an
     # observer reads every message it sees", and the claim had been wrong THREE
