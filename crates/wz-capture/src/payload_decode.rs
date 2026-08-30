@@ -1523,6 +1523,31 @@ pub fn subtree_shm_descriptor(field: &Field) -> Option<&Field> {
     None
 }
 
+/// R2209 (open-debt item 563) — THE WIRE QUESTION, asked WITHOUT A MAPPING.
+///
+/// `Some` exactly when this message's payload slot holds an SHM descriptor, so
+/// the data it names never crossed the wire this reader is reading.
+///
+/// # Why it is its own door
+///
+/// R2170 moved this question ahead of the declaration check inside
+/// [`decode_payload`], on the argument that whether a record's data crossed the
+/// wire has nothing to do with what formats the reader declared. That argument
+/// is right and it stopped at the function boundary: the EMITTER
+/// (`fields_json`) asks for a decoding only when a caller supplied a mapping,
+/// so a consumer who declared no format got no `payload_decode` object and
+/// therefore no marker — the fact was still trapped behind the declarations,
+/// one level up.
+///
+/// So the question gets a door a caller can ask WITHOUT a mapping, and
+/// `decode_payload` is its first caller rather than a second implementation.
+/// There is one place that decides what an SHM descriptor means.
+pub fn shm_decoding(field: &Field) -> Option<PayloadDecoding> {
+    subtree_shm_descriptor(field).map(|descriptor| PayloadDecoding::NotOnTheWire {
+        descriptor_bytes: descriptor.span.end.saturating_sub(descriptor.span.start),
+    })
+}
+
 /// Apply the mapping to one walked message.
 pub fn decode_payload(field: &Field, map: &Declarations<'_>, at: KeyexprAt<'_>) -> PayloadDecoding {
     // R2170 (open-debt item 546) — ASKED BEFORE THE RULES, and the ORDER is the
@@ -1536,10 +1561,12 @@ pub fn decode_payload(field: &Field, map: &Declarations<'_>, at: KeyexprAt<'_>) 
     // the `no_payload` answer left everyone else. Two tests hold this ordering
     // — one with a rule and one with an empty map — and swapping these blocks
     // reds the second.
-    if let Some(descriptor) = subtree_shm_descriptor(field) {
-        return PayloadDecoding::NotOnTheWire {
-            descriptor_bytes: descriptor.span.end.saturating_sub(descriptor.span.start),
-        };
+    //
+    // R2209 (open-debt item 563) — and it is `shm_decoding` now, because the
+    // EMITTER needs the same question and asking it there in a second place is
+    // how two answers to one fact begin.
+    if let Some(decoding) = shm_decoding(field) {
+        return decoding;
     }
     if map.is_empty() {
         return PayloadDecoding::NoRules;

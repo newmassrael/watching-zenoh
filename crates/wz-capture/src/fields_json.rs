@@ -338,6 +338,30 @@ fn push_walk(
                     let at = KeyexprAt::new(frame.direction, spaces);
                     out.push_str(",\"payload_decode\":");
                     push_decoding(&decode_payload(&field, declarations, at), out);
+                } else if let Some(decoding) = crate::payload_decode::shm_decoding(&field) {
+                    // R2209 (open-debt item 563) — THE ONE STATE A READER WHO
+                    // DECLARED NOTHING IS STILL TOLD.
+                    //
+                    // Every other `payload_decode` state answers a question
+                    // about the reader's own declarations, and the rule above
+                    // is right for those: somebody who asked about no formats
+                    // is not lectured about payloads. `not_on_the_wire` is not
+                    // one of them. It says the data this record names never
+                    // crossed the wire being read -- a fact about the CAPTURE,
+                    // true whether or not anybody declared a format, and the
+                    // reason `Verdict::NotOnTheWire` was built as a NAMED
+                    // ABSENCE rather than left as a silent `no_payload`.
+                    //
+                    // R2170 made that argument inside `decode_payload` and the
+                    // emitter did not inherit it, so the fact stayed behind the
+                    // declarations one level up: a consuming surface counting
+                    // `payloads.descriptors` could see HOW MANY records were
+                    // SHM and could not say WHICH. That is item 563, and the
+                    // consuming surface's own sufficient condition is exactly
+                    // this marker -- it does not ask for the descriptor bytes,
+                    // which were never on the wire either.
+                    out.push_str(",\"payload_decode\":");
+                    push_decoding(&decoding, out);
                 }
             } else {
                 let mut why = String::from("the session read these bytes as ");
@@ -1654,6 +1678,92 @@ mod tests {
         let found = capped.misbindings();
         assert_eq!(found.len(), 1, "the rule is still named: {found:?}");
         assert_eq!(found[0].samples, 1, "but the count is short: {found:?}");
+    }
+
+    /// R2209 (open-debt item 563) — A READER WHO DECLARED NOTHING IS STILL TOLD
+    /// WHICH RECORD WAS NOT ON THE WIRE.
+    ///
+    /// # The gap, as the tree itself had already written it down
+    ///
+    /// `payload::tests`'s `the_descriptor_count_is_a_row_total_and_cannot_name_\
+    /// which_record` asserts the census row is consistent with either record
+    /// having been the descriptor, and says in as many words that attributing
+    /// it needs the per-message plane. That plane existed and its answer could
+    /// not be reached: `push_walk` asked for a decoding only when a caller
+    /// supplied a mapping, so a consuming surface that declared no format got
+    /// `payloads.descriptors` -- how many -- and never WHICH.
+    ///
+    /// R2170 had already made the argument one level down, moving the SHM
+    /// question ahead of the declaration check inside `decode_payload` because
+    /// "whether a record's data crossed this wire has nothing to do with what
+    /// formats the reader declared". The emitter did not inherit it.
+    ///
+    /// # Why the CONTROL is the half that matters
+    ///
+    /// The rule this changes is a real one and is still in force: a reader who
+    /// declared nothing is not lectured about payloads they did not ask about.
+    /// So the same document, from the same call, must carry NO `payload_decode`
+    /// for the ordinary record beside the SHM one. Without that arm this test
+    /// is satisfied by an emitter that reverted to a block on every row, which
+    /// is the change item 563 does NOT ask for.
+    ///
+    /// ⚠ `network-codecs`, because `payload::tests_support` is -- the Put
+    /// builders this fixture needs live there. MEASURED the hard way: without
+    /// the gate the test does not compile into the default `--lib` target at
+    /// all, and `cargo test … an_shm_record_names_itself` printed
+    /// `running 0 tests … ok`, which is this workspace's most-repeated way of
+    /// reading a green over nothing.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn an_shm_record_names_itself_to_a_reader_that_declared_no_format() {
+        // TWO records in one capture on one topic: one whose payload slot holds
+        // an SHM descriptor, one ordinary. Same topic on purpose -- the census
+        // folds both onto one row, which is exactly why the row cannot name
+        // either of them.
+        let mut framed = Vec::new();
+        for push in [
+            crate::payload::tests_support::push_with_shm_descriptor(
+                "shm/topic",
+                5,
+                &[0x01, 0x00, 0x2A],
+            ),
+            crate::payload::tests_support::push_declaring("shm/topic", 5, br#"{"a":1}"#),
+        ] {
+            let wire = crate::datagram_tests::frame_carrying(&push);
+            framed.push(wire.len() as u8);
+            framed.push(0);
+            framed.extend_from_slice(&wire);
+        }
+        let packet = tcp_packet(1000, &framed);
+        let mut d = Dissection::new();
+        d.push_packet(LINKTYPE_ETHERNET, 0, &packet);
+        d.finish();
+        let file = crate::pcap::write(1, &[(0, 0, packet.as_slice())]);
+
+        // NO DECLARATIONS. This is the door a consuming surface reaches for
+        // when it has no format to declare, and the one item 563 is about.
+        let out = fields_json(&d, &file, None, None);
+
+        let blocks = out.matches("\"payload_decode\"").count();
+        assert_eq!(
+            blocks, 1,
+            "exactly one of the two records may carry a payload_decode block \
+             with no declarations -- the SHM one. {blocks} did: {out}"
+        );
+        assert!(
+            out.contains("\"payload_decode\":{\"state\":\"not_on_the_wire\""),
+            "and the block must carry the state that names the fact, since a \
+             consuming surface counting `payloads.descriptors` can already see \
+             HOW MANY and needs WHICH: {out}"
+        );
+        // THE CONTROL, on the number rather than on a second string: the
+        // ordinary record shares this document and this call, and it is the
+        // record that must still be told nothing.
+        assert!(
+            out.contains("\"keyexpr\""),
+            "the fixture must actually reach the walked rows, or the count \
+             above is over an empty document: {out}"
+        );
     }
 
     /// ITEM 298, THE DATAGRAM DOOR — both listings cap, so both must say so.

@@ -9390,6 +9390,7 @@ layer_c1bn_passive_dissection_features() {
         fields_json::tests::a_row_the_stream_cannot_supply_is_declined_with_the_reason \
         fields_json::tests::a_capture_that_cannot_be_reread_is_reported_rather_than_left_empty \
         fields_json::tests::a_declared_format_decodes_the_payload_and_the_spans_are_the_messages \
+        fields_json::tests::an_shm_record_names_itself_to_a_reader_that_declared_no_format \
         payload_decode::tests::a_declaration_that_binds_nothing_is_still_reported \
         payload_decode::tests::a_sample_whose_declared_encoding_contradicts_the_rule_is_not_decoded \
         payload_decode::tests::the_claim_the_rule_agrees_with_and_the_silence_that_is_no_claim_both_decode \
