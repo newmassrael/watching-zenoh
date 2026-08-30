@@ -762,7 +762,7 @@ pub fn exchanges_where(dissection: &crate::Dissection, filter: &Filter) -> Excha
     table.capture_origin_ms = dissection.capture_origin_ms();
     // R311y721 — see `agg::aggregate_where`: the dissection's enumeration, so
     // a producer that is not a flow at all still reaches this plane.
-    for (_, _, frames) in dissection.message_lists() {
+    for (_, frames) in dissection.message_lists() {
         table.observe_flow_where(frames, filter);
     }
     table

@@ -245,7 +245,7 @@ fn decode_ns_per_packet(payload_len: usize, iters: usize, ceiling: Ceiling) -> (
     // decoder ever emitted. This is the population.
     let produced: u64 = d
         .message_lists_with_origin()
-        .map(|(_, _, _, list)| list.produced())
+        .map(|(_, _, list)| list.produced())
         .sum();
     (elapsed.as_nanos() as f64 / iters as f64, produced)
 }

@@ -1861,6 +1861,88 @@ pub(crate) mod fed_tests {
         );
     }
 
+    /// R2206 (open-debt item 561) — AND THE SERIAL LINE NAMES ITS SPACE TOO,
+    /// which is the arm the test above did not have and the hole the item fell
+    /// into.
+    ///
+    /// # Why it is a test of its own and not a third arm up there
+    ///
+    /// So that it FAILS BY ITS OWN NAME. The stream and datagram arms above
+    /// share a `#[test]`, and a defect in the coordinate path reds the first of
+    /// them and stops — which is what a reader would then go and look at. A
+    /// serial line is a third producer, reached through neither of those two
+    /// fixtures, and its own red is what says so.
+    ///
+    /// # What it holds
+    ///
+    /// A serial link is datagram-flowed
+    /// (`vendor/zenoh-pico/src/link/unicast/serial.c:68`): one COBS frame
+    /// carries one transport message, and the reader anchors it to the CAPTURE
+    /// PACKET the frame completed in. The document said `stream_byte` for it
+    /// anyway — from a hand-written match over the message lists that no test
+    /// reached — so every plane emitted a packet index under the word that
+    /// tells a consumer to add byte spans to it. Both directions are asserted:
+    /// the word that must appear, and the word that must not.
+    #[test]
+    fn a_serial_lines_anchors_are_named_packet_indices_in_the_document() {
+        let over_serial = census_json_where(&serial_capture(), &crate::filter::Filter::any());
+        assert!(
+            over_serial.contains("\"first_anchor\""),
+            "the serial fixture must actually reach a plane that emits an \
+             anchor, or the two assertions below are over an empty document: \
+             {over_serial}"
+        );
+        assert!(
+            over_serial.contains("\"offset_space\":\"packet\",\"first_anchor\""),
+            "a serial line's anchors are capture PACKET INDICES -- the reader \
+             hands the packet's own index to the datagram coordinate path -- \
+             and the label must say so: {over_serial}"
+        );
+        assert!(
+            !over_serial.contains("\"offset_space\":\"stream_byte\""),
+            "and none of them may be labelled a byte offset: that is item 561, \
+             and it is the label a consumer adds a message-relative span to: \
+             {over_serial}"
+        );
+    }
+
+    /// R2206 (open-debt item 561) — a one-line SERIAL capture, the third arm of
+    /// the label test above.
+    ///
+    /// Declared rather than sniffed, exactly as `--serial` does it and for the
+    /// reason `crate::serial`'s module doc gives: the pseudo-header of
+    /// `LINKTYPE_RTAC_SERIAL` cannot be verified from this machine, so nothing
+    /// here parses one. The INIT is the LINK's own handshake -- counted, not
+    /// decoded -- and what it does here is settle which wire is which so the
+    /// line stops holding its frames back.
+    fn serial_capture() -> Dissection {
+        use wz_session_core::serial_link::{encode_frame, SERIAL_FLAG_INIT};
+
+        const SERIAL_LINKTYPE: u32 = 250;
+        let wire = crate::datagram_tests::frame_carrying(&push(
+            sender_space(0, Some("demo/temp")),
+            &[0u8; 8],
+        ));
+        let mut d = Dissection::new();
+        d.declared_serial_linktypes = alloc::vec![SERIAL_LINKTYPE];
+        d.push_packet_on(
+            SERIAL_LINKTYPE,
+            0,
+            0,
+            None,
+            &encode_frame(SERIAL_FLAG_INIT, &[]).expect("a handshake frame encodes"),
+        );
+        d.push_packet_on(
+            SERIAL_LINKTYPE,
+            1,
+            0,
+            None,
+            &encode_frame(0, &wire).expect("a one-message frame encodes"),
+        );
+        d.finish();
+        d
+    }
+
     /// A one-flow DATAGRAM capture, the control arm for the label above.
     fn datagram_capture() -> Dissection {
         let mut d = Dissection::new();

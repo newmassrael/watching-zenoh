@@ -271,13 +271,16 @@ impl NodeCensus {
     /// `flow` is what makes a link answerable: two zids are peers because they
     /// named themselves on THE SAME flow in opposite directions, and a fold
     /// that took only the frames could not say that.
-    pub fn observe_flow(
-        &mut self,
-        flow: &FlowKey,
-        frames: &[PassiveFrame],
-        anchors: crate::AnchorSpace,
-    ) {
-        self.anchors = anchors;
+    pub fn observe_flow(&mut self, flow: &FlowKey, frames: &[PassiveFrame]) {
+        // R2206 (open-debt item 561) — the space is read off the frames rather
+        // than handed in. It arrived as an argument decided one layer up by a
+        // match over the message lists, and that second opinion was item 561.
+        // The first frame answers for the list: every frame of one list comes
+        // out of the same producer, and `the_space_a_list_reports_is_the_one_\
+        // its_frames_carry` is what holds that.
+        if let Some(frame) = frames.first() {
+            self.anchors = crate::anchor_space_of(frame);
+        }
         // Per-direction, the last zid seen naming itself on an admissible
         // message. A flow that re-handshakes names the same pair again, and a
         // flow that is genuinely reused by a different node names the new one —
@@ -503,8 +506,8 @@ pub fn nodes(dissection: &crate::Dissection) -> NodeCensus {
     // `quic/...` peer's Init is inside a QUIC stream and a serial peer's is
     // inside a COBS frame; a census that named the two flow tables would report
     // either deployment as having no participants at all.
-    for (flow, anchors, frames) in dissection.message_lists() {
-        census.observe_flow(&flow, frames, anchors);
+    for (flow, frames) in dissection.message_lists() {
+        census.observe_flow(&flow, frames);
     }
     for flow in dissection.datagram_flows() {
         // The scouting list, which is where a discovery-only capture's nodes

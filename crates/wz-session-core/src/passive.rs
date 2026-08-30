@@ -300,6 +300,81 @@ fn has_any_ext_id(extensions: &[ExtEntryOwned], id: u8) -> bool {
         .any(|e| crate::ext_header::ext_id(e.header) == id)
 }
 
+/// R2206 (open-debt item 561) — WHICH COORDINATE [`PassiveFrame::stream_offset`]
+/// is in, said by the caller that chose it.
+///
+/// # Why the number cannot say this for itself
+///
+/// `stream_offset` has carried two meanings since the datagram path was added:
+/// a byte offset into one direction's reassembled stream, and an INDEX handed
+/// in by a caller that has no stream — [`PassiveSession::next_datagram_on`]
+/// takes the coordinate as an argument precisely because a datagram link has no
+/// byte position of its own. They are small integers either way and cannot be
+/// told apart by looking, which is the whole reason the capture layer publishes
+/// an `anchor_space` beside the anchor.
+///
+/// It published it from a SECOND place: a match over the message lists,
+/// written by hand, with nothing joining it to the caller that actually chose
+/// the number. Item 561 is what that cost — the serial line feeds
+/// `next_datagram_on` with a capture PACKET INDEX and was labelled
+/// `StreamBytes`, so a consumer told to switch on the field was told the wrong
+/// thing, in exactly the field that exists to stop it guessing.
+///
+/// So the discriminant travels WITH the number, set where the number is chosen.
+/// There is one place that constructs a [`PassiveFrame`] and two callers that
+/// hand it a coordinate; each of the two says which space it is in, and no
+/// layer above gets a second opinion to keep in step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OffsetSpace {
+    /// An INDEX the caller supplied — a capture packet's position, counting
+    /// from zero. Global to the capture, so two such anchors are comparable
+    /// across lists. It must not be added to a byte span.
+    PacketIndex,
+    /// A byte offset within one direction of this flow's stream, counted from
+    /// the first byte the observer was given. Absolute only within that
+    /// direction of that list.
+    StreamBytes,
+}
+
+/// R2206 (open-debt item 561) — A COORDINATE AND THE SPACE IT IS IN, together,
+/// because separately is how item 561 happened.
+///
+/// The two were separate for as long as the datagram path existed: a caller
+/// handed in a `usize` and something else, one crate away, decided what kind of
+/// number it had been. This type is the seam where that stops — the observer's
+/// framing walk takes ONE argument for the anchor, so a caller cannot supply
+/// the number and leave the space to be guessed later.
+///
+/// [`PassiveFrame`] still carries the two as separate fields. That is not an
+/// inconsistency: dozens of readers index `stream_offset` and folding it into a
+/// struct would be a churn with no invariant behind it — the invariant is about
+/// what a PRODUCER may leave unsaid, and a produced frame has already said it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Anchor {
+    /// The number: a byte offset or an index, per [`Self::space`].
+    pub offset: usize,
+    /// Which of the two [`Self::offset`] is.
+    pub space: OffsetSpace,
+}
+
+impl Anchor {
+    /// A byte offset within one direction of a stream.
+    pub const fn bytes(offset: usize) -> Self {
+        Self {
+            offset,
+            space: OffsetSpace::StreamBytes,
+        }
+    }
+
+    /// An index the caller supplied — a capture packet's position.
+    pub const fn packet(index: usize) -> Self {
+        Self {
+            offset: index,
+            space: OffsetSpace::PacketIndex,
+        }
+    }
+}
+
 /// One decoded transport message plus where it sat in its direction's stream.
 #[derive(Debug)]
 pub struct PassiveFrame {
@@ -308,7 +383,13 @@ pub struct PassiveFrame {
     /// Byte offset of the frame's LENGTH PREFIX within that direction's
     /// stream, counted from the first byte the observer was given. The anchor
     /// a capture-side layer (G1) maps back to a packet.
+    ///
+    /// ⚠ R2206 — OR AN INDEX. Read it according to [`Self::offset_space`],
+    /// which is on this struct for the reason that field's own doc gives.
     pub stream_offset: usize,
+    /// R2206 (open-debt item 561) — which coordinate [`Self::stream_offset`] is
+    /// in, from the caller that chose it. See [`OffsetSpace`].
+    pub offset_space: OffsetSpace,
     /// R311y631 (§1.2b) — position of this message WITHIN its framing unit,
     /// counted from zero.
     ///
@@ -1313,7 +1394,9 @@ impl PassiveSession {
             .decode_framing_unit(
                 direction,
                 &body,
-                stream_offset,
+                // The one caller that counts BYTES: `stream.consumed` is where
+                // this unit's length prefix stood in the direction's stream.
+                Anchor::bytes(stream_offset),
                 width,
                 LinkHandshake::Present,
                 resync,
@@ -1365,15 +1448,29 @@ impl PassiveSession {
     /// verdict, the carried payload, the reserved header bits, the mandatory
     /// extension check — is a property of one message and is computed per
     /// message.
+    ///
+    /// R2206 (open-debt item 561) — the anchor arrives as an [`Anchor`], which
+    /// is a coordinate AND the space it is in, because a caller that could hand
+    /// in the number alone is what item 561 was.
+    ///
+    /// Inferring the space from `prefix_width == 0` would work today and is a
+    /// guess: the width is a fact about FRAMING and the space is a fact about
+    /// what the caller counted, and the two agree only for as long as no link
+    /// arrives that frames without a prefix over a stream. A caller that knows
+    /// which number it handed in is the only party that does.
     fn decode_framing_unit(
         &mut self,
         direction: Direction,
         bytes: &[u8],
-        offset: usize,
+        anchor: Anchor,
         prefix_width: usize,
         handshake: LinkHandshake,
         mut resync: Option<StreamResync>,
     ) -> Vec<PassiveFrame> {
+        let Anchor {
+            offset,
+            space: offset_space,
+        } = anchor;
         let exceeds_negotiated_batch = self.exceeds_batch(bytes.len());
         let mut out = Vec::new();
         let mut pos = 0usize;
@@ -1440,6 +1537,7 @@ impl PassiveSession {
             out.push(PassiveFrame {
                 direction,
                 stream_offset: offset,
+                offset_space,
                 batch_index,
                 unit_offset: pos,
                 unit_len: bytes.len(),
@@ -1714,7 +1812,16 @@ impl PassiveSession {
         // `parse_inbound` dispatches on `header & 0x1F` and ignores the
         // reserved bits exactly as zenoh's own decoder does. The walk reads
         // them per message.
-        self.decode_framing_unit(direction, bytes, offset, 0, handshake, None)
+        //
+        // R2206 (open-debt item 561) — AND THE SPACE IS THE CALLER'S INDEX, not
+        // a byte count. This path has no stream to count bytes in; `offset` is
+        // whatever coordinate the caller had for the thing that carried these
+        // bytes, which for every caller in this tree is a capture packet index.
+        // Saying so HERE is the fix for item 561: the capture layer used to say
+        // it a second time, from a match over its message lists, and the serial
+        // line was labelled with the answer the OTHER caller of this function
+        // deserved.
+        self.decode_framing_unit(direction, bytes, Anchor::packet(offset), 0, handshake, None)
     }
 
     /// R311y585 (A5) — did this frame's wire length break the negotiated

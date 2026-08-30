@@ -350,7 +350,7 @@ impl LiveDissection {
         let mut written = 0usize;
         let mut present: BTreeSet<(FlowKey, MessageListOrigin)> = BTreeSet::new();
 
-        for (flow, origin, space, list) in dissection.message_lists_with_origin() {
+        for (flow, origin, list) in dissection.message_lists_with_origin() {
             let key = (flow, origin);
             present.insert(key);
 
@@ -408,7 +408,7 @@ impl LiveDissection {
 
             while mark.drained < produced && written < out.len() {
                 let idx = (mark.drained - first_held) as usize;
-                out[written] = record_of(&list[idx], flow_id, list_id, origin, space);
+                out[written] = record_of(&list[idx], flow_id, list_id, origin);
                 written += 1;
                 mark.drained += 1;
             }
@@ -482,10 +482,10 @@ impl LiveDissection {
                 "no list of this handle carries that list_id",
             ));
         };
-        let Some((_, _, _, list)) = self
+        let Some((_, _, list)) = self
             .dissection
             .message_lists_with_origin()
-            .find(|(f, o, _, _)| *f == flow && *o == origin)
+            .find(|(f, o, _)| *f == flow && *o == origin)
         else {
             return wz_capture::MessageBytes::Retired(String::from(
                 "the list this record came out of is no longer held",
@@ -524,7 +524,6 @@ fn record_of(
     flow_id: u64,
     list_id: u64,
     origin: MessageListOrigin,
-    space: AnchorSpace,
 ) -> WzDissectRecord {
     let mut flags = 0u32;
     if frame.exceeds_negotiated_batch {
@@ -555,7 +554,15 @@ fn record_of(
             Direction::A => 0,
             Direction::B => 1,
         },
-        anchor_space: match space {
+        // R2206 (open-debt item 561) — off the FRAME. It used to be handed in
+        // from the enumeration that walks the message lists, which decided the
+        // space by a hand-written match with nothing joining it to the caller
+        // that chose the coordinate. That is what published a capture packet
+        // index under WZ_DISSECT_ANCHOR_STREAM_BYTES for a serial line: the
+        // header's own argument for this field is that the two cannot be told
+        // apart by looking, so a consumer switching on it was told to add byte
+        // spans to a packet index.
+        anchor_space: match wz_capture::anchor_space_of(frame) {
             AnchorSpace::PacketIndex => 0,
             AnchorSpace::StreamBytes => 1,
         },

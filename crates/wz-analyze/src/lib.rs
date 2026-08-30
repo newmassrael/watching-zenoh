@@ -7657,6 +7657,9 @@ mod message_name_tests {
         let frame = wz_session_core::passive::PassiveFrame {
             direction: wz_session_core::passive::Direction::A,
             stream_offset: 12,
+            // R2206 — `prefix_width: 2` below says this stands for a framed
+            // STREAM unit, so its offset counts bytes.
+            offset_space: wz_session_core::passive::OffsetSpace::StreamBytes,
             batch_index: 0,
             unit_offset: 0,
             unit_len: 0,
@@ -7696,6 +7699,9 @@ mod message_name_tests {
         wz_session_core::passive::PassiveFrame {
             direction: wz_session_core::passive::Direction::A,
             stream_offset,
+            // R2206 — a framed stream unit (`prefix_width: 2`), so the offset
+            // this fixture is parameterised on counts bytes.
+            offset_space: wz_session_core::passive::OffsetSpace::StreamBytes,
             batch_index: 0,
             unit_offset: 0,
             unit_len: 1,

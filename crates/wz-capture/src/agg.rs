@@ -865,16 +865,18 @@ impl ThroughputTable {
     /// `list` for two stream lists would make two spaces look like one, which
     /// is why the production callers pass `enumerate()`'s index rather than a
     /// number of their own.
-    pub fn observe_flow_where(
-        &mut self,
-        frames: &[PassiveFrame],
-        filter: &Filter,
-        anchors: crate::AnchorSpace,
-        list: usize,
-    ) {
+    pub fn observe_flow_where(&mut self, frames: &[PassiveFrame], filter: &Filter, list: usize) {
         let mut spaces = KeyexprSpaces::new();
         for frame in frames {
             let anchor = frame.stream_offset;
+            // R2206 (open-debt item 561) — the space comes off the FRAME now.
+            // It arrived as an argument, decided by a match over the message
+            // lists one crate layer up, and that second opinion is what item
+            // 561 was: the serial line's anchors are packet indices and the
+            // match said `StreamBytes`, so every row this plane emitted for a
+            // serial capture carried the wrong word AND a token that made a
+            // capture-global coordinate look list-local.
+            let anchors = crate::anchor_space_of(frame);
             self.anchor_space = match anchors {
                 crate::AnchorSpace::PacketIndex => 0,
                 crate::AnchorSpace::StreamBytes => 1 + list * 2 + dir_index(frame.direction),
@@ -1749,8 +1751,8 @@ pub fn aggregate_where(dissection: &crate::Dissection, filter: &Filter) -> Throu
     // enumeration. Naming the two flow tables here is what left this plane
     // blind to a serial line, which is in neither: see
     // `Dissection::message_lists`.
-    for (list, (_, anchors, frames)) in dissection.message_lists().enumerate() {
-        table.observe_flow_where(frames, filter, anchors, list);
+    for (list, (_, frames)) in dissection.message_lists().enumerate() {
+        table.observe_flow_where(frames, filter, list);
     }
     table
 }
@@ -2785,12 +2787,7 @@ pub(crate) mod tests {
 
         let mut by_hand = ThroughputTable::new();
         for (list, flow) in d.datagram_flows().iter().enumerate() {
-            by_hand.observe_flow_where(
-                &flow.frames,
-                &filter,
-                crate::AnchorSpace::PacketIndex,
-                list,
-            );
+            by_hand.observe_flow_where(&flow.frames, &filter, list);
         }
         assert_eq!(by_hand.selection().undecided, 1);
         assert_eq!(by_hand.rows().len(), 0);
@@ -4423,7 +4420,7 @@ pub(crate) mod tests {
         let mut seen = 0usize;
         for _ in 0..4 {
             for flow in d.datagram_flows() {
-                for (_, frames) in flow.frame_lists() {
+                for frames in flow.frame_lists() {
                     for frame in frames {
                         seen += frame.stream_offset & 1;
                     }

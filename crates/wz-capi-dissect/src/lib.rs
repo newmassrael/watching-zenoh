@@ -6035,7 +6035,7 @@ mod tests {
         let dissection = Dissection::from_capture(&file).expect("the document door reads it too");
         let decoded: usize = dissection
             .message_lists_with_origin()
-            .map(|(_, _, _, list)| list.len())
+            .map(|(_, _, list)| list.len())
             .sum();
         assert_eq!(
             decoded,

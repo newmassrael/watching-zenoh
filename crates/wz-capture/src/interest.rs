@@ -750,14 +750,22 @@ impl InterestCensus {
         &mut self,
         flow: &FlowKey,
         frames: &[PassiveFrame],
-        anchors: crate::AnchorSpace,
         // Round 2019 (item 270) — the list's index in
         // `Dissection::message_lists()`, which is what `crate::agg` already
         // takes for the same reason: it is half the space token, and without it
         // two directions of two different flows are one number.
         list: usize,
     ) {
-        self.anchors = anchors;
+        // R2206 (open-debt item 561) — the SPACE is the frames', not an
+        // argument. It used to be decided one layer up by a match over the
+        // message lists, with nothing joining that match to the caller that
+        // chose the coordinates; the serial line is what that cost. Every frame
+        // of one list comes out of one producer, so the first answers for the
+        // list -- and `the_space_a_list_reports_is_the_one_its_frames_carry`
+        // holds that rather than leaving it as a sentence.
+        if let Some(frame) = frames.first() {
+            self.anchors = crate::anchor_space_of(frame);
+        }
         self.list = list;
         let mut spaces = KeyexprSpaces::new();
         // The OPEN declaration per `(declarer, kind, id)`, as an index into
@@ -1256,8 +1264,8 @@ pub fn interests(dissection: &crate::Dissection) -> InterestCensus {
     // does. The two walks must agree on the list index or their space tokens
     // are not comparable, and they agree by walking the same enumeration of the
     // same iterator.
-    for (list, (flow, anchors, frames)) in dissection.message_lists().enumerate() {
-        census.observe_flow(&flow, frames, anchors, list);
+    for (list, (flow, frames)) in dissection.message_lists().enumerate() {
+        census.observe_flow(&flow, frames, list);
     }
     census
 }

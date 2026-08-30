@@ -888,7 +888,7 @@ mod plane_tests {
         // What DID reach it: the same enumeration the other three walked. If
         // `message_lists` missed the serial line, this count would be zero for
         // a capture that decoded three messages.
-        let seen: usize = d.message_lists().map(|(_, _, frames)| frames.len()).sum();
+        let seen: usize = d.message_lists().map(|(_, frames)| frames.len()).sum();
         assert_eq!(
             seen,
             d.decoded_messages(),

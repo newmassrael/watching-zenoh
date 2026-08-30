@@ -665,12 +665,14 @@ pub struct DatagramDissection {
 /// claim: the tables that carry one overwrite it per frame before any row can
 /// exist, and the alternative — an `Option` on every row — would put a "not
 /// known yet" state into a document where it can never occur.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AnchorSpace {
     /// The anchor is the index of the packet that carried the message. Global
     /// to the capture.
     #[default]
     PacketIndex,
+    // R2206 — `Ord` so a set of these can be compared in a test; the ORDER is
+    // this declaration's and means nothing about the spaces.
     /// The anchor is a byte offset within one direction of this list's stream.
     /// Absolute there and meaningless against any other list or direction.
     StreamBytes,
@@ -716,6 +718,43 @@ impl AnchorSpace {
             Self::StreamBytes => return None,
         })
     }
+}
+
+/// R2206 (open-debt item 561) — the DOCUMENT's word for the space the decoder
+/// recorded, and the ONLY way this crate learns which space an anchor is in.
+///
+/// # Why there is a conversion and not a second match
+///
+/// Until this existed, the space was decided TWICE: once by the caller that
+/// handed [`PassiveSession::next_datagram_on`] or the stream framer a
+/// coordinate, and again by a hand-written match over the message lists in
+/// [`Dissection::message_lists_with_origin`]. Nothing joined the two, and item
+/// 561 is the bill: the serial line feeds the datagram path with a capture
+/// PACKET INDEX and the match called it `StreamBytes`, so every plane reported
+/// a packet index under the word that tells a consumer to add byte spans to it.
+///
+/// Now the decoder records the space beside the number it chose
+/// ([`PassiveFrame::offset_space`]) and this is the only reader of it. There is
+/// no second opinion left to keep in step, which is why the enumerations above
+/// no longer carry a space at all — a list's space is a property of its frames
+/// and is read off them.
+impl From<wz_session_core::passive::OffsetSpace> for AnchorSpace {
+    fn from(space: wz_session_core::passive::OffsetSpace) -> Self {
+        use wz_session_core::passive::OffsetSpace;
+        match space {
+            OffsetSpace::PacketIndex => Self::PacketIndex,
+            OffsetSpace::StreamBytes => Self::StreamBytes,
+        }
+    }
+}
+
+/// R2206 (open-debt item 561) — the space of ONE frame, as a document word.
+///
+/// A free function beside the conversion rather than a method on
+/// [`PassiveFrame`]: the vocabulary is this crate's, and `wz-session-core` must
+/// not grow a name whose only meaning is what a census document calls it.
+pub fn anchor_space_of(frame: &PassiveFrame) -> AnchorSpace {
+    AnchorSpace::from(frame.offset_space)
 }
 
 /// R2102 (open-debt item 524) — WHICH list of decoded messages this is, as a
@@ -941,7 +980,7 @@ impl DatagramDissection {
     /// about the QUIC half with it. The lesson is R311y700's: a new list that
     /// reaches one row producer reports the rest as empty.
     pub fn decoded_messages(&self) -> usize {
-        self.frame_lists().map(|(_, list)| list.len()).sum()
+        self.frame_lists().map(|list| list.len()).sum()
     }
 
     /// R311y718 — every list of decoded transport messages this flow holds.
@@ -966,9 +1005,9 @@ impl DatagramDissection {
     /// second walk of the same fields. See that method for why the origin
     /// exists; this one drops it because every existing caller counts or folds
     /// and none of them needs to tell one list from another.
-    pub fn frame_lists(&self) -> impl Iterator<Item = (AnchorSpace, &[PassiveFrame])> {
+    pub fn frame_lists(&self) -> impl Iterator<Item = &[PassiveFrame]> {
         self.frame_lists_with_origin()
-            .map(|(_, space, list)| (space, list.as_slice()))
+            .map(|(_, list)| list.as_slice())
     }
 
     /// R2102 (open-debt item 524) — the same enumeration, saying WHICH list
@@ -990,29 +1029,23 @@ impl DatagramDissection {
     /// cannot move — and a slice has lost it.
     pub fn frame_lists_with_origin(
         &self,
-    ) -> impl Iterator<Item = (MessageListOrigin, AnchorSpace, &messages::MessageList)> {
-        core::iter::once((
-            MessageListOrigin::Datagram,
-            AnchorSpace::PacketIndex,
-            &self.frames,
-        ))
-        .chain(self.quic_streams.iter().map(|s| {
-            (
-                MessageListOrigin::QuicStream(s.id),
-                AnchorSpace::StreamBytes,
-                &s.frames,
+    ) -> impl Iterator<Item = (MessageListOrigin, &messages::MessageList)> {
+        core::iter::once((MessageListOrigin::Datagram, &self.frames))
+            .chain(
+                self.quic_streams
+                    .iter()
+                    .map(|s| (MessageListOrigin::QuicStream(s.id), &s.frames)),
             )
-        }))
-        // R311y918 — the SAME space as the cleartext list beside it, which
-        // is what `quic_datagrams`' own doc says: the anchor is the index
-        // of the QUIC packet that carried the message. The two lists are
-        // kept apart because one consumer RESOLVES the coordinate against
-        // protected bytes, not because the coordinate differs.
-        .chain(core::iter::once((
-            MessageListOrigin::QuicDatagram,
-            AnchorSpace::PacketIndex,
-            &self.quic_datagrams,
-        )))
+            // R311y918 — the cleartext datagram list and this one are kept
+            // apart because one consumer RESOLVES the coordinate against
+            // protected bytes, not because the coordinate differs: the anchor
+            // is the index of the QUIC packet that carried the message either
+            // way. R2206 — and that sentence is now a fact the FRAMES carry
+            // rather than one this enumeration asserts.
+            .chain(core::iter::once((
+                MessageListOrigin::QuicDatagram,
+                &self.quic_datagrams,
+            )))
     }
 
     /// R311y713 (§B6) — the chains this flow lost, whatever the cause.
@@ -2543,11 +2576,11 @@ mod message_list_census {
         // AND THE THREE ARE THE ENUMERATION. Without this the pattern above
         // would only prove that someone typed the names, not that the door
         // opens onto them.
-        let enumerated: usize = d.message_lists().map(|(_, _, frames)| frames.len()).sum();
+        let enumerated: usize = d.message_lists().map(|(_, frames)| frames.len()).sum();
         let named: usize = flows.iter().map(|f| f.frames.len()).sum::<usize>()
             + datagram_flows
                 .iter()
-                .map(|f| f.frame_lists().map(|(_, list)| list.len()).sum::<usize>())
+                .map(|f| f.frame_lists().map(|list| list.len()).sum::<usize>())
                 .sum::<usize>()
             + serial_frames.len();
         assert_eq!(
@@ -4019,9 +4052,15 @@ impl Dissection {
     /// R2102 — a projection of [`Self::message_lists_with_origin`], which is
     /// where the fields are now named. The planes call this one; nothing about
     /// what they see changed.
-    pub fn message_lists(&self) -> impl Iterator<Item = (FlowKey, AnchorSpace, &[PassiveFrame])> {
+    /// R2206 (open-debt item 561) — the SPACE is no longer among the fields
+    /// this hands out. It was a hand-written match with nothing joining it to
+    /// the caller that chose the coordinate, and that is the whole of item 561;
+    /// a frame now carries its own ([`crate::anchor_space_of`]), which is where
+    /// every consumer of this iterator was already reading it from — none of
+    /// them ever used the space of a list with no frames in it.
+    pub fn message_lists(&self) -> impl Iterator<Item = (FlowKey, &[PassiveFrame])> {
         self.message_lists_with_origin()
-            .map(|(flow, _, space, list)| (flow, space, list.as_slice()))
+            .map(|(flow, _, list)| (flow, list.as_slice()))
     }
 
     /// R2102 (open-debt item 524) — THE enumeration, saying which list each one
@@ -4049,27 +4088,13 @@ impl Dissection {
     /// [`MessageListOrigin::Datagram`] are what tell those two apart.
     pub fn message_lists_with_origin(
         &self,
-    ) -> impl Iterator<
-        Item = (
-            FlowKey,
-            MessageListOrigin,
-            AnchorSpace,
-            &messages::MessageList,
-        ),
-    > {
+    ) -> impl Iterator<Item = (FlowKey, MessageListOrigin, &messages::MessageList)> {
         self.flows
             .iter()
-            .map(|f| {
-                (
-                    f.flow,
-                    MessageListOrigin::Stream,
-                    AnchorSpace::StreamBytes,
-                    &f.frames,
-                )
-            })
+            .map(|f| (f.flow, MessageListOrigin::Stream, &f.frames))
             .chain(self.datagram_flows.iter().flat_map(|f| {
                 f.frame_lists_with_origin()
-                    .map(move |(origin, space, frames)| (f.flow, origin, space, frames))
+                    .map(move |(origin, frames)| (f.flow, origin, frames))
             }))
             .chain(core::iter::once((
                 // The key a serial line stands under: empty in every field,
@@ -4077,9 +4102,6 @@ impl Dissection {
                 // capture. See `FlowKey::serial_line`.
                 FlowKey::serial_line(),
                 MessageListOrigin::Serial,
-                // A serial line is a byte stream with two directions, so its
-                // anchor is an offset like any other stream's.
-                AnchorSpace::StreamBytes,
                 &self.serial_frames,
             )))
     }
@@ -14172,38 +14194,33 @@ mod tls_flow_tests {
         }
     }
 
-    /// R2205 (open-debt item 560) — EVERY message list this reader can produce
-    /// is reached by a real dissection, and the byte door's answer for it
-    /// agrees with the coordinate space the SAME walk reports.
+    /// R2205 / R2206 — a dissection that reaches EVERY message-list producer
+    /// this crate has, built once for the two tests that walk them.
     ///
-    /// # What makes this more than the exhaustive match
+    /// # The unit is FAT on purpose (R2206, open-debt item 561)
     ///
-    /// Three things, and each is a different way the door could be wrong:
-    ///
-    /// 1. REACH. The population is the successor chain over
-    ///    [`MessageListOrigin`], not the origins this corpus happens to
-    ///    produce. An origin nobody reaches FAILS — there is no exemption
-    ///    table, because all five are reachable and a table would be the place
-    ///    a sixth quietly went to sleep.
-    /// 2. AGREEMENT ACROSS TWO INDEPENDENT MATCHES. The door decides whether a
-    ///    list has bytes; `message_lists_with_origin` decides which coordinate
-    ///    space its anchors are in. They are different matches in different
-    ///    places, and the relation between them is exact:
-    ///    `CallerHoldsThePacket` if and only if the anchors are packet indices.
-    ///    A misclassification moves one side and not the other.
-    /// 3. THE BYTES ARE THE MESSAGE'S. Every slice handed back is walked again
-    ///    by the decoder, and the kind it yields must be the kind the frame in
-    ///    the list already carries. An off-by-one in the slice arithmetic, or a
-    ///    frame matched by the wrong coordinates, fails here and passes
-    ///    everything above.
-    #[test]
-    fn every_message_list_origin_is_reached_and_answered() {
-        use crate::datagram_tests::{framed_keepalive, tcp_packet, tcp_packet_reverse, udp_packet};
+    /// Each stream unit carries `BATCH` KeepAlives, so a direction's byte
+    /// offsets run far ahead of the number of packets pushed. That is what
+    /// makes a byte offset and a packet index TELLABLE APART by looking, which
+    /// they are not in general and which
+    /// `the_space_a_frame_reports_is_the_one_its_anchor_is_actually_in` needs.
+    /// A three-byte unit would leave the two ranges overlapping and that test
+    /// would pass over a corpus with no discriminating power.
+    fn every_producer_corpus() -> Dissection {
+        use crate::datagram_tests::{tcp_packet, tcp_packet_reverse, udp_packet};
         use wz_session_core::serial_link::{encode_frame, SERIAL_FLAG_INIT};
 
         const SERIAL_LINKTYPE: u32 = 250;
+        const BATCH: usize = 32;
         let keepalive = alloc::vec![wz_session_core::wire_const::T_MID_KEEP_ALIVE];
-        let unit = framed_keepalive();
+        // One framing unit of `BATCH` KeepAlives: a two-byte little-endian
+        // length prefix and then that many one-byte messages.
+        let mut unit = (BATCH as u16).to_le_bytes().to_vec();
+        unit.extend(core::iter::repeat_n(
+            wz_session_core::wire_const::T_MID_KEEP_ALIVE,
+            BATCH,
+        ));
+        let step = unit.len() as u32;
 
         let mut d = Dissection::new();
         // Declared rather than sniffed, exactly as `--serial` does it. The
@@ -14211,71 +14228,126 @@ mod tls_flow_tests {
         // caller that can set it without a capture file.
         d.declared_serial_linktypes = alloc::vec![SERIAL_LINKTYPE];
 
-        // 1 — the STREAM list: a TCP flow, both directions, one framed message
-        // each so the flow has a session to decode under.
-        d.push_packet(LINKTYPE_ETHERNET, 0, &tcp_packet(1000, &unit));
-        d.push_packet(LINKTYPE_ETHERNET, 1, &tcp_packet_reverse(1000, &unit));
+        // 1 — the STREAM list: a TCP flow, both directions, three units each so
+        // the direction's byte offsets advance past any packet index here.
+        let mut at = 0usize;
+        for i in 0..3u32 {
+            d.push_packet(LINKTYPE_ETHERNET, at, &tcp_packet(1000 + i * step, &unit));
+            at += 1;
+            d.push_packet(
+                LINKTYPE_ETHERNET,
+                at,
+                &tcp_packet_reverse(1000 + i * step, &unit),
+            );
+            at += 1;
+        }
 
         // 2 — the cleartext DATAGRAM list, which is also the flow the two QUIC
         // lists are recovered from.
         d.push_packet(
             LINKTYPE_ETHERNET,
-            2,
+            at,
             &udp_packet([10, 0, 0, 1], 43210, [10, 0, 0, 2], 7447, &keepalive),
         );
+        at += 1;
         let flow = d.datagram_flows()[0].flow;
 
         // 3 and 4 — the two RECOVERED lists. Fed rather than pushed, because
         // this crate carries no cipher: what a caller hands in is the plaintext
         // it decrypted, which is precisely why those bytes are not retained.
         // The stream id is not the one `next_origin` names, so the arm is
-        // reached with a value the chain never mentions.
+        // reached with a value the chain never mentions. TWO units, so this
+        // list's second anchor is a byte offset that no packet index reaches.
         d.feed_quic_stream(flow, Direction::A, 7, false, &unit);
-        d.feed_quic_datagram(flow, Direction::A, 3, &keepalive);
+        d.feed_quic_stream(flow, Direction::A, 7, false, &unit);
+        d.feed_quic_datagram(flow, Direction::A, at, &keepalive);
 
         // 5 — the SERIAL line. The INIT is the LINK's own handshake: it is
         // counted, not decoded, and what it does here is settle which wire is
         // which so the line stops holding its frames back.
         d.push_packet_on(
             SERIAL_LINKTYPE,
-            4,
+            at,
             0,
             None,
             &encode_frame(SERIAL_FLAG_INIT, &[]).expect("a handshake frame encodes"),
         );
+        at += 1;
         d.push_packet_on(
             SERIAL_LINKTYPE,
-            5,
+            at,
             0,
             None,
             &encode_frame(0, &keepalive).expect("a one-message frame encodes"),
         );
         d.finish();
+        d
+    }
+
+    /// R2205 (open-debt item 560) — EVERY message list this reader can produce
+    /// is reached by a real dissection, and the byte door answers each of them.
+    ///
+    /// # What makes this more than the exhaustive match
+    ///
+    /// 1. REACH. The population is the successor chain over
+    ///    [`MessageListOrigin`], not the origins this corpus happens to
+    ///    produce. An origin nobody reaches FAILS — there is no exemption
+    ///    table, because all five are reachable and a table would be the place
+    ///    a sixth quietly went to sleep.
+    /// 2. THE TWO AXES ARE INDEPENDENT, AND ALL FOUR COMBINATIONS ARE REACHED.
+    ///    A list's COORDINATE SPACE and whether this reader RETAINS its bytes
+    ///    are different facts, and R2205 wrote them down as one — it asserted
+    ///    `CallerHoldsThePacket` if and only if the anchors are packet indices,
+    ///    which held only because the serial line was mislabelled (open-debt
+    ///    item 561). Serial is packet-anchored AND hands bytes back. So what is
+    ///    held here is the implication that is actually true —
+    ///    a `CallerHoldsThePacket` refusal must be on a packet-anchored list,
+    ///    since it tells the caller to go and read the packet — plus the
+    ///    coverage of the 2x2 grid, whose fourth cell was empty for as long as
+    ///    the defect stood.
+    /// 3. THE BYTES ARE THE MESSAGE'S. Every slice handed back is walked again
+    ///    by the decoder, and the kind it yields must be the kind the frame in
+    ///    the list already carries. An off-by-one in the slice arithmetic, or a
+    ///    frame matched by the wrong coordinates, fails here and passes
+    ///    everything above.
+    #[test]
+    fn every_message_list_origin_is_reached_and_answered() {
+        let d = every_producer_corpus();
 
         // The walk, and what each origin ANSWERED.
         let mut reached: alloc::vec::Vec<&'static str> = alloc::vec::Vec::new();
         let mut retained = 0usize;
-        for (flow, origin, space, list) in d.message_lists_with_origin() {
+        // The 2x2 grid of (coordinate space, does this reader hold the bytes),
+        // as the corpus fills it: [packet-no, packet-yes, stream-no, stream-yes].
+        let mut grid = [0usize; 4];
+        for (flow, origin, list) in d.message_lists_with_origin() {
             if list.is_empty() {
                 continue;
             }
             reached.push(origin_class(origin));
             for index in 0..list.len() {
+                let space = anchor_space_of(&list[index]);
                 let answer = d.message_bytes_at(flow, origin, index);
-                // (2) — the two matches, held to each other in BOTH directions.
-                let says_packet = matches!(
+                let has_bytes = matches!(answer, MessageBytes::Retained(_));
+                grid[usize::from(space == AnchorSpace::StreamBytes) * 2
+                    + usize::from(has_bytes)] += 1;
+                // (2) — the implication that is true. A refusal that tells the
+                // caller "you are holding the packet" must be on a list whose
+                // anchors name packets, or the caller is being sent to a
+                // coordinate it cannot resolve.
+                if matches!(
                     answer,
                     MessageBytes::NoSource(NoByteSource::CallerHoldsThePacket)
-                );
-                assert_eq!(
-                    says_packet,
-                    space == AnchorSpace::PacketIndex,
-                    "the byte door and the anchor space disagree about \
-                     {}: the door says {:?} and the space is {space:?}. One \
-                     of the two matches has been edited without the other",
-                    origin_class(origin),
-                    answer
-                );
+                ) {
+                    assert_eq!(
+                        space,
+                        AnchorSpace::PacketIndex,
+                        "{} is refused as the caller's own packet while its \
+                         anchors are byte offsets -- the caller has no packet \
+                         to go and read",
+                        origin_class(origin)
+                    );
+                }
                 // (3) — the slice really is this message's.
                 if let MessageBytes::Retained(bytes) = answer {
                     retained += 1;
@@ -14326,6 +14398,116 @@ mod tls_flow_tests {
             "at least two producers hand bytes back (the reassembled stream \
              and the serial line); a run where none did would pass every \
              assertion above over an empty population"
+        );
+        // (2) — and the grid is FULL. The cell that was empty while item 561
+        // stood is `packet index, bytes retained`: the serial line, which feeds
+        // the datagram coordinate path and whose framed bytes this reader
+        // keeps. An empty cell here means the two axes have collapsed into one
+        // again, whichever direction it collapsed in.
+        assert!(
+            grid.iter().all(|n| *n > 0),
+            "every combination of coordinate space and byte source must be \
+             reached, and this corpus filled {grid:?} \
+             (packet/no, packet/yes, stream/no, stream/yes). The two are \
+             INDEPENDENT facts; a corpus reaching only three of the four \
+             cannot tell an implication from an equivalence"
+        );
+    }
+
+    /// R2206 (open-debt item 561) — THE SPACE A FRAME REPORTS IS THE ONE ITS
+    /// ANCHOR IS ACTUALLY IN, measured rather than declared.
+    ///
+    /// # Why this can be measured at all
+    ///
+    /// In general it cannot: a packet index and a byte offset are small
+    /// integers and, in the header's own words, "cannot be told apart by
+    /// looking". That is the whole reason the discriminant is carried rather
+    /// than inferred. But a CORPUS can be built where the two ranges are
+    /// disjoint — fat framing units, so a direction's byte offsets run past the
+    /// number of packets that were ever pushed — and then the claim is
+    /// checkable:
+    ///
+    /// * a `PacketIndex` anchor names a packet that was pushed, so it is below
+    ///   [`Dissection::next_packet_index`];
+    /// * a `StreamBytes` list must reach an anchor at or above that, because
+    ///   the corpus made its offsets do so.
+    ///
+    /// The second half is asserted per list rather than in aggregate, and a
+    /// corpus that stopped separating the two ranges FAILS here instead of
+    /// passing without having asked anything. That is what stops this from
+    /// becoming a test whose subject never exists.
+    ///
+    /// # What it would have caught
+    ///
+    /// Item 561 exactly. The serial line feeds the datagram coordinate path
+    /// with a capture packet index, and the enumeration one crate layer up
+    /// called that list `StreamBytes` from a hand-written match. The label and
+    /// the coordinate now come from ONE place — the caller that chose the
+    /// number — and this is the leg that says so out of observation rather than
+    /// out of the same match it would be checking.
+    #[test]
+    fn the_space_a_frame_reports_is_the_one_its_anchor_is_actually_in() {
+        let d = every_producer_corpus();
+        let packets = d.next_packet_index();
+        let mut lists = 0usize;
+        let mut stream_lists = 0usize;
+
+        for (_, origin, list) in d.message_lists_with_origin() {
+            if list.is_empty() {
+                continue;
+            }
+            lists += 1;
+            let spaces: alloc::collections::BTreeSet<AnchorSpace> =
+                list.iter().map(anchor_space_of).collect();
+            assert_eq!(
+                spaces.len(),
+                1,
+                "one list is one producer, so its frames must agree about the \
+                 space their anchors are in; {} reports {spaces:?}",
+                origin_class(origin)
+            );
+            match spaces.into_iter().next().expect("just checked") {
+                AnchorSpace::PacketIndex => {
+                    for frame in list.iter() {
+                        assert!(
+                            frame.stream_offset < packets,
+                            "{} says its anchors are PACKET INDICES and one of \
+                             them is {}, past the {packets} packet(s) this \
+                             capture ever held -- it is not a packet index",
+                            origin_class(origin),
+                            frame.stream_offset
+                        );
+                    }
+                }
+                AnchorSpace::StreamBytes => {
+                    stream_lists += 1;
+                    let highest = list
+                        .iter()
+                        .map(|f| f.stream_offset)
+                        .max()
+                        .expect("the list is not empty");
+                    assert!(
+                        highest >= packets,
+                        "{} says its anchors are BYTE OFFSETS and the highest \
+                         is {highest}, which a packet index could also be over \
+                         {packets} packet(s). This corpus has stopped telling \
+                         the two ranges apart, so the check above it proves \
+                         nothing -- widen the framing units",
+                        origin_class(origin)
+                    );
+                }
+            }
+        }
+
+        assert!(
+            lists >= 4,
+            "the corpus must reach several producers for this to be a \
+             comparison rather than one list's self-report; it reached {lists}"
+        );
+        assert!(
+            stream_lists >= 1,
+            "and at least one of them must be a BYTE-OFFSET list, or the \
+             discriminating half of this test never ran"
         );
     }
 }

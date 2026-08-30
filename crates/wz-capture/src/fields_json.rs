@@ -181,9 +181,14 @@ fn push_stream_flow(
             out,
             // R311y919 — the word comes from `AnchorSpace` now, so this row and
             // the census planes cannot drift into two vocabularies for one fact.
+            // R2206 (open-debt item 561) — and it comes off the FRAME, not from
+            // a literal named here. A literal per producer is exactly what the
+            // message-list enumeration used to carry, and the serial line is
+            // what it cost: two places deciding one fact, with nothing joining
+            // either to the caller that chose the coordinate.
             "{{\"direction\":\"{}\",\"offset_space\":\"{}\",\"message_at\":{at},",
             dir_name(frame.direction),
-            crate::AnchorSpace::StreamBytes.name()
+            crate::anchor_space_of(frame).name()
         );
         match flow.message_bytes(frame) {
             Err(why) => push_declined(&why, out),
@@ -270,9 +275,11 @@ fn push_datagram_flow(
         emitted += 1;
         let _ = write!(
             out,
+            // R2206 (open-debt item 561) — off the FRAME, on the argument the
+            // stream producer above makes.
             "{{\"direction\":\"{}\",\"offset_space\":\"{}\",\"packet\":{index},",
             dir_name(frame.direction),
-            crate::AnchorSpace::PacketIndex.name()
+            crate::anchor_space_of(frame).name()
         );
         push_walk(message, frame, declarations.map(|d| (d, &spaces)), out);
         out.push('}');
