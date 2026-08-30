@@ -2095,6 +2095,24 @@ PY
     # is the safe direction. Measured 0.2s.
     python3 scripts/lib/feature_public_surface_census.py --selftest || return 1
     python3 scripts/lib/feature_public_surface_census.py --check || return 1
+    # R2208 (open-debt item 562) — WHAT A MACHINE MUST ALREADY HAVE for the
+    # lanes this script arms, and the way to ask one.
+    #
+    # Three adjudicators here carry a `WZ_*_REQUIRE=1` prefix, which turns
+    # "the oracle was absent" from a skip into a failure. That is a statement
+    # about the RUNNER, and the only runner anyone had checked was the hosted
+    # one -- `ci.yml` installs libpcap-dev, tcpdump and netbase for exactly
+    # these. Measured 2026-08-31: `pcap/dlt.h` was absent on all three remote
+    # build hosts, so Layer C1bn could not complete anywhere else, and because
+    # the adjudicator sits early in that lane its later legs never ran at all.
+    #
+    # Only the machine-INDEPENDENT half rides a lane: that every arming is
+    # accounted for and that each row's oracle still occurs in the test which
+    # reaches for it. `--probe [--host H]` is the other half and belongs to a
+    # person about to send a lane somewhere, because what a hosted runner has
+    # and what a build box has are different facts.
+    python3 scripts/lib/armed_oracle_census.py --selftest || return 1
+    python3 scripts/lib/armed_oracle_census.py --check || return 1
     # R311y605 — the DISSECT FEATURE CENSUS, the name census's sibling one level
     # up. `dissect`'s doc says it selects the whole codec-* MID space so "an
     # observer reads every message it sees", and the claim had been wrong THREE
