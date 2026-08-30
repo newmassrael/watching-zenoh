@@ -1992,6 +1992,31 @@ PY
     # which quoted it three times to describe the rename.
     python3 scripts/lib/prose_feature_gate.py --selftest || return 1
     python3 scripts/lib/prose_feature_gate.py --check || return 1
+    # R2192 (open-debt item 530, the FIRST measured case) — a dependency this
+    # tree's prose names is one cargo resolves, and one it DENIES is one
+    # nothing reaches.
+    #
+    # The sibling above took item 530's second case. This takes the first, the
+    # one R2105 measured and R2190 was explicit about not covering: two files
+    # said a plain build wanted no native XML toolchain while the resolve graph
+    # reached that crate down a build-script chain, and the portability job
+    # said the opposite in its own comment.
+    #
+    # Same principle, applied to the graph: find the form prose ALREADY uses.
+    # Measured over every tracked file, this tree states a dependency in two
+    # syntactic ways and both name their two crates in the sentence. Neither
+    # is a marker, which is why open-debt item 526's block was rejected as this
+    # item's candidate — a form that must be applied is one unmarked prose
+    # walks straight past.
+    #
+    # THE POLARITIES MEASURE DIFFERENT RELATIONS. An assertion is held to a
+    # direct edge; a denial is held to REACHABILITY, because "does not depend"
+    # is only true if nothing carries it. A denial checked against direct
+    # edges would pass exactly the sentence this item was opened for, and the
+    # selftest fixture carries a two-hop chain so that arm cannot be born
+    # green.
+    python3 scripts/lib/prose_dep_graph_gate.py --selftest || return 1
+    python3 scripts/lib/prose_dep_graph_gate.py --check || return 1
     # R311y605 — the DISSECT FEATURE CENSUS, the name census's sibling one level
     # up. `dissect`'s doc says it selects the whole codec-* MID space so "an
     # observer reads every message it sees", and the claim had been wrong THREE
