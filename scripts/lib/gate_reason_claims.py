@@ -182,6 +182,21 @@ INVENTORY_GLOB = re.compile(r"^[a-z0-9-]*[*?\[\]][a-z0-9*?\[\]-]*$")
 EXPRESSION_PUNCT = frozenset(".()[]{}:,#")
 IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
+# R2217 (open-debt item 567) — a citation of a repository this tree does not
+# hold, saying WHICH one. `zenoh:network/request.rs`.
+#
+# The single colon is the whole shape, and `(?!:)` is why it does not collide
+# with Rust: `link::decapsulate` and `QoSType::{D_FLAG, F_FLAG}` both carry
+# `::` and are left to the arms that own them. MEASURED over all 182 tokens
+# before the form was introduced: ZERO already matched, so nothing is
+# reclassified by the shape arriving.
+UPSTREAM_CITATION = re.compile(r"^([a-z][a-z0-9-]*):(?!:)(\S.*)$")
+
+# Where a `git clone` URL may be written down. Not a list of upstreams -- a
+# list of PLACES the tree already records them, which is the difference
+# between deriving the set and re-typing it.
+UPSTREAM_SOURCES = (".gitmodules", "scripts/", ".github/")
+
 # The `re` entry points whose FIRST argument is a pattern. `split` and `sub`
 # are here and `str.split` is not, which is why the check below insists the
 # call's receiver is the `re` module by name: `_FIXTURE_SRC.split(...)` looked
@@ -216,8 +231,11 @@ BUDGET = {
     # `network/request.rs` and `unicast/establishment/ext/shm.rs` -- four
     # citations of a codebase this tree does not hold, which R2215 measured to
     # be uncheckable here rather than merely unchecked.
-    "dissect_name_census.py": 4,
-    # R2215 — `expired_blocker_lint.py` LEFT this table. Its `IDENT` was never
+    #
+    # R2217 — and those four left as well, by DECLARING their repository. They
+    # are NOT resolved: they moved to `DECLARED_UPSTREAM`, a separate pinned
+    # line, for the reason stated there.
+    # R2215 — `expired_blocker_lint.py` LEFT this table too. Its `IDENT` was never
     # a citation at all: it is a regex fragment CONCATENATED into
     # `ABSENCE_PATTERNS`, which a comprehension hands to `re.compile`. The
     # REGEX arm now follows both hops, so the table is classified rather than
@@ -231,6 +249,21 @@ BUDGET = {
     # budget.
 }
 
+# R2217 (open-debt item 567) — HOW MANY citations declare an upstream, pinned.
+#
+# ⚠⚠ THIS PIN IS WHY THE DECLARATION FORM IS NOT AN ESCAPE HATCH, and without
+# it the form would be one. `zenoh:` written in front of any invented remainder
+# would otherwise buy silence: the NAME is checked against the repositories
+# this tree clones, and nothing can check the part after the colon -- R2215
+# measured why, and that measurement has not changed.
+#
+# So a declaration does not buy a pass. It buys a line in a DIFFERENT ledger,
+# pinned in both directions exactly as the budget is: one more and this gate
+# asks whether the new citation is real, one fewer and the pin comes down in
+# the same commit. An author who wants to quiet an unresolved citation by
+# prefixing it still has to move a number and answer for it.
+DECLARED_UPSTREAM = 4
+
 
 class Fatal(Exception):
     """A derivation that cannot be made. Never a silent pass."""
@@ -241,6 +274,46 @@ def tracked() -> list[str]:
         ["git", "ls-files", "-z"], cwd=ROOT, capture_output=True, text=True, check=True
     ).stdout
     return [p for p in out.split("\0") if p]
+
+
+def upstream_names(paths: list[str]) -> frozenset[str]:
+    """Every repository this tree already fetches, DERIVED from its own URLs.
+
+    R2217 (item 567) — the item asked where a "known references list" should
+    live, and the answer measured out to be NOWHERE NEW. The tree already
+    names its upstreams in two machine-readable places: the `url` of every
+    submodule, and every `git clone` in a tracked script or workflow. Reading
+    those is the list; writing a third one would be the second copy this whole
+    area exists to prevent.
+
+    ⚠ LINE CONTINUATIONS ARE JOINED FIRST, and skipping that step is how the
+    first probe of this round concluded that zenoh was absent from the tree.
+    `build-zenohd.sh` writes `git clone --depth 1 --branch "$V" \\` and puts
+    the URL on the next line, so a line-at-a-time scan finds the clone and not
+    what it clones -- and the set came back five names short of the truth,
+    missing the very repository item 567 is about.
+    """
+    names: set[str] = set()
+    for path in paths:
+        if not path.startswith(UPSTREAM_SOURCES):
+            continue
+        try:
+            text = (ROOT / path).read_text(errors="replace")
+        except OSError:
+            continue
+        joined = text.replace("\\\n", " ")
+        urls: list[str] = []
+        if path == ".gitmodules":
+            urls += re.findall(r"url\s*=\s*(\S+)", joined)
+        for clone in re.findall(r"git\s+clone[^\n]*", joined):
+            urls += re.findall(r"(?:https://|git@)\S+", clone)
+        for url in urls:
+            name = url.strip("\"' \\").rstrip("/").split("/")[-1]
+            if name.endswith(".git"):
+                name = name[: -len(".git")]
+            if name:
+                names.add(name)
+    return frozenset(names)
 
 
 def _inventory_ids() -> frozenset[str]:
@@ -308,6 +381,39 @@ class Corpus:
         self.per_file = whole
         self.files = len(code)
         self.inventory = _inventory_ids()
+        self.upstreams = upstream_names(paths)
+        if not self.upstreams:
+            raise Fatal(
+                "no `git clone` URL and no submodule url is readable, so the "
+                "upstream set is empty and every declared citation would be "
+                "refused for the wrong reason."
+            )
+
+    def upstream_declared(self, token: str) -> str | None:
+        """A citation that DECLARES its repository, judged on the declaration.
+
+        R2217 (item 567) — this arm CLASSIFIES and does not verify, and the
+        difference is the item's whole content. R2215 measured that no oracle
+        for these exists here: `git ls-files vendor/` prints four lines because
+        the vendored trees are submodules, and `.gitmodules` does not name
+        zenoh at all, so the only way to check the path after the colon would
+        be to make a checkout the oracle -- a gate whose answer differs per
+        clone, which is what CLAUDE.md forbids machine-local paths for.
+
+        So what is judged is the NAME, against the set the tree derives from
+        its own clone URLs, and what is not judged is stated rather than
+        implied: nothing here knows whether `network/request.rs` is really a
+        file of the zenoh repository at the pinned version.
+
+        That is still strictly more than the budget gave. A budget conflates a
+        true upstream citation with a mistyped local identifier -- both are
+        merely "unresolved". This separates them: `zenohh:x` is refused on the
+        spot, and a typo'd wz name never reaches this arm at all.
+        """
+        match = UPSTREAM_CITATION.match(token)
+        if match is None:
+            return None
+        return "declared upstream" if match.group(1) in self.upstreams else None
 
     def expression_holds(self, token: str) -> bool:
         """Whether one tracked file carries EVERY identifier of the expression.
@@ -340,6 +446,13 @@ class Corpus:
     def resolve(self, token: str, siblings: frozenset[str]) -> str | None:
         if token in siblings:
             return "sibling row"
+        if UPSTREAM_CITATION.match(token):
+            # FIRST among the shape arms, and terminal: a token that declares a
+            # repository is answered by that declaration or by nothing. Letting
+            # it fall through would give an unknown name a second chance at the
+            # identifier arm, where `zenohh:x` might match some substring and
+            # the refusal this arm exists for would evaporate.
+            return self.upstream_declared(token)
         if "/" in token and not any(c.isspace() for c in token):
             if token.split("/", 1)[0] in self.tops:
                 if token in self.paths:
@@ -586,10 +699,13 @@ def classify(tree: ast.Module) -> dict[str, tuple[str, list[str]]]:
 # --------------------------------------------------------------------------
 
 
-def survey(corpus: Corpus, paths: list[str]) -> tuple[dict[str, int], dict[str, list[str]], int]:
-    """(class counts, per-file unresolved tokens, tables seen)."""
+def survey(
+    corpus: Corpus, paths: list[str]
+) -> tuple[dict[str, int], dict[str, list[str]], int, list[str]]:
+    """(class counts, per-file unresolved tokens, tables seen, declarations)."""
     counts = {"REASON": 0, "FIXTURE": 0, "REGEX": 0}
     unresolved: dict[str, list[str]] = {}
+    declared: list[str] = []
     tables = 0
     for path in paths:
         if not path.startswith(f"{GATES}/") or not path.endswith(".py"):
@@ -604,10 +720,15 @@ def survey(corpus: Corpus, paths: list[str]) -> tuple[dict[str, int], dict[str, 
             counts[kind] += len(tokens)
             if kind != "REASON":
                 continue
-            missing = [t for t in tokens if corpus.resolve(t, siblings) is None]
-            if missing:
-                unresolved.setdefault(pathlib.Path(path).name, []).extend(missing)
-    return counts, unresolved, tables
+            for token in tokens:
+                where = corpus.resolve(token, siblings)
+                if where is None:
+                    unresolved.setdefault(pathlib.Path(path).name, []).append(token)
+                elif where == "declared upstream":
+                    # NOT counted as resolved: a declaration is its own ledger
+                    # line, because nothing here can check what it declares.
+                    declared.append(token)
+    return counts, unresolved, tables, declared
 
 
 def run() -> int:
@@ -618,7 +739,7 @@ def run() -> int:
             "the corpus holds no crates source, so every identifier claim would "
             "resolve nowhere for the wrong reason."
         )
-    counts, unresolved, tables = survey(corpus, paths)
+    counts, unresolved, tables, declared = survey(corpus, paths)
     if sum(counts.values()) == 0:
         raise Fatal(
             "no gate table carries a backticked token at all. The population is "
@@ -635,6 +756,16 @@ def run() -> int:
     )
 
     findings: list[str] = []
+    if len(declared) != DECLARED_UPSTREAM:
+        verb = "ADDED" if len(declared) > DECLARED_UPSTREAM else "REMOVED"
+        findings.append(
+            f"{len(declared)} citation(s) declare an upstream, pinned at "
+            f"{DECLARED_UPSTREAM} -- this change {verb} one "
+            f"({sorted(set(declared))[:4]}). The name is checked against the "
+            f"repositories this tree clones and the REMAINDER is checked by "
+            f"nothing, so a declaration moves this number rather than buying "
+            f"silence: move the pin and say which citation it is."
+        )
     for name, missing in sorted(unresolved.items()):
         budget = BUDGET.get(name, 0)
         if len(missing) > budget:
@@ -661,6 +792,11 @@ def run() -> int:
     print(
         f"  budget: {spent} citation(s) resolve nowhere, across "
         f"{len(unresolved)} file(s), exactly as pinned"
+    )
+    print(
+        f"  declared upstream: {len(declared)} citation(s) name a repository "
+        f"this tree clones ({len(corpus.upstreams)} known), exactly as pinned; "
+        f"what follows the colon is checked by nothing and says so"
     )
     return 0
 
@@ -824,7 +960,43 @@ def selftest() -> int:
         if marks and marks <= EXPRESSION_PUNCT:
             return fail(f"{outside!r} was claimed by the expression shape")
 
-    print("gate-reason-claims: selftest OK (24 derivations driven)")
+    # R2217 — the UPSTREAM DECLARATION arm. It judges the NAME and nothing
+    # else, so the controls are about what it refuses.
+    if corpus.resolve("zenoh:network/request.rs", frozenset()) != "declared upstream":
+        return fail("a citation declaring a cloned repository was not accepted")
+    if corpus.resolve("zenohh:x", frozenset()) is not None:
+        return fail("a citation declaring an UNKNOWN repository was accepted")
+    # `::` is Rust, not a declaration, and the arm runs first -- so if it
+    # claimed these the arms that own them would never see them.
+    for rust in ("link::decapsulate", "QoSType::{D_FLAG, F_FLAG}"):
+        if UPSTREAM_CITATION.match(rust):
+            return fail(f"{rust!r} was claimed by the declaration shape")
+
+    # ⚠ THE LINE-CONTINUATION CONTROL, and it is the one this round needed. A
+    # scan that reads `git clone` a line at a time finds the clone and not what
+    # it clones: `build-zenohd.sh` puts the URL on the continuation line, and
+    # the round's first probe concluded from that that zenoh was absent.
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        holder = pathlib.Path(tmp) / "scripts"
+        holder.mkdir()
+        (holder / "provision.sh").write_text(
+            'git clone --depth 1 --branch "$V" \\\n'
+            "    https://github.com/example-org/example-repo \"$DEST\"\n"
+        )
+        saved = globals()["ROOT"]
+        try:
+            globals()["ROOT"] = pathlib.Path(tmp)
+            names = upstream_names(["scripts/provision.sh"])
+        finally:
+            globals()["ROOT"] = saved
+    if "example-repo" not in names:
+        return fail("a clone whose URL sits on the continuation line was missed")
+    if not corpus.upstreams or "zenoh" not in corpus.upstreams:
+        return fail(f"the tree's own upstream set is wrong: {sorted(corpus.upstreams)}")
+
+    print("gate-reason-claims: selftest OK (30 derivations driven)")
     return 0
 
 

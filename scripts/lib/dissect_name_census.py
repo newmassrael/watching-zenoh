@@ -167,7 +167,7 @@ OWN_VOCABULARY = {
     "(`pubkey` / `usrpwd`). Held to Init and Open by the arm's guard, because "
     "`0x3` is a `Put`'s user `attachment` and those bytes can parse as a chain",
     "alice_segment": "the segment an InitSyn offers -- upstream's own field "
-    "name (`zenoh-transport` `unicast/establishment/ext/shm.rs`)",
+    "name (`zenoh:zenoh-transport` `zenoh:unicast/establishment/ext/shm.rs`)",
     "alice_challenge": "the InitAck's proof it could map that segment. The "
     "SAME wire position as `alice_segment` in the other half of the handshake, "
     "renamed because a reader told `alice_segment` on an ACK would have the "
@@ -201,7 +201,7 @@ OWN_VOCABULARY = {
     "the method's secret, which is the part that really is opaque",
     "hmac_len": "as `user_len`, for the second record",
     "pubkey_n": "the RSA modulus of a serialised public key, `n.to_bytes_le()` "
-    "(zenoh's `ZPublicKey` `WCodec`). NOT `n`: that is already a protocol FLAG "
+    "(zenoh's `ZPublicKey` `zenoh:WCodec`). NOT `n`: that is already a protocol FLAG "
     "letter in this vocabulary, and a reader could not tell a modulus from a "
     "header bit",
     "pubkey_n_len": "as `user_len`, for the modulus record",
@@ -254,7 +254,7 @@ OWN_VOCABULARY = {
     "budget. Not derivable from `undefined_bits` -- a literal `0` on the wire "
     "discards nothing and still means it",
     "target": "which matching queryables a Request is FOR -- upstream's own "
-    "name (`network/request.rs` `ext_target`), as a label because the wire "
+    "name (`zenoh:network/request.rs` `ext_target`), as a label because the wire "
     "carries the enum's discriminant and the reader wants the value. Absent "
     "rather than guessed for a discriminant upstream rejects",
     "complete": "whether a declared queryable can serve the whole query by "
