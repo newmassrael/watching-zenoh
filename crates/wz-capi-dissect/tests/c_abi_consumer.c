@@ -116,13 +116,11 @@ static size_t udp_keepalive_frame(unsigned char *out) {
  * makes the `origin` and `anchor_space` fields discriminating here: a test
  * that only ever saw datagrams would pass against a library that answered one
  * constant for every message. */
-static size_t tcp_keepalive_frame(unsigned char *out, unsigned long seq) {
-    /* A zenoh stream frames each unit with a 2-byte little-endian length
-     * prefix, so one KeepAlive on the wire is 01 00 04. */
-    static const unsigned char payload[3] = {0x01, 0x00, 0x04};
+static size_t tcp_frame_with(unsigned char *out, unsigned long seq,
+                             const unsigned char *payload, size_t paylen) {
     unsigned long sum;
     unsigned short ck;
-    size_t n = ipv4_head(out, 6, 20 + sizeof payload);
+    size_t n = ipv4_head(out, 6, 20 + paylen);
 
     out[n + 0] = 0x04; /* source port 1111 */
     out[n + 1] = 0x57;
@@ -135,18 +133,35 @@ static size_t tcp_keepalive_frame(unsigned char *out, unsigned long seq) {
     out[n + 12] = 5 << 4; /* data offset */
     out[n + 13] = 0x10;   /* ACK */
     out[n + 15] = 64;     /* window */
-    memcpy(out + n + 20, payload, sizeof payload);
+    memcpy(out + n + 20, payload, paylen);
 
     /* The pseudo-header, then the segment, through the same accumulator. */
     sum = ones_complement(out + 26, 8, 0); /* src + dst addresses */
     sum += 6;                              /* protocol */
-    sum += 20 + sizeof payload;            /* TCP length */
-    ck = fold(ones_complement(out + n, 20 + sizeof payload, sum));
+    sum += 20 + paylen;                    /* TCP length */
+    ck = fold(ones_complement(out + n, 20 + paylen, sum));
     out[n + 16] = (unsigned char)(ck >> 8);
     out[n + 17] = (unsigned char)(ck & 0xFF);
 
-    n += 20 + sizeof payload;
+    n += 20 + paylen;
     return n < 60 ? 60 : n;
+}
+
+/* R2102 -- ONE KeepAlive on a stream link. A zenoh stream frames each unit
+ * with a 2-byte little-endian length prefix, so one KeepAlive on the wire is
+ * 01 00 04. */
+static size_t tcp_keepalive_frame(unsigned char *out, unsigned long seq) {
+    static const unsigned char payload[3] = {0x01, 0x00, 0x04};
+    return tcp_frame_with(out, seq, payload, sizeof payload);
+}
+
+/* R2205 -- TWO KeepAlives in ONE framing unit, which is what a BATCH is on the
+ * wire: one length prefix declaring two, and two messages behind it. The byte
+ * door's whole contract about where a message's slice ENDS is only visible on
+ * a unit that holds more than one. */
+static size_t tcp_batch_frame(unsigned char *out, unsigned long seq) {
+    static const unsigned char payload[4] = {0x02, 0x00, 0x04, 0x04};
+    return tcp_frame_with(out, seq, payload, sizeof payload);
 }
 
 /* R2102 -- the LIVE door, driven from C.
@@ -394,6 +409,181 @@ static int check_live_door(void) {
     return 0;
 }
 
+/* R2205 (open-debt item 560) -- THE BYTES UNDER THE DESCRIPTION, driven from C.
+ *
+ * Its own function and not another arm of check_live_door for the reason that
+ * one is split out of main: this is a capability, not one more call. What only
+ * C can say here is the part that matters to a linking consumer -- the bytes
+ * land in an array THIS translation unit declared, at the length this library
+ * reported, with nothing to give back afterwards. A Rust test asserting on a
+ * `&[u8]` cannot make that statement.
+ *
+ * The three arms are the three answers, and a test with fewer would pass
+ * against a library that returned one of them always:
+ *
+ *   1. a STREAM record, whose bytes only this reader can produce;
+ *   2. a DATAGRAM record, refused BY NAME because the caller is holding the
+ *      packet already -- the half of item 560 the consumer cut off itself;
+ *   3. a record this handle never issued, refused as a MISS rather than
+ *      answered with whatever sits at those coordinates.
+ */
+static int check_message_bytes_door(void) {
+    wz_dissect_live *h = NULL;
+    wz_dissect_live *other = NULL;
+    unsigned char frame[64];
+    unsigned char buf[8];
+    size_t frame_len;
+    wz_dissect_record records[8];
+    wz_dissect_record stream_rec;
+    size_t written = 999;
+    size_t needed = 999;
+    int rc;
+
+    rc = wz_dissect_live_open(WZ_DISSECT_LIMITS_NONE, &h);
+    CHECK(rc == WZ_DISSECT_OK, "bytes live_open rc=%d", rc);
+
+    /* 1 -- A STREAM MESSAGE. Its anchor is a byte offset into a stream this
+     * reader reassembled, so no packet the caller pushed contains it at that
+     * coordinate: this is the arm with no workaround on the consumer's side. */
+    frame_len = tcp_keepalive_frame(frame, 1000);
+    rc = wz_dissect_live_push(h, 1 /* ETHERNET */, 1000000u, frame, frame_len);
+    CHECK(rc == WZ_DISSECT_OK, "stream push rc=%d", rc);
+    rc = wz_dissect_live_drain(h, records, 8, &written);
+    CHECK(rc == WZ_DISSECT_OK, "stream drain rc=%d", rc);
+    CHECK(written == 1, "one framed KeepAlive is one record, got %zu", written);
+    CHECK(records[0].anchor_space == WZ_DISSECT_ANCHOR_STREAM_BYTES,
+          "this arm is about the stream space, got %u",
+          (unsigned)records[0].anchor_space);
+    stream_rec = records[0];
+
+    /* SIZE FIRST. A null `out` with a zero `cap` is the documented way to ask
+     * for the length alone, and it must not be an argument error. */
+    needed = 999;
+    rc = wz_dissect_live_message_bytes(h, &stream_rec, NULL, 0, &needed);
+    CHECK(rc == WZ_DISSECT_OK, "sizing call rc=%d", rc);
+    CHECK(needed == 1, "one KeepAlive is one byte, got %zu", needed);
+
+    /* A SHORT BUFFER WRITES NOTHING. The sentinel is what says so: a door that
+     * truncated would leave a prefix here, and a consumer that trusted `needed`
+     * would render a fragment as the message. */
+    memset(buf, 0xAB, sizeof buf);
+    needed = 999;
+    rc = wz_dissect_live_message_bytes(h, &stream_rec, buf, 0, &needed);
+    CHECK(rc == WZ_DISSECT_OK, "short-buffer rc=%d", rc);
+    CHECK(needed == 1, "the length is reported whatever the cap, got %zu", needed);
+    CHECK(buf[0] == 0xAB, "a cap below the length must write NOTHING");
+
+    /* AND THEN THE BYTES, into an array this translation unit owns. */
+    memset(buf, 0xAB, sizeof buf);
+    needed = 999;
+    rc = wz_dissect_live_message_bytes(h, &stream_rec, buf, sizeof buf, &needed);
+    CHECK(rc == WZ_DISSECT_OK, "byte call rc=%d", rc);
+    CHECK(needed == 1, "needed=%zu", needed);
+    CHECK(buf[0] == 0x04, "the KeepAlive's own byte, got 0x%02X", buf[0]);
+    CHECK(buf[1] == 0xAB, "nothing past the message may be written");
+
+    /* 2 -- A DATAGRAM MESSAGE is refused BY NAME. The caller pushed the packet
+     * that carried it and `unit_offset` says where inside it the message is, so
+     * copying the bytes back would be handing over what the caller is holding.
+     * A `needed` of zero beside the refusal: there is nothing to size for. */
+    frame_len = udp_keepalive_frame(frame);
+    rc = wz_dissect_live_push(h, 1, 2000000u, frame, frame_len);
+    CHECK(rc == WZ_DISSECT_OK, "datagram push rc=%d", rc);
+    rc = wz_dissect_live_drain(h, records, 8, &written);
+    CHECK(rc == WZ_DISSECT_OK, "datagram drain rc=%d", rc);
+    CHECK(written == 1, "expected one datagram record, got %zu", written);
+    CHECK(records[0].anchor_space == WZ_DISSECT_ANCHOR_PACKET,
+          "this arm is about the packet space, got %u",
+          (unsigned)records[0].anchor_space);
+    needed = 999;
+    rc = wz_dissect_live_message_bytes(h, &records[0], buf, sizeof buf, &needed);
+    CHECK(rc == WZ_DISSECT_ERR_NO_BYTE_SOURCE,
+          "a packet-anchored record must be refused by NAME, rc=%d", rc);
+    CHECK(needed == 0, "a refusal must not report a length to size for: %zu",
+          needed);
+
+    /* 3 -- A RECORD FROM ANOTHER HANDLE. Its ids are that handle's, and the
+     * failure this rules out is the one that costs data rather than time: a
+     * lookup that fell through to some list of THIS handle would hand back
+     * another message's bytes with no error anywhere. */
+    rc = wz_dissect_live_open(WZ_DISSECT_LIMITS_NONE, &other);
+    CHECK(rc == WZ_DISSECT_OK, "second live_open rc=%d", rc);
+    needed = 999;
+    rc = wz_dissect_live_message_bytes(other, &stream_rec, buf, sizeof buf, &needed);
+    CHECK(rc == WZ_DISSECT_ERR_BYTES_RETIRED,
+          "a foreign record must MISS, not resolve, rc=%d", rc);
+    CHECK(needed == 0, "a miss reports no length, got %zu", needed);
+    wz_dissect_live_close(other);
+
+    /* Nulls are refused before anything is dereferenced. */
+    rc = wz_dissect_live_message_bytes(NULL, &stream_rec, buf, sizeof buf, &needed);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null handle rc=%d", rc);
+    rc = wz_dissect_live_message_bytes(h, NULL, buf, sizeof buf, &needed);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null record rc=%d", rc);
+    rc = wz_dissect_live_message_bytes(h, &stream_rec, buf, sizeof buf, NULL);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null needed rc=%d", rc);
+    rc = wz_dissect_live_message_bytes(h, &stream_rec, NULL, sizeof buf, &needed);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG,
+          "a null buffer with a non-zero cap is a caller bug, rc=%d", rc);
+    wz_dissect_live_close(h);
+
+    /* A BATCH, which is where the contract about the slice's END is visible at
+     * all. One length prefix declares two messages; the FIRST message's slice
+     * runs to the end of the unit and therefore covers both, and the SECOND
+     * runs to the end alone. That is not an accident of the implementation --
+     * it is the slice the field walker itself was handed, which is what makes a
+     * message-relative span out of the `fields` document index it directly. */
+    h = NULL;
+    rc = wz_dissect_live_open(WZ_DISSECT_LIMITS_NONE, &h);
+    CHECK(rc == WZ_DISSECT_OK, "batch live_open rc=%d", rc);
+    frame_len = tcp_batch_frame(frame, 2000);
+    rc = wz_dissect_live_push(h, 1, 3000000u, frame, frame_len);
+    CHECK(rc == WZ_DISSECT_OK, "batch push rc=%d", rc);
+    rc = wz_dissect_live_drain(h, records, 8, &written);
+    CHECK(rc == WZ_DISSECT_OK, "batch drain rc=%d", rc);
+    CHECK(written == 2, "one unit of two KeepAlives is two records, got %zu",
+          written);
+    CHECK(records[0].anchor == records[1].anchor,
+          "two messages of ONE unit share its anchor");
+    CHECK(records[0].unit_offset == 0 && records[1].unit_offset == 1,
+          "and are told apart by where they stand in it: %u / %u",
+          (unsigned)records[0].unit_offset, (unsigned)records[1].unit_offset);
+
+    /* A NON-EMPTY buffer that is still too small. This is the case a zero cap
+     * cannot reach: a door that truncated would leave a one-byte prefix here
+     * and report a length of two, and a consumer trusting `needed` would render
+     * one byte of stale memory as the second. The batch is the only message in
+     * this file long enough for the case to exist at all. */
+    memset(buf, 0xAB, sizeof buf);
+    needed = 999;
+    rc = wz_dissect_live_message_bytes(h, &records[0], buf, 1, &needed);
+    CHECK(rc == WZ_DISSECT_OK, "batch short-buffer rc=%d", rc);
+    CHECK(needed == 2, "the full length is reported whatever the cap: %zu",
+          needed);
+    CHECK(buf[0] == 0xAB,
+          "a cap between zero and the length must still write NOTHING");
+
+    memset(buf, 0xAB, sizeof buf);
+    needed = 999;
+    rc = wz_dissect_live_message_bytes(h, &records[0], buf, sizeof buf, &needed);
+    CHECK(rc == WZ_DISSECT_OK, "batch[0] rc=%d", rc);
+    CHECK(needed == 2, "the first message's slice runs to the unit's end: %zu",
+          needed);
+    CHECK(buf[0] == 0x04 && buf[1] == 0x04, "both KeepAlives, got %02X %02X",
+          buf[0], buf[1]);
+    CHECK(buf[2] == 0xAB, "and nothing past the unit");
+
+    memset(buf, 0xAB, sizeof buf);
+    needed = 999;
+    rc = wz_dissect_live_message_bytes(h, &records[1], buf, sizeof buf, &needed);
+    CHECK(rc == WZ_DISSECT_OK, "batch[1] rc=%d", rc);
+    CHECK(needed == 1, "the second message's slice is what is left: %zu", needed);
+    CHECK(buf[0] == 0x04, "the second KeepAlive, got 0x%02X", buf[0]);
+    CHECK(buf[1] == 0xAB, "and nothing past it");
+    wz_dissect_live_close(h);
+    return 0;
+}
+
 /* R2171 -- a classic pcap holding `n` copies of `frame`, laid out by hand in
  * the same 24 + 16 form the summary fixture in main uses, little-endian
  * throughout because the magic is written that way.
@@ -588,8 +778,12 @@ int main(void) {
      * reads a capture FILE into the LIVE handle, which is what let a frozen
      * capture drive the binary record family at all. A symbol, so the number
      * moves; the memory rule does not, because the handle it returns is the
-     * one wz_dissect_live_close already took back. */
-    CHECK(wz_dissect_abi_version() == 13, "abi version is %d, expected 13",
+     * one wz_dissect_live_close already took back.
+     * R2205 -- 14 since wz_dissect_live_message_bytes joined it: the door that
+     * hands back the BYTES a record was decoded from. One symbol, and the
+     * memory rule deliberately left where it stands -- the bytes go into a
+     * buffer the caller owns, so there is nothing new to give back. */
+    CHECK(wz_dissect_abi_version() == 14, "abi version is %d, expected 14",
           wz_dissect_abi_version());
 
     /* A KeepAlive: one header byte, the smallest complete transport message,
@@ -1163,6 +1357,12 @@ int main(void) {
     /* R2171 (ABI 13) -- and the door that joins the two halves, so a FROZEN
      * capture can drive the record door a live tap uses. */
     if (check_replay_door() != 0) {
+        return 1;
+    }
+
+    /* R2205 (ABI 14) -- and the BYTES under the description, which is the one
+     * output of this library that is neither a document nor a scalar. */
+    if (check_message_bytes_door() != 0) {
         return 1;
     }
 

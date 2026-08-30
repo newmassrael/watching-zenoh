@@ -415,6 +415,22 @@ ONLY_CAPI = {
     # R2171 (open-debt item 547) — the door between the file half and the
     # record half. Filed in the round that added the symbol, which is where
     # this table's own header says the answering belongs.
+    # R2205 (open-debt item 560) — the BYTES under the description. Filed in
+    # the round that added the symbol, which is where this table's own header
+    # says the answering belongs.
+    "the bytes one decoded message was framed out of": (
+        "wz_dissect_live_message_bytes",
+        "DELIBERATE. The terminal never needed a door for this and cannot want "
+        "one: it holds the dissection in its own process, so the bytes are "
+        "already beside the walk that produced them, and what it emits is a "
+        "RENDERING for a person -- `--messages` and `--fields`, or `--json` for "
+        "a machine. A flag that printed a message's raw bytes at a terminal "
+        "would be a hex dump, which is a picture and not a capability; the "
+        "capability is the bytes CROSSING a boundary, and only one of these two "
+        "surfaces has a boundary to cross. This is the mirror image of "
+        "`--csv` two rows up, where the reasoning runs the other way.",
+        (4, 5),
+    ),
     "a FROZEN capture read into binary records": (
         "wz_dissect_pcap_replay",
         "DELIBERATE, and it rides `decoded messages as BINARY records` above. "
@@ -513,8 +529,14 @@ NO_REACH_PATH = {
     3: "OUT OF SURFACE, on the same argument as the number above. What feeds it "
     "is the deployment manifest and its checker (`deploy/*.yaml`, "
     "`scripts/validate-deploy.sh`), which is not a dissection either.",
-    4: "OUT OF SURFACE. Same as the first number here: not decode work, so "
-    "neither a flag nor a symbol is the shape it would arrive in.",
+    # R2205 (open-debt item 560) — 4 LEFT THIS TABLE, and the gate is what
+    # evicted it. The entry read "not decode work, so neither a flag nor a
+    # symbol is the shape it would arrive in", and it was wrong in a way nobody
+    # could see from inside this file: the RENDERING is not decode work, and
+    # the bytes under the rendering are nothing else. The moment
+    # `wz_dissect_live_message_bytes` named this number, the contradiction check
+    # below refused the pair -- which is exactly the direction this table's own
+    # header says keeps a decision from outliving the fact under it.
 }
 
 

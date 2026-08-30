@@ -100,6 +100,26 @@ pub const WZ_DISSECT_ERR_SELECTOR: c_int = -4;
 /// must send them back to would be answering neither. Call
 /// [`wz_dissect_declarations_diagnose`] to learn which line and why.
 pub const WZ_DISSECT_ERR_DECLARATION: c_int = -5;
+/// R2205 (open-debt item 560) — the message's bytes ARE GONE from this reader.
+///
+/// A retention ceiling trimmed them, the list was evicted, or the record names
+/// a message this handle no longer holds. POSITIONAL: a NEWER message of the
+/// same list still answers, so a consumer greys this one out and carries on.
+///
+/// Its own code and not [`WZ_DISSECT_ERR_NO_BYTE_SOURCE`], because that is the
+/// one distinction a caller acts on — retry versus never — and folding the two
+/// would make a live tap's own ceiling look like a permanent limitation of the
+/// library.
+pub const WZ_DISSECT_ERR_BYTES_RETIRED: c_int = -6;
+/// R2205 (open-debt item 560) — this message's list NEVER hands back bytes.
+///
+/// STRUCTURAL, and the opposite of [`WZ_DISSECT_ERR_BYTES_RETIRED`]: no message
+/// of such a list will ever answer. Two lists are in it and both for a stated
+/// reason — one anchors to a packet index, so the caller is holding the bytes
+/// itself (`anchor` is the caller's own push ordinal and `unit_offset` the
+/// place inside it), and one was recovered from an encrypted transport, walked
+/// while the plaintext was alive and never retained.
+pub const WZ_DISSECT_ERR_NO_BYTE_SOURCE: c_int = -7;
 
 /// R311y887 — read with no ceilings at all, which is what a FILE deserves: it
 /// ends, so keeping every byte of it is already bounded.
@@ -208,11 +228,31 @@ pub const WZ_DISSECT_NO_TIMESTAMP: u64 = live::NO_TIMESTAMP;
 /// A consumer wanting both had to open the pcap container itself, which puts a
 /// second reader of that format in the system.
 ///
+/// R2205 (open-debt item 560) — 13 → 14, ADDING
+/// [`wz_dissect_live_message_bytes`]. A new symbol, so the revision moves under
+/// the rule this doc has stated since R311y748.
+///
+/// The MEMORY RULE IS UNTOUCHED, and saying so is the point of this entry
+/// rather than an aside. This is the first door that hands back something other
+/// than a `char*` or a fixed-layout record, so it is the one that could have
+/// moved the rule — bytes are not a string, and `wz_dissect_string_free` is not
+/// their shape. It does not, because the bytes go into a buffer the CALLER owns
+/// and sized, exactly as [`wz_dissect_live_drain`]'s records do. Nothing new
+/// crosses this boundary allocated, no callback runs, and the one handle kind
+/// that outlives its call is still the only one.
+///
+/// What the symbol answers is the question every other door here dodged: this
+/// library described what it decoded and never handed over the bytes UNDER the
+/// description. Half of that was never ours — a packet-anchored record names a
+/// packet the caller pushed — and this door says which half by name, with
+/// [`WZ_DISSECT_ERR_NO_BYTE_SOURCE`] beside
+/// [`WZ_DISSECT_ERR_BYTES_RETIRED`].
+///
 /// # Safety
 /// None; takes no arguments and touches no memory.
 #[no_mangle]
 pub extern "C" fn wz_dissect_abi_version() -> c_int {
-    13
+    14
 }
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
@@ -1517,6 +1557,118 @@ pub unsafe extern "C" fn wz_dissect_live_lost(handle: *const live::LiveDissectio
     }
     // SAFETY: caller contract above.
     unsafe { (*handle).lost() }
+}
+
+/// R2205 (open-debt item 560) — THE BYTES a drained record was decoded from,
+/// into a buffer YOU own.
+///
+/// # The gap this closes
+///
+/// Every other output of this library is a DESCRIPTION: a document naming what
+/// was decoded, or a record saying that a message arrived. A consumer rendering
+/// the message itself — a hex view with the field the reader picked highlighted
+/// in it — needs the bytes under that description, and until this door existed
+/// no symbol here handed any back. Measured before it was written: of the
+/// entry points this header declares, ZERO took a `unsigned char *` out
+/// parameter or returned one.
+///
+/// Half of that gap was never ours. A record whose `anchor_space` is
+/// `WZ_DISSECT_ANCHOR_PACKET` names a packet the CALLER pushed, and
+/// `unit_offset` says where inside it the message stands, so those bytes are
+/// already in the caller's hands — this door says so by name
+/// ([`WZ_DISSECT_ERR_NO_BYTE_SOURCE`]) rather than by copying them back. The
+/// half that was ours is `WZ_DISSECT_ANCHOR_STREAM_BYTES`: that coordinate is
+/// an offset into a stream THIS READER reassembled, and a consumer has no such
+/// stream to index.
+///
+/// # Why it takes the RECORD and not a span
+///
+/// A `(list_id, direction, start, end)` door cannot be written, and that is
+/// measured rather than argued: finding a message inside its framing unit needs
+/// the width of the length prefix, and no coordinate this ABI publishes carries
+/// it — `anchor` names the PREFIX, not the body behind it. A span door would
+/// therefore hand every consumer the job of re-deriving this library's framing
+/// rule from numbers that cannot express it. Taking the record costs the caller
+/// nothing, since it is the value just drained, and it makes a question that
+/// has no answer impossible to ask: there is no way to name a range that is not
+/// a message.
+///
+/// # The memory rule is UNCHANGED, and this is the door that could have moved it
+///
+/// Bytes are not a string, so [`wz_dissect_string_free`] is not the shape for
+/// them, and this ABI does not run callbacks. What is left is the shape the
+/// record family already uses: the bytes go into a buffer the CALLER owns and
+/// sized, so nothing crosses this boundary allocated and there is nothing new
+/// to give back. Both halves of the rule stated at the top of the header stand
+/// exactly as they did — one handle kind outlives its call, no callbacks run,
+/// and every `char*` is still released with `wz_dissect_string_free`.
+///
+/// # Sizing
+///
+/// `needed` always receives the message's full length. When `cap` is at least
+/// that, `out` holds the bytes; when it is less, NOTHING is written and the
+/// caller sizes and calls again — the same never-truncate contract
+/// [`wz_dissect_record_layout`] has. `out` may be null when `cap` is zero,
+/// which is how a caller asks for the length alone.
+///
+/// # What comes back
+///
+/// The bytes the field walker itself was handed: from the message's first byte
+/// to the end of the framing unit it arrived in. Byte 0 is the message's byte
+/// 0, so a span out of the `fields` document — which is message-relative —
+/// indexes this buffer directly, with no arithmetic in between. A unit carrying
+/// a BATCH runs on past this message, and what bounds it is the next record of
+/// the same `list_id`, `direction` and `anchor`: its `unit_offset` is where
+/// this message stops. That trailing region is deliberately not trimmed away —
+/// it is the difference between what the walk covered and what the wire
+/// carried, which is the one thing a hex view is for.
+///
+/// # Safety
+/// `handle` must be a live handle, `record` must point at one readable
+/// [`WzDissectRecord`], `needed` must be a writable `size_t`, and `out` must
+/// point to at least `cap` writable bytes or be null with `cap` zero.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_live_message_bytes(
+    handle: *const live::LiveDissection,
+    record: *const WzDissectRecord,
+    out: *mut u8,
+    cap: usize,
+    needed: *mut usize,
+) -> c_int {
+    if handle.is_null() || record.is_null() || needed.is_null() || (out.is_null() && cap != 0) {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let (handle, record) = unsafe { (&*handle, &*record) };
+    let bytes = match handle.message_bytes(record) {
+        wz_capture::MessageBytes::Retained(bytes) => bytes,
+        wz_capture::MessageBytes::Retired(_) => {
+            // SAFETY: null-checked above. Zero rather than a stale length: the
+            // caller has nothing to size for, and a non-zero `needed` beside a
+            // failure would read as "call again with a bigger buffer".
+            unsafe { *needed = 0 };
+            return WZ_DISSECT_ERR_BYTES_RETIRED;
+        }
+        wz_capture::MessageBytes::NoSource(_) => {
+            // SAFETY: null-checked above.
+            unsafe { *needed = 0 };
+            return WZ_DISSECT_ERR_NO_BYTE_SOURCE;
+        }
+    };
+    // SAFETY: null-checked above.
+    unsafe { *needed = bytes.len() };
+    if cap < bytes.len() {
+        // Nothing written, and still WZ_DISSECT_OK with the length: the caller
+        // knows its own `cap`, so `cap >= *needed` IS the "it wrote" answer and
+        // there is nothing ambiguous to tell apart. Truncating would be the
+        // ambiguous one.
+        return WZ_DISSECT_OK;
+    }
+    // SAFETY: `out` is writable for `cap >= bytes.len()` bytes by the caller
+    // contract, and the two regions cannot overlap -- `bytes` is inside the
+    // dissection this library owns.
+    unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), out, bytes.len()) };
+    WZ_DISSECT_OK
 }
 
 /// R2102 — release a live handle. Null is a no-op.
@@ -3918,7 +4070,15 @@ mod tests {
         // What it added is the door between this ABI's two halves — a capture
         // FILE read into the LIVE handle, so a frozen capture can drive the
         // binary record family, which until now took packets only.
-        assert_eq!(wz_dissect_abi_version(), 13);
+        //
+        // R2205 (open-debt item 560) — 14, one new symbol
+        // (`wz_dissect_live_message_bytes`) and the memory rule DELIBERATELY
+        // left where it stands. That is worth this sentence rather than a
+        // silence: it is the first door handing back something that is neither
+        // a `char*` nor a fixed-layout record, so it is the one that could have
+        // moved the rule. Bytes into a buffer the CALLER sized keep both halves
+        // intact -- nothing new crosses allocated, and no callback runs.
+        assert_eq!(wz_dissect_abi_version(), 14);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -5152,6 +5312,80 @@ mod tests {
         buffer
     }
 
+    /// Feed one Ethernet packet, through the ABI.
+    fn push_live(handle: *mut live::LiveDissection, ts_ns: u64, packet: &[u8]) {
+        let rc = unsafe {
+            wz_dissect_live_push(
+                handle,
+                LINKTYPE_ETHERNET,
+                ts_ns,
+                packet.as_ptr(),
+                packet.len(),
+            )
+        };
+        assert_eq!(rc, WZ_DISSECT_OK, "push rc");
+    }
+
+    /// R2205 (open-debt item 560) — one record's bytes, THROUGH THE PUBLISHED
+    /// DOOR, sized first and read second exactly as the header tells a consumer
+    /// to.
+    ///
+    /// Not a call on `LiveDissection` directly: what a consumer receives is an
+    /// error CODE, and a test that read the Rust enum would be asserting on a
+    /// value no linking consumer can see. It also holds the sizing contract on
+    /// every call rather than in one test of its own — a door that wrote into a
+    /// short buffer would corrupt the sentinel here.
+    fn live_bytes(
+        handle: *mut live::LiveDissection,
+        record: &WzDissectRecord,
+    ) -> Result<Vec<u8>, c_int> {
+        let mut needed = usize::MAX;
+        let rc = unsafe {
+            wz_dissect_live_message_bytes(handle, record, core::ptr::null_mut(), 0, &mut needed)
+        };
+        if rc != WZ_DISSECT_OK {
+            assert_eq!(needed, 0, "a refusal must report no length to size for");
+            return Err(rc);
+        }
+        // One byte short, with a sentinel under it: nothing may be written.
+        let mut buffer = vec![0xABu8; needed + 1];
+        let mut again = usize::MAX;
+        let rc = unsafe {
+            wz_dissect_live_message_bytes(
+                handle,
+                record,
+                buffer.as_mut_ptr(),
+                needed.saturating_sub(1),
+                &mut again,
+            )
+        };
+        assert_eq!(rc, WZ_DISSECT_OK, "short-buffer rc");
+        assert_eq!(again, needed, "the length is reported whatever the cap");
+        assert!(
+            buffer.iter().all(|b| *b == 0xAB),
+            "a cap below the length must write NOTHING"
+        );
+
+        let mut written = usize::MAX;
+        let rc = unsafe {
+            wz_dissect_live_message_bytes(
+                handle,
+                record,
+                buffer.as_mut_ptr(),
+                buffer.len(),
+                &mut written,
+            )
+        };
+        assert_eq!(rc, WZ_DISSECT_OK, "byte call rc");
+        assert_eq!(written, needed, "the length must not move between calls");
+        assert_eq!(
+            buffer[needed], 0xAB,
+            "nothing past the message may be written"
+        );
+        buffer.truncate(written);
+        Ok(buffer)
+    }
+
     /// R2102 — THE RECORD'S LAYOUT IS THE ONE THE HEADER DECLARES.
     ///
     /// # Why a size assertion is not pedantry here
@@ -5504,6 +5738,158 @@ mod tests {
             drain_live(handle, 4).is_empty(),
             "and it produces no records"
         );
+        unsafe { wz_dissect_live_close(handle) };
+    }
+
+    /// R2205 (open-debt item 560) — THE THREE ANSWERS OF THE BYTE DOOR, told
+    /// apart on ONE handle.
+    ///
+    /// # Why the three have to be in one test
+    ///
+    /// Each of them alone is satisfied by a library that answers it always.
+    /// `Retained` alone passes against one that never refuses; `NoSource` alone
+    /// passes against one that never answers; and the pair without `Retired`
+    /// passes against one that cannot tell a ceiling from a structural limit —
+    /// which is the distinction a consumer acts on, since only one of the two
+    /// is worth retrying a newer message for.
+    ///
+    /// # Why the retired arm is HERE and not in the C consumer
+    ///
+    /// It needs a retention ceiling small enough to bite inside a test, and the
+    /// C door takes a PRESET: `WZ_DISSECT_LIMITS_LIVE_TAP` keeps four megabytes
+    /// per direction, so reaching this arm across the boundary would mean
+    /// pushing four megabytes of traffic to prove a branch. The preset is the
+    /// right shape for the ABI and the wrong shape for this witness, so the
+    /// witness sits on the side that can name the limit.
+    #[test]
+    fn the_byte_door_tells_retained_retired_and_no_source_apart() {
+        // Eight bytes per direction, which two framed KeepAlives (three bytes
+        // each) walk past on the third push.
+        let limits = wz_capture::DissectionLimits {
+            stream_bytes_per_direction: Some(8),
+            ..wz_capture::DissectionLimits::default()
+        };
+        let handle = Box::into_raw(Box::new(live::LiveDissection::new(limits)));
+        let unit = [1u8, 0, KIND_KEEPALIVE];
+        for (i, seq) in [1000u32, 1003, 1006, 1009].into_iter().enumerate() {
+            push_live(handle, i as u64 * 1_000_000, &tcp_packet(seq, &unit));
+        }
+        push_live(
+            handle,
+            9_000_000,
+            &udp_packet([10, 0, 0, 1], 43210, [10, 0, 0, 2], 7447, &[KIND_KEEPALIVE]),
+        );
+
+        let records = drain_live(handle, 16);
+        let stream: Vec<&WzDissectRecord> = records
+            .iter()
+            .filter(|r| r.anchor_space == 1 && r.origin == 1)
+            .collect();
+        assert!(
+            stream.len() >= 3,
+            "this fixture must produce enough stream messages for a ceiling to \
+             separate the old from the new; it produced {}",
+            stream.len()
+        );
+        let datagram = records
+            .iter()
+            .find(|r| r.anchor_space == 0)
+            .expect("the fixture pushes one datagram message");
+
+        // OLDEST: its bytes went with the ceiling. A newer message of the same
+        // list still answers, which is what makes this POSITIONAL.
+        assert_eq!(
+            live_bytes(handle, stream[0]),
+            Err(WZ_DISSECT_ERR_BYTES_RETIRED),
+            "the oldest stream message's bytes were trimmed and must be \
+             reported as retired, not as a list with no byte source"
+        );
+        // NEWEST: still held, and still the message it says it is.
+        assert_eq!(
+            live_bytes(handle, stream[stream.len() - 1]),
+            Ok(vec![KIND_KEEPALIVE]),
+            "the bytes handed back are not the message the record names"
+        );
+        // DATAGRAM: never had a byte source here, and never will.
+        assert_eq!(
+            live_bytes(handle, datagram),
+            Err(WZ_DISSECT_ERR_NO_BYTE_SOURCE),
+            "a packet-anchored message must be refused by NAME, so a consumer \
+             learns it is holding the bytes rather than that this reader lost \
+             them"
+        );
+        unsafe { wz_dissect_live_close(handle) };
+    }
+
+    /// R2205 (open-debt item 560) — A RECORD THAT NAMES NOTHING MISSES, and it
+    /// misses in every way a record can be wrong.
+    ///
+    /// The failure this rules out costs data rather than time: a lookup that
+    /// fell through to whatever list was nearest would hand back ANOTHER
+    /// message's bytes, and a hex view would render them under the wrong
+    /// heading with no error anywhere. So each coordinate is broken on its own,
+    /// against a control that is otherwise identical and does resolve.
+    #[test]
+    fn a_record_whose_coordinates_name_no_message_misses_rather_than_resolving() {
+        let handle = open_live(WZ_DISSECT_LIMITS_NONE).expect("the preset opens");
+        let unit = [1u8, 0, KIND_KEEPALIVE];
+        push_live(handle, 0, &tcp_packet(1000, &unit));
+        let records = drain_live(handle, 4);
+        assert_eq!(records.len(), 1, "one framed KeepAlive is one record");
+        let good = records[0];
+
+        // THE CONTROL. Without it every assertion below is satisfied by a door
+        // that misses always.
+        assert_eq!(
+            live_bytes(handle, &good),
+            Ok(vec![KIND_KEEPALIVE]),
+            "the unmodified record must resolve, or this test proves nothing"
+        );
+
+        for (what, broken) in [
+            (
+                "list_id",
+                WzDissectRecord {
+                    list_id: good.list_id.wrapping_add(1000),
+                    ..good
+                },
+            ),
+            (
+                "anchor",
+                WzDissectRecord {
+                    anchor: good.anchor.wrapping_add(1),
+                    ..good
+                },
+            ),
+            (
+                "batch_index",
+                WzDissectRecord {
+                    batch_index: good.batch_index.wrapping_add(1),
+                    ..good
+                },
+            ),
+            (
+                "direction",
+                WzDissectRecord {
+                    direction: 1 - good.direction,
+                    ..good
+                },
+            ),
+            (
+                "direction (out of range)",
+                WzDissectRecord {
+                    direction: 9,
+                    ..good
+                },
+            ),
+        ] {
+            assert_eq!(
+                live_bytes(handle, &broken),
+                Err(WZ_DISSECT_ERR_BYTES_RETIRED),
+                "a record whose {what} names no message must MISS, never \
+                 resolve to a neighbour's bytes"
+            );
+        }
         unsafe { wz_dissect_live_close(handle) };
     }
 

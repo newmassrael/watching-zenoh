@@ -50,7 +50,7 @@ import subprocess
 import sys
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 13
+EXPECTED_VERSION = 14
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -93,6 +93,14 @@ EXPECTED_SYMBOLS = {
     "wz_dissect_live_drain",
     "wz_dissect_live_lost",
     "wz_dissect_live_close",
+    # R2205 (open-debt item 560) — the BYTES a drained record was decoded from.
+    # The memory rule did NOT move with it, and that is the fact worth pinning
+    # here rather than assuming: this is the first door handing back something
+    # that is neither a `char*` nor a fixed-layout record, so it is the one a
+    # reader of this file would expect to have moved it. Bytes into a buffer the
+    # CALLER sized add nothing to release and run no callback, so the revision
+    # moves for the symbol alone.
+    "wz_dissect_live_message_bytes",
     # R2171 (open-debt item 547) — the door BETWEEN the two families above and
     # the nine document doors below. It hands back the same opaque handle
     # `wz_dissect_live_open` does, so the memory rule does not move with it:

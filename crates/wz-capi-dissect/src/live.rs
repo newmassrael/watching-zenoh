@@ -428,6 +428,81 @@ impl LiveDissection {
         written
     }
 
+    /// R2205 (open-debt item 560) — THE BYTES one drained record was decoded
+    /// from, found by the coordinates that record already carries.
+    ///
+    /// # Why the RECORD is the key and not a span
+    ///
+    /// The obvious door takes `(list_id, direction, start, end)` and hands back
+    /// that range. It cannot be written, and the reason is a measurement rather
+    /// than a preference: locating a message inside its framing unit needs
+    /// `PassiveFrame::prefix_width`, and [`WzDissectRecord`] does not carry it —
+    /// `anchor` names the unit's LENGTH PREFIX, not its body. A consumer asked
+    /// for a span would therefore be asked to re-derive this crate's framing
+    /// rule from coordinates that cannot express it, which is the second reader
+    /// of the same bytes `wz-capture` keeps removing.
+    ///
+    /// Handing back the record instead costs the consumer nothing — it is the
+    /// value it just drained — and it makes an unanswerable question
+    /// unaskable: there is no way to name a range that is not a message.
+    ///
+    /// # How a record is resolved back to a frame
+    ///
+    /// `list_id` names the list through the same watermark map that issued it,
+    /// so a list that has been REPLACED cannot be reached by an old record's id
+    /// — the successor got a new one, which is `Mark::list_id`'s whole
+    /// purpose. Inside the list, `(direction, anchor, batch_index)` is exact:
+    /// two messages of one list in one direction share an anchor only when they
+    /// are in the same framing unit, and `batch_index` is what tells those
+    /// apart.
+    ///
+    /// A record whose message has since been trimmed away resolves to nothing
+    /// and is answered `Retired` — the same word `wz-capture` uses for bytes a
+    /// ceiling took, because from the consumer's side it is the same fact.
+    pub fn message_bytes(&self, record: &WzDissectRecord) -> wz_capture::MessageBytes<'_> {
+        let direction = match record.direction {
+            0 => Direction::A,
+            1 => Direction::B,
+            // Not a direction this ABI has, so it names no message. Answered as
+            // a miss rather than as a panic: the record crossed a C boundary
+            // and this library does not get to assume what is on the other side
+            // of it.
+            _ => {
+                return wz_capture::MessageBytes::Retired(String::from(
+                    "no such direction on any message of this reader",
+                ))
+            }
+        };
+        let Some((&(flow, origin), _)) = self
+            .marks
+            .iter()
+            .find(|(_, mark)| mark.list_id == record.list_id)
+        else {
+            return wz_capture::MessageBytes::Retired(String::from(
+                "no list of this handle carries that list_id",
+            ));
+        };
+        let Some((_, _, _, list)) = self
+            .dissection
+            .message_lists_with_origin()
+            .find(|(f, o, _, _)| *f == flow && *o == origin)
+        else {
+            return wz_capture::MessageBytes::Retired(String::from(
+                "the list this record came out of is no longer held",
+            ));
+        };
+        let Some(index) = list.iter().position(|f| {
+            f.direction == direction
+                && f.stream_offset as u64 == record.anchor
+                && f.batch_index as u32 == record.batch_index
+        }) else {
+            return wz_capture::MessageBytes::Retired(String::from(
+                "this message is no longer in its list",
+            ));
+        };
+        self.dissection.message_bytes_at(flow, origin, index)
+    }
+
     /// The lists this handle is currently tracking a watermark for. Used by the
     /// tests that assert the map does not grow without bound.
     #[cfg(test)]

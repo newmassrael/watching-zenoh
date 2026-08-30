@@ -765,6 +765,84 @@ pub enum MessageListOrigin {
     Serial,
 }
 
+/// R2205 (open-debt item 560) — WHY a decoded message's own bytes cannot be
+/// handed back, when they cannot.
+///
+/// Two answers and not one, because they are different facts about the same
+/// reader and a consumer acts differently on each. One is POSITIONAL — those
+/// bytes existed and a ceiling took them, so a newer message of the same list
+/// will answer — and it is [`MessageBytes::Retired`]. The two here are
+/// STRUCTURAL: no message of such a list will ever answer, and a consumer that
+/// retried would be waiting for something that cannot arrive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoByteSource {
+    /// The list anchors to a PACKET INDEX, so the caller already holds the
+    /// bytes: the packet it pushed is the one that carried the message, and
+    /// `unit_offset` says where inside it the message stands.
+    ///
+    /// This reader keeps no copy of a pushed packet on purpose. Holding one per
+    /// message would double what a live tap retains, in order to hand back
+    /// bytes the caller has not let go of.
+    CallerHoldsThePacket,
+    /// A stream RECOVERED from inside an encrypted transport. Those bytes were
+    /// never on the wire in that form — they were decrypted and reassembled by
+    /// the caller, walked while they were alive, and are not retained here.
+    ///
+    /// [`Dissection::feed_quic_stream_with_sink`] is the consequence, and its
+    /// shape is the proof: the walk happens INSIDE the call because afterwards
+    /// there is nothing left to walk.
+    RecoveredPlaintextNotRetained,
+}
+
+impl NoByteSource {
+    /// The reason as a sentence, for a reader rendering it.
+    pub fn why(self) -> &'static str {
+        match self {
+            Self::CallerHoldsThePacket => {
+                "this list anchors to a packet index, so the bytes are the ones you pushed"
+            }
+            Self::RecoveredPlaintextNotRetained => {
+                "these bytes were recovered from an encrypted transport and are not retained"
+            }
+        }
+    }
+}
+
+/// R2205 (open-debt item 560) — the bytes ONE decoded message was framed out
+/// of, or the reason this reader cannot hand them back.
+///
+/// # Why this is a door and not an offset
+///
+/// A consumer holding a decoded message's coordinates cannot slice the bytes
+/// itself, and that is measured rather than argued: locating a message inside
+/// its framing unit needs [`PassiveFrame::prefix_width`], which is not among
+/// the coordinates any consumption surface hands out. A door that returned an
+/// offset instead of the bytes would therefore ask every consumer to re-derive
+/// the framing rule — the SECOND reader of the same bytes this crate keeps
+/// removing (see [`FlowDissection::message_bytes`] on the copy that was not
+/// merely redundant but wrong about a batch).
+#[derive(Debug)]
+pub enum MessageBytes<'a> {
+    /// The bytes this message was decoded from, exactly as the field walker
+    /// received them: from the message's first byte to the end of the framing
+    /// unit it arrived in.
+    ///
+    /// Byte 0 is the message's byte 0, so a field span out of the `fields`
+    /// document — which is message-relative — indexes this slice directly. A
+    /// unit carrying a BATCH runs on past this message, and the next message of
+    /// that unit is the one whose `unit_offset` says where this one stops.
+    Retained(&'a [u8]),
+    /// The bytes are gone: a retention ceiling trimmed them, the list was
+    /// evicted, or the framing unit outlived the stream that survived. The
+    /// sentence says which.
+    ///
+    /// POSITIONAL and not structural — a newer message of the same list can
+    /// still answer, which is what separates this from [`NoByteSource`].
+    Retired(alloc::string::String),
+    /// This list never has bytes to hand back, and never will.
+    NoSource(NoByteSource),
+}
+
 /// R311y718 (§1.2a) — one recovered QUIC stream, framed as zenoh.
 ///
 /// The QUIC half of it — packet protection, frame walking, reassembly — is a
@@ -4004,6 +4082,94 @@ impl Dissection {
                 AnchorSpace::StreamBytes,
                 &self.serial_frames,
             )))
+    }
+
+    /// R2205 (open-debt item 560) — THE BYTES of one message of one list,
+    /// addressed the way [`Self::message_lists_with_origin`] names it.
+    ///
+    /// `index` is a position in the list that walk hands back, so it moves with
+    /// a trim exactly as the list does; a caller holding a stale one gets
+    /// [`MessageBytes::Retired`] rather than a neighbour's bytes.
+    ///
+    /// # Why the match is here and nowhere else
+    ///
+    /// Whether a list HAS bytes to hand back is a property of the producer, and
+    /// this crate has five. Answering per caller is how the same question gets
+    /// five answers that drift; answering here, over
+    /// [`MessageListOrigin`], makes the set closed — a producer added later
+    /// fails this match rather than falling through to a default that would
+    /// report "no bytes" for a list that has them.
+    ///
+    /// ⚠ EXHAUSTIVENESS IS DOMAIN AND NOT REACH. That a variant is answered
+    /// here does not mean any capture ever produced one; the witness that each
+    /// arm is REACHED is
+    /// `every_message_list_origin_is_reached_and_answered`, which drives all
+    /// five out of real dissections.
+    pub fn message_bytes_at(
+        &self,
+        flow: link::FlowKey,
+        origin: MessageListOrigin,
+        index: usize,
+    ) -> MessageBytes<'_> {
+        match origin {
+            MessageListOrigin::Stream => {
+                let Some(dissection) = self.flows.iter().find(|f| f.flow == flow) else {
+                    return MessageBytes::Retired(alloc::string::String::from(
+                        "the flow this message came out of is no longer held",
+                    ));
+                };
+                let Some(frame) = dissection.frames.get(index) else {
+                    return MessageBytes::Retired(alloc::string::String::from(
+                        "this message is no longer in its flow's list",
+                    ));
+                };
+                match dissection.message_bytes(frame) {
+                    Ok(bytes) => MessageBytes::Retained(bytes),
+                    Err(why) => MessageBytes::Retired(why),
+                }
+            }
+            // The cleartext datagram list and the recovered RFC 9221 one both
+            // anchor to a packet INDEX, and that index is the caller's own push
+            // ordinal. See [`NoByteSource::CallerHoldsThePacket`].
+            MessageListOrigin::Datagram | MessageListOrigin::QuicDatagram => {
+                MessageBytes::NoSource(NoByteSource::CallerHoldsThePacket)
+            }
+            MessageListOrigin::QuicStream(_) => {
+                MessageBytes::NoSource(NoByteSource::RecoveredPlaintextNotRetained)
+            }
+            // The serial line is the one producer whose bytes are retained
+            // WHOLE rather than as a stream: a serial link is datagram-flowed
+            // (`vendor/zenoh-pico/src/link/unicast/serial.c:67-68`), so one
+            // COBS frame carries one framing unit and this reader keeps it
+            // beside the message it decoded (`serial_origins`). The two lists
+            // are appended together in `decode_pending_serial` and nowhere
+            // else, which is what makes the index correspondence an invariant
+            // rather than a convention.
+            MessageListOrigin::Serial => {
+                let (Some(carrier), Some(frame)) = (
+                    self.serial_origins.get(index),
+                    self.serial_frames.get(index),
+                ) else {
+                    return MessageBytes::Retired(alloc::string::String::from(
+                        "this message is no longer in the serial line's list",
+                    ));
+                };
+                // The same slice `message_bytes` takes for a stream, with the
+                // unit being the frame's payload: from this message's first
+                // byte to the end of the unit. `prefix_width` is zero on this
+                // path -- a serial frame has no length prefix inside it -- so
+                // the message begins at `unit_offset`.
+                match carrier.payload.get(frame.unit_offset..frame.unit_len) {
+                    Some(bytes) => MessageBytes::Retained(bytes),
+                    None => MessageBytes::Retired(alloc::format!(
+                        "this message stands {} byte(s) into a unit of {} and the frame holds {}",
+                        frame.unit_offset,
+                        frame.unit_len,
+                        carrier.payload.len()
+                    )),
+                }
+            }
+        }
     }
 
     /// R311y661 (§1.2a) — the Decryption Secrets Blocks the capture file
@@ -13966,6 +14132,200 @@ mod tls_flow_tests {
             4,
             "an out-of-order packet must not walk the next coordinate BACK \
              onto one already spent"
+        );
+    }
+
+    /// R2205 (open-debt item 560) — the SUCCESSOR CHAIN over
+    /// [`MessageListOrigin`], so the set below is WALKED and not listed.
+    ///
+    /// The exhaustive `match` in [`Dissection::message_bytes_at`] is a domain
+    /// guarantee and nothing more: it proves every variant has an answer, and
+    /// says nothing about any of them ever being produced. This chain is the
+    /// other half — a producer added later has to be placed in it before this
+    /// file compiles, and the test that drives it then demands a real
+    /// dissection that reaches the new variant.
+    ///
+    /// `QuicStream` carries the stream's own id and every other variant is a
+    /// unit, so the chain names one representative id. The classification
+    /// ignores it, which
+    /// `every_message_list_origin_is_reached_and_answered` re-checks by
+    /// reaching that arm with an id this chain does not name.
+    fn next_origin(origin: MessageListOrigin) -> Option<MessageListOrigin> {
+        match origin {
+            MessageListOrigin::Stream => Some(MessageListOrigin::Datagram),
+            MessageListOrigin::Datagram => Some(MessageListOrigin::QuicStream(0)),
+            MessageListOrigin::QuicStream(_) => Some(MessageListOrigin::QuicDatagram),
+            MessageListOrigin::QuicDatagram => Some(MessageListOrigin::Serial),
+            MessageListOrigin::Serial => None,
+        }
+    }
+
+    /// The chain above, as the SET it walks. `QuicStream` is compared without
+    /// its id — two recovered streams are the same producer.
+    fn origin_class(origin: MessageListOrigin) -> &'static str {
+        match origin {
+            MessageListOrigin::Stream => "stream",
+            MessageListOrigin::Datagram => "datagram",
+            MessageListOrigin::QuicStream(_) => "quic-stream",
+            MessageListOrigin::QuicDatagram => "quic-datagram",
+            MessageListOrigin::Serial => "serial",
+        }
+    }
+
+    /// R2205 (open-debt item 560) — EVERY message list this reader can produce
+    /// is reached by a real dissection, and the byte door's answer for it
+    /// agrees with the coordinate space the SAME walk reports.
+    ///
+    /// # What makes this more than the exhaustive match
+    ///
+    /// Three things, and each is a different way the door could be wrong:
+    ///
+    /// 1. REACH. The population is the successor chain over
+    ///    [`MessageListOrigin`], not the origins this corpus happens to
+    ///    produce. An origin nobody reaches FAILS — there is no exemption
+    ///    table, because all five are reachable and a table would be the place
+    ///    a sixth quietly went to sleep.
+    /// 2. AGREEMENT ACROSS TWO INDEPENDENT MATCHES. The door decides whether a
+    ///    list has bytes; `message_lists_with_origin` decides which coordinate
+    ///    space its anchors are in. They are different matches in different
+    ///    places, and the relation between them is exact:
+    ///    `CallerHoldsThePacket` if and only if the anchors are packet indices.
+    ///    A misclassification moves one side and not the other.
+    /// 3. THE BYTES ARE THE MESSAGE'S. Every slice handed back is walked again
+    ///    by the decoder, and the kind it yields must be the kind the frame in
+    ///    the list already carries. An off-by-one in the slice arithmetic, or a
+    ///    frame matched by the wrong coordinates, fails here and passes
+    ///    everything above.
+    #[test]
+    fn every_message_list_origin_is_reached_and_answered() {
+        use crate::datagram_tests::{framed_keepalive, tcp_packet, tcp_packet_reverse, udp_packet};
+        use wz_session_core::serial_link::{encode_frame, SERIAL_FLAG_INIT};
+
+        const SERIAL_LINKTYPE: u32 = 250;
+        let keepalive = alloc::vec![wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        let unit = framed_keepalive();
+
+        let mut d = Dissection::new();
+        // Declared rather than sniffed, exactly as `--serial` does it. The
+        // field is this crate's own, and a test in this module is the one
+        // caller that can set it without a capture file.
+        d.declared_serial_linktypes = alloc::vec![SERIAL_LINKTYPE];
+
+        // 1 — the STREAM list: a TCP flow, both directions, one framed message
+        // each so the flow has a session to decode under.
+        d.push_packet(LINKTYPE_ETHERNET, 0, &tcp_packet(1000, &unit));
+        d.push_packet(LINKTYPE_ETHERNET, 1, &tcp_packet_reverse(1000, &unit));
+
+        // 2 — the cleartext DATAGRAM list, which is also the flow the two QUIC
+        // lists are recovered from.
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            2,
+            &udp_packet([10, 0, 0, 1], 43210, [10, 0, 0, 2], 7447, &keepalive),
+        );
+        let flow = d.datagram_flows()[0].flow;
+
+        // 3 and 4 — the two RECOVERED lists. Fed rather than pushed, because
+        // this crate carries no cipher: what a caller hands in is the plaintext
+        // it decrypted, which is precisely why those bytes are not retained.
+        // The stream id is not the one `next_origin` names, so the arm is
+        // reached with a value the chain never mentions.
+        d.feed_quic_stream(flow, Direction::A, 7, false, &unit);
+        d.feed_quic_datagram(flow, Direction::A, 3, &keepalive);
+
+        // 5 — the SERIAL line. The INIT is the LINK's own handshake: it is
+        // counted, not decoded, and what it does here is settle which wire is
+        // which so the line stops holding its frames back.
+        d.push_packet_on(
+            SERIAL_LINKTYPE,
+            4,
+            0,
+            None,
+            &encode_frame(SERIAL_FLAG_INIT, &[]).expect("a handshake frame encodes"),
+        );
+        d.push_packet_on(
+            SERIAL_LINKTYPE,
+            5,
+            0,
+            None,
+            &encode_frame(0, &keepalive).expect("a one-message frame encodes"),
+        );
+        d.finish();
+
+        // The walk, and what each origin ANSWERED.
+        let mut reached: alloc::vec::Vec<&'static str> = alloc::vec::Vec::new();
+        let mut retained = 0usize;
+        for (flow, origin, space, list) in d.message_lists_with_origin() {
+            if list.is_empty() {
+                continue;
+            }
+            reached.push(origin_class(origin));
+            for index in 0..list.len() {
+                let answer = d.message_bytes_at(flow, origin, index);
+                // (2) — the two matches, held to each other in BOTH directions.
+                let says_packet = matches!(
+                    answer,
+                    MessageBytes::NoSource(NoByteSource::CallerHoldsThePacket)
+                );
+                assert_eq!(
+                    says_packet,
+                    space == AnchorSpace::PacketIndex,
+                    "the byte door and the anchor space disagree about \
+                     {}: the door says {:?} and the space is {space:?}. One \
+                     of the two matches has been edited without the other",
+                    origin_class(origin),
+                    answer
+                );
+                // (3) — the slice really is this message's.
+                if let MessageBytes::Retained(bytes) = answer {
+                    retained += 1;
+                    let walked =
+                        wz_session_core::inbound::parse_inbound(bytes).unwrap_or_else(|e| {
+                            panic!(
+                                "the bytes handed back for {} #{index} do not \
+                                 decode as the message they were sliced for: \
+                                 {e:?}",
+                                origin_class(origin)
+                            )
+                        });
+                    let expected = list[index]
+                        .frame
+                        .as_ref()
+                        .expect("this corpus decodes every message it pushes")
+                        .kind_code();
+                    assert_eq!(
+                        walked.kind_code(),
+                        expected,
+                        "re-walking the bytes handed back for {} #{index} \
+                         yields a different message than the one in the list",
+                        origin_class(origin)
+                    );
+                }
+            }
+        }
+
+        // (1) — REACH, against the chain and not against what turned up.
+        let mut expected = alloc::vec::Vec::new();
+        let mut walk = Some(MessageListOrigin::Stream);
+        while let Some(origin) = walk {
+            expected.push(origin_class(origin));
+            walk = next_origin(origin);
+        }
+        reached.sort_unstable();
+        reached.dedup();
+        let mut want = expected.clone();
+        want.sort_unstable();
+        assert_eq!(
+            reached, want,
+            "every message-list producer must be REACHED by this corpus and \
+             answered by the byte door. An exhaustive match proves each has an \
+             answer and proves nothing about any of them existing"
+        );
+        assert!(
+            retained >= 2,
+            "at least two producers hand bytes back (the reassembled stream \
+             and the serial line); a run where none did would pass every \
+             assertion above over an empty population"
         );
     }
 }

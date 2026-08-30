@@ -25,6 +25,16 @@
  *     wz_dissect_live_close. It is not thread-safe. Use one handle from one
  *     thread at a time, and open a handle per tap rather than sharing one.
  *
+ * R2205 (ABI 14) DID NOT REVISE IT AGAIN, and that is stated here rather than
+ * left to be inferred, because wz_dissect_live_message_bytes is the first door
+ * in this file handing back something that is neither a char* nor a
+ * fixed-layout record -- so it is the one a reader would expect to have moved
+ * the rule. BYTES ARE NOT A STRING: wz_dissect_string_free is not their shape,
+ * and a door that allocated them would have added a second thing to give back.
+ * It hands them into a buffer YOU own and sized instead, exactly as
+ * wz_dissect_live_drain hands records, so the three clauses above stand word
+ * for word. Nothing new crosses this boundary allocated.
+ *
  * WHY IT COULD NOT STAY: a live tap is a dissection kept alive between
  * packets. A door that could not keep one would re-read the whole link on
  * every call, which is not a tap, it is a file read repeated. Widening the
@@ -410,6 +420,18 @@ extern "C" {
  * which box to send them back to would be answering neither. Call
  * wz_dissect_declarations_diagnose to learn which line and why. */
 #define WZ_DISSECT_ERR_DECLARATION (-5)
+/* R2205 -- the message's bytes are GONE from this reader. A retention ceiling
+ * trimmed them, the list was evicted, or the record names a message this
+ * handle no longer holds. POSITIONAL: a NEWER message of the same list still
+ * answers, so grey this one out and carry on. */
+#define WZ_DISSECT_ERR_BYTES_RETIRED (-6)
+/* R2205 -- this message's list NEVER hands back bytes, and the difference from
+ * the code above is the one a caller acts on: retry versus never. Two lists
+ * are in it, each for a stated reason -- one anchors to a PACKET index, so you
+ * are already holding the bytes (`anchor` is your own push ordinal and
+ * `unit_offset` the place inside it), and one was recovered from an encrypted
+ * transport, walked while the plaintext was alive and never retained. */
+#define WZ_DISSECT_ERR_NO_BYTE_SOURCE (-7)
 
 /* R311y887 -- LIMIT PRESETS, for the doors that take one as an argument.
  *
@@ -1176,6 +1198,77 @@ int wz_dissect_live_drain(wz_dissect_live *h, wz_dissect_record *out,
  * a bounded read that could not say so would be reporting a floor as a
  * total. `0` for a null handle. */
 uint64_t wz_dissect_live_lost(const wz_dissect_live *h);
+
+/* ── R2205 (ABI 14) — THE BYTES UNDER THE DESCRIPTION ────────────────────
+ *
+ * Every other output of this library DESCRIBES what was decoded: a document
+ * naming the fields, or a record saying that a message arrived, when, on which
+ * flow. A consumer rendering the message ITSELF -- a hex view with the field
+ * the reader picked lit up inside it -- needs the bytes under that
+ * description, and until this door existed no symbol here handed any back.
+ * Measured before it was written: of the entry points this file declares, ZERO
+ * took an `unsigned char *` out parameter or returned one.
+ *
+ * HALF OF THAT GAP WAS NEVER OURS, and this door says which half by name. A
+ * record whose `anchor_space` is WZ_DISSECT_ANCHOR_PACKET names a packet YOU
+ * pushed, and `unit_offset` says where inside it the message stands -- so
+ * those bytes are already in your hands, and asking for them here is
+ * WZ_DISSECT_ERR_NO_BYTE_SOURCE rather than a copy of what you are holding.
+ * The half that was ours is WZ_DISSECT_ANCHOR_STREAM_BYTES: that coordinate is
+ * an offset into a stream THIS READER reassembled out of many packets, and a
+ * consumer has no such stream to index.
+ *
+ * WHY IT TAKES THE RECORD AND NOT A SPAN. The obvious door is
+ * `(list_id, direction, start, end)`, and it cannot be written: finding a
+ * message inside its framing unit needs the width of the length prefix, and no
+ * coordinate this ABI publishes carries it -- `anchor` names the PREFIX, not
+ * the body behind it. A span door would therefore hand every consumer the job
+ * of re-deriving this library's framing rule out of numbers that cannot
+ * express it, which is the second decoder this whole ABI exists to avoid.
+ * Passing the record back costs you nothing -- it is the value you just
+ * drained -- and it makes an unanswerable question unaskable: there is no way
+ * to name a range that is not a message.
+ *
+ * WHAT COMES BACK is the slice the field walker itself was handed: from the
+ * message's first byte to the end of the framing unit it arrived in. Byte 0 is
+ * the message's byte 0, so a span out of the `fields` document -- which is
+ * message-relative -- indexes this buffer directly, with no arithmetic in
+ * between. A unit carrying a BATCH runs on past this message; what bounds it is
+ * the next record sharing this one's `list_id`, `direction` and `anchor`, whose
+ * `unit_offset` is where this message stops. That trailing region is
+ * deliberately not trimmed away -- the difference between what the walk covered
+ * and what the wire carried is the one thing a hex view is for.
+ *
+ * SIZING, and it never truncates. `needed` always receives the message's full
+ * length. When `cap` is at least that, `out` holds the bytes; when it is less,
+ * NOTHING is written -- size and call again. You know your own `cap`, so
+ * `cap >= *needed` IS the answer to "did it write", and there is nothing
+ * ambiguous to tell apart. `out` may be null when `cap` is zero, which is how
+ * you ask for the length alone.
+ *
+ *     size_t n;
+ *     if (wz_dissect_live_message_bytes(h, &rec, NULL, 0, &n) == WZ_DISSECT_OK) {
+ *         unsigned char *buf = malloc(n);
+ *         wz_dissect_live_message_bytes(h, &rec, buf, n, &n);
+ *         ...                          // render buf[0..n]
+ *         free(buf);                   // YOURS. Nothing here to give back.
+ *     }
+ *
+ * READ THE MEMORY RULE AT THE TOP OF THIS FILE. This door adds nothing to it:
+ * the bytes go into a buffer you own, so there is no new thing to release and
+ * no callback. The R2205 paragraph there says so in the rule's own words.
+ *
+ * The record must be one THIS handle drained. A record from another handle
+ * names coordinates in another handle's spaces and is answered
+ * WZ_DISSECT_ERR_BYTES_RETIRED -- a miss, never another message's bytes.
+ *
+ * @bound cap buffer-capacity -- the size of YOUR array. This library imposes
+ * nothing by it and discards nothing for it: below the length it writes
+ * nothing at all, and `needed` says how much there is. */
+int wz_dissect_live_message_bytes(const wz_dissect_live *h,
+                                  const wz_dissect_record *record,
+                                  unsigned char *out, size_t cap,
+                                  size_t *needed);
 
 /* Release a live handle. Null is a no-op, so your cleanup path needs no
  * guard of its own -- the same rule wz_dissect_string_free follows, and the
