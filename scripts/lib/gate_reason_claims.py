@@ -191,9 +191,11 @@ BUDGET = {
     # `network/request.rs`, plus expression-shaped citations like
     # `n.to_bytes_le()` and `QoSType::{D_FLAG, F_FLAG}`.
     "dissect_name_census.py": 9,
-    # A regex fragment interpolated into another pattern rather than passed to
-    # `re` directly, so the REGEX arm cannot see it.
-    "expired_blocker_lint.py": 1,
+    # R2215 — `expired_blocker_lint.py` LEFT this table. Its `IDENT` was never
+    # a citation at all: it is a regex fragment CONCATENATED into
+    # `ABSENCE_PATTERNS`, which a comprehension hands to `re.compile`. The
+    # REGEX arm now follows both hops, so the table is classified rather than
+    # budgeted -- which is the difference between an answer and a note.
     # R2214 — `verdict_leg_mutation.py` LEFT this table too, and not because an
     # arm was added: its citation was STALE. It named `link::strip_transport`,
     # which this tree has never held; the function that returns the
@@ -340,15 +342,99 @@ def selftest_closure(tree: ast.Module) -> set[str]:
     return closure
 
 
-def _regex_tables(tree: ast.Module, assigns: dict[str, ast.Assign]) -> set[str]:
+def _composed_names(value: ast.AST, pool: set[str]) -> set[str]:
+    """Module names used to BUILD a string: `+`, `%`, an f-string, format, join.
+
+    R2215 — deliberately narrower than "appears anywhere in the initialiser".
+    A pattern assembled out of a fragment is composing it; a pattern that
+    SUBSCRIPTS or CALLS a table is merely reading one, and treating that as
+    composition would let an ordinary reason table be re-classified REGEX and
+    stop having its claims checked. That is a false pass, and it is the one
+    direction this classifier must not fail in.
+
+    MEASURED: over the tree the round it was written, the narrow rule and the
+    wide one give the SAME answer -- four regex tables become five, and the
+    fifth is `expired_blocker_lint.py`'s `IDENT`. So the narrowness costs
+    nothing today and is what keeps the arm's scope from drifting.
+    """
     out: set[str] = set()
-    for name, node in assigns.items():
-        for sub in ast.walk(node.value):
-            if _is_re_call(sub):
-                out.add(name)
+    for node in ast.walk(value):
+        if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Mod)):
+            out |= _loads(node, pool)
+        elif isinstance(node, ast.JoinedStr):
+            out |= _loads(node, pool)
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in {"format", "join"}
+        ):
+            out |= _loads(node, pool)
+    return out
+
+
+def _iteration_binds(tree: ast.Module, pool: set[str]) -> dict[str, set[str]]:
+    """Local name -> the module tables it iterates over.
+
+    `[re.compile(p) for p in ABSENCE_PATTERNS]` compiles a table without ever
+    naming it at the call, so a check that reads only `re.*`'s argument sees a
+    LOCAL and stops. The binding is what carries it back to the table.
+    """
+    binds: dict[str, set[str]] = {}
     for node in ast.walk(tree):
-        if _is_re_call(node) and node.args:
-            out |= _loads(node.args[0], set(assigns))
+        target = iterable = None
+        if isinstance(node, ast.comprehension):
+            target, iterable = node.target, node.iter
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            target, iterable = node.target, node.iter
+        if isinstance(target, ast.Name) and iterable is not None:
+            binds.setdefault(target.id, set()).update(_loads(iterable, pool))
+    return binds
+
+
+def _regex_tables(tree: ast.Module, assigns: dict[str, ast.Assign]) -> set[str]:
+    """Every module table that IS a regular expression, by dataflow.
+
+    Three seeds and one closure. A table is a pattern when its own initialiser
+    calls `re`, when `re`'s pattern argument names it, or when that argument
+    names a LOCAL that iterates over it -- and then, transitively, so is every
+    fragment COMPOSED into a pattern.
+
+    R2215 — the closure is the half that was missing, and item 566's budget
+    named the cost: `expired_blocker_lint.py`'s `IDENT` is a fragment
+    concatenated into `ABSENCE_PATTERNS`, which a comprehension compiles. Two
+    hops, neither of them visible to a check that reads only the call.
+    """
+    pool = set(assigns)
+    seeds: set[str] = set()
+    for name, node in assigns.items():
+        if any(_is_re_call(sub) for sub in ast.walk(node.value)):
+            seeds.add(name)
+    binds = _iteration_binds(tree, pool)
+    for node in ast.walk(tree):
+        if not (_is_re_call(node) and node.args):
+            continue
+        argument = node.args[0]
+        # The argument IS the table, or COMPOSES it. Not "mentions it": R2215's
+        # own selftest control caught this seed reading `re.compile(REASONS[k])`
+        # as proof that `REASONS` is a pattern, which would have exempted an
+        # ordinary reason table from ever having its claims checked.
+        if isinstance(argument, ast.Name) and argument.id in pool:
+            seeds.add(argument.id)
+        seeds |= _composed_names(argument, pool)
+        for sub in ast.walk(argument):
+            if isinstance(sub, ast.Name) and sub.id in binds:
+                seeds |= binds[sub.id]
+    out = set(seeds)
+    stack = list(seeds)
+    while stack:
+        name = stack.pop()
+        node = assigns.get(name)
+        if node is None:
+            continue
+        for fragment in _composed_names(node.value, pool):
+            if fragment not in out:
+                out.add(fragment)
+                stack.append(fragment)
     return out
 
 
@@ -546,6 +632,38 @@ def selftest() -> int:
     if got.get("PAT") != "REGEX":
         return fail(f"a regex read only from the selftest was classed {got.get('PAT')!r}")
 
+    # R2215 — the two hops the REGEX arm has to follow. A fragment is
+    # CONCATENATED into a table, and a comprehension hands that table to
+    # `re.compile`, so neither the fragment nor the table is ever named at the
+    # call. This is `expired_blocker_lint.py`'s real shape.
+    two_hops = (
+        "import re\n"
+        "FRAG = r'`(z_[a-z]*)`'\n"
+        # The table carries a backtick of its OWN as well, so both it and the
+        # fragment are in the population and both verdicts are asserted.
+        "PATTERNS = [FRAG + r' is not declared', r'no `exported` ' + FRAG]\n"
+        "def main():\n"
+        "    return [re.compile(p) for p in PATTERNS]\n"
+    )
+    got = _classes(two_hops)
+    if got.get("FRAG") != "REGEX":
+        return fail(f"a fragment concatenated into a compiled table was {got.get('FRAG')!r}")
+    if got.get("PATTERNS") != "REGEX":
+        return fail(f"a table a comprehension compiles was {got.get('PATTERNS')!r}")
+
+    # The NARROWNESS control: a pattern that merely READS a table is not
+    # composing one, and the table must keep having its claims checked.
+    subscripted = (
+        "import re\n"
+        "REASONS = {'k': 'cites `something`'}\n"
+        "PAT = re.compile(REASONS['k'])\n"
+        "def main():\n"
+        "    return PAT\n"
+    )
+    got = _classes(subscripted)
+    if got.get("REASONS") == "REGEX":
+        return fail("a table a pattern SUBSCRIPTS was exempted as a regex")
+
     # A fixture assembled into ANOTHER fixture at module level: the direct
     # reader is `<module>`, and only following the chain reaches the closure.
     chained = (
@@ -609,7 +727,7 @@ def selftest() -> int:
         if INVENTORY_GLOB.match(other):
             return fail(f"{other!r} was claimed by the inventory-glob shape")
 
-    print("gate-reason-claims: selftest OK (13 derivations driven)")
+    print("gate-reason-claims: selftest OK (16 derivations driven)")
     return 0
 
 
