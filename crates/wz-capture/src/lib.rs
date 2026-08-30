@@ -6380,6 +6380,134 @@ mod datagram_tests {
         d
     }
 
+    /// R2211 (open-debt item 565) — the establishment `0x7 Patch` offer, at a
+    /// level the caller names.
+    ///
+    /// Fragment chain-boundary markers are ARMED by the negotiated level and
+    /// by nothing else (`extpatch::has_fragmentation_markers`, zenoh
+    /// `PatchType`), and the negotiation is a `min()` over BOTH Inits — so a
+    /// fixture that wants the markers honoured has to put this on both.
+    #[cfg(feature = "reassembly")]
+    fn patch_offer(level: u64) -> Vec<u8> {
+        let entry: wz_codecs::ext_entry::ExtEntryOwned = wz_codecs::ext_entry::ExtEntryOwned {
+            header: wz_session_core::extpatch::PATCH_EXT_ID
+                | wz_session_core::ext_header::EXT_ENC_Z64,
+            body: wz_codecs::ext_entry::ExtEntryOwnedVariant::CodecZenohExtZint(
+                wz_codecs::ext_zint::ExtZint { value: level },
+            ),
+        };
+        entry.as_borrowed().encode_to_vec()
+    }
+
+    /// R2211 (open-debt item 565) — a Fragment's own ext chain carrying the
+    /// chain-boundary markers the caller asks for.
+    ///
+    /// The ENTRIES come from `extfragment`'s own encoders rather than from
+    /// header bytes written here: they are the SSOT for the two ids, and a
+    /// fixture that spelled `0x02` itself would keep passing if that SSOT
+    /// moved. Only the chain-continuation `Z` bit is applied here, because
+    /// `ext_chain::encode_ext_chain` — which owns it for the production
+    /// encoders — is `pub(crate)` to the crate one layer down.
+    #[cfg(feature = "reassembly")]
+    fn marker_chain(first: bool, dropped: bool) -> Vec<u8> {
+        let mut entries: Vec<wz_codecs::ext_entry::ExtEntryOwned> = Vec::new();
+        if first {
+            entries.push(wz_session_core::extfragment::encode_fragment_first_ext());
+        }
+        if dropped {
+            entries.push(wz_session_core::extfragment::encode_fragment_drop_ext());
+        }
+        let mut out = Vec::new();
+        for (i, entry) in entries.iter().enumerate() {
+            let mut bytes = entry.as_borrowed().encode_to_vec();
+            if i + 1 < entries.len() {
+                bytes[0] |= wz_session_core::ext_header::EXT_FLAG_Z;
+            }
+            out.extend_from_slice(&bytes);
+        }
+        out
+    }
+
+    /// R2211 (open-debt item 565) — a capture whose session NEGOTIATED the
+    /// patch level, followed by fragments carrying the chain-boundary markers
+    /// the caller describes.
+    ///
+    /// Each descriptor is `(sn, more, first, drop)`. The handshake is the same
+    /// four datagrams [`reassembled_record_dissection`] uses, plus the `0x7`
+    /// offer on both Inits — without which the router leaves the marker rules
+    /// disarmed and every outcome this fixture exists to produce becomes an
+    /// ordinary chain start.
+    ///
+    /// Payload bytes are arbitrary and the chains are not meant to COMPLETE:
+    /// what this fixture is for is the outcomes a chain reaches on its way,
+    /// which is precisely the half the aggregation plane used to discard.
+    /// The dissection alone, for the callers that never re-read the file.
+    #[cfg(feature = "reassembly")]
+    pub(crate) fn marked_fragment_dissection(fragments: &[(u8, bool, bool, bool)]) -> Dissection {
+        marked_fragment_dissection_with_file(fragments).0
+    }
+
+    /// R2211 (open-debt item 565) — the same capture WITH its file bytes, which
+    /// the field document needs: a datagram flow has no stream to hold the
+    /// message, so `fields_json` re-reads each packet out of the capture and
+    /// renders nothing at all without one.
+    #[cfg(feature = "reassembly")]
+    pub(crate) fn marked_fragment_dissection_with_file(
+        fragments: &[(u8, bool, bool, bool)],
+    ) -> (Dissection, Vec<u8>) {
+        let fragment = |sn: u8, more: bool, first: bool, dropped: bool| {
+            let chain = marker_chain(first, dropped);
+            let mut wire = alloc::vec![
+                wz_session_core::wire_const::T_MID_FRAGMENT
+                    | wz_codecs::wire_const::FLAG_T_FRAGMENT_R
+                    | if more {
+                        wz_codecs::wire_const::FLAG_T_FRAGMENT_M
+                    } else {
+                        0
+                    }
+                    | if chain.is_empty() {
+                        0
+                    } else {
+                        wz_codecs::wire_const::FLAG_T_Z
+                    },
+                sn,
+            ];
+            // Header, VLE sn, Z-gated ext chain, tail payload — the order
+            // `inbound::parse_inbound`'s Fragment arm reads, which is what a
+            // fixture has to agree with rather than the order it would guess.
+            wire.extend_from_slice(&chain);
+            wire.extend_from_slice(&[0xDE, 0xAD]);
+            wire
+        };
+        let patch = patch_offer(wz_session_core::extpatch::CURRENT_PATCH as u64);
+        let mut messages = alloc::vec![
+            (true, init_datagram(false, &patch)),
+            (false, init_datagram(true, &patch)),
+            (true, open_datagram(false)),
+            (false, open_datagram(true)),
+        ];
+        for (sn, more, first, dropped) in fragments {
+            messages.push((true, fragment(*sn, *more, *first, *dropped)));
+        }
+        let mut d = Dissection::new();
+        let mut packets: Vec<(u32, u32, Vec<u8>)> = Vec::new();
+        for (i, (from_low, message)) in messages.into_iter().enumerate() {
+            let packet = if from_low {
+                udp_packet([10, 0, 0, 1], 43210, [10, 0, 0, 2], 7447, &message)
+            } else {
+                udp_packet([10, 0, 0, 2], 7447, [10, 0, 0, 1], 43210, &message)
+            };
+            d.push_packet(LINKTYPE_ETHERNET, i, &packet);
+            packets.push((i as u32, 0, packet));
+        }
+        let refs: Vec<(u32, u32, &[u8])> = packets
+            .iter()
+            .map(|(s, u, b)| (*s, *u, b.as_slice()))
+            .collect();
+        let file = crate::pcap::write(LINKTYPE_ETHERNET, &refs);
+        (d, file)
+    }
+
     /// R311y621 (§1.4i) — a capture that STARTED MID-SESSION: a Fragment and no
     /// InitAck before it.
     ///

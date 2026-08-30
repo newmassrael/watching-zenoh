@@ -529,6 +529,53 @@ mod tests {
     /// over a capture whose rows never rendered — a pin taken on a shape that
     /// only exists in that build.
     #[cfg(feature = "network-codecs")]
+    /// R2211 (open-debt item 565) — THE MARKER NAMES REACH THE FIELD DOCUMENT,
+    /// and this is the half of that item that was already true.
+    ///
+    /// # Why nobody could see it
+    ///
+    /// Item 565 was filed as "the `First` / `Drop` markers do not go out to the
+    /// consumption surface", on a sweep that read `fields_json.rs`,
+    /// `census_json.rs` and `doc_revision.rs` for the words. Neither emitter
+    /// spells them and no document key is named for them, so the sweep found an
+    /// absence — and the names were arriving all along, from
+    /// `ext_name::FRAGMENT`'s rows (`0x2 -> "first"`, `0x3 -> "drop"`) through
+    /// `dissect::walk_ext_entry`, which pushes the row's name as an `ext_name`
+    /// FIELD. A value, in a tree, produced by a table one crate over: the one
+    /// shape a grep for the word cannot reach.
+    ///
+    /// So this test exists to make the fact ASKABLE rather than re-derivable.
+    /// The half that genuinely had no surface — what the markers CAUSED — is
+    /// the census's `fragment_chains` object, added the same round.
+    ///
+    /// # The control
+    ///
+    /// The same fixture with no ext chain at all. It must render neither name,
+    /// or this test would pass on a document that names every extension it has
+    /// ever heard of regardless of what the capture carried.
+    #[cfg(feature = "reassembly")]
+    #[test]
+    fn a_fragments_chain_boundary_markers_are_named_in_the_field_document() {
+        let (d, file) =
+            crate::datagram_tests::marked_fragment_dissection_with_file(&[(0, true, true, true)]);
+        let doc = fields_json(&d, &file, None, None);
+        assert!(
+            doc.contains("\"first\""),
+            "the `0x2 First` marker must reach the field document by NAME: {doc}"
+        );
+        assert!(doc.contains("\"drop\""), "and so must `0x3 Drop`: {doc}");
+
+        let (plain, plain_file) =
+            crate::datagram_tests::marked_fragment_dissection_with_file(&[(0, true, false, false)]);
+        let control = fields_json(&plain, &plain_file, None, None);
+        assert!(
+            !control.contains("\"first\"") && !control.contains("\"drop\""),
+            "a Fragment carrying no ext chain must name neither, or the \
+             assertion above is about the emitter's vocabulary rather than \
+             about this capture: {control}"
+        );
+    }
+
     #[test]
     fn the_field_documents_key_set_is_pinned() {
         use crate::payload::formats::FormatMap;

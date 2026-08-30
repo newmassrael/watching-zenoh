@@ -2247,6 +2247,27 @@ impl<'a> CaptureReport<'a> {
                     g.halted_batches, g.unparsed_bytes, g.undecompressible_batches, g.unresolvable_fragments
                 ));
             }
+            // R2211 (open-debt item 565) — suppressed on QUIET rather than on
+            // clean, and the difference is the point: a healthy fragmented
+            // transfer sets `begun` and `completed` and is not a shortfall, so
+            // this line is not an UNREAD sibling. It appears whenever the
+            // capture carried chain activity at all.
+            let ch = t.chains();
+            if !ch.is_quiet() {
+                s.push_str(&format!(
+                    "  CHAINS: {} begun, {} continued, {} completed; aborted {} out-of-order, {} over capacity, {} sender-dropped, {} superseded; refused {} peer-quota, {} pool-exhausted, {} no-start-marker\n",
+                    ch.begun,
+                    ch.continued,
+                    ch.completed,
+                    ch.aborted_out_of_order,
+                    ch.aborted_capacity_overflow,
+                    ch.aborted_sender_dropped,
+                    ch.aborted_superseded,
+                    ch.refused_peer_quota,
+                    ch.refused_pool_exhausted,
+                    ch.refused_missing_start_marker
+                ));
+            }
             // Only where a selector was actually applied: an unfiltered report
             // would otherwise carry a line saying every record matched, which
             // is true and tells the reader nothing.
@@ -2547,6 +2568,10 @@ fn throughput_json(t: &ThroughputTable, s: &mut String) {
     ));
     s.push_str(",\"gaps\":");
     gaps_json(t.gaps(), s);
+    // R2211 (open-debt item 565) — beside the losses and not inside them: a
+    // fragment chain in progress is not traffic this table lost.
+    s.push_str(",\"fragment_chains\":");
+    chains_json(t.chains(), s);
     s.push_str(",\"selection\":");
     selection_json(t.selection(), s);
     // R311y642 (§1.1t) — the hierarchy beside the flat list, not instead of it.
@@ -2649,6 +2674,40 @@ fn gaps_json(g: ThroughputGaps, s: &mut String) {
     } = g;
     s.push_str(&format!(
         "{{\"halted_batches\":{halted_batches},\"unparsed_bytes\":{unparsed_bytes},\"undecompressible_batches\":{undecompressible_batches},\"unresolvable_fragments\":{unresolvable_fragments}}}"
+    ));
+}
+
+/// R2211 (open-debt item 565) — what the Fragment `First` / `Drop` markers did,
+/// read by DESTRUCTURING on exactly [`gaps_json`]'s argument.
+///
+/// The observer computes every one of these and, until this round, the
+/// aggregation plane discarded the whole outcome at its `Carried::Fragment`
+/// arm. The WIRE half of the same fact was never missing: `ext_name`'s
+/// `FRAGMENT` rows put `first` / `drop` on the field document already. What had
+/// no surface was the CONSEQUENCE — that a sender announced an abandon, that a
+/// restart stranded a prefix, that a reader joined mid-chain.
+fn chains_json(c: crate::agg::FragmentChains, s: &mut String) {
+    let crate::agg::FragmentChains {
+        begun,
+        continued,
+        completed,
+        aborted_out_of_order,
+        aborted_capacity_overflow,
+        aborted_sender_dropped,
+        aborted_superseded,
+        refused_peer_quota,
+        refused_pool_exhausted,
+        refused_missing_start_marker,
+    } = c;
+    s.push_str(&format!(
+        "{{\"begun\":{begun},\"continued\":{continued},\"completed\":{completed},\
+         \"aborted_out_of_order\":{aborted_out_of_order},\
+         \"aborted_capacity_overflow\":{aborted_capacity_overflow},\
+         \"aborted_sender_dropped\":{aborted_sender_dropped},\
+         \"aborted_superseded\":{aborted_superseded},\
+         \"refused_peer_quota\":{refused_peer_quota},\
+         \"refused_pool_exhausted\":{refused_pool_exhausted},\
+         \"refused_missing_start_marker\":{refused_missing_start_marker}}}"
     ));
 }
 

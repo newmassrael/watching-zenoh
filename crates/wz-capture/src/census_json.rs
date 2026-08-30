@@ -474,6 +474,8 @@ pub fn keyexprs_json(t: &ThroughputTable) -> String {
     push_selection(&t.selection(), true, &mut out);
     out.push(',');
     push_gaps(&t.gaps(), &mut out);
+    out.push(',');
+    push_chains(&t.chains(), &mut out);
     out.push('}');
     out
 }
@@ -822,12 +824,55 @@ fn push_gaps(g: &ThroughputGaps, out: &mut String) {
     push_gaps_named(g, "gaps", out);
 }
 
+/// R2211 — by DESTRUCTURING, the rule `report::gaps_json` states at length and
+/// this twin did not follow: a field added to [`ThroughputGaps`] kept compiling
+/// here and this document kept omitting it, silently, in the one place whose
+/// whole purpose is that losses are never silent. Repaired in the round that
+/// added a sibling object beside it rather than left as a second seam.
 fn push_gaps_named(g: &ThroughputGaps, key: &str, out: &mut String) {
+    let ThroughputGaps {
+        halted_batches,
+        unparsed_bytes,
+        undecompressible_batches,
+        unresolvable_fragments,
+    } = *g;
     let _ = write!(
         out,
-        "\"{key}\":{{\"halted_batches\":{},\"unparsed_bytes\":{},\
-         \"undecompressible_batches\":{},\"unresolvable_fragments\":{}}}",
-        g.halted_batches, g.unparsed_bytes, g.undecompressible_batches, g.unresolvable_fragments
+        "\"{key}\":{{\"halted_batches\":{halted_batches},\"unparsed_bytes\":{unparsed_bytes},\
+         \"undecompressible_batches\":{undecompressible_batches},\
+         \"unresolvable_fragments\":{unresolvable_fragments}}}"
+    );
+}
+
+/// R2211 (open-debt item 565) — what the Fragment `First` / `Drop` markers did,
+/// on the same destructuring rule as the object above and for the same reason.
+///
+/// Emitted STRUCTURALLY, every field whatever its value, because a consumer's
+/// field lookup must not depend on whether this capture happened to carry a
+/// fragmented transfer — the rule `selection_json` states for the selector.
+fn push_chains(c: &crate::agg::FragmentChains, out: &mut String) {
+    let crate::agg::FragmentChains {
+        begun,
+        continued,
+        completed,
+        aborted_out_of_order,
+        aborted_capacity_overflow,
+        aborted_sender_dropped,
+        aborted_superseded,
+        refused_peer_quota,
+        refused_pool_exhausted,
+        refused_missing_start_marker,
+    } = *c;
+    let _ = write!(
+        out,
+        "\"fragment_chains\":{{\"begun\":{begun},\"continued\":{continued},\
+         \"completed\":{completed},\"aborted_out_of_order\":{aborted_out_of_order},\
+         \"aborted_capacity_overflow\":{aborted_capacity_overflow},\
+         \"aborted_sender_dropped\":{aborted_sender_dropped},\
+         \"aborted_superseded\":{aborted_superseded},\
+         \"refused_peer_quota\":{refused_peer_quota},\
+         \"refused_pool_exhausted\":{refused_pool_exhausted},\
+         \"refused_missing_start_marker\":{refused_missing_start_marker}}}"
     );
 }
 
@@ -1604,6 +1649,87 @@ pub(crate) mod fed_tests {
     /// the header's line the change is on. It is `capi_abi_pin.py`'s shape one
     /// layer in: that pins the symbol set against the revision, this pins the
     /// document the symbols hand back.
+    /// R2211 (open-debt item 565) — A SENDER THAT ABANDONS A CHAIN SAYS SO IN
+    /// THE DOCUMENT, and is not filed under the receiver's inference.
+    ///
+    /// Both halves matter and they are different facts. `aborted_sender_dropped`
+    /// is a HEALTHY sender whose TX pipeline could not obtain a batch
+    /// mid-fragmentation; `aborted_out_of_order` is a LOSSY LINK. A consumer
+    /// drawing a link-health view acts on one and not the other, and a document
+    /// that summed them would be reporting a fault where there is none — which
+    /// is why the control below asserts the out-of-order counter stayed at zero
+    /// rather than only asserting the drop counter moved.
+    ///
+    /// The marker reaches the wire through `extfragment`'s own encoders and the
+    /// session negotiates the patch level that arms it, so what this measures
+    /// is the whole path: decode, projection, router verdict, fold, emit.
+    #[cfg(feature = "reassembly")]
+    #[test]
+    fn a_sender_that_abandons_a_chain_is_counted_apart_from_a_lossy_link() {
+        let d = crate::datagram_tests::marked_fragment_dissection(&[
+            // A chain start, marked. Then the sender says it is not finishing.
+            (0, true, true, false),
+            (1, true, false, true),
+        ]);
+        let doc = census_json_where(&d, &crate::filter::Filter::any());
+        assert!(
+            doc.contains("\"begun\":1"),
+            "the marked fragment starts a chain: {doc}"
+        );
+        assert!(
+            doc.contains("\"aborted_sender_dropped\":1"),
+            "the `0x3 Drop` marker must reach the document: {doc}"
+        );
+        assert!(
+            doc.contains("\"aborted_out_of_order\":0"),
+            "and must NOT be filed as a lossy link: {doc}"
+        );
+        assert!(
+            doc.contains("\"refused_missing_start_marker\":0"),
+            "nor as a reader that joined mid-chain: {doc}"
+        );
+    }
+
+    /// R2211 (open-debt item 565) — A READER THAT JOINED MID-CHAIN IS NOT A
+    /// RESOURCE SHORTFALL.
+    ///
+    /// With the markers armed, a fragment that would START a chain and carries
+    /// no `0x2 First` is refused. For an OBSERVER that is the ordinary shape of
+    /// attaching to a live flow, and summing it with the two pool refusals
+    /// would tell a consumer to raise a quota that is not the problem.
+    ///
+    /// The CONTROL is the same fixture with the marker present: the identical
+    /// bytes, one extension apart, must produce `begun` instead — so this test
+    /// cannot pass by the fixture simply failing to reach the router.
+    #[cfg(feature = "reassembly")]
+    #[test]
+    fn a_reader_that_joined_mid_chain_is_counted_apart_from_a_pool_refusal() {
+        let joined = crate::datagram_tests::marked_fragment_dissection(&[(0, true, false, false)]);
+        let doc = census_json_where(&joined, &crate::filter::Filter::any());
+        assert!(
+            doc.contains("\"refused_missing_start_marker\":1"),
+            "an unmarked chain start on an armed session is refused: {doc}"
+        );
+        assert!(
+            doc.contains("\"refused_peer_quota\":0")
+                && doc.contains("\"refused_pool_exhausted\":0"),
+            "and is not a resource shortfall: {doc}"
+        );
+        assert!(
+            doc.contains("\"begun\":0"),
+            "nor did it start a chain: {doc}"
+        );
+
+        let marked = crate::datagram_tests::marked_fragment_dissection(&[(0, true, true, false)]);
+        let control = census_json_where(&marked, &crate::filter::Filter::any());
+        assert!(
+            control.contains("\"begun\":1")
+                && control.contains("\"refused_missing_start_marker\":0"),
+            "the control differs by ONE extension and must land in the other \
+             counter, or the test above proves only that the fixture is inert: {control}"
+        );
+    }
+
     #[test]
     fn the_census_documents_key_set_is_pinned() {
         let doc = census_json_where(

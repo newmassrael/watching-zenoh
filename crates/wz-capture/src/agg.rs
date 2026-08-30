@@ -774,6 +774,9 @@ pub struct ThroughputTable {
     /// an `elapsed` term is undecidable rather than counted from a guess.
     capture_origin_ms: Option<u64>,
     gaps: ThroughputGaps,
+    /// R2211 (open-debt item 565) — what the chain-boundary markers did. See
+    /// [`FragmentChains`]; kept apart from `gaps` because a chain is not a loss.
+    chains: FragmentChains,
     selection: Selection,
 }
 
@@ -821,6 +824,125 @@ impl ThroughputGaps {
     /// `true` when this table's rows cover everything it was shown.
     pub fn is_clean(&self) -> bool {
         *self == Self::default()
+    }
+}
+
+/// R2211 (open-debt item 565) — WHAT THE FRAGMENT CHAIN-BOUNDARY MARKERS DID,
+/// which this table used to compute and throw away.
+///
+/// # The gap this closes, and the half of the item that was already closed
+///
+/// The `0x2 First` / `0x3 Drop` markers ([`wz_session_core::extfragment`])
+/// reach the consumption surface in TWO different senses, and item 565 was
+/// filed over only one of them:
+///
+/// * the WIRE fact — that a particular Fragment carried the marker byte —
+///   already reaches the FIELD document, named. `ext_name.rs`'s `FRAGMENT`
+///   rows map `0x2 -> "first"` and `0x3 -> "drop"`, and
+///   `dissect::walk_ext_entry` pushes that name as an `ext_name` field on
+///   every entry it recognises. Neither emitter SPELLS the words, which is
+///   why a sweep over `fields_json.rs` / `census_json.rs` reported an
+///   absence: the name comes from a table one crate over and appears in the
+///   emitted document as a VALUE.
+/// * the SESSION fact — what the marker CAUSED — reached nothing. The
+///   observer computes it in full: `passive.rs` hands the projected markers
+///   to the router, which answers with an
+///   [`IngestOutcome`](wz_session_core::reassembly_dispatch::IngestOutcome)
+///   naming the chain-boundary consequences apart from every other cause
+///   (`AbortReason::SenderDropped` is the sender saying so, `Superseded` is
+///   a restart, `RefuseReason::MissingStartMarker` is a reader that joined
+///   mid-chain). `observe_flow_where` then matched `Carried::Fragment(_)` and
+///   discarded the whole outcome, correctly refusing to call it a GAP and
+///   wrongly leaving it nowhere else.
+///
+/// This is where it lands. It is deliberately NOT part of [`ThroughputGaps`]:
+/// a chain in progress is not traffic this table lost, and folding it into the
+/// loss object would make `is_clean` false for a capture with nothing wrong
+/// with it.
+///
+/// # Every counter here has a live path, and one arm is named for the opposite
+///
+/// `IngestOutcome::Reassembled` cannot arrive through `Carried::Fragment`:
+/// the observer's `deliver` closure fills its buffer on that outcome, and a
+/// filled buffer is what makes the frame `Carried::Reassembled` instead. So it
+/// is folded into `completed` beside the arm that CAN fire, rather than given a
+/// counter of its own that no capture could move — a field whose value is
+/// always zero reads as a measurement and is a naming error.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct FragmentChains {
+    /// A chain-starting fragment was accepted into a fresh slot.
+    pub begun: usize,
+    /// An in-order continuation was accepted; the chain stays open.
+    pub continued: usize,
+    /// A chain finished and its reassembled batch was walked.
+    pub completed: usize,
+    /// Aborted because a continuation's SN was not the expected next one —
+    /// a RECEIVER-side inference about a lossy link.
+    pub aborted_out_of_order: usize,
+    /// Aborted because staging the fragment would exceed the slot's capacity.
+    pub aborted_capacity_overflow: usize,
+    /// Aborted because the SENDER said so: a fragment carrying `0x3 Drop`.
+    ///
+    /// The distinction from [`Self::aborted_out_of_order`] is the whole point
+    /// of carrying the reason: one is a lossy link and the other is a healthy
+    /// sender whose TX pipeline could not obtain a batch mid-fragmentation.
+    pub aborted_sender_dropped: usize,
+    /// Aborted because a `0x2 First` arrived while a chain was already open on
+    /// the same key: the sender restarted and the staged prefix is stranded.
+    pub aborted_superseded: usize,
+    /// A chain start was refused because the peer already holds its quota of
+    /// open chains.
+    pub refused_peer_quota: usize,
+    /// A chain start was refused because every slot was occupied.
+    pub refused_pool_exhausted: usize,
+    /// A fragment would have STARTED a chain but carried no `0x2 First` on a
+    /// session whose negotiated patch level demands one.
+    ///
+    /// For an OBSERVER this is the ordinary shape of attaching to a live flow,
+    /// not a defect — which is exactly why it is counted apart from the two
+    /// resource refusals above rather than summed with them.
+    pub refused_missing_start_marker: usize,
+}
+
+impl FragmentChains {
+    /// `true` when this capture showed no fragment chain activity at all.
+    ///
+    /// Not "nothing went wrong": a capture of a healthy fragmented transfer
+    /// has `begun` and `completed` set and is not quiet. The report line is
+    /// suppressed on quiet rather than on clean, because every field here is a
+    /// fact about the wire and none of them is a shortfall.
+    pub fn is_quiet(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Fold ONE router outcome in, by an exhaustive match.
+    ///
+    /// The match is the gate: a new `IngestOutcome` variant, or a new
+    /// `AbortReason` / `RefuseReason`, fails to compile here rather than
+    /// falling through a catch-all into silence — the rule
+    /// `ThroughputTable::observe_flow_where` already applies to `Carried`,
+    /// one layer in.
+    #[cfg(feature = "reassembly")]
+    fn fold(&mut self, outcome: wz_session_core::reassembly_dispatch::IngestOutcome) {
+        use wz_session_core::reassembly_dispatch::{AbortReason, IngestOutcome, RefuseReason};
+        match outcome {
+            IngestOutcome::Begun => self.begun += 1,
+            IngestOutcome::Continued => self.continued += 1,
+            // Unreachable through this path and folded rather than counted
+            // apart; see the type's own doc for why a dead field would be worse.
+            IngestOutcome::Reassembled => self.completed += 1,
+            IngestOutcome::Aborted(AbortReason::OutOfOrder) => self.aborted_out_of_order += 1,
+            IngestOutcome::Aborted(AbortReason::CapacityOverflow) => {
+                self.aborted_capacity_overflow += 1
+            }
+            IngestOutcome::Aborted(AbortReason::SenderDropped) => self.aborted_sender_dropped += 1,
+            IngestOutcome::Aborted(AbortReason::Superseded) => self.aborted_superseded += 1,
+            IngestOutcome::Refused(RefuseReason::PeerQuota) => self.refused_peer_quota += 1,
+            IngestOutcome::Refused(RefuseReason::PoolExhausted) => self.refused_pool_exhausted += 1,
+            IngestOutcome::Refused(RefuseReason::MissingStartMarker) => {
+                self.refused_missing_start_marker += 1
+            }
+        }
     }
 }
 
@@ -892,6 +1014,12 @@ impl ThroughputTable {
                 }
                 #[cfg(feature = "reassembly")]
                 Carried::Reassembled(batch) => {
+                    // R2211 (item 565) — a chain ENDED here, and this is the
+                    // only arm that can say so: the router reports
+                    // `IngestOutcome::Reassembled` by filling the observer's
+                    // deliver buffer, which is what turns the frame into this
+                    // variant rather than `Fragment`.
+                    self.chains.completed += 1;
                     self.observe_batch(&mut spaces, frame, anchor, batch, filter)
                 }
                 // R311y614 (§1.4i) — the arms that carry traffic this table
@@ -905,8 +1033,14 @@ impl ThroughputTable {
                 // `Fragment` is a chain still in progress: neither is a batch
                 // this table lost, so neither is a gap.
                 Carried::Nothing => {}
+                // R2211 (open-debt item 565) — still not a gap, and no longer
+                // discarded. The outcome names what the chain-boundary markers
+                // DID, which the observer computed and nothing carried out.
+                // Matched by name for the reason the arms above are: a new
+                // `IngestOutcome` variant must fail to compile here rather than
+                // join a silent set.
                 #[cfg(feature = "reassembly")]
-                Carried::Fragment(_) => {}
+                Carried::Fragment(outcome) => self.chains.fold(*outcome),
             }
         }
     }
@@ -1329,6 +1463,12 @@ impl ThroughputTable {
     /// makes the rows a complete account, and anything else is a short one.
     pub fn gaps(&self) -> ThroughputGaps {
         self.gaps
+    }
+
+    /// R2211 (open-debt item 565) — what the fragment chain-boundary markers
+    /// did over this table's frames. See [`FragmentChains`].
+    pub fn chains(&self) -> FragmentChains {
+        self.chains
     }
 }
 

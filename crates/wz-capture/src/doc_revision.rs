@@ -517,6 +517,26 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: CENSUS_R6_PLANES,
         carries: CENSUS_R6_CARRIES,
     },
+    // R2211 (open-debt item 565) — the `fragment_chains` object arrives. The
+    // observer already computed every one of its counters and the aggregation
+    // plane discarded them at its `Carried::Fragment` arm, so a consumer could
+    // see that a Fragment carried the `0x3 Drop` marker (the field document
+    // names it through `ext_name`) and could not see that a chain was
+    // ABANDONED because of it.
+    //
+    // An ADDITION, so revision 6 has nothing to retire. The families / planes /
+    // carries axes are unchanged and carried forward by name rather than
+    // re-listed: the object is not a row family, not a plane and not a
+    // conditional companion — it is one structural object on the keyexpr plane.
+    DocumentShape {
+        document: CENSUS,
+        revision: 7,
+        keys: CENSUS_R7_KEYS,
+        retiring: &[],
+        families: CENSUS_R6_FAMILIES,
+        planes: CENSUS_R6_PLANES,
+        carries: CENSUS_R6_CARRIES,
+    },
     DocumentShape {
         document: FIELDS,
         revision: 1,
@@ -921,6 +941,186 @@ pub const CENSUS_R1_KEYS: &[&str] = &[
 /// measured, on the first draft of this very constant, which came out 71 names
 /// long and disagreed with its predecessor in both directions.
 pub const CENSUS_R2_KEYS: &[&str] = CENSUS_R1_KEYS;
+
+/// The census document's key set at revision 7 (R2211, open-debt item 565).
+///
+/// Revision 6 PLUS the `fragment_chains` object and the ten counters under it —
+/// what the Fragment `First` / `Drop` chain-boundary markers DID over the
+/// capture. `completed` was already in the set under another plane, so the
+/// object adds ten names rather than eleven.
+///
+/// No removal and no rename, so revision 6's `retiring` stays empty. The
+/// revision moves anyway because `the_census_documents_key_set_is_pinned`
+/// compares against the NEWEST row: a set that grew is still a set that moved,
+/// and a consumer reading the revision is what tells it there is more to read.
+///
+/// Written out rather than aliased, and R2123 recorded why: an alias cannot
+/// express a difference, and it silently becomes a pin on a shape the library
+/// has stopped emitting.
+///
+/// MEASURED, like every set here: the pin test prints what the document emits
+/// and the run is what filled this.
+pub const CENSUS_R7_KEYS: &[&str] = &[
+    "a",
+    "a_to_b",
+    "aborted_capacity_overflow",
+    "aborted_out_of_order",
+    "aborted_sender_dropped",
+    "aborted_superseded",
+    "addr",
+    "admissible",
+    "aggregate",
+    "anchor_intervals",
+    "anchors_exact",
+    "answers",
+    "answers_in_scope",
+    "asked_at",
+    "asker",
+    "asks",
+    "at_most_bytes",
+    "attributed_bytes",
+    "b",
+    "b_to_a",
+    "begun",
+    "by_kind",
+    "bytes",
+    "cancelled_at",
+    "caps",
+    "children",
+    "closed_at",
+    "completed",
+    "completion",
+    "consistent",
+    "continued",
+    "contradictions",
+    "count",
+    "declaration",
+    "declarations",
+    "declared",
+    "declared_at",
+    "declarer",
+    "declarer_zid",
+    "dels",
+    "descriptors",
+    "document",
+    "dropped_by_limits",
+    "elsewhere",
+    "errs",
+    "evidence",
+    "exchanges",
+    "first",
+    "first_anchor",
+    "first_reply",
+    "flow",
+    "flows",
+    "fragment_chains",
+    "frames",
+    "frames_per_flow",
+    "gaps",
+    "halted_batches",
+    "hello",
+    "high",
+    "id",
+    "inadmissible",
+    "init",
+    "interests",
+    "join",
+    "judged",
+    "keyexpr",
+    "keyexprs",
+    "keys",
+    "kind",
+    "last",
+    "last_anchor",
+    "links",
+    "liveliness_token",
+    "locators",
+    "low",
+    "matched",
+    "max_flows_per_table",
+    "max_ms",
+    "max_scout_askers",
+    "mean_ms",
+    "messages",
+    "min_ms",
+    "mismatched",
+    "mode",
+    "name",
+    "narrowed_by_selector",
+    "nodes",
+    "non_monotonic",
+    "not_as_declared",
+    "offset_space",
+    "orphan_answers",
+    "orphan_responses",
+    "orphan_withdrawals",
+    "payload_bytes",
+    "payload_bytes_ceiling",
+    "payloads",
+    "planes",
+    "port",
+    "prefix",
+    "puts",
+    "queries",
+    "queryable",
+    "queryables",
+    "records",
+    "refused_missing_start_marker",
+    "refused_peer_quota",
+    "refused_pool_exhausted",
+    "rejected",
+    "replies",
+    "requests",
+    "restricted",
+    "revision",
+    "rows",
+    "scout",
+    "scout_askers",
+    "selection",
+    "share_bp",
+    "silent",
+    "skipped",
+    "skipped_packets",
+    "solicited_by",
+    "source_ahead_of_observer",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "subscriber",
+    "subscribers",
+    "subtrees",
+    "tokens",
+    "total_ms",
+    "total_payload_bytes",
+    "totals",
+    "unanswered",
+    "unattributed_bytes",
+    "unattributed_records",
+    "unattributed_requests",
+    "unclaimed",
+    "unclaimed_exact",
+    "unclosed",
+    "undecidable",
+    "undecided",
+    "undeclarations",
+    "undecompressible_batches",
+    "unjudged_answers",
+    "unknown_ids",
+    "unlocatable_records",
+    "unmeasured_payloads",
+    "unparsed_bytes",
+    "unread",
+    "unresolvable_fragments",
+    "unresolved",
+    "unresolved_declarations",
+    "unresolved_records",
+    "unsized_payloads",
+    "unstamped",
+    "walked_records",
+    "whatami",
+    "wire_bytes",
+    "withdrawn_at",
+    "zid",
+];
 
 /// The census document's key set at revision 3 (R2123, open-debt item 453).
 ///
@@ -3530,7 +3730,10 @@ mod tests {
             // families' words decide the keys that arrive beside them. All
             // five are passengers, which is a measured verdict about
             // straight-line row emitters and not a shrug.
-            (CENSUS, 6u32),
+            // R2211 (item 565) — to 7 for the oldest reason of all, a key set
+            // that GREW: the `fragment_chains` object, ten counters the
+            // observer already computed and the aggregation plane discarded.
+            (CENSUS, 7u32),
             // R2175 (open-debt item 552) — the field document moved to 2 when
             // its PAYLOAD PLANE joined the pin (fifteen keys revision 1 had
             // never covered) and its first three value families were declared.
