@@ -2089,17 +2089,18 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
          needs the MECHANISM widened rather than just another fixture, and \
          saying so is the difference between a queue and a wish.",
     ),
-    (
-        "transport/multicast/qos/enabled",
-        KIND_NOT_YET_READ,
-        "the exact multicast analogue of `transport/unicast/qos/enabled`, \
-         which is already wire-proven — and it is here on its own evidence, \
-         not on that resemblance: the multicast Join message carries \
-         `ext_qos: Option<ext::QoSType>` at zenoh-protocol join.rs:103. So a \
-         frame read proves it, on the Join rather than on InitSyn/OpenSyn, \
-         which means it shares `timestamping/enabled`'s need for the FIXTURES \
-         mechanism to read a frame it does not read today.",
-    ),
+    //
+    // ⚠ R2202 (open-debt item 220) RETIRED `transport/multicast/qos/enabled`
+    // from this kind — it is `wire` now, read as the multicast JOIN beacon's
+    // `qos` extension by
+    // `every_key_proven_on_the_wire_is_in_the_frame_a_zenohd_would_receive`.
+    // Its row's verdict was right in full, route included: it said the FIXTURES
+    // mechanism had to be widened to read a frame it did not read, and that is
+    // what the leg grew — a datagram observer beside the TCP acceptor. The one
+    // thing the row did not say is that the key's effect exists in ONE run-mode,
+    // wz spawning a multicast egress inside `run_router_hat` alone; the leg
+    // DERIVES that from what each arm broadcast rather than excusing arms by
+    // name, so an arm that starts beaconing is judged the moment it does.
     // ── (2) no frame field carries it ───────────────────────────────────
     (
         "connect/timeout_ms",
@@ -5073,15 +5074,45 @@ mod stock_config_tests {
     #[test]
     fn every_honoured_key_is_classified_by_what_proves_its_effect() {
         let no_sink = config_keys_the_demo_drops();
-        let wire: Vec<&str> = CONFIG_KEYS_PROVEN_ON_THE_WIRE.to_vec();
 
-        // The two named classes must be disjoint: a key with no sink here cannot
-        // also be one a frame carries, and a row in both would mean one of the
-        // two lists is describing a different build than the other.
-        for key in &wire {
-            assert!(
-                !no_sink.contains(key),
-                "{key} is claimed both wire-proven and sink-less"
+        // R2202 (open-debt item 220) — the two lists describe DIFFERENT BUILDS,
+        // and this round is where a key finally made that visible.
+        //
+        // This assertion used to be a DISJOINTNESS one, on the reasoning that "a
+        // key with no sink here cannot also be one a frame carries". That premise
+        // was only accidentally true. `config_keys_the_demo_drops` answers per
+        // `cfg!(feature = ..)` — what THIS build can expand into — while
+        // `CONFIG_KEYS_PROVEN_ON_THE_WIRE` is a plain const stating what the wire
+        // LEG read, and that leg runs on the lane's build rather than on this one.
+        // `transport/multicast/qos/enabled` is the first key where the two
+        // disagree honestly: `--multicast-qos` exits(2) without `transport-qos`,
+        // so a narrow build MUST drop it, while the lane's build broadcasts a JOIN
+        // whose qos extension the leg reads out of the datagram.
+        //
+        // So the overlap is a legitimate state, and the rule is which side wins
+        // HERE: a key this build cannot even expand into is not evidence of
+        // anything on a wire this build never writes, so `no sink` decides it and
+        // the wire claim stays the lane's. Nothing is waved through — the key is
+        // still classified, still counted, and still exhaustively partitioned
+        // below.
+        //
+        // ⛔ The removal is NOT an unchecked exemption, and it is not checked
+        // HERE either, because this test cannot see the lane's feature set. A
+        // DIFFERENT derivation judges it: `scripts/lib/config_key_fixture_gate.py`
+        // reads the drop guards out of this file and the demo build line out of
+        // `run-ci.sh`, and reds when a wire-proven key's enabling feature is
+        // missing from the lane that claims to have read it.
+        let (wire, deferred): (Vec<&str>, Vec<&str>) = CONFIG_KEYS_PROVEN_ON_THE_WIRE
+            .iter()
+            .copied()
+            .partition(|k| !no_sink.contains(k));
+        // PRINTED, never silent: a build that judges fewer wire keys than the
+        // list claims should say which ones and why, the same way the class
+        // tallies below are printed rather than asserted.
+        if !deferred.is_empty() {
+            eprintln!(
+                "config-effect wire deferred to `no sink` in this build ({}): {deferred:?}",
+                deferred.len()
             );
         }
 

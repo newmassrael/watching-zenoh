@@ -1154,26 +1154,59 @@ fn every_key_proven_on_the_wire_is_in_the_frame_a_zenohd_would_receive() {
     // axis this leg already had and had never read a key off.
     const ARM_VARYING: &[&str] = &["mode"];
 
+    /// (key, the fragment for run A, its expected reading,
+    ///       the fragment for run B, its expected reading)
+    ///
+    /// R2202 (open-debt item 220) — a THIRD shape of wire proof, and the first
+    /// whose frame is not a handshake at all.
+    ///
+    /// Both shapes above read the TCP link a node dials out. This one reads the
+    /// multicast JOIN beacon it broadcasts, because that is where the effect is:
+    /// upstream puts `ext_qos` on a Join (`zenoh-protocol` join.rs:103) and gates
+    /// it on `config.transport().multicast().qos().enabled()` (`io/zenoh-transport`
+    /// multicast/manager.rs:118), and wz's own chain is the mirror —
+    /// `--multicast-qos` reaches `MulticastParams::is_qos` (`multicast_glue.rs`),
+    /// which is what makes `multicast_join::encode_join` set the `Z` flag and
+    /// append the per-priority table. The item said this key needed "the FIXTURES
+    /// mechanism widened to read a frame it does not read today"; the widening is
+    /// [`beacon_reading_from_a_config`], and it is the same file-moving contract
+    /// as `FIXTURES` — two documents, two readings that must differ.
+    const BEACON: &[(&str, &str, &str, &str, &str)] = &[(
+        "transport/multicast/qos/enabled",
+        "transport: { multicast: { qos: { enabled: true } } }",
+        "offered",
+        "transport: { multicast: { qos: { enabled: false } } }",
+        "absent",
+    )];
+
     // The POPULATION is the constant, so a key declared wire-proven without a
     // fixture here reds rather than going unasked — and a fixture for a key the
     // constant no longer claims reds too.
     let mut named: Vec<&str> = FIXTURES.iter().map(|(k, ..)| *k).collect();
     named.extend(ARM_VARYING.iter().copied());
+    named.extend(BEACON.iter().map(|(k, ..)| *k));
     named.sort_unstable();
     let mut declared: Vec<&str> = CONFIG_KEYS_PROVEN_ON_THE_WIRE.to_vec();
     declared.sort_unstable();
     assert_eq!(
         named, declared,
-        "every key declared proven on the wire needs either a pair of files this \
-         leg can hand the demo or a row in ARM_VARYING"
+        "every key declared proven on the wire needs a pair of files this leg can \
+         hand the demo, a row in ARM_VARYING, or a row in BEACON"
     );
 
-    // The two shapes must be DISJOINT. A key in both would be asked twice under
-    // two different contracts, and the weaker answer would decide it.
+    // The three shapes must be DISJOINT. A key in two of them would be asked
+    // twice under two different contracts, and the weaker answer would decide it.
     for key in ARM_VARYING {
         assert!(
             !FIXTURES.iter().any(|(k, ..)| k == key),
             "{key} is both a fixture pair and arm-varying; one of the two is \
+             describing a different key than it thinks"
+        );
+    }
+    for (key, ..) in BEACON {
+        assert!(
+            !FIXTURES.iter().any(|(k, ..)| k == key) && !ARM_VARYING.contains(key),
+            "{key} is a beacon row and also a handshake shape; one of the two is \
              describing a different key than it thinks"
         );
     }
@@ -1310,6 +1343,87 @@ fn every_key_proven_on_the_wire_is_in_the_frame_a_zenohd_would_receive() {
         mode_failures.len(),
         ARMS.len(),
         mode_failures.join("\n  ")
+    );
+
+    // ── R2202 (open-debt item 220) — the BEACON sweep ───────────────────────
+    //
+    // Same contract as the fixture sweep — two documents, and the wire has to
+    // MOVE with them — read off a different frame. What is new is that a beacon
+    // key's effect does not exist in every arm: wz's multicast egress is spawned
+    // inside `run_router_hat` and nowhere else (`runner.rs`), so the two dial
+    // arms broadcast nothing at all.
+    //
+    // ⛔ THAT IS NOT A TABLE OF EXEMPT ARMS. An arm named as "expected to be
+    // silent" would be an escape hatch: the day someone gives `peer_loop` a
+    // group and forgets this key, the exemption would keep the sweep green. So
+    // the partition is DERIVED from what the arms did:
+    //
+    //  * SPEAKING (a beacon under BOTH documents) is held to the full contract —
+    //    each reading matches its file, and the two must differ;
+    //  * SILENT (no beacon under EITHER) is a reading, not an excuse: an arm that
+    //    starts beaconing joins the judged set by itself;
+    //  * MIXED is a FAILURE. This key decides what a beacon CARRIES; a document
+    //    that decides whether one is broadcast at all is a different key than the
+    //    one this row claims.
+    //
+    // And at least one arm must speak, or the shape measures nothing — the same
+    // anti-vacuity the partition test applies to `wire`.
+    let mut beacon_failures: Vec<String> = Vec::new();
+    for (key, frag_a, want_a, frag_b, want_b) in BEACON {
+        let mut speaking = 0usize;
+        let mut seen: Vec<(String, Option<String>, Option<String>)> = Vec::new();
+        for (mode, max_links) in ARMS {
+            let arm = ArmLabel(*mode, *max_links);
+            let got_a = beacon_reading_from_a_config(frag_a, *mode, *max_links);
+            let got_b = beacon_reading_from_a_config(frag_b, *mode, *max_links);
+            match (got_a.as_deref(), got_b.as_deref()) {
+                (None, None) => {}
+                (Some(a), Some(b)) => {
+                    speaking += 1;
+                    if a != *want_a {
+                        beacon_failures.push(format!(
+                            "{arm} {key}: the beacon carried {a} where the file said {want_a}"
+                        ));
+                    }
+                    if b != *want_b {
+                        beacon_failures.push(format!(
+                            "{arm} {key}: the beacon carried {b} where the file said {want_b}"
+                        ));
+                    }
+                    if a == b {
+                        beacon_failures.push(format!(
+                            "{arm} {key}: the beacon did not move with the file, \
+                             so the file is not what set it"
+                        ));
+                    }
+                }
+                (a, b) => beacon_failures.push(format!(
+                    "{arm} {key}: the document decided WHETHER a beacon is \
+                     broadcast at all ({a:?} then {b:?}); this key decides what a \
+                     beacon CARRIES, so one of the two runs is not the node this \
+                     row is about"
+                )),
+            }
+            seen.push((format!("{arm}"), got_a, got_b));
+        }
+        // Printed for the same reason the two sweeps above print theirs: a round
+        // asking which arm spoke reads it under `--nocapture` rather than
+        // re-deriving it.
+        eprintln!("beacon {key}: per-arm readings {seen:?}");
+        if speaking == 0 {
+            beacon_failures.push(format!(
+                "{key}: no arm broadcast a beacon at all, so every reading above \
+                 is an absence and this row proves nothing"
+            ));
+        }
+    }
+    assert!(
+        beacon_failures.is_empty(),
+        "{} of the {} beacon readings disagree with the document that produced \
+         them:\n  {}",
+        beacon_failures.len(),
+        BEACON.len() * ARMS.len() * 2,
+        beacon_failures.join("\n  ")
     );
 }
 
@@ -1449,12 +1563,40 @@ enum RunMode {
 /// message says and why it says it that way.
 use wz_integration_tests::common::still_running_reason;
 
-fn handshake_field_from_a_config(
-    key: &str,
+/// A demo brought up on ONE document and caught at its first dial.
+///
+/// R2202 (open-debt item 220) — extracted from `handshake_field_from_a_config`,
+/// which was the only caller until this round added a second proof shape. The
+/// shapes read different wires — a handshake frame off the accepted TCP link, a
+/// JOIN beacon off a multicast group — and they are comparable only while the
+/// NODE is the same one: the same document template, the same argv, and the same
+/// "it dialled, so it is up" anchor. Two copies of that setup would be two nodes
+/// wearing one arm label, which is exactly the confusion the arm axis exists to
+/// prevent.
+struct DialledDemo {
+    /// Kills the child on drop. FIRST field on purpose: struct fields drop in
+    /// declaration order, so the node dies before the file it was pointed at is
+    /// unlinked.
+    guard: ChildGuard,
+    /// The accepted loopback link. The handshake shape reads frames off it; the
+    /// beacon shape needs only that it HAPPENED.
+    stream: std::net::TcpStream,
+    /// The document, verbatim, so a failure message can be pasted into a shell.
+    source: String,
+    /// The child's stderr once it closes — the reason a refused document gives.
+    drained: Box<dyn Fn() -> String>,
+    /// Held so the config file outlives the child that reads it.
+    config: NamedTempFile,
+}
+
+/// Spawn the demo on a document that names `fragment`, and return once it has
+/// dialled this leg's acceptor.
+fn dial_the_demo(
     fragment: &str,
     run_mode: RunMode,
     max_links: Option<usize>,
-) -> String {
+    extra_argv: &[String],
+) -> DialledDemo {
     let demo = wz_ap_demo_binary();
     assert_demo_binary_newer_than_sources(&demo);
 
@@ -1528,6 +1670,13 @@ fn handshake_field_from_a_config(
     // path. What is under judgement here is still only what the FILE's
     // capability keys reached; the arm decides which of wz's dial paths carried
     // them.
+    //
+    // R2202 (open-debt item 220) — `extra_argv` rides the same rule and for the
+    // same reason. Its one caller passes `--multicast-locator`, which names the
+    // GROUP the beacon shape observes; that is scaffolding, exactly as the
+    // acceptor's own port is, and it is not the expansion of the key under
+    // judgement (`transport/multicast/qos/enabled` reaches `--multicast-qos`,
+    // which only the FILE may type).
     let mut cmd = Command::new(&demo);
     cmd.arg("--config")
         .arg(file.path())
@@ -1536,6 +1685,7 @@ fn handshake_field_from_a_config(
     if let Some(n) = max_links {
         cmd.arg("--max-links").arg(n.to_string());
     }
+    cmd.args(extra_argv);
     let mut child = cmd
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -1570,7 +1720,7 @@ fn handshake_field_from_a_config(
         .set_nonblocking(true)
         .expect("a listener that can be polled");
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
-    let (mut stream, _) = loop {
+    let (stream, _) = loop {
         match listener.accept() {
             Ok(pair) => break pair,
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -1603,6 +1753,157 @@ fn handshake_field_from_a_config(
     stream
         .set_read_timeout(Some(Duration::from_secs(20)))
         .expect("a read deadline");
+
+    DialledDemo {
+        guard,
+        stream,
+        source,
+        drained: Box::new(drained),
+        config: file,
+    }
+}
+
+/// The multicast group the beacon shape pins every run to.
+///
+/// The ADDRESS is this leg's own choice and the node is TOLD it
+/// (`--multicast-locator`), so nothing here is a claim about what the demo
+/// defaults to; 224.0.0.225 is the address wz's router names as its own default
+/// (`runner.rs`), kept so the leg reads the shape a deployment produces rather
+/// than one nothing else uses. The PORT is ephemeral — see
+/// [`beacon_reading_from_a_config`], where it comes from the observer's own
+/// bind, so two runs on one host never share a group socket.
+const BEACON_GROUP: std::net::Ipv4Addr = std::net::Ipv4Addr::new(224, 0, 0, 225);
+
+/// How long a node is given to broadcast, AFTER it has dialled.
+///
+/// The dial is the liveness anchor and it is what makes a SILENT verdict mean
+/// anything: [`dial_the_demo`] returns only once the node is up, and the router
+/// hat spawns its multicast egress BEFORE the peer loop that dials
+/// (`runner.rs`). So this is a beacon-INTERVAL budget and not a startup one —
+/// the group's `join_interval_ms` is 100, which makes four seconds about forty
+/// chances. A silent arm costs the whole of it, which is why it is seconds
+/// rather than tens of them.
+const BEACON_BUDGET: Duration = Duration::from_secs(4);
+
+/// What the node's multicast JOIN beacon carried — `None` when it broadcast none
+/// at all on the group its locator names.
+///
+/// R2202 (open-debt item 220). `transport/multicast/qos/enabled`'s effect is a
+/// field of a frame this leg had never read: upstream carries `ext_qos` on a
+/// Join (`zenoh-protocol` join.rs:103) and gates it on
+/// `config.transport().multicast().qos().enabled()` (`io/zenoh-transport`
+/// multicast/manager.rs:118). A handshake acceptor cannot see that at all, so
+/// the item's own words were "the FIXTURES mechanism needs widening rather than
+/// just another fixture" — this is the widening, and the datagram half of it is
+/// the shape `zenoh_join_qos_foreign_witness` already proved on this tree.
+///
+/// `None` is a READING, not a failure. Which run-modes broadcast is not declared
+/// anywhere here: the sweep derives it from what the arms actually did, so an arm
+/// that starts or stops beaconing changes the verdict instead of being excused by
+/// a table.
+fn beacon_reading_from_a_config(
+    fragment: &str,
+    run_mode: RunMode,
+    max_links: Option<usize>,
+) -> Option<String> {
+    // ⚠ SO_REUSEADDR IS LOAD-BEARING and `std::net::UdpSocket` cannot set it.
+    // The node JOINs its own group for ingress (`spawn_router_mcast_ingress`),
+    // so two sockets share this port, and a receiver without the option gets
+    // NOTHING. Measured on this tree already, against zenohd, by
+    // `zenoh_join_qos_foreign_witness` — which recorded zero datagrams for a
+    // whole budget until it set the option.
+    let raw = socket2::Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::DGRAM,
+        Some(socket2::Protocol::UDP),
+    )
+    .expect("open a UDP socket");
+    raw.set_reuse_address(true)
+        .expect("SO_REUSEADDR, or the node keeps the group to itself");
+    // Port 0: the kernel picks, and the number it picks is what the node is then
+    // TOLD to use. A fixed port would make two concurrent runs one run.
+    raw.bind(&std::net::SocketAddrV4::new(std::net::Ipv4Addr::UNSPECIFIED, 0).into())
+        .expect("bind an ephemeral multicast port");
+    let observer: std::net::UdpSocket = raw.into();
+    let group_port = observer
+        .local_addr()
+        .expect("the observer has an address")
+        .port();
+    observer
+        .join_multicast_v4(&BEACON_GROUP, &std::net::Ipv4Addr::LOCALHOST)
+        .expect("join the group on loopback");
+    observer
+        .set_read_timeout(Some(Duration::from_millis(250)))
+        .expect("a read deadline, so a silent group cannot hang this leg");
+
+    // `#iface=127.0.0.1` rather than `#iface=lo`: the selector's FIRST arm takes
+    // an address literal and needs no interface table at all
+    // (`link_interfaces::multicast_iface_selector_v4`), so the egress is pinned
+    // to the interface this observer joined on without depending on what the
+    // loopback device is named. Unpinned, the datagram leaves by the host's
+    // default multicast route and a receiver joined on loopback never sees it.
+    let locator = format!("udp/{BEACON_GROUP}:{group_port}#iface=127.0.0.1");
+    let demo = dial_the_demo(
+        fragment,
+        run_mode,
+        max_links,
+        &[String::from("--multicast-locator"), locator],
+    );
+
+    let mut reading = None;
+    let deadline = std::time::Instant::now() + BEACON_BUDGET;
+    let mut buf = [0u8; 65_535];
+    while reading.is_none() && std::time::Instant::now() < deadline {
+        let Ok((n, _)) = observer.recv_from(&mut buf) else {
+            continue;
+        };
+        if n == 0 {
+            continue;
+        }
+        // The dissector, not a hand-rolled reader — the same second-opinion rule
+        // the handshake shape follows. A datagram that does not parse, or parses
+        // as something other than a JOIN, is not this shape's subject: the group
+        // also carries this node's data plane.
+        let Ok(field) = dissect_transport_message(&buf[..n], 0) else {
+            continue;
+        };
+        if field.name != "Join" {
+            continue;
+        }
+        // ⚠ NOT `field.find("qos")` — the dissector names an extension's entry
+        // `ext_name` and puts the NAME in its value, which is why `ext_names`
+        // exists and why the handshake shape's `Presence` arm carries the same
+        // warning. `find` would answer None for every extension that exists.
+        reading = Some(if ext_names(&field).iter().any(|n| n == "qos") {
+            String::from("offered")
+        } else {
+            String::from("absent")
+        });
+    }
+    // The node has said everything this reading needed; killing it here rather
+    // than at the end of the sweep keeps at most one demo alive at a time.
+    drop(demo);
+    reading
+}
+
+fn handshake_field_from_a_config(
+    key: &str,
+    fragment: &str,
+    run_mode: RunMode,
+    max_links: Option<usize>,
+) -> String {
+    // R2202 (open-debt item 220) — the document, the argv and the "it dialled,
+    // so it is up" anchor moved into [`dial_the_demo`], because a SECOND proof
+    // shape now brings the same node up and reads a DIFFERENT wire off it. Two
+    // copies of that setup would be two nodes wearing one arm label, and the
+    // arms are the only thing that makes the two shapes comparable.
+    let DialledDemo {
+        guard,
+        mut stream,
+        source,
+        drained: _drained,
+        config: _config,
+    } = dial_the_demo(fragment, run_mode, max_links, &[]);
 
     let payload = read_stream_frame(&mut stream, &source, "the demo's first frame");
 

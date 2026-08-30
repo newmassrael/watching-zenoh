@@ -99,6 +99,12 @@ FIXTURE_TEST = (
     / "wz_reads_a_stock_zenohd_config.rs"
 )
 CRATES = REPO_ROOT / "crates"
+# ── the FOURTH site's inputs (R2202, open-debt item 220) ──
+DEMO_ARGS = CRATES / "wz-ap-demo" / "src" / "args.rs"
+DEMO_MANIFEST = CRATES / "wz-ap-demo" / "Cargo.toml"
+RUN_CI = REPO_ROOT / "scripts" / "run-ci.sh"
+# The test whose lane build decides whether a wire claim was measurable at all.
+WIRE_LEG_TEST = "wz_reads_a_stock_zenohd_config"
 
 # The key sets a fixture can depend on. Derived from the Rust source below rather
 # than trusted: a name here that no longer exists is reported, not ignored.
@@ -259,6 +265,146 @@ def dependent_tests() -> list[tuple[str, int, str, bool, list[str]]]:
                 )
             )
     return rows
+
+
+# ── the FOURTH site (R2202, open-debt item 220) ──
+#
+# `CONFIG_KEYS_PROVEN_ON_THE_WIRE` says a leg READ the key off a frame the node
+# wrote. That claim is about the build the leg runs on, and nothing checked that
+# the lane actually builds a node the key can reach.
+#
+# It is not hypothetical: `transport/multicast/qos/enabled` is the first wire key
+# whose sink is COMPILED OUT of a narrow build — `--multicast-qos` exits(2)
+# without `transport-qos`, so `config_keys_the_demo_drops` drops the key — and
+# the demo's own classification test therefore has to defer it to `no sink` in
+# any build lacking the feature. That deferral is only sound while the LANE has
+# the feature; if it did not, the key would be claimed wire-proven by a node that
+# cannot expand it, and the classification test would report a clean partition in
+# every build while the claim was true in none.
+#
+# Both sides are on disk — the drop guards are `cfg!` expressions in the demo's
+# source, the lane's feature list is the `--features` on the build line that
+# precedes the leg's own invocation — so a static read answers it, which is what
+# puts it in this file rather than behind a zenohd.
+GUARD_RE = re.compile(
+    r"if\s+!cfg!\((.*?)\)\s*\{(.*?)\n    \}", re.S
+)
+CFG_FEATURE_RE = re.compile(r'feature\s*=\s*"([^"]+)"')
+DROPS_FN_RE = re.compile(
+    r"fn config_keys_the_demo_drops\(\) -> Vec<&'static str> \{(.*?)\n    out\n",
+    re.S,
+)
+# `name = ["a", "wz/b"]` in the demo manifest's `[features]` table. Only the
+# entries WITHOUT a `/` are this package's own features; `wz/x` enables a feature
+# of the facade, which no `cfg!` in the demo's own source can read.
+MANIFEST_FEATURES_RE = re.compile(r"^\[features\]$(.*?)^\[", re.S | re.M)
+MANIFEST_ROW_RE = re.compile(r"^([A-Za-z0-9_-]+)\s*=\s*\[(.*?)\]", re.S | re.M)
+
+
+def drop_guards(src: str) -> tuple[list[tuple[str, list[str]]], list[str]]:
+    """`(cfg expression, keys it drops)` for every guard in the drop list.
+
+    Derived from the function's own body, never listed here: a guard added
+    without this gate hearing about it is exactly the drift the file exists for.
+    """
+    m = DROPS_FN_RE.search(src)
+    if not m:
+        return [], [
+            f"could not anchor `fn config_keys_the_demo_drops` in "
+            f"{rel(DEMO_ARGS)} — the drop guards are one half of this check, so "
+            f"re-anchor it rather than dropping the check"
+        ]
+    body = rust_comments.strip_comments(m.group(1))
+    guards = [
+        (expr.strip(), re.findall(r'out\.push\("([^"]+)"\)', block))
+        for expr, block in GUARD_RE.findall(body)
+    ]
+    guards = [(expr, keys) for expr, keys in guards if keys]
+    if not guards:
+        return [], [
+            f"read ZERO drop guards out of `config_keys_the_demo_drops` in "
+            f"{rel(DEMO_ARGS)}. An empty guard set makes every wire claim look "
+            f"reachable, which is the one direction this check must never "
+            f"report as clean."
+        ]
+    return guards, []
+
+
+def cfg_satisfied(expr: str, features: frozenset[str]) -> bool:
+    """Whether a `cfg!` expression holds for `features`.
+
+    Three shapes occur and each is read for what it means, not matched loosely:
+    a bare `feature = "x"`, an `all(..)` of them, and an `any(..)` of them. An
+    expression in none of those shapes RAISES rather than defaulting either way —
+    a guard this reader cannot understand must not be silently satisfied.
+    """
+    names = CFG_FEATURE_RE.findall(expr)
+    if not names:
+        raise ValueError(f"no feature named in cfg expression {expr!r}")
+    if expr.startswith("all("):
+        return all(n in features for n in names)
+    if expr.startswith("any("):
+        return any(n in features for n in names)
+    if len(names) == 1 and expr.startswith("feature"):
+        return names[0] in features
+    raise ValueError(f"unrecognised cfg expression {expr!r}")
+
+
+def demo_feature_closure(named: frozenset[str]) -> frozenset[str]:
+    """`named` plus every demo feature they transitively enable.
+
+    Resolved from the demo's own manifest rather than by asking cargo, because
+    this gate runs in `pre-push` where a cargo invocation is the whole budget.
+    The transitive step is load-bearing and was measured to be: R2202's lane line
+    names `router-multicast-faces`, which enables `router-hat-router` without
+    naming it, so a literal membership test would refuse a feature the build has.
+    """
+    table: dict[str, list[str]] = {}
+    block = MANIFEST_FEATURES_RE.search(DEMO_MANIFEST.read_text())
+    if block:
+        for name, body in MANIFEST_ROW_RE.findall(block.group(1)):
+            table[name] = [
+                v for v in re.findall(r'"([^"]+)"', body) if "/" not in v
+            ]
+    out = set(named)
+    queue = list(named)
+    while queue:
+        for nxt in table.get(queue.pop(), []):
+            if nxt not in out:
+                out.add(nxt)
+                queue.append(nxt)
+    return frozenset(out)
+
+
+def wire_leg_lane_features() -> tuple[frozenset[str], list[str]]:
+    """The `--features` of the demo build that the wire leg's lane runs on.
+
+    ANCHORED on the leg's own invocation and then scanned BACKWARD to the nearest
+    demo build, rather than unioning every build line in the file: a feature some
+    OTHER lane passes says nothing about the binary this leg spawns, and a union
+    would let one lane's feature satisfy another lane's claim.
+    """
+    txt = RUN_CI.read_text()
+    invocation = txt.find(f"--test {WIRE_LEG_TEST} ")
+    if invocation < 0:
+        return frozenset(), [
+            f"could not find the wire leg's `--test {WIRE_LEG_TEST}` invocation "
+            f"in {rel(RUN_CI)} — without it this gate cannot say which build the "
+            f"wire claims were measured on"
+        ]
+    builds = list(
+        re.finditer(
+            r"cargo build -p wz-ap-demo[^\n|)]*?--features ([A-Za-z0-9_,-]+)",
+            txt[:invocation],
+        )
+    )
+    if not builds:
+        return frozenset(), [
+            f"found the wire leg's invocation in {rel(RUN_CI)} but no "
+            f"`cargo build -p wz-ap-demo --features …` before it — the lane's "
+            f"binary is what the wire claims are about"
+        ]
+    return frozenset(builds[-1].group(1).split(",")), []
 
 
 def fixture_fn_literal(src: str, name: str) -> str | None:
@@ -532,6 +678,64 @@ def main() -> int:
                 f"the tree is clean."
             )
 
+    # ── the FOURTH site: the LANE that measured a wire claim (R2202, item 220) ──
+    #
+    # See the block comment above `drop_guards` for the defect. In one sentence:
+    # a wire-proven key whose sink this build can compile out is only honestly
+    # wire-proven while the LANE running the leg carries the feature that keeps
+    # the sink, and nothing said so.
+    guards, guard_problems = drop_guards(DEMO_ARGS.read_text())
+    failures.extend(guard_problems)
+    lane_named, lane_problems = wire_leg_lane_features()
+    failures.extend(lane_problems)
+    wire_keys = deepenable_audit.rust_const("CONFIG_KEYS_PROVEN_ON_THE_WIRE")
+    lane_closure: frozenset[str] = frozenset()
+    unreachable: list[tuple[str, str]] = []
+    control_dropped: list[str] = []
+    in_lane_scope: list[tuple[str, str]] = []
+    if guards and lane_named:
+        lane_closure = demo_feature_closure(lane_named)
+        try:
+            for expr, keys in guards:
+                held = cfg_satisfied(expr, lane_closure)
+                # The POSITIVE CONTROL, and it is over EVERY guard rather than
+                # only the in-scope ones, so it stays live even in a tree where
+                # no wire key has a feature-dependent sink. With no features at
+                # all, every guarded key must read as dropped; if one does not,
+                # the expression reader is broken and a clean verdict below would
+                # mean nothing.
+                if not cfg_satisfied(expr, frozenset()):
+                    control_dropped.extend(keys)
+                for key in keys:
+                    if key not in wire_keys:
+                        continue
+                    in_lane_scope.append((key, expr))
+                    if not held:
+                        unreachable.append((key, expr))
+        except ValueError as e:
+            failures.append(
+                f"a drop guard in {rel(DEMO_ARGS)} is in a shape this gate "
+                f"cannot read ({e}); teach the reader the shape rather than "
+                f"letting an unread guard count as satisfied"
+            )
+        for key, expr in unreachable:
+            failures.append(
+                f"`{key}` is in CONFIG_KEYS_PROVEN_ON_THE_WIRE and the lane that "
+                f"runs the wire leg builds wz-ap-demo WITHOUT what `!cfg!({expr})` "
+                f"needs, so the demo drops the key there. A wire claim is a claim "
+                f"that a leg read the value off a frame the node WROTE; a node "
+                f"that cannot expand the key writes no such frame. Add the "
+                f"feature to that lane's build line, or take the key out of the "
+                f"wire list."
+            )
+        if not control_dropped:
+            failures.append(
+                f"the positive control dropped NO key when handed an empty "
+                f"feature set, so `cfg_satisfied` is not reading the guards in "
+                f"{rel(DEMO_ARGS)}. A reader that answers 'satisfied' to "
+                f"everything reports every lane clean."
+            )
+
     if args.verbose:
         for f, ln, name, _ig, used in ignored:
             print(f"  guard {f}:{ln} {name} <- {','.join(used)}")
@@ -574,6 +778,20 @@ def main() -> int:
             f"{len(census_filled)} filled by `census_config`; control "
             f"`operator_config` fills "
             + ", ".join(f"{p}" for p, _ in control_filled)
+        )
+
+    if guards and lane_named:
+        # The scope is printed as a LIST rather than a count, and beside the
+        # control, because an empty scope is a legitimate tree state — no wire
+        # key with a feature-dependent sink — and the reader has to be able to
+        # tell that from a check that stopped working.
+        print(
+            f"  wire lane: {len(wire_keys)} wire-proven key(s), "
+            f"{len(in_lane_scope)} with a feature-dependent sink "
+            f"({', '.join(k for k, _ in in_lane_scope) or 'none'}); the leg's "
+            f"lane names {len(lane_named)} feature(s), {len(lane_closure)} after "
+            f"the manifest's own closure; control drops "
+            f"{len(control_dropped)} key(s) at no features"
         )
 
     if failures:

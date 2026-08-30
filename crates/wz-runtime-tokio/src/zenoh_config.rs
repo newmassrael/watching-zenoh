@@ -2403,6 +2403,25 @@ pub const CONFIG_KEYS_PROVEN_ON_THE_WIRE: &[&str] = &[
     "transport/unicast/lowlatency",
     "transport/unicast/compression/enabled",
     "transport/unicast/qos/enabled",
+    // R2202 (open-debt item 220) — the first key here proven off a frame that is
+    // not a handshake at all, and therefore the first that the leg's TCP acceptor
+    // structurally could not have read.
+    //
+    // Upstream carries `ext_qos` on the multicast Join (`zenoh-protocol`
+    // join.rs:103) and gates it on this exact key
+    // (`config.transport().multicast().qos().enabled()`, `io/zenoh-transport`
+    // multicast/manager.rs:118, reaching `next_sns.len() == Priority::NUM` at
+    // multicast/link.rs:485). wz's chain is the mirror: `--multicast-qos` reaches
+    // `MulticastParams::is_qos` (`multicast_glue::spawn_router_mcast_egress`),
+    // which is what `multicast_join::encode_join` reads to set the `Z` flag and
+    // append the per-priority table.
+    //
+    // ⚠ Its ARM SCOPE is narrower than every row above and the leg does not take
+    // that on trust: wz spawns a multicast egress inside `run_router_hat` alone,
+    // so the two dial arms broadcast nothing — which the sweep DERIVES from what
+    // the arms did rather than reading off a list of exempt ones. An arm that
+    // starts beaconing is judged the moment it does.
+    "transport/multicast/qos/enabled",
 ];
 
 /// The only keys below which a real zenohd accepts leaves this tree's census

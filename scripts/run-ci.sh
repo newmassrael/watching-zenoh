@@ -12719,7 +12719,16 @@ layer_z_zenohd_interop() {
     # (`wz_shm_establishment_zenohd_interop`) already rebuild the demo with this
     # exact feature and then restore this line, so they are unaffected either
     # way. Both restatements of this line carry it.
-    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,routing-router,router-hat-router,router-connect-reconcile,routing-token-tables,namespace,transport-qos,transport-lowlatency,session-extcompression,session-extshm,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,transport-multilink,zenoh-config --quiet) || return 1
+    # R2202 adds `router-multicast-faces` (open-debt item 220). The wire sweep
+    # grew a THIRD proof shape, whose frame is the multicast JOIN beacon rather
+    # than a handshake, and `transport/multicast/qos/enabled` is read off it.
+    # Without the feature `run_router_hat` spawns no multicast egress at all, so
+    # every arm is SILENT and the sweep's anti-vacuity rule reds -- deliberately,
+    # because a build that cannot broadcast is not a node this key was measured
+    # on. Additive like the rest: `--multicast-locator` is absent from every
+    # other leg's argv here, and the router-hat legs that do not pass it keep the
+    # demo's own default group. Both restatements of this line carry it.
+    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,routing-router,router-hat-router,router-connect-reconcile,router-multicast-faces,routing-token-tables,namespace,transport-qos,transport-lowlatency,session-extcompression,session-extshm,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,transport-multilink,zenoh-config --quiet) || return 1
     # R311y442 review (REVIEWER 3, finding 3) added a clippy of the demo's
     # `advanced` arm right here, closing the `-D warnings` hole R311y433 closed
     # for transport-lowlatency and session-extcompression. R311y443-review
@@ -12831,7 +12840,11 @@ layer_z_zenohd_interop() {
     # the strongest sense -- this restatement exists to RESTORE the lane's build
     # after the two legs that rebuild with `session-extshm` alone, so the feature
     # was already reaching those legs' binary. Both restatements carry it.
-    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,routing-router,router-hat-router,router-connect-reconcile,routing-token-tables,namespace,transport-qos,transport-lowlatency,session-extcompression,session-extshm,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,transport-multilink,zenoh-config --quiet) || return 1
+    # R2202 adds `router-multicast-faces` (open-debt item 220): the wire sweep's
+    # third proof shape reads the multicast JOIN beacon, and without the feature
+    # `run_router_hat` spawns no egress so every arm is SILENT and the sweep's
+    # anti-vacuity rule reds. Both restatements carry it.
+    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,routing-router,router-hat-router,router-connect-reconcile,router-multicast-faces,routing-token-tables,namespace,transport-qos,transport-lowlatency,session-extcompression,session-extshm,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,transport-multilink,zenoh-config --quiet) || return 1
     # R311y435 — wz COMPOSED lowlatency x compression cross-impl: the measurement
     # R311y434 explicitly did NOT claim ("no leg dials zenohd with both modes,
     # because the demo cannot stage both offers"). The offer-SET widening of
