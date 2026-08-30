@@ -59,16 +59,49 @@ rather than letting a zero read as a verdict.
 
 ## How a REASON token resolves, and where it may NOT look
 
-Four arms, typed by the token's own shape, and the corpus is the half that
+Five arms, typed by the token's own shape, and the corpus is the half that
 matters most:
 
   * a SIBLING ROW KEY -- a token naming a key of some table in the same module,
     which is a claim about that module and true by inspection;
   * a TRACKED PATH -- slash-bearing, whitespace-free, first segment a directory
     git tracks; resolved against `git ls-files`, globs included;
+  * an INVENTORY-ID GLOB -- see below;
   * an IDENTIFIER -- resolved in COMMENT-STRIPPED `crates/**` source;
   * a PHRASE (it has a space) -- resolved in the whole text, comments included,
     because a sentence is a claim about what the documentation SAYS.
+
+## The INVENTORY-ID GLOB arm (R2214), and why its shape is narrow
+
+`apfull_membership.py` cites `platform-*`, `runtime-*` and `api-compat-*`. Those
+are neither source identifiers nor files: they are GLOBS OVER THE STORE'S
+INVENTORY IDS, and the claim is that the inventory holds members under those
+prefixes. MEASURED: seven, six and two respectively.
+
+The shape test is deliberately narrow -- lowercase, digits, hyphen and glob
+characters only, with at least one glob character and no whitespace. A wider
+"has a glob char and no slash" test was written first and MEASURED to catch
+seven tokens where only three are inventory globs: `#[must_use] Discarded` and
+`*lost +=` carry `[` and `*`, and `((?:z|ze|zc|zp)_[A-Za-z0-9_]*\\*?)` is a
+regular expression. Those three must keep falling through to the arms that own
+them.
+
+⚠ MEASURED rather than asserted, because the obvious claim is too strong: with
+the loose shape restored, the live budget does NOT move. Two of the three carry
+whitespace and are refused either way, and the regular expression, read as an
+`fnmatch` pattern, happens to match no inventory id -- so today the narrowness
+buys nothing at the tree and everything at the SELFTEST, which is where it is
+enforced. That is the honest statement of what this shape is for: it keeps the
+arm's SCOPE from drifting, and the day a citation like `wz-*` arrives it is the
+difference between an answer and a coincidence.
+
+⚠ The oracle is the tracked store's `inventory_entries` KEYS and nothing else.
+Not its reasons, not its changelog, not `mnemosyne-cli`. The prose in that file
+mentions these very tokens, so reading the store as TEXT would resolve every one
+of them against the sentence citing it -- the vacuity this gate's header opens
+with, rebuilt one file over. Reading a structured field is what keeps the arm
+honest, and it also keeps this gate free of a binary that Layer C0 would then
+have to guarantee.
 
 ⚠⚠ `scripts/**` IS NOT IN THE CORPUS, and leaving it in was measured to make
 this whole gate vacuous. With every tracked text file in the corpus, all 163
@@ -109,6 +142,7 @@ from __future__ import annotations
 import argparse
 import ast
 import fnmatch
+import json
 import pathlib
 import re
 import subprocess
@@ -120,6 +154,14 @@ import rust_comments  # noqa: E402  -- after the path insert that finds it
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 GATES = "scripts/lib"
+STORE = "docs/.atomic/workspace.atomic.json"
+
+# An inventory id is lowercase words joined by hyphens; a CITATION of a family
+# of them adds glob characters and nothing else. Anything carrying whitespace,
+# an underscore, a capital or a regex metacharacter is some other kind of
+# token and must reach the arm that owns it -- see the header for the three
+# that a looser shape swallowed.
+INVENTORY_GLOB = re.compile(r"^[a-z0-9-]*[*?\[\]][a-z0-9*?\[\]-]*$")
 
 # The `re` entry points whose FIRST argument is a pattern. `split` and `sub`
 # are here and `str.split` is not, which is why the check below insists the
@@ -135,9 +177,12 @@ RE_FUNCS = frozenset(
 # resolver has no arm for yet; the arms are the work, the numbers are the
 # holding pattern, and both directions are enforced.
 BUDGET = {
-    # `platform-*` / `runtime-*` / `api-compat-*` -- ATOM ID globs, a claim
-    # about the inventory rather than about source or files.
-    "apfull_membership.py": 3,
+    # R2214 — `apfull_membership.py` LEFT this table. Its three citations were
+    # `platform-*` / `runtime-*` / `api-compat-*`, globs over the store's
+    # inventory ids, and the arm that reads that field resolves all three. The
+    # ratchet is what made the removal compulsory rather than optional: with
+    # the arm in and the row still at 3, this gate went red in the OTHER
+    # direction and named the number to write.
     # `west build` -- a shell command of the Zephyr toolchain.
     "apt_package_census.py": 1,
     # `#[must_use] Discarded` -- an attribute and a type read as one token.
@@ -149,8 +194,13 @@ BUDGET = {
     # A regex fragment interpolated into another pattern rather than passed to
     # `re` directly, so the REGEX arm cannot see it.
     "expired_blocker_lint.py": 1,
-    # `link::strip_transport` -- a path into a module this corpus does not hold.
-    "verdict_leg_mutation.py": 1,
+    # R2214 — `verdict_leg_mutation.py` LEFT this table too, and not because an
+    # arm was added: its citation was STALE. It named `link::strip_transport`,
+    # which this tree has never held; the function that returns the
+    # `SkipReason` the sentence is about is `link::decapsulate`. That is the
+    # class this gate was built for, found on its first day, and the fix is the
+    # one the ratchet's own message names -- correct the citation, never the
+    # budget.
 }
 
 
@@ -163,6 +213,45 @@ def tracked() -> list[str]:
         ["git", "ls-files", "-z"], cwd=ROOT, capture_output=True, text=True, check=True
     ).stdout
     return [p for p in out.split("\0") if p]
+
+
+def _inventory_ids() -> frozenset[str]:
+    """The store's inventory ids, read as a STRUCTURED FIELD.
+
+    Keys only. The store also holds every inventory reason and every changelog
+    entry this repository has ever written, and those name the very tokens an
+    inventory glob cites -- so reading the file as text would resolve each of
+    them against the sentence citing it. That is the vacuity the header opens
+    with, and taking a field rather than a blob is what keeps it out.
+
+    A missing or unreadable store is FATAL rather than an empty set: an arm
+    that cannot reach its oracle must not answer "resolves nowhere" and let a
+    true citation go red, nor answer "resolves" and let a false one pass.
+    """
+    path = ROOT / STORE
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        raise Fatal(
+            f"the inventory oracle {STORE} could not be read ({exc}); the "
+            "inventory-glob arm has no input and must not guess in either "
+            "direction."
+        ) from exc
+    entries = data.get("inventory_entries")
+    if isinstance(entries, dict):
+        ids = frozenset(entries)
+    elif isinstance(entries, list):
+        ids = frozenset(
+            e.get("id") or e.get("inventory_id") for e in entries if isinstance(e, dict)
+        ) - {None}
+    else:
+        raise Fatal(f"{STORE} holds no `inventory_entries` this arm can read.")
+    if not ids:
+        raise Fatal(
+            f"{STORE} reports an EMPTY inventory. Every glob would resolve "
+            "nowhere for the wrong reason, which reads as a citation defect."
+        )
+    return ids
 
 
 class Corpus:
@@ -189,6 +278,7 @@ class Corpus:
         self.code = "\n".join(code)
         self.whole = "\n".join(whole)
         self.files = len(code)
+        self.inventory = _inventory_ids()
 
     def resolve(self, token: str, siblings: frozenset[str]) -> str | None:
         if token in siblings:
@@ -202,6 +292,10 @@ class Corpus:
                 ):
                     return "tracked path"
                 return None
+        if INVENTORY_GLOB.match(token):
+            if any(fnmatch.fnmatch(i, token) for i in self.inventory):
+                return "inventory ids"
+            return None
         needle = token.split("::")[-1]
         haystack = self.whole if " " in token else self.code
         return "crates source" if needle in haystack else None
@@ -504,7 +598,18 @@ def selftest() -> int:
     if corpus.resolve("deploy/*.nosuchext", frozenset()) is not None:
         return fail("a glob matching nothing resolved")
 
-    print("gate-reason-claims: selftest OK (9 derivations driven)")
+    # R2214 — the inventory-glob arm, both directions and its SHAPE.
+    if corpus.resolve("platform-*", frozenset()) != "inventory ids":
+        return fail("a glob over real inventory ids did not resolve as one")
+    if corpus.resolve("zzqq-nosuch-*", frozenset()) is not None:
+        return fail("an inventory glob matching NOTHING resolved; the arm passes anything")
+    # The three tokens a looser shape swallowed. None of them is a claim about
+    # the inventory, and each must reach the arm that owns it instead.
+    for other in ("#[must_use] Discarded", "*lost +=", r"((?:z|ze|zc|zp)_[A-Za-z0-9_]*\*?)"):
+        if INVENTORY_GLOB.match(other):
+            return fail(f"{other!r} was claimed by the inventory-glob shape")
+
+    print("gate-reason-claims: selftest OK (13 derivations driven)")
     return 0
 
 

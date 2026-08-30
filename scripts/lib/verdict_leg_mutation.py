@@ -415,7 +415,7 @@ UNWITNESSED = {
         "`Dissection::push_packet` routes every IPv4 fragment to `push_fragment`, "
         "which records `IpFragmentPending` or completes the datagram "
         "(crates/wz-capture/src/lib.rs:4125). The variant exists for a consumer "
-        "of `link::strip_transport` that declines to reassemble, and this tree "
+        "of `link::decapsulate` that declines to reassemble, and this tree "
         "has none, so the counter is structurally zero and a fixture cannot "
         "move it."
     ),
