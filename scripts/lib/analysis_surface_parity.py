@@ -82,6 +82,7 @@ build, which is what makes it cheap enough to be run every time.
 
 from __future__ import annotations
 
+import fnmatch
 import pathlib
 import re
 import subprocess
@@ -580,21 +581,123 @@ def source_blobs() -> dict[str, tuple[str, str]]:
     return out
 
 
+def _strings(value: object) -> list[str]:
+    """Every string reachable inside a table's entry, at any nesting.
+
+    A reason is a `str` in `ONLY_CLI` and a `str` inside a tuple in
+    `SELF_REPORT`, and the next table to arrive will hold it somewhere else
+    again. Walking the value is what keeps this axis from needing to know the
+    shape of each table it reads.
+    """
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [s for v in value.values() for s in _strings(v)]
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [s for v in value for s in _strings(v)]
+    return []
+
+
 def reason_claims() -> list[tuple[str, str, str]]:
-    """(table, row, token) for every BACKTICKED token in a one-sided reason.
+    """(table, row, token) for every BACKTICKED token in EVERY reason table.
 
     Backticks are what makes a claim a claim. The prose around them argues; the
     thing inside them is asserted to EXIST, and this is the population that
-    assertion is checked over. Derived from the table rather than listed, so a
+    assertion is checked over. Derived from the tables rather than listed, so a
     reason rewritten to name something new is measured on the round that
     rewrites it.
+
+    # R2212 — the TABLES are derived too, and that is the half this was missing
+
+    Until this round the population named two tables by hand, and the file held
+    four that carry prose. `NO_REACH_PATH` and `SELF_REPORT` between them
+    asserted eight things that nothing resolved -- among them five FILE PATHS,
+    which is the citation shape this repository has already watched rot
+    unnoticed for months. A reason table that nobody named was a reason table
+    nobody checked, and naming three instead of two would have rebuilt the same
+    hole one table further out.
+
+    So the population is every module-level UPPERCASE container, walked for
+    strings. A table added to this file joins the axis by existing. Tables that
+    carry no prose (`DELIVERY_TRANCHES`, `GATED_TRANCHES`) contribute nothing
+    and cost nothing, which is the right answer rather than a list of which
+    ones to skip.
     """
     out: list[tuple[str, str, str]] = []
-    for table, rows_ in (("ONLY_CLI", ONLY_CLI), ("ONLY_CAPI", ONLY_CAPI)):
-        for row, (_handle, reason, _reqs) in rows_.items():
-            for token in re.findall(r"`([^`]+)`", reason):
-                out.append((table, row, token))
+    module = sys.modules[__name__]
+    for name in sorted(dir(module)):
+        if not name.isupper():
+            continue
+        value = getattr(module, name)
+        if not isinstance(value, (dict, list, tuple, set, frozenset)):
+            continue
+        rows = value.items() if isinstance(value, dict) else enumerate(value)
+        for row, entry in rows:
+            for text in _strings(entry):
+                for token in re.findall(r"`([^`]+)`", text):
+                    out.append((name, str(row), token))
     return out
+
+
+def tracked_paths() -> frozenset[str]:
+    """Every tracked repo-relative path, from git rather than from a walk.
+
+    The same reason `source_blobs` uses git: a build artifact lying in the tree
+    must not be able to satisfy a citation nobody committed.
+    """
+    listed = subprocess.run(
+        ["git", "ls-files", "-z"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    return frozenset(p for p in listed.split("\0") if p)
+
+
+def _top_levels() -> frozenset[str]:
+    """The repo's own top-level directory names, derived from what git tracks.
+
+    This is what separates a PATH claim from a keyexpr or any other token that
+    happens to carry a slash: `demo/**` is not a claim about this filesystem and
+    must fall through to the identifier arms, while `deploy/*.yaml` is. Derived
+    rather than listed, so a new top-level directory does not need this file
+    edited to be citable.
+    """
+    return frozenset(p.split("/", 1)[0] for p in tracked_paths() if "/" in p)
+
+
+def _is_repo_path(token: str) -> bool:
+    """Whether the token's SHAPE makes it a claim about a tracked file."""
+    if "/" not in token or any(ch.isspace() for ch in token):
+        return False
+    return token.split("/", 1)[0] in _top_levels()
+
+
+def _path_claim_holds(token: str) -> bool:
+    """Whether that claim is true: an exact tracked path, or a glob matching one.
+
+    A glob is admitted because a reason legitimately cites a FAMILY of files
+    (`deploy/*.yaml` is the deployment manifests, not one of them), and a glob
+    that matches nothing fails exactly as a missing file does -- which is the
+    direction that matters, since a family that emptied is a citation that has
+    stopped pointing at anything.
+
+    ⚠ `fnmatch`, so `*` CROSSES a slash, and that is a decision rather than an
+    oversight: it is what `git ls-files 'deploy/*.yaml'` does with the same
+    string, and these citations are written in the repository's own pathspec
+    idiom. MEASURED while probing this arm -- `deploy/*.toml` reaches
+    `deploy/mcu-freertos-demo/Cargo.toml`, which surprised the round that wrote
+    it. A stricter matcher would make a citation mean one thing here and
+    another at the shell, which is the second-copy hazard in a different
+    costume.
+    """
+    paths = tracked_paths()
+    if token in paths:
+        return True
+    if not any(ch in token for ch in "*?["):
+        return False
+    return any(fnmatch.fnmatch(path, token) for path in paths)
 
 
 def resolve_claim(
@@ -604,16 +707,33 @@ def resolve_claim(
 
     TYPED, in the order the token's own shape names a surface: a `--flag` is a
     claim about the command line's USAGE, a `wz_dissect_*` name is a claim about
-    the ABI's exports, a name equal to a row key is a claim about this table,
-    and anything else is a claim about the source. A token that satisfies none
-    of them is an unfalsifiable claim, and those are what this axis refuses --
-    a reason may argue in prose, but it may not ASSERT something no artifact
-    knows about.
+    the ABI's exports, a REPO PATH is a claim about the filesystem, a name equal
+    to a row key is a claim about this table, and anything else is a claim about
+    the source. A token that satisfies none of them is an unfalsifiable claim,
+    and those are what this axis refuses -- a reason may argue in prose, but it
+    may not ASSERT something no artifact knows about.
+
+    # R2212 — the PATH arm, and why it could not be skipped
+
+    `NO_REACH_PATH` cites five files, and a path is invisible to every arm that
+    was here: it has no leading dash, no `wz_dissect_` prefix, is no row key,
+    and appears in tracked code only inside comments, which `source_blobs`
+    strips by design. All five resolved NOWHERE the moment the population
+    widened to reach them -- five TRUE claims that would have gone red, which is
+    how a missing arm announces itself.
+
+    Nothing about that is cosmetic. A cited path that rots is this repository's
+    OWN recorded failure: CLAUDE.md carries the rule against machine-local paths
+    because one sat in it for months pointing at a directory that no longer
+    existed, and it was quoted rather than checked the whole time. The arm makes
+    that class red instead of silent.
     """
     if token.startswith("-"):
         return "USAGE" if any(token in flag for flag in flags) else None
     if token.startswith("wz_dissect_"):
         return "ABI exports" if token in symbols else None
+    if _is_repo_path(token):
+        return "tracked files" if _path_claim_holds(token) else None
     if token in BOTH or token in ONLY_CLI or token in ONLY_CAPI:
         return "this table"
     # R2131 (item 402) — an IDENTIFIER answers to the code and a PHRASE answers
@@ -686,10 +806,17 @@ SELF_REPORT = {
     ),
     "EXT BODIES READ:": (
         "wz_dissect_readable_surfaces",
+        # R2212 — the second pair of backticks came OFF, and the edit is the
+        # axis working rather than an exception to it. `value` is a citation:
+        # the renderer emits that word and the claim is checkable. "there was
+        # no structure here" was a simile the sentence invented to say what
+        # `value` READS LIKE, and backticking it asserted the existence of a
+        # string no artifact has ever held. Prose may argue; only a citation
+        # may wear backticks.
         "An extension body this build does not open is COUNTED and NAMED and "
-        "rendered as `value`, which reads exactly like `there was no structure "
-        "here`. Both surfaces now answer which ones it opens, from the same "
-        "dispatch-driven renderer.",
+        "rendered as `value`, which reads exactly like a body that had no "
+        "structure in it. Both surfaces now answer which ones it opens, from "
+        "the same dispatch-driven renderer.",
         (10,),
     ),
     # R2114 (open-debt item 237) — the third self-report, and the only one a
@@ -1117,8 +1244,9 @@ def main() -> int:
     )
     print(
         f"  analysis-surface-reasons: {len(claims)} claim(s) named by "
-        f"{len({(t, r) for t, r, _ in claims})} one-sided reason(s) still "
-        f"resolve to a flag, a symbol, a row or a source file"
+        f"{len({(t, r) for t, r, _ in claims})} reason(s) across "
+        f"{len({t for t, _, _ in claims})} table(s) still resolve to a flag, a "
+        f"symbol, a tracked path, a row or a source file"
     )
     # EVERY tranche, gated or not. The un-gated line is the whole repayment of
     # item 533: before it, a tranche this axis does not cover was invisible
