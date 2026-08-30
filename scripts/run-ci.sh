@@ -12890,6 +12890,52 @@ layer_z_zenohd_interop() {
     # pins transport-fragmentation.
     _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_fragment_rx_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
+    # R2200 (open-debt item 558) — wz RX reassembly PER CONDUIT, against the
+    # genuine router. The two legs above witness fragmentation and say nothing
+    # about CHANNELS: `priority`, `reliability`, `conduit` and `qos` appear in
+    # neither file. wz keys a reassembly chain on `(peer, reliable, priority)`
+    # (`wz-session-core/src/reassembly_dispatch.rs`, `find_active`) and the only
+    # thing measuring that key was C1bb, a unit lane where wz grades wz.
+    #
+    # SEPARATE GUARD, wider prereq: this leg needs zenohd AND the core zenoh
+    # `z_pub` example, for the reason item 558 recorded — it is the only
+    # publisher any oracle here provisions that can be told WHICH PRIORITY to
+    # publish at, and it does it through `--cfg qos/publication` rather than a
+    # flag. Folding its count into the `$zenohd` guard above would report a
+    # missing example as a missing router.
+    #
+    # FOUR legs: two AXES x (proof, option-atom TWIN). The axes are the two
+    # halves of wz's chain key, each holding the other FIXED — priority 1 vs 6
+    # both reliable, then reliable vs best_effort both at priority 6 — because a
+    # leg that varied both at once passes on an implementation that read either
+    # one alone. Within an axis the legs differ in ONE argument, the relay
+    # fault, because a genuine router does not interleave two chains of its own
+    # accord: MEASURED, the chains arrive `1 1 1 1 1 | 6 6 6 6 6 | ...`,
+    # strictly sequential, which a reassembler that ignored the conduit entirely
+    # also handles. Each proof arm makes the wire overlap them and asserts
+    # `held >= 1` / `overtaken >= 1`; each TWIN forwards verbatim, asserts both
+    # counters are ZERO over the same router and publishers, and still delivers.
+    #
+    # R2200 measured the discrimination directly, and it is ORTHOGONAL: dropping
+    # the `priority` term from `find_active` reds the priority proof and leaves
+    # the other three green; dropping `reliable` reds the reliability proof and
+    # leaves the other three green. That is why the interleave is load-bearing
+    # and why neither axis is carrying the other.
+    local missing_zpub_example=""
+    local zpub_examples_dir="${WZ_ZENOH_CORE_EXAMPLES_DIR:-$PWD/target/zenohd}"
+    [[ -x "$zpub_examples_dir/zenoh_z_pub" ]] || missing_zpub_example="zenoh_z_pub"
+    if [[ -n "$missing_zpub_example" ]]; then
+        _z_unavailable "zenoh core publisher oracle not built \
+($zpub_examples_dir/$missing_zpub_example; run: bash scripts/build-zenohd.sh)" || return 1
+    else
+        _runci_guarded_test Z 4 env WZ_ZENOHD_BIN="$zenohd" \
+            WZ_ZENOH_CORE_EXAMPLES_DIR="$zpub_examples_dir" \
+            cargo test -p wz-integration-tests \
+            --test wz_channel_reassembly_zenohd_interop \
+            -- --ignored --quiet --test-threads=1 || return 1
+        echo "  Z: genuine conduits reassemble separately while interleaved, on"
+        echo "     both halves of the chain key (priority, reliability)"
+    fi
     # R311y774 — the SUBSCRIBERS Interest, judged by the router that decides
     # whether wz hears anything. Registered HERE and not in Layer E for the
     # standard reason: the fixture needs a real zenohd, and its test name

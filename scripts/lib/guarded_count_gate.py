@@ -112,11 +112,19 @@ SUMMARY_RE = re.compile(r"^test result: ok\. (\d+) passed", re.M)
 class Guard:
     """One count guard, as `run-ci.sh` writes it."""
 
-    def __init__(self, lineno, spelling, want, cmd):
+    def __init__(self, lineno, spelling, want, cmd, prelude=()):
         self.lineno = lineno
         self.spelling = spelling
         self.want = want
         self.cmd = cmd
+        # Everything the line puts BEFORE `cargo` -- in practice an `env
+        # VAR=... VAR=...` prefix. Carried rather than dropped because it is
+        # part of what makes the command reproducible, and because dropping it
+        # hid a shell expansion from the very check that exists to notice one:
+        # R2200's Layer Z guard reads `env WZ_ZENOHD_BIN="$zenohd" ... cargo
+        # test ...`, and with the prefix discarded the remaining tokens carry no
+        # `$` at all.
+        self.prelude = tuple(prelude)
         joined = " ".join(cmd)
         m = cgl.PKG_RE.search(joined)
         self.pkg = m.group(1) if m else None
@@ -131,6 +139,15 @@ class Guard:
 
     def label(self):
         return f"{self.where} [{self.spelling}] {' '.join(self.cmd)}"
+
+    @property
+    def whole_command(self):
+        """Every token the line spells for this guard, prefix included.
+
+        What `SHELL_EXPANSION_RE` must be asked about: a command this runner
+        cannot reproduce is unreproducible whichever half the shell assembles.
+        """
+        return self.prelude + tuple(self.cmd)
 
 
 def parse_guards(text):
@@ -165,10 +182,16 @@ def _guard_from(lineno, spelling, want, seg):
     toks = cgl.command_tokens(seg)
     if "cargo" not in toks:
         return None
-    cmd = toks[toks.index("cargo"):]
+    at = toks.index("cargo")
+    cmd = toks[at:]
     if len(cmd) < 2 or cmd[1] != "test":
         return None
-    return Guard(lineno, spelling, want, cmd)
+    # The tokens before `cargo` are the guard's label and any `env` prefix. Only
+    # the run of tokens from `env` onwards is part of the COMMAND; the label is
+    # the helper's own argument and its quoting says nothing about whether the
+    # command can be reproduced.
+    prelude = toks[toks.index("env", 0, at):at] if "env" in toks[:at] else ()
+    return Guard(lineno, spelling, want, cmd, prelude)
 
 
 def dir_for_package(pkg, manifest_names):
@@ -215,7 +238,7 @@ def select(guards, changed_files, changed_lines, manifest_names, read_text):
         if g.pkg is None:
             skipped.append((g, "names no package"))
             continue
-        if any(cgl.SHELL_EXPANSION_RE.search(t) for t in g.cmd):
+        if any(cgl.SHELL_EXPANSION_RE.search(t) for t in g.whole_command):
             skipped.append((g, "the shell assembles part of this command"))
             continue
         d = dir_for_package(g.pkg, manifest_names)
@@ -441,6 +464,10 @@ FIXTURE = """
         cargo test -p other-crate --features x other_tests --quiet || return 1
     _runci_guarded_test "C1AY loop $leg 2" 2 \\
         cargo test -p demo-crate --exact "$leg" --quiet || return 1
+    _runci_guarded_test "Z oracle 3" 3 env DEMO_ORACLE_BIN="$oracle" \\
+        cargo test -p demo-crate --test topology_binary --quiet || return 1
+    _runci_guarded_test "Z fixed 5" 5 env DEMO_ORACLE_BIN=/opt/fixed \\
+        cargo test -p demo-crate --test topology_binary --quiet || return 1
 """
 
 MANIFESTS = {"demo": "demo-crate", "other": "other-crate", "third": "other-crate"}
@@ -462,8 +489,8 @@ def selftest():
         arms.append((name, bool(cond), why))
 
     arm(
-        "parse: 3 runnable numeric guards, the $leg one carried",
-        len(guards) == 4 and [g.want for g in guards] == [37, 4, 9, 2],
+        "parse: every numeric guard, the unrunnable ones carried too",
+        len(guards) == 6 and [g.want for g in guards] == [37, 4, 9, 2, 3, 5],
         "a parser that cut at the label would find the wrong command",
     )
 
@@ -486,6 +513,31 @@ def selftest():
         "the $leg guard is reported unrunnable, not silently dropped",
         any("shell assembles" in w for _g, w in skip),
         "a silent drop reads exactly like coverage",
+    )
+
+    # R2200: the expansion is in the `env` PREFIX, which the parser used to
+    # discard before this check ever saw it. The remaining tokens carry no `$`,
+    # so the old reader selected the guard, ran it somewhere the shell-supplied
+    # oracle does not exist, and reported UNMEASURED -- a broken instrument
+    # blocking a push over a count it never read. The control below is the half
+    # that keeps this from being a blanket excuse for an `env` prefix.
+    sel_env, skip_env = select(
+        guards,
+        ["crates/demo/tests/topology_binary.rs"],
+        {"demo": ["#[test]"]},
+        MANIFESTS,
+        _reader,
+    )
+    arm(
+        "R2200: a shell-assembled env PREFIX makes the guard unrunnable",
+        3 not in [g.want for g in sel_env]
+        and any(g.want == 3 and "shell assembles" in w for g, w in skip_env),
+        "the prefix is part of the command; dropping it hides the expansion",
+    )
+    arm(
+        "CONTROL: a LITERAL env prefix stays runnable",
+        5 in [g.want for g in sel_env],
+        "skipping every `env` prefix would excuse the reproducible ones too",
     )
 
     # A package the push did not touch must not be selected. An implementation
@@ -517,8 +569,14 @@ def selftest():
         _reader,
     )
     arm(
+        # NON-EMPTY first, `all` second. `all` over an empty list is true, so
+        # the second half alone would report green on exactly the failure this
+        # arm exists to catch. The count is deliberately NOT pinned: how many
+        # guards the fixture aims at this target is a property of the fixture,
+        # and pinning it made this arm red when R2200 widened the fixture for a
+        # different rule.
         "a --test guard IS reached by its own file",
-        [g.test_target for g in sel] == ["topology_binary"],
+        sel and all(g.test_target == "topology_binary" for g in sel),
         "the previous arm alone would also pass if nothing were ever selected",
     )
 

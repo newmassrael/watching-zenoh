@@ -250,6 +250,18 @@ sce-rust-runtime = { path = "../../vendor/sce/backends/rust/runtime" }
 # regardless of its serial backend — no coupling pin needed here anymore.
 wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
     "transport-fragmentation",
+    # R2200 (open-debt item 558) — the PER-CONDUIT reassembly interop e2e
+    # (tests/wz_channel_reassembly_zenohd_interop.rs) opens its session with
+    # `initiate_and_open_session_with_qos`, so the InitSyn carries the `ext_qos`
+    # unit ext and a non-DEFAULT priority rides its own per-priority conduit.
+    # Without the offer there are no conduits to tell apart and the leg's whole
+    # subject disappears — which is why the leg ALSO asserts that two distinct
+    # conduits were actually observed, rather than trusting this pin.
+    # Same additive-unification note as `storage-aligner` below: under
+    # `cargo test --workspace` this reaches the shared wz-runtime-tokio build
+    # (its qos lib tests additionally run there); the isolated
+    # `cargo test -p wz-runtime-tokio` build stays at its defaults.
+    "transport-qos",
     "transport-multicast",
     # The serial pin is BACK, for a different reason than R311nx's. That one
     # was a cross-crate gate-skew workaround and is correctly gone. This one

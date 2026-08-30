@@ -271,9 +271,22 @@ if [[ -n "$ZH" ]]; then
         # route selects on. `z_queryable --complete` and `z_get --target` are the
         # only foreign binaries in existence that can drive both sides of that
         # decision. Same source-A-only constraint as the ext examples.
-        echo "build-zenohd: building zenoh core examples (z_queryable, z_get) ..." >&2
+        #
+        # R2200 (open-debt item 558) — `z_pub` joins them, and for a reason the
+        # query pair's does not cover: it is the only publisher in any oracle
+        # this tree provisions that can be told WHICH PRIORITY to publish at.
+        # zenoh-pico's `z_pub` takes `k:v:e:m:l:n:a` and nothing else
+        # (`vendor/zenoh-pico/examples/unix/c11/z_pub.c:118`), and
+        # `z_advanced_pub --help` has no priority flag either. This one has no
+        # priority FLAG, but it has `--cfg`, and `qos/publication` is a real
+        # config path -- MEASURED against a live router: two `z_pub`s under
+        # `qos/publication:[{"key_exprs":[..],"config":{"priority":..}}]` put
+        # priority 1 and priority 6 fragment chains on ONE link, which is the
+        # precondition every per-channel reassembly witness needs and which
+        # nothing else here can produce.
+        echo "build-zenohd: building zenoh core examples (z_queryable, z_get, z_pub) ..." >&2
         CARGO_TARGET_DIR="$BUILD_DIR" cargo "+$TOOLCHAIN" build \
-            -p zenoh-examples --example z_queryable --example z_get \
+            -p zenoh-examples --example z_queryable --example z_get --example z_pub \
             --release --manifest-path "$ZH/Cargo.toml"
         CORE_EXAMPLES_SRC="$BUILD_DIR/release/examples"
     fi
@@ -383,7 +396,7 @@ else
     echo "  and will FAIL rather than grade a table it could not read." >&2
 fi
 if [[ -n "$CORE_EXAMPLES_SRC" ]]; then
-    for ex in z_queryable z_get; do
+    for ex in z_queryable z_get z_pub; do
         install -m 0755 "$CORE_EXAMPLES_SRC/$ex" "$INSTALL_DIR/zenoh_$ex"
         echo "build-zenohd: installed -> $INSTALL_DIR/zenoh_$ex" >&2
     done

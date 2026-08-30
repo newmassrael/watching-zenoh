@@ -18,6 +18,7 @@ pub mod common {
     //! `ap_demo_*` integration tests. See module-level rationale for
     //! the flake background.
 
+    use std::collections::BTreeSet;
     use std::fs::File;
     use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
     use std::path::{Path, PathBuf};
@@ -1192,13 +1193,20 @@ pub mod common {
         path
     }
 
-    /// R311y841 — locate a CORE `zenoh-examples` binary (`z_queryable` / `z_get`),
-    /// installed by `scripts/build-zenohd.sh` under a `zenoh_` prefix so which
-    /// IMPLEMENTATION a leg spawned is legible at the call site: this tree also
-    /// carries a `z_get` and a `z_queryable` from zenoh-pico, and the two are
-    /// different oracles with different capabilities.
+    /// R311y841 — locate a CORE `zenoh-examples` binary (`z_queryable`, `z_get`
+    /// or `z_pub`), installed by `scripts/build-zenohd.sh` under a `zenoh_`
+    /// prefix so which IMPLEMENTATION a leg spawned is legible at the call site:
+    /// this tree also carries a `z_get`, a `z_queryable` and a `z_pub` from
+    /// zenoh-pico, and the two sets are different oracles with different
+    /// capabilities.
     ///
-    /// These exist because a `QueryTarget` route selects on COMPLETENESS, and
+    /// `z_pub` joined them in R2200 (open-debt item 558) for a capability the
+    /// query pair's reason does not cover: it is the only publisher any oracle
+    /// here provisions that can be told WHICH PRIORITY to publish at. It has no
+    /// priority FLAG either, but it has `--cfg`, and `qos/publication` is a real
+    /// config path — see [`spawn_publishing_zenoh_zpub`].
+    ///
+    /// The query pair exists because a `QueryTarget` route selects on COMPLETENESS, and
     /// neither oracle already provisioned can express it. zenohd is a router and
     /// declares no queryable of its own; zenoh-pico's `z_queryable` example takes
     /// `z_queryable_options_default()`, whose `complete` is hardcoded `false`
@@ -2332,6 +2340,131 @@ pub mod common {
     /// where `FRAME = 0x05` / `FRAGMENT = 0x06` match wz's constants exactly).
     const TRANSPORT_MID_MASK: u8 = 0x1F;
 
+    /// R2200 (open-debt item 558) — the wire facts
+    /// [`RelayFault::InterleaveConduitsAcceptorToDialer`] needs to tell one
+    /// conduit from another, spelled here because this crate's LIB target does
+    /// not depend on `wz-codecs` (only its tests do) and a lib-scope dependency
+    /// added for three constants would reach `cargo doc` and every subset lane.
+    ///
+    /// Each is stated with BOTH implementations' authority, the same discipline
+    /// [`TRANSPORT_MID_MASK`] is written with, and none of them is trusted on
+    /// its own: the leg that uses this parser asserts that the priorities it
+    /// reads MATCH the ones wz's own decoder reported for the same session, so
+    /// a wrong constant here surfaces as a mismatch rather than as a silently
+    /// wrong interleave.
+    ///
+    /// * `FRAGMENT` is `0x06` — `wz_codecs::wire_const::T_MID_FRAGMENT`, zenoh
+    ///   `id::FRAGMENT` (`commons/zenoh-protocol/src/transport/mod.rs:59-60`).
+    /// * `M` is `0x40`, "more fragments follow" —
+    ///   `wz_codecs::wire_const::FLAG_T_FRAGMENT_M`.
+    /// * `R` is `0x20`, "this fragment rides the RELIABLE channel" —
+    ///   `wz_codecs::wire_const::FLAG_T_FRAGMENT_R`, and the bit wz's own
+    ///   decoder reads into its chain key
+    ///   (`wz-session-core/src/inbound.rs:670`).
+    /// * `Z` is `0x80`, "an extension chain follows the body's fixed part" —
+    ///   `wz_codecs::wire_const::FLAG_T_Z`.
+    /// * the QoS extension is ext-id `0x1`, and the header packs
+    ///   `id[0:3] | M[4] | enc[5:6] | Z[7]`
+    ///   (`commons/zenoh-protocol/src/common/extension.rs:60-68`), so the id is
+    ///   the low nibble. Its z64 body is a single `VLE(priority)`
+    ///   (`wz-session-core/src/frame_encode.rs`, `write_qos_ext`).
+    /// * `DEFAULT_PRIORITY` is `5` (`Priority::Data`), what a Frame or Fragment
+    ///   carrying NO QoS ext means — zenoh omits the ext at the default, so
+    ///   absence is a value and not a gap.
+    const T_MID_FRAGMENT_LOCAL: u8 = 0x06;
+    const FLAG_FRAGMENT_MORE: u8 = 0x40;
+    const FLAG_FRAGMENT_RELIABLE: u8 = 0x20;
+    const FLAG_EXT_CHAIN: u8 = 0x80;
+    const EXT_ID_MASK: u8 = 0x0F;
+    const EXT_ID_QOS: u8 = 0x01;
+    const DEFAULT_PRIORITY: u8 = 5;
+
+    /// Which conduit a fragment rides, as the PAIR wz keys a reassembly chain
+    /// on: `(reliable, priority)`
+    /// (`wz-session-core/src/reassembly_dispatch.rs`, `ChainKey`).
+    ///
+    /// A pair rather than a priority because both halves are load-bearing and
+    /// each is separately deniable. Two chains at the SAME priority and
+    /// different reliabilities are two conduits; so are two at the same
+    /// reliability and different priorities. A relay that read only the
+    /// priority would report ONE conduit for the first pair and could then not
+    /// tell an implementation that keys on both from one that drops the
+    /// reliability bit — which is exactly the discrimination this parser exists
+    /// to make possible.
+    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+    pub struct Conduit {
+        /// The `ext_qos` priority, or the DEFAULT — 5, `Priority::Data`, the
+        /// crate-private `DEFAULT_PRIORITY` — when the ext is absent.
+        pub priority: u8,
+        /// The header's `R` flag: the reliable channel, not the best-effort one.
+        pub reliable: bool,
+    }
+
+    /// Read one base-128 VLE out of `bytes` at `at`, returning the value and
+    /// the index just past it. `None` when the encoding runs off the end.
+    fn read_vle(bytes: &[u8], mut at: usize) -> Option<(u64, usize)> {
+        let mut value = 0u64;
+        let mut shift = 0u32;
+        while at < bytes.len() {
+            let byte = bytes[at];
+            at += 1;
+            value |= u64::from(byte & 0x7F) << shift;
+            if byte < 0x80 {
+                return Some((value, at));
+            }
+            shift += 7;
+            if shift >= 64 {
+                return None;
+            }
+        }
+        None
+    }
+
+    /// The [`Conduit`] of a batch whose FIRST transport message is a Fragment,
+    /// or `None` when the batch does not open with one.
+    ///
+    /// The layout read here is `[header][VLE(sn)][ext chain][payload]`, and the
+    /// QoS ext is FIRST in that chain when present because zenoh writes
+    /// extensions in ascending id order and QoS is `0x1`
+    /// (`wz-session-core/src/frame_encode.rs`, `write_qos_ext`'s doc). A header
+    /// without the Z flag carries no chain at all, which means the DEFAULT
+    /// priority rather than an unknown one. The reliability comes off the
+    /// header byte itself and is therefore always readable, ext or no ext.
+    ///
+    /// Returns the DEFAULT priority rather than `None` for a fragment whose
+    /// first extension is something else: `None` here means "not a fragment",
+    /// and conflating the two would make a batch this parser did not understand
+    /// look like a batch that was not a fragment — the quiet direction.
+    pub fn fragment_conduit(batch: &[u8]) -> Option<Conduit> {
+        let header = *batch.first()?;
+        if header & TRANSPORT_MID_MASK != T_MID_FRAGMENT_LOCAL {
+            return None;
+        }
+        let reliable = header & FLAG_FRAGMENT_RELIABLE != 0;
+        let at_default = Conduit {
+            priority: DEFAULT_PRIORITY,
+            reliable,
+        };
+        if header & FLAG_EXT_CHAIN == 0 {
+            return Some(at_default);
+        }
+        let (_sn, at) = read_vle(batch, 1)?;
+        let ext_header = *batch.get(at)?;
+        if ext_header & EXT_ID_MASK != EXT_ID_QOS {
+            return Some(at_default);
+        }
+        let (priority, _) = read_vle(batch, at + 1)?;
+        Some(Conduit {
+            priority: priority as u8,
+            reliable,
+        })
+    }
+
+    /// Whether a fragment batch's header says more fragments follow.
+    fn fragment_has_more(batch: &[u8]) -> bool {
+        batch.first().is_some_and(|h| h & FLAG_FRAGMENT_MORE != 0)
+    }
+
     /// A live [`spawn_counting_relay`] — the listening port a dialer aims at,
     /// plus the per-direction counters the relay accumulates.
     ///
@@ -2346,6 +2479,9 @@ pub mod common {
         dialer_to_acceptor: Arc<AtomicUsize>,
         acceptor_to_dialer: Arc<AtomicUsize>,
         dropped: Arc<AtomicUsize>,
+        held: Arc<AtomicUsize>,
+        overtaken: Arc<AtomicUsize>,
+        conduits: Arc<Mutex<BTreeSet<Conduit>>>,
     }
 
     impl CountingRelay {
@@ -2378,6 +2514,41 @@ pub mod common {
         /// guards for `counted_mid`).
         pub fn dropped_count(&self) -> usize {
             self.dropped.load(Ordering::Relaxed)
+        }
+
+        /// Fragment batches this relay HELD back under
+        /// [`RelayFault::InterleaveConduitsAcceptorToDialer`]. Zero under every
+        /// other fault.
+        ///
+        /// A leg must assert on this for the reason `dropped_count` gives for
+        /// its own: an overlap that was never induced leaves the leg asserting
+        /// that a sequential stream reassembles, which every implementation
+        /// does, including the one the leg exists to refuse.
+        pub fn held_count(&self) -> usize {
+            self.held.load(Ordering::Relaxed)
+        }
+
+        /// Batches that OVERTOOK the held chain — a fragment on a different
+        /// conduit forwarded while the first chain was still held back.
+        ///
+        /// This, not `held_count`, is what says the two chains actually
+        /// OVERLAPPED: holding a chain and then releasing it with nothing in
+        /// between is a delay, not an interleave, and it discriminates nothing.
+        pub fn overtaken_count(&self) -> usize {
+            self.overtaken.load(Ordering::Relaxed)
+        }
+
+        /// Every distinct [`Conduit`] this relay read off a FRAGMENT batch
+        /// flowing acceptor -> dialer — the `(reliable, priority)` pair, not
+        /// the priority alone, because that pair is what wz keys a chain on.
+        ///
+        /// The relay's own answer to "did the genuine side really split these
+        /// across conduits", derived from the bytes by a parser that is not
+        /// wz's. A leg cross-checks it against what wz's decoder reported: two
+        /// independent readings of the same wire, and a leg whose only witness
+        /// was wz's own decode would be asking wz whether wz was right.
+        pub fn conduits_seen(&self) -> BTreeSet<Conduit> {
+            self.conduits.lock().expect("relay conduit set").clone()
         }
     }
 
@@ -2419,6 +2590,50 @@ pub mod common {
             /// The byte sequence identifying the batch to remove.
             needle: Vec<u8>,
         },
+        /// HOLD one whole fragment chain flowing ACCEPTOR -> DIALER until a
+        /// fragment on a DIFFERENT [`Conduit`] has overtaken it, then release it
+        /// in order.
+        ///
+        /// The chain held is the first to START once the direction has carried
+        /// TWO conduits — not the first chain outright. The crate-private
+        /// `interleave_step` carries the measurement that forced the
+        /// distinction.
+        ///
+        /// ## Why the wire has to be made to do this
+        ///
+        /// A genuine router does NOT interleave two chains of its own accord.
+        /// [`spawn_counting_relay`]'s own docs already record why — it flushes
+        /// before it fragments and holds one mutex for the whole chain — and
+        /// R2200 measured the consequence directly: two publishers at priority
+        /// 1 and priority 6, both fragmenting to a 64-byte MTU on ONE link,
+        /// arrive as `1 1 1 1 1 | 6 6 6 6 6 | 1 1 1 1 1 | ...`, strictly
+        /// sequential.
+        ///
+        /// Sequential chains do not test what a per-channel reassembler is
+        /// FOR. An implementation that keyed its reassembly on the peer alone,
+        /// ignoring the conduit entirely, reassembles that stream correctly:
+        /// each chain opens, completes and closes before the next begins. Only
+        /// an OVERLAP separates the two implementations, and since neither peer
+        /// will produce one, the transport in between has to.
+        ///
+        /// ## Why this is a legal thing for a wire to do
+        ///
+        /// Reordering ACROSS conduits is not a protocol violation — it is what
+        /// a conduit IS. Each carries its own sequence-number space, and a
+        /// receiver that could not tolerate one conduit's message arriving
+        /// between two of another's would not survive any real network. Within
+        /// one conduit this fault preserves order exactly: it holds a WHOLE
+        /// chain and re-emits it in the order it arrived.
+        ///
+        /// That is also why it reads the [`Conduit`] rather than counting
+        /// batches. A positional rule ("hold the Nth") cannot tell one conduit
+        /// from another, so it would reorder WITHIN a chain, which IS a
+        /// violation, and wz would reject it — a red that says nothing about
+        /// reassembly. It reads BOTH halves for the same reason: two chains at
+        /// one priority and different reliabilities are two conduits, and a
+        /// rule that saw only the priority would call them one and reorder
+        /// within.
+        InterleaveConduitsAcceptorToDialer,
     }
 
     /// Bind a TCP relay that a dialer under test connects to in place of
@@ -2507,8 +2722,9 @@ pub mod common {
              not a header byte with its Z/M/R flags set — a flagged value never matches \
              and would leave a `== 0` calibration arm passing vacuously"
         );
+        let interleave = matches!(fault, RelayFault::InterleaveConduitsAcceptorToDialer);
         let needle = match fault {
-            RelayFault::None => None,
+            RelayFault::None | RelayFault::InterleaveConduitsAcceptorToDialer => None,
             RelayFault::DropFirstAcceptorToDialer { needle } => {
                 assert!(
                     !needle.is_empty(),
@@ -2524,9 +2740,24 @@ pub mod common {
         let dialer_to_acceptor = Arc::new(AtomicUsize::new(0));
         let acceptor_to_dialer = Arc::new(AtomicUsize::new(0));
         let dropped = Arc::new(AtomicUsize::new(0));
+        let held = Arc::new(AtomicUsize::new(0));
+        let overtaken = Arc::new(AtomicUsize::new(0));
+        let conduits = Arc::new(Mutex::new(BTreeSet::new()));
         let up = Arc::clone(&dialer_to_acceptor);
         let down = Arc::clone(&acceptor_to_dialer);
         let down_dropped = Arc::clone(&dropped);
+        let down_interleave = interleave.then(|| InterleaveSinks {
+            held: Arc::clone(&held),
+            overtaken: Arc::clone(&overtaken),
+        });
+        // The conduit OBSERVATION is deliberately not part of the fault. It
+        // rides every acceptor -> dialer pump whatever `fault` is, because
+        // `conduits_seen()` answers "what did the far side put on this link",
+        // which no relay behaviour changes. R2200's first draft fed it from
+        // inside the interleave and the calibration twin could then never
+        // report a conduit at all -- an instrument that only exists on the arm
+        // it is meant to discriminate FROM.
+        let down_conduits = Arc::clone(&conduits);
 
         thread::spawn(move || {
             // An accept that never comes means the test finished without
@@ -2557,8 +2788,12 @@ pub mod common {
                     dialer_tx,
                     &down,
                     counted_mid,
-                    needle.as_deref(),
-                    &down_dropped,
+                    PumpTaps {
+                        needle: needle.as_deref(),
+                        dropped: &down_dropped,
+                        interleave: down_interleave.as_ref(),
+                        conduits: Some(&down_conduits),
+                    },
                 )
             });
             pump_counting(
@@ -2566,8 +2801,7 @@ pub mod common {
                 acceptor_tx,
                 &up,
                 counted_mid,
-                None,
-                &AtomicUsize::new(0),
+                PumpTaps::inert(&AtomicUsize::new(0)),
             );
         });
 
@@ -2576,8 +2810,101 @@ pub mod common {
             dialer_to_acceptor,
             acceptor_to_dialer,
             dropped,
+            held,
+            overtaken,
+            conduits,
         }
     }
+
+    /// Everything one direction of a relay does BESIDES forwarding and counting,
+    /// and everywhere it reports.
+    ///
+    /// Grouped rather than passed as four more parameters because they are one
+    /// thing — the taps on this direction — and because the DIALER -> ACCEPTOR
+    /// direction takes none of them: `PumpTaps::inert(&counter)` says that at
+    /// the call site, where four bare `None`s said only that four arguments
+    /// existed. Faults ride the acceptor -> dialer pump alone (the dialer under
+    /// test is the receiver whose recovery path a leg exercises), so this
+    /// asymmetry is the normal case rather than a special one.
+    struct PumpTaps<'a> {
+        /// FIRST-match-only drop rule. `None` leaves the stream intact.
+        needle: Option<&'a [u8]>,
+        /// Where a dropped batch is counted. Only the needle rule writes it, so
+        /// an inert direction can share one throwaway counter.
+        dropped: &'a AtomicUsize,
+        /// The interleave fault's counters. `None` under every other fault.
+        interleave: Option<&'a InterleaveSinks>,
+        /// Where every conduit a fragment rode is recorded — independent of
+        /// `interleave`, because what the far side PUT on the link is not a
+        /// property of what this relay did to it.
+        conduits: Option<&'a Mutex<BTreeSet<Conduit>>>,
+    }
+
+    impl<'a> PumpTaps<'a> {
+        /// A direction that only forwards and counts. `dropped` is still taken
+        /// because the needle rule is what writes it and there is no needle
+        /// here; a caller supplies a throwaway.
+        fn inert(dropped: &'a AtomicUsize) -> Self {
+            Self {
+                needle: None,
+                dropped,
+                interleave: None,
+                conduits: None,
+            }
+        }
+    }
+
+    /// Where [`RelayFault::InterleaveConduitsAcceptorToDialer`] reports what it
+    /// DID. Grouped rather than passed as two more arguments because they are
+    /// one fact — what the interleave did to the ordering — and a pump given
+    /// one of them and not the other could not answer for it.
+    ///
+    /// What the relay merely SAW is not here: `conduits_seen()` is fed by the
+    /// pump regardless of fault, so the calibration twin can report the same
+    /// conduits as the proof.
+    struct InterleaveSinks {
+        held: Arc<AtomicUsize>,
+        overtaken: Arc<AtomicUsize>,
+    }
+
+    /// The interleave's own state, for one direction of one relay.
+    #[derive(Default)]
+    struct InterleaveState {
+        /// The held chain's batches, in arrival order.
+        held: Vec<(Vec<u8>, Vec<u8>)>,
+        /// The conduit the held chain rides.
+        conduit: Option<Conduit>,
+        /// The held chain has seen its terminating fragment.
+        closed: bool,
+        /// Released; everything forwards verbatim from here on.
+        done: bool,
+        /// Batches seen since the hold began — the deadlock bound.
+        since_hold: usize,
+        /// Distinct conduits a fragment has ridden on this direction.
+        ///
+        /// The hold does not arm until there are TWO. R2200 measured why: the
+        /// two genuine publishers come up SEQUENTIALLY (each spawn blocks until
+        /// its child says it is publishing), so the first seconds of the link
+        /// carry one conduit only. A hold armed there waits for an overtake
+        /// that does not exist yet, hits the same-conduit release on the next
+        /// chain, and retires having never interleaved — `overtaken == 0`, on a
+        /// link where both conduits went on to appear.
+        seen: BTreeSet<Conduit>,
+        /// Conduits with a chain currently OPEN — a fragment said "more
+        /// follows" and its terminator has not arrived.
+        ///
+        /// The hold arms at a chain START and never mid-chain: holding a chain's
+        /// tail while its head has already gone past splits one chain across the
+        /// release, which is a WITHIN-conduit reorder.
+        open: BTreeSet<Conduit>,
+    }
+
+    /// How many batches may pass with the chain held before it is released
+    /// unconditionally. A conduit that never appears would otherwise strand the
+    /// held chain and hang the leg on a timeout, which reads as a wz defect;
+    /// releasing instead leaves `overtaken_count()` at zero, which is a leg
+    /// FAILURE with the right subject.
+    const INTERLEAVE_BATCH_BOUND: usize = 256;
 
     /// Forward every `[u16 LE len][batch]` from `src` to `dst` byte-for-byte,
     /// bumping `counter` for each batch whose first transport message carries
@@ -2646,13 +2973,19 @@ pub mod common {
         mut dst: TcpStream,
         counter: &AtomicUsize,
         counted_mid: u8,
-        needle: Option<&[u8]>,
-        dropped: &AtomicUsize,
+        taps: PumpTaps<'_>,
     ) {
+        let PumpTaps {
+            needle,
+            dropped,
+            interleave,
+            conduits,
+        } = taps;
         use std::io::{Read, Write};
         use std::net::Shutdown;
 
         let mut prefix = [0u8; 2];
+        let mut state = InterleaveState::default();
         loop {
             if src.read_exact(&mut prefix).is_err() {
                 break;
@@ -2676,12 +3009,192 @@ pub mod common {
             {
                 counter.fetch_add(1, Ordering::Relaxed);
             }
+            // The COUNT above is taken before any hold, and deliberately: it
+            // answers "what the far side put on the wire", which a relay that
+            // delays a batch has not changed. Only the ORDER is this fault's
+            // business.
+            //
+            // The conduit reading is taken on the same terms and in the same
+            // place, so it is a property of the LINK rather than of the fault:
+            // outside `state.done`, outside the `interleave` option, and before
+            // any batch can be held back.
+            if let Some(conduits) = conduits {
+                if let Some(conduit) = fragment_conduit(&batch) {
+                    conduits.lock().expect("relay conduit set").insert(conduit);
+                }
+            }
+            if let Some(sinks) = interleave.filter(|_| !state.done) {
+                match interleave_step(&mut state, sinks, &prefix, &batch) {
+                    // Held: nothing goes out for this batch.
+                    Step::Hold => continue,
+                    Step::Forward => {}
+                    // The overtake: the OTHER conduit's batch goes out ahead of
+                    // the chain still waiting behind it.
+                    Step::ForwardThenRelease => {
+                        if dst.write_all(&prefix).is_err() || dst.write_all(&batch).is_err() {
+                            break;
+                        }
+                        if release_held(&mut dst, &mut state).is_err() {
+                            break;
+                        }
+                        continue;
+                    }
+                    // Retirement WITHOUT an overtake: the held chain goes out
+                    // FIRST and this batch follows it. Emitting them the other
+                    // way round is what the fault must never do -- both cases
+                    // that reach here are same-conduit or bound-driven, where
+                    // going first would reorder within one conduit.
+                    Step::ReleaseThenForward => {
+                        if release_held(&mut dst, &mut state).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
             if dst.write_all(&prefix).is_err() || dst.write_all(&batch).is_err() {
                 break;
             }
         }
+        // A held chain must not die with the pump: the dialer would see a
+        // truncated chain and report a reassembly failure that the RELAY
+        // caused. Flushing on the way out keeps every red this leg can produce
+        // attributable to wz.
+        if interleave.is_some() && !state.held.is_empty() {
+            use std::io::Write;
+            for (p, b) in std::mem::take(&mut state.held) {
+                if dst.write_all(&p).is_err() || dst.write_all(&b).is_err() {
+                    break;
+                }
+            }
+        }
         let _ = src.shutdown(Shutdown::Read);
         let _ = dst.shutdown(Shutdown::Write);
+    }
+
+    /// What [`interleave_step`] decided for one batch.
+    enum Step {
+        /// Buffered; emit nothing now.
+        Hold,
+        /// Emit this batch normally.
+        Forward,
+        /// Emit this batch, then the whole held chain behind it. The OVERTAKE,
+        /// and the only step that reorders anything.
+        ForwardThenRelease,
+        /// Emit the whole held chain, then this batch behind it. Retirement in
+        /// arrival order, reordering nothing.
+        ReleaseThenForward,
+    }
+
+    /// Write the held chain out in arrival order and retire the interleave.
+    ///
+    /// Shared by both release steps so "the held chain leaves in the order it
+    /// arrived" is written once: the two steps differ in where THIS batch goes
+    /// relative to the chain, never in the chain's own order.
+    fn release_held(
+        dst: &mut TcpStream,
+        state: &mut InterleaveState,
+    ) -> Result<(), std::io::Error> {
+        use std::io::Write;
+        let released = std::mem::take(&mut state.held);
+        state.done = true;
+        for (p, b) in released {
+            dst.write_all(&p)?;
+            dst.write_all(&b)?;
+        }
+        Ok(())
+    }
+
+    /// Advance the interleave for one batch.
+    ///
+    /// The rule, stated once: once TWO conduits are known to ride this link,
+    /// hold the next WHOLE fragment chain that starts; forward anything that is
+    /// not on its conduit; the first fragment that IS on another conduit goes
+    /// out first and the held chain follows it.
+    ///
+    /// ## Why the hold waits for the second conduit
+    ///
+    /// Because arming earlier retires the fault before it can fire. The two
+    /// genuine publishers come up one after the other, so the link's first
+    /// seconds carry ONE conduit; a hold armed there has nothing to be
+    /// overtaken by, meets the same-conduit release on the very next chain, and
+    /// retires with `overtaken == 0` on a link where the second conduit does
+    /// arrive a moment later. MEASURED, R2200: the first draft armed on the
+    /// first fragment and both arms of the leg failed on exactly that.
+    ///
+    /// Waiting is not a weaker fault. `overtaken >= 1` is still what the proof
+    /// asserts, and it is still unreachable unless two chains genuinely
+    /// overlapped -- the wait only stops the fault from being spent before its
+    /// subject exists.
+    ///
+    /// Two cases release without interleaving, and both must, because holding
+    /// forever is a hang and a hang reads as a wz defect:
+    ///   * the same conduit starts a SECOND chain. Emitting it ahead of the
+    ///     held one would reorder WITHIN a conduit, which is the violation this
+    ///     fault exists not to commit — hence [`Step::ReleaseThenForward`],
+    ///     which puts the held chain back in front of it.
+    ///   * [`INTERLEAVE_BATCH_BOUND`] batches pass with nothing to overtake.
+    ///
+    /// Neither bumps `overtaken`, so a leg asserting on it fails rather than
+    /// passing on a stream that never overlapped.
+    fn interleave_step(
+        state: &mut InterleaveState,
+        sinks: &InterleaveSinks,
+        prefix: &[u8; 2],
+        batch: &[u8],
+    ) -> Step {
+        let Some(conduit) = fragment_conduit(batch) else {
+            // Not a fragment. It rides its own conduit's ordering, not the held
+            // chain's, so it never waits.
+            return Step::Forward;
+        };
+        // Read BEFORE the open-set is updated: a batch begins a chain exactly
+        // when its conduit had none in flight.
+        let starts_chain = !state.open.contains(&conduit);
+        if fragment_has_more(batch) {
+            state.open.insert(conduit);
+        } else {
+            state.open.remove(&conduit);
+        }
+        state.seen.insert(conduit);
+
+        if state.conduit.is_none() {
+            // Not yet armed. Both conditions are necessary and neither is
+            // sufficient: a second conduit must exist to overtake with, and the
+            // batch must OPEN a chain rather than continue one.
+            if state.seen.len() < 2 || !starts_chain {
+                return Step::Forward;
+            }
+            state.conduit = Some(conduit);
+            state.closed = !fragment_has_more(batch);
+            state.held.push((prefix.to_vec(), batch.to_vec()));
+            sinks.held.fetch_add(1, Ordering::Relaxed);
+            return Step::Hold;
+        }
+        state.since_hold += 1;
+        if state.since_hold > INTERLEAVE_BATCH_BOUND {
+            return Step::ReleaseThenForward;
+        }
+        if state.conduit == Some(conduit) {
+            if state.closed {
+                // A second chain on the SAME conduit: release rather than
+                // reorder within it.
+                return Step::ReleaseThenForward;
+            }
+            state.closed = !fragment_has_more(batch);
+            state.held.push((prefix.to_vec(), batch.to_vec()));
+            sinks.held.fetch_add(1, Ordering::Relaxed);
+            return Step::Hold;
+        }
+        // A different conduit, and the held chain is still behind it. This is
+        // the overlap the leg is for.
+        sinks.overtaken.fetch_add(1, Ordering::Relaxed);
+        if state.closed {
+            Step::ForwardThenRelease
+        } else {
+            // The held chain is not complete yet, so keep holding and let this
+            // one past — the strongest form of the overlap, both chains open.
+            Step::Forward
+        }
     }
 
     /// Spawn a zenoh-pico `z_sub` as a CLIENT of a router
@@ -2815,6 +3328,92 @@ pub mod common {
             eprintln!("z_pub open attempt {attempt}/{ATTEMPTS} did not start publishing; retrying");
         }
         panic!("pico z_pub failed to open a session to {router_label} after {ATTEMPTS} attempts");
+    }
+
+    /// R2200 (open-debt item 558) — spawn the CORE zenoh `z_pub` example as a
+    /// client of a router, publishing on a NAMED CONDUIT, returned once it has
+    /// started publishing (`"Putting Data"`).
+    ///
+    /// ## Why a second publisher helper instead of a flag on the first
+    ///
+    /// The two binaries share neither their argument spelling (`-v` vs `-p` for
+    /// the value) nor their capabilities, and only this one can be told which
+    /// conduit to publish on. It has no priority FLAG either — but it has
+    /// `--cfg`, and `qos/publication` is a real config path whose entries carry
+    /// BOTH halves of a conduit, a `priority` and a `reliability`
+    /// (`target/zenohd/DEFAULT_CONFIG.json5`, the commented `qos.publication`
+    /// block). MEASURED against a live router before this helper was written:
+    /// two of these, at `real_time` and `data_low`, put priority 1 and priority
+    /// 6 fragment chains on ONE link.
+    ///
+    /// Both halves are parameters because wz keys a reassembly chain on the
+    /// PAIR, and a helper that fixed the reliability could only ever witness
+    /// half of that key. `reliability` takes zenoh's own spelling — `reliable`
+    /// or `best_effort`.
+    ///
+    /// The `key_exprs` of the overwrite is the publisher's own key, so the rule
+    /// cannot reach anything else on the session. `key` is refused if it
+    /// carries a quote or a backslash: the config is assembled as JSON5 text
+    /// here, and a key that could close the string would silently produce a
+    /// DIFFERENT rule rather than an error.
+    ///
+    /// No retry loop, unlike the pico helper: that one absorbs a foreign
+    /// one-shot's open transient (`"Unable to open session!"`, which pico does
+    /// not self-retry). This binary is the Rust session, which retries its own
+    /// connect, so a retry here would only mask a real failure to reach the
+    /// router.
+    pub fn spawn_publishing_zenoh_zpub(
+        z_pub: &Path,
+        key: &str,
+        payload: &str,
+        endpoint: &str,
+        priority: &str,
+        reliability: &str,
+        mut mk_stdout: impl FnMut() -> File,
+    ) -> ChildGuard {
+        assert!(
+            !key.contains('"') && !key.contains('\\'),
+            "key {key:?} would not survive being written into the JSON5 qos rule"
+        );
+        let cfg = format!(
+            "qos/publication:[{{\"key_exprs\":[\"{key}\"],\
+             \"config\":{{\"priority\":\"{priority}\",\
+             \"reliability\":\"{reliability}\"}}}}]"
+        );
+        let out = mk_stdout();
+        let out_writer = out.try_clone().expect("dup z_pub stdout handle");
+        let mut out_reader = out;
+        let mut child = ChildGuard::wrap(
+            "z_pub client (zenoh core example)",
+            Command::new("stdbuf")
+                .args(["-oL", "-eL"])
+                .arg(z_pub)
+                .args([
+                    "-k", key, "-p", payload, "-e", endpoint, "-m", "client", "--cfg", &cfg,
+                ])
+                .stderr(Stdio::from(
+                    out_writer.try_clone().expect("dup stderr handle"),
+                ))
+                .stdout(Stdio::from(out_writer))
+                .spawn()
+                .expect("spawn zenoh z_pub via stdbuf"),
+        );
+        let deadline = Instant::now() + Duration::from_secs(12);
+        loop {
+            let cap = read_captured(&mut out_reader);
+            if cap.contains("Putting Data") {
+                return child;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.child_mut().kill();
+                let _ = child.child_mut().wait();
+                panic!(
+                    "zenoh z_pub did not start publishing on {key} at priority \
+                     {priority} / {reliability} within 12s; captured: {cap}"
+                );
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
     }
 
     /// Spawn a zenoh-pico `z_queryable` against a router (`-e <endpoint> -m

@@ -2218,6 +2218,20 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
         "not-this-key",
         "PluginRegistry",
     ),
+    // R2200 (open-debt item 558) — wz's source spells `qos/publication` to
+    // configure the GENUINE zenoh `z_pub` example, never itself. The key is the
+    // only way any oracle this tree provisions can be told which PRIORITY to
+    // publish at (that binary has no priority flag; zenoh-pico's `z_pub` and
+    // `z_advanced_pub` have neither flag nor `--cfg`), and a per-conduit
+    // reassembly witness needs two priorities on one link before it has a
+    // subject at all. wz honours nothing here: the key stays in the
+    // `QosOverwriteItemConf` beyond-wz group, whose subject is an interceptor
+    // wz does not have.
+    (
+        "qos/publication",
+        "foreign-node-config",
+        "spawn_publishing_zenoh_zpub",
+    ),
     (
         "scouting/gossip/autoconnect",
         "wz-has-it",

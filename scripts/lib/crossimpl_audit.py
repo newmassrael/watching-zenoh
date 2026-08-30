@@ -460,7 +460,24 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # on the DISCOVERY plane for the same reason: its existing zenohd adjudicators
 # all dial, or are dialled at, an endpoint the test hands over, and none of them
 # establish that the run-mode can be FOUND.
-FOREIGN_ADJUDICATOR_LINKS = 859
+# R2200 (item 558) — 859 -> 865, in the NEW wz_channel_reassembly_zenohd_interop.rs.
+# TWO proof legs, THREE links each (their `wz-proves` lines are exactly the
+# delta); the calibration TWIN beside each declares `none` and is counted
+# nowhere, which is the arrangement A4-3 asks for. What moved is not that
+# `transport-fragmentation` gained another zenohd witness -- it had two -- but
+# that none of them said anything about CHANNELS: `priority`, `reliability`,
+# `conduit` and `qos` appear in neither of those two files, while wz keys a
+# reassembly chain on `(peer, reliable, priority)`. `transport-qos` gains
+# witnesses in which the conduit is not merely negotiated but SEPARATES two
+# chains that overlap on one link.
+#
+# The two proofs are two witnesses rather than one repeated because they take
+# the chain key's halves SEPARATELY -- priorities at one reliability, then
+# reliabilities at one priority. MEASURED: dropping `priority` from
+# `find_active` reds the first and not the second, dropping `reliable` reds the
+# second and not the first, so neither is a duplicate of the other and the
+# count is honest at six.
+FOREIGN_ADJUDICATOR_LINKS = 865
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
