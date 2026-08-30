@@ -6,11 +6,20 @@
 //! Each `mod <stem>` block `include!`s the sce-codegen Rust output for
 //! the matching `sources/codecs/<stem>.scxml` file. R311y22: that output
 //! is COMMITTED under `out/wz-codecs/<stem>.rs` (resolved via
-//! `env!("CARGO_MANIFEST_DIR")`), so this crate has no build script and
-//! pulls no libxml2/SCE toolchain. `xtask` (scripts/regen-codegen.sh)
-//! regenerates the committed files from the SCXML SSOT and the CI
-//! regen-diff lane enforces committed == regenerated. Manual edits to
-//! `out/**` are forbidden.
+//! `env!("CARGO_MANIFEST_DIR")`), so this crate has no build script of its
+//! own. `xtask` (scripts/regen-codegen.sh) regenerates the committed files
+//! from the SCXML SSOT and the CI regen-diff lane enforces
+//! committed == regenerated. Manual edits to `out/**` are forbidden.
+//!
+//! R2196 (open-debt item 530) — that sentence used to end "and pulls no
+//! libxml2/SCE toolchain", and the libxml2 half was FALSE. `wz-codecs`
+//! depends on `sce-forge-runtime`, `sce-forge-runtime` build-depends on
+//! `sce-build`, and `sce-build` depends on `libxml`, so native libxml2 is in
+//! the build closure whether or not codegen runs. R2105 corrected the same
+//! claim in `run-ci.sh` and `xtask/src/main.rs` and did not reach the two
+//! sites that make it about the crate the chain runs through.
+//! `scripts/lib/prose_build_closure_gate.py` now adjudicates the shape, and
+//! the three hops above are adjudicated by `prose_dep_graph_gate.py`.
 //!
 //! The codegen output references sibling modules with
 //! `use super::X::Y;`, so all stems are declared at the same level in

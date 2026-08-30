@@ -226,7 +226,15 @@ sce-portable-bytes = { path = "../../vendor/sce/backends/rust/portable-bytes", d
 
 # R311y22 — no [build-dependencies]. Codegen moved to `xtask` (the codegen
 # SSOT); the committed `out/wz-codecs/*.rs` is `include!`-ed directly, so this
-# crate no longer pulls `sce-build` (hence libxml2) into the build graph.
+# crate runs no codegen of its own.
+#
+# R2196 (open-debt item 530) — the clause used to end "so this crate no longer
+# pulls `sce-build` (hence libxml2) into the build graph", and that was FALSE.
+# `wz-codecs` depends on `sce-forge-runtime`, `sce-forge-runtime` build-depends
+# on `sce-build`, and `sce-build` depends on `libxml`, so the resolve graph
+# reaches both whatever this manifest stops doing. R2105 caught the same
+# sentence in run-ci.sh and xtask and never reached these two sites. What
+# R311y22 removed is a build script here, not the chain.
 
 [lints]
 workspace = true

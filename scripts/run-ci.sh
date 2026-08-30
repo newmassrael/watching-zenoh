@@ -2017,6 +2017,28 @@ PY
     # green.
     python3 scripts/lib/prose_dep_graph_gate.py --selftest || return 1
     python3 scripts/lib/prose_dep_graph_gate.py --check || return 1
+    # R2196 (open-debt item 530) — the OTHER half of the same item, and the
+    # half R2192's closing note wrongly declared covered elsewhere. That gate
+    # reads a dependency written as TWO NAMED CRATES. The sentence R2105
+    # actually measured names only ONE, because the other is the crate whose
+    # directory the file sits in: "so this crate has no build script and pulls
+    # no libxml2/SCE toolchain". Re-measured here, that sentence was still in
+    # the tree in two wz-codecs sites R2105 never reached, and both were FALSE
+    # -- `sce-forge-runtime`'s build script reaches `sce-build` and `libxml`
+    # from exactly that crate.
+    #
+    # THE SUBJECT IS THE FILE'S LOCATION, and that is what makes this exact
+    # rather than a phrase list. The tree writes the same object word, verb and
+    # polarity in wz-link-lwip's build.rs where it is TRUE. A banned-phrase
+    # grep reds both; only resolving the owning package separates them.
+    #
+    # Denials are held to the BUILD CLOSURE, not to direct edges: measured this
+    # round, a direct-edge check reports GREEN on the tree while both false
+    # sentences are in it. The selftest carries that chain so the arm cannot be
+    # born green, and a quoted claim is spared so a round can still retract one
+    # (the R2161 counterexample).
+    python3 scripts/lib/prose_build_closure_gate.py --selftest || return 1
+    python3 scripts/lib/prose_build_closure_gate.py --check || return 1
     # R2193 (open-debt item 532) — how many of this workspace's non-default
     # features gate a public item, DERIVED rather than estimated.
     #
