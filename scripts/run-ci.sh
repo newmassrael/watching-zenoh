@@ -2165,6 +2165,29 @@ PY
     # day the item was filed. Numbers only, by design: nothing else of the
     # delivery document is carried, and the axis works without it.
     python3 scripts/lib/analysis_surface_parity.py || return 1
+    # R2210 (open-debt item 564) — and the half of that table nothing could
+    # ask a machine about.
+    #
+    # `NO_REACH_PATH` carries REASONS, and its entry for the configuration
+    # number says the two analysis surfaces "take capture bytes and hand back
+    # documents". The table's own header is candid about the only check on
+    # that: an entry is contradicted when a capability ROW starts naming the
+    # same number. Nothing looks at the surfaces. A surface that grew a
+    # configuration reader with no row added would leave the sentence standing
+    # and false -- the exemption-table shape R2194 recorded, where a reason is
+    # an escape hatch unless a SEPARATE derivation can call it out.
+    #
+    # Item 564 asked for a VERDICT on whether the analysis surfaces owe a
+    # config door, and the verdict is no: the door exists in `wz-capi-c`
+    # (R2172, item 548), and one here would contradict this declaration. That
+    # is the reason this runs beside the gate whose sentence it holds up.
+    #
+    # Its selftest drives every arm red from a fixture, and R2210 also drove
+    # all four red in the TREE -- a copied key, a dev edge to the config
+    # crate, a door renamed to carry the word, and the declaration pointed at
+    # another file.
+    python3 scripts/lib/analysis_surface_config_free.py || return 1
+    python3 scripts/lib/analysis_surface_config_free.py --selftest >/dev/null || return 1
     # R311y887 (open-debt item 361) — and what a bounded read's OUTPUT must
     # contain, which is the gate above one layer in.
     #

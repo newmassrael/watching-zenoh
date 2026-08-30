@@ -525,7 +525,13 @@ NO_REACH_PATH = {
     "`crates/wz-runtime-tokio/src/zenoh_config.rs` -- which neither of these "
     "two surfaces reads or writes; they take capture bytes and hand back "
     "documents. Its own instrument is `scripts/lib/deepenable_audit.py`, and "
-    "answering for it here would put one fact under two labels.",
+    "answering for it here would put one fact under two labels. R2210 (item "
+    "564) made the clause after the dash a DERIVATION rather than this "
+    "sentence: `scripts/lib/analysis_surface_config_free.py` finds this entry "
+    "by the file it names and goes red when either surface reaches "
+    "configuration by dependency, by a copied key, or by a door or flag that "
+    "carries the word -- none of which the contradiction check below can see, "
+    "because it fires only when a capability ROW names this number.",
     3: "OUT OF SURFACE, on the same argument as the number above. What feeds it "
     "is the deployment manifest and its checker (`deploy/*.yaml`, "
     "`scripts/validate-deploy.sh`), which is not a dissection either.",
