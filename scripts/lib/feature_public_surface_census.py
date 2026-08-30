@@ -108,6 +108,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import typing
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 CRATES = ROOT / "crates"
@@ -142,6 +143,63 @@ CALL_OR_PATH = re.compile(
 BARE_NAME = re.compile(r"^\s*[A-Za-z_][A-Za-z0-9_:.]*\s*,?\s*$")
 
 DENOMINATOR_CLASSES = ("public-item", "macro-invocation")
+
+# R2207 — a cfg that is not a bare `feature = "x"`. MEASURED on rustc 1.97.0
+# and recorded in `feature_gate_diagnostic`'s own DEFERRED prose: when the
+# attribute is a compound, the note reads "the item is gated here" and NAMES NO
+# FEATURE, so such an item cannot witness the property the axis holds down.
+COMPOUND = re.compile(r"\b(?:any|all|not)\s*\(")
+
+
+class Shape(typing.NamedTuple):
+    """Where one denominator site is, and the two facts a deferral turns on."""
+
+    where: str
+    #: the attribute is an `any(...)` / `all(...)` / `not(...)`
+    compound: bool
+    #: the gated item's indentation. Zero is a module-level item, which a
+    #: consumer names as `module::thing`; anything deeper is inside an `impl`
+    #: or a nested block, and a method there is spelled `Type::thing`.
+    column: int
+
+
+# R2207 — the CLOSED vocabulary a `DEFERRED` reason must carry, and what each
+# word OBLIGES. Marker spelling: `@defer <word>` anywhere in the reason.
+#
+# ## Why a reason string needed a marker at all
+#
+# `feature_gate_diagnostic.DEFERRED` is the axis's waiting list: gates a public
+# item, not probed yet, reason given. Until this existed the reason was PROSE,
+# and prose is what this workspace keeps paying for -- `NO_PUBLIC_PATH` one
+# table up already carries the warning in capitals ("THIS TABLE IS NOT
+# BELIEVED") precisely because a reason nobody measures is an escape hatch from
+# the derivation it sits beside. The waiting list had no such check: a feature
+# whose public item is a plain module-level `pub fn` under a simple cfg -- one
+# a probe could be written for this afternoon -- could sit there forever under
+# any sentence at all.
+#
+# So each word implies something DERIVED FROM THE SITES, and the check below
+# holds it:
+#
+#   * `compound-cfg`  -- EVERY public-item site of that feature is compound.
+#                        A single simple-cfg site refutes it: that one could
+#                        carry the probe.
+#   * `impl-method`   -- no public-item site under a SIMPLE cfg is at column
+#                        zero. A module-level item under a simple cfg is
+#                        exactly the shape the axis probes, so the deferral
+#                        would be declining work that is already possible.
+#   * `cfg-not-twin`  -- the package writes `cfg(not(feature = "x"))` for it,
+#                        so the feature swaps an implementation rather than
+#                        removing a path and there is no resolution error to
+#                        annotate. Its module-level site is expected, which is
+#                        why it cannot be folded into `impl-method`.
+#
+# A reason carrying no marker, or a word outside this set, is a FINDING --
+# unclassified is not a pass. And a marker whose obligation the sites refute is
+# a FINDING, which is the direction that matters: it turns "somebody wrote a
+# sentence" into "the tree still agrees with it".
+DEFER_POLICY = ("compound-cfg", "impl-method", "cfg-not-twin")
+DEFER_MARKER = re.compile(r"@defer\s+([a-z-]+)")
 
 # path -> why this gate cannot classify the site there. BOTH DIRECTIONS: an
 # undeclared unclassified site FAILS, and a declaration with no site FAILS.
@@ -231,81 +289,23 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "a test-support crate; same reason as the other one",
         frozenset({"tls-fixtures"}),
     ),
-    "wz-session-core": (
-        "the protocol core, second-largest surface. Most of these gate a codec "
-        "or a declaration arm that the runtime crates re-export, so probing "
-        "here and at the runtime would ask the same question twice; which of "
-        "the two layers owns the probe is the decision this round did not make",
-        frozenset(
-            {
-                "access-extauth-usrpwd",
-                "adminspace-config-hotreload",
-                "adminspace-core",
-                "adminspace-metrics",
-                "attachment-bytes",
-                "codec-close",
-                "codec-declare",
-                "codec-frame",
-                "codec-hello",
-                "codec-init-body",
-                "codec-join",
-                "codec-linkstate",
-                "codec-open-body",
-                "codec-push",
-                "codec-request",
-                "codec-response",
-                "codec-response-final",
-                "codec-scout",
-                "declare-interest",
-                "declare-queryable",
-                "declare-subscriber",
-                "declare-token",
-                "declare-undeclare",
-                "deferred-fire",
-                "dissect",
-                "ext-pubsub-group-membership",
-                "ext-pubsub-serde-codec",
-                "keyexpr-prefix",
-                "liveliness-get",
-                "liveliness-token",
-                "multicast-declarations",
-                "query-attachment",
-                "query-reply-err",
-                "query-source-info",
-                "query-value",
-                "reassembly",
-                "routing-namespace",
-                "routing-routes",
-                "scouting-active",
-                "scouting-static",
-                "session-extauth",
-                "session-extcompression",
-                "session-extqos",
-                "session-extshm",
-                "session-matching",
-                "session-multicast",
-                "session-unicast",
-                "storage-aligner",
-                "storage-backend",
-                "storage-history",
-                "storage-mgr-garbage-collection",
-                "storage-mgr-multi-storage-host",
-                "storage-mgr-strip-prefix",
-                "storage-replication",
-                "switchboard",
-                "transport-compression",
-                "transport-fragmentation",
-                "transport-keepalive",
-                "transport-link-raweth",
-                "transport-link-serial",
-                "transport-lowlatency",
-                "transport-multilink",
-                "transport-qos",
-                "transport-shm",
-                "transport-stats",
-            }
-        ),
-    ),
+    # `wz-session-core` used to sit here with all 65 of its public-gating
+    # features -- 65 of the 90 pairs no axis had taken, the longest row this
+    # table ever held. R2207 put it ON the axis, so its features are decided in
+    # `feature_gate_diagnostic`'s own tables now; listing it in both places
+    # would be the second copy of one fact this file refuses elsewhere, and the
+    # check below fails if a package on the axis reappears here.
+    #
+    # ⛔ ITS REASON WAS REFUTED, not outgrown, and that is worth the sentence.
+    # It read "probing here and at the runtime would ask the same question
+    # twice". MEASURED when the axis came to take it: of the 65, only 23 are
+    # probed at `wz-runtime-tokio` at all and 31 exist there under no name. And
+    # even where the NAME is shared the two are not one question -- rustc
+    # attaches its "gated behind the `x` feature" note to the ITEM it configured
+    # out, so a probe spelling `wz_runtime_tokio::…` says nothing whatever about
+    # a consumer who types `wz_session_core::…`. A reason that sounds structural
+    # can still be a guess, and this table is where such a guess goes to live
+    # for months.
     "wz-session-lwip": (
         "one feature, on the lwip session glue; consumers are deploy probes",
         frozenset({"transport-multicast"}),
@@ -386,11 +386,17 @@ def attached(lines: list[str], start: int) -> str | None:
 
 def scan(
     root: pathlib.Path, files: list[str], dirs: dict[str, str], nondefault: dict[str, set[str]]
-) -> tuple[collections.Counter, set[tuple[str, str]], list[tuple[str, int, str]]]:
-    """(class counts, denominator pairs, unclassified sites)."""
+) -> tuple[
+    collections.Counter,
+    set[tuple[str, str]],
+    list[tuple[str, int, str]],
+    dict[tuple[str, str], list["Shape"]],
+]:
+    """(class counts, denominator pairs, unclassified sites, site shapes)."""
     counts: collections.Counter = collections.Counter()
     denom: set[tuple[str, str]] = set()
     unclassified: list[tuple[str, int, str]] = []
+    sites: dict[tuple[str, str], list[Shape]] = collections.defaultdict(list)
     for rel in files:
         if not rel.endswith(".rs"):
             continue
@@ -418,10 +424,18 @@ def scan(
             if kind == "UNCLASSIFIED":
                 unclassified.append((rel, i + 1, following.strip()[:60]))
             elif kind in DENOMINATOR_CLASSES and pkg is not None:
+                # R2207 — the SHAPE of the site, kept so a deferral's stated
+                # reason can be held to it. See `DEFER_POLICY`.
+                shape = Shape(
+                    where=f"{rel}:{i + 1}",
+                    compound=bool(COMPOUND.search(line)),
+                    column=len(following) - len(following.lstrip()),
+                )
                 for f in feats:
                     if f in nondefault.get(pkg, ()):
                         denom.add((pkg, f))
-    return counts, denom, unclassified
+                        sites[(pkg, f)].append(shape)
+    return counts, denom, unclassified, sites
 
 
 def probed_pairs() -> set[tuple[str, str]]:
@@ -481,12 +495,101 @@ def unprobed_pairs() -> set[tuple[str, str]]:
     return deferred | off
 
 
+@functools.lru_cache(maxsize=None)
+def negated_in(package: str) -> frozenset[str]:
+    """Features this package writes a `cfg(not(feature = "x"))` for.
+
+    The obligation behind `@defer cfg-not-twin`: such a feature SWAPS an
+    implementation rather than removing a path, so turning it off leaves the
+    path resolvable and there is no error for rustc to annotate. Read out of the
+    package's own sources, so the claim ages with them.
+    """
+    out: set[str] = set()
+    listed = subprocess.run(
+        ["git", "ls-files", f"crates/{package}"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    for rel in listed:
+        if not rel.endswith(".rs"):
+            continue
+        try:
+            text = (ROOT / rel).read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        for line in text.split("\n"):
+            if "not(" in line and "feature" in line:
+                out.update(FEATURE.findall(line))
+    return frozenset(out)
+
+
+def defer_findings(sites: dict[tuple[str, str], list[Shape]]) -> list[str]:
+    """R2207 — hold every `DEFERRED` reason to what its marker obliges.
+
+    See `DEFER_POLICY` for the vocabulary and why prose alone was not enough.
+    Only pairs the scan actually found sites for are judged: a name whose sites
+    have gone is a different finding, already raised above, and reporting both
+    for one edit would say the same thing twice.
+    """
+    out: list[str] = []
+    for pkg, feats in sorted(fgd.DEFERRED.items()):
+        for feat, why in sorted(feats.items()):
+            marks = DEFER_MARKER.findall(why)
+            if len(marks) != 1 or marks[0] not in DEFER_POLICY:
+                out.append(
+                    f"`{pkg}` / `{feat}` is deferred with a reason carrying "
+                    f"{'no' if not marks else 'the'} `@defer` marker"
+                    f"{'' if not marks else ' ' + repr(marks)}. Exactly one is "
+                    f"required, from {DEFER_POLICY}: a waiting-list reason "
+                    f"nothing can check is the escape hatch this file refuses "
+                    f"one table up."
+                )
+                continue
+            found = sites.get((pkg, feat))
+            if not found:
+                continue
+            word = marks[0]
+            if word == "compound-cfg":
+                simple = [s for s in found if not s.compound]
+                if simple:
+                    out.append(
+                        f"`{pkg}` / `{feat}` is deferred as `compound-cfg` -- "
+                        f"every public item it gates behind an `any`/`all`/"
+                        f"`not`, which rustc cannot name a feature for. It has "
+                        f"{len(simple)} site(s) under a SIMPLE cfg "
+                        f"({', '.join(s.where for s in simple[:3])}), and one "
+                        f"of those can carry the probe."
+                    )
+            elif word == "impl-method":
+                bare = [s for s in found if not s.compound and s.column == 0]
+                if bare:
+                    out.append(
+                        f"`{pkg}` / `{feat}` is deferred as `impl-method` -- "
+                        f"reachable only as `Type::name`, which removing makes "
+                        f"an E0599 rather than the E0432/E0433 this axis "
+                        f"adjudicates. It has {len(bare)} MODULE-LEVEL site(s) "
+                        f"under a simple cfg "
+                        f"({', '.join(s.where for s in bare[:3])}), which is "
+                        f"the shape the axis probes."
+                    )
+            elif word == "cfg-not-twin" and feat not in negated_in(pkg):
+                out.append(
+                    f"`{pkg}` / `{feat}` is deferred as `cfg-not-twin` -- an "
+                    f"implementation swap with no resolution error to "
+                    f"annotate -- and no `cfg(not(feature = \"{feat}\"))` "
+                    f"occurs in that package. The twin the reason turns on is "
+                    f"not there."
+                )
+    return out
+
+
 def check() -> int:
     dirs, nondefault = workspace()
     files = subprocess.run(
         ["git", "ls-files", "crates"], cwd=ROOT, capture_output=True, text=True
     ).stdout.split()
-    counts, denom, unclassified = scan(ROOT, files, dirs, nondefault)
+    counts, denom, unclassified, sites = scan(ROOT, files, dirs, nondefault)
 
     findings: list[str] = []
 
@@ -569,6 +672,7 @@ def check() -> int:
             f"`{pkg}` / `{feat}` is both handled by the diagnostic axis and "
             f"listed as unprobed, and those cannot both be true"
         )
+    findings.extend(defer_findings(sites))
 
     if findings:
         print(f"feature-public-surface: FAIL -- {len(findings)} finding(s)")
@@ -641,7 +745,7 @@ def selftest() -> int:
         for rel, body in fixture.items():
             (home / rel).parent.mkdir(parents=True, exist_ok=True)
             (home / rel).write_text(body, encoding="utf-8")
-        counts, denom, unclassified = scan(
+        counts, denom, unclassified, sites = scan(
             home, sorted(fixture), dirs, nondefault
         )
 
@@ -676,11 +780,57 @@ def selftest() -> int:
             f"{unclassified}"
         )
         return 1
+    # R2207 — AND THE DEFERRAL POLICY, driven through every way it refuses.
+    #
+    # A fixture rather than the tree, for the reason this whole function
+    # exists: the tree is (and must stay) clean, so the FAIL paths of a check
+    # that only ever sees clean input are the half nobody exercises. Each probe
+    # below is a shape the OLD prose-only waiting list would have swallowed
+    # without a word.
+    shapes = {
+        ("demo", "compound_ok"): [Shape("a.rs:1", True, 0)],
+        ("demo", "compound_bad"): [Shape("a.rs:2", True, 0), Shape("a.rs:3", False, 0)],
+        ("demo", "method_ok"): [Shape("b.rs:1", False, 4)],
+        ("demo", "method_bad"): [Shape("b.rs:2", False, 0)],
+        ("demo", "marker_missing"): [Shape("c.rs:1", True, 0)],
+        ("demo", "marker_unknown"): [Shape("c.rs:2", True, 0)],
+        ("demo", "gone"): [],
+    }
+    probes = {
+        "compound_ok": "@defer compound-cfg",
+        "compound_bad": "@defer compound-cfg",
+        "method_ok": "@defer impl-method",
+        "method_bad": "@defer impl-method",
+        "marker_missing": "no marker at all",
+        "marker_unknown": "@defer someday",
+        "gone": "@defer compound-cfg",
+    }
+    real = fgd.DEFERRED
+    try:
+        fgd.DEFERRED = {"demo": probes}
+        got = {f.split("`")[3] for f in defer_findings(shapes)}
+    finally:
+        fgd.DEFERRED = real
+    want = {"compound_bad", "method_bad", "marker_missing", "marker_unknown"}
+    if got != want:
+        print(
+            f"feature-public-surface: SELFTEST FAIL -- the deferral policy must "
+            f"refuse exactly {sorted(want)} and it refused {sorted(got)}. "
+            f"`compound_ok` and `method_ok` are the CONTROLS: a check that "
+            f"refused those would be refusing the shapes the markers exist to "
+            f"describe, and `gone` is the one whose sites have vanished, which "
+            f"a different arm already reports."
+        )
+        return 1
+
     print(
         "feature-public-surface: selftest OK -- separates a public item, a "
         "macro call, a restricted item, a private item, a field, a statement "
-        "and an assertion; finds an item behind a stacked attribute; and "
-        "refuses to guess at a shape it does not know"
+        "and an assertion; finds an item behind a stacked attribute; refuses "
+        "to guess at a shape it does not know; and holds each `@defer` marker "
+        "to what its sites say, refusing a simple-cfg site under "
+        "`compound-cfg`, a module-level one under `impl-method`, a missing "
+        "marker and an unknown word -- past two clean controls"
     )
     return 0
 

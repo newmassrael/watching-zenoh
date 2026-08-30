@@ -91,6 +91,21 @@ AXIS: dict[str, str] = {
     # gate a public item, and 44 of those gate one at the CRATE ROOT, where the
     # path a consumer would type is derivable rather than hand-written.
     "wz-runtime-tokio": "wz_runtime_tokio",
+    # R2207 — the protocol core, and the row `feature_public_surface_census`
+    # carried the longest: 65 of its non-default features gate a public item,
+    # which was 65 of the 90 pairs no axis had taken.
+    #
+    # It sat OFF the axis under the reason "probing here and at the runtime
+    # would ask the same question twice", and that reason is REFUTED by
+    # measurement rather than by argument. Of the 65, only 23 are probed at
+    # `wz-runtime-tokio` at all and 31 do not exist there under any name -- so
+    # the overlap it feared covers a third of the row. More decisively, the two
+    # are not the same question even where the NAME is shared: rustc attaches
+    # its "gated behind the `x` feature" note to the ITEM it configured out, so
+    # a probe naming `wz_runtime_tokio::…` says nothing whatever about a
+    # consumer who types `wz_session_core::…`. The probe is owned by the crate
+    # whose path the consumer spells, and both layers own their own.
+    "wz-session-core": "wz_session_core",
 }
 
 # package -> feature -> the probes that prove a consumer is told about it.
@@ -127,6 +142,10 @@ PROBES: dict[str, dict[str, list[tuple[str, str, frozenset[str]]]]] = {
     # omission, it is what the table-agreement check requires a package on the
     # axis to have, and an empty one says "derived, none typed".
     "wz-runtime-tokio": {},
+    # R2207 — derived too, and for the same reason: an empty entry is what the
+    # table-agreement check requires of a package on the axis, and it says
+    # "every probe here is read off the crate root", not "nobody wrote one".
+    "wz-session-core": {},
 }
 
 # package -> feature -> why it gates no public path. A reason is what the next
@@ -141,6 +160,63 @@ PROBES: dict[str, dict[str, list[tuple[str, str, frozenset[str]]]]] = {
 # table would otherwise be.
 NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
     "wz-capture": {},
+    # R2207 — the thirty of this package's ninety-five non-default features
+    # that attach to no publicly visible item at all.
+    #
+    # ⚠ THE LIST IS DERIVED FROM THE SAME SCAN THAT CHECKS IT, and saying so is
+    # the honest part: `feature_public_surface_census` computes which features
+    # gate a public item, these are exactly the complement, so its
+    # `declared & denom` arm cannot fail on them TODAY. What it can do is fail
+    # TOMORROW -- the moment somebody attaches one of these to a `pub` item the
+    # derivation grows and the declaration becomes false. That is the whole
+    # value of the arm here: it is a ratchet against drift, not a check of this
+    # afternoon's typing, and a reader who expected the second would otherwise
+    # take false comfort.
+    #
+    # MEASURED at the same time, and it is why this list can be trusted to be
+    # the complement rather than a leftover: the features the diagnostic said
+    # nothing was decided about, and the features the census derives as gating
+    # no public item, are the SAME set -- thirty either way, compared as sets
+    # and not as counts.
+    "wz-session-core": {
+        f: (
+            "no `#[cfg]` in this package attaches this feature to a publicly "
+            "visible item; it gates private items, expressions or struct "
+            "fields only, which the census re-derives every run"
+        )
+        for f in (
+            "adminspace-introspection-handlers",
+            "adminspace-plugins-handlers",
+            "adminspace-router-linkstate",
+            "codec-fragment",
+            "codec-keep-alive",
+            "declare-final",
+            "declare-keyexpr",
+            "dissect-serde",
+            "liveliness-subscriber",
+            "no_macrostep_diagnostics",
+            "no_std",
+            "pubsub-attachment",
+            "pubsub-congestion-control",
+            "pubsub-delete",
+            "pubsub-encoding",
+            "pubsub-express",
+            "pubsub-priority",
+            "pubsub-put",
+            "pubsub-qos",
+            "pubsub-source-info",
+            "pubsub-timestamp",
+            "query-queryable",
+            "query-reply",
+            "query-selector-parameters",
+            "reply-source-info",
+            "session-reconnect",
+            "session-unicast-accept",
+            "session-unicast-open",
+            "storage-mgr-wildcard-updates",
+            "transport-batching",
+        )
+    },
     "wz-runtime-tokio": {
         f: (
             "no `#[cfg]` in this package attaches this feature to a publicly "
@@ -198,9 +274,9 @@ DEFERRED: dict[str, dict[str, str]] = {
     "wz-runtime-tokio": {
         **{
             f: (
-                "every public item it gates is behind a COMPOUND cfg, and "
-                "rustc's note for those reads 'the item is gated here' without "
-                "naming a feature -- measured on 1.97.0"
+                "@defer compound-cfg -- every public item it gates is behind a "
+                "COMPOUND cfg, and rustc's note for those reads 'the item is "
+                "gated here' without naming a feature -- measured on 1.97.0"
             )
             for f in (
                 "live-capture",
@@ -222,9 +298,10 @@ DEFERRED: dict[str, dict[str, str]] = {
         # "public method" there is the work that would retire this class.
         **{
             f: (
-                "it gates only METHODS inside `impl` blocks, so there is no "
-                "`module::name` path to import; removing one is an E0599, not "
-                "the E0432/E0433 this axis adjudicates"
+                "@defer impl-method -- it gates only METHODS inside `impl` "
+                "blocks, so there is no `module::name` path to import; "
+                "removing one is an E0599, not the E0432/E0433 this axis "
+                "adjudicates"
             )
             for f in (
                 "adminspace-introspection-handlers",
@@ -243,10 +320,57 @@ DEFERRED: dict[str, dict[str, str]] = {
         # The derivation now sees such twins and declines them, and this row
         # records the one that taught it.
         "locator-iface": (
-            "the only path it gates has a `cfg(not(...))` twin, so the feature "
-            "swaps an implementation rather than removing a path -- there is "
-            "no resolution error for rustc to annotate"
+            "@defer cfg-not-twin -- the only path it gates has a `cfg(not(...))` "
+            "twin, so the feature swaps an implementation rather than removing "
+            "a path; there is no resolution error for rustc to annotate"
         ),
+    },
+    # R2207 — the seventeen this package's own features landed on when the axis
+    # took it. NOT written from a reading: the row was left EMPTY, the census
+    # was run, and it named exactly these seventeen as decided nowhere. Their
+    # split into the two classes below is derived the same way -- for each
+    # feature, every `#[cfg]` in this package that attaches it to a public item
+    # was read for whether the attribute is compound and whether the item sits
+    # at column zero. The census now re-derives both every run and FAILS on a
+    # name whose sites stop agreeing with its marker, so neither list can rot
+    # into a permission slip.
+    "wz-session-core": {
+        **{
+            f: (
+                "@defer compound-cfg -- every public item it gates is behind a "
+                "COMPOUND cfg, and rustc's note for those reads 'the item is "
+                "gated here' without naming a feature -- measured on 1.97.0"
+            )
+            for f in (
+                "attachment-bytes",
+                "codec-hello",
+                "codec-linkstate",
+                "codec-scout",
+                "declare-undeclare",
+                "routing-routes",
+                "session-matching",
+            )
+        },
+        **{
+            f: (
+                "@defer impl-method -- it gates only METHODS inside `impl` "
+                "blocks, so there is no `module::name` path to import; "
+                "removing one is an E0599, not the E0432/E0433 this axis "
+                "adjudicates"
+            )
+            for f in (
+                "declare-interest",
+                "declare-queryable",
+                "declare-token",
+                "multicast-declarations",
+                "query-attachment",
+                "query-reply-err",
+                "query-source-info",
+                "query-value",
+                "storage-mgr-garbage-collection",
+                "switchboard",
+            )
+        },
     },
 }
 
@@ -306,19 +430,66 @@ PATH_ITEM = re.compile(
 )
 
 
+#: R2207 — how far up a multi-line attribute's opener may be. A bound rather
+#: than an unbounded walk: without one, an item whose tail-shaped line is
+#: ordinary code would walk this function to the top of the file.
+_ATTR_SPAN = 40
+
+
 def _attributes_above(lines: list[str], index: int) -> list[str]:
-    """The attribute stack an item at `index` carries, nearest last."""
+    """The attribute stack an item at `index` carries, nearest last.
+
+    R2207 — MULTI-LINE ATTRIBUTES ARE JOINED, and until they were this
+    function returned nothing at all for them. It matched `#[` at the start of
+    a line, so an attribute written
+
+        #[cfg(all(
+            feature = "codec-init-body",
+            feature = "codec-frame"
+        ))]
+        pub mod passive;
+
+    presented `))]` as the line above the item; that starts with neither `#[`
+    nor a comment, so the walk BROKE THERE and reported an unattributed item.
+
+    MEASURED, and it is why this is a repair rather than a tidy-up: three
+    features of `wz-session-core` had probes whose builds failed with rustc
+    naming the WRONG feature. `passive::Carried` is gated by `codec-frame`
+    inside a module gated by `codec-init-body`, and because the chain's
+    requirement was invisible the probe turned neither on -- so rustc answered
+    about the module and a consumer was told a feature that is not the one it
+    is missing. That is the half-answer this whole axis exists to refuse,
+    arriving inside the axis's own derivation.
+    """
     out: list[str] = []
     j = index - 1
     while j >= 0:
         s = lines[j].strip()
-        if s.startswith("#["):
-            out.insert(0, s)
-            j -= 1
-            continue
         if s.startswith("//") or s == "":
             j -= 1
             continue
+        if s.startswith("#[") and s.count("[") == s.count("]"):
+            out.insert(0, s)
+            j -= 1
+            continue
+        if s.endswith("]"):
+            # The TAIL of a multi-line attribute. Walk up to the line that
+            # opens it, and accept only if the join is a balanced `#[...]` --
+            # so a line of ordinary code that happens to end in `]` joins
+            # nothing and falls through to the break below.
+            buf = [s]
+            k = j - 1
+            while k >= 0 and len(buf) < _ATTR_SPAN:
+                t = lines[k].strip()
+                buf.insert(0, t)
+                if t.startswith("#["):
+                    break
+                k -= 1
+            joined = " ".join(buf)
+            if joined.startswith("#[") and joined.count("[") == joined.count("]"):
+                out.insert(0, joined)
+                j = k - 1
+                continue
         break
     return out
 
@@ -351,9 +522,60 @@ def _module_file(base: pathlib.Path, name: str) -> pathlib.Path | None:
     return None
 
 
+def _cfg_requirements(attr: str) -> tuple[set[str], list[frozenset[str]]]:
+    """What a `#[cfg(...)]` REQUIRES, split into the two shapes that differ.
+
+    R2207. Returns `(required, alternative groups)`: a feature named outside
+    every `any(...)` must be on, while an `any(...)` needs only ONE of its
+    members -- and which one is not fixed here, because the answer depends on
+    the feature a probe is trying to turn OFF.
+
+    That distinction is the repair. `public_module_tree` used to take
+    `sorted(names)[0]` for an attribute whose text began `#[cfg(any(`, which
+    handled the flat case and nothing else: `wz-session-core` writes
+    `all(feature = "alloc", any(feature = "codec-init-body", …))`, and reading
+    every name in that as REQUIRED makes a module look unreachable without the
+    very feature under test. `codec-close` is the measured instance -- its
+    module needs `alloc` plus one of four codecs, and `codec-init-body` is a
+    sibling that makes it exist while `codec-close` stays off.
+
+    A `not(...)` span contributes nothing: it is satisfied by the feature being
+    ABSENT. Nested `any(any(...))` is folded into the outer group, which is
+    over-permissive in a shape this tree does not currently write -- and a probe
+    built on a wrong alternative FAILS LOUDLY rather than passing, which is the
+    direction to be wrong in.
+    """
+    masked = list(attr)
+    groups: list[frozenset[str]] = []
+    i = 0
+    while i < len(attr):
+        for kw, collect in (("any(", True), ("not(", False)):
+            if not attr.startswith(kw, i):
+                continue
+            depth, j = 0, i + len(kw) - 1
+            while j < len(attr):
+                if attr[j] == "(":
+                    depth += 1
+                elif attr[j] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j += 1
+            if collect:
+                inside = frozenset(FEATURE_NAME.findall(attr[i + len(kw) : j]))
+                if inside:
+                    groups.append(inside)
+            for k in range(i, min(j + 1, len(masked))):
+                masked[k] = " "
+            i = j
+            break
+        i += 1
+    return set(FEATURE_NAME.findall("".join(masked))), groups
+
+
 def public_module_tree(
     src: pathlib.Path,
-) -> dict[str, tuple[tuple[str, ...], frozenset[str]]]:
+) -> dict[str, tuple[tuple[str, ...], frozenset[str], tuple[frozenset[str], ...]]]:
     """Every file reachable from `lib.rs` through `pub mod`, with what it needs.
 
     The second element is the set of features the CHAIN requires -- a module
@@ -362,17 +584,24 @@ def public_module_tree(
     turning the inner one off, which is the only way to ask rustc about the
     inner one at all.
 
-    For an `any(...)` chain attribute the first named feature is taken: one of
-    them suffices to make the module exist, and which one is not the question
-    being asked below.
+    R2207 — the second element is now a PAIR: the features the chain requires
+    outright, and the `any(...)` groups it needs one member of each. See
+    `_cfg_requirements` for why the two cannot be one set.
     """
-    tree: dict[str, tuple[tuple[str, ...], frozenset[str]]] = {}
+    tree: dict[
+        str, tuple[tuple[str, ...], frozenset[str], tuple[frozenset[str], ...]]
+    ] = {}
 
-    def walk(f: pathlib.Path, chain: tuple[str, ...], need: frozenset[str]) -> None:
+    def walk(
+        f: pathlib.Path,
+        chain: tuple[str, ...],
+        need: frozenset[str],
+        groups: tuple[frozenset[str], ...],
+    ) -> None:
         key = str(f.relative_to(src))
         if key in tree:
             return
-        tree[key] = (chain, need)
+        tree[key] = (chain, need, groups)
         try:
             lines = f.read_text(encoding="utf-8").split("\n")
         except (UnicodeDecodeError, OSError):
@@ -385,22 +614,24 @@ def public_module_tree(
             if not m:
                 continue
             extra: set[str] = set()
+            alts: list[frozenset[str]] = []
             for attr in _attributes_above(lines, i):
                 if "cfg(" not in attr:
                     continue
-                named = FEATURE_NAME.findall(attr)
-                if not named:
-                    continue
-                if attr.startswith("#[cfg(any("):
-                    extra.add(sorted(named)[0])
-                else:
-                    extra.update(named)
+                req, grp = _cfg_requirements(attr)
+                extra.update(req)
+                alts.extend(grp)
             nxt = _module_file(base, m.group(1)) or _module_file(src, m.group(1))
             if nxt is None:
                 continue
-            walk(nxt, chain + (m.group(1),), need | frozenset(extra))
+            walk(
+                nxt,
+                chain + (m.group(1),),
+                need | frozenset(extra),
+                groups + tuple(alts),
+            )
 
-    walk(src / "lib.rs", (), frozenset())
+    walk(src / "lib.rs", (), frozenset(), ())
     return tree
 
 
@@ -418,12 +649,18 @@ def submodule_probes(
     A feature that appears in its own chain is skipped: the module it would
     have to turn on is the thing being turned off, and that item's absence is
     already the root derivation's subject.
+
+    R2207 — that skip is now decided PER FEATURE against the chain's `any(...)`
+    groups. A module needing "one of four codecs" is reachable while any one of
+    the other three is on, so a feature is skipped only when a group has no
+    member BUT itself. Reading such a group as four requirements is what made
+    three of this package's features look unprobeable.
     """
     src = WORKSPACE / package / "src"
     if not (src / "lib.rs").is_file():
         return {}
     found: dict[str, list[tuple[str, str, frozenset[str]]]] = {}
-    for rel, (chain, need) in sorted(public_module_tree(src).items()):
+    for rel, (chain, need, groups) in sorted(public_module_tree(src).items()):
         if not chain:
             continue
         try:
@@ -439,6 +676,19 @@ def submodule_probes(
                 continue
             feature = m.group(1)
             if feature in need:
+                continue
+            # R2207 — satisfy each `any(...)` with a member that is NOT the
+            # feature under test; a group offering nothing else means the
+            # module really does go away with it.
+            extras = set(need)
+            unreachable = False
+            for group in groups:
+                alternative = sorted(group - {feature})
+                if not alternative:
+                    unreachable = True
+                    break
+                extras.add(alternative[0])
+            if unreachable:
                 continue
             following = None
             for j in range(i + 1, len(lines)):
@@ -457,7 +707,7 @@ def submodule_probes(
                 (
                     f"an import of `{path}`",
                     f"#[allow(unused_imports)]\nuse {crate_path}::{path};\n",
-                    need,
+                    frozenset(extras),
                 )
             )
     # One probe per feature, deterministically the shortest path then the
