@@ -2176,6 +2176,96 @@ mod tests {
         );
     }
 
+    /// R2223 (open-debt item 573) — EVERY REVISION THE HEADER PRINTS IS ONE
+    /// THIS BUILD EMITS.
+    ///
+    /// # Found while adding a family, and three of the four were already wrong
+    ///
+    /// The header teaches its contract by showing what arrives, and four of
+    /// those examples embed a live revision: `{"name":"fields","revision":4,…}`
+    /// and so on. MEASURED on this gate's first run, before the round that
+    /// wrote it moved anything: `census` was shown at 5 and at 6 while the
+    /// build emitted 7, and `fields` at 3 and at 4 while it emitted 4. So three
+    /// of the four had been stale for whole rounds, each one telling a consumer
+    /// that a vocabulary it must switch on was declared by an older revision
+    /// than the one that declares it.
+    ///
+    /// That is the same defect the `revisioned` table in `c_abi_consumer.c`
+    /// exists to catch one surface over, and the reason it was not caught here
+    /// is the reason this gate is worth having: a number inside a comment is
+    /// prose, and nothing in this workspace measured the header's prose against
+    /// the library until now.
+    ///
+    /// # The population is DERIVED from the header, not listed here
+    ///
+    /// Every `"name":"<document>","revision":<n>` literal in the file, whatever
+    /// paragraph it sits in. Listing the four would make this a table checked
+    /// against itself — the shape R2185 measured passing at exit 0 — and a
+    /// fifth example added later would be invisible to it. The `<N>` PLACEHOLDER
+    /// the top of the header uses to teach the envelope's shape is not matched,
+    /// because it is not a number and makes no claim.
+    ///
+    /// ⚠ NO EXEMPTION LIST, and that is deliberate. A header wanting to show a
+    /// consumer what an OLD revision looked like has to say so in a form that
+    /// is not this one; an escape hatch here would be a way to keep a stale
+    /// number by declaring it historical, which is exactly what the four stale
+    /// numbers above would have been declared.
+    #[test]
+    fn the_headers_example_documents_carry_this_builds_revisions() {
+        const HEADER: &str = include_str!("../include/wz_dissect.h");
+
+        let mut shown: Vec<(&str, u32)> = Vec::new();
+        for rest in HEADER.split("\"name\":\"").skip(1) {
+            let Some((document, tail)) = rest.split_once('"') else {
+                continue;
+            };
+            let Some(digits) = tail.strip_prefix(",\"revision\":") else {
+                continue;
+            };
+            let digits: String = digits.chars().take_while(char::is_ascii_digit).collect();
+            if digits.is_empty() {
+                continue;
+            }
+            shown.push((document, digits.parse().expect("only digits were taken")));
+        }
+
+        // A population of zero would make every comparison below trivially
+        // true, and so would a population that reached one document.
+        let mut documents: Vec<&str> = shown.iter().map(|(d, _)| *d).collect();
+        documents.sort_unstable();
+        documents.dedup();
+        assert!(
+            documents.len() >= 2,
+            "this gate found example revisions for {documents:?}; it found `census` \
+             and `fields` when it was written, and a scan that stopped matching \
+             would report every remaining example as correct by never reading one"
+        );
+
+        let mut wrong: Vec<String> = Vec::new();
+        for (document, revision) in shown {
+            let Some(live) = wz_capture::doc_revision::revision(document) else {
+                wrong.push(format!(
+                    "the header shows a {document:?} document and this library emits \
+                     no such document at all"
+                ));
+                continue;
+            };
+            if live != revision {
+                wrong.push(format!(
+                    "the header shows {document} at revision {revision} and this build \
+                     emits revision {live}"
+                ));
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "the header teaches a revision this build does not emit, which tells a \
+             consumer its switch was declared exhaustive by an older revision than \
+             the one that declares it:\n{}",
+            wrong.join("\n")
+        );
+    }
+
     /// ITEM 281 — AND SO DOES THIS CRATE'S OWN RUSTDOC, which is the THIRD
     /// copy of that vocabulary and the one nothing measured.
     ///

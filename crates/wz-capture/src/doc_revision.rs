@@ -613,6 +613,28 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R4_CARRIES,
     },
+    // R2223 (open-debt item 573) — revision 5 ADDS `carried` and `message`, and
+    // declares the vocabulary the NETWORK MESSAGE NAMES have always been.
+    //
+    // The one key a consumer of this document switched on that no revision
+    // could ever have declared: `name` is the union of every field name at
+    // every depth of the walked tree, so the word `Push` and the word
+    // `keyexpr` arrive under the same key. A consumer splitting traffic by
+    // message therefore held an OPEN set where it needed a closed one, and the
+    // list that would have closed it lived in a `publish = false` crate with
+    // nothing checking it — which is how R2050 shipped a message-name list
+    // missing `Join`.
+    //
+    // An ADDITION, so a consumer pinned to revision 4 loses nothing.
+    DocumentShape {
+        document: FIELDS,
+        revision: 5,
+        keys: FIELDS_R5_KEYS,
+        retiring: &[],
+        families: FIELDS_R5_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R5_CARRIES,
+    },
     DocumentShape {
         document: SUMMARY,
         revision: 1,
@@ -1865,6 +1887,190 @@ pub const FIELDS_R4_CARRIES: &[KeyCarries] = &[
     },
 ];
 
+/// The field document's key set at revision 5 — revision 4's plus `carried` and
+/// `message`.
+///
+/// R2223 (open-debt item 573). An ADDITION and nothing retires, so a consumer
+/// pinned to revision 4 loses nothing; what it gains by moving is the one thing
+/// this document could not previously say — WHICH of a row's tree nodes are
+/// messages, from a set that is closed and declared.
+pub const FIELDS_R5_KEYS: &[&str] = &[
+    "addr",
+    "caps",
+    "capture_reread",
+    "carried",
+    "datagram_flows",
+    "declaration_checked",
+    "declared",
+    "descriptor_bytes",
+    "despite_encoding",
+    "direction",
+    "document",
+    "dropped_by_limits",
+    "end",
+    "example",
+    "fields",
+    "flow",
+    "flows",
+    "format",
+    "frames",
+    "frames_per_flow",
+    "high",
+    "keyexpr",
+    "kind",
+    "low",
+    "max_flows_per_table",
+    "max_scout_askers",
+    "message",
+    "message_at",
+    "messages",
+    "name",
+    "note",
+    "offset_space",
+    "omitted",
+    "path",
+    "payload_decode",
+    "payload_mapping",
+    "payload_mapping_counts_exact",
+    "payload_refusals",
+    "port",
+    "revision",
+    "samples",
+    "scout_askers",
+    "shown",
+    "skipped",
+    "skipped_packets",
+    "start",
+    "state",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "stream_flows",
+    "under",
+    "value",
+    "why",
+    "wrong",
+];
+
+/// The value families the field document declares at revision 5 — revision 4's
+/// six plus `message`.
+///
+/// Sorted by key, which [`audit`] refuses to take on trust.
+pub const FIELDS_R5_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "direction",
+        values: DIRECTION_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "kind",
+        values: FIELD_VALUE_KIND_R3,
+    },
+    ValueFamily {
+        key: "message",
+        values: MESSAGE_R5,
+    },
+    ValueFamily {
+        key: "offset_space",
+        values: ANCHOR_SPACE_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "state",
+        values: PAYLOAD_STATE_R2,
+    },
+    ValueFamily {
+        key: "under",
+        values: REFUSED_UNDER_R2,
+    },
+    ValueFamily {
+        key: "wrong",
+        values: MISBOUND_R2,
+    },
+];
+
+/// `carried[].message` at field-document revision 5 — SORTED, which is why it
+/// does not read in `MessageName`'s own MID order.
+///
+/// R2223 (open-debt item 573) — THE NETWORK MESSAGE VOCABULARY, and the last
+/// key a consumer of these documents switched on with nothing declared behind
+/// it. The list itself is not new; where it lived is the item. It was
+/// `MESSAGE_NAMES` in `wz-integration-tests`, a `publish = false` crate, and
+/// its own doc claimed to be "checked against [the MIDs] rather than extended
+/// by one" while no test in the tree checked it. R2050 measured what that
+/// costs: `Join` was missing, and stayed missing, because every witness read a
+/// TCP unicast capture and a Join is a multicast announcement.
+///
+/// ⚠ NOT the same set as the field document's `name`, and that distinction is
+/// the reason this key exists. `name` is the union of every field name at every
+/// depth of the walked tree — an open set by construction, which no revision
+/// could declare — so a consumer splitting traffic by message had an open set
+/// where it needed a closed one.
+///
+/// Written out rather than pointing at the walk, for the reason
+/// [`ValueFamily::values`] gives: a table that read
+/// `MessageName::names` would widen with it and the revision would never have
+/// to move. The joint is
+/// `the_declared_value_families_match_the_librarys_own_vocabularies`, and the
+/// walk behind it is held to the DISPATCHERS over all thirty-two MID values by
+/// `the_message_vocabulary_is_the_one_the_dispatchers_produce`.
+pub const MESSAGE_R5: &[&str] = &[
+    "Close",
+    "Declare",
+    // ⚠ BEFORE `Frame`, which reads wrong and is right: this list is sorted the
+    // way `str` compares, and `Fragment` and `Frame` share three letters before
+    // `g` decides it. Written in the order a reader expects, the joint test
+    // reports a vocabulary that "widened" — measured on this constant's first
+    // run.
+    "Fragment",
+    "Frame",
+    "Init",
+    "Interest",
+    "Join",
+    "KeepAlive",
+    "Oam",
+    "Open",
+    "Push",
+    "Request",
+    "Response",
+    "ResponseFinal",
+];
+
+/// What each field-document family's WORD decides about the keys beside it, at
+/// revision 5 — revision 4's, plus the verdict for `message`.
+///
+/// R2223 (open-debt item 573). `message` is a PASSENGER, and it is DERIVED like
+/// every other row here rather than judged: every word arrives in a `carried`
+/// entry with `start` and `end` beside it and nothing else, so no word decides
+/// the shape of the object it sits in.
+pub const FIELDS_R5_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "direction",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "kind",
+        shape: CarriesShape::Discriminant(FIELD_VALUE_KIND_CARRIES_R4),
+    },
+    KeyCarries {
+        key: "message",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "offset_space",
+        shape: CarriesShape::Discriminant(FIELD_OFFSET_SPACE_CARRIES_R5),
+    },
+    KeyCarries {
+        key: "state",
+        shape: CarriesShape::Discriminant(PAYLOAD_STATE_CARRIES_R4),
+    },
+    KeyCarries {
+        key: "under",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "wrong",
+        shape: CarriesShape::Passenger,
+    },
+];
+
 /// Every shape each `fields[].kind` word's object takes, at field-document
 /// revision 4.
 ///
@@ -1932,6 +2138,40 @@ pub const FIELD_OFFSET_SPACE_CARRIES_R4: &[WordCarries] = &[
         shapes: &[
             &["direction", "fields", "message_at", "name"],
             &[
+                "direction",
+                "fields",
+                "message_at",
+                "name",
+                "payload_decode",
+            ],
+        ],
+    },
+];
+
+/// Every shape each `fields[].offset_space` word's object takes, at
+/// field-document revision 5.
+///
+/// R2223 (open-debt item 573) — revision 4's map with `carried` in every shape,
+/// because a WALKED message row now always carries the listing. MEASURED, like
+/// revision 4's: printed by `the_declared_carries_axis_is_the_one_the_emitters_render`
+/// over the arms it renders and pasted back.
+///
+/// ⚠ This is the axis the new key MOVED, and it moved without being about the
+/// new key at all. `carried` is not a value family and declares no words; what
+/// changed is the COMPANION SET of a family that was already declared, which is
+/// exactly the fact revision 4 exists to state and the reason adding a key to a
+/// row is never a free change.
+pub const FIELD_OFFSET_SPACE_CARRIES_R5: &[WordCarries] = &[
+    WordCarries {
+        word: "packet",
+        shapes: &[&["carried", "direction", "fields", "name", "packet"]],
+    },
+    WordCarries {
+        word: "stream_byte",
+        shapes: &[
+            &["carried", "direction", "fields", "message_at", "name"],
+            &[
+                "carried",
                 "direction",
                 "fields",
                 "message_at",
@@ -3745,7 +3985,11 @@ mod tests {
             // discriminants where the item that filed it had measured two:
             // `offset_space` decides its shape through two row emitters rather
             // than through two arms of one `match`.
-            (FIELDS, 4),
+            // R2223 (item 573) — to 5 for `carried` and `message`: the network
+            // message vocabulary, which had never been declarable because the
+            // only key carrying it was `name`, the union of every field name at
+            // every depth of the walked tree.
+            (FIELDS, 5),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.

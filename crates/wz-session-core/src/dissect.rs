@@ -2873,17 +2873,244 @@ pub fn dissect_scouting_message(bytes: &[u8], base: usize) -> Result<Option<Fiel
     Ok(Some(group(name, start, c.offset(), fields)))
 }
 
+/// Every MESSAGE this dissector names, transport and network, as ONE closed
+/// vocabulary joined to the wire.
+///
+/// R2223 (open-debt item 573) — the list existed and was unreachable. It lived
+/// as `MESSAGE_NAMES` in `wz-integration-tests`, a `publish = false` crate no
+/// consumer links, and its own doc claimed to be "every transport MID
+/// (`wire_const::T_MID_*`) plus every network one, checked against them rather
+/// than extended by one" while NOTHING in the tree checked it. R2050 is what
+/// that cost: `Join` was missing for as long as every witness read a TCP
+/// unicast capture, because a Join is a multicast announcement and no capture
+/// carried one. An omission invisible until traffic reveals it is the exact
+/// shape a vocabulary declaration exists to end.
+///
+/// # Why a type and not a `&[&str]`
+///
+/// A slice is a list somebody remembers to extend. Here every arm below is
+/// exhaustive over this enum, so a variant added later does not compile until
+/// it has a name, a transport MID answer and a network MID answer — and
+/// [`Self::of_transport`] / [`Self::of_network`] are then a SECOND opinion
+/// about which byte carries it, independent of the dispatchers' own arms.
+/// `the_message_vocabulary_is_the_one_the_dispatchers_produce` is the joint: it
+/// asks both walkers about all thirty-two values a 5-bit MID can take and holds
+/// the answers against this type. A walker that learns a message this type does
+/// not know fails there, which is the R2050 direction; a variant this type
+/// knows that no walker produces fails there too.
+///
+/// ⚠ THE CHAIN IS NOT THE POPULATION. `next` makes a new variant a SOURCE of
+/// the walk and never forces it to be a DESTINATION, so one nothing chains to
+/// is simply not walked — R2183's measurement on [`FieldValue`], which stayed
+/// green for a nine-variant type reporting eight words. What holds this walk to
+/// the type is that byte-domain probe, which never consults the chain.
+///
+/// `Oam` carries BOTH MIDs — `T_MID_OAM` (0x00) and `N_MID_OAM` (0x1F) — which
+/// is why the two accessors are separate `Option`s rather than one MID field.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MessageName {
+    /// Transport OAM (`wire_const::T_MID_OAM`), and the network one.
+    Oam,
+    /// `wire_const::T_MID_INIT`.
+    Init,
+    /// `wire_const::T_MID_OPEN`.
+    Open,
+    /// `wire_const::T_MID_CLOSE`.
+    Close,
+    /// `wire_const::T_MID_KEEP_ALIVE`.
+    KeepAlive,
+    /// `wire_const::T_MID_FRAME`.
+    Frame,
+    /// `wire_const::T_MID_FRAGMENT`.
+    Fragment,
+    /// `wire_const::T_MID_JOIN`.
+    Join,
+    /// `wire_const::N_MID_INTEREST`.
+    Interest,
+    /// `wire_const::N_MID_RESPONSE_FINAL`.
+    ResponseFinal,
+    /// `wire_const::N_MID_RESPONSE`.
+    Response,
+    /// `wire_const::N_MID_REQUEST`.
+    Request,
+    /// `wire_const::N_MID_PUSH`.
+    Push,
+    /// `wire_const::N_MID_DECLARE`.
+    Declare,
+}
+
+impl MessageName {
+    /// The first variant of the walk, so a caller can start one without naming
+    /// a member.
+    const FIRST: Self = Self::Oam;
+
+    /// The word every rendering prints for this message.
+    ///
+    /// The dispatchers name their groups through this, so the tree, the field
+    /// document's `carried` listing and the vocabulary a consumer is handed
+    /// cannot spell one message three ways.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Oam => "Oam",
+            Self::Init => "Init",
+            Self::Open => "Open",
+            Self::Close => "Close",
+            Self::KeepAlive => "KeepAlive",
+            Self::Frame => "Frame",
+            Self::Fragment => "Fragment",
+            Self::Join => "Join",
+            Self::Interest => "Interest",
+            Self::ResponseFinal => "ResponseFinal",
+            Self::Response => "Response",
+            Self::Request => "Request",
+            Self::Push => "Push",
+            Self::Declare => "Declare",
+        }
+    }
+
+    /// The TRANSPORT MID that carries this message, or `None` for one that only
+    /// travels inside a `Frame` batch.
+    ///
+    /// Every arm names a `wire_const` constant rather than a literal byte: the
+    /// binding is the compiler's, so a constant renamed or removed in
+    /// `wz-codecs` fails this file rather than leaving a number behind that
+    /// nothing joins to the wire spec.
+    pub const fn transport_mid(self) -> Option<u8> {
+        Some(match self {
+            Self::Oam => wz_codecs::wire_const::T_MID_OAM,
+            Self::Init => wz_codecs::wire_const::T_MID_INIT,
+            Self::Open => wz_codecs::wire_const::T_MID_OPEN,
+            Self::Close => wz_codecs::wire_const::T_MID_CLOSE,
+            Self::KeepAlive => wz_codecs::wire_const::T_MID_KEEP_ALIVE,
+            Self::Frame => wz_codecs::wire_const::T_MID_FRAME,
+            Self::Fragment => wz_codecs::wire_const::T_MID_FRAGMENT,
+            Self::Join => wz_codecs::wire_const::T_MID_JOIN,
+            Self::Interest
+            | Self::ResponseFinal
+            | Self::Response
+            | Self::Request
+            | Self::Push
+            | Self::Declare => return None,
+        })
+    }
+
+    /// The NETWORK MID that carries this message inside a `Frame` batch, or
+    /// `None` for a transport-only message.
+    pub const fn network_mid(self) -> Option<u8> {
+        Some(match self {
+            Self::Oam => wz_codecs::wire_const::N_MID_OAM,
+            Self::Interest => wz_codecs::wire_const::N_MID_INTEREST,
+            Self::ResponseFinal => wz_codecs::wire_const::N_MID_RESPONSE_FINAL,
+            Self::Response => wz_codecs::wire_const::N_MID_RESPONSE,
+            Self::Request => wz_codecs::wire_const::N_MID_REQUEST,
+            Self::Push => wz_codecs::wire_const::N_MID_PUSH,
+            Self::Declare => wz_codecs::wire_const::N_MID_DECLARE,
+            Self::Init
+            | Self::Open
+            | Self::Close
+            | Self::KeepAlive
+            | Self::Frame
+            | Self::Fragment
+            | Self::Join => return None,
+        })
+    }
+
+    /// The next message in the walk, so [`Self::all`] visits every arm without
+    /// a list. Exhaustive: a variant added later does not compile until it has
+    /// a successor.
+    const fn next(self) -> Option<Self> {
+        Some(match self {
+            Self::Oam => Self::Init,
+            Self::Init => Self::Open,
+            Self::Open => Self::Close,
+            Self::Close => Self::KeepAlive,
+            Self::KeepAlive => Self::Frame,
+            Self::Frame => Self::Fragment,
+            Self::Fragment => Self::Join,
+            Self::Join => Self::Interest,
+            Self::Interest => Self::ResponseFinal,
+            Self::ResponseFinal => Self::Response,
+            Self::Response => Self::Request,
+            Self::Request => Self::Push,
+            Self::Push => Self::Declare,
+            Self::Declare => return None,
+        })
+    }
+
+    /// Every message, walked.
+    pub fn all() -> Vec<Self> {
+        let mut out = Vec::new();
+        let mut cursor = Some(Self::FIRST);
+        while let Some(v) = cursor {
+            out.push(v);
+            cursor = v.next();
+        }
+        out
+    }
+
+    /// Every word [`Self::name`] can return, in walk order.
+    ///
+    /// The population `wz-capture`'s `doc_revision` declares the
+    /// `fields.message` family from.
+    pub fn names() -> Vec<&'static str> {
+        Self::all().iter().map(|m| m.name()).collect()
+    }
+
+    /// Which message a TRANSPORT MID carries, or `None` for a byte this build
+    /// does not name.
+    ///
+    /// Derived from [`Self::transport_mid`] rather than written as a second
+    /// table, so the two directions cannot disagree.
+    pub fn of_transport(mid: u8) -> Option<Self> {
+        Self::all()
+            .into_iter()
+            .find(|m| m.transport_mid() == Some(mid))
+    }
+
+    /// Which message a NETWORK MID carries, or `None` for a byte this build
+    /// does not name.
+    pub fn of_network(mid: u8) -> Option<Self> {
+        Self::all()
+            .into_iter()
+            .find(|m| m.network_mid() == Some(mid))
+    }
+
+    /// The message this WORD names, or `None` for a word that is not one.
+    ///
+    /// Allocation-free, because the caller is a tree walk asking it per node.
+    pub fn named(word: &str) -> Option<Self> {
+        let mut cursor = Some(Self::FIRST);
+        while let Some(v) = cursor {
+            if v.name() == word {
+                return Some(v);
+            }
+            cursor = v.next();
+        }
+        None
+    }
+}
+
 pub fn walk_network_record(c: &mut SpanCursor<'_>) -> Result<Option<Field>, CodecError> {
     use wz_codecs::wire_const;
     let mid = c.peek_u8()? & 0x1F;
+    // R2223 (item 573) — the WORD comes from `MessageName`, once per arm, on
+    // `push_json`'s rule about `kind`: seven arms each spelling their own
+    // literal is seven places for the emitted name to differ from the
+    // vocabulary a consumer is handed. The mid → arm map here and
+    // `MessageName::of_network` stay SEPARATE opinions on purpose — deriving
+    // one from the other would make
+    // `the_message_vocabulary_is_the_one_the_dispatchers_produce` compare a
+    // table with itself.
     let f = match mid {
-        wire_const::N_MID_PUSH => c.nested("Push", walk_push)?,
-        wire_const::N_MID_REQUEST => c.nested("Request", walk_request)?,
-        wire_const::N_MID_RESPONSE => c.nested("Response", walk_response)?,
-        wire_const::N_MID_RESPONSE_FINAL => c.nested("ResponseFinal", walk_response_final)?,
-        wire_const::N_MID_INTEREST => c.nested("Interest", walk_interest)?,
-        wire_const::N_MID_DECLARE => c.nested("Declare", walk_declare)?,
-        wire_const::N_MID_OAM => c.nested("Oam", walk_oam)?,
+        wire_const::N_MID_PUSH => c.nested(MessageName::Push.name(), walk_push)?,
+        wire_const::N_MID_REQUEST => c.nested(MessageName::Request.name(), walk_request)?,
+        wire_const::N_MID_RESPONSE => c.nested(MessageName::Response.name(), walk_response)?,
+        wire_const::N_MID_RESPONSE_FINAL => {
+            c.nested(MessageName::ResponseFinal.name(), walk_response_final)?
+        }
+        wire_const::N_MID_INTEREST => c.nested(MessageName::Interest.name(), walk_interest)?,
+        wire_const::N_MID_DECLARE => c.nested(MessageName::Declare.name(), walk_declare)?,
+        wire_const::N_MID_OAM => c.nested(MessageName::Oam.name(), walk_oam)?,
         _ => return Ok(None),
     };
     Ok(Some(f))
@@ -3040,7 +3267,7 @@ pub fn dissect_transport_message(bytes: &[u8], base: usize) -> Result<Field, Cod
                 // reader can see WHY it is opaque.
                 _ => out.push(c.tail("body")?),
             }
-            "Oam"
+            MessageName::Oam.name()
         }
         wire_const::T_MID_INIT => {
             out.push(flag("a", carrier, (header & 0x20) != 0));
@@ -3064,7 +3291,7 @@ pub fn dissect_transport_message(bytes: &[u8], base: usize) -> Result<Field, Cod
                 out.push(len);
                 out.push(c.bytes("cookie", n as usize)?);
             }
-            "Init"
+            MessageName::Init.name()
         }
         wire_const::T_MID_OPEN => {
             out.push(flag("a", carrier, (header & 0x20) != 0));
@@ -3080,7 +3307,7 @@ pub fn dissect_transport_message(bytes: &[u8], base: usize) -> Result<Field, Cod
                 out.push(len);
                 out.push(c.bytes("cookie", n as usize)?);
             }
-            "Open"
+            MessageName::Open.name()
         }
         wire_const::T_MID_CLOSE => {
             // R311y839 — the SCOPE flag, rendered for the same reason JOIN's
@@ -3092,9 +3319,9 @@ pub fn dissect_transport_message(bytes: &[u8], base: usize) -> Result<Field, Cod
             out.push(flag("s", carrier, (header & 0x20) != 0));
             let (_, reason) = c.u8("reason")?;
             out.push(reason);
-            "Close"
+            MessageName::Close.name()
         }
-        wire_const::T_MID_KEEP_ALIVE => "KeepAlive",
+        wire_const::T_MID_KEEP_ALIVE => MessageName::KeepAlive.name(),
         wire_const::T_MID_JOIN => {
             out.push(flag("t", carrier, (header & 0x20) != 0));
             out.push(flag("s", carrier, (header & 0x40) != 0));
@@ -3118,7 +3345,7 @@ pub fn dissect_transport_message(bytes: &[u8], base: usize) -> Result<Field, Cod
             out.push(r);
             let (_, b) = c.vle_u64("next_sn_best_effort")?;
             out.push(b);
-            "Join"
+            MessageName::Join.name()
         }
         wire_const::T_MID_FRAME | wire_const::T_MID_FRAGMENT => {
             out.push(flag("r", carrier, (header & 0x20) != 0));
@@ -3165,9 +3392,9 @@ pub fn dissect_transport_message(bytes: &[u8], base: usize) -> Result<Field, Cod
                 out.push(c.tail("payload")?);
             }
             if mid == wire_const::T_MID_FRAME {
-                "Frame"
+                MessageName::Frame.name()
             } else {
-                "Fragment"
+                MessageName::Fragment.name()
             }
         }
         _ => {
@@ -3275,6 +3502,151 @@ fn push_json(field: &Field, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// R2223 (open-debt item 573) — THE MESSAGE VOCABULARY IS DERIVED FROM THE
+    /// DISPATCHERS OVER THE WHOLE MID DOMAIN, never read off a list.
+    ///
+    /// # What went wrong before, and why a list could not have caught it
+    ///
+    /// R2050 found `Join` missing from the message-name list every witness in
+    /// this workspace shared. The reason it stayed missing is the reason a list
+    /// is the wrong instrument: every witness read a TCP unicast capture, a
+    /// Join is a multicast announcement, and so the hole was invisible until
+    /// traffic carried one. A population taken from captures is a population
+    /// taken from what somebody happened to observe.
+    ///
+    /// # The population, and it cannot be short
+    ///
+    /// A MID is five bits. So the population is all thirty-two values, asked of
+    /// BOTH dispatchers, and the answer is whatever they do with it — not what
+    /// [`MessageName`] says they should. That makes this a genuine second
+    /// opinion: `walk_network_record`'s `match` and `MessageName::of_network`
+    /// are separate tables, and this is the only thing that joins them.
+    ///
+    /// It also supplies what a successor chain structurally cannot. R2183
+    /// measured a nine-variant `FieldValue` walking eight words, because
+    /// `next` forces a new variant to HAVE a successor and not to BE one. Here
+    /// the walk is checked against something outside itself: a variant nothing
+    /// chains to is absent from [`MessageName::names`] while the dispatcher
+    /// still produces its word, and the comparison below is what fails.
+    #[test]
+    fn the_message_vocabulary_is_the_one_the_dispatchers_produce() {
+        // Long enough that every arm reaches its own name rather than running
+        // out of body: zeros decode as zero-valued zints and zero-length
+        // slices, which is the cheapest complete message each walker accepts.
+        let mut bytes = alloc::vec![0u8; 64];
+
+        // ── The TRANSPORT half ───────────────────────────────────────────
+        //
+        // The `_` arm is not a failure: it reads the remainder as an opaque
+        // body and names the group `Unknown`, which is the emitted way of
+        // saying "this build does not name this MID". So `Unknown` is the
+        // UNCLAIMED verdict here, and every other word is a claim.
+        let mut transport: Vec<(u8, &str)> = Vec::new();
+        for mid in 0u8..32 {
+            bytes[0] = mid;
+            let field = dissect_transport_message(&bytes, 0)
+                .unwrap_or_else(|e| panic!("mid {mid:#04x} did not walk: {e:?}"));
+            let name = match MessageName::named(&field.name) {
+                Some(m) => m.name(),
+                None => {
+                    assert_eq!(
+                        field.name, "Unknown",
+                        "the transport dispatcher names mid {mid:#04x} {:?}, which is \
+                         neither a `MessageName` nor the `Unknown` catch-all. A word \
+                         a consumer receives with no declared vocabulary behind it is \
+                         the whole of item 573",
+                        field.name
+                    );
+                    continue;
+                }
+            };
+            transport.push((mid, name));
+        }
+        let expected_transport: Vec<(u8, &str)> = (0u8..32)
+            .filter_map(|mid| MessageName::of_transport(mid).map(|m| (mid, m.name())))
+            .collect();
+        assert_eq!(
+            transport, expected_transport,
+            "the transport dispatcher and `MessageName::transport_mid` disagree about \
+             which MIDs carry which message. Both are tables; this is the only thing \
+             that joins them, and a walker that learned a message the vocabulary does \
+             not know is R2050 happening again"
+        );
+
+        // ── The NETWORK half ─────────────────────────────────────────────
+        //
+        // `walk_network_record` peeks the MID before consuming anything and
+        // answers `Ok(None)` for one it does not name, so the CLAIM is exact
+        // whatever the body does afterwards. A claimed MID whose zero body the
+        // walker refuses still counts as claimed and simply carries no word
+        // here — recorded rather than skipped, so the assertion below can say
+        // which arms this probe read the name of.
+        let mut network: Vec<(u8, Option<&str>)> = Vec::new();
+        for mid in 0u8..32 {
+            bytes[0] = mid;
+            let mut c = SpanCursor::with_base(&bytes, 0);
+            match walk_network_record(&mut c) {
+                Ok(None) => {}
+                Ok(Some(field)) => {
+                    let m = MessageName::named(&field.name).unwrap_or_else(|| {
+                        panic!(
+                            "the network dispatcher names mid {mid:#04x} {:?}, which no \
+                             `MessageName` variant carries",
+                            field.name
+                        )
+                    });
+                    network.push((mid, Some(m.name())));
+                }
+                Err(_) => network.push((mid, None)),
+            }
+        }
+        let expected_network: Vec<u8> = (0u8..32)
+            .filter(|mid| MessageName::of_network(*mid).is_some())
+            .collect();
+        let claimed: Vec<u8> = network.iter().map(|(mid, _)| *mid).collect();
+        assert_eq!(
+            claimed, expected_network,
+            "the network dispatcher and `MessageName::network_mid` disagree about which \
+             MIDs it walks"
+        );
+        for (mid, word) in &network {
+            if let Some(word) = word {
+                assert_eq!(
+                    Some(*word),
+                    MessageName::of_network(*mid).map(|m| m.name()),
+                    "the network dispatcher names mid {mid:#04x} differently from the \
+                     vocabulary"
+                );
+            }
+        }
+
+        // ── AND EVERY VARIANT IS REACHED BY A DISPATCHER ─────────────────
+        //
+        // The direction the two comparisons above cannot cover on their own: a
+        // variant that no walker produces is a word declared to a consumer for
+        // a message that cannot arrive, which is the same defect as an
+        // undeclared word with the sign flipped.
+        let mut reached: Vec<&str> = transport
+            .iter()
+            .map(|(_, name)| *name)
+            .chain(
+                expected_network
+                    .iter()
+                    .filter_map(|mid| MessageName::of_network(*mid).map(|m| m.name())),
+            )
+            .collect();
+        reached.sort_unstable();
+        reached.dedup();
+        let mut walked = MessageName::names();
+        walked.sort_unstable();
+        assert_eq!(
+            reached, walked,
+            "the dispatchers produce one set of message names and `MessageName::names` \
+             walks another. A word only the walk knows is a declaration with no message \
+             behind it; a word only a dispatcher knows is an undeclared vocabulary"
+        );
+    }
 
     /// Flatten every non-alias terminal span under `field`, in wire order.
     fn leaves(field: &Field) -> Vec<Span> {

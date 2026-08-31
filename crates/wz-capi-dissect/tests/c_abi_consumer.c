@@ -1223,8 +1223,16 @@ int main(void) {
      * those five families whether the WORD decides which keys arrive beside it.
      * All five are passengers here -- these rows write every key and put `null`
      * where a value does not apply -- which is a promise a consumer can now
-     * read rather than infer. */
-    revisioned[0].revision = 6;
+     * read rather than infer.
+     * R2211 (item 565) -- 7. ⚠ THIS LINE WAS LEFT AT 6 BY THAT ROUND AND LAYER
+     * C1bo HAS BEEN RED EVER SINCE, which is the failure the `summary` comment
+     * below already describes happening a second time: the literal is the
+     * consumer's own on purpose, so nothing in the Rust crate can move it and
+     * only this lane sees it. It is repaired here by R2223 rather than in a
+     * round of its own because that round is adding a revision to the FIELD
+     * document three lines down and would otherwise leave the same red
+     * standing on a second row. */
+    revisioned[0].revision = 7;
     revisioned[0].doc = NULL;
     rc = wz_dissect_pcap_census(pcap, sizeof pcap, &revisioned[0].doc);
     CHECK(rc == WZ_DISSECT_OK, "census rc=%d", rc);
@@ -1256,8 +1264,13 @@ int main(void) {
      * decides the keys beside it. THREE of the six do: `kind`, `state` and
      * `offset_space`, the last through two row emitters rather than two arms
      * of one match. Reading `value` off an `opaque` field is the parse this
-     * revision exists to stop. */
-    revisioned[2].revision = 4;
+     * revision exists to stop.
+     * R2223 (item 573) -- 5 when a walked message row gained `carried`, the
+     * listing of which MESSAGES it holds and where their bytes are. The word is
+     * a closed family, which `name` could never be: `name` is every field name
+     * at every depth of the tree, so a consumer splitting traffic by message
+     * was testing an open set against a hand-written list. */
+    revisioned[2].revision = 5;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

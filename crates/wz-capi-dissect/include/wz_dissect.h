@@ -164,8 +164,48 @@
  *
  * ⚠ AND IT IS NOT THE CENSUS `kind`. Same spelling, different closed set,
  * different document: on an interest row the word is `subscriber`, `queryable`
- * or `liveliness_token`. A third near-namesake, the message kind on a record
- * row, travels under `name` and is not a member of either family.
+ * or `liveliness_token`.
+ *
+ * R2223 -- AND THE MESSAGE NAMES, at field-document revision 5. The third
+ * near-namesake above used to end this paragraph as an exception -- "the
+ * message kind on a record row travels under `name` and is not a member of
+ * either family" -- and that sentence was the item. It is now a family of its
+ * own.
+ *
+ * WHY IT COULD NOT BE `name`. A walked message row carries `name`, and so does
+ * every node inside its tree, at every depth: `Push` and `keyexpr` and `sn`
+ * arrive under one key. That set is open by construction, so no revision could
+ * declare it, and a program splitting traffic by message had to test an open
+ * set against a list it wrote by hand. Ours was in a crate you cannot link, and
+ * it shipped for months missing `Join` -- every witness read a TCP unicast
+ * capture and a Join is a multicast announcement, so nothing revealed the hole.
+ *
+ * WHAT ARRIVES INSTEAD. Every walked message row carries
+ *
+ *     "carried":[{"message":"Frame","start":0,"end":41},
+ *                {"message":"Push","start":3,"end":41}]
+ *
+ * -- the transport message this row is, then every network message batched
+ * inside it, each with the span its bytes occupy in the row's own coordinate
+ * space (`start` and `end` are message-relative, exactly as they are inside
+ * `fields`; the row's `message_at` or `packet` says where the message itself
+ * sits). The word is read from the MID BYTE through the library's own message
+ * type, not from the tree's node names.
+ *
+ *     `message`      which message: `Init`, `Open`, `Close`, `KeepAlive`,
+ *                    `Frame`, `Fragment`, `Join`, `Oam` on the transport, and
+ *                    `Push`, `Request`, `Response`, `ResponseFinal`,
+ *                    `Interest`, `Declare` inside a `Frame` batch. `Oam` is
+ *                    both -- it has a transport MID and a network one.
+ *
+ * ⚠ AN EMPTY `carried` IS A STATEMENT. A transport MID this build does not name
+ * walks as the `Unknown` group -- the row says so under `name` -- and gets no
+ * entry here, because `Unknown` is not a message and putting it in this
+ * vocabulary would make the set something other than what the wire constants
+ * define. The two facts are held to be the same set over all thirty-two values
+ * a MID can take, by `the_message_vocabulary_is_the_one_the_dispatchers_produce`.
+ *
+ * @values fields message
  *
  * R2180 — AND A DOCUMENT SAYS WHICH OF ITS TOP-LEVEL KEYS ARE PLANES, which is
  * a third question neither number above can answer. A PLANE is an independent
@@ -189,7 +229,7 @@
  *
  * SO THE DOCUMENT CARRIES THE LIST. Its envelope reads
  *
- *     {"document":{"name":"census","revision":5,
+ *     {"document":{"name":"census","revision":7,
  *                  "planes":["exchanges","interests","keyexprs","nodes",
  *                            "payloads"]}, ...}
  *
@@ -235,11 +275,11 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":4,"key":"kind","values":[...],
+ *     {"name":"fields","revision":5,"key":"kind","values":[...],
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
- *     {"name":"census","revision":6,"key":"mode","values":[...],
+ *     {"name":"census","revision":7,"key":"mode","values":[...],
  *      "carries":null}
  *
  * `null` is a VALUE here and not an absence: it says the word is a PASSENGER --
@@ -263,6 +303,7 @@
  * @carries census offset_space passenger
  * @carries fields direction passenger
  * @carries fields kind discriminant
+ * @carries fields message passenger
  * @carries fields offset_space discriminant
  * @carries fields state discriminant
  * @carries fields under passenger
@@ -908,7 +949,7 @@ int wz_dissect_declarations_diagnose(const char *declarations, char **out);
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":3,"key":"state",
+ *     "value_families":[{"name":"fields","revision":5,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,

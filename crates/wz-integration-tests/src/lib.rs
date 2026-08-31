@@ -6324,37 +6324,23 @@ pub mod ext_bodies {
     /// See [`ENC_UNIT`].
     pub const ENC_ZBUF: u64 = 2;
 
-    /// The message groups a walked tree names, so an extension is attributed
-    /// to the message that CARRIED it rather than to the transport envelope.
-    ///
-    /// Needed because `dissect_transport_message` returns one tree per
-    /// transport message and a `Frame` descends into its whole record batch:
-    /// without this every `qos` inside a frame would be attributed to `Frame`.
-    ///
-    /// R2050 — `Join` was MISSING, and the reason it stayed missing is the
-    /// point: every witness that had ever used this list read a TCP unicast
-    /// capture, and a Join is a MULTICAST announcement. So the omission was
-    /// invisible until a capture carried one, and then it was not a wrong
-    /// attribution but a blank one — `?/qos` for the very body the round was
-    /// asserting about. This list is now every transport MID
-    /// (`wire_const::T_MID_*`) plus every network one, checked against them
-    /// rather than extended by one.
-    pub const MESSAGE_NAMES: &[&str] = &[
-        "Init",
-        "Open",
-        "Close",
-        "KeepAlive",
-        "Frame",
-        "Fragment",
-        "Join",
-        "Oam",
-        "Push",
-        "Request",
-        "Response",
-        "ResponseFinal",
-        "Interest",
-        "Declare",
-    ];
+    // R2223 (open-debt item 573) — `MESSAGE_NAMES` LIVED HERE AND IS GONE.
+    //
+    // It was fourteen words with a doc claiming to be "every transport MID
+    // (`wire_const::T_MID_*`) plus every network one, checked against them
+    // rather than extended by one", and NOTHING in the tree checked it. That
+    // sentence was written by the round that repaired R2050's missing `Join`;
+    // it described the intention and no mechanism, so the next drift would have
+    // been as silent as that one.
+    //
+    // Two defects, and the second is why the repair is a move and not a test.
+    // This crate is `publish = false`, so the only vocabulary of message names
+    // this workspace held was one no consumer could reach — while a consuming
+    // surface splitting traffic by message had to write its own list by hand.
+    // The words now live in `wz_session_core::dissect::MessageName`, are
+    // declared to a C consumer as the field document's `message` family, and
+    // are held to what BOTH dispatchers do with all thirty-two values a MID can
+    // take by `the_message_vocabulary_is_the_one_the_dispatchers_produce`.
 
     /// The fields `walk_ext_entry` pushes for EVERY entry whatever the body —
     /// the envelope, not a reading of it.
@@ -6453,7 +6439,8 @@ pub mod ext_bodies {
     pub struct Body {
         /// Which half wrote it.
         pub direction: Direction,
-        /// The message that carried it — the innermost [`MESSAGE_NAMES`] group.
+        /// The message that carried it — the innermost group the published
+        /// message vocabulary (`wz_session_core::dissect::MessageName`) names.
         pub carrier: String,
         /// `ext_name`: which row of `wz_session_core::ext_name`'s table this is.
         pub name: String,
@@ -6557,10 +6544,11 @@ pub mod ext_bodies {
         depth: Depth,
         out: &mut Vec<Body>,
     ) {
-        let carrier = if MESSAGE_NAMES.contains(&field.name.as_ref()) {
-            field.name.as_ref()
-        } else {
-            carrier
+        // R2223 (item 573) — asked of the PUBLISHED vocabulary. The local list
+        // this used to test against is gone; see the comment where it stood.
+        let carrier = match wz_session_core::dissect::MessageName::named(&field.name) {
+            Some(message) => message.name(),
+            None => carrier,
         };
         if field.name == "ext" {
             if let Some(FieldValue::Label(name)) = own_child(field, "ext_name").map(|f| &f.value) {

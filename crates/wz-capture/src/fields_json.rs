@@ -334,6 +334,7 @@ fn push_walk(
                 escape_into(&field.name, out);
                 out.push_str(",\"fields\":");
                 out.push_str(&to_json(&field));
+                push_carried(bytes, &field, out);
                 if let Some((declarations, spaces)) = lens {
                     let at = KeyexprAt::new(frame.direction, spaces);
                     out.push_str(",\"payload_decode\":");
@@ -381,6 +382,100 @@ fn push_walk(
 fn push_declined(why: &str, out: &mut String) {
     out.push_str("\"declined\":");
     escape_into(why, out);
+}
+
+/// R2223 (open-debt item 573) — WHICH MESSAGES THIS ROW CARRIES, by name and by
+/// span, from a CLOSED vocabulary.
+///
+/// # The key `name` could not be
+///
+/// A consumer of this document splits traffic by message — `Push` here,
+/// `Declare` there — and the only word it had to do that with was `name`, which
+/// `DocumentShape::keys`' own rule makes the UNION of every field name at every
+/// depth of the tree. That is an open set by construction, so no revision could
+/// ever declare it, and a message name added upstream reached a consumer as a
+/// `switch` fallthrough. `message` is the closed half of that fact, given its
+/// own key so it can be declared.
+///
+/// # Read off the WIRE, through the vocabulary
+///
+/// The word comes from the MID BYTE — `bytes[0]` for the transport message,
+/// and the first byte of each batched record's span for the network ones —
+/// resolved through [`MessageName`]. Not from the tree's node names: those are
+/// the walker's own strings, and asking the walker to confirm the walker is the
+/// tautology this whole axis exists to avoid. `dissect_transport_message` is
+/// driven at base 0 here (see [`push_walk`]), so a record's `span.start` indexes
+/// `bytes` directly.
+///
+/// # An UNNAMED transport MID emits no entry, and that is a statement
+///
+/// A byte this build does not name walks as the `Unknown` group, which the row
+/// already reports under `name`. Adding `Unknown` to this family would make the
+/// vocabulary something other than the message set the wire constants define,
+/// so the entry is omitted instead — and what makes the omission a statement
+/// rather than a silence is
+/// `the_message_vocabulary_is_the_one_the_dispatchers_produce`, which holds
+/// "the dispatcher named it `Unknown`" and "the vocabulary does not claim this
+/// MID" to be the same set over all thirty-two MIDs.
+///
+/// A BATCHED record is a different case and is never dropped: those bytes were
+/// accepted by `walk_network_record`, so a vocabulary with no answer for one is
+/// a disagreement and not a gap. It arrives under its walked name, where the
+/// declared-values gate reports it as a word no revision declares — the rule
+/// this workspace states as "unclassified is RED, not a pass".
+fn push_carried(bytes: &[u8], field: &wz_session_core::dissect::Field, out: &mut String) {
+    use wz_session_core::dissect::MessageName;
+    out.push_str(",\"carried\":[");
+    let mut first = true;
+    let mut entry = |word: &str, span: &wz_session_core::dissect::Span, out: &mut String| {
+        if !first {
+            out.push(',');
+        }
+        first = false;
+        out.push_str("{\"message\":");
+        escape_into(word, out);
+        let _ = write!(out, ",\"start\":{},\"end\":{}}}", span.start, span.end);
+    };
+    if let Some(message) = bytes
+        .first()
+        .and_then(|b| MessageName::of_transport(b & 0x1F))
+    {
+        entry(message.name(), &field.span, out);
+    }
+    for record in batched_records(field) {
+        let word = bytes
+            .get(record.span.start)
+            .and_then(|b| MessageName::of_network(b & 0x1F))
+            .map_or(record.name.as_ref(), |m| m.name());
+        entry(word, &record.span, out);
+    }
+    out.push(']');
+}
+
+/// The network records a `Frame` batched, or nothing for every other message.
+///
+/// STRUCTURAL rather than by name: `dissect_transport_message`'s Frame arm is
+/// the only one that builds a NESTED `payload` group, and it fills it with
+/// `dissect_batch`'s records plus — when the walk halted — one `unparsed`
+/// remainder that is a byte range and not a message. Every other MID either
+/// carries no payload or carries it as a leaf, so this returns empty for them
+/// without needing to know which they are.
+fn batched_records(
+    field: &wz_session_core::dissect::Field,
+) -> Vec<&wz_session_core::dissect::Field> {
+    use wz_session_core::dissect::FieldValue;
+    let FieldValue::Nested(children) = &field.value else {
+        return Vec::new();
+    };
+    children
+        .iter()
+        .find(|c| c.name == "payload")
+        .and_then(|payload| match &payload.value {
+            FieldValue::Nested(records) => Some(records),
+            _ => None,
+        })
+        .map(|records| records.iter().filter(|r| r.name != "unparsed").collect())
+        .unwrap_or_default()
 }
 
 fn note(
@@ -832,11 +927,23 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 9] = [
+        let live: [(&str, &str, Vec<&'static str>); 10] = [
             (
                 rev::FIELDS,
                 "kind",
                 wz_session_core::dissect::FieldValue::kind_words(),
+            ),
+            // R2223 (open-debt item 573) — the message vocabulary, and the row
+            // whose walk is held to something outside itself. The others here
+            // are successor chains checked against a derive or against each
+            // other; `MessageName::names` is checked against what the two
+            // DISPATCHERS produce over all thirty-two values a MID can take,
+            // because the defect this row closes was a list that drifted from
+            // the walkers and stayed drifted until traffic revealed it.
+            (
+                rev::FIELDS,
+                "message",
+                wz_session_core::dissect::MessageName::names(),
             ),
             (rev::FIELDS, "state", PayloadDecoding::STATES.to_vec()),
             (rev::FIELDS, "under", RefusedUnder::names()),
@@ -918,6 +1025,86 @@ mod tests {
              library emits today must be held to a WALK, whichever document it \
              is on; the one that is not is a vocabulary that can widen in \
              silence again, which is item 552 happening a second time"
+        );
+    }
+
+    /// R2223 (open-debt item 573) — AND THE MESSAGE WORDS REACH THE DOCUMENT,
+    /// read back off one this library actually emitted.
+    ///
+    /// The `kind` sibling below makes the argument for both: the vocabulary
+    /// gate holds two Rust constants against each other and neither has been
+    /// near a capture, so a walk could report a word `push_carried` never
+    /// writes, or write it under a key no document carries.
+    ///
+    /// A SUBSET with a floor, for the reason that sibling gives. This fixture
+    /// is one capture and the vocabulary is every message the wire defines;
+    /// `Join` is the standing example of a word no unicast capture can reach,
+    /// and the exact reason the family comes from a walk and not from an
+    /// artifact. What is asserted here is that the words which DO arrive are
+    /// declared, that enough of them arrive for the comparison to mean
+    /// something, and that a word this capture cannot produce is nevertheless
+    /// declared — the last being the check that would fail if anyone ever
+    /// derived this family from observation.
+    #[test]
+    fn the_field_documents_message_words_are_all_declared() {
+        use crate::payload::formats::FormatMap;
+        use crate::payload_decode::Declarations;
+
+        let (d, file) =
+            crate::census_json::fed_tests::every_plane_capture_with_file("demo/temp", None, false);
+        let mut map = FormatMap::new();
+        map.declare("demo/**=json").expect("a keyexpr pattern");
+        let run = Declarations::new(&map);
+
+        let declared = crate::doc_revision::newest(crate::doc_revision::FIELDS)
+            .expect("the field document has a revision")
+            .families
+            .iter()
+            .find(|f| f.key == "message")
+            .expect("revision 5 declares the message family")
+            .values;
+
+        let mut seen: Vec<&str> = Vec::new();
+        let with = fields_json(&d, &file, None, Some(&run));
+        let without = fields_json(&d, &file, None, None);
+        for doc in [&with, &without] {
+            seen.extend(
+                crate::doc_revision::json_string_values(doc)
+                    .into_iter()
+                    .filter(|(k, _)| *k == "message")
+                    .map(|(_, v)| v),
+            );
+        }
+        seen.sort_unstable();
+        seen.dedup();
+
+        let stray: Vec<&&str> = seen.iter().filter(|w| !declared.contains(w)).collect();
+        assert!(
+            stray.is_empty(),
+            "the field document emits the `message` word(s) {stray:?}, which no \
+             revision declares. A value that ARRIVES is the break — see \
+             `ValueFamily` for the asymmetry — so APPEND a revision to \
+             `doc_revision::DOCUMENT_HISTORY` carrying the widened set"
+        );
+        assert_eq!(
+            seen.len(),
+            8,
+            "this fixture reached {} of the declared message words ({seen:?}); it \
+             reached eight of fourteen when the family was written — `Declare`, \
+             `Frame`, `Init`, `Interest`, `Push`, `Request`, `Response`, \
+             `ResponseFinal` — and a capture that stopped producing rows would \
+             make the subset above true by having nothing to compare",
+            seen.len()
+        );
+        assert!(
+            !seen.contains(&"Join") && declared.contains(&"Join"),
+            "`Join` is declared and this capture does not produce it, which is the \
+             measurement that decides where this vocabulary comes from. It is also \
+             the exact word R2050 shipped a list without, for exactly this reason: \
+             a Join is a MULTICAST announcement and every witness read a unicast \
+             capture. If a fixture now DOES reach it, that is good news and this \
+             assertion is what should change — but the family must keep coming \
+             from `MessageName`, never from what a capture happened to show"
         );
     }
 
