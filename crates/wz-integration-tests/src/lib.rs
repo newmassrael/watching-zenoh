@@ -7151,3 +7151,369 @@ pub mod ext_bodies {
         }
     }
 }
+
+/// R2227 (open-debt item 575) — a SECOND reader over a recorded batch's
+/// FRAGMENT extension chain, and the control group that keeps its negatives
+/// meaningful.
+///
+/// ## Why a second reader at all
+///
+/// `tests/wz_chain_drop_zenohd_interop.rs` measures what a genuine `zenohd`
+/// puts on the wire when it abandons a fragment chain, and its headline is that
+/// the `0x3 Drop` marker is NOT there. Asking wz's own dissector would make the
+/// census vouch for itself, so the walk here is written against upstream's
+/// extension envelope directly — `[Z|ENC(2)|ID(5)]`, whose body shape the ENC
+/// bits give — which both implementations encode identically.
+///
+/// ## Why it lives in the lib rather than beside the leg that uses it
+///
+/// Because its control group has to RUN, and in that file it could not. Layer
+/// C0 requires `#[ignore]` of every `#[test]` in a binary-dep fixture, and
+/// Layer Z runs those with `-- --ignored`, which selects an un-ignored one
+/// never — so a control group written next to the leg would be gated out of the
+/// default lane by C0 and out of Z by the flag. That is R311y479's "a witness in
+/// no lane" class, and this module takes the same repair a prior round took for
+/// `the_stalled_message_offers_hypotheses_rather_than_a_verdict`: the assertion
+/// moved to the lib, where it needs no zenohd, no demo and no socket, and
+/// `cargo test --workspace` reaches it.
+///
+/// ## What the control group is FOR
+///
+/// The leg's finding is a ZERO. A walk that structurally cannot reach `0x3`
+/// reports exactly the same zero as a wire that does not carry one, so without
+/// a control group the leg's conclusion would rest on this reader rather than
+/// on the router. MEASURED, and it corrected the guess that prompted it: the
+/// defect that survives every assertion the leg was filed with is a narrowed ID
+/// MASK, not a reordered chain walk. Reordering takes `first_marked` down too —
+/// upstream never writes First and Drop on one batch, so both are last on
+/// theirs — and the leg's own `first_marked >= 1` precondition reds on it. With
+/// `EXT_MID_MASK` narrowed to `0x1E` instead, `0x2` still matches itself while
+/// `0x3` folds onto it and can never match: both arms keep `first_marked` (1
+/// and 7), both keep `drop_marked == 0`, every pre-existing assertion passes,
+/// and only `drop_reader_alive_on` reds.
+pub mod fragment_ext {
+    use super::wire_tap::Side;
+
+    /// `[Z|ENC(2)|ID(5)]` — the ext envelope's id field, upstream's
+    /// `iext::EID_MASK` (`commons/zenoh-protocol/src/common/extension.rs`).
+    pub const EXT_MID_MASK: u8 = 0x1F;
+    /// The "another ext follows" bit, upstream's `iext::FLAG_Z`. The LAST ext in
+    /// a chain has it CLEAR, which is why [`fragment_ext_offset`] tests `wanted`
+    /// BEFORE it tests this.
+    pub const EXT_Z_FLAG: u8 = 0x80;
+    /// The two encoding bits that say how long the ext body is.
+    pub const EXT_ENC_MASK: u8 = 0x60;
+
+    /// The fragment ext ids upstream defines, from
+    /// `commons/zenoh-protocol/src/transport/fragment.rs:94-97`.
+    pub const EXT_ID_FIRST: u8 = 0x2;
+    /// The chain-abandon marker. See [`EXT_ID_FIRST`].
+    pub const EXT_ID_DROP: u8 = 0x3;
+
+    /// Read a batch's fragment ext chain and report WHERE `wanted` sits in it —
+    /// the index of its envelope byte, or `None`.
+    ///
+    /// Takes the batch WITHOUT its `[u16 LE len]` frame.
+    ///
+    /// Returns `None` for anything it cannot walk, including a reserved
+    /// encoding: a skip it cannot compute would put the cursor somewhere
+    /// arbitrary, and a marker "found" there means nothing.
+    ///
+    /// ⚠ IT RETURNS AN OFFSET RATHER THAN A BOOL SO THE READER CAN BE MUTATED
+    /// ON THE ROUTER'S OWN BYTES — see [`drop_reader_alive_on`].
+    ///
+    /// ⚠ THE ORDER OF THE TWO TESTS IN THE LOOP IS LOAD-BEARING. Upstream
+    /// writes `ext_drop` LAST (`commons/zenoh-codec/src/transport/fragment.rs:65-76`
+    /// — QoS, then First, then Drop), so the Drop envelope is the one whose `Z`
+    /// bit is clear and testing `Z` first makes `0x3` undiscoverable.
+    pub fn fragment_ext_offset(batch: &[u8], fragment_mid: u8, wanted: u8) -> Option<usize> {
+        let &header = batch.first()?;
+        if header & EXT_MID_MASK != fragment_mid || header & EXT_Z_FLAG == 0 {
+            return None;
+        }
+        // `[header][VLE(sn)][ext chain]`.
+        let mut at = skip_vle(batch, 1)?;
+        loop {
+            let &ext = batch.get(at)?;
+            let envelope = at;
+            at += 1;
+            if ext & EXT_MID_MASK == wanted {
+                return Some(envelope);
+            }
+            at = match (ext & EXT_ENC_MASK) >> 5 {
+                // unit: the ext IS its own value, no body follows
+                0 => at,
+                // z64: one VLE
+                1 => skip_vle(batch, at)?,
+                // zbuf: a VLE length and that many bytes
+                2 => {
+                    let next = skip_vle(batch, at)?;
+                    let (len, _) = read_vle_at(batch, at)?;
+                    next + len as usize
+                }
+                _ => return None,
+            };
+            if ext & EXT_Z_FLAG == 0 {
+                return None;
+            }
+        }
+    }
+
+    /// Whether `wanted` is in the batch's fragment ext chain.
+    pub fn fragment_ext_present(batch: &[u8], fragment_mid: u8, wanted: u8) -> bool {
+        fragment_ext_offset(batch, fragment_mid, wanted).is_some()
+    }
+
+    fn read_vle_at(bytes: &[u8], mut at: usize) -> Option<(u64, usize)> {
+        let mut value = 0u64;
+        let mut shift = 0u32;
+        while let Some(&byte) = bytes.get(at) {
+            at += 1;
+            value |= u64::from(byte & 0x7F) << shift;
+            if byte < 0x80 {
+                return Some((value, at));
+            }
+            shift += 7;
+            if shift >= 64 {
+                return None;
+            }
+        }
+        None
+    }
+
+    fn skip_vle(bytes: &[u8], at: usize) -> Option<usize> {
+        read_vle_at(bytes, at).map(|(_, next)| next)
+    }
+
+    /// How many recorded batches on the LISTENER's direction carry `wanted`.
+    ///
+    /// Segments arrive `[u16 LE len][batch]`, which is why the walk starts at
+    /// byte 2.
+    pub fn ext_marked_batches(
+        recording: &[(Side, Vec<u8>)],
+        fragment_mid: u8,
+        wanted: u8,
+    ) -> usize {
+        recording
+            .iter()
+            .filter(|(side, _)| *side == Side::FromListener)
+            .filter(|(_, segment)| {
+                segment.len() > 2 && fragment_ext_present(&segment[2..], fragment_mid, wanted)
+            })
+            .count()
+    }
+
+    /// Take a batch the LISTENER really wrote that carries ext `0x2`, re-label
+    /// that one envelope byte `0x3`, and report whether the same walk then
+    /// finds it.
+    ///
+    /// This is the anti-vacuity half of a `drop_marked == 0` reading, taken on
+    /// the arm's OWN bytes rather than on a shape a fixture invented. `None`
+    /// when the recording carries no `0x2` batch at all — a caller that has
+    /// already required a chain START has excluded that.
+    ///
+    /// One byte differs from what upstream WOULD have sent had its encode
+    /// survived: its Drop batch is its First batch's envelope with `0x2`
+    /// replaced by `0x3`, both being `zextunit!` bodies
+    /// (`commons/zenoh-protocol/src/transport/fragment.rs:94-97`). So this is
+    /// not a synthesised marker standing in for a genuine one — it is the
+    /// genuine chain-start batch, re-labelled, and it asserts about the READER
+    /// only. What crossed the wire is still what `ext_marked_batches` says.
+    pub fn drop_reader_alive_on(recording: &[(Side, Vec<u8>)], fragment_mid: u8) -> Option<bool> {
+        let (_, segment) = recording.iter().find(|(side, segment)| {
+            *side == Side::FromListener
+                && segment.len() > 2
+                && fragment_ext_present(&segment[2..], fragment_mid, EXT_ID_FIRST)
+        })?;
+        let batch = &segment[2..];
+        let at = fragment_ext_offset(batch, fragment_mid, EXT_ID_FIRST)?;
+        let mut relabelled = batch.to_vec();
+        // Only the id field moves; `Z` and the encoding bits stay as the writer
+        // wrote them, which is what makes this the batch upstream WOULD have
+        // sent.
+        relabelled[at] = (relabelled[at] & !EXT_MID_MASK) | EXT_ID_DROP;
+        Some(fragment_ext_present(&relabelled, fragment_mid, EXT_ID_DROP))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// `id::FRAGMENT` at zenoh 1.5.0, and `wz_codecs::wire_const::T_MID_FRAGMENT`.
+        /// Passed in rather than imported so this module carries no dependency
+        /// on a codec crate for a single byte.
+        const FRAGMENT_MID: u8 = 0x06;
+
+        /// ⚠ THE BYTES BELOW ARE WRITTEN AS LITERALS ON PURPOSE. Assembling
+        /// them from `EXT_Z_FLAG` / `EXT_ENC_MASK` / `EXT_MID_MASK` would build
+        /// the fixture out of the very constants under test, and a walk that
+        /// mis-defines one would then be checked against a fixture that
+        /// mis-defines it the same way — the "a table compared against its own
+        /// length" trap. Each literal is spelled out against upstream's
+        /// definition on the line that uses it.
+        ///
+        /// `FRAGMENT` with the `Z` flag set: `id::FRAGMENT | flag::Z`
+        /// (`commons/zenoh-protocol/src/transport/fragment.rs:19-22` for
+        /// `Z == 1 << 7`).
+        const HEADER_Z: u8 = 0x86;
+        /// The same header WITHOUT `Z`, so no ext chain follows it.
+        const HEADER_NO_Z: u8 = 0x06;
+        /// A one-byte VLE carrying sn 7 — any value below 0x80 encodes as itself.
+        const SN: u8 = 0x07;
+
+        /// The literal headers must stay the message id the walk tests against;
+        /// if they diverged, every fixture below would be walking a message the
+        /// reader rejects and would go green by rejecting it.
+        #[test]
+        fn the_fixture_header_is_the_fragment_message_id() {
+            assert_eq!(HEADER_Z & 0x1F, FRAGMENT_MID);
+            assert_eq!(HEADER_NO_Z & 0x1F, FRAGMENT_MID);
+        }
+
+        /// THE ONE THAT MATTERS. Upstream writes `ext_drop` LAST, and the last
+        /// ext in a chain carries `Z == 0`. So the Drop envelope is `0x03`: unit
+        /// encoding (`zextunit!(0x3, false)`,
+        /// `commons/zenoh-protocol/src/transport/fragment.rs:97`), id 3, `Z`
+        /// clear.
+        #[test]
+        fn reader_finds_a_drop_that_is_the_last_ext() {
+            let batch = [HEADER_Z, SN, 0x03];
+            assert!(
+                fragment_ext_present(&batch, FRAGMENT_MID, EXT_ID_DROP),
+                "the walk did not find a `0x3 Drop` that is the chain's LAST \
+                 ext, which is the only position upstream ever writes it in"
+            );
+            assert_eq!(
+                fragment_ext_offset(&batch, FRAGMENT_MID, EXT_ID_DROP),
+                Some(2)
+            );
+        }
+
+        /// Drop behind a `z64` ext, which is where it lands when the writer's
+        /// QoS is not `DEFAULT`: `0xA1` is `Z | ENC(z64) | id 1`
+        /// (`QoS = zextz64!(0x1, true)`), its body one VLE, then `0x03`.
+        #[test]
+        fn reader_finds_a_drop_after_a_z64_ext() {
+            let batch = [HEADER_Z, SN, 0xA1, 0x00, 0x03];
+            assert!(
+                fragment_ext_present(&batch, FRAGMENT_MID, EXT_ID_DROP),
+                "the walk lost the chain skipping a z64 ext body, so a Drop \
+                 behind a non-default QoS would never be counted"
+            );
+            assert_eq!(
+                fragment_ext_offset(&batch, FRAGMENT_MID, EXT_ID_DROP),
+                Some(4)
+            );
+        }
+
+        /// Drop behind a `unit` ext: `0x82` is `Z | ENC(unit) | id 2`, no body,
+        /// then `0x03`. Upstream never writes First and Drop on the same batch
+        /// — the emit site is the `else` of `if fragment.ext_first.is_some()` —
+        /// but the walk's unit-skip is exercised by nothing else, and an
+        /// off-by-one there is the second way a `0x3` goes missing.
+        #[test]
+        fn reader_finds_a_drop_after_a_unit_ext() {
+            let batch = [HEADER_Z, SN, 0x82, 0x03];
+            assert!(
+                fragment_ext_present(&batch, FRAGMENT_MID, EXT_ID_DROP),
+                "the walk lost the chain skipping a unit ext, so a Drop behind \
+                 one would never be counted"
+            );
+            assert_eq!(
+                fragment_ext_offset(&batch, FRAGMENT_MID, EXT_ID_DROP),
+                Some(3)
+            );
+        }
+
+        /// THE NARROWING CONTROL. The three arms above would all pass a walk
+        /// that ignored `wanted` and returned the first envelope it reached.
+        /// These say the id is actually compared.
+        #[test]
+        fn reader_does_not_report_a_drop_that_is_absent() {
+            let first_only = [HEADER_Z, SN, 0x02];
+            assert!(
+                fragment_ext_present(&first_only, FRAGMENT_MID, EXT_ID_FIRST),
+                "the walk did not find the `0x2 First` that IS on this batch"
+            );
+            assert!(
+                !fragment_ext_present(&first_only, FRAGMENT_MID, EXT_ID_DROP),
+                "the walk reported a `0x3 Drop` on a batch carrying only \
+                 `0x2 First`, so it is not comparing the id at all"
+            );
+            let qos_only = [HEADER_Z, SN, 0x21, 0x00];
+            assert!(
+                !fragment_ext_present(&qos_only, FRAGMENT_MID, EXT_ID_DROP),
+                "the walk reported a `0x3 Drop` on a batch carrying only a QoS ext"
+            );
+        }
+
+        /// A header without `Z` has no ext chain at all, and a walk that read
+        /// one anyway would be reading the fragment PAYLOAD as envelopes —
+        /// where a `0x03` byte occurs constantly. That is the direction that
+        /// would make a RED look like upstream had been fixed.
+        #[test]
+        fn reader_refuses_a_batch_whose_header_declares_no_exts() {
+            let batch = [HEADER_NO_Z, SN, 0x03];
+            assert!(
+                !fragment_ext_present(&batch, FRAGMENT_MID, EXT_ID_DROP),
+                "the walk read an ext chain off a header that declares none, so \
+                 it is reading payload bytes as envelopes"
+            );
+        }
+
+        /// A chain that promises another ext and ends is not a chain the walk
+        /// may guess at — nothing found, rather than a marker found past the
+        /// end.
+        #[test]
+        fn reader_refuses_a_truncated_chain() {
+            let batch = [HEADER_Z, SN, 0x82];
+            assert!(
+                !fragment_ext_present(&batch, FRAGMENT_MID, EXT_ID_DROP),
+                "the walk found something past the end of a truncated ext chain"
+            );
+        }
+
+        /// A recorded segment carries its `[u16 LE len]` frame, and the walk
+        /// starts past it. A reader that forgot the frame would find the length
+        /// bytes where the header belongs.
+        fn framed(batch: &[u8]) -> Vec<u8> {
+            let mut out = (batch.len() as u16).to_le_bytes().to_vec();
+            out.extend_from_slice(batch);
+            out
+        }
+
+        /// The re-labelling probe finds a Drop where the router wrote a First,
+        /// and reports the DIALLER's batches as no evidence at all — the
+        /// direction matters, because only the listener is the router here.
+        #[test]
+        fn the_relabelling_probe_is_alive_on_a_listener_first_batch() {
+            let recording = vec![
+                (Side::FromDialer, framed(&[HEADER_Z, SN, 0x02])),
+                (Side::FromListener, framed(&[HEADER_Z, SN, 0x02])),
+            ];
+            assert_eq!(
+                drop_reader_alive_on(&recording, FRAGMENT_MID),
+                Some(true),
+                "re-labelling a listener's `0x2 First` envelope to `0x3` did \
+                 not make the walk find it"
+            );
+            let dialler_only = vec![(Side::FromDialer, framed(&[HEADER_Z, SN, 0x02]))];
+            assert_eq!(
+                drop_reader_alive_on(&dialler_only, FRAGMENT_MID),
+                None,
+                "a `0x2` on the DIALLER's side was accepted as the router's"
+            );
+        }
+
+        /// And it reports `None` — not `Some(false)` — when there is no chain
+        /// start to re-label. The two are different findings: `None` says the
+        /// probe had no subject, `Some(false)` says the reader is broken, and
+        /// collapsing them would let an arm that never fragmented read as one
+        /// whose reader is dead.
+        #[test]
+        fn the_relabelling_probe_reports_no_subject_rather_than_a_failure() {
+            let no_chain = vec![(Side::FromListener, framed(&[HEADER_Z, SN, 0x21, 0x00]))];
+            assert_eq!(drop_reader_alive_on(&no_chain, FRAGMENT_MID), None);
+        }
+    }
+}

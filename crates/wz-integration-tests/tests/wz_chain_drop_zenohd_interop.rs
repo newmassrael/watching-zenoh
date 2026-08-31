@@ -53,6 +53,31 @@
 //! the day upstream repairs that `encode` this leg REDS and says so, at which
 //! point item 575's genuine witness becomes buildable for the first time.
 //!
+//! ## R2227 — AND THAT THE ZERO IS ABOUT THE ROUTER, NOT ABOUT THE READER
+//!
+//! Everything above rests on `drop_marked == 0`, which is produced by ONE walk
+//! over the recorded bytes (`fragment_ext_offset`). A walk that cannot reach
+//! `0x3` returns exactly the same zero as a wire that does not carry one, and
+//! as filed the leg had nothing that told the two apart — the class this tree
+//! has recorded as "a dead probe and a negative result look the same".
+//!
+//! Two halves now do, and they answer different halves of the question:
+//!
+//!   * on the ROUTER'S OWN BYTES — `drop_reader_seen_on_router_bytes`, a
+//!     precondition of BOTH arms: take a batch the router really wrote,
+//!     re-label its `0x2` envelope `0x3`, and the walk must find it. One byte
+//!     from what upstream would have sent had its encode survived, and it
+//!     asserts about the reader only;
+//!   * on UPSTREAM'S ENVELOPE SHAPES — the control group at the end of this
+//!     file, which needs no zenohd and so runs in the DEFAULT lane, where the
+//!     two arms above never do.
+//!
+//! MEASURED, and it corrected the guess that prompted it: the reader defect
+//! that survives every pre-existing assertion is a narrowed ID MASK, not a
+//! reordered chain walk. Under `EXT_MID_MASK = 0x1E` both arms keep
+//! `first_marked` (1 and 7) and keep `drop_marked == 0`, every assertion this
+//! leg was filed with passes, and only the new precondition reds.
+//!
 //! ## THREE conditions at once, and the third is the one that is easy to miss
 //!
 //! Reaching that emit site needs all of:
@@ -239,20 +264,27 @@ const NEGOTIATED_MTU: u16 = 2048;
 /// keyexpr.
 const PAYLOAD_LEN: usize = 56 * 1024;
 
-/// The fragment ext ids upstream defines, from
-/// `commons/zenoh-protocol/src/transport/fragment.rs:94-97`.
-const EXT_ID_FIRST: u8 = 0x2;
-const EXT_ID_DROP: u8 = 0x3;
-
 /// What one arm observed.
 struct ArmOutcome {
     /// The census document over the bytes the RELAY recorded.
     census: String,
-    /// Fragment batches the router wrote carrying ext `0x3`, counted by this
-    /// file's own ext-chain walk rather than by the census.
+    /// Fragment batches the router wrote carrying ext `0x3`, counted by
+    /// `wz_integration_tests::fragment_ext`'s walk rather than by the census.
     drop_marked: usize,
     /// Fragment batches the router wrote carrying ext `0x2`, the chain starts.
     first_marked: usize,
+    /// Whether the reader that produced `drop_marked` CAN see a `0x3` in the
+    /// bytes this very arm recorded — `fragment_ext::drop_reader_alive_on`,
+    /// which takes one batch the router really wrote and re-labels its `0x2`
+    /// envelope `0x3`.
+    ///
+    /// ⚠ WITHOUT THIS, `drop_marked == 0` HAS NO DISCRIMINATING POWER: a reader
+    /// that structurally cannot reach `0x3` reports the same zero as a wire
+    /// that does not carry it, and this leg's headline would rest on the reader
+    /// rather than on the router. `first_marked` does not close it — see that
+    /// module's own docs for the mutation that survives every other assertion
+    /// here.
+    drop_reader_seen_on_router_bytes: bool,
     /// Zero-length batches the router put on the wire — upstream's actual
     /// signature for reaching its abandon path. See the module docs.
     empty_batches: usize,
@@ -264,95 +296,17 @@ struct ArmOutcome {
     delivered: bool,
 }
 
-/// Read a `[u16 LE len]`-framed batch's fragment ext chain and report whether
-/// `wanted` is in it.
-///
-/// A SECOND reader over the same bytes, deliberately not wz's: the claim this
-/// supports is "the genuine router wrote this marker", and asking wz's own
-/// dissector would make the census vouch for itself. The layout is upstream's
-/// extension envelope — `[Z|ENC(2)|ID(5)]` with a body whose shape the ENC bits
-/// give — which both implementations encode identically.
-///
-/// Returns `false` for anything it cannot walk, including a reserved encoding:
-/// a skip it cannot compute would put the cursor somewhere arbitrary, and a
-/// marker "found" there means nothing.
-fn fragment_ext_present(batch: &[u8], wanted: u8) -> bool {
-    const MID_MASK: u8 = 0x1F;
-    const Z_FLAG: u8 = 0x80;
-    const ENC_MASK: u8 = 0x60;
-    let Some(&header) = batch.first() else {
-        return false;
-    };
-    if header & MID_MASK != T_MID_FRAGMENT || header & Z_FLAG == 0 {
-        return false;
-    }
-    // `[header][VLE(sn)][ext chain]`.
-    let Some(mut at) = skip_vle(batch, 1) else {
-        return false;
-    };
-    loop {
-        let Some(&ext) = batch.get(at) else {
-            return false;
-        };
-        at += 1;
-        if ext & MID_MASK == wanted {
-            return true;
-        }
-        at = match (ext & ENC_MASK) >> 5 {
-            // unit: the ext IS its own value, no body follows
-            0 => at,
-            // z64: one VLE
-            1 => match skip_vle(batch, at) {
-                Some(next) => next,
-                None => return false,
-            },
-            // zbuf: a VLE length and that many bytes
-            2 => match skip_vle(batch, at) {
-                Some(next) => {
-                    let Some((len, _)) = read_vle_at(batch, at) else {
-                        return false;
-                    };
-                    next + len as usize
-                }
-                None => return false,
-            },
-            _ => return false,
-        };
-        if ext & Z_FLAG == 0 {
-            return false;
-        }
-    }
-}
-
-fn read_vle_at(bytes: &[u8], mut at: usize) -> Option<(u64, usize)> {
-    let mut value = 0u64;
-    let mut shift = 0u32;
-    while let Some(&byte) = bytes.get(at) {
-        at += 1;
-        value |= u64::from(byte & 0x7F) << shift;
-        if byte < 0x80 {
-            return Some((value, at));
-        }
-        shift += 7;
-        if shift >= 64 {
-            return None;
-        }
-    }
-    None
-}
-
-fn skip_vle(bytes: &[u8], at: usize) -> Option<usize> {
-    read_vle_at(bytes, at).map(|(_, next)| next)
-}
-
-/// How many recorded batches on the ROUTER's direction carry `wanted`.
-fn ext_marked_batches(recording: &[(Side, Vec<u8>)], wanted: u8) -> usize {
-    recording
-        .iter()
-        .filter(|(side, _)| *side == Side::FromListener)
-        .filter(|(_, segment)| segment.len() > 2 && fragment_ext_present(&segment[2..], wanted))
-        .count()
-}
+/// The ext-chain walk, its two counters and its anti-vacuity probe live in
+/// `wz_integration_tests::fragment_ext` rather than here, and that placement is
+/// the point: Layer C0 requires `#[ignore]` of every `#[test]` in a binary-dep
+/// fixture and Layer Z runs those with `-- --ignored`, so a control group
+/// written in THIS file would run in no lane at all. In the lib it needs no
+/// zenohd, no demo and no socket, and `cargo test --workspace` reaches it.
+/// See that module's docs for what the control group is for and for the
+/// mutation that survives every assertion in this file.
+use wz_integration_tests::fragment_ext::{
+    drop_reader_alive_on, ext_marked_batches, EXT_ID_DROP, EXT_ID_FIRST,
+};
 
 /// Drive one arm: a genuine publisher, a real zenohd whose tx path is shallow,
 /// and a wz subscriber dialling THROUGH a relay that stalls inside the chain.
@@ -551,16 +505,18 @@ async fn subscribe_through_a_stalled_link(hold: Duration) -> ArmOutcome {
         "arm hold={hold:?}: stalls={stalls} fragment_batches={fragment_batches} \
          first_marked={} drop_marked={} router_bytes={from_router} \
          wz_reassembly_drops={} delivered={}\n  fragment_chains: {chains}",
-        ext_marked_batches(&recording, EXT_ID_FIRST),
-        ext_marked_batches(&recording, EXT_ID_DROP),
+        ext_marked_batches(&recording, T_MID_FRAGMENT, EXT_ID_FIRST),
+        ext_marked_batches(&recording, T_MID_FRAGMENT, EXT_ID_DROP),
         rx_reassembly_drops.load(std::sync::atomic::Ordering::SeqCst),
         delivered.load(std::sync::atomic::Ordering::SeqCst),
     );
 
     ArmOutcome {
         census,
-        drop_marked: ext_marked_batches(&recording, EXT_ID_DROP),
-        first_marked: ext_marked_batches(&recording, EXT_ID_FIRST),
+        drop_marked: ext_marked_batches(&recording, T_MID_FRAGMENT, EXT_ID_DROP),
+        first_marked: ext_marked_batches(&recording, T_MID_FRAGMENT, EXT_ID_FIRST),
+        drop_reader_seen_on_router_bytes: drop_reader_alive_on(&recording, T_MID_FRAGMENT)
+            .unwrap_or(false),
         empty_batches,
         fragment_batches,
         stalls,
@@ -592,6 +548,21 @@ fn assert_the_arm_reached_the_state_under_test(arm: &ArmOutcome, what: &str) {
         arm.first_marked >= 1,
         "{what}: no batch carried the `0x2 First` marker, so no chain START \
          reached the wire"
+    );
+    // ── AND THE READER THAT WILL REPORT `drop_marked` IS ALIVE ────────────
+    //
+    // A precondition rather than a leg-local check, because BOTH arms read
+    // `drop_marked == 0` and both would be vacuous the same way. The zero has
+    // to mean "the router did not write `0x3`"; a walk that structurally
+    // cannot reach `0x3` returns exactly the same zero, and `first_marked`
+    // above does not exclude it — upstream writes `ext_drop` LAST, so the Drop
+    // envelope is the one whose `Z` bit is clear, and a `Z`-before-id walk
+    // keeps finding every `0x2` while never finding a `0x3`.
+    assert!(
+        arm.drop_reader_seen_on_router_bytes,
+        "{what}: re-labelling a REAL recorded `0x2 First` envelope to `0x3` \
+         did not make this file's ext walk find it, so `drop_marked` is read \
+         by a walk that cannot see the marker and its zero means nothing"
     );
     // `begun` is asserted as NOT ZERO rather than as a literal: the publisher
     // republishes on a cadence, so how many chains a run contains is a
@@ -743,3 +714,7 @@ async fn wz_sees_no_abandon_when_a_genuine_zenohd_outwaits_the_stall() {
          this arm is not a healthy baseline"
     );
 }
+
+// The control group for the reader above is NOT here, and its absence is
+// deliberate: see the `use` near the top of this file and
+// `wz_integration_tests::fragment_ext`.
