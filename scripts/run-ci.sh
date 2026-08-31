@@ -6137,9 +6137,14 @@ layer_c1bl_cargo_test_router_failfast() {
     # startup. Run under each mesh feature ALONE, not only together, because the
     # helper is `cfg(any(..))` and a build with one of the two must still compile
     # and still resolve; a single combined run would not distinguish them.
-    _runci_guarded_test "C1BL mesh_dial_target peer 3" 3 \
+    # R2233 (open-debt item 585) — 3 -> 4. The mesh dial side stopped bypassing
+    # `dial_locator`, so the case that asserted "a `tls/` target is REFUSED"
+    # split into the two claims it had been conflating: every IP-family scheme
+    # is ADMITTED, and the four endpoint shapes with no address are not. Both
+    # numbers re-measured on THESE commands, not counted off the diff.
+    _runci_guarded_test "C1BL mesh_dial_target peer 4" 4 \
         cargo test -p wz-ap-demo --features routing-peer mesh_dial_target --quiet || return 1
-    _runci_guarded_test "C1BL mesh_dial_target router-hat 3" 3 \
+    _runci_guarded_test "C1BL mesh_dial_target router-hat 4" 4 \
         cargo test -p wz-ap-demo --features router-hat-router mesh_dial_target --quiet || return 1
 }
 
