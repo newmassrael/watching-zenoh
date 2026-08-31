@@ -4064,7 +4064,7 @@ pub async fn initiate_and_open_session_with_offer(
 ///
 /// # Why this is a public entrypoint and not another `_with_x` sibling
 ///
-/// [`initiator_open_offering`]'s doc already names `stage` "one extension point
+/// `initiator_open_offering`'s doc already names `stage` "one extension point
 /// for staging that is not part of the offer", and item 516 is the record of
 /// what growing a SIBLING per capability costs: the aggregating entrypoint was
 /// written beside the offering one rather than through it, and three of four

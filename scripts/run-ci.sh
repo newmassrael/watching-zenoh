@@ -1713,6 +1713,23 @@ PY
         echo "  inert families already stay covered." >&2
         return 1
     fi
+    # R2222 (open-debt items 568 + 569) — the MIRROR of the obligation above.
+    # That one keeps Layer E from running a fixture another lane owns; this one
+    # asks whether ANY lane runs it. Nothing had, four times: R311y528's drop-in
+    # leg, R311y842's `zenoh_config_emit_zenohd_interop`, and both fixtures
+    # R2221 wrote for the two claims — each carrying a skip token in every fn
+    # name, so Layer E's sweep passed them over, and named by no lane. Every
+    # one was found by hand, late, by reading a lane log.
+    #
+    # It reads no `#[ignore]` reason. The owner is stated there by a convention
+    # with 183 spellings across this crate, and a matcher loose enough to see
+    # them all invents owners out of sentences that merely mention a lane —
+    # measured, on the file whose doc says "Layer C0 scopes the #[ignore]
+    # discipline to the FILE". Reachability is structural instead: the fn names,
+    # the `#[ignore]`s, the token list scraped from Layer E's own sweep, and the
+    # `--test` names on run-ci.sh's non-comment lines.
+    python3 scripts/lib/lane_reach_gate.py --selftest || return 1
+    python3 scripts/lib/lane_reach_gate.py --check || return 1
     # R311y606 — the PYTHON-FLOOR lint, FIRST because every check below it is
     # a python script and their answers are only as portable as the interpreter
     # that runs them. R311y605 landed `import tomllib` (stdlib from 3.11) in
@@ -13213,6 +13230,41 @@ layer_z_zenohd_interop() {
     _runci_guarded_test Z 12 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_reads_a_stock_zenohd_config -- --ignored --quiet --test-threads=1 \
         || return 1
+    # R2222 (open-debt items 568 + 569, and the lane hole they exposed) — the
+    # two fixtures R2221 wrote and registered NOWHERE. Both name Layer Z in
+    # their `#[ignore]` reason and every one of their test fns carries the
+    # `zenohd` token, so Layer E's sweep skips them and no lane named them:
+    # from the round that wrote them they ran in NO lane, hosted or local.
+    # That is the R311y528 / R311y842 class again, which is why the question is
+    # now DERIVED rather than left to prose — `scripts/lib/lane_reach_gate.py`,
+    # Layer C0.
+    #
+    # FOUR legs: the SN-ring axis (adopt / keep-default) and the PATCH axis
+    # (1 / 0), each pair being an arm and its control. The ring value is
+    # configured on the ROUTER, so the number reaches wz only through the
+    # InitAck and "wz adopts it" is a question rather than a restatement of
+    # wz's own advertisement; the patch pair varies what WZ announces, and a
+    # stock zenohd answers min(CURRENT, that). Prereqs are the ones this lane
+    # already guards above: zenohd and the zenoh-pico z_sub CLI.
+    _runci_guarded_test Z 4 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_negotiated_axes_zenohd_interop -- --ignored --quiet --test-threads=1 \
+        || return 1
+    # THREE legs: the `wz_dissect_live_*` C door driven over genuine zenohd
+    # bytes and graded on offset / length / time as VALUES against the recorded
+    # byte stream, plus three shifted-record controls the oracle must REJECT and
+    # a single-byte damage sweep. Prereqs: zenohd and the zenoh-pico z_pub CLI,
+    # both guarded above.
+    _runci_guarded_test Z 3 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test zenohd_binary_door_dissection -- --ignored --quiet --test-threads=1 \
+        || return 1
+    # R2222 — the same hole in a fixture this round did NOT write, found by the
+    # same instrument: TWO legs asking a real zenohd's adminspace for its node
+    # information and for its link-state graph. Both fn names carry `zenohd`
+    # and no lane named the file, so it ran nowhere either. zenohd is its only
+    # prereq, so it is registered here rather than behind a plugin branch.
+    _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_adminspace_query_zenohd_interop -- --ignored --quiet --test-threads=1 \
+        || return 1
     # R311y528 — §5.27 api-compat-pico LEG 9: upstream's own `z_info.c`, linked
     # against wz's cdylib, must report a REAL zenohd's zid under "Routers IDs".
     #
@@ -13855,6 +13907,16 @@ scripts/build-zenohd.sh from a source checkout)" || return 1
     (cd crates && WZ_ZENOHD_BIN="$zenohd" WZ_STORAGE_MANAGER_SO="$plugin" \
         cargo test -p wz-integration-tests \
         --test wz_zenohd_storage_replication -- --ignored --quiet --test-threads=1) || return 1
+    # R2222 — the fourth fixture the lane-reachability gate found running in no
+    # lane at all: a wz `all_complete` querier against a zenohd storage declared
+    # COMPLETE, with a storage declared incomplete as its control. It rides
+    # INSIDE this block rather than beside the three legs above because the
+    # storage-manager plugin is its prereq, and the absent-plugin branch above
+    # returns from the whole lane.
+    _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" \
+        WZ_STORAGE_MANAGER_SO="$plugin" cargo test -p wz-integration-tests \
+        --test wz_querier_all_complete_vs_zenohd_storage \
+        -- --ignored --quiet --test-threads=1 || return 1
 }
 
 # ─── Layer E3 — multi-peer ROUTER e2e (R311qa) ─────────────────────
