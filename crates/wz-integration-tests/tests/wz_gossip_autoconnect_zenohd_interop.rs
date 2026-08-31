@@ -15,17 +15,42 @@
 //! measured as a wz peer seeing only `peak 2 node(s)` beside a zenohd.
 //!
 //! The measurement was real; the explanation was not. zenoh's peer routing mode
-//! is a SUBSYSTEM-WIDE setting, not a per-node one: `routing.peer.mode` selects
-//! the whole hat (`zenoh/src/net/routing/hat/mod.rs:275-281` — `"linkstate"` ->
-//! `linkstate_peer::HatCode`, otherwise `p2p_peer::HatCode`), and zenoh's own
-//! config documents that it "needs to be set to the same value in all peers and
-//! routers of the subsystem" (`DEFAULT_CONFIG.json5:240-241`). wz's
-//! `LinkstateNetwork` ingest mirrors the FULL-linkstate path, i.e. wz IS a
-//! `routing.peer.mode = "linkstate"` peer. The earlier spike put it in a
-//! subsystem left at zenoh's `"peer_to_peer"` default, which zenoh's own rule
-//! forbids mixing — so `peak 2 node(s)` was the documented consequence of a
-//! non-uniform subsystem, not a wall in the demo's mode set. The FIXTURE was
-//! what had to change.
+//! WAS a SUBSYSTEM-WIDE setting, not a per-node one: `routing.peer.mode` selected
+//! the whole hat (`"linkstate"` -> `linkstate_peer::HatCode`, otherwise
+//! `p2p_peer::HatCode`), and zenoh's own config documented that it "needs to be
+//! set to the same value in all peers and routers of the subsystem". So the
+//! earlier spike's `peak 2 node(s)` was the documented consequence of a
+//! non-uniform subsystem, not a wall in the demo's mode set, and the FIXTURE was
+//! what had to change: every node was given `routing/peer/mode:"linkstate"`.
+//!
+//! ## R2235 — the pin moved and that fixture stopped existing
+//!
+//! At the 1.10.0 pin there is no full-linkstate peer subsystem to configure.
+//! `hat/peer/mod.rs:207` and `:242` both pass a literal `false` for
+//! `Network::new`'s `full_linkstate` parameter (`protocol/network.rs:153-157`),
+//! and `routing/peer/mode` now deserializes into `DeprecatedRoutingPeer`, which
+//! logs "deprecated and have no effect" and is read by nothing. A peer that
+//! floods topology EDGES cannot be asked for any more.
+//!
+//! Two consequences, and this file's repair is one edit per consequence rather
+//! than one edit that happens to make both greens appear:
+//!
+//!   * The SUBSYSTEM is gossip, so the wz peer runs `--peer-mode peer-to-peer`
+//!     — not as a variation but because that is the only subsystem there is. wz
+//!     still DEFAULTS to `linkstate` (the plane its data path implements), and a
+//!     wz peer in that mode GCs the linkless gossip entries on arrival and
+//!     discovers nothing. That is leg 7's assertion, unchanged and still green.
+//!   * The fixture's zenohd bind moved to `0.0.0.0`, because a node advertises
+//!     `get_locators_noloopback()` for its own entry (`protocol/gossip.rs:200`,
+//!     `protocol/network.rs:342`). Listening only on loopback floods
+//!     `locators: []`, and the third party then arrives as a node with nothing
+//!     to dial — indistinguishable, from wz's side, from a declined autoconnect.
+//!
+//! Each is pinned by a mutation that reds only the legs it belongs to: reverting
+//! the bind reds legs 1, 4 and 6; putting wz back in `linkstate` reds legs 1 and
+//! 4 (leg 6 sets its own mode). ⚠ Leg 5 survives BOTH — it asserts a DECLINE,
+//! which a fixture that discovered nothing also satisfies. Its guard is leg 4
+//! failing, which is why that leg settles on the flood and says so.
 //!
 //! ## The topology
 //!
@@ -34,12 +59,13 @@
 //!   |\
 //!   | \
 //!   P  W    P = zenohd, mode=peer, LISTENING on its own port
-//!           W = wz-ap-demo --peer --autoconnect
+//!           W = wz-ap-demo --peer --autoconnect --peer-mode peer-to-peer
 //! ```
 //!
-//! All three run `routing/peer/mode:"linkstate"`. W's argv names R's port and
-//! nothing else; P's listen port reaches W only inside R's `LinkStateList`, and
-//! the assertion is that W's second face landed on exactly that port.
+//! W's argv names R's port and nothing else; P's listen port reaches W only
+//! inside R's `LinkStateList`, and the assertion is that W's second face landed
+//! on exactly that port. The HOST of that address is not asserted — it is
+//! whichever non-loopback locator P announced.
 //!
 //! WHO MAY DIAL IS PINNED BY CONFIG, not left to a race. zenoh's own
 //! `connect_discovered_peer` sleeps a random 0-100ms before dialing, so a leg
@@ -50,12 +76,14 @@
 //! and `accepted 0` is structural. The neuter leg inverts it — P's autoconnect is
 //! ON there precisely so the mesh still forms with wz initiating nothing.
 //!
-//! JOIN ORDER IS NOT A PRECONDITION, and that was measured rather than assumed:
-//! in full-linkstate mode `Network::add_link` sends the delta to every existing
-//! link (`zenoh/src/net/protocol/network.rs:860-864` — the `whatami == Router`
-//! narrowing applies only when `!full_linkstate`), so an already-attached peer is
-//! told about a later joiner. Both orders were run and both produce one gossip
-//! dial, so this test spawns P and W without an inter-node readiness gate.
+//! JOIN ORDER IS NOT A PRECONDITION, and that was measured rather than assumed.
+//! It was originally measured on the full-linkstate arm of `Network::add_link`,
+//! which sends the delta to every existing link; at the 1.10.0 pin that arm is
+//! unreachable for peers and the surviving `!full_linkstate` path narrows the
+//! re-send to `whatami == Router` links (`protocol/network.rs:883-889`) — which
+//! is R, the node this fixture routes discovery THROUGH. Both orders were re-run
+//! against the pin and both still produce one gossip dial, so this test spawns P
+//! and W without an inter-node readiness gate.
 //!
 //! ## The legs
 //!
@@ -71,12 +99,15 @@
 //!      LOWER — wz dials the greater-zid peer anyway.
 //!   5. `--autoconnect-strategy greater-zid`, same fixture — the very same peer
 //!      is declined. The strategy pair: legs 4 and 5 differ in that value alone.
-//!   6. `--peer-mode peer-to-peer` in a STOCK subsystem (neither zenohd carries
-//!      `routing/peer/mode`) — wz still decodes the gossip flood and dials, and
-//!      the router logs no `unknown link mapping`: the `add_link` twin of the
-//!      leg-1 regression, since the gossip re-flood relays direct neighbours
-//!      only and never taught the router our psid for the new one.
-//!   7. `--peer-mode linkstate`, same stock subsystem — the linkstate ingest
+//!   6. `--peer-mode peer-to-peer` stated EXPLICITLY at the leg — wz decodes the
+//!      gossip flood and dials, and the router logs no `unknown link mapping`:
+//!      the `add_link` twin of the leg-1 regression, since the gossip re-flood
+//!      relays direct neighbours only and never taught the router our psid for
+//!      the new one. R2235: this used to be the "STOCK subsystem" leg, contrasted
+//!      with legs 1-5's configured one. There is only one subsystem now, so what
+//!      survives is the pair with leg 7 — same helper, one `--peer-mode` value
+//!      each — and that pair is what keeps the flag from being untested.
+//!   7. `--peer-mode linkstate`, same subsystem — the linkstate ingest
 //!      rebuilds edges and GCs what the update left unreachable, and a gossip
 //!      entry carries no links, so the third party is deleted on arrival and
 //!      only the static `--connect` dial happens. The mode pair: without leg 7
@@ -142,20 +173,21 @@ struct ZenohdSpec<'a> {
     /// that can never INITIATE, which is what makes a leg's `accepted 0`
     /// structural instead of a bet on zenoh's 0-100ms dial backoff.
     gossip_autoconnect: bool,
-    /// Pass `routing/peer/mode:"linkstate"`. `false` leaves the node STOCK, i.e.
-    /// on zenoh's own `"peer_to_peer"` default — the subsystem legs 6/7 use to
-    /// prove wz can join a mesh nobody configured for it.
-    linkstate_subsystem: bool,
 }
 
-/// Spawn a zenohd participating in a `routing/peer/mode:"linkstate"` subsystem,
-/// block until it is HANDSHAKE-ready, and return its guard plus a readable
-/// capture of its log (leg 1 asserts on the router's).
+/// Spawn one zenohd of the GOSSIP subsystem, block until it is HANDSHAKE-ready,
+/// and return its guard plus a readable capture of its log (leg 1 asserts on the
+/// router's).
 ///
-/// Every instance carries the uniform peer-mode cfg — a zenohd left at the
-/// `"peer_to_peer"` default would be a non-uniform subsystem, which zenoh's own
-/// config forbids.
-fn spawn_linkstate_zenohd(spec: ZenohdSpec<'_>) -> (ChildGuard, File) {
+/// R2235 — there is no `routing/peer/mode` cfg here any more, and its absence is
+/// the fixture's whole subject rather than a tidy-up. The pinned upstream carries
+/// ONE peer subsystem: `hat/peer/mod.rs:207` and `:242` both pass a literal
+/// `false` for `Network::new`'s `full_linkstate` parameter
+/// (`protocol/network.rs:153-157`), and the key that used to select the other one
+/// deserializes into `DeprecatedRoutingPeer` — it logs "deprecated and have no
+/// effect" and is read by nothing. Passing it would leave the fixture stating a
+/// choice it no longer makes, which is the failure mode this file exists to avoid.
+fn spawn_gossip_zenohd(spec: ZenohdSpec<'_>) -> (ChildGuard, File) {
     let capture = tempfile::tempfile().expect("tempfile for zenohd log");
     let writer = capture.try_clone().expect("dup zenohd log handle");
     let mut command = Command::new(zenohd_binary());
@@ -165,15 +197,22 @@ fn spawn_linkstate_zenohd(spec: ZenohdSpec<'_>) -> (ChildGuard, File) {
         .env("RUST_LOG", "z=info")
         .arg("--id")
         .arg(spec.id)
+        // R2235 — `0.0.0.0`, not `127.0.0.1`, and the kernel-reserved port is
+        // unchanged. A node's own LinkState entry advertises
+        // `get_locators_noloopback()` (`protocol/gossip.rs:200`,
+        // `protocol/network.rs:342`), so a zenohd listening only on loopback
+        // floods a self-entry with `locators: []`: the third party then reaches wz
+        // as a node with NOTHING TO DIAL, and every leg that asserts a dial times
+        // out with a message about the autoconnect policy. Binding the wildcard
+        // gives the flood a real address to carry. The claim under test is
+        // untouched — wz still learns the PORT only from the flood, because it is
+        // still absent from wz's argv.
         .arg("-l")
-        .arg(format!("tcp/127.0.0.1:{}", spec.port))
+        .arg(format!("tcp/0.0.0.0:{}", spec.port))
         .arg("--no-multicast-scouting")
         .arg("--rest-http-port")
         .arg("none");
     // The `--cfg KEY:VALUE` VALUE is JSON5, so string values are quoted.
-    if spec.linkstate_subsystem {
-        command.arg("--cfg").arg("routing/peer/mode:\"linkstate\"");
-    }
     if spec.peer_mode {
         command.arg("--cfg").arg("mode:\"peer\"");
     }
@@ -216,34 +255,26 @@ fn spawn_linkstate_zenohd(spec: ZenohdSpec<'_>) -> (ChildGuard, File) {
 /// The router of the fixture: `mode:"router"`, no seed link, and no gossip
 /// autoconnect of its own (zenoh's router default is the empty matcher anyway —
 /// passing it explicitly keeps every node's dial rights stated at the call site).
-fn spawn_router(port: u16, linkstate_subsystem: bool) -> (ChildGuard, File) {
-    spawn_linkstate_zenohd(ZenohdSpec {
+fn spawn_router(port: u16) -> (ChildGuard, File) {
+    spawn_gossip_zenohd(ZenohdSpec {
         label: "zenohd (router)",
         port,
         id: ROUTER_ID,
         peer_mode: false,
         dial_port: None,
         gossip_autoconnect: false,
-        linkstate_subsystem,
     })
 }
 
 /// The THIRD PARTY: a zenohd peer listening on `port` and seeded to the router.
-fn spawn_third_party(
-    port: u16,
-    id: &str,
-    router_port: u16,
-    may_dial: bool,
-    linkstate_subsystem: bool,
-) -> (ChildGuard, File) {
-    spawn_linkstate_zenohd(ZenohdSpec {
+fn spawn_third_party(port: u16, id: &str, router_port: u16, may_dial: bool) -> (ChildGuard, File) {
+    spawn_gossip_zenohd(ZenohdSpec {
         label: "zenohd (third-party peer)",
         port,
         id,
         peer_mode: true,
         dial_port: Some(router_port),
         gossip_autoconnect: may_dial,
-        linkstate_subsystem,
     })
 }
 
@@ -275,7 +306,17 @@ fn spawn_wz_peer(
         .arg("--connect")
         .arg(format!("127.0.0.1:{router_port}"))
         .arg("--zid")
-        .arg(zid);
+        .arg(zid)
+        // R2235 — `peer-to-peer`, wz's non-default peer mode, and it is the mode
+        // this fixture's subsystem now IS rather than a variation on it. wz
+        // defaults to `linkstate` because that is the plane its data path
+        // implements; the pinned upstream has no full-linkstate peer HAT left, so
+        // every zenohd here floods gossip entries that carry no links. A wz peer
+        // in `linkstate` mode GCs exactly those on arrival and discovers nothing
+        // — which is not a regression but the claim leg 7 asserts, deliberately,
+        // as this flag's negative half.
+        .arg("--peer-mode")
+        .arg("peer-to-peer");
     let label = match autoconnect {
         Autoconnect::Off => "wz-ap-demo peer (no --autoconnect)",
         Autoconnect::DefaultStrategy => {
@@ -355,9 +396,9 @@ fn wz_peer_gossip_autoconnects_to_a_zenohd_peer_discovered_through_a_zenohd_rout
     let (port_res, peer_port) = PortReservation::pick_pair();
     let router_port = port_res.port();
 
-    let (mut router, mut router_log) = spawn_router(router_port, true);
+    let (mut router, mut router_log) = spawn_router(router_port);
     // may_dial = false: P can never initiate, so `accepted 0` below is structural.
-    let (mut peer, _peer_log) = spawn_third_party(peer_port, PEER_ID, router_port, false, true);
+    let (mut peer, _peer_log) = spawn_third_party(peer_port, PEER_ID, router_port, false);
 
     let (mut wz_guard, mut wz_reader) =
         spawn_wz_peer(&demo, router_port, WZ_ZID, Autoconnect::DefaultStrategy);
@@ -365,7 +406,14 @@ fn wz_peer_gossip_autoconnects_to_a_zenohd_peer_discovered_through_a_zenohd_rout
 
     // Settle on the face to P — the post-dial barrier. Matching P's LISTEN port
     // here (not merely its zid) also makes the wait itself discriminating.
-    let face_needle = format!("UP (peer 127.0.0.1:{peer_port}, zid {PEER_ZID_AS_LOGGED})");
+    //
+    // R2235 — the HOST half of that address is no longer pinned, and dropping it
+    // is what the fixture's `0.0.0.0` bind costs. The pinned upstream advertises
+    // `get_locators_noloopback()` for its own node, so the address wz dials is
+    // whatever non-loopback locator P announced; the PORT is still the fixture's
+    // kernel-reserved one and still absent from wz's argv, which is the whole of
+    // what this needle has to discriminate.
+    let face_needle = format!(":{peer_port}, zid {PEER_ZID_AS_LOGGED})");
     let face_up = wait_for_substring(&mut wz_reader, &face_needle, Duration::from_secs(20));
 
     graceful_terminate(wz_guard.child_mut(), Duration::from_secs(5));
@@ -381,8 +429,11 @@ fn wz_peer_gossip_autoconnects_to_a_zenohd_peer_discovered_through_a_zenohd_rout
     face_up.unwrap_or_else(|c| {
         panic!(
             "wz peer never brought up a face to the third-party zenohd peer on \
-             127.0.0.1:{peer_port} within 20s — either R's LinkStateList did not carry \
-             P's locators, or the autoconnect policy declined it.\n\
+             port {peer_port} within 20s — either R's LinkStateList did not carry \
+             P's locators, or the autoconnect policy declined it. A THIRD reading \
+             since R2235: upstream advertises only NON-LOOPBACK locators for its \
+             own node, so this fixture binds `0.0.0.0` and a host with no \
+             non-loopback address floods `locators: []` and reaches here too.\n\
              --- wz peer stderr at deadline ---\n{c}"
         )
     });
@@ -430,10 +481,10 @@ fn wz_peer_without_autoconnect_discovers_the_same_peer_and_dials_nothing() {
     let (port_res, peer_port) = PortReservation::pick_pair();
     let router_port = port_res.port();
 
-    let (mut router, _router_log) = spawn_router(router_port, true);
+    let (mut router, _router_log) = spawn_router(router_port);
     // may_dial = true: with wz declining to initiate, P's OWN zenoh autoconnect is
     // the only thing that can form the wz<->P link — which is the point.
-    let (mut peer, _peer_log) = spawn_third_party(peer_port, PEER_ID, router_port, true, true);
+    let (mut peer, _peer_log) = spawn_third_party(peer_port, PEER_ID, router_port, true);
 
     let (mut wz_guard, mut wz_reader) = spawn_wz_peer(&demo, router_port, WZ_ZID, Autoconnect::Off);
     drop(port_res);
@@ -502,7 +553,7 @@ fn wz_peer_with_autoconnect_and_no_third_party_dials_nothing() {
     let router_port = port_res.port();
 
     // R alone — the flood carries no node wz is not already attached to.
-    let (mut router, _router_log) = spawn_router(router_port, true);
+    let (mut router, _router_log) = spawn_router(router_port);
 
     let (mut wz_guard, mut wz_reader) =
         spawn_wz_peer(&demo, router_port, WZ_ZID, Autoconnect::DefaultStrategy);
@@ -550,11 +601,10 @@ fn run_strategy_leg(strategy: &'static str, expects_a_dial: bool) -> String {
     let (port_res, peer_port) = PortReservation::pick_pair();
     let router_port = port_res.port();
 
-    let (mut router, _router_log) = spawn_router(router_port, true);
+    let (mut router, _router_log) = spawn_router(router_port);
     // may_dial = false throughout: the question is what WZ decides, so the foreign
     // peer must not be able to form the link on its own and mask the answer.
-    let (mut peer, _peer_log) =
-        spawn_third_party(peer_port, HIGH_PEER_ID, router_port, false, true);
+    let (mut peer, _peer_log) = spawn_third_party(peer_port, HIGH_PEER_ID, router_port, false);
 
     let (mut wz_guard, mut wz_reader) =
         spawn_wz_peer(&demo, router_port, WZ_ZID, Autoconnect::Strategy(strategy));
@@ -633,18 +683,23 @@ fn wz_peer_greater_zid_strategy_declines_a_peer_with_a_greater_zid() {
     );
 }
 
-/// Legs 6/7: a STOCK zenoh subsystem — no `routing/peer/mode` anywhere, so both
-/// zenohd run zenoh's own `peer_to_peer` default — with wz joining under
-/// `--peer-mode <mode>`. Returns the wz peer's captured stderr plus the router's.
+/// Legs 6/7: the gossip subsystem — the only one the pinned upstream has — with
+/// wz joining under an EXPLICIT `--peer-mode <mode>`, one value per leg. Returns
+/// the wz peer's captured stderr plus the router's.
+///
+/// R2235 — the word that left is "stock". Until the 1.10.0 pin these two legs
+/// were the ones that withheld `routing/peer/mode` while legs 1-5 supplied it,
+/// and "stock" named that contrast. The key is now a deprecated no-op, no leg
+/// passes it, and the only thing still varying here is wz's own flag.
 fn run_subsystem_leg(wz_peer_mode: &'static str, expects_a_dial: bool) -> (String, String) {
     let demo = wz_ap_demo_binary();
     let (port_res, peer_port) = PortReservation::pick_pair();
     let router_port = port_res.port();
 
-    let (mut router, mut router_log) = spawn_router(router_port, false);
+    let (mut router, mut router_log) = spawn_router(router_port);
     // may_dial = false: the question is whether WZ dials, so the foreign peer
     // must not be able to form the link itself and mask the answer.
-    let (mut peer, _peer_log) = spawn_third_party(peer_port, PEER_ID, router_port, false, false);
+    let (mut peer, _peer_log) = spawn_third_party(peer_port, PEER_ID, router_port, false);
 
     let stderr = tempfile::tempfile().expect("tempfile for wz peer stderr");
     let writer = stderr.try_clone().expect("dup wz peer stderr handle");
@@ -689,7 +744,7 @@ fn run_subsystem_leg(wz_peer_mode: &'static str, expects_a_dial: bool) -> (Strin
     ingested.unwrap_or_else(|c| {
         panic!(
             "wz peer never ingested a link-state within 20s under --peer-mode \
-             `{wz_peer_mode}` — the stock subsystem's flood did not arrive, so this \
+             `{wz_peer_mode}` — the gossip subsystem's flood did not arrive, so this \
              leg's verdict is not a mode decision.\n\
              --- wz peer stderr at deadline ---\n{c}"
         )
@@ -734,7 +789,7 @@ fn wz_peer_in_gossip_mode_autoconnects_inside_a_stock_zenoh_subsystem() {
 
 // wz-proves: scouting-autoconnect zenohd->wz partial
 //
-// The mode PAIR: the same stock subsystem, the same flood, wz in the WRONG mode.
+// The mode PAIR: the same subsystem, the same flood, wz in the WRONG mode.
 // The linkstate ingest rebuilds edges and then GCs whatever the update left
 // unreachable — and a gossip entry carries no links, so the third party is
 // unreachable by construction and is deleted the moment it arrives. Without this
