@@ -57,6 +57,7 @@ instead of a claim in a reply.
 
 import os
 import pathlib
+import re
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -66,15 +67,34 @@ import negotiated_axis_witness_gate as base  # noqa: E402
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 
-# MEASURED, not chosen — the number this gate itself printed once the R2221
-# witnesses existed. The three are `body:batch_size` (which already had one, in
+# MEASURED, not chosen — the number this gate itself prints. Raise it in the
+# commit that adds the next witness; the gate reds in both directions, which is
+# the point.
+#
+# R2221 set this to 3: `body:batch_size` (already witnessed, in
 # `wz_fragment_tx_to_pico_zsub.rs`), plus `body:seq_num_res` and
-# `ext:negotiate_patch_against_peer`, both from
-# `wz_negotiated_axes_zenohd_interop.rs`. The other six print SYNTHETIC-ONLY on
-# every run, which is the outstanding work stated as a list rather than as a
-# sentence in a reply. Raise this in the commit that adds the next one; the gate
-# reds in both directions, which is the point.
-GENUINE_AXIS_FLOOR = 3
+# `ext:negotiate_patch_against_peer` from `wz_negotiated_axes_zenohd_interop.rs`.
+#
+# R2224 (open-debt item 572) raises it to 7, and the four are NOT four new
+# tests. TWO of them — compression and lowlatency — were already witnessed
+# against a real zenohd when the item was filed, and this gate could not see it
+# because the accessor is read inside the BINARY the test drives.
+# `reported_witnesses` is that false negative repaired, and the item's premise
+# ("the handle is on the wz side, so a green says nothing") is refuted for both:
+# each has its handle on the ROUTER's config and a calibration twin against a
+# stock one. The other two are new — `body:req_id_res` and
+# `ext:negotiate_qos_against_peer`, both in
+# `wz_negotiated_axes_zenohd_interop.rs`, each with an orthogonal mutation
+# recorded in that file's ledger entry.
+#
+# The two that remain SYNTHETIC-ONLY are named on every run and are not an
+# oversight. `ext:negotiate_qos_link_against_peer` and
+# `ext:negotiate_shm_against_peer` sit outside the set of negotiated axes the
+# consuming surface claimed; shm additionally reads its witness through a HELPER
+# that parses the demo line, so the value is laundered out of every assertion —
+# the shape R2221 recorded as "assert where the session is alive", and the
+# repair for it is that leg's to make, not this gate's to chase.
+GENUINE_AXIS_FLOOR = 7
 
 
 def corpus_files() -> set[str]:
@@ -93,6 +113,27 @@ def corpus_files() -> set[str]:
         if parts and parts[0] == "crates":
             rel = pathlib.Path(*parts[1:])
         out.add(str(rel))
+    return out
+
+
+def driven_binaries() -> dict[str, list[str]]:
+    """Which BINARIES each foreign-corpus file drives.
+
+    R2224 (open-debt item 572). The same `crossimpl_corpus` resolution the
+    corpus itself comes from, asked for its other field: `binary_freshness_lint`
+    already reads `cf.binaries` for the staleness question, and this is that
+    population put to the witness question. Keyed and spelled exactly like
+    `corpus_files`, so the two join without a second normalisation.
+    """
+    out: dict[str, list[str]] = {}
+    for cf in crossimpl_corpus.scan_all():
+        if not cf.classes:
+            continue
+        rel = cf.path.relative_to(crossimpl_corpus.REPO_ROOT)
+        parts = rel.parts
+        if parts and parts[0] == "crates":
+            rel = pathlib.Path(*parts[1:])
+        out[str(rel)] = sorted(cf.binaries or [])
     return out
 
 
@@ -133,6 +174,167 @@ def axes_of(root: pathlib.Path):
             )
         )
     return axes, unresolved
+
+
+# R2224 (open-debt item 572) — the log macros a driven binary reports through.
+# Derived from what the binaries actually call rather than chosen: `log::` is
+# this workspace's only logging facade in a `main`.
+LOG_OPEN_RE = re.compile(r"\blog::(?:error|warn|info|debug|trace)!\s*\(")
+
+# String literals inside one macro argument list, escapes honoured.
+STR_LIT_RE = re.compile(r'"((?:[^"\\]|\\.)*)"')
+
+# How much of a demo's line an assertion must reproduce before the two are
+# joined. MEASURED, not chosen: the two lines this join exists for share
+# `compression negotiated = ` (25 chars) and `lowlatency negotiated = ` (24)
+# with their assertions, while the LONGEST run any two DIFFERENT demo lines in
+# this tree share is ` negotiated = ` (14). Twenty sits between them with room
+# on both sides, and `a_short_literal_cannot_be_joined` is the control that
+# keeps it from being lowered quietly.
+MIN_SHARED_LITERAL = 20
+
+
+def macro_invocations(text: str, opener: re.Pattern[str]) -> list[str]:
+    """Every `opener` macro's argument list, by bracket matching.
+
+    `base.assert_arguments`' scanner with the pattern as a parameter — the same
+    string-and-escape handling, because a format string full of braces is
+    exactly what a line-anchored or brace-counting reader gets wrong.
+    """
+    out: list[str] = []
+    for m in opener.finditer(text):
+        open_at = m.end() - 1
+        depth = 0
+        in_str = False
+        esc = False
+        for k in range(open_at, len(text)):
+            ch = text[k]
+            if esc:
+                esc = False
+                continue
+            if ch == "\\":
+                esc = True
+                continue
+            if ch == '"':
+                in_str = not in_str
+                continue
+            if in_str:
+                continue
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    out.append(text[open_at + 1 : k])
+                    break
+    return out
+
+
+def reported_prefixes(accessor: str, binary_sources: list[str]) -> list[str]:
+    """The literal PREFIX of every log line a binary emits FROM `accessor`.
+
+    The macro's own argument list must read the accessor, so a line that merely
+    happens to sit near one is not a report of it. The prefix ends at the first
+    `{`, which is where the value the accessor returned begins.
+    """
+    call = re.compile(r"\.\s*" + re.escape(accessor) + r"\s*\(")
+    out: list[str] = []
+    for text in binary_sources:
+        if not call.search(text):
+            continue
+        for args in macro_invocations(text, LOG_OPEN_RE):
+            if not call.search(args):
+                continue
+            lit = STR_LIT_RE.search(args)
+            if not lit:
+                continue
+            prefix = lit.group(1).split("{", 1)[0]
+            if prefix and prefix not in out:
+                out.append(prefix)
+    return out
+
+
+def shared_head(prefix: str, literal: str) -> int:
+    """How much of `literal`'s HEAD is a TAIL of `prefix`.
+
+    The convention this measures is the one the tree writes: a binary logs
+    `"<label>: <fact> = {}"` and a test asserts on `"<fact> = <value>"`, so the
+    assertion's head is a suffix of the format string's prefix. Longest-common-
+    SUBSTRING would also match two unrelated lines through a shared ` = `;
+    anchoring one end of each makes the run mean "the same line".
+
+    ⚠ AN OVERLAP THAT IS NOT A WORD IS NOT AN OVERLAP, and this is a repair
+    rather than a refinement. MEASURED on the first run: every report in the
+    tree ends its prefix with a space, so every assertion literal beginning with
+    one scored 1 — and thirty-nine of those arrived as "near miss" complaints
+    about files that are not near anything. Requiring a run of three letters
+    makes the number mean "these two lines share a WORD", which is what a
+    near-miss report has to be about to be worth printing.
+    """
+    for k in range(min(len(prefix), len(literal)), 0, -1):
+        if prefix.endswith(literal[:k]):
+            return k if re.search(r"[A-Za-z]{3}", literal[:k]) else 0
+    return 0
+
+
+def reported_witnesses(
+    accessor: str,
+    sources: list[tuple[str, str]],
+    corpus: set[str],
+    binaries: dict[str, list[str]],
+    crate_sources,
+) -> tuple[list[str], list[str]]:
+    """Corpus files that witness `accessor` ACROSS A PROCESS BOUNDARY.
+
+    # The false negative this repairs, measured
+
+    `base.witnesses` asks whether an assertion reads the accessor IN THE FILE.
+    Three of this tree's foreign-interop legs cannot answer that and are genuine
+    anyway: the reading happens inside the binary the test DRIVES. R2224
+    measured it — `wz_compression_zenohd_interop.rs` runs `wz-ap-demo` against a
+    zenohd configured `transport/unicast/compression/enabled:true`, the demo
+    logs `is_compression()`, the test asserts on that line, and a calibration
+    twin against a STOCK zenohd asserts the opposite. That is a router-side
+    handle with an orthogonal control — a stronger witness than several the
+    in-file rule already accepts — and it read SYNTHETIC-ONLY.
+
+    # Why this cannot manufacture a witness
+
+    Three conditions, each derived and each necessary. The file must be in the
+    FOREIGN corpus; it must drive a binary whose OWN source reads the accessor
+    inside a log macro; and it must ASSERT on that line, matched by
+    `shared_head` rather than by a name either side could have chosen freely.
+    Shorten the format string to game it and `MIN_SHARED_LITERAL` refuses —
+    loudly, as the second return value, because a report nothing can join is a
+    gap and not an absence.
+
+    Returns `(witness paths, unjoinable complaints)`.
+    """
+    hits: list[str] = []
+    unjoinable: list[str] = []
+    text_of = dict(sources)
+    for path in sorted(corpus):
+        text = text_of.get(path)
+        if text is None:
+            continue
+        for binary in binaries.get(path, []):
+            prefixes = reported_prefixes(accessor, crate_sources(binary))
+            for prefix in prefixes:
+                best = 0
+                for arg in base.assert_arguments(text):
+                    for lit in STR_LIT_RE.finditer(arg):
+                        best = max(best, shared_head(prefix, lit.group(1)))
+                if best >= MIN_SHARED_LITERAL:
+                    if path not in hits:
+                        hits.append(path)
+                elif 0 < best:
+                    unjoinable.append(
+                        f"genuine-axis: {path} asserts on {best} character(s) of "
+                        f"{binary}'s {accessor!r} report {prefix!r}, below the "
+                        f"{MIN_SHARED_LITERAL} this join requires -- a report a "
+                        "test cannot be shown to be reading is not a witness"
+                    )
+    return sorted(hits), unjoinable
 
 
 def join(axes, sources, corpus: set[str]) -> dict[str, list[str]]:
@@ -194,13 +396,54 @@ def run(root: pathlib.Path, floor: int = GENUINE_AXIS_FLOOR) -> int:
     sources = base.rust_sources(root / "crates")
     witnessed = join(axes, sources, corpus)
 
+    # R2224 (open-debt item 572) — the SECOND route to a witness, joined here
+    # rather than folded into `join` so the report can say WHICH route each
+    # axis took. An axis read inside the binary a corpus test drives is
+    # witnessed by that test; see `reported_witnesses` for what stops that from
+    # being a way to manufacture one.
+    binaries = driven_binaries()
+    crate_dirs = {b for bins in binaries.values() for b in bins}
+    crate_text: dict[str, list[str]] = {}
+    for binary in sorted(crate_dirs):
+        src = root / "crates" / binary / "src"
+        if not src.is_dir():
+            failures.append(
+                f"genuine-axis: the corpus drives {binary!r} and there is no "
+                f"{src.relative_to(root)} to read its reports from -- "
+                "UNCLASSIFIED is red, not a pass"
+            )
+            crate_text[binary] = []
+            continue
+        crate_text[binary] = [t for _, t in base.rust_sources(src)]
+
+    reported: dict[str, list[str]] = {}
+    for axis, _slot, accessors in axes:
+        hits: list[str] = []
+        for accessor, _also in accessors:
+            found, unjoinable = reported_witnesses(
+                accessor, sources, corpus, binaries, lambda b: crate_text.get(b, [])
+            )
+            failures.extend(unjoinable)
+            for path in found:
+                if path not in hits:
+                    hits.append(path)
+        reported[axis] = sorted(hits)
+
     genuine = 0
     for axis in sorted(witnessed):
         hits = witnessed[axis]
+        via = reported.get(axis, [])
         if hits:
             genuine += 1
             more = f" (+{len(hits) - 1} more)" if len(hits) > 1 else ""
             print(f"  genuine-axis: {axis} witnessed by {hits[0]}{more}")
+        elif via:
+            genuine += 1
+            more = f" (+{len(via) - 1} more)" if len(via) > 1 else ""
+            print(
+                f"  genuine-axis: {axis} witnessed by {via[0]}{more} "
+                "(through the binary it drives)"
+            )
         else:
             print(f"  genuine-axis: {axis} SYNTHETIC-ONLY -- no foreign-corpus witness")
 
@@ -276,6 +519,90 @@ def selftest() -> int:
         6,
         "an EMPTY corpus witnesses nothing",
         join(axes, sources, set()) == {"ext:alpha": [], "ext:beta": []},
+    )
+
+    # ── R2224 (open-debt item 572) — the PROCESS-BOUNDARY join ────────────
+    #
+    # Four arms, and three of them are NARROWING. A widening that only ever
+    # demonstrates the thing it now accepts is a redefinition with a test
+    # beside it; what says this one is a repair is that the same fixture, with
+    # ONE condition removed each time, goes back to synthetic-only.
+    reported_sources = [
+        (
+            "wz-integration-tests/tests/drives.rs",
+            'fn t() { assert!(log.contains("gamma capability negotiated = true")); }',
+        ),
+        (
+            "wz-integration-tests/tests/mentions.rs",
+            'fn t() { let _ = "gamma capability negotiated = true"; assert!(other); }',
+        ),
+    ]
+    reported_corpus = {
+        "wz-integration-tests/tests/drives.rs",
+        "wz-integration-tests/tests/mentions.rs",
+    }
+    demo = [
+        'fn m() { log::info!("demo: gamma capability negotiated = {}", s.is_gamma()); }'
+    ]
+    silent = [
+        'fn m() { log::info!("demo: gamma capability negotiated = {}", s.other()); }'
+    ]
+    driving = {
+        "wz-integration-tests/tests/drives.rs": ["demo"],
+        "wz-integration-tests/tests/mentions.rs": ["demo"],
+    }
+    # A report whose whole prefix is EIGHT characters, asserted in full by a
+    # corpus file: a real word-level overlap, and still under the bar.
+    short_sources = [
+        (
+            "wz-integration-tests/tests/drives.rs",
+            'fn t() { assert!(log.contains("gamma = true")); }',
+        )
+    ]
+    short = ['fn m() { log::info!("gamma = {}", s.is_gamma()); }']
+
+    hits, unjoinable = reported_witnesses(
+        "is_gamma", reported_sources, reported_corpus, driving, lambda _b: demo
+    )
+    rc |= arm(
+        7,
+        "an axis read inside the binary a corpus test DRIVES is genuine",
+        hits == ["wz-integration-tests/tests/drives.rs"] and not unjoinable,
+    )
+    rc |= arm(
+        8,
+        "a corpus file that MENTIONS the line outside an assertion is not a witness",
+        "wz-integration-tests/tests/mentions.rs" not in hits,
+    )
+    rc |= arm(
+        9,
+        "a binary that logs the line WITHOUT reading the accessor witnesses nothing",
+        reported_witnesses(
+            "is_gamma", reported_sources, reported_corpus, driving, lambda _b: silent
+        )
+        == ([], []),
+    )
+    hits, unjoinable = reported_witnesses(
+        "is_gamma",
+        short_sources,
+        {"wz-integration-tests/tests/drives.rs"},
+        driving,
+        lambda _b: short,
+    )
+    rc |= arm(
+        10,
+        "a report too SHORT to join is refused BY NAME rather than ignored",
+        hits == [] and len(unjoinable) == 1,
+    )
+    # And the file must be in the corpus at all, which is the condition the
+    # whole gate rests on and the one an over-eager join would drop first.
+    rc |= arm(
+        11,
+        "a driven binary's report in a NON-corpus file is not a witness",
+        reported_witnesses(
+            "is_gamma", reported_sources, set(), driving, lambda _b: demo
+        )
+        == ([], []),
     )
     return rc
 

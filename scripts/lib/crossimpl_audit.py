@@ -497,7 +497,21 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # copied off a failure message: three proof legs in the 568 file at two atoms
 # each (its twin declares `none`), plus one leg in the 569 file at two atoms
 # (its two siblings declare `none`).
-FOREIGN_ADJUDICATOR_LINKS = 873
+#
+# R2224 (open-debt item 572) — 873 -> 877, and the arithmetic again. FOUR, from
+# two new proof legs in `wz_negotiated_axes_zenohd_interop.rs` at two atoms
+# each: `wz_adopts_the_request_id_ring_a_genuine_zenohd_answered`
+# (`codec-init-body` + `session-unicast-open`) and
+# `wz_negotiates_qos_only_when_a_genuine_zenohd_offers_it_back` (`transport-qos`
+# + `session-unicast-open`).
+#
+# The round's other two new legs add NOTHING here, and that is the declaration
+# working: `wz_keeps_a_request_id_ring_below_what_a_genuine_zenohd_holds` and
+# `wz_lowlatency_offer_is_not_negotiated_by_a_stock_zenohd` are CALIBRATION
+# TWINS and each declares `none`. A negotiation that correctly does not happen
+# adjudicates nobody's implementation, so a round that added two controls and
+# moved this counter by two would be counting its own controls as evidence.
+FOREIGN_ADJUDICATOR_LINKS = 877
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

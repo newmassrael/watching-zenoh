@@ -145,7 +145,7 @@ use tokio::net::TcpStream;
 
 use wz_integration_tests::common::{
     assert_demo_binary_newer_than_sources, spawn_counting_relay, spawn_subscribed_zsub,
-    spawn_zenohd_sn_resolution_on_ephemeral_tcp, wz_ap_demo_binary, zenoh_pico_cli_binary,
+    spawn_zenohd_sn_resolution_and_qos_on_ephemeral_tcp, wz_ap_demo_binary, zenoh_pico_cli_binary,
     CountingRelay, RelayFault,
 };
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
@@ -162,7 +162,7 @@ use wz_session_core::extpatch::{encode_patch_ext_at, CURRENT_PATCH, NO_PATCH};
 use wz_session_core::initial_sn::derive_initial_sn;
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::sn::mask_from_res;
-use wz_session_core::transport_mode::SessionOffer;
+use wz_session_core::transport_mode::{SessionOffer, TransportMode};
 
 const ITER_CAP: usize = 4096;
 const PUBLISH_KEYEXPR: &str = "demo/negotiated-axes";
@@ -181,6 +181,35 @@ const NON_DEFAULT_RES_CODE: u8 = 1;
 const DEFAULT_RESOLUTION: &str = "32bit";
 /// The wire code `DEFAULT_RESOLUTION` decodes to (`U32 = 0b10`).
 const DEFAULT_RES_CODE: u8 = 2;
+/// R2224 (open-debt item 572) — the REQUEST-ID resolution a genuine zenohd
+/// holds, and it is not configurable.
+///
+/// `Resolution::default()` builds its request-id half as
+/// `Bits::from(RequestId::MAX)` (`commons/zenoh-protocol/src/core/resolution.rs:152-157`)
+/// and `RequestId = u32` (`network/request.rs:19`), so the router's value is
+/// `Bits::U32` = 2 on every zenohd there is. MEASURED against
+/// `DEFAULT_CONFIG.json5`: `sequence_number_resolution` is the ONLY resolution
+/// key upstream exposes, and it moves the FRAME SN half alone. That is why this
+/// axis's pair varies what WZ announces while the SN pair varies the router —
+/// the handle is on the side that has one.
+const ROUTER_REQ_ID_RES: u8 = 2;
+/// The code wz announces on the arm that must ABANDON it. `Bits::U64` = 3, one
+/// step ABOVE the router's, so `min` lands on the router's number and the arm
+/// reads a value wz never advertised.
+///
+/// ⚠ TEST-LOCAL, and deliberately not a shipping advertisement: a 64-bit
+/// request-id ring is one wz has no code to honour. It never has to — the
+/// negotiated answer is [`ROUTER_REQ_ID_RES`] — and staging it on the params
+/// keeps it inside this leg.
+const ABOVE_ROUTER_REQ_ID_RES: u8 = 3;
+/// The code wz announces on the arm that KEEPS it. `Bits::U16` = 1, one step
+/// BELOW the router's, so `min` lands on wz's own number.
+///
+/// The pair is what makes either arm mean anything: alone, the arm above is
+/// green for an implementation that hardcodes 2, and this one is green for an
+/// implementation that echoes its own advertisement. Only both together exclude
+/// both.
+const BELOW_ROUTER_REQ_ID_RES: u8 = 1;
 /// Frames to put on the link. Far above 1 (so the ring CONTAINMENT claim has a
 /// population) and far below the smaller ring's 16384 (so neither arm wraps —
 /// see the module docs on why a wrap would be a harness failure and not a wz
@@ -194,6 +223,10 @@ struct ArmOutcome {
     /// The negotiated protocol patch level, and whether the merge ran at all.
     negotiated_patch: u8,
     patch_was_negotiated: bool,
+    /// R2224 (open-debt item 572) — the negotiated REQUEST-ID resolution.
+    negotiated_req_id_res: u8,
+    /// R2224 (open-debt item 572) — whether QoS ended up negotiated.
+    negotiated_qos: bool,
     /// The two identities the ring origin is derived from. Carried out of the
     /// arm rather than re-fetched by the caller so the recomputation runs on
     /// the SAME values the session used — a second source for `own_zid` is a
@@ -221,6 +254,27 @@ struct Arm {
     /// The level a genuine zenohd must therefore answer with — its acceptor
     /// returns `min(PatchType::CURRENT, what the InitSyn carried)`.
     expected_patch: u8,
+    /// R2224 (open-debt item 572) — the REQUEST-ID resolution wz announces in
+    /// its InitSyn body, as a `Bits` code (`resolution.rs:24-28`).
+    advertised_req_id_res: u8,
+    /// What a genuine zenohd's answer must therefore reduce to. Its acceptor
+    /// runs `res.set(Field::RequestID, i_rid_res.min(m_rid_res))`
+    /// (`accept.rs:207-209`) against a router value that is ALWAYS
+    /// `Bits::from(RequestId::MAX)` — `RequestId = u32`, so
+    /// [`ROUTER_REQ_ID_RES`].
+    expected_req_id_res: u8,
+    /// R2224 (open-debt item 572) — whether the ROUTER runs with
+    /// `transport/unicast/qos/enabled` (`DEFAULT_CONFIG.json5:547-549`).
+    router_qos: bool,
+    /// Whether WZ offers `TransportMode::Qos` on its InitSyn.
+    ///
+    /// Separate from [`Self::router_qos`] because the negotiation is `local &&
+    /// peer`, and an arm that varied both at once could not say which side the
+    /// answer came from.
+    offer_qos: bool,
+    /// What `is_qos()` must therefore read: the AND of the two above, since
+    /// wz's ext is mirrored only by a router that has QoS on.
+    expected_qos: bool,
 }
 
 /// Drive one arm: a zenohd whose SN ring is `arm.resolution`, a pico `z_sub`
@@ -246,6 +300,11 @@ async fn dial_zenohd(arm: &Arm) -> ArmOutcome {
         res_code,
         advertised_patch,
         expected_patch,
+        advertised_req_id_res,
+        expected_req_id_res,
+        router_qos,
+        offer_qos,
+        expected_qos,
     } = *arm;
     // The demo is not the subject here — this leg opens its own in-process
     // session — but `spawn_zenohd_*` spawns it as the handshake-readiness probe
@@ -256,9 +315,10 @@ async fn dial_zenohd(arm: &Arm) -> ArmOutcome {
     // readiness timeout whose message points at zenohd.
     assert_demo_binary_newer_than_sources(&wz_ap_demo_binary());
     let z_sub = zenoh_pico_cli_binary("z_sub");
-    let (mut zenohd, zenohd_port) = spawn_zenohd_sn_resolution_on_ephemeral_tcp(resolution, || {
-        tempfile::tempfile().expect("tempfile for readiness probe stderr")
-    });
+    let (mut zenohd, zenohd_port) =
+        spawn_zenohd_sn_resolution_and_qos_on_ephemeral_tcp(resolution, router_qos, || {
+            tempfile::tempfile().expect("tempfile for readiness probe stderr")
+        });
     let relay: CountingRelay = spawn_counting_relay(zenohd_port, T_MID_FRAME, RelayFault::None);
 
     // pico subscribes to zenohd DIRECTLY: it is the far-side witness, and
@@ -274,15 +334,30 @@ async fn dial_zenohd(arm: &Arm) -> ArmOutcome {
     // The zenohd-STRICT open shape (version 0x09 / real batch_size / res 2).
     // `seq_num_res` is left at 2 in BOTH arms: the whole point is that the
     // number wz ends up on comes from the ROUTER.
-    let params = zenohd_interop_session_init_params();
+    let mut params = zenohd_interop_session_init_params();
+    // R2224 (item 572) — the REQUEST-ID half of the same body byte
+    // (`(seq_num_res & 0x03) | ((req_id_res & 0x03) << 2)`,
+    // `peer_init_caps.rs:100-101`). Staged on the params rather than through
+    // the ext-chain closure because that is where this axis lives: it is an
+    // InitSyn BODY field, and `SessionInitParams::req_id_res` is the value
+    // `encode_init` puts on the wire.
+    params.req_id_res = advertised_req_id_res;
     let own_zid = params.zid.clone();
     let stream = TcpStream::connect(("127.0.0.1", relay.port()))
         .await
         .expect("wz dials the sn-recording relay");
+    // R2224 (item 572) — the QoS OFFER is wz's half of that axis. `Universal`
+    // on every other arm, so the four legs that predate this axis put the same
+    // bytes on the wire they always did.
+    let offer = if offer_qos {
+        SessionOffer::universal().with_mode(TransportMode::Qos)
+    } else {
+        SessionOffer::universal()
+    };
     let opened = initiate_and_open_session_with_staging(
         DialedLink::Tcp(stream),
         params,
-        SessionOffer::universal(),
+        offer,
         |actions| {
             // Staged before the first wire byte, so this IS what the InitSyn
             // announces. `advertised_patch` is the only thing the patch pair
@@ -343,9 +418,51 @@ async fn dial_zenohd(arm: &Arm) -> ArmOutcome {
          not read."
     );
 
+    // AXIS 3 (R2224, open-debt item 572) — the REQUEST-ID resolution, and the
+    // same discipline: read and asserted here, where the session is alive.
+    //
+    // `init_ack_params()` is `min(own, peer)` over the caps slot the InitAck
+    // populated (`session_actions.rs:1899-1919`), so on the arm that announces
+    // ABOVE the router this number can only have come off zenohd's wire — wz
+    // announced 3 and reads 2. On the arm that announces BELOW it, wz's own
+    // number survives, and the pair is what excludes the two ways of being
+    // green for nothing.
+    assert_eq!(
+        opened.actions.init_ack_params().req_id_res,
+        expected_req_id_res,
+        "wz announced req_id_res {advertised_req_id_res}; a genuine zenohd \
+         answers min({advertised_req_id_res}, {ROUTER_REQ_ID_RES}) = \
+         {expected_req_id_res} and wz must settle there. Reading its own \
+         advertisement back means the InitAck body was not merged."
+    );
+
+    // AXIS 4 (R2224, open-debt item 572) — QoS, and the value lives on the
+    // ROUTER. `is_qos()` is `local_offer && peer_offer`, so the arm that offers
+    // against a `qos/enabled:false` zenohd reads `false` for a reason that
+    // exists only on the far side of the wire: an implementation that reported
+    // its own offer back would read `true` on BOTH offering arms.
+    //
+    // Asserted on EVERY arm, the non-offering ones included, so the reading is
+    // total rather than conditional: a session that never offered the ext and
+    // reported `true` would be a defect no `#[cfg]`-shaped skip could see.
+    assert_eq!(
+        opened.actions.is_qos(),
+        expected_qos,
+        "wz {} QoS against a router with qos/enabled={router_qos}, so `is_qos()` \
+         must read {expected_qos}. The negotiation is local && peer; reading \
+         wz's own offer back means the peer's InitAck ext was not consulted.",
+        if offer_qos {
+            "OFFERED"
+        } else {
+            "did not offer"
+        }
+    );
+
     let negotiated_mask = opened.actions.negotiated_sn_mask();
     let negotiated_patch = opened.actions.negotiated_patch();
     let patch_was_negotiated = opened.actions.patch_was_negotiated();
+    let negotiated_req_id_res = opened.actions.init_ack_params().req_id_res;
+    let negotiated_qos = opened.actions.is_qos();
     let peer_zid = opened
         .actions
         .peer_zid()
@@ -419,9 +536,13 @@ async fn dial_zenohd(arm: &Arm) -> ArmOutcome {
     // Reported rather than asserted here: an arm is data, and every assertion
     // belongs in the `#[test]` that owns the claim.
     eprintln!(
-        "arm resolution={resolution} advertised_patch={advertised_patch}: \
+        "arm resolution={resolution} advertised_patch={advertised_patch} \
+         advertised_req_id_res={advertised_req_id_res} \
+         router_qos={router_qos} offer_qos={offer_qos}: \
          mask=0x{negotiated_mask:X} patch={negotiated_patch} \
-         patch_negotiated={patch_was_negotiated} frames={} first_sn={:?}",
+         patch_negotiated={patch_was_negotiated} \
+         req_id_res={negotiated_req_id_res} qos={negotiated_qos} \
+         frames={} first_sn={:?}",
         frame_sns.len(),
         frame_sns.first()
     );
@@ -430,6 +551,8 @@ async fn dial_zenohd(arm: &Arm) -> ArmOutcome {
         negotiated_mask,
         negotiated_patch,
         patch_was_negotiated,
+        negotiated_req_id_res,
+        negotiated_qos,
         own_zid,
         peer_zid,
         frame_sns,
@@ -539,6 +662,11 @@ async fn wz_adopts_the_sn_resolution_a_genuine_zenohd_negotiated() {
         res_code: NON_DEFAULT_RES_CODE,
         advertised_patch: CURRENT_PATCH,
         expected_patch: CURRENT_PATCH,
+        advertised_req_id_res: ROUTER_REQ_ID_RES,
+        expected_req_id_res: ROUTER_REQ_ID_RES,
+        router_qos: true,
+        offer_qos: false,
+        expected_qos: false,
     })
     .await;
     assert_ring(
@@ -569,6 +697,11 @@ async fn wz_keeps_the_default_sn_resolution_against_a_stock_ring_zenohd() {
         res_code: DEFAULT_RES_CODE,
         advertised_patch: CURRENT_PATCH,
         expected_patch: CURRENT_PATCH,
+        advertised_req_id_res: ROUTER_REQ_ID_RES,
+        expected_req_id_res: ROUTER_REQ_ID_RES,
+        router_qos: true,
+        offer_qos: false,
+        expected_qos: false,
     })
     .await;
     assert_ring(
@@ -589,6 +722,11 @@ async fn wz_takes_the_patch_level_a_genuine_zenohd_announced() {
         res_code: DEFAULT_RES_CODE,
         advertised_patch: CURRENT_PATCH,
         expected_patch: CURRENT_PATCH,
+        advertised_req_id_res: ROUTER_REQ_ID_RES,
+        expected_req_id_res: ROUTER_REQ_ID_RES,
+        router_qos: true,
+        offer_qos: false,
+        expected_qos: false,
     })
     .await;
     arm.delivery
@@ -623,6 +761,11 @@ async fn wz_takes_the_lowered_patch_level_a_genuine_zenohd_answered() {
         res_code: DEFAULT_RES_CODE,
         advertised_patch: NO_PATCH,
         expected_patch: NO_PATCH,
+        advertised_req_id_res: ROUTER_REQ_ID_RES,
+        expected_req_id_res: ROUTER_REQ_ID_RES,
+        router_qos: true,
+        offer_qos: false,
+        expected_qos: false,
     })
     .await;
     arm.delivery
@@ -643,5 +786,162 @@ async fn wz_takes_the_lowered_patch_level_a_genuine_zenohd_answered() {
         arm.negotiated_patch, CURRENT_PATCH,
         "the two patch arms must not read the same level, or neither measures \
          the axis"
+    );
+}
+
+// wz-proves: codec-init-body zenohd->wz
+// wz-proves: session-unicast-open wz->zenohd
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "binary-dep e2e (zenohd router + zenoh-pico z_sub); set WZ_ZENOHD_BIN, run via Layer Z / --ignored"]
+async fn wz_adopts_the_request_id_ring_a_genuine_zenohd_answered() {
+    // AXIS 3 — R2224 (open-debt item 572). wz announces ONE STEP ABOVE the
+    // router's fixed `Bits::from(RequestId::MAX)`, so `min` lands on the
+    // ROUTER's number and this reading is one wz never advertised.
+    let arm = dial_zenohd(&Arm {
+        resolution: DEFAULT_RESOLUTION,
+        res_code: DEFAULT_RES_CODE,
+        advertised_patch: CURRENT_PATCH,
+        expected_patch: CURRENT_PATCH,
+        advertised_req_id_res: ABOVE_ROUTER_REQ_ID_RES,
+        expected_req_id_res: ROUTER_REQ_ID_RES,
+        router_qos: true,
+        offer_qos: false,
+        expected_qos: false,
+    })
+    .await;
+    arm.delivery
+        .as_ref()
+        .unwrap_or_else(|e| panic!("the above-the-router req_id_res arm did not complete — {e}"));
+
+    assert_eq!(
+        arm.negotiated_req_id_res, ROUTER_REQ_ID_RES,
+        "the value carried out of the arm is not the one the arm checked"
+    );
+    assert_ne!(
+        arm.negotiated_req_id_res, ABOVE_ROUTER_REQ_ID_RES,
+        "wz reported back the ring it ANNOUNCED. The whole point of announcing \
+         above the router is that this number can then only come from the \
+         InitAck; reading {ABOVE_ROUTER_REQ_ID_RES} means the body was echoed \
+         rather than merged"
+    );
+}
+
+// wz-proves: none -- the CALIBRATION twin of the leg above.
+//
+// It witnesses that wz KEEPS its own ring when that ring is the smaller one,
+// which is what forbids reading the sibling's `2` as a hardcoded constant. A
+// negotiation that correctly lands on wz's own number proves no atom's
+// cross-impl behaviour by itself, which is why this leg claims none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "binary-dep e2e (zenohd router + zenoh-pico z_sub); set WZ_ZENOHD_BIN, run via Layer Z / --ignored"]
+async fn wz_keeps_a_request_id_ring_below_what_a_genuine_zenohd_holds() {
+    let above = dial_zenohd(&Arm {
+        resolution: DEFAULT_RESOLUTION,
+        res_code: DEFAULT_RES_CODE,
+        advertised_patch: CURRENT_PATCH,
+        expected_patch: CURRENT_PATCH,
+        advertised_req_id_res: ABOVE_ROUTER_REQ_ID_RES,
+        expected_req_id_res: ROUTER_REQ_ID_RES,
+        router_qos: true,
+        offer_qos: false,
+        expected_qos: false,
+    })
+    .await;
+    let below = dial_zenohd(&Arm {
+        resolution: DEFAULT_RESOLUTION,
+        res_code: DEFAULT_RES_CODE,
+        advertised_patch: CURRENT_PATCH,
+        expected_patch: CURRENT_PATCH,
+        advertised_req_id_res: BELOW_ROUTER_REQ_ID_RES,
+        expected_req_id_res: BELOW_ROUTER_REQ_ID_RES,
+        router_qos: true,
+        offer_qos: false,
+        expected_qos: false,
+    })
+    .await;
+    above
+        .delivery
+        .as_ref()
+        .unwrap_or_else(|e| panic!("the above-the-router arm did not complete — {e}"));
+    below
+        .delivery
+        .as_ref()
+        .unwrap_or_else(|e| panic!("the below-the-router arm did not complete — {e}"));
+
+    // THE PAIR, asserted before either arm's own number is read as evidence.
+    // Two arms that agreed would mean the reading is a constant, whichever
+    // constant it is — and that is true of BOTH failure shapes at once: an
+    // implementation that hardcodes the router's ring agrees at 2, and one that
+    // echoes its own advertisement agrees with neither arm's expectation. This
+    // is the claim the two `expected_*` values cannot make on their own.
+    assert_ne!(
+        above.negotiated_req_id_res, below.negotiated_req_id_res,
+        "both req_id_res arms settled on the same ring, so nothing here \
+         distinguishes a negotiated value from a constant"
+    );
+    assert_eq!(
+        below.negotiated_req_id_res, BELOW_ROUTER_REQ_ID_RES,
+        "wz announced the SMALLER ring, so `min` must leave it standing; \
+         reading the router's {ROUTER_REQ_ID_RES} means wz took the peer's \
+         number unconditionally rather than reducing"
+    );
+}
+
+// wz-proves: transport-qos wz->zenohd
+// wz-proves: session-unicast-open wz->zenohd
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "binary-dep e2e (zenohd router + zenoh-pico z_sub); set WZ_ZENOHD_BIN, run via Layer Z / --ignored"]
+async fn wz_negotiates_qos_only_when_a_genuine_zenohd_offers_it_back() {
+    // AXIS 4 — R2224 (open-debt item 572). wz's OFFER is identical on both
+    // arms and the ROUTER's `transport/unicast/qos/enabled` is the only thing
+    // that moves, so the two readings differ for a reason that exists nowhere
+    // in this tree. That is what an implementation reporting its own offer back
+    // cannot reproduce: it reads `true` on both.
+    let offered = dial_zenohd(&Arm {
+        resolution: DEFAULT_RESOLUTION,
+        res_code: DEFAULT_RES_CODE,
+        advertised_patch: CURRENT_PATCH,
+        expected_patch: CURRENT_PATCH,
+        advertised_req_id_res: ROUTER_REQ_ID_RES,
+        expected_req_id_res: ROUTER_REQ_ID_RES,
+        router_qos: true,
+        offer_qos: true,
+        expected_qos: true,
+    })
+    .await;
+    let refused = dial_zenohd(&Arm {
+        resolution: DEFAULT_RESOLUTION,
+        res_code: DEFAULT_RES_CODE,
+        advertised_patch: CURRENT_PATCH,
+        expected_patch: CURRENT_PATCH,
+        advertised_req_id_res: ROUTER_REQ_ID_RES,
+        expected_req_id_res: ROUTER_REQ_ID_RES,
+        router_qos: false,
+        offer_qos: true,
+        expected_qos: false,
+    })
+    .await;
+    offered
+        .delivery
+        .as_ref()
+        .unwrap_or_else(|e| panic!("the qos-enabled arm did not complete — {e}"));
+    // The refused arm must still DELIVER. A session that failed to establish
+    // would read `is_qos() == false` for a reason that has nothing to do with
+    // the negotiation, which is the shape the compression twin already guards
+    // against one axis over.
+    refused
+        .delivery
+        .as_ref()
+        .unwrap_or_else(|e| panic!("the qos-disabled arm did not complete — {e}"));
+
+    assert_ne!(
+        offered.negotiated_qos, refused.negotiated_qos,
+        "both arms offered QoS and read the same answer, so this pair \
+         distinguishes nothing: the router's qos/enabled is the only input that \
+         differs between them"
+    );
+    assert!(
+        offered.negotiated_qos,
+        "a router with qos/enabled:true mirrors the ext, so wz must negotiate it"
     );
 }

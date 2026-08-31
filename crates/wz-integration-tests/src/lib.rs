@@ -3917,6 +3917,42 @@ pub mod common {
     /// THIS router, so the resolution has to be one a wz handshake survives.
     /// That is not a limitation to work around — a value that broke the probe
     /// would break the leg too, and finding out here is finding out earlier.
+    /// R2224 (open-debt item 572) — a zenohd whose FRAME SN RING and whose QOS
+    /// are BOTH named, the foreign oracle for the negotiated-axes pairs.
+    ///
+    /// # Both keys on every arm, including the ones that ask for the default
+    ///
+    /// `transport/unicast/qos/enabled` defaults to TRUE
+    /// (`DEFAULT_CONFIG.json5:547-549`), so a `qos: true` arm could have been
+    /// spelled by calling [`spawn_zenohd_sn_resolution_on_ephemeral_tcp`] and
+    /// saying nothing. R2204's finding is why it is not: two arms that differ
+    /// in WHICH HELPER THEY CALLED differ in more than the value under test,
+    /// and "the default happens to be the value I wanted" is a premise that
+    /// stops being true the day upstream moves it. Here the two arms of a pair
+    /// differ in ONE BOOLEAN and the router is told both keys either way.
+    ///
+    /// `resolution` carries [`spawn_zenohd_sn_resolution_on_ephemeral_tcp`]'s
+    /// whole argument about why the ring value belongs on the ROUTER; that
+    /// helper stays for the callers that need only it.
+    pub fn spawn_zenohd_sn_resolution_and_qos_on_ephemeral_tcp(
+        resolution: &str,
+        qos_enabled: bool,
+        mut mk_probe_stderr: impl FnMut() -> File,
+    ) -> (ChildGuard, u16) {
+        let sn = format!("transport/link/tx/sequence_number_resolution:\"{resolution}\"");
+        let qos = format!("transport/unicast/qos/enabled:{qos_enabled}");
+        let (guard, port) = spawn_zenohd_dialer_on_ephemeral_tcp_with_cfgs(
+            &zenohd_binary(),
+            "zenohd (reference router, sn resolution + qos)",
+            None,
+            &[],
+            None,
+            &[sn.as_str(), qos.as_str()],
+        );
+        wait_for_zenohd_handshake_ready(&format!("127.0.0.1:{port}"), &mut mk_probe_stderr);
+        (guard, port)
+    }
+
     pub fn spawn_zenohd_sn_resolution_on_ephemeral_tcp(
         resolution: &str,
         mut mk_probe_stderr: impl FnMut() -> File,

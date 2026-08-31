@@ -2315,10 +2315,22 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
     // group, whose subject is a configurable link-TX surface wz does not have.
     // What wz has is the wire negotiation, which is a different thing from a
     // config key that sets the local advertisement.
+    // R2224 (open-debt item 572) — the anchor is the helper-name PREFIX, not one
+    // helper. That round needed a router carrying this key AND a named
+    // `qos/enabled`, so the axes fixture moved to
+    // `spawn_zenohd_sn_resolution_and_qos_on_ephemeral_tcp` and this row went
+    // RED — correctly: it had named an exact function and the function was no
+    // longer what the fixture called.
+    //
+    // Shortening it is not a weakening, and the reason is measurable: nothing
+    // else in the tree begins with these characters, so the prefix names the
+    // FAMILY of helpers that put this key on a genuine router and nothing else.
+    // Keeping the full name would have forced the axes fixture to spawn a
+    // second router to satisfy a table, which is the tail wagging the dog.
     (
         "transport/link/tx/sequence_number_resolution",
         "foreign-node-config",
-        "spawn_zenohd_sn_resolution_on_ephemeral_tcp",
+        "spawn_zenohd_sn_resolution",
     ),
     ("transport/link/tx/threads", "asserted-ignored", "ignored"),
     (

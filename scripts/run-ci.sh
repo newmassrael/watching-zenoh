@@ -13239,14 +13239,25 @@ layer_z_zenohd_interop() {
     # now DERIVED rather than left to prose — `scripts/lib/lane_reach_gate.py`,
     # Layer C0.
     #
-    # FOUR legs: the SN-ring axis (adopt / keep-default) and the PATCH axis
-    # (1 / 0), each pair being an arm and its control. The ring value is
-    # configured on the ROUTER, so the number reaches wz only through the
-    # InitAck and "wz adopts it" is a question rather than a restatement of
+    # SEVEN legs: the SN-ring axis (adopt / keep-default), the PATCH axis
+    # (1 / 0), the REQUEST-ID ring (adopt / keep-below) and QOS (offered /
+    # refused by the router), each pair being an arm and its control. The ring
+    # value is configured on the ROUTER, so the number reaches wz only through
+    # the InitAck and "wz adopts it" is a question rather than a restatement of
     # wz's own advertisement; the patch pair varies what WZ announces, and a
-    # stock zenohd answers min(CURRENT, that). Prereqs are the ones this lane
-    # already guards above: zenohd and the zenoh-pico z_sub CLI.
-    _runci_guarded_test Z 4 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+    # stock zenohd answers min(CURRENT, that).
+    #
+    # R2224 (open-debt item 572) added the last four. `req_id_res` has NO
+    # router-side handle — upstream exposes `sequence_number_resolution` and
+    # nothing for the request-id half — so its pair moves wz's own
+    # advertisement ABOVE and BELOW the router's fixed `Bits::from(u32::MAX)`,
+    # which is the only arrangement in which the two arms read different
+    # numbers. QoS is the opposite shape: wz's offer is identical on both arms
+    # and `transport/unicast/qos/enabled` is what moves.
+    #
+    # Prereqs are the ones this lane already guards above: zenohd and the
+    # zenoh-pico z_sub CLI.
+    _runci_guarded_test Z 7 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_negotiated_axes_zenohd_interop -- --ignored --quiet --test-threads=1 \
         || return 1
     # THREE legs: the `wz_dissect_live_*` C door driven over genuine zenohd
