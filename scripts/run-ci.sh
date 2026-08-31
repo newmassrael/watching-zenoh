@@ -4331,7 +4331,15 @@ layer_c1ae_cargo_test_compression() {
 #      plus the ON-path and OFF-path (session-multicast WITHOUT routing-namespace)
 #      clippy gates proving the seam composes and the off path is dead-code clean.
 layer_c1ax_cargo_test_routing_namespace() {
-    _runci_guarded_test "C1AX namespace 19" 19 \
+    # R2220 — 19 -> 22. The three are the per-message-type diff this atom's
+    # residual asked for and never had: the sourced `UndeclareQueryable`'s
+    # `ext_keyexpr` is now decorated as upstream decorates `ext_wire_expr`
+    # (`namespace.rs:71-73`), its CONTROL pins that the subscriber and token
+    # exts are still left alone as upstream leaves them (`:67, :79`), and the
+    # third reads an interest keyexpr's mapping off the body header's `M` bit
+    # instead of the decoded variant, which the generated decoder tags `Local`
+    # unconditionally.
+    _runci_guarded_test "C1AX namespace 22" 22 \
         cargo test -p wz-session-core --features routing-namespace,session-unicast,codec-push,codec-request,codec-response,codec-response-final,codec-declare,reassembly --lib namespace --quiet || return 1
     _runci_guarded_test "C1AX namespace_e2e 4" 4 \
         cargo test -p wz-runtime-tokio --features routing-namespace --test namespace_e2e --quiet || return 1
@@ -4345,7 +4353,10 @@ layer_c1ax_cargo_test_routing_namespace() {
         cargo test -p wz-runtime-tokio --features routing-namespace,transport-fragmentation --test namespace_reassembly_e2e --quiet || return 1
     _runci_guarded_test "C1AX namespace_reconnect_e2e 2" 2 \
         cargo test -p wz-runtime-tokio --features routing-namespace,session-reconnect --test namespace_reconnect_e2e --quiet || return 1
-    _runci_guarded_test "C1AX session-multicast 25" 25 \
+    # R2220 — 25 -> 28, the same three tests as the unicast guard above seen
+    # through the multicast feature set (this selection is the `namespace`
+    # filter over a `--no-default-features` build, so it carries them too).
+    _runci_guarded_test "C1AX session-multicast 28" 28 \
         cargo test -p wz-session-core --no-default-features --features routing-namespace,session-multicast,codec-join,codec-frame,codec-close,codec-push,codec-declare,codec-response,codec-response-final,liveliness-token,query-queryable,reassembly,pubsub-put --lib namespace --quiet || return 1
     # R311y775: 15 -> 18. R311y772 added three graceful-stop cases to
     # `multicast_glue` and raised the THREE guards in Layer C1q while missing

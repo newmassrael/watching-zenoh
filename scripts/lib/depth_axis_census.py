@@ -131,10 +131,17 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # answered from the group socket it received on; it now elects, the demo binds
 # the sockets to elect from, and a Layer M leg watches two askers on two
 # addresses each get the nearer one. The total falls with it, 86 -> 85.
-PIN_REACHED = 73
+#
+# R2220 — 73 -> 72, the second move, for the same reason: `routing-namespace`'s
+# residual was ONE named axis (the per-message-type diff against upstream
+# `net/routing/namespace.rs`), that diff was walked arm for arm, and the two
+# gaps it found were CLOSED rather than re-described. The total falls with it,
+# 85 -> 84, and the citation pin below falls because that reason's two wz
+# citations left the PARTIAL corpus with it.
+PIN_REACHED = 72
 PIN_UNREACHED = 2
 PIN_NO_SYMBOL = 10
-PIN_WZ_CITATIONS = 409
+PIN_WZ_CITATIONS = 407
 PIN_AMBIGUOUS = 86
 
 

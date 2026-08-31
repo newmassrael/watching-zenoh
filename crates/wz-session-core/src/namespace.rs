@@ -75,6 +75,18 @@ use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
 const INTEREST_C: u8 = 0x20;
 const INTEREST_F: u8 = 0x40;
 
+/// R2220 — the interest BODY header's `M` bit: the wireexpr mapping the sender
+/// used, `1` = Local (Sender-mapped). `interest_body.scxml` declares it
+/// (`<sce:flag name="M" bit="6"/>`) and zenoh-pico's `_z_interest_encode` sets
+/// it from `_z_wireexpr_is_local`; it is read here because the generated decoder
+/// does not dispatch the wireexpr variant on it — see
+/// [`NamespaceIngress::strip_mapped`].
+///
+/// Distinct byte from [`INTEREST_C`] / [`INTEREST_F`], which are the OUTER
+/// interest header's mode bits. Same numeric value as `INTEREST_F` and a
+/// different field: naming it separately is what stops the two being confused.
+const INTEREST_BODY_M: u8 = 0x40;
+
 /// Read `(id, suffix)` from a wireexpr regardless of Local/Nonlocal arm.
 fn id_suffix(we: &WireexprOwned) -> (u64, Option<&str>) {
     match &we.body {
@@ -132,9 +144,18 @@ pub fn apply_egress(ns: &OwnedNonWildKeyExpr, msg: &mut NetworkMessage) -> Resul
         NetworkMessage::Interest(i) => apply_egress_interest(ns, i)?,
         #[cfg(feature = "codec-declare")]
         NetworkMessage::Declare(d) => apply_egress_declare(ns, d)?,
-        // ResponseFinal / Oam / Unknown carry no keyexpr (and any non-compiled
-        // codec variant) — nothing to namespace.
-        _ => {}
+        // R2220 — the no-keyexpr messages, named rather than caught. `Oam` is a
+        // control envelope upstream's `Primitives` has no method for at all;
+        // `ResponseFinal` is a bare request-id and upstream leaves it
+        // undecorated on purpose (`send_response_final` forwards untouched,
+        // zenoh `net/routing/namespace.rs:111-113`); `Unknown` is a MID this
+        // build cannot decode, so it holds bytes and no field to reach. Written
+        // out so a new `NetworkMessage` variant is a COMPILE ERROR here rather
+        // than a message that quietly leaves undecorated.
+        #[cfg(feature = "codec-response-final")]
+        NetworkMessage::ResponseFinal(_) => {}
+        NetworkMessage::Oam(_) => {}
+        NetworkMessage::Unknown { .. } => {}
     }
     Ok(())
 }
@@ -244,9 +265,41 @@ pub fn apply_egress_declare(
                 set_literal_suffix(&mut m.keyexpr, new)?;
             }
         }
-        // Undeclares carry only an id (no keyexpr); DeclareFinal / Default carry
-        // none — untouched, exactly as zenoh's handle_declare_egress.
-        _ => {}
+        // R2220 — THE ONE ARM UPSTREAM HAS THAT THIS MATCH DID NOT. zenoh
+        // decorates the retracted keyexpr a SOURCED `UndeclareQueryable` carries
+        // in its `ext_wire_expr`
+        // (`handle_namespace_egress(&mut m.ext_wire_expr.wire_expr, false)`,
+        // zenoh `net/routing/namespace.rs:71-73`), and this match reached it
+        // through a `_ => {}` whose comment said "Undeclares carry only an id
+        // (no keyexpr)". That sentence is FALSE of this tree: three builders
+        // put a LITERAL keyexpr in exactly this extension
+        // (`declare_build::build_undeclare_{subscriber,queryable,token}_with_keyexpr`).
+        DV::CodecZenohUndeclQueryable(m) => {
+            // Read then write: `read_ext_keyexpr` borrows out of the extension
+            // it is about to be replaced in.
+            let literal = crate::declare_ext_keyexpr::read_ext_keyexpr(m.extensions.as_ref())
+                .map(String::from);
+            if let (Some(literal), Some(exts)) = (literal, m.extensions.as_mut()) {
+                let prefixed = ns.prepend(&literal);
+                crate::declare_ext_keyexpr::set_ext_keyexpr_literal(exts, &prefixed)?;
+            }
+        }
+        // ⚠ THE ASYMMETRY IS UPSTREAM'S, and these arms are written out rather
+        // than folded into a catch-all so that reading it is unavoidable.
+        // `UndeclareSubscriber` and `UndeclareToken` carry the same
+        // `ext_wire_expr` field upstream does, and upstream decorates NEITHER —
+        // `DeclareBody::UndeclareSubscriber(_) => {}` and
+        // `DeclareBody::UndeclareToken(_) => {}` (`namespace.rs:67, 79`), beside
+        // the queryable arm that does. Matching it is not an endorsement: a
+        // drop-in replacement is judged on the bytes it puts on the wire, and
+        // decorating here would hand a stock zenoh peer a keyexpr its own
+        // `ENamespace` does not strip (that ingress reads no extension at all).
+        DV::CodecZenohUndeclSubscriber(_) | DV::CodecZenohUndeclToken(_) => {}
+        // No keyexpr anywhere in the body: `UndeclareKeyExpr` is an id
+        // (`namespace.rs:65`), `DeclareFinal` is empty (`:80`), and `Default` is
+        // a MID this build does not name, which by definition has no field this
+        // decorator could reach.
+        DV::CodecZenohUndeclKexpr(_) | DV::CodecZenohDeclFinal(_) | DV::Default { .. } => {}
     }
     Ok(())
 }
@@ -387,9 +440,17 @@ impl NamespaceIngress {
             NetworkMessage::Interest(i) => self.interest_ingress(i),
             #[cfg(feature = "codec-declare")]
             NetworkMessage::Declare(d) => self.declare_ingress(d),
-            // ResponseFinal / Oam / Unknown (+ any non-compiled codec) carry no
-            // keyexpr — pass through. zenoh leaves send_response_final unstripped.
-            _ => true,
+            // R2220 — named, not caught, for [`apply_egress`]'s reason. Upstream
+            // forwards `send_response_final` unstripped (zenoh
+            // `net/routing/namespace.rs:279-281`), has no `EPrimitives` method
+            // for `Oam` at all, and cannot see an `Unknown` MID. A new
+            // `NetworkMessage` variant must be adjudicated here rather than
+            // admitted by default — an admitted message is one this decorator
+            // let past the namespace.
+            #[cfg(feature = "codec-response-final")]
+            NetworkMessage::ResponseFinal(_) => true,
+            NetworkMessage::Oam(_) => true,
+            NetworkMessage::Unknown { .. } => true,
         }
     }
 
@@ -398,8 +459,32 @@ impl NamespaceIngress {
     /// kept. `decl_id` is `Some` only for a `DeclareKeyExpr` DEFINITION (so a
     /// non-matching definition is parked in `incomplete` by that id).
     fn strip(&mut self, we: &mut WireexprOwned, decl_id: Option<u64>) -> bool {
-        let (id, suffix_opt) = id_suffix(we);
         let sender = is_sender_mapped(we);
+        self.strip_mapped(we, decl_id, sender)
+    }
+
+    /// [`Self::strip`] with the MAPPING supplied by the caller instead of read
+    /// off the decoded variant.
+    ///
+    /// R2220 — this parameter exists because for ONE message the variant is not
+    /// the truth. `out/wz-codecs/interest_body.rs:66` decodes the interest
+    /// keyexpr as `Wireexpr::decode(cursor, .., 0x1u8)` — the variant tag is a
+    /// LITERAL `Local`, where the six sibling codecs pass `(header >> 6) & 0x1`,
+    /// their `M` bit. So every inbound interest keyexpr read back as
+    /// Sender-mapped whatever the wire said, and upstream's first ingress rule —
+    /// `if scope != EMPTY_EXPR_ID && mapping == Mapping::Receiver { return true }`
+    /// (zenoh `net/routing/namespace.rs:149-151`) — was UNREACHABLE for
+    /// interests.
+    ///
+    /// The bit is not lost, only unread: `M` is bit 6 of the interest body's own
+    /// header, and [`WireexprLocal`](wz_codecs::wireexpr_local::WireexprLocalOwned)
+    /// and its Nonlocal twin decode the SAME three fields from the SAME bytes
+    /// (`out/wz-codecs/wireexpr_local.rs:45-70` against
+    /// `wireexpr_nonlocal.rs`), so the mis-tagged variant corrupts no value — it
+    /// only forgets which table the id belongs to. Reading `M` here recovers
+    /// exactly that, with no change to the pinned codegen.
+    fn strip_mapped(&mut self, we: &mut WireexprOwned, decl_id: Option<u64>, sender: bool) -> bool {
+        let (id, suffix_opt) = id_suffix(we);
         // id != 0, Receiver(Nonlocal): an alias in OUR own table, already in
         // relative (stripped) form — pass through without re-stripping.
         if id != 0 && !sender {
@@ -494,8 +579,13 @@ impl NamespaceIngress {
                 }
             }
             DV::CodecZenohUndeclToken(m) => !self.blocked_tokens.remove(&m.id),
-            // DeclareFinal / Default carry no keyexpr.
-            _ => true,
+            // No keyexpr and no correlation: upstream admits both
+            // (`DeclareBody::DeclareFinal(_) => true`, zenoh
+            // `net/routing/namespace.rs:225`). `Default` is a MID this build
+            // cannot name, so there is nothing to strip and nothing to block —
+            // it is admitted for the same reason, and written out rather than
+            // caught so a new sub-MID has to be adjudicated here.
+            DV::CodecZenohDeclFinal(_) | DV::Default { .. } => true,
         }
     }
 
@@ -503,27 +593,40 @@ impl NamespaceIngress {
     /// no keyexpr) correlates against `blocked_interests`; a non-final interest
     /// with a keyexpr strips+blocks; one without a keyexpr passes.
     ///
-    /// CODEC LIMITATION (not a logic gap): the interest-keyexpr decoder
-    /// (`out/wz-codecs/interest_body.rs`) hardcodes the wireexpr mapping bit `M`
-    /// to Local(Sender) rather than reading options-byte bit 6, so an inbound
-    /// interest keyexpr is always seen as Sender-mapped. The
-    /// Receiver(Nonlocal)-mapped pass-through branch in [`Self::strip`] is thus
-    /// unreachable FOR INTERESTS — a Receiver-mapped ALIASED interest keyexpr
-    /// takes the `incomplete` lookup instead, which differs from zenoh only if
-    /// that alias id collides with a parked `DeclareKeyExpr` id (a miss returns
-    /// `true`, the same pass-through). Closing it fully needs the interest_body
-    /// codegen to decode `M` (a separate codec atom, `out/**` is regenerated
-    /// from SCXML and not edited here); literal (non-aliased) interest keyexprs
-    /// — the common case — strip correctly regardless.
+    /// R2220 — THE MAPPING IS READ FROM THE BODY HEADER, and the clause that
+    /// used to stand here recorded why it could not be. That clause called this
+    /// a "CODEC LIMITATION (not a logic gap)": the interest-keyexpr decoder
+    /// hardcodes the wireexpr variant tag to Local, so every inbound interest
+    /// keyexpr read back Sender-mapped and upstream's Receiver pass-through was
+    /// unreachable. It also said closing it "needs the interest_body codegen to
+    /// decode `M` (a separate codec atom)". That last part is FALSE, and the
+    /// measurement is one line: `M` is bit 6 of the body's OWN header
+    /// (`interest_body.scxml` declares `<sce:flag name="M" bit="6"/>`, and the
+    /// generated `InterestBodyOwned` keeps that byte), so the bit the decoder
+    /// declined to dispatch on is still in the struct this method holds. The
+    /// two wireexpr arms decode identical fields from identical bytes, so the
+    /// mis-tagged variant loses the mapping and nothing else. Reading it here
+    /// makes [`Self::strip_mapped`]'s Receiver arm reachable for interests, with
+    /// no change to the pinned `out/**` codegen.
     fn interest_ingress(&mut self, i: &mut wz_codecs::interest::InterestOwned) -> bool {
         let is_final = (i.header & INTEREST_C) == 0 && (i.header & INTEREST_F) == 0;
         if is_final {
             return !self.blocked_interests.remove(&i.interest_id);
         }
         let id = i.interest_id;
+        // Read before the mutable borrow of the same body below.
+        // A `match`, not `is_none_or`: that method is stable since 1.82 and this
+        // workspace's MSRV is 1.81 (`crates/Cargo.toml`), which
+        // `clippy::incompatible-msrv` enforces on this lane.
+        let sender = match i.body.as_ref() {
+            Some(b) => (b.header & INTEREST_BODY_M) != 0,
+            // No body means no keyexpr, so the mapping is never consulted; this
+            // is the value the decoded variant would have reported anyway.
+            None => true,
+        };
         match i.body.as_mut().and_then(|b| b.keyexpr.as_mut()) {
             Some(we) => {
-                if self.strip(we, None) {
+                if self.strip_mapped(we, None, sender) {
                     true
                 } else {
                     self.blocked_interests.insert(id);
@@ -1040,5 +1143,117 @@ mod tests {
             },
         ))));
         assert!(!ing.blocked_queryables.contains(&3));
+    }
+
+    // ─── R2220: the per-message-type diff's two findings ───
+
+    /// Upstream's ONE `handle_declare_egress` arm this decorator did not have:
+    /// the keyexpr a SOURCED `UndeclareQueryable` retracts rides an extension,
+    /// and zenoh prefixes it
+    /// (`handle_namespace_egress(&mut m.ext_wire_expr.wire_expr, false)`,
+    /// `net/routing/namespace.rs:71-73`).
+    #[test]
+    fn a_sourced_undeclare_queryables_ext_keyexpr_is_decorated() {
+        use crate::declare_ext_keyexpr::read_ext_keyexpr;
+        use wz_codecs::declare::DeclareOwnedVariant as DV;
+        let n = ns("myns");
+        let mut d = crate::declare_build::build_undeclare_queryable_with_keyexpr("demo/q")
+            .expect("build the sourced retraction");
+        apply_egress_declare(&n, &mut d).expect("egress");
+        let DV::CodecZenohUndeclQueryable(m) = &d.body else {
+            panic!("the builder produced the wrong variant");
+        };
+        assert_eq!(
+            read_ext_keyexpr(m.extensions.as_ref()),
+            Some("myns/demo/q"),
+            "the retracted keyexpr must leave under the namespace, as upstream's does"
+        );
+    }
+
+    /// THE CONTROL, and it pins an asymmetry rather than a symmetry. Upstream
+    /// carries the same `ext_wire_expr` field on `UndeclareSubscriber` and
+    /// `UndeclareToken` and decorates NEITHER (`namespace.rs:67, 79`), so wz
+    /// must not either — the wire is what a drop-in is judged on. Without this
+    /// arm, "decorate every ext" would pass the test above and put a keyexpr on
+    /// the wire that a stock zenoh peer's `ENamespace` never strips.
+    ///
+    /// It also names what it did NOT vary: the same namespace, the same builder
+    /// shape, the same literal — only the retracted ENTITY differs.
+    #[test]
+    fn the_subscriber_and_token_ext_keyexprs_are_left_alone_as_upstream_leaves_them() {
+        use crate::declare_ext_keyexpr::read_ext_keyexpr;
+        use wz_codecs::declare::DeclareOwnedVariant as DV;
+        let n = ns("myns");
+
+        let mut sub = crate::declare_build::build_undeclare_subscriber_with_keyexpr("demo/s")
+            .expect("build the sourced subscriber retraction");
+        apply_egress_declare(&n, &mut sub).expect("egress");
+        let DV::CodecZenohUndeclSubscriber(m) = &sub.body else {
+            panic!("the builder produced the wrong variant");
+        };
+        assert_eq!(read_ext_keyexpr(m.extensions.as_ref()), Some("demo/s"));
+
+        let mut token = crate::declare_build::build_undeclare_token_with_keyexpr("demo/t")
+            .expect("build the sourced token retraction");
+        apply_egress_declare(&n, &mut token).expect("egress");
+        let DV::CodecZenohUndeclToken(m) = &token.body else {
+            panic!("the builder produced the wrong variant");
+        };
+        assert_eq!(read_ext_keyexpr(m.extensions.as_ref()), Some("demo/t"));
+    }
+
+    /// An interest whose keyexpr is an alias in OUR OWN table (`M = 0`,
+    /// Receiver-mapped) is passed through untouched — upstream's first ingress
+    /// rule, `if scope != EMPTY_EXPR_ID && mapping == Mapping::Receiver { return
+    /// true }` (`net/routing/namespace.rs:149-151`).
+    ///
+    /// THE DISCRIMINATOR is the second arm: the SAME alias id, the same suffix,
+    /// the same parked declaration — only `M` differs — must take the
+    /// `incomplete` reconstruction instead and come out rewritten. Before R2220
+    /// both arms took the second path, because the generated decoder tags every
+    /// interest keyexpr `Local`; a run that only checked the first arm would
+    /// have passed then too, since a parked-id MISS also returns `true`. The
+    /// collision is therefore the whole point of parking id 7 first.
+    #[test]
+    fn an_interest_alias_is_read_by_its_own_mapping_bit_not_by_the_decoded_variant() {
+        fn interest_with(body_header: u8, we: WireexprOwned) -> NetworkMessage {
+            NetworkMessage::Interest(wz_codecs::interest::InterestOwned {
+                header: INTEREST_C,
+                interest_id: 1,
+                body: Some(wz_codecs::interest_body::InterestBodyOwned {
+                    header: body_header,
+                    keyexpr: Some(we),
+                }),
+                extensions: None,
+            })
+        }
+
+        // Receiver-mapped (M = 0): passed through, and the keyexpr is UNCHANGED.
+        let mut ing = NamespaceIngress::new(ns("myns"));
+        let mut defn = literal("my");
+        assert!(!ing.strip(&mut defn, Some(7)), "the definition is parked");
+        let mut recv = interest_with(0, aliased_receiver(7, Some("ns/x")));
+        assert!(
+            ing.apply(&mut recv),
+            "a Receiver alias is upstream's early true"
+        );
+        assert_eq!(
+            interest_ke(&recv),
+            Some("ns/x".to_string()),
+            "an alias in our own table is not rewritten"
+        );
+
+        // Sender-mapped (M = 1): the parked head is prepended and stripped, so
+        // the SAME id on the SAME parked declaration comes out as "x".
+        let mut ing = NamespaceIngress::new(ns("myns"));
+        let mut defn = literal("my");
+        assert!(!ing.strip(&mut defn, Some(7)));
+        let mut send = interest_with(INTEREST_BODY_M, aliased_sender(7, Some("ns/x")));
+        assert!(ing.apply(&mut send));
+        assert_eq!(
+            interest_ke(&send),
+            Some("x".to_string()),
+            "a Sender alias resolves through `incomplete` and is stripped"
+        );
     }
 }

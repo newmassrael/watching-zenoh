@@ -126,6 +126,45 @@ pub fn read_ext_keyexpr(exts: Option<&Vec<ExtEntryOwned>>) -> Option<&str> {
     core::str::from_utf8(suffix_bytes).ok()
 }
 
+/// R2220 — rewrite the LITERAL a `ext_keyexpr` entry carries, in place.
+///
+/// The write twin of [`read_ext_keyexpr`], and it exists for exactly one caller:
+/// the namespace EGRESS decorator, which must prefix the keyexpr an
+/// `UndeclareQueryable` retracts, because upstream does
+/// (`handle_namespace_egress(&mut m.ext_wire_expr.wire_expr, false)`, zenoh
+/// `net/routing/namespace.rs:71-73`).
+///
+/// Only the ZBuf BODY is replaced; the entry keeps its own `header` verbatim and
+/// its position in the vec. That is what makes this chain-safe without knowing
+/// anything about the chain: the per-entry `Z` continuation bit lives in that
+/// header ([`crate::ext_nodeid::apply_chain_z_bits`] owns it), so rewriting the
+/// body cannot make a terminal entry look like a continued one or the reverse.
+///
+/// `Ok(false)` when there is nothing to rewrite — no `ext_keyexpr` entry, a
+/// non-ZBuf body, or an ALIASED keyexpr. That is exactly the population
+/// [`read_ext_keyexpr`] answers `None` for, and it is upstream's own
+/// no-op condition too: an already-optimized keyexpr carries its namespace from
+/// the declaration that defined it, so `handle_namespace_egress` leaves it alone.
+pub fn set_ext_keyexpr_literal(
+    exts: &mut Vec<ExtEntryOwned>,
+    literal: &str,
+) -> Result<bool, CodecError> {
+    let Some(index) = exts.iter().position(|ext| {
+        ext_id(ext.header) == KEYEXPR_EXT_ID
+            && matches!(ext.body, ExtEntryOwnedVariant::CodecZenohExtZbuf(_))
+    }) else {
+        return Ok(false);
+    };
+    // The literal gate is `read_ext_keyexpr`'s rather than a second copy of it:
+    // an aliased id has no literal to rewrite. Both readers select the FIRST
+    // id-matching ZBuf entry, so they cannot be looking at different ones.
+    if read_ext_keyexpr(Some(exts)).is_none() {
+        return Ok(false);
+    }
+    exts[index].body = build_ext_keyexpr(literal)?.body;
+    Ok(true)
+}
+
 /// Resolve the keyexpr an `ext_keyexpr` extension carries against a peer mapping
 /// `table` (c3c-3 B1b) — the
 /// [`resolve_wireexpr`](crate::wireexpr_resolve::resolve_wireexpr) analogue for
