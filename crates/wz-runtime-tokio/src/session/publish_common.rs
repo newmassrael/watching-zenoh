@@ -482,6 +482,19 @@ pub enum PublishError {
     /// NOT raise this — it routes through the send seam and runs on either
     /// transport; only the unicast-mapping aliased path does.
     RequiresUnicast,
+    /// R2238 (open-debt item 580) — the session's finite fragment TX budget
+    /// ran out while this publish's `T_MID_FRAGMENT` chain was being emitted,
+    /// so the message was ABANDONED.
+    ///
+    /// ⚠ Deliberately NOT folded into [`Self::ExceedsCapacity`], which the
+    /// two size bounds share because both mean "too large to send; NO WIRE
+    /// BYTES EMITTED". This one breaks that second half: when the budget ran
+    /// out part-way, fragments ARE on the wire and a `0x3 Drop` stop fragment
+    /// followed them telling the peer to discard the prefix. A caller that
+    /// read this as `ExceedsCapacity` would believe nothing left the host and
+    /// could not distinguish "resend the same bytes once there is budget"
+    /// (true here) from "this message can never be sent as-is" (true there).
+    FragmentChainAbandoned,
 }
 
 impl std::fmt::Display for PublishError {
@@ -503,6 +516,13 @@ impl std::fmt::Display for PublishError {
                 "PublishError: aliased publish requires a unicast transport \
                  (no outbound keyexpr-mapping table on a multicast session); \
                  the Push was not emitted"
+            ),
+            PublishError::FragmentChainAbandoned => write!(
+                f,
+                "PublishError: the session's fragment TX budget ran out while \
+                 emitting this Push's chain, so it was abandoned — any \
+                 fragments already on the wire were followed by a 0x3 Drop \
+                 stop fragment; resend once the budget is refilled"
             ),
         }
     }
@@ -528,6 +548,10 @@ impl From<SendWireError> for PublishError {
             // Both mean "too large to send; no wire bytes emitted" — one
             // bound is the codec's, the other the reassembly slot's.
             SendWireError::ExceedsReassemblyCap => PublishError::ExceedsCapacity,
+            // R2238 — kept SEPARATE from the two above precisely because the
+            // "no wire bytes emitted" half does not hold; see
+            // `PublishError::FragmentChainAbandoned`.
+            SendWireError::FragmentTxBudgetExhausted => PublishError::FragmentChainAbandoned,
         }
     }
 }

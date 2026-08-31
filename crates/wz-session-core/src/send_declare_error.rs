@@ -109,6 +109,24 @@ pub enum SendDeclareError {
     /// Variant ordering: appended at end, per the note on
     /// [`Self::FeatureDisabled`].
     ExceedsReassemblyCap,
+    /// R2238 (open-debt item 580) — declare-plane projection of
+    /// [`SendWireError::FragmentTxBudgetExhausted`](crate::send_wire_error::SendWireError::FragmentTxBudgetExhausted):
+    /// the session's fragment TX budget ran out while the DECLARE's chain was
+    /// being emitted, so the message was abandoned mid-flight.
+    ///
+    /// ⚠ Unlike [`Self::ExceedsReassemblyCap`] this is NOT always a no-emit
+    /// reject — when the budget ran out part-way, fragments are on the wire
+    /// and a `0x3 Drop` stop fragment follows them. The declare cache is
+    /// still not updated, so the caller may re-declare once the budget is
+    /// refilled; the peer has been told to discard what it staged.
+    ///
+    /// Reachable on the same flooding declare/OAM paths
+    /// [`Self::ExceedsReassemblyCap`] names, and for the same reason: those
+    /// messages grow with the mesh rather than with one caller's argument.
+    ///
+    /// Variant ordering: appended at end, per the note on
+    /// [`Self::FeatureDisabled`].
+    FragmentTxBudgetExhausted,
 }
 
 impl fmt::Display for SendDeclareError {
@@ -139,6 +157,13 @@ impl fmt::Display for SendDeclareError {
                 "send_declare: DECLARE exceeds this profile's reassembly cap \
                  — its fragment chain could not be rejoined by a peer running \
                  this profile, so no bytes were emitted and nothing was cached",
+            ),
+            Self::FragmentTxBudgetExhausted => f.write_str(
+                "send_declare: the session's fragment TX budget ran out while \
+                 emitting this DECLARE's chain, so it was abandoned — any \
+                 fragments already on the wire are followed by a 0x3 Drop \
+                 stop fragment and nothing was cached; re-declare once the \
+                 budget is refilled",
             ),
             Self::Codec(e) => write!(
                 f,
@@ -199,6 +224,7 @@ impl From<crate::send_wire_error::SendWireError> for SendDeclareError {
             W::TransportUnavailable => Self::TransportUnavailable,
             W::UnsupportedVariant => Self::RequiresUnicast,
             W::ExceedsReassemblyCap => Self::ExceedsReassemblyCap,
+            W::FragmentTxBudgetExhausted => Self::FragmentTxBudgetExhausted,
         }
     }
 }

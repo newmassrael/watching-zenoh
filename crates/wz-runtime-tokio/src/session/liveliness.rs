@@ -341,6 +341,12 @@ pub enum LivelinessAliasError {
     /// `SendWireError::UnsupportedVariant`, projected here. No wire bytes
     /// were emitted.
     RequiresUnicast,
+    /// R2238 (open-debt item 580) — the session's fragment TX budget ran out
+    /// while this DECLARE's chain was being emitted, so it was abandoned.
+    /// Unlike every variant above, wire bytes MAY have been emitted (followed
+    /// by a `0x3 Drop` stop fragment); nothing was cached, so re-declaring
+    /// once the budget is refilled is the repair.
+    FragmentChainAbandoned,
 }
 
 impl std::fmt::Display for LivelinessAliasError {
@@ -378,6 +384,13 @@ impl std::fmt::Display for LivelinessAliasError {
                  unicast transport; this session holds a multicast transport \
                  (no declare handshake bundle); the DECLARE was not emitted"
             ),
+            LivelinessAliasError::FragmentChainAbandoned => write!(
+                f,
+                "LivelinessAliasError: the session's fragment TX budget ran out \
+                 while emitting this DECLARE's chain, so it was abandoned (a 0x3 \
+                 Drop stop fragment followed any fragments already sent); nothing \
+                 was cached — re-declare once the budget is refilled"
+            ),
         }
     }
 }
@@ -390,7 +403,8 @@ impl std::error::Error for LivelinessAliasError {
             | LivelinessAliasError::FeatureDisabled
             | LivelinessAliasError::ExceedsCapacity
             | LivelinessAliasError::TransportUnavailable
-            | LivelinessAliasError::RequiresUnicast => None,
+            | LivelinessAliasError::RequiresUnicast
+            | LivelinessAliasError::FragmentChainAbandoned => None,
         }
     }
 }
@@ -828,6 +842,11 @@ pub enum LivelinessSubscriberAliasError {
     /// (a unicast session still mid-handshake — that one resolves; this
     /// one never will on multicast). No wire bytes were emitted.
     RequiresUnicast,
+    /// R2238 (open-debt item 580) — the session's fragment TX budget ran out
+    /// while this Interest's chain was being emitted, so it was abandoned.
+    /// Unlike every variant above, wire bytes MAY have been emitted (followed
+    /// by a `0x3 Drop` stop fragment); retry once the budget is refilled.
+    FragmentChainAbandoned,
 }
 
 impl std::fmt::Display for LivelinessSubscriberAliasError {
@@ -862,6 +881,13 @@ impl std::fmt::Display for LivelinessSubscriberAliasError {
                  (no interest handshake bundle / outbound mapping table); the Interest \
                  was not emitted"
             ),
+            LivelinessSubscriberAliasError::FragmentChainAbandoned => write!(
+                f,
+                "LivelinessSubscriberAliasError: the session's fragment TX budget \
+                 ran out while emitting this Interest's chain, so it was abandoned \
+                 (a 0x3 Drop stop fragment followed any fragments already sent); \
+                 retry once the budget is refilled"
+            ),
         }
     }
 }
@@ -880,6 +906,11 @@ impl From<SendWireError> for LivelinessSubscriberAliasError {
             // Both mean "too large to send; no wire bytes emitted" — one
             // bound is the codec's, the other the reassembly slot's.
             SendWireError::ExceedsReassemblyCap => LivelinessSubscriberAliasError::ExceedsCapacity,
+            // R2238 — NOT folded in above: that pair's shared claim includes
+            // "no wire bytes emitted", which this one breaks.
+            SendWireError::FragmentTxBudgetExhausted => {
+                LivelinessSubscriberAliasError::FragmentChainAbandoned
+            }
         }
     }
 }

@@ -503,6 +503,11 @@ pub enum PublishAliasError {
     /// the `Session::actions()` projection rejects. No wire bytes were
     /// emitted.
     RequiresUnicast,
+    /// R2238 (open-debt item 580) — the session's fragment TX budget ran out
+    /// while this Push's chain was being emitted, so it was abandoned.
+    /// Unlike every variant above, wire bytes MAY have been emitted (followed
+    /// by a `0x3 Drop` stop fragment); resend once the budget is refilled.
+    FragmentChainAbandoned,
 }
 
 impl std::fmt::Display for PublishAliasError {
@@ -530,6 +535,13 @@ impl std::fmt::Display for PublishAliasError {
                  this session holds a multicast transport (no outbound keyexpr- \
                  mapping table); the Push was not emitted"
             ),
+            PublishAliasError::FragmentChainAbandoned => write!(
+                f,
+                "PublishAliasError: the session's fragment TX budget ran out while \
+                 emitting this Push's chain, so it was abandoned (a 0x3 Drop stop \
+                 fragment followed any fragments already sent); resend once the \
+                 budget is refilled"
+            ),
         }
     }
 }
@@ -542,6 +554,7 @@ impl From<PublishError> for PublishAliasError {
             PublishError::ExceedsCapacity => PublishAliasError::ExceedsCapacity,
             PublishError::TransportUnavailable => PublishAliasError::TransportUnavailable,
             PublishError::RequiresUnicast => PublishAliasError::RequiresUnicast,
+            PublishError::FragmentChainAbandoned => PublishAliasError::FragmentChainAbandoned,
         }
     }
 }

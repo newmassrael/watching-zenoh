@@ -509,6 +509,50 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// on this struct uses the same seam.
     #[cfg(feature = "transport-fragmentation")]
     pub max_reassembly_bytes: R::Mutex<usize>,
+    /// R2238 (open-debt item 580) — how many more `T_MID_FRAGMENT` messages
+    /// this session may put on the wire. Each fragment of a chain draws ONE
+    /// credit through `SessionLinkActions::take_fragment_tx_credit` (private,
+    /// so a code span rather than an intra-doc link — on a public item's docs
+    /// that link is BROKEN and spends the Layer C1bz budget) as it is emitted;
+    /// when the draw fails the chain is abandoned and the send reports
+    /// [`SendWireError::FragmentTxBudgetExhausted`].
+    ///
+    /// This is wz's answer to the finite batch pool upstream fragments
+    /// against (`common/pipeline.rs`, `zgetbatch_rets!`), and the reason wz
+    /// needed one at all: with an unbounded writer channel
+    /// (`wz-runtime-tokio/src/serial_pipeline.rs`, `link_pipeline.rs` and
+    /// their siblings all take `mpsc::unbounded_channel`) and a
+    /// build-the-whole-chain-first encoder, there was no state in which some
+    /// fragments had been sent and the rest could not be — so there was no
+    /// place to report a chain abandon from, whatever the encoder could
+    /// spell. The budget is what makes that state REACHABLE, and reaching it
+    /// deterministically is what a gate can assert on.
+    ///
+    /// ⚠ It is a SESSION-wide resource, not a per-chain allowance, and the
+    /// distinction is load-bearing rather than stylistic. A per-chain
+    /// allowance would be knowable before the walk began, and the honest
+    /// implementation of it would be a pre-check that refuses the whole
+    /// message and emits nothing — which never reaches the mid-chain state
+    /// at all. Shared, the credit another sender takes between two of this
+    /// chain's fragments is not predictable from inside the chain, so the
+    /// walk must stream and find out, exactly as upstream's does.
+    ///
+    /// The stop fragment itself does NOT draw a credit: it is the abandon
+    /// NOTICE, not chain payload, and a budget that could not afford to say
+    /// it had run out would leave the peer holding the buffer this whole
+    /// mechanism exists to release. Upstream draws its stop batch outside
+    /// the pool for the same reason (`WBatch::new_ephemeral`).
+    ///
+    /// `usize::MAX` (the default) means "unbounded" and is never decremented,
+    /// so a host that never calls
+    /// [`set_fragment_tx_budget`](SessionLinkActions::set_fragment_tx_budget)
+    /// keeps the pre-existing behavior byte for byte.
+    ///
+    /// Held behind `R::Mutex` rather than an atomic for the same reason
+    /// [`Self::max_reassembly_bytes`] is: ARMv6-M has no
+    /// `target_has_atomic = "ptr"`.
+    #[cfg(feature = "transport-fragmentation")]
+    pub fragment_tx_budget: R::Mutex<usize>,
     pub trace: R::Mutex<ActionTrace>,
     /// Cookie material captured from a peer's InitAck via
     /// `handle_inbound`. When populated this overrides
@@ -1566,6 +1610,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // configures its reassembly bound keeps the prior behavior.
                 #[cfg(feature = "transport-fragmentation")]
                 max_reassembly_bytes: R::new_mutex(usize::MAX),
+                // "Unbounded" until a host declares a budget — a profile that
+                // never configures one fragments exactly as it did before.
+                #[cfg(feature = "transport-fragmentation")]
+                fragment_tx_budget: R::new_mutex(usize::MAX),
                 trace: R::new_mutex(ActionTrace::default()),
                 inbound_cookie: R::new_mutex(None::<Vec<u8>>),
                 peer_open_lease_ms: R::new_mutex(None::<u64>),
@@ -2027,6 +2075,52 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(feature = "transport-fragmentation")]
     pub fn max_reassembly_bytes(&self) -> usize {
         R::with_mutex_mut(&self.max_reassembly_bytes, |slot| *slot)
+    }
+
+    /// R2238 (open-debt item 580) — declare how many more `T_MID_FRAGMENT`
+    /// messages this session may emit; see
+    /// [`SessionCore::fragment_tx_budget`]. `usize::MAX` restores the default
+    /// "unbounded".
+    ///
+    /// This both SETS and REFILLS: a session whose budget ran out resumes
+    /// fragmenting from the next chain onward once a host calls this again.
+    /// There is no partial-chain resume — an abandoned chain is abandoned,
+    /// which is what its stop fragment told the peer.
+    #[cfg(feature = "transport-fragmentation")]
+    pub fn set_fragment_tx_budget(&self, fragments: usize) {
+        R::with_mutex_mut(&self.fragment_tx_budget, |slot| *slot = fragments);
+    }
+
+    /// Fragments this session may still emit, or `usize::MAX` when the host
+    /// declared no budget.
+    ///
+    /// ⚠ Reading this to decide whether a chain will fit is exactly the
+    /// pre-check [`SessionCore::fragment_tx_budget`] explains must not
+    /// happen — the value can change between this read and the next
+    /// fragment. It is here for hosts and tests to OBSERVE the resource, not
+    /// for the emit path to plan against.
+    #[cfg(feature = "transport-fragmentation")]
+    pub fn fragment_tx_budget(&self) -> usize {
+        R::with_mutex_mut(&self.fragment_tx_budget, |slot| *slot)
+    }
+
+    /// Draw ONE fragment credit, reporting whether it was available.
+    ///
+    /// The unbounded default (`usize::MAX`) always succeeds and never
+    /// decrements, so an unconfigured session cannot exhaust and cannot
+    /// saturate its own counter downward into a false exhaustion.
+    #[cfg(feature = "transport-fragmentation")]
+    fn take_fragment_tx_credit(&self) -> bool {
+        R::with_mutex_mut(&self.fragment_tx_budget, |slot| {
+            if *slot == usize::MAX {
+                return true;
+            }
+            if *slot == 0 {
+                return false;
+            }
+            *slot -= 1;
+            true
+        })
     }
 
     /// Replace the ext chain for the given role. Production callers
@@ -4306,31 +4400,86 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // R311y215 — a QoS chain carries an ext_qos on every fragment, so
                 // the count (which the follow-on SN reserve below must match) uses
                 // the same qos budget the `fragment_body` chunker does.
-                let count =
-                    crate::frame_encode::fragment_count(body.len(), mtu, ext_qos.is_some()) as u64;
-                // The oversize frame's already-minted `sn` IS the first
-                // fragment's SN; reserve only the `count - 1` follow-on SNs so
-                // the chain is ring-consecutive from `sn` (zenoh
-                // `io/zenoh-transport/.../pipeline.rs` reuses the frame SN slot;
-                // the `multicast_frame_or_fragments` twin does the same). The
-                // prior code re-minted a fresh `fetch_add(count)` block,
-                // discarding `sn` and leaving a 1-SN gap on the wire — tolerated
-                // wz<->wz by the peer's half-window SN check but a real
-                // divergence from the reference (R311y206).
-                // R311y215 — the follow-on SNs are reserved on the SAME
-                // (priority, reliable) conduit the first fragment minted from
-                // (the base-mint + reserve MUST share one conduit key, else
-                // conduit[priority] under-advances and reuses an SN).
-                for _ in 1..count {
-                    self.outbound_frame_sn.reserve_next(priority, reliable);
-                }
-                for frag in
-                    crate::frame_encode::fragment_body(body, reliable, mtu, sn, sn_mask, ext_qos)
-                {
+                // R2238 (open-debt item 580) — the chain STREAMS: one fragment
+                // is built, paid for out of the session's finite fragment TX
+                // budget, and written, and only then is the next one built.
+                //
+                // The pre-R2238 code reserved `count - 1` follow-on SNs up
+                // front and then walked a `Vec` the encoder had already
+                // materialised whole. Both halves of that are now per-fragment,
+                // and the SN policy is UNCHANGED by it: the oversize frame's
+                // already-minted `sn` IS the first fragment's SN and each
+                // further fragment reserves exactly one more, so the chain
+                // stays ring-consecutive from `sn` with no skipped SN
+                // (R311y206; zenoh `io/zenoh-transport/.../pipeline.rs` reuses
+                // the frame SN slot and the `multicast_frame_or_fragments`
+                // twin does the same). Reserving as we go rather than in
+                // advance is not a weakening: the whole walk runs inside the
+                // one `tx_mutex` hold, which is what made the split
+                // reservation atomic w.r.t. a concurrent sender in the first
+                // place. What it BUYS is that an abandoned chain reserves
+                // only the SNs it actually put on the wire, instead of
+                // punching a `count`-wide hole in the conduit's ring.
+                //
+                // R311y215 — every reserve is on the SAME (priority, reliable)
+                // conduit the first fragment minted from (the base-mint +
+                // reserve MUST share one conduit key, else conduit[priority]
+                // under-advances and reuses an SN).
+                let mut chain = crate::frame_encode::FragmentChain::new(
+                    body, reliable, mtu, sn, sn_mask, ext_qos,
+                );
+                let mut emitted = 0usize;
+                while chain.remaining_fragments() > 0 {
+                    // Read the SN BEFORE drawing, so it names the fragment
+                    // this iteration is about to send — which is also the SN
+                    // the stop fragment takes if the draw fails, keeping the
+                    // conduit's ring gapless across the abandon.
+                    let this_sn = chain.next_sn();
+                    if !self.take_fragment_tx_credit() {
+                        if emitted == 0 {
+                            // Nothing left this session, and nothing has left
+                            // for THIS message: there is no chain for a peer to
+                            // be holding, so no marker is due. Upstream's
+                            // equivalent arm restores the SN and writes nothing
+                            // (`common/pipeline.rs`, `ext_first.is_some()`).
+                            //
+                            // wz cannot restore it: `sn` was minted by the
+                            // caller before the encoded length was knowable, so
+                            // a refused send leaves the same 1-SN gap
+                            // `ExceedsReassemblyCap` above leaves, for the same
+                            // reason and with the same tolerance.
+                            return Err(SendWireError::FragmentTxBudgetExhausted);
+                        }
+                        // Fragments are already on the wire and the peer is
+                        // staging them. Tell it to stop — the marker is the
+                        // abandon NOTICE, not chain payload, so it is drawn
+                        // OUTSIDE the budget (upstream's ephemeral stop batch
+                        // is outside its pool for the same reason). It does
+                        // spend an SN, which zenoh's receive-side `SeqNum::roll`
+                        // requires of every accepted transport message.
+                        let marker = crate::frame_encode::build_fragment_drop_wire(
+                            this_sn, reliable, ext_qos,
+                        );
+                        self.outbound_frame_sn.reserve_next(priority, reliable);
+                        self.send_wire(&marker, reliability, priority);
+                        return Err(SendWireError::FragmentTxBudgetExhausted);
+                    }
+                    let frag = match chain.next() {
+                        Some(f) => f,
+                        // `remaining_fragments() > 0` and `next() == None` are
+                        // the same predicate negated, so this arm is
+                        // unreachable; breaking rather than panicking keeps the
+                        // no_std profiles free of a formatter.
+                        None => break,
+                    };
+                    if emitted > 0 {
+                        self.outbound_frame_sn.reserve_next(priority, reliable);
+                    }
                     // Every fragment rides the frame's conduit (`priority`
                     // reconstructed above == the SN-mint conduit) so the whole
                     // chain pins to one link (y217 one-conduit=one-link).
                     self.send_wire(&frag, reliability, priority);
+                    emitted += 1;
                 }
                 return Ok(());
             }

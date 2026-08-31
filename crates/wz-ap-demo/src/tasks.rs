@@ -820,6 +820,22 @@ fn emit_one_push(
                  skipping this iteration"
             );
         }
+        // R2238 (open-debt item 580) — the session's fragment TX budget ran
+        // out mid-chain, so this Put was abandoned and the peer was told with
+        // a `0x3 Drop` stop fragment. Logged at WARN, not ERROR, and skipped:
+        // unlike every arm above it is a TRANSIENT resource condition, and
+        // the next cycle's Put goes out whole once there is credit. ⚠ The
+        // wording says the bytes may have LEFT, because they may have — this
+        // is the one publish reject in this match that is not a no-emit
+        // refusal, and a log line that implied otherwise would send a reader
+        // looking for a message the peer never saw.
+        Err(e @ PublishAliasError::FragmentChainAbandoned) => {
+            log::warn!(
+                "wz-ap-demo: publisher_task publish abandoned on idx={idx}: {e}; \
+                 part of the chain may already be on the wire and the peer was \
+                 told to discard it; skipping this iteration"
+            );
+        }
     }
 }
 

@@ -109,6 +109,36 @@ pub enum SendWireError {
     /// downstream crates surface a non-exhaustive-match warning rather
     /// than silently rebind a prior variant.
     ExceedsReassemblyCap,
+    /// R2238 (open-debt item 580) — the session's finite fragment TX budget
+    /// ran out while a `T_MID_FRAGMENT` chain was being emitted, so the
+    /// message was ABANDONED. Distinct from [`Self::ExceedsReassemblyCap`],
+    /// which refuses a chain BEFORE any byte leaves and is a property of the
+    /// message; this one is a property of the moment, and the same message
+    /// sent again with credit available goes out whole.
+    ///
+    /// Two wire outcomes hide behind this one variant, and the difference is
+    /// visible to the PEER rather than to the caller:
+    ///
+    ///   * the budget was already empty when the chain started — nothing was
+    ///     emitted, and no marker is sent, because there is no chain for a
+    ///     receiver to be holding. Upstream's equivalent arm restores the SN
+    ///     and writes nothing (`common/pipeline.rs`, the `ext_first.is_some()`
+    ///     branch);
+    ///   * it ran out MID-CHAIN — the fragments already emitted are on the
+    ///     wire, and a `0x3 Drop` stop fragment
+    ///     ([`build_fragment_drop_wire`](crate::frame_encode::build_fragment_drop_wire))
+    ///     follows them so the receiver releases its defragmentation buffer
+    ///     instead of holding a chain that will never complete.
+    ///
+    /// Inert unless the host sets a budget
+    /// ([`SessionLinkActions::set_fragment_tx_budget`](crate::session_actions::SessionLinkActions::set_fragment_tx_budget));
+    /// the default is "unbounded", so a profile that never configures one
+    /// behaves exactly as before.
+    ///
+    /// Variant ordering: appended at end so existing match arms in
+    /// downstream crates surface a non-exhaustive-match warning rather
+    /// than silently rebind a prior variant.
+    FragmentTxBudgetExhausted,
 }
 
 impl fmt::Display for SendWireError {
@@ -141,6 +171,13 @@ impl fmt::Display for SendWireError {
                  reply-plane variants are emitted by the drive-loop \
                  MulticastReplySink, never routed here) — no bytes emitted; \
                  a feature-off build returns FeatureDisabled instead",
+            ),
+            Self::FragmentTxBudgetExhausted => f.write_str(
+                "send_wire: the session's fragment TX budget ran out while \
+                 emitting this chain, so the message was abandoned — any \
+                 fragments already on the wire are followed by a 0x3 Drop \
+                 stop fragment so the peer releases its defragmentation \
+                 buffer; retry once the budget is refilled",
             ),
         }
     }

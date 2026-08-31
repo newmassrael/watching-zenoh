@@ -7543,7 +7543,10 @@ layer_c1l_reassembly() {
     # R311y580 — the same eleven, on the sibling feature arm.
     _runci_guarded_test C1l 27 cargo test -p wz-session-core --features transport-fragmentation --lib reassembly --quiet \
         || return 1
-    _runci_guarded_test C1l 1 cargo test -p wz-runtime-tokio --features transport-fragmentation --test layer3_reassembly_tx --quiet \
+    # R2238 (open-debt item 580) — 1 -> 2: the finite-fragment-budget abandon
+    # e2e joined this file. MEASURED under THIS feature set (which is not the
+    # one Layer Z builds the same file with): `running 2 tests`.
+    _runci_guarded_test C1l 2 cargo test -p wz-runtime-tokio --features transport-fragmentation --test layer3_reassembly_tx --quiet \
         || return 1
     _runci_guarded_test C1l 4 cargo test -p wz-runtime-tokio --features transport-fragmentation --test layer3_reassembly_rx --quiet \
         || return 1
@@ -13151,7 +13154,11 @@ layer_z_zenohd_interop() {
     # documented at the helper: `--ignored` selecting ZERO tests still exits 0,
     # and because both names carry the `zenohd` token that Layer E skips by
     # substring, an elided test would then run in NO lane with every lane green.
-    _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+    # R2238 (open-debt item 580) — 3: the abandon leg joined the pair. It
+    # publishes under a finite fragment budget so the chain is cut part-way,
+    # and asserts the `0x3 Drop` stop fragment reached a real zenohd (the
+    # calibration twin's zero on the same walk is what makes that a reading).
+    _runci_guarded_test Z 3 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_fragment_tx_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
     # R311y439 — wz RX FRAGMENTATION cross-impl (transport-fragmentation
     # zenohd->wz), the direction R311y438 explicitly left open ("the tiny MTU

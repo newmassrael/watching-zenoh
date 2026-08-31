@@ -3722,6 +3722,11 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                     SendDeclareError::Codec(_) | SendDeclareError::ExceedsReassemblyCap => {
                         QueryableError::ExceedsCapacity
                     }
+                    // R2238 — NOT folded in above: that group's shared claim
+                    // includes "no wire bytes emitted", which this one breaks.
+                    SendDeclareError::FragmentTxBudgetExhausted => {
+                        QueryableError::FragmentChainAbandoned
+                    }
                     // F2 — reconnect-window reject, typed through.
                     SendDeclareError::TransportUnavailable => QueryableError::TransportUnavailable,
                     // R311g1 — reachable only in a feature combo where
@@ -3927,6 +3932,11 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                     SendDeclareError::Codec(_) | SendDeclareError::ExceedsReassemblyCap => {
                         SubscribeError::ExceedsCapacity
                     }
+                    // R2238 — NOT folded in above: that group's shared claim
+                    // includes "no wire bytes emitted", which this one breaks.
+                    SendDeclareError::FragmentTxBudgetExhausted => {
+                        SubscribeError::FragmentChainAbandoned
+                    }
                     // F2 — reconnect-window reject, typed through.
                     SendDeclareError::TransportUnavailable => SubscribeError::TransportUnavailable,
                     // R311g1 — reachable only in a feature combo where
@@ -4073,6 +4083,11 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                     SendDeclareError::Codec(_) | SendDeclareError::ExceedsReassemblyCap => {
                         LivelinessAliasError::ExceedsCapacity
                     }
+                    // R2238 — NOT folded in above: that group's shared claim
+                    // includes "no wire bytes emitted", which this one breaks.
+                    SendDeclareError::FragmentTxBudgetExhausted => {
+                        LivelinessAliasError::FragmentChainAbandoned
+                    }
                     other => unreachable!(
                         "declare_token literal-mode prepare/seam returned \
                          {other:?} unexpectedly"
@@ -4190,6 +4205,11 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                     // emitted, and nothing cached".
                     SendDeclareError::Codec(_) | SendDeclareError::ExceedsReassemblyCap => {
                         LivelinessAliasError::ExceedsCapacity
+                    }
+                    // R2238 — NOT folded in above: that group's shared claim
+                    // includes "no wire bytes emitted", which this one breaks.
+                    SendDeclareError::FragmentTxBudgetExhausted => {
+                        LivelinessAliasError::FragmentChainAbandoned
                     }
                     // F2 — reconnect-window reject, typed through.
                     SendDeclareError::TransportUnavailable => {

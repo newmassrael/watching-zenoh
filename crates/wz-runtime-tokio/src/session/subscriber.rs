@@ -304,6 +304,10 @@ pub enum SubscribeAliasError {
     /// R311ou — the transport is not currently accepting sends (link released /
     /// reconnecting). Projected from [`SubscribeError::TransportUnavailable`].
     TransportUnavailable,
+    /// R2238 — the fragment chain carrying this routed announce was abandoned
+    /// mid-flight. Projected from
+    /// [`SubscribeError::FragmentChainAbandoned`].
+    FragmentChainAbandoned,
 }
 
 #[cfg(feature = "transport-unicast")]
@@ -314,6 +318,7 @@ impl From<SubscribeError> for SubscribeAliasError {
             SubscribeError::ExceedsCapacity => SubscribeAliasError::ExceedsCapacity,
             SubscribeError::FeatureDisabled => SubscribeAliasError::FeatureDisabled,
             SubscribeError::TransportUnavailable => SubscribeAliasError::TransportUnavailable,
+            SubscribeError::FragmentChainAbandoned => SubscribeAliasError::FragmentChainAbandoned,
         }
     }
 }
@@ -343,6 +348,12 @@ impl std::fmt::Display for SubscribeAliasError {
             SubscribeAliasError::TransportUnavailable => write!(
                 f,
                 "SubscribeAliasError: transport not accepting sends (link released / reconnecting)"
+            ),
+            SubscribeAliasError::FragmentChainAbandoned => write!(
+                f,
+                "SubscribeAliasError: the session's fragment TX budget ran out while \
+                 emitting this DECLARE's chain, so it was abandoned; nothing was \
+                 cached — re-declare once the budget is refilled"
             ),
         }
     }
@@ -388,6 +399,14 @@ pub enum SubscribeError {
     /// emitted; re-declare after the session re-establishes (zenoh-pico
     /// `_Z_ERR_TRANSPORT_NOT_AVAILABLE`).
     TransportUnavailable,
+    /// R2238 (open-debt item 580) — the session's fragment TX budget ran out
+    /// while this DECLARE's chain was being emitted, so it was abandoned.
+    ///
+    /// ⚠ Kept apart from [`Self::ExceedsCapacity`] for the reason given on
+    /// `QueryableError::FragmentChainAbandoned`: that variant's group claims
+    /// "no wire bytes emitted", and this one may have emitted some. Nothing
+    /// was cached, so re-declaring once the budget is refilled is the repair.
+    FragmentChainAbandoned,
 }
 
 #[cfg(feature = "transport-unicast")]
@@ -411,6 +430,13 @@ impl std::fmt::Display for SubscribeError {
             SubscribeError::TransportUnavailable => write!(
                 f,
                 "SubscribeError: transport not accepting sends (link released / reconnecting)"
+            ),
+            SubscribeError::FragmentChainAbandoned => write!(
+                f,
+                "SubscribeError: the session's fragment TX budget ran out while \
+                 emitting this DECLARE's chain, so it was abandoned (a 0x3 Drop \
+                 stop fragment followed any fragments already sent); nothing was \
+                 cached — re-declare once the budget is refilled"
             ),
         }
     }

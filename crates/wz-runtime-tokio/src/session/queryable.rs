@@ -458,6 +458,10 @@ pub enum QueryableAliasError {
     /// R311ow — the transport is not currently accepting sends (link released /
     /// reconnecting). Projected from [`QueryableError::TransportUnavailable`].
     TransportUnavailable,
+    /// R2238 — the fragment chain carrying this aliased DECLARE was abandoned
+    /// mid-flight. Projected from
+    /// [`QueryableError::FragmentChainAbandoned`].
+    FragmentChainAbandoned,
 }
 
 #[cfg(feature = "transport-unicast")]
@@ -468,6 +472,7 @@ impl From<QueryableError> for QueryableAliasError {
             QueryableError::ExceedsCapacity => QueryableAliasError::ExceedsCapacity,
             QueryableError::FeatureDisabled => QueryableAliasError::FeatureDisabled,
             QueryableError::TransportUnavailable => QueryableAliasError::TransportUnavailable,
+            QueryableError::FragmentChainAbandoned => QueryableAliasError::FragmentChainAbandoned,
         }
     }
 }
@@ -498,6 +503,12 @@ impl std::fmt::Display for QueryableAliasError {
             QueryableAliasError::TransportUnavailable => write!(
                 f,
                 "QueryableAliasError: transport not accepting sends (link released / reconnecting)"
+            ),
+            QueryableAliasError::FragmentChainAbandoned => write!(
+                f,
+                "QueryableAliasError: the session's fragment TX budget ran out while \
+                 emitting this DECLARE's chain, so it was abandoned; nothing was \
+                 cached — re-declare once the budget is refilled"
             ),
         }
     }
@@ -547,6 +558,17 @@ pub enum QueryableError {
     /// emitted; re-declare after the session re-establishes (zenoh-pico
     /// `_Z_ERR_TRANSPORT_NOT_AVAILABLE`).
     TransportUnavailable,
+    /// R2238 (open-debt item 580) — the session's fragment TX budget ran out
+    /// while this DECLARE's chain was being emitted, so it was abandoned.
+    ///
+    /// ⚠ Kept apart from [`Self::ExceedsCapacity`], which the codec and
+    /// reassembly bounds share because both mean "too large to send; NO WIRE
+    /// BYTES EMITTED, and nothing cached". Only the second half differs here
+    /// and it is the half a caller acts on: fragments may already be on the
+    /// wire, followed by a `0x3 Drop` stop fragment telling the peer to
+    /// discard them. Nothing was cached either way, so re-declaring once the
+    /// budget is refilled is the repair.
+    FragmentChainAbandoned,
 }
 
 #[cfg(feature = "transport-unicast")]
@@ -571,6 +593,13 @@ impl std::fmt::Display for QueryableError {
             QueryableError::TransportUnavailable => write!(
                 f,
                 "QueryableError: transport not accepting sends (link released / reconnecting)"
+            ),
+            QueryableError::FragmentChainAbandoned => write!(
+                f,
+                "QueryableError: the session's fragment TX budget ran out while \
+                 emitting this DECLARE's chain, so it was abandoned (a 0x3 Drop \
+                 stop fragment followed any fragments already sent); nothing was \
+                 cached — re-declare once the budget is refilled"
             ),
         }
     }

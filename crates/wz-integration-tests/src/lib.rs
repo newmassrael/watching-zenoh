@@ -7438,9 +7438,27 @@ pub mod fragment_ext {
         fragment_mid: u8,
         wanted: u8,
     ) -> usize {
+        ext_marked_batches_from(recording, Side::FromListener, fragment_mid, wanted)
+    }
+
+    /// R2238 (open-debt item 580) — the same walk over EITHER direction.
+    ///
+    /// [`ext_marked_batches`] pins the listener's side because its callers ask
+    /// about a foreign ROUTER's transmit path. A leg asking what wz itself put
+    /// on the wire needs [`Side::FromDialer`], and pointing the existing
+    /// helper at a direction it does not serve would be a silent zero — the
+    /// "a dead probe and a negative result look the same" shape this tree
+    /// keeps paying for. So the direction becomes an argument and the old
+    /// name stays as the listener-side wrapper its callers already read.
+    pub fn ext_marked_batches_from(
+        recording: &[(Side, Vec<u8>)],
+        side: Side,
+        fragment_mid: u8,
+        wanted: u8,
+    ) -> usize {
         recording
             .iter()
-            .filter(|(side, _)| *side == Side::FromListener)
+            .filter(|(s, _)| *s == side)
             .filter(|(_, segment)| {
                 segment.len() > 2 && fragment_ext_present(&segment[2..], fragment_mid, wanted)
             })

@@ -644,6 +644,30 @@ const FRAG_HEADER_BUDGET: usize = 1 + 10;
 #[cfg(feature = "transport-fragmentation")]
 const FRAGMENT_FIRST_EXT_HEADER: u8 = crate::extfragment::FRAGMENT_FIRST_EXT_ID;
 
+/// R2238 (open-debt item 580) — the `FRAGMENT_DROP` transport extension header
+/// byte: ext-id `0x03`, encoding `unit` (`0b00`, no body), non-mandatory (M=0)
+/// → `0x03`. zenoh `fragment::ext::Drop = zextunit!(0x3, false)`.
+///
+/// It announces that the SENDER abandoned the chain, so the receiver may
+/// release its defragmentation buffer instead of holding a chain that will
+/// never complete. zenoh's receiver honours it —
+/// `io/zenoh-transport/src/unicast/universal/rx.rs:180-185` at the 1.10.0 pin
+/// (`if ext_drop.is_some() { guard.defrag.clear(); return Ok(()); }`, the
+/// multicast twin at `:225`) — and so does zenoh-pico's decoder
+/// (`vendor/zenoh-pico/src/protocol/codec/transport.c:442` reads `msg->drop`).
+///
+/// ⚠ NO implementation puts it ON the wire at this pin, which is the whole
+/// reason this side can. Upstream has one emit site (`common/pipeline.rs`,
+/// the `zgetbatch_rets!` restore arm) and it encodes the header against a
+/// reader that `fragbuf.clear()` has just emptied, so `ZBufReader::siphon`
+/// returns `DidntSiphon`, the codec rewinds past the header, and an EMPTY
+/// batch goes out instead — measured and pinned by
+/// `wz-integration-tests/tests/wz_chain_drop_zenohd_interop.rs` (open-debt
+/// item 575). zenoh-pico's one call site passes `false`
+/// (`src/transport/common/tx.c:466`).
+#[cfg(feature = "transport-fragmentation")]
+const FRAGMENT_DROP_EXT_HEADER: u8 = crate::extfragment::FRAGMENT_DROP_EXT_ID;
+
 /// Per-fragment payload capacity at this `mtu`. Floored at 1 so a pathological
 /// `mtu <= FRAG_HEADER_BUDGET` still terminates (one body byte per fragment)
 /// rather than dividing by zero; production `mtu` is the negotiated batch size,
@@ -695,37 +719,166 @@ pub fn fragment_body(
     sn_mask: u64,
     ext_qos: Option<Priority>,
 ) -> Vec<Vec<u8>> {
-    // A QoS chain shrinks every chunk by the per-fragment ext_qos width; without
-    // `transport-qos` the ext is never present, so the chunking is unchanged.
-    #[cfg(feature = "transport-qos")]
-    let qos = ext_qos.is_some();
-    #[cfg(not(feature = "transport-qos"))]
-    let qos = {
-        let _ = ext_qos;
-        false
-    };
-    let chunk = fragment_chunk_size(mtu, qos);
-    let mut out = Vec::with_capacity(fragment_count(body.len(), mtu, qos));
-    let mut off = 0usize;
-    let mut sn = base_sn & sn_mask;
-    loop {
-        let end = core::cmp::min(off + chunk, body.len());
-        let more = end < body.len();
-        out.push(build_fragment_wire(
-            sn,
-            &body[off..end],
-            reliable,
-            more,
-            off == 0,
-            ext_qos,
-        ));
-        off = end;
-        if !more {
-            break;
-        }
-        sn = crate::sn::increment(sn_mask, sn);
-    }
+    let chain = FragmentChain::new(body, reliable, mtu, base_sn, sn_mask, ext_qos);
+    let mut out = Vec::with_capacity(chain.remaining_fragments());
+    out.extend(chain);
     out
+}
+
+/// R2238 (open-debt item 580) — the same chain [`fragment_body`] returns, but
+/// yielded ONE FRAGMENT AT A TIME so a sender can stop part-way and say so.
+///
+/// ## Why this exists rather than the `Vec` alone
+///
+/// `fragment_body` builds the WHOLE chain before a byte leaves, which is why
+/// wz had no "abandoned the chain" STATE to report: there was no moment at
+/// which some fragments had been emitted and the rest could not be. Upstream
+/// has that moment because it pulls a batch per fragment from a finite pool
+/// (`common/pipeline.rs`, `zgetbatch_rets!`) and can fail to get one; this
+/// iterator is the shape that gives wz the same seam, and
+/// [`SessionCore::fragment_tx_budget`](crate::session_actions::SessionCore::fragment_tx_budget)
+/// is the finite resource it draws against.
+///
+/// ⚠ The budget is deliberately NOT consulted here. This type stays a pure
+/// wire producer — the emit site owns the policy, because the budget is a
+/// SHARED session resource: another sender may take the last credit between
+/// two fragments of this chain, so "will this chain fit" cannot be decided
+/// before the walk starts. That is the same reason upstream streams rather
+/// than pre-checking its pool.
+///
+/// Byte-for-byte identical to [`fragment_body`]: that function is now this
+/// iterator collected, so the wire SSOT has ONE producer and cannot drift
+/// between the streaming and the whole-chain caller.
+#[cfg(feature = "transport-fragmentation")]
+pub struct FragmentChain<'a> {
+    body: &'a [u8],
+    off: usize,
+    chunk: usize,
+    sn: u64,
+    sn_mask: u64,
+    reliable: bool,
+    ext_qos: Option<Priority>,
+    done: bool,
+}
+
+#[cfg(feature = "transport-fragmentation")]
+impl<'a> FragmentChain<'a> {
+    /// Start a chain over `body` with the same parameters [`fragment_body`]
+    /// takes; `base_sn` is the oversize FRAME's already-minted SN, which IS
+    /// the first fragment's SN (R311y206).
+    pub fn new(
+        body: &'a [u8],
+        reliable: bool,
+        mtu: usize,
+        base_sn: u64,
+        sn_mask: u64,
+        ext_qos: Option<Priority>,
+    ) -> Self {
+        // A QoS chain shrinks every chunk by the per-fragment ext_qos width;
+        // without `transport-qos` the ext is never present, so the chunking is
+        // unchanged.
+        #[cfg(feature = "transport-qos")]
+        let qos = ext_qos.is_some();
+        #[cfg(not(feature = "transport-qos"))]
+        let qos = {
+            let _ = ext_qos;
+            false
+        };
+        Self {
+            body,
+            off: 0,
+            chunk: fragment_chunk_size(mtu, qos),
+            sn: base_sn & sn_mask,
+            sn_mask,
+            reliable,
+            ext_qos,
+            done: false,
+        }
+    }
+
+    /// Fragments this chain has NOT yet yielded — `fragment_count` of the
+    /// unwalked tail, so `fragment_body`'s `Vec` reserves exactly what the
+    /// pre-R2238 code did.
+    pub fn remaining_fragments(&self) -> usize {
+        if self.done {
+            return 0;
+        }
+        (self.body.len() - self.off).div_ceil(self.chunk).max(1)
+    }
+
+    /// The SN the NEXT emitted transport message on this conduit carries.
+    ///
+    /// This is the abandon marker's SN when a sender stops here: upstream
+    /// stamps its stop fragment with exactly this value (`fragment.sn =
+    /// tch.sn.get()` after the last successful encode). ⚠ The marker must
+    /// then CONSUME that SN rather than leave it for the next chain —
+    /// zenoh's receive-side `SeqNum::roll` (`common/seq_num.rs:145-155`)
+    /// advances on every accepted transport message and rejects a repeat
+    /// (`gap == 0` → `Ok(false)` → dropped), so a marker that did not spend
+    /// its SN would make the NEXT message unreadable to a real zenohd. That
+    /// divergence from upstream is invisible there only because upstream's
+    /// marker never reaches the wire at all (item 575).
+    pub fn next_sn(&self) -> u64 {
+        self.sn
+    }
+}
+
+#[cfg(feature = "transport-fragmentation")]
+impl Iterator for FragmentChain<'_> {
+    type Item = Vec<u8>;
+
+    fn next(&mut self) -> Option<Vec<u8>> {
+        if self.done {
+            return None;
+        }
+        let end = core::cmp::min(self.off + self.chunk, self.body.len());
+        let more = end < self.body.len();
+        let wire = build_fragment_wire(
+            self.sn,
+            &self.body[self.off..end],
+            self.reliable,
+            more,
+            self.off == 0,
+            false,
+            self.ext_qos,
+        );
+        self.off = end;
+        // The SN advances past EVERY emitted fragment, the last one included,
+        // so `next_sn` names the conduit's next value whether the walk ran to
+        // completion or stopped mid-chain.
+        self.sn = crate::sn::increment(self.sn_mask, self.sn);
+        if !more {
+            self.done = true;
+        }
+        Some(wire)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let n = self.remaining_fragments();
+        (n, Some(n))
+    }
+}
+
+/// R2238 (open-debt item 580) — the STOP FRAGMENT that announces an abandoned
+/// chain: a payload-less `T_MID_FRAGMENT` carrying the `0x3 Drop` marker
+/// (`FRAGMENT_DROP_EXT_HEADER`, private to this module — a code span rather
+/// than an intra-doc link, which on a public item's docs is a BROKEN link and
+/// spends the Layer C1bz budget) at `sn`, with M (more) SET.
+///
+/// The shape mirrors upstream's ephemeral stop batch (`common/pipeline.rs`:
+/// `more: true`, `ext_first: None`, `ext_drop: Some(..)`, empty payload) —
+/// with the one difference that decides the whole item: here the empty
+/// payload is written, so the message actually reaches the wire. Upstream
+/// hands the same empty payload to a codec whose `siphon` refuses a
+/// zero-length read and rewinds the header away with it.
+///
+/// M is set because the chain did NOT complete; a receiver that ignores the
+/// marker (a patch-0 peer) then treats this as one more continuation
+/// fragment and stays in the same state it was already in, rather than being
+/// told a truncated chain ended cleanly.
+#[cfg(feature = "transport-fragmentation")]
+pub fn build_fragment_drop_wire(sn: u64, reliable: bool, ext_qos: Option<Priority>) -> Vec<u8> {
+    build_fragment_wire(sn, &[], reliable, true, false, true, ext_qos)
 }
 
 /// Encode one `T_MID_FRAGMENT` wire frame: a `[flags | T_MID_FRAGMENT]`
@@ -751,6 +904,17 @@ pub fn fragment_body(
 /// `zenoh-codec/src/transport/fragment.rs`). The ext-chain `Z` header bit is set
 /// whenever EITHER ext is present; the QoS ext carries the chain-continuation
 /// bit iff the First marker follows it.
+///
+/// R2238 — `drop_marker` appends the `0x3 Drop` ext
+/// ([`FRAGMENT_DROP_EXT_HEADER`]) LAST, keeping the same id-ascending order
+/// (`0x1` QoS, `0x2` First, `0x3` Drop). Every entry ahead of it now carries
+/// the chain-continuation bit, which is why `first` gates that bit through
+/// `drop_marker` too rather than being the chain's assumed tail. Production
+/// reaches this through [`build_fragment_drop_wire`], where `first` is false
+/// and the payload empty; the two are nonetheless INDEPENDENT here, because
+/// zenoh's own header codec writes `ext_first` and `ext_drop` from separate
+/// `Option`s and a wz reader that could not decode the pair would be reading
+/// a shape upstream can emit.
 #[cfg(feature = "transport-fragmentation")]
 fn build_fragment_wire(
     sn: u64,
@@ -758,6 +922,7 @@ fn build_fragment_wire(
     reliable: bool,
     more: bool,
     first: bool,
+    drop_marker: bool,
     ext_qos: Option<Priority>,
 ) -> Vec<u8> {
     let mut flags = 0u8;
@@ -774,14 +939,20 @@ fn build_fragment_wire(
         let _ = ext_qos;
         false
     };
-    // Z: a Fragment ext chain (ext_qos and/or the FRAGMENT_FIRST marker) follows.
-    let has_ext = first || has_qos;
+    // Z: a Fragment ext chain (ext_qos and/or the FRAGMENT_FIRST / FRAGMENT_DROP
+    // markers) follows.
+    let has_ext = first || has_qos || drop_marker;
     if has_ext {
         flags |= wire_const::FLAG_T_Z;
     }
     let qos_reserve = if has_qos { QOS_EXT_WIRE_BYTES } else { 0 };
-    let mut wire =
-        Vec::with_capacity(FRAG_HEADER_BUDGET + payload.len() + usize::from(first) + qos_reserve);
+    let mut wire = Vec::with_capacity(
+        FRAG_HEADER_BUDGET
+            + payload.len()
+            + usize::from(first)
+            + usize::from(drop_marker)
+            + qos_reserve,
+    );
     wire.push(flags | wire_const::T_MID_FRAGMENT);
     if has_ext {
         // Wire body: VLE(sn) + [ext_qos] + [FRAGMENT_FIRST] + payload. The codec
@@ -797,11 +968,17 @@ fn build_fragment_wire(
         }
         #[cfg(feature = "transport-qos")]
         if let Some(priority) = ext_qos {
-            // The QoS ext chains to the FRAGMENT_FIRST marker iff `first`.
-            write_qos_ext(&mut wire, priority, first);
+            // The QoS ext chains to whichever marker follows it, if any.
+            write_qos_ext(&mut wire, priority, first || drop_marker);
         }
         if first {
-            wire.push(FRAGMENT_FIRST_EXT_HEADER);
+            // ...and First chains to Drop when both ride the same fragment.
+            let chained = if drop_marker { wire_const::FLAG_T_Z } else { 0 };
+            wire.push(FRAGMENT_FIRST_EXT_HEADER | chained);
+        }
+        if drop_marker {
+            // Last in id order, so it never carries the continuation bit.
+            wire.push(FRAGMENT_DROP_EXT_HEADER);
         }
         wire.extend_from_slice(payload);
     } else {
@@ -1184,7 +1361,9 @@ mod tests {
 
 #[cfg(all(test, feature = "transport-fragmentation"))]
 mod fragment_tests {
-    use super::{fragment_body, fragment_count};
+    use super::{
+        build_fragment_drop_wire, build_fragment_wire, fragment_body, fragment_count, FragmentChain,
+    };
     use crate::inbound::{parse_inbound, InboundFrame};
     use alloc::vec::Vec;
     use wz_codecs::wire_const;
@@ -1347,6 +1526,156 @@ mod fragment_tests {
             };
             assert!(!has_ext, "fragment {i} (not first) has no ext chain");
         }
+    }
+
+    /// R2238 (open-debt item 580) — the stop fragment is a payload-less
+    /// `T_MID_FRAGMENT` carrying `0x3 Drop`, with M still SET, and wz's own
+    /// RX projects the marker back out of it.
+    ///
+    /// The M bit is asserted rather than assumed: it is what makes a
+    /// patch-0 peer — one that cannot read the marker at all — treat this as
+    /// a continuation of the chain it is already staging instead of as a
+    /// clean final fragment it should try to deliver.
+    #[test]
+    fn fragment_drop_wire_is_a_payloadless_marker_the_rx_reads() {
+        let sn = 7u64; // VLE width 1 -> the ext byte lands at wire[2].
+        let wire = build_fragment_drop_wire(sn, true, None);
+
+        assert_eq!(
+            wire.len(),
+            3,
+            "header + VLE(sn) + the one-byte 0x3 ext, and nothing else"
+        );
+        assert_ne!(
+            wire[0] & wire_const::FLAG_T_FRAGMENT_R,
+            0,
+            "a reliable chain's stop fragment keeps R"
+        );
+        assert_ne!(
+            wire[0] & wire_const::FLAG_T_FRAGMENT_M,
+            0,
+            "M stays SET: the chain did NOT complete"
+        );
+        assert_ne!(
+            wire[0] & wire_const::FLAG_T_Z,
+            0,
+            "the ext chain is present, so Z is set"
+        );
+        assert_eq!(
+            wire[2],
+            super::FRAGMENT_DROP_EXT_HEADER,
+            "the 0x3 Drop ext follows VLE(sn), unchained (it is last in id order)"
+        );
+
+        let InboundFrame::Fragment {
+            sn: got_sn,
+            payload,
+            markers,
+            ..
+        } = parse_inbound(&wire).expect("parse the stop fragment")
+        else {
+            panic!("the stop fragment is not a Fragment");
+        };
+        assert_eq!(got_sn, sn, "the marker spends the SN it names");
+        assert!(payload.is_empty(), "a stop fragment carries no chain bytes");
+        assert!(markers.dropped, "RX projects the abandon marker");
+        assert!(
+            !markers.first,
+            "and does NOT read it as a chain start (the ids are 0x3 vs 0x2)"
+        );
+    }
+
+    /// R2238 — `First` and `Drop` on ONE fragment chain in id-ascending
+    /// order, `0x2` carrying the continuation bit and `0x3` not.
+    ///
+    /// Production never emits this pair (a stop fragment is never a chain
+    /// start), and that is exactly why it is worth pinning: zenoh's header
+    /// codec writes `ext_first` and `ext_drop` from independent `Option`s
+    /// (`zenoh-codec/src/transport/fragment.rs`), so upstream CAN put this
+    /// shape on the wire, and a chain walk that assumed `0x2` was always the
+    /// tail would stop reading before the `0x3`.
+    #[test]
+    fn fragment_markers_chain_in_id_order_when_both_ride_one_fragment() {
+        let sn = 7u64;
+        let wire = build_fragment_wire(sn, &[], true, true, true, true, None);
+
+        assert_eq!(
+            wire[2],
+            super::FRAGMENT_FIRST_EXT_HEADER | wire_const::FLAG_T_Z,
+            "0x2 First comes first and CHAINS to the 0x3 that follows"
+        );
+        assert_eq!(
+            wire[3],
+            super::FRAGMENT_DROP_EXT_HEADER,
+            "0x3 Drop is last, so it carries no continuation bit"
+        );
+
+        let InboundFrame::Fragment { markers, .. } =
+            parse_inbound(&wire).expect("parse the two-marker fragment")
+        else {
+            panic!("not a Fragment");
+        };
+        assert!(
+            markers.first && markers.dropped,
+            "the walk reaches BOTH entries, not just the first"
+        );
+    }
+
+    /// R2238 — [`FragmentChain`] is the one producer: collected it is
+    /// byte-for-byte [`fragment_body`], and stopped part-way its `next_sn`
+    /// names the slot the stop fragment takes — the SN the chain would have
+    /// used next, so the conduit's ring stays gapless across an abandon.
+    #[test]
+    fn fragment_chain_streams_fragment_body_and_names_the_marker_sn() {
+        let body: Vec<u8> = (0..200u32).map(|i| (i * 7) as u8).collect();
+        let mtu = 64usize;
+        let mask = crate::sn::mask_from_res(0x02);
+        let base_sn = 7u64;
+
+        let whole = fragment_body(&body, true, mtu, base_sn, mask, None);
+        let streamed: Vec<Vec<u8>> =
+            FragmentChain::new(&body, true, mtu, base_sn, mask, None).collect();
+        assert_eq!(
+            streamed, whole,
+            "the streaming walk and the whole-chain call share one wire SSOT"
+        );
+        assert!(whole.len() >= 3, "200B at mtu 64 is a multi-fragment chain");
+
+        // Stop after TWO fragments: the marker's SN is the third fragment's.
+        let mut chain = FragmentChain::new(&body, true, mtu, base_sn, mask, None);
+        assert_eq!(
+            chain.remaining_fragments(),
+            whole.len(),
+            "an unwalked chain still owes every fragment"
+        );
+        let _ = chain.next().expect("first fragment");
+        let _ = chain.next().expect("second fragment");
+        assert_eq!(
+            chain.next_sn(),
+            crate::sn::increment(mask, crate::sn::increment(mask, base_sn)),
+            "next_sn is base + 2 after two emitted fragments"
+        );
+        assert_eq!(
+            chain.remaining_fragments(),
+            whole.len() - 2,
+            "and the chain owes exactly the unwalked tail"
+        );
+
+        // Walked to the end, the SN has still advanced past the LAST
+        // fragment — the value the next message on this conduit takes.
+        let mut all = FragmentChain::new(&body, true, mtu, base_sn, mask, None);
+        let n = all.by_ref().count();
+        assert_eq!(n, whole.len());
+        assert_eq!(all.remaining_fragments(), 0, "a finished chain owes none");
+        let mut expect = base_sn;
+        for _ in 0..n {
+            expect = crate::sn::increment(mask, expect);
+        }
+        assert_eq!(
+            all.next_sn(),
+            expect,
+            "the SN advances past every emitted fragment, the last included"
+        );
     }
 
     /// R311kb — a chain whose reserved block crosses the ring seam walks

@@ -971,6 +971,12 @@ pub enum LivelinessGetError {
     /// (a unicast session still mid-handshake — that one resolves; this
     /// one never will on multicast).
     RequiresUnicast,
+    /// R2238 (open-debt item 580) — the session's fragment TX budget ran out
+    /// while this Interest's chain was being emitted, so it was abandoned.
+    /// Wire bytes MAY have been emitted (followed by a `0x3 Drop` stop
+    /// fragment), which is why this is not folded into
+    /// [`Self::ExceedsCapacity`]; retry once the budget is refilled.
+    FragmentChainAbandoned,
 }
 
 impl std::fmt::Display for LivelinessGetError {
@@ -998,6 +1004,13 @@ impl std::fmt::Display for LivelinessGetError {
                  this session holds a multicast transport (no interest handshake \
                  bundle); the Interest was not emitted"
             ),
+            LivelinessGetError::FragmentChainAbandoned => write!(
+                f,
+                "LivelinessGetError: the session's fragment TX budget ran out while \
+                 emitting this Interest's chain, so it was abandoned (a 0x3 Drop \
+                 stop fragment followed any fragments already sent); retry once \
+                 the budget is refilled"
+            ),
         }
     }
 }
@@ -1016,6 +1029,9 @@ impl From<SendWireError> for LivelinessGetError {
             // Both mean "too large to send; no wire bytes emitted" — one
             // bound is the codec's, the other the reassembly slot's.
             SendWireError::ExceedsReassemblyCap => LivelinessGetError::ExceedsCapacity,
+            // R2238 — NOT folded in above: that pair's shared claim includes
+            // "no wire bytes emitted", which this one breaks.
+            SendWireError::FragmentTxBudgetExhausted => LivelinessGetError::FragmentChainAbandoned,
         }
     }
 }
@@ -1076,6 +1092,11 @@ pub enum QueryAliasError {
     /// analogue of; the `Session::actions()` projection rejects with
     /// `SendWireError::UnsupportedVariant`. No wire bytes were emitted.
     RequiresUnicast,
+    /// R2238 (open-debt item 580) — the session's fragment TX budget ran out
+    /// while this query's chain was being emitted, so it was abandoned.
+    /// Unlike every variant above, wire bytes MAY have been emitted (followed
+    /// by a `0x3 Drop` stop fragment); retry once the budget is refilled.
+    FragmentChainAbandoned,
 }
 
 impl std::fmt::Display for QueryAliasError {
@@ -1108,6 +1129,13 @@ impl std::fmt::Display for QueryAliasError {
                  session holds a multicast transport (no query handshake bundle / \
                  outbound mapping table); the Request(Query) was not emitted"
             ),
+            QueryAliasError::FragmentChainAbandoned => write!(
+                f,
+                "QueryAliasError: the session's fragment TX budget ran out while \
+                 emitting this Request(Query)'s chain, so it was abandoned (a 0x3 \
+                 Drop stop fragment followed any fragments already sent); retry \
+                 once the budget is refilled"
+            ),
         }
     }
 }
@@ -1124,6 +1152,9 @@ impl From<SendWireError> for QueryAliasError {
             // Both mean "too large to send; no wire bytes emitted" — one
             // bound is the codec's, the other the reassembly slot's.
             SendWireError::ExceedsReassemblyCap => QueryAliasError::ExceedsCapacity,
+            // R2238 — NOT folded in above: that pair's shared claim includes
+            // "no wire bytes emitted", which this one breaks.
+            SendWireError::FragmentTxBudgetExhausted => QueryAliasError::FragmentChainAbandoned,
         }
     }
 }
