@@ -811,6 +811,15 @@ fn main() -> ExitCode {
                     tls_key: parse_pair(rest, "--tls-key"),
                     quic_cert: parse_pair(rest, "--quic-cert"),
                     quic_key: parse_pair(rest, "--quic-key"),
+                    // R2233 (open-debt item 585) — the DIAL twin: a `--connect
+                    // tls/...` / `quic/...` from this peer verifies the peer's
+                    // server cert against these. The same two flags the one-shot
+                    // Initiator has always read; the mesh run-modes could not use
+                    // them until the loop had somewhere to put the material.
+                    dial_certs: crate::runner::DialCertPaths {
+                        tls_ca: parse_pair(rest, "--tls-ca"),
+                        quic_ca: parse_pair(rest, "--quic-ca"),
+                    },
                     #[cfg(feature = "routing-interest-pending-gc")]
                     interest_timeout_ms,
                     #[cfg(feature = "scouting-responder")]
@@ -1022,6 +1031,14 @@ fn main() -> ExitCode {
                     quic_key: parse_pair(rest, "--quic-key"),
                 },
                 crate::runner::RouterHatOpts {
+                    // R2233 (open-debt item 585) — the DIAL mirror of the
+                    // `AcceptCertPaths` above: a `--connect quic/...` federation
+                    // link from this router-hat verifies the far router's server
+                    // cert against these.
+                    dial_certs: crate::runner::DialCertPaths {
+                        tls_ca: parse_pair(rest, "--tls-ca"),
+                        quic_ca: parse_pair(rest, "--quic-ca"),
+                    },
                     multicast_qos,
                     // R311y454 — `--multicast-locator udp/<group>:<port>[#iface=<name>]`:
                     // the router's data-plane multicast group, spelled as a LOCATOR so

@@ -60,6 +60,14 @@ use wz_session_core::session_timeouts::SessionTimeouts;
 
 const ITER_CAP: usize = 8192;
 
+/// R2233 (open-debt item 585) — `FaceSources::dial_targets` carries LOCATORS, so
+/// a fixture builds its dial target through the locator SSOT rather than a
+/// struct literal: the fixture then reads the same grammar a configured
+/// `--connect` does, and a new locator field cannot silently default here.
+fn tcp_dial(addr: std::net::SocketAddr) -> wz_session_core::locator::AnyLocator {
+    wz_session_core::locator::parse_any_locator(&format!("tcp/{addr}")).expect("tcp/<addr> locator")
+}
+
 /// The state a [`CapturingForwarder`] threads out of a production loop so the
 /// test can observe the aggregated session WITHOUT reaching into the loop's
 /// internals: the primary session's actions handle (captured at `register`, its
@@ -253,6 +261,8 @@ async fn deploy_active_two_links_aggregate_segregate_reject_survive() {
         FaceSources {
             listeners: vec![BoundListener::Tcp(b_listener)],
             dial_targets: vec![],
+            // Accept-only in this fixture: no dial, so no client trust material.
+            dial_config: Arc::new(wz_runtime_tokio::session_open::DialConfig::default()),
             dial_intents: None,
             mcast_ingress: None,
             mcast_members: None,
@@ -468,6 +478,8 @@ async fn deploy_active_dial_side_aggregates_through_the_loop() {
         FaceSources {
             listeners: vec![BoundListener::Tcp(b_listener)],
             dial_targets: vec![],
+            // Accept-only in this fixture: no dial, so no client trust material.
+            dial_config: Arc::new(wz_runtime_tokio::session_open::DialConfig::default()),
             dial_intents: None,
             mcast_ingress: None,
             mcast_members: None,
@@ -499,7 +511,9 @@ async fn deploy_active_dial_side_aggregates_through_the_loop() {
     let a_loop = peer_loop(
         FaceSources {
             listeners: vec![BoundListener::Tcp(a_listener)],
-            dial_targets: vec![b_addr, b_addr],
+            dial_targets: vec![tcp_dial(b_addr), tcp_dial(b_addr)],
+            // The dial half of this fixture is plain tcp — no cert material.
+            dial_config: Arc::new(wz_runtime_tokio::session_open::DialConfig::default()),
             dial_intents: None,
             mcast_ingress: None,
             mcast_members: None,
@@ -601,6 +615,8 @@ async fn deploy_active_qos_priority_segregates_across_links() {
         FaceSources {
             listeners: vec![BoundListener::Tcp(b_listener)],
             dial_targets: vec![],
+            // Accept-only in this fixture: no dial, so no client trust material.
+            dial_config: Arc::new(wz_runtime_tokio::session_open::DialConfig::default()),
             dial_intents: None,
             mcast_ingress: None,
             mcast_members: None,

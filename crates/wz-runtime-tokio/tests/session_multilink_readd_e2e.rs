@@ -227,7 +227,16 @@ async fn readd_dialed_link_auto_reconnects_onto_surviving_session() {
     let a_loop = peer_loop(
         FaceSources {
             listeners: vec![BoundListener::Tcp(a_listener)],
-            dial_targets: vec![b_addr, b_addr],
+            // R2233 (open-debt item 585) — LOCATORS, built through the locator
+            // SSOT so the fixture reads the grammar a configured `--connect` does.
+            dial_targets: vec![
+                wz_session_core::locator::parse_any_locator(&format!("tcp/{b_addr}"))
+                    .expect("tcp/<addr> locator"),
+                wz_session_core::locator::parse_any_locator(&format!("tcp/{b_addr}"))
+                    .expect("tcp/<addr> locator"),
+            ],
+            // Plain tcp dials — no client trust material.
+            dial_config: Arc::new(wz_runtime_tokio::session_open::DialConfig::default()),
             dial_intents: None,
             mcast_ingress: None,
             mcast_members: None,

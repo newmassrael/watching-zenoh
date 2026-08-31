@@ -45,8 +45,19 @@ use wz_runtime_tokio::accept_loop::{peer_loop, AcceptEvent, FaceSources, NoOpFor
 use wz_runtime_tokio::link_pipeline::bind_tcp;
 use wz_runtime_tokio::retry_period::RetryPolicy;
 use wz_runtime_tokio::runtime_impl::TokioTime;
-use wz_runtime_tokio::session_open::{BoundListener, SessionOffer, DEFAULT_OPEN_TICK_MS};
+use wz_runtime_tokio::session_open::{
+    BoundListener, DialConfig, SessionOffer, DEFAULT_OPEN_TICK_MS,
+};
 use wz_runtime_tokio_test_support::fixture_session_init_params;
+use wz_session_core::locator::{parse_any_locator, AnyLocator};
+
+/// R2233 (open-debt item 585) — the dial axis's currency is a LOCATOR now, on
+/// `FaceSources::dial_targets` and on the reconcile channel alike. Built through
+/// the locator SSOT so the fixture reads the grammar a configured `--connect`
+/// does rather than a struct literal.
+fn tcp_dial(addr: SocketAddr) -> AnyLocator {
+    parse_any_locator(&format!("tcp/{addr}")).expect("tcp/<addr> locator")
+}
 
 /// A loopback address with NOTHING listening: bind it, read the port, drop the
 /// listener. A connect there is REFUSED immediately rather than timing out, which
@@ -88,7 +99,8 @@ async fn observed_gaps_ms(retry: RetryPolicy, want: usize) -> Vec<u128> {
             listeners: vec![listener],
             // The ONE unreachable desired peer. Seeded statically, so it enters
             // `desired` and every failed dial is re-scheduled.
-            dial_targets: vec![target],
+            dial_targets: vec![tcp_dial(target)],
+            dial_config: Arc::new(DialConfig::default()),
             dial_intents: None,
             mcast_ingress: None,
             mcast_members: None,
@@ -192,7 +204,7 @@ async fn a_peer_removed_and_re_added_starts_over_at_the_initial_wait() {
             .expect("bind SUT listener"),
     );
     let (shut_tx, shut_rx) = watch::channel(false);
-    let (reconcile_tx, reconcile_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<SocketAddr>>();
+    let (reconcile_tx, reconcile_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<AnyLocator>>();
 
     let stamps: Arc<StdMutex<Vec<Instant>>> = Arc::new(StdMutex::new(Vec::new()));
     let sink = stamps.clone();
@@ -201,7 +213,8 @@ async fn a_peer_removed_and_re_added_starts_over_at_the_initial_wait() {
     let loop_fut = peer_loop(
         FaceSources {
             listeners: vec![listener],
-            dial_targets: vec![target],
+            dial_targets: vec![tcp_dial(target)],
+            dial_config: Arc::new(DialConfig::default()),
             dial_intents: None,
             mcast_ingress: None,
             mcast_members: None,
@@ -236,7 +249,9 @@ async fn a_peer_removed_and_re_added_starts_over_at_the_initial_wait() {
                 // the address was no longer desired the loop dropped it instead of
                 // re-scheduling — which is the moment `forget` runs. Re-add it.
                 4 => {
-                    reconcile_tx.send(vec![target]).expect("send re-add");
+                    reconcile_tx
+                        .send(vec![tcp_dial(target)])
+                        .expect("send re-add");
                 }
                 // 5 = the reconcile-add's immediate dial failing. 6 = the retry it
                 // scheduled, whose wait is the value under test.

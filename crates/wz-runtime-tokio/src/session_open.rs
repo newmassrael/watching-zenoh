@@ -40,7 +40,7 @@ use wz_session_core::link::InterceptorLink;
 #[cfg(feature = "transport-link-serial")]
 use wz_session_core::locator::SerialEndpoint;
 use wz_session_core::locator::{
-    parse_any_locator, AnyLocator, AnyLocatorError, LocatorParseError, Proto,
+    parse_any_locator, AnyLocator, AnyLocatorError, LocatorParseError, ParsedLocator, Proto,
 };
 #[cfg(feature = "scouting-static")]
 use wz_session_core::scout_static::{resolve_static_config, StaticRole};
@@ -2300,13 +2300,13 @@ pub async fn dial_endpoint(connect: &str, cfg: &DialConfig) -> io::Result<Dialed
     dial_locator(locator, cfg).await
 }
 
-/// Why a configured MESH dial target did not resolve to the [`SocketAddr`] a
+/// Why a configured MESH dial target did not resolve to the numeric locator a
 /// face loop holds in `FaceSources::dial_targets`.
 ///
 /// Three outcomes, kept apart because they are three different operator
 /// mistakes: the string is not an endpoint at all, it is a perfectly good
-/// endpoint of a scheme this side cannot carry, or it named a host that does
-/// not resolve. Before R311y809 all three arrived as one
+/// endpoint whose SHAPE has no address to identify it by, or it named a host
+/// that does not resolve. Before R311y809 all three arrived as one
 /// `invalid --connect dial target`, because the mesh hosts parsed the string
 /// with a bare `str::parse::<SocketAddr>()` instead of the shared classifier.
 #[derive(Debug)]
@@ -2317,24 +2317,30 @@ pub enum DialTargetError {
     /// exactly what Layer C1bz counts).
     Malformed(AnyLocatorError),
     /// A well-formed locator whose scheme the mesh DIAL side cannot carry —
-    /// everything except `tcp`, today.
+    /// the endpoint shapes with no `SocketAddr`: `serial` / `unixsock-stream` /
+    /// `unixpipe` / `vsock`.
     ///
-    /// This is a capability statement, not a parse failure, and it is worth
-    /// its own variant because the ACCEPT side of the same loop DOES carry the
-    /// stream family: `BoundListener::accept_raw` has taken tcp/ws/tls since
-    /// R311y376, while `accept_loop::dial_face` still opens a bare
-    /// `TcpStream::connect`. The asymmetry is that function's own declared
-    /// follow-up ("generalizing it — locator / DNS / TLS dial, reusing
-    /// `connect_and_open_session` — is a later `routing-peer` atom, the
-    /// dial-side twin of this stage"), and naming it here is what turns it
-    /// from a confusing rejection into a reported one.
+    /// R2233 (open-debt item 585) — this used to mean "everything except
+    /// `tcp`", because `accept_loop::dial_face` opened a bare
+    /// `TcpStream::connect` and bypassed the [`dial_locator`] scheme
+    /// dispatcher entirely. The dial side now goes THROUGH that dispatcher, so
+    /// every IP-family scheme (`tcp` / `udp` / `tls` / `ws` / `quic` /
+    /// `quic-datagram`) is mesh-dialable and this variant reports only what is
+    /// still genuinely out of scope.
+    ///
+    /// The surviving limit is an IDENTITY one, not a transport one: before the
+    /// handshake a mesh dial target's only name is its address (`accept_loop`'s
+    /// dial dedup, the `desired` set, and the per-address re-dial schedule all
+    /// key on it), and these four endpoint shapes have no address to be named
+    /// by. Admitting one means giving that arm its own pre-handshake identity
+    /// first — see [`mesh_dial_plan`], which is where the classification lives.
     UnsupportedScheme {
         /// The locator as configured, so the operator sees their own string.
         target: String,
         /// The scheme token that cannot be dialed on this side.
         scheme: &'static str,
     },
-    /// A `tcp` DNS name that did not resolve.
+    /// An IP-family DNS name that did not resolve.
     Resolve(io::Error),
 }
 
@@ -2344,9 +2350,10 @@ impl std::fmt::Display for DialTargetError {
             Self::Malformed(e) => write!(f, "not a dialable endpoint: {e:?}"),
             Self::UnsupportedScheme { target, scheme } => write!(
                 f,
-                "{target:?} is a valid {scheme} locator, but the mesh dial side is \
-                 tcp-only (its accept side does carry {scheme}); \
-                 see accept_loop::dial_face"
+                "{target:?} is a valid {scheme} locator, but a {scheme} endpoint has \
+                 no address to identify it by before the handshake — which is what \
+                 the mesh dial's dedup and its re-dial schedule key on; \
+                 see session_open::mesh_dial_plan"
             ),
             Self::Resolve(e) => write!(f, "the host did not resolve: {e}"),
         }
@@ -2363,16 +2370,84 @@ impl From<DialTargetError> for io::Error {
     }
 }
 
+/// Split a mesh dial target into the numeric IP endpoint the loop dials — the
+/// dial PLAN — or hand the locator back when it has no such endpoint.
+///
+/// THE one place that answers "can the mesh dial side carry this locator", and
+/// it answers with the [`ParsedLocator`] rather than a boolean so the caller
+/// cannot re-derive the address by a second route. Both the configuration-time
+/// resolver ([`resolve_mesh_dial_target`]) and the face loop's own seam read
+/// it, so the policy is stated once.
+///
+/// `Ok` for every IP-family endpoint: it carries a `SocketAddr`, which is the
+/// mesh dial's PRE-HANDSHAKE IDENTITY — the dedup key for "am I already dialing
+/// this", the `desired` connect-set member, and the per-address re-dial
+/// schedule's key. The scheme itself is no longer part of the question, because
+/// [`dial_locator`] dispatches on it (R2233, open-debt item 585).
+///
+/// `Err` — carrying the locator back so the caller reports it in its own idiom —
+/// for the four endpoint shapes that have no `SocketAddr` at all
+/// (`serial` / `unixsock-stream` / `unixpipe` / `vsock`) and for
+/// [`AnyLocator::Named`], whose address exists only after a DNS resolution this
+/// synchronous seam deliberately does not perform: the face loop must never
+/// block on a resolver, so a name is resolved at configuration time by
+/// [`resolve_mesh_dial_target`] and reaches the loop already numeric.
+pub fn mesh_dial_plan(locator: AnyLocator) -> Result<ParsedLocator, AnyLocator> {
+    match locator {
+        AnyLocator::Ip(parsed) => Ok(parsed),
+        // Exhaustive, no catch-all: a new `AnyLocator` variant must force a
+        // decision about its pre-handshake identity here rather than silently
+        // inheriting "not mesh-dialable" (the R311y408 lesson).
+        other @ (AnyLocator::Named { .. }
+        | AnyLocator::Serial(_)
+        | AnyLocator::Unixsock(_)
+        | AnyLocator::Unixpipe(_)
+        | AnyLocator::Vsock(_)) => Err(other),
+    }
+}
+
+/// The scheme token of any [`AnyLocator`], for the messages that have to name
+/// the scheme they are refusing.
+///
+/// Total by construction (every variant, every [`Proto`]) so no caller needs an
+/// `unreachable!` arm — the shape the previous spelling of this mapping needed,
+/// and the reason it is lifted out of the refusal site.
+pub fn locator_scheme(locator: &AnyLocator) -> &'static str {
+    fn proto_scheme(proto: Proto) -> &'static str {
+        match proto {
+            Proto::Tcp => "tcp",
+            Proto::Udp => "udp",
+            Proto::Tls => "tls",
+            Proto::Ws => "ws",
+            Proto::Quic => "quic",
+            Proto::QuicDatagram => "quic-datagram",
+        }
+    }
+    match locator {
+        AnyLocator::Ip(p) => proto_scheme(p.proto),
+        AnyLocator::Named { proto, .. } => proto_scheme(*proto),
+        AnyLocator::Serial(_) => "serial",
+        AnyLocator::Unixsock(_) => "unixsock-stream",
+        AnyLocator::Unixpipe(_) => "unixpipe",
+        AnyLocator::Vsock(_) => "vsock",
+    }
+}
+
 /// Resolve ONE configured mesh dial target — a `--connect`-style endpoint
-/// string — into the [`SocketAddr`] a face loop dials.
+/// string — into the numeric [`AnyLocator`] a face loop dials.
 ///
-/// The mesh hosts need a resolved address rather than a locator because the
-/// address is also their DEDUP AND RE-DIAL KEY (`FaceSources::dial_targets`,
-/// the `desired` set, and the per-address `RedialSchedule`); carrying the
-/// locator instead is the larger change that has to move all three, and is
-/// not this seam.
+/// R2233 (open-debt item 585) — this used to return a bare [`SocketAddr`] and
+/// reject every non-`tcp` scheme, because the loop dialed with
+/// `TcpStream::connect`. It returns the LOCATOR now: the scheme has to survive
+/// to the loop for [`dial_locator`] to dispatch on, and the address the loop
+/// still needs as its dedup key is carried inside it ([`mesh_dial_plan`] is the
+/// accessor, so the two can never be derived apart).
 ///
-/// What this DOES fix is that the resolution was never the shared one. Both
+/// The returned locator is always [`AnyLocator::Ip`] — a name is resolved HERE,
+/// at configuration time, where blocking on a resolver is free, and never in
+/// the loop.
+///
+/// What this ALSO fixes is that the resolution was never the shared one. Both
 /// mesh hosts parsed their `--connect` targets with a bare
 /// `str::parse::<SocketAddr>()`, so a `tcp/1.2.3.4:7447` — zenoh's own
 /// spelling, and what every other wz entry point accepts — was rejected as
@@ -2383,66 +2458,52 @@ impl From<DialTargetError> for io::Error {
 ///
 /// - `tcp/HOST:PORT`, and the scheme-less `HOST:PORT` convenience, both land
 ///   as `tcp` through the one classifier rather than through two code paths.
-/// - A `tcp` DNS name resolves through [`resolve_locator_addrs`], the same
-///   resolver the single-session dial uses.
-/// - Every other scheme gets [`DialTargetError::UnsupportedScheme`], which
-///   REPORTS the mesh dial side's tcp-only limit instead of disguising it as
-///   a malformed string.
+/// - A DNS name of ANY IP-family scheme resolves through
+///   [`resolve_locator_addrs`], the same resolver the single-session dial uses
+///   (R2233 widened this from `tcp` alone: the resolution is the address
+///   token's business, not the scheme's).
+/// - An endpoint shape with no address at all gets
+///   [`DialTargetError::UnsupportedScheme`], which REPORTS the surviving
+///   pre-handshake-identity limit instead of disguising it as a malformed
+///   string.
 ///
 /// ONE DOCUMENTED DIVERGENCE from wz's single-session dial: a resolved name
 /// yields the FIRST address, where `dial_locator` walks all of them. zenoh
 /// takes the first too (`.next()`), and here it is additionally forced — the
 /// address is the loop's dedup key, so "this target" has to be one address,
 /// not a set.
-/// The return type is spelled `std::net::SocketAddr` in full ON PURPOSE: this
-/// module's `SocketAddr` import is `transport-link-udp`-gated, and this seam is
-/// feature-independent, so naming the short form here would make an ungated
-/// signature depend on a gated import (R311y809 — caught by the pre-push doc
-/// gate, not by clippy `--all-features`, which has that feature on).
-pub async fn resolve_mesh_dial_target(
-    target: &str,
-) -> Result<std::net::SocketAddr, DialTargetError> {
-    // Exhaustive per variant and per proto, with no catch-all: the R311y408
-    // lesson applied to a third match — a new `Proto` must force a decision
-    // here rather than silently landing in an "unsupported" bucket that was
-    // never reconsidered.
-    match plan_endpoint(target).map_err(DialTargetError::Malformed)? {
-        AnyLocator::Ip(parsed) => match parsed.proto {
-            Proto::Tcp => Ok(parsed.addr),
-            Proto::Udp => Err(unsupported_mesh_dial(target, "udp")),
-            Proto::Tls => Err(unsupported_mesh_dial(target, "tls")),
-            Proto::Ws => Err(unsupported_mesh_dial(target, "ws")),
-            Proto::Quic => Err(unsupported_mesh_dial(target, "quic")),
-            Proto::QuicDatagram => Err(unsupported_mesh_dial(target, "quic-datagram")),
-        },
+pub async fn resolve_mesh_dial_target(target: &str) -> Result<AnyLocator, DialTargetError> {
+    // A name is resolved HERE so the loop never blocks on a resolver; the
+    // reconstruction keeps the scheme and the `#iface=` bind, and cannot keep
+    // the multicast tail because `Named` does not carry one (a DNS-named
+    // endpoint is not a multicast group).
+    let locator = match plan_endpoint(target).map_err(DialTargetError::Malformed)? {
         AnyLocator::Named {
-            proto: Proto::Tcp,
+            proto,
             host,
             port,
-            ..
+            iface,
         } => {
             let addrs = crate::link_pipeline::resolve_locator_addrs(&host, port)
                 .await
                 .map_err(DialTargetError::Resolve)?;
             // `resolve_locator_addrs` rejects an empty result itself, so the
             // first element exists; taking it is zenoh's `.next()`.
-            Ok(addrs[0])
+            AnyLocator::Ip(ParsedLocator {
+                proto,
+                addr: addrs[0],
+                iface,
+                mcast_ttl: None,
+                mcast_join: Vec::new(),
+            })
         }
-        AnyLocator::Named { proto, .. } => Err(unsupported_mesh_dial(
-            target,
-            match proto {
-                Proto::Tcp => unreachable!("the Tcp arm is matched above"),
-                Proto::Udp => "udp",
-                Proto::Tls => "tls",
-                Proto::Ws => "ws",
-                Proto::Quic => "quic",
-                Proto::QuicDatagram => "quic-datagram",
-            },
-        )),
-        AnyLocator::Serial(_) => Err(unsupported_mesh_dial(target, "serial")),
-        AnyLocator::Unixsock(_) => Err(unsupported_mesh_dial(target, "unixsock-stream")),
-        AnyLocator::Unixpipe(_) => Err(unsupported_mesh_dial(target, "unixpipe")),
-        AnyLocator::Vsock(_) => Err(unsupported_mesh_dial(target, "vsock")),
+        other => other,
+    };
+    // ONE classification, shared with the loop's own seam: a locator this
+    // rejects is one with no pre-handshake identity, whatever its scheme.
+    match mesh_dial_plan(locator) {
+        Ok(parsed) => Ok(AnyLocator::Ip(parsed)),
+        Err(rejected) => Err(unsupported_mesh_dial(target, locator_scheme(&rejected))),
     }
 }
 
@@ -5206,31 +5267,73 @@ mod tests {
             .await
             .expect("tcp/ host:port resolves");
         assert_eq!(bare, schemed);
-        assert_eq!(bare.port(), 7447);
+        let plan = mesh_dial_plan(bare).expect("a tcp target has an address identity");
+        assert_eq!(plan.addr.port(), 7447);
+        assert_eq!(plan.proto, Proto::Tcp);
     }
 
     #[tokio::test]
-    async fn mesh_dial_target_resolves_a_tcp_name() {
-        // A DNS-named mesh peer was impossible before: `str::parse::<SocketAddr>`
-        // has no resolver. `localhost` is the one name a unit may assume.
-        let addr = resolve_mesh_dial_target("tcp/localhost:7447")
-            .await
-            .expect("localhost resolves");
-        assert!(addr.ip().is_loopback(), "expected loopback, got {addr}");
-        assert_eq!(addr.port(), 7447);
+    async fn mesh_dial_target_resolves_a_name_of_any_ip_scheme() {
+        // A DNS-named mesh peer was impossible before R311y809 (`str::parse::
+        // <SocketAddr>` has no resolver) and, until R2233, possible only for
+        // `tcp` — resolution had been written as a property of the SCHEME when it
+        // is a property of the ADDRESS TOKEN. `localhost` is the one name a unit
+        // may assume.
+        for (target, proto) in [
+            ("tcp/localhost:7447", Proto::Tcp),
+            ("quic/localhost:7447", Proto::Quic),
+            ("tls/localhost:7447", Proto::Tls),
+        ] {
+            let resolved = resolve_mesh_dial_target(target)
+                .await
+                .unwrap_or_else(|e| panic!("{target} resolves: {e}"));
+            let plan = mesh_dial_plan(resolved).expect("a resolved name is numeric");
+            assert!(
+                plan.addr.ip().is_loopback(),
+                "expected loopback for {target}, got {}",
+                plan.addr
+            );
+            assert_eq!(plan.addr.port(), 7447);
+            assert_eq!(plan.proto, proto, "the scheme must survive resolution");
+        }
+    }
+
+    /// R2233 (open-debt item 585) — the INVERTED half of what this seam used to
+    /// assert. `tls` / `ws` / `quic` / `udp` were refused here because
+    /// `accept_loop::dial_face` bypassed [`dial_locator`] and opened a raw
+    /// `TcpStream`; the loop dispatches on scheme now, so a mesh dial target of
+    /// any IP-family scheme resolves — and the SCHEME reaches the loop, which is
+    /// the whole point (a target flattened to a `SocketAddr` could only be TCP).
+    #[tokio::test]
+    async fn mesh_dial_target_now_carries_every_ip_scheme() {
+        for (target, proto) in [
+            ("tls/127.0.0.1:7447", Proto::Tls),
+            ("ws/127.0.0.1:7447", Proto::Ws),
+            ("quic/127.0.0.1:7447", Proto::Quic),
+            ("udp/127.0.0.1:7447", Proto::Udp),
+        ] {
+            let resolved = resolve_mesh_dial_target(target)
+                .await
+                .unwrap_or_else(|e| panic!("{target} must now resolve: {e}"));
+            let plan = mesh_dial_plan(resolved).expect("an IP endpoint has an address identity");
+            assert_eq!(plan.proto, proto);
+            assert_eq!(plan.addr, "127.0.0.1:7447".parse().unwrap());
+        }
     }
 
     #[tokio::test]
-    async fn mesh_dial_target_reports_the_scheme_it_cannot_dial() {
-        // The point of the variant: these are VALID locators whose scheme the
-        // mesh dial side cannot carry — and whose scheme its ACCEPT side does.
-        // A `Malformed` here would be the old lie in a new place.
+    async fn mesh_dial_target_reports_the_endpoint_shape_it_cannot_identify() {
+        // What SURVIVES the widening: an endpoint with no `SocketAddr` cannot be
+        // a mesh dial target, because the mesh dial's dedup key, its `desired`
+        // connect-set and its per-address re-dial schedule are all keyed by
+        // address. This is an IDENTITY limit, not a transport one — and it is a
+        // capability statement, so a `Malformed` here would be the old lie in a
+        // new place.
         for (target, scheme) in [
-            ("tls/127.0.0.1:7447", "tls"),
-            ("ws/127.0.0.1:7447", "ws"),
-            ("quic/127.0.0.1:7447", "quic"),
-            ("udp/127.0.0.1:7447", "udp"),
             ("unixsock-stream//tmp/wz.sock", "unixsock-stream"),
+            ("unixpipe//tmp/wz.pipe", "unixpipe"),
+            ("vsock/3:7447", "vsock"),
+            ("serial//dev/ttyUSB0#baudrate=115200", "serial"),
         ] {
             match resolve_mesh_dial_target(target).await {
                 Err(DialTargetError::UnsupportedScheme {
@@ -5242,6 +5345,45 @@ mod tests {
                 }
                 other => panic!("expected UnsupportedScheme for {target:?}, got {other:?}"),
             }
+        }
+    }
+
+    /// The loop's own seam reads the SAME classification the resolver does, so a
+    /// caller that hands `FaceSources::dial_targets` a locator directly (the
+    /// field is public) gets the identical verdict. Both directions, so the
+    /// classifier cannot pass by admitting everything.
+    #[test]
+    fn mesh_dial_plan_admits_exactly_the_endpoints_with_an_address() {
+        for admitted in [
+            "tcp/127.0.0.1:7447",
+            "udp/127.0.0.1:7447",
+            "tls/127.0.0.1:7447",
+            "ws/127.0.0.1:7447",
+            "quic/127.0.0.1:7447",
+            "quic-datagram/127.0.0.1:7447",
+        ] {
+            let locator = parse_any_locator(admitted).expect("parses");
+            let plan = mesh_dial_plan(locator).unwrap_or_else(|l| {
+                panic!("{admitted} must be mesh-dialable, got {l:?}");
+            });
+            assert_eq!(plan.addr, "127.0.0.1:7447".parse().unwrap());
+        }
+        for refused in [
+            // No address at all.
+            "unixsock-stream//tmp/wz.sock",
+            "unixpipe//tmp/wz.pipe",
+            "vsock/3:7447",
+            "serial//dev/ttyUSB0#baudrate=115200",
+            // An address that exists only after a resolution this synchronous
+            // seam does not perform — the loop must never block on a resolver.
+            "tcp/example.org:7447",
+        ] {
+            let locator = parse_any_locator(refused).expect("parses");
+            let scheme = locator_scheme(&locator);
+            assert!(
+                mesh_dial_plan(locator).is_err(),
+                "{refused} ({scheme}) has no pre-handshake address identity"
+            );
         }
     }
 

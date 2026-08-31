@@ -665,6 +665,37 @@ impl AcceptCertPaths {
     }
 }
 
+/// R2233 (open-debt item 585) — the DIAL mirror of [`AcceptCertPaths`]: the
+/// `--tls-ca` / `--quic-ca` root-CA PEM paths a mesh DIAL verifies its peer
+/// against.
+///
+/// Until this round these two flags existed only on the one-shot
+/// `Role::Initiator` arm, and `--tls-ca`'s own doc said so ("Read only by the
+/// one-shot `establish_link`"). That was not an oversight in the flag plumbing:
+/// the mesh loop had nowhere to put the material, because `FaceSources` carried
+/// no trust field at all and its dial called `TcpStream::connect`. With
+/// `FaceSources::dial_config` in place, a mesh node that dials `quic/...` or
+/// `tls/...` needs exactly this, and a build without it would leave the new
+/// capability present and unreachable.
+///
+/// `Default` (both `None`) is [`DialConfig::default`] — "no client trust
+/// material" — under which a `tls/` or `quic/` dial surfaces the runtime's typed
+/// `Unsupported`. That is one fact under one name, so there is no second
+/// spelling of "absent" here.
+#[cfg(any(feature = "routing-peer", feature = "router-hat-router"))]
+#[derive(Default)]
+pub(crate) struct DialCertPaths {
+    pub tls_ca: Option<String>,
+    pub quic_ca: Option<String>,
+}
+
+#[cfg(any(feature = "routing-peer", feature = "router-hat-router"))]
+impl DialCertPaths {
+    fn build(&self) -> io::Result<DialConfig> {
+        build_dial_config(&self.tls_ca, &self.quic_ca)
+    }
+}
+
 /// R311y375/y401 — build the [`AcceptConfig`] for a one-shot `--listen`, the accept
 /// mirror of [`build_dial_config`]. Cert-free acceptors (tcp/ws/udp) take
 /// [`AcceptConfig::default`]; a cert acceptor threads its `--<scheme>-cert` +
@@ -3609,14 +3640,20 @@ async fn run_router_until(
 /// so an operator reading stderr knows which host refused. Fail-fast per target
 /// (the prior discipline): a malformed or undialable entry stops startup rather
 /// than silently dropping a mesh link.
+///
+/// R2233 (open-debt item 585) — returns LOCATORS. It used to return
+/// `SocketAddr`s, which is where every mesh dial's scheme was thrown away: the
+/// loop then had nothing but an address and could only `TcpStream::connect` it,
+/// so a `--connect quic/...` on a `--peer` was rejected at this seam as
+/// "unsupported" no matter that the same node's ACCEPT side carried quic.
 #[cfg(any(feature = "routing-peer", feature = "router-hat-router"))]
 async fn resolve_dial_targets(
     role: &str,
     dial_targets: &[String],
-) -> io::Result<Vec<std::net::SocketAddr>> {
+) -> io::Result<Vec<wz::runtime_tokio::locator::AnyLocator>> {
     let mut dials = Vec::with_capacity(dial_targets.len());
     for target in dial_targets {
-        let addr = wz::runtime_tokio::session_open::resolve_mesh_dial_target(target)
+        let locator = wz::runtime_tokio::session_open::resolve_mesh_dial_target(target)
             .await
             .map_err(|e| {
                 io::Error::new(
@@ -3624,7 +3661,7 @@ async fn resolve_dial_targets(
                     format!("wz-ap-demo {role}: --connect dial target {e}"),
                 )
             })?;
-        dials.push(addr);
+        dials.push(locator);
     }
     Ok(dials)
 }
@@ -3856,6 +3893,11 @@ pub(crate) struct PeerOpts {
     pub tls_key: Option<String>,
     pub quic_cert: Option<String>,
     pub quic_key: Option<String>,
+    /// R2233 (open-debt item 585) — the DIAL twin of the four above: the
+    /// `--tls-ca` / `--quic-ca` root CAs a `--connect tls/...` / `quic/...`
+    /// verifies the PEER against. Cert-free schemes leave both `None`. See
+    /// [`DialCertPaths`] for why a mesh run-mode could not carry these before.
+    pub dial_certs: DialCertPaths,
     /// R311y512 (`routing-interest-pending-gc`) — zenoh's
     /// `routing.interests.timeout` in milliseconds (`--interest-timeout`): how long
     /// a CLIENT's CURRENT interest, once BROKERED to an upstream face, waits for
@@ -4097,10 +4139,11 @@ async fn run_peer_until(
         },
     };
 
-    // Parse the outbound dial targets — TCP socket addresses for this atom. Only the
-    // DIAL side is TCP-only; the LISTEN side is transport-general (unixpipe-capable as
-    // of R311y397, above). A malformed target fails fast rather than silently dropping
-    // a mesh link.
+    // Parse the outbound dial targets. R2233 (open-debt item 585) — this comment
+    // used to read "TCP socket addresses for this atom. Only the DIAL side is
+    // TCP-only; the LISTEN side is transport-general", and that asymmetry is gone:
+    // both sides carry the whole IP family now, the dial through `dial_locator`.
+    // A malformed target still fails fast rather than silently dropping a mesh link.
     let dials = resolve_dial_targets("peer", dial_targets).await?;
 
     log::info!(
@@ -4809,6 +4852,12 @@ async fn run_peer_until(
             // inbound peer reaches this node at any address its document named.
             listeners,
             dial_targets: dials,
+            // R2233 (open-debt item 585) — the peer's OUTBOUND trust material.
+            // Built once here, shared by every dial and every re-dial the loop
+            // makes; the default (both CAs absent) is the cert-free mesh, under
+            // which a `tls/` or `quic/` target dials to the runtime's typed
+            // `Unsupported` rather than to a silent TCP connect.
+            dial_config: std::sync::Arc::new(opts.dial_certs.build()?),
             dial_intents,
             // A peer node hosts no router multicast ingress plane.
             mcast_ingress: None,
@@ -5446,6 +5495,12 @@ pub(crate) struct RouterHatOpts {
     /// the OFF policy reachable, which until this round it was not: the wz
     /// router stamped whatever the operator's document said.
     pub timestamping: crate::args::NodeTimestamping,
+    /// R2233 (open-debt item 585) — the `--tls-ca` / `--quic-ca` root CAs this
+    /// router-hat's OUTBOUND federation dials verify their peer against, the
+    /// dial mirror of the `cert_paths` its listen presents. A knob rather than
+    /// identity/topology, which is why it belongs in this bundle; see
+    /// [`DialCertPaths`].
+    pub dial_certs: DialCertPaths,
 }
 
 #[cfg(feature = "router-hat-router")]
@@ -5626,29 +5681,24 @@ async fn run_router_hat_until(
     // `--connect-after <ms>:<addr>[,<addr>...]` schedules a runtime ADD of the
     // listed connect endpoints `<ms>` after the mesh comes up — the operator-driven
     // trigger that mirrors zenoh re-reading `connect/endpoints` on a config change
-    // and `update_peers`-dialing the newly-listed members. Parsed to `SocketAddr`
-    // here (the same numeric-TCP scope + fail-fast as the static dials above).
+    // and `update_peers`-dialing the newly-listed members.
+    //
+    // R2233 (open-debt item 585) — resolved through `resolve_dial_targets`, the
+    // SAME seam the static `--connect` list uses, so a runtime add reads the same
+    // grammar as a startup one. It used to be a bare
+    // `t.parse::<std::net::SocketAddr>()`, which is precisely the half-truth
+    // R311y809 removed from the static list and left standing here: it refused
+    // `tcp/HOST:PORT` (zenoh's own spelling), could not resolve a name, and could
+    // not express a non-tcp scheme at all.
     #[cfg(feature = "router-connect-reconcile")]
-    let connect_after_addrs: Option<(u64, Vec<std::net::SocketAddr>)> = match connect_after {
-        Some((ms, targets)) => {
-            let mut addrs = Vec::with_capacity(targets.len());
-            for t in &targets {
-                match t.parse::<std::net::SocketAddr>() {
-                    Ok(a) => addrs.push(a),
-                    Err(e) => {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            format!(
-                                "wz-ap-demo router-hat: invalid --connect-after target {t:?}: {e}"
-                            ),
-                        ));
-                    }
-                }
-            }
-            Some((ms, addrs))
-        }
-        None => None,
-    };
+    let connect_after_addrs: Option<(u64, Vec<wz::runtime_tokio::locator::AnyLocator>)> =
+        match connect_after {
+            Some((ms, targets)) => Some((
+                ms,
+                resolve_dial_targets("router-hat --connect-after", &targets).await?,
+            )),
+            None => None,
+        };
     #[cfg(not(feature = "router-connect-reconcile"))]
     let _ = connect_after;
 
@@ -5827,17 +5877,19 @@ async fn run_router_hat_until(
     // set as the desired gate. Created only when the feature is compiled.
     #[cfg(feature = "router-connect-reconcile")]
     let (reconcile_tx, reconcile_rx) =
-        tokio::sync::mpsc::unbounded_channel::<Vec<std::net::SocketAddr>>();
+        tokio::sync::mpsc::unbounded_channel::<Vec<wz::runtime_tokio::locator::AnyLocator>>();
     #[cfg(feature = "router-connect-reconcile")]
-    let reconcile_schedule: Option<(tokio::time::Instant, Vec<std::net::SocketAddr>)> =
-        connect_after_addrs.map(|(ms, mut addrs)| {
-            let mut full = dials.clone();
-            full.append(&mut addrs);
-            (
-                tokio::time::Instant::now() + Duration::from_millis(ms),
-                full,
-            )
-        });
+    let reconcile_schedule: Option<(
+        tokio::time::Instant,
+        Vec<wz::runtime_tokio::locator::AnyLocator>,
+    )> = connect_after_addrs.map(|(ms, mut addrs)| {
+        let mut full = dials.clone();
+        full.append(&mut addrs);
+        (
+            tokio::time::Instant::now() + Duration::from_millis(ms),
+            full,
+        )
+    });
     #[cfg(feature = "router-connect-reconcile")]
     let reconcile = Some(reconcile_rx);
     #[cfg(not(feature = "router-connect-reconcile"))]
@@ -6021,6 +6073,11 @@ async fn run_router_hat_until(
             // R2099 (item 512) — EVERY bound `listen/endpoints` member.
             listeners,
             dial_targets: dials,
+            // R2233 (open-debt item 585) — the router-hat's OUTBOUND trust
+            // material, the dial mirror of the cert its listen presents. One
+            // build, shared by the static federation dials, the reconcile-added
+            // ones, and every re-dial.
+            dial_config: std::sync::Arc::new(opts.dial_certs.build()?),
             // No gossip-autoconnect on a router (zenoh: routers are reached via
             // configured links, `default_autoconnect_matcher(Router)` is empty) —
             // so no dial-intent stream, exactly run_peer's `--autoconnect`-off arm.
@@ -7515,20 +7572,53 @@ mod mesh_dial_target_tests {
         assert_eq!(dials[0], dials[1], "one classifier, one address");
     }
 
-    /// A scheme the mesh dial side cannot carry is REPORTED as that, naming the
-    /// scheme — not disguised as a malformed string. The role prefix is part of
-    /// the contract too: an operator reading stderr must know which host refused.
+    /// R2233 (open-debt item 585) — the INVERSION at the demo seam. This test
+    /// used to assert that `tls/127.0.0.1:7447` was REFUSED here and that the
+    /// message said `tcp-only`. Both halves were true statements about a bypass
+    /// (`accept_loop::dial_face` opened a raw `TcpStream` and never reached the
+    /// scheme dispatcher), not about a capability, so the demo's `--connect` for
+    /// a mesh node could name only tcp targets while the same node's `--listen`
+    /// took the whole family. Every IP-family scheme is admitted now.
     #[tokio::test]
-    async fn an_undialable_scheme_is_named_not_called_malformed() {
-        let targets = vec!["tls/127.0.0.1:7447".to_string()];
+    async fn every_ip_scheme_is_admitted_as_a_mesh_dial_target() {
+        let targets = vec![
+            "tls/127.0.0.1:7447".to_string(),
+            "quic/127.0.0.1:7447".to_string(),
+            "ws/127.0.0.1:7447".to_string(),
+            "udp/127.0.0.1:7447".to_string(),
+        ];
+        let dials = resolve_dial_targets("router-hat", &targets)
+            .await
+            .expect("every IP-family scheme is a mesh dial target");
+        assert_eq!(dials.len(), 4);
+        // The SCHEME must survive to the caller — that is the whole point of
+        // carrying a locator instead of an address, and a `Vec` of four equal
+        // addresses would satisfy a length check while losing it.
+        let schemes: Vec<&str> = dials
+            .iter()
+            .map(wz::runtime_tokio::session_open::locator_scheme)
+            .collect();
+        assert_eq!(schemes, vec!["tls", "quic", "ws", "udp"]);
+    }
+
+    /// What SURVIVES the widening: an endpoint shape with no address is REPORTED
+    /// as that, naming the scheme — not disguised as a malformed string. The role
+    /// prefix is part of the contract too: an operator reading stderr must know
+    /// which host refused.
+    #[tokio::test]
+    async fn an_endpoint_with_no_address_is_named_not_called_malformed() {
+        let targets = vec!["unixsock-stream//tmp/wz.sock".to_string()];
         let err = resolve_dial_targets("router-hat", &targets)
             .await
-            .expect_err("a tls dial target is refused");
+            .expect_err("a unixsock dial target is refused");
         let msg = err.to_string();
         assert!(msg.contains("router-hat"), "role must be named: {msg}");
-        assert!(msg.contains("tls"), "the scheme must be named: {msg}");
         assert!(
-            msg.contains("tcp-only"),
+            msg.contains("unixsock-stream"),
+            "the scheme must be named: {msg}"
+        );
+        assert!(
+            msg.contains("no address to identify it by"),
             "the LIMIT must be stated, not just the rejection: {msg}"
         );
     }
@@ -7787,6 +7877,10 @@ mod peer_quic_cert_tests {
             tls_key: None,
             quic_cert: Some(cert_path.clone()),
             quic_key: Some(key_path.clone()),
+            // R2233 — these two legs are BIND witnesses with no `--connect`, so
+            // there is no dial to carry trust material for; the default is the
+            // honest value rather than a placeholder.
+            dial_certs: super::DialCertPaths::default(),
             #[cfg(feature = "routing-interest-pending-gc")]
             interest_timeout_ms: None,
             #[cfg(feature = "scouting-responder")]

@@ -248,6 +248,9 @@ async fn leg(port: u16, matcher: WhatAmIMatcher) -> AcceptLoopSummary {
             // NOTHING configured. Every dial this loop makes therefore comes from
             // an intent, which is what makes `dialed` attributable at all.
             dial_targets: vec![],
+            // Every dial here comes from an intent and every intent is plain tcp,
+            // so there is no client trust material to carry.
+            dial_config: std::sync::Arc::new(wz_runtime_tokio::session_open::DialConfig::default()),
             dial_intents: Some(dial_rx),
             mcast_ingress: None,
             mcast_members: None,
