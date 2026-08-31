@@ -3892,8 +3892,9 @@ pub mod common {
         (guard, port)
     }
 
-    /// R2221 (open-debt item 568) — spawn a zenohd whose FRAME SN RING is
-    /// `resolution` wide, the foreign oracle for the negotiated-resolution leg.
+    /// R2221 (open-debt item 568) / R2224 (item 572) — spawn a zenohd whose
+    /// FRAME SN RING and whose QOS are both named, the foreign oracle for the
+    /// negotiated-axes pairs.
     ///
     /// # Why the ROUTER carries the non-default value and not wz
     ///
@@ -3917,23 +3918,28 @@ pub mod common {
     /// THIS router, so the resolution has to be one a wz handshake survives.
     /// That is not a limitation to work around — a value that broke the probe
     /// would break the leg too, and finding out here is finding out earlier.
-    /// R2224 (open-debt item 572) — a zenohd whose FRAME SN RING and whose QOS
-    /// are BOTH named, the foreign oracle for the negotiated-axes pairs.
     ///
     /// # Both keys on every arm, including the ones that ask for the default
     ///
+    /// R2224 (open-debt item 572) added `qos_enabled`.
     /// `transport/unicast/qos/enabled` defaults to TRUE
-    /// (`DEFAULT_CONFIG.json5:547-549`), so a `qos: true` arm could have been
-    /// spelled by calling [`spawn_zenohd_sn_resolution_on_ephemeral_tcp`] and
-    /// saying nothing. R2204's finding is why it is not: two arms that differ
-    /// in WHICH HELPER THEY CALLED differ in more than the value under test,
-    /// and "the default happens to be the value I wanted" is a premise that
-    /// stops being true the day upstream moves it. Here the two arms of a pair
-    /// differ in ONE BOOLEAN and the router is told both keys either way.
+    /// (`DEFAULT_CONFIG.json5:547-549`), so a `qos: true` arm could be spelled
+    /// by saying nothing at all. R2204's finding is why it is not: two arms
+    /// that differ in WHICH HELPER THEY CALLED differ in more than the value
+    /// under test, and "the default happens to be the value I wanted" is a
+    /// premise that stops being true the day upstream moves it. Here the two
+    /// arms of a pair differ in ONE BOOLEAN and the router is told both keys
+    /// either way.
     ///
-    /// `resolution` carries [`spawn_zenohd_sn_resolution_on_ephemeral_tcp`]'s
-    /// whole argument about why the ring value belongs on the ROUTER; that
-    /// helper stays for the callers that need only it.
+    /// ⚠ R2225 — THIS HELPER SUPERSEDED AN SN-ONLY ONE, and the round that
+    /// added the QoS parameter left the older `spawn_zenohd_sn_resolution_on_ephemeral_tcp`
+    /// behind with a doc sentence claiming it "stays for the callers that need
+    /// only it". MEASURED: it had none — its one caller was the very fixture
+    /// that had just moved to this helper. The sentence was a justification
+    /// written for a population nobody counted, which is the class this tree
+    /// keeps paying for; the helper is gone and passing `qos_enabled: true`
+    /// spells its behaviour explicitly, which this doc already argues is the
+    /// better shape.
     pub fn spawn_zenohd_sn_resolution_and_qos_on_ephemeral_tcp(
         resolution: &str,
         qos_enabled: bool,
@@ -3948,23 +3954,6 @@ pub mod common {
             &[],
             None,
             &[sn.as_str(), qos.as_str()],
-        );
-        wait_for_zenohd_handshake_ready(&format!("127.0.0.1:{port}"), &mut mk_probe_stderr);
-        (guard, port)
-    }
-
-    pub fn spawn_zenohd_sn_resolution_on_ephemeral_tcp(
-        resolution: &str,
-        mut mk_probe_stderr: impl FnMut() -> File,
-    ) -> (ChildGuard, u16) {
-        let cfg = format!("transport/link/tx/sequence_number_resolution:\"{resolution}\"");
-        let (guard, port) = spawn_zenohd_dialer_on_ephemeral_tcp_with_cfgs(
-            &zenohd_binary(),
-            "zenohd (reference router, sn resolution)",
-            None,
-            &[],
-            None,
-            &[cfg.as_str()],
         );
         wait_for_zenohd_handshake_ready(&format!("127.0.0.1:{port}"), &mut mk_probe_stderr);
         (guard, port)
