@@ -65,19 +65,19 @@
 //!      `--router-hat quic-datagram/...` (`WhatAmI::Router`); a STOCK (default
 //!      `mode=router`) zenohd dials it over datagrams. `routers_net` converges to 2
 //!      AND wz DECODES zenohd's `LinkStateList` OAM (`learned mesh topology`).
-//!   2. [`wz_peer_federates_with_a_quic_datagram_dialing_linkstate_zenohd`] — wz
-//!      `--peer quic-datagram/...` (`WhatAmI::Peer`); a `mode=peer` +
-//!      `routing/peer/mode=linkstate` zenohd dials it. wz ingests the
-//!      `linkstatepeers_net` flood AND forms a MUTUAL edge (`confirmed reciprocal
-//!      mesh link`), the full-linkstate discriminator.
-//!   3. [`wz_peer_gossip_quic_datagram_dialer_yields_no_linkstate_edge`] (ROUTING
-//!      NEUTER) — the SAME wz `--peer quic-datagram/...`, but the dialing zenohd runs
-//!      DEFAULT gossip. wz still `learned mesh topology` (the gossip
-//!      self-announcement decodes) but forms NO edge (`0 graph edge(s)`, reciprocal
-//!      witness ABSENT) — proving leg 2's reciprocal witness is LOAD-BEARING over
-//!      datagrams and not a green-but-meaningless ingested-only pass.
+//!   2. [`wz_peer_asking_a_datagram_dialing_zenohd_for_linkstate_still_yields_no_edge`]
+//!      — wz `--peer quic-datagram/...` (`WhatAmI::Peer`); a `mode=peer` zenohd IS
+//!      given `routing/peer/mode=linkstate` and dials it. wz ingests the flood and
+//!      forms NO mutual edge, because at this pin the key is a deprecated no-op.
+//!   3. [`wz_peer_gossip_quic_datagram_dialer_yields_no_linkstate_edge`] — the SAME
+//!      fixture with the key WITHHELD. The pair reaches one postcondition from two
+//!      configs, which is what measures the key's inertness on the DATAGRAM wire.
+//!      (Until R2236 leg 2 was the positive half of a full-linkstate vs gossip
+//!      discriminator; upstream deleted the full-linkstate peer HAT.)
 //!
-//! Data plane (real pub/sub across the accepted datagram mesh link, both directions):
+//! Data plane (real pub/sub across the accepted datagram mesh link, both
+//! directions; wz runs `--peer-mode peer-to-peer`, the only peer subsystem this
+//! pin has):
 //!   4. [`wz_peer_receives_pico_data_across_a_quic_datagram_mesh_link`] — a pico
 //!      `z_pub` behind the dialing zenohd publishes; the Put routes pico --tcp-->
 //!      zenohd --datagram--> wz's `--subscribe` (`received mesh data`).
@@ -278,6 +278,14 @@ fn spawn_wz_peer_quic_datagram(
         cert_path,
         "--quic-key",
         key_path,
+        // R2236 (open-debt item 588) — the datagram twin of the reliable-quic
+        // file's same argument: the pinned upstream's peer HAT is gossip-only
+        // (`hat/peer/mod.rs:207`, `:242` pass `full_linkstate = false`), so no
+        // graph edge can form and wz's `linkstate` default declares and routes
+        // along a spanning tree that has no children. `peer-to-peer` is the
+        // plane that matches, and R2236 gave it a declaration and data path.
+        "--peer-mode",
+        "peer-to-peer",
     ];
     args.extend_from_slice(extra);
     spawn_on_ephemeral_port(
@@ -443,22 +451,32 @@ fn wz_router_hat_federates_with_a_quic_datagram_dialing_zenohd() {
     );
 }
 
-/// Leg 2 — the PEER-tier federation floor over a QUIC-DATAGRAM mesh listen. wz
-/// `--peer quic-datagram/...` binds a datagram listen presenting the cert; a
-/// `mode=peer` + `routing/peer/mode=linkstate` zenohd DIALS it as `quic/<wz>?rel=0`
-/// and floods its `linkstatepeers_net` self-entry with a reciprocal link, so wz forms
-/// a MUTUAL graph edge over datagrams.
+/// Leg 2 — ASKING the pinned upstream for full-linkstate peering changes nothing
+/// on the DATAGRAM wire either. wz `--peer quic-datagram/...` binds a datagram
+/// listen presenting the cert; a `mode=peer` zenohd IS given
+/// `routing/peer/mode=linkstate` and DIALS it as `quic/<wz>?rel=0`.
+///
+/// R2236 rewrote it. It used to assert the reciprocal link that a 1.5.0
+/// full-linkstate self-entry carried; at the 1.10.0 pin the key deserializes into
+/// `DeprecatedRoutingPeer` and the peer HAT passes `full_linkstate = false`
+/// (`hat/peer/mod.rs:207`, `:242`), so no mutual edge can form. What it asserts
+/// now is the deprecation ON THE WIRE — supplied and inert — with leg 3 as the
+/// key-withheld half of the pair. It is the datagram twin of the reliable-quic
+/// leg and is kept separate because it adjudicates the same claim on a different
+/// LINK, which is this file's whole reason to exist.
 // wz-proves: transport-link-quic-datagram zenohd->wz
 // wz-proves: routing-peer zenohd->wz partial
 #[test]
 #[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer,quic-datagram + zenohd peer); Layer Z runs via --ignored"]
-fn wz_peer_federates_with_a_quic_datagram_dialing_linkstate_zenohd() {
+fn wz_peer_asking_a_datagram_dialing_zenohd_for_linkstate_still_yields_no_edge() {
     let demo = wz_ap_demo_binary();
     let (cert_path, key_path, _cleanup) = write_wz_cert("pr");
 
     let (mut wz_guard, mut wz_reader, udp_port) =
         spawn_wz_peer_quic_datagram(&demo, &cert_path, &key_path, &[]);
 
+    // The dialer IS given `routing/peer/mode=linkstate` -- `LinkstatePeer` here is
+    // the whole experiment, not a fixture default.
     let wz_datagram_addr = format!("127.0.0.1:{udp_port}");
     let (mut zenohd, _zenohd_tcp_port) = spawn_zenohd_quic_datagram_mesh_dialer(
         &wz_datagram_addr,
@@ -467,12 +485,12 @@ fn wz_peer_federates_with_a_quic_datagram_dialing_linkstate_zenohd() {
         DialLink::Datagram,
     );
 
-    // Settle on the in-run reciprocal-link witness: wz ingested zenohd's linkstate
-    // flood over the datagram link AND formed the mutual graph edge (the
-    // full-linkstate discriminator). This is the deterministic post-ingest barrier.
-    let reciprocal = wait_for_substring(
+    // Settle on the ingest witness: wz DECODED zenohd's link-state flood over the
+    // datagram link. R2236 moved this off `reciprocal mesh link confirmed`, an
+    // event the pinned upstream cannot produce.
+    let ingested = wait_for_substring(
         &mut wz_reader,
-        "peer: reciprocal mesh link confirmed",
+        "peer: ingested neighbour link-state",
         Duration::from_secs(15),
     );
 
@@ -483,30 +501,37 @@ fn wz_peer_federates_with_a_quic_datagram_dialing_linkstate_zenohd() {
     let _ = zenohd.child_mut().wait();
     eprintln!("--- wz mesh quic-datagram peer stderr ---\n{wz_captured}");
 
-    reciprocal.unwrap_or_else(|c| {
+    ingested.unwrap_or_else(|c| {
         panic!(
-            "wz --peer never confirmed a reciprocal mesh link with a QUIC-DATAGRAM-dialing \
-             linkstate zenohd within 15s — the mesh datagram accept path did not converge \
-             a mutual edge over the wire (did the cert-threaded datagram bind fail?)\n\
+            "wz --peer never ingested a link-state from a QUIC-DATAGRAM-dialing zenohd \
+             within 15s — the mesh datagram accept path carried no link-state at all \
+             (did the cert-threaded datagram bind fail?)\n\
              --- wz mesh quic-datagram peer stderr ---\n{c}"
         )
     });
-    // Weak witness: wz decoded SOME zenohd LinkStateList over datagrams (necessary but
-    // not sufficient for the linkstate claim; shared with a gossip peer — see leg 3).
     assert!(
         wz_captured.contains("peer: learned mesh topology"),
         "wz --peer summary must report 'learned mesh topology' — it must ingest zenohd's \
          link-state flood over the datagram link\n\
          --- wz mesh quic-datagram peer stderr ---\n{wz_captured}"
     );
-    // Load-bearing witness: wz formed a MUTUAL edge, which ONLY a full-linkstate
-    // self-entry (reciprocal link back to wz) produces — the wz-peer <-> zenohd-peer
-    // linkstate-tier federation proof over a QUIC-DATAGRAM mesh listen wz accepted.
+    // THE claim: the key was supplied and NO mutual edge formed. A revival upstream
+    // reddens exactly here -- the datagram twin of the reliable-quic leg, and the
+    // reason it is kept as its own leg is that it adjudicates the deprecation on a
+    // DIFFERENT link.
     assert!(
-        wz_captured.contains("peer: confirmed reciprocal mesh link"),
-        "wz --peer summary must report 'confirmed reciprocal mesh link' — federating with \
-         a LINKSTATE zenohd peer that dialed the quic-datagram mesh listen must form a \
-         mutual graph edge (zenohd's self-entry advertises a link back to wz)\n\
+        !wz_captured.contains("peer: confirmed reciprocal mesh link"),
+        "a zenohd peer GIVEN `routing/peer/mode=linkstate` formed a reciprocal mesh \
+         link with wz over datagrams. At the pinned 1.10.0 that key is a deprecated \
+         no-op and the peer HAT cannot do full linkstate, so this is upstream having \
+         CHANGED: re-read the wz-extension claim for `routing/peer/mode` in \
+         `WZ_EXTENSION_CONFIG_KEYS` before adjusting this leg\n\
+         --- wz mesh quic-datagram peer stderr ---\n{wz_captured}"
+    );
+    assert!(
+        wz_captured.contains(", 0 graph edge(s),"),
+        "wz --peer summary must report '0 graph edge(s)' against a zenohd peer asked \
+         for linkstate over datagrams (node learned, no mutual edge)\n\
          --- wz mesh quic-datagram peer stderr ---\n{wz_captured}"
     );
 }
@@ -614,19 +639,21 @@ fn wz_peer_receives_pico_data_across_a_quic_datagram_mesh_link() {
     let (mut zenohd, zenohd_tcp_port) = spawn_zenohd_quic_datagram_mesh_dialer(
         &wz_datagram_addr,
         &cert_path,
-        DialerMode::LinkstatePeer,
+        DialerMode::GossipPeer,
         DialLink::Datagram,
     );
 
-    // Barrier: the mesh converged over datagrams (wz formed the mutual edge). Only then
-    // has wz's subscription had a mesh to advertise across, so zenohd can route a
-    // publisher's Put back to it. The 30-Put burst below absorbs the residual
-    // route-install slack after this, and on this UNRELIABLE link a dropped Put — but
-    // NOT a dropped subscription Declare, which is sent once and would strand the whole
-    // burst (see the reliability caveat in this file's header).
+    // Barrier: wz DECODED the neighbour's link-state over the datagram link. Only
+    // then has wz's subscription had a mesh to advertise across, so zenohd can
+    // route a publisher's Put back to it. The 30-Put burst below absorbs the
+    // residual route-install slack after this, and on this UNRELIABLE link a
+    // dropped Put — but NOT a dropped subscription Declare, which is sent once and
+    // would strand the whole burst (see the reliability caveat in this file's
+    // header). R2236 moved this off `reciprocal mesh link confirmed`, an event the
+    // pinned upstream cannot produce.
     let converged = wait_for_substring(
         &mut wz_reader,
-        "peer: reciprocal mesh link confirmed",
+        "peer: ingested neighbour link-state",
         Duration::from_secs(15),
     );
     if converged.is_err() {
@@ -701,16 +728,17 @@ fn wz_peer_publishes_data_across_a_quic_datagram_mesh_link_to_pico() {
     let (mut zenohd, zenohd_tcp_port) = spawn_zenohd_quic_datagram_mesh_dialer(
         &wz_datagram_addr,
         &cert_path,
-        DialerMode::LinkstatePeer,
+        DialerMode::GossipPeer,
         DialLink::Datagram,
     );
 
-    // Barrier: the mesh converged over datagrams before attaching the pico subscriber,
-    // so its subscription propagates into wz (deactivating wz's write-filter) over an
-    // established link.
+    // Barrier: wz decoded the neighbour's link-state over datagrams before
+    // attaching the pico subscriber, so that subscription propagates into wz
+    // (deactivating wz's write-filter) over an established link. R2236 moved this
+    // off the reciprocal witness -- see the data-IN leg for the full reason.
     let converged = wait_for_substring(
         &mut wz_reader,
-        "peer: reciprocal mesh link confirmed",
+        "peer: ingested neighbour link-state",
         Duration::from_secs(15),
     );
     if converged.is_err() {
@@ -915,13 +943,13 @@ fn wz_peer_with_a_trailing_zero_zid_still_routes_data_out() {
     let (mut zenohd, zenohd_tcp_port) = spawn_zenohd_quic_datagram_mesh_dialer(
         &wz_datagram_addr,
         &cert_path,
-        DialerMode::LinkstatePeer,
+        DialerMode::GossipPeer,
         DialLink::Datagram,
     );
 
     let converged = wait_for_substring(
         &mut wz_reader,
-        "peer: reciprocal mesh link confirmed",
+        "peer: ingested neighbour link-state",
         Duration::from_secs(15),
     );
     if converged.is_err() {

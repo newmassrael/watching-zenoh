@@ -54,30 +54,31 @@
 //! every wz<->zenohd hop is quic, and the pico endpoint is the foreign data
 //! origin/sink that makes the crossing cross-impl end to end.
 //!
-//! ## The five legs
+//! ## The six legs
 //!
 //! Control plane (topology federation floor):
 //!   1. [`wz_router_hat_federates_with_a_quic_dialing_zenohd`] — wz `--router-hat
 //!      quic/...` (`WhatAmI::Router`); a STOCK (default `mode=router`) zenohd dials
 //!      it over quic. `routers_net` converges to 2 AND wz DECODES zenohd's
-//!      `LinkStateList` OAM (`learned mesh topology`).
-//!   2. [`wz_peer_federates_with_a_quic_dialing_linkstate_zenohd`] — wz `--peer
-//!      quic/...` (`WhatAmI::Peer`); a `mode=peer` + `routing/peer/mode=linkstate`
-//!      zenohd dials it. wz ingests the `linkstatepeers_net` flood AND forms a
-//!      MUTUAL edge (`confirmed reciprocal mesh link`), the full-linkstate
-//!      discriminator.
-//!   3. [`wz_peer_gossip_quic_dialer_yields_no_linkstate_edge`] (NEUTER) — the SAME
-//!      wz `--peer quic/...`, but the quic-dialing zenohd runs DEFAULT gossip
-//!      (`mode=peer`, no `routing/peer/mode`). wz still `learned mesh topology`
-//!      (the gossip self-announcement decodes) but forms NO edge (`0 graph
-//!      edge(s)`, reciprocal witness ABSENT) — proving leg 2's reciprocal witness
-//!      is LOAD-BEARING over quic and not a green-but-meaningless ingested-only
-//!      pass.
+//!      `LinkStateList` OAM (`learned mesh topology`). The ROUTER tier is the one
+//!      upstream still runs at full linkstate, which is why this leg alone kept
+//!      its federation claim across the 1.10.0 pin.
+//!   2. [`wz_peer_asking_a_quic_dialing_zenohd_for_linkstate_still_yields_no_edge`]
+//!      — wz `--peer quic/...` (`WhatAmI::Peer`); a `mode=peer` zenohd IS given
+//!      `routing/peer/mode=linkstate` and dials it. wz ingests the flood and
+//!      forms NO mutual edge, because at this pin the key is a deprecated no-op.
+//!   3. [`wz_peer_gossip_quic_dialer_yields_no_linkstate_edge`] — the SAME fixture
+//!      with the key WITHHELD. Reaching the same postcondition from both sides is
+//!      the point: the pair measures the key's inertness on the wire, which no
+//!      serializer-side check can do. (Until R2236 this pair discriminated a
+//!      full-linkstate flood from a gossip one and leg 2 was the positive half;
+//!      upstream deleted the full-linkstate peer HAT, so the subject moved.)
 //!
-//! Data plane (real pub/sub across the accepted quic mesh link, both directions):
+//! Data plane (real pub/sub across the accepted quic mesh link, both directions;
+//! wz runs `--peer-mode peer-to-peer`, the only peer subsystem this pin has):
 //!   4. [`wz_peer_receives_pico_data_across_a_quic_mesh_link`] — wz `--peer quic/...
 //!      --subscribe demo/**`; a pico `z_pub` (TCP client of the quic-dialing
-//!      linkstate zenohd) publishes `demo/key`. The Put routes pico --tcp-->
+//!      zenohd) publishes `demo/key`. The Put routes pico --tcp-->
 //!      zenohd --quic--> wz's subscriber (`received mesh data`) — data INTO wz over
 //!      the accepted quic mesh link.
 //!   5. [`wz_peer_publishes_data_across_a_quic_mesh_link_to_pico`] — wz `--peer
@@ -85,6 +86,9 @@
 //!      zenohd) subscribes `demo/**`. wz's write-filter deactivates on learning the
 //!      remote sub over quic, and its Put routes wz --quic--> zenohd --tcp--> the
 //!      pico subscriber (`Received ('demo/key'`) — data OUT of wz over the link.
+//!   6. [`wz_peer_with_a_trailing_zero_zid_still_routes_data_out_over_quic`] — the
+//!      data-OUT leg with a zid ending in a ZERO BYTE, the Zid-canonicalisation
+//!      regression this lane once exposed.
 //!
 //! ## The discriminator (RED+TWIN) — binds to the R311y406 cert-threading seam
 //!
@@ -183,6 +187,17 @@ fn spawn_wz_peer_quic(
         cert_path,
         "--quic-key",
         key_path,
+        // R2236 (open-debt item 588) — the mode the PINNED upstream is, not a
+        // variation on the fixture. 1.10.0's peer HAT hands `Network::new` a
+        // literal `false` for `full_linkstate` at both call sites
+        // (`hat/peer/mod.rs:207`, `:242`), so a genuine peer never advertises a
+        // link back and no graph edge can form on either side. wz's `linkstate`
+        // default declares and routes along a spanning tree, which over an
+        // edgeless graph reaches nobody; `peer-to-peer` is the plane that
+        // matches, and R2236 is what gave that plane a declaration and data
+        // path rather than discovery alone.
+        "--peer-mode",
+        "peer-to-peer",
     ];
     args.extend_from_slice(extra);
     spawn_on_ephemeral_port(
@@ -323,34 +338,48 @@ fn wz_router_hat_federates_with_a_quic_dialing_zenohd() {
     );
 }
 
-/// Leg 2 — the PEER-tier federation floor over a QUIC mesh listen. wz `--peer
-/// quic/...` binds a quic listen presenting the cert; a `mode=peer` +
-/// `routing/peer/mode=linkstate` zenohd DIALS it over quic and floods its
-/// `linkstatepeers_net` self-entry with a reciprocal link, so wz forms a MUTUAL
-/// graph edge. The reversed-dial, quic-transport analog of
-/// `wz_peer_federates_with_zenohd_at_linkstate_tier`.
+/// Leg 2 — ASKING the pinned upstream for full-linkstate peering changes
+/// nothing on the wire, and this leg is where that is measured rather than read.
+///
+/// R2236 rewrote it. It used to assert that a `mode=peer` +
+/// `routing/peer/mode=linkstate` zenohd floods a self-entry with a reciprocal
+/// link back, so wz forms a MUTUAL graph edge -- true of the 1.5.0 pin and
+/// impossible at 1.10.0, where `routing/peer/mode` deserializes into
+/// `DeprecatedRoutingPeer` (accepted, logged "have no effect", read by nothing)
+/// and the peer HAT hands `Network::new` a literal `false` for `full_linkstate`
+/// at both call sites (`hat/peer/mod.rs:207`, `:242`).
+///
+/// So the leg now asserts what IS true, and it is worth a leg because it is the
+/// only place in this tree that adjudicates the deprecation ON THE WIRE rather
+/// than in a serializer: the config is SUPPLIED and the edge still does not
+/// form. Together with leg 3 -- byte-identical fixture, key withheld -- the pair
+/// says the key is inert. It is also the REVERSE gate: if upstream ever revives
+/// full-linkstate peering, this leg reds, and that red is the signal to re-read
+/// the wz-extension claim `WZ_EXTENSION_CONFIG_KEYS` makes for
+/// `routing/peer/mode`.
 // wz-proves: transport-link-quic zenohd->wz
 // wz-proves: routing-peer zenohd->wz partial
 #[test]
 #[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer,quic + zenohd peer); Layer Z runs via --ignored"]
-fn wz_peer_federates_with_a_quic_dialing_linkstate_zenohd() {
+fn wz_peer_asking_a_quic_dialing_zenohd_for_linkstate_still_yields_no_edge() {
     let demo = wz_ap_demo_binary();
     let (cert_path, key_path, _cleanup) = write_wz_cert("pr");
 
     let (mut wz_guard, mut wz_reader, quic_port) =
         spawn_wz_peer_quic(&demo, &cert_path, &key_path, &[]);
 
-    // zenohd (mode=peer, routing/peer/mode=linkstate) DIALS the wz quic mesh listen.
+    // zenohd (mode=peer) DIALS the wz quic mesh listen, and IS given
+    // `routing/peer/mode=linkstate` -- the `true` here is the whole experiment.
     let wz_quic_endpoint = format!("quic/127.0.0.1:{quic_port}");
     let (mut zenohd, _zenohd_tcp_port) =
         spawn_zenohd_peer_quic_dialer(&wz_quic_endpoint, &cert_path, true);
 
-    // Settle on the in-run reciprocal-link witness: wz ingested zenohd's linkstate
-    // flood over the quic link AND formed the mutual graph edge (the full-linkstate
-    // discriminator). This is the deterministic post-ingest barrier.
-    let reciprocal = wait_for_substring(
+    // Settle on the ingest witness: wz DECODED zenohd's link-state flood over the
+    // quic link. That is the event this pin can produce, and it is still a
+    // wire-decode rather than a handshake artefact.
+    let ingested = wait_for_substring(
         &mut wz_reader,
-        "peer: reciprocal mesh link confirmed",
+        "peer: ingested neighbour link-state",
         Duration::from_secs(15),
     );
 
@@ -361,42 +390,54 @@ fn wz_peer_federates_with_a_quic_dialing_linkstate_zenohd() {
     let _ = zenohd.child_mut().wait();
     eprintln!("--- wz mesh quic peer stderr ---\n{wz_captured}");
 
-    reciprocal.unwrap_or_else(|c| {
+    ingested.unwrap_or_else(|c| {
         panic!(
-            "wz --peer never confirmed a reciprocal mesh link with a QUIC-dialing \
-             linkstate zenohd within 15s — the mesh quic accept path did not \
-             converge a mutual edge over the wire (did the cert-threaded quic bind \
-             fail?)\n--- wz mesh quic peer stderr ---\n{c}"
+            "wz --peer never ingested a link-state from a QUIC-dialing zenohd \
+             within 15s — the mesh quic accept path carried no link-state at all \
+             (did the cert-threaded quic bind fail?)\n\
+             --- wz mesh quic peer stderr ---\n{c}"
         )
     });
-    // Weak witness: wz decoded SOME zenohd LinkStateList over quic (necessary but
-    // not sufficient for the linkstate claim; shared with a gossip peer — see the
-    // NEUTER leg, which proves the reciprocal witness below is load-bearing).
     assert!(
         wz_captured.contains("peer: learned mesh topology"),
         "wz --peer summary must report 'learned mesh topology' — it must ingest \
          zenohd's link-state flood over the quic link\n\
          --- wz mesh quic peer stderr ---\n{wz_captured}"
     );
-    // Load-bearing witness: wz formed a MUTUAL edge, which ONLY a full-linkstate
-    // self-entry (reciprocal link back to wz) produces — the wz-peer <-> zenohd-peer
-    // linkstate-tier federation proof over a QUIC mesh listen wz accepted.
+    // THE claim: the key was supplied and NO mutual edge formed. A revival
+    // upstream reddens exactly here.
     assert!(
-        wz_captured.contains("peer: confirmed reciprocal mesh link"),
-        "wz --peer summary must report 'confirmed reciprocal mesh link' — federating \
-         with a LINKSTATE zenohd peer that dialed the quic mesh listen must form a \
-         mutual graph edge (zenohd's self-entry advertises a link back to wz)\n\
+        !wz_captured.contains("peer: confirmed reciprocal mesh link"),
+        "a zenohd peer GIVEN `routing/peer/mode=linkstate` formed a reciprocal \
+         mesh link with wz. At the pinned 1.10.0 that key is a deprecated no-op \
+         and the peer HAT cannot do full linkstate, so this is upstream having \
+         CHANGED: re-read the wz-extension claim for `routing/peer/mode` in \
+         `WZ_EXTENSION_CONFIG_KEYS` before adjusting this leg\n\
+         --- wz mesh quic peer stderr ---\n{wz_captured}"
+    );
+    // Comma-bounded on both sides so a multi-digit count cannot satisfy it.
+    assert!(
+        wz_captured.contains(", 0 graph edge(s),"),
+        "wz --peer summary must report '0 graph edge(s)' against a zenohd peer \
+         asked for linkstate (node learned, no mutual edge)\n\
          --- wz mesh quic peer stderr ---\n{wz_captured}"
     );
 }
 
-/// Leg 3 (NEUTER) — the SAME wz `--peer quic/...` acceptor as leg 2, but the
-/// quic-dialing zenohd runs DEFAULT gossip (`mode=peer`, no `routing/peer/mode`).
-/// A gossip self-entry carries no reciprocal link, so wz decodes it (`learned mesh
-/// topology` still fires — the weak witness is shared) but forms NO mutual edge.
-/// This proves leg 2's `confirmed reciprocal mesh link` witness is LOAD-BEARING
-/// over quic: it distinguishes a full-linkstate flood from a gossip one, rather
-/// than firing on any decoded LinkStateList. The quic analog of
+/// Leg 3 (the KEY-WITHHELD half of the pair) — the SAME wz `--peer quic/...`
+/// acceptor and the SAME fixture as leg 2, except the quic-dialing zenohd is not
+/// given `routing/peer/mode`. A gossip self-entry carries no reciprocal link, so
+/// wz decodes it (`learned mesh topology` still fires — the weak witness is
+/// shared) but forms NO mutual edge.
+///
+/// R2236 — what this pair proves has MOVED, and saying so is the point. Until
+/// the 1.10.0 pin the pair discriminated a full-linkstate flood from a gossip
+/// one, and leg 2's reciprocal witness was the load-bearing half. Upstream
+/// deleted the full-linkstate peer HAT, so both halves now reach the same
+/// postcondition and the only thing varying between them is whether the
+/// deprecated key was supplied. That makes the pair a measurement of the key's
+/// INERTNESS on the wire — which no serializer-side check can make — and it is
+/// why this leg is kept rather than folded into leg 2. The quic analog of
 /// `wz_peer_gossip_zenohd_yields_no_linkstate_edge`.
 // wz-proves: routing-peer zenohd->wz partial
 #[test]
@@ -446,15 +487,13 @@ fn wz_peer_gossip_quic_dialer_yields_no_linkstate_edge() {
          zenohd dialing over quic — it decoded the gossip self-announcement (the weak \
          witness is shared)\n--- wz mesh quic peer (gossip neuter) stderr ---\n{wz_captured}"
     );
-    // The load-bearing witness is ABSENT: a gossip self-entry carries no reciprocal
-    // link, so wz forms NO mutual edge. This is what makes leg 2's reciprocal
-    // witness load-bearing over the quic mesh accept path.
+    // No mutual edge, and at this pin the SAME is asserted by leg 2 with the key
+    // supplied. Reading both greens together is what says the key is inert.
     assert!(
         !wz_captured.contains("peer: confirmed reciprocal mesh link"),
         "wz --peer must NOT report 'confirmed reciprocal mesh link' against a GOSSIP \
          zenohd dialing over quic — a peer_to_peer self-entry advertises no link \
-         back, so no mutual edge can form; leg 2's reciprocal witness would be \
-         green-but-meaningless if it fired here\n\
+         back, so no mutual edge can form\n\
          --- wz mesh quic peer (gossip neuter) stderr ---\n{wz_captured}"
     );
     // Precise corroboration: the shutdown summary reports zero graph edges,
@@ -490,15 +529,20 @@ fn wz_peer_receives_pico_data_across_a_quic_mesh_link() {
 
     let wz_quic_endpoint = format!("quic/127.0.0.1:{quic_port}");
     let (mut zenohd, zenohd_tcp_port) =
-        spawn_zenohd_peer_quic_dialer(&wz_quic_endpoint, &cert_path, true);
+        spawn_zenohd_peer_quic_dialer(&wz_quic_endpoint, &cert_path, false);
 
-    // Barrier: the mesh converged over quic (wz formed the mutual edge). Only then
-    // has wz's subscription had a mesh to advertise across, so zenohd can route a
-    // publisher's Put back to it. The 30-Put burst below absorbs the residual
-    // route-install slack after this.
+    // Barrier: wz DECODED the neighbour's link-state over the quic mesh link.
+    //
+    // R2236 — this used to settle on `reciprocal mesh link confirmed`, and that
+    // is now an event the pinned upstream cannot produce: a 1.10.0 peer never
+    // advertises a link back, so no mutual edge forms and the barrier timed out
+    // 15s before the data phase began. The ingest witness is what a gossip
+    // neighbour DOES emit, and it is still a wire-decode rather than a
+    // handshake artefact. The 30-Put burst below absorbs the route-install
+    // slack that the stronger barrier used to cover.
     let converged = wait_for_substring(
         &mut wz_reader,
-        "peer: reciprocal mesh link confirmed",
+        "peer: ingested neighbour link-state",
         Duration::from_secs(15),
     );
     if converged.is_err() {
@@ -574,14 +618,16 @@ fn wz_peer_publishes_data_across_a_quic_mesh_link_to_pico() {
 
     let wz_quic_endpoint = format!("quic/127.0.0.1:{quic_port}");
     let (mut zenohd, zenohd_tcp_port) =
-        spawn_zenohd_peer_quic_dialer(&wz_quic_endpoint, &cert_path, true);
+        spawn_zenohd_peer_quic_dialer(&wz_quic_endpoint, &cert_path, false);
 
-    // Barrier: the mesh converged over quic before attaching the pico subscriber,
-    // so its subscription propagates into wz (deactivating wz's write-filter) over
-    // an established link.
+    // Barrier: wz decoded the neighbour's link-state over quic before attaching
+    // the pico subscriber, so that subscription propagates into wz (deactivating
+    // wz's write-filter) over an established link. R2236 moved this off the
+    // `reciprocal mesh link confirmed` witness, which the pinned upstream cannot
+    // produce -- see the data-IN leg for the full reason.
     let converged = wait_for_substring(
         &mut wz_reader,
-        "peer: reciprocal mesh link confirmed",
+        "peer: ingested neighbour link-state",
         Duration::from_secs(15),
     );
     if converged.is_err() {
@@ -665,6 +711,11 @@ fn wz_peer_with_a_trailing_zero_zid_still_routes_data_out_over_quic() {
             "70728300",
             "--publish",
             KEYEXPR,
+            // R2236 — the same mode every other leg here runs; see
+            // `spawn_wz_peer_quic`, which this leg cannot use because it pins
+            // its own zid.
+            "--peer-mode",
+            "peer-to-peer",
         ],
         "peer: listening on 127.0.0.1:",
         "wz mesh quic peer (trailing-zero zid)",
@@ -673,11 +724,11 @@ fn wz_peer_with_a_trailing_zero_zid_still_routes_data_out_over_quic() {
 
     let wz_quic_endpoint = format!("quic/127.0.0.1:{quic_port}");
     let (mut zenohd, zenohd_tcp_port) =
-        spawn_zenohd_peer_quic_dialer(&wz_quic_endpoint, &cert_path, true);
+        spawn_zenohd_peer_quic_dialer(&wz_quic_endpoint, &cert_path, false);
 
     let converged = wait_for_substring(
         &mut wz_reader,
-        "peer: reciprocal mesh link confirmed",
+        "peer: ingested neighbour link-state",
         Duration::from_secs(15),
     );
     if converged.is_err() {

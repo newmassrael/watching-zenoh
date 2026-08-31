@@ -32,13 +32,25 @@
 //! the register-time `add_link` (self's outbound link only) never fabricates one;
 //! the edge appears solely from ingesting zenohd's reciprocal advertisement.
 //!
-//! Hence the two legs:
-//!   - [`wz_peer_federates_with_zenohd_at_linkstate_tier`] (positive): a
-//!     linkstate zenohd → wz emits BOTH witnesses.
-//!   - [`wz_peer_gossip_zenohd_yields_no_linkstate_edge`] (neuter): a default
-//!     gossip zenohd → wz emits `"learned mesh topology"` but NOT the reciprocal
-//!     witness (`0 edge(s)`), proving the edge witness is load-bearing and the
-//!     positive proof is not a green-but-meaningless `ingested`-only pass.
+//! R2236 — the paragraph above describes the 1.5.0 pin and is kept because it
+//! is the mechanism, not the claim. What changed is which side of it upstream
+//! can still produce: 1.10.0 deleted the full-linkstate peer HAT
+//! (`hat/peer/mod.rs:207` and `:242` pass `Network::new` a literal `false` for
+//! `full_linkstate`), so NO zenohd peer advertises `links={wz}` any more and the
+//! reciprocal edge is not weakened here, it is extinct upstream. The positive
+//! witness moved to a wz-to-wz leg
+//! (`wz_peer_mesh_confirms_a_reciprocal_edge_between_two_wz_peers` in
+//! `wz_peer_data_forward`), because leaving it nowhere would retire the
+//! capability's evidence to a set of negatives.
+//!
+//! Hence the two legs, which now differ only in whether the DEPRECATED key was
+//! supplied — and that is exactly what they measure:
+//!   - [`wz_peer_asking_zenohd_for_linkstate_still_yields_no_edge`]: zenohd IS
+//!     given `routing/peer/mode=linkstate` → wz emits `"learned mesh topology"`
+//!     and still NO reciprocal witness. An upstream revival reddens here.
+//!   - [`wz_peer_gossip_zenohd_yields_no_linkstate_edge`]: the key withheld →
+//!     the same postcondition. Reaching one answer from two configs is what
+//!     says the key is inert on the wire.
 //!
 //! SCOPE (round 1): this proves the CONTROL-PLANE / topology tier only — that
 //! wz and zenohd converge a link-state peer mesh over the wire. The DATA plane
@@ -136,16 +148,31 @@ fn spawn_wz_peer_dialing(demo: &std::path::Path, port: u16) -> (ChildGuard, File
     (guard, stderr)
 }
 
+/// R2236 — ASKING the pinned upstream for full-linkstate peering changes nothing
+/// on the TCP wire either, and this is the plain-transport member of that family
+/// (its quic and quic-datagram twins live in the two mesh-acceptor files).
+///
+/// This leg used to be `wz_peer_federates_with_zenohd_at_linkstate_tier` and it
+/// asserted the mutual edge a 1.5.0 `hat/linkstate_peer` self-entry produced.
+/// At the 1.10.0 pin `routing/peer/mode` deserializes into
+/// `DeprecatedRoutingPeer` — accepted, logged "have no effect", read by nothing —
+/// and the surviving peer HAT hands `Network::new` a literal `false` for
+/// `full_linkstate` at both call sites (`hat/peer/mod.rs:207`, `:242`). There is
+/// no path by which a genuine peer advertises a link back, so the claim is not
+/// weakened here, it is EXTINCT upstream. What replaces it is the measurement of
+/// that fact on the wire, paired with the gossip leg below as the key-withheld
+/// half.
 // wz-proves: routing-peer zenohd->wz partial
 // wz-proves: routing-peer wz->zenohd partial
 #[test]
 #[ignore = "binary-dep e2e (zenohd peer + wz-ap-demo --features routing-peer); Layer Z runs via --ignored"]
-fn wz_peer_federates_with_zenohd_at_linkstate_tier() {
+fn wz_peer_asking_zenohd_for_linkstate_still_yields_no_edge() {
     let demo = wz_ap_demo_binary();
     let port_res = PortReservation::pick();
     let port = port_res.port();
 
-    // zenohd in FULL-LINKSTATE peer mode (the `hat/linkstate_peer` HAT).
+    // zenohd IS given `routing/peer/mode=linkstate` -- the `true` is the whole
+    // experiment, not a fixture default.
     let mut zenohd = spawn_peer_zenohd(port, true);
 
     // wz peer dials zenohd; the port reservation is held until both zenohd has
@@ -153,13 +180,13 @@ fn wz_peer_federates_with_zenohd_at_linkstate_tier() {
     let (mut wz_guard, mut wz_reader) = spawn_wz_peer_dialing(&demo, port);
     drop(port_res);
 
-    // Settle on the reciprocal-link witness: wz ingested zenohd's linkstate flood
-    // AND formed the mutual graph edge (the full-linkstate discriminator). This
-    // is the deterministic post-ingest barrier — no dependence on the face-UP
-    // timing that precedes the inbound OAM poll.
-    let reciprocal = wait_for_substring(
+    // Settle on the INGEST witness: wz decoded zenohd's flood over the wire. It is
+    // the deterministic post-ingest barrier the reciprocal witness used to be, and
+    // it is what guarantees the "no edge" assertion below is a content
+    // distinction rather than a premature-teardown false negative.
+    let ingested = wait_for_substring(
         &mut wz_reader,
-        "reciprocal mesh link confirmed",
+        "ingested neighbour link-state",
         Duration::from_secs(15),
     );
 
@@ -172,32 +199,32 @@ fn wz_peer_federates_with_zenohd_at_linkstate_tier() {
     eprintln!("--- wz peer stderr ---\n{wz_captured}");
 
     // Diagnostics first, then assert.
-    reciprocal.unwrap_or_else(|c| {
+    ingested.unwrap_or_else(|c| {
         panic!(
-            "wz peer never confirmed a reciprocal mesh link with the linkstate zenohd \
-             within 15s — the linkstatepeers_net flood did not converge into a mutual \
-             edge over the wire\n--- wz peer stderr ---\n{c}"
+            "wz peer never ingested a link-state from the zenohd peer within 15s — \
+             no flood arrived at all, so this leg cannot say anything about what \
+             the flood CONTAINED\n--- wz peer stderr ---\n{c}"
         )
     });
 
     // Weak witness: wz decoded SOME zenohd LinkStateList (shared with the gossip
-    // case; necessary but not sufficient for the linkstate claim).
+    // case).
     assert!(
         wz_captured.contains("learned mesh topology"),
         "wz peer summary must report 'learned mesh topology' — it must ingest \
          zenohd's link-state flood over the wire\n--- wz peer stderr ---\n{wz_captured}"
     );
-    // Load-bearing witness: wz formed a MUTUAL edge, which ONLY a full-linkstate
-    // self-entry (reciprocal `links={wz}`) produces — the wz-peer <-> zenohd-peer
-    // linkstate-tier federation proof. NOTE: `edge_count > 0` uniquely names the
-    // wz <-> zenohd link here ONLY because the topology has exactly two nodes (no
-    // third node can contribute an unrelated edge); a future 3-node variant must
-    // assert the edge ENDPOINTS, not just the count.
+    // THE claim: the key was supplied and NO mutual edge formed. If upstream ever
+    // revives full-linkstate peering this reddens, and that red is the signal to
+    // re-read the wz-extension claim `WZ_EXTENSION_CONFIG_KEYS` makes for
+    // `routing/peer/mode`.
     assert!(
-        wz_captured.contains("confirmed reciprocal mesh link"),
-        "wz peer summary must report 'confirmed reciprocal mesh link' — federating \
-         with a LINKSTATE zenohd peer must form a mutual graph edge (zenohd's \
-         self-entry advertises a link back to wz)\n--- wz peer stderr ---\n{wz_captured}"
+        !wz_captured.contains("confirmed reciprocal mesh link"),
+        "a zenohd peer GIVEN `routing/peer/mode=linkstate` formed a reciprocal mesh \
+         link with wz. At the pinned 1.10.0 that key is a deprecated no-op and the \
+         peer HAT cannot do full linkstate, so this is upstream having CHANGED: \
+         re-read the wz-extension claim for `routing/peer/mode` before adjusting \
+         this leg\n--- wz peer stderr ---\n{wz_captured}"
     );
 }
 

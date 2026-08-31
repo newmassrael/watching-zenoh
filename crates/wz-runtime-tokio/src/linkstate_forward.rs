@@ -1695,7 +1695,7 @@ impl LinkstateForwarder {
             };
             build_linkstate_oam_owned(&list)?
         };
-        self.fan_out(true, Some(self.gossip_target.get()), |id, zid| {
+        let reached = self.fan_out(true, Some(self.gossip_target.get()), |id, zid| {
             if id == new_face {
                 // the new link is bootstrapped with the FULL topology.
                 return Ok(Some(NetworkMessage::Oam(full.clone())));
@@ -1710,7 +1710,34 @@ impl LinkstateForwarder {
                 return Ok(None);
             }
             Ok(Some(NetworkMessage::Oam(delta.clone())))
-        })
+        });
+        // R2236 (open-debt item 588) — the JOIN-time half, and without it the
+        // other two arms are unreachable in practice.
+        //
+        // A declaration is made once, when the app declares it, and a peer that
+        // joins LATER is caught up by the tree-change re-advertise
+        // (`recompute_and_advertise` -> `re_advertise_subscriptions`). In gossip
+        // mode that never fires: `compute_trees` over an edgeless graph produces
+        // an EMPTY new-children delta, so a wz peer that declared `demo/**` at
+        // startup and met its neighbour a second later told it nothing. Measured
+        // exactly that way -- the demo logs `declared subscriber` BEFORE
+        // `face 0 UP`, and zenohd's own face teardown reported
+        // `removed_subscribers: {}`.
+        //
+        // Upstream does this at the same point and by name: its peer HAT runs
+        // `repropagate_subscribers` / `repropagate_queryables` inside
+        // `new_transport_unicast_face`. So does this: the new neighbour is
+        // synthesized as a new CHILD of self's own tree, which is the delta
+        // shape `re_advertise_interest` already consumes, and the existing
+        // per-source filter (`*src == tree_id`) keeps it to declarations this
+        // node originated -- a transit re-advertise is not this arm's job.
+        if !self.net.borrow().full_linkstate() {
+            let self_zid = *self.net.borrow().self_zid();
+            let joined = [(self_zid, vec![*neighbour])];
+            self.re_advertise_subscriptions(&joined);
+            self.re_advertise_queryables(&joined);
+        }
+        reached
     }
 
     /// Flood self's LOST-link event (the [`deregister`](FaceForwarder::deregister)
@@ -3719,8 +3746,77 @@ impl LinkstateForwarder {
         root: &Zid,
         build: impl Fn() -> NetworkMessage,
     ) -> Result<usize, CodecError> {
+        // R2236 (open-debt item 588) — in GOSSIP mode there is no tree to be a
+        // child of, and asking for one silently reaches nobody.
+        //
+        // `tree_children_of` walks the topology graph, and a graph edge exists
+        // only when BOTH ends advertise the link (`update_edge` is gated on
+        // `graph[idx].links.contains_key(self_zid)`, mirroring upstream
+        // `protocol/network.rs:866-871`). A `peer_to_peer` neighbour never
+        // advertises links at all, so self's tree has no children, every
+        // origin declaration reached ZERO faces, and the failure was silent:
+        // a `Ok(0)` that reads exactly like "nobody was interested".
+        //
+        // Upstream does not have this problem because its `p2p_peer` HAT never
+        // consults a `Network` for declarations — `propagate_simple_subscriber`
+        // walks `tables.faces`. That is what this arm restores: a gossip peer's
+        // neighbours ARE its faces, so the child set of self's own "tree" is
+        // every direct peer face and nothing transits.
+        //
+        // Scoped to `root == self_zid` on purpose. A non-self root is a TRANSIT
+        // re-flood of somebody else's declaration, which in a gossip full mesh
+        // is not this node's job (every peer declares to its own neighbours);
+        // widening this to transit would duplicate declarations rather than
+        // deliver new ones, so it is left alone and named in the item.
+        //
+        // ⚠ MEASURED, and recorded because it is the uncomfortable half: NO leg
+        // in this tree reddens when this arm alone is disabled. Every fixture
+        // declares at startup, before any face exists, so the JOIN-TIME arm in
+        // `flood_link_added` is what delivers there. This arm is what serves a
+        // declaration made while a face is already up -- a co-attached client
+        // subscribing later, through `ingest_client_subscription` -- and that
+        // path has no cross-impl fixture. Open-debt item 589 carries the gap
+        // with the mutation that showed it; the arm is kept because deleting it
+        // would restore the silent zero for that path, not because a test says
+        // so.
+        if !self.net.borrow().full_linkstate() && *root == *self.net.borrow().self_zid() {
+            let children = self.gossip_neighbour_zids();
+            return self.flood_to_children(&children, build);
+        }
         let children = self.net.borrow().tree_children_of(root);
         self.flood_to_children(&children, build)
+    }
+
+    /// R2236 (open-debt item 588) — the gossip-mode substitute for a spanning-tree
+    /// child set: the zid of every live face whose handshake `whatami` is in the
+    /// gossip target.
+    ///
+    /// Read off [`faces`](Self#structfield.faces) rather than off the topology
+    /// graph, and that is the whole point — a `peer_to_peer` subsystem has no
+    /// edges to walk, so the face table is the only place the neighbour set
+    /// exists. The gossip target is the same matcher the link-state OAM flood
+    /// passes to [`fan_out`](Self::fan_out), so a CLIENT face is excluded here
+    /// too: a co-attached client's copy of a declaration is the client plane's
+    /// job ([`push_future_subscription`](Self::push_future_subscription)), and
+    /// sending it from here as well would double-declare.
+    fn gossip_neighbour_zids(&self) -> Vec<Zid> {
+        let target = self.gossip_target.get();
+        let mut out: Vec<Zid> = Vec::new();
+        for (_id, state) in self.faces.borrow().iter() {
+            if !target.matches(peer_whatami_routing(&state.actions)) {
+                continue;
+            }
+            // A face whose handshake carried no zid cannot be named as a child
+            // (the child set is matched by zid in `fan_out`), so it is skipped
+            // rather than defaulted — an unnamed face is not a silent broadcast.
+            let Some(zid) = peer_zid_routing(&state.actions) else {
+                continue;
+            };
+            if !out.contains(&zid) {
+                out.push(zid);
+            }
+        }
+        out
     }
 
     /// Flood `msg` to a GIVEN set of children — the lowest-level proactive
@@ -5272,7 +5368,20 @@ pub(crate) fn compute_self_publish_forward(
     if interested.is_empty() {
         return Ok(None);
     }
-    let children = net.directions_toward(&self_zid, &interested);
+    // R2236 (open-debt item 588) — the data-plane half of the same seam.
+    // `directions_toward` asks the topology graph for a next hop, and a gossip
+    // subsystem has no edges, so every self-originated Push resolved to zero
+    // directions and returned `Ok(None)` — indistinguishable from "no remote
+    // subscriber". In `peer_to_peer` there is no transit: every node that can
+    // be interested is a DIRECT neighbour, so the interested set IS the
+    // direction set. It is self-filtering, because the caller only uses this
+    // list to match live faces by zid — an interested node with no face is
+    // simply not sent to.
+    let children = if net.full_linkstate() {
+        net.directions_toward(&self_zid, &interested)
+    } else {
+        interested
+    };
     if children.is_empty() {
         return Ok(None);
     }

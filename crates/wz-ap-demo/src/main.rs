@@ -410,10 +410,20 @@ fn main() -> ExitCode {
             // wz DEFAULTS TO `linkstate` even though zenoh defaults to
             // `peer_to_peer`, and the divergence is deliberate: wz's data plane
             // routes along the linkstate spanning tree, so `linkstate` is the
-            // mode its whole stack implements. `peer-to-peer` here switches the
-            // DISCOVERY plane (ingest + re-flood) so a wz peer can learn and
-            // gossip-autoconnect inside a default-configured zenoh subsystem;
-            // its data plane in that mode is NOT claimed.
+            // mode its whole stack implements.
+            //
+            // R2236 (open-debt item 588) — `peer-to-peer` now carries a
+            // DECLARATION and DATA plane too, and that sentence is why this
+            // comment changed rather than being tidied. It used to end "its data
+            // plane in that mode is NOT claimed", and the cost of that was
+            // exact: the pinned upstream 1.10.0 deleted the full-linkstate peer
+            // HAT, so a genuine peer never advertises a link back, no graph edge
+            // forms, and a wz peer in EITHER mode exchanged no pub/sub data with
+            // it at all -- `linkstate` because its tree had no children,
+            // `peer-to-peer` because it only ever did discovery. The gossip arms
+            // in `LinkstateForwarder` (origin declaration, join-time
+            // re-advertise, self-originated data) are what closed that, so this
+            // mode is now the one to run against a stock zenoh subsystem.
             let full_linkstate = match parse_pair(rest, "--peer-mode").as_deref() {
                 None | Some("linkstate") => true,
                 Some("peer-to-peer") => false,

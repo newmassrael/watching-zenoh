@@ -100,6 +100,72 @@ fn spawn_peer(label: &str, args: &[&str]) -> (ChildGuard, File, u16) {
     (guard, reader, port)
 }
 
+/// R2236 (open-debt items 584 / 588) — the POSITIVE witness that wz's
+/// full-linkstate peer federation still works, wz to wz.
+///
+/// It exists because this round removed the last positive assertion of
+/// `confirmed reciprocal mesh link` anywhere in the tree. Those assertions lived
+/// in the three zenohd interop files and were correct against the 1.5.0 pin;
+/// 1.10.0 deleted the full-linkstate peer HAT (`hat/peer/mod.rs:207` and `:242`
+/// pass `Network::new` a literal `false` for `full_linkstate`), so a genuine
+/// peer can no longer produce the event and those legs now assert its ABSENCE.
+/// Leaving it there would have retired the capability's evidence to a set of
+/// negatives -- the shape where a population of zero reports green -- while wz
+/// still implements it and `WZ_EXTENSION_CONFIG_KEYS` still claims
+/// `routing/peer/mode` as an honoured wz extension. The owner's disposition for
+/// item 584 said the extension keeps its behaviour and moves its witness off the
+/// foreign impl; this leg is that witness.
+///
+/// Two peers, wz's DEFAULT `linkstate` mode, no `--peer-mode` flag: B dials A,
+/// each advertises a link to the other, and `update_edge` fires on both sides
+/// only when BOTH have. Asserted on BOTH logs, because a one-sided assertion
+/// would pass on a self-entry that was never reciprocated.
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer); Layer E runs via --ignored"]
+fn wz_peer_mesh_confirms_a_reciprocal_edge_between_two_wz_peers() {
+    let (mut a_guard, mut a_reader, p_a) = spawn_peer("peer-A", &["--peer", "127.0.0.1:0"]);
+    let addr_a = format!("127.0.0.1:{p_a}");
+    let (mut b_guard, mut b_reader, _p_b) =
+        spawn_peer("peer-B", &["--peer", "127.0.0.1:0", "--connect", &addr_a]);
+
+    // Settle on the DIALER's confirmation first -- it is the side that learns
+    // A's reciprocated self-entry, so it cannot fire before both advertised.
+    let b_edge = wait_for_substring(
+        &mut b_reader,
+        "peer: reciprocal mesh link confirmed",
+        Duration::from_secs(15),
+    );
+
+    graceful_terminate(b_guard.child_mut(), Duration::from_secs(5));
+    graceful_terminate(a_guard.child_mut(), Duration::from_secs(5));
+    let a_captured = read_captured(&mut a_reader);
+    let b_captured = read_captured(&mut b_reader);
+    eprintln!("--- peer-A stderr ---\n{a_captured}");
+    eprintln!("--- peer-B stderr ---\n{b_captured}");
+
+    b_edge.unwrap_or_else(|c| {
+        panic!(
+            "peer-B never confirmed a reciprocal mesh link with peer-A within 15s — \
+             two wz peers in the DEFAULT linkstate mode must converge a mutual graph \
+             edge, and this is the only positive witness of that left in the tree\n\
+             --- peer-B stderr ---\n{c}"
+        )
+    });
+    // BOTH sides, from their shutdown summaries: an edge is mutual or it is not
+    // an edge, and asserting only the dialer would accept a half-formed one.
+    assert!(
+        a_captured.contains("peer: confirmed reciprocal mesh link"),
+        "peer-A (the ACCEPTOR) must also report 'confirmed reciprocal mesh link' — \
+         the edge is symmetric, and a one-sided pass would be a half-formed \
+         topology reported as federation\n--- peer-A stderr ---\n{a_captured}"
+    );
+    assert!(
+        b_captured.contains("peer: confirmed reciprocal mesh link"),
+        "peer-B (the DIALER) must report 'confirmed reciprocal mesh link' in its \
+         shutdown summary\n--- peer-B stderr ---\n{b_captured}"
+    );
+}
+
 #[test]
 #[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer); Layer E runs via --ignored"]
 fn wz_peer_mesh_forwards_subscribed_data_two_hops() {
