@@ -8011,6 +8011,10 @@ mod peer_failfast_tests {
             tls_key: None,
             quic_cert: None,
             quic_key: None,
+            // R2233 — this fixture fails fast at zid derivation and never dials,
+            // so there is no client trust material to carry. The default is the
+            // honest value here, not a placeholder.
+            dial_certs: super::DialCertPaths::default(),
             #[cfg(feature = "routing-interest-pending-gc")]
             interest_timeout_ms: None,
             #[cfg(feature = "scouting-responder")]
