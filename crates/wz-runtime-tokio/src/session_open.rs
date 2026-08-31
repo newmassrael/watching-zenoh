@@ -4047,11 +4047,63 @@ pub async fn initiate_and_open_session_with_offer(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
-    initiator_open_offering(
+    initiate_and_open_session_with_staging(
         connected,
         params,
         offer,
         |_actions| Ok(()),
+        clock,
+        max_iters,
+        tick_interval_ms,
+    )
+    .await
+}
+
+/// R2221 (open-debt item 568) — [`initiate_and_open_session_with_offer`] with
+/// the staging seam it already has EXPOSED to the caller.
+///
+/// # Why this is a public entrypoint and not another `_with_x` sibling
+///
+/// [`initiator_open_offering`]'s doc already names `stage` "one extension point
+/// for staging that is not part of the offer", and item 516 is the record of
+/// what growing a SIBLING per capability costs: the aggregating entrypoint was
+/// written beside the offering one rather than through it, and three of four
+/// capabilities then had no route through it at all. Every state a caller can
+/// legitimately install before the first wire byte does not deserve its own
+/// `pub async fn` here; it deserves the seam.
+///
+/// `stage` runs after the offer is applied and BEFORE any wire byte, so what it
+/// installs is on the InitSyn. It returns [`OpenError`] because staging can
+/// fail — the accept-side twin draws OS entropy — and because a caller whose
+/// staging failed must not proceed to a handshake that would advertise
+/// something else.
+///
+/// # What a caller may reach through it, said plainly
+///
+/// [`wz_session_core::session_actions::SessionLinkActions`]' own public surface,
+/// which is where the negotiable state lives: `set_ext_chain` (the InitSyn ext
+/// chain, e.g. announcing a protocol patch level other than
+/// [`wz_session_core::extpatch::CURRENT_PATCH`]), `install_auth_dispatch`,
+/// `set_max_reassembly_bytes`. Nothing here widens that surface; it makes the
+/// EXISTING surface reachable at the one instant when installing on it still
+/// changes the wire.
+pub async fn initiate_and_open_session_with_staging<S>(
+    connected: DialedLink,
+    params: SessionInitParams,
+    offer: SessionOffer,
+    stage: S,
+    clock: TokioTime,
+    max_iters: Option<usize>,
+    tick_interval_ms: u64,
+) -> Result<OpenedSession, OpenError>
+where
+    S: FnOnce(&Arc<SessionLinkActions>) -> Result<(), OpenError>,
+{
+    initiator_open_offering(
+        connected,
+        params,
+        offer,
+        stage,
         clock,
         max_iters,
         tick_interval_ms,

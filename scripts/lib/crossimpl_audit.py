@@ -477,7 +477,27 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # `find_active` reds the first and not the second, dropping `reliable` reds the
 # second and not the first, so neither is a duplicate of the other and the
 # count is honest at six.
-FOREIGN_ADJUDICATOR_LINKS = 865
+# R2221 (items 568, 569) — 865 -> 873, across two NEW zenohd fixtures. Their
+# `wz-proves` lines are exactly the delta, and both files put their calibration
+# arms behind `none --` so nothing is counted twice.
+#
+# `wz_negotiated_axes_zenohd_interop.rs` (item 568) is the one that changes what
+# the number MEANS for these atoms. `codec-init-body` had zenohd witnesses
+# already; none of them read `seq_num_res` or the `0x7` PATCH level AS A
+# NEGOTIATED VALUE, so both axes' assertions in this tree stood on a wire this
+# tree wrote. `codec-frame` gains a witness in which the frame's SEQUENCE NUMBER
+# is the subject rather than the frame's arrival.
+#
+# `zenohd_binary_door_dissection.rs` (item 569) grades the decode of a genuine
+# router's bytes through the fixed-layout C record — offset, length and time as
+# VALUES. Its sweep and clock legs declare `none`: the sweep's inputs are
+# mutated bytes no implementation would send, and the clock is the harness's.
+#
+# EIGHT, and the arithmetic is stated so the number is checkable rather than
+# copied off a failure message: three proof legs in the 568 file at two atoms
+# each (its twin declares `none`), plus one leg in the 569 file at two atoms
+# (its two siblings declare `none`).
+FOREIGN_ADJUDICATOR_LINKS = 873
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

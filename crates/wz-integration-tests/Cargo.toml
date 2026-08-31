@@ -107,6 +107,20 @@ wz-codecs = { path = "../wz-codecs", features = ["codec-serial"] }
 # one of its three clients, so the measurement lives in ONE file beside the
 # pico + demo legs it is compared against (rlib crate-type makes this linkable).
 wz-capi-pico = { path = "../wz-capi-pico" }
+# R2221 (open-debt item 569) — the BINARY DOOR a framework links, driven here
+# over bytes a genuine zenohd wrote. Every lane witness reads
+# `wz_capture::Dissection`; the consuming surface reads the fixed-layout
+# `WzDissectRecord` above it, and nothing joined the two.
+#
+# NOT the `wz-capi-c` situation one line up, and the difference was measured
+# rather than assumed: that crate is excluded because its `#[no_mangle]` `z_*`
+# exports collide with the real zenoh-pico symbols this crate links, and
+# `wz-capi-dissect`'s 23 `#[no_mangle]` exports are ALL `wz_dissect_*` with
+# ZERO `z_*`. `crate-type` carries `rlib`, the dependency direction is toward
+# `wz-capture` / `wz-session-core` so there is no cycle, and three sibling
+# crates already depend on it. No prose in this tree records a decision to keep
+# it out; the omission is one.
+wz-capi-dissect = { path = "../wz-capi-dissect" }
 # W3 no-alloc bounded mirror migration — tests build owned-mirror
 # heapless fields via the `codec_bound::bounded_{bytes,string}` helpers
 # (the same idiom production code uses at decode boundaries).

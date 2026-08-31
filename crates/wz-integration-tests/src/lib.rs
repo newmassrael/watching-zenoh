@@ -2372,6 +2372,14 @@ pub mod common {
     ///   carrying NO QoS ext means — zenoh omits the ext at the default, so
     ///   absence is a value and not a gap.
     const T_MID_FRAGMENT_LOCAL: u8 = 0x06;
+    /// `FRAME` is `0x05` — `wz_codecs::wire_const::T_MID_FRAME`, zenoh
+    /// `id::FRAME` (`commons/zenoh-protocol/src/transport/mod.rs:59-60` at
+    /// zenoh 1.5.0). Spelled locally for the reason the block above gives, and
+    /// trusted no more than those are: the leg reading it
+    /// (`wz_negotiated_axes_zenohd_interop.rs`) cross-checks the SN this parser
+    /// pulls off the wire against a value derived independently of the relay,
+    /// so a wrong constant surfaces as a mismatch rather than as an empty list.
+    const T_MID_FRAME_LOCAL: u8 = 0x05;
     const FLAG_FRAGMENT_MORE: u8 = 0x40;
     const FLAG_FRAGMENT_RELIABLE: u8 = 0x20;
     const FLAG_EXT_CHAIN: u8 = 0x80;
@@ -2482,6 +2490,7 @@ pub mod common {
         held: Arc<AtomicUsize>,
         overtaken: Arc<AtomicUsize>,
         conduits: Arc<Mutex<BTreeSet<Conduit>>>,
+        dialer_frame_sns: Arc<Mutex<Vec<u64>>>,
     }
 
     impl CountingRelay {
@@ -2549,6 +2558,34 @@ pub mod common {
         /// was wz's own decode would be asking wz whether wz was right.
         pub fn conduits_seen(&self) -> BTreeSet<Conduit> {
             self.conduits.lock().expect("relay conduit set").clone()
+        }
+
+        /// R2221 (open-debt item 568) — the sequence number of every `T_MID_FRAME`
+        /// batch the DIALER put on the wire, in the order it put them there.
+        ///
+        /// # Why the wire and not the session
+        ///
+        /// `SessionLinkActions::negotiated_sn_mask()` answers what wz DECIDED the
+        /// ring is. It cannot answer whether that decision reached the bytes, and
+        /// those are two different claims — the second is the one a negotiated
+        /// axis is FOR. This list is read by a parser that holds none of wz's
+        /// session state: it takes the batch's first header, checks the 5-bit MID,
+        /// and reads the VLE that follows it.
+        ///
+        /// # Why the DIALER direction only
+        ///
+        /// The dialer is wz in every leg built on this, and the claim is about
+        /// what WZ emitted. The acceptor's own SNs live on the acceptor's ring
+        /// and say nothing about whether wz adopted the negotiation.
+        ///
+        /// Fed on every pump whatever the [`RelayFault`] is, for the reason
+        /// [`Self::conduits_seen`] gives for its own reading: what a peer put on
+        /// the link is not a property of what this relay did to it.
+        pub fn dialer_to_acceptor_frame_sns(&self) -> Vec<u64> {
+            self.dialer_frame_sns
+                .lock()
+                .expect("relay frame sn list")
+                .clone()
         }
     }
 
@@ -2743,6 +2780,7 @@ pub mod common {
         let held = Arc::new(AtomicUsize::new(0));
         let overtaken = Arc::new(AtomicUsize::new(0));
         let conduits = Arc::new(Mutex::new(BTreeSet::new()));
+        let dialer_frame_sns = Arc::new(Mutex::new(Vec::new()));
         let up = Arc::clone(&dialer_to_acceptor);
         let down = Arc::clone(&acceptor_to_dialer);
         let down_dropped = Arc::clone(&dropped);
@@ -2758,6 +2796,7 @@ pub mod common {
         // report a conduit at all -- an instrument that only exists on the arm
         // it is meant to discriminate FROM.
         let down_conduits = Arc::clone(&conduits);
+        let up_frame_sns = Arc::clone(&dialer_frame_sns);
 
         thread::spawn(move || {
             // An accept that never comes means the test finished without
@@ -2793,6 +2832,7 @@ pub mod common {
                         dropped: &down_dropped,
                         interleave: down_interleave.as_ref(),
                         conduits: Some(&down_conduits),
+                        frame_sns: None,
                     },
                 )
             });
@@ -2801,7 +2841,7 @@ pub mod common {
                 acceptor_tx,
                 &up,
                 counted_mid,
-                PumpTaps::inert(&AtomicUsize::new(0)),
+                PumpTaps::faultless(&AtomicUsize::new(0), &up_frame_sns),
             );
         });
 
@@ -2813,6 +2853,7 @@ pub mod common {
             held,
             overtaken,
             conduits,
+            dialer_frame_sns,
         }
     }
 
@@ -2838,18 +2879,31 @@ pub mod common {
         /// `interleave`, because what the far side PUT on the link is not a
         /// property of what this relay did to it.
         conduits: Option<&'a Mutex<BTreeSet<Conduit>>>,
+        /// Where the SN of every `T_MID_FRAME` batch on this direction is
+        /// recorded, on the same terms as `conduits`. `None` leaves the reading
+        /// off the direction entirely — see
+        /// [`CountingRelay::dialer_to_acceptor_frame_sns`].
+        frame_sns: Option<&'a Mutex<Vec<u64>>>,
     }
 
     impl<'a> PumpTaps<'a> {
-        /// A direction that only forwards and counts. `dropped` is still taken
-        /// because the needle rule is what writes it and there is no needle
-        /// here; a caller supplies a throwaway.
-        fn inert(dropped: &'a AtomicUsize) -> Self {
+        /// A direction that applies no FAULT: it forwards, counts, and records
+        /// the frame sequence numbers it saw. `dropped` is still taken because
+        /// the needle rule is what writes it and there is no needle here; a
+        /// caller supplies a throwaway.
+        ///
+        /// Named for what it does NOT do rather than `inert`, which it was
+        /// called while it also observed nothing. An observation is not a
+        /// fault, and the two must stay separable — a reading available only on
+        /// the arm it is meant to discriminate FROM is the instrument R2200
+        /// had to move out of the interleave.
+        fn faultless(dropped: &'a AtomicUsize, frame_sns: &'a Mutex<Vec<u64>>) -> Self {
             Self {
                 needle: None,
                 dropped,
                 interleave: None,
                 conduits: None,
+                frame_sns: Some(frame_sns),
             }
         }
     }
@@ -2980,6 +3034,7 @@ pub mod common {
             dropped,
             interleave,
             conduits,
+            frame_sns,
         } = taps;
         use std::io::{Read, Write};
         use std::net::Shutdown;
@@ -3021,6 +3076,21 @@ pub mod common {
             if let Some(conduits) = conduits {
                 if let Some(conduit) = fragment_conduit(&batch) {
                     conduits.lock().expect("relay conduit set").insert(conduit);
+                }
+            }
+            // R2221 — the frame SN reading, on the same terms and in the same
+            // place as the conduit reading above: before any hold, outside the
+            // fault, and derived from the bytes rather than from either peer's
+            // state. The layout is `[header][VLE(sn)]…`, the same prefix
+            // `fragment_conduit` walks.
+            if let Some(frame_sns) = frame_sns {
+                if batch
+                    .first()
+                    .is_some_and(|header| header & TRANSPORT_MID_MASK == T_MID_FRAME_LOCAL)
+                {
+                    if let Some((sn, _)) = read_vle(&batch, 1) {
+                        frame_sns.lock().expect("relay frame sn list").push(sn);
+                    }
                 }
             }
             if let Some(sinks) = interleave.filter(|_| !state.done) {
@@ -3817,6 +3887,48 @@ pub mod common {
                 "transport/unicast/qos/enabled:false",
                 "transport/unicast/compression/enabled:true",
             ],
+        );
+        wait_for_zenohd_handshake_ready(&format!("127.0.0.1:{port}"), &mut mk_probe_stderr);
+        (guard, port)
+    }
+
+    /// R2221 (open-debt item 568) — spawn a zenohd whose FRAME SN RING is
+    /// `resolution` wide, the foreign oracle for the negotiated-resolution leg.
+    ///
+    /// # Why the ROUTER carries the non-default value and not wz
+    ///
+    /// `Resolution` is `min()`ed on both sides
+    /// (`io/zenoh-transport/src/unicast/establishment/accept.rs:198-213` at
+    /// zenoh 1.5.0 — `res.set(Field::FrameSN, i_fsn_res.min(m_fsn_res))`), so
+    /// the SMALLER advertisement wins. Put the small value on wz and the
+    /// negotiated ring equals wz's own advertisement, which an implementation
+    /// that ignored the peer's InitAck entirely would also produce: the leg
+    /// would pass while measuring nothing. Put it on the ROUTER and the
+    /// negotiated ring is a number that exists ONLY on zenohd's side of the
+    /// wire until its InitAck carries it back.
+    ///
+    /// `resolution` is one of zenoh's own spellings — `"8bit"`, `"16bit"`,
+    /// `"32bit"`, `"64bit"` (`commons/zenoh-protocol/src/core/resolution.rs:32-35`).
+    /// The DEFAULT is `"32bit"` (`DEFAULT_CONFIG.json5:590`), so the
+    /// un-configured [`spawn_zenohd_on_ephemeral_tcp`] is this helper's twin
+    /// and the calibration arm of any pair built on it.
+    ///
+    /// ⚠ The probe session `wait_for_zenohd_handshake_ready` opens runs against
+    /// THIS router, so the resolution has to be one a wz handshake survives.
+    /// That is not a limitation to work around — a value that broke the probe
+    /// would break the leg too, and finding out here is finding out earlier.
+    pub fn spawn_zenohd_sn_resolution_on_ephemeral_tcp(
+        resolution: &str,
+        mut mk_probe_stderr: impl FnMut() -> File,
+    ) -> (ChildGuard, u16) {
+        let cfg = format!("transport/link/tx/sequence_number_resolution:\"{resolution}\"");
+        let (guard, port) = spawn_zenohd_dialer_on_ephemeral_tcp_with_cfgs(
+            &zenohd_binary(),
+            "zenohd (reference router, sn resolution)",
+            None,
+            &[],
+            None,
+            &[cfg.as_str()],
         );
         wait_for_zenohd_handshake_ready(&format!("127.0.0.1:{port}"), &mut mk_probe_stderr);
         (guard, port)
@@ -5952,6 +6064,30 @@ pub mod wire_tap {
         dialer_port: u16,
         listener_port: u16,
     ) -> Vec<u8> {
+        let packets = synthesise_packets(recording, dialer_port, listener_port);
+        let borrowed: Vec<(u32, u32, &[u8])> = packets
+            .iter()
+            .map(|(s, f, p)| (*s, *f, p.as_slice()))
+            .collect();
+        wz_capture::pcap::write(wz_capture::link::LINKTYPE_ETHERNET, &borrowed)
+    }
+
+    /// R2221 (open-debt item 569) — the PACKETS [`synthesise_pcap`] writes,
+    /// before they are written, as `(ts_sec, ts_usec, ethernet frame)`.
+    ///
+    /// Lifted out of `synthesise_pcap` on its second consumer rather than
+    /// copied into it. A live tap door takes PACKETS and not a file
+    /// (`wz_dissect_live_push`), so a witness that drives it needs the same
+    /// envelope — and a second copy of the envelope rules would drift from this
+    /// one the first time either moved, which is exactly what the module docs
+    /// say the shared harness exists to prevent. `synthesise_pcap` is now this
+    /// function plus the pcap header, so the two witnesses cannot disagree
+    /// about what the wire looked like.
+    pub fn synthesise_packets(
+        recording: &[(Side, Vec<u8>)],
+        dialer_port: u16,
+        listener_port: u16,
+    ) -> Vec<(u32, u32, Vec<u8>)> {
         let mut dialer_seq: u32 = 1;
         let mut listener_seq: u32 = 1;
         let mut packets: Vec<(u32, u32, Vec<u8>)> = Vec::new();
@@ -5970,11 +6106,7 @@ pub mod wire_tap {
             };
             packets.push((1, index as u32, pkt));
         }
-        let borrowed: Vec<(u32, u32, &[u8])> = packets
-            .iter()
-            .map(|(s, f, p)| (*s, *f, p.as_slice()))
-            .collect();
-        wz_capture::pcap::write(wz_capture::link::LINKTYPE_ETHERNET, &borrowed)
+        packets
     }
 
     #[cfg(test)]

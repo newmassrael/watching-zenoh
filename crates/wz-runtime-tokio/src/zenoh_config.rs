@@ -2298,6 +2298,28 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
         "wz-has-it",
         "ServerNameVerification",
     ),
+    // R2221 (open-debt item 568) — wz's source spells
+    // `transport/link/tx/sequence_number_resolution` to configure the GENUINE
+    // zenohd, never itself, and the `qos/publication` row above is the same
+    // shape for the same reason: it is the only way to put a non-default value
+    // on the OTHER side of the wire.
+    //
+    // The axis needs that. `Resolution` is `min()`ed by both peers
+    // (`unicast/establishment/accept.rs:198-213` at zenoh 1.5.0), so a small
+    // value advertised by WZ makes the negotiated ring equal wz's own
+    // advertisement — which an implementation that ignored the InitAck entirely
+    // also produces. Only a value that exists on the ROUTER's side until its
+    // InitAck carries it back can measure whether wz ADOPTS it.
+    //
+    // wz honours nothing here: the key stays in the `LinkTxConf` beyond-wz
+    // group, whose subject is a configurable link-TX surface wz does not have.
+    // What wz has is the wire negotiation, which is a different thing from a
+    // config key that sets the local advertisement.
+    (
+        "transport/link/tx/sequence_number_resolution",
+        "foreign-node-config",
+        "spawn_zenohd_sn_resolution_on_ephemeral_tcp",
+    ),
     ("transport/link/tx/threads", "asserted-ignored", "ignored"),
     (
         "transport/multicast/join_interval",

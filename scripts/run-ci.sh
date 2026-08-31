@@ -1605,6 +1605,15 @@ if actual != set(TOKENS):
 
 TEST_ATTR = re.compile(r"#\[(?:tokio::)?test\b")
 FN_NAME = re.compile(r"^\s*(?:async\s+)?fn\s+([A-Za-z0-9_]+)")
+# R2221 — a COMMENT line is prose, not code. Both loops below arm on a `#[test]`
+# / `#[ignore = ..]` line and then blame the next `fn`, and neither could tell a
+# real attribute from a doc comment that MENTIONS one. Measured: a module doc
+# reading "the `#[test]`s keep everything the arm cannot claim" armed the first
+# loop, and the next ordinary helper `fn` in that file was reported as an
+# unskipped test. Skipping comment lines cannot hide a real case in the other
+# direction -- an attribute inside a comment is never an attribute, and a `fn`
+# inside one is never a function.
+COMMENT = re.compile(r"^\s*(?://|/\*|\*)")
 
 # SCOPE: Layer E runs `cargo test -p wz-integration-tests` and nothing else
 # (see the invocation in layer_e_ap_demo_round_trip). A `--skip` cannot reach a
@@ -1625,6 +1634,8 @@ for path in TESTS:
     lines = path.read_text().splitlines()
     pending = False
     for line in lines:
+        if COMMENT.match(line):
+            continue
         if TEST_ATTR.search(line):
             pending = True
             continue
@@ -1659,6 +1670,8 @@ OWNING_LANE = re.compile(r"Layer\s+([A-Za-z0-9]+)\s+runs via")
 for path in TESTS:
     reason = None
     for line in path.read_text().splitlines():
+        if COMMENT.match(line):
+            continue
         m = IGNORE_REASON.search(line)
         if m:
             reason = m.group(1)
@@ -1996,6 +2009,22 @@ PY
     # itself in the same assertion.
     python3 scripts/lib/negotiated_axis_witness_gate.py --selftest || return 1
     python3 scripts/lib/negotiated_axis_witness_gate.py --check || return 1
+    # R2221 (open-debt item 568) — the same axes, asked a HARDER question: is
+    # any of them witnessed by a test that drives a FOREIGN implementation.
+    #
+    # The gate above answers "asserted somewhere", and its own output was the
+    # argument for this one: every axis reported its first witness from a
+    # `wz-runtime-tokio` test, i.e. from a wire this tree wrote. An encoder and
+    # a decoder in one tree that are wrong together satisfy all nine.
+    #
+    # Separate script, and deliberately: the widening needs a second population
+    # (which tests can witness a foreign impl) that `crossimpl_corpus.py`
+    # already owns for Layer A4. This file imports BOTH derivations and is only
+    # the join plus a two-directional ratchet — below the floor means an axis
+    # lost its genuine witness, above it means the floor was not raised in the
+    # commit that gained one.
+    python3 scripts/lib/genuine_axis_witness_gate.py --selftest || return 1
+    python3 scripts/lib/genuine_axis_witness_gate.py --check || return 1
     # R2190 (open-debt item 530, NARROWED) — a cargo command written down in
     # this tree names features that exist.
     #
