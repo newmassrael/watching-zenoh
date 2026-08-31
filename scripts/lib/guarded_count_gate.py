@@ -175,6 +175,57 @@ def parse_guards(text):
             g = _guard_from(lineno, "bare", want, seg)
             if g:
                 guards.append(g)
+    attach_demo_builds(text, guards)
+    return guards
+
+
+# R2236 — the `wz-ap-demo` build a guard's own lane runs before it.
+#
+# Cargo uplifts every feature variant of one bin to ONE path (the R311y269
+# note in run-ci), so `crates/target/debug/wz-ap-demo` is whatever the LAST
+# build left there. A lane provisions its own demo and then runs its guards;
+# this gate runs a guard's command ALONE, so it inherits whatever the previous
+# pre-push step happened to build -- and a Layer Z guard against a
+# default-feature demo does not print a wrong count, it prints
+# `test result: FAILED` with six `wz_ap_demo_binary` preconditions panicking.
+# The gate then reports UNMEASURED, and the hook fails a push on a gate that
+# says, in its own words, that it measured nothing.
+#
+# MEASURED, R2236: with the Layer Z feature set the guarded command prints
+# `test result: ok. 6 passed`; rebuilt at bare `cargo build -p wz-ap-demo` the
+# same command prints `test result: FAILED. 0 passed; 6 failed`.
+#
+# So the build line is DERIVED rather than listed: scan BACKWARD from the
+# guard for the nearest `cargo build -p wz-ap-demo ... --features <list>` that
+# is still inside the same top-level lane function. A hand-kept table of
+# "which guards need a demo" would be the escape hatch this file exists to
+# avoid -- it would go stale the round a lane moves its build line, and
+# nothing would measure that.
+DEMO_BUILD_RE = re.compile(r"cargo build -p wz-ap-demo\b[^\n|)]*?--features ([A-Za-z0-9_,-]+)")
+FN_OPEN_RE = re.compile(r"^[a-z_][a-z0-9_]*\(\) \{")
+
+
+def attach_demo_builds(text, guards):
+    """Give each guard the feature list its own lane builds the demo with.
+
+    `None` when the enclosing lane builds no demo -- that guard's command does
+    not depend on one, and running a build for it would be a cost with no
+    claim behind it.
+    """
+    lines = text.splitlines()
+    for g in guards:
+        features = None
+        for i in range(min(g.lineno, len(lines)) - 1, -1, -1):
+            line = lines[i]
+            if FN_OPEN_RE.match(line):
+                break  # left the lane; a build in another one is not this guard's
+            if line.lstrip().startswith("#"):
+                continue
+            m = DEMO_BUILD_RE.search(line)
+            if m:
+                features = m.group(1)
+                break
+        g.demo_features = features
     return guards
 
 
@@ -301,6 +352,35 @@ def run_guard(g, verbose):
     cmd = list(g.cmd)
     bx = os.environ.get("BX", "")
     routed = bool(bx) and os.access(bx, os.X_OK)
+    # R2236 — provision the demo the guard's own lane provisions, FIRST. See
+    # `attach_demo_builds`: without this the command runs against whatever the
+    # previous pre-push step left at the one uplifted bin path, and a Layer Z
+    # guard then fails its preconditions instead of reporting a count.
+    features = getattr(g, "demo_features", None)
+    if features:
+        # ...and run it HERE, never through `$BX`. A lane that builds a demo is
+        # a lane whose guards depend on machine-local provisioning -- the demo
+        # at the one uplifted bin path, plus `target/zenohd/zenohd` and
+        # `target/zenoh-pico-cli/*`, none of which a remote builder has.
+        # MEASURED, R2236: routed to a build host the same command reported
+        # `z_sub binary missing at /home/<other-host>/.../target/zenoh-pico-cli/z_sub`
+        # and `--peer requires the routing-peer feature`, i.e. it was answering
+        # about a machine that was never provisioned. "Has a demo build" is the
+        # DERIVED test for that dependence; a hand-kept list of oracle-needing
+        # guards would go stale the round a lane moves.
+        routed = False
+        build = ["cargo", "build", "-p", "wz-ap-demo", "--features", features, "--quiet"]
+        if verbose:
+            print(f"  provisioning {' '.join(build)}")
+        pre = subprocess.run(
+            build, cwd=str(REPO_ROOT / "crates"), capture_output=True, text=True
+        )
+        if pre.returncode != 0:
+            # Say WHICH half failed. A build error here is not a count claim,
+            # and folding it into the run's verdict would blame the guard.
+            if verbose:
+                print(f"  demo build failed for {g.where}:\n{pre.stdout}{pre.stderr}")
+            return "UNMEASURED", []
     if routed:
         cmd = [bx, "--label", f"guard-count-{g.lineno}", "--"] + cmd
     if verbose:
@@ -637,6 +717,36 @@ def selftest():
         verdict(37, 0, "bx: exit=0 in 27s — full log: /x.log")
         == ("UNMEASURED", []),
         "folding it into MOVED pronounces on a subject never reached",
+    )
+
+    # R2236 — the demo a guard's lane provisions, DERIVED. The fixture carries
+    # the shape the previous implementation swallowed: a guard whose lane builds
+    # the demo (so the guard depends on machine-local provisioning) and a guard
+    # in a LATER function that must NOT inherit that build. Without the second
+    # arm the derivation could be "the nearest build anywhere above", which is
+    # green on the first arm alone and wrong for every lane after a demo lane.
+    demo_fixture = "\n".join(
+        [
+            "layer_with_a_demo() {",
+            "    (cd crates && cargo build -p wz-ap-demo --features quic,routing-peer"
+            " --quiet) || return 1",
+            "    _runci_guarded_test A 6 cargo test -p p --test t -- --ignored",
+            "}",
+            "layer_without_one() {",
+            "    _runci_guarded_test B 3 cargo test -p p --test u -- --ignored",
+            "}",
+        ]
+    )
+    dg = parse_guards(demo_fixture)
+    arm(
+        "R2236: a guard inherits its OWN lane's demo build",
+        len(dg) == 2 and dg[0].demo_features == "quic,routing-peer",
+        "a guard run without its lane's demo answers about the wrong binary",
+    )
+    arm(
+        "R2236: the scan stops at the function boundary (the control)",
+        len(dg) == 2 and dg[1].demo_features is None,
+        "inheriting a previous lane's build would provision the wrong features",
     )
 
     bad = [(n, w) for n, ok, w in arms if not ok]
