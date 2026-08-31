@@ -823,13 +823,37 @@ pub struct ZenohNodeConfig {
     pub connect: Vec<String>,
     /// `scouting/multicast/enabled`.
     pub multicast_scouting: bool,
-    /// R2063 (open-debt item 214) — `routing/peer/mode`.
+    /// R2063 (open-debt item 214) — `routing/peer/mode`, a
+    /// [`WZ_EXTENSION_CONFIG_KEYS`] member since R2230.
     ///
-    /// `true` is upstream's `linkstate`, the default; `false` is
-    /// `peer-to-peer`. A `bool` and not a two-variant enum because that is the
-    /// shape the sink already has — `wz-ap-demo`'s `--peer-mode` parses to
-    /// `full_linkstate: bool` — and a third spelling here would be a type the
-    /// reader converts and nothing else consumes.
+    /// `true` selects full link-state peering, `false` peer-to-peer. A `bool`
+    /// and not a two-variant enum because that is the shape the sink already
+    /// has — `wz-ap-demo`'s `--peer-mode` parses to `full_linkstate: bool` —
+    /// and a third spelling here would be a type the reader converts and
+    /// nothing else consumes.
+    ///
+    /// ⛔ R2231 (open-debt item 584) — THIS DOC USED TO SAY `true` IS
+    /// "upstream's `linkstate`, the default". That is false against the pinned
+    /// 1.10.0 and the correction is the point, not a wording fix: upstream
+    /// DELETED full-linkstate peer routing. 1.5.0 had two peer HATs
+    /// (`hat/linkstate_peer` and `hat/p2p_peer`) and this key chose between
+    /// them; 1.10.0 has one (`hat/peer`), and BOTH of its `Network::new` call
+    /// sites pass a literal `false` for the `full_linkstate` parameter
+    /// (`net/protocol/network.rs:153-157` names it; `hat/peer/mod.rs:207` and
+    /// `:242` pass it). There is no path by which a stock 1.10.0 peer floods a
+    /// topology edge.
+    ///
+    /// So this is a capability wz HAS and upstream no longer does — a wz
+    /// extension, on the owner's decision of 2026-08-31, taken in the same
+    /// terms as the config-key split: keep the behaviour so an existing
+    /// deployment still comes up, and stop calling it upstream parity so the
+    /// surface's name stays true.
+    ///
+    /// ⚠ The reversal is ALREADY GATED and needs no second instrument: if
+    /// upstream ever restores full-linkstate peering it restores this config
+    /// key with it, `upstream_carries_the_surface.py` then reads the key as
+    /// CARRIED rather than discarded, and reds — which is the signal to move
+    /// the key back onto the surface and re-examine this claim with it.
     ///
     /// ⚠ WHAT THIS HONOURS, precisely: it switches the DISCOVERY plane
     /// (link-state ingest and re-flood) so a wz peer can learn and
