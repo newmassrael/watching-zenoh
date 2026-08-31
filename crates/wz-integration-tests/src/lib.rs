@@ -1954,8 +1954,64 @@ pub mod common {
         }
     }
 
-    /// Extract the port from zenohd's `Zenoh can be reached at: tcp/127.0.0.1:<port>`
-    /// announcement (R311y411). Pure so it is unit-testable without a zenohd.
+    /// The zenohd log line every ephemeral-port helper reads its port back from.
+    ///
+    /// R2230 (open-debt item 579) — MOVED here as one spelling, and moved off
+    /// `"Zenoh can be reached at: tcp/127.0.0.1:"`, which the three helpers that
+    /// wanted it each spelled for themselves.
+    ///
+    /// The old needle CANNOT MATCH on the pinned 1.10.0, and it is not a format
+    /// change: upstream narrowed what that line is ABOUT. 1.5.0's
+    /// `print_locators` iterated `get_locators()`; 1.10.0's iterates
+    /// `get_locators_noloopback()` (`zenoh/src/net/runtime/orchestrator.rs:610`
+    /// against `1.5.0:...:583`). Every helper here binds `tcp/127.0.0.1:0`
+    /// because a test must be hermetic, so the line is now about exactly the
+    /// locators these tests never have. Re-spelling the old needle would have
+    /// been guessing at a line that no longer exists.
+    ///
+    /// `Listener added:` is the better needle on its own merits, which is why
+    /// this is not a workaround. It is emitted where the listener is actually
+    /// added (`orchestrator.rs:601`), it carries the RESOLVED endpoint with the
+    /// kernel's port, it is byte-identical in 1.5.0 and 1.10.0, and it says the
+    /// thing the callers' own budget message claims to be waiting for —
+    /// "announcing its bound tcp listener". The reachability advertisement never
+    /// did: a locator can be advertised for a listener that is not this one.
+    ///
+    /// ⚠ It is a `debug!`, so a helper using it must pin `RUST_LOG=z=debug`.
+    /// Measured on the move: 32 lines of zenohd output at that level for a
+    /// spawn, against 3 at info, so the capture cost is not a reason to prefer
+    /// a line that cannot fire.
+    pub const ZENOHD_LISTENER_LINE: &str = "Listener added: tcp/127.0.0.1:";
+
+    /// zenohd's scout-listener announcement, printed from `bind_mcast_port` once
+    /// the group socket is bound and joined.
+    ///
+    /// The group is spelled out so a zenohd whose `scouting/multicast/address`
+    /// ever moved would fail the gate rather than silently never answering a
+    /// Scout.
+    ///
+    /// R2230 (open-debt item 579) — MOVED here beside the listener line, and the
+    /// text changed: 1.5.0 printed `"zenohd listening scout messages on {}"`
+    /// and 1.10.0 prints `"Listening scout messages on {}"`
+    /// (`orchestrator.rs:731` against `1.5.0:...:701`). ⚠ Unlike
+    /// [`ZENOHD_LISTENER_LINE`], this one really IS a reword — same event, same
+    /// level, different wording — which is why the two sit together: a reader
+    /// who finds one stale should check the other, and the two failures need
+    /// different repairs. Re-spelling is right here; it was wrong there.
+    pub const ZENOHD_SCOUT_LINE: &str = "Listening scout messages on 224.0.0.224:7446";
+
+    /// [`ZENOHD_LISTENER_LINE`] for a router asked to listen on EVERY interface.
+    ///
+    /// zenohd logs the address it was GIVEN, not the addresses that resolves to
+    /// (measured: `-l tcp/0.0.0.0:0` prints `Listener added: tcp/0.0.0.0:44007`
+    /// and then three `Zenoh can be reached at:` lines on real interfaces), so a
+    /// caller reading the kernel's port back has to match the form it asked for.
+    /// See `spawn_zenohd_multicast_scouting_on_any_interface` for why that
+    /// spawn exists at all.
+    pub const ZENOHD_ANY_LISTENER_LINE: &str = "Listener added: tcp/0.0.0.0:";
+
+    /// Extract the port from zenohd's [`ZENOHD_LISTENER_LINE`] announcement
+    /// (R311y411). Pure so it is unit-testable without a zenohd.
     ///
     /// Requires a TERMINATING non-digit after the port. A capture file can in
     /// principle be read mid-write, and accepting a digit run that ends at
@@ -4494,7 +4550,7 @@ pub mod common {
     /// CLI offers no fd-inheritance or socket-activation flag to close it. So this
     /// helper inverts the direction: zenohd binds `tcp/127.0.0.1:0`, the KERNEL picks
     /// a free port and the child never lets go of it, and the test reads the number
-    /// back from zenohd's own `Zenoh can be reached at: tcp/127.0.0.1:<port>` line.
+    /// back from zenohd's own [`crate::common::ZENOHD_LISTENER_LINE`] log line.
     /// Nothing is guessed, so there is no window to lose. Readiness is still the
     /// `wait_for_tcp_accept_alive` probe on the discovered port, so callers keep the
     /// same guarantee.
@@ -4579,9 +4635,7 @@ pub mod common {
         config_path: Option<&str>,
         extra_cfgs: &[&str],
     ) -> (ChildGuard, u16) {
-        /// zenohd's orchestrator announces each bound listener with this prefix; the
-        /// port digits follow it directly.
-        const LISTEN_LINE: &str = "Zenoh can be reached at: tcp/127.0.0.1:";
+        use super::common::ZENOHD_LISTENER_LINE as LISTEN_LINE;
 
         let (writer, mut reader) = zenohd_stdout_capture();
         let mut command = Command::new(zenohd_bin);
@@ -4593,7 +4647,12 @@ pub mod common {
             // `RUST_LOG=warn` silently filters the line away and every leg then burns
             // its full budget on a healthy process. `spawn_on_ephemeral_port` pins the
             // same variable for the wz demo for the same reason.
-            .env("RUST_LOG", "z=info")
+            //
+            // R2230 (open-debt item 579) — `info` -> `debug`, because
+            // `ZENOHD_LISTENER_LINE` is a `debug!` and the `info!` line this used
+            // to read stopped covering loopback in 1.10.0. Read that constant for
+            // why the needle moved rather than being re-spelled.
+            .env("RUST_LOG", "z=debug")
             .arg("-l")
             .arg("tcp/127.0.0.1:0")
             .arg("--no-multicast-scouting")
@@ -4646,8 +4705,11 @@ pub mod common {
             panic!(
                 "{label}: {e}\n\
                  (if the process is alive and the capture looks empty, the announcement \
-                 was filtered out of zenohd's log — this helper pins RUST_LOG=z=info for \
-                 exactly that reason, so a hit here means the log FORMAT moved)"
+                 was filtered out of zenohd's log — this helper pins RUST_LOG=z=debug for \
+                 exactly that reason, so a hit here means the line MOVED. R2230 is the \
+                 worked example: 1.10.0 did not reword it, it narrowed the OLD needle to \
+                 non-loopback locators, which these hermetic helpers never have. Read \
+                 `common::ZENOHD_LISTENER_LINE` before re-spelling anything)"
             )
         });
         if let Err(e) = wait_for_tcp_accept_alive(guard.child_mut(), port, ZENOHD_TCP_ACCEPT_BUDGET)
@@ -4677,10 +4739,11 @@ pub mod common {
     /// listening on the group yet. A scout emitted into that window is a lost
     /// datagram — nothing retransmits it, and the peer's later readiness cannot
     /// recover it. So this additionally waits for zenohd's OWN
-    /// `listening scout messages on <group>` announcement, printed from inside
-    /// `bind_mcast_port` (orchestrator.rs:701) once the socket is bound and
-    /// joined. Both needles come out of one capture, so the wait costs nothing
-    /// extra.
+    /// [`crate::common::ZENOHD_SCOUT_LINE`] announcement, printed from inside
+    /// `bind_mcast_port` once the socket is bound and joined. Both needles come
+    /// out of one capture, so the wait costs nothing extra. (R2230 moved the
+    /// text into that constant, where the version it was measured against is
+    /// recorded beside it — a line quoted inline is a line nobody re-measures.)
     pub fn spawn_zenohd_multicast_scouting_on_ephemeral_tcp(
         label: &'static str,
     ) -> (ChildGuard, u16) {
@@ -4702,11 +4765,76 @@ pub mod common {
         label: &'static str,
         extra_args: &[&str],
     ) -> (ChildGuard, u16) {
-        const LISTEN_LINE: &str = "Zenoh can be reached at: tcp/127.0.0.1:";
-        /// zenohd's scout-listener announcement. The group is spelled out so a
-        /// zenohd whose `scouting/multicast/address` ever moved would fail the
-        /// gate here rather than silently never answering wz's Scout.
-        const SCOUT_LINE: &str = "listening scout messages on 224.0.0.224:7446";
+        spawn_zenohd_multicast_scouting_listening_on(
+            label,
+            "tcp/127.0.0.1:0",
+            super::common::ZENOHD_LISTENER_LINE,
+            extra_args,
+        )
+    }
+
+    /// R2230 (open-debt item 579) — the same scouting router LISTENING ON EVERY
+    /// INTERFACE, for the one caller that needs the Hello to carry a locator.
+    ///
+    /// # Why a loopback listener stopped being enough
+    ///
+    /// The pinned 1.10.0 chooses a scout reply's locators by WHO ASKED:
+    /// `get_hello_locators` returns `get_locators()` for a loopback peer and
+    /// `get_locators_noloopback()` for everyone else
+    /// (`zenoh/src/net/runtime/orchestrator.rs:1283`, its own comment: "public
+    /// locators intentionally exclude loopback"). 1.5.0 had no such fork — it
+    /// answered `get_locators()` unconditionally (`1.5.0:...:1165`).
+    ///
+    /// A multicast scout does not arrive from loopback. zenoh-pico's default
+    /// locator names no interface (`Z_CONFIG_MULTICAST_LOCATOR_DEFAULT`,
+    /// `vendor/zenoh-pico/include/zenoh-pico/config.h.in:133`), so the kernel
+    /// sends it from a real interface and zenohd sees a non-loopback peer. A
+    /// router listening only on `127.0.0.1` therefore answers with an EMPTY
+    /// locator list — measured: the real zenoh-pico `z_scout` found the router,
+    /// printed its zid and `whatami: "Router"`, and `locators: []`.
+    ///
+    /// # Why this is the repair and not a workaround
+    ///
+    /// The leg that needs this compares wz's C-ABI rendering of a Hello against
+    /// the real zenoh-pico's rendering of THE SAME Hello, and what makes it
+    /// sharp is that the locator carries a port the kernel chose and neither
+    /// scout was told. Both survive: `tcp/0.0.0.0:0` is still a kernel-assigned
+    /// ephemeral port, and both scouts still receive one Hello from one router.
+    /// Only the ADDRESS in the locator changes, from the loopback literal to
+    /// whichever interfaces the host has — which is the thing the comparison
+    /// never depended on.
+    ///
+    /// ⚠ Stated rather than hidden: this binds the ephemeral port on every
+    /// interface for the life of the leg, where the loopback form did not. That
+    /// is the cost, and it is the smaller one — the alternative is a leg whose
+    /// oracle can no longer see anything, which its own anti-vacuity guard
+    /// correctly refuses to call a pass.
+    pub fn spawn_zenohd_multicast_scouting_on_any_interface(
+        label: &'static str,
+    ) -> (ChildGuard, u16) {
+        spawn_zenohd_multicast_scouting_listening_on(
+            label,
+            "tcp/0.0.0.0:0",
+            super::common::ZENOHD_ANY_LISTENER_LINE,
+            &[],
+        )
+    }
+
+    /// The body the three scouting entry points share.
+    ///
+    /// `listen` and `listen_needle` travel TOGETHER because they are one fact:
+    /// the needle is how the kernel's choice of port is read back out of
+    /// zenohd's own log, and it must name the address that was asked for. Split
+    /// across two call sites they could disagree, and the failure would be a
+    /// spawn that waits out its whole budget on a healthy router.
+    fn spawn_zenohd_multicast_scouting_listening_on(
+        label: &'static str,
+        listen: &str,
+        listen_needle: &str,
+        extra_args: &[&str],
+    ) -> (ChildGuard, u16) {
+        use super::common::ZENOHD_SCOUT_LINE as SCOUT_LINE;
+        let listen_line = listen_needle;
 
         let (writer, mut reader) = zenohd_stdout_capture();
         let mut command = Command::new(zenohd_binary());
@@ -4715,9 +4843,14 @@ pub mod common {
             // readiness needles are LOG lines, so an inherited `RUST_LOG=warn`
             // would filter them away and the spawn would burn its full budget on
             // a perfectly healthy router.
-            .env("RUST_LOG", "z=info")
+            //
+            // R2230 (open-debt item 579) — `info` -> `debug`, with the port
+            // needle. `SCOUT_LINE` is unaffected either way: `debug` is the more
+            // permissive filter, so a level that carries the new needle carries
+            // the old ones too.
+            .env("RUST_LOG", "z=debug")
             .arg("-l")
-            .arg("tcp/127.0.0.1:0")
+            .arg(listen)
             .arg("--rest-http-port")
             .arg("none")
             // R311y606 — stderr goes to the SAME capture as stdout rather than
@@ -4731,6 +4864,12 @@ pub mod common {
         // LAST, so a caller can override anything above it: zenohd's clap parse
         // keeps the final occurrence, and the readiness needles this helper waits
         // on are what constrain what a caller may sensibly override.
+        //
+        // ⚠ `-l` is the one flag a caller must NOT pass here: zenohd APPENDS
+        // listeners rather than replacing them, so an extra `-l` gives the
+        // router a second port while `listen_needle` still reads the first. The
+        // listen address is a parameter of this function for exactly that
+        // reason.
         command.args(extra_args);
         let mut guard = ChildGuard::wrap(
             label,
@@ -4750,13 +4889,13 @@ pub mod common {
                 if !captured.contains(SCOUT_LINE) {
                     return None;
                 }
-                parse_announced_tcp_port(captured, LISTEN_LINE)
+                parse_announced_tcp_port(captured, listen_line)
             },
         )
         .unwrap_or_else(|e| {
             panic!(
                 "{label}: {e}\n\
-                 (both needles are zenohd log lines: {LISTEN_LINE:?} and \
+                 (both needles are zenohd log lines: {listen_line:?} and \
                  {SCOUT_LINE:?}. A live process with a capture holding only the \
                  first means multicast scouting did not come up — check that no \
                  --no-multicast-scouting reached this spawn; a capture with \
@@ -5896,8 +6035,13 @@ mod tests {
     /// pins that, since a torn read is exactly the case a live run does not produce.
     #[test]
     fn parse_announced_tcp_port_refuses_an_unterminated_digit_run() {
-        use super::common::parse_announced_tcp_port;
-        const NEEDLE: &str = "Zenoh can be reached at: tcp/127.0.0.1:";
+        // R2230 (open-debt item 579) — the fixture drives the needle the helpers
+        // ACTUALLY look for, rather than a fourth copy of a string. It had been a
+        // literal, and when the real needle moved this test kept passing against
+        // a line no zenohd emits any more: a torn-read guard proven over a
+        // fiction. The parser is generic over its needle, so nothing here needed
+        // the literal in the first place.
+        use super::common::{parse_announced_tcp_port, ZENOHD_LISTENER_LINE as NEEDLE};
 
         // Complete line (the real shape: zenohd writes it with its trailing \n).
         assert_eq!(

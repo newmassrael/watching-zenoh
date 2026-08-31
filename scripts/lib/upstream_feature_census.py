@@ -123,7 +123,15 @@ UPSTREAM_PACKAGE = "zenoh"
 # same checkout before it builds the oracle, for the same reason: a cache that
 # later resolves a different zenoh must fail fast rather than silently regrade
 # the surface. Bumping it is a round that RE-JUDGES the table below.
-UPSTREAM_VERSION = "1.5.0"
+#
+# R2230 (open-debt item 579) — 1.5.0 -> 1.10.0, and the re-judgement is recorded
+# rather than asserted. The refusal above did its job: R2229 moved the pin and
+# this gate stopped Layer Z rather than regrading 19 rows against a surface
+# nobody had looked at. Measured on the move: every existing row still names a
+# feature 1.10.0 declares (no row outlived its subject), and TWO arrived
+# unjudged. `test` became a PINNED_NON_CAPABILITY and `uring` became an
+# UNANSWERED row — see both for the evidence each was judged on.
+UPSTREAM_VERSION = "1.10.0"
 
 # Features that are upstream capability toggles by shape but not by meaning.
 # `default` and the implicit optional-dep feature are DERIVED (see the module
@@ -142,6 +150,14 @@ PINNED_NON_CAPABILITY: dict[str, str] = {
     "internal_config": (
         "un-hides config-struct internals to zenoh's own crates. Same shape as "
         "`internal`, one crate narrower"
+    ),
+    "test": (
+        "R2230: ARRIVED in 1.10.0. It exposes zenoh-transport's own test "
+        "scaffolding -- `pub mod test_helpers`, `TransportManagerBuilder::"
+        "build_test`, and the `#[cfg(all(test, feature = \"test\"))]` auth unit "
+        "tests. Same class as `internal`: a visibility toggle over items "
+        "upstream wrote for its own suite, gating no capability an operator can "
+        "deploy, and a node built with and without it speaks the same wire"
     ),
 }
 
@@ -216,6 +232,19 @@ ANSWERS: tuple[tuple[str, str | None, str], ...] = (
         "protocol capability: it decorates zenoh-task / zenoh-runtime futures "
         "with tracing spans. Named rather than excused, because the one gap in "
         "an otherwise closed surface is the whole value of counting it",
+    ),
+    (
+        "uring",
+        None,
+        "UNANSWERED -- open-debt item 583. R2230: ARRIVED in 1.10.0 and this "
+        "direction is the only one that could see it. An io_uring submission "
+        "backend for the link layer (`zenoh-uring` + `zenoh-link-*/uring`, "
+        "Linux and five architectures), so it adds no link SCHEME and moves no "
+        "byte on the wire -- it changes how the bytes are moved. Judged a "
+        "capability and not an exclusion on this table's own precedent: `stats` "
+        "and `tracing-instrument` are rows though neither touches the wire, "
+        "while every PINNED_NON_CAPABILITY entry is a VISIBILITY toggle. wz has "
+        "no io_uring path at all, so the honest answer is a named gap",
     ),
 )
 

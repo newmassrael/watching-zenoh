@@ -128,10 +128,26 @@ FIXTURE_RE = re.compile(
 # The test's own exception list, anchored to the iteration it belongs to so that
 # a `!=` comparison anywhere else in this 2700-line file cannot be mistaken for
 # one.
+#
+# R2230 (open-debt items 579 / 582) — the anchor admits an optional
+# `.chain(WZ_EXTENSION_HONOURED_KEYS)` between the two ends, and `HONOURED_SETS`
+# below is why that is a widening rather than a loosening. wz honours three
+# `routing/*` keys the pinned 1.10.0 parses and discards, so they left the
+# upstream surface for a separate constant while the READER kept them; the
+# drop-in fixture must still name every key the expansion can emit, and that set
+# is now the union of two lists. Anchoring on the union's own expression keeps
+# this gate reading the test rather than carrying a third copy of it.
 EXCEPTION_RE = re.compile(
-    r"HONOURED_CONFIG_KEYS\s*\.iter\(\)\s*\.copied\(\)\s*"
+    r"HONOURED_CONFIG_KEYS\s*\.iter\(\)\s*"
+    r"(?:\.chain\(\s*WZ_EXTENSION_HONOURED_KEYS\s*\)\s*)?"
+    r"\.copied\(\)\s*"
     r"((?:\.filter\([^)]*\)\s*)*)\.collect\(\)"
 )
+
+# The lists whose union the drop-in fixture must name. Read from the Rust source
+# the same way `HONOURED_CONFIG_KEYS` is, so a rename reds here instead of
+# quietly shrinking the population this gate checks.
+HONOURED_SETS = ("HONOURED_CONFIG_KEYS", "WZ_EXTENSION_HONOURED_KEYS")
 JSON5_TOKEN = re.compile(r'"[^"]*"|[A-Za-z_][A-Za-z0-9_]*|[{}\[\]:,]|[^\s{}\[\]:,"]+')
 
 
@@ -158,6 +174,23 @@ DEFAULT_CLASS_CONSTS = (
 # 2700-line file from being mistaken for a class member.
 CLAIMS_RE = re.compile(
     r"let claims: Vec<\(&str, String\)> = vec!\[(.*?)\n    \];", re.S
+)
+# R2230 (open-debt items 579 / 582) — the FIFTH class, and it is a different
+# KIND of statement from the other four.
+#
+# Those four all say what the resolved tree HOLDS for a key. A wz extension is a
+# key the pinned upstream parses and discards, so the tree holds nothing for it
+# at all: `resolved.get(path)` is `None`, not `Some(Null)`. `routing/peer/mode`
+# sat in `THE_TREE_ANSWERS_NULL` until the 1.10.0 pin and could not stay — the
+# two are different findings and that list only ever meant the first.
+#
+# ⚠ Anchored on the test's OWN loop rather than credited from the constant.
+# Otherwise this class would be a free pass: any key moved into
+# `WZ_EXTENSION_CONFIG_KEYS` would count as classed whether or not the defaults
+# leg asserts anything about it, which is exactly the accounting hole the four
+# classes above exist to close.
+EXTENSION_CLASS_RE = re.compile(
+    r"for path in WZ_EXTENSION_CONFIG_KEYS \{.*?resolved\.get\(path\).*?None,", re.S
 )
 
 
@@ -205,6 +238,23 @@ def default_class_keys(src: str) -> tuple[dict[str, list[str]], list[str]]:
     else:
         body = rust_comments.strip_comments(m.group(1))
         classes["claims"] = re.findall(r'\(\s*"([^"]+)"\s*,', body)
+    # R2230 — the wz-extension class, credited only when the leg actually
+    # asserts it. The members are the HONOURED extensions: the accounting below
+    # is over keys the reader applies, and an unhonoured extension needs no
+    # decision about what wz falls back to any more than an unhonoured surface
+    # key does.
+    if EXTENSION_CLASS_RE.search(rust_comments.strip_comments(src)):
+        classes["wz_extension"] = deepenable_audit.rust_const(
+            "WZ_EXTENSION_HONOURED_KEYS"
+        )
+    else:
+        problems.append(
+            "could not anchor the defaults leg's `for path in "
+            "WZ_EXTENSION_CONFIG_KEYS { … resolved.get(path) … None }` loop — a "
+            "honoured wz extension is a key the pinned upstream does not carry "
+            "AT ALL, which is a different finding from resolving to null, and "
+            "without that loop nothing in the leg says so"
+        )
     return classes, problems
 
 
@@ -495,13 +545,19 @@ def main() -> int:
         return 1
 
     # ── the one coupling a static read can settle ────────────────────
-    honoured = deepenable_audit.rust_const("HONOURED_CONFIG_KEYS")
-    if not honoured:
-        print(
-            "config-key-fixture FAIL: HONOURED_CONFIG_KEYS read as empty.",
-            file=sys.stderr,
-        )
-        return 1
+    # R2230 — the union of HONOURED_SETS, and EACH member must be non-empty. A
+    # union that tolerated one empty half would keep passing on the day a
+    # constant is renamed, having quietly stopped checking that half's keys.
+    honoured: list[str] = []
+    for name in HONOURED_SETS:
+        part = deepenable_audit.rust_const(name)
+        if not part:
+            print(
+                f"config-key-fixture FAIL: {name} read as empty.",
+                file=sys.stderr,
+            )
+            return 1
+        honoured.extend(part)
 
     test_src = FIXTURE_TEST.read_text()
     m = FIXTURE_RE.search(test_src)

@@ -66,7 +66,7 @@ use std::time::Duration;
 
 use wz_integration_tests::common::{
     read_captured, wait_for_substring, wz_ap_demo_binary, zenohd_shm_binary, ChildGuard,
-    PortReservation,
+    PortReservation, ZENOHD_LISTENER_LINE,
 };
 
 /// The demo's negotiated-capability witness. `is_shm()` is
@@ -143,12 +143,15 @@ fn wz_negotiates_shm_with_a_zenohd_it_dials() {
         Command::new(&zenohd)
             .args(["-l", &format!("tcp/{addr}")])
             .args(["--no-multicast-scouting", "--rest-http-port", "none"])
+            // R2230 (open-debt item 579) — the readiness needle below is a
+            // `debug!`. See `common::ZENOHD_LISTENER_LINE`.
+            .env("RUST_LOG", "z=debug")
             .stdout(Stdio::from(zd_w))
             .stderr(Stdio::from(zd_w2))
             .spawn()
             .expect("spawn shm zenohd"),
     );
-    if let Err(c) = wait_for_substring(&mut zd_log, "can be reached at", Duration::from_secs(20)) {
+    if let Err(c) = wait_for_substring(&mut zd_log, ZENOHD_LISTENER_LINE, Duration::from_secs(20)) {
         panic!("the shm zenohd never announced its listener within 20s\n--- zenohd ---\n{c}");
     }
     drop(port);

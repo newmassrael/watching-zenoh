@@ -62,10 +62,25 @@
 //! ninety flags. A replacement that cannot read the deployment's own
 //! configuration is not one.
 //!
-//! The reader is deliberately PARTIAL and says so out loud. wz models 14 of
-//! the 111 leaf keys a real zenohd resolves, and
-//! `ZenohConfigIngest::ignored` names every key in the document that is not
-//! one of them. The alternative shapes are both worse: refusing an unknown key
+//! The reader is deliberately PARTIAL and says so out loud. wz models the
+//! [`HONOURED_CONFIG_KEYS`](crate::zenoh_config::HONOURED_CONFIG_KEYS) fraction
+//! of the leaf keys a real zenohd resolves, and `ZenohConfigIngest::ignored`
+//! names every key in the document that is not one of them.
+//!
+//! ⚠ The link above is spelled as a FULL PATH, like the `WzConfig` one at the
+//! head of this doc and unlike every `[`Item`]` elsewhere in this file. A bare
+//! form here resolves in no scope — measured, it cost Layer C1bz's budget one
+//! over — because a MODULE doc is not resolved against this module's items the
+//! way an ITEM's doc is.
+//!
+//! ⚠ R2230 (open-debt items 579 / 582) — this sentence used to carry the
+//! fraction as two literals, "14 of the 111". Both were wrong when they were
+//! read this round: the numerator had been stale for many rounds while nothing
+//! measured it, and the denominator moved in this one. The numbers live in the
+//! constants' own `.len()`, which `the_two_halves_of_the_upstream_surface_do_not_overlap`
+//! pins and `scripts/lib/upstream_carries_the_surface.py` adjudicates against
+//! the pinned binary; a third copy in prose is a claim nobody re-measures, which
+//! is the whole shape of open-debt item 47. The alternative shapes are both worse: refusing an unknown key
 //! makes the reader useless against a real config, and applying what it knows
 //! while staying silent lets an operator believe a TLS root-CA path took
 //! effect. The partition is also what a coverage census compares against the
@@ -1500,14 +1515,15 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     // validation with it, so a key routed there before this round would have
     // been honoured on paper and inert in fact.
     "connect/retry",
-    // R2063 (open-debt item 214) — MOVED from
-    // `UNHONOURED_UPSTREAM_CONFIG_KEYS`, and the reason is the item's own:
-    // that list carries two unrelated things under one name, and this key was
-    // the second kind -- not "wz cannot act on it" but "the reader had not
-    // learned it". The demo's `--peer-mode` has switched the discovery plane
-    // for rounds and its `--help` CITES this key by name (`usage.rs:128`), so
-    // an operator reading that line and putting it in their file got nothing.
-    "routing/peer/mode",
+    // R2230 (open-debt item 579/582) — `routing/peer/mode` LEFT this list, for
+    // [`WZ_EXTENSION_CONFIG_KEYS`]. R2063 had moved it IN from
+    // `UNHONOURED_UPSTREAM_CONFIG_KEYS` on a reason that was right at the time
+    // (the demo's `--peer-mode` had switched the discovery plane for rounds and
+    // its `--help` cited the key while the reader did not know it). What moved
+    // is upstream: the pinned 1.10.0 deprecates `routing.peer` to a wrapper that
+    // parses and discards, so the key names no upstream CAPABILITY any more and
+    // cannot be a member of a surface whose fraction is read as coverage. wz
+    // still reads it — that is now an EXTENSION, and it says so.
     // R2141 (open-debt item 223) — the two keys that made the multicast plane
     // DIAL. Item 223 filed them as a wiring round on the strength of wz already
     // having an `AutoConnect`; both halves of that had to be corrected before
@@ -1577,7 +1593,81 @@ const HONOURED_SUBTREE_LEAVES: &[&str] = &[
     "listen/retry/period_increase_factor",
 ];
 
-/// Every leaf key a real zenoh 1.5.0 resolves that wz does NOT honour.
+/// R2230 (open-debt items 579 / 582) — keys wz ACCEPTS that the pinned upstream
+/// PARSES AND DISCARDS, so they are wz's own surface and not zenoh's.
+///
+/// # Why a third list exists at all
+///
+/// [`HONOURED_CONFIG_KEYS`] + [`UNHONOURED_UPSTREAM_CONFIG_KEYS`] partition the
+/// UPSTREAM surface, and the whole point of that partition is that the fraction
+/// it yields reads as coverage: "of what a real zenoh does from its file, wz
+/// does this much". That sentence is only true while every member names a thing
+/// upstream actually DOES.
+///
+/// The pin move to 1.10.0 broke that for three keys. Upstream did not delete
+/// them — it wrapped them in `DeprecatedRoutingPeer` /
+/// `DeprecatedPeersFailoverBrokering`, which deserialize, log "deprecated and
+/// have no effect", and are read by nothing. They are additionally
+/// `#[serde(default, skip_serializing)]`, which is the mechanically detectable
+/// half: a real zenohd's own resolved config does not contain them.
+///
+/// So the three sit in a THIRD position that neither half of the partition can
+/// express, and which the old instrument could not even see. Counting them as
+/// upstream surface inflates the denominator with non-capabilities; dropping
+/// them entirely would make wz REFUSE a file it used to start on (see
+/// `upstream_knows`), and drop-in acceptance of an operator's existing file is
+/// the point of the project. They are extensions, and they say so.
+///
+/// # What the owner decided, and what it costs
+///
+/// Three dispositions were on the table: keep claiming them upstream, remove
+/// the behaviour, or split the claim from the behaviour. The third was chosen
+/// (2026-08-31). Removing the behaviour was refused because an operator's
+/// existing file must keep starting a wz node; keeping the claim was refused
+/// because a surface that names non-capabilities makes its own fraction
+/// meaningless. The cost accepted is exactly this list: "what upstream defines"
+/// and "what wz accepts" are now two structures rather than one. They genuinely
+/// ARE two things for a project aiming at a superset, so the split is honest
+/// rather than a bookkeeping dodge.
+///
+/// # What keeps this from becoming an escape hatch
+///
+/// A list of "keys exempt from the surface" is precisely the shape that lets a
+/// future round shrink a denominator to make a gate green. Two things stop it,
+/// and neither is prose:
+///
+/// * `scripts/lib/upstream_carries_the_surface.py` (Layer Z) asks the pinned
+///   zenohd for its OWN resolved config and requires every surface key to be
+///   carried and every key here to be accepted-but-not-carried. Membership is
+///   therefore a verdict from upstream's serializer, not a wz-side opinion —
+///   moving a live key here REDS, and upstream reviving one of these REDS too.
+/// * `every_extension_key_is_accepted_and_says_which_kind_it_is` holds the
+///   wz-side half in every lane that compiles this crate: the list is
+///   non-empty, disjoint from both halves of the surface, and each member
+///   actually loads.
+///
+/// # Their upstream provenance, so this is not a wz invention
+///
+/// Each was a resolved leaf of the previously pinned 1.5.0 and appears in the
+/// register under its own item. `routing/peer/mode` is honoured — it switches
+/// wz's discovery plane, which wz still HAS and upstream retired — and the
+/// other two are accepted and reported ignored, the same treatment they had as
+/// unhonoured surface keys.
+pub const WZ_EXTENSION_CONFIG_KEYS: &[&str] = &[
+    "routing/peer/linkstate/transport_weights",
+    "routing/peer/mode",
+    "routing/router/peers_failover_brokering",
+];
+
+/// The subset of [`WZ_EXTENSION_CONFIG_KEYS`] the reader HONOURS.
+///
+/// Separate from the list above for the reason [`HONOURED_CONFIG_KEYS`] is
+/// separate from [`UNHONOURED_UPSTREAM_CONFIG_KEYS`]: `ignored` must not name a
+/// key wz just applied, and a reader taught a path without this list learning
+/// it would report itself ignored while acting on it.
+pub const WZ_EXTENSION_HONOURED_KEYS: &[&str] = &["routing/peer/mode"];
+
+/// Every leaf key the pinned real zenoh resolves that wz does NOT honour.
 ///
 /// Together with [`HONOURED_CONFIG_KEYS`] this is the UPSTREAM CONFIG SURFACE
 /// — the whole of it, obtained by execution rather than by reading
@@ -1585,6 +1675,13 @@ const HONOURED_SUBTREE_LEAVES: &[&str] = &[
 /// out). `wz_reads_a_stock_zenohd_config` adjudicates it against a running
 /// zenohd's own resolved config, so this list is a claim about zenoh that
 /// zenoh checks, not a wz-side opinion.
+///
+/// ⚠ The version is deliberately NOT spelled here. It was "1.5.0" until R2230,
+/// which is the round that moved the pin to 1.10.0 — the sentence had gone
+/// false in the round before this one, and a second literal would only go false
+/// again. `scripts/lib/upstream_release_distance.py` names the pin, and
+/// `scripts/lib/upstream_carries_the_surface.py` adjudicates this list against
+/// whichever binary that pin builds.
 ///
 /// These are not defects. wz models the topology-and-transport subset it can
 /// act on; `transport/auth/*` needs an auth stack, `plugins*` a plugin host,
@@ -1616,6 +1713,11 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     // different kind of debt") is real: it cost a round of its own, which is
     // what the item asked for.
     "downsampling",
+    // R2230 (open-debt item 579) — ARRIVED in 1.10.0, and the census leg is what
+    // found it: upstream's own resolved tree carried a key wz's surface did not
+    // name. Seven arrived this way; each is beyond-wz and each earned that
+    // classification from a search that states what it looked for.
+    "gateway/south",
     "low_pass_filter",
     "metadata",
     "open/return_conditions/connect_scouted",
@@ -1625,13 +1727,17 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     "plugins_loading/search_dirs",
     "qos/network",
     "qos/publication",
-    "routing/peer/linkstate/transport_weights",
-    // R2063 (item 214) — `routing/peer/mode` MOVED to HONOURED_CONFIG_KEYS.
-    // It was in this list not because wz cannot act on it but because the
-    // reader had not learned it, which is exactly the two-kinds-under-one-name
-    // the item records. The demo's `--help` was already citing it.
+    // R2230 (open-debt item 579) — ARRIVED in 1.10.0, the gateway plane's other
+    // half: a node's own region label, which upstream's subregion filters match
+    // on (`GatewayFiltersConf::region_names`).
+    "region_name",
+    // R2230 (open-debt item 579/582) — `routing/peer/linkstate/transport_weights`
+    // and `routing/router/peers_failover_brokering` LEFT this list, for
+    // [`WZ_EXTENSION_CONFIG_KEYS`]. Both are keys the pinned 1.10.0 parses into
+    // a deprecated wrapper and discards, so neither is an upstream capability
+    // wz is failing to reach; leaving them here would count two non-features in
+    // the denominator that "wz honours N of M" divides by.
     "routing/router/linkstate/transport_weights",
-    "routing/router/peers_failover_brokering",
     "scouting/delay",
     "scouting/gossip/autoconnect",
     "scouting/gossip/autoconnect_strategy",
@@ -1643,6 +1749,14 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     // twins two lines up stay: the gossip plane's policy is installed from the
     // command line (`--autoconnect`), not from the file, and moving those keys
     // is a different seam with a different witness.
+    //
+    // R2230 (open-debt item 579) — `stats/filters` ARRIVED in 1.10.0. ⚠ Do NOT
+    // read wz's `transport-stats` feature as answering it: that feature answers
+    // upstream's `stats` FEATURE (four per-session counters), and this key is
+    // upstream's per-KEYEXPR statistics selector. wz counts at two wire seams
+    // neither of which sees a key expression, so there is no dimension here to
+    // filter on.
+    "stats/filters",
     "timestamping/drop_future_timestamp",
     "transport/auth/pubkey/key_size",
     "transport/auth/pubkey/known_keys_file",
@@ -1687,6 +1801,12 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     "transport/multicast/join_interval",
     "transport/multicast/max_sessions",
     "transport/shared_memory/mode",
+    // R2230 (open-debt item 579) — the four `transport_optimization` knobs
+    // ARRIVED in 1.10.0. Their group sentence carries the evidence.
+    "transport/shared_memory/transport_optimization/enabled",
+    "transport/shared_memory/transport_optimization/message_size_threshold",
+    "transport/shared_memory/transport_optimization/messages",
+    "transport/shared_memory/transport_optimization/pool_size",
     "transport/unicast/accept_pending",
     "transport/unicast/accept_timeout",
     "transport/unicast/max_sessions",
@@ -1728,8 +1848,20 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
 ///   session caps, open/accept timeouts.
 /// * `open/return_conditions/*` — a session-open readiness barrier
 ///   (`ReturnConditionsConf`).
-/// * `routing/*` — configurable link-state weighting and failover brokering
-///   (`RoutingConf`).
+/// * `routing/router/linkstate/*` — configurable link-state weighting
+///   (`RoutingConf`). R2230 narrowed this from `routing/*`: the pinned 1.10.0
+///   retired `routing.peer` and `routing.router.peers_failover_brokering` to
+///   deprecated no-ops, so they are [`WZ_EXTENSION_CONFIG_KEYS`] and not an
+///   upstream capability wz lacks.
+/// * `gateway/south` — a gateway region-partitioning plane (`GatewayConf`), and
+///   `region_name` — a node region identity (`RegionName`), its other half.
+///   Both ARRIVED in 1.10.0 (R2230).
+/// * `stats/filters` — per-keyexpr statistics (`StatsFilterConfig`). ⚠ Not
+///   answered by wz's `transport-stats`, which answers upstream's `stats`
+///   FEATURE; see the row's own comment.
+/// * `transport/shared_memory/transport_optimization/*` — an implicit
+///   large-message SHM promotion path (`LargeMessageTransportOpt`). wz HAS
+///   shared memory and still lacks this one, which is why it is worth a group.
 /// * `scouting/delay` — a startup scouting delay (`ScoutingDelay`).
 /// * `timestamping/drop_future_timestamp` — a future-timestamp drop policy
 ///   (`TimestampingConf`).
@@ -1773,6 +1905,16 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
 pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     "aggregation/publishers",
     "aggregation/subscribers",
+    // R2230 (open-debt item 579) — ARRIVED in 1.10.0. Beyond wz, and the
+    // negative is derived rather than grepped once: `gateway`, `south`,
+    // `subregion`, `partition`, `federat` and `bridge` were each searched across
+    // `crates/` and the only hits are a REST keyspace remark, two tests
+    // asserting wz REFUSES `gateway` as an autoconnect target and as a mode, the
+    // tokio runtime's thread partitions, and the multicast/unicast QoS bridge.
+    // The nearest wz mechanism matching upstream's filter FIELDS (modes,
+    // interfaces, zids) is the ACL subject selector, which is an authorization
+    // predicate on an established session and assigns no subregion.
+    "gateway/south",
     // R2159 (open-debt item 229) — `connect/exit_on_failure` and the three
     // `listen/*` LEFT here, and the `ListenConfig` group left with them: their
     // group sentence said wz would need "a dial/listen failure policy", which
@@ -1785,11 +1927,32 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     "plugins_loading/search_dirs",
     "qos/network",
     "qos/publication",
-    "routing/peer/linkstate/transport_weights",
+    // R2230 (open-debt item 579) — ARRIVED in 1.10.0, the gateway plane's other
+    // half. `region_name` / `regionname` occur nowhere in `crates/`; bare
+    // `region` occurs only in three unrelated senses (memory regions, SCXML
+    // parallel regions, prose). `zone`, `domain`, `cluster`, `site_id` and
+    // `tier` were searched too. ⚠ `routing-namespace` is NOT this: a keyexpr
+    // prefix, matched by no peer filter, and zenoh-ext group membership is an
+    // application-level named group over liveliness keys rather than an
+    // establishment-time node attribute.
+    "region_name",
+    // R2230 (item 579/582) — the peer twin and `peers_failover_brokering` left
+    // with the surface; see [`WZ_EXTENSION_CONFIG_KEYS`]. The router weighting
+    // stays: upstream 1.10.0 still CARRIES it (`routing.router.linkstate`), so
+    // it is a capability wz does not have rather than one upstream retired.
     "routing/router/linkstate/transport_weights",
-    "routing/router/peers_failover_brokering",
     "scouting/delay",
     "scouting/gossip/enabled",
+    // R2230 (open-debt item 579) — ARRIVED in 1.10.0, and it is the row most at
+    // risk of being read as a reader gap, because wz DOES have a `transport-stats`
+    // feature. That feature answers upstream's `stats` FEATURE. This key is
+    // upstream's `StatsFilterConfig { key: OwnedKeyExpr }` — statistics selected
+    // PER KEY EXPRESSION. wz's `TransportStats` is four `AtomicUsize`
+    // (`tx_bytes`/`tx_msgs`/`rx_bytes`/`rx_msgs`) counted at two wire seams,
+    // neither of which sees a key expression, reported as one flat OpenMetrics
+    // block with no selector. There is no dimension here to filter on; wz's own
+    // doc already records that even a per-priority split is a later extension.
+    "stats/filters",
     "timestamping/drop_future_timestamp",
     "transport/auth/pubkey/key_size",
     "transport/auth/pubkey/known_keys_file",
@@ -1830,6 +1993,12 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     "transport/multicast/join_interval",
     "transport/multicast/max_sessions",
     "transport/shared_memory/mode",
+    // R2230 (open-debt item 579) — the four `transport_optimization` knobs
+    // ARRIVED in 1.10.0. Their group sentence carries the evidence.
+    "transport/shared_memory/transport_optimization/enabled",
+    "transport/shared_memory/transport_optimization/message_size_threshold",
+    "transport/shared_memory/transport_optimization/messages",
+    "transport/shared_memory/transport_optimization/pool_size",
     "transport/unicast/accept_pending",
     "transport/unicast/accept_timeout",
     "transport/unicast/max_sessions",
@@ -2059,13 +2228,40 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
             "open/return_conditions/declares",
         ],
     ),
+    // R2230 (item 579/582) — the sentence LOST "and failover brokering", and the
+    // group lost two of its three rows, because upstream 1.10.0 retired both:
+    // `peers_failover_brokering` is a deprecated no-op and `routing.peer` is
+    // parsed and discarded. This is the group table working in the direction
+    // R2151 built it for, mirrored — a row goes when UPSTREAM stops naming the
+    // capability, not only when wz grows it.
     (
-        "configurable link-state weighting and failover brokering",
+        "configurable link-state weighting",
         "RoutingConf",
+        &["routing/router/linkstate/transport_weights"],
+    ),
+    // R2230 (open-debt item 579) — the four groups the 1.10.0 pin brought in.
+    // Each states the thing wz would need as a NAME that must not exist in wz's
+    // code, which is what makes a future capability red its own row rather than
+    // leave the group quietly stale.
+    (
+        "a gateway region-partitioning plane",
+        "GatewayConf",
+        &["gateway/south"],
+    ),
+    ("a node region identity", "RegionName", &["region_name"]),
+    (
+        "per-keyexpr statistics",
+        "StatsFilterConfig",
+        &["stats/filters"],
+    ),
+    (
+        "an implicit large-message SHM promotion path",
+        "LargeMessageTransportOpt",
         &[
-            "routing/peer/linkstate/transport_weights",
-            "routing/router/linkstate/transport_weights",
-            "routing/router/peers_failover_brokering",
+            "transport/shared_memory/transport_optimization/enabled",
+            "transport/shared_memory/transport_optimization/message_size_threshold",
+            "transport/shared_memory/transport_optimization/messages",
+            "transport/shared_memory/transport_optimization/pool_size",
         ],
     ),
     (
@@ -2575,7 +2771,7 @@ pub const DEEPENABLE_UPSTREAM_KEYS: &[&str] = &[
     "timestamping/enabled",
 ];
 
-/// Whether upstream would accept this leaf path at all.
+/// Whether wz accepts this leaf path at all, rather than refusing the document.
 ///
 /// R2078 (open-debt item 501) — this used to accept anything BELOW a key it
 /// knew, and that prefix rule was the last judge in exactly one place: a typo
@@ -2587,13 +2783,21 @@ pub const DEEPENABLE_UPSTREAM_KEYS: &[&str] = &[
 /// The rule is now EXACT, with [`DEEPENABLE_UPSTREAM_KEYS`] as the measured
 /// exception. `wz_reads_a_stock_zenohd_config`'s boundary leg holds both
 /// directions against a real zenohd.
-fn upstream_knows(path: &str) -> bool {
+///
+/// R2230 (open-debt items 579 / 582) — RENAMED from `upstream_knows`, and the
+/// rename is the change. [`WZ_EXTENSION_CONFIG_KEYS`] joined the chain, so the
+/// old name asserted something the body had stopped doing: three of the paths
+/// it now accepts are ones upstream parses and discards. This round exists
+/// because a surface whose NAME is wrong makes the number it yields
+/// unreadable, and a predicate is not exempt from that.
+fn wz_accepts(path: &str) -> bool {
     let under = |known: &&str| {
         path.len() > known.len() && path.starts_with(*known) && path.as_bytes()[known.len()] == b'/'
     };
     HONOURED_CONFIG_KEYS
         .iter()
         .chain(UNHONOURED_UPSTREAM_CONFIG_KEYS)
+        .chain(WZ_EXTENSION_CONFIG_KEYS)
         .any(|known| path == *known)
         || HONOURED_SUBTREE_LEAVES.contains(&path)
         || DEEPENABLE_UPSTREAM_KEYS.iter().any(under)
@@ -2762,7 +2966,11 @@ fn honoured<'a>(doc: &'a Json5Value, path: &str) -> Option<&'a Json5Value> {
 /// `commons/zenoh-config/src/lib.rs`, and a real zenohd starts on the table
 /// spelling: handed `listen: { endpoints: { router: [..], peer: [..] } }` with
 /// `mode: "router"` it binds the ROUTER entry and says so
-/// (`Zenoh can be reached at: …`), measured rather than inferred.
+/// (`Listener added: …`, its own line at the bind), measured rather than
+/// inferred. R2230 restated the line: it used to cite
+/// `Zenoh can be reached at: …`, which the pinned 1.10.0 narrowed to
+/// non-loopback locators, so the leg that measures this reads a different one
+/// now — see `wz_integration_tests::common::ZENOHD_LISTENER_LINE`.
 ///
 /// Until this round wz's reader accepted only the `Unique` spelling and
 /// answered the other with `WrongType`, which is worse than not honouring a key:
@@ -3311,7 +3519,7 @@ impl ZenohNodeConfig {
         // Checked first so a typo is reported as a typo rather than as a
         // missing value somewhere downstream.
         let leaves = doc.leaf_paths();
-        if let Some(unknown) = leaves.iter().find(|p| !upstream_knows(p)) {
+        if let Some(unknown) = leaves.iter().find(|p| !wz_accepts(p)) {
             return Err(ConfigIngestError::UnknownKey {
                 path: unknown.clone(),
             });
@@ -3646,6 +3854,14 @@ impl ZenohNodeConfig {
             .filter(|p| {
                 !HONOURED_CONFIG_KEYS.contains(&p.as_str())
                     && !HONOURED_SUBTREE_LEAVES.contains(&p.as_str())
+                    // R2230 (items 579 / 582) — an extension key wz HONOURS is
+                    // applied, so naming it here would tell the operator the
+                    // opposite of what just happened. The extension keys wz does
+                    // NOT honour are absent from this list and so still reported,
+                    // which is the treatment they had as unhonoured surface keys
+                    // and the only signal an operator gets that upstream retired
+                    // them.
+                    && !WZ_EXTENSION_HONOURED_KEYS.contains(&p.as_str())
                     // R2075 — a mode table's own leaves (`listen/endpoints/router`)
                     // are wz's to honour, so reporting them as unhonoured would
                     // contradict the resolution that just happened.
@@ -4558,14 +4774,6 @@ mod tests {
                                             "period_max_ms": 9000,
                                             "period_increase_factor": 1.5 } } }"#,
             ),
-            // R2063 (open-debt item 214) — `peer-to-peer` and not `linkstate`,
-            // because the default is `linkstate` and this gate requires the
-            // ingest to MOVE. A fixture naming the default would report the key
-            // honoured while proving only that the reader did not crash.
-            (
-                "routing/peer/mode",
-                r#"{ "routing": { "peer": { "mode": "peer-to-peer" } } }"#,
-            ),
             // R2141 (open-debt item 223) — the two keys that make the multicast
             // plane DIAL. Each is driven off the default a document that says
             // nothing resolves to for THIS reader's default mode (`peer`):
@@ -4626,11 +4834,35 @@ mod tests {
                 "listen/timeout_ms",
                 r#"{ "listen": { "timeout_ms": 1500 } }"#,
             ),
+            // R2063 (open-debt item 214) — `peer-to-peer` and not `linkstate`,
+            // because the default is `linkstate` and this gate requires the
+            // ingest to MOVE. A fixture naming the default would report the key
+            // honoured while proving only that the reader did not crash.
+            //
+            // R2230 (items 579 / 582) — this row MOVED to the tail of the table
+            // when the key left `HONOURED_CONFIG_KEYS` for
+            // `WZ_EXTENSION_HONOURED_KEYS`. It is still driven, and driven the
+            // same way: what the key MEANS to wz did not change, only whose
+            // surface it is on. Dropping the row instead would have retired the
+            // only proof that a honoured extension is genuinely read — which is
+            // the exact failure this whole test exists to prevent, reintroduced
+            // through the exemption list.
+            (
+                "routing/peer/mode",
+                r#"{ "routing": { "peer": { "mode": "peer-to-peer" } } }"#,
+            ),
         ];
         // The case list IS the table, so a key added to one and not the other
-        // fails here rather than going unmeasured.
+        // fails here rather than going unmeasured. R2230 widened the table to
+        // both honoured lists in ONE expression, so an extension key cannot be
+        // added without a driving fixture any more than a surface key can.
         let covered: Vec<&str> = cases.iter().map(|(k, _)| *k).collect();
-        assert_eq!(covered, HONOURED_CONFIG_KEYS.to_vec());
+        let expected: Vec<&str> = HONOURED_CONFIG_KEYS
+            .iter()
+            .chain(WZ_EXTENSION_HONOURED_KEYS)
+            .copied()
+            .collect();
+        assert_eq!(covered, expected);
 
         for (key, doc) in cases {
             let ingest = ZenohNodeConfig::from_json5(doc).unwrap_or_else(|e| panic!("{key}: {e}"));
@@ -4941,7 +5173,27 @@ mod tests {
         assert_eq!(all.len(), total, "a path appears in both halves");
         // Pinned as a value so a silently shrinking surface is visible here as
         // well as in the zenohd census.
-        assert_eq!(total, 111);
+        //
+        // R2230 (open-debt items 579 / 582) — 111 → 108. The three that left are
+        // `routing/peer/mode`, `routing/peer/linkstate/transport_weights` and
+        // `routing/router/peers_failover_brokering`, which the pin move to
+        // 1.10.0 turned into deprecated no-ops upstream; they are
+        // `WZ_EXTENSION_CONFIG_KEYS` now. This pin is what made that a decision
+        // instead of a drift — it FAILED on the edit, which is the whole reason
+        // it is a literal. ⚠ Lowering it is only ever legitimate beside a
+        // measurement that says upstream stopped carrying the key;
+        // `scripts/lib/upstream_carries_the_surface.py` is that measurement, and
+        // it reds if this list and the pinned binary disagree in EITHER
+        // direction.
+        //
+        // Then 108 -> 115 in the same round, and the two moves are opposite
+        // findings that happen to be about the same pin. SEVEN keys ARRIVED in
+        // 1.10.0 — `gateway/south`, `region_name`, `stats/filters` and the four
+        // `transport/shared_memory/transport_optimization/*` — and the census
+        // leg against a running zenohd is what found them. Netting them against
+        // the three that left would have reported "the surface moved by 4" and
+        // hidden both events; they are recorded as what they are.
+        assert_eq!(total, 115);
         let mut unhonoured = UNHONOURED_UPSTREAM_CONFIG_KEYS.to_vec();
         unhonoured.sort_unstable();
         assert_eq!(
@@ -4950,6 +5202,119 @@ mod tests {
             "the unhonoured list is compared against a sorted census, so it \
              has to be sorted itself"
         );
+    }
+
+    /// R2230 (open-debt items 579 / 582) — the wz-side half of what keeps
+    /// [`WZ_EXTENSION_CONFIG_KEYS`] from being an exemption list.
+    ///
+    /// A list named "keys that do not count towards the surface" is the classic
+    /// escape hatch: the cheapest way to make any surface gate green is to move
+    /// the offending key into it. Two independent things have to hold, and this
+    /// is the one that needs no zenohd, so it runs in every lane that compiles
+    /// the crate rather than only in Layer Z:
+    ///
+    /// * the list is NON-EMPTY and disjoint from both halves of the surface, so
+    ///   it can never be a second home for a key that is already counted;
+    /// * every member is genuinely ACCEPTED — the drop-in claim that is the
+    ///   entire reason the keys were not simply deleted. An operator's existing
+    ///   file names them, and a wz that refused it would have paid the
+    ///   denominator's honesty with the project's actual goal;
+    /// * the honoured subset is honoured and the rest are REPORTED, which is
+    ///   the partition `ignored` makes and the only signal an operator gets
+    ///   that upstream retired the key under them.
+    ///
+    /// The other half — "upstream really does parse-and-discard these" — cannot
+    /// be asserted here, because nothing in this crate knows what upstream
+    /// does. `scripts/lib/upstream_carries_the_surface.py` asks the pinned
+    /// binary. Splitting it this way is deliberate: a claim about zenoh is
+    /// adjudicated by zenoh, and a claim about wz by wz.
+    #[test]
+    fn every_extension_key_is_accepted_and_says_which_kind_it_is() {
+        assert!(
+            !WZ_EXTENSION_CONFIG_KEYS.is_empty(),
+            "an empty extension list would make every check below vacuous"
+        );
+        let mut sorted = WZ_EXTENSION_CONFIG_KEYS.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            sorted,
+            WZ_EXTENSION_CONFIG_KEYS.to_vec(),
+            "the extension list is sorted and unique, like both halves of the \
+             surface it sits beside"
+        );
+        for key in WZ_EXTENSION_CONFIG_KEYS {
+            assert!(
+                !HONOURED_CONFIG_KEYS.contains(key)
+                    && !UNHONOURED_UPSTREAM_CONFIG_KEYS.contains(key),
+                "{key} is an extension AND on the upstream surface — it would \
+                 be counted in the denominator it was moved out of"
+            );
+        }
+        for key in WZ_EXTENSION_HONOURED_KEYS {
+            assert!(
+                WZ_EXTENSION_CONFIG_KEYS.contains(key),
+                "{key} is a honoured extension that is not an extension"
+            );
+        }
+
+        // Each key driven with the value shape upstream documented for it while
+        // it was still a capability, because that is what an operator's file
+        // carries. A nonsense shape here would prove only that wz did not crash.
+        const DOCS: &[(&str, &str)] = &[
+            (
+                "routing/peer/linkstate/transport_weights",
+                r#"{ "routing": { "peer": { "linkstate": { "transport_weights":
+                     [ { "dst_zid": "1", "weight": 10 } ] } } } }"#,
+            ),
+            (
+                "routing/peer/mode",
+                r#"{ "routing": { "peer": { "mode": "peer-to-peer" } } }"#,
+            ),
+            (
+                "routing/router/peers_failover_brokering",
+                r#"{ "routing": { "router": { "peers_failover_brokering": true } } }"#,
+            ),
+        ];
+        let covered: Vec<&str> = DOCS.iter().map(|(k, _)| *k).collect();
+        assert_eq!(
+            covered,
+            WZ_EXTENSION_CONFIG_KEYS.to_vec(),
+            "a key added to the extension list without a loading fixture would \
+             be exempted from the surface AND unproven as accepted"
+        );
+
+        for (key, doc) in DOCS {
+            let ingest = ZenohNodeConfig::from_json5(doc)
+                .unwrap_or_else(|e| panic!("{key}: wz refused a file it used to accept: {e}"));
+            if WZ_EXTENSION_HONOURED_KEYS.contains(key) {
+                assert!(
+                    ingest.named.contains(key),
+                    "{key} is a honoured extension but was not reported named: {:?}",
+                    ingest.named
+                );
+                assert!(
+                    !ingest.ignored.iter().any(|p| p == key),
+                    "{key} was applied and reported ignored at the same time"
+                );
+                assert_ne!(
+                    ingest.config,
+                    ZenohNodeConfig::default(),
+                    "{key} parsed but changed nothing"
+                );
+            } else {
+                assert!(
+                    ingest.ignored.iter().any(|p| p == key),
+                    "{key} is an unhonoured extension, so the operator has to be \
+                     told it did nothing; ignored was {:?}",
+                    ingest.ignored
+                );
+                assert!(
+                    !ingest.named.contains(key),
+                    "{key} is reported both applied and ignored"
+                );
+            }
+        }
     }
 
     /// zenoh writes `null` for every key it left unset, so a null is the
@@ -5739,7 +6104,7 @@ mod tests {
     /// Whether `path` names something strictly INSIDE `key`.
     ///
     /// The length guard is not decoration: `path == key` would index one byte
-    /// past the end of `path`. `upstream_knows` spells the same predicate the
+    /// past the end of `path`. `wz_accepts` spells the same predicate the
     /// same way, and the three tests below share this one rather than each
     /// restating it — a partition rule written three times is three things to
     /// get wrong, and two of the three drafts here were missing the guard.

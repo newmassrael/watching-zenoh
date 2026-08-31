@@ -97,7 +97,7 @@ use std::time::Duration;
 use wz_integration_tests::common::{
     compile_pico_example_against_wz_capi, compile_pico_example_against_wz_capi_with_includes,
     graceful_terminate, project_root, read_captured,
-    spawn_zenohd_multicast_scouting_on_ephemeral_tcp, wait_for_capture_alive, wait_for_exit,
+    spawn_zenohd_multicast_scouting_on_any_interface, wait_for_capture_alive, wait_for_exit,
     wait_for_substring, wait_for_tcp_accept_alive, zenoh_pico_cli_binary, zenoh_pico_include_dirs,
     zenoh_pico_include_dirs_single_threaded, zenoh_pico_library_dir, zenohd_binary, ChildGuard,
     PortReservation,
@@ -2149,11 +2149,32 @@ fn oracle_binary(example: &str, dir: &std::path::Path) -> std::path::PathBuf {
 /// `port`, or `None`. Selecting by the PORT rather than by line index is what
 /// makes this robust to another zenoh process answering the same host-wide
 /// multicast group: an extra peer adds a line, it does not move this one.
+///
+/// R2230 (open-debt item 579) — the needle was `tcp/127.0.0.1:{port}` and is now
+/// `:{port}` inside any `tcp/` locator. The pinned 1.10.0 answers a NON-loopback
+/// scouter with `get_locators_noloopback()`, so the reply carries the router's
+/// real-interface addresses and never the loopback literal; see
+/// `spawn_zenohd_multicast_scouting_on_any_interface` for the measurement. The
+/// PORT is what the discrimination rested on all along — it is the value the
+/// kernel chose and neither scout was told — and pinning the address as well was
+/// pinning the one part of the locator this leg does not care about.
 fn hello_line_for_port(printed: &str, port: u16) -> Option<&str> {
-    let needle = format!("tcp/127.0.0.1:{port}");
+    hello_lines_for_port(printed, port).next()
+}
+
+/// Every such line, for the callers that assert HOW MANY there are.
+///
+/// R2230 (open-debt item 579) — extracted because the predicate had been written
+/// out a third and fourth time, inline, in the two occurrence counters. When the
+/// pin move invalidated the locator's address those copies did not move with
+/// `hello_line_for_port`, and the counters went to zero while the finder
+/// succeeded — one predicate reading two different ways about the same output.
+/// Counting and finding are now the same question asked twice.
+fn hello_lines_for_port(printed: &str, port: u16) -> impl Iterator<Item = &str> {
+    let needle = format!(":{port}");
     printed
         .lines()
-        .find(|l| l.starts_with("Hello {") && l.contains(&needle))
+        .filter(move |l| l.starts_with("Hello {") && l.contains("tcp/") && l.contains(&needle))
 }
 
 /// LEG 15 (`wz vs pico`, ORACLE) — upstream's `z_scout.c`, compiled twice
@@ -2217,8 +2238,13 @@ fn pico_zscout_source_on_wz_capi_matches_the_real_pico_against_a_zenohd() {
     // A zenohd with its DEFAULT multicast scouting responder; the spawn gates
     // on zenohd's own scout-listener line, so the group socket is bound and
     // joined before either scout emits (nothing retransmits a lost Scout).
+    // R2230 (open-debt item 579) — listening on EVERY interface, not loopback.
+    // The pinned 1.10.0 answers a non-loopback scouter with
+    // `get_locators_noloopback()`, so a loopback-only router replies with an
+    // EMPTY locator list and the comparison below has nothing to compare. The
+    // helper's own doc carries the measurement.
     let (mut zenohd, port) =
-        spawn_zenohd_multicast_scouting_on_ephemeral_tcp("zenohd (multicast-scouting router)");
+        spawn_zenohd_multicast_scouting_on_any_interface("zenohd (multicast-scouting router)");
 
     // The ORACLE first, so a failure to provision multicast at all reads as the
     // REAL library finding nothing — never as a wz defect.
@@ -2241,8 +2267,8 @@ fn pico_zscout_source_on_wz_capi_matches_the_real_pico_against_a_zenohd() {
 
     let oracle_line = hello_line_for_port(&oracle_printed, port).unwrap_or_else(|| {
         panic!(
-            "the REAL zenoh-pico z_scout did not discover the zenohd on \
-             tcp/127.0.0.1:{port} — multicast scouting is not working on this host, \
+            "the REAL zenoh-pico z_scout did not discover the zenohd on port \
+             {port} — multicast scouting is not working on this host, \
              so the comparison below would be vacuous.\n\
              --- oracle stdout ---\n{oracle_printed}"
         )
@@ -2267,10 +2293,7 @@ fn pico_zscout_source_on_wz_capi_matches_the_real_pico_against_a_zenohd() {
     // Not implied by the line comparison: the oracle prints ONE line per peer,
     // and a wz that re-reported the peer every cycle would still match on the
     // first line while flooding the callback.
-    let wz_hits = wz_printed
-        .lines()
-        .filter(|l| l.starts_with("Hello {") && l.contains(&format!("tcp/127.0.0.1:{port}")))
-        .count();
+    let wz_hits = hello_lines_for_port(&wz_printed, port).count();
     assert_eq!(
         wz_hits, 1,
         "wz reported the same peer {wz_hits} times; the real zenoh-pico reports it \
@@ -2318,10 +2341,13 @@ fn pico_zscout_source_on_wz_capi_reports_every_zenohd_on_the_group() {
     let dropin = dropin_binary("z_scout", dir.path());
     let oracle = oracle_binary("z_scout", dir.path());
 
+    // R2230 (open-debt item 579) — both on EVERY interface, for the reason the
+    // single-router leg above states: a loopback-only router's Hello carries no
+    // locator on the pinned 1.10.0, and this leg needs TWO distinguishable ones.
     let (mut router_a, port_a) =
-        spawn_zenohd_multicast_scouting_on_ephemeral_tcp("zenohd A (multicast-scouting router)");
+        spawn_zenohd_multicast_scouting_on_any_interface("zenohd A (multicast-scouting router)");
     let (mut router_b, port_b) =
-        spawn_zenohd_multicast_scouting_on_ephemeral_tcp("zenohd B (multicast-scouting router)");
+        spawn_zenohd_multicast_scouting_on_any_interface("zenohd B (multicast-scouting router)");
     assert_ne!(port_a, port_b, "the two routers must be distinguishable");
 
     let oracle_out = Command::new("stdbuf")
@@ -2347,7 +2373,7 @@ fn pico_zscout_source_on_wz_capi_reports_every_zenohd_on_the_group() {
         if hello_line_for_port(&oracle_printed, port).is_none() {
             panic!(
                 "the REAL zenoh-pico z_scout did not report the zenohd on \
-                 tcp/127.0.0.1:{port}, so this host cannot carry two multicast \
+                 port {port}, so this host cannot carry two multicast \
                  responders and the comparison below would be vacuous.\n\
                  --- oracle stdout ---\n{oracle_printed}"
             );
@@ -2359,9 +2385,9 @@ fn pico_zscout_source_on_wz_capi_reports_every_zenohd_on_the_group() {
         let wz_line = hello_line_for_port(&wz_printed, port).unwrap_or_else(|| {
             panic!(
                 "upstream z_scout.c on wz's C-ABI reported only some of the routers \
-                 the REAL zenoh-pico found on the same group — tcp/127.0.0.1:{port} \
-                 is missing, which is what a scout that stops at the FIRST answer \
-                 looks like from outside.\n\
+                 the REAL zenoh-pico found on the same group — the router on port \
+                 {port} is missing, which is what a scout that stops at the FIRST \
+                 answer looks like from outside.\n\
                  --- oracle stdout (found it) ---\n{oracle_printed}\n\
                  --- z_scout.c on wz stdout ---\n{wz_printed}"
             )
@@ -2369,17 +2395,14 @@ fn pico_zscout_source_on_wz_capi_reports_every_zenohd_on_the_group() {
         assert_eq!(
             wz_line, oracle_line,
             "upstream z_scout.c printed a DIFFERENT line on wz than on the real \
-             zenoh-pico for the zenohd on tcp/127.0.0.1:{port}.\n\
+             zenoh-pico for the zenohd on port {port}.\n\
              --- z_scout.c on wz stdout ---\n{wz_printed}\n\
              --- oracle stdout ---\n{oracle_printed}"
         );
-        let hits = wz_printed
-            .lines()
-            .filter(|l| l.starts_with("Hello {") && l.contains(&format!("tcp/127.0.0.1:{port}")))
-            .count();
+        let hits = hello_lines_for_port(&wz_printed, port).count();
         assert_eq!(
             hits, 1,
-            "wz reported the router on tcp/127.0.0.1:{port} {hits} times; one Scout \
+            "wz reported the router on port {port} {hits} times; one Scout \
              draws one answer per peer.\n--- z_scout.c on wz stdout ---\n{wz_printed}"
         );
     }

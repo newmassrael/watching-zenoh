@@ -29,10 +29,18 @@
 //!    other coverage gate in this tree begins at a wz atom and asks whether it
 //!    is proven; none begins at zenoh's own surface and asks whether wz has
 //!    anything corresponding. Here the denominator is zenohd's own resolved
-//!    config — 111 leaf keys, obtained by execution, not by parsing a document
-//!    — and every one is either honoured or named in the pinned unhonoured
-//!    SET. A zenoh version that adds a key makes this RED, which is the point:
-//!    the surface is allowed to grow, silently growing is not.
+//!    config — obtained by execution, not by parsing a document — and every one
+//!    is either honoured or named in the pinned unhonoured SET. A zenoh version
+//!    that adds a key makes this RED, which is the point: the surface is allowed
+//!    to grow, silently growing is not.
+//!
+//!    ⚠ R2230 (open-debt items 579 / 582) — the leaf count was spelled here as
+//!    "111 leaf keys" and is not any more. It moved to 108 when the pin went to
+//!    1.10.0 and three `routing/*` keys turned out to be deprecated no-ops
+//!    upstream, and a literal in prose is the one copy no gate re-measures.
+//!    `scripts/lib/upstream_carries_the_surface.py` is where the denominator is
+//!    adjudicated against the pinned binary, in BOTH directions — a key upstream
+//!    stopped carrying reds just as loudly as one it added.
 //! 3. [`a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd`]
 //!    — THE DROP-IN. `wz-ap-demo --config <file>` and nothing else: the
 //!    endpoint exists in no argv, no env var and no default, only in the
@@ -72,7 +80,7 @@ use wz_integration_tests::wire_tap::{synthesise_pcap, tap_proxy, Recording};
 use wz_runtime_tokio::zenoh_config::{
     default_listen_endpoint, ZenohNodeConfig, CONFIG_KEYS_PROVEN_ON_THE_WIRE, DAEMON_DEFAULT_MODE,
     DEEPENABLE_UPSTREAM_KEYS, HONOURED_CONFIG_KEYS, LIBRARY_DEFAULT_MODE,
-    UNHONOURED_UPSTREAM_CONFIG_KEYS,
+    UNHONOURED_UPSTREAM_CONFIG_KEYS, WZ_EXTENSION_CONFIG_KEYS, WZ_EXTENSION_HONOURED_KEYS,
 };
 use wz_runtime_tokio_test_support::zenoh_interop_session_init_params;
 use wz_session_core::dissect::{dissect_transport_message, FieldValue};
@@ -95,9 +103,14 @@ const RESOLVED_CONF_MARKER: &str = "Initial conf:";
 /// only READ the resolved config out of that line and are correct to wait on
 /// it; only a leg that connects needs this one.
 ///
-/// Upstream's text, quoted from `zenoh/src/net/runtime/orchestrator.rs:586` in
-/// the pinned checkout (`tracing::info!("Zenoh can be reached at: {}", locator)`).
-const LISTENER_UP_MARKER: &str = "Zenoh can be reached at:";
+/// R2230 (open-debt item 579) — this is `common::ZENOHD_LISTENER_LINE` now,
+/// re-exported rather than spelled, and the constant it points at records why.
+/// In short: the line quoted here used to be
+/// `tracing::info!("Zenoh can be reached at: {}", locator)` over ALL locators,
+/// and the pinned 1.10.0 narrowed it to the non-loopback ones
+/// (`orchestrator.rs:610` iterating `get_locators_noloopback()`). Every leg in
+/// this file binds loopback, so the old marker cannot fire here at all.
+use wz_integration_tests::common::ZENOHD_LISTENER_LINE as LISTENER_UP_MARKER;
 
 /// How long to wait for zenohd to print its resolved config.
 const STARTUP_BUDGET: Duration = Duration::from_secs(30);
@@ -219,6 +232,12 @@ fn spawn_on_config(label: &'static str, config_path: &std::path::Path) -> (Child
         .arg(config_path)
         .arg("--rest-http-port")
         .arg("none")
+        // R2230 (open-debt item 579) — PIN the level, because
+        // `LISTENER_UP_MARKER` is a `debug!` since the pin move. `Initial conf:`
+        // is an `info!` and the legs that only read it were fine either way; the
+        // two legs that wait on the LISTENER were not, and an unpinned filter
+        // also let an inherited RUST_LOG decide whether this file passes.
+        .env("RUST_LOG", "z=debug")
         .stdout(Stdio::from(out))
         .stderr(Stdio::from(err));
     (
@@ -508,11 +527,18 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         "listen/exit_on_failure",
         "listen/retry",
         "listen/timeout_ms",
-        // The two where wz DOES carry a flat default and upstream's is a
+        // The one where wz DOES carry a flat default and upstream's is a
         // function of `mode`. See this leg's doc: not a gap in the fixture, a
         // limit of the oracle.
+        //
+        // R2230 (open-debt items 579 / 582) — `routing/peer/mode` LEFT this list.
+        // It is not a key the tree answers `null` for any more; the pinned
+        // 1.10.0 does not put it in the tree AT ALL, because upstream retired it
+        // to a `skip_serializing` deprecated shim. `Some(Null)` and `None` are
+        // different findings and this list only ever meant the first, so the
+        // key is now asserted by the loop below instead — the stronger claim,
+        // and the one that reds if upstream ever brings it back.
         "timestamping/enabled",
-        "routing/peer/mode",
     ];
 
     // `adminspace` is a BLOCK on wz's side and three resolved leaves on
@@ -604,6 +630,28 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
             Some(&Json5Value::Null),
             "{path} is listed as one the tree cannot answer and a real zenohd \
              now resolves it; move it into the compared set\n{captured}"
+        );
+    }
+
+    // R2230 (open-debt items 579 / 582) — the extension keys are ABSENT from the
+    // tree, which is a different finding from resolving to `null` and is why
+    // they are asserted here rather than in the list above.
+    //
+    // This is the leg's own witness for the split the round made: wz accepts
+    // these keys and the pinned upstream does not carry them, so they are wz's
+    // surface and not zenoh's. Upstream reviving one would red HERE as well as
+    // in `upstream_carries_the_surface.py` — two instruments on different
+    // machinery, because the classification is what the honoured fraction is
+    // divided by.
+    assert!(!WZ_EXTENSION_CONFIG_KEYS.is_empty());
+    for path in WZ_EXTENSION_CONFIG_KEYS {
+        assert_eq!(
+            resolved.get(path),
+            None,
+            "{path} is claimed as a wz EXTENSION and the pinned zenohd carries \
+             it in its own resolved tree — so it is upstream surface after all \
+             and belongs back on HONOURED_CONFIG_KEYS or \
+             UNHONOURED_UPSTREAM_CONFIG_KEYS\n{captured}"
         );
     }
 
@@ -2847,8 +2895,15 @@ fn every_key_wz_lets_deepen_is_one_a_real_zenohd_deepens_too() {
 #[test]
 #[ignore = "binary-dep e2e: needs target/zenohd/zenohd (scripts/build-zenohd.sh)"]
 fn a_mode_dependent_endpoint_table_binds_the_same_row_for_zenohd_and_for_wz() {
-    /// zenohd's own line for the endpoint it actually reached the network on.
-    const REACHABLE: &str = "Zenoh can be reached at: ";
+    /// zenohd's own line for the endpoint it actually BOUND.
+    ///
+    /// R2230 (open-debt item 579) — was `"Zenoh can be reached at: "`, which
+    /// 1.10.0 narrowed to non-loopback locators; see
+    /// `common::ZENOHD_LISTENER_LINE`. The replacement is the better witness for
+    /// what this leg claims: the prose above says the table is proved "by
+    /// BINDING", and `Listener added:` is emitted at the bind, whereas a
+    /// reachability advertisement is about locators a node publishes.
+    const REACHABLE: &str = LISTENER_UP_MARKER;
 
     // `pick_pair` and not two `pick`s: the reservation mutex is non-reentrant,
     // and the pair form is what guarantees the two ports differ.
@@ -3169,8 +3224,15 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
     // client that also listens expands to `--listen` instead of `--connect`,
     // which is a different node from the one this leg is about. Named here
     // rather than left as a silent shortfall.
+    // R2230 (open-debt items 579 / 582) — `WZ_EXTENSION_HONOURED_KEYS` joins the
+    // expected set. The claim this leg makes is about what the EXPANSION can
+    // emit, and a honoured extension is emitted exactly like a honoured surface
+    // key: `routing/peer/mode` left the surface because upstream retired it, not
+    // because wz stopped reading it. Comparing against the surface half alone
+    // would have quietly dropped a flag this binary must still accept.
     let mut every_honoured: Vec<&str> = HONOURED_CONFIG_KEYS
         .iter()
+        .chain(WZ_EXTENSION_HONOURED_KEYS)
         .copied()
         .filter(|k| *k != "listen/endpoints")
         .collect();
@@ -3560,7 +3622,7 @@ fn attempts_in_window(demo: &std::path::Path, source: &str) -> usize {
 /// ## Why the RESOLVED CONFIG and not the listener
 ///
 /// A router's default is port 7447 — a real, fixed port. A leg that proved this
-/// by reading `Zenoh can be reached at:` would bind it, and would then fail on
+/// by reading the listener line would bind it, and would then fail on
 /// any machine where something else already had it: an upstream-agreement claim
 /// turned into a port-availability claim, which is the class this very file paid
 /// for one round ago. zenohd renders the WHOLE mode table into its

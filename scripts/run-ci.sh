@@ -2159,6 +2159,21 @@ PY
     # and what a build box has are different facts.
     python3 scripts/lib/armed_oracle_census.py --selftest || return 1
     python3 scripts/lib/armed_oracle_census.py --check || return 1
+    # R2230 (open-debt items 579 / 582) — the machine-INDEPENDENT half of
+    # `upstream_carries_the_surface.py`, whose other half needs a pinned zenohd
+    # and therefore lives in Layer Z.
+    #
+    # The classifier is what decides whether a key belongs on the upstream
+    # surface or in `WZ_EXTENSION_CONFIG_KEYS`, and it is the piece that has to
+    # discriminate: an exemption list judged by a check that cannot fail is an
+    # escape hatch with a gate painted on it. Its fixtures drive BOTH directions
+    # — including the state R2229 actually shipped (a discarded key claimed as
+    # surface) and its mirror (a live key hidden in the extension list) — and it
+    # counts the silent rows too, because a classifier that complains about
+    # everything would satisfy every red row and be just as useless.
+    #
+    # Milliseconds, no binary, no source tree. Layer Z runs the adjudication.
+    python3 scripts/lib/upstream_carries_the_surface.py --selftest || return 1
     # R311y605 — the DISSECT FEATURE CENSUS, the name census's sibling one level
     # up. `dissect`'s doc says it selects the whole codec-* MID space so "an
     # observer reads every message it sees", and the claim had been wrong THREE
@@ -12640,20 +12655,66 @@ layer_z_zenohd_interop() {
     # Item 503 filed this as "no lane runs it" on the premise that the oracle is
     # untracked. That premise was WRONG and re-checking it is what closed the
     # item: this lane already provisions zenohd. The real cost is wall clock,
-    # RE-MEASURED in R2149 at 117s for 111 keys — 95 of them refusals, each
+    # RE-MEASURED in R2230 at 122s for 115 keys against the 1.10.0 pin, each
     # paying zenohd's own startup, which is not ours to shorten. Hosted-only:
     # pre-push never runs Layer Z, so this does not slow a push.
     #
     # The figures above were "219s for 116 keys — 111 of them refusals" until
-    # R2149. Both had gone stale as the surface moved under them, which is the
-    # ordinary fate of a measurement written as prose beside the thing it
-    # measures; they are restated rather than quietly replaced so the next
-    # reader can see the drift is expected here and re-measure instead of
-    # quoting.
+    # R2149, and "117s for 111 keys" until R2230, which re-measured 122s for 115
+    # keys against the 1.10.0 pin. Each is restated rather than quietly replaced
+    # so the next reader can see that drift is EXPECTED here and re-measure
+    # instead of quoting — this is the ordinary fate of a measurement written as
+    # prose beside the thing it measures, and three generations of it in one
+    # comment is the evidence.
     if ! WZ_ZENOHD_BIN="$zenohd" python3 scripts/lib/deepenable_audit.py; then
         echo "  Z FAIL: the acceptance boundary's exception list no longer matches" \
              "what a real zenohd accepts — see the lines above for which key and" \
              "which direction"
+        return 1
+    fi
+    # R2230 (open-debt items 579 / 582) — is every key wz calls UPSTREAM SURFACE
+    # one the pinned upstream actually CARRIES?
+    #
+    # The audit above cannot answer that, and R2229 is the proof: the pin move to
+    # 1.10.0 made it report two `routing/peer/*` keys as newly "accepting a
+    # deeper shape", which reads as upstream having GROWN a subtree there. The
+    # truth was the reverse — upstream RETIRED them into a deprecated shim typed
+    # `Option<Value>`, which accepts any shape at all. A probe that classifies by
+    # whether the node starts cannot separate "means anything" from "means
+    # nothing", and the surface fraction is read as coverage, so a denominator
+    # holding non-features makes "wz honours N of M" a number about nothing.
+    #
+    # The oracle is the daemon's own `Initial conf:` line: upstream marks a
+    # retired key `skip_serializing`, so its serializer answers directly and for
+    # the whole surface in ONE start. Nothing in this tree lists what upstream
+    # has — the population is wz's constants, the verdict is upstream's binary,
+    # so a pin move re-answers this instead of aging it.
+    #
+    # It also adjudicates `WZ_EXTENSION_CONFIG_KEYS`, which is the reason it must
+    # gate rather than inform: that list exempts keys from the surface, and the
+    # cheapest way to green any surface check is to move the offending key into
+    # it. Membership is measured in both directions here — a live key hidden
+    # there reds, upstream reviving one reds, and a name upstream no longer has
+    # at all reds instead of being tolerated.
+    #
+    # Cost is 4 zenohd starts (one baseline, one per extension key), against the
+    # 111 the audit above pays, because the dump answers the whole surface at
+    # once. Layer C0 runs `--selftest`, which needs no binary.
+    WZ_ZENOHD_BIN="$zenohd" python3 scripts/lib/upstream_carries_the_surface.py
+    local carries_rc=$?
+    if [[ $carries_rc -eq 2 ]]; then
+        echo "  Z FAIL: the surface/upstream comparison could not READ its input," \
+             "so NOTHING was graded — this is not a claim about the lists. The" \
+             "lines above name what was missing (the constants, the zenohd, or a" \
+             "parseable \`Initial conf:\` line). A gate that cannot read its input" \
+             "must not report green."
+        return 1
+    elif [[ $carries_rc -ne 0 ]]; then
+        echo "  Z FAIL: wz's upstream config surface no longer matches what the" \
+             "pinned zenohd carries in its own resolved config — see the lines" \
+             "above for which key and which direction. ⛔ The fix is NEVER to" \
+             "widen WZ_EXTENSION_CONFIG_KEYS to quiet it: that list is judged by" \
+             "this same check."
         return 1
     fi
     # R2162 (unregistered open-debt item 199) — the UPSTREAM arm of the
@@ -13206,7 +13267,10 @@ layer_z_zenohd_interop() {
     # until R311y842 it was an input to nothing. Four legs: the differential
     # oracle (wz and zenohd resolve the same bytes and are compared key by key),
     # the upstream-surface census (zenohd's own resolved config enumerated, every
-    # one of its 111 leaf keys honoured or in the pinned unhonoured SET), the
+    # one of its leaf keys honoured or in the pinned unhonoured SET — R2230 struck
+    # the literal "111" that stood here, which the pin move to 1.10.0 had made
+    # false; Layer Z's `upstream_carries_the_surface.py` is what re-measures it),
+    # the
     # acceptance boundary (a key zenohd refuses is one wz refuses), and the
     # drop-in itself (`wz-ap-demo --config` and nothing else, dialling a port that
     # exists only inside the file).

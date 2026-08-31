@@ -2390,7 +2390,9 @@ pub(crate) fn config_keys_the_demo_drops() -> Vec<&'static str> {
 mod stock_config_tests {
     use super::*;
 
-    use wz::runtime_tokio::zenoh_config::{CONFIG_KEYS_PROVEN_ON_THE_WIRE, HONOURED_CONFIG_KEYS};
+    use wz::runtime_tokio::zenoh_config::{
+        CONFIG_KEYS_PROVEN_ON_THE_WIRE, HONOURED_CONFIG_KEYS, WZ_EXTENSION_HONOURED_KEYS,
+    };
 
     fn argv(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| String::from(*s)).collect()
@@ -3424,7 +3426,17 @@ mod stock_config_tests {
         // COVERAGE, both directions: a new honoured key with no row here would
         // otherwise be silently untested, and a row for a key the reader no
         // longer honours would be testing nothing.
-        let mut want: Vec<&str> = HONOURED_CONFIG_KEYS.to_vec();
+        // R2230 (open-debt items 579 / 582) — the union of BOTH honoured lists.
+        // What the demo must reach is what the READER applies, and
+        // `routing/peer/mode` left `HONOURED_CONFIG_KEYS` because upstream
+        // deprecated the key to a no-op, not because wz stopped reading it.
+        // Comparing against the surface half alone would have dropped the one
+        // fixture that proves a honoured extension reaches the demo.
+        let mut want: Vec<&str> = HONOURED_CONFIG_KEYS
+            .iter()
+            .chain(WZ_EXTENSION_HONOURED_KEYS)
+            .copied()
+            .collect();
         let mut got: Vec<&str> = fixtures.iter().map(|(k, _, _)| *k).collect();
         want.sort_unstable();
         got.sort_unstable();
@@ -4055,9 +4067,17 @@ mod stock_config_tests {
         );
 
         // ── THE CLAIM ────────────────────────────────────────────────────
+        // R2230 (open-debt items 579 / 582) — a honoured EXTENSION keeps the
+        // promise too. `--help` cites `routing/peer/mode` and the reader still
+        // applies it; what changed is that upstream deprecated the key, which is
+        // a fact about zenoh and not about whether this program does what its
+        // own help text says.
         let unhonoured: Vec<&String> = cited
             .iter()
-            .filter(|k| !HONOURED_CONFIG_KEYS.contains(&k.as_str()))
+            .filter(|k| {
+                !HONOURED_CONFIG_KEYS.contains(&k.as_str())
+                    && !WZ_EXTENSION_HONOURED_KEYS.contains(&k.as_str())
+            })
             .collect();
         assert!(
             unhonoured.is_empty(),
@@ -5153,9 +5173,19 @@ mod stock_config_tests {
             );
         }
 
-        let argv_only: Vec<&str> = HONOURED_CONFIG_KEYS
-            .iter()
-            .copied()
+        // R2230 (open-debt items 579 / 582) — BOTH honoured lists, on both sides
+        // of the partition. This test was self-consistent either way, which is
+        // exactly why it had to move deliberately: narrowing to the surface half
+        // would have kept it green while quietly dropping `routing/peer/mode`
+        // out of a partition whose whole claim is EXHAUSTIVENESS over what the
+        // reader applies.
+        let honoured_by_the_reader = || {
+            HONOURED_CONFIG_KEYS
+                .iter()
+                .chain(WZ_EXTENSION_HONOURED_KEYS)
+                .copied()
+        };
+        let argv_only: Vec<&str> = honoured_by_the_reader()
             .filter(|k| !wire.contains(k) && !no_sink.contains(k))
             .collect();
 
@@ -5165,7 +5195,7 @@ mod stock_config_tests {
         union.extend(no_sink.iter().copied());
         union.extend(argv_only.iter().copied());
         union.sort_unstable();
-        let mut honoured: Vec<&str> = HONOURED_CONFIG_KEYS.to_vec();
+        let mut honoured: Vec<&str> = honoured_by_the_reader().collect();
         honoured.sort_unstable();
         assert_eq!(
             union, honoured,
@@ -5217,8 +5247,14 @@ mod stock_config_tests {
     fn every_argv_only_key_says_which_kind_of_unproven_it_is() {
         let no_sink = config_keys_the_demo_drops();
         let wire: Vec<&str> = CONFIG_KEYS_PROVEN_ON_THE_WIRE.to_vec();
+        // R2230 (open-debt items 579 / 582) — the union of BOTH honoured lists,
+        // for the reason the two sites above use it: this ledger classes keys the
+        // READER applies, and a honoured extension is applied like any other.
+        // Narrowing to the surface half would drop a key from the ledger's
+        // population without any decision being taken about it.
         let mut argv_only: Vec<&str> = HONOURED_CONFIG_KEYS
             .iter()
+            .chain(WZ_EXTENSION_HONOURED_KEYS)
             .copied()
             .filter(|k| !wire.contains(k) && !no_sink.contains(k))
             .collect();
@@ -5249,8 +5285,15 @@ mod stock_config_tests {
         //  * a row RETIRES when its key moves to `wire`, which is the whole
         //    point of item 220, so the gate fires on the debt being PAID and
         //    not merely on regression.
+        // R2230 (open-debt items 579 / 582) — BOTH honoured lists, matching the
+        // `argv_only` above. The ledger's job is "every key the reader applies
+        // and the wire has not yet proven", and a honoured extension is applied
+        // exactly like a surface key; a row already exists for
+        // `routing/peer/mode` and narrowing here would have DEMANDED its
+        // retirement, which is the opposite of what happened to it.
         let mut expected: Vec<&str> = HONOURED_CONFIG_KEYS
             .iter()
+            .chain(WZ_EXTENSION_HONOURED_KEYS)
             .copied()
             .filter(|k| !wire.contains(k))
             .collect();

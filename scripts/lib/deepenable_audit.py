@@ -80,10 +80,21 @@ the same reason in the smaller. A gate whose input is absent must not report
 green.
 
 pre-push never runs Layer Z, so none of this slows a push. Wall clock is why it
-sits there and not in a fast lane: one zenohd startup per key, measured at 117s
-for the 111-key surface in R2149 -- the same figure `run-ci.sh` carries beside
-the call, deliberately, because two numbers for one measurement is how the pair
-this round had to correct went stale in the first place.
+sits there and not in a fast lane: one zenohd startup per key, re-measured in
+R2230 at 122s for the 115-key surface under the 1.10.0 pin -- the same figure
+`run-ci.sh` carries beside the call, deliberately, because two numbers for one
+measurement is how the pair R2149 had to correct went stale in the first place.
+
+⚠ R2230 -- THIS SCRIPT CANNOT SEE THE THIRD STATE A KEY CAN BE IN, and the pin
+move to 1.10.0 is where that stopped being theoretical. It reported
+`routing/peer/mode` and `routing/peer/linkstate/transport_weights` as newly
+"accepting a deeper shape", which reads as upstream having GROWN a subtree.
+Upstream had RETIRED them, into a deprecated shim typed `Option<Value>` that
+accepts any shape at all -- and "accepts anything" is indistinguishable from
+"means something" to a probe that classifies by whether the node started.
+`upstream_carries_the_surface.py` asks the question this one structurally
+cannot, by reading the daemon's own serialized config; the two run beside each
+other in Layer Z and neither subsumes the other.
 
 ⚠ Until R2149 this section was titled "Why this is NOT wired into a CI layer"
 and said the oracle is one "no CI runner has". That had been false since R2080
@@ -138,9 +149,31 @@ def rust_const(name: str) -> list[str]:
     below could not catch it: counting too MANY passes every one of them.
     """
     src = SOURCE.read_text()
-    m = re.search(r"(?:pub )?const " + name + r": &\[&str\] = &\[(.*?)\n\];", src, re.S)
+    # R2230 — TWO shapes, and the single-line one is not a nicety. The pattern
+    # was `= &\[(.*?)\n\];`, which a const declared entirely on its own line
+    # (`= &["routing/peer/mode"];`) does not match at all -- so `.*?` ran on to
+    # the NEXT `\n];` in the file and swallowed a whole other constant. Measured
+    # the day it was introduced: `WZ_EXTENSION_HONOURED_KEYS` read as 80 keys
+    # instead of 1, and `config_key_fixture_gate` reported 116 honoured keys and
+    # 79 "missing" fixture entries. It did not fail to read; it read something
+    # else and said nothing, which is the failure mode this whole file is about.
+    m = re.search(
+        r"(?:pub )?const " + name + r": &\[&str\] = &\[([^\n]*?)\];", src
+    ) or re.search(
+        r"(?:pub )?const " + name + r": &\[&str\] = &\[(.*?)\n\];", src, re.S
+    )
     if not m:
         raise SystemExit(f"deepenable-audit: FAIL -- {name} not found in {SOURCE}")
+    # The anti-swallow guard, because the bug above was silent and a louder
+    # pattern is not the same as a checked one: no `&[&str]` constant's BODY
+    # contains another item declaration, so finding one means the match ran past
+    # the constant it was asked for.
+    if re.search(r"^\s*(?:pub )?(?:const|fn|struct|enum) ", m.group(1), re.M):
+        raise SystemExit(
+            f"deepenable-audit: FAIL -- the read of {name} ran past its own "
+            f"`];` and swallowed a following item. Do not widen this pattern to "
+            f"accept the result: fix the shape it could not match."
+        )
     # R2131 (unregistered open-debt item 402) — the stripping moved to
     # `rust_comments`, which two other sweeps measured this round now share. It
     # BLANKS a comment rather than dropping its line, which is stricter than the

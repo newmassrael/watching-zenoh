@@ -84,6 +84,7 @@ use std::time::Duration;
 
 use wz_integration_tests::common::{
     wait_for_substring, wz_ap_demo_binary, zenohd_binary, ChildGuard, PortReservation,
+    ZENOHD_LISTENER_LINE,
 };
 
 /// The demo's post-handshake witness: the QoS link metadata NEGOTIATED on a
@@ -337,12 +338,18 @@ fn zenohd_accepts_the_qoslink_wz_encodes_when_wz_dials() {
         Command::new(&zenohd)
             .args(["-l", &format!("tcp/{zd_addr}")])
             .args(["--no-multicast-scouting", "--rest-http-port", "none"])
+            // R2230 (open-debt item 579) — the readiness needle below is a
+            // `debug!`. See `common::ZENOHD_LISTENER_LINE`: the `info!` line this
+            // leg used to wait on stopped covering LOOPBACK in 1.10.0, and every
+            // leg here binds loopback, so it waited out its whole budget on a
+            // healthy router.
+            .env("RUST_LOG", "z=debug")
             .stdout(Stdio::from(zd_w))
             .stderr(Stdio::from(zd_w2))
             .spawn()
             .expect("spawn zenohd"),
     );
-    if let Err(c) = wait_for_substring(&mut zd_log, "can be reached at", Duration::from_secs(20)) {
+    if let Err(c) = wait_for_substring(&mut zd_log, ZENOHD_LISTENER_LINE, Duration::from_secs(20)) {
         panic!("zenohd never announced its listener within 20s\n--- zenohd ---\n{c}");
     }
     // zenohd has bound; release the reservation so wz can take its own port.
