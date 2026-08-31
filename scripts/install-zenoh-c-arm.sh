@@ -88,7 +88,7 @@ if [[ ! -f "$REF/CMakeLists.txt" ]]; then
     say "FAIL: zenoh-c's SOURCE checkout is absent at $REF."
     say "      The release archive install-zenoh-c.sh provisions is not enough —"
     say "      this build needs the repository:"
-    say "      git clone --depth 1 --branch 1.5.0 \\"
+    say "      git clone --depth 1 --branch 1.10.0 \\"
     say "      https://github.com/eclipse-zenoh/zenoh-c $REF"
     exit 1
 fi

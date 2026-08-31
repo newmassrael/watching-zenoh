@@ -33,7 +33,7 @@
 #
 # Output: target/zenohd/zenohd
 #
-# Built with zenoh 1.5.0's pinned toolchain (channel 1.85.0) to avoid any
+# Built with the pinned zenoh release's OWN toolchain, to avoid any
 # newer-rustc incompatibility. Re-runs are idempotent: the checkout build is
 # incremental, the crates.io install is a no-op when the version is already
 # installed, and `install -m 0755` overwrites atomically.
@@ -43,8 +43,37 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INSTALL_DIR="$ROOT/target/zenohd"
 BUILD_DIR="$ROOT/target/zenohd-build"
-TOOLCHAIN="1.85.0"
-ZENOHD_VERSION="${ZENOHD_VERSION:-1.5.0}"
+ZENOHD_VERSION="${ZENOHD_VERSION:-1.10.0}"
+
+# R2229 (open-debt item 579) — the toolchain that release pins, DERIVED.
+#
+# It used to be a second hand-maintained constant beside `ZENOHD_VERSION`, and
+# moving the version meant remembering to move it too: 1.5.0 pins channel
+# 1.85.0 and 1.10.0 pins 1.97.1, so the pair going out of step builds the new
+# router with the old compiler and reports whatever that produces. That is the
+# open-debt item 47 class — one fact in two places, with nothing measuring the
+# gap — and this round hit it while moving the very pin it describes.
+#
+# The release states its own answer in `rust-toolchain.toml`, so that is what
+# is read. The fallback is NOT a default channel: an unreadable file is a hard
+# error, because "build it with whatever rustc is around" is exactly the
+# incompatibility the pin exists to prevent.
+zenohd_toolchain() {
+    local raw
+    raw="$(gh api "repos/eclipse-zenoh/zenoh/contents/rust-toolchain.toml?ref=$ZENOHD_VERSION" \
+        --jq .content 2>/dev/null | base64 -d 2>/dev/null || true)"
+    local channel
+    channel="$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' <<<"$raw" | head -1)"
+    if [[ -z "$channel" ]]; then
+        echo "build-zenohd: cannot read the toolchain zenoh $ZENOHD_VERSION pins" >&2
+        echo "  (repos/eclipse-zenoh/zenoh/contents/rust-toolchain.toml?ref=$ZENOHD_VERSION)." >&2
+        echo "  Set ZENOHD_TOOLCHAIN=<channel> to override, but do not guess: building" >&2
+        echo "  the reference router with the wrong rustc is what this pin prevents." >&2
+        exit 1
+    fi
+    printf '%s' "$channel"
+}
+TOOLCHAIN="${ZENOHD_TOOLCHAIN:-$(zenohd_toolchain)}"
 
 # R311y392 — the unixpipe-enabled variant. zenoh's `default` feature set OMITS
 # transport_unixpipe (zenoh/Cargo.toml), and `cargo install` (source B) cannot add

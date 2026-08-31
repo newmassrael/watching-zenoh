@@ -38,9 +38,11 @@
 # examples from — and a reference that the build mutates is not a reference.
 #
 # The toolchain comes from the checkout's own `rust-toolchain.toml`, for the
-# reason R311y540 measured: `z_owned_task_t` is 32 bytes under the pinned 1.85.0
-# and 24 under 1.97.0, so a header built with the wrong compiler describes a
-# different ABI than upstream ships.
+# reason R311y540 measured: `z_owned_task_t` was 32 bytes under the then-pinned
+# 1.85.0 and 24 under 1.97.0, so a header built with the wrong compiler
+# describes a different ABI than upstream ships. R2229 moved the zenoh-c pin
+# from 1.5.0 to 1.10.0 and this file needed no edit for it — deriving the
+# channel from the checkout is why.
 #
 # Output: target/zenoh-c-shm/{include,lib}
 # Consumers point WZ_ZENOH_C_PREFIX at it.

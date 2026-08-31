@@ -98,10 +98,15 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 # MEASURED 2026-08-31 (R2228). Read the module docstring before changing a row:
 # a rising number is upstream moving and belongs to open-debt item 579, not to
 # this table.
+#
+# R2229 (item 579) moved zenoh and zenoh-c from 9 to 0 by bumping the pins to
+# 1.10.0, and this table RED-ed on the way through — in the falling direction,
+# which is the half a one-sided budget would have missed. That is the round this
+# gate was built one round early for.
 PINNED: dict[str, tuple[str, int]] = {
     "FreeRTOS/FreeRTOS-Kernel": ("MEASURED", 3),
-    "eclipse-zenoh/zenoh": ("MEASURED", 9),
-    "eclipse-zenoh/zenoh-c": ("MEASURED", 9),
+    "eclipse-zenoh/zenoh": ("MEASURED", 0),
+    "eclipse-zenoh/zenoh-c": ("MEASURED", 0),
     "eclipse-zenoh/zenoh-pico": ("MEASURED", 1),
     "lwip-tcpip/lwip": ("NO_RELEASES", 0),
     "newmassrael/scxml-core-engine": ("NO_RELEASES", 0),
@@ -246,7 +251,70 @@ def judge(pin: str | None, tags: list[str]) -> tuple[str, int]:
     return ("PIN_NOT_A_RELEASE", 0)
 
 
-def run(fetch=None) -> int:
+# ── R2229 (open-debt item 579): the SECOND question, inside the tree ────────
+#
+# The distance above is about upstream. This is about whether this tree agrees
+# with ITSELF about which release it pins, and it was added because moving one
+# pin turned out to touch SEVEN places: the script's default, a `rustup
+# toolchain install` in the workflow, and five cache keys. A cache key naming
+# the old release is the dangerous one — it restores an old binary under a new
+# pin, and every lane then grades wz against a router nobody meant to run.
+#
+# ⚠ THE POPULATION IS STRUCTURAL, NOT A LIST OF PLACES SOMEBODY REMEMBERED.
+# Two shapes, both of which are what the workflow actually writes:
+#   * `rustup toolchain install <channel>` — must equal the channel the pinned
+#     release itself declares in `rust-toolchain.toml`;
+#   * `key: <name>-<version>-<os>-…` — the version must be one this tree pins
+#     somewhere. Not "the zenoh one": ANY derived pin, so a key for a different
+#     upstream is not forced to name zenoh's.
+# Anything matching a shape and resolving to neither is RED. There is no
+# exemption table, because a version literal that is allowed to mean nothing is
+# how the workflow drifted from the script in the first place.
+CACHE_KEY = re.compile(r"^\s*key:\s*[a-z0-9-]+?-(\d+\.\d+\.\d+)-[a-z]", re.M)
+TOOLCHAIN_INSTALL = re.compile(r"rustup\s+toolchain\s+install\s+(\d+\.\d+\.\d+)")
+
+
+def release_toolchain(repo: str, ref: str, fetch=None) -> str | None:
+    """The channel `ref` of `repo` pins, read from its own `rust-toolchain.toml`."""
+    if fetch is not None:
+        return fetch(repo, ref)
+    got = subprocess.run(
+        ["gh", "api", f"repos/{repo}/contents/rust-toolchain.toml?ref={ref}", "--jq", ".content"],
+        capture_output=True,
+        text=True,
+    )
+    if got.returncode != 0:
+        raise Unmeasurable(f"{repo}@{ref}: cannot read rust-toolchain.toml")
+    import base64
+
+    try:
+        raw = base64.b64decode(got.stdout).decode("utf-8", "replace")
+    except ValueError as exc:
+        raise Unmeasurable(f"{repo}@{ref}: rust-toolchain.toml is not base64: {exc}") from None
+    m = re.search(r'channel\s*=\s*"([^"]+)"', raw)
+    return m.group(1) if m else None
+
+
+def pin_consistency(workflow: str, pins: dict[str, str], toolchains: set[str]) -> list[str]:
+    """Complaints about version literals in the workflow that no pin explains."""
+    bad: list[str] = []
+    known = set(pins.values())
+    for version in set(CACHE_KEY.findall(workflow)):
+        if version not in known:
+            bad.append(
+                f"cache key names {version}, which no pin in this tree derives "
+                f"(derived: {sorted(known)})"
+            )
+    for channel in set(TOOLCHAIN_INSTALL.findall(workflow)):
+        if channel not in toolchains:
+            bad.append(
+                f"the workflow installs toolchain {channel}, which no pinned "
+                f"release declares (declared: {sorted(toolchains)})"
+            )
+    return sorted(bad)
+
+
+def run(fetch=None, tc_fetch=None) -> int:
     paths = tracked_paths()
     urls = grc.upstream_urls(paths)
     stray = unroutable_urls(urls)
@@ -263,14 +331,51 @@ def run(fetch=None) -> int:
             continue
         observed[repo] = judge(pins.get(url), tags)
 
+    # The workflow's own version literals, checked against the pins above. A
+    # `rustup toolchain install` is only meaningful next to the release that
+    # declares that channel, so the declared set is derived per pinned repo.
+    toolchains: set[str] = set()
+    for repo, url in sorted(repos.items()):
+        ref = pins.get(url)
+        if ref is None:
+            continue
+        try:
+            channel = release_toolchain(repo, ref, fetch=tc_fetch)
+        except Unmeasurable as exc:
+            # A repository with no `rust-toolchain.toml` is the normal case, and
+            # `gh` reports that as a failed call. Only a repo the workflow
+            # actually installs a channel for can make this matter, and that is
+            # what the comparison below decides -- so this is recorded, not
+            # fatal.
+            del exc
+            continue
+        if channel:
+            toolchains.add(channel)
+    workflow_path = ROOT / ".github" / "workflows" / "ci.yml"
+    drift: list[str] = []
+    try:
+        drift = pin_consistency(workflow_path.read_text(errors="replace"), pins, toolchains)
+    except OSError as exc:
+        failures.append(f"cannot read {workflow_path}: {exc}")
+
     print(f"upstream-release-distance: {len(repos)} repository(ies) derived from the tree")
     for repo in sorted(observed):
         verdict, distance = observed[repo]
         pinned = PINNED.get(repo)
         mark = "  " if pinned == observed[repo] else "!!"
         print(f"  {mark} {repo:38s} {verdict:18s} distance={distance}")
+    print(f"  workflow pin consistency: {len(drift)} complaint(s); "
+          f"channels declared by pinned releases: {sorted(toolchains)}")
 
     bad = False
+    if drift:
+        bad = True
+        print("upstream-release-distance: FAIL — the workflow disagrees with the pins:")
+        for line in drift:
+            print(f"    {line}")
+        print("    A cache key or toolchain naming the old release restores the old")
+        print("    binary under the new pin, and every lane then grades wz against a")
+        print("    router nobody meant to run.")
     if stray:
         bad = True
         print("upstream-release-distance: FAIL — a derived URL this gate cannot route:")
@@ -376,12 +481,38 @@ def selftest() -> int:
         bad += 1
         print(f"  selftest FAIL: unroutable_urls reported {stray}")
 
+    # ── R2229: the workflow-consistency arm, with its narrowing control ────
+    #
+    # On a tree that has just been moved, this arm reports zero — and a zero
+    # from a check that cannot fire reads the same as a tree that agrees with
+    # itself. The control is the FIRST case: a workflow matching the pins must
+    # produce NO complaint, or the arm would red on everything and mean nothing.
+    fx_pins = {"https://github.com/eclipse-zenoh/zenoh": "1.10.0"}
+    fx_tcs = {"1.97.1"}
+    agreeing = (
+        "          key: zenohd-1.10.0-ubuntu-22.04-x\n"
+        "          run: rustup toolchain install 1.97.1 --profile minimal\n"
+    )
+    stale_key = agreeing.replace("zenohd-1.10.0", "zenohd-1.5.0")
+    stale_tc = agreeing.replace("install 1.97.1", "install 1.85.0")
+    for label, wf, want_complaints in (
+        ("a workflow that agrees", agreeing, 0),
+        ("a cache key at the old release", stale_key, 1),
+        ("a toolchain at the old channel", stale_tc, 1),
+        ("both stale", stale_key.replace("install 1.97.1", "install 1.85.0"), 2),
+    ):
+        got = pin_consistency(wf, fx_pins, fx_tcs)
+        if len(got) != want_complaints:
+            bad += 1
+            print(f"  selftest FAIL: {label} gave {len(got)} complaint(s), want {want_complaints}")
+
     if bad:
         print(f"upstream-release-distance selftest: FAIL ({bad})")
         return 1
     print(
         f"upstream-release-distance selftest: OK ({len(cases)} classifier case(s), "
-        f"the measure/observe split, and the two zero-population arms)"
+        f"the measure/observe split, the two zero-population arms, and the "
+        f"workflow-consistency arm with its control)"
     )
     return 0
 
