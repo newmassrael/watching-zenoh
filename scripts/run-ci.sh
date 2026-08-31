@@ -13260,6 +13260,23 @@ layer_z_zenohd_interop() {
     _runci_guarded_test Z 7 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_negotiated_axes_zenohd_interop -- --ignored --quiet --test-threads=1 \
         || return 1
+    # R2226 (open-debt item 575) — TWO legs: a genuine zenohd stalled past its
+    # own `max_wait_before_drop_fragments` budget, and its twin stalled for less
+    # than it. The pair is what attributes the router's behaviour to that
+    # deadline rather than to the back-pressure, the relay or the bounded
+    # kernel buffers, all of which are identical across the two.
+    #
+    # ⚠ The proof leg asserts the `0x3 Drop` marker does NOT reach the wire, and
+    # that is the round's FINDING rather than a weakened claim: upstream's one
+    # emit site hands the codec an empty reader and the encode fails, so an
+    # empty batch goes out in its place. A RED there means upstream fixed it and
+    # item 575's genuine witness has become buildable.
+    #
+    # Prereqs: zenohd (guarded above) and the core zenoh `z_pub` example, which
+    # `zenoh_core_example_binary` panics on if absent.
+    _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_chain_drop_zenohd_interop -- --ignored --quiet --test-threads=1 \
+        || return 1
     # THREE legs: the `wz_dissect_live_*` C door driven over genuine zenohd
     # bytes and graded on offset / length / time as VALUES against the recorded
     # byte stream, plus three shifted-record controls the oracle must REJECT and

@@ -2298,6 +2298,32 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
         "wz-has-it",
         "ServerNameVerification",
     ),
+    // R2226 (open-debt item 575) — TWO capacity knobs wz spells at a GENUINE
+    // zenohd and never at itself, on the same footing as
+    // `sequence_number_resolution` below.
+    //
+    // The leg they exist for has to make a real router run out of batches
+    // mid-fragmentation. That needs the router to BLOCK in `write`, and how far
+    // it gets first is decided by how much it can hold: one batch object per
+    // priority (`queue/size/data`) and the kernel's send buffer
+    // (`tcp/so_sndbuf`). Both are configured on the far side; wz honours
+    // neither and has no local surface that would.
+    //
+    // ⚠ Kept apart from the DEADLINE the same leg depends on, which is left at
+    // its upstream default deliberately: capacity decides how far a sender
+    // gets, and only the deadline decides what it does when it stops. Naming
+    // that one here too would have made the router's willingness to abandon a
+    // property of this harness.
+    (
+        "transport/link/tcp/so_sndbuf",
+        "foreign-node-config",
+        "spawn_zenohd_shallow_tx_queue_on_ephemeral_tcp",
+    ),
+    (
+        "transport/link/tx/queue/size/data",
+        "foreign-node-config",
+        "spawn_zenohd_shallow_tx_queue_on_ephemeral_tcp",
+    ),
     // R2221 (open-debt item 568) — wz's source spells
     // `transport/link/tx/sequence_number_resolution` to configure the GENUINE
     // zenohd, never itself, and the `qos/publication` row above is the same

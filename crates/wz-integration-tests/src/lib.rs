@@ -28,6 +28,15 @@ pub mod common {
     use std::thread;
     use std::time::{Duration, Instant};
 
+    /// R2226 (open-debt item 575) — the relay records what it carried, and it
+    /// records it in the SHAPE `wire_tap::synthesise_pcap` already consumes.
+    ///
+    /// Imported rather than redeclared: a second `Side` in this module would be
+    /// a second answer to "which end wrote this segment", and every leg that
+    /// rebuilds a wire would then have to pick one. The two harness halves stay
+    /// one vocabulary.
+    use crate::wire_tap::{Recording, Side};
+
     fn port_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
@@ -2491,6 +2500,8 @@ pub mod common {
         overtaken: Arc<AtomicUsize>,
         conduits: Arc<Mutex<BTreeSet<Conduit>>>,
         dialer_frame_sns: Arc<Mutex<Vec<u64>>>,
+        recording: Recording,
+        stalls: Arc<AtomicUsize>,
     }
 
     impl CountingRelay {
@@ -2587,6 +2598,37 @@ pub mod common {
                 .expect("relay frame sn list")
                 .clone()
         }
+
+        /// R2226 (open-debt item 575) — every batch this relay carried, in the
+        /// order it READ them, tagged with which side wrote it and carrying the
+        /// `[u16 LE len]` prefix.
+        ///
+        /// Suitable for [`crate::wire_tap::synthesise_pcap`], which is the
+        /// point: a leg whose
+        /// claim is "the FAR SIDE wrote these bytes" cannot make it from
+        /// counters this crate maintains, and dissecting the recording puts a
+        /// second, independent reader over the same wire.
+        ///
+        /// ⚠ READ order, not forwarded order, and the difference is the whole
+        /// value under a fault. A recording taken after a hold would describe
+        /// what the harness did with the bytes; this describes what the peer
+        /// put on the link, which no relay behaviour changes.
+        pub fn recording(&self) -> Vec<(Side, Vec<u8>)> {
+            self.recording.lock().expect("relay recording").clone()
+        }
+
+        /// R2226 (open-debt item 575) — how many times
+        /// [`RelayFault::StallAcceptorToDialerInsideAChain`] actually held.
+        ///
+        /// The anti-vacuity reading for that fault, and it is needed on BOTH
+        /// arms of a pair built on it. A leg whose proof reds and whose twin
+        /// greens could otherwise be reading "the fault worked" or "the fault
+        /// never fired" — the second passes a `== 0` twin silently, which is
+        /// the shape this crate's `counted_mid` assertion already exists to
+        /// refuse one axis over.
+        pub fn stalls(&self) -> usize {
+            self.stalls.load(Ordering::Relaxed)
+        }
     }
 
     /// What the relay does to the stream BESIDES forwarding and counting it.
@@ -2671,6 +2713,68 @@ pub mod common {
         /// rule that saw only the priority would call them one and reorder
         /// within.
         InterleaveConduitsAcceptorToDialer,
+        /// R2226 (open-debt item 575) — STOP READING the acceptor -> dialer
+        /// direction for `hold`, once a fragment chain has STARTED on it, then
+        /// resume and forward everything in order.
+        ///
+        /// ## What this is for, and why nothing weaker reaches it
+        ///
+        /// `fragment_chains.aborted_sender_dropped` counts a sender that
+        /// abandoned a chain mid-flight — the `0x3 Drop` marker. The only
+        /// implementation that emits it in production is zenoh (Rust): wz's
+        /// encoder has no production caller and zenoh-pico's single call site
+        /// passes `false`. So the marker can only ever be witnessed by making a
+        /// GENUINE zenoh abandon a chain, and this is the fault that makes it.
+        ///
+        /// Upstream emits it from ONE place, `zgetbatch_rets!`'s restore arm
+        /// (`io/zenoh-transport/src/common/pipeline.rs:395-407` at zenoh 1.5.0),
+        /// and reaching it needs THREE things at once:
+        ///
+        ///   1. the pipeline runs out of batches mid-fragmentation
+        ///      (`s_ref.pull()` yields `None`), which is what STOPPING THE
+        ///      READ produces: the far side's socket fills, its link task
+        ///      blocks on `write`, and batches stop returning to the refill
+        ///      queue;
+        ///   2. the message is DROPPABLE — the deadline arm is taken only for
+        ///      `msg.is_droppable()` (`pipeline.rs:823`), which is
+        ///      `!is_reliable() || congestion_control == Drop`
+        ///      (`commons/zenoh-protocol/src/network/mod.rs:162`). A Block
+        ///      message takes the `wait_before_close` arm instead and the
+        ///      session is TORN DOWN rather than marked;
+        ///   3. ⚠ AT LEAST ONE FRAGMENT ALREADY EMITTED. The marker sits in the
+        ///      `else` of `if fragment.ext_first.is_some()`: on the FIRST
+        ///      fragment upstream merely resets the sequence number and emits
+        ///      NOTHING. That is why this fault waits for a chain to start
+        ///      before stalling, and it is also why a leg must assert
+        ///      `begun > 0` before reading the drop counter — the two are the
+        ///      same fact.
+        ///
+        /// ## Why the hold is on the READ and why that is legal
+        ///
+        /// A relay that stopped WRITING would still drain its upstream socket,
+        /// so the far side would never block and never exhaust. Stopping the
+        /// READ is what propagates back-pressure, which is the ordinary
+        /// behaviour of a slow consumer — a receiver that stops reading for a
+        /// moment is not violating anything, and a sender's reaction to it is
+        /// exactly the production path under witness. NOTHING IS DROPPED,
+        /// REORDERED OR REWRITTEN: every byte the far side wrote is forwarded,
+        /// in order, after the hold.
+        ///
+        /// ## Aimed INSIDE the chain, not at a position
+        ///
+        /// The trigger is "the first batch whose first transport message is a
+        /// `T_MID_FRAGMENT`", read by [`fragment_conduit`], not "the Nth
+        /// batch". A positional rule would stall during the handshake or
+        /// between chains, where no chain is in flight and upstream has nothing
+        /// to abandon.
+        StallAcceptorToDialerInsideAChain {
+            /// How long to stop reading. Must exceed the sender's own
+            /// `max_wait_before_drop_fragments` budget, which upstream defaults
+            /// to 50000 µs (`DEFAULT_CONFIG.json5:626-632`), or the deadline
+            /// never expires and the chain completes late instead of being
+            /// abandoned.
+            hold: Duration,
+        },
     }
 
     /// Bind a TCP relay that a dialer under test connects to in place of
@@ -2760,8 +2864,21 @@ pub mod common {
              and would leave a `== 0` calibration arm passing vacuously"
         );
         let interleave = matches!(fault, RelayFault::InterleaveConduitsAcceptorToDialer);
+        // R2226 — the hold is NOT range-checked here, and that is deliberate.
+        // Whether it outlasts upstream's own `max_wait_before_drop_fragments`
+        // is the very thing a leg varies between its proof and its calibration
+        // twin, so a helper that refused the short one would forbid the
+        // control. The relation belongs where both numbers sit together; see
+        // `UPSTREAM_DROP_FRAGMENT_BUDGET` in
+        // `tests/wz_chain_drop_zenohd_interop.rs`.
+        let stall = match &fault {
+            RelayFault::StallAcceptorToDialerInsideAChain { hold } => Some(*hold),
+            _ => None,
+        };
         let needle = match fault {
-            RelayFault::None | RelayFault::InterleaveConduitsAcceptorToDialer => None,
+            RelayFault::None
+            | RelayFault::InterleaveConduitsAcceptorToDialer
+            | RelayFault::StallAcceptorToDialerInsideAChain { .. } => None,
             RelayFault::DropFirstAcceptorToDialer { needle } => {
                 assert!(
                     !needle.is_empty(),
@@ -2781,6 +2898,15 @@ pub mod common {
         let overtaken = Arc::new(AtomicUsize::new(0));
         let conduits = Arc::new(Mutex::new(BTreeSet::new()));
         let dialer_frame_sns = Arc::new(Mutex::new(Vec::new()));
+        // R2226 — recorded on BOTH directions and under EVERY fault. A leg that
+        // rebuilds the wire as a pcap needs the handshake as well as the data,
+        // and the calibration twin needs a recording of exactly the same shape
+        // as the proof or the two dissections are not comparable.
+        let recording: Recording = Arc::new(Mutex::new(Vec::new()));
+        let down_recording = Arc::clone(&recording);
+        let up_recording = Arc::clone(&recording);
+        let stalls = Arc::new(AtomicUsize::new(0));
+        let down_stalls = Arc::clone(&stalls);
         let up = Arc::clone(&dialer_to_acceptor);
         let down = Arc::clone(&acceptor_to_dialer);
         let down_dropped = Arc::clone(&dropped);
@@ -2811,6 +2937,25 @@ pub mod common {
             // deliberately panics to avoid.
             let acceptor_side = TcpStream::connect((Ipv4Addr::LOCALHOST, upstream_port))
                 .expect("counting relay dials its upstream");
+            // R2226 (open-debt item 575) — BOUND THE KERNEL'S OWN BUFFER when a
+            // stall fault is configured.
+            //
+            // The stall works by back-pressure: the far side must run out of
+            // room and block in `write`. Between it and this relay stand two
+            // kernel buffers, and loopback ones auto-tune into the megabytes —
+            // so without this the sender writes for far longer than any
+            // reasonable hold, and the fault reads as inert. Bounding the
+            // RECEIVE side is the half this process owns; the send side is
+            // `so_sndbuf` on the router (see
+            // `spawn_zenohd_shallow_tx_queue_on_ephemeral_tcp`).
+            //
+            // ⚠ Applied to EVERY stall-faulted relay, including one whose hold
+            // is short. A calibration twin that differed from its proof in the
+            // buffer size as well as the hold would vary two inputs, and the
+            // leg could not attribute the difference to either.
+            if stall.is_some() {
+                bound_recv_buffer(&acceptor_side, STALL_RECV_BUFFER_BYTES);
+            }
             let dialer_tx = dialer_side
                 .try_clone()
                 .expect("dup relay dialer-side handle");
@@ -2833,6 +2978,8 @@ pub mod common {
                         interleave: down_interleave.as_ref(),
                         conduits: Some(&down_conduits),
                         frame_sns: None,
+                        stall: stall.map(|hold| (hold, &*down_stalls)),
+                        recording: Some((&down_recording, Side::FromListener)),
                     },
                 )
             });
@@ -2841,7 +2988,10 @@ pub mod common {
                 acceptor_tx,
                 &up,
                 counted_mid,
-                PumpTaps::faultless(&AtomicUsize::new(0), &up_frame_sns),
+                PumpTaps {
+                    recording: Some((&up_recording, Side::FromDialer)),
+                    ..PumpTaps::faultless(&AtomicUsize::new(0), &up_frame_sns)
+                },
             );
         });
 
@@ -2854,6 +3004,8 @@ pub mod common {
             overtaken,
             conduits,
             dialer_frame_sns,
+            recording,
+            stalls,
         }
     }
 
@@ -2884,6 +3036,24 @@ pub mod common {
         /// off the direction entirely — see
         /// [`CountingRelay::dialer_to_acceptor_frame_sns`].
         frame_sns: Option<&'a Mutex<Vec<u64>>>,
+        /// R2226 (open-debt item 575) — how long to STOP READING once a chain
+        /// has started on this direction, and where the hold is COUNTED.
+        /// `None` under every other fault.
+        ///
+        /// See [`RelayFault::StallAcceptorToDialerInsideAChain`] for why the
+        /// stall is what makes a genuine sender abandon a chain, and why it is
+        /// applied to the READ side rather than to the write.
+        stall: Option<(Duration, &'a AtomicUsize)>,
+        /// R2226 — where every batch this direction carried is recorded,
+        /// verbatim and length prefix included, so a leg can rebuild the wire
+        /// as a pcap and dissect it.
+        ///
+        /// Fed on the same terms as `conduits` and `frame_sns`: before any
+        /// hold, outside the fault, and from the bytes rather than from either
+        /// peer's state. A recording taken after the fault would be a record of
+        /// what the harness did, and the claim this exists to support is about
+        /// what the FAR SIDE wrote.
+        recording: Option<(&'a Recording, Side)>,
     }
 
     impl<'a> PumpTaps<'a> {
@@ -2904,6 +3074,8 @@ pub mod common {
                 interleave: None,
                 conduits: None,
                 frame_sns: Some(frame_sns),
+                stall: None,
+                recording: None,
             }
         }
     }
@@ -3035,12 +3207,15 @@ pub mod common {
             interleave,
             conduits,
             frame_sns,
+            stall,
+            recording,
         } = taps;
         use std::io::{Read, Write};
         use std::net::Shutdown;
 
         let mut prefix = [0u8; 2];
         let mut state = InterleaveState::default();
+        let mut stalled = false;
         loop {
             if src.read_exact(&mut prefix).is_err() {
                 break;
@@ -3048,6 +3223,19 @@ pub mod common {
             let mut batch = vec![0u8; u16::from_le_bytes(prefix) as usize];
             if src.read_exact(&mut batch).is_err() {
                 break;
+            }
+            // R2226 — the RECORDING, first of the taps and before every rule
+            // below, so what lands in it is what the far side wrote rather than
+            // what this relay decided to do about it. Both the prefix and the
+            // batch, because a pcap of one without the other does not parse.
+            if let Some((recording, side)) = recording {
+                let mut segment = Vec::with_capacity(2 + batch.len());
+                segment.extend_from_slice(&prefix);
+                segment.extend_from_slice(&batch);
+                recording
+                    .lock()
+                    .expect("relay recording")
+                    .push((side, segment));
             }
             // FIRST match only — the retransmitted copy carries the same bytes,
             // so a rule that kept matching would swallow the recovery reply and
@@ -3091,6 +3279,22 @@ pub mod common {
                     if let Some((sn, _)) = read_vle(&batch, 1) {
                         frame_sns.lock().expect("relay frame sn list").push(sn);
                     }
+                }
+            }
+            // R2226 (open-debt item 575) — THE STALL, applied once, after a
+            // chain has demonstrably started on this direction.
+            //
+            // Placed after every observation above and before the forward: the
+            // batch that TRIGGERS the stall is itself recorded, counted and
+            // forwarded normally, so the fault removes nothing. Sleeping here
+            // means this thread also stops calling `read_exact`, which is the
+            // mechanism — see the variant's docs for why back-pressure and not
+            // a write-side delay is what makes a genuine sender abandon.
+            if let Some((hold, stalls)) = stall.filter(|_| !stalled) {
+                if fragment_conduit(&batch).is_some() {
+                    stalled = true;
+                    stalls.fetch_add(1, Ordering::Relaxed);
+                    thread::sleep(hold);
                 }
             }
             if let Some(sinks) = interleave.filter(|_| !state.done) {
@@ -3432,6 +3636,77 @@ pub mod common {
     /// not self-retry). This binary is the Rust session, which retries its own
     /// connect, so a retry here would only mask a real failure to reach the
     /// router.
+    /// R2226 (open-debt item 575) — a genuine `z_pub` that names
+    /// `congestion_control: "drop"`, for a leg whose subject is what the ROUTER
+    /// does when its pipeline runs dry.
+    ///
+    /// # Why the congestion control is named rather than inherited
+    ///
+    /// It decides which arm upstream takes when a batch cannot be obtained.
+    /// `pipeline.rs:823` reaches the deadline — and therefore the `0x3 Drop`
+    /// marker — only for `msg.is_droppable()`, which is `!is_reliable() ||
+    /// congestion_control == Drop`
+    /// (`commons/zenoh-protocol/src/network/mod.rs:162`). A **Block** message
+    /// takes the `wait_before_close` arm instead: the transport is TORN DOWN
+    /// and nothing is marked. A leg that let this default would be one config
+    /// change away from witnessing a session teardown and calling it an
+    /// abandoned chain.
+    ///
+    /// Separate from [`spawn_publishing_zenoh_zpub`] rather than a parameter on
+    /// it, because that helper's callers vary priority and reliability and are
+    /// indifferent to this field; giving them all a fourth qos argument would
+    /// make four legs state a value none of them is about.
+    pub fn spawn_publishing_zenoh_zpub_dropping(
+        z_pub: &Path,
+        key: &str,
+        payload: &str,
+        endpoint: &str,
+        mut mk_stdout: impl FnMut() -> File,
+    ) -> ChildGuard {
+        assert!(
+            !key.contains('"') && !key.contains('\\'),
+            "key {key:?} would not survive being written into the JSON5 qos rule"
+        );
+        let cfg = format!(
+            "qos/publication:[{{\"key_exprs\":[\"{key}\"],\
+             \"config\":{{\"congestion_control\":\"drop\"}}}}]"
+        );
+        let out = mk_stdout();
+        let out_writer = out.try_clone().expect("dup z_pub stdout handle");
+        let mut out_reader = out;
+        let mut child = ChildGuard::wrap(
+            "z_pub client (zenoh core example, congestion_control=drop)",
+            Command::new("stdbuf")
+                .args(["-oL", "-eL"])
+                .arg(z_pub)
+                .args([
+                    "-k", key, "-p", payload, "-e", endpoint, "-m", "client", "--cfg", &cfg,
+                ])
+                .stderr(Stdio::from(
+                    out_writer.try_clone().expect("dup stderr handle"),
+                ))
+                .stdout(Stdio::from(out_writer))
+                .spawn()
+                .expect("spawn zenoh z_pub via stdbuf"),
+        );
+        let deadline = Instant::now() + Duration::from_secs(12);
+        loop {
+            let cap = read_captured(&mut out_reader);
+            if cap.contains("Putting Data") {
+                return child;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.child_mut().kill();
+                let _ = child.child_mut().wait();
+                panic!(
+                    "zenoh z_pub did not start publishing on {key} with \
+                     congestion_control=drop within 12s; captured: {cap}"
+                );
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     pub fn spawn_publishing_zenoh_zpub(
         z_pub: &Path,
         key: &str,
@@ -3940,6 +4215,98 @@ pub mod common {
     /// keeps paying for; the helper is gone and passing `qos_enabled: true`
     /// spells its behaviour explicitly, which this doc already argues is the
     /// better shape.
+    /// R2226 (open-debt item 575) — a zenohd whose TX path holds AS LITTLE AS
+    /// UPSTREAM ALLOWS, the foreign oracle for the abandoned-chain witness.
+    ///
+    /// # What is configured, and why both keys are the same kind of knob
+    ///
+    /// * `transport/link/tx/queue/size/data`, from its default of 2 down to 1
+    ///   (`DEFAULT_CONFIG.json5:615-624`; the legal range is 1..=16). One batch
+    ///   object per priority means the sender cannot start the next fragment
+    ///   until the link has WRITTEN the previous one and returned it.
+    /// * `transport/link/tcp/so_sndbuf`, from the kernel's default down to
+    ///   `SO_SNDBUF_BYTES` (`DEFAULT_CONFIG.json5:705-712`). Without it a
+    ///   stalled reader has to be out-waited by megabytes of kernel buffer
+    ///   before a single `write` blocks, and the run-up dominates the leg.
+    ///
+    /// BOTH are knobs about CAPACITY — how far a sender gets before it runs out
+    /// of room — and NEITHER says anything about what it does then.
+    ///
+    /// ⚠ THE DROP DEADLINE IS LEFT AT ITS DEFAULT, and that is the leg's point
+    /// rather than an oversight. `max_wait_before_drop_fragments` (50000 µs,
+    /// `DEFAULT_CONFIG.json5:626-632`) is what decides whether a stalled sender
+    /// ABANDONS the chain or waits the stall out, so tuning it would make the
+    /// router's willingness to abandon a property of this harness. Left alone,
+    /// the marker that reaches the wire is upstream acting on its own shipped
+    /// policy, and the only thing a leg varies is whether the link stalls at
+    /// all — which is what lets its calibration twin differ in exactly one
+    /// input.
+    pub fn spawn_zenohd_shallow_tx_queue_on_ephemeral_tcp(
+        mut mk_probe_stderr: impl FnMut() -> File,
+    ) -> (ChildGuard, u16) {
+        let sndbuf = format!("transport/link/tcp/so_sndbuf:{SO_SNDBUF_BYTES}");
+        let (guard, port) = spawn_zenohd_dialer_on_ephemeral_tcp_with_cfgs(
+            &zenohd_binary(),
+            "zenohd (reference router, shallow tx path)",
+            None,
+            &[],
+            None,
+            &["transport/link/tx/queue/size/data:1", sndbuf.as_str()],
+        );
+        wait_for_zenohd_handshake_ready(&format!("127.0.0.1:{port}"), &mut mk_probe_stderr);
+        (guard, port)
+    }
+
+    /// How small a stall-faulted relay asks the kernel to make its RECEIVE
+    /// buffer on the upstream socket.
+    ///
+    /// The counterpart of [`SO_SNDBUF_BYTES`]: between a blocked reader and a
+    /// sender that must run out of room stand two kernel buffers, and both have
+    /// to be bounded or the sender writes megabytes before it blocks.
+    pub const STALL_RECV_BUFFER_BYTES: usize = 16384;
+
+    /// Ask the kernel for a small receive buffer on `sock`.
+    ///
+    /// R2226 (open-debt item 575). `std::net` exposes no `SO_RCVBUF`, and this
+    /// is the whole of why `libc` is reached for here. The kernel is free to
+    /// round the request up — Linux doubles it for bookkeeping and enforces its
+    /// own floor — so the result is a BOUND and not a setting, which is all the
+    /// stall needs.
+    ///
+    /// A failure is not fatal and not silent: the fault still forwards
+    /// correctly, it just may not make the sender block, and the leg's own
+    /// assertions are what report that. Panicking here would turn a portability
+    /// question into a test failure in a place that cannot explain it.
+    fn bound_recv_buffer(sock: &TcpStream, bytes: usize) {
+        use std::os::fd::AsRawFd;
+        let size = bytes as libc::c_int;
+        // SAFETY: `sock` owns a valid fd for the duration of the call, and
+        // `size` is a live `c_int` of exactly the length passed.
+        let rc = unsafe {
+            libc::setsockopt(
+                sock.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_RCVBUF,
+                std::ptr::addr_of!(size).cast(),
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+        if rc != 0 {
+            eprintln!(
+                "counting relay: SO_RCVBUF({bytes}) was refused by the kernel; a \
+                 stall fault may not make the sender block"
+            );
+        }
+    }
+
+    /// How small [`spawn_zenohd_shallow_tx_queue_on_ephemeral_tcp`] asks the
+    /// kernel to make the router's TCP send buffer.
+    ///
+    /// Small enough that a stalled reader blocks the sender within a few
+    /// fragments, and left as a named constant because a leg's payload has to
+    /// exceed it comfortably — the two numbers are one decision.
+    pub const SO_SNDBUF_BYTES: usize = 4096;
+
     pub fn spawn_zenohd_sn_resolution_and_qos_on_ephemeral_tcp(
         resolution: &str,
         qos_enabled: bool,

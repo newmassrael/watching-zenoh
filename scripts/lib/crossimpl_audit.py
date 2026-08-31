@@ -511,7 +511,20 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # TWINS and each declares `none`. A negotiation that correctly does not happen
 # adjudicates nobody's implementation, so a round that added two controls and
 # moved this counter by two would be counting its own controls as evidence.
-FOREIGN_ADJUDICATOR_LINKS = 877
+#
+# R2226 (open-debt item 575) — 877 -> 879, and the arithmetic again. TWO, from
+# the one proof leg in `wz_chain_drop_zenohd_interop.rs` at two atoms:
+# `transport-fragmentation` and `codec-fragment`, both `zenohd->wz`.
+#
+# ⚠ THAT LEG'S HEADLINE CLAIM IS A NEGATIVE — the `0x3 Drop` marker does NOT
+# reach the wire — and it still adjudicates, which is why it counts. What a
+# foreign implementation does at its abandon path is a fact about that
+# implementation's fragment TX, measured against it; the leg pins the bytes it
+# writes there (exactly one zero-length batch) as well as the ones it does not.
+#
+# Its calibration twin adds nothing here and declares `none`, on this counter's
+# standing rule: a chain that correctly completes adjudicates nobody.
+FOREIGN_ADJUDICATOR_LINKS = 879
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
