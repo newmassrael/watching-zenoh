@@ -276,8 +276,8 @@ def tracked() -> list[str]:
     return [p for p in out.split("\0") if p]
 
 
-def upstream_names(paths: list[str]) -> frozenset[str]:
-    """Every repository this tree already fetches, DERIVED from its own URLs.
+def upstream_urls(paths: list[str]) -> frozenset[str]:
+    """Every repository URL this tree already fetches, DERIVED from the tree.
 
     R2217 (item 567) — the item asked where a "known references list" should
     live, and the answer measured out to be NOWHERE NEW. The tree already
@@ -287,13 +287,20 @@ def upstream_names(paths: list[str]) -> frozenset[str]:
     area exists to prevent.
 
     ⚠ LINE CONTINUATIONS ARE JOINED FIRST, and skipping that step is how the
-    first probe of this round concluded that zenoh was absent from the tree.
+    first probe of that round concluded that zenoh was absent from the tree.
     `build-zenohd.sh` writes `git clone --depth 1 --branch "$V" \\` and puts
     the URL on the next line, so a line-at-a-time scan finds the clone and not
     what it clones -- and the set came back five names short of the truth,
     missing the very repository item 567 is about.
+
+    R2228 (item 578) split this out of [`upstream_names`], which discarded
+    everything but the last path segment. A second consumer needs the OWNER
+    too — "how many releases behind is this pin" is a question about
+    `eclipse-zenoh/zenoh`, not about `zenoh` — and deriving the same set twice
+    from the same two places is exactly the second copy item 567 refused. The
+    name half is now a projection of this one.
     """
-    names: set[str] = set()
+    urls: set[str] = set()
     for path in paths:
         if not path.startswith(UPSTREAM_SOURCES):
             continue
@@ -302,17 +309,31 @@ def upstream_names(paths: list[str]) -> frozenset[str]:
         except OSError:
             continue
         joined = text.replace("\\\n", " ")
-        urls: list[str] = []
+        found: list[str] = []
         if path == ".gitmodules":
-            urls += re.findall(r"url\s*=\s*(\S+)", joined)
+            found += re.findall(r"url\s*=\s*(\S+)", joined)
         for clone in re.findall(r"git\s+clone[^\n]*", joined):
-            urls += re.findall(r"(?:https://|git@)\S+", clone)
-        for url in urls:
-            name = url.strip("\"' \\").rstrip("/").split("/")[-1]
-            if name.endswith(".git"):
-                name = name[: -len(".git")]
-            if name:
-                names.add(name)
+            found += re.findall(r"(?:https://|git@)\S+", clone)
+        for url in found:
+            cleaned = url.strip("\"' \\").rstrip("/")
+            if cleaned:
+                urls.add(cleaned)
+    return frozenset(urls)
+
+
+def upstream_names(paths: list[str]) -> frozenset[str]:
+    """The last path segment of every URL [`upstream_urls`] derives.
+
+    The shape this file's own arms want: a citation writes `zenoh:...`, not
+    `eclipse-zenoh/zenoh:...`.
+    """
+    names: set[str] = set()
+    for url in upstream_urls(paths):
+        name = url.split("/")[-1]
+        if name.endswith(".git"):
+            name = name[: -len(".git")]
+        if name:
+            names.add(name)
     return frozenset(names)
 
 

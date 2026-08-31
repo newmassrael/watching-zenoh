@@ -943,6 +943,21 @@ jobs:
           WZ_C0I_REQUIRE: "1"
         run: bash scripts/run-ci.sh --layer C0i
 
+      - name: Layer U — how many releases behind each pinned upstream is
+        # R2228 (open-debt item 578). Two rounds judged "what a genuine zenoh
+        # does" from a checkout pinned five minors back, and the only thing
+        # that surfaced it was a person asking. This lane asks instead.
+        #
+        # ⛔ THE ONLY STEP IN THIS WORKFLOW THAT NEEDS THE NETWORK, and it is
+        # given a token deliberately: unauthenticated the releases API is 60
+        # requests an hour per IP, which a shared runner exhausts, and item
+        # 578's condition ③ makes "could not measure" a FAILURE rather than a
+        # skip. So an outage reds this lane. That is the stated cost of not
+        # having a green that means nothing.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/run-ci.sh --layer U
+
       - name: Layer C0b — the job budget-margin gate discriminates both ways
         # R311y791. The `ci` job's last step runs
         # scripts/lib/job-budget-margin.sh, whose whole value is a refusal near

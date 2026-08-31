@@ -2640,6 +2640,35 @@ layer_c0mut_verdict_legs() {
     return 0
 }
 
+# ─── Layer U — how many releases behind each pinned upstream is ─────
+#
+# R2228 (open-debt item 578). This tree judges "what a genuine zenoh does" from
+# a pinned checkout, and until this lane NOTHING measured which release that
+# pin names. R2226/R2227 read upstream at 1.5.0 while upstream was at 1.10.0,
+# and the only reason that surfaced was a person asking.
+#
+# ⛔ THE ONLY LANE IN THIS TREE THAT NEEDS THE NETWORK, and the only one with
+# no SKIP. Item 578's condition ③ is explicit -- a gate that cannot measure
+# must not report green -- so an absent `gh`, an unauthenticated one, or an
+# unreachable API all FAIL here. The cost is real and stated: a GitHub outage
+# reds this lane. The alternative is the failure mode the whole item is about,
+# one level up.
+#
+# ⚠ DELIBERATELY NOT IN `pre-push`. A developer without a network must still be
+# able to push; what they must not be able to do is run this lane and be told
+# everything is fine. Those are different guarantees, and separating them is
+# what lets condition ③ hold without an arming flag.
+layer_u_upstream_release_distance() {
+    python3 scripts/lib/upstream_release_distance.py --selftest || return 1
+    if ! command -v gh >/dev/null 2>&1; then
+        echo "  Layer U FAIL: gh is not on PATH, so the releases API cannot be" \
+            "read and the distance cannot be measured (item 578 condition 3)" >&2
+        return 1
+    fi
+    python3 scripts/lib/upstream_release_distance.py || return 1
+    return 0
+}
+
 # ─── Layer C0i — the impact-ref gate discriminates BOTH ways ────────
 #
 # R311y783. `scripts/append-round.sh` resolves a round's `--impact` ids against
@@ -15845,6 +15874,7 @@ run_layer B2 layer_b2_regen_diff || overall=1
 run_layer C0 layer_c0_test_discipline || overall=1
 run_layer C0mut layer_c0mut_verdict_legs || overall=1
 run_layer C0i layer_c0i_impact_ref_gate || overall=1
+run_layer U layer_u_upstream_release_distance || overall=1
 run_layer C0b layer_c0b_job_budget_margin || overall=1
 run_layer C0d layer_c0d_doclink_dependents || overall=1
 run_layer C0e layer_c0e_inventory_tag_reader || overall=1
