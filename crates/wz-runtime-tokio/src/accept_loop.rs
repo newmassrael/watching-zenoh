@@ -2875,6 +2875,10 @@ mod tests {
     /// R2233 — the dial-target currency is a LOCATOR; build the `tcp/<addr>` one
     /// through the locator SSOT so a fixture reads the grammar a configured
     /// `--connect` does, and a new locator field cannot default in silently here.
+    ///
+    /// `routing-peer`-gated because every caller is: an accept-only build has no
+    /// dial targets to construct, and an ungated helper is dead code there.
+    #[cfg(feature = "routing-peer")]
     fn tcp_dial(addr: SocketAddr) -> AnyLocator {
         wz_session_core::locator::parse_any_locator(&format!("tcp/{addr}"))
             .expect("tcp/<addr> locator")
