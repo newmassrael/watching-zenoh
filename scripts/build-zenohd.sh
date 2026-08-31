@@ -58,8 +58,30 @@ ZENOHD_VERSION="${ZENOHD_VERSION:-1.10.0}"
 # is read. The fallback is NOT a default channel: an unreadable file is a hard
 # error, because "build it with whatever rustc is around" is exactly the
 # incompatibility the pin exists to prevent.
+# R2231 (open-debt item 579) — THE SOURCE TREE IS ASKED FIRST, and this is a
+# correctness fix, not a convenience one.
+#
+# R2229 introduced this derivation reading GitHub's contents API. That fails on
+# the hosted runner: `gh` needs `GH_TOKEN`, the build step's env carries only
+# `ZENOHD_ALLOW_CLONE`, so the call runs unauthenticated, returns nothing, and
+# the hard error below fires. MEASURED on run 33399557876 — and it takes the
+# WHOLE cross-impl job with it, so hosted Layer Z never runs at all. Layer Z was
+# being read as "red because of the config surface" while it was not executing.
+#
+# ⛔ The fix is NOT to hand the step a token. This script CLONES the pinned tag
+# (`ZENOHD_ALLOW_CLONE=1`, the path CI takes) and then builds from that tree, so
+# the toolchain fact is already on disk beside the source it belongs to. Asking
+# an API instead lets the two disagree — the same "two identities" trap
+# `upstream_feature_census.py::upstream_anchors` documents for the feature table,
+# where the installed answer outranks a live checkout for exactly this reason.
+# The API stays as the fallback for the crates.io path, which has no tree.
 zenohd_toolchain() {
-    local raw
+    local tree="${1:-}"
+    local raw=""
+    if [[ -n "$tree" && -r "$tree/rust-toolchain.toml" ]]; then
+        raw="$(cat "$tree/rust-toolchain.toml")"
+    fi
+    [[ -n "$raw" ]] || \
     raw="$(gh api "repos/eclipse-zenoh/zenoh/contents/rust-toolchain.toml?ref=$ZENOHD_VERSION" \
         --jq .content 2>/dev/null | base64 -d 2>/dev/null || true)"
     local channel
@@ -73,7 +95,9 @@ zenohd_toolchain() {
     fi
     printf '%s' "$channel"
 }
-TOOLCHAIN="${ZENOHD_TOOLCHAIN:-$(zenohd_toolchain)}"
+# ⚠ TOOLCHAIN is resolved further down, AFTER `$ZH` names the source tree — the
+# tree has to exist before it can be asked. The `rustup` availability check moved
+# with it, since it has nothing to check until then.
 
 # R311y392 — the unixpipe-enabled variant. zenoh's `default` feature set OMITS
 # transport_unixpipe (zenoh/Cargo.toml), and `cargo install` (source B) cannot add
@@ -131,12 +155,6 @@ elif [[ "${ZENOHD_SHM:-0}" -eq 1 ]]; then
     VARIANT_NAME="shared-memory"
 fi
 
-if ! rustup toolchain list 2>/dev/null | grep -q "^$TOOLCHAIN"; then
-    echo "build-zenohd: toolchain $TOOLCHAIN not installed" >&2
-    echo "  run: rustup toolchain install $TOOLCHAIN" >&2
-    exit 1
-fi
-
 # Source A — locate the zenoh checkout (cargo git cache) that carries the
 # zenohd crate. The directory is hash-named, so glob for the one with a
 # zenohd/Cargo.toml. Skipped entirely when ZENOHD_FORCE_CRATES_IO=1.
@@ -188,6 +206,18 @@ if [[ -z "$ZH" && "${ZENOHD_ALLOW_CLONE:-0}" -eq 1 ]]; then
             https://github.com/eclipse-zenoh/zenoh "$SRC_TREE"
     fi
     ZH="$SRC_TREE"
+fi
+
+# R2231 — the toolchain is resolved HERE, once `$ZH` names the tree this build
+# will use, so the compiler and the source come from one place. On the crates.io
+# path `$ZH` is empty and `zenohd_toolchain` falls through to the API, which is
+# the only answer available there. The `rustup` availability check moved down
+# with it: it had nothing to check before `$TOOLCHAIN` existed.
+TOOLCHAIN="${ZENOHD_TOOLCHAIN:-$(zenohd_toolchain "$ZH")}"
+if ! rustup toolchain list 2>/dev/null | grep -q "^$TOOLCHAIN"; then
+    echo "build-zenohd: toolchain $TOOLCHAIN not installed" >&2
+    echo "  run: rustup toolchain install $TOOLCHAIN" >&2
+    exit 1
 fi
 
 if [[ -n "$ZH" ]]; then
