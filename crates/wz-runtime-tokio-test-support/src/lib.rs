@@ -893,11 +893,29 @@ mod port_tests {
     /// nothing here to fail — asserting turns "this runner behaves differently"
     /// into a broken build, which is what happened.
     ///
-    /// So it PRINTS, and it FAILS only when armed. `WZ_PORT_RACE_REQUIRE=1` is
-    /// the same shape Layer Qz uses for its prerequisites: green-with-a-reason
-    /// where the condition is genuinely absent, red where a lane has guaranteed
-    /// it. That keeps the anti-masked-failure stance without spending a red on
-    /// a fact about somebody's scheduler.
+    /// So it PRINTS, and it asserts nothing.
+    ///
+    /// # Why there is no arming flag here, which is not the usual answer
+    ///
+    /// R311y889 gave this an env handle, on the model of the `WZ_..._REQUIRE`
+    /// flags Layer Qz uses: green-with-a-reason where a precondition is
+    /// genuinely absent, red where a lane has guaranteed it. R2254 (open-debt
+    /// item 599) measured that no lane script and no workflow ever set it, and
+    /// found that none COULD:
+    ///
+    ///   * the precondition is a kernel behaviour, not a file and not a
+    ///     program, so it is outside the closed set of oracle kinds
+    ///     `armed_oracle_census.py` can probe on a machine;
+    ///   * and a lane that established it first would be arming on the result
+    ///     of the very draw this test then judges, which can never disagree
+    ///     with itself. Arming is vacuous BY CONSTRUCTION here, not merely
+    ///     unwired.
+    ///
+    /// A handle no job can turn on is a verdict nobody can reach, so the
+    /// branch is gone rather than left as a promise. What the anti-masking
+    /// stance actually needs is served by `free_port_never_repeats`, which
+    /// stands on its own; this test's job is to say how sharp the race is on
+    /// the host reading it.
     #[test]
     fn the_old_shape_repeats_where_the_kernel_lets_it() {
         let (repeats, distinct, drawn) = old_shape_repeats();
@@ -909,13 +927,6 @@ mod port_tests {
              ({distinct} distinct)"
         );
         if repeats == 0 {
-            let armed = std::env::var("WZ_PORT_RACE_REQUIRE").is_ok();
-            assert!(
-                !armed,
-                "WZ_PORT_RACE_REQUIRE is set and the old bind-read-drop shape \
-                 produced {distinct} DISTINCT ports over {drawn} draw(s), so \
-                 this host cannot provoke the race `free_port` exists to avoid"
-            );
             std::println!(
                 "  this host does not reuse a released ephemeral port, so the \
                  race is unprovokable here. That is a fact about the kernel, \

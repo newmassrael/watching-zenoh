@@ -465,30 +465,54 @@ def python_env_reads(path: pathlib.Path) -> set[str]:
     return found
 
 
-def surface() -> tuple[set[str], set[str], dict[str, list[str]]]:
-    """`(named, live, where)` across the tree's own gate surface.
+def surface(
+    root: pathlib.Path | None = None,
+) -> tuple[set[str], set[str], set[str], dict[str, list[str]]]:
+    """`(named, read, armed, where)` across the tree's own gate surface.
 
-    NAMED is a claim -- the text asserts something about the flag. LIVE is a
-    reader or a setter. Each language answers both questions its own way,
+    NAMED is a claim -- the text asserts something about the flag. READ is a
+    consumer: `$FLAG` in shell, `os.environ.get` in Python, `env::var` in Rust.
+    ARMED is a setter: a workflow's `env:` key, or the `FLAG=1 cargo` prefix a
+    lane script puts on a command. Each language answers all three its own way,
     because the same characters mean different things: `"WZ_X"` is prose in a
     docstring and a read inside `os.environ.get`.
+
+    R2254 (open-debt item 599) split READ from ARMED, which R2247 had merged
+    into one `live` set. Merged, the axis could only ask whether a flag exists
+    somewhere; it could not ask the two questions that matter separately:
+
+      * ARMED AND NEVER READ -- a workflow turns a handle on and no code
+        consults it. The job pays for a promise nothing keeps.
+      * READ AND NEVER ARMED -- code branches on a handle no lane ever sets, so
+        the branch behind it cannot be taken in any job. That was
+        WZ_PORT_RACE_REQUIRE, measured as the only instance.
+
+    `live` is still available as `read | armed`, and the NAMED axis still uses
+    it: a name on the lane surface is satisfied by either.
     """
-    listed = subprocess.run(
-        ["git", "ls-files", "scripts", ".github", "crates"],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.split()
+    base = ROOT if root is None else root
+    if root is None:
+        listed = subprocess.run(
+            ["git", "ls-files", "scripts", ".github", "crates"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.split()
+    else:
+        listed = sorted(
+            str(p.relative_to(base)) for p in base.rglob("*") if p.is_file()
+        )
     named: set[str] = set()
-    live: set[str] = set()
+    read_set: set[str] = set()
+    armed_set: set[str] = set()
     where: dict[str, list[str]] = {}
     for rel in listed:
-        path = ROOT / rel
+        path = base / rel
         if path.suffix == ".py":
             named |= python_named(path)
             for handle in python_env_reads(path):
-                live.add(handle)
+                read_set.add(handle)
                 where.setdefault(handle, []).append(rel)
             continue
         try:
@@ -505,17 +529,26 @@ def surface() -> tuple[set[str], set[str], dict[str, list[str]]]:
                     continue
                 if path.suffix == ".rs":
                     if "env::var" in line or "environ" in line:
-                        live.add(handle)
+                        read_set.add(handle)
                         where.setdefault(handle, []).append(f"{rel}:{number}")
                     continue
                 read = re.search(rf"\$\{{{handle}[:\-}}]", line) or re.search(
                     rf"\${handle}\b", line
                 )
-                assign = re.search(rf"\b{handle}\s*[:=]", line)
+                # An ARMING, not an expansion. `${FLAG:-0}` puts a `:` right
+                # after the name and the first draft of this counted it as a
+                # setter, which made every shell READ look armed and left the
+                # read-and-never-armed axis with nothing to find. The lookbehind
+                # is what separates `${FLAG:-0}` and `$FLAG` from a workflow's
+                # `  FLAG: 1` key and a lane's `FLAG=1 cargo` prefix.
+                assign = re.search(rf"(?<![\w${{]){handle}\s*[:=]", line)
+                if read:
+                    read_set.add(handle)
+                if assign:
+                    armed_set.add(handle)
                 if read or assign:
-                    live.add(handle)
                     where.setdefault(handle, []).append(f"{rel}:{number}")
-    return named, live, where
+    return named, read_set, armed_set, where
 
 
 def check(root: pathlib.Path | None = None) -> int:
@@ -574,14 +607,43 @@ def check(root: pathlib.Path | None = None) -> int:
                 f"reports green on a machine it never graded."
             )
 
-    if root is None:
-        named, live, where = surface()
+    # R2254 -- the surface axes run against a fixture root too. They used to be
+    # `root is None` only, so the three set-difference rules below were graded
+    # by nothing: a proof placed where nothing invokes it does not run anywhere.
+    tally = ""
+    if True:
+        named, read_set, armed_set, where = surface(root)
+        live = read_set | armed_set
+        tally = (
+            f" {len(armed_set)} flag(s) armed and {len(read_set)} read, with "
+            f"neither difference non-empty"
+        )
         for handle in sorted(named - live):
             findings.append(
                 f"`{handle}` is named on the lane surface and nothing reads or "
                 f"sets it anywhere in this tree. A flag nobody reads arms "
                 f"nothing; either the name is a typo for a live one or the text "
                 f"describes an arming that was never built."
+            )
+        # R2254 (open-debt item 599) -- the two halves the merged set could not
+        # ask about. Both are about a handle that exists and connects to
+        # nothing, and they fail for opposite reasons.
+        for handle in sorted(armed_set - read_set):
+            findings.append(
+                f"`{handle}` is ARMED and nothing reads it. A job turns it on "
+                f"at {', '.join(where.get(handle, [])[:2])} and no code "
+                f"consults it, so whatever the arming was meant to demand is "
+                f"not demanded anywhere. Read it where the demand belongs, or "
+                f"stop setting it."
+            )
+        for handle in sorted(read_set - armed_set):
+            findings.append(
+                f"`{handle}` is READ at {', '.join(where.get(handle, [])[:2])} "
+                f"and no lane script or workflow arms it, so the branch behind "
+                f"it cannot be taken in any job and whatever it guards cannot "
+                f"fail. Arm it where the precondition is genuinely guaranteed, "
+                f"or drop the branch -- a handle nothing can turn on is a "
+                f"verdict nobody can reach."
             )
         if not live:
             findings.append(
@@ -590,7 +652,12 @@ def check(root: pathlib.Path | None = None) -> int:
                 "with everything; if the last arming has genuinely gone, this "
                 "floor comes down in the same commit that removed it."
             )
-        del where
+        if not armed_set:
+            findings.append(
+                "armed-skip: no WZ_..._REQUIRE flag is ARMED anywhere. The two "
+                "axes above are set differences and an empty minuend agrees "
+                "with both; same floor, same reason."
+            )
 
     if not armed_scopes:
         findings.append(
@@ -605,7 +672,7 @@ def check(root: pathlib.Path | None = None) -> int:
     print(
         f"armed-skip: OK -- {armed_scopes} armed shell scope(s); every decline "
         f"reads its flag, every arming-helper call reads its status, and every "
-        f"flag named on the lane surface is live."
+        f"flag named on the lane surface is live.{tally}."
     )
     return 0
 
@@ -733,12 +800,69 @@ lane_alias_guard() {
 }
 
 
+#: R2254 -- every fixture gets a workflow that ARMS the flag the fixtures read,
+#: and a shell scope that reads it. Without them the two surface differences are
+#: non-empty for every case and the fixture set would be grading those instead
+#: of its own subject. `SURFACE_FIXTURES` below then adds, per case, exactly the
+#: one file that unbalances a flag in one direction.
+BASE_SURFACE = {
+    ".github/workflows/base.yml": "jobs:\n  lane:\n    env:\n      WZ_FIX_REQUIRE: 1\n",
+}
+
+#: Cases whose subject IS a set difference. Each is the base plus one file.
+SURFACE_FIXTURES: dict[str, tuple[dict[str, str], bool]] = {
+    "armed-and-never-read": (
+        {
+            ".github/workflows/extra.yml": (
+                "jobs:\n  lane:\n    env:\n      WZ_UNREAD_REQUIRE: 1\n"
+            ),
+        },
+        False,
+    ),
+    "read-and-never-armed": (
+        {
+            "crates/x/src/lib.rs": (
+                "pub fn f() {\n"
+                '    let _ = std::env::var("WZ_UNARMED_REQUIRE").is_ok();\n'
+                "}\n"
+            ),
+        },
+        False,
+    ),
+    "read-and-armed-is-fine": (
+        {
+            ".github/workflows/extra.yml": (
+                "jobs:\n  lane:\n    env:\n      WZ_PAIRED_REQUIRE: 1\n"
+            ),
+            "crates/x/src/lib.rs": (
+                "pub fn f() {\n"
+                '    let _ = std::env::var("WZ_PAIRED_REQUIRE").is_ok();\n'
+                "}\n"
+            ),
+        },
+        True,
+    ),
+}
+
+
 def selftest() -> int:
     bad = 0
-    for name, (body, want_pass) in sorted(FIXTURES.items()):
+    cases: dict[str, tuple[dict[str, str], bool]] = {
+        name: ({name: body}, want) for name, (body, want) in FIXTURES.items()
+    }
+    cases.update(SURFACE_FIXTURES)
+    # The base is the arming workflow plus one correct shell scope, so the
+    # GUARD floor and both surface differences are satisfied before a case adds
+    # whatever it is about. `good.sh` is that scope, and it is the fixture set's
+    # own control, so the base cannot quietly be a second implementation.
+    base = {**BASE_SURFACE, "good.sh": FIXTURES["good.sh"][0]}
+    for name, (files, want_pass) in sorted(cases.items()):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
-            (root / name).write_text(body, encoding="utf-8")
+            for rel, body in {**base, **files}.items():
+                path = root / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(body, encoding="utf-8")
             rc = check(root=root)
         ok = (rc == 0) == want_pass
         print(
