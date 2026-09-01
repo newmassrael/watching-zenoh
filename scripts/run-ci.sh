@@ -2091,6 +2091,15 @@ PY
     # reported seven findings that were one mistake.
     python3 scripts/lib/self_counted_table_gate.py --selftest || return 1
     python3 scripts/lib/self_counted_table_gate.py --check || return 1
+    # R2273 (`debt-carry-N46`) — every `scripts/…` path the git hooks NAME has
+    # to exist. That item said a guard hook pointed at `scripts/verify.sh`;
+    # measured, the file is indeed absent and NOTHING points at it — the
+    # sentence rode into the store with the register migration and nobody has
+    # measured it since. Closing the row would leave the hole, so the row is
+    # closed by this instead. Selftest first, on the rule the gate above
+    # follows: six cases, four of them RED and each pinning WHICH red.
+    python3 scripts/lib/hook_script_reference_gate.py --selftest || return 1
+    python3 scripts/lib/hook_script_reference_gate.py --check || return 1
     # R2199 (open-debt item 557) — EVERY HANDSHAKE-NEGOTIATED AXIS IS ASSERTED.
     #
     # The consuming surface reported that no test measured `sn_resolution` or
