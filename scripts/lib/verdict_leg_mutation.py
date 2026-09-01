@@ -75,6 +75,7 @@ import re
 import shutil
 import subprocess
 import sys
+import typing
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -82,12 +83,225 @@ LINT = Path(__file__).resolve().parent / "verdict_reason_lint.py"
 
 # The file the legs live in, and where its untouched bytes are held while a
 # mutant is on disk.
+#
+# R2268 (open-debt item 609) — the backup is a DIRECTORY, not a name. There
+# used to be a `BACKUP` constant spelling one file,
+# `crates/target/verdict-mutation/report.rs.pristine`, and a pre-flight that
+# tested it. Nothing has written that name since the sweep grew past one file:
+# the only code that creates a backup writes `<path with / as __>.pristine`, so
+# that guard had NO PATH TO BEING TRUE and the one below it did all the work.
+# Two guards spelling different names means one of them is vacuous, and the
+# vacuous one is where the better sentence had been left.
 SOURCE = Path("crates/wz-capture/src/report.rs")
-BACKUP = Path("crates/target/verdict-mutation/report.rs.pristine")
+BACKUP_DIR = Path("crates/target/verdict-mutation")
+BACKUP_SUFFIX = ".pristine"
+
+
+def backup_name(rel: str) -> str:
+    """The file name this tool holds `rel`'s pristine bytes under.
+
+    R2268 (item 609) — this used to be an expression inlined at the one place
+    that built the map, which is why the ORPHAN question below could not be
+    asked: naming the encoder is what makes "which names are ours" a set.
+
+    ⛔ The encoding is LOSSY AND COLLIDING, measured rather than assumed:
+    `crates/wz-capture/src/report.rs` and `crates__wz-capture/src/report.rs`
+    produce the SAME name, and a path that already contains `__` does not
+    survive a round trip. So nothing may DECIDE anything by decoding a name
+    back into a path -- see `orphan_verdict`, which prints a decoded guess and
+    labels it a guess.
+    """
+    return rel.replace("/", "__") + BACKUP_SUFFIX
 
 # A build directory of this sweep's own, so twenty-three recompiles do not
 # evict the tree's ordinary one.
 TARGET_DIR = Path("crates/target/verdict-mutation/target")
+
+
+# R2268 (open-debt item 609) — WHAT A LEFTOVER BACKUP MEANS, decided rather
+# than assumed.
+#
+# ## What the old pre-flight did, and the day it nearly cost
+#
+# It tested `backup.exists()` and said, for every case: "a previous run died
+# with a MUTANT on disk. Compare it against <file>, restore by hand, delete the
+# backup, and run again." Following that instruction on 2026-09-02 would have
+# been DESTRUCTIVE. Five backups were present; every one carried
+# `SPDX-License-Identifier: LGPL-3.0-or-later`, from before the 2026-08-25
+# relicense; and all five working files were byte-identical to HEAD. There was
+# no mutant anywhere. "Restoring" would have reinstated the old licence header
+# and months-old code.
+#
+# ## Three states, not one, and the discriminator is already in the repo
+#
+# A backup is a copy of the file BEFORE mutation, so it is never itself a
+# mutant; the mutant, if there is one, is in the WORKING TREE. That makes
+# `git` the oracle, and no new heuristic is needed:
+#
+#   * worktree == HEAD  -> nothing was left mutated. The backup is DEBRIS.
+#     Whether it also matches HEAD only changes what we SAY, not what we do.
+#   * worktree != HEAD, backup == HEAD -> the working tree is a mutant and the
+#     backup is the real pristine. Restoring is right, and this refuses to
+#     guess further: it stops and says so.
+#   * worktree != HEAD, backup != HEAD, backup != worktree -> all three
+#     disagree. The backup is STALE, and restoring from it walks the tree
+#     BACKWARDS. This is the case the old wording got wrong, and here it
+#     REFUSES to recommend a restore.
+#   * worktree != HEAD, backup == worktree -> somebody is editing, and the
+#     backup is a copy of that edit. Nothing is lost by dropping it.
+#
+# ## Why the safe states CLEAR rather than stop
+#
+# The old guard made this lane PERMANENTLY red until a human deleted a file by
+# hand, and hosted CI never saw it because every run gets a fresh runner. When
+# the derivation proves there is no mutant, stopping buys nothing and costs the
+# lane. It stops only where a human judgement is actually required.
+#
+# ⛔ THE FIVE BRANCHES ARE A PARTITION, and that is checked rather than hoped
+# for. The three comparisons admit eight assignments and equality is
+# transitive, so any two of them force the third: (worktree==HEAD,
+# backup==HEAD, backup==worktree) cannot be (0,1,1), (1,0,1) or (1,1,0). Five
+# remain, and the branches below take exactly those five. There is therefore NO
+# fall-through case, and writing one would have been the same defect this
+# function exists to remove -- a guard with no path to being true. `unknown` is
+# reserved for the one thing that genuinely can happen and is not a state of
+# the files: the oracle being unreadable.
+class Preflight(typing.NamedTuple):
+    """What to do about one leftover backup, and what to say about it."""
+
+    #: `clean` / `debris` / `stale-debris` / `edited` / `mutant` /
+    #: `stale-backup` / `unknown`
+    state: str
+    #: True when the sweep may proceed after dropping the backup
+    proceed: bool
+    #: what to print; `None` only for `clean`
+    message: str | None
+
+
+def preflight(
+    rel: str,
+    worktree: bytes,
+    backup: bytes | None,
+    head: bytes | None,
+) -> Preflight:
+    """Classify one leftover backup. Pure: bytes in, verdict out.
+
+    `head` is `None` when the file's committed bytes could not be read, which
+    is not a pass -- a guard that cannot reach its oracle must say so, the same
+    rule this tool applies to its own inputs elsewhere.
+    """
+    if backup is None:
+        return Preflight("clean", True, None)
+    if head is None:
+        return Preflight(
+            "unknown",
+            False,
+            f"a backup for `{rel}` is present and its committed bytes could "
+            f"not be read, so nothing here can tell debris from a mutant. "
+            f"A guard that cannot reach its oracle does not get to pass.",
+        )
+    w_head = worktree == head
+    b_head = backup == head
+    b_work = backup == worktree
+    if w_head and b_head:
+        return Preflight(
+            "debris",
+            True,
+            f"a backup for `{rel}` was left behind by a run that did not "
+            f"finish, and the working file is identical to HEAD -- no mutant "
+            f"was left on disk. Dropping the backup and continuing.",
+        )
+    if w_head and not b_head:
+        return Preflight(
+            "stale-debris",
+            True,
+            f"a backup for `{rel}` was left behind and is OLDER than HEAD -- "
+            f"the file has been committed over since. The working file is "
+            f"identical to HEAD, so there is no mutant; restoring from that "
+            f"backup would walk the tree backwards. Dropping it and "
+            f"continuing.",
+        )
+    if not w_head and b_head:
+        return Preflight(
+            "mutant",
+            False,
+            f"`{rel}` differs from HEAD and its backup matches HEAD, which is "
+            f"what a run dying mid-mutation leaves. Restore `{rel}` from the "
+            f"backup, delete the backup, and run again.",
+        )
+    if b_work:
+        return Preflight(
+            "edited",
+            True,
+            f"`{rel}` differs from HEAD and its backup is a copy of exactly "
+            f"those bytes, so the difference is an edit in progress and not a "
+            f"mutant. Dropping the backup and continuing.",
+        )
+    return Preflight(
+        "stale-backup",
+        False,
+        f"`{rel}`, its backup and HEAD all disagree, and the backup is "
+        f"not HEAD. This tool will not guess which copy is real, and it "
+        f"will NOT tell you to restore: that backup predates HEAD, so "
+        f"restoring from it would undo committed work. Decide by hand "
+        f"which bytes are wanted, then delete the backup.",
+    )
+
+
+def committed_bytes(rel: str) -> bytes | None:
+    """`rel` as HEAD holds it, or `None` when git cannot say."""
+    out = subprocess.run(
+        ["git", "show", f"HEAD:{rel}"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+    )
+    return out.stdout if out.returncode == 0 else None
+
+
+# R2268 (open-debt item 609, condition 6) — THE POPULATION COMES FROM THE
+# DIRECTORY, not from what this run happens to mutate.
+#
+# `backup_of` is built from `[SOURCE] + the files named in PREDICATES`. Classify
+# only those and a `.pristine` belonging to a file that has since LEFT
+# `PREDICATES` is never looked at by anything, ever: not debris, not a mutant,
+# not reported -- simply invisible. That is the rule "an unclassified thing is
+# RED, not a pass" broken by the classifier's own reach, and it is the same seam
+# the five-state split was closing one layer up.
+#
+# ⚠ Stated precisely: this is not a hole that HAS leaked, it is one that cannot
+# be seen. Measured over the last twenty commits that moved this file, the
+# `PREDICATES` file set was always the same five (agg, exchange, filter, lib,
+# report) and no orphan has ever existed. But the set does move -- `432296ed`
+# GREW it by adding the predicate layer -- and the shrinking direction is what
+# strands a backup. A gate for a case that has not happened yet only lives if it
+# is shown red on one, which is why the sweep below is proved by making one.
+#
+# ⛔ AND A REFUTED PRESCRIPTION, recorded where it would be repeated. Item 609
+# first said to "decode the name back into a path and put it through the same
+# classifier". That is NOT safe: `backup_name` is lossy and collides (see its
+# docstring). Decoding to judge would hand `preflight` a path that is not the
+# one the bytes came from, and `git show HEAD:<wrong path>` answering is worse
+# than it failing. So an orphan is refused BY NAME, unconditionally, and the
+# decoded path appears only in the message, marked as a guess.
+def orphans(present: typing.Iterable[str], expected: typing.Iterable[str]) -> list[str]:
+    """Backup file names on disk that this run does not account for."""
+    return sorted(set(present) - set(expected))
+
+
+def orphan_verdict(name: str) -> Preflight:
+    """Refuse one unaccounted-for backup, and guess out loud."""
+    guess = name[: -len(BACKUP_SUFFIX)].replace("__", "/")
+    return Preflight(
+        "orphan",
+        False,
+        f"`{BACKUP_DIR / name}` is a backup this run cannot account for: no "
+        f"file it touches is held under that name. It was most likely left by "
+        f"a run whose file set differed from this one's. This tool will NOT "
+        f"decide what it is -- the name encoding is lossy and collides, so "
+        f"reading a path back out of it would judge the wrong file -- but as "
+        f"a GUESS ONLY, unverified, the name reads as `{guess}`. Check that "
+        f"file by hand, then delete the backup.",
+    )
 
 # One leg, as `reasons()` raises it.
 PUSH = re.compile(r"^(\s*)out\.push\(VerdictReason::(\w+)\);\s*$", re.M)
@@ -713,6 +927,205 @@ def selftest() -> int:
     if [t for t in predicate_terms("self.a") if not any(t in r for r in {"self.a == 0"})]:
         failures.append("  coverage test: a recipe rewriting a COMPARISON must cover its term")
 
+    # R2268 (item 609) — AND THE LEFTOVER-BACKUP CLASSIFIER, every state.
+    #
+    # This half did not exist and neither did any test of it: the old
+    # pre-flight read `backup.exists()` and its three states were never once
+    # walked. The fixture below can BUILD each of them, which is the property
+    # that matters -- a fixture that cannot reach a branch never exercises the
+    # rule on it, and `stale-backup` is exactly such a branch (it needs a
+    # backup that differs from HEAD, which no run of this tool produces).
+    HEAD_, WORK_, OLD_ = b"head", b"mutant", b"older"
+    cases = (
+        # (backup, worktree, head) -> state, may proceed
+        ("clean", None, HEAD_, HEAD_, True),
+        ("debris", HEAD_, HEAD_, HEAD_, True),
+        ("stale-debris", OLD_, HEAD_, HEAD_, True),
+        ("mutant", HEAD_, WORK_, HEAD_, False),
+        ("edited", WORK_, WORK_, HEAD_, True),
+        ("stale-backup", OLD_, WORK_, HEAD_, False),
+        # the oracle itself missing is not a pass
+        ("unknown", HEAD_, HEAD_, None, False),
+    )
+    seen: set[str] = set()
+    for want_state, backup, worktree, head, want_proceed in cases:
+        got = preflight("x.rs", worktree, backup, head)
+        seen.add(got.state)
+        if got.state != want_state or got.proceed != want_proceed:
+            failures.append(
+                f"  leftover-backup {want_state}: expected "
+                f"({want_state}, proceed={want_proceed}) and got "
+                f"({got.state}, proceed={got.proceed})"
+            )
+        if want_state != "clean" and not got.message:
+            failures.append(f"  leftover-backup {want_state}: no message to print")
+    # The two REFUSALS must not read alike, and the one this item is about must
+    # forbid the restore the other one prescribes. A classifier that split the
+    # states and then said the same thing about both would have fixed nothing.
+    mutant_msg = preflight("x.rs", WORK_, HEAD_, HEAD_).message or ""
+    stale_msg = preflight("x.rs", WORK_, OLD_, HEAD_).message or ""
+    if "Restore" not in mutant_msg:
+        failures.append("  leftover-backup: the `mutant` state must prescribe a restore")
+    if "NOT tell you to restore" not in stale_msg:
+        failures.append(
+            "  leftover-backup: the `stale-backup` state must REFUSE to "
+            "prescribe a restore -- that is the whole of item 609"
+        )
+    # THE PARTITION CLAIM, measured rather than asserted. Over every assignment
+    # of three distinct byte strings to (worktree, backup), the three
+    # comparisons land on exactly five triples -- equality is transitive, so
+    # the other three of the eight cannot occur -- and those five reach five
+    # DIFFERENT states. That is what makes a fall-through case unnecessary, and
+    # writing one anyway would be a guard with no path to being true, which is
+    # the very defect this classifier replaced.
+    triples: set[tuple[bool, bool, bool]] = set()
+    reached: set[str] = set()
+    for w in (HEAD_, WORK_, OLD_):
+        for b in (HEAD_, WORK_, OLD_):
+            triples.add((w == HEAD_, b == HEAD_, b == w))
+            reached.add(preflight("x.rs", w, b, HEAD_).state)
+    if len(triples) != 5 or len(reached) != 5:
+        failures.append(
+            f"  leftover-backup: the five branches must be a PARTITION of the "
+            f"reachable comparisons -- got {len(triples)} triple(s) reaching "
+            f"{len(reached)} state(s) {sorted(reached)}"
+        )
+
+    # R2268 (item 609, condition 4) — ONE SPELLING OF A BACKUP NAME, derived.
+    #
+    # What this file arrived with was TWO pre-flights reading two different
+    # names: a `BACKUP` constant spelling `report.rs.pristine`, which nothing
+    # had written since the sweep grew past one file, and the `backup_of` map
+    # spelling `crates__wz-capture__src__report.rs.pristine`, which is what the
+    # only backup-writing line produces. Two guards over two names means one of
+    # them has no path to being true, and it was the dead one that carried the
+    # better sentence. Deleting it is not enough on its own: nothing stopped a
+    # second spelling from being introduced again.
+    #
+    # So the rule is derived from the module's own syntax rather than reviewed.
+    # Every string literal here that names a backup file must be the ONE suffix
+    # constant; a second literal ending in it is a second spelling, whoever
+    # wrote it. `ast` is the right reader precisely because comments are not in
+    # it -- the prose above says `.pristine` repeatedly and must not count,
+    # while a literal in code must.
+    import ast as _ast
+
+    _src = Path(__file__).read_text()
+    _tree = _ast.parse(_src)
+    _docstrings = {
+        id(n.body[0].value)
+        for n in _ast.walk(_tree)
+        if isinstance(
+            n, (_ast.Module, _ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef)
+        )
+        and n.body
+        and isinstance(n.body[0], _ast.Expr)
+        and isinstance(n.body[0].value, _ast.Constant)
+        and isinstance(n.body[0].value.value, str)
+    }
+    _spellings = sorted(
+        {
+            n.value
+            for n in _ast.walk(_tree)
+            if isinstance(n, _ast.Constant)
+            and isinstance(n.value, str)
+            and n.value.endswith(BACKUP_SUFFIX)
+            and id(n) not in _docstrings
+        }
+    )
+    if _spellings != [BACKUP_SUFFIX]:
+        failures.append(
+            f"  backup naming: a backup file name must be spelled ONCE, by "
+            f"`backup_name`, and this module holds the literal(s) {_spellings}. "
+            f"Two spellings is how item 609's dead guard came to exist -- one "
+            f"of them necessarily never fires"
+        )
+    # ...and the ENCODING itself, counted the same way. Deliberately not a text
+    # count: spelling the call out as a string would make this check its own
+    # second occurrence, which is how a self-referential rule reports a defect
+    # that is only itself. Measured -- the text form said 2 and named nothing.
+    _encoders = [
+        n
+        for n in _ast.walk(_tree)
+        if isinstance(n, _ast.Call)
+        and isinstance(n.func, _ast.Attribute)
+        and n.func.attr == "replace"
+        and len(n.args) == 2
+        and all(isinstance(a, _ast.Constant) for a in n.args)
+        and [a.value for a in n.args] == ["/", "_" * 2]
+    ]
+    if len(_encoders) != 1:
+        failures.append(
+            f"  backup naming: the path-to-name encoding must live in "
+            f"`backup_name` alone and this module performs it "
+            f"{len(_encoders)} time(s); a second copy is a second spelling "
+            f"that can drift from it"
+        )
+
+    # R2268 (item 609, condition 6) — THE ORPHAN SWEEP, both directions.
+    #
+    # A name this run accounts for must NOT be called an orphan, and a name it
+    # does not account for MUST be. Only the second direction is the bug; only
+    # the first stops the fix from being "call everything an orphan".
+    ours = {backup_name("crates/wz-capture/src/report.rs")}
+    stray = backup_name("crates/wz-capture/src/gone.rs")
+    if orphans(ours, ours):
+        failures.append("  orphan sweep: a name this run holds is not an orphan")
+    if orphans(ours | {stray}, ours) != [stray]:
+        failures.append(
+            "  orphan sweep: a backup for a file no longer in PREDICATES must "
+            "be REFUSED, not silently skipped -- that is the whole of "
+            "condition 6"
+        )
+    if not orphans(ours, set()):
+        failures.append("  orphan sweep: an empty expected set makes everything stray")
+    orphan_msg = orphan_verdict(stray).message or ""
+    seen.add(orphan_verdict(stray).state)
+    if orphan_verdict(stray).proceed:
+        failures.append("  orphan sweep: an unaccounted-for backup must not proceed")
+    if "GUESS ONLY" not in orphan_msg or "crates/wz-capture/src/gone.rs" not in orphan_msg:
+        failures.append(
+            "  orphan sweep: the decoded path must be printed AND marked a "
+            "guess -- item 609 refuted deciding by it"
+        )
+    # THE REASON it is only a guess, measured here rather than asserted in
+    # prose: the encoding is not injective, so a decoded name can name a file
+    # the bytes never came from. If this ever starts holding, the refusal above
+    # is over-cautious and should be revisited -- which is why it is a test and
+    # not a comment.
+    if backup_name("crates__wz-capture/src/report.rs") != backup_name(
+        "crates/wz-capture/src/report.rs"
+    ):
+        failures.append(
+            "  orphan sweep: `backup_name` was believed to COLLIDE, and this "
+            "measurement says it no longer does -- the guess-only wording "
+            "rests on that"
+        )
+
+    # Every state this classifier can return has to be reached by the fixture,
+    # or the ones it does not reach are untested while reporting green.
+    #
+    # ⛔ The state list is DERIVED from this module's own source, not typed out
+    # here. A hand-written list is the R2185 defect exactly: the gate would be
+    # comparing a table it wrote against a literal it also wrote, so adding a
+    # seventh state and forgetting to test it would stay green forever. Reading
+    # the constructions means a new state arrives UNREACHED, which is red.
+    declared = set(
+        re.findall(r"Preflight\(\s*\n?\s*\"([a-z-]+)\"", Path(__file__).read_text())
+    )
+    if len(declared) < len(seen):
+        failures.append(
+            f"  leftover-backup: the state list must be derived from the "
+            f"`Preflight(...)` constructions and found only {sorted(declared)}, "
+            f"which is fewer than the fixture reaches"
+        )
+    unreached = declared - seen
+    if unreached:
+        failures.append(
+            f"  leftover-backup: {sorted(unreached)} is a state the fixture "
+            f"never builds, so nothing tests it"
+        )
+
     if failures:
         print("verdict-leg mutation selftest: FAIL", file=sys.stderr)
         for f in failures:
@@ -720,7 +1133,13 @@ def selftest() -> int:
         return 1
     print(
         f"verdict-leg mutation selftest: OK — {len(TERM_CASES)} predicate "
-        "shape(s) read, including the two the sum splitter could not"
+        "shape(s) read, including the two the sum splitter could not; and "
+        f"{len(declared)} leftover-backup state(s) derived from this file's "
+        "own `Preflight` constructions, each built by the fixture, with "
+        "`mutant` prescribing a restore, `stale-backup` refusing one, and "
+        "`orphan` reached from the directory rather than from `PREDICATES`; "
+        f"and {len(_spellings)} backup-name spelling(s) in "
+        f"{len(_encoders)} encoder(s), so no guard can read a name nothing writes"
     )
     return 0
 
@@ -905,20 +1324,10 @@ def main() -> int:
             return 2
 
     source_path = REPO_ROOT / SOURCE
-    backup_path = REPO_ROOT / BACKUP
     if not source_path.is_file():
         print(
             f"verdict-leg mutation: FAIL — {SOURCE} is not there, so there are "
             "no legs to sever and this must not report OK.",
-            file=sys.stderr,
-        )
-        return 1
-    if backup_path.exists():
-        print(
-            f"verdict-leg mutation: FAIL — {BACKUP} exists, which means a "
-            "previous run died with a MUTANT on disk. This tool will not guess "
-            f"which copy is real. Compare it against {SOURCE}, restore by hand, "
-            "delete the backup, and run again.",
             file=sys.stderr,
         )
         return 1
@@ -1074,21 +1483,49 @@ def main() -> int:
     pristine_of = {
         rel: (REPO_ROOT / rel).read_text(encoding="utf-8") for rel in touched
     }
-    backup_of = {
-        rel: backup_path.parent / (str(rel).replace("/", "__") + ".pristine")
-        for rel in touched
-    }
-    for rel, bk in backup_of.items():
-        if bk.exists():
+    backup_dir = REPO_ROOT / BACKUP_DIR
+    backup_of = {rel: backup_dir / backup_name(str(rel)) for rel in touched}
+    # R2268 (item 609) — a leftover backup is CLASSIFIED, not assumed. See
+    # `preflight`: the working tree, the backup and HEAD decide between debris
+    # this may clear and a state only a person can settle.
+    blocked = False
+    # ...and the population is the DIRECTORY's, so a backup belonging to a file
+    # this run no longer touches is REFUSED rather than never looked at. See
+    # `orphans` for why it is refused by name instead of decoded.
+    on_disk = (
+        sorted(p.name for p in backup_dir.glob("*" + BACKUP_SUFFIX))
+        if backup_dir.is_dir()
+        else []
+    )
+    for name in orphans(on_disk, (bk.name for bk in backup_of.values())):
+        verdict = orphan_verdict(name)
+        print(
+            f"verdict-leg mutation: FAIL [{verdict.state}] — {verdict.message}",
+            file=sys.stderr,
+        )
+        blocked = True
+    for rel, bk in sorted(backup_of.items()):
+        verdict = preflight(
+            str(rel),
+            (REPO_ROOT / rel).read_bytes(),
+            bk.read_bytes() if bk.exists() else None,
+            committed_bytes(str(rel)) if bk.exists() else None,
+        )
+        if verdict.state == "clean":
+            continue
+        if verdict.proceed:
+            print(f"  leftover backup [{verdict.state}]: {verdict.message}", flush=True)
+            bk.unlink()
+        else:
             print(
-                f"verdict-leg mutation: FAIL — {bk} exists, which means a "
-                "previous run died with a MUTANT on disk. Compare it against "
-                f"{rel}, restore by hand, delete the backup, and run again.",
+                f"verdict-leg mutation: FAIL [{verdict.state}] — {verdict.message}",
                 file=sys.stderr,
             )
-            return 1
+            blocked = True
+    if blocked:
+        return 1
 
-    backup_path.parent.mkdir(parents=True, exist_ok=True)
+    backup_dir.mkdir(parents=True, exist_ok=True)
     for rel, bk in backup_of.items():
         shutil.copy2(REPO_ROOT / rel, bk)
     survivors: list[tuple[str, str, str]] = []
