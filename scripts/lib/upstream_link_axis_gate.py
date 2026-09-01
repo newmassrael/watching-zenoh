@@ -61,7 +61,6 @@ a way to stop grading a link.
 from __future__ import annotations
 
 import argparse
-import os
 import pathlib
 import re
 import sys
@@ -186,19 +185,23 @@ def agreement_findings(text: str) -> list[str]:
 def upstream_root() -> pathlib.Path | None:
     """A checkout of the pinned zenoh, or `None`.
 
-    `ZENOHD_SRC` first, because an explicit instruction beats a discovery --
-    the order `upstream_feature_census` states for the same question. The
-    $HOME-relative fallback is not written into a tracked file as an absolute
-    path (the CLAUDE.md rule); it is a name, resolved per machine.
+    DELEGATED to `upstream_citation_anchor_gate.upstream_root`, which is itself
+    derived through `upstream_feature_census.upstream_anchors()` — the chain
+    `build-zenohd.sh` mirrors, WITH the version check that makes it the pinned
+    one rather than whichever checkout sorts first. A second discovery of my own
+    could disagree about which upstream the tree means, and that disagreement is
+    what open debt 578 was opened for. One derivation, three consumers.
     """
-    explicit = os.environ.get("ZENOHD_SRC")
-    candidates = [pathlib.Path(explicit)] if explicit else []
-    home = pathlib.Path(os.environ.get("HOME", "~")).expanduser()
-    candidates.append(home / "zenoh-ref")
-    candidates.append(ROOT / "target" / "zenohd-build" / "zenoh-src")
-    for c in candidates:
-        if (c / "io" / "zenoh-links").is_dir():
-            return c
+    try:
+        sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+        import upstream_citation_anchor_gate as cite
+    except ImportError:  # pragma: no cover - the sibling is tracked beside this
+        return None
+    root = cite.upstream_root()
+    # That chain answers "the pinned zenoh"; this gate additionally needs the
+    # link crates to BE there, and says so rather than reporting an empty grade.
+    if root is not None and (root / "io" / "zenoh-links").is_dir():
+        return root
     return None
 
 
