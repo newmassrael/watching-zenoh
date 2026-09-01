@@ -249,8 +249,11 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         frozenset({"zenoh-c-no-unstable-api", "zenoh-c-shared-memory"}),
     ),
     "wz-codecs-test-support": (
-        "a test-support crate: its consumers are this workspace's own test "
-        "targets, which the lanes already compile under every combination",
+        "a test-support crate: `publish = false`, and NO workspace library "
+        "consumes it -- every edge into it is a `dev-dependency`, so the only "
+        "Rust sites that can name its gated paths are this workspace's own "
+        "test targets. Held to `TEST_ONLY_REACH` below rather than to this "
+        "sentence",
         frozenset(
             {
                 "codec-declare",
@@ -288,7 +291,12 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
     # elsewhere, and the check below fails if a package on the axis reappears
     # here.
     "wz-runtime-tokio-test-support": (
-        "a test-support crate; same reason as the other one",
+        "a test-support crate: `publish = false`, and the one workspace "
+        "library consuming it outside a `dev-dependency` (`wz-e2e-harness`) "
+        "is itself consumed only by packages with no library target, so no "
+        "library a Rust consumer could name reaches its gated paths. NOT "
+        "\"same reason as the other one\", which is what this row used to say "
+        "and which the graph refuted. Held to `TEST_ONLY_REACH` below",
         frozenset({"tls-fixtures"}),
     ),
     # `wz-session-core` used to sit here with all 65 of its public-gating
@@ -313,7 +321,12 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         frozenset({"transport-multicast"}),
     ),
     "wz-tls-record": (
-        "one feature, and it gates test fixtures",
+        "`publish = false`, and the only workspace edge that turns `fixtures` "
+        "on is a `dev-dependency`; no feature definition anywhere in this "
+        "workspace enables it either, so the only sites that can name its "
+        "gated paths are test targets. The CRATE is not test-only -- "
+        "`wz-analyze` takes it as a normal dependency -- which is why this is "
+        "held to `TEST_ONLY_FEATURE` below and not to `TEST_ONLY_REACH`",
         frozenset({"fixtures"}),
     ),
 }
@@ -360,8 +373,13 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
 #
 # ## What this deliberately does NOT claim
 #
-# That the other seven `OFF_AXIS` rows are measured. They are not; their reasons
-# are still prose, and that residue is filed rather than hidden.
+# That the OTHER `OFF_AXIS` rows are measured. Some are not; their reasons are
+# still prose, and that residue is filed (open-debt item 606) rather than
+# hidden. ⛔ R2266 struck the number that used to stand in this sentence: it
+# said "the other seven" while the table held ten rows and nine of them were
+# prose. A residue named by a hand-typed count is a count nobody re-derives, so
+# `PROSE_ONLY` below carries the residue as a SET and `check` refuses a row
+# that is in neither the predicates nor that set.
 ABI_CONTRACT: dict[str, str] = {
     "wz-capi-c": (
         "the zenoh-c drop-in cdylib; its symbol set is graded against "
@@ -386,8 +404,231 @@ ABI_DECLARATION = re.compile(r"^\s*pub\s+(?:const|static|struct|enum|type|union)
 ABI_USE = re.compile(r"^\s*pub\s+use\b")
 
 
-def workspace() -> tuple[dict[str, str], dict[str, set[str]]]:
-    """(manifest dir -> package, package -> its NON-DEFAULT features)."""
+# R2266 (open-debt item 606) — the packages whose `OFF_AXIS` reason is the claim
+# "this crate's consumers are this workspace's own test targets", MEASURED
+# instead of asserted.
+#
+# ## What refuted the sentence this replaces
+#
+# `wz-runtime-tokio-test-support` read "a test-support crate; same reason as the
+# other one", and the other one reads "its consumers are this workspace's own
+# test targets, which the lanes already compile under every combination". The
+# first half is FALSE and the graph says so: `wz-e2e-harness` consumes it as a
+# NORMAL dependency, from a `lib` target, and its own manifest argues the case
+# in a comment nobody could reach from here. A `lib` is not a test target; it is
+# exactly the shape whose public paths a Rust consumer names.
+#
+# The row is still RIGHT to be off the axis, and the reason for it was wrong --
+# the same shape R2260 found one row over. So the reason becomes a predicate,
+# and the predicate is the narrow true one below.
+#
+# ## The predicate
+#
+# For each package here, BOTH of these must hold:
+#
+#   * `publish = false` in its own manifest. `cargo` refuses to publish a crate
+#     that carries an unpublishable path dependency, so this closes the whole
+#     library closure below it against a registry consumer, not just this
+#     crate. It is the "outside the workspace" half, and it is a fact in the
+#     metadata rather than a habit.
+#   * every workspace package that consumes it through a NON-dev edge is a
+#     library, and walking those edges upward terminates only at packages with
+#     no library target at all -- a `bin` or a test-only crate, which nothing
+#     can name a path through. That transitive set of libraries is PINNED here
+#     as a SET, and it is checked in BOTH directions: a library that starts
+#     consuming one of these reds because the set grew, and a name left behind
+#     after its edge is deleted reds because the set shrank.
+#
+# A `build`-dependency edge is a FINDING: a build script is not a test target,
+# and its code names paths like any other consumer. There is none today, which
+# is the point -- the population must not be able to grow in silence.
+#
+# An empty population is a FINDING too, per package and overall: a crate no
+# workspace edge reaches at all is one this row excuses without measuring, and
+# "nobody consumes it" is the shape that makes every check below vacuous.
+#
+# ## What this does NOT claim
+#
+# The second half of the old sentence, "which the lanes already compile under
+# every combination". That is a claim about lane coverage, it is `OFF_AXIS`'s
+# weakest link, and NOTHING here measures it. It is deliberately dropped from
+# both reasons rather than carried unmeasured -- feature COMBINATIONS have no
+# instrument in this workspace at all (open-debt item 374), so a reason that
+# leaned on them was leaning on nothing.
+#
+#: package -> the transitive set of workspace LIBRARIES that consume it through
+#: non-dev edges. Empty means no library consumes it at all.
+TEST_ONLY_REACH: dict[str, frozenset[str]] = {
+    "wz-codecs-test-support": frozenset(),
+    "wz-runtime-tokio-test-support": frozenset({"wz-e2e-harness"}),
+}
+
+
+# R2266 (open-debt item 606) — the FEATURE-level form of the same claim, for a
+# crate that is NOT test-only but whose gated feature is.
+#
+# `wz-tls-record` read "one feature, and it gates test fixtures". The crate is
+# ordinary -- `wz-analyze` consumes it as a normal dependency and `wz-replay`
+# reaches it transitively -- so `TEST_ONLY_REACH` above cannot hold it: its
+# library closure is real. What IS test-only is the FEATURE, and that is a
+# different predicate rather than a looser one:
+#
+#   * `publish = false`, as above and for the same reason;
+#   * every workspace edge that turns the named feature ON is a
+#     `dev-dependency`, and at least one does -- a feature nothing enables is a
+#     population of zero, which reports green by construction;
+#   * NO feature definition anywhere in the workspace enables it, in this
+#     package or another. That is the escape route: `wz-session-lwip`'s
+#     `buffer-pool-session-rx-slim` enables `wz-link-lwip`'s feature of the
+#     same name, so this shape is real in this tree and an edges-only check
+#     would miss it;
+#   * the `OFF_AXIS` row is covered ENTIRELY. A predicate holding part of a row
+#     leaves the rest excused by prose while the row reads as measured, which
+#     is worse than prose that admits what it is.
+#: package -> the features of its `OFF_AXIS` row that are test-only
+TEST_ONLY_FEATURE: dict[str, frozenset[str]] = {
+    "wz-tls-record": frozenset({"fixtures"}),
+}
+
+# The residue of item 606, as a SET so that it is derived rather than recounted.
+# Every `OFF_AXIS` row is in exactly one of three places: `ABI_CONTRACT`,
+# `TEST_ONLY_REACH`, or here -- meaning its reason is still prose that nothing
+# measures. A row in none of them, or in two, is a FINDING, so a row added
+# tomorrow cannot land unclassified and this residue cannot drift.
+#
+# ⛔ These are NOT one kind of claim, which is why one predicate does not take
+# them: `wz` re-exports whole subtrees, `wz-runtime-coop` points at the facade
+# row, `wz-link-lwip` / `wz-session-lwip` point at deploy probes, and
+# `wz-packet-socket` / `wz-runtime-core` / `wz-tls-record` each assert what
+# their one feature gates. Retiring one is a round's work, and the round that
+# does it moves the name out of this set in the same edit.
+PROSE_ONLY: frozenset[str] = frozenset(
+    {
+        "wz",
+        "wz-link-lwip",
+        "wz-packet-socket",
+        "wz-runtime-coop",
+        "wz-runtime-core",
+        "wz-session-lwip",
+    }
+)
+
+
+class Dep(typing.NamedTuple):
+    """One workspace dependency edge, seen from the package depended UPON."""
+
+    consumer: str
+    #: `cargo metadata` spells a normal edge as `null`; normalised here.
+    kind: str
+    #: the features this edge turns on explicitly. `TEST_ONLY_FEATURE` asks
+    #: WHICH edge enables a name, which a crate-level walk cannot answer.
+    features: frozenset[str] = frozenset()
+
+
+#: The target kinds that make a package nameable by a Rust consumer. A `bin`,
+#: a `test`, a `bench` and an `example` are NOT here on purpose: nothing can
+#: take a dependency on them, so a path cannot be named through one.
+LIB_KINDS = frozenset({"lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"})
+
+
+def dep_graph() -> tuple[dict[str, list[Dep]], set[str], set[str]]:
+    """(package -> the workspace edges INTO it, libraries, unpublishables).
+
+    The direction is deliberately reversed from a manifest's. The question
+    `TEST_ONLY_REACH` asks is "who can name a path into this crate", and that
+    is answered by CONSUMERS; a dependency list answers the other question.
+
+    `publish` arrives as `[]` when a manifest says `publish = false` and as
+    `null` when it says nothing at all, and `null` means "any registry". So the
+    unpublishable set is the one carrying an EMPTY registry list, and reading
+    it as a boolean would put every silent package in it.
+    """
+    meta = _metadata()
+    into: dict[str, list[Dep]] = collections.defaultdict(list)
+    libs: set[str] = set()
+    unpublishable: set[str] = set()
+    names = {p["name"] for p in meta["packages"]}
+    for p in meta["packages"]:
+        if any(set(t["kind"]) & LIB_KINDS for t in p["targets"]):
+            libs.add(p["name"])
+        if p.get("publish") == []:
+            unpublishable.add(p["name"])
+        for d in p["dependencies"]:
+            if d["name"] in names:
+                into[d["name"]].append(
+                    Dep(
+                        p["name"],
+                        d.get("kind") or "normal",
+                        frozenset(d.get("features") or ()),
+                    )
+                )
+    return dict(into), libs, unpublishable
+
+
+def feature_defs() -> dict[str, dict[str, list[str]]]:
+    """package -> its feature table, exactly as `cargo metadata` reports it.
+
+    Needed because an edge is not the only way a feature comes on: one
+    package's feature can name another's (`wz-session-lwip`'s
+    `buffer-pool-session-rx-slim` names `wz-link-lwip`'s, and that is a real
+    row in this workspace), and a check that only read edges would call such a
+    name unreachable.
+    """
+    return {p["name"]: p["features"] for p in _metadata()["packages"]}
+
+
+class Reach(typing.NamedTuple):
+    """What walking the consumer edges upward from one package found."""
+
+    #: the transitive workspace LIBRARIES consuming it through non-dev edges
+    libs: set[str]
+    #: the packages the walk terminated at, which have no library target
+    terminals: set[str]
+    #: `(subject, consumer, kind)` for every edge that was not `normal`
+    other: list[tuple[str, str, str]]
+    #: how many edges were examined at all -- zero is a finding, never a pass
+    edges: int
+
+
+def reach_of(pkg: str, into: dict[str, list[Dep]], libs: set[str]) -> Reach:
+    """Walk consumer edges upward from `pkg`, following libraries only.
+
+    A non-library consumer ENDS the walk rather than continuing it, and that is
+    the whole predicate: a `bin` cannot be depended on, so no path runs through
+    one and the missing-feature diagnostic has no site to fire at beyond it.
+    """
+    seen: set[str] = set()
+    terminals: set[str] = set()
+    other: list[tuple[str, str, str]] = []
+    edges = 0
+    walked = {pkg}
+    work = [pkg]
+    while work:
+        subject = work.pop()
+        for dep in into.get(subject, []):
+            edges += 1
+            if dep.kind != "normal":
+                other.append((subject, dep.consumer, dep.kind))
+                continue
+            if dep.consumer in libs:
+                if dep.consumer not in walked:
+                    walked.add(dep.consumer)
+                    seen.add(dep.consumer)
+                    work.append(dep.consumer)
+            else:
+                terminals.add(dep.consumer)
+    return Reach(seen, terminals, other, edges)
+
+
+@functools.lru_cache(maxsize=1)
+def _metadata() -> dict:
+    """`cargo metadata` for this workspace, read ONCE.
+
+    Two derivations need it now -- the non-default feature lists below, and the
+    dependency graph `TEST_ONLY_REACH` is decided from. Two subprocess runs
+    could disagree about a tree edited between them, and that disagreement
+    would surface as an unexplained finding rather than as itself.
+    """
     out = subprocess.run(
         ["cargo", "metadata", "--no-deps", "--format-version", "1"],
         cwd=CRATES,
@@ -396,7 +637,12 @@ def workspace() -> tuple[dict[str, str], dict[str, set[str]]]:
     )
     if out.returncode != 0:
         raise RuntimeError(f"cargo metadata failed: {out.stderr[:400]}")
-    meta = json.loads(out.stdout)
+    return json.loads(out.stdout)
+
+
+def workspace() -> tuple[dict[str, str], dict[str, set[str]]]:
+    """(manifest dir -> package, package -> its NON-DEFAULT features)."""
+    meta = _metadata()
     dirs: dict[str, str] = {}
     nondefault: dict[str, set[str]] = {}
     for p in meta["packages"]:
@@ -713,6 +959,191 @@ def abi_contract_findings(root: pathlib.Path, sites: dict[tuple[str, str], list[
     return findings
 
 
+def test_only_reach_findings(
+    graph: tuple[dict[str, list[Dep]], set[str], set[str]] | None = None,
+) -> list[str]:
+    """R2266 — hold every `TEST_ONLY_REACH` row to the dependency graph.
+
+    `graph` is injectable so the selftest can drive the FAIL paths the real
+    tree cannot produce while it is clean, which is the half of any check here
+    that nobody would otherwise exercise.
+    """
+    into, libs, unpublishable = graph if graph is not None else dep_graph()
+    findings: list[str] = []
+    examined = 0
+    for pkg in sorted(TEST_ONLY_REACH):
+        pinned = set(TEST_ONLY_REACH[pkg])
+        if pkg not in OFF_AXIS:
+            findings.append(
+                f"`{pkg}` pins a test-only closure in `TEST_ONLY_REACH` but has "
+                f"no `OFF_AXIS` row, so the claim excuses nothing and is unread"
+            )
+            continue
+        if pkg not in libs:
+            findings.append(
+                f"`{pkg}` is excused as a test-support LIBRARY and has no "
+                f"library target, so there is no public Rust surface for this "
+                f"row to be about"
+            )
+            continue
+        if pkg not in unpublishable:
+            findings.append(
+                f"`{pkg}` is excused because its consumers are this "
+                f"workspace's own test targets, and its manifest does not say "
+                f"`publish = false` -- a registry consumer outside this "
+                f"workspace would be one this row never counted"
+            )
+        reach = reach_of(pkg, into, libs)
+        examined += reach.edges
+        if reach.edges == 0:
+            findings.append(
+                f"`{pkg}` is excused as test-support and NO workspace package "
+                f"consumes it, by any kind of edge. An excuse held to an empty "
+                f"population excuses everything: either something depends on "
+                f"it and this walk is wrong, or the crate is dead and the row "
+                f"is about nothing"
+            )
+        for subject, consumer, kind in sorted(reach.other):
+            if kind == "dev":
+                continue
+            findings.append(
+                f"`{consumer}` consumes `{subject}` as a `{kind}`-dependency, "
+                f"and `{pkg}`'s row is excused on the claim that only test "
+                f"targets name it. A build script is not a test target"
+            )
+        grew = reach.libs - pinned
+        shrank = pinned - reach.libs
+        for name in sorted(grew):
+            findings.append(
+                f"`{name}` is a workspace LIBRARY that now reaches `{pkg}` "
+                f"through non-dev dependency edges, and `TEST_ONLY_REACH` does "
+                f"not list it. A library is exactly the shape whose public "
+                f"paths a Rust consumer names, so either the pin grows with a "
+                f"reason or the row leaves this table"
+            )
+        for name in sorted(shrank):
+            findings.append(
+                f"`TEST_ONLY_REACH` pins `{name}` in `{pkg}`'s closure and no "
+                f"chain of non-dev edges reaches it any more. A pin that "
+                f"outlives its subject reports a closure nobody has; delete "
+                f"the name in the commit that deleted the edge"
+            )
+    if TEST_ONLY_REACH and examined == 0:
+        findings.append(
+            "no `TEST_ONLY_REACH` package has a single workspace dependency "
+            "edge to hold its reason to, so this arm graded nothing while "
+            "reporting clean"
+        )
+    # THE RESIDUE, DERIVED. Every `OFF_AXIS` row is measured by one of the
+    # predicates or declared prose-only; a row in neither is unclassified, and
+    # unclassified is RED here for the same reason it is in `classify`.
+    measured = set(ABI_CONTRACT) | set(TEST_ONLY_REACH) | set(TEST_ONLY_FEATURE)
+    for pkg in sorted(set(OFF_AXIS) - measured - PROSE_ONLY):
+        findings.append(
+            f"`{pkg}` has an `OFF_AXIS` row and is in neither predicate table "
+            f"nor `PROSE_ONLY`. A row nothing measures and nothing admits to "
+            f"be prose is an escape hatch from the derivation it sits beside "
+            f"-- name it in `PROSE_ONLY` with item 606, or measure it"
+        )
+    for pkg in sorted(measured & PROSE_ONLY):
+        findings.append(
+            f"`{pkg}` is held to a predicate AND declared prose-only, and "
+            f"those cannot both be true -- one fact, one place"
+        )
+    for pkg in sorted(PROSE_ONLY - set(OFF_AXIS)):
+        findings.append(
+            f"`{pkg}` is declared prose-only and has no `OFF_AXIS` row, so the "
+            f"residue it reports is work nobody has. Delete the name"
+        )
+    tables = (ABI_CONTRACT, TEST_ONLY_REACH, TEST_ONLY_FEATURE)
+    for i, first in enumerate(tables):
+        for second in tables[i + 1 :]:
+            for pkg in sorted(set(first) & set(second)):
+                findings.append(
+                    f"`{pkg}` is held to two predicate tables, and each was "
+                    f"written for a different kind of claim -- pick the one "
+                    f"its row makes"
+                )
+    return findings
+
+
+def test_only_feature_findings(
+    graph: tuple[dict[str, list[Dep]], set[str], set[str]] | None = None,
+    defs: dict[str, dict[str, list[str]]] | None = None,
+) -> list[str]:
+    """R2266 — hold every `TEST_ONLY_FEATURE` row to the graph AND the feature
+    tables. Both inputs are injectable, for the reason the sibling arm gives.
+    """
+    into, _libs, unpublishable = graph if graph is not None else dep_graph()
+    tables = defs if defs is not None else feature_defs()
+    findings: list[str] = []
+    examined = 0
+    for pkg in sorted(TEST_ONLY_FEATURE):
+        feats = set(TEST_ONLY_FEATURE[pkg])
+        if pkg not in OFF_AXIS:
+            findings.append(
+                f"`{pkg}` names test-only features in `TEST_ONLY_FEATURE` but "
+                f"has no `OFF_AXIS` row, so the claim excuses nothing and is "
+                f"unread"
+            )
+            continue
+        _why, row = OFF_AXIS[pkg]
+        if feats != set(row):
+            findings.append(
+                f"`{pkg}`'s `OFF_AXIS` row names {sorted(row)} and "
+                f"`TEST_ONLY_FEATURE` holds {sorted(feats)}. A predicate "
+                f"covering PART of a row leaves the rest excused by prose "
+                f"while the row reads as measured, which is worse than prose "
+                f"that admits what it is"
+            )
+            continue
+        if pkg not in unpublishable:
+            findings.append(
+                f"`{pkg}` has a test-only feature row and its manifest does "
+                f"not say `publish = false`, so a registry consumer could "
+                f"enable that feature from outside this workspace"
+            )
+        for feat in sorted(feats):
+            enabling = [d for d in into.get(pkg, []) if feat in d.features]
+            examined += len(enabling)
+            if not enabling:
+                findings.append(
+                    f"nothing in this workspace turns `{pkg}`'s `{feat}` on, "
+                    f"so the claim that only test targets do is held to an "
+                    f"empty population -- either the feature is dead or this "
+                    f"read of the edges is wrong"
+                )
+            for dep in sorted(enabling):
+                if dep.kind != "dev":
+                    findings.append(
+                        f"`{dep.consumer}` turns `{pkg}`'s `{feat}` on through "
+                        f"a `{dep.kind}` edge, and the row is excused on the "
+                        f"claim that only test targets enable it"
+                    )
+            for other_pkg, table in sorted(tables.items()):
+                for other_feat, enables in sorted(table.items()):
+                    if other_pkg == pkg and other_feat == feat:
+                        continue
+                    for token in enables:
+                        base = token.split("?/")[0].split("/")[0]
+                        base = base[4:] if base.startswith("dep:") else base
+                        named = token.split("/", 1)[1] if "/" in token else token
+                        if (base == pkg or other_pkg == pkg) and named == feat:
+                            findings.append(
+                                f"`{other_pkg}`'s `{other_feat}` feature "
+                                f"enables `{pkg}`'s `{feat}` (`{token}`), so "
+                                f"an edge that never names `{feat}` can still "
+                                f"turn it on. A check that only read edges "
+                                f"would call this unreachable"
+                            )
+    if TEST_ONLY_FEATURE and examined == 0:
+        findings.append(
+            "no `TEST_ONLY_FEATURE` row has a single edge enabling it, so this "
+            "arm graded nothing while reporting clean"
+        )
+    return findings
+
+
 def defer_findings(sites: dict[tuple[str, str], list[Shape]]) -> list[str]:
     """R2207 — hold every `DEFERRED` reason to what its marker obliges.
 
@@ -863,6 +1294,8 @@ def check() -> int:
         )
     findings.extend(defer_findings(sites))
     findings.extend(abi_contract_findings(ROOT, sites))
+    findings.extend(test_only_reach_findings())
+    findings.extend(test_only_feature_findings())
 
     if findings:
         print(f"feature-public-surface: FAIL -- {len(findings)} finding(s)")
@@ -882,6 +1315,14 @@ def check() -> int:
         f"gate no public path, {len(denom & deferred_on_axis)} deferred on the "
         f"axis, {len(denom & unprobed) - len(denom & deferred_on_axis)} in "
         f"{len(OFF_AXIS)} package(s) the axis has not taken"
+    )
+    # The residue of item 606, DERIVED. It used to be a number in a comment,
+    # and that number was wrong by two for as long as it stood.
+    print(
+        f"    off-axis reasons: {len(set(ABI_CONTRACT) & set(OFF_AXIS))} held to "
+        f"`ABI_CONTRACT`, {len(set(TEST_ONLY_REACH) & set(OFF_AXIS))} to "
+        f"`TEST_ONLY_REACH`, {len(set(TEST_ONLY_FEATURE) & set(OFF_AXIS))} to "
+        f"`TEST_ONLY_FEATURE`, {len(PROSE_ONLY)} still prose (item 606)"
     )
     for kind in (
         "public-item",
@@ -1019,6 +1460,213 @@ def abi_selftest() -> int:
     return 0
 
 
+def test_only_selftest() -> int:
+    """R2266 — drive `test_only_reach_findings` through every way it refuses.
+
+    An INJECTED graph rather than the tree, for the reason the sibling arms
+    give: the tree is (and must stay) clean, so every FAIL path here is one the
+    real run never takes. Two of the rows are CONTROLS that must PASS, and they
+    are what stops the predicate being one that refuses test-support crates in
+    general -- `ts_dev` is the dev-edges-only shape and `ts_chain` is the one
+    the refuted `wz-runtime-tokio-test-support` row actually has: a library
+    consumer, terminating at a package with no library target.
+    """
+    libs = {
+        "ts_dev",
+        "ts_chain",
+        "h_lib",
+        "ts_grown",
+        "new_lib",
+        "ts_shrunk",
+        "ts_orphan",
+        "ts_pub",
+        "ts_build",
+        "ts_noff",
+        "px_dual",
+    }
+    unpublishable = libs - {"ts_pub"} | {"ts_nolib"}
+    into: dict[str, list[Dep]] = {
+        "ts_dev": [Dep("t_tests", "dev")],
+        "ts_chain": [Dep("h_lib", "normal")],
+        "h_lib": [Dep("b_bin", "normal")],
+        "ts_grown": [Dep("new_lib", "normal")],
+        "ts_shrunk": [Dep("t_tests", "dev")],
+        "ts_pub": [Dep("t_tests", "dev")],
+        "ts_build": [Dep("bs", "build")],
+        "ts_nolib": [Dep("t_tests", "dev")],
+        "ts_noff": [Dep("t_tests", "dev")],
+        "px_dual": [Dep("t_tests", "dev")],
+    }
+    reach = {
+        "ts_dev": frozenset(),
+        "ts_chain": frozenset({"h_lib"}),
+        "ts_grown": frozenset(),
+        "ts_shrunk": frozenset({"vanished"}),
+        "ts_orphan": frozenset(),
+        "ts_pub": frozenset(),
+        "ts_build": frozenset(),
+        "ts_nolib": frozenset(),
+        "ts_noff": frozenset(),
+        "px_dual": frozenset(),
+    }
+    off = {
+        name: ("fixture", frozenset({"f"}))
+        for name in list(reach) + ["px_prose", "px_unclassified", "px_both"]
+        if name != "ts_noff"
+    }
+    real = (OFF_AXIS.copy(), TEST_ONLY_REACH.copy(), ABI_CONTRACT.copy(), PROSE_ONLY)
+    try:
+        OFF_AXIS.clear()
+        OFF_AXIS.update(off)
+        TEST_ONLY_REACH.clear()
+        TEST_ONLY_REACH.update(reach)
+        ABI_CONTRACT.clear()
+        ABI_CONTRACT.update({"px_both": "fixture", "px_dual": "fixture"})
+        globals()["PROSE_ONLY"] = frozenset({"px_prose", "px_both", "px_ghost"})
+        findings = test_only_reach_findings((into, libs, unpublishable))
+        empty = test_only_reach_findings(({}, libs, unpublishable))
+    finally:
+        OFF_AXIS.clear()
+        OFF_AXIS.update(real[0])
+        TEST_ONLY_REACH.clear()
+        TEST_ONLY_REACH.update(real[1])
+        ABI_CONTRACT.clear()
+        ABI_CONTRACT.update(real[2])
+        globals()["PROSE_ONLY"] = real[3]
+
+    marks = (
+        ("excuses nothing and is unread", "no-off-axis-row"),
+        ("has no library target", "not-a-library"),
+        ("`publish = false`", "publishable"),
+        ("NO workspace package consumes it", "empty-population"),
+        ("-dependency, and", "build-edge"),
+        ("does not list it", "closure-grew"),
+        ("outlives its subject", "closure-shrank"),
+        ("nor `PROSE_ONLY`", "unclassified-row"),
+        ("AND declared prose-only", "measured-and-prose"),
+        ("the residue it reports is work nobody has", "prose-only-ghost"),
+        ("held to two predicate tables", "two-predicates"),
+    )
+    got = {mark for needle, mark in marks if any(needle in f for f in findings)}
+    want = {mark for _needle, mark in marks}
+    if got != want:
+        print(
+            f"feature-public-surface: SELFTEST FAIL -- the test-only-reach "
+            f"predicate must refuse exactly {sorted(want)} and it refused "
+            f"{sorted(got)} (from {findings}). `ts_dev`, `ts_chain` and "
+            f"`px_prose` are the CONTROLS: refusing a crate whose only edges "
+            f"are dev ones, or one whose library consumer terminates at a "
+            f"package with no library target, would refuse exactly what a "
+            f"test-support crate is."
+        )
+        return 1
+    for control in ("ts_dev", "ts_chain", "px_prose"):
+        if any(f"`{control}`" in f for f in findings):
+            print(
+                f"feature-public-surface: SELFTEST FAIL -- `{control}` is a "
+                f"CONTROL and the predicate reported it: {findings}"
+            )
+            return 1
+    if not any("graded nothing" in f for f in empty):
+        print(
+            "feature-public-surface: SELFTEST FAIL -- a graph with no edge at "
+            "all must FAIL rather than report clean; a closure held to nothing "
+            "excuses everything"
+        )
+        return 1
+    return 0
+
+
+def test_only_feature_selftest() -> int:
+    """R2266 — drive `test_only_feature_findings` through every way it refuses.
+
+    `tf_ok` is the CONTROL: a `publish = false` crate with one feature that a
+    single `dev-dependency` edge enables and no feature definition names. That
+    is exactly `wz-tls-record`'s shape, and a predicate refusing it would be
+    refusing what a test-fixture feature IS.
+    """
+    unpublishable = {"tf_ok", "tf_normal", "tf_dead", "tf_indirect", "tf_partial", "tf_noff"}
+    into: dict[str, list[Dep]] = {
+        "tf_ok": [Dep("t_tests", "dev", frozenset({"fx"}))],
+        "tf_normal": [Dep("prod", "normal", frozenset({"fx"}))],
+        "tf_pub": [Dep("t_tests", "dev", frozenset({"fx"}))],
+        "tf_dead": [Dep("t_tests", "dev", frozenset())],
+        "tf_indirect": [Dep("t_tests", "dev", frozenset({"fx"}))],
+        "tf_partial": [Dep("t_tests", "dev", frozenset({"fx"}))],
+        "tf_noff": [Dep("t_tests", "dev", frozenset({"fx"}))],
+    }
+    rows = {
+        "tf_ok": frozenset({"fx"}),
+        "tf_normal": frozenset({"fx"}),
+        "tf_pub": frozenset({"fx"}),
+        "tf_dead": frozenset({"fx"}),
+        "tf_indirect": frozenset({"fx"}),
+        "tf_partial": frozenset({"fx"}),
+        "tf_noff": frozenset({"fx"}),
+    }
+    off = {
+        name: ("fixture", frozenset({"fx", "other"}) if name == "tf_partial" else frozenset({"fx"}))
+        for name in rows
+        if name != "tf_noff"
+    }
+    defs = {
+        "tf_ok": {"fx": []},
+        "tf_normal": {"fx": []},
+        "tf_pub": {"fx": []},
+        "tf_dead": {"fx": []},
+        # the escape route: another package's feature turns it on, so no edge
+        # has to name it
+        "tf_indirect": {"fx": []},
+        "neighbour": {"bundle": ["tf_indirect/fx"]},
+        "tf_partial": {"fx": [], "other": []},
+        "tf_noff": {"fx": []},
+    }
+    real_off, real_rows = OFF_AXIS.copy(), TEST_ONLY_FEATURE.copy()
+    try:
+        OFF_AXIS.clear()
+        OFF_AXIS.update(off)
+        TEST_ONLY_FEATURE.clear()
+        TEST_ONLY_FEATURE.update(rows)
+        findings = test_only_feature_findings((into, set(), unpublishable), defs)
+        empty = test_only_feature_findings(({}, set(), unpublishable), defs)
+    finally:
+        OFF_AXIS.clear()
+        OFF_AXIS.update(real_off)
+        TEST_ONLY_FEATURE.clear()
+        TEST_ONLY_FEATURE.update(real_rows)
+
+    marks = (
+        ("excuses nothing and is unread", "no-off-axis-row"),
+        ("covering PART of a row", "partial-row"),
+        ("does not say `publish = false`", "publishable"),
+        ("nothing in this workspace turns", "dead-feature"),
+        ("edge, and the row is excused", "normal-edge"),
+        ("would call this unreachable", "feature-enables-it"),
+    )
+    got = {mark for needle, mark in marks if any(needle in f for f in findings)}
+    want = {mark for _needle, mark in marks}
+    if got != want:
+        print(
+            f"feature-public-surface: SELFTEST FAIL -- the test-only-feature "
+            f"predicate must refuse exactly {sorted(want)} and it refused "
+            f"{sorted(got)} (from {findings}). `tf_ok` is the CONTROL."
+        )
+        return 1
+    if any("`tf_ok`" in f for f in findings):
+        print(
+            f"feature-public-surface: SELFTEST FAIL -- `tf_ok` is the CONTROL "
+            f"and the predicate reported it: {findings}"
+        )
+        return 1
+    if not any("graded nothing" in f for f in empty):
+        print(
+            "feature-public-surface: SELFTEST FAIL -- a graph with no enabling "
+            "edge at all must FAIL rather than report clean"
+        )
+        return 1
+    return 0
+
+
 def selftest() -> int:
     """Every class, both denominator members, and the two late repairs."""
     dirs = {"demo": "demo"}
@@ -1116,6 +1764,15 @@ def selftest() -> int:
     if abi_selftest() != 0:
         return 1
 
+    # R2266 — AND THE TEST-ONLY-REACH PREDICATE, on an injected dependency
+    # graph and for the same reason. The row this one replaces said "same
+    # reason as the other one" while a `lib` target consumed it as a normal
+    # dependency, so the shapes below are not hypothetical either.
+    if test_only_selftest() != 0:
+        return 1
+    if test_only_feature_selftest() != 0:
+        return 1
+
     print(
         "feature-public-surface: selftest OK -- separates a public item, a "
         "macro call, a restricted item, a private item, a field, a statement "
@@ -1127,7 +1784,19 @@ def selftest() -> int:
         "each `ABI_CONTRACT` row to the source, refusing a loose `pub fn`, a "
         "module that is one once opened, a `pub use`, a module file that is "
         "not there, a shape it has no rule for, a row with no `OFF_AXIS` "
-        "entry and an empty population -- past three clean controls"
+        "entry and an empty population -- past three clean controls; and "
+        "holds each `TEST_ONLY_REACH` row to the dependency graph, refusing a "
+        "publishable crate, one with no library target, a build-dependency "
+        "edge, a library consumer the pin does not list, a pinned name no "
+        "edge reaches, a crate nothing consumes, a row with no `OFF_AXIS` "
+        "entry, an `OFF_AXIS` row in neither predicate nor `PROSE_ONLY`, a "
+        "row in both, a prose-only name with no row, and an empty graph -- "
+        "past three clean controls; and holds each `TEST_ONLY_FEATURE` row to "
+        "the graph AND the feature tables, refusing a publishable crate, a "
+        "non-dev edge that enables the feature, a feature no edge enables, a "
+        "feature another package's feature turns on, a row covered only in "
+        "part, a row with no `OFF_AXIS` entry and an empty graph -- past one "
+        "clean control"
     )
     return 0
 
