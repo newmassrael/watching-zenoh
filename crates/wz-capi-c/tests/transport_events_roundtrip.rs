@@ -35,6 +35,18 @@
 //! produce a second transition and the leg is about the DIRECTION reaching C,
 //! not about a count nobody promised.
 
+// Both planes are UNSTABLE-gated upstream and so is wz's `events` module, so on
+// the no-unstable arm there is no API to drive and this file compiles to zero
+// tests. Named rather than hidden, exactly as `source_info_roundtrip.rs` names
+// the same hole: a lane running only that arm would report green having
+// measured nothing, which is why the arm that MATTERS here is the default one.
+//
+// ⚠ MEASURED, not anticipated: without this the crate stops compiling under
+// `--all-features` (which turns `zenoh-c-no-unstable-api` ON and configures the
+// module out), and pre-push's non-default-features gate is what said so. Gate 3
+// builds default features and never sees it.
+#![cfg(not(feature = "zenoh-c-no-unstable-api"))]
+
 use std::ffi::{c_void, CString};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
