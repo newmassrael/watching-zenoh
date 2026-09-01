@@ -524,7 +524,26 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 #
 # Its calibration twin adds nothing here and declares `none`, on this counter's
 # standing rule: a chain that correctly completes adjudicates nobody.
-FOREIGN_ADJUDICATOR_LINKS = 879
+#
+# R2244 — 879 -> 880, and this one is a DEBT PAID LATE rather than a claim
+# declared with its round. ONE link, from `df0ec18b` (R2238): the abandon leg
+# `wz_abandons_an_over_budget_chain_with_a_marker_a_real_zenohd_accepts` in
+# `wz_fragment_tx_zenohd_interop.rs`, claiming `transport-fragmentation
+# wz->zenohd`. It is the MIRROR of the R2226 leg two paragraphs up — that one
+# measured what a genuine zenohd writes at ITS abandon path, this one measures
+# what a genuine zenohd DOES WITH wz's `0x3 Drop`, so it adjudicates zenohd's
+# fragment RX and counts.
+#
+# ⚠ THE ROUND THAT ADDED IT DID NOT MOVE THIS LINE, WHICH IS THE FAILURE THIS
+# COUNTER EXISTS TO MAKE LOUD, AND IT WAS LOUD: hosted Layer A4 has been red at
+# `measured 880, declared 879` on THREE consecutive pushes (the run at
+# `847e725c`, which carried `df0ec18b`, and both runs after it). That is
+# verbatim the three-in-a-row shape pre-push gate 2b was built for after
+# R311y759/y760/y762. Re-derived rather than trusted: the diff from the commit
+# that declared 879 to HEAD contains exactly ONE added `wz-proves:` line in
+# `crates/`, and gate 2b's own scoping expression matches that push range, so
+# the gate was not defective — it did not run.
+FOREIGN_ADJUDICATOR_LINKS = 880
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

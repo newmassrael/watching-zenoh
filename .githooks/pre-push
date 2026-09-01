@@ -274,8 +274,19 @@ if [[ -n "$diff_base" ]]; then
         a4_reason="the cross-impl audit itself changed"
     fi
     if [[ -n "$a4_reason" ]]; then
+        # R2244 — ARMED. `audit-crossimpl-proof.sh` SKIP-greens when
+        # mnemosyne-cli or python3 is missing, and its own docstring draws the
+        # line: "a SKIP on a developer's box is honest; a SKIP where the job
+        # PROVISIONS the tool is a provisioning regression masquerading as
+        # success". THIS caller provisions both — gate 1 above hard-fails
+        # without mnemosyne-cli and the schema pin hard-fails without python3 —
+        # so a skip here is unreachable today and silent if a gate is ever
+        # reordered. Arming costs nothing and makes it a hard fail instead.
+        # Hosted already sets this (ci.yml); bare `run-ci.sh --layer A4`
+        # deliberately does NOT, because there the developer may genuinely lack
+        # the tool.
         echo "pre-push: cross-impl proof audit ($a4_reason) ..."
-        if ! bash scripts/audit-crossimpl-proof.sh; then
+        if ! WZ_A4_REQUIRE=1 bash scripts/audit-crossimpl-proof.sh; then
             echo "" >&2
             echo "pre-push: cross-impl proof audit FAILED — this is hosted Layer A4," >&2
             echo "          run early because a claim moved in this push." >&2
