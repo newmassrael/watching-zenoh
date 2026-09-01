@@ -52,9 +52,18 @@
 //!      the ASCII the pico process serialised) and requires the row to follow
 //!      the wire rather than the expectation. If the row still read the original
 //!      string, this file would be asserting against its own `-k` argument.
-//!    * the BINDING control drops the segment carrying the declaration and
-//!      requires the id to surface in `unresolved`. If the reference resolved
-//!      anyway, the mapping would not be coming from the declaration at all.
+//!    * the BINDING control points the declaration at a DIFFERENT id and
+//!      requires the put's id to surface in `unresolved`. If the reference
+//!      resolved anyway, the mapping would not be coming from the declaration
+//!      at all.
+//!
+//! ⚠ THE BINDING CONTROL'S FIRST VERSION WAS FLAKY AND THE MEASUREMENT SAYS
+//! WHY. It dropped the recorded SEGMENT the declaration sat in, which assumes
+//! the put sits in a different one -- a fact about `read(2)`, not about the
+//! protocol. Measured here: pico's declare and put arrived in ONE 72-byte
+//! segment, so the control removed the reference along with the binding and
+//! left nothing to be unresolved. See `rebind_declaration` for what replaced it
+//! and why cutting the declaration's bytes is not an option either.
 
 use std::process::Command;
 use std::time::Duration;
@@ -257,25 +266,82 @@ fn the_analyzer_census_resolves_an_id_to_the_path_a_real_zenoh_pico_declared() {
         mutant.rows().iter().map(|r| &r.keyexpr).collect::<Vec<_>>()
     );
 
-    // ── ③b CONTROL, BINDING: without the declaration the id is UNRESOLVED ──
-    // The declaring segment is dropped. The put that referenced the id is
-    // still there, so a census that resolved it anyway would not be reading
-    // the binding at all.
-    let mut without: Vec<(Side, Vec<u8>)> = segments.clone();
-    without.remove(declaring_segment);
-    let without_pcap = synthesise_pcap(&without, DIALER_PORT, LISTENER_PORT);
-    let without_table =
-        aggregate(&Dissection::from_pcap(&without_pcap).expect("the truncated pcap still parses"));
+    // ── ③b CONTROL, BINDING: the referenced id is left UNBOUND ────────────
+    // The declaration is pointed at a DIFFERENT id, in place, so the put's
+    // reference has nothing behind it. A census that produced the row anyway
+    // would not be reading the binding at all, and one that dropped the
+    // reference silently would be reporting a capture it did not understand
+    // as a capture with nothing in it.
+    let mut rebound = segments.clone();
+    rebind_declaration(&mut rebound[declaring_segment].1, DECLARED);
+    let rebound_pcap = synthesise_pcap(&rebound, DIALER_PORT, LISTENER_PORT);
+    let rebound_table =
+        aggregate(&Dissection::from_pcap(&rebound_pcap).expect("the rebound pcap still parses"));
     assert!(
-        without_table.row(DECLARED).is_none(),
-        "the declaration was removed from the capture and the census still \
-         resolves the id to {DECLARED}"
+        rebound_table.row(DECLARED).is_none(),
+        "the declaration was pointed at another id and the census still \
+         resolves the put to {DECLARED}"
     );
     assert!(
-        !without_table.unresolved().is_empty(),
-        "the declaration was removed and no alias is reported unresolved, so \
-         the reference is being dropped silently rather than reported"
+        !rebound_table.unresolved().is_empty(),
+        "the reference was left unbound and no alias is reported unresolved, \
+         so it is being dropped silently rather than reported"
     );
+}
+
+/// Point the declaration at a DIFFERENT id, in place.
+///
+/// # Why not simply drop the declaration
+///
+/// The first version of this control removed the whole recorded segment the
+/// declaration sat in, and it was FLAKY -- because whether the put shares that
+/// segment is a fact about `read(2)`, not about the protocol. MEASURED on this
+/// tree: pico's declare and its put arrived in ONE 72-byte segment, so dropping
+/// it removed the reference as well and nothing was left to be unresolved. A
+/// control whose meaning depends on TCP segmentation is not a control.
+///
+/// Cutting the declaration's BYTES is no better: the `Declare` rides inside a
+/// transport `Frame`'s batch, so removing it would falsify that frame's length
+/// and the capture would stop parsing for a reason that is not the subject.
+///
+/// So the id moves instead, which is same-length and leaves every frame intact.
+/// The three bytes before the path are `[id][scope][len]` (a `DeclKexpr` writes
+/// its id, then the WireExpr's scope and suffix length), and this ASSERTS that
+/// shape before touching it: a layout change reds HERE, naming what it found,
+/// rather than silently rewriting some other field and reporting a census
+/// result about it.
+fn rebind_declaration(bytes: &mut [u8], path: &str) {
+    let at = bytes
+        .windows(path.len())
+        .position(|w| w == path.as_bytes())
+        .expect("the caller located this segment by the same needle");
+    assert!(
+        at >= 3,
+        "the declared path starts at byte {at}, with no room for the id, scope \
+         and length that precede it"
+    );
+    let (id, scope, len) = (bytes[at - 3], bytes[at - 2], bytes[at - 1]);
+    assert_eq!(
+        scope, 0,
+        "expected a zero WireExpr scope before the suffix and found {scope:#04x}; \
+         the declaration's layout has moved and this control would be rewriting \
+         some other field"
+    );
+    assert_eq!(
+        len as usize,
+        path.len(),
+        "expected the suffix length {} before the suffix and found {len}",
+        path.len()
+    );
+    assert!(
+        id < 0x80,
+        "the id is a multi-byte VLE ({id:#04x}); flipping one byte of it would \
+         change the encoding's length as well as its value"
+    );
+    // Bit 6, so the result is still a single-byte VLE and certainly a different
+    // id. Which id it becomes does not matter -- only that nothing declares the
+    // one the put references.
+    bytes[at - 3] = id ^ 0x40;
 }
 
 /// Replace the single occurrence of `from` with `to` in place. Same length by

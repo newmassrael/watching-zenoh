@@ -201,7 +201,18 @@ def parse_guards(text):
 # "which guards need a demo" would be the escape hatch this file exists to
 # avoid -- it would go stale the round a lane moves its build line, and
 # nothing would measure that.
-DEMO_BUILD_RE = re.compile(r"cargo build -p wz-ap-demo\b[^\n|)]*?--features ([A-Za-z0-9_,-]+)")
+# R2248 — the feature list is OPTIONAL, and requiring it was a hole rather than
+# a narrowing. The clause this regex serves is "a lane that builds the demo is a
+# lane whose guards depend on machine-local provisioning", and a FEATURELESS
+# `cargo build -p wz-ap-demo --quiet` is such a build: Layer Ewire runs exactly
+# that, and its guards need `target/zenoh-pico-cli/z_put` besides. With the
+# features mandatory those guards read as demo-free, were routed to a build
+# host, and came back with no libtest summary at all -- `UNMEASURED`, which is
+# this gate refusing to invent a number and is why the hole surfaced instead of
+# passing. A guard's routing must follow the DEMO, not the feature list.
+DEMO_BUILD_RE = re.compile(
+    r"cargo build -p wz-ap-demo\b(?:[^\n|)]*?--features ([A-Za-z0-9_,-]+))?"
+)
 FN_OPEN_RE = re.compile(r"^[a-z_][a-z0-9_]*\(\) \{")
 
 
@@ -223,7 +234,11 @@ def attach_demo_builds(text, guards):
                 continue
             m = DEMO_BUILD_RE.search(line)
             if m:
-                features = m.group(1)
+                # `""` (a featureless build) and `None` (no build in this lane)
+                # are DIFFERENT answers and the caller branches on which. A
+                # falsy-test would fold them and put the featureless case back
+                # on the build host.
+                features = m.group(1) or ""
                 break
         g.demo_features = features
     return guards
@@ -357,7 +372,7 @@ def run_guard(g, verbose):
     # previous pre-push step left at the one uplifted bin path, and a Layer Z
     # guard then fails its preconditions instead of reporting a count.
     features = getattr(g, "demo_features", None)
-    if features:
+    if features is not None:
         # ...and run it HERE, never through `$BX`. A lane that builds a demo is
         # a lane whose guards depend on machine-local provisioning -- the demo
         # at the one uplifted bin path, plus `target/zenohd/zenohd` and
@@ -369,7 +384,9 @@ def run_guard(g, verbose):
         # DERIVED test for that dependence; a hand-kept list of oracle-needing
         # guards would go stale the round a lane moves.
         routed = False
-        build = ["cargo", "build", "-p", "wz-ap-demo", "--features", features, "--quiet"]
+        build = ["cargo", "build", "-p", "wz-ap-demo", "--quiet"]
+        if features:
+            build[4:4] = ["--features", features]
         if verbose:
             print(f"  provisioning {' '.join(build)}")
         pre = subprocess.run(
@@ -735,18 +752,36 @@ def selftest():
             "layer_without_one() {",
             "    _runci_guarded_test B 3 cargo test -p p --test u -- --ignored",
             "}",
+            # R2248 — the shape the OLD regex swallowed: Layer Ewire's build
+            # names no features, and requiring them read this lane as demo-free.
+            "layer_with_a_featureless_demo() {",
+            "    (cd crates && cargo build -p wz-ap-demo --quiet) || return 1",
+            "    _runci_guarded_test C 1 cargo test -p p --test v -- --ignored",
+            "}",
         ]
     )
     dg = parse_guards(demo_fixture)
     arm(
         "R2236: a guard inherits its OWN lane's demo build",
-        len(dg) == 2 and dg[0].demo_features == "quic,routing-peer",
+        len(dg) == 3 and dg[0].demo_features == "quic,routing-peer",
         "a guard run without its lane's demo answers about the wrong binary",
     )
     arm(
         "R2236: the scan stops at the function boundary (the control)",
-        len(dg) == 2 and dg[1].demo_features is None,
+        len(dg) == 3 and dg[1].demo_features is None,
         "inheriting a previous lane's build would provision the wrong features",
+    )
+    arm(
+        "R2248: a FEATURELESS demo build is still a demo build",
+        len(dg) == 3 and dg[2].demo_features == "",
+        "requiring --features read Layer Ewire as demo-free, routed its guard "
+        "to a build host that has no zenoh-pico CLI, and the run came back "
+        "with no libtest summary at all",
+    )
+    arm(
+        "R2248: and `` is not `None` -- the two answers stay apart (the control)",
+        len(dg) == 3 and dg[2].demo_features is not None and dg[1].demo_features is None,
+        "folding the featureless case into None puts it back on the build host",
     )
 
     bad = [(n, w) for n, ok, w in arms if not ok]
