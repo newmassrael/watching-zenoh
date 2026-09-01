@@ -240,6 +240,14 @@ unsafe impl Send for Segment {}
 // SAFETY: as above.
 unsafe impl Sync for Segment {}
 
+/// R2264 — the alignment every segment's base carries, so an offset aligned
+/// inside it is aligned in MEMORY too.
+///
+/// A page, because that is what upstream's `mmap`ed segments give and therefore
+/// the boundary a C program written against zenoh-c may already assume. Nothing
+/// here needs a page specifically; what it needs is a bound, stated once.
+const SEGMENT_ALIGN: usize = 4096;
+
 impl Segment {
     /// Allocate a segment of `len` bytes, all free.
     ///
@@ -247,9 +255,32 @@ impl Segment {
     /// `z_get_shm.c` builds its provider from `strlen(value)`, which is 0 when
     /// the example is run without a payload.
     fn new(len: usize) -> Arc<Self> {
-        let mut bytes = vec![0u8; len].into_boxed_slice();
-        let base = bytes.as_mut_ptr();
-        std::mem::forget(bytes);
+        // R2264 — the segment is allocated at PAGE alignment, and that is a
+        // correctness requirement rather than a tidiness one.
+        //
+        // `claim` aligns an OFFSET inside the segment. A caller of
+        // `z_shm_provider_alloc_aligned` is handed a POINTER and told it meets
+        // the alignment it asked for, so the two agree only when the base does
+        // too. This was `vec![0u8; len]` — alignment 1 — so a 64-byte request
+        // returned an address that was 64-aligned within the segment and
+        // arbitrary in memory. MEASURED: the first aligned spelling this round
+        // added came back at `addr % 64 == 48`.
+        //
+        // Upstream has this for free: its segments are `mmap`ed and therefore
+        // page-aligned. Matching that here makes every alignment up to a page
+        // exact, and beyond a page neither implementation promises anything.
+        let base = if len == 0 {
+            std::ptr::null_mut()
+        } else {
+            let layout = std::alloc::Layout::from_size_align(len, SEGMENT_ALIGN)
+                .expect("a segment layout at page alignment");
+            // SAFETY: `len` is non-zero, so the layout is non-zero-sized.
+            let p = unsafe { std::alloc::alloc_zeroed(layout) };
+            if p.is_null() {
+                std::alloc::handle_alloc_error(layout);
+            }
+            p
+        };
         Arc::new(Self {
             base,
             len,
@@ -274,12 +305,16 @@ impl Segment {
 
 impl Drop for Segment {
     fn drop(&mut self) {
-        if self.len == 0 && self.base.is_null() {
+        if self.len == 0 || self.base.is_null() {
             return;
         }
-        // SAFETY: `base` / `len` came from `Box<[u8]>::into` in `new` and no
-        // chunk can outlive the `Arc` that owns this.
-        drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(self.base, self.len)) });
+        // SAFETY: `base` came from `alloc_zeroed` in `new` with exactly this
+        // layout, and no chunk can outlive the `Arc` that owns this. R2264 — the
+        // matching `dealloc`; it was `Box::from_raw` while `new` used `vec!`,
+        // and both had to move together when the segment gained an alignment.
+        let layout = std::alloc::Layout::from_size_align(self.len, SEGMENT_ALIGN)
+            .expect("the layout `new` allocated with");
+        unsafe { std::alloc::dealloc(self.base, layout) };
     }
 }
 
@@ -699,6 +734,121 @@ pub unsafe extern "C" fn z_shm_provider_alloc_gc_defrag_blocking(
     guard_val((), || {
         // SAFETY: the caller's contract, delegated.
         unsafe { provider_alloc(out_result, provider, size, ALIGN_BYTE, true) };
+    });
+}
+
+// --- R2264 (open-debt item 607): the ALIGNED and DEALLOC spellings ----------
+//
+// Upstream's provider surface is one allocation with three independent axes —
+// the reclaim policy (gc / gc+defrag / gc+defrag+dealloc), whether it BLOCKS,
+// and whether the caller names an alignment — and it spells every reachable
+// combination as its own symbol. wz already had the unaligned column; these
+// five are the rest of the grid that needs no machinery wz does not have.
+//
+// ⛔ THE ALIGNMENT IS NOT DECORATION HERE, and that is why these are not
+// aliases of the five above: `provider_alloc` already takes an alignment and
+// the existing entry points all pass `ALIGN_BYTE`. Each function below passes
+// the CALLER'S, so a program that asks for 64-byte alignment gets it — which
+// `z_shm_provider_alloc_aligned` already proved reachable on the non-gc path.
+//
+// ⚠ `dealloc` is upstream's THIRD reclaim step: when gc and defrag both fail,
+// forcibly release the least recently used segment. wz's allocator has nothing
+// to force — a chunk returns to the free list in its own `Drop` and adjacent
+// ranges coalesce there, so by the time an allocation fails there is nothing
+// held that releasing could recover. That makes these two identical to their
+// defrag twins HERE, for the same measured reason `alloc_gc` is identical to
+// `alloc`, and the doc says so rather than leaving a reader to infer a
+// shortcut.
+
+/// Allocate at the caller's alignment, reclaiming first (zenoh-c
+/// `z_shm_provider_alloc_gc_aligned`).
+///
+/// # Safety
+/// As [`z_shm_provider_alloc`].
+#[no_mangle]
+pub unsafe extern "C" fn z_shm_provider_alloc_gc_aligned(
+    out_result: *mut z_buf_layout_alloc_result_t,
+    provider: *const z_loaned_shm_provider_t,
+    size: usize,
+    alignment: z_alloc_alignment_t,
+) {
+    guard_val((), || {
+        // SAFETY: the caller's contract, delegated.
+        unsafe { provider_alloc(out_result, provider, size, alignment, false) };
+    });
+}
+
+/// Allocate at the caller's alignment, reclaiming and defragmenting (zenoh-c
+/// `z_shm_provider_alloc_gc_defrag_aligned`).
+///
+/// # Safety
+/// As [`z_shm_provider_alloc`].
+#[no_mangle]
+pub unsafe extern "C" fn z_shm_provider_alloc_gc_defrag_aligned(
+    out_result: *mut z_buf_layout_alloc_result_t,
+    provider: *const z_loaned_shm_provider_t,
+    size: usize,
+    alignment: z_alloc_alignment_t,
+) {
+    guard_val((), || {
+        // SAFETY: the caller's contract, delegated.
+        unsafe { provider_alloc(out_result, provider, size, alignment, false) };
+    });
+}
+
+/// Allocate at the caller's alignment and BLOCK rather than fail (zenoh-c
+/// `z_shm_provider_alloc_gc_defrag_blocking_aligned`).
+///
+/// # Safety
+/// As [`z_shm_provider_alloc`].
+#[no_mangle]
+pub unsafe extern "C" fn z_shm_provider_alloc_gc_defrag_blocking_aligned(
+    out_result: *mut z_buf_layout_alloc_result_t,
+    provider: *const z_loaned_shm_provider_t,
+    size: usize,
+    alignment: z_alloc_alignment_t,
+) {
+    guard_val((), || {
+        // SAFETY: the caller's contract, delegated.
+        unsafe { provider_alloc(out_result, provider, size, alignment, true) };
+    });
+}
+
+/// Allocate, reclaiming, defragmenting and force-releasing (zenoh-c
+/// `z_shm_provider_alloc_gc_defrag_dealloc`).
+///
+/// Identical to its defrag twin here — see the block comment above for why wz
+/// has no third reclaim step to take.
+///
+/// # Safety
+/// As [`z_shm_provider_alloc`].
+#[no_mangle]
+pub unsafe extern "C" fn z_shm_provider_alloc_gc_defrag_dealloc(
+    out_result: *mut z_buf_layout_alloc_result_t,
+    provider: *const z_loaned_shm_provider_t,
+    size: usize,
+) {
+    guard_val((), || {
+        // SAFETY: the caller's contract, delegated.
+        unsafe { provider_alloc(out_result, provider, size, ALIGN_BYTE, false) };
+    });
+}
+
+/// The aligned twin of [`z_shm_provider_alloc_gc_defrag_dealloc`] (zenoh-c
+/// `z_shm_provider_alloc_gc_defrag_dealloc_aligned`).
+///
+/// # Safety
+/// As [`z_shm_provider_alloc`].
+#[no_mangle]
+pub unsafe extern "C" fn z_shm_provider_alloc_gc_defrag_dealloc_aligned(
+    out_result: *mut z_buf_layout_alloc_result_t,
+    provider: *const z_loaned_shm_provider_t,
+    size: usize,
+    alignment: z_alloc_alignment_t,
+) {
+    guard_val((), || {
+        // SAFETY: the caller's contract, delegated.
+        unsafe { provider_alloc(out_result, provider, size, alignment, false) };
     });
 }
 
@@ -1494,6 +1644,101 @@ const _: () = {
     assert!(align_of::<z_buf_layout_alloc_result_t>() == 8);
     assert!(size_of::<z_buf_alloc_result_t>() == 96);
 };
+
+#[cfg(test)]
+mod aligned_alloc_tests {
+    use super::*;
+
+    /// # Safety
+    /// The returned provider is the caller's to drop.
+    unsafe fn provider(total: usize) -> z_owned_shm_provider_t {
+        let mut p = z_owned_shm_provider_t::null_value();
+        assert_eq!(z_shm_provider_default_new(&mut p, total), Z_OK);
+        p
+    }
+
+    /// R2264 — the CALLER's alignment reaches the allocator on every one of the
+    /// new aligned spellings.
+    ///
+    /// This is the assertion that separates them from aliases of the unaligned
+    /// five: those pass `ALIGN_BYTE`, so a new entry point that forgot to
+    /// forward its argument would still allocate, still return OK, and still
+    /// pass any test that only checked the status. The address is what tells.
+    #[test]
+    fn every_aligned_spelling_honours_the_callers_alignment() {
+        const POW: u8 = 6; // 64 bytes
+        let align = z_alloc_alignment_t { pow: POW };
+        type Aligned = unsafe extern "C" fn(
+            *mut z_buf_layout_alloc_result_t,
+            *const z_loaned_shm_provider_t,
+            usize,
+            z_alloc_alignment_t,
+        );
+        let spellings: [(&str, Aligned); 4] = [
+            ("alloc_gc_aligned", z_shm_provider_alloc_gc_aligned),
+            (
+                "alloc_gc_defrag_aligned",
+                z_shm_provider_alloc_gc_defrag_aligned,
+            ),
+            (
+                "alloc_gc_defrag_blocking_aligned",
+                z_shm_provider_alloc_gc_defrag_blocking_aligned,
+            ),
+            (
+                "alloc_gc_defrag_dealloc_aligned",
+                z_shm_provider_alloc_gc_defrag_dealloc_aligned,
+            ),
+        ];
+        for (name, f) in spellings {
+            // SAFETY: a live provider this frame owns.
+            let mut p = unsafe { provider(64 * 1024) };
+            let mut out: z_buf_layout_alloc_result_t = unsafe { std::mem::zeroed() };
+            // SAFETY: `out` is writable and `p` is live.
+            unsafe { f(&mut out, z_shm_provider_loan(&p), 128, align) };
+            assert_eq!(
+                out.status, ZC_BUF_LAYOUT_ALLOC_STATUS_OK,
+                "{name} must allocate from a fresh 64K provider"
+            );
+            // SAFETY: the status says the buffer is live.
+            let data = unsafe { z_shm_mut_data(z_shm_mut_loan(&out.buf)) };
+            assert!(!data.is_null(), "{name} returned OK with no data");
+            assert_eq!(
+                data as usize % (1usize << POW),
+                0,
+                "{name} did not honour the caller's alignment — it is forwarding \
+                 ALIGN_BYTE like its unaligned twin"
+            );
+            let mut moved = z_moved_shm_mut_t { _this: out.buf };
+            // SAFETY: dropped once.
+            unsafe { z_shm_mut_drop(&mut moved) };
+            let mut moved_p = z_moved_shm_provider_t { _this: p };
+            // SAFETY: as above.
+            unsafe { z_shm_provider_drop(&mut moved_p) };
+            p = z_owned_shm_provider_t::null_value();
+            let _ = p;
+        }
+    }
+
+    /// The two DEALLOC spellings allocate, which is the claim their name makes
+    /// about wz: there is no third reclaim step, but the entry point works.
+    #[test]
+    fn the_dealloc_spellings_allocate() {
+        // SAFETY: a live provider this frame owns.
+        let mut p = unsafe { provider(64 * 1024) };
+        let mut out: z_buf_layout_alloc_result_t = unsafe { std::mem::zeroed() };
+        // SAFETY: `out` is writable and `p` is live.
+        unsafe { z_shm_provider_alloc_gc_defrag_dealloc(&mut out, z_shm_provider_loan(&p), 256) };
+        assert_eq!(out.status, ZC_BUF_LAYOUT_ALLOC_STATUS_OK);
+        let mut moved = z_moved_shm_mut_t { _this: out.buf };
+        // SAFETY: dropped once.
+        unsafe { z_shm_mut_drop(&mut moved) };
+        let mut moved_p = z_moved_shm_provider_t { _this: p };
+        // SAFETY: as above.
+        unsafe { z_shm_provider_drop(&mut moved_p) };
+        p = z_owned_shm_provider_t::null_value();
+        let _ = p;
+    }
+}
 
 #[cfg(test)]
 mod memory_layout_tests {

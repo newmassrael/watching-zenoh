@@ -211,7 +211,16 @@ const BASELINES: &[(&str, usize, &str)] = &[
     // ⚠ `z_owned_alloc_layout_t` is a TYPEDEF of `z_owned_precomputed_layout_t`
     // upstream, so those two families are one type under two names — 22
     // functions, not two planes.
-    ("unstable-shm", 78, "1.10.0"),
+    // R2264 lowered this 78 -> 73: the five provider spellings that need no
+    // machinery wz lacks — three `_aligned` twins and the `_dealloc` pair.
+    //
+    // ⚠ Building them found a REAL DEFECT in the five that were already there:
+    // `claim` aligns an OFFSET, and the segment was `vec![0u8; len]` at
+    // alignment 1, so `z_shm_provider_alloc_aligned` returned addresses that
+    // were aligned inside the segment and arbitrary in memory (measured:
+    // `addr % 64 == 48`). Segments are page-aligned now, which is what
+    // upstream's `mmap`ed ones give for free.
+    ("unstable-shm", 73, "1.10.0"),
     // R311y614 — the two arms that had NO oracle on any machine, and therefore
     // no row: the gate hard-FAILED on them rather than guessing a ceiling from
     // a neighbour. `scripts/install-zenoh-c-arm.sh` builds any of the four, so
