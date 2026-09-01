@@ -4812,11 +4812,38 @@ pub mod common {
     pub fn spawn_zenohd_multicast_scouting_on_any_interface(
         label: &'static str,
     ) -> (ChildGuard, u16) {
+        spawn_zenohd_multicast_scouting_on_any_interface_with_args(label, &[])
+    }
+
+    /// R2246 — the any-interface spawn with EXTRA argv.
+    ///
+    /// ⚠ R2230's doc above says this listen address is for "the ONE caller that
+    /// needs the Hello to carry a locator". That was measured against the pico
+    /// leg and it was not the whole population: `wz_scout_zenohd_interop`'s
+    /// `wz_scout_discovers_zenohd_over_multicast_and_opens_the_advertised_locator`
+    /// needs it for exactly the same reason and was left on the loopback form,
+    /// where 1.10.0 answers its multicast scout with an empty locator list. It
+    /// went red on every hosted run from the pin move onward and was masked by a
+    /// compile error in the same lane until R2243 cleared that.
+    ///
+    /// The population is derivable rather than remembered: of the three callers
+    /// of the loopback form, the other two (`zenohd_scouts_wz_interop`,
+    /// `zenohd_scouts_wz_router_interop`) run the OPPOSITE direction — zenohd
+    /// asks and wz answers — so zenohd's own locators never reach an assertion
+    /// there. Direction is the discriminator, not the count.
+    ///
+    /// A separate entry point rather than a changed signature, for the reason
+    /// `spawn_zenohd_multicast_scouting_with_args` gives one screen up: the
+    /// existing call sites stay byte-identical.
+    pub fn spawn_zenohd_multicast_scouting_on_any_interface_with_args(
+        label: &'static str,
+        extra_args: &[&str],
+    ) -> (ChildGuard, u16) {
         spawn_zenohd_multicast_scouting_listening_on(
             label,
             "tcp/0.0.0.0:0",
             super::common::ZENOHD_ANY_LISTENER_LINE,
-            &[],
+            extra_args,
         )
     }
 

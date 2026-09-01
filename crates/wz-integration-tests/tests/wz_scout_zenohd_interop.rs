@@ -48,7 +48,8 @@ use std::time::Duration;
 
 use wz_integration_tests::common::{
     configured_zid_value, hello_zid_value, per_process_zid_hex, read_captured,
-    spawn_zenohd_multicast_scouting_with_args, wait_for_substring, wz_ap_demo_binary, ChildGuard,
+    spawn_zenohd_multicast_scouting_on_any_interface_with_args, wait_for_substring,
+    wz_ap_demo_binary, ChildGuard,
 };
 
 // wz-proves: scouting-active wz->zenohd
@@ -94,11 +95,32 @@ fn wz_scout_discovers_zenohd_over_multicast_and_opens_the_advertised_locator() {
     // `SCOUTING_E2E_ZID_WIDTHS` can say in one place which widths the suite's
     // foreign witnesses walk. Byte-identical to the `format!` it replaces.
     let zenohd_zid_hex = per_process_zid_hex("3f1c", 16);
-    let (mut zenohd, zenohd_port) = spawn_zenohd_multicast_scouting_with_args(
+    // R2246 — ON EVERY INTERFACE, not just loopback, and the change is forced by
+    // the pin rather than chosen. 1.10.0 picks a Hello's locators by WHO ASKED:
+    // `zenoh/src/net/runtime/orchestrator.rs` @ `fn get_hello_locators` returns
+    // `get_locators()` for a loopback peer and `get_locators_noloopback()` for
+    // everyone else. A multicast scout never arrives from loopback, so a router
+    // listening only on `127.0.0.1` has every one of its locators filtered out
+    // and answers with an EMPTY list. Measured on this tree, one variable and two
+    // arms: with `tcp/127.0.0.1:0` the demo logs ZERO `scouted peer locator`
+    // lines and reports `found no peer`; with `tcp/0.0.0.0:0` it logs one and
+    // reaches `session Established`. The Hello does arrive either way — it simply
+    // names nothing to dial.
+    //
+    // R2230 made this same move for the pico leg and recorded it as "the ONE
+    // caller that needs the Hello to carry a locator". This is the second.
+    let (mut zenohd, zenohd_port) = spawn_zenohd_multicast_scouting_on_any_interface_with_args(
         "zenohd (multicast-scouting router)",
         &["--cfg", &format!("id:\"{zenohd_zid_hex}\"")],
     );
-    let expected_locator = format!("tcp/127.0.0.1:{zenohd_port}");
+    // The PORT, not the whole locator. The address literal was never what made
+    // this assertion sharp — the comment below says so itself: the port is the
+    // kernel's choice and the demo was never told it. Under `0.0.0.0` zenohd
+    // announces that same port on each real interface, so pinning the port keeps
+    // the whole claim and drops only the half the pin took away. Pinning
+    // `tcp/0.0.0.0:` instead would be worse than useless: that literal never
+    // appears in a Hello, which expands to the interfaces.
+    let expected_port = format!(":{zenohd_port}");
 
     // wz-ap-demo in `--scout` mode. NOTE what is absent: no --connect, no
     // address of any kind. The only endpoint this process can reach is one a
@@ -155,13 +177,24 @@ fn wz_scout_discovers_zenohd_over_multicast_and_opens_the_advertised_locator() {
             )
         });
     assert!(
-        scouted_line.contains(&expected_locator),
-        "wz scouted a locator that is not zenohd's announced listener.\n\
-         expected: {expected_locator}\n\
-         line:     {scouted_line}\n\
+        scouted_line.contains(&expected_port),
+        "wz scouted a locator that does not carry zenohd's announced port.\n\
+         expected port: {expected_port}\n\
+         line:          {scouted_line}\n\
          A mismatch here means the Hello was decoded into the wrong endpoint (or \
          another zenoh peer on this host answered first).\n\
          --- captured wz-ap-demo stderr ---\n{demo_captured}"
+    );
+    // And the locator names a ROUTABLE address rather than the loopback the
+    // pinned zenohd refuses to advertise to a multicast peer. Without this the
+    // port check alone would still pass if `get_hello_locators` were ever to
+    // start answering `127.0.0.1` again — which is the exact state that made
+    // this leg unable to dial, so it must not read as a pass.
+    assert!(
+        !scouted_line.contains("tcp/127.0.0.1:"),
+        "wz scouted a LOOPBACK locator. The pinned zenohd filters loopback out \
+         of a Hello answered to a non-loopback scout, so this line means either \
+         the pin moved or another peer on this host answered.\nline: {scouted_line}"
     );
 
     // Assertion 2 — the FSM's own dispatch counter. Binds the claim to
@@ -219,16 +252,29 @@ fn wz_scout_discovers_zenohd_over_multicast_and_opens_the_advertised_locator() {
     // the `wz->zenohd` leg: zenohd answers a Scout only after decoding it and
     // matching its `what` mask, and it then accepted the handshake on the
     // endpoint it had advertised.
+    // R2246 — the locator is read OUT OF THE SCOUTED LINE rather than rebuilt
+    // from a literal this test chose. Under `0.0.0.0` the address zenohd
+    // advertises is whichever interface the host has, so there is no literal to
+    // compare against; and reading it back is the stronger claim anyway — it
+    // binds "what wz dialled" to "what the Hello said" instead of to a string
+    // the test already believed.
+    let scouted_locator = scouted_line
+        .split("scouted peer locator ")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .unwrap_or_else(|| {
+            panic!("no locator token follows 'scouted peer locator'.\nline: {scouted_line}")
+        });
     established.unwrap_or_else(|c| {
         panic!(
             "wz-ap-demo did not log '{established_substr}' within 20s — the SCOUTED \
-             locator {expected_locator} did not carry a session to zenohd.\n\
+             locator {scouted_locator} did not carry a session to zenohd.\n\
              --- captured wz-ap-demo stderr at deadline ---\n{c}"
         )
     });
     assert!(
-        demo_captured.contains(&format!("connected to {expected_locator}")),
-        "wz established, but not against the scouted locator {expected_locator}.\n\
+        demo_captured.contains(&format!("connected to {scouted_locator}")),
+        "wz established, but not against the scouted locator {scouted_locator}.\n\
          --- captured wz-ap-demo stderr ---\n{demo_captured}"
     );
 }
