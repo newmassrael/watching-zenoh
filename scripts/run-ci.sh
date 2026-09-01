@@ -520,6 +520,30 @@ fi
 # stamp, a duration, and — on failure — the lane name to FAILED_LAYERS for the
 # unmissable end-of-run summary. The pass/fail verdict is still the exit code.
 FAILED_LAYERS=()
+# R2274 (debt-carry-N57, N42) — a lane that exits 0 having run NOTHING used to
+# print the SAME verdict as one that worked, and the run ended on a flat
+# `all required layers pass`. The evidence was always there (`Qz SKIP (…)`,
+# `test result: ok. 0 passed`) and nothing read it. These three record what the
+# reading found so the end-of-run verdict can no longer be silent about it:
+#   RAN_LAYERS     — lanes that actually executed (a `--layer X` run has one)
+#   NOWORK_LAYERS  — "<lane>(<VERDICT>)" for each lane whose own output PROVES
+#                    it ran nothing: a decline with no work beside it, or a
+#                    libtest total of zero
+#   QUIET_LAYERS   — lanes that printed NOTHING. Counted and named, never
+#                    claimed as "ran nothing": measured over 15189 historical
+#                    lane runs, 9 lanes are silent on success to this day
+#                    (C2, C3, C1h, C1bl, C1bm, C1bq, C1br, C1own, B2) because a
+#                    clean clippy prints nothing — and it did the work. The
+#                    reading cannot separate those from a lane that did nothing,
+#                    so it says so instead of guessing.
+#   UNREAD_LAYERS  — lanes whose output could NOT be read; never a green
+RAN_LAYERS=()
+NOWORK_LAYERS=()
+QUIET_LAYERS=()
+UNREAD_LAYERS=()
+# Why the reading could not be armed at all, if so. Named in the verdict rather
+# than silently skipped: a gate that cannot read its input must not report green.
+DECLINE_READ_OFF=""
 _runci_ts() { date +'%Y-%m-%dT%H:%M:%S%z'; }
 
 # ─── resume checkpoint (--resume) ──────────────────────────────────
@@ -642,6 +666,63 @@ _runci_unreached_report() {
          "$((total - reached)) did not run. That is what this red is covering" >&2
 }
 
+# ─── the decline reading (R2274, debt-carry-N57 + N42) ─────────────────────
+#
+# Called on `run_layer`'s PASS path, AFTER the verdict line has been echoed.
+# That ordering is the whole trick: `run-ci.sh` self-tees its output through an
+# ASYNCHRONOUS `tee`, so the bytes a lane just wrote are not necessarily in
+# `$RUNCI_LOG_FILE` yet — reading it the instant the lane returns races the tee
+# and hands back a truncated tail. The verdict line is printed first and is
+# therefore a sentinel: `lane_decline_read.py` waits for IT, and everything the
+# lane wrote before it is flushed by then. Nothing about how the lane RUNS
+# changes — same shell, same fds, same live streaming — which is what rules out
+# the two capture forms this round measured and refused (a `| tee` pipeline puts
+# the lane in a subshell and would have dropped the three globals that cross
+# lane boundaries; a redirect-then-replay ends live streaming, which R311y889
+# already paid a round for).
+_runci_read_lane() {
+    local name="$1" out rc
+    RAN_LAYERS+=("$name")
+    if [[ -n "$DECLINE_READ_OFF" ]]; then
+        return 0
+    fi
+    if [[ -z "${RUNCI_LOG_FILE:-}" || ! -f "${RUNCI_LOG_FILE:-}" ]]; then
+        DECLINE_READ_OFF="the self-log is off (RUNCI_NO_SELF_LOG=1), so no lane's output was readable"
+        return 0
+    fi
+    if ! command -v python3 >/dev/null 2>&1; then
+        DECLINE_READ_OFF="python3 is not on PATH, so no lane's output was readable"
+        return 0
+    fi
+    out="$(python3 scripts/lib/lane_decline_read.py --read \
+             --log "$RUNCI_LOG_FILE" --lane "$name" 2>&1)"
+    rc=$?
+    case "$rc:$out" in
+        0:WORKED*)
+            return 0
+            ;;
+        0:SILENT*)
+            # The lane printed nothing. NOT claimed as "ran nothing" — a clean
+            # clippy prints nothing too, and this reading cannot tell the two
+            # apart. Named so the pass is not read as evidence, and left out of
+            # the armed expectation for the same reason.
+            QUIET_LAYERS+=("$name")
+            ;;
+        0:*)
+            # DECLINED / ZEROTEST — the lane's OWN OUTPUT proves it ran nothing.
+            # Said on its own line so it cannot be lost in the lane's output,
+            # and recorded so the final verdict has to carry it.
+            echo "[$(_runci_ts)] WARN  Layer $name ran nothing: ${out}" >&2
+            NOWORK_LAYERS+=("$name(${out%% *})")
+            ;;
+        *)
+            echo "[$(_runci_ts)] ERROR Layer $name: the decline reading FAILED: ${out}" >&2
+            UNREAD_LAYERS+=("$name")
+            ;;
+    esac
+    return 0
+}
+
 run_layer() {
     local name="$1"
     shift
@@ -675,6 +756,7 @@ run_layer() {
         trap - DEBUG
         set +T
         echo "[$(_runci_ts)] INFO  Layer $name pass ($((SECONDS - start))s)"
+        _runci_read_lane "$name"
         _ckpt_mark "$name"
         return 0
     else
@@ -2100,6 +2182,23 @@ PY
     # follows: six cases, four of them RED and each pinning WHICH red.
     python3 scripts/lib/hook_script_reference_gate.py --selftest || return 1
     python3 scripts/lib/hook_script_reference_gate.py --check || return 1
+    # R2274 (debt-carry-N57, N42) — THE DECLINE READING'S OWN VOCABULARY, pinned
+    # both ways against this file. `run_layer` now reads each lane's own output
+    # on the PASS path and refuses to let `all required layers pass` stand for a
+    # run in which lanes ran nothing; that reading recognises a decline by the
+    # token `SKIP`, which is what run-ci.sh actually writes. This gate is what
+    # keeps that sentence true instead of merely written: every `_*_unavailable`
+    # helper — a population DERIVED from this file, never listed there — must
+    # emit a decline line the reader classifies as a decline, and a REQUIRE-arm
+    # FAIL line that it does NOT. An empty family is RED: a vocabulary gate whose
+    # subject has vanished has lost its subject, it has not passed.
+    #
+    # The selftest's last arm drives `run-ci.sh --layer Qz` with its Zephyr venv
+    # pointed at a path that does not exist — N57's own reproduction — and fails
+    # unless the run says the lane ran nothing. That is the arm that proves the
+    # reading is WIRED rather than merely written.
+    python3 scripts/lib/lane_decline_read.py --selftest || return 1
+    python3 scripts/lib/lane_decline_read.py --audit || return 1
     # R2199 (open-debt item 557) — EVERY HANDSHAKE-NEGOTIATED AXIS IS ASSERTED.
     #
     # The consuming surface reported that no test measured `sn_resolution` or
@@ -16441,12 +16540,89 @@ if [[ -n "$ONLY_LAYER" && "${LAYER_MATCHED:-0}" -ne 1 ]]; then
     FAILED_LAYERS+=("--layer $ONLY_LAYER (no such lane)")
     overall=1
 fi
+# R2274 (debt-carry-N57, N42) — WHAT THE DECLINE READING FOUND, before the
+# verdict is worded. Two of these three set `overall`, and the third qualifies
+# the green line: `all required layers pass` must never again be the verdict of
+# a run in which lanes ran nothing.
+#
+# A reading that FAILED is not a pass. The sentinel it waits for is written by
+# this very script microseconds earlier, so a timeout means something is wrong
+# with the log, not with the timing.
+if (( ${#UNREAD_LAYERS[@]} > 0 )); then
+    echo "[$(_runci_ts)] ERROR run-ci: the decline reading FAILED for ${#UNREAD_LAYERS[@]} lane(s): ${UNREAD_LAYERS[*]} — their green is unverified" >&2
+    FAILED_LAYERS+=("decline reading unread: ${UNREAD_LAYERS[*]}")
+    overall=1
+fi
+# THE ARMED ASSERTION, and it is BIDIRECTIONAL — a SET, not a count. Arm it with
+# the lanes a caller EXPECTS to run nothing (`WZ_DECLINED_EXPECT=` for "none",
+# which is what a job that provisions its own oracles is claiming). A lane that
+# runs nothing outside the set is a provisioning regression; a lane INSIDE the
+# set that did work is a set that has gone stale, and a pin that only fires one
+# way is the shape this tree keeps throwing away.
+if [[ -n "${WZ_DECLINED_EXPECT+set}" ]]; then
+    if [[ -n "$DECLINE_READ_OFF" ]]; then
+        echo "[$(_runci_ts)] ERROR run-ci: WZ_DECLINED_EXPECT is armed but the decline reading did not run ($DECLINE_READ_OFF) — an assertion cannot be satisfied by a reading that never happened" >&2
+        FAILED_LAYERS+=("WZ_DECLINED_EXPECT armed with no reading")
+        overall=1
+    else
+        _dx_want=()
+        IFS=',' read -r -a _dx_want <<< "${WZ_DECLINED_EXPECT}"
+        _dx_got=()
+        for _dx in ${NOWORK_LAYERS[@]+"${NOWORK_LAYERS[@]}"}; do
+            _dx_got+=("${_dx%%(*}")
+        done
+        _dx_unexpected=()
+        for _dx in ${_dx_got[@]+"${_dx_got[@]}"}; do
+            [[ " ${_dx_want[*]-} " == *" $_dx "* ]] || _dx_unexpected+=("$_dx")
+        done
+        _dx_missing=()
+        for _dx in ${_dx_want[@]+"${_dx_want[@]}"}; do
+            [[ -n "$_dx" ]] || continue
+            # A named lane that did not RUN is not a violation — `--layer X`
+            # runs one lane — but a named lane that ran AND worked is.
+            [[ " ${RAN_LAYERS[*]-} " == *" $_dx "* ]] || continue
+            [[ " ${_dx_got[*]-} " == *" $_dx "* ]] || _dx_missing+=("$_dx")
+        done
+        if (( ${#_dx_unexpected[@]} > 0 )); then
+            echo "[$(_runci_ts)] ERROR run-ci: ${#_dx_unexpected[@]} lane(s) ran nothing outside WZ_DECLINED_EXPECT='${WZ_DECLINED_EXPECT}': ${_dx_unexpected[*]}" >&2
+            FAILED_LAYERS+=("ran nothing, unexpected: ${_dx_unexpected[*]}")
+            overall=1
+        fi
+        if (( ${#_dx_missing[@]} > 0 )); then
+            echo "[$(_runci_ts)] ERROR run-ci: WZ_DECLINED_EXPECT names ${#_dx_missing[@]} lane(s) that RAN and did work: ${_dx_missing[*]} — the expectation is stale" >&2
+            FAILED_LAYERS+=("expected to run nothing but worked: ${_dx_missing[*]}")
+            overall=1
+        fi
+    fi
+fi
+# The qualification carried by BOTH verdicts below. Empty in the ordinary case,
+# so the historical `run-ci: all required layers pass` token is unchanged for
+# every grep that matches it.
+_runci_nowork_suffix() {
+    if [[ -n "$DECLINE_READ_OFF" ]]; then
+        printf ' — WITHOUT the lane decline reading (%s), so this is not evidence any lane did work' \
+            "$DECLINE_READ_OFF"
+        return 0
+    fi
+    if (( ${#NOWORK_LAYERS[@]} > 0 )); then
+        printf ' — but %d of the %d lane(s) that ran did NOTHING: %s' \
+            "${#NOWORK_LAYERS[@]}" "${#RAN_LAYERS[@]}" "${NOWORK_LAYERS[*]}"
+    fi
+    # Reported beside it, never folded into it: a silent lane is one this
+    # reading cannot decide, not one it has decided against.
+    if (( ${#QUIET_LAYERS[@]} > 0 )); then
+        printf ' — and %d lane(s) printed nothing, so their pass is not evidence either: %s' \
+            "${#QUIET_LAYERS[@]}" "${QUIET_LAYERS[*]}"
+    fi
+}
 if [[ $overall -eq 0 ]]; then
-    echo "[$(_runci_ts)] INFO  run-ci: all required layers pass"
+    echo "[$(_runci_ts)] INFO  run-ci: all required layers pass$(_runci_nowork_suffix)"
 else
     # Name every failed lane so the verdict is unmissable regardless of how large
     # the log is or how it was captured — no hunting for a buried FAIL line.
     echo "[$(_runci_ts)] ERROR run-ci: ${#FAILED_LAYERS[@]} layer(s) FAILED: ${FAILED_LAYERS[*]}" >&2
+    _dx_suffix="$(_runci_nowork_suffix)"
+    [[ -n "$_dx_suffix" ]] && echo "[$(_runci_ts)] ERROR run-ci: and the lanes that passed${_dx_suffix}" >&2
     # Under GitHub Actions, ALSO surface the verdict + the actual failing lines as
     # a `::error` annotation. Annotations render in the run summary and the
     # `gh run view` ANNOTATIONS section even when `gh run view --log-failed`
