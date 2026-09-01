@@ -359,7 +359,8 @@ pub struct InterestRequest {
     ///
     /// Upstream does not send these — the router answers an interest from the
     /// declarations that `matches` its restriction
-    /// (`zenoh/src/net/routing/hat/router/pubsub.rs:986`) and only for the
+    /// (`zenoh/src/net/routing/hat/router/pubsub.rs`
+    /// @ `res.is_none_or(|res| res.matches(sub))`) and only for the
     /// kinds its option bits named (`hat/router/interests.rs:60,71,82`) — so
     /// each one is a finding about the peer rather than furniture.
     pub mismatched: Vec<usize>,

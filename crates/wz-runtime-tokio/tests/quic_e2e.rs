@@ -312,7 +312,8 @@ async fn a_listen_iface_bind_decides_whether_a_loopback_quic_dial_connects() {
 ///
 /// zenoh does the same: `get_quic_addr` resolves the locator with `lookup_host`
 /// and `get_quic_host` feeds the SNI, both off the same address
-/// (`io/zenoh-links/zenoh-link-quic/src/utils.rs:502,509`). Before this round wz
+/// (`io/zenoh-link-commons/src/quic/utils.rs` @ `pub async fn get_quic_addr`;
+/// 1.10.0 moved it out of `zenoh-links/`). Before this round wz
 /// answered `Unsupported` for `quic/NAME` on the dial half, and the bind half
 /// had no `Proto::Quic` NAME arm at all.
 ///

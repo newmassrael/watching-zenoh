@@ -4439,7 +4439,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // already-minted `sn` IS the first fragment's SN and each
                 // further fragment reserves exactly one more, so the chain
                 // stays ring-consecutive from `sn` with no skipped SN
-                // (R311y206; zenoh `io/zenoh-transport/.../pipeline.rs` reuses
+                // (R311y206; zenoh `io/zenoh-transport/src/common/pipeline.rs`
+                // @ `fn on_next_fragment` reuses
                 // the frame SN slot and the `multicast_frame_or_fragments`
                 // twin does the same). Reserving as we go rather than in
                 // advance is not a weakening: the whole walk runs inside the

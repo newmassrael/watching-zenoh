@@ -170,7 +170,8 @@ pub async fn bind_tcp_host(host: &str, iface: Option<&str>) -> io::Result<TcpLis
 /// zenoh resolves the same addresses with `lookup_host(..).next()` and uses the
 /// FIRST result only — `get_tls_addr` (`io/zenoh-links/zenoh-link-tls/src/utils.rs:590`),
 /// `get_ws_addr` (`io/zenoh-links/zenoh-link-ws/src/lib.rs:79`), `get_quic_addr`
-/// (`io/zenoh-links/zenoh-link-quic/src/utils.rs:502`) are the same four lines
+/// (`io/zenoh-link-commons/src/quic/utils.rs` @ `pub async fn get_quic_addr`;
+/// 1.10.0 moved it out of `zenoh-links/`) are the same four lines
 /// three times. wz returns EVERY resolved address so the caller can walk them,
 /// matching what wz's own `tcp` path has always done ([`dial_tcp_host`] walks
 /// the `ToSocketAddrs` set) and what `TcpStream::connect` does for free. That is

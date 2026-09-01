@@ -124,8 +124,16 @@ impl TransportStatsReport {
     /// The LINE FORMAT is upstream's exactly — `# HELP <name> <text>`,
     /// `# TYPE <name> <type>`, then `<name> <value>`, each newline-terminated,
     /// which is what the `stats_struct!` macro emits for a plain (non-
-    /// discriminated) field (`io/zenoh-transport/src/common/stats.rs:48-53`
-    /// and `:207-230`).
+    /// discriminated) field.
+    ///
+    /// ⚠ R2241: the citation used to name `io/zenoh-transport/src/common/
+    /// stats.rs` and its `stats_struct!` macro. NEITHER exists at 1.10.0 — the
+    /// whole transport-stats module is gone, and the only place upstream still
+    /// emits this format is the admin space's build info
+    /// (`zenoh/src/net/runtime/adminspace.rs` @ `# HELP zenoh_build`). The LINE
+    /// FORMAT claim above is therefore anchored on what upstream still writes,
+    /// and the fact that the per-transport counters no longer have an upstream
+    /// twin is a finding in its own right rather than something to paper over.
     ///
     /// # The NAMES are not uniform, and that is the honest part
     ///

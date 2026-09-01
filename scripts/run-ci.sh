@@ -2646,6 +2646,37 @@ PY
     # binary beside it, an all-absent population armed and unarmed).
     python3 scripts/lib/oracle_pin_gate.py --selftest || return 1
     python3 scripts/lib/oracle_pin_gate.py --check || return 1
+    # R2241 (unregistered open-debt item 581) — an upstream claim must still
+    # MEAN something after upstream moves. `CLAUDE.md` asks for `file:line` on
+    # every source claim, which is right for OUR sources (we move those lines
+    # and the same commit fixes the citation) and wrong for upstream, which
+    # moves without us: a stale line number is not an error, it is a silently
+    # DIFFERENT claim. The owner's decision of 2026-09-01 is that upstream
+    # claims stop using line numbers.
+    #
+    # Measured before this gate existed: seventeen citations were wrong THAT
+    # DAY -- five naming a file gone at the pin, two pointing past the end of
+    # the file they cite, ten more as bare mentions of a deleted path -- and
+    # nothing in the tree could say so.
+    #
+    # Three buckets, every occurrence in exactly one, and anything the scanner
+    # cannot place is a FAIL rather than a skip: ANCHORED (`path` @ `needle`,
+    # both halves resolved against the pinned checkout), LINE (the old form,
+    # ratcheted), BARE (a path with neither, ratcheted separately). Both
+    # ratchets are checked in BOTH directions, so a commit that adds one reds
+    # and a commit that removes one has to lower the budget with it.
+    #
+    # ⛔ It refuses rather than passing when it cannot measure: no pinned
+    # checkout, a population of zero, or an ANCHORED population of zero (which
+    # would leave the needle-resolving half a branch nothing takes).
+    #
+    # Enforcement MEASURED by mutation on the real tree, and the first attempt
+    # FOUND A DEFECT: breaking an anchor's needle came back green because the
+    # anchor spanned two comment lines and the separator could not step over
+    # `/// `. With that fixed, breaking a needle reds and names it, and adding
+    # a single new `path:line` citation reds on the budget.
+    python3 scripts/lib/upstream_citation_anchor_gate.py --selftest || return 1
+    python3 scripts/lib/upstream_citation_anchor_gate.py --check || return 1
     return 0
 }
 

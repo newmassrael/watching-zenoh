@@ -171,7 +171,8 @@ macro_rules! ext_carriers {
         /// module, plus the two `Declare` sub-bodies that carry their own. A
         /// carrier with no extensions upstream (`Close`, `KeepAlive`,
         /// `zenoh::Reply`) still gets a variant, because a chain can APPEAR on
-        /// one — `Reply` decodes into `ext_unknown` (`zenoh/reply.rs`) — and
+        /// one — `Reply` decodes into `ext_unknown`
+        /// (`commons/zenoh-protocol/src/zenoh/reply.rs` @ `pub struct Reply`) — and
         /// the honest answer for every id there is "not a named extension of
         /// this carrier", which is what an empty row set says.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -375,7 +376,8 @@ const DECLARE_COMMON: &[Row] = &[(0x0f, MAND, EXT_ENC_ZBUF, WIRE_EXPR)];
 /// `network/declare.rs` `queryable::ext`.
 const DECLARE_QUERYABLE: &[Row] = &[(0x01, OPT, EXT_ENC_Z64, "queryable_info")];
 
-/// `zenoh/put.rs` — `shm` is `zextunit!(0x2, true)`, the mandatory marker that
+/// `commons/zenoh-protocol/src/zenoh/put.rs` @ `pub struct Put` — `shm` is
+/// `zextunit!(0x2, true)`, the mandatory marker that
 /// says the payload slot holds an ADDRESS.
 const PUT: &[Row] = &[
     (0x1, OPT, EXT_ENC_ZBUF, SOURCE_INFO),
@@ -383,14 +385,16 @@ const PUT: &[Row] = &[
     (0x3, OPT, EXT_ENC_ZBUF, "attachment"),
 ];
 
-/// `zenoh/del.rs` — `Attachment` moves DOWN to `0x2` because `Del` has no SHM
+/// `commons/zenoh-protocol/src/zenoh/del.rs` @ `pub struct Del` — `Attachment`
+/// moves DOWN to `0x2` because `Del` has no SHM
 /// marker; a table keyed on the id alone would call it `shm`.
 const DEL: &[Row] = &[
     (0x1, OPT, EXT_ENC_ZBUF, SOURCE_INFO),
     (0x2, OPT, EXT_ENC_ZBUF, "attachment"),
 ];
 
-/// `zenoh/query.rs` — `0x3` is the query's VALUE
+/// `commons/zenoh-protocol/src/zenoh/query.rs` @ `pub struct Query` — `0x3` is
+/// the query's VALUE
 /// (`ValueType<{ ZExtZBuf::<0x03>::id(false) }, 0x04>`), the ext a reader that
 /// looks only at the message body never finds.
 const QUERY: &[Row] = &[
@@ -399,7 +403,8 @@ const QUERY: &[Row] = &[
     (0x5, OPT, EXT_ENC_ZBUF, "attachment"),
 ];
 
-/// `zenoh/err.rs` — `SourceInfo` and the SHM marker, no attachment.
+/// `commons/zenoh-protocol/src/zenoh/err.rs` @ `pub struct Err` — `SourceInfo`
+/// and the SHM marker, no attachment.
 const ERR: &[Row] = &[
     (0x1, OPT, EXT_ENC_ZBUF, SOURCE_INFO),
     (0x2, MAND, EXT_ENC_UNIT, "shm"),

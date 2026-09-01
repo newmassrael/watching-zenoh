@@ -6,8 +6,9 @@
 //! codec (transport-message exts, the node-id ext, the Z_EXT_AUTH inner method
 //! chain).
 //!
-//! These are protocol constants (zenoh `commons/zenoh-protocol/src/common.rs`
-//! `iext`), feature-INDEPENDENT, so they live in an UNCONDITIONAL module rather
+//! These are protocol constants (zenoh
+//! `commons/zenoh-protocol/src/common/extension.rs` @ `pub mod iext`),
+//! feature-INDEPENDENT, so they live in an UNCONDITIONAL module rather
 //! than under a codec gate. Previously the vocabulary lived only in
 //! [`crate::ext_nodeid`] (gated on `codec-push` / `-declare` / `-request`),
 //! which forced every gated-out consumer (the `session-extauth` auth dispatch +

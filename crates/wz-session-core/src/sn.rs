@@ -277,7 +277,8 @@ impl RxConduits {
 /// advertises the LIVE `next_*` values. A non-qos JOIN advertises the one
 /// DEFAULT conduit ([`Self::advertise_default`]); a qos JOIN additionally
 /// advertises all `Priority::NUM` conduits in its `ext_qos` (zenoh's
-/// `Join.ext_qos = Box<[PrioritySn; NUM]>`, `commons/zenoh-protocol/.../join.rs`).
+/// `Join.ext_qos`, `commons/zenoh-protocol/src/transport/join.rs`
+/// @ `pub ext_qos: Option<ext::QoSType>`).
 ///
 /// DIVERGENCE from the unicast [`crate::session_actions::FrameTxConduits`]: that
 /// mirror uses `AtomicTxSn` because the unicast writer is reached concurrently

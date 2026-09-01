@@ -244,7 +244,8 @@ fn chunk_matches(pattern: &str, target: &str) -> bool {
 }
 
 /// zenoh's `MayHaveVerbatim::has_direct_verbatim`
-/// (`commons/zenoh-keyexpr/src/key_expr/intersect/mod.rs:115`): a chunk that
+/// (`commons/zenoh-keyexpr/src/key_expr/intersect/mod.rs`
+/// @ `fn has_direct_verbatim`): a chunk that
 /// begins with `@` is VERBATIM — it belongs to the admin namespace and is
 /// reachable only by a byte-equal chunk, never by `*`, `**` or a `$*` DSL
 /// chunk.
