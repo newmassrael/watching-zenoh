@@ -100,17 +100,30 @@ asserted a word list was doing the deciding, so the PROSE was repaired, while
 `armed_skip_guard.py` quotes `WZ_C1BC_REQUIRE` precisely to say nothing reads
 it, so it is a row. That residue is open-debt item 601 rather than a silence.
 
-## Only TOOLING prose, and why the rest is a different gate
+## TOOLING prose, and ONE axis of Rust prose
 
-`scripts/**`, `.githooks/**`, `.github/**` -- prose about this tree's own
-machinery. Rust prose under `crates/**` is a different subject and was measured
-before being left out, not assumed: 739 names spelled as code there, 65
-resolving nowhere, and they are libc, Win32, ELF and the zenoh-c / zenoh-pico C
-API -- AF_LINK, CMSG_SPACE, names of that kind. Resolving them needs an
-upstream checkout, and zenoh-pico is a SUBMODULE (one gitlink to `git
-ls-files`, absent from a clone made without `--recursive`) while zenoh-c is not
-vendored at all. A gate whose oracle may be absent skips, and a skip that
-prints green is the class item 598 closed. It is open-debt item 602.
+The first subject is `scripts/**`, `.githooks/**`, `.github/**` -- prose about
+this tree's own machinery, where a name spelled as code is a claim about the
+tree.
+
+Rust prose under `crates/**` is a different subject, and R2251b (open-debt item
+602) measured what R2250 had only assumed. Re-derived with the rule this file
+actually uses: 1020 names spelled as code there and 151 resolving nowhere --
+not the 739 / 65 filed from a narrower prototype, and 85% carried rather than
+"mostly foreign". Many of the 151 ARE foreign (libc, Win32, ELF: AF_LINK,
+CMSG_SPACE), and deciding those needs an upstream checkout this repository
+cannot promise -- zenoh-pico is a SUBMODULE, one gitlink to `git ls-files` and
+empty in a clone made without `--recursive`, while zenoh-c is not vendored at
+all. A gate whose oracle may be absent skips, and a skip that prints green is
+the class item 598 closed.
+
+So this file takes the axis that needs NO oracle, because the question turns
+around: not "does upstream have this name" but "do WE". This tree reimplements
+the zenoh-c / zenoh-pico C API and its own prose spells 152 of that API's
+names, carrying 109. The 43 it does not carry are held as a SET, and each is
+either a constant we have yet to provide or a sentence naming something that
+was never here. What remains -- the libc / Win32 / ELF names, and our own dead
+identifiers among the rest -- is open-debt item 604.
 
 ## An empty population FAILs
 
@@ -219,6 +232,75 @@ ABSENT: dict[str, tuple[str, str | None, tuple[str, ...]]] = {
 }
 
 
+#: R2251b (open-debt item 602). Rust prose under `crates/**` is a DIFFERENT
+#: subject from tooling prose, and one axis of it is decidable with no upstream
+#: checkout at all -- because the question is not "does upstream have this
+#: name" but "do WE". wz reimplements the zenoh-c / zenoh-pico C API, so a
+#: constant of that API named in our own prose and absent from our own tree is
+#: a fact worth holding: either a constant we have not carried, or prose naming
+#: something that was never there.
+#:
+#: The prefixes are DECLARED and then JUDGED: one with no carried member names
+#: nothing this tree implements and is refused. `ZP_` was refused on the first
+#: run and correctly -- its only occurrence is a CMake variable in a build
+#: script, not an API constant.
+UPSTREAM_PREFIXES = ("Z_", "ZC_", "ZENOH_")
+
+#: The SET, pinned, not a count. A count would be a ceiling to ratchet; a set
+#: fails in BOTH directions and names which way. A name ENTERING it means our
+#: prose started citing an upstream constant we do not provide; a name LEAVING
+#: it means we implemented it or the sentence went, and the pin comes down in
+#: that same commit. Derived on 2026-09-01 from 152 upstream-family names in
+#: Rust prose, of which 109 are carried.
+UPSTREAM_UNCARRIED = frozenset(
+    {
+        "ZC_LOCALITY_DEFAULT",
+        "ZENOH_COMPILER_CLANG",
+        "ZENOH_COMPILER_GCC",
+        "ZENOH_RUNTIME",
+        "Z_BATCH_MULTICAST_SIZE",
+        "Z_CONFIG_MULTICAST_IPV4_ADDRESS_KEY",
+        "Z_CONFIG_MULTICAST_LOCATOR_DEFAULT",
+        "Z_CONFIG_SCOUTING_TIMEOUT_DEFAULT",
+        "Z_CONFIG_SCOUTING_WHAT_DEFAULT",
+        "Z_CONGESTION_CONTROL_DEFAULT",
+        "Z_FEATURE_BATCHING",
+        "Z_FEATURE_CONNECTIVITY",
+        "Z_FEATURE_ENCODING_VALUES",
+        "Z_FEATURE_FRAGMENTATION",
+        "Z_FEATURE_LIVELINESS",
+        "Z_FEATURE_MATCHING",
+        "Z_FEATURE_MULTICAST_DECLARATIONS",
+        "Z_FEATURE_PUBLICATION",
+        "Z_FEATURE_QUERYABLE",
+        "Z_FEATURE_SUBSCRIPTION",
+        "Z_FRAG_MAX_SIZE",
+        "Z_JOIN_INTERVAL",
+        "Z_KEYEXPR_CANON_CONTAINS_SHARP_OR_QMARK",
+        "Z_KEYEXPR_CANON_CONTAINS_UNBOUND_DOLLAR",
+        "Z_KEYEXPR_CANON_DOLLAR_AFTER_DOLLAR_OR_STAR",
+        "Z_KEYEXPR_CANON_EMPTY_CHUNK",
+        "Z_KEYEXPR_CANON_LONE_DOLLAR_STAR",
+        "Z_KEYEXPR_CANON_STARS_IN_CHUNK",
+        "Z_KEYEXPR_CANON_SUCCESS",
+        "Z_LINK_CAP_FLOW_DATAGRAM",
+        "Z_LINK_CAP_TRANSPORT_RAWETH",
+        "Z_LINK_CAP_TRANSPORT_UNICAST",
+        "Z_LISTEN_MAX_CONNECTION_NB",
+        "Z_LOCALITY_ANY",
+        "Z_LOCALITY_REMOTE",
+        "Z_LOCALITY_SESSION_LOCAL",
+        "Z_QUERY_TARGET_DEFAULT",
+        "Z_REPLY_KEYEXPR_DEFAULT",
+        "Z_SAMPLE_KIND_DEFAULT",
+        "Z_SELECTOR_QUERY_MATCH",
+        "Z_SELECTOR_TIME",
+        "Z_TRANSPORT_LEASE_EXPIRE_FACTOR",
+        "Z_ZID_LENGTH",
+    }
+)
+
+
 def tracked(root: pathlib.Path | None) -> list[str]:
     if root is None:
         out = subprocess.run(
@@ -314,6 +396,39 @@ def span_name(span: str) -> str | None:
     return None
 
 
+#: Module-level assignments in THIS file whose CONTENT is pinned data: names
+#: this gate records as absent, and fixture bodies that spell names on purpose.
+#: Their line spans do not resolve anything -- see `Tree.carries`.
+PINNED_DATA = (
+    "ABSENT",
+    "UPSTREAM_UNCARRIED",
+    "FIXTURES",
+    "BASE_UPSTREAM",
+    "BASE_TOOLING",
+    "FIXTURE_PINS",
+)
+
+
+def pinned_data_lines(text: str) -> set[int]:
+    """Line numbers covered by this file's `PINNED_DATA` assignments."""
+    lines: set[int] = set()
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return lines
+    for node in tree.body:
+        targets: list[ast.expr] = []
+        if isinstance(node, ast.Assign):
+            targets = list(node.targets)
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        for target in targets:
+            if isinstance(target, ast.Name) and target.id in PINNED_DATA:
+                end = node.end_lineno or node.lineno
+                lines.update(range(node.lineno, end + 1))
+    return lines
+
+
 def prose_lines(rel: str, text: str) -> set[int]:
     body = text.split("\n")
     suffix = os.path.splitext(rel)[1]
@@ -338,16 +453,33 @@ class Tree:
     def __init__(self, root: pathlib.Path | None) -> None:
         self.root = ROOT if root is None else root
         self.files = tracked(root)
-        self._cache: dict[str, tuple[list[str], set[int]]] = {}
+        self._cache: dict[str, tuple[list[str], set[int], set[int]]] = {}
 
     def read(self, rel: str) -> tuple[list[str], set[int]]:
+        """`(lines, PROSE lines)` -- the population side."""
         if rel not in self._cache:
             try:
                 text = (self.root / rel).read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError):
                 text = ""
-            self._cache[rel] = (text.split("\n"), prose_lines(rel, text))
-        return self._cache[rel]
+            pinned: set[int] = set()
+            if (self.root / rel).resolve() == pathlib.Path(__file__).resolve():
+                pinned = pinned_data_lines(text)
+            self._cache[rel] = (text.split("\n"), prose_lines(rel, text), pinned)
+        body, prose, _ = self._cache[rel]
+        return body, prose
+
+    def non_resolving(self, rel: str) -> set[int]:
+        """Lines that cannot RESOLVE a name: prose, plus this file's pinned data.
+
+        Two different sets on purpose. Prose is where a name is CLAIMED, so it
+        feeds the population; pinned data is neither claim nor evidence, so it
+        feeds only this one. Merging them put the fixture bodies into the
+        population and reported six selftest names as dangling.
+        """
+        self.read(rel)
+        _, prose, pinned = self._cache[rel]
+        return prose | pinned
 
     def prose_runs(self, rel: str) -> list[str]:
         """Maximal runs of consecutive prose lines, joined back into text."""
@@ -377,23 +509,45 @@ class Tree:
                         out.setdefault(name, set()).add(rel)
         return out
 
+    def rust_named(self) -> dict[str, set[str]]:
+        """`name -> the crates/** Rust files whose PROSE spells it as code`.
+
+        Same span rule as `named()`; a different subject. Rust prose cites a
+        foreign API on purpose all day, so only the upstream families this tree
+        reimplements are read from it -- see `UPSTREAM_PREFIXES`.
+        """
+        out: dict[str, set[str]] = {}
+        for rel in self.files:
+            if not (rel.startswith("crates/") and rel.endswith(".rs")):
+                continue
+            for run in self.prose_runs(rel):
+                for match in CODE_SPAN.finditer(run):
+                    name = span_name(match.group(1))
+                    if name is not None and name.startswith(UPSTREAM_PREFIXES):
+                        out.setdefault(name, set()).add(rel)
+        return out
+
     def carries(self, name: str) -> bool:
         """The name, or a longer identifier it heads, on a non-prose line.
 
-        THIS FILE is not part of the universe. Its table spells every name it
-        classifies, in dict keys, and its fixtures spell more -- all of them in
-        code position. Left in, the gate would resolve every absence it is
-        there to record, starting with the row it was written for. Its PROSE is
-        walked like anyone else's, which is why its own paragraphs are pinned in
-        the table below.
+        THIS FILE's PINNED DATA is not part of the universe. Its tables spell
+        every name they classify, in keys and in set members, and its fixtures
+        spell more -- all of them in code position. Counted, the gate would
+        resolve every absence it exists to record, starting with the row it was
+        written for; R2250 saw all seven `ABSENT` rows go red at once the moment
+        the file was staged, for exactly that reason.
+        ⚠ R2251b narrowed this from "skip the whole file", which was too much:
+        it made the gate's own prose unable to name its own constants, and
+        `UPSTREAM_PREFIXES` reported as a dangling name the instant it was
+        documented. What must not resolve is the pinned DATA, not the code that
+        reads it -- see `PINNED_DATA`.
         """
         pattern = re.compile(r"\b" + re.escape(name) + r"(?:_[A-Za-z0-9]+)*\b")
         for rel in self._grep_files(name):
-            if (self.root / rel).resolve() == pathlib.Path(__file__).resolve():
-                continue
-            body, prose = self.read(rel)
+            body, _ = self.read(rel)
+            skip = self.non_resolving(rel)
             for number, line in enumerate(body, 1):
-                if number in prose:
+                if number in skip:
                     continue
                 if pattern.search(line):
                     return True
@@ -411,6 +565,49 @@ class Tree:
                 raise RuntimeError(f"git grep failed for {needle}: {proc.stderr}")
             return proc.stdout.split()
         return self.files
+
+
+def upstream_findings(tree: "Tree") -> tuple[list[str], int, int]:
+    """The upstream-family axis: `(findings, family size, uncarried size)`."""
+    named = tree.rust_named()
+    findings: list[str] = []
+    if not named:
+        findings.append(
+            "no upstream-family name is spelled as code in any Rust prose. This "
+            "tree reimplements that API and its own comments cite it constantly, "
+            "so an empty population is a broken derivation, not a clean result"
+        )
+        return findings, 0, 0
+
+    for prefix in UPSTREAM_PREFIXES:
+        members = [n for n in named if n.startswith(prefix)]
+        if not any(tree.carries(n) for n in members):
+            findings.append(
+                f"prefix `{prefix}` has no CARRIED member among the "
+                f"{len(members)} name(s) our prose spells with it, so it names "
+                f"nothing this tree implements and is not an upstream family "
+                f"this axis can speak about -- drop it, or carry one"
+            )
+
+    uncarried = {n for n in named if not tree.carries(n)}
+    entered = sorted(uncarried - UPSTREAM_UNCARRIED)
+    left = sorted(UPSTREAM_UNCARRIED - uncarried)
+    for name in entered:
+        where = ", ".join(sorted(named[name])[:2])
+        findings.append(
+            f"{where}: our prose cites upstream `{name}` and this tree does not "
+            f"carry it. Either provide it, or stop naming it as ours. If it is "
+            f"deliberately absent, add it to UPSTREAM_UNCARRIED in this commit "
+            f"so the set stays the record of what we do not provide"
+        )
+    for name in left:
+        findings.append(
+            f"UPSTREAM_UNCARRIED pins `{name}` and it is no longer uncarried -- "
+            f"this tree now provides it, or the sentence citing it went. Take it "
+            f"out of the set in the same commit; a pin that outlives its reason "
+            f"is how a set becomes a list nobody reads"
+        )
+    return findings, len(named), len(uncarried)
 
 
 def check(root: pathlib.Path | None = None) -> int:
@@ -491,6 +688,9 @@ def check(root: pathlib.Path | None = None) -> int:
                 f"`foreign` carries one."
             )
 
+    upstream, family, uncarried_count = upstream_findings(tree)
+    findings.extend(upstream)
+
     if findings:
         for line in findings:
             print(f"prose-name gate FAIL: {line}", file=sys.stderr)
@@ -502,7 +702,9 @@ def check(root: pathlib.Path | None = None) -> int:
         f"{len(ABSENT)} classified absent ("
         f"{sum(1 for k, _, _ in ABSENT.values() if k == 'foreign')} foreign, "
         f"{sum(1 for k, _, _ in ABSENT.values() if k == 'hypothetical')} "
-        f"hypothetical)."
+        f"hypothetical). Rust prose cites {family} upstream-family name(s); "
+        f"{family - uncarried_count} carried, {uncarried_count} pinned as not "
+        f"provided by this tree."
     )
     return 0
 
@@ -611,6 +813,40 @@ echo hello
         },
         False,
     ),
+    # R2251b (item 602), the upstream axis. `upstream-pinned` is the state the
+    # tree is actually in: our prose cites a constant we do not carry, and the
+    # pin is the record of that. `upstream-unpinned` is the same prose with an
+    # empty pin, which must FAIL -- that is a name entering the set unrecorded.
+    "upstream-pinned": (
+        {
+            "crates/y/src/lib.rs": "//! Upstream has `Z_SELFTEST_MISSING`; we do not.\n"
+            "pub fn f() {}\n",
+        },
+        True,
+    ),
+    "upstream-unpinned": (
+        {
+            "crates/y/src/lib.rs": "//! Upstream has `Z_SELFTEST_MISSING`; we do not.\n"
+            "pub fn f() {}\n",
+        },
+        False,
+    ),
+    # A pin whose reason went: nothing cites the name any more.
+    "upstream-pin-outlived": ({}, False),
+    # The floor. No Rust prose cites the API this tree reimplements, which
+    # cannot be true of this tree and must not read as clean.
+    "upstream-empty": (
+        {
+            "scripts/lib/g.py": '''\
+"""A gate whose prose names `rule()`."""
+
+
+def rule(line):
+    return line.startswith("#")
+''',
+        },
+        False,
+    ),
     "out-of-scope-prose": (
         {
             "crates/x/src/lib.rs": "//! Upstream calls this `AF_SELFTEST_ONLY`.\n"
@@ -628,12 +864,59 @@ def rule(line):
 }
 
 
+#: Written into every fixture root except the case that is ABOUT an empty
+#: upstream population: one upstream-family name our prose cites and our code
+#: carries, so the axis has a population to be right about.
+BASE_UPSTREAM = {
+    "crates/base/src/lib.rs": (
+        "//! Ours mirrors upstream `Z_SELFTEST_CARRIED`, `ZC_SELFTEST_CARRIED`\n"
+        "//! and `ZENOH_SELFTEST_CARRIED` -- one per declared prefix, because a\n"
+        "//! prefix with no carried member is refused and a fixture that omits\n"
+        "//! one would be testing that refusal instead of the axis.\n"
+        "pub const Z_SELFTEST_CARRIED: u8 = 1;\n"
+        "pub const ZC_SELFTEST_CARRIED: u8 = 2;\n"
+        "pub const ZENOH_SELFTEST_CARRIED: u8 = 3;\n"
+    ),
+}
+
+#: The upstream pin each fixture runs under; absent means the empty set.
+FIXTURE_PINS = {
+    "upstream-pinned": frozenset({"Z_SELFTEST_MISSING"}),
+    "upstream-pin-outlived": frozenset({"Z_SELFTEST_GHOST"}),
+}
+
+#: A tooling file for every fixture, for the same reason: both floors are
+#: unconditional, so a case about one axis must still satisfy the other.
+BASE_TOOLING = {
+    "scripts/lib/base.py": '''\
+"""A gate whose prose names `rule()`, which it has."""
+
+
+def rule(line):
+    return line.startswith("#")
+''',
+}
+
+#: Which base a case must NOT get, because that empty population IS the case.
+FIXTURE_NO_BASE = {"upstream-empty": "upstream", "empty": "tooling"}
+
+
 def selftest() -> int:
+    global UPSTREAM_UNCARRIED
     bad = 0
     saved = dict(ABSENT)
+    saved_pin = UPSTREAM_UNCARRIED
     ABSENT.clear()
     try:
         for name, (files, want_pass) in sorted(FIXTURES.items()):
+            UPSTREAM_UNCARRIED = FIXTURE_PINS.get(name, frozenset())
+            omit = FIXTURE_NO_BASE.get(name)
+            base: dict[str, str] = {}
+            if omit != "upstream":
+                base.update(BASE_UPSTREAM)
+            if omit != "tooling":
+                base.update(BASE_TOOLING)
+            files = {**base, **files}
             with tempfile.TemporaryDirectory() as tmp:
                 root = pathlib.Path(tmp)
                 for rel, body in files.items():
@@ -651,6 +934,7 @@ def selftest() -> int:
                 bad = 1
     finally:
         ABSENT.update(saved)
+        UPSTREAM_UNCARRIED = saved_pin
     return bad
 
 
@@ -661,7 +945,14 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.check == args.selftest:
         parser.error("pass exactly one of --check / --selftest")
-    return selftest() if args.selftest else check()
+    # An `if` STATEMENT, not a conditional expression: `gate_reason_claims.py`
+    # seeds the selftest call closure from the branch, so the expression form
+    # leaves it empty and this file's fixture tables get graded as reason
+    # tables whose backticks must resolve. Written the way the tree's own
+    # classifier can derive it.
+    if args.selftest:
+        return selftest()
+    return check()
 
 
 if __name__ == "__main__":
