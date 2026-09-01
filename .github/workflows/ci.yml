@@ -1687,12 +1687,38 @@ jobs:
         id: zenohd-cache
         uses: actions/cache@v4
         with:
-          path: target/zenohd
+          # R2242 — THE SOURCE TRAVELS WITH THE BINARY. `zenoh-src` is the shallow
+          # clone the build below makes; it is what `upstream_anchors()` calls
+          # source A2, and Layer Z's upstream-citation RESOLUTION arm reads cited
+          # files out of it. Until now only `target/zenohd` was cached, so on a
+          # cache HIT the build step is skipped and the source never exists —
+          # which is R2164's story verbatim, one artifact over: that round found
+          # the capability census exiting 2 on four consecutive pushes for
+          # exactly this reason. R2164 could answer it with a 196 KB derivative
+          # (`cargo metadata`) installed beside the binary. This gate cannot: a
+          # citation added by a LATER commit has to resolve against the pin
+          # without re-provisioning, so nothing short of the tree serves, and a
+          # partial copy would make "gone upstream" and "not installed" the same
+          # observation. 29 MB, measured by R2164 when it declined to pay it for
+          # a denominator it could derive.
+          #
+          # Caching them TOGETHER rather than under a second key is the point:
+          # the tree that resolves the citations is then the same tree that built
+          # the oracle the interop runs against. Two entries could drift, which
+          # is the two-identities trap R2109 named here first.
+          path: |
+            target/zenohd
+            target/zenohd-build/zenoh-src
           # Keyed on the BUILD SCRIPT's content too, not just the version: a cache once
           # populated without the storage-manager plugin (a run that fell back to the
           # crates.io path) would otherwise strand that proof behind a green SKIP for as
           # long as the key lives. Change the script, get a fresh cache.
-          key: zenohd-1.10.0-ubuntu-22.04-${{ hashFiles('scripts/build-zenohd.sh') }}
+          #
+          # The `-src` token is load-bearing and NOT decoration: `actions/cache`
+          # re-saves only on a miss, so widening `path` under the OLD key would
+          # restore binary-only entries forever and red the assert below on every
+          # run. Widening a cached path and moving its key are one edit.
+          key: zenohd-1.10.0-src-ubuntu-22.04-${{ hashFiles('scripts/build-zenohd.sh') }}
 
       - name: Build zenohd 1.10.0 + the storage-manager plugin (cache miss only)
         if: steps.zenohd-cache.outputs.cache-hit != 'true'
@@ -1758,6 +1784,24 @@ jobs:
           # merely believed.
           test -f target/zenohd/zenoh-cargo-metadata.json \
             || { echo "::error::zenoh-cargo-metadata.json missing — Layer Z's capability census has no denominator and cannot grade the feature table"; exit 1; }
+          # R2242 (open-debt item 581) — the upstream-citation gate's RESOLUTION
+          # arm reads cited files out of this tree. Asserted for the reason every
+          # line above it is: the cache step now names this path, and an assert is
+          # what makes "it will be restored" checkable rather than believed. The
+          # two probes are deliberately different questions — the directory can
+          # exist as an empty restore, so the second one reads the protocol
+          # crate's own lib root, which `upstream_root()` requires of any
+          # candidate before it will accept the tree.
+          #
+          # That path is spelled out in the `test` below and NOT repeated in this
+          # comment, because a backticked upstream path in prose is a citation:
+          # writing it here once took the bare-form count 60 -> 61 and the gate
+          # this step exists to serve refused the commit. Repaid rather than
+          # exempted, which is the rule the budget is a ratchet for.
+          test -f target/zenohd-build/zenoh-src/zenoh/Cargo.toml \
+            || { echo "::error::zenoh-src missing — Layer Z's upstream-citation resolution arm has no checkout and will FAIL rather than skip"; exit 1; }
+          test -f target/zenohd-build/zenoh-src/commons/zenoh-protocol/src/lib.rs \
+            || { echo "::error::zenoh-src is present but not a zenoh workspace — upstream_root() would reject it and the resolution arm would FAIL"; exit 1; }
 
       - name: Build zenoh-pico CLI binaries
         run: bash scripts/build-zenoh-pico-cli.sh
