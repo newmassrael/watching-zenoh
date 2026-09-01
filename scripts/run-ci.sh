@@ -576,9 +576,82 @@ footprint_remap_rustflags() {
     echo "--remap-path-prefix=${repo_root}=/wz --remap-path-prefix=${cargo_home}=/cargo"
 }
 
+# ─── unreached-leg reporting (R2255, open-debt item 597) ─────────────────────
+#
+# A LANE THAT STOPS AT ITS FIRST FAILURE HIDES THE REST OF ITSELF, and nothing
+# said how much. Measured on this file: 647 legs are guarded `|| return 1` and
+# 22 accumulate into `rc=1`/`fail=1`, across 115 of its 176 functions -- so
+# stopping is overwhelmingly the convention, and it is usually the right one
+# because a later leg leans on an earlier leg's output. Rewriting 669 sites to
+# accumulate is not the repair. What was missing is the COUNT: R2235 had three
+# peer-plane families that had not run since a pin because Layer Z returned at
+# the first binary, and R2246 had a scout regression hidden for rounds because
+# Layer M died in its first cargo call.
+#
+# So this is REPORTING, not a gate. It does not turn a lane green and it does
+# not change what a lane runs; it says what the red is covering.
+#
+# The population is DERIVED from the lane's own body, never written down: the
+# legs are the guarded lines between the function's `name() {` and its closing
+# brace, and the leg the lane REACHED comes from a DEBUG trap that records the
+# last line executed inside that range. Two integer comparisons per command,
+# and `set -uo pipefail` here means no errexit for the trap to interact with.
+_runci_self() { printf '%s\n' "${BASH_SOURCE[0]}"; }
+
+_runci_lane_span() {
+    awk -v want="$1" '
+        $0 ~ "^" want "\\(\\)[[:space:]]*\\{[[:space:]]*$" { lo = NR; next }
+        lo && /^\}[[:space:]]*$/ { print lo, NR; exit }
+    ' "$(_runci_self)"
+}
+
+_runci_lane_leg_lines() {
+    awk -v lo="$1" -v hi="$2" '
+        NR > lo && NR < hi && $0 !~ /^[[:space:]]*#/ &&
+        ($0 ~ /\|\|[[:space:]]*return[[:space:]]+1/ ||
+         $0 ~ /\|\|[[:space:]]*(rc|fail)=1/) { print NR }
+    ' "$(_runci_self)"
+}
+
+_runci_unreached_report() {
+    local fn="$1" lo="$2" hi="$3" stopped="$4"
+    if [[ -z "$lo" || -z "$hi" ]]; then
+        echo "  unreached: \`$fn\` is not a function defined in this script, so" \
+             "its legs could not be derived and the FAIL above is the whole" \
+             "report" >&2
+        return 0
+    fi
+    local total reached
+    total="$(_runci_lane_leg_lines "$lo" "$hi" | wc -l)"
+    if (( total == 0 )); then
+        echo "  unreached: \`$fn\` guards no leg, so there is no leg" \
+             "population for the failure to sit in" >&2
+        return 0
+    fi
+    if (( stopped == 0 )); then
+        # SAID, not silently reported as zero. An unplaceable failure and a
+        # failure at the first leg are different facts, and a count that cannot
+        # tell them apart is the shape this whole item is about.
+        echo "  unreached: \`$fn\` has $total guarded leg(s) and the trace" \
+             "placed the failure at none of them -- it returned from a helper" \
+             "or before the first leg, so how many were skipped is not known" >&2
+        return 0
+    fi
+    reached="$(_runci_lane_leg_lines "$lo" "$hi" | awk -v s="$stopped" '$1 <= s' | wc -l)"
+    echo "  unreached: reached $reached of $total guarded leg(s) in \`$fn\`;" \
+         "$((total - reached)) did not run. That is what this red is covering" >&2
+}
+
 run_layer() {
     local name="$1"
     shift
+    local _lane_fn="$1"
+    local _lane_span _lane_lo="" _lane_hi=""
+    _lane_span="$(_runci_lane_span "$_lane_fn")"
+    if [[ -n "$_lane_span" ]]; then
+        _lane_lo="${_lane_span% *}"
+        _lane_hi="${_lane_span#* }"
+    fi
     if [[ -n "$ONLY_LAYER" && "$ONLY_LAYER" != "$name" ]]; then
         return 0
     fi
@@ -591,13 +664,25 @@ run_layer() {
     fi
     echo "[$(_runci_ts)] INFO  ──── Layer $name ────"
     local start=$SECONDS
+    _RUNCI_LANE_LINE=0
+    if [[ -n "$_lane_lo" ]]; then
+        _RUNCI_LO="$_lane_lo"
+        _RUNCI_HI="$_lane_hi"
+        set -T
+        trap '(( LINENO >= _RUNCI_LO && LINENO <= _RUNCI_HI )) && _RUNCI_LANE_LINE=$LINENO' DEBUG
+    fi
     if "$@"; then
+        trap - DEBUG
+        set +T
         echo "[$(_runci_ts)] INFO  Layer $name pass ($((SECONDS - start))s)"
         _ckpt_mark "$name"
         return 0
     else
         local rc=$?
+        trap - DEBUG
+        set +T
         echo "[$(_runci_ts)] ERROR Layer $name FAIL (rc=$rc, $((SECONDS - start))s)" >&2
+        _runci_unreached_report "$_lane_fn" "$_lane_lo" "$_lane_hi" "$_RUNCI_LANE_LINE"
         FAILED_LAYERS+=("$name")
         return 1
     fi
