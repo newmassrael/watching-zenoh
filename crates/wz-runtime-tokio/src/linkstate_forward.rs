@@ -3802,7 +3802,11 @@ impl LinkstateForwarder {
     fn gossip_neighbour_zids(&self) -> Vec<Zid> {
         let target = self.gossip_target.get();
         let mut out: Vec<Zid> = Vec::new();
-        for (_id, state) in self.faces.borrow().iter() {
+        // `values()`, not `iter()` with a discarded key: the face id is not part
+        // of this walk's question — a neighbour is named by the zid its
+        // handshake carried, read below, and `fan_out` matches on that.
+        // `fan_out_qos` keeps `iter()` because it genuinely uses the id.
+        for state in self.faces.borrow().values() {
             if !target.matches(peer_whatami_routing(&state.actions)) {
                 continue;
             }

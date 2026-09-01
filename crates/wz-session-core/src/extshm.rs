@@ -169,12 +169,18 @@ pub fn peer_offered_shm(extensions: &[ExtEntryOwned]) -> bool {
 pub const SHM_ZBUF_EXT_HEADER: u8 = SHM_ESTABLISHMENT_EXT_ID | crate::ext_header::EXT_ENC_ZBUF;
 
 /// The number of priority bands a `PerPriority` counter block carries — zenoh
-/// `Priority::NUM`, which is `1 + MIN - MAX` over an enum running
-/// `Control = 0 ..= Background = 7`. DERIVED here as that expression's value
-/// rather than copied as "8", because the constant this mirrors is itself
-/// computed from the enum's ends.
+/// `Priority::NUM`, which upstream computes as `1 + MIN - MAX` over an enum
+/// running `Control = 0 ..= Background = 7`.
+///
+/// ⚠ ALIASED to [`crate::qos::Priority::NUM`] rather than re-derived. This
+/// constant spelled that expression out as `1 + 7 - 0`, which is a SECOND
+/// derivation of a fact the crate already owns three modules over — the
+/// conduit arrays, the Join QoS reader and the dissect band table all size
+/// themselves from `Priority::NUM`, so a band count that drifted here would
+/// disagree with them silently. One fact, one place. (`qos` is an
+/// unconditional module, so the alias costs this cfg nothing.)
 #[cfg(feature = "session-extshm")]
-pub const SHM_PRIORITY_BANDS: usize = 1 + 7 - 0;
+pub const SHM_PRIORITY_BANDS: usize = crate::qos::Priority::NUM;
 
 /// zenoh's `HandoffCounterIds` (`HandoffConfig<ShmCounterID>`) — the SHM
 /// back-pressure counter block that 1.10.0 added to BOTH Open-phase messages.
@@ -800,7 +806,15 @@ mod tests {
         /// test pins what took their place.
         #[test]
         fn open_phase_carries_a_challenge_and_a_counter_block() {
-            assert_eq!(SHM_PRIORITY_BANDS, 8, "Priority::NUM = 1 + 7 - 0");
+            // The alias is checked against upstream's OWN number here, which is
+            // the point of keeping this line after the constant stopped
+            // spelling the expression out: `Priority::NUM` drifting would
+            // resize the counter block on the wire, and this is where that
+            // shows up.
+            assert_eq!(
+                SHM_PRIORITY_BANDS, 8,
+                "zenoh Priority::NUM = 1 + MIN(Background=7) - MAX(Control=0)"
+            );
 
             // Disabled is ONE raw byte after the challenge's VLE, so the whole
             // OpenSyn for a 300-challenge is exactly three bytes.

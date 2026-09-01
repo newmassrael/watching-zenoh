@@ -31,7 +31,12 @@
 # Coverage the changed-crate test does NOT give (all covered by hosted CI):
 #   - feature-gated lanes (a change behind a non-default cfg is not run here);
 #   - changes outside crates/ (sources/, out/, runtime/, deploy/, ci.yml);
-#   - clippy / fmt / footprint / cross-compile / interop.
+#   - fmt / footprint / cross-compile / interop, and the clippy gate 7 below
+#     does not reach: the NAMED per-feature legs (C1af, C1y, C1bl, M and the
+#     transport-link family each lint a named subset, which --all-features
+#     covers as a superset but not as the same build) and every crate this
+#     push did not change. Since R2243 gate 7 DOES clippy the changed crates
+#     at --all-features, so this line no longer says "no clippy at all".
 # If you want the old full sweep locally, run `bash scripts/run-ci.sh` by hand.
 #
 # The empty-ref / delete-only short-circuit (R224a) is kept. The R224b flock
@@ -759,7 +764,8 @@ if ! bash scripts/lib/reduced-features-gate.sh "${pkgs[@]}"; then
     exit 1
 fi
 
-# ─── gate 7 — changed-crate NON-DEFAULT FEATURE COMPILATION (R2133) ──
+# ─── gate 7 — changed-crate NON-DEFAULT FEATURE JUDGEMENT (R2133, ────
+#              widened to clippy by R2243)
 # The mirror of gate 6, and the one that closes unregistered item 176. Gate 6
 # asks whether a changed crate survives its defaults being OFF; nothing asked
 # whether the code behind a feature that is off BY DEFAULT reaches rustc at
@@ -772,15 +778,26 @@ fi
 # missed the SAME two, and that break was still in the tree when R2133 wrote
 # this — found by the sweep, not by a person. Both reached origin.
 #
-# Cost, measured rather than assumed: the full sweep is ~126s over 19 crates,
-# so a push touching one is seconds. Crates with no non-default feature are
-# skipped by the script's own derivation and cost nothing.
-echo "pre-push: non-default feature compilation (Layer C1cn, subset): ${pkgs[*]}"
+# ⚠ R2243 MOVED IT FROM `cargo check` TO `cargo clippy … -- -D warnings`, and
+# the reason is a measurement, not a preference. Hosted run 33468082489 was red
+# in EIGHT jobs and FIVE of them were TWO clippy lines in non-default code —
+# one const in wz-session-core, one loop in wz-runtime-tokio. Every lane that
+# lints such code is hosted, so both crates were pushed green by this hook and
+# failed five jobs away. The blind spot was never "rustc has not seen it"; it
+# is "nothing local has JUDGED it", and hosted judges with `-D warnings`.
+# clippy is rustc plus lints, so R2133's compile-error class is unchanged.
+#
+# Cost, measured rather than assumed: the full sweep is 217s over 19 crates
+# (126s when it was `check`), so a push touching one is seconds. Crates with no
+# non-default feature are skipped by the script's own derivation and cost
+# nothing.
+echo "pre-push: non-default feature clippy (Layer C1cn, subset): ${pkgs[*]}"
 if ! bash scripts/lib/nondefault-features-gate.sh "${pkgs[@]}"; then
     echo "" >&2
-    echo "pre-push: a changed crate does not COMPILE with its non-default" >&2
-    echo "          features on — this is code no other local gate hands to" >&2
-    echo "          rustc, so fix it, or place the crate in a named tier in" >&2
+    echo "pre-push: a changed crate is not CLEAN with its non-default" >&2
+    echo "          features on — this is code no other local gate judges" >&2
+    echo "          (gate 3 is default features and runs no clippy), so fix" >&2
+    echo "          it, or place the crate in a named tier in" >&2
     echo "          scripts/lib/nondefault-features-gate.sh and say why." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
     exit 1

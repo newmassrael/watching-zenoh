@@ -7425,7 +7425,7 @@ layer_c1cf_reduced_features() {
     bash scripts/lib/reduced-features-gate.sh || return 1
 }
 
-# ─── Layer C1cn — every crate COMPILES the code behind its non-default ──
+# ─── Layer C1cn — every crate LINTS CLEAN behind its non-default ────
 #                 features
 #
 # R2133, unregistered open-debt item 176. C1cf's mirror: that lane asks whether
@@ -7433,6 +7433,11 @@ layer_c1cf_reduced_features() {
 # code behind a feature that is off BY DEFAULT is handed to rustc at all. It is
 # not — pre-push gate 3 is `cargo test -p <pkg>` with default features — so a
 # crate's non-default modules are not merely untested, they are never compiled.
+#
+# R2243 widened the verb from `cargo check` to `cargo clippy … -- -D warnings`
+# after measuring that the lint half of this blind spot cost FIVE of the eight
+# red jobs in run 33468082489, on two lines. The gate's own header carries the
+# measurement; nothing about the population or the tiers moved.
 #
 # The class has now fired THREE times at the same shape, twice at the same two
 # fixtures in `wz-ap-demo`:

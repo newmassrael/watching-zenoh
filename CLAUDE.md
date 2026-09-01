@@ -238,9 +238,14 @@ git config core.hooksPath .githooks
   developer's machine". This hook runs the twelve `hook` rows, Layer
   C1bn runs all thirteen via `--all-legs`, and the script PRINTS the
   ones it deferred, so an omission can never read as coverage. Gate
-  7 already COMPILED these (`cargo check --all-features`) and
-  compiling is not running, which is what let four measured
-  red-first probes pass this hook while dying at exit 101.
+  7 already COMPILED these (`cargo clippy --all-features`, `cargo
+  check` until R2243) and compiling is not running, which is what
+  let four measured red-first probes pass this hook while dying at
+  exit 101. R2243 widened gate 7's VERB, not its population: it
+  now judges those crates with the same `-D warnings` hosted uses,
+  because five of eight red jobs in run 33468082489 were two clippy
+  lines in code only a non-default feature compiles. Compiling is
+  still not running, so 2h keeps its subject.
   ⛔ A leg NAMES its features, one per source line, and
   `--all-features` is refused BY NAME. The `--census` population is
   DEFINED as "what all-features lists minus what default lists", so
@@ -263,7 +268,12 @@ git config core.hooksPath .githooks
   them is open-debt item 544, an intermittent hang that this
   widening FOUND by running a test no gate had ever run — plus
   changes outside `crates/` (sources/, out/, deploy/,
-  ci.yml), clippy / fmt / footprint. (`runtime/` used to be listed
+  ci.yml), fmt / footprint, and the clippy the changed-crate
+  gate 7 does NOT reach — the named per-feature legs (C1af, C1y,
+  C1bl, M and the transport-link family each clippy a NAMED
+  subset, which `--all-features` covers as a superset but not as
+  the same build) and every crate the push did not touch.
+  (`runtime/` used to be listed
   here and was struck by R2153: there is no such directory and no
   tracked file under it, the same finding R311y794 made about the
   SPDX list.) For the old full sweep

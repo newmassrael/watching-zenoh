@@ -25,14 +25,29 @@
 # pre-push reported a pass over code that does not compile. That is the whole
 # defect, and it is why this gate compiles rather than lints.
 #
-# ## Why `check --all-features` and not clippy
+# ## Why `clippy --all-features` — R2243 moved this off `cargo check`
 #
-# The sibling gate uses clippy because ITS class is lint-visible — an unused
-# import, a test module whose every member is gated. This class is not: the
-# failure is a hard compile error in code rustc never saw. `cargo check` is the
-# cheapest thing that hands the code to the compiler, and `--all-targets` is
-# required because a `cfg(test)` fixture behind a non-default feature is inside
-# the same blind spot.
+# R2133 wrote "`cargo check`, not clippy" here and gave the reason: this class
+# is a hard compile error in code rustc never saw, and check is the cheapest
+# thing that hands the code to the compiler. The first half is still true. The
+# second turned out to under-serve the blind spot it was defending, and R2243
+# MEASURED it: hosted run 33468082489 was red in EIGHT jobs, and FIVE of them
+# were two clippy lines — `identity_op` on a `wz-session-core` const and
+# `for_kv_map` on a `wz-runtime-tokio` loop — both in code that only a
+# non-default feature compiles. Every lane that runs clippy over such code is
+# hosted (C1bf, C1af, C1y, C1bl, M), so the crate that MOVED was tested green
+# locally and the failure surfaced five jobs away.
+#
+# The blind spot was never "rustc has not seen this code". It is "nothing local
+# has JUDGED this code", and hosted judges it with `-D warnings`. clippy is
+# rustc plus lints, so moving to it keeps R2133's class intact — a hard compile
+# error still fails, at the same targets — and adds the class that leaked. The
+# flags are `--all-targets --all-features --quiet -- -D warnings`, spelled the
+# same way Layer C1bf spells them, because two spellings of one lint
+# configuration disagree the day either moves.
+#
+# `--all-targets` stays required for R2133's own reason: a `cfg(test)` fixture
+# behind a non-default feature is inside the same blind spot.
 #
 # ## What this deliberately does NOT do
 #
@@ -161,18 +176,22 @@ for pkg in "${members[@]}"; do
     fi
     if [[ " $lib_only " == *" $pkg "* ]]; then
         mode="lib-only"
-        args=(check -p "$pkg" --all-features --quiet)
+        args=(clippy -p "$pkg" --all-features --quiet)
     else
         mode="all-targets"
-        args=(check -p "$pkg" --all-features --all-targets --quiet)
+        args=(clippy -p "$pkg" --all-features --all-targets --quiet)
     fi
     checked=$((checked + 1))
-    if ! cargo "${args[@]}" >/dev/null 2>&1; then
-        echo "  nondefault-features FAIL: $pkg does not compile with all of its" \
-             "features on ($mode). This is code no local gate hands to rustc —" \
-             "gate 3 builds default features only — so fix it, or move the crate" \
-             "to a named tier in scripts/lib/nondefault-features-gate.sh and say" \
-             "why."
+    # The diagnostic is SHOWN, not swallowed. R2133 sent both streams to
+    # /dev/null because a compile error's text is reproduced by re-running the
+    # command; a lint's is the whole finding, and hiding it would make this
+    # gate say "something is wrong with $pkg" about a one-line fix.
+    if ! cargo "${args[@]}" -- -D warnings; then
+        echo "  nondefault-features FAIL: $pkg does not compile CLEAN with all" \
+             "of its features on ($mode). This is code no local gate judges —" \
+             "gate 3 builds default features and runs no clippy at all — so fix" \
+             "it, or move the crate to a named tier in" \
+             "scripts/lib/nondefault-features-gate.sh and say why."
         fail=1
     fi
 done
@@ -205,6 +224,6 @@ if [[ $checked -eq 0 ]]; then
     exit $fail
 fi
 
-[[ $fail -eq 0 ]] && echo "  nondefault-features: $checked crate(s) compile with all features on" \
+[[ $fail -eq 0 ]] && echo "  nondefault-features: $checked crate(s) clippy-clean with all features on" \
     "(of ${#with_nondefault[@]} with any non-default feature)"
 exit $fail
