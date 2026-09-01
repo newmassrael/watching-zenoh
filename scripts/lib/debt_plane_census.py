@@ -126,24 +126,105 @@ def register_path() -> pathlib.Path:
     return pathlib.Path(override) if override else DEFAULT_REGISTER
 
 
-def items(text: str) -> dict[int, str]:
-    """Every item's number mapped to its TITLE LINE.
+def item_lines(text: str) -> tuple[dict[int, str], dict[int, str]]:
+    """`(live titles, archived titles)`, split by whether a fold encloses them.
 
-    The title carries the closed marker, so open/closed is read from the same
-    line the number is on rather than from a window that could reach the next
-    item's.
+    R2250b (open-debt item 603). The register's own closing convention writes
+    the CLOSED verdict ABOVE and folds the item's original wording BELOW, into
+    `<details>`. Reading the file as flat text and letting the last match win
+    therefore returns the ARCHIVED title, which carries no verdict word because
+    it was written before there was one -- so an item closed by the convention
+    this repository actually uses reads back as open. MEASURED on the register
+    at the time this was written: seven of them, `558 559 580 582 595 598 600`,
+    two of which sit on the analyzer roster.
+
+    ⚠ The population GROWS every time a round closes an item properly, which is
+    why the defect survived: closing 600 by the convention took the count from
+    six to seven. It also escaped the guard one level up -- "item N is CLOSED
+    and still on the roster" can never fire for an item whose title is read as
+    open.
+
+    The depth scan is the one `unclosed_folds` already does, deliberately reused
+    rather than reimplemented: one balance, no HTML parser, for the reason
+    stated there.
     """
-    found: dict[int, str] = {}
-    for form in ITEM_FORMS:
-        for m in form.finditer(text):
-            line_end = text.find("\n", m.start())
-            line = text[m.start() : line_end if line_end >= 0 else len(text)]
-            found[int(m.group(1))] = line
-    return found
+    live: dict[int, str] = {}
+    archived: dict[int, str] = {}
+    depth = 0
+    for line in text.split("\n"):
+        if "<details>" in line:
+            depth += 1
+        for form in ITEM_FORMS:
+            m = form.match(line)
+            if m:
+                (archived if depth > 0 else live)[int(m.group(1))] = line
+                break
+        if "</details>" in line:
+            depth = max(0, depth - 1)
+    return live, archived
+
+
+def items(text: str) -> dict[int, str]:
+    """Every item's number mapped to its LIVE title line.
+
+    An item that exists only in archived form keeps that title, so a number is
+    never silently absent; what an archive must not do is OVERWRITE a live
+    verdict, which is what `item_lines` separates.
+    """
+    live, archived = item_lines(text)
+    return {**archived, **live}
+
+
+#: The words a title uses to say an item is discharged. DERIVED from the
+#: register, not chosen: `CLOSED` (277 titles), `REFUTED` (3, where the round
+#: that filed the item disproved it) and `DUPLICATE` (1, item 213, kept under
+#: its number on purpose). `PAID` is NOT here although the operator's counting
+#: recipe names it -- no title uses it, and `verdict_findings` refuses a word
+#: this register does not carry, because a vocabulary entry that can never
+#: match is an exemption nothing judges.
+VERDICTS = ("CLOSED", "REFUTED", "DUPLICATE")
+
+#: The mark a discharged title carries beside its word. Two of the three words
+#: are always preceded by it; `DUPLICATE` is not, which is why the word list
+#: exists at all rather than just this.
+DISCHARGED = "✅"
 
 
 def is_open(title: str) -> bool:
-    return "✅" not in title and "CLOSED" not in title
+    if DISCHARGED in title:
+        return False
+    return not any(word in title for word in VERDICTS)
+
+
+def verdict_findings(live: dict[int, str]) -> list[str]:
+    """The vocabulary, judged in BOTH directions against the register.
+
+    Forward: a title marked discharged whose verdict word this reader does not
+    know is a FAIL and not an open item -- unclassified is red, or the mark
+    becomes a way to close an item the counter keeps counting.
+
+    Backward: a word in `VERDICTS` that no live title uses is a FAIL too. That
+    is the arm that keeps this list from growing into a table of possibilities
+    nobody has to justify, and it is the one that removed `PAID`.
+    """
+    out: list[str] = []
+    for number, title in sorted(live.items()):
+        if DISCHARGED in title and not any(w in title for w in VERDICTS):
+            out.append(
+                f"item {number} is marked {DISCHARGED} and its title carries no "
+                f"verdict this reader knows ({', '.join(VERDICTS)}). An "
+                f"unclassified verdict must be a FAIL: read as open it keeps "
+                f"being counted, read as closed by the mark alone the word list "
+                f"stops meaning anything"
+            )
+    for word in VERDICTS:
+        if not any(word in title for title in live.values()):
+            out.append(
+                f"`{word}` is in VERDICTS and no live title uses it. A word that "
+                f"cannot match is an entry nothing judges -- drop it in the "
+                f"commit that stops using it"
+            )
+    return out
 
 
 class Roster(typing.NamedTuple):
@@ -226,12 +307,26 @@ def unclosed_folds(text: str) -> list[int]:
     return opened
 
 
+#: R2250b -- the fixture carries ONE TITLE PER VERDICT WORD and one item closed
+#: the way this register actually closes things: the verdict above, the original
+#: folded below. Without those shapes the vocabulary arms are never executed,
+#: and item 16 is the exact case item 603 was filed for -- under the previous
+#: reader its folded original won and the item read back as open.
 SELFTEST_ROSTER = """\
 - **10. an open analyzer item.**
 - **11. another open one.**
 - **12. ✅ CLOSED -- a discharged item.**
 - **13. an open item nobody put on any list.**
+- **14. ⛔ DUPLICATE of 10 -- kept under its own number on purpose.**
+- **15. ✅ REFUTED (Round 1) -- the round that filed it disproved it.**
+- **16. ✅ CLOSED -- discharged, with its original folded below.**
 
+  <details><summary>original</summary>
+
+- **16. the open-looking wording this item had before it was closed.**
+
+  </details>
+{extra}
 {begin}
 plane:analyzer = 10 11
 plane:analyzer-owner-decision = 13
@@ -257,6 +352,7 @@ def selftest() -> int:
 
     cases: list[tuple[str, dict[str, str], int, str]] = [
         # (label, roster fields, expected exit, a substring the output must carry)
+        # `args` and `extra` are optional fields; see `args_for` / the template.
         ("head is named first", {"priority": "10 11"}, 3, "take item 10 next"),
         ("ack of the head clears it", {"priority": "10 11"}, 0, "acknowledged"),
         ("ack of a NON-head fails", {"priority": "10 11"}, 1, "does not name the head"),
@@ -266,11 +362,24 @@ def selftest() -> int:
         ("a DUPLICATE on the queue fails", {"priority": "10 10"}, 1, "appears twice"),
         ("an UNJUDGED item on the queue fails", {"priority": "10", "swept": "9"}, 1, "past `swept_through"),
         ("an OWNER-DECISION item on the queue fails", {"priority": "13"}, 1, "held for an OWNER DECISION"),
+        # R2250b (item 603). A folded original must not reopen its item: 10, 11
+        # and 13 are the only open ones, and 16's archived wording is the shape
+        # that used to win.
+        ("a folded original does not reopen its item", {"priority": ""}, 0, "open = 3  closed = 4"),
+        # The verdict vocabulary, forward: a mark with a word this reader does
+        # not know is a FAIL rather than an open item.
+        (
+            "a discharge mark with an unknown word fails",
+            {"priority": "", "extra": "- **17. ✅ DISCHARGED -- a word nobody taught this reader.**"},
+            1,
+            "no verdict this reader knows",
+        ),
     ]
     env_for = {
         "ack of the head clears it": {"WZ_DEBT_PRIORITY_ACK": "10"},
         "ack of a NON-head fails": {"WZ_DEBT_PRIORITY_ACK": "11"},
     }
+    args_for = {"a folded original does not reopen its item": ["--count"]}
 
     failures = 0
     for label, fields, want_rc, want_text in cases:
@@ -279,6 +388,7 @@ def selftest() -> int:
             end=END,
             priority=fields.get("priority", ""),
             swept=fields.get("swept", "20"),
+            extra=fields.get("extra", ""),
         )
         with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as fh:
             fh.write(body)
@@ -288,7 +398,7 @@ def selftest() -> int:
         env["WZ_DEBT_REGISTER"] = fixture
         env.update(env_for.get(label, {}))
         run = subprocess.run(
-            [sys.executable, __file__],
+            [sys.executable, __file__, *args_for.get(label, [])],
             capture_output=True,
             text=True,
             env=env,
@@ -325,10 +435,35 @@ def main() -> int:
         )
         return 2
     text = path.read_text(encoding="utf-8")
-    found = items(text)
+    live, archived = item_lines(text)
+    found = {**archived, **live}
+
+    if "--count" in sys.argv:
+        # R2250b (open-debt item 603), the OTHER consumer. The only reader of
+        # this register inside the repository is this file; the reader that
+        # actually gets the count wrong every round is the operator's ad-hoc
+        # regex, rewritten from memory at each round start. It has now been
+        # wrong twice in two different ways on the same file -- 329 by not
+        # knowing about folds, then 325 by a verdict vocabulary that counted
+        # ✅ REFUTED as open and ⛔ DUPLICATE as closed. Neither is a defect in
+        # the register; both are a predicate re-typed instead of run.
+        opened = sorted(n for n, title in found.items() if is_open(title))
+        closed = sorted(n for n in found if n not in set(opened))
+        for line in verdict_findings(live):
+            print(f"  debt-plane-census: FAIL -- {line}", file=sys.stderr)
+        print(
+            f"  debt-register: open = {len(opened)}  closed = {len(closed)}  "
+            f"max = {max(found) if found else 0}  "
+            f"(archived titles ignored: {len(set(archived) & set(live))})"
+        )
+        if opened:
+            print(f"  newest open: {' '.join(str(n) for n in opened[-8:])}")
+        return 1 if verdict_findings(live) else 0
+
     target, owner, swept, priority = roster(text)
 
     findings: list[str] = []
+    findings.extend(verdict_findings(live))
     for line_no in unclosed_folds(text):
         findings.append(
             f"the `<details>` opened at line {line_no} is never closed, so every "

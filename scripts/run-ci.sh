@@ -2185,6 +2185,20 @@ PY
     # would resolve the name the round was opened to remove.
     python3 scripts/lib/prose_named_identifier_gate.py --selftest || return 1
     python3 scripts/lib/prose_named_identifier_gate.py --check || return 1
+    # R2250b (open-debt item 603) — the SELFTEST only. `debt_plane_census.py`
+    # reads an agent-memory register no runner carries, so its `--check` cannot
+    # be a lane; its own docstring says the split exists precisely so the RULES
+    # stay gradable where the register is absent, and then nothing ran them.
+    # A proof placed where nothing invokes it does not run anywhere, which is
+    # the objection C0g raised against `apt-install.sh` and C0i against
+    # `append-round.sh` — answered here the same way.
+    #
+    # Its fixture now carries one title per verdict word and one item closed
+    # the way this register really closes things (the verdict above, the
+    # original folded below). That is the shape item 603 was filed for: read
+    # flat, the archived wording wins and an item discharged by the convention
+    # reads back as open.
+    python3 scripts/lib/debt_plane_census.py --selftest || return 1
     # R2230 (open-debt items 579 / 582) — the machine-INDEPENDENT half of
     # `upstream_carries_the_surface.py`, whose other half needs a pinned zenohd
     # and therefore lives in Layer Z.
