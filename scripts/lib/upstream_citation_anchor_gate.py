@@ -96,10 +96,12 @@ sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 SKIP_PREFIXES = ("vendor/", "out/", "docs/.atomic/")
 
 #: An upstream zenoh source path. Root-anchored: without the lookbehind this
-#: matches from the MIDDLE of a longer path, so `io/zenoh-link-commons/src/
-#: unicast.rs` yields `commons/src/unicast.rs` -- a path that never existed,
-#: which the first draft then reported as "gone upstream". Thirty-four of a
-#: measured 334 were that artefact.
+#: matches from the MIDDLE of a longer path -- a link-commons unicast path
+#: yields a `commons/src/...` fragment, a path that never existed, which the
+#: first draft then reported as "gone upstream". Thirty-four of a measured 334
+#: were that artefact. (The fragment is DESCRIBED rather than written out: this
+#: file is inside the population it scans, so a literal here would be a citation
+#: -- see `selftest`'s case 8.)
 _PATH = r"(?:io|commons|zenoh|plugins)/[\w/.-]+\.rs"
 LINE_CITE = re.compile(rf"(?<![\w/.-])({_PATH}):(\d+)")
 #: The two halves may sit on different COMMENT LINES, so the separator has to
@@ -257,8 +259,30 @@ def scan(files: list[str], root: pathlib.Path, ref: pathlib.Path):
     return counts, findings
 
 
-def run(root: pathlib.Path, ref: pathlib.Path | None) -> int:
-    if ref is None:
+def run(root: pathlib.Path, ref: pathlib.Path | None, resolve: bool) -> int:
+    """`resolve=False` runs the FORM arm only; `resolve=True` adds the
+    RESOLUTION arm and requires a checkout.
+
+    THE SPLIT IS A MEASUREMENT, not a convenience. Scanning this tree against
+    the pinned checkout and against an EMPTY directory gives identical counts
+    (20/303/62 both ways when it was measured) and 6 findings versus 385: the
+    classification and the budgets need no upstream source at all, and every
+    finding needs one. So the two arms can live in different lanes without
+    either becoming a skip.
+
+    They have to. The hosted C0 jobs (`ci`, `validate-codegen`) provision no
+    zenoh source -- no `build-zenohd`, no `ZENOHD_SRC`, no cargo checkout -- so
+    a single-armed gate wired there would fail on EVERY hosted run under its own
+    condition (3). R2241 shipped exactly that. The form arm belongs in C0, where
+    it can always measure; the resolution arm belongs in Layer Z, which builds
+    zenohd and therefore has a source tree, and where "no checkout" is a real
+    failure rather than a fact about the runner.
+
+    `upstream_feature_census.py` already splits this way for the same reason,
+    and it PRINTS the deferral rather than letting a green shape arm read as a
+    graded surface. So does this.
+    """
+    if resolve and ref is None:
         print(
             "  upstream-citation-anchor: FAIL -- no pinned zenoh checkout is "
             "reachable, so no citation could be resolved. That is a skip, and a "
@@ -268,15 +292,30 @@ def run(root: pathlib.Path, ref: pathlib.Path | None) -> int:
         )
         return 1
     files = tracked_files(root)
-    counts, findings = scan(files, root, ref)
+    # With `resolve=False` the scan still walks every occurrence -- the buckets
+    # and the budgets are what the form arm is -- but its findings are DROPPED
+    # rather than reported, because without a real checkout every one of them
+    # would be "this path is gone" about a path that is merely unreachable here.
+    counts, findings = scan(files, root, ref if ref is not None else root / ".git")
+    if not resolve:
+        findings = []
     total = counts["anchored"] + counts["line"] + counts["bare"]
 
+    where = f"pin at {ref}" if resolve else "FORM arm only"
     print(
         f"  upstream-citation-anchor: {total} upstream citation(s) across "
         f"{len(files)} tracked file(s) -- {counts['anchored']} anchored, "
         f"{counts['line']} line-form (budget {LINE_BUDGET}), "
-        f"{counts['bare']} bare (budget {BARE_BUDGET}); pin at {ref}"
+        f"{counts['bare']} bare (budget {BARE_BUDGET}); {where}"
     )
+    if not resolve:
+        print(
+            "  upstream-citation-anchor: the RESOLUTION arm (does each path and "
+            "needle still exist upstream?) is DEFERRED to Layer Z, which has a "
+            "pinned source tree. This run graded the FORM only -- do not read "
+            "it as "
+            "'every citation resolves'."
+        )
 
     rc = 0
     if total == 0:
@@ -326,10 +365,17 @@ def run(root: pathlib.Path, ref: pathlib.Path | None) -> int:
             )
             rc = 1
     if rc == 0:
+        # The two arms must not claim the same thing. A FORM-arm run that said
+        # "every citation resolves" would be the escape hatch this whole split
+        # exists to avoid -- it graded no path and no needle.
         print(
             "  upstream-citation-anchor: OK -- every anchored citation resolves "
             "against the pinned checkout, and both legacy forms sit exactly on "
             "their budget."
+            if resolve
+            else "  upstream-citation-anchor: OK (FORM) -- every occurrence is "
+            "classified and both legacy forms sit exactly on their budget. "
+            "Nothing here was resolved against upstream."
         )
     return rc
 
@@ -337,8 +383,33 @@ def run(root: pathlib.Path, ref: pathlib.Path | None) -> int:
 def selftest() -> int:
     """Drive each verdict from a fixture, including the shapes an earlier
     reading swallowed: a path matched from the middle of a longer one, an
-    anchor whose needle is gone, and a population of zero."""
+    anchor whose needle is gone, and a population of zero.
+
+    ⚠ EVERY upstream path below is ASSEMBLED from segments rather than written
+    as a literal, and that is load-bearing rather than style. This file is
+    tracked, so it is IN the population it scans, and a literal
+    zenoh-transport path written out in a fixture is indistinguishable from a
+    claim someone made about upstream. R2241 shipped it with literals and the
+    gate reported SIX findings against its own test data the moment `git add`
+    put it under `git ls-files` -- the R2191 class ("a gate whose population
+    comes from `git ls-files` cannot see itself before the commit"), walked into
+    with the lesson already written down.
+
+    Assembly rather than an exclusion list, because the two are not the same
+    thing. An exclusion excuses a FILE and would hide a real citation written
+    beside the fixtures; assembly removes only what was never a citation, and a
+    control run confirms it: a literal path in a probe file counts 1 and finds
+    1, the assembled twin counts 0, and a citation written as prose in a
+    neighbouring file still counts 1 and finds 1.
+    """
     failures: list[str] = []
+    # Segment tuples, joined at runtime. `_p` never appears in this source as a
+    # path, which is the whole point.
+    def _p(*seg: str) -> str:
+        return "/".join(seg)
+
+    UNICAST = _p("io", "zenoh-link-commons", "src", "unicast.rs")
+    GONE = _p("io", "zenoh-transport", "src", "shm.rs")
     with tempfile.TemporaryDirectory() as td:
         base = pathlib.Path(td)
         ref = base / "ref"
@@ -357,47 +428,57 @@ def selftest() -> int:
 
         # 1. The root-anchoring defect: a path matched from the middle of a
         #    longer one must NOT be reported as a missing file.
-        c, f = scan_text("// `io/zenoh-link-commons/src/unicast.rs:2`\n")
+        c, f = scan_text(f"// `{UNICAST}:2`\n")
         if f:
             failures.append(f"a mid-path match leaked: {f}")
         if c["line"] != 1:
             failures.append(f"expected 1 line-form, got {c}")
 
         # 2. A line past the end reds.
-        c, f = scan_text("// io/zenoh-link-commons/src/unicast.rs:99\n")
+        c, f = scan_text(f"// {UNICAST}:99\n")
         if not f:
             failures.append("a line past EOF did not red")
 
         # 3. A gone path reds, in BOTH the line and the bare form.
-        c, f = scan_text("// io/zenoh-transport/src/shm.rs:5\n")
+        c, f = scan_text(f"// {GONE}:5\n")
         if not f:
             failures.append("a gone path in line form did not red")
-        c, f = scan_text("// see io/zenoh-transport/src/shm.rs for the fsm\n")
+        c, f = scan_text(f"// see {GONE} for the fsm\n")
         if not f:
             failures.append("a gone path in bare form did not red")
         if c["bare"] != 1:
             failures.append(f"expected 1 bare, got {c}")
 
         # 4. An anchor that resolves is OK and is NOT double-counted as bare.
-        c, f = scan_text(
-            "// `io/zenoh-link-commons/src/unicast.rs` @ `fn keeper()`\n"
-        )
+        c, f = scan_text(f"// `{UNICAST}` @ `fn keeper()`\n")
         if f:
             failures.append(f"a resolving anchor red: {f}")
         if (c["anchored"], c["bare"], c["line"]) != (1, 0, 0):
             failures.append(f"anchored occurrence was double-counted: {c}")
 
         # 5. An anchor whose needle is GONE reds -- the arm the whole form is for.
-        c, f = scan_text(
-            "// `io/zenoh-link-commons/src/unicast.rs` @ `fn vanished()`\n"
-        )
+        c, f = scan_text(f"// `{UNICAST}` @ `fn vanished()`\n")
         if not f:
             failures.append("an anchor with a missing needle did not red")
 
         # 6. An anchor naming a gone FILE reds too (both halves are checked).
-        c, f = scan_text("// `io/zenoh-transport/src/shm.rs` @ `fn a()`\n")
+        c, f = scan_text(f"// `{GONE}` @ `fn a()`\n")
         if not f:
             failures.append("an anchor on a gone file did not red")
+
+        # 8. THE FIXTURE PATHS ARE ASSEMBLED, and this is the arm that keeps
+        #    that true. A future edit that inlines one back as a literal makes
+        #    this file cite upstream, which is exactly the R2241 defect; the
+        #    check is on THIS SOURCE, so it cannot be satisfied by the fixture.
+        own = pathlib.Path(__file__).read_text(errors="replace")
+        leaked = [m.group(1) for m in BARE_CITE.finditer(own)] + [
+            m.group(1) for m in LINE_CITE.finditer(own)
+        ]
+        if leaked:
+            failures.append(
+                f"this file writes upstream path literal(s) {sorted(set(leaked))}; "
+                "assemble them from segments so the gate does not cite upstream"
+            )
 
         # 7. A population of zero must FAIL, not pass vacuously.
         src = base / "empty"
@@ -406,19 +487,105 @@ def selftest() -> int:
         c, f = scan(["f.rs"], src, ref)
         if c["anchored"] + c["line"] + c["bare"] != 0:
             failures.append("the empty fixture was not empty")
-        # run() is what turns that into a verdict; check it refuses.
-        # (Budgets are module constants, so run() is exercised through the real
-        # tree elsewhere; here the zero-population branch is what matters.)
+
+        # 9. EVERY VERDICT `run()` CAN REACH, driven from a fixture.
+        #
+        # Until R2242 this file tested `scan()` and left `run()` -- the layer
+        # that turns counts into a verdict -- reachable only from `main()`. Its
+        # branches had been exercised by hand on the real tree and by nothing
+        # that would run again, so a future edit could delete any of them and
+        # this selftest would stay green. That is the shape this whole gate
+        # exists to refuse, one level up.
+        #
+        # `all green` is not decoration: without a case that returns 0, "every
+        # branch reds" cannot be told from "this gate refuses everything".
+        # Budgets are module constants, so they are swapped around each call and
+        # restored -- the alternative is a fixture that can never exercise a
+        # ratchet, which is the same vacuity in a different place.
+        def git_fixture(name: str, body: str | None) -> pathlib.Path:
+            d = base / name
+            d.mkdir()
+            subprocess.run(["git", "-C", str(d), "init", "-q"], check=True)
+            if body is not None:
+                (d / "f.rs").write_text(body)
+                subprocess.run(["git", "-C", str(d), "add", "f.rs"], check=True)
+            return d
+
+        # The fixture REF, not the machine's checkout: this selftest has to be
+        # runnable where no pinned tree exists, which is most of CI.
+        empty_repo = git_fixture("repo_empty", None)
+        line_repo = git_fixture("repo_line", f"// {UNICAST}:1\n")
+        anchor_repo = git_fixture("repo_anchor", f"// `{UNICAST}` @ `fn keeper()`\n")
+        # A fixture carrying BOTH forms, so a budget row is not shadowed by the
+        # anchored==0 guard. Measured: with a line-only fixture, disabling the
+        # budget guard left the selftest green because `anchored == 0` caught
+        # the same run -- a control group that cannot separate two guards has
+        # not tested either.
+        mixed_repo = git_fixture(
+            "repo_mixed", f"// `{UNICAST}` @ `fn keeper()`\n// {UNICAST}:1\n"
+        )
+        # The FINDINGS guard is the resolution arm's whole verdict, and nothing
+        # covered it until R2242 measured that too: disabling it left this
+        # selftest green AND `--check --resolve` green on the real tree. This
+        # fixture is built so findings is the ONLY guard that can fire -- two
+        # anchored citations (so `anchored != 0`), zero line and bare (so both
+        # budgets sit at 0), one needle alive and one dead.
+        dead_needle_repo = git_fixture(
+            "repo_dead_needle",
+            f"// `{UNICAST}` @ `fn keeper()`\n// `{UNICAST}` @ `fn vanished()`\n",
+        )
+        keep = (LINE_BUDGET, BARE_BUDGET)
+
+        def verdict(root: pathlib.Path, r, resolve: bool, line_b: int, bare_b: int):
+            globals()["LINE_BUDGET"], globals()["BARE_BUDGET"] = line_b, bare_b
+            try:
+                return run(root, r, resolve=resolve)
+            finally:
+                globals()["LINE_BUDGET"], globals()["BARE_BUDGET"] = keep
+
+        # ⚠ MEASURED OVERLAP, recorded rather than hidden: disabling the
+        # zero-population guard does NOT make the first row fail, because an
+        # empty tree also has no anchored citation and the next guard catches
+        # it. So that row pins "an empty tree reds", not "this branch reds" --
+        # the two are redundant on this fixture and no fixture can separate them
+        # (a tree with zero citations cannot have a non-zero anchored count).
+        # The redundancy is deliberate defence, not dead code: if the PATTERN
+        # ever stops matching, both fire. The rows that ARE separable were
+        # checked by mutation and each one reds alone.
+        for label, got, want in (
+            ("a population of zero", verdict(empty_repo, ref, True, *keep), 1),
+            ("no anchored citation", verdict(line_repo, ref, True, 1, 0), 1),
+            ("a budget exceeded", verdict(mixed_repo, ref, True, 0, 0), 1),
+            ("a budget undershot", verdict(mixed_repo, ref, True, 9, 0), 1),
+            ("the mixed fixture otherwise clean", verdict(mixed_repo, ref, True, 1, 0), 0),
+            ("a dead needle, findings the only guard",
+             verdict(dead_needle_repo, ref, True, 0, 0), 1),
+            ("no checkout, resolving", verdict(anchor_repo, None, True, 0, 0), 1),
+            ("a clean tree", verdict(anchor_repo, ref, True, 0, 0), 0),
+        ):
+            if got != want:
+                failures.append(f"run() on {label}: expected rc={want}, got {got}")
+
+        # 10. The FORM arm must NOT resolve, and must not claim it did.
+        if verdict(anchor_repo, None, False, 0, 0) != 0:
+            failures.append("the form arm failed with no checkout, which is the "
+                            "wiring defect R2242 repaid")
 
     for f in failures:
         print(f"  upstream-citation-anchor: SELFTEST FAIL -- {f}", file=sys.stderr)
     if failures:
         return 1
     print(
-        "  upstream-citation-anchor: selftest passed (7 cases: mid-path match, "
-        "line past EOF, gone path in both forms, a resolving anchor not "
+        "  upstream-citation-anchor: selftest passed -- 8 scan cases (mid-path "
+        "match, line past EOF, gone path in both forms, a resolving anchor not "
         "double-counted, a dead needle, a gone anchored file, an empty "
-        "population)"
+        "population, and this file writing no upstream path literal of its own) "
+        "plus 9 run() verdicts (zero population, no anchored citation, a budget "
+        "exceeded, a budget undershot, a mixed tree otherwise clean, a dead "
+        "needle with findings as the only live guard, no checkout while "
+        "resolving, a clean tree returning 0, and the form arm passing with no "
+        "checkout). MUTATION-CHECKED: disabling the budget guard reds the "
+        "budget row and disabling the findings guard reds the dead-needle row"
     )
     return 0
 
@@ -430,10 +597,16 @@ def main() -> int:
     )
     ap.add_argument("--check", action="store_true", help="read the real tree")
     ap.add_argument("--selftest", action="store_true", help="drive the verdicts")
+    ap.add_argument(
+        "--resolve",
+        action="store_true",
+        help="also resolve every path and needle against the pinned checkout "
+        "(requires one; without this flag only the FORM arm runs)",
+    )
     args = ap.parse_args()
     if args.selftest:
         return selftest()
-    return run(ROOT, upstream_root())
+    return run(ROOT, upstream_root(), resolve=args.resolve)
 
 
 if __name__ == "__main__":

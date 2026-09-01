@@ -2675,6 +2675,18 @@ PY
     # anchor spanned two comment lines and the separator could not step over
     # `/// `. With that fixed, breaking a needle reds and names it, and adding
     # a single new `path:line` citation reds on the budget.
+    #
+    # ⚠ THE FORM ARM ONLY, and the split is measured rather than chosen. The
+    # hosted C0 jobs (`ci`, `validate-codegen`) provision no zenoh source --
+    # zero mentions of `build-zenohd`, `ZENOHD_SRC`, `zenoh-src` or a cargo
+    # checkout between them -- so a run that RESOLVED paths here would fail on
+    # every hosted run under its own "cannot measure" rule. R2241 wired it that
+    # way and R2242 split it. Scanning this tree against the pin and against an
+    # empty directory gives IDENTICAL counts and 6 findings versus 385: the
+    # classification and the budgets need no upstream source, every finding
+    # needs one. The resolution arm runs in Layer Z, which builds zenohd; this
+    # run PRINTS that deferral so a green form arm cannot be read as "every
+    # citation resolves".
     python3 scripts/lib/upstream_citation_anchor_gate.py --selftest || return 1
     python3 scripts/lib/upstream_citation_anchor_gate.py --check || return 1
     return 0
@@ -12745,6 +12757,16 @@ layer_z_zenohd_interop() {
     # you which zenohd it had been talking to. This can.
     if ! python3 scripts/lib/oracle_pin_gate.py --check --require; then
         echo "  Layer Z FAIL: an oracle this lane relies on is not at the pin" >&2
+        return 1
+    fi
+    # R2242 (unregistered open-debt item 581) — the RESOLUTION arm of the
+    # upstream-citation gate, here rather than in Layer C0 for the same reason
+    # `upstream_feature_census.py`'s upstream arm is here: it needs a zenoh
+    # SOURCE tree, and this is the lane that provisions one. C0 grades the FORM
+    # (buckets and budgets, which measure identically with or without a
+    # checkout) and prints that it deferred this half.
+    if ! python3 scripts/lib/upstream_citation_anchor_gate.py --check --resolve; then
+        echo "  Layer Z FAIL: an upstream citation no longer resolves at the pin" >&2
         return 1
     fi
     # R2080 (open-debt item 503) — the COMPLETENESS audit of the acceptance
