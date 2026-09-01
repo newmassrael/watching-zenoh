@@ -382,6 +382,18 @@ macro_rules! define_shm_opaque {
     };
 }
 
+/// zenoh-c `z_owned_memory_layout_t` (`zenoh_opaque.h`: `ALIGN(8) uint8_t
+/// _0[16]`) — MEASURED off the shm-arm header, which is the only arm that
+/// declares it.
+const MEMORY_LAYOUT_SIZE: usize = 16;
+
+define_shm_opaque!(
+    z_owned_memory_layout_t,
+    z_loaned_memory_layout_t,
+    z_moved_memory_layout_t,
+    MEMORY_LAYOUT_SIZE
+);
+
 define_shm_opaque!(z_owned_shm_t, z_loaned_shm_t, z_moved_shm_t, SHM_SIZE);
 define_shm_opaque!(
     z_owned_shm_mut_t,
@@ -814,6 +826,181 @@ pub unsafe extern "C" fn z_internal_shm_provider_null(this_: *mut z_owned_shm_pr
 #[no_mangle]
 pub unsafe extern "C" fn z_internal_shm_provider_check(
     this_: *const z_owned_shm_provider_t,
+) -> bool {
+    guard_val(false, || {
+        // SAFETY: the caller's contract.
+        !this_.is_null() && !unsafe { (*this_).handle }.is_null()
+    })
+}
+
+// ---------------------------------------------------------------------------
+// the MEMORY LAYOUT — R2263 (open-debt item 607)
+// ---------------------------------------------------------------------------
+//
+// A `(size, alignment)` pair, and nothing else. It is the most self-contained
+// of the eighty-four symbols item 607 covers: no provider, no segment, no
+// allocation — which is why this round takes it whole and leaves the layout
+// family that DOES allocate (`z_alloc_layout_*` / `z_precomputed_layout_*`,
+// which upstream makes ALIASES of one type) to a round that can witness an
+// allocation end to end.
+//
+// ⚠ The C type is 16 bytes at align 8 and holds a `usize` plus a byte, so wz
+// stores its state behind the same handle every sibling here uses rather than
+// packing the two inline. The alternative would make this the one type in the
+// module whose loan is not a pointer cast.
+
+/// What an owned memory layout's handle points at.
+struct MemoryLayoutState {
+    size: usize,
+    alignment: z_alloc_alignment_t,
+}
+
+/// Borrow the state behind a loaned memory layout.
+///
+/// # Safety
+/// `this_` must be null or a live loaned layout whose handle this crate minted.
+#[inline]
+unsafe fn memory_layout_state<'a>(
+    this_: *const z_loaned_memory_layout_t,
+) -> Option<&'a MemoryLayoutState> {
+    if this_.is_null() {
+        return None;
+    }
+    // SAFETY: the caller's contract.
+    let handle = unsafe { (*this_).handle };
+    if handle.is_null() {
+        return None;
+    }
+    // SAFETY: a live `Box<MemoryLayoutState>` this module leaked.
+    Some(unsafe { &*(handle as *const MemoryLayoutState) })
+}
+
+/// Construct a memory layout (zenoh-c `z_memory_layout_new`).
+///
+/// ⛔ REFUSES a zero size and a non-power-of-two alignment, which upstream also
+/// refuses — its `AllocLayout::new` returns a `LayoutError` for both. A layout
+/// is a PRECONDITION for an allocation, so accepting a nonsense one here would
+/// move the failure to a later call that cannot explain it.
+///
+/// `z_alloc_alignment_t` carries a power-of-two EXPONENT rather than the
+/// alignment itself, so every representable value is already a power of two;
+/// what is refused is an exponent so large that `1 << pow` does not fit a
+/// `usize`, which is the same boundary upstream's `AllocAlignment` checks.
+///
+/// # Safety
+/// `this_` must be null or writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_memory_layout_new(
+    this_: *mut z_owned_memory_layout_t,
+    size: usize,
+    alignment: z_alloc_alignment_t,
+) -> ZResult {
+    guarded(|| {
+        if this_.is_null() {
+            return Z_ENULL;
+        }
+        // Written before the checks so a refused layout leaves a gravestone
+        // rather than the caller's uninitialised stack value.
+        // SAFETY: the caller's contract.
+        unsafe { *this_ = z_owned_memory_layout_t::null_value() };
+        if size == 0 {
+            return Z_EINVAL;
+        }
+        if usize::from(alignment.pow) >= usize::BITS as usize {
+            return Z_EINVAL;
+        }
+        let state = MemoryLayoutState { size, alignment };
+        let handle = Box::into_raw(Box::new(state)) as Handle;
+        // SAFETY: the caller's contract.
+        unsafe { *this_ = z_owned_memory_layout_t::from_handle(handle) };
+        Z_OK
+    })
+}
+
+/// Read a layout's `(size, alignment)` back (zenoh-c `z_memory_layout_get_data`).
+///
+/// Both outputs are written independently, so a caller that wants one passes
+/// NULL for the other — upstream's signature takes two pointers and says
+/// nothing about them being required together.
+///
+/// # Safety
+/// `this_` must be null or a live loaned layout; each output must be null or
+/// valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_memory_layout_get_data(
+    this_: *const z_loaned_memory_layout_t,
+    out_size: *mut usize,
+    out_alignment: *mut z_alloc_alignment_t,
+) {
+    guard_val((), || {
+        // SAFETY: the caller's contract, delegated.
+        let Some(state) = (unsafe { memory_layout_state(this_) }) else {
+            return;
+        };
+        if !out_size.is_null() {
+            // SAFETY: the caller's contract.
+            unsafe { *out_size = state.size };
+        }
+        if !out_alignment.is_null() {
+            // SAFETY: as above.
+            unsafe { *out_alignment = state.alignment };
+        }
+    });
+}
+
+/// Borrow an owned memory layout (zenoh-c `z_memory_layout_loan`).
+///
+/// # Safety
+/// `this_` must be null or a valid owned layout.
+#[no_mangle]
+pub unsafe extern "C" fn z_memory_layout_loan(
+    this_: *const z_owned_memory_layout_t,
+) -> *const z_loaned_memory_layout_t {
+    this_.cast()
+}
+
+/// Free a memory layout (zenoh-c `z_memory_layout_drop`).
+///
+/// # Safety
+/// `this_` must be null or a valid moved layout whose handle is live.
+#[no_mangle]
+pub unsafe extern "C" fn z_memory_layout_drop(this_: *mut z_moved_memory_layout_t) {
+    guard_val((), || {
+        if this_.is_null() {
+            return;
+        }
+        // SAFETY: the caller's contract.
+        let taken = unsafe {
+            std::mem::replace(&mut (*this_)._this, z_owned_memory_layout_t::null_value())
+        };
+        if !taken.handle.is_null() {
+            // SAFETY: a `Box<MemoryLayoutState>` this module leaked, dropped
+            // once because the source was gravestoned above.
+            drop(unsafe { Box::from_raw(taken.handle as *mut MemoryLayoutState) });
+        }
+    });
+}
+
+/// Gravestone an owned memory layout (zenoh-c `z_internal_memory_layout_null`).
+///
+/// # Safety
+/// `this_` must be null or writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_internal_memory_layout_null(this_: *mut z_owned_memory_layout_t) {
+    if !this_.is_null() {
+        // SAFETY: the caller's contract.
+        unsafe { *this_ = z_owned_memory_layout_t::null_value() };
+    }
+}
+
+/// `true` iff the owned layout holds a live handle (zenoh-c
+/// `z_internal_memory_layout_check`).
+///
+/// # Safety
+/// `this_` must be null or a valid owned layout.
+#[no_mangle]
+pub unsafe extern "C" fn z_internal_memory_layout_check(
+    this_: *const z_owned_memory_layout_t,
 ) -> bool {
     guard_val(false, || {
         // SAFETY: the caller's contract.
@@ -1307,6 +1494,110 @@ const _: () = {
     assert!(align_of::<z_buf_layout_alloc_result_t>() == 8);
     assert!(size_of::<z_buf_alloc_result_t>() == 96);
 };
+
+#[cfg(test)]
+mod memory_layout_tests {
+    use super::*;
+
+    /// A layout round-trips its `(size, alignment)` through the C accessors.
+    ///
+    /// Both fields are asserted with DISTINCT values, and the alignment is a
+    /// non-zero exponent: a layout that stored only the size, or that dropped
+    /// the exponent, would pass a test that checked one of them or that used
+    /// `pow = 0`.
+    #[test]
+    fn a_layout_round_trips_its_size_and_alignment() {
+        let mut owned = z_owned_memory_layout_t::null_value();
+        assert!(!unsafe { z_internal_memory_layout_check(&owned) });
+        assert_eq!(
+            unsafe { z_memory_layout_new(&mut owned, 4096, z_alloc_alignment_t { pow: 6 }) },
+            Z_OK
+        );
+        assert!(unsafe { z_internal_memory_layout_check(&owned) });
+
+        let loaned = unsafe { z_memory_layout_loan(&owned) };
+        let mut size = 0usize;
+        let mut alignment = z_alloc_alignment_t { pow: 0 };
+        unsafe { z_memory_layout_get_data(loaned, &mut size, &mut alignment) };
+        assert_eq!(size, 4096);
+        assert_eq!(alignment.pow, 6);
+
+        // Each output is independently optional — upstream's signature says
+        // nothing about them being required together.
+        let mut only_size = 0usize;
+        unsafe { z_memory_layout_get_data(loaned, &mut only_size, std::ptr::null_mut()) };
+        assert_eq!(only_size, 4096);
+
+        let mut moved = z_moved_memory_layout_t { _this: owned };
+        unsafe { z_memory_layout_drop(&mut moved) };
+        assert!(!unsafe { z_internal_memory_layout_check(&moved._this) });
+    }
+
+    /// A nonsense layout is REFUSED at construction, with a gravestone left
+    /// behind rather than the caller's stack value.
+    ///
+    /// This is the half a stub gets wrong: returning `Z_OK` for a zero size
+    /// moves the failure to the allocation that uses the layout, which cannot
+    /// say what was wrong with it.
+    #[test]
+    fn a_nonsense_layout_is_refused_at_construction() {
+        let mut owned = z_owned_memory_layout_t::null_value();
+        assert_eq!(
+            unsafe { z_memory_layout_new(&mut owned, 0, z_alloc_alignment_t { pow: 3 }) },
+            Z_EINVAL,
+            "a zero-size layout is not a layout"
+        );
+        assert!(
+            !unsafe { z_internal_memory_layout_check(&owned) },
+            "and the refusal must leave a gravestone"
+        );
+
+        // An exponent at or past the pointer width cannot name an alignment.
+        assert_eq!(
+            unsafe {
+                z_memory_layout_new(
+                    &mut owned,
+                    64,
+                    z_alloc_alignment_t {
+                        pow: usize::BITS as u8,
+                    },
+                )
+            },
+            Z_EINVAL
+        );
+        assert!(!unsafe { z_internal_memory_layout_check(&owned) });
+
+        // CONTROL: the same size with a representable exponent is accepted, so
+        // the refusals above are about the values and not about the function.
+        assert_eq!(
+            unsafe { z_memory_layout_new(&mut owned, 64, z_alloc_alignment_t { pow: 3 }) },
+            Z_OK
+        );
+        let mut moved = z_moved_memory_layout_t { _this: owned };
+        unsafe { z_memory_layout_drop(&mut moved) };
+    }
+
+    /// Every accessor tolerates NULL, and a gravestone reads as absent.
+    #[test]
+    fn the_accessors_answer_without_dereferencing_null() {
+        assert!(!unsafe { z_internal_memory_layout_check(std::ptr::null()) });
+        assert_eq!(
+            unsafe { z_memory_layout_new(std::ptr::null_mut(), 8, z_alloc_alignment_t { pow: 0 }) },
+            Z_ENULL
+        );
+        let mut size = 7usize;
+        unsafe { z_memory_layout_get_data(std::ptr::null(), &mut size, std::ptr::null_mut()) };
+        assert_eq!(size, 7, "a null layout must not write the outputs");
+        unsafe { z_memory_layout_drop(std::ptr::null_mut()) };
+
+        let mut grave = z_owned_memory_layout_t::null_value();
+        let loaned = unsafe { z_memory_layout_loan(&grave) };
+        unsafe { z_memory_layout_get_data(loaned, &mut size, std::ptr::null_mut()) };
+        assert_eq!(size, 7, "a gravestone carries no data to read");
+        unsafe { z_internal_memory_layout_null(&mut grave) };
+        assert!(!unsafe { z_internal_memory_layout_check(&grave) });
+    }
+}
 
 #[cfg(test)]
 mod segment_tests {

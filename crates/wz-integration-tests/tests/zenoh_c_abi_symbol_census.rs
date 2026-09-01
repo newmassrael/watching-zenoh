@@ -194,7 +194,24 @@ const BASELINES: &[(&str, usize, &str)] = &[
     // what remains on this arm is now the SHM provider/allocator plane and
     // NOTHING ELSE — measured, by filtering the difference for the SHM
     // vocabulary and finding the non-SHM remainder empty.
-    ("unstable-shm", 84, "1.10.0"),
+    // R2263 lowered this 84 -> 78: the `z_memory_layout_*` plane, the most
+    // self-contained six of what item 607 covers.
+    //
+    // ⛔ AND THAT ITEM'S PREMISE WAS WRONG, which is the finding of the round.
+    // It said wz "does not build the SHM provider / allocator plane". wz DOES:
+    // `shm.rs` is 1400 lines and exports 36 symbols, and its own header states
+    // the split — the buffer allocator is implemented completely, the transport
+    // optimisation is not. What the 78 are is narrower and structured, derived
+    // by grouping each symbol under the TYPE it belongs to rather than by a
+    // guessed prefix: alloc_layout 12, shm_provider variants 12,
+    // precomputed_layout 10, shm_client_storage 7, shm_client_list 7,
+    // ptr_in_segment 6, shared_shm_provider 6, chunk_alloc_result 5,
+    // shm_client 4, posix_shm_provider 2, and six strays.
+    //
+    // ⚠ `z_owned_alloc_layout_t` is a TYPEDEF of `z_owned_precomputed_layout_t`
+    // upstream, so those two families are one type under two names — 22
+    // functions, not two planes.
+    ("unstable-shm", 78, "1.10.0"),
     // R311y614 — the two arms that had NO oracle on any machine, and therefore
     // no row: the gate hard-FAILED on them rather than guessing a ceiling from
     // a neighbour. `scripts/install-zenoh-c-arm.sh` builds any of the four, so
