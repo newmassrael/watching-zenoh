@@ -118,6 +118,30 @@ OWN_VOCABULARY = {
     "what": "Scout's what-am-I-looking-for bits",
     "rest": "trailing bytes of a record the walker read but does not name further",
     "unparsed": "bytes after a halt -- the best-effort marker, not a wire field",
+    # R2272 (paying R2270's hosted red) — the two resolutions `sn_res` codes.
+    # The codec has ONE field for the byte and the byte holds TWO independent
+    # 2-bit resolutions (`zenoh-protocol`, `core/resolution.rs`:
+    # `Field { FrameSN = 0, RequestID = 2 }`), so there is no codec field to be
+    # named after and these are wz's own.
+    #
+    # ⛔ THE OTHER ROUTE THIS GATE OFFERS WOULD HAVE PASSED, WRONGLY. "name it
+    # after the codec's field" is satisfied by any `pub <name>:` in ANY codec,
+    # because `codec_fields()` unions them across messages -- so a child called
+    # `request_id` would have gone green on `response.rs`'s `pub request_id:
+    # u64`. That field is a request's ID; this one is the RESOLUTION its ids are
+    # counted in. Same spelling, different message, different meaning, and the
+    # gate cannot tell. Declaring is the only honest route here, and the prefix
+    # is what keeps the two apart for a reader.
+    "sn_res_frame_sn": "the frame-SN half of `sn_res`, bits 0-1, as the word "
+    "upstream spells (`8bit`/`16bit`/`32bit`/`64bit`). A `label` and not a "
+    "`bits` child because the four codes are in bijection with the four words, "
+    "so the readable form loses nothing -- and a two-bit code shown as its "
+    "number would have repeated the complaint the opaque byte was filed for",
+    "sn_res_request_id": "the request-ID half of `sn_res`, bits 2-3, same "
+    "vocabulary. ⛔ NOT `request_id`: that IS a codec field elsewhere "
+    "(`response.rs`) meaning a request's id rather than its resolution, and "
+    "this gate's codec-field set is unioned across messages, so the bare name "
+    "would have been accepted for the wrong reason",
     "shm_descriptor": "the Put/Err payload slot when the body ext chain carries the "
     "SHM marker. NOT `payload`: the codec's field is the payload and these bytes are "
     "an ADDRESS, so sharing the name is what let a reader take one for the other "
@@ -292,6 +316,12 @@ REASON_NON_NAMES = {
     "label": "a `FieldValue` RENDER KIND. That reason says how the value is "
     "SHOWN, not what the field is called",
     "text": "the sibling render kind, cited in the same contrast as `label`",
+    # R2272 — the THIRD render kind, added when a reason first cited it. Its
+    # absence was not a decision: `label` and `text` were declared because a
+    # reason happened to name them, and `bits` sat outside only because none had
+    # yet. The `sn_res_*` rows argue label-versus-bits, so it is one now.
+    "bits": "the render kind for a coded value shown as its number. Cited to "
+    "say how a value is SHOWN, in the same contrast as `label` and `text`",
     "walk_wireexpr": "a walker FUNCTION. The reason cites it to say which "
     "walker does NOT read this body",
 }

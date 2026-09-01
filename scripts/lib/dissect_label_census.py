@@ -79,6 +79,34 @@ DECIDED_BY_FUNCTION = {
     ),
     # The ext-name vocabulary, decided one level up by the field-name census.
     "name": "crate::ext_name::ext_name(), decided by dissect_name_census.py",
+    # R2272 (paying R2270's hosted red) — the two `sn_res` resolutions.
+    #
+    # BOTH spellings of the call are listed rather than normalised, on the rule
+    # the priority rows above already state: the table is keyed on what a reader
+    # sees at the site, and collapsing them would hide that the byte is read
+    # twice at two different shifts.
+    #
+    # WHAT PINS IT, measured rather than asserted. The four words are upstream's
+    # (zenoh-protocol, core/resolution.rs, Bits::S8..S64) and that file is in the
+    # cargo registry, which is machine-local -- a gate reading it would SKIP on
+    # every clone that has none, the exact trap the ext_target row above refuses.
+    # But this tree ALREADY feeds two of the four to a genuine zenohd as config
+    # values: NON_DEFAULT_RESOLUTION = "16bit" and DEFAULT_RESOLUTION = "32bit"
+    # in crates/wz-integration-tests/tests/wz_negotiated_axes_zenohd_interop.rs.
+    # A rename upstream would make the router reject that config and the lane go
+    # red, so those two spellings are pinned ON THE WIRE by a real router.
+    #
+    # RESIDUE, stated rather than hidden: that is TWO of four -- "8bit" and
+    # "64bit" are exercised nowhere -- and the tie between those constants and
+    # this function is prose here, not a predicate. Open-debt item 611.
+    "sn_res_word(sn_res)": (
+        "crate::dissect::sn_res_word, upstream's Bits::S8..S64 vocabulary; "
+        '"16bit" and "32bit" are pinned on the wire by a genuine zenohd in '
+        "wz_negotiated_axes_zenohd_interop.rs, the other two by nothing (item 611)"
+    ),
+    "sn_res_word(sn_res >> 2)": (
+        "the same sn_res_word at the request-ID shift, same pin and same residue"
+    ),
 }
 
 # Walkers whose label value is a LITERAL chosen inside the function, with the
