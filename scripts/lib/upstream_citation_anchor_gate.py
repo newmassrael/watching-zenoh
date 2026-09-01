@@ -121,6 +121,46 @@ BARE_CITE = re.compile(rf"(?<![\w/.-])({_PATH})(?!:\d)")
 LINE_BUDGET = 300
 BARE_BUDGET = 60
 
+#: A LIVE invocation of the RESOLUTION arm. R2242 split this gate in two and,
+#: in doing so, made `--resolve` a flag someone can simply stop passing: delete
+#: the Layer Z line and the form arm goes on printing "DEFERRED to Layer Z"
+#: while nothing resolves anything and every lane stays green. That is
+#: condition (3) -- a skip must not report green -- defeated one level up, by
+#: the very split that exists to honour it. So the arm that DEFERS is the arm
+#: that has to prove the deferral arrives somewhere.
+RESOLVE_WIRED = re.compile(r"upstream_citation_anchor_gate\.py\s+--check\s+--resolve")
+
+
+def resolution_arm_is_wired(root: pathlib.Path) -> bool:
+    """Does this tree still RUN the half the form arm defers?
+
+    NON-COMMENT lines only. `lane-reach` paid for that distinction one file
+    over -- "a stem named ONLY inside a run-ci comment is not run by it" -- and
+    here it is a live case rather than a hypothetical: Layer C0's own comment
+    block discusses resolving at length without invoking it. Counting prose
+    would make this check satisfiable by the sentence that describes the
+    problem. Measured on this tree while the check was being written: one live
+    invocation, zero comment-only mentions, and the C0 block carries no literal
+    of the flag -- so deleting the Layer Z line really does flip it.
+
+    Checked HERE rather than by a separate Layer C0 lint on purpose. A second
+    lint would be a second derivation of "is the resolution arm wired", and two
+    derivations can disagree -- which is exactly why `upstream_root()` reuses
+    `upstream_anchors()` instead of discovering the pin a second time.
+
+    An ABSENT `run-ci.sh` answers False, not "not applicable": a tree that
+    cannot be asked whether it wires the other arm has not answered yes.
+    """
+    runci = root / "scripts" / "run-ci.sh"
+    if not runci.is_file():
+        return False
+    for line in runci.read_text(errors="replace").splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        if RESOLVE_WIRED.search(line):
+            return True
+    return False
+
 
 class Finding(typing.NamedTuple):
     where: str
@@ -364,6 +404,17 @@ def run(root: pathlib.Path, ref: pathlib.Path | None, resolve: bool) -> int:
                 file=sys.stderr,
             )
             rc = 1
+    if not resolve and not resolution_arm_is_wired(root):
+        print(
+            "  upstream-citation-anchor: FAIL -- this run DEFERRED resolution "
+            "to Layer Z, and no live (non-comment) line of scripts/run-ci.sh "
+            "invokes this gate with `--check --resolve`. A half deferred to "
+            "nothing is a skip reporting green, which is the rule this gate "
+            "enforces one level down (open debt 581 condition 3). Restore the "
+            "Layer Z invocation; do not relax this check.",
+            file=sys.stderr,
+        )
+        rc = 1
     if rc == 0:
         # The two arms must not claim the same thing. A FORM-arm run that said
         # "every citation resolves" would be the escape hatch this whole split
@@ -502,10 +553,21 @@ def selftest() -> int:
         # Budgets are module constants, so they are swapped around each call and
         # restored -- the alternative is a fixture that can never exercise a
         # ratchet, which is the same vacuity in a different place.
-        def git_fixture(name: str, body: str | None) -> pathlib.Path:
+        # `runci` writes a `scripts/run-ci.sh` and is NOT git-added on purpose:
+        # `resolution_arm_is_wired` reads the filesystem, and leaving the file
+        # untracked keeps it out of `tracked_files`, so these fixtures' citation
+        # counts stay exactly what their `body` says. A tracked one would work
+        # too (the wiring line carries no upstream path) but it would couple two
+        # unrelated numbers.
+        def git_fixture(
+            name: str, body: str | None, runci: str | None = None
+        ) -> pathlib.Path:
             d = base / name
             d.mkdir()
             subprocess.run(["git", "-C", str(d), "init", "-q"], check=True)
+            if runci is not None:
+                (d / "scripts").mkdir()
+                (d / "scripts" / "run-ci.sh").write_text(runci)
             if body is not None:
                 (d / "f.rs").write_text(body)
                 subprocess.run(["git", "-C", str(d), "add", "f.rs"], check=True)
@@ -566,10 +628,49 @@ def selftest() -> int:
             if got != want:
                 failures.append(f"run() on {label}: expected rc={want}, got {got}")
 
-        # 10. The FORM arm must NOT resolve, and must not claim it did.
-        if verdict(anchor_repo, None, False, 0, 0) != 0:
-            failures.append("the form arm failed with no checkout, which is the "
-                            "wiring defect R2242 repaid")
+        # 10. THE FORM ARM MUST NOT RESOLVE, MUST NOT CLAIM IT DID, AND MUST
+        #     REFUSE TO DEFER INTO A VOID.
+        #
+        # The three rows below are the escape hatch `--resolve` opened and the
+        # bolt on it. Row 1 is the wiring defect R2242 repaid: with the other
+        # arm wired, no checkout is FINE here. Rows 2 and 3 are the bolt --
+        # delete the Layer Z line and the form arm reds; write it in a COMMENT
+        # and it still reds, which is the distinction `lane-reach` measured one
+        # file over. The `#` row is not decoration: without it the check would
+        # be satisfiable by the prose that describes the deferral, and Layer
+        # C0's real comment block does discuss resolving without invoking it.
+        WIRED = (
+            "#!/usr/bin/env bash\n"
+            "python3 scripts/lib/upstream_citation_anchor_gate.py"
+            " --check --resolve\n"
+        )
+        COMMENTED = (
+            "#!/usr/bin/env bash\n"
+            "#   python3 scripts/lib/upstream_citation_anchor_gate.py"
+            " --check --resolve\n"
+            "echo 'the resolution arm used to run here'\n"
+        )
+        wired_repo = git_fixture(
+            "repo_wired", f"// `{UNICAST}` @ `fn keeper()`\n", runci=WIRED
+        )
+        commented_repo = git_fixture(
+            "repo_commented", f"// `{UNICAST}` @ `fn keeper()`\n", runci=COMMENTED
+        )
+        for label, got, want in (
+            ("the form arm, other arm wired, no checkout",
+             verdict(wired_repo, None, False, 0, 0), 0),
+            ("the form arm when run-ci.sh only MENTIONS --resolve in a comment",
+             verdict(commented_repo, None, False, 0, 0), 1),
+            ("the form arm when there is no run-ci.sh at all",
+             verdict(anchor_repo, None, False, 0, 0), 1),
+            # The wiring check belongs to the FORM arm alone. A resolving run
+            # already grades every needle, so making it also demand its own
+            # invocation would be a gate asserting it was called.
+            ("the RESOLUTION arm, unaffected by the wiring check",
+             verdict(anchor_repo, ref, True, 0, 0), 0),
+        ):
+            if got != want:
+                failures.append(f"run() on {label}: expected rc={want}, got {got}")
 
     for f in failures:
         print(f"  upstream-citation-anchor: SELFTEST FAIL -- {f}", file=sys.stderr)
@@ -580,12 +681,17 @@ def selftest() -> int:
         "match, line past EOF, gone path in both forms, a resolving anchor not "
         "double-counted, a dead needle, a gone anchored file, an empty "
         "population, and this file writing no upstream path literal of its own) "
-        "plus 9 run() verdicts (zero population, no anchored citation, a budget "
-        "exceeded, a budget undershot, a mixed tree otherwise clean, a dead "
-        "needle with findings as the only live guard, no checkout while "
-        "resolving, a clean tree returning 0, and the form arm passing with no "
-        "checkout). MUTATION-CHECKED: disabling the budget guard reds the "
-        "budget row and disabling the findings guard reds the dead-needle row"
+        "plus 13 run() verdicts -- zero population, no anchored citation, a "
+        "budget exceeded, a budget undershot, a mixed tree otherwise clean, a "
+        "dead needle with findings as the only live guard, no checkout while "
+        "resolving, a clean tree returning 0, the form arm passing with no "
+        "checkout, and FOUR on the deferral itself: the other arm wired (0), "
+        "named only in a run-ci comment (1), no run-ci.sh at all (1), and the "
+        "resolution arm unaffected by any of it (0). MUTATION-CHECKED, each "
+        "guard against the rows that exist for it: disabling the budget guard "
+        "reds the budget row, disabling the findings guard reds the dead-needle "
+        "row, and making `resolution_arm_is_wired` always answer True reds the "
+        "comment-only and absent rows and nothing else"
     )
     return 0
 
