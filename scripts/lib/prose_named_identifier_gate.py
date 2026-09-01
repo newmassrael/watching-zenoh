@@ -147,6 +147,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import contextlib
 import io
 import os
 import pathlib
@@ -552,7 +553,23 @@ class Tree:
         documented. What must not resolve is the pinned DATA, not the code that
         reads it -- see `PINNED_DATA`.
         """
+        return bool(self._non_prose_hits(name, first_only=True))
+
+    def carrier_sites(self, name: str) -> set[str]:
+        """EVERY file that carries the name outside prose.
+
+        R2269 (open-debt item 605) -- `carries` answers "does the tree talk to
+        this at all", which is the whole of what `foreign` used to require and
+        is why a false attribution to a REAL foreigner passed. Asking WHERE
+        needs the same walk without the short circuit, so both are one spelling
+        of it: two walks that could disagree is the shape R2268 removed one
+        layer down, and the disagreement would be silent here too.
+        """
+        return self._non_prose_hits(name, first_only=False)
+
+    def _non_prose_hits(self, name: str, first_only: bool) -> set[str]:
         pattern = re.compile(r"\b" + re.escape(name) + r"(?:_[A-Za-z0-9]+)*\b")
+        hits: set[str] = set()
         for rel in self._grep_files(name):
             body, _ = self.read(rel)
             skip = self.non_resolving(rel)
@@ -560,8 +577,31 @@ class Tree:
                 if number in skip:
                     continue
                 if pattern.search(line):
-                    return True
-        return False
+                    hits.add(rel)
+                    if first_only:
+                        return hits
+                    break
+        return hits
+
+    def prose_sites(self, name: str) -> set[str]:
+        """EVERY file whose prose spells the name as a code span.
+
+        R2269 (item 605) -- deliberately NOT `named()`, which is tooling-only
+        because that is the population it feeds. This is the other side of the
+        witness: `RTLD_LOCAL` is spelled in tooling prose (the row) AND in
+        `crates/**` Rust prose, and it is the Rust one that sits in the package
+        whose manifest declares the owner. Restricting this to tooling would
+        have made the one row that needs the package arm unprovable, and the
+        arm would then have been reachable by nothing -- an escape hatch with a
+        justification written into it.
+        """
+        sites: set[str] = set()
+        for rel in self._grep_files(name):
+            for run in self.prose_runs(rel):
+                for match in CODE_SPAN.finditer(run):
+                    if span_name(match.group(1)) == name:
+                        sites.add(rel)
+        return sites
 
     def _grep_files(self, needle: str) -> list[str]:
         if self.root is ROOT:
@@ -575,6 +615,69 @@ class Tree:
                 raise RuntimeError(f"git grep failed for {needle}: {proc.stderr}")
             return proc.stdout.split()
         return self.files
+
+
+def foreign_witness(tree: "Tree", name: str, owner: str) -> str | None:
+    """WHERE this tree ties `name` to `owner`, or `None` when nowhere.
+
+    R2269 (open-debt item 605) -- the independent derivation the `foreign` kind
+    was missing.
+
+    ## What was wrong with asking only whether the owner is live
+
+    `foreign` says a name is absent because it belongs to a foreigner, and the
+    gate checked two things: the name is absent from non-prose, and the OWNER
+    is present in non-prose. Nothing tied the two. So a row could attribute a
+    name to a foreigner this tree really does use and pass on that foreigner's
+    liveness alone -- `DT_SONAME` filed as belonging to `libloading` would have
+    been accepted, because `libloading` is in the lockfile. An invented owner
+    was refused; a real one falsely claimed was not, and that is the harder
+    half to notice because everything in the row is individually true.
+
+    ## The derivation: one FILE holds both
+
+    Some file of this tree must spell `name` in its prose AND carry `owner`
+    outside prose. That is what "the tree talks to this foreigner ABOUT this
+    name" reduces to when a program has to decide it.
+
+    ⛔ It is NOT "the owner is live somewhere and the name is spelled somewhere"
+    -- that is the check being replaced, spelled with two greps instead of one.
+    The two sets must MEET.
+
+    ⛔ And it is not solved by widening the owner list, which item 605 forbids
+    by name: nothing here consults a list of acceptable foreigners. A new row
+    stands or falls on whether this tree itself puts the two words in one file.
+
+    ## ⚠⚠ A SECOND, WIDER UNIT WAS BUILT, MEASURED, AND REMOVED
+
+    Item 605's own prescription said the tie is co-occurrence "in the same call
+    or the same LINK unit", so a cargo-package arm was written next to the file
+    arm. Measured against this tree, it was wrong twice over:
+
+    * NO row needs it. R2253 had measured the file rule rejecting
+      `RTLD_LOCAL`/`libloading` and concluded the file was too narrow -- but it
+      had measured against the row's DECLARED tooling paths, and
+      `crossimpl_corpus.py` really does not spell `libloading`. Widening the
+      prose side to the whole tree (see `Tree.prose_sites`) puts
+      `pico_pure_function_oracle.rs` in the population, which spells the flag in
+      its prose and carries `libloading` in its own code. All three rows are
+      witnessed by the FILE arm; the package arm reached nothing.
+    * It ADMITTED a false attribution. `RTLD_LOCAL` filed against `sce-codegen`
+      PASSED the package arm, because `crates/wz-integration-tests` is large
+      enough to contain some file that says `sce-codegen`. A unit that big
+      witnesses almost any pair.
+
+    So it went. An arm no row exercises is a way out nothing justified -- the
+    rule this file already applies to `KINDS`, applied to itself. A future row
+    that genuinely needs a wider unit has to bring a derivation that still
+    refuses `RTLD_LOCAL`/`sce-codegen`, which is measured in the fixtures.
+    """
+    shared = sorted(tree.prose_sites(name) & tree.carrier_sites(owner))
+    return (
+        f"`{shared[0]}` spells the name in prose and carries `{owner}`"
+        if shared
+        else None
+    )
 
 
 def upstream_findings(tree: "Tree") -> tuple[list[str], int, int]:
@@ -692,6 +795,14 @@ def check(root: pathlib.Path | None = None) -> int:
                     f"occurs nowhere in this tree outside prose. Then the tree "
                     f"does not talk to it and the row is prose about prose."
                 )
+            elif foreign_witness(tree, name, owner) is None:
+                findings.append(
+                    f"ABSENT[{name}] is `foreign` to `{owner}` and nothing "
+                    f"TIES them: no file and no cargo package holds both the "
+                    f"prose that spells `{name}` and `{owner}` outside prose. "
+                    f"`{owner}` being live somewhere is the foreigner existing, "
+                    f"not this name belonging to it -- see `foreign_witness`."
+                )
 
     # The kind vocabulary, judged BACKWARD as well -- the arm R2251 put on
     # `debt_plane_census.py`'s verdict words, for the same reason. A kind no row
@@ -718,7 +829,8 @@ def check(root: pathlib.Path | None = None) -> int:
         f"prose-name: OK -- {len(named)} name(s) spelled as code in tooling "
         f"prose; {len(named) - len(unresolved)} carried by this tree, "
         f"{len(ABSENT)} classified absent, all "
-        f"{'/'.join(KINDS)}. Rust prose cites {family} upstream-family name(s); "
+        f"{'/'.join(KINDS)} and each TIED to its owner by a file that holds "
+        f"both. Rust prose cites {family} upstream-family name(s); "
         f"{family - uncarried_count} carried, {uncarried_count} pinned as not "
         f"provided by this tree."
     )
@@ -767,6 +879,73 @@ def rule(line):
 
 SELFTEST_ONLY_DELTA_WIDE = 2
 ''',
+        },
+        True,
+    ),
+    # R2269 (open-debt item 605) -- THE THREE FOREIGN ARMS, none of which had a
+    # fixture. Every case ran the one base row, and that row passes, so the two
+    # ways a `foreign` claim can be false were driven by nothing.
+    #
+    # `foreign-unwitnessed` is item 605 itself: `selftestowner` IS live in this
+    # fixture tree, in `base.py`, and the old gate asked for nothing more. The
+    # name it is filed against lives in a different file entirely, so the tree
+    # never puts the two words together and the claim is unsupported.
+    "foreign-owner-absent": (
+        {
+            "scripts/lib/g.py": '''\
+"""A gate whose prose names `SELFTEST_ONLY_GHOSTOWNED`, filed against an owner
+this tree does not have. The owner is deliberately NOT written in a code span
+anywhere: a span asserts the name exists, and its existing is the thing under
+test -- spell it and this case reds as a dangling name instead, which is what
+the pinned reason caught on the first run.
+"""
+
+
+def rule(line):
+    return line.startswith("#")
+''',
+        },
+        False,
+    ),
+    "foreign-unwitnessed": (
+        {
+            "scripts/lib/g.py": '''\
+"""A gate whose prose names `SELFTEST_ONLY_STRANDED` and files it against
+`selftestowner` -- which really is live in this tree, in another file, and
+never anywhere near this name.
+"""
+
+
+def rule(line):
+    return line.startswith("#")
+''',
+        },
+        False,
+    ),
+    "foreign-witnessed-abroad": (
+        {
+            "scripts/lib/g.py": '''\
+"""A gate whose prose names `SELFTEST_ONLY_LOADED`, opened through
+`selftestloader`, which this file never spells in code.
+"""
+
+
+def rule(line):
+    return line.startswith("#")
+''',
+            # The witness, and the reason `Tree.prose_sites` reads the WHOLE
+            # tree rather than tooling alone: the file that ties the flag to
+            # its loader is not the file that files the claim. Narrow this to
+            # tooling and this case goes red -- which is the control that keeps
+            # the widening honest.
+            "crates/z/src/lib.rs": (
+                "//! The loader opens each object with `SELFTEST_ONLY_LOADED`,\n"
+                "//! which is its flag and not ours.\n"
+                "\n"
+                "pub fn open() -> u8 {\n"
+                "    selftestloader::flag()\n"
+                "}\n"
+            ),
         },
         True,
     ),
@@ -930,12 +1109,87 @@ BASE_ABSENT = {
 #: Which base a case must NOT get, because that empty population IS the case.
 FIXTURE_NO_BASE = {"upstream-empty": "upstream", "empty": "tooling"}
 
+#: R2269 (open-debt item 605) -- extra `ABSENT` rows a fixture runs with, on
+#: top of `BASE_ABSENT`. The `foreign` arms could not be driven without this:
+#: every fixture used to run the one base row, which passes, so the two ways a
+#: foreign row can be WRONG had no fixture at all.
+FIXTURE_ABSENT: dict[str, dict[str, tuple[str, str | None, tuple[str, ...]]]] = {
+    "foreign-owner-absent": {
+        "SELFTEST_ONLY_GHOSTOWNED": (
+            "foreign",
+            "selftestnobody",
+            ("scripts/lib/g.py",),
+        ),
+    },
+    "foreign-unwitnessed": {
+        "SELFTEST_ONLY_STRANDED": (
+            "foreign",
+            "selftestowner",
+            ("scripts/lib/g.py",),
+        ),
+    },
+    "foreign-witnessed-abroad": {
+        "SELFTEST_ONLY_LOADED": (
+            "foreign",
+            "selftestloader",
+            ("scripts/lib/g.py",),
+        ),
+    },
+}
+
+#: R2269 (item 605) -- the sentence each RED fixture is about. Required for
+#: every `want_pass=False` case; see `selftest` for why a bare `rc != 0` was
+#: not an assertion about anything.
+FIXTURE_REASON = {
+    "claim": "SELFTEST_ONLY_ALPHA",
+    "empty": "no code span in any tooling prose",
+    "ledger-rescue": "SELFTEST_ONLY_ALPHA",
+    "md-does-not-rescue": "WZ_SELFTEST_ONLY_REQUIRE",
+    "shell-claim": "WZ_SELFTEST_ONLY_REQUIRE",
+    "upstream-empty": "no upstream-family name",
+    "upstream-pin-outlived": "Z_SELFTEST_GHOST",
+    "upstream-unpinned": "Z_SELFTEST_MISSING",
+    "foreign-owner-absent": "occurs nowhere in this tree outside prose",
+    "foreign-unwitnessed": "nothing TIES them",
+}
+
 
 def selftest() -> int:
     global UPSTREAM_UNCARRIED
     bad = 0
     saved = dict(ABSENT)
     saved_pin = UPSTREAM_UNCARRIED
+
+    # R2269 (open-debt item 605) -- WHICH fixtures owe a reason, DERIVED from
+    # the fixture table, and judged BOTH ways.
+    #
+    # This started as a per-case `if why is None: fail`, and a mutation showed
+    # it GREEN: every red fixture already pinned a reason, so that branch had no
+    # reachable case and deleting it changed nothing. A rule nothing can reach
+    # is not a rule -- the same finding R2268 made about a guard with no path to
+    # being true, arriving here as a guard with no INPUT that takes it.
+    #
+    # Comparing the two SETS is reachable in both directions: drop a reason and
+    # the forward arm reds; pin a reason for a fixture that passes or no longer
+    # exists and the backward arm does. The backward half is not decoration --
+    # it is what keeps this table from outliving the fixture it describes, the
+    # arm R2251 put on `debt_plane_census.py`'s verdict words.
+    reds = {name for name, (_files, want_pass) in FIXTURES.items() if not want_pass}
+    for name in sorted(reds - set(FIXTURE_REASON)):
+        print(
+            f"prose-name selftest {name}: WRONG -- a fixture that must go RED "
+            f"pins no reason, so it only asserts that SOMETHING failed",
+            file=sys.stderr,
+        )
+        bad = 1
+    for name in sorted(set(FIXTURE_REASON) - reds):
+        print(
+            f"prose-name selftest {name}: WRONG -- a reason is pinned for a "
+            f"fixture that is not a RED case (it passes, or it is gone)",
+            file=sys.stderr,
+        )
+        bad = 1
+
     try:
         for name, (files, want_pass) in sorted(FIXTURES.items()):
             UPSTREAM_UNCARRIED = FIXTURE_PINS.get(name, frozenset())
@@ -943,24 +1197,43 @@ def selftest() -> int:
             ABSENT.clear()
             if omit != "tooling":
                 ABSENT.update(BASE_ABSENT)
+            ABSENT.update(FIXTURE_ABSENT.get(name, {}))
             base: dict[str, str] = {}
             if omit != "upstream":
                 base.update(BASE_UPSTREAM)
             if omit != "tooling":
                 base.update(BASE_TOOLING)
             files = {**base, **files}
+            said = io.StringIO()
             with tempfile.TemporaryDirectory() as tmp:
                 root = pathlib.Path(tmp)
                 for rel, body in files.items():
                     path = root / rel
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_text(body, encoding="utf-8")
-                rc = check(root=root)
+                with contextlib.redirect_stderr(said), contextlib.redirect_stdout(
+                    io.StringIO()
+                ):
+                    rc = check(root=root)
             ok = (rc == 0) == want_pass
+            # R2269 (open-debt item 605) -- WHY it failed, not just THAT it did.
+            #
+            # Twelve fixtures shared one assertion, `rc != 0`, and every gate
+            # here reds through the same `return 1`. A fixture built for the
+            # foreign axis that tripped the tooling floor instead would have
+            # read as a pass forever, which is the "population of zero reports
+            # green" trap wearing a fixture's clothes. So a failing fixture
+            # PINS the sentence it is about, and one that pins nothing is
+            # itself a failure -- unclassified is RED, not a pass.
+            why = FIXTURE_REASON.get(name)
+            detail = ""
+            if not want_pass and why is not None and why not in said.getvalue():
+                ok = False
+                detail = f" -- expected the finding about {why!r}"
             print(
                 f"prose-name selftest {name}: rc={rc} "
                 f"want={'pass' if want_pass else 'fail'} "
-                f"{'ok' if ok else 'WRONG'}"
+                f"{'ok' if ok else 'WRONG'}{detail}"
             )
             if not ok:
                 bad = 1
