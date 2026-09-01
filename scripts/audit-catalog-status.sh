@@ -319,7 +319,7 @@ for atom in sorted(atoms):
     else:
         # R311y299 — separate "typo'd a tag" from "wrote no tag". impl_tag()
         # returns None for both, so the old single message misdiagnosed
-        # `BEYOND_PICO` / `OUT OF SCOPE` as a MISSING tag and printed the
+        # a BEYOND_PICO or an OUT OF SCOPE head as a MISSING tag and printed the
         # wrong instruction. A head token that is ALL-CAPS and tag-shaped but
         # not in the closed set is a typo; anything else is genuinely untagged.
         #

@@ -60,16 +60,22 @@ The population is derived twice over and there is no exemption table:
     condition, a `!`, or a following `return $?`.
 
   * LIVE -- a `WZ_..._REQUIRE` NAMED on the lane surface must be read or set
-    somewhere in the tree. `run-ci.sh` claimed `WZ_C1BC_REQUIRE=1` turned a skip
-    into a failure; no such name is read anywhere, and the paragraph is about
-    C1ce's neighbour C1cc. A flag nobody reads arms nothing, and prose is where
-    that is invisible.
+    somewhere in the tree. `run-ci.sh` claimed a WZ_C1BC_REQUIRE=1 prefix turned
+    a skip into a failure; no such name is read anywhere, and the paragraph is
+    about C1ce's neighbour C1cc. A flag nobody reads arms nothing, and prose is
+    where that is invisible.
 
 Python sources are on the LIVE axis's naming side too, minus their string
 literals -- tokenized, not regexed. That distinction is structural rather than
-an exemption: `armed_oracle_census.py` carries `WZ_X_REQUIRE` and
-`WZ_NEW_REQUIRE` inside a docstring and a selftest fixture, which are names of
-nothing on purpose, while a typo in a `#` comment is a claim like any other.
+an exemption: `armed_oracle_census.py` carries WZ_X_REQUIRE and WZ_NEW_REQUIRE
+inside a docstring and a selftest fixture, which are names of nothing on
+purpose, while a typo in a `#` comment is a claim like any other.
+
+⚠ Those three flag names are deliberately NOT written as code spans here.
+R2253 (open-debt item 601) removed the `hypothetical` kind from
+`prose_named_identifier_gate.py`, which had been the way a nonexistent name
+kept a code span: a span holding one identifier asserts the identifier exists,
+so a sentence ABOUT a name's absence spells it in plain text.
 
 An empty population FAILs. Every assertion here is about a set, an empty set
 agrees with everything, and if the last armed lane genuinely goes then this
@@ -438,7 +444,7 @@ def python_env_reads(path: pathlib.Path) -> set[str]:
     BOTH directions. A flag name inside `os.environ.get("...")` is a string
     literal and is a real read; a flag name inside any OTHER string is prose.
     The first version of this gate read liveness off the text and so its own
-    docstring -- which quotes `WZ_C1BC_REQUIRE=1` while explaining that
+    docstring -- which quotes a WZ_C1BC_REQUIRE=1 prefix while explaining that
     nothing reads it -- marked that flag live. A gate whose prose satisfies
     its own predicate has stopped being a gate.
     """

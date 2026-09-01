@@ -28,7 +28,7 @@ The implementation's judgement was the right one. What was wrong was the
 prose, so the repair was the prose. What had no instrument at all was the
 CLASS: a discarded design that survives as a NAME. The next reader either
 goes looking for a thing that is not there, or -- worse, and this is the shape
-`WZ_C1BC_REQUIRE` took before R2247 -- takes the sentence as evidence that a
+WZ_C1BC_REQUIRE took before R2247 -- takes the sentence as evidence that a
 hole is closed.
 
 ## The population is DERIVED, in both directions
@@ -63,7 +63,7 @@ findings into it, in sentences, wrapped in JSON. Counted as code it would
 resolve every name any round ever discussed -- including, on the very next
 append, the one this round was opened to remove. A gate that its own round's
 ledger entry switches off is worse than no gate, because it reports green.
-Measured while building this: `WZ_C1BC_REQUIRE`, whose entire defect was that
+Measured while building this: WZ_C1BC_REQUIRE, whose entire defect was that
 nothing in the tree reads it, resolved through the ledger and nowhere else.
 
 ## The residue is CLASSIFIED, and unclassified is RED
@@ -91,14 +91,25 @@ back, so that it cannot become the place findings go to be forgotten:
     `libloading` is a crate in the lockfile. A foreign name excuses itself only
     where the tree really talks to that foreigner.
 
-STILL NOT JUDGED, stated rather than implied: which of the two kinds a row
-carries. `hypothetical` is judged by the pin and by absence, not by the mood of
-the sentence, and no derivation here separates a sentence whose SUBJECT is that
-a name does not exist from one that wrongly says it does. Both shapes are in
-this tree today and they landed differently on purpose: the census paragraph
-asserted a word list was doing the deciding, so the PROSE was repaired, while
-`armed_skip_guard.py` quotes `WZ_C1BC_REQUIRE` precisely to say nothing reads
-it, so it is a row. That residue is open-debt item 601 rather than a silence.
+R2250 left a SECOND kind here, `hypothetical`, for a name whose sentence is
+about its absence -- an example, a flag deliberately naming nothing, a wrapper
+nobody has written. Nothing derived it. The pin and the absence were the whole
+judgement, so a genuinely false claim written under that kind passed unread,
+and item 600 is exactly a false claim that read as ordinary prose for months.
+R2253 (open-debt item 601) removed it rather than giving it a heuristic: the
+four sentences that carried it share no shape a parser can see, and a word
+list would be the exemption table `unclassifiable()` threw away. Those four now
+spell their names in plain text, which is the honest form -- a span holding one
+identifier ASSERTS the identifier exists, and a sentence about a name that does
+not exist should not make that assertion.
+
+STILL NOT JUDGED, stated rather than implied: `foreign` needs a human to say
+the name belongs to a foreigner. The owner must be live in the tree outside
+prose, which refuses an invented one, but a real false claim filed as foreign
+to something the tree does happen to use would pass. Narrowing the owner to
+the ROW'S OWN FILES was measured and rejected: it holds for two of the three
+rows and fails for `RTLD_LOCAL`, whose file reaches the loader through the
+crate rather than by naming it. That residue is open-debt item 605.
 
 ## TOOLING prose, and ONE axis of Rust prose
 
@@ -173,15 +184,30 @@ TOOLING = (
     (".github/", (".yml", ".yaml")),
 )
 
-KINDS = ("foreign", "hypothetical")
+#: ONE kind, and that is the point. R2253 (open-debt item 601) removed
+#: `hypothetical`, which had been the row a name got when the sentence was ABOUT
+#: its absence -- an example, a flag named as a name of nothing, a wrapper
+#: nobody has written. Nothing derived that. The pin and the absence were the
+#: whole judgement, so a genuinely false claim written as that kind passed, and
+#: item 600 is precisely a false claim that read as ordinary prose for months.
+#:
+#: The item asked for a STRUCTURAL test of whether a sentence's subject is the
+#: absence. Reading the four sentences that carried the kind, there is none:
+#: they share no shape a parser can see, and any word-list proxy is the
+#: exemption table `unclassifiable()` threw away and item 600 was made of. So
+#: the kind went instead of getting a heuristic, and the four sentences now
+#: spell those names in plain text. A span holding one identifier asserts that
+#: the identifier exists; a sentence about a name that does not exist has no
+#: business making that assertion, and saying so in prose costs two backticks.
+#:
+#: What remains is `foreign`, which IS derived: the row names an owner and the
+#: tree must talk to that owner outside prose.
+KINDS = ("foreign",)
 
 #: Names spelled as code in tooling prose that this tree does not carry, and
 #: the reason that is correct. `paths` must EQUAL the files whose prose names
 #: it; `owner` is required for `foreign` and must itself be live in non-prose.
 ABSENT: dict[str, tuple[str, str | None, tuple[str, ...]]] = {
-    # An example of a head token that is tag-SHAPED and not in the closed set,
-    # which is the case that paragraph exists to separate from "no tag".
-    "BEYOND_PICO": ("hypothetical", None, ("scripts/audit-catalog-status.sh",)),
     # The ELF dynamic tag. The gate beside this row runs `readelf -d` and reads
     # the SONAME out of its output; nothing in the tree spells the tag.
     "DT_SONAME": (
@@ -212,23 +238,6 @@ ABSENT: dict[str, tuple[str, str | None, tuple[str, ...]]] = {
             "scripts/verify-codegen.sh",
         ),
     ),
-    # R2247's finding, quoted by the gate that found it: run-ci.sh claimed this
-    # flag turned a skip into a failure and no such name was ever read. The
-    # sentence is TRUE and its subject is the absence -- which is the half this
-    # gate cannot tell from a false claim, and is open-debt item 601.
-    "WZ_C1BC_REQUIRE": (
-        "hypothetical",
-        None,
-        (
-            "scripts/lib/armed_skip_guard.py",
-            "scripts/lib/prose_named_identifier_gate.py",
-        ),
-    ),
-    # An example flag, named in a sentence about names of nothing.
-    "WZ_X_REQUIRE": ("hypothetical", None, ("scripts/lib/armed_skip_guard.py",)),
-    # A wrapper nobody has written; the sentence is about what would happen to
-    # the call-graph resolution if somebody did.
-    "spawn_wz_ap_demo": ("hypothetical", None, ("scripts/lib/crossimpl_corpus.py",)),
 }
 
 
@@ -405,6 +414,7 @@ PINNED_DATA = (
     "FIXTURES",
     "BASE_UPSTREAM",
     "BASE_TOOLING",
+    "BASE_ABSENT",
     "FIXTURE_PINS",
 )
 
@@ -682,10 +692,18 @@ def check(root: pathlib.Path | None = None) -> int:
                     f"occurs nowhere in this tree outside prose. Then the tree "
                     f"does not talk to it and the row is prose about prose."
                 )
-        elif owner is not None:
+
+    # The kind vocabulary, judged BACKWARD as well -- the arm R2251 put on
+    # `debt_plane_census.py`'s verdict words, for the same reason. A kind no row
+    # uses is a possibility nobody had to justify, and it is how `hypothetical`
+    # sat here unexercised as an escape. Adding a kind now costs a row that
+    # exercises it, in the same commit.
+    for kind in KINDS:
+        if not any(k == kind for k, _, _ in ABSENT.values()):
             findings.append(
-                f"ABSENT[{name}] is `{kind}` and names an owner. Only "
-                f"`foreign` carries one."
+                f"kind `{kind}` is declared and no row uses it. A kind nothing "
+                f"exercises is a way out that no case ever justified -- drop it "
+                f"in the commit that stops using it."
             )
 
     upstream, family, uncarried_count = upstream_findings(tree)
@@ -699,10 +717,8 @@ def check(root: pathlib.Path | None = None) -> int:
     print(
         f"prose-name: OK -- {len(named)} name(s) spelled as code in tooling "
         f"prose; {len(named) - len(unresolved)} carried by this tree, "
-        f"{len(ABSENT)} classified absent ("
-        f"{sum(1 for k, _, _ in ABSENT.values() if k == 'foreign')} foreign, "
-        f"{sum(1 for k, _, _ in ABSENT.values() if k == 'hypothetical')} "
-        f"hypothetical). Rust prose cites {family} upstream-family name(s); "
+        f"{len(ABSENT)} classified absent, all "
+        f"{'/'.join(KINDS)}. Rust prose cites {family} upstream-family name(s); "
         f"{family - uncarried_count} carried, {uncarried_count} pinned as not "
         f"provided by this tree."
     )
@@ -889,12 +905,26 @@ FIXTURE_PINS = {
 #: unconditional, so a case about one axis must still satisfy the other.
 BASE_TOOLING = {
     "scripts/lib/base.py": '''\
-"""A gate whose prose names `rule()`, which it has."""
+"""A gate whose prose names `rule()`, which it has, and `SELFTEST_ONLY_ABROAD`,
+which it does not -- that one belongs to `selftestowner`, invoked below.
+
+The absent name is here so every fixture EXERCISES the one kind, which the
+kind vocabulary now requires: a kind no row uses fails, so a fixture set that
+never files a row would be testing that failure instead of the case.
+"""
 
 
 def rule(line):
-    return line.startswith("#")
+    return line.startswith("#") and selftestowner
+
+
+selftestowner = 1
 ''',
+}
+
+#: The row `BASE_TOOLING` justifies. Fixtures run with exactly this in `ABSENT`.
+BASE_ABSENT = {
+    "SELFTEST_ONLY_ABROAD": ("foreign", "selftestowner", ("scripts/lib/base.py",)),
 }
 
 #: Which base a case must NOT get, because that empty population IS the case.
@@ -906,11 +936,13 @@ def selftest() -> int:
     bad = 0
     saved = dict(ABSENT)
     saved_pin = UPSTREAM_UNCARRIED
-    ABSENT.clear()
     try:
         for name, (files, want_pass) in sorted(FIXTURES.items()):
             UPSTREAM_UNCARRIED = FIXTURE_PINS.get(name, frozenset())
             omit = FIXTURE_NO_BASE.get(name)
+            ABSENT.clear()
+            if omit != "tooling":
+                ABSENT.update(BASE_ABSENT)
             base: dict[str, str] = {}
             if omit != "upstream":
                 base.update(BASE_UPSTREAM)
@@ -933,6 +965,7 @@ def selftest() -> int:
             if not ok:
                 bad = 1
     finally:
+        ABSENT.clear()
         ABSENT.update(saved)
         UPSTREAM_UNCARRIED = saved_pin
     return bad

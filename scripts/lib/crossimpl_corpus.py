@@ -361,7 +361,7 @@ def helper_classes() -> tuple[dict[str, set[str]], dict[str, set[str]]]:
     Returns (foreign_classes_by_helper, wz_packages_by_helper). Both are resolved
     through the CALL GRAPH, not by grepping the test for the root's name: the flagship
     zenohd proofs reach zenohd through `spawn_zenohd`, never naming `zenohd_binary(`.
-    The same is true of the wz side -- a future `spawn_wz_ap_demo()` wrapper would make
+    The same is true of the wz side -- a future spawn_wz_ap_demo() wrapper would make
     every caller look like an in-process test, and A4-5 would then check the WRONG
     binary's feature closure (the two closures are not nested).
     """
