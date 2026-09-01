@@ -174,7 +174,9 @@ const BASELINES: &[(&str, usize, &str)] = &[
     // addition and a rename respectively — upstream kept the `zc_` locality and
     // dropped the `zc_` reply-keyexpr), and both are driven by the
     // pure-function oracle rather than merely defined.
-    ("unstable-shm", 189, "1.10.0"),
+    // R2257 lowered this 189 -> 180: the cancellation-token plane is built, and
+    // it is nine symbols on both unstable arms.
+    ("unstable-shm", 180, "1.10.0"),
     // R311y614 — the two arms that had NO oracle on any machine, and therefore
     // no row: the gate hard-FAILED on them rather than guessing a ceiling from
     // a neighbour. `scripts/install-zenoh-c-arm.sh` builds any of the four, so
@@ -208,8 +210,11 @@ const BASELINES: &[(&str, usize, &str)] = &[
     //   arm             reference  wz   missing        (1.5.0 was)
     //   nounstable            570  568        2         568/568/0
     //   nounstable-shm        570  568        2         568/568/0
-    //   unstable              757  653      104         657/657/0
-    //   unstable-shm          878  689      189         758/693/65
+    //   unstable              757  662       95         657/657/0
+    //   unstable-shm          878  698      180         758/693/65
+    //
+    // (R2256 measured 104 and 189; R2257 built the cancellation-token plane and
+    // both came down by its nine.)
     //
     // `nounstable-shm` still DEFINES exactly what `nounstable` does — the set
     // difference is empty at 1.10.0 too, so upstream still gates its SHM
@@ -220,13 +225,23 @@ const BASELINES: &[(&str, usize, &str)] = &[
     // where at 1.5.0 the difference ran one way only. The planes are 187
     // (unstable-only) and 122 (shm-with-unstable).
     //
-    // And the 189 is not "the allocator half and nothing else" any more: 103 of
-    // it is missing from the `unstable` arm too — the LINK (25), TRANSPORT (19),
-    // closure (18), internal-check (23) and cancellation-token (7) planes, none
-    // of which is about shared memory. Only 86 are SHM-only. Three whole planes
-    // that did not exist at 1.5.0 are what grew, which is why every one of these
-    // numbers moved and why the version column exists.
-    ("unstable", 104, "1.10.0"),
+    // And the 180 is not "the allocator half and nothing else" any more: 94 of
+    // it is missing from the `unstable` arm too, and only 86 are SHM-only. The
+    // shared part is four planes, counted by leading family token over the set
+    // difference rather than by a guessed prefix:
+    //
+    //   31  LINK events        `z_link_*`, `z_info_links*`
+    //   26  the closure halves of the two event planes
+    //   25  TRANSPORT events   `z_transport_*`, `z_info_transports`
+    //   12  the declare / undeclare / info listeners of those two planes, plus
+    //       `z_query_accepts_replies`, `z_query_source_info`, `z_session_id`
+    //
+    // The cancellation-token plane was the fifth and R2257 built it, which is
+    // what took 103 to 94. Three whole planes that did not exist at 1.5.0 are
+    // what grew, which is why every one of these numbers moved and why the
+    // version column exists.
+    // R2257 lowered this 104 -> 95, same plane.
+    ("unstable", 95, "1.10.0"),
     ("nounstable-shm", 2, "1.10.0"),
 ];
 

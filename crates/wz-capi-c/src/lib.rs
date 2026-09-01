@@ -73,6 +73,18 @@ pub mod abi_origin;
 #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
 pub mod advanced;
 pub mod bytes;
+// R2257 — MEASURED, not assumed: upstream's `nounstable` build defines no
+// `z_cancellation_token_*` symbol at all, so exporting this family
+// unconditionally puts wz ABOVE the reference on that arm and
+// `wz_exports_nothing_the_reference_does_not` reds with nine extras. The plane
+// is UNSTABLE-gated upstream and is gated the same way here.
+// R2257 — MEASURED, not assumed: upstream's `nounstable` build defines no
+// `z_cancellation_token_*` symbol at all, so exporting this family
+// unconditionally puts wz ABOVE the reference on that arm and
+// `wz_exports_nothing_the_reference_does_not` reds with nine extras. The plane
+// is UNSTABLE-gated upstream and is gated the same way here.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+pub mod cancellation;
 pub mod config;
 pub mod encoding;
 mod ffi;
