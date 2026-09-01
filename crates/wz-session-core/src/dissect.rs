@@ -3202,6 +3202,62 @@ fn transport_carrier(mid: u8) -> crate::ext_name::ExtCarrier {
     }
 }
 
+/// The word upstream spells for one 2-bit resolution code.
+///
+/// R2270 (open-debt item 576). `sn_res` is a single byte holding TWO
+/// independent resolutions, and the reader was handed the byte and nothing
+/// else -- `10` is not a value a person reads. Upstream's own vocabulary is
+/// `Bits { U8 = 0b00, U16 = 0b01, U32 = 0b10, U64 = 0b11 }` with the strings
+/// `"8bit" / "16bit" / "32bit" / "64bit"` already written next to it
+/// (`zenoh-protocol`, `src/core/resolution.rs`), so nothing here invents a
+/// spelling.
+///
+/// ⛔ TOTAL over two bits by construction: four codes, four words, and the last
+/// arm is `_` rather than `0b11` precisely so there is no unclassified case to
+/// fall through to. Upstream transmutes the same two bits straight into `Bits`,
+/// which is the same totality claim written as an unsafe cast. A `label` and
+/// not a `bits` child because the codes are in bijection with the words, so the
+/// human-readable form loses nothing -- and `bits` children would have repeated
+/// the complaint this closes, `0..3` being no more readable than `10`.
+fn sn_res_word(code: u8) -> &'static str {
+    match code & 0b11 {
+        0b00 => "8bit",
+        0b01 => "16bit",
+        0b10 => "32bit",
+        _ => "64bit",
+    }
+}
+
+/// The body INIT and JOIN both carry behind the `S` flag: `sn_res`, the two
+/// resolutions it codes, then a little-endian `batch_size`.
+///
+/// R2270 (item 576) -- ONE function because the two call sites were duplicated
+/// byte for byte, and the sharpest half of that item is that fixing INIT alone
+/// leaves JOIN an opaque number and makes the reader's guarantee ASYMMETRIC.
+/// Sharing the emitter makes the asymmetry unrepresentable rather than merely
+/// avoided once.
+///
+/// The raw `sn_res` field is KEPT. The children alias its span, the way
+/// `whatami` and `zid_len` alias `cbyte`'s, so nothing about where the bytes
+/// came from is restated or lost.
+fn sn_res_and_batch(c: &mut SpanCursor<'_>) -> Result<alloc::vec::Vec<Field>, CodecError> {
+    let (sn_res, sn_res_field) = c.u8("sn_res")?;
+    let carrier = sn_res_field.span;
+    let (_, batch) = c.u16_le("batch_size")?;
+    Ok(alloc::vec![
+        sn_res_field,
+        // Both children ALWAYS, whatever the byte holds. Code `0b00` is `8bit`,
+        // a resolution a sender really chooses and not an absence, so emitting
+        // only the non-zero ones would make "the sender chose 8-bit"
+        // indistinguishable from "this capture did not carry the field". The
+        // second thing is already said, and said better: when `S` is clear
+        // there is no `sn_res` field at all.
+        label("sn_res_frame_sn", carrier, sn_res_word(sn_res)),
+        label("sn_res_request_id", carrier, sn_res_word(sn_res >> 2)),
+        batch,
+    ])
+}
+
 pub fn dissect_transport_message(bytes: &[u8], base: usize) -> Result<Field, CodecError> {
     use wz_codecs::wire_const;
     let mut c = SpanCursor::with_base(bytes, base);
@@ -3281,10 +3337,7 @@ pub fn dissect_transport_message(bytes: &[u8], base: usize) -> Result<Field, Cod
             out.push(bits("zid_len", cb_span, (((cbyte >> 4) & 0xF) + 1) as u64));
             out.push(c.bytes("zid", ((cbyte >> 4) & 0xF) as usize + 1)?);
             if (header & 0x40) != 0 {
-                let (_, sn_res) = c.u8("sn_res")?;
-                out.push(sn_res);
-                let (_, batch) = c.u16_le("batch_size")?;
-                out.push(batch);
+                out.extend(sn_res_and_batch(&mut c)?);
             }
             if (header & 0x20) != 0 {
                 let (n, len) = c.vle_u64("cookie_len")?;
@@ -3334,10 +3387,7 @@ pub fn dissect_transport_message(bytes: &[u8], base: usize) -> Result<Field, Cod
             out.push(bits("zid_len", cb_span, (((cbyte >> 4) & 0xF) + 1) as u64));
             out.push(c.bytes("zid", ((cbyte >> 4) & 0xF) as usize + 1)?);
             if (header & 0x40) != 0 {
-                let (_, sn_res) = c.u8("sn_res")?;
-                out.push(sn_res);
-                let (_, batch) = c.u16_le("batch_size")?;
-                out.push(batch);
+                out.extend(sn_res_and_batch(&mut c)?);
             }
             let (_, lease) = c.vle_u64("lease")?;
             out.push(lease);
@@ -3941,6 +3991,20 @@ mod tests {
         match root.find(name).map(|f| &f.value) {
             Some(FieldValue::Bits(v)) => *v,
             other => panic!("{name} is not a bits subfield: {other:?}"),
+        }
+    }
+
+    /// `field` must hold this table-resolved word.
+    ///
+    /// R2270 (item 576) -- the KIND is asserted alongside the value, the same
+    /// reason `bits_of` gives: a walker that demoted a `Label` to a `Bits`
+    /// would hand the reader back the opaque number that item was filed about,
+    /// and an accessor that only compared the payload would not notice.
+    #[track_caller]
+    fn label_of(root: &Field, name: &str) -> String {
+        match root.find(name).map(|f| &f.value) {
+            Some(FieldValue::Label(v)) => v.as_ref().into(),
+            other => panic!("{name} is not a label subfield: {other:?}"),
         }
     }
 
@@ -5639,6 +5703,98 @@ mod tests {
     /// fixtures are the CODEC's own encode rather than hand-laid bytes, so a
     /// walker that disagrees with the codec fails here instead of agreeing with
     /// my reading of the layout.
+    /// R2270 (open-debt item 576) — `sn_res` codes TWO resolutions, and both
+    /// come out named, in INIT and in JOIN alike.
+    ///
+    /// ⛔ THE FIXTURE'S BYTE IS THE WHOLE POINT. `0x09` puts `0b01` in the low
+    /// pair and `0b10` in the high one, so the two fields DIFFER. The capture
+    /// this item was filed from carried `0b1010`, where both pairs read `0b10`
+    /// — and against that byte an implementation that shifted by 0 and 2 and
+    /// one that swapped them give the SAME answer. A fixture with no
+    /// discriminating power is the population-of-zero green wearing a test's
+    /// clothes, so the assertion below would hold for a walker that had the
+    /// layout backwards.
+    ///
+    /// ⛔ AND ZERO IS A VALUE, not an absence. The `8bit` leg exists because
+    /// code `0b00` is a resolution a sender really picks; emitting the children
+    /// only when the byte is non-zero would make "the sender chose 8-bit"
+    /// indistinguishable from "the field was not carried". The second is said
+    /// elsewhere and better — an S-clear JOIN has no `sn_res` field at all,
+    /// which the test below this one asserts and which must stay true.
+    #[test]
+    fn sn_res_names_both_resolutions_in_init_and_in_join() {
+        // INIT, S set so the capability pair is present. `A` clear.
+        let init = wz_codecs::init_body::InitBody {
+            version: 0x09,
+            cbyte: (3 << 4) | 0x01,
+            zid: &[0xB0, 0xB1, 0xB2, 0xB3],
+            sn_res: Some(0x09),
+            batch_size: Some(0x2000),
+            cookie_len: None,
+            cookie: None,
+        };
+        let mut bytes = alloc::vec![wz_codecs::wire_const::T_MID_INIT | 0x40];
+        bytes.extend_from_slice(&init.encode_to_vec(1, 0));
+        let f = dissect_transport_message(&bytes, 0).expect("the walker rejected the init");
+        // The raw byte SURVIVES: the children are a reading of it, not a
+        // replacement for it.
+        assert_eq!(uint(&f, "sn_res"), 0x09);
+        assert_eq!(label_of(&f, "sn_res_frame_sn"), "16bit");
+        assert_eq!(label_of(&f, "sn_res_request_id"), "32bit");
+        // The children ALIAS the byte's span, the way `whatami` aliases
+        // `cbyte`'s -- a reader following either child lands on the byte it was
+        // read from.
+        let raw_span = f.find("sn_res").expect("sn_res").span;
+        assert_eq!(f.find("sn_res_frame_sn").expect("frame_sn").span, raw_span);
+        assert_eq!(f.find("sn_res_request_id").expect("req_id").span, raw_span);
+
+        // JOIN, the SAME byte. Item 576's sharpest point: a fix applied to INIT
+        // alone leaves this one an opaque number.
+        let join = wz_codecs::join::Join {
+            version: 0x09,
+            cbyte: (3 << 4) | 0x01,
+            zid: &[0xA0, 0xA1, 0xA2, 0xA3],
+            sn_res: Some(0x09),
+            batch_size: Some(0x1000),
+            lease: 10_000,
+            next_sn_reliable: 7,
+            next_sn_best_effort: 9,
+        };
+        let mut bytes =
+            alloc::vec![wz_codecs::wire_const::T_MID_JOIN | wz_codecs::wire_const::FLAG_T_JOIN_S];
+        bytes.extend_from_slice(&join.encode_to_vec(1));
+        let f = dissect_transport_message(&bytes, 0).expect("the walker rejected the join");
+        assert_eq!(uint(&f, "sn_res"), 0x09);
+        assert_eq!(label_of(&f, "sn_res_frame_sn"), "16bit");
+        assert_eq!(label_of(&f, "sn_res_request_id"), "32bit");
+
+        // Code `0b00` in BOTH pairs -- present, named, and read as `8bit`.
+        let zeroed = wz_codecs::join::Join {
+            sn_res: Some(0x00),
+            ..join
+        };
+        let mut bytes =
+            alloc::vec![wz_codecs::wire_const::T_MID_JOIN | wz_codecs::wire_const::FLAG_T_JOIN_S];
+        bytes.extend_from_slice(&zeroed.encode_to_vec(1));
+        let f = dissect_transport_message(&bytes, 0).expect("the walker rejected the zeroed join");
+        assert_eq!(uint(&f, "sn_res"), 0x00);
+        assert_eq!(label_of(&f, "sn_res_frame_sn"), "8bit");
+        assert_eq!(label_of(&f, "sn_res_request_id"), "8bit");
+
+        // Every code the two bits can hold reaches a word, and the four words
+        // are DISTINCT -- that bijection is what makes the human-readable form
+        // lossless, and it is the reason these are `label` children and not a
+        // second copy of the number.
+        let words: alloc::vec::Vec<&str> = (0u8..4).map(sn_res_word).collect();
+        assert_eq!(words, alloc::vec!["8bit", "16bit", "32bit", "64bit"]);
+        let mut unique = words.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), 4, "the code -> word map must be injective");
+        // ...and the high bits of the byte never leak into a pair's reading.
+        assert_eq!(sn_res_word(0xFC), "8bit");
+    }
+
     #[test]
     fn the_transport_walkers_agree_with_their_generated_codecs() {
         use sce_forge_runtime::codec::SceCursor;
