@@ -2159,6 +2159,16 @@ PY
     # and what a build box has are different facts.
     python3 scripts/lib/armed_oracle_census.py --selftest || return 1
     python3 scripts/lib/armed_oracle_census.py --check || return 1
+    # R2247 (open-debt item 598) — the OTHER side of the same flag. The census
+    # above walks the armings this file SETS; this walks the ones a lane READS,
+    # and asks whether every branch that declines to run reads its own. C1ce
+    # consulted its flag at one decline out of two and Layer Q at two out of
+    # thirteen, so `WZ_C1CE_REQUIRE=1` with the examples clone moved away
+    # printed `pass (0s)` and `all required layers pass`. The two populations
+    # are disjoint by construction, which is why the census was green through
+    # every round that hole was open.
+    python3 scripts/lib/armed_skip_guard.py --selftest || return 1
+    python3 scripts/lib/armed_skip_guard.py --check || return 1
     # R2230 (open-debt items 579 / 582) — the machine-INDEPENDENT half of
     # `upstream_carries_the_surface.py`, whose other half needs a pinned zenohd
     # and therefore lives in Layer Z.
@@ -11802,6 +11812,30 @@ layer_g_cross_compile_cortex_m() {
 # CoopJoinHandle::abort surface (R311bd) + wz-link-lwip UDP raw API
 # (R311az-2) + lwip-sys cross-real build (R311az-1) + R311bf's
 # SystickClock ClockSource composed in one binary per target).
+
+# R2247 — the ONE place Layer Q decides that a missing tool is a skip.
+#
+# Same idiom as `_z_unavailable` / `_qz_unavailable` / `_pico_cli_unavailable`,
+# and here for the reason those exist: the arming has to be on EVERY branch that
+# declines to run a leg, and thirteen branches meant thirteen chances to forget
+# it. Eleven had. The two that remembered were copied by hand, which is the
+# other half of the same problem -- an arming spelled out per branch is an
+# arming that drifts per branch.
+#
+# `fail=1` rather than `return 1` at the call sites: this lane accumulates and
+# returns `$fail` at the end, so one unprovisioned leg must not hide the verdict
+# of the legs after it. That is a deliberate difference from `_z_unavailable`,
+# whose lanes are single-legged.
+_q_unavailable() {
+    if [[ -n "${WZ_Q_REQUIRE:-}" ]]; then
+        echo "  $1 FAIL — required (WZ_Q_REQUIRE set) but $2" \
+             "(provisioning regression)" >&2
+        return 1
+    fi
+    echo "  $1 SKIP ($2)"
+    return 0
+}
+
 layer_q_qemu_mcu_e2e() {
     # Default gate (R311pt — opt-in axis retired). The rustup-target /
     # qemu-system-arm / arm-none-eabi-* graceful SKIPs below keep this a
@@ -11875,7 +11909,8 @@ layer_q_qemu_mcu_e2e() {
     for plane in "${probe_lanes[@]}"; do
         IFS=':' read -r pmachine pcpu ptarget <<< "$plane"
         if ! grep -q "^${ptarget}$" <<< "$installed"; then
-            echo "  Q.0.${pmachine} SKIP (rustup target ${ptarget} absent)"
+            _q_unavailable "Q.0.${pmachine}" "rustup target ${ptarget} absent" \
+                || fail=1
             continue
         fi
         if cargo build --release \
@@ -11889,7 +11924,8 @@ layer_q_qemu_mcu_e2e() {
             continue
         fi
         if [[ "$has_qemu" -ne 1 ]]; then
-            echo "  Q.0.${pmachine} run SKIP (qemu-system-arm not on PATH)"
+            _q_unavailable "Q.0.${pmachine} run" "qemu-system-arm not on PATH" \
+                || fail=1
             continue
         fi
         pbin="deploy/mcu-noheap-probe/target/${ptarget}/release/mcu-noheap-probe"
@@ -11901,8 +11937,8 @@ layer_q_qemu_mcu_e2e() {
     done
 
     if ! command -v arm-none-eabi-gcc >/dev/null 2>&1; then
-        echo "  Q.1-3 SKIP (arm-none-eabi-gcc not on PATH;" \
-             "install gcc-arm-none-eabi — mcu-qemu-demo lwip-sys needs it)"
+        _q_unavailable "Q.1-3" "arm-none-eabi-gcc not on PATH; install \
+gcc-arm-none-eabi — mcu-qemu-demo lwip-sys needs it" || fail=1
         return "$fail"
     fi
 
@@ -11965,14 +12001,8 @@ layer_q_qemu_mcu_e2e() {
         fi
 
         if ! grep -q "^${target}$" <<< "$installed"; then
-            if [[ -n "${WZ_Q_REQUIRE:-}" ]]; then
-                echo "  Q.${machine} FAIL — required (WZ_Q_REQUIRE set) but rustup" \
-                     "target ${target} absent (provisioning regression)" >&2
-                fail=1
-            else
-                echo "  Q.${machine} SKIP (rustup target ${target} absent;" \
-                     "rustup target add ${target})"
-            fi
+            _q_unavailable "Q.${machine}" "rustup target ${target} absent; \
+rustup target add ${target}" || fail=1
             continue
         fi
 
@@ -11995,8 +12025,8 @@ layer_q_qemu_mcu_e2e() {
         if [[ "$run_policy" == "skip" ]]; then
             echo "  Q.2.${machine} run KNOWN_SKIP (${skip_reason})"
         elif [[ "$has_qemu" -ne 1 ]]; then
-            echo "  Q.2.${machine} run SKIP (qemu-system-arm not on PATH;" \
-                 "install qemu-system-arm)"
+            _q_unavailable "Q.2.${machine} run" "qemu-system-arm not on PATH; \
+install qemu-system-arm" || fail=1
         else
             local bin
             bin="deploy/mcu-qemu-demo/target/${target}/release/mcu-qemu-demo"
@@ -12048,7 +12078,8 @@ layer_q_qemu_mcu_e2e() {
             echo "  Q.frt build mcu-freertos-demo thumbv7m-none-eabi OK"
             any_built=1
             if [[ "$has_qemu" -ne 1 ]]; then
-                echo "  Q.frt run SKIP (qemu-system-arm not on PATH)"
+                _q_unavailable "Q.frt run" "qemu-system-arm not on PATH" \
+                    || fail=1
             elif ! run_qemu_case \
                 "Q.frt run mcu-freertos-demo via qemu-system-arm mps2-an385" \
                 cortex-m3 mps2-an385 \
@@ -12097,7 +12128,8 @@ layer_q_qemu_mcu_e2e() {
     for lane in "${acceptor_lanes[@]}"; do
         IFS=':' read -r amachine acpu atarget <<< "$lane"
         if ! grep -q "^${atarget}$" <<< "$installed"; then
-            echo "  Q.4.${amachine} SKIP (rustup target ${atarget} absent)"
+            _q_unavailable "Q.4.${amachine}" "rustup target ${atarget} absent" \
+                || fail=1
             continue
         fi
         for amode in frame reasm; do
@@ -12119,7 +12151,8 @@ layer_q_qemu_mcu_e2e() {
             any_built=1
 
             if [[ "$has_qemu" -ne 1 ]]; then
-                echo "  Q.4.${amachine}.${alabel} run SKIP (qemu-system-arm not on PATH)"
+                _q_unavailable "Q.4.${amachine}.${alabel} run" \
+                    "qemu-system-arm not on PATH" || fail=1
                 continue
             fi
             abin="deploy/mcu-session-acceptor/target/${atarget}/release/mcu-session-acceptor"
@@ -12152,7 +12185,8 @@ layer_q_qemu_mcu_e2e() {
             echo "  Q.4.microbit.slim build mcu-session-acceptor thumbv6m-none-eabi OK"
             any_built=1
             if [[ "$has_qemu" -ne 1 ]]; then
-                echo "  Q.4.microbit.slim run SKIP (qemu-system-arm not on PATH)"
+                _q_unavailable "Q.4.microbit.slim run" \
+                    "qemu-system-arm not on PATH" || fail=1
             elif ! run_qemu_case \
                 "Q.4.microbit.slim run mcu-session-acceptor via qemu-system-arm microbit" \
                 cortex-m0 microbit \
@@ -12164,7 +12198,8 @@ layer_q_qemu_mcu_e2e() {
             fail=1
         fi
     else
-        echo "  Q.4.microbit SKIP (rustup target thumbv6m-none-eabi absent)"
+        _q_unavailable "Q.4.microbit" "rustup target thumbv6m-none-eabi absent" \
+            || fail=1
     fi
 
     # ── Q.5 — R311mi multicast footprint artifact (deploy/mcu-multicast-e2e).
@@ -12185,13 +12220,7 @@ layer_q_qemu_mcu_e2e() {
     local mctarget
     for mctarget in thumbv7m-none-eabi thumbv7em-none-eabihf; do
         if ! grep -q "^${mctarget}$" <<< "$installed"; then
-            if [[ -n "${WZ_Q_REQUIRE:-}" ]]; then
-                echo "  Q.5.${mctarget} FAIL — required (WZ_Q_REQUIRE set) but" \
-                     "rustup target absent (provisioning regression)" >&2
-                fail=1
-            else
-                echo "  Q.5.${mctarget} SKIP (rustup target absent)"
-            fi
+            _q_unavailable "Q.5.${mctarget}" "rustup target absent" || fail=1
             continue
         fi
         if WZ_LWIP_PORT="$lwip_port" cargo build --release \
@@ -12258,7 +12287,8 @@ layer_q_qemu_mcu_e2e() {
         "mps2-an500:cortex-m7:thumbv7em-none-eabihf"; do
         IFS=':' read -r mcmachine mccpu mctgt <<< "$mcrun_lane"
         if ! grep -q "^${mctgt}$" <<< "$installed"; then
-            echo "  Q.6.${mcmachine} SKIP (rustup target ${mctgt} absent)"
+            _q_unavailable "Q.6.${mcmachine}" "rustup target ${mctgt} absent" \
+                || fail=1
             continue
         fi
         # Build once per triple (an386 + an500 share thumbv7em-none-eabihf).
@@ -12278,7 +12308,8 @@ layer_q_qemu_mcu_e2e() {
             fi
         fi
         if [[ "$has_qemu" -ne 1 ]]; then
-            echo "  Q.6.${mcmachine} run SKIP (qemu-system-arm not on PATH)"
+            _q_unavailable "Q.6.${mcmachine} run" "qemu-system-arm not on PATH" \
+                || fail=1
             continue
         fi
         if ! run_qemu_case \
@@ -12294,9 +12325,16 @@ layer_q_qemu_mcu_e2e() {
         # mcu job, which PROVISIONS the targets) turns "measured zero bytes" into a
         # FAIL: the footprint gate is the whole subject of R311y267, so it must not
         # be the one lane that reports green having gated nothing. The per-sub-lane
-        # target-absent escalations above already FAIL individually under
-        # WZ_Q_REQUIRE; this catches the aggregate case a future SKIP path could
-        # reintroduce. Off (a host-only dev machine) it stays a soft SKIP.
+        # escalations above FAIL individually under WZ_Q_REQUIRE; this catches the
+        # aggregate case a future SKIP path could reintroduce. Off (a host-only dev
+        # machine) it stays a soft SKIP.
+        #
+        # R2247 — that sentence was FALSE when it was written and this backstop is
+        # why nobody noticed. Two of the thirteen sub-lane declines consulted the
+        # flag; the other eleven printed SKIP and moved on, so a job that had lost
+        # qemu still built SOMETHING and never reached here. It is true now because
+        # all thirteen route through `_q_unavailable`, and `armed_skip_guard.py`
+        # is what keeps it true rather than this comment.
         if [[ -n "${WZ_Q_REQUIRE:-}" ]]; then
             echo "Layer Q FAIL — required (WZ_Q_REQUIRE set) but nothing built" \
                  "(no Layer Q rustup targets installed?); footprint measured 0 axes" >&2
@@ -15411,7 +15449,7 @@ layer_e12_apfull_adminspace_pico() {
 #
 # R311y498. The ORACLE (zenoh-c's headers, libzenohc.so, and a clone of its
 # examples) is machine-local and is NOT in this repo, so the lane SKIPs when it is
-# absent — and `WZ_C1BC_REQUIRE=1` turns that skip into a hard failure on any job
+# absent — and `WZ_C1CC_REQUIRE=1` turns that skip into a hard failure on any job
 # that provisions it. The arming flag exists because a skip is green, which is the
 # R311y265 masked-skip burn and what R311y495 caught C1bp doing for two rounds.
 #
@@ -15659,7 +15697,14 @@ layer_c1ce_api_compat_c_shm_oracle() {
     fi
     # The examples corpus still comes from the reference clone; only the headers
     # and the reference library change.
-    if [[ ! -f "${WZ_ZENOH_C_EXAMPLES:-$HOME/zenoh-c-ref/examples}/z_put.c" ]]; then
+    local examples="${WZ_ZENOH_C_EXAMPLES:-$HOME/zenoh-c-ref/examples}"
+    if [[ ! -f "$examples/z_put.c" ]]; then
+        if [[ -n "${WZ_C1CE_REQUIRE:-}" ]]; then
+            echo "  Layer C1ce FAIL — required (WZ_C1CE_REQUIRE set) but the" >&2
+            echo "  zenoh-c examples clone is absent at $examples." >&2
+            echo "  Provision it with: bash scripts/install-zenoh-c.sh" >&2
+            return 1
+        fi
         echo "  Layer C1ce SKIP (the zenoh-c examples clone is absent)"
         return 0
     fi
