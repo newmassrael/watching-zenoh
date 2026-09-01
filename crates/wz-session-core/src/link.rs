@@ -111,6 +111,39 @@ impl InterceptorLink {
         }
     }
 
+    /// R2259 (open-debt item 593) — whether this protocol carries a BYTE STREAM
+    /// rather than framed datagrams, which is what zenoh-c's `z_link_is_streamed`
+    /// reports and what wz's own framing already branches on.
+    ///
+    /// Derived from the protocol rather than recorded per link, because it IS a
+    /// property of the protocol: every wz link of a given scheme frames the same
+    /// way. The two datagram schemes are the ones whose drivers deliver a whole
+    /// batch per receive — `udp` and the RFC9221 `quic-datagram` — and every
+    /// other one hands the session an unframed stream that COBS, a length prefix
+    /// or a WebSocket message boundary re-frames.
+    ///
+    /// ⚠ `Ws` is STREAMED here even though a WebSocket delivers discrete BINARY
+    /// messages, and that is upstream's classification rather than a slip: zenoh
+    /// builds its ws link on `LinkUnicastTrait` with `is_streamed() == true`
+    /// (`io/zenoh-link-ws/src/unicast.rs`), because the transport layer above it
+    /// must still prefix each batch with its length.
+    pub fn is_streamed(&self) -> bool {
+        !matches!(self, InterceptorLink::Udp | InterceptorLink::QuicDatagram)
+    }
+
+    /// R2259 (open-debt item 593) — whether this protocol delivers RELIABLY,
+    /// the input to zenoh-c's `z_link_reliability`.
+    ///
+    /// The same two datagram schemes are the unreliable ones, and for the same
+    /// reason they are unstreamed: neither retransmits. They are nevertheless
+    /// two questions rather than one — a protocol could frame and still not
+    /// retransmit — so this is written as its own match instead of delegating to
+    /// [`is_streamed`](Self::is_streamed), which would make the coincidence look
+    /// like a definition.
+    pub fn is_reliable(&self) -> bool {
+        !matches!(self, InterceptorLink::Udp | InterceptorLink::QuicDatagram)
+    }
+
     /// R311y473 — the DIALABLE LOCATOR for this protocol at `address`: the string
     /// a foreign peer has to be able to parse and connect to.
     ///

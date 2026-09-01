@@ -246,6 +246,12 @@ pub use wz_session_core::action_trace::ActionTrace;
 // TokioLinkDriverAdapter / UdpWriteDriver / TcpWriteDriver impls + external
 // callers keep naming crate::session_glue::BoxedLinkDriver.
 pub use wz_session_core::link::BoxedLinkDriver;
+// R2259 (open-debt item 593) — the two link facts the C link-events plane
+// reports, beside the trait that produces them. `linkstate_forward` already
+// re-exports `InterceptorLink`, but it is a ROUTING module and a consumer that
+// needs the link's protocol has no business depending on the routing tier; the
+// pair belongs where `BoxedLinkDriver::link_endpoints` is named.
+pub use wz_session_core::link::{InterceptorLink, LinkEndpoints, LinkSubject};
 // chunk-5 — `SessionRuntime` (the runtime-tier extension owning `R::LinkSink`)
 // is named only by the `SessionLinkActions` impls, which moved to
 // wz-session-core::session_actions; the import left session_glue with them.

@@ -85,7 +85,7 @@ use wz_runtime_tokio::session::{
     TokioSession,
 };
 use wz_runtime_tokio::session_glue::{
-    new_session_actions, BoxedLinkDriver, IterationEvent, SessionLinkActions,
+    new_session_actions, BoxedLinkDriver, InterceptorLink, IterationEvent, SessionLinkActions,
 };
 use wz_runtime_tokio::sink::SampleView;
 use wz_runtime_tokio::sync::Mutex as WzMutex;
@@ -671,9 +671,157 @@ impl BoxedLinkDriver for InertLinkDriver {
     fn close_blocking(&self) {}
 }
 
+/// R2259 (open-debt item 593) — one PHYSICAL link of an established face, as
+/// zenoh-c's `z_owned_link_t` reports it.
+///
+/// Every field is READ off the face, never defaulted into a plausible-looking
+/// value: `interfaces` keeps `LinkSubject`'s three-state answer (resolved,
+/// resolved-empty, undetermined) rather than flattening a failed lookup to an
+/// empty set the way upstream does, and `protocol` is `None` for a driver that
+/// cannot name itself. The C accessors are what decide how to spell "unknown"
+/// at the ABI, and they can only do that honestly if the unknown survives here.
+#[derive(Debug, Clone)]
+pub struct LinkSnapshot {
+    /// This end's locator (`z_link_src`).
+    pub src: String,
+    /// The peer end's locator (`z_link_dst`).
+    pub dst: String,
+    /// The link protocol, or `None` when the driver cannot say (`z_link_is_streamed`,
+    /// `z_link_reliability`).
+    pub protocol: Option<InterceptorLink>,
+    /// The NICs this link's local address sits on (`z_link_interfaces`), with
+    /// `None` meaning "could not be determined" — see `LinkSubject`.
+    pub interfaces: Option<Vec<String>>,
+    /// The negotiated outbound frame budget (`z_link_mtu`), clamped into the
+    /// `uint16_t` upstream returns.
+    pub mtu: u16,
+}
+
+/// R2259 (open-debt item 593) — one ESTABLISHED face as zenoh-c's
+/// `z_owned_transport_t` reports it, plus the links under it.
+///
+/// The transport half is exactly the 19 bytes `zenoh_opaque.h` gives
+/// `z_owned_transport_t` — zid, whatami, and the two negotiated booleans — which
+/// is why `zc_internal_create_transport` can construct one from four scalars and
+/// why the C type is a VALUE rather than a handle. The links are carried
+/// alongside rather than inside for the same reason upstream separates them: a
+/// transport outlives any one of its links.
+#[derive(Debug, Clone)]
+pub struct FaceSnapshot {
+    /// The peer's zid (`z_transport_zid`, `z_link_zid`).
+    pub zid: [u8; 16],
+    /// The peer's role as the raw 2-bit INIT wire form (`z_transport_whatami`).
+    pub whatami: u8,
+    /// Whether QoS was negotiated on this transport (`z_transport_is_qos`).
+    pub is_qos: bool,
+    /// Whether this is a multicast transport (`z_transport_is_multicast`).
+    ///
+    /// Always `false` for a face: wz's C surface establishes UNICAST transports
+    /// only, and the honest report for one is that it is not multicast. The
+    /// field exists because `zc_internal_create_transport` can build a
+    /// transport value that IS multicast — upstream's own test door — and that
+    /// value must round-trip through the same accessor.
+    pub is_multicast: bool,
+    /// Whether SHM was negotiated on this transport (`z_transport_is_shm`).
+    ///
+    /// Reported on every build, unlike the C accessor that consumes it: upstream
+    /// only widens `z_owned_transport_t` to twenty bytes under
+    /// `Z_FEATURE_SHARED_MEMORY`, but the FACT is one wz can state either way,
+    /// and gating the field would make the ABI's shape decide what the session
+    /// is allowed to know.
+    pub is_shm: bool,
+    /// This face's physical links, one entry each — see
+    /// [`SessionLinkActions::link_endpoints_all`].
+    pub links: Vec<LinkSnapshot>,
+}
+
+impl FaceSnapshot {
+    /// Snapshot one face's session, or `None` when its INIT has not populated
+    /// the identity slots yet.
+    ///
+    /// The `None` is the half-open case [`SharedSession::peer_identities`]
+    /// skips, and it is a REFUSAL rather than a default: a transport reported
+    /// with a zero zid is a peer the C application can neither match nor dial.
+    fn of(session: &TokioSession) -> Option<Self> {
+        let actions = session.actions();
+        let peer = actions.peer_zid()?;
+        let whatami = actions.peer_whatami_wire()?;
+        let mut zid = [0u8; 16];
+        let n = peer.len().min(16);
+        zid[..n].copy_from_slice(&peer[..n]);
+        let subject = actions.link_subject().cloned();
+        let mtu = u16::try_from(actions.negotiated_batch_mtu()).unwrap_or(u16::MAX);
+        let links = actions
+            .link_endpoints_all()
+            .into_iter()
+            .map(|e| LinkSnapshot {
+                src: e.src,
+                dst: e.dst,
+                protocol: subject.as_ref().and_then(|s| s.protocol),
+                interfaces: subject.as_ref().and_then(|s| s.interfaces.clone()),
+                mtu,
+            })
+            .collect();
+        // A build without `transport-qos` never negotiates the ext, so `false`
+        // is the MEASURED answer here rather than a stand-in: there is no
+        // conduit split to report. `is_qos` itself is gated, so this is also the
+        // only spelling that compiles in both configurations.
+        #[cfg(feature = "transport-qos")]
+        let is_qos = actions.is_qos();
+        #[cfg(not(feature = "transport-qos"))]
+        let is_qos = false;
+        // Same shape, same reason, for the SHM ext.
+        #[cfg(feature = "transport-shm")]
+        let is_shm = actions.is_shm();
+        #[cfg(not(feature = "transport-shm"))]
+        let is_shm = false;
+        Some(Self {
+            zid,
+            whatami,
+            is_qos,
+            is_multicast: false,
+            is_shm,
+            links,
+        })
+    }
+}
+
+/// R2259 (open-debt item 593) — which way a face moved, the input to the `kind`
+/// a `z_link_event_t` / `z_transport_event_t` carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaceEventKind {
+    /// The face reached Established (`Z_SAMPLE_KIND_PUT`).
+    Up,
+    /// The face left the live set (`Z_SAMPLE_KIND_DELETE`).
+    Down,
+}
+
+/// R2259 (open-debt item 593) — a face-lifecycle observer, as
+/// [`SharedSession::watch_faces`] holds it.
+///
+/// `Arc` rather than `Box` because `SharedSession::fire_face_event` clones the
+/// sink list OUT of the registry lock before invoking any of them; see that
+/// method for why that is load-bearing rather than tidy.
+pub type FaceEventSink = Arc<dyn Fn(FaceEventKind, &FaceSnapshot) + Send + Sync>;
+
 #[derive(Default)]
 struct Inner {
     faces: BTreeMap<u64, FaceEntry>,
+    /// R2259 (open-debt item 593) — the face-lifecycle observers the C
+    /// link/transport event planes register, keyed by the id
+    /// [`SharedSession::watch_faces`] hands back.
+    ///
+    /// A `Vec` of `(id, sink)` rather than a map because the population is a
+    /// handful of listeners iterated on every face transition and looked up only
+    /// when one is undeclared: iteration order IS the delivery order, and a
+    /// `BTreeMap` would silently make that "by id" rather than "by declaration",
+    /// which is not a promise upstream makes but is one a test would come to
+    /// depend on.
+    face_watchers: Vec<(u64, FaceEventSink)>,
+    /// The allocator behind [`SharedSession::watch_faces`]. Its own space, for
+    /// the reason `next_entity_id` has one: an id shared with another plane
+    /// makes two unrelated undeclares able to collide.
+    next_face_watcher_id: u64,
     /// The local plane's own handles for the SSOT declarations, keyed by the
     /// same C-level ids the per-face maps use.
     ///
@@ -1019,6 +1167,11 @@ impl SharedSession {
                 adv_subs.insert(entry.id, sub);
             }
         }
+        // R2259 (item 593) — taken BEFORE the entry moves into the map, and
+        // fired after the lock drops. The face is Established by the time
+        // `face_up` runs (both callers reach it past a completed handshake), so
+        // the identity slots this reads are already populated.
+        let snapshot = FaceSnapshot::of(&session);
         let replaced = guard.faces.insert(
             id,
             FaceEntry {
@@ -1038,6 +1191,11 @@ impl SharedSession {
         );
         drop(guard);
         drop(replaced);
+        // Outside the lock, for the reason `fire_face_event` states: a C
+        // listener may re-enter this registry.
+        if let Some(snapshot) = snapshot {
+            self.fire_face_event(FaceEventKind::Up, &snapshot);
+        }
     }
 
     /// A face left the live set (peer Close / link loss).
@@ -1078,6 +1236,12 @@ impl SharedSession {
         // and the last one may release the final `Arc<CClosure>` and run the
         // C `drop(context)`.
         let removed = self.lock().faces.remove(&id);
+        // R2259 (item 593) — the DEPARTED face's identity, taken while the
+        // entry is still alive. There is no other moment: `face_down` is handed
+        // an id, and once the entry drops nothing can say which peer it was.
+        if let Some(snapshot) = removed.as_ref().and_then(|e| FaceSnapshot::of(&e.session)) {
+            self.fire_face_event(FaceEventKind::Down, &snapshot);
+        }
         if let Some(entry) = &removed {
             // Both steps run BEFORE the drop: the sinks that must receive the
             // Deletes are owned by the entry being dropped.
@@ -1565,6 +1729,69 @@ impl SharedSession {
             .values()
             .map(|face| face.session.clone())
             .collect()
+    }
+
+    /// R2259 (open-debt item 593) — every ESTABLISHED face as the C
+    /// link/transport planes see it: the input to `z_info_transports` and
+    /// `z_info_links`.
+    ///
+    /// Built on the same `face_sessions` walk and the same "skip a face whose
+    /// INIT has not populated the slots" rule as
+    /// [`peer_identities`](Self::peer_identities), because it answers the same
+    /// question one level richer — a half-open face is not a transport, and
+    /// reporting one with a zero id would put a peer on the C side that no peer
+    /// is.
+    pub fn face_snapshots(&self) -> Vec<FaceSnapshot> {
+        self.face_sessions()
+            .iter()
+            .filter_map(FaceSnapshot::of)
+            .collect()
+    }
+
+    /// R2259 (open-debt item 593) — register a face-lifecycle observer, and get
+    /// back the id that undeclares it.
+    ///
+    /// `sink` runs on the DRIVE task, inside `face_up` / `face_down`, which is
+    /// the same role every other C callback on this ABI is invoked from — the
+    /// `unsafe impl Sync` premise behind a C closure here is that the C
+    /// application thread never invokes it, and that premise is what makes this
+    /// the right seam rather than a poll from the C side.
+    pub fn watch_faces(&self, sink: FaceEventSink) -> u64 {
+        let mut guard = self.lock();
+        guard.next_face_watcher_id += 1;
+        let id = guard.next_face_watcher_id;
+        guard.face_watchers.push((id, sink));
+        id
+    }
+
+    /// R2259 — drop a face-lifecycle observer. `true` when one was registered
+    /// under `id`, so an undeclare of an already-undeclared listener is
+    /// distinguishable from one that was never declared.
+    pub fn unwatch_faces(&self, id: u64) -> bool {
+        let mut guard = self.lock();
+        let before = guard.face_watchers.len();
+        guard.face_watchers.retain(|(held, _)| *held != id);
+        guard.face_watchers.len() != before
+    }
+
+    /// R2259 — deliver one face transition to every registered observer.
+    ///
+    /// The sinks are CLONED OUT of the lock before any runs. A sink reaches C
+    /// code, and C code is free to re-enter this registry — declaring a
+    /// subscriber, or undeclaring the very listener being invoked — so holding
+    /// the lock across the call would deadlock on exactly the paths a C program
+    /// is most likely to take. That is the same discipline `face_down` states
+    /// for dropping a `FaceEntry` outside the lock.
+    fn fire_face_event(&self, kind: FaceEventKind, snapshot: &FaceSnapshot) {
+        let sinks: Vec<FaceEventSink> = self
+            .lock()
+            .face_watchers
+            .iter()
+            .map(|(_, sink)| sink.clone())
+            .collect();
+        for sink in sinks {
+            sink(kind, snapshot);
+        }
     }
 
     /// This registry's monotonic clock reading, in milliseconds.

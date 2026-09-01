@@ -143,6 +143,25 @@ pub(crate) struct StringArrayState {
     entries: Vec<Box<z_owned_string_t>>,
 }
 
+/// R2259 (open-debt item 593) — build an OWNED string array over `values`, the
+/// one constructor callers outside this module use.
+///
+/// `z_link_interfaces` is the second producer of a `z_owned_string_array_t`
+/// (`z_hello_locators` was the first), and it lives in another module. Exposing
+/// the CONSTRUCTOR rather than the state type keeps `StringArrayState` private:
+/// the invariant that makes the array safe — every entry is a boxed owned string
+/// this crate minted, dropped exactly once by `StringArrayState::drop` — is one
+/// this function establishes and a caller cannot break.
+///
+/// Gated on its one consumer, `z_link_interfaces`, which the no-unstable arms do
+/// not compile — an ungated definition is dead code there, and `-D warnings` is
+/// right about that.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+pub(crate) fn owned_string_array_from(values: &[String]) -> z_owned_string_array_t {
+    let handle = Box::into_raw(Box::new(StringArrayState::from_strings(values))) as Handle;
+    z_owned_string_array_t::from_handle(handle)
+}
+
 impl StringArrayState {
     fn from_strings(values: &[String]) -> Self {
         Self {

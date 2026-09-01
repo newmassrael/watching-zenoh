@@ -924,8 +924,8 @@ pub const Z_REPLY_KEYEXPR_MATCHING_QUERY: u32 = 1;
 ///
 /// R2258 (open-debt item 593) — the second of the twelve strays, and like
 /// `z_session_id` it needed no new machinery: the answer is the `_anyke`
-/// selector token, which [`QueryMarshal`] has carried in its `anyke` field
-/// since the marshal was written and which [`parameters_has_anyke`] derives.
+/// selector token, which `QueryMarshal` has carried in its `anyke` field
+/// since the marshal was written and which `parameters_has_anyke` derives.
 ///
 /// ⚠ The item recorded these strays as "accessors, each needing a value wz's
 /// marshals do not carry yet". MEASURED, that is the opposite of the case here

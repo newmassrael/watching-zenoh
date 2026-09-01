@@ -230,6 +230,19 @@ macro_rules! define_opaque {
 /// Declare only the OWNED + MOVED half of a family, for the types whose loaned
 /// form is a zero-sized TAG rather than a stack-allocatable struct.
 ///
+// R2259 (open-debt item 593) — reachable from the rest of the crate, not only
+// from this module. The link/transport event planes declare four opaque families
+// of their own, and hand-writing the handle-plus-pad arithmetic per family is
+// exactly the shape the const assertion inside this macro exists to make
+// unnecessary. A `macro_rules!` is otherwise visible only below its definition
+// in ITS OWN module, so this re-export is what lets `crate::define_opaque!`
+// resolve elsewhere.
+// Gated on the ONE consumer: `events` is the only module outside this one that
+// expands it, and that module is absent on the no-unstable arms, where an
+// ungated re-export is an unused import and `-D warnings` is right to say so.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+pub(crate) use define_opaque;
+
 /// `z_owned_sample_t` / `z_owned_query_t` / `z_owned_reply_t` are all
 /// stack-allocated by the C side, so their SIZE is ABI — but the matching
 /// `z_loaned_*` is only ever seen as a pointer, and this crate aims that pointer

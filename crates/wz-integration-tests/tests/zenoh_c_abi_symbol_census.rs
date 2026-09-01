@@ -178,7 +178,19 @@ const BASELINES: &[(&str, usize, &str)] = &[
     // pure-function oracle rather than merely defined.
     // R2257 lowered this 189 -> 180: the cancellation-token plane is built, and
     // it is nine symbols on both unstable arms.
-    ("unstable-shm", 178, "1.10.0"),
+    // R2259 lowered this 178 -> 85: the LINK and TRANSPORT event planes are
+    // built. NINETY-THREE on this arm rather than the ninety-two the `unstable`
+    // row lost, and the extra one is the finding of the round: the transport
+    // TYPE ITSELF differs by arm. `Z_FEATURE_SHARED_MEMORY` widens
+    // `z_owned_transport_t` 19 -> 20 bytes, replaces the five-argument
+    // `zc_internal_create_transport` with a six-argument
+    // `zc_internal_create_transport_shm`, and adds `z_transport_is_shm`. Building
+    // the plane from the `unstable` header alone therefore exported one symbol
+    // upstream does NOT define here — measured as `extra=1` against this oracle,
+    // which is `wz_exports_nothing_the_reference_does_not` red — and left two
+    // it does. The remainder is the SHM provider/allocator plane (84) plus
+    // `z_query_source_info`.
+    ("unstable-shm", 85, "1.10.0"),
     // R311y614 — the two arms that had NO oracle on any machine, and therefore
     // no row: the gate hard-FAILED on them rather than guessing a ceiling from
     // a neighbour. `scripts/install-zenoh-c-arm.sh` builds any of the four, so
@@ -248,7 +260,16 @@ const BASELINES: &[(&str, usize, &str)] = &[
     // R2257 lowered this 104 -> 95, same plane.
     // R2258 lowered this 95 -> 93: `z_session_id` and
     // `z_query_accepts_replies`, two of the twelve strays.
-    ("unstable", 93, "1.10.0"),
+    // R2259 lowered this 93 -> 1: the LINK and TRANSPORT event planes, taken
+    // WHOLE rather than a verb at a time. The families in the comment above are
+    // not separable — a `z_link_event_t` is reachable only through a
+    // `z_owned_closure_link_event_t`, installed only by
+    // `z_declare_link_events_listener` — so shipping any one of them alone
+    // leaves a header promising a link that fails, which is the defect item 593
+    // names. The ONE that remains is `z_query_source_info`, and it is the one
+    // stray R2258 measured as genuinely needing a value `QueryMarshal` does not
+    // carry: the marshal has no `(zid, eid, sn)` where `SampleMarshal` does.
+    ("unstable", 1, "1.10.0"),
     ("nounstable-shm", 1, "1.10.0"),
 ];
 

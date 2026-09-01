@@ -56,6 +56,18 @@ transport-link-unixpipe = ["wz-runtime-tokio/transport-link-unixpipe"]
 # under it. Off by default like its siblings — a C ABI that never dials `tls/`
 # should not pull rustls.
 transport-link-tls = ["wz-runtime-tokio/transport-link-tls"]
+# R2259 (open-debt item 593) — the QoS ext, named here for the same reason the
+# three link kinds above are: `FaceSnapshot::of` reads `SessionLinkActions::is_qos`,
+# which is `transport-qos`-gated upstream, so the name must EXIST here or the
+# arm that reads it becomes an unknown cfg. Off by default, matching
+# wz-runtime-tokio's own default set — a session that never negotiated the ext
+# reports `is_qos == false`, which is the measured answer and not a stand-in.
+transport-qos = ["wz-runtime-tokio/transport-qos"]
+# R2259 (open-debt item 593) — the SHM ext, named for the same reason as
+# `transport-qos` above: `FaceSnapshot::of` reads `SessionLinkActions::is_shm`,
+# which is `transport-shm`-gated upstream. It feeds the SHM arm's twentieth
+# transport byte, which upstream adds only when `Z_FEATURE_SHARED_MEMORY` is set.
+transport-shm = ["wz-runtime-tokio/transport-shm"]
 
 [dependencies]
 # OS entropy for the per-session zid, as zenoh-pico does at `z_open`

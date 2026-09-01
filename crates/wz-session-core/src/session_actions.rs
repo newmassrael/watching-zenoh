@@ -1751,12 +1751,34 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// to tidy a string.
     #[cfg(feature = "adminspace-core")]
     pub fn admin_links(&self) -> Vec<crate::adminspace::AdminLink> {
+        self.link_endpoints_all()
+            .into_iter()
+            .map(|e| crate::adminspace::AdminLink {
+                src: e.src,
+                dst: e.dst,
+            })
+            .collect()
+    }
+
+    /// R2259 (open-debt item 593) — the same per-physical-link `(src, dst)`
+    /// enumeration [`admin_links`](Self::admin_links) renders, WITHOUT the
+    /// `adminspace-core` gate.
+    ///
+    /// The adminspace view was the first consumer of this walk and so owned it;
+    /// the C `z_info_links` / link-events plane is the second, and it is
+    /// compiled in builds that carry no adminspace at all. Duplicating the
+    /// multilink branch into that plane would put the "one entry per PHYSICAL
+    /// link" rule in two places, and the rule is exactly the fact R311y472
+    /// measured wrong once already. So the walk moves here and the adminspace
+    /// renderer becomes a projection of it — one derivation, two consumers.
+    ///
+    /// A link whose driver cannot name its endpoints still gets an entry with
+    /// blank ends, for the reason `admin_links` states: the COUNT is the
+    /// load-bearing answer.
+    pub fn link_endpoints_all(&self) -> Vec<crate::link::LinkEndpoints> {
         let render = |driver: &dyn BoxedLinkDriver| match driver.link_endpoints() {
-            Some(e) => crate::adminspace::AdminLink {
-                src: e.src.clone(),
-                dst: e.dst.clone(),
-            },
-            None => crate::adminspace::AdminLink::default(),
+            Some(e) => e.clone(),
+            None => crate::link::LinkEndpoints::default(),
         };
         #[cfg(feature = "transport-multilink")]
         {

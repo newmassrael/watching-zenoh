@@ -80,6 +80,16 @@ zenoh-c-no-unstable-api = []
 # configuration it serves is the common one — a program built against an SHM
 # header that uses none of the SHM entry points.
 #
+# R2259 (open-debt item 593) — "layout only" now has a MEASURED edge, and the
+# two symbols on it are here because they ARE layout. `Z_FEATURE_SHARED_MEMORY`
+# widens `z_owned_transport_t` from 19 bytes to 20, and the twentieth byte comes
+# with the two doors that write and read it: `zc_internal_create_transport_shm`
+# (which REPLACES the five-argument constructor upstream compiles out on this
+# arm) and `z_transport_is_shm`. Both are transport accessors rather than
+# allocator entry points, and both are `#if`-gated on this same flag in
+# `zenoh_commons.h`. The 85 SHM symbols that remain missing on this arm are the
+# provider/allocator plane, which is still not exported and is still item 593's.
+#
 # OFF by default, because the published standalone archive is built without it.
 zenoh-c-shared-memory = []
 

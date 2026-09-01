@@ -87,6 +87,12 @@ pub mod bytes;
 pub mod cancellation;
 pub mod config;
 pub mod encoding;
+// R2259 (open-debt item 593) — the LINK and TRANSPORT event planes. Gated for
+// the reason `cancellation` above is, and measured the same way: upstream's
+// `nounstable` and `nounstable-shm` oracles define ZERO of these ninety-two
+// symbols, so exporting them unconditionally would put wz above its reference.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+pub mod events;
 mod ffi;
 pub mod get;
 pub mod handlers;
