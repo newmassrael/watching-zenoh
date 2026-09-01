@@ -311,6 +311,27 @@ pub(crate) struct QueryMarshal {
     /// `Option` because `z_queryable.c` branches on its NULL. The two shapes
     /// differ because upstream's two signatures do.
     encoding: crate::encoding::EncodingState,
+    /// R2261 (open-debt item 593) — the QUERIER's `(zid, eid, sn)`, or `None`
+    /// when the query carried no source-info ext.
+    ///
+    /// ⛔ Item 593 recorded this as the one stray that "genuinely needs a value
+    /// `QueryMarshal` does not carry", and the first half is true while the
+    /// second is narrower than it reads: the value is carried, one layer up.
+    /// `QueryView::source_info` has existed since the accessor was added,
+    /// `BorrowedQuery` has the field, and the receive path already fills it
+    /// (`session/queryable.rs` — `source_info: owned.source_info.as_ref()`).
+    /// What was missing was this marshal keeping it, so a C entry point could
+    /// read it back — the SAME shape R2258 measured for the other two strays,
+    /// one layer deeper.
+    ///
+    /// Stored as the wz type and VIEWED through `source_info_c`, the contract
+    /// [`crate::sample::SampleMarshal`] states for its twin: the accessor hands
+    /// out a pointer whose lifetime is this marshal's.
+    source_info: Option<wz_runtime_tokio::sample::SourceInfo>,
+    /// The C view [`z_query_source_info`] returns a pointer to. A VALUE since
+    /// zenoh-c 1.10.0 retired the owned/loaned split.
+    #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+    source_info_c: crate::source_info::z_source_info_t,
     keyexpr_state: KeyexprState,
     loaned_keyexpr: z_loaned_keyexpr_t,
     loaned_payload: z_loaned_bytes_t,
@@ -356,6 +377,9 @@ impl QueryMarshal {
                 Some(hint) => crate::encoding::EncodingState::from_hint(hint),
                 None => crate::encoding::EncodingState::default_encoding(),
             },
+            source_info: view.source_info().cloned(),
+            #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+            source_info_c: crate::source_info::z_source_info_t::empty(),
             keyexpr_state: KeyexprState::new(keyexpr.clone()),
             keyexpr,
             loaned_keyexpr: z_loaned_keyexpr_t::null_value(),
@@ -386,6 +410,17 @@ impl QueryMarshal {
         self.loaned_encoding = crate::abi::z_loaned_encoding_t::from_handle(
             &self.encoding as *const crate::encoding::EncodingState as *mut c_void,
         );
+        // R2261 — the same conversion `SampleMarshal::bind` does, at the same
+        // moment and for the same reason: the C view is a VALUE living inside
+        // this marshal, so it can only be filled once the marshal is at its
+        // final address.
+        #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+        {
+            self.source_info_c = match self.source_info.as_ref() {
+                Some(info) => crate::source_info::z_source_info_t::from_runtime(info),
+                None => crate::source_info::z_source_info_t::empty(),
+            };
+        }
     }
 
     /// Bind the FACE's session, so this marshal can be escaped. Called only by
@@ -413,6 +448,14 @@ impl QueryMarshal {
                 .as_ref()
                 .map(|s| BytesState::whole(s.payload.clone())),
             encoding: self.encoding.deep_copy(),
+            // R2261 — the ESCAPED copy keeps the querier's identity. A query
+            // escaped into a `z_owned_query_t` outlives the callback, and the
+            // whole reason a C program escapes one is to answer it later; a
+            // copy that dropped the source info would answer `NULL` from a
+            // query whose borrowed twin answered a zid.
+            source_info: self.source_info.clone(),
+            #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+            source_info_c: crate::source_info::z_source_info_t::empty(),
             keyexpr_state: KeyexprState::new(self.keyexpr.clone()),
             loaned_keyexpr: z_loaned_keyexpr_t::null_value(),
             loaned_payload: z_loaned_bytes_t::null_value(),
@@ -946,6 +989,46 @@ pub unsafe extern "C" fn z_query_accepts_replies(this_: *const z_loaned_query_t)
         match unsafe { query_marshal(this_) } {
             Some(m) if m.anyke => Z_REPLY_KEYEXPR_ANY,
             _ => Z_REPLY_KEYEXPR_MATCHING_QUERY,
+        }
+    })
+}
+
+/// The QUERIER's `(zid, eid, sn)`, or NULL when the query carried none
+/// (zenoh-c `z_query_source_info`).
+///
+/// R2261 (open-debt item 593) — the LAST of the twelve strays, and the one the
+/// item said would need a value wz did not carry. Re-measured, the value was
+/// carried: `QueryView::source_info` is filled by the receive path out of the
+/// query's own source-info ext, and what this round added is the marshal
+/// keeping it plus this door. The item's sentence was right about
+/// `QueryMarshal` and wrong about the tree.
+///
+/// NULL rather than a zeroed struct for the absent case, because upstream
+/// returns `Option<&z_source_info_t>` (`~/zenoh-c-ref/src/queryable.rs` @
+/// `pub extern "C" fn z_query_source_info`) and a C program written against it
+/// checks the pointer. A zeroed struct would read as a real querier whose zid
+/// is sixteen zero bytes.
+///
+/// The pointer borrows the marshal, exactly as [`z_sample_source_info`] does —
+/// see that function for the lifetime contract.
+///
+/// UNSTABLE-gated as upstream gates it: MEASURED with `nm -D` against all four
+/// provisioned 1.10.0 oracles, the two no-unstable arms define it ZERO times.
+///
+/// # Safety
+/// `this_` must be null or a live loaned query.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+#[no_mangle]
+pub unsafe extern "C" fn z_query_source_info(
+    this_: *const z_loaned_query_t,
+) -> *const crate::source_info::z_source_info_t {
+    guard_val(std::ptr::null(), || {
+        // SAFETY: the caller's contract, delegated.
+        match unsafe { query_marshal(this_) } {
+            Some(m) if m.source_info.is_some() => {
+                &m.source_info_c as *const crate::source_info::z_source_info_t
+            }
+            _ => std::ptr::null(),
         }
     })
 }
@@ -1677,5 +1760,117 @@ mod tests {
             );
             z_query_drop(std::ptr::null_mut());
         }
+    }
+
+    /// R2261 — a `QueryView` whose source info is whatever the test hands it.
+    ///
+    /// Written here rather than reused from the pico side because the point is
+    /// the SEAM: `QueryMarshal::new` reads `view.source_info()`, and a fake that
+    /// left the accessor at its default `None` could never show the wiring.
+    ///
+    /// Gated with the three tests below: the accessor they grade does not exist
+    /// on the no-unstable arms, so neither can a fixture built to reach it.
+    #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+    struct SourcedQuery {
+        source_info: Option<wz_runtime_tokio::sample::SourceInfo>,
+    }
+
+    #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+    impl QueryView for SourcedQuery {
+        fn keyexpr(&self) -> &str {
+            "demo/**"
+        }
+        fn parameters(&self) -> Option<&[u8]> {
+            None
+        }
+        fn attachment(&self) -> Option<&[u8]> {
+            None
+        }
+        fn source_info(&self) -> Option<&wz_runtime_tokio::sample::SourceInfo> {
+            self.source_info.as_ref()
+        }
+        fn rid(&self) -> u64 {
+            11
+        }
+        fn is_local(&self) -> bool {
+            false
+        }
+    }
+
+    /// The querier's `(zid, eid, sn)` reaches the C accessor.
+    ///
+    /// The three fields are asserted SEPARATELY and with distinct values: a
+    /// marshal that carried the struct but converted it wrong — the zid
+    /// re-padding is a real conversion, not a memcpy — would pass a test that
+    /// only checked non-NULL.
+    #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+    #[test]
+    fn a_querys_source_info_reaches_the_c_accessor() {
+        let view = SourcedQuery {
+            source_info: Some(wz_runtime_tokio::sample::SourceInfo::new(&[9u8; 16], 5, 77)),
+        };
+        let mut marshal = QueryMarshal::new(&view);
+        marshal.bind();
+        let loaned = &marshal as *const QueryMarshal as *const z_loaned_query_t;
+        // SAFETY: `loaned` aims at a live, bound marshal on this frame.
+        let got = unsafe { z_query_source_info(loaned) };
+        assert!(
+            !got.is_null(),
+            "a query that carried source info must not report NULL"
+        );
+        // SAFETY: non-null, and it borrows the marshal above.
+        let si = unsafe { &*got };
+        assert_eq!(si.zid, [9u8; 16]);
+        assert_eq!(si.eid, 5);
+        assert_eq!(si.sn, 77);
+    }
+
+    /// A query with no source-info ext reports NULL, not a zeroed struct.
+    ///
+    /// Upstream returns `Option<&z_source_info_t>`, so a C program checks the
+    /// pointer; a zeroed struct would read as a real querier whose zid is
+    /// sixteen zero bytes.
+    #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+    #[test]
+    fn a_query_without_source_info_reports_null() {
+        let view = SourcedQuery { source_info: None };
+        let mut marshal = QueryMarshal::new(&view);
+        marshal.bind();
+        let loaned = &marshal as *const QueryMarshal as *const z_loaned_query_t;
+        // SAFETY: as above.
+        assert!(unsafe { z_query_source_info(loaned) }.is_null());
+    }
+
+    /// An ESCAPED query keeps the querier's identity.
+    ///
+    /// ⚠ This drives the REAL `deep_copy_deferred`, and the first draft did
+    /// not: it copied the two fields by hand into a struct literal, which
+    /// asserts what the TEST wrote rather than what the escape path does. A
+    /// `deep_copy_deferred` that set `source_info: None` would have passed it.
+    /// The session comes from a real `SharedSession` for exactly that reason —
+    /// the copy needs one, and a test that avoids needing one is avoiding the
+    /// function it claims to grade.
+    #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+    #[test]
+    fn an_escaped_query_keeps_its_source_info() {
+        let shared = wz_capi_core::faces::SharedSession::new(
+            wz_runtime_tokio::runtime_impl::TokioTime::new(),
+            vec![0x11; 16],
+        )
+        .expect("test host entropy");
+        let view = SourcedQuery {
+            source_info: Some(wz_runtime_tokio::sample::SourceInfo::new(&[4u8; 16], 1, 2)),
+        };
+        let borrowed = QueryMarshal::new(&view);
+        let mut escaped = borrowed.deep_copy_deferred(shared.local_session().clone());
+        escaped.bind();
+        let loaned = &escaped as *const QueryMarshal as *const z_loaned_query_t;
+        // SAFETY: `loaned` aims at a live, bound marshal on this frame.
+        let got = unsafe { z_query_source_info(loaned) };
+        assert!(!got.is_null(), "the escaped copy must carry it too");
+        // SAFETY: non-null.
+        assert_eq!(unsafe { &*got }.zid, [4u8; 16]);
+        assert_eq!(unsafe { &*got }.eid, 1);
+        assert_eq!(unsafe { &*got }.sn, 2);
     }
 }

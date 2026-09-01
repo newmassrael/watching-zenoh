@@ -190,7 +190,11 @@ const BASELINES: &[(&str, usize, &str)] = &[
     // which is `wz_exports_nothing_the_reference_does_not` red — and left two
     // it does. The remainder is the SHM provider/allocator plane (84) plus
     // `z_query_source_info`.
-    ("unstable-shm", 85, "1.10.0"),
+    // R2261 lowered this 85 -> 84: the query source-info accessor is built, and
+    // what remains on this arm is now the SHM provider/allocator plane and
+    // NOTHING ELSE — measured, by filtering the difference for the SHM
+    // vocabulary and finding the non-SHM remainder empty.
+    ("unstable-shm", 84, "1.10.0"),
     // R311y614 — the two arms that had NO oracle on any machine, and therefore
     // no row: the gate hard-FAILED on them rather than guessing a ceiling from
     // a neighbour. `scripts/install-zenoh-c-arm.sh` builds any of the four, so
@@ -269,7 +273,21 @@ const BASELINES: &[(&str, usize, &str)] = &[
     // names. The ONE that remains is `z_query_source_info`, and it is the one
     // stray R2258 measured as genuinely needing a value `QueryMarshal` does not
     // carry: the marshal has no `(zid, eid, sn)` where `SampleMarshal` does.
-    ("unstable", 1, "1.10.0"),
+    //
+    // ⭐ R2261 took it to ZERO. On this arm wz now defines EVERY ONE of the
+    // reference's 757 public symbols, and `wz_exports_nothing_the_reference_does_not`
+    // says it defines no more — the two together are the drop-in claim, closed
+    // on the arm hosted CI provisions for the C examples.
+    //
+    // Zero is a live ratchet rather than a retired row: one symbol appearing on
+    // either side reds this in one direction or the other. The row stays, and
+    // its version column is what will catch upstream growing again.
+    //
+    // ⚠ The item's sentence about this last stray was half right. `QueryMarshal`
+    // really did not carry the value — but the TREE did: `QueryView::source_info`
+    // is filled by the receive path out of the query's own ext, so the work was
+    // one layer of wiring rather than a new wire feature.
+    ("unstable", 0, "1.10.0"),
     ("nounstable-shm", 1, "1.10.0"),
 ];
 
