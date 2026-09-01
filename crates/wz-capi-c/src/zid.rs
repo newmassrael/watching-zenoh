@@ -333,6 +333,45 @@ pub unsafe extern "C" fn z_info_zid(session: *const z_loaned_session_t) -> z_id_
     })
 }
 
+/// This session's GLOBAL ENTITY ID (zenoh-c `z_session_id`).
+///
+/// R2258 (open-debt item 593) — one of the twelve strays the census counts on
+/// both unstable arms, and the one that needed no new machinery: the zid half
+/// is what [`z_info_zid`] already answers, and the eid half is ZERO because the
+/// session is not an entity WITHIN itself. That is the same convention the five
+/// entity accessors state — a publisher is not a separate node, so its zid is
+/// the session's — read from the other end: the session has no per-entity
+/// handle to narrow, so its eid is the empty one.
+///
+/// ⚠ The item recorded these strays as "accessors, each needing a value wz's
+/// marshals do not carry yet". MEASURED when this was built, that is not true
+/// of this one: `SessionState::zid()` has carried the value since the open
+/// minted it, and `z_entity_global_id_t` has existed since R311y568.
+///
+/// UNSTABLE-gated as upstream gates it (`#if defined(Z_FEATURE_UNSTABLE_API)`),
+/// and it has to be for the same reason [`crate::publisher::z_publisher_id`]
+/// is: the return type lives in [`crate::advanced`], which the other arm does
+/// not compile.
+///
+/// # Safety
+/// `session` must be null or a valid loaned session.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+#[no_mangle]
+pub unsafe extern "C" fn z_session_id(
+    session: *const z_loaned_session_t,
+) -> crate::advanced::z_entity_global_id_t {
+    guard_val(crate::advanced::z_entity_global_id_t::empty(), || {
+        // SAFETY: the caller's contract.
+        match unsafe { session_state(session) } {
+            Some(state) => crate::advanced::z_entity_global_id_t {
+                zid: z_id_t { id: state.zid() },
+                eid: 0,
+            },
+            None => crate::advanced::z_entity_global_id_t::empty(),
+        }
+    })
+}
+
 /// The 2-bit INIT `whatami` wire encoding: 0 Router, 1 Peer, 2 Client.
 const WHATAMI_WIRE_ROUTER: u8 = 0;
 /// Select routers only — `z_info_routers_zid`.

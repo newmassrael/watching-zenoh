@@ -148,7 +148,9 @@ const BASELINES: &[(&str, usize, &str)] = &[
     // published standalone archive" — no longer names this arm. That archive is
     // at 1.10.0 and resolves as `unstable-shm`, so `install-zenoh-c-arm.sh`
     // building from source is the only route to a `nounstable` oracle now.
-    ("nounstable", 2, "1.10.0"),
+    // R2258 lowered this 2 -> 1: `z_query_accepts_replies` is one of the two
+    // upstream defines on the no-unstable arm as well.
+    ("nounstable", 1, "1.10.0"),
     // The arm hosted CI provisions. 83 -> 65 at R311y573 against 1.5.0; 65 ->
     // 189 at R2239, and every one of the 124 is upstream GROWING rather than wz
     // regressing. Re-measured, the remainder is FOUR planes and three strays,
@@ -176,7 +178,7 @@ const BASELINES: &[(&str, usize, &str)] = &[
     // pure-function oracle rather than merely defined.
     // R2257 lowered this 189 -> 180: the cancellation-token plane is built, and
     // it is nine symbols on both unstable arms.
-    ("unstable-shm", 180, "1.10.0"),
+    ("unstable-shm", 178, "1.10.0"),
     // R311y614 — the two arms that had NO oracle on any machine, and therefore
     // no row: the gate hard-FAILED on them rather than guessing a ceiling from
     // a neighbour. `scripts/install-zenoh-c-arm.sh` builds any of the four, so
@@ -208,13 +210,14 @@ const BASELINES: &[(&str, usize, &str)] = &[
     // arms at 1.10.0 and re-measured, and the shape it describes has MOVED:
     //
     //   arm             reference  wz   missing        (1.5.0 was)
-    //   nounstable            570  568        2         568/568/0
-    //   nounstable-shm        570  568        2         568/568/0
-    //   unstable              757  662       95         657/657/0
-    //   unstable-shm          878  698      180         758/693/65
+    //   nounstable            570  569        1         568/568/0
+    //   nounstable-shm        570  569        1         568/568/0
+    //   unstable              757  664       93         657/657/0
+    //   unstable-shm          878  700      178         758/693/65
     //
     // (R2256 measured 104 and 189; R2257 built the cancellation-token plane and
-    // both came down by its nine.)
+    // both came down by its nine; R2258 added `z_session_id` and
+    // `z_query_accepts_replies`, the latter on all four arms.)
     //
     // `nounstable-shm` still DEFINES exactly what `nounstable` does — the set
     // difference is empty at 1.10.0 too, so upstream still gates its SHM
@@ -237,12 +240,16 @@ const BASELINES: &[(&str, usize, &str)] = &[
     //       `z_query_accepts_replies`, `z_query_source_info`, `z_session_id`
     //
     // The cancellation-token plane was the fifth and R2257 built it, which is
-    // what took 103 to 94. Three whole planes that did not exist at 1.5.0 are
-    // what grew, which is why every one of these numbers moved and why the
-    // version column exists.
+    // what took 103 to 94. R2258 then took two of those three strays — 92
+    // remain shared, and `z_query_source_info` is the one that genuinely needs
+    // a value `QueryMarshal` does not carry, which the other two did not.
+    // Three whole planes that did not exist at 1.5.0 are what grew, which is
+    // why every one of these numbers moved and why the version column exists.
     // R2257 lowered this 104 -> 95, same plane.
-    ("unstable", 95, "1.10.0"),
-    ("nounstable-shm", 2, "1.10.0"),
+    // R2258 lowered this 95 -> 93: `z_session_id` and
+    // `z_query_accepts_replies`, two of the twelve strays.
+    ("unstable", 93, "1.10.0"),
+    ("nounstable-shm", 1, "1.10.0"),
 ];
 
 /// The zenoh-c version an oracle prefix declares, out of its own

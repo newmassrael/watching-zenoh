@@ -909,6 +909,47 @@ pub unsafe extern "C" fn z_query_keyexpr(
     })
 }
 
+/// zenoh-c `z_reply_keyexpr_t` (`zenoh_commons.h:171-181`).
+///
+/// Two values and a `DEFAULT` alias for the second, so the C spelling
+/// `Z_REPLY_KEYEXPR_DEFAULT` and `Z_REPLY_KEYEXPR_MATCHING_QUERY` are the same
+/// discriminant — which is why this is a plain `u32` constant pair rather than
+/// a Rust enum with three variants.
+pub const Z_REPLY_KEYEXPR_ANY: u32 = 0;
+/// See [`Z_REPLY_KEYEXPR_ANY`]. `Z_REPLY_KEYEXPR_DEFAULT` aliases this one.
+pub const Z_REPLY_KEYEXPR_MATCHING_QUERY: u32 = 1;
+
+/// Whether this query accepts replies under ANY key (zenoh-c
+/// `z_query_accepts_replies`).
+///
+/// R2258 (open-debt item 593) — the second of the twelve strays, and like
+/// `z_session_id` it needed no new machinery: the answer is the `_anyke`
+/// selector token, which [`QueryMarshal`] has carried in its `anyke` field
+/// since the marshal was written and which [`parameters_has_anyke`] derives.
+///
+/// ⚠ The item recorded these strays as "accessors, each needing a value wz's
+/// marshals do not carry yet". MEASURED, that is the opposite of the case here
+/// — the marshal carries it and the reply path already CONSULTS it, so the only
+/// thing missing was the C entry point that reads it back.
+///
+/// A gravestoned query answers `MATCHING_QUERY`, which is upstream's
+/// `Z_REPLY_KEYEXPR_DEFAULT`: the conservative half, since a caller that
+/// mistakes a dead query for one accepting anything would send a reply the
+/// responder is supposed to refuse.
+///
+/// # Safety
+/// `this_` must be null or a live loaned query.
+#[no_mangle]
+pub unsafe extern "C" fn z_query_accepts_replies(this_: *const z_loaned_query_t) -> u32 {
+    guard_val(Z_REPLY_KEYEXPR_MATCHING_QUERY, || {
+        // SAFETY: the caller's contract.
+        match unsafe { query_marshal(this_) } {
+            Some(m) if m.anyke => Z_REPLY_KEYEXPR_ANY,
+            _ => Z_REPLY_KEYEXPR_MATCHING_QUERY,
+        }
+    })
+}
+
 /// Write a view over a query's selector parameters (zenoh-c
 /// `z_query_parameters`).
 ///
