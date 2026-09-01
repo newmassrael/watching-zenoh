@@ -543,7 +543,15 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # that declared 879 to HEAD contains exactly ONE added `wz-proves:` line in
 # `crates/`, and gate 2b's own scoping expression matches that push range, so
 # the gate was not defective — it did not run.
-FOREIGN_ADJUDICATOR_LINKS = 880
+# R2248 (open-debt item 595) — 880 -> 881, in the NEW
+# `pico_declared_keyexpr_census_witness.rs`. ONE link, and the step's shape is a
+# witness for a resolution nothing foreign had ever adjudicated: `declare-keyexpr
+# pico->wz` had witnesses for the MESSAGE, and none for what the analyzer does
+# with the id afterwards. Stock `z_put` declares the alias, publishes through it
+# and undeclares it, and the census must report the row under the path pico
+# serialised. Measured, not guessed: the audit read `881, declared 880` with the
+# file staged, which is exactly its one `wz-proves:` line.
+FOREIGN_ADJUDICATOR_LINKS = 881
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

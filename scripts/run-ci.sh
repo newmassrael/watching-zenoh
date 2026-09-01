@@ -10775,6 +10775,17 @@ layer_ewire_pico_wire_dissection() {
         --test pico_wire_dissection -- --ignored --quiet --test-threads=1 \
         || return 1
     echo "  Ewire: the analyzer parsed a real zenoh-pico session end to end"
+    # R2248 (open-debt item 595) — the CENSUS half of the same capture shape.
+    # Named here rather than left to `--ignored` at large: this lane invokes its
+    # witnesses by `--test <name>`, so a proof placed anywhere else runs nowhere,
+    # which is the failure the item was filed against in a different costume.
+    # Same oracle guard above, because it is the same `z_put`.
+    _runci_guarded_test "Ewire declared-keyexpr census" 1 \
+        cargo test -p wz-integration-tests \
+        --test pico_declared_keyexpr_census_witness \
+        -- --ignored --quiet --test-threads=1 \
+        || return 1
+    echo "  Ewire: the census resolved an id to the path zenoh-pico declared"
 }
 
 # R311y760 (carry N65) — the same witness against the OTHER reference
