@@ -1713,10 +1713,48 @@ where
                     if w == 4 {
                         // transport-lowlatency — the 4-byte u32 prefix is NOT the
                         // u16 StreamEnvelope shape; the payload is the frame tail.
-                        return LinkEvent::Rx(RxFrame::new(bytes[4..].to_vec()));
+                        let payload = &bytes[4..];
+                        if payload.is_empty() {
+                            continue;
+                        }
+                        return LinkEvent::Rx(RxFrame::new(payload.to_vec()));
                     }
                     let mut cursor = SceCursor::new(&bytes);
                     return match StreamEnvelope::decode(&mut cursor) {
+                        // R2271 (open-debt item 577) — A ZERO-LENGTH BATCH IS A
+                        // BATCH OF NO MESSAGES, and reading it means doing
+                        // nothing. Passing the empty payload up made the parser
+                        // meet it as `InboundParseError::Empty` and the link go
+                        // `LinkLost(PeerClosed)`: one harmless malformed batch
+                        // from a peer ended the session.
+                        //
+                        // MEASURED against both implementations this one
+                        // replaces, because "whose defect is it" is not the
+                        // question -- "must a receiver survive it" is:
+                        //
+                        //   * zenoh (Rust) reads a batch with
+                        //     `while !batch.is_empty()` (`zenoh-transport`,
+                        //     `unicast/universal/rx.rs`), `while reader.can_read()`
+                        //     on the lowlatency path, and `while !batch.is_empty()`
+                        //     again for multicast. An empty batch runs the body
+                        //     zero times and returns `Ok(())`.
+                        //   * zenoh-pico reads one with
+                        //     `while (_z_zbuf_len(&zbuf) > 0)`
+                        //     (`src/transport/unicast/read.c`,
+                        //     `_z_unicast_process_messages`, which is what the
+                        //     steady-state read task calls). Zero iterations,
+                        //     `_Z_RES_OK`, session kept.
+                        //
+                        // Both survive; only this did not. Skipping back to the
+                        // next frame is the same sentence as their `while`, and
+                        // it loses nothing: no transport message is zero bytes
+                        // long, so an empty payload can only mean "no messages".
+                        //
+                        // ⚠ NOT a busy loop. Every pass through `Idle` reaches an
+                        // awaited `src.read()`, so an endless stream of empty
+                        // batches costs one syscall each and stays cancel-safe --
+                        // exactly what it costs the two implementations above.
+                        Ok(env) if env.payload.is_empty() => continue,
                         Ok(env) => LinkEvent::Rx(RxFrame::new(env.payload.to_vec())),
                         Err(_) => LinkEvent::Lost {
                             cause: LostCause::PeerClosed,
@@ -2239,6 +2277,90 @@ mod poll_framed_lowlatency_tests {
         let mut st = ReadState::Idle;
         let ev = poll_framed(&mut st, &mut src, true).await;
         assert!(matches!(ev, LinkEvent::Lost { .. }));
+    }
+
+    /// R2271 (open-debt item 577) — a zero-length batch is SKIPPED, and the
+    /// frame behind it still arrives.
+    ///
+    /// The measured failure: a genuine zenohd on its abandon path writes a
+    /// zero-length batch instead of the `0x3 Drop` marker, wz met it as
+    /// `InboundParseError::Empty`, and the link went `LinkLost(PeerClosed)`.
+    /// One harmless malformed batch from a peer ended the session.
+    ///
+    /// ⛔ THE SECOND FRAME IS THE ASSERTION, not the absence of a `Lost`. A fix
+    /// that skipped the empty batch and then lost its place in the stream would
+    /// satisfy "no Lost" perfectly well by hanging or by returning garbage; only
+    /// reading the NEXT frame correctly says the state machine resynchronised.
+    /// The two frames are handed over in one buffer for the same reason -- a
+    /// second `poll_framed` over a fresh slice would not test that at all.
+    ///
+    /// ⛔ AND THE CONTROL IS IN THE SAME TEST: a batch that is malformed while
+    /// NOT being empty must still be `Lost`. Without it this reads equally well
+    /// as "the codec-error arm was deleted", which would be a much worse
+    /// change than the one item 577 asked for.
+    #[tokio::test]
+    async fn a_zero_length_batch_is_skipped_and_the_next_frame_still_arrives() {
+        let real = StreamEnvelope {
+            payload_len: 3,
+            payload: &[0x01, 0x02, 0x03],
+        }
+        .encode_to_vec();
+
+        // An empty batch is the two prefix bytes and nothing else.
+        let mut wire = vec![0x00u8, 0x00];
+        wire.extend_from_slice(&real);
+        let mut src: &[u8] = &wire;
+        let mut st = ReadState::Idle;
+        match poll_framed(&mut st, &mut src, false).await {
+            LinkEvent::Rx(rx) => assert_eq!(rx.bytes, vec![0x01, 0x02, 0x03]),
+            other => panic!("the empty batch must be skipped, not {other:?}"),
+        }
+
+        // ...and TWO of them in a row, because a fix that consumed one by
+        // falling through would pass the leg above and fail here.
+        let mut wire = vec![0x00u8, 0x00, 0x00, 0x00];
+        wire.extend_from_slice(&real);
+        let mut src: &[u8] = &wire;
+        let mut st = ReadState::Idle;
+        match poll_framed(&mut st, &mut src, false).await {
+            LinkEvent::Rx(rx) => assert_eq!(rx.bytes, vec![0x01, 0x02, 0x03]),
+            other => panic!("two empty batches must both be skipped, not {other:?}"),
+        }
+
+        // transport-lowlatency carries the same shape behind a 4-byte prefix,
+        // and upstream tolerates it there too (`while reader.can_read()`).
+        let mut wire = vec![0x00u8, 0x00, 0x00, 0x00];
+        wire.extend_from_slice(&[0x02, 0x00, 0x00, 0x00, 0xAA, 0xBB]);
+        let mut src: &[u8] = &wire;
+        let mut st = ReadState::Idle;
+        match poll_framed(&mut st, &mut src, true).await {
+            LinkEvent::Rx(rx) => assert_eq!(rx.bytes, vec![0xAA, 0xBB]),
+            other => panic!("an empty lowlatency batch must be skipped, not {other:?}"),
+        }
+
+        // THE CONTROL: a batch that ENDS EARLY is still fatal. Declared length
+        // 3, one byte delivered, then EOF -> `Lost`. Without this the whole
+        // test reads equally well as "the failure arms were deleted".
+        //
+        // ⚠ This is not the control that was written FIRST, and the difference
+        // is a finding rather than a detail. The first attempt fed a "malformed
+        // but non-empty" batch and expected the envelope decode to refuse it --
+        // and it did not, because `StreamEnvelope::decode` fails on exactly one
+        // condition, fewer than two bytes remaining, and this call site always
+        // hands it `2 + payload_len` bytes taken from those very two. So the
+        // `Err(_) => Lost` arm below has NO PATH TO BEING TRUE here: R2268's
+        // dead guard, in another file. Filed as its own open-debt item rather
+        // than quietly deleted, because whether the repair is dropping the arm
+        // or not pre-sizing the buffer from an untrusted length is a judgement
+        // of its own. EOF is the reachable fatal case, so EOF is the control.
+        let wire = [0x03u8, 0x00, 0xAA];
+        let mut src: &[u8] = &wire;
+        let mut st = ReadState::Idle;
+        let ev = poll_framed(&mut st, &mut src, false).await;
+        assert!(
+            matches!(ev, LinkEvent::Lost { .. }),
+            "a truncated batch must still lose the link, got {ev:?}"
+        );
     }
 }
 

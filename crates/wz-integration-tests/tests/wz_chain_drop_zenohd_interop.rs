@@ -42,9 +42,16 @@
 //!
 //! MEASURED, not deduced: on the arm below whose stall outlasts upstream's
 //! budget, the router's direction carries EXACTLY ONE zero-length batch and it
-//! is the last thing the router writes; wz then reports `ParseError(Empty)` and
-//! `LinkLost(PeerClosed)`. On the twin, whose stall is shorter than the same
-//! budget, there is none.
+//! is the last thing the router writes. On the twin, whose stall is shorter
+//! than the same budget, there is none.
+//!
+//! ⚠ R2271 (open-debt item 577) CHANGED THE SECOND HALF OF THAT SENTENCE. It
+//! used to end "wz then reports `ParseError(Empty)` and `LinkLost(PeerClosed)`",
+//! which was true when this leg was written and is no longer: `poll_framed`
+//! now SKIPS a zero-length batch, because zenoh and zenoh-pico both read a
+//! batch with a `while`-not-empty loop and survive one. The wire fact above is
+//! unchanged — it is about what the ROUTER writes — and it is the only half
+//! this leg witnesses.
 //!
 //! ## What this leg therefore witnesses
 //!
@@ -152,13 +159,19 @@
 //!     `aborted_superseded` is a restart, and a document reporting either would
 //!     send a consumer to a diagnosis the wire does not support.
 //!
-//! ## ⚠ The wz-side consequence, recorded rather than asserted here
+//! ## ⚠ The wz-side consequence — filed, then SETTLED, elsewhere
 //!
-//! wz meets that empty batch with `ParseError(Empty)` and drops the link. Whose
-//! defect that is, and whether a receiver should survive a peer's malformed
-//! zero-length batch, is a question about wz and not about this leg's subject;
-//! it is filed as its own open-debt item rather than settled in an assertion
-//! here.
+//! wz used to meet that empty batch with `ParseError(Empty)` and drop the link.
+//! Whether a receiver should survive a peer's malformed zero-length batch was a
+//! question about wz and not about this leg's subject, so it was filed as
+//! open-debt item 577 rather than settled in an assertion here.
+//!
+//! R2271 answered it by measuring the two implementations wz replaces: zenoh
+//! reads a batch with `while !batch.is_empty()` and zenoh-pico with
+//! `while (_z_zbuf_len(&zbuf) > 0)`, so an empty one runs the body zero times
+//! and both keep the session. wz now skips it too, and the assertion lives with
+//! the code it is about (`poll_framed`'s unit test), not here — this leg's
+//! subject is still what the ROUTER wrote.
 //!
 //! Opt-in (`#[ignore]`, run-ci Layer Z): zenohd and the core zenoh `z_pub`
 //! example are external binaries. The test NAMES carry `zenohd` because Layer
