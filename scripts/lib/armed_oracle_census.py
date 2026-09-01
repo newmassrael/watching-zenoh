@@ -54,11 +54,21 @@ only one that arms on EVERY runner rather than being set by a hosted job's
 at shell context.
 
 Narrow leaves a hole, and the hole is closed rather than stated: every OTHER
-`WZ_..._REQUIRE=1` in the file is required to be followed by an English
-connective from `PROSE_AFTER` -- the shape a sentence about the flag takes.
-Anything else is a FINDING. So an arming written some other way (`env
-WZ_X_REQUIRE=1 bash …`, say) does not slip past unnoticed; it fails until
-somebody teaches this file the shape or names it.
+`WZ_..._REQUIRE=1` in the file has to be prose ABOUT an arming, and
+`unclassifiable()` decides that POSITIONALLY -- the line is a `#` comment, or
+the occurrence sits inside something being echoed. Anything else is a FINDING.
+So an arming written some other way (an `env WZ_..._REQUIRE=1 bash …` prefix,
+say) does not slip past unnoticed; it fails until somebody teaches this file
+the shape or moves it into a comment.
+
+Positional, and not a list of the English words a sentence about a flag tends
+to use, which is what stood here first. A word list is an exemption table:
+an arming phrased unfamiliarly would have to be added to it, and adding to it
+is indistinguishable from excusing a real arming. WHERE the text sits is a
+fact about the script instead of a judgement about English. That reasoning is
+recorded on `unclassifiable()` itself; this paragraph described the discarded
+design for long enough that R2250 built a gate to stop prose naming machinery
+the code does not have.
 
 ## Why the oracle kinds are a CLOSED set of two
 

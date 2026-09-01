@@ -2169,6 +2169,22 @@ PY
     # every round that hole was open.
     python3 scripts/lib/armed_skip_guard.py --selftest || return 1
     python3 scripts/lib/armed_skip_guard.py --check || return 1
+    # R2250 (open-debt item 600) — the THIRD side of the same thing, and the
+    # one about this tree's own sentences. The two gates above ask what a
+    # machine has and what a lane reads; this asks whether a name the prose
+    # spells as code is a name that exists. `armed_oracle_census.py` opened by
+    # saying a named word list closed a hole in its arming pattern, and no such
+    # name was ever in the tree — the implementation decides positionally and
+    # says on `unclassifiable()` why the word list was thrown away. A discarded
+    # design surviving as a NAME sends the next reader looking for it, or is
+    # read as evidence a hole is handled, which is the shape R2247 found in
+    # run-ci.sh's own C1cc paragraph.
+    #
+    # The atomic store counts as PROSE here, deliberately: it is a ledger of
+    # sentences in a JSON wrapper, and counted as code this round's own entry
+    # would resolve the name the round was opened to remove.
+    python3 scripts/lib/prose_named_identifier_gate.py --selftest || return 1
+    python3 scripts/lib/prose_named_identifier_gate.py --check || return 1
     # R2230 (open-debt items 579 / 582) — the machine-INDEPENDENT half of
     # `upstream_carries_the_surface.py`, whose other half needs a pinned zenohd
     # and therefore lives in Layer Z.
