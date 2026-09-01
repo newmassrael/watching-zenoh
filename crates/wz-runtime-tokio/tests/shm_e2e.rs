@@ -231,7 +231,8 @@ async fn shm_negotiation_and_merge() {
 ///
 /// The four messages all have to land for this to pass — the initiator's segment
 /// id on InitSyn, the acceptor's echo plus its own id on InitAck, the
-/// initiator's answer on OpenSyn, the acceptor's literal `1` on OpenAck — so a
+/// initiator's answer on OpenSyn, the acceptor's counter block on OpenAck
+/// (1.10.0 replaced the literal `1` that used to sit there, R2240) — so a
 /// break anywhere in the chain shows up here as `is_shm() == false` rather than
 /// as a passing session that negotiated nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

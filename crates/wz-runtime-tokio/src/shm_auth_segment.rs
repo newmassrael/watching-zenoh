@@ -18,20 +18,40 @@
 //! ## The layout is a wire format
 //!
 //! A foreign zenohd opens this object and reads it as
-//! `ArrayInSHM<AuthSegmentID, AuthChallenge, usize>` — an array of `u64`:
+//! `StructInSHM<AuthSegmentID, ShmTransportMetadata>` — one `#[repr(C)]` struct
+//! at offset 0, with no header of its own:
 //!
-//! | index | field | note |
+//! | byte | field | note |
 //! |---|---|---|
-//! | 0 | `protocols.len()` | count of the trailing protocol ids |
-//! | 1 | `!challenge` | INVERTED on purpose (see below) |
-//! | 2 | `SHM_VERSION` | `1`; a mismatch means "no SHM", not an error |
-//! | 3.. | `ProtocolID` each | `POSIX_PROTOCOL_ID = 0` |
+//! | 0 | `id_count: u64` | count of the protocol ids that follow |
+//! | 8 | `challenge: u64` | VERBATIM; see below |
+//! | 16 | `version: u64` | `SHM_VERSION` = `2` |
+//! | 24 | `protocols: [ProtocolID; 256]` | `u32` each; `POSIX_PROTOCOL_ID = 0` |
+//! | 1048 | `shm_counters: [AtomicU32; 762 + 2048]` | the handoff counters |
 //!
-//! The challenge is stored BITWISE-NEGATED. Upstream's comment says why: "to
-//! prevent SHM probing between new versioned SHM implementation and the old
-//! one" — an older reader that does not know about the version word would find
-//! a challenge that never matches instead of a plausible one. So the inversion
-//! is load-bearing interop, not obfuscation, and both write and read apply it.
+//! ## What R2240 moved, and why each half had to move
+//!
+//! Until 1.10.0 this was an `ArrayInSHM` of four `u64`s — `[len, !challenge,
+//! version, protocols…]`, 32 bytes — and the challenge was stored BITWISE
+//! NEGATED, which upstream's own comment justified as anti-probing between
+//! versioned implementations. **1.10.0 stores it verbatim.** The three scalars
+//! kept their byte offsets, so the change is invisible to an offset-by-offset
+//! reading and shows up only as a peer whose echo never validates: a zenohd
+//! reads byte 8, echoes what it finds, and this node compares it against the
+//! un-negated value it holds.
+//!
+//! The version word moved 1 -> 2 in the same release, and upstream does NOT
+//! check the peer's copy — `validate()` is only ever called on the LOCAL
+//! segment (`establishment/ext/shm/auth.rs`, the two `self.inner.validate(..)`
+//! calls). So this node's `version` is written for a wz peer and for a future
+//! upstream that does look; what makes THIS node interoperate is that its
+//! READER accepts `2`.
+//!
+//! The protocol list is not decoration. Upstream reads it after establishment
+//! — `PartnerShmConfig::supports_protocol` in `common/shm/interop.rs` asks
+//! `link_partner_segment.protocols().contains(&protocol)` before sending an SHM
+//! buffer — so a segment that establishes with an empty list negotiates and
+//! then carries nothing.
 //!
 //! The object NAME is equally a wire format: zenoh calls
 //! `shm_open("{id}.zenoh", ..)` (`shm/unix.rs:256`), where `id` is the `u32`
@@ -58,22 +78,44 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use memmap2::{Mmap, MmapMut, MmapOptions};
 use wz_session_core::extshm::ShmAuthenticator;
 
-/// zenoh `SHM_VERSION` (`commons/zenoh-shm/src/version.rs:15`). A peer whose
-/// segment carries a different value is treated as "no SHM".
-const SHM_VERSION: u64 = 1;
-/// zenoh `POSIX_PROTOCOL_ID` (`api/protocol_implementations/posix/protocol_id.rs:19`).
-const POSIX_PROTOCOL_ID: u64 = 0;
+/// zenoh `SHM_VERSION` (`commons/zenoh-shm/src/version.rs`, the `SHM_VERSION`
+/// constant). A peer whose segment carries a different value is treated as
+/// "no SHM". R2240 moved it 1 -> 2 with the rest of the layout below.
+const SHM_VERSION: u64 = 2;
+/// zenoh `POSIX_PROTOCOL_ID` (`api/protocol_implementations/posix/protocol_id.rs`,
+/// `pub const POSIX_PROTOCOL_ID: ProtocolID = 0`). `ProtocolID` is a `u32` in
+/// 1.10.0, which is why the protocol slots below are four bytes and not eight.
+const POSIX_PROTOCOL_ID: u32 = 0;
 
-/// Array indices, named as upstream names them (`ext/shm.rs:38-41`).
+/// `u64` slot indices for the three scalar fields, which sit at the same byte
+/// offsets in BOTH layouts — `id_count` 0, `challenge` 8, `version` 16.
 const LEN_INDEX: usize = 0;
 const CHALLENGE_INDEX: usize = 1;
 const VERSION_INDEX: usize = 2;
-const ID_START_INDEX: usize = 3;
 
-/// The one protocol wz's segment advertises, so the array is exactly four u64s.
-const WZ_PROTOCOLS: [u64; 1] = [POSIX_PROTOCOL_ID];
-const SEGMENT_ELEMS: usize = ID_START_INDEX + WZ_PROTOCOLS.len();
-const SEGMENT_BYTES: usize = SEGMENT_ELEMS * core::mem::size_of::<u64>();
+/// Byte offset of `ShmTransportMetadata::protocols`, i.e. straight after the
+/// three `u64` scalars.
+const PROTOCOLS_OFFSET: usize = 3 * core::mem::size_of::<u64>();
+/// `protocols: [ProtocolID; 256]`.
+const PROTOCOL_SLOTS: usize = 256;
+/// `shm_counters: [AtomicU32; 762 + 2048]`, restated as upstream spells the sum
+/// so a reader can join the two halves to the declaration.
+const COUNTER_SLOTS: usize = 762 + 2048;
+
+/// The one protocol wz's segment advertises. Written into `protocols[0]` with
+/// `id_count = 1`; upstream's `PartnerShmConfig::supports_protocol`
+/// (`common/shm/interop.rs`, `link_partner_segment.protocols().contains`) reads
+/// it when it decides whether wz can be SENT an SHM buffer, so an empty list
+/// would establish and then never carry anything.
+const WZ_PROTOCOLS: [u32; 1] = [POSIX_PROTOCOL_ID];
+
+/// `size_of::<ShmTransportMetadata>()`, derived from the field composition
+/// rather than transcribed: 3 x u64 + 256 x u32 + 2810 x AtomicU32 = 12288, and
+/// the struct is `#[repr(C)]` with an 8-byte alignment that the total already
+/// satisfies, so there is no tail padding to account for.
+const SEGMENT_BYTES: usize = PROTOCOLS_OFFSET
+    + PROTOCOL_SLOTS * core::mem::size_of::<u32>()
+    + COUNTER_SLOTS * core::mem::size_of::<u32>();
 
 /// zenoh retries id allocation this many times before giving up
 /// (`posix_shm/segment.rs:22` `SEGMENT_DEDICATE_TRIES`).
@@ -176,6 +218,27 @@ fn write_u64(map: &mut [u8], index: usize, value: u64) {
     map[start..start + 8].copy_from_slice(&value.to_ne_bytes());
 }
 
+/// Read one `ProtocolID` slot — a `u32` at a BYTE offset, because the protocol
+/// array no longer shares the `u64` grid the three scalars sit on.
+///
+/// TEST-ONLY on purpose, and the reason is interop rather than tidiness: the
+/// establishment path must NOT consult the peer's protocol list, because
+/// upstream does not. `RXAuthSegment` is opened and its `challenge()` read with
+/// no validation at all; the list is consulted later, at send time, by
+/// `PartnerShmConfig::supports_protocol`. A reader here that rejected a peer
+/// whose list it disliked would be stricter than the implementation it has to
+/// interoperate with. What the slot IS for is the layout assertion, which is
+/// where this is used.
+#[cfg(test)]
+fn read_u32_at(map: &[u8], offset: usize) -> Option<u32> {
+    let bytes: [u8; 4] = map.get(offset..offset + 4)?.try_into().ok()?;
+    Some(u32::from_ne_bytes(bytes))
+}
+
+fn write_u32_at(map: &mut [u8], offset: usize, value: u32) {
+    map[offset..offset + 4].copy_from_slice(&value.to_ne_bytes());
+}
+
 /// This node's own auth segment: created once at bring-up, unlinked on drop.
 ///
 /// Holding the `MmapMut` alive keeps the mapping valid; the FILE stays on
@@ -194,8 +257,9 @@ pub struct ShmAuthSegment {
 
 impl ShmAuthSegment {
     /// Create this node's segment with `challenge`, retrying on an id
-    /// collision. `challenge` is the caller's random u64; it is stored INVERTED
-    /// per upstream.
+    /// collision. `challenge` is the caller's random u64; it is stored VERBATIM
+    /// per upstream — 1.5.0 negated it, 1.10.0 does not (R2240), and a peer
+    /// reading the negated form echoes a value that can never validate.
     pub fn create(challenge: u64) -> io::Result<Self> {
         let mut last_err = None;
         for _ in 0..SEGMENT_DEDICATE_TRIES {
@@ -218,11 +282,17 @@ impl ShmAuthSegment {
                     // process; the mapping is the only writer.
                     let mut map = unsafe { MmapOptions::new().map_mut(&file)? };
                     write_u64(&mut map, LEN_INDEX, WZ_PROTOCOLS.len() as u64);
-                    // INVERTED, per the module doc.
-                    write_u64(&mut map, CHALLENGE_INDEX, !challenge);
+                    // VERBATIM, per the module doc. 1.5.0 stored `!challenge`
+                    // and 1.10.0 does not; a peer reading the inverted form
+                    // echoes a value that can never match.
+                    write_u64(&mut map, CHALLENGE_INDEX, challenge);
                     write_u64(&mut map, VERSION_INDEX, SHM_VERSION);
                     for (i, p) in WZ_PROTOCOLS.iter().enumerate() {
-                        write_u64(&mut map, ID_START_INDEX + i, *p);
+                        write_u32_at(
+                            &mut map,
+                            PROTOCOLS_OFFSET + i * core::mem::size_of::<u32>(),
+                            *p,
+                        );
                     }
                     map.flush()?;
                     return Ok(Self {
@@ -287,8 +357,8 @@ pub fn open_peer_challenge(segment_id: u32) -> Option<u64> {
     if read_u64(&map, VERSION_INDEX)? != SHM_VERSION {
         return None;
     }
-    // Un-invert, the mirror of `create`.
-    Some(!read_u64(&map, CHALLENGE_INDEX)?)
+    // Verbatim, the mirror of `create`.
+    read_u64(&map, CHALLENGE_INDEX)
 }
 
 /// The [`ShmAuthenticator`] a session is handed at bring-up: this node's own
@@ -399,33 +469,46 @@ mod tests {
         );
     }
 
-    /// The challenge is stored BITWISE-NEGATED, as upstream stores it. Asserted
-    /// on the RAW BYTES rather than through the accessor, because the accessor
-    /// inverts on both sides and would pass either way — and it is the raw
-    /// bytes a zenohd reads.
+    /// The challenge is stored VERBATIM, as 1.10.0 stores it. Asserted on the
+    /// RAW BYTES rather than through the accessor, because the accessor would
+    /// pass either way if writer and reader agreed on a negation — and it is
+    /// the raw bytes a zenohd reads.
+    ///
+    /// R2240 INVERTED this test rather than deleting it. Its old form asserted
+    /// `!challenge` and was right for 1.5.0; the negated form is now the defect,
+    /// and it is the one a zenohd cannot tell from a wrong peer.
     #[test]
-    fn the_challenge_is_stored_inverted_on_the_page() {
+    fn the_challenge_is_stored_verbatim_on_the_page() {
         let challenge = 0x0123_4567_89AB_CDEFu64;
         let seg = ShmAuthSegment::create(challenge).expect("create");
         let raw = std::fs::read(auth_segment_path(seg.id())).expect("read back");
         assert_eq!(raw.len(), SEGMENT_BYTES);
-        assert_eq!(read_u64(&raw, CHALLENGE_INDEX), Some(!challenge));
+        assert_eq!(read_u64(&raw, CHALLENGE_INDEX), Some(challenge));
         assert_ne!(
             read_u64(&raw, CHALLENGE_INDEX),
-            Some(challenge),
-            "storing it uninverted is the bug this pins"
+            Some(!challenge),
+            "storing it inverted is the 1.5.0 shape, and the bug this pins"
         );
     }
 
     /// The rest of the layout is what a foreign reader indexes into: the
-    /// protocol COUNT at 0, the VERSION at 2, and `POSIX_PROTOCOL_ID` at 3.
+    /// protocol COUNT at byte 0, the VERSION at byte 16, `POSIX_PROTOCOL_ID` as
+    /// a `u32` at byte 24 — and the whole object exactly the size of upstream's
+    /// struct, since `StructInSHM::create` allocates `size_of::<Elem>()` and
+    /// dereferences the mapping as that type.
     #[test]
-    fn the_array_layout_matches_what_a_foreign_reader_indexes() {
+    fn the_struct_layout_matches_what_a_foreign_reader_dereferences() {
         let seg = ShmAuthSegment::create(1).expect("create");
         let raw = std::fs::read(auth_segment_path(seg.id())).expect("read back");
+        assert_eq!(raw.len(), 12_288, "size_of::<ShmTransportMetadata>()");
+        assert_eq!(raw.len(), SEGMENT_BYTES, "and the derivation agrees");
         assert_eq!(read_u64(&raw, LEN_INDEX), Some(1), "one protocol");
         assert_eq!(read_u64(&raw, VERSION_INDEX), Some(SHM_VERSION));
-        assert_eq!(read_u64(&raw, ID_START_INDEX), Some(POSIX_PROTOCOL_ID));
+        assert_eq!(read_u32_at(&raw, PROTOCOLS_OFFSET), Some(POSIX_PROTOCOL_ID));
+        // The slot AFTER the one wz declares must be zero, not a second id: a
+        // reader takes `protocols[..id_count]`, so a stray non-zero here would
+        // be invisible to us and meaningful to a peer that read a larger count.
+        assert_eq!(read_u32_at(&raw, PROTOCOLS_OFFSET + 4), Some(0));
     }
 
     /// A version mismatch reads as "no SHM", not as an error — the arm that

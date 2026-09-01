@@ -107,13 +107,22 @@ pub fn body_has_shm_marker(extensions: &[ExtEntryOwned]) -> bool {
 
 /// The Z_EXT_SHM ESTABLISHMENT ext id (on Init / Open) — a DISTINCT carrier from
 /// the body marker above though it shares the numeric 0x2 (zenoh's establishment
-/// Shm ext space, `commons/zenoh-protocol/src/transport/init.rs:149`). SCOPED: wz
-/// negotiates SHM with a UNIT capability ext (offer / reflect / `&=`, the
-/// lowlatency / compression pattern), NOT zenoh's ZBuf-on-Init / z64-on-Open
-/// CHALLENGE-RESPONSE (which additionally proves both peers can MAP each other's
-/// segment). The challenge-response + cross-impl are a disclosed deferral — for
-/// same-host trusted peers the capability AND-merge correctly gates the data
-/// path. No M bit (a non-SHM peer drops the offer silently).
+/// Shm ext space, `transport/init.rs`'s `pub type Shm`). This UNIT form is wz's
+/// own SCOPED capability ext — offer / reflect / `&=`, the lowlatency /
+/// compression pattern — and it is what a deploy with NO authenticator installed
+/// speaks. No M bit (a non-SHM peer drops the offer silently).
+///
+/// ⚠ It is NOT the extension a conforming zenoh sends. That one is the ZBuf
+/// challenge-response below, which additionally proves both peers can MAP each
+/// other's segment; wz has spoken it since R311y507 and R2240 re-based it on
+/// 1.10.0. The two live at the same 4-bit id and are told apart by the ENCODING
+/// bits, which is why every match here goes through
+/// [`crate::ext_header::ext_eid`] and never the id field.
+///
+/// (This paragraph said "NOT zenoh's ZBuf-on-Init / z64-on-Open
+/// challenge-response … a disclosed deferral" until R2240. Both halves had gone
+/// stale: the deferral was paid off at R311y507, and 1.10.0 made the Open phase
+/// a ZBuf too, so "z64-on-Open" named a shape that no longer exists anywhere.)
 #[cfg(feature = "session-extshm")]
 pub const SHM_ESTABLISHMENT_EXT_ID: u8 = crate::ext_header::establishment_ext_id::SHM;
 
@@ -132,30 +141,55 @@ pub fn peer_offered_shm(extensions: &[ExtEntryOwned]) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// session-extshm (R311y507) — zenoh's ZBuf-on-Init / z64-on-Open CHALLENGE-
-// RESPONSE. The wire half; the POSIX auth segment behind it is `std` and lives
-// in `wz-runtime-tokio::shm_auth_segment`, reached through [`ShmAuthenticator`].
+// session-extshm (R311y507, re-based on zenoh 1.10.0 by R2240) — zenoh's
+// ZBuf-on-Init AND ZBuf-on-Open CHALLENGE-RESPONSE. The wire half; the POSIX
+// auth segment behind it is `std` and lives in
+// `wz-runtime-tokio::shm_auth_segment`, reached through [`ShmAuthenticator`].
 // ---------------------------------------------------------------------------
 
-/// The encoded header of `init::ext::Shm` — `zextzbuf!(0x2, false)`
-/// (`transport/init.rs:152`), i.e. id `0x2` with the ZBuf encoding bits. A
-/// DIFFERENT extension from the UNIT offer at the same 4-bit id, which is the
-/// whole point of matching on [`crate::ext_header::ext_eid`] rather than the id
-/// field (R311y505 measured wz reading one as the other).
+/// The encoded header both establishment `Shm` extensions carry — id `0x2` with
+/// the ZBuf encoding bits. `transport/init.rs` and `transport/open.rs` BOTH
+/// declare `pub type Shm = zextzbuf!(0x2, false)` at 1.10.0, so there is one
+/// header here and not two.
+///
+/// R2240 collapsed the pair. Until 1.10.0 the Open phase was `zextz64!`, and
+/// this module carried a second constant for it; the two are now the same byte
+/// and what separates an Init `Shm` from an Open `Shm` is the MESSAGE CARRYING
+/// IT, not the header. wz already keeps those apart structurally — the four
+/// `ExtChainRole` slots are four distinct stores — so the collapse costs no
+/// discrimination. It does mean a reader must not conclude "Init" from the
+/// header alone.
+///
+/// Still a DIFFERENT extension from the UNIT offer at the same 4-bit id, which
+/// is why matching goes through [`crate::ext_header::ext_eid`] rather than the
+/// id field (R311y505 measured wz reading one as the other).
 #[cfg(feature = "session-extshm")]
-pub const SHM_INIT_EXT_HEADER: u8 = SHM_ESTABLISHMENT_EXT_ID | crate::ext_header::EXT_ENC_ZBUF;
+pub const SHM_ZBUF_EXT_HEADER: u8 = SHM_ESTABLISHMENT_EXT_ID | crate::ext_header::EXT_ENC_ZBUF;
 
-/// The encoded header of `open::ext::Shm` — `zextz64!(0x2, false)`. The Open
-/// phase carries a bare challenge (initiator) or the literal `1` (acceptor), so
-/// it is a z64 rather than a ZBuf.
+/// The number of priority bands a `PerPriority` counter block carries — zenoh
+/// `Priority::NUM`, which is `1 + MIN - MAX` over an enum running
+/// `Control = 0 ..= Background = 7`. DERIVED here as that expression's value
+/// rather than copied as "8", because the constant this mirrors is itself
+/// computed from the enum's ends.
 #[cfg(feature = "session-extshm")]
-pub const SHM_OPEN_EXT_HEADER: u8 = SHM_ESTABLISHMENT_EXT_ID | crate::ext_header::EXT_ENC_Z64;
+pub const SHM_PRIORITY_BANDS: usize = 1 + 7 - 0;
 
-/// The value the acceptor puts in its OpenAck `Shm` ext to confirm the
-/// negotiation — zenoh `send_open_ack`: `Some(open::ext::Shm::new(1))`, and
-/// `recv_open_ack` rejects anything else (`if ext.value != 1`).
+/// zenoh's `HandoffCounterIds` (`HandoffConfig<ShmCounterID>`) — the SHM
+/// back-pressure counter block that 1.10.0 added to BOTH Open-phase messages.
+///
+/// wz declares [`Self::Disabled`], which is the arm upstream itself picks for a
+/// `BestEffort` link and which its `RxHandoffChannel::new_rx` accepts without
+/// touching a counter. That is a truthful declaration rather than a shortcut:
+/// wz operates no handoff counters, so naming indices into a counter array it
+/// never decrements would be the claim that is false.
 #[cfg(feature = "session-extshm")]
-pub const SHM_OPEN_ACK_VALUE: u64 = 1;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShmHandoffCounters {
+    /// Wire byte `0x00` and nothing after it.
+    Disabled,
+    /// Wire byte `0x01` then one `ShmCounterID` per band, in band order.
+    PerPriority([u16; SHM_PRIORITY_BANDS]),
+}
 
 /// Encode the InitSyn `Shm` body — zenoh's `InitSyn { alice_segment }`, a bare
 /// segment id. `AuthSegmentID` is a `u32` and zenoh's codec writes every
@@ -195,13 +229,101 @@ pub fn decode_shm_init_ack_body(bytes: &[u8]) -> Option<(u64, u32)> {
     Some((challenge, u32::try_from(segment).ok()?))
 }
 
-/// Wrap an Init-phase body in the `init::ext::Shm` ZBuf ext entry (header
-/// `0x42`). Fallible only because the owned ZBuf copy re-checks its inline
-/// capacity, the same bound decode enforces.
+/// Encode a [`ShmHandoffCounters`] exactly as zenoh's `WCodec` for
+/// `HandoffCounterIds` does: a STATUS BYTE, then the per-band ids when it is
+/// `1`.
+///
+/// The status is written by `WCodec<u8>`, which is `writer.write_u8` — a RAW
+/// byte, not a VLE. For `0` and `1` the two encodings coincide, so this cannot
+/// be caught by a round-trip against ourselves; it is written raw because that
+/// is what the peer's READER consumes.
+///
+/// Each id is a `ShmCounterID` (`u16`), and zenoh routes every unsigned integer
+/// except `u8` through `uint_impl!`, which widens to `u64` and writes the same
+/// VLE — so an id is one VLE, not two fixed bytes.
 #[cfg(feature = "session-extshm")]
-pub fn encode_shm_init_ext(body: &[u8]) -> Result<ExtEntryOwned, CodecError> {
+fn encode_shm_handoff_counters(out: &mut Vec<u8>, counters: ShmHandoffCounters) {
+    match counters {
+        ShmHandoffCounters::Disabled => out.push(0),
+        ShmHandoffCounters::PerPriority(ids) => {
+            out.push(1);
+            for id in ids {
+                encode_vle_u64_into(out, id as u64);
+            }
+        }
+    }
+}
+
+/// Decode a [`ShmHandoffCounters`], returning it and the bytes consumed.
+///
+/// A status byte that is neither `0` nor `1` is NOT "assume disabled": upstream
+/// treats every non-zero as `PerPrio` and then reads a full band block, so a
+/// reader that guessed would desynchronise from the peer rather than disagree
+/// with it. Anything that does not decode into a whole block is `None`.
+#[cfg(feature = "session-extshm")]
+fn decode_shm_handoff_counters(bytes: &[u8]) -> Option<(ShmHandoffCounters, usize)> {
+    let (&status, rest) = bytes.split_first()?;
+    if status == 0 {
+        return Some((ShmHandoffCounters::Disabled, 1));
+    }
+    let mut ids = [0u16; SHM_PRIORITY_BANDS];
+    let mut used = 1;
+    for slot in ids.iter_mut() {
+        let (v, n) = read_vle_u64(rest.get(used - 1..)?)?;
+        *slot = u16::try_from(v).ok()?;
+        used += n;
+    }
+    Some((ShmHandoffCounters::PerPriority(ids), used))
+}
+
+/// Encode the OpenSyn `Shm` body — zenoh's `OpenSyn { bob_challenge,
+/// alice_counters }`, in that field order. The challenge is the value the
+/// INITIATOR read out of the ACCEPTOR's segment.
+#[cfg(feature = "session-extshm")]
+pub fn encode_shm_open_syn_body(bob_challenge: u64, counters: ShmHandoffCounters) -> Vec<u8> {
+    let mut out = Vec::with_capacity(10);
+    encode_vle_u64_into(&mut out, bob_challenge);
+    encode_shm_handoff_counters(&mut out, counters);
+    out
+}
+
+/// Decode the OpenSyn `Shm` body into `(bob_challenge, alice_counters)`.
+#[cfg(feature = "session-extshm")]
+pub fn decode_shm_open_syn_body(bytes: &[u8]) -> Option<(u64, ShmHandoffCounters)> {
+    let (challenge, n0) = read_vle_u64(bytes)?;
+    let (counters, _n1) = decode_shm_handoff_counters(bytes.get(n0..)?)?;
+    Some((challenge, counters))
+}
+
+/// Encode the OpenAck `Shm` body — zenoh's `OpenAck { bob_counters }`, which is
+/// the counter block and NOTHING else.
+///
+/// ⚠ 1.10.0 removed the literal `1` the 1.5.0 acceptor sent here, and with it
+/// the only explicit "I accepted your echo" signal on the wire. See
+/// [`ShmAuthDispatch::recv_open_ack`].
+#[cfg(feature = "session-extshm")]
+pub fn encode_shm_open_ack_body(counters: ShmHandoffCounters) -> Vec<u8> {
+    let mut out = Vec::with_capacity(1);
+    encode_shm_handoff_counters(&mut out, counters);
+    out
+}
+
+/// Decode the OpenAck `Shm` body into the peer's counter block.
+#[cfg(feature = "session-extshm")]
+pub fn decode_shm_open_ack_body(bytes: &[u8]) -> Option<ShmHandoffCounters> {
+    decode_shm_handoff_counters(bytes).map(|(c, _)| c)
+}
+
+/// Wrap an establishment body in the `Shm` ZBuf ext entry (header `0x42`).
+/// Fallible only because the owned ZBuf copy re-checks its inline capacity, the
+/// same bound decode enforces.
+///
+/// ONE encoder for both phases, because 1.10.0 gives both the same header; the
+/// caller picks the phase by which `ExtChainRole` slot it stages into.
+#[cfg(feature = "session-extshm")]
+pub fn encode_shm_zbuf_ext(body: &[u8]) -> Result<ExtEntryOwned, CodecError> {
     Ok(ExtEntryOwned {
-        header: SHM_INIT_EXT_HEADER,
+        header: SHM_ZBUF_EXT_HEADER,
         body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
             value_len: body.len() as u64,
             value: crate::codec_owned::owned_bytes(body)?,
@@ -209,39 +331,16 @@ pub fn encode_shm_init_ext(body: &[u8]) -> Result<ExtEntryOwned, CodecError> {
     })
 }
 
-/// Read the `init::ext::Shm` ZBuf body out of an Init ext chain, matching on the
-/// full extension IDENTITY so wz's own UNIT offer at the same id is never
-/// mistaken for it.
+/// Read the `Shm` ZBuf body out of an ext chain, matching on the full extension
+/// IDENTITY so wz's own UNIT offer at the same id is never mistaken for it.
+/// Which PHASE the body belongs to is decided by which chain was passed in.
 #[cfg(feature = "session-extshm")]
-pub fn peer_shm_init_body(extensions: &[ExtEntryOwned]) -> Option<&[u8]> {
+pub fn peer_shm_zbuf_body(extensions: &[ExtEntryOwned]) -> Option<&[u8]> {
     extensions
         .iter()
-        .find(|e| crate::ext_header::ext_eid(e.header) == SHM_INIT_EXT_HEADER)
+        .find(|e| crate::ext_header::ext_eid(e.header) == SHM_ZBUF_EXT_HEADER)
         .and_then(|e| match &e.body {
             ExtEntryOwnedVariant::CodecZenohExtZbuf(z) => Some(z.value.as_slice()),
-            _ => None,
-        })
-}
-
-/// Build the Open-phase `open::ext::Shm` z64 ext (header `0x22`) carrying
-/// `value` — the peer's challenge on OpenSyn, [`SHM_OPEN_ACK_VALUE`] on OpenAck.
-#[cfg(feature = "session-extshm")]
-pub fn encode_shm_open_ext(value: u64) -> ExtEntryOwned {
-    use wz_codecs::ext_zint::ExtZint;
-    ExtEntryOwned {
-        header: SHM_OPEN_EXT_HEADER,
-        body: ExtEntryOwnedVariant::CodecZenohExtZint(ExtZint { value }),
-    }
-}
-
-/// Read the `open::ext::Shm` z64 value out of an Open ext chain.
-#[cfg(feature = "session-extshm")]
-pub fn peer_shm_open_value(extensions: &[ExtEntryOwned]) -> Option<u64> {
-    extensions
-        .iter()
-        .find(|e| crate::ext_header::ext_eid(e.header) == SHM_OPEN_EXT_HEADER)
-        .and_then(|e| match &e.body {
-            ExtEntryOwnedVariant::CodecZenohExtZint(z) => Some(z.value),
             _ => None,
         })
 }
@@ -313,8 +412,10 @@ pub enum ShmAuthError {
 ///    the proof it could map the initiator's memory.
 /// 3. **OpenSyn** — the initiator checks the echo against its own challenge,
 ///    then opens the acceptor's segment and answers with ITS challenge.
-/// 4. **OpenAck** — the acceptor checks that second echo and confirms with the
-///    literal `1`.
+/// 4. **OpenAck** — the acceptor answers with its handoff counter block.
+///    ⚠ 1.10.0 removed the literal `1` the 1.5.0 acceptor confirmed with, so
+///    this message no longer carries "I accepted your echo" — see
+///    [`ShmAuthDispatch::recv_open_ack`] for what is left to assert.
 ///
 /// So each side proves map-ability to the other, and neither is taken on trust.
 /// A node with no authenticator installed emits nothing at all (zenoh's
@@ -378,7 +479,7 @@ impl ShmAuthDispatch {
     /// Step 1, INITIATOR: publish our segment id. zenoh `send_init_syn`.
     pub fn send_init_syn(&self) -> Option<ExtEntryOwned> {
         let a = self.authenticator.as_ref()?;
-        encode_shm_init_ext(&encode_shm_init_syn_body(a.local_segment_id())).ok()
+        encode_shm_zbuf_ext(&encode_shm_init_syn_body(a.local_segment_id())).ok()
     }
 
     /// Step 2a, ACCEPTOR: open the initiator's segment and remember the
@@ -393,7 +494,7 @@ impl ShmAuthDispatch {
         let Some(a) = self.authenticator.as_ref() else {
             return Ok(());
         };
-        let Some(body) = peer_shm_init_body(extensions) else {
+        let Some(body) = peer_shm_zbuf_body(extensions) else {
             return Ok(());
         };
         let alice_segment = decode_shm_init_syn_body(body).ok_or(ShmAuthError::MalformedInitSyn)?;
@@ -408,7 +509,7 @@ impl ShmAuthDispatch {
     pub fn send_init_ack(&self) -> Option<ExtEntryOwned> {
         let a = self.authenticator.as_ref()?;
         let alice_challenge = self.peer_challenge?;
-        encode_shm_init_ext(&encode_shm_init_ack_body(
+        encode_shm_zbuf_ext(&encode_shm_init_ack_body(
             alice_challenge,
             a.local_segment_id(),
         ))
@@ -427,7 +528,7 @@ impl ShmAuthDispatch {
         let Some(a) = self.authenticator.as_ref() else {
             return false;
         };
-        let Some(body) = peer_shm_init_body(extensions) else {
+        let Some(body) = peer_shm_zbuf_body(extensions) else {
             return false;
         };
         let Some((alice_challenge, bob_segment)) = decode_shm_init_ack_body(body) else {
@@ -442,34 +543,77 @@ impl ShmAuthDispatch {
     }
 
     /// Step 3b, INITIATOR: answer with the challenge we read out of the
-    /// acceptor's segment. zenoh `send_open_syn`.
+    /// acceptor's segment, plus our counter block. zenoh `send_open_syn`.
     pub fn send_open_syn(&self) -> Option<ExtEntryOwned> {
         self.authenticator.as_ref()?;
-        Some(encode_shm_open_ext(self.peer_challenge?))
+        encode_shm_zbuf_ext(&encode_shm_open_syn_body(
+            self.peer_challenge?,
+            ShmHandoffCounters::Disabled,
+        ))
+        .ok()
     }
 
     /// Step 4a, ACCEPTOR: check the initiator echoed OUR challenge. zenoh
-    /// `recv_open_syn`; `true` here is what sets `negotiated_to_use_shm` on the
-    /// accept side.
+    /// `recv_open_syn`, whose `self.inner.validate(open_syn.bob_challenge, ..)`
+    /// is the same comparison. `true` here is what keeps the accept side's flag.
+    ///
+    /// The counter block is decoded and DISCARDED rather than ignored: a body
+    /// that does not parse as `challenge ++ counters` is refused, because a
+    /// peer whose counter block we could not read is a peer we did not
+    /// understand — not one whose challenge half we may use anyway.
     pub fn recv_open_syn(&self, extensions: &[ExtEntryOwned]) -> bool {
         let Some(a) = self.authenticator.as_ref() else {
             return false;
         };
-        peer_shm_open_value(extensions) == Some(a.local_challenge())
+        let Some(body) = peer_shm_zbuf_body(extensions) else {
+            return false;
+        };
+        let Some((bob_challenge, _counters)) = decode_shm_open_syn_body(body) else {
+            return false;
+        };
+        bob_challenge == a.local_challenge()
     }
 
-    /// Step 4b, ACCEPTOR: confirm with the literal `1`, and only when the
-    /// exchange actually completed. zenoh `send_open_ack`.
+    /// Step 4b, ACCEPTOR: send our counter block. zenoh `send_open_ack`.
+    ///
+    /// ⚠ Upstream sends this UNCONDITIONALLY once the extension is engaged —
+    /// it does not consult whether `recv_open_syn` validated. wz keeps the
+    /// `negotiated` gate, which is STRICTER than upstream and safe in the only
+    /// direction that matters: a wz acceptor that refused the echo stays
+    /// silent, so a peer cannot read our ack as agreement we never gave.
     pub fn send_open_ack(&self, negotiated: bool) -> Option<ExtEntryOwned> {
         self.authenticator.as_ref()?;
-        negotiated.then(|| encode_shm_open_ext(SHM_OPEN_ACK_VALUE))
+        if !negotiated {
+            return None;
+        }
+        encode_shm_zbuf_ext(&encode_shm_open_ack_body(ShmHandoffCounters::Disabled)).ok()
     }
 
-    /// Step 4c, INITIATOR: the acceptor's confirmation. zenoh `recv_open_ack`
-    /// accepts ONLY the literal `1` (`if ext.value != 1`), so this is where the
-    /// open side finally sets its own flag.
+    /// Step 4c, INITIATOR: the acceptor's OpenAck.
+    ///
+    /// ⚠ THIS IS WHERE 1.10.0 TOOK A SIGNAL AWAY. The 1.5.0 acceptor sent the
+    /// literal `1` here and `recv_open_ack` refused anything else, so the ack
+    /// was an explicit "I accepted your echo". 1.10.0's OpenAck carries only
+    /// the counter block, and upstream's own `recv_open_ack` does no more than
+    /// decode it — the initiator's SHM was already decided at InitAck, by
+    /// whether it could map the acceptor's segment and the acceptor echoed the
+    /// initiator's challenge.
+    ///
+    /// So the strongest thing this can now assert is PRESENCE plus a body that
+    /// decodes. That is weaker than 1.5.0 and it is upstream's own strength.
+    /// It does not open a hole for a correct wz: reaching here means
+    /// `recv_init_ack` already validated the acceptor's echo of OUR challenge
+    /// and read the acceptor's challenge out of its segment, so the OpenSyn we
+    /// sent is right by construction and an acceptor that refused it would have
+    /// to be refusing a correct echo.
     pub fn recv_open_ack(&self, extensions: &[ExtEntryOwned]) -> bool {
-        self.authenticator.is_some() && peer_shm_open_value(extensions) == Some(SHM_OPEN_ACK_VALUE)
+        if self.authenticator.is_none() {
+            return false;
+        }
+        let Some(body) = peer_shm_zbuf_body(extensions) else {
+            return false;
+        };
+        decode_shm_open_ack_body(body).is_some()
     }
 }
 
@@ -560,26 +704,44 @@ mod tests {
         /// The two establishment headers are DISTINCT extensions at one id, and
         /// neither is wz's UNIT offer. This is the property R311y505 was written
         /// for, restated for the forms this round adds.
+        ///
+        /// R2240 INVERTED this test rather than deleting it. Its old form
+        /// asserted THREE distinct forms and was right for 1.5.0, where the
+        /// Open phase was `zextz64!` and carried its own header `0x22`. At
+        /// 1.10.0 `init.rs` and `open.rs` both declare
+        /// `pub type Shm = zextzbuf!(0x2, false)`, so there are TWO headers and
+        /// the third distinction moved OUT of the byte and INTO the carrier.
+        /// Asserting three would now be asserting something upstream does not
+        /// do; what has to be pinned instead is that the collapse costs no
+        /// discrimination, which is the second half below.
         #[test]
-        fn the_three_forms_at_id_two_are_distinct() {
-            assert_eq!(SHM_INIT_EXT_HEADER, 0x42, "ZBuf enc (0x40) | id 0x2");
-            assert_eq!(SHM_OPEN_EXT_HEADER, 0x22, "Z64 enc (0x20) | id 0x2");
+        fn two_forms_at_id_two_are_distinct_and_the_carrier_separates_the_third() {
+            assert_eq!(SHM_ZBUF_EXT_HEADER, 0x42, "ZBuf enc (0x40) | id 0x2");
             assert_eq!(encode_shm_establishment_ext().header, 0x02, "UNIT | id 0x2");
 
-            // The ZBuf form is not read as the unit offer, nor as the z64 form.
-            let init = encode_shm_init_ext(&encode_shm_init_syn_body(7)).expect("fits");
+            // The ZBuf form is not read as the unit offer, and vice versa.
+            let init = encode_shm_zbuf_ext(&encode_shm_init_syn_body(7)).expect("fits");
+            let init_header = init.header;
             assert!(!peer_offered_shm(core::slice::from_ref(&init)));
-            assert_eq!(peer_shm_open_value(core::slice::from_ref(&init)), None);
             assert_eq!(
-                peer_shm_init_body(&[init]).map(<[u8]>::to_vec),
+                peer_shm_zbuf_body(&[init]).map(<[u8]>::to_vec),
                 Some(vec![7])
             );
+            let unit = encode_shm_establishment_ext();
+            assert_eq!(peer_shm_zbuf_body(core::slice::from_ref(&unit)), None);
+            assert!(peer_offered_shm(&[unit]));
 
-            // ...and the z64 form is not read as either of the other two.
-            let open = encode_shm_open_ext(SHM_OPEN_ACK_VALUE);
+            // THE COLLAPSE, stated as the property it has to keep: an Init body
+            // and an Open body now carry the SAME header, so the reader cannot
+            // tell them apart — and must not try. What tells them apart is which
+            // chain they arrive in, and the four `ExtChainRole` slots are four
+            // distinct stores. Pinned here as a byte-level equality so that a
+            // future round which re-splits the headers has to come through this
+            // test rather than past it.
+            let open = encode_shm_zbuf_ext(&encode_shm_open_ack_body(ShmHandoffCounters::Disabled))
+                .expect("fits");
+            assert_eq!(open.header, init_header, "one header, both phases");
             assert!(!peer_offered_shm(core::slice::from_ref(&open)));
-            assert_eq!(peer_shm_init_body(core::slice::from_ref(&open)), None);
-            assert_eq!(peer_shm_open_value(&[open]), Some(1));
         }
 
         /// The InitSyn body is ONE VLE and nothing else — zenoh writes the bare
@@ -625,15 +787,57 @@ mod tests {
             assert_eq!(decode_shm_init_ack_body(&[0xAC]), None, "truncated");
         }
 
-        /// The Open-phase value round-trips, and the OpenAck constant is the
-        /// literal `1` zenoh checks for (`recv_open_ack`: `if ext.value != 1`).
+        /// The Open-phase bodies round-trip, and the counter block's STATUS BYTE
+        /// is a raw byte with a full band block behind `1`.
+        ///
+        /// R2240 replaced `open_phase_carries_a_bare_z64_challenge`, which
+        /// pinned the 1.5.0 shape (one z64: the challenge, or the literal `1`).
+        /// Both halves of that are gone — the encoding and the literal — so the
+        /// test pins what took their place.
         #[test]
-        fn open_phase_carries_a_bare_z64_challenge() {
-            assert_eq!(SHM_OPEN_ACK_VALUE, 1);
+        fn open_phase_carries_a_challenge_and_a_counter_block() {
+            assert_eq!(SHM_PRIORITY_BANDS, 8, "Priority::NUM = 1 + 7 - 0");
+
+            // Disabled is ONE raw byte after the challenge's VLE, so the whole
+            // OpenSyn for a 300-challenge is exactly three bytes.
+            assert_eq!(
+                encode_shm_open_syn_body(300, ShmHandoffCounters::Disabled),
+                vec![0xAC, 0x02, 0x00]
+            );
+            assert_eq!(
+                encode_shm_open_ack_body(ShmHandoffCounters::Disabled),
+                vec![0x00]
+            );
+
             for v in [0u64, 1, 300, u64::MAX] {
-                assert_eq!(peer_shm_open_value(&[encode_shm_open_ext(v)]), Some(v));
+                for c in [
+                    ShmHandoffCounters::Disabled,
+                    ShmHandoffCounters::PerPriority([0, 1, 127, 128, 300, 2809, 65535, 7]),
+                ] {
+                    assert_eq!(
+                        decode_shm_open_syn_body(&encode_shm_open_syn_body(v, c)),
+                        Some((v, c)),
+                        "OpenSyn round trip for ({v}, {c:?})"
+                    );
+                    assert_eq!(
+                        decode_shm_open_ack_body(&encode_shm_open_ack_body(c)),
+                        Some(c),
+                        "OpenAck round trip for {c:?}"
+                    );
+                }
             }
-            assert_eq!(peer_shm_open_value(&[]), None);
+
+            // An empty body, and a PerPrio block cut short, are both refused —
+            // a partial band block must not read as a shorter one.
+            assert_eq!(decode_shm_open_syn_body(&[]), None);
+            assert_eq!(decode_shm_open_ack_body(&[]), None);
+            let short = encode_shm_open_ack_body(ShmHandoffCounters::PerPriority([1; 8]));
+            assert_eq!(decode_shm_open_ack_body(&short[..short.len() - 1]), None);
+
+            // A challenge with no counter block at all is refused: that is the
+            // 1.5.0 OpenSyn, and a peer still sending it is not a peer we can
+            // read.
+            assert_eq!(decode_shm_open_syn_body(&[0xAC, 0x02]), None);
         }
     }
 
@@ -680,6 +884,17 @@ mod tests {
         const BOB_CHALLENGE: u64 = 0xB0B_u64;
 
         /// Both sides can map each other — the mutually-visible case.
+        /// An OpenSyn ext carrying `challenge` and an empty counter block — the
+        /// shape a conforming 1.10.0 peer sends, so a test that forges one
+        /// forges the WHOLE message rather than the half it cares about.
+        fn open_syn_ext(challenge: u64) -> ExtEntryOwned {
+            encode_shm_zbuf_ext(&encode_shm_open_syn_body(
+                challenge,
+                ShmHandoffCounters::Disabled,
+            ))
+            .expect("fits")
+        }
+
         fn pair() -> (ShmAuthDispatch, ShmAuthDispatch) {
             let alice = FakeAuth {
                 id: ALICE_ID,
@@ -779,7 +994,7 @@ mod tests {
 
             // A forged InitAck: correct SHAPE, correct bob segment, WRONG echo.
             let forged =
-                encode_shm_init_ext(&encode_shm_init_ack_body(ALICE_CHALLENGE ^ 1, BOB_ID))
+                encode_shm_zbuf_ext(&encode_shm_init_ack_body(ALICE_CHALLENGE ^ 1, BOB_ID))
                     .expect("fits");
             assert!(
                 !alice.recv_init_ack(&[forged]),
@@ -790,24 +1005,42 @@ mod tests {
             // And the acceptor side refuses a forged OpenSyn the same way.
             let (_, bob) = pair();
             assert!(
-                !bob.recv_open_syn(&[encode_shm_open_ext(BOB_CHALLENGE ^ 1)]),
+                !bob.recv_open_syn(&[open_syn_ext(BOB_CHALLENGE ^ 1)]),
                 "a wrong echo on OpenSyn must not negotiate"
             );
-            assert!(bob.recv_open_syn(&[encode_shm_open_ext(BOB_CHALLENGE)]));
+            assert!(bob.recv_open_syn(&[open_syn_ext(BOB_CHALLENGE)]));
         }
 
-        /// The acceptor confirms with the literal 1 and the initiator accepts
-        /// ONLY that (zenoh `recv_open_ack`: `if ext.value != 1`). A peer that
-        /// echoes something else — including our own challenge — is refused.
+        /// The acceptor's ack is a COUNTER BLOCK, and the initiator accepts a
+        /// present, well-formed one — no more, because 1.10.0 left no more on
+        /// the wire.
+        ///
+        /// R2240 replaced `the_open_ack_must_be_the_literal_one`, whose whole
+        /// subject (the literal `1`, and `recv_open_ack` refusing anything
+        /// else) upstream deleted. What can still be pinned, and is:
+        ///   * ABSENCE is refused — the arm that keeps a peer doing no SHM from
+        ///     being read as agreement;
+        ///   * a MALFORMED body is refused — the arm that replaces "wrong
+        ///     value", and the only discrimination the new shape affords;
+        ///   * wz's acceptor stays SILENT when it did not negotiate, which is
+        ///     stricter than upstream's unconditional `send_open_ack`.
         #[test]
-        fn the_open_ack_must_be_the_literal_one() {
+        fn the_open_ack_is_a_counter_block_and_absence_is_refused() {
             let (alice, bob) = pair();
             assert!(bob.send_open_ack(false).is_none(), "not negotiated, no ack");
             let ack = bob.send_open_ack(true).expect("negotiated");
             assert!(alice.recv_open_ack(core::slice::from_ref(&ack)));
-            assert!(!alice.recv_open_ack(&[encode_shm_open_ext(0)]));
-            assert!(!alice.recv_open_ack(&[encode_shm_open_ext(ALICE_CHALLENGE)]));
-            assert!(!alice.recv_open_ack(&[]));
+            assert!(!alice.recv_open_ack(&[]), "absence is not agreement");
+            // A PerPrio block cut one byte short: present, right header, and
+            // still refused.
+            let full = encode_shm_open_ack_body(ShmHandoffCounters::PerPriority([1; 8]));
+            let truncated = encode_shm_zbuf_ext(&full[..full.len() - 1]).expect("fits");
+            assert!(!alice.recv_open_ack(&[truncated]));
+            // ...and the 1.5.0 ack, a bare z64 `1`, no longer parses as one:
+            // its body is a single byte that the counter reader sees as a
+            // PerPrio status with no block behind it.
+            let legacy = encode_shm_zbuf_ext(&[0x01]).expect("fits");
+            assert!(!alice.recv_open_ack(&[legacy]));
         }
 
         /// A node with no authenticator emits NOTHING and negotiates nothing —
@@ -835,14 +1068,14 @@ mod tests {
         fn a_malformed_init_syn_is_the_one_hard_error() {
             let (_, mut bob) = pair();
             // An `Shm` ZBuf whose body is an empty (truncated) VLE.
-            let bad = encode_shm_init_ext(&[]).expect("fits");
+            let bad = encode_shm_zbuf_ext(&[]).expect("fits");
             assert_eq!(
                 bob.recv_init_syn(&[bad]),
                 Err(ShmAuthError::MalformedInitSyn)
             );
             // Whereas the initiator's mirror of the same class merely says no.
             let (mut alice, _) = pair();
-            assert!(!alice.recv_init_ack(&[encode_shm_init_ext(&[]).expect("fits")]));
+            assert!(!alice.recv_init_ack(&[encode_shm_zbuf_ext(&[]).expect("fits")]));
         }
     }
 }

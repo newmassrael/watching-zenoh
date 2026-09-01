@@ -2616,6 +2616,36 @@ PY
     # failure branches would have a population of zero on most runs.
     python3 scripts/lib/upstream_feature_census.py --selftest || return 1
     python3 scripts/lib/upstream_feature_census.py || return 1
+    # R2240 (unregistered open-debt item 592, completion condition 2) — every
+    # zenohd ORACLE this tree builds must answer with the version this tree
+    # PINS. The binaries are gitignored build output, so R2228 moving
+    # `ZENOHD_VERSION` 1.5.0 -> 1.10.0 moved NOTHING on a machine that already
+    # had them: three of this tree's four oracles were still the old version on
+    # 2026-09-01, and the SHM one had been quietly grading wz against a release
+    # the tree no longer targets.
+    #
+    # The population is DERIVED from `build-zenohd.sh`'s own `INSTALL_DIR=`
+    # assignments and the pin from its own `ZENOHD_VERSION` default, so a fifth
+    # variant added there is covered the day it is added; a population of zero
+    # is a HARD FAIL rather than a green. The version comes from the BINARY's
+    # `--version`, because mtime, cache key and the metadata sidecar are all
+    # claims something ELSE made about it.
+    #
+    # UNARMED here on purpose. A host with no oracle built has nothing to judge
+    # and says so ("checked NOTHING -- that is a skip, not a pass"); what this
+    # layer catches is the case that actually happened, an oracle that is
+    # PRESENT and OFF THE PIN. The absent case is armed where it can mean
+    # something — `--require` in Layer Z, which has just required
+    # a zenohd of its own.
+    #
+    # Enforcement MEASURED both ways, live rather than by fixture: swapping
+    # `target/zenohd-shm/zenohd` for a 1.5.0 build reds this and NAMES that
+    # oracle ("binary says 49c8a538, pin says 1.10.0"), and restoring the pinned
+    # binary returns OK. The selftest additionally drives the classes a live
+    # tree cannot produce on demand (mute binary, metadata disagreeing with the
+    # binary beside it, an all-absent population armed and unarmed).
+    python3 scripts/lib/oracle_pin_gate.py --selftest || return 1
+    python3 scripts/lib/oracle_pin_gate.py --check || return 1
     return 0
 }
 
@@ -12659,6 +12689,32 @@ layer_z_zenohd_interop() {
     if [[ ! -x "$zenohd" ]]; then
         _z_unavailable "zenohd not built ($zenohd; run: bash scripts/build-zenohd.sh)" || return 1
         return 0
+    fi
+    # R2240 (unregistered open-debt item 592) — ARMED here, and only here.
+    #
+    # Layer C0 runs this gate unarmed, where an absent oracle is honestly a
+    # skip. Past this point that reading is no longer available: this lane has
+    # just established that a zenohd exists, so every oracle it goes on to use
+    # is one somebody built ON PURPOSE, and "not built" stops being a fact about
+    # the host and becomes a gap in what this lane claims to have measured.
+    # `--require` turns a fully absent population into a FAIL, which is the arm
+    # that keeps "checked nothing" from reading as "found nothing". It is an
+    # ARGUMENT rather than a `WZ_..._REQUIRE=1` env prefix on purpose: that
+    # spelling belongs to `armed_oracle_census.py`, whose subject is an
+    # integration TEST's skip-adjudicator and whose every row names a test file
+    # and strings that must occur in it. This gate is not a test and derives its
+    # oracles instead of naming them, so a row for it could only be written by
+    # hardcoding the paths the derivation exists to avoid.
+    #
+    # It reds the case this item was OPENED by, too: an oracle that is present
+    # and stale. That is not hypothetical here — the SHM leg below was green for
+    # months against a 1.5.0 binary after the pin moved, and after R2240 ported
+    # wz's SHM establishment to 1.10.0 the SAME rollback reds the leg instead.
+    # The direction flipped; what did not change is that the LANE could not tell
+    # you which zenohd it had been talking to. This can.
+    if ! python3 scripts/lib/oracle_pin_gate.py --check --require; then
+        echo "  Layer Z FAIL: an oracle this lane relies on is not at the pin" >&2
+        return 1
     fi
     # R2080 (open-debt item 503) — the COMPLETENESS audit of the acceptance
     # boundary's exception list, run HERE for the same reason the close-scope

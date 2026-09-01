@@ -3638,7 +3638,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(all(feature = "session-extshm", feature = "codec-init-body"))]
     pub fn shm_peer_offered(&self, extensions: &[ExtEntryOwned]) -> bool {
         if self.shm_auth_installed() {
-            crate::extshm::peer_shm_init_body(extensions).is_some()
+            crate::extshm::peer_shm_zbuf_body(extensions).is_some()
         } else {
             crate::extshm::peer_offered_shm(extensions)
         }
