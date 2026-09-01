@@ -2109,7 +2109,35 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// The unbounded default (`usize::MAX`) always succeeds and never
     /// decrements, so an unconfigured session cannot exhaust and cannot
     /// saturate its own counter downward into a false exhaustion.
-    #[cfg(feature = "transport-fragmentation")]
+    ///
+    /// ⚠ The cfg is [`Self::emit_frame_or_fragments`]' OWN, repeated —
+    /// `transport-fragmentation` alone is not the condition. That method is
+    /// this draw's only caller and is itself gated on a codec/declare arm
+    /// existing to frame anything, so a build with fragmentation ON and every
+    /// emitter OFF compiles the fragmenter and nothing that reaches it; the
+    /// draw is then dead code and `-D warnings` refuses the crate. MEASURED,
+    /// R2238: `--features transport-qos,transport-fragmentation,
+    /// transport-batching,reassembly,session-multicast` is exactly that
+    /// combination, and pre-push gate 4b is what found it — no lane this
+    /// round ran by hand composes it. The repetition is deliberate rather
+    /// than a helper: if the two lists ever disagree, THIS error is what says
+    /// so, which a shared `allow(dead_code)` would have silenced instead.
+    #[cfg(all(
+        feature = "transport-fragmentation",
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-final",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        )
+    ))]
     fn take_fragment_tx_credit(&self) -> bool {
         R::with_mutex_mut(&self.fragment_tx_budget, |slot| {
             if *slot == usize::MAX {
