@@ -242,9 +242,11 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         ),
     ),
     "wz-capi-c": (
-        "one feature, and it selects between two ABI spellings rather than "
-        "adding or removing a Rust path a consumer names",
-        frozenset({"zenoh-c-no-unstable-api"}),
+        "a C ABI crate: its public contract is the SYMBOL SET a C program "
+        "links against, not a Rust path a consumer names, and that contract "
+        "is already measured against upstream's own library on all four ABI "
+        "arms. Held to `ABI_CONTRACT` below rather than to this sentence",
+        frozenset({"zenoh-c-no-unstable-api", "zenoh-c-shared-memory"}),
     ),
     "wz-codecs-test-support": (
         "a test-support crate: its consumers are this workspace's own test "
@@ -315,6 +317,73 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         frozenset({"fixtures"}),
     ),
 }
+
+# R2260 (open-debt item 593's residue) — the packages whose `OFF_AXIS` reason is
+# the claim "this crate's public contract is a C ABI symbol set, not a Rust
+# path", MEASURED instead of asserted.
+#
+# ## Why this exists, and what refuted the sentence it replaces
+#
+# `OFF_AXIS` reasons are PROSE, which is the shape this file already warns
+# about one table up: "a reason nobody measures is an escape hatch from the very
+# derivation it sits beside". `wz-capi-c`'s reason was "one feature, and it
+# selects between two ABI spellings rather than adding or removing a Rust path a
+# consumer names", and BOTH halves were false when re-measured:
+#
+#   * "one feature" — R2259 made it two, which is how this row was found at all.
+#   * "rather than adding or removing a Rust path" — the row's own feature gates
+#     FIVE `pub mod` declarations (`advanced`, `cancellation`, `events`,
+#     `source_info`, `zenoh_ext`). A gated `pub mod` is exactly a Rust path
+#     appearing and disappearing.
+#
+# The row is still RIGHT to be off the axis; the reason for it was wrong. So the
+# reason becomes a predicate, and the predicate is the narrow true one: what the
+# crate exposes under these features is the C ABI, so a Rust consumer has no
+# non-`extern` function to reach for and the missing-feature diagnostic R2115
+# probes for has no subject here.
+#
+# ## The predicate
+#
+# For every `(package, feature)` in this table's `OFF_AXIS` row, every
+# public-item site it gates must be one of:
+#
+#   * an `fn` carrying `#[no_mangle]` — a C entry point;
+#   * a `pub mod` whose every STRICTLY-`pub` `fn` carries `#[no_mangle]` — an
+#     ABI module, checked by opening the module's own file;
+#   * a `const` / `struct` / `enum` / `type` / `union` — what a C header
+#     declares, and not something a Rust caller can call.
+#
+# A `use` is a FINDING even though there is none today: a gated re-export IS a
+# Rust path, and the whole point of writing this down is that the population
+# must not be able to grow in silence. So is any item shape this does not know —
+# unclassified is RED, never a pass.
+#
+# ## What this deliberately does NOT claim
+#
+# That the other seven `OFF_AXIS` rows are measured. They are not; their reasons
+# are still prose, and that residue is filed rather than hidden.
+ABI_CONTRACT: dict[str, str] = {
+    "wz-capi-c": (
+        "the zenoh-c drop-in cdylib; its symbol set is graded against "
+        "upstream's own libzenohc.so on all four ABI arms by "
+        "`crates/wz-integration-tests/tests/zenoh_c_abi_symbol_census.rs`"
+    ),
+}
+
+#: A strictly-`pub` `fn`, at any depth — the shape that would be a Rust caller's
+#: entry point if it were not an `extern "C"` one. `pub(crate)` is deliberately
+#: NOT matched: it is unreachable from outside the crate, the same line
+#: `classify` draws with `restricted-item`.
+ABI_PUB_FN = re.compile(r"^\s*pub\s+(?:unsafe\s+|const\s+|async\s+)*(?:extern\s+\"[^\"]*\"\s+)?fn\b")
+
+#: `pub mod name;` — a gated Rust path whose contents decide whether it is one.
+ABI_PUB_MOD = re.compile(r"^\s*pub\s+mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;")
+
+#: The item keywords a C header declares and a Rust caller cannot call.
+ABI_DECLARATION = re.compile(r"^\s*pub\s+(?:const|static|struct|enum|type|union)\b")
+
+#: A gated re-export. Not present today; a FINDING if it ever is.
+ABI_USE = re.compile(r"^\s*pub\s+use\b")
 
 
 def workspace() -> tuple[dict[str, str], dict[str, set[str]]]:
@@ -524,6 +593,126 @@ def negated_in(package: str) -> frozenset[str]:
     return frozenset(out)
 
 
+def abi_module_is_abi(root: pathlib.Path, rel: str, module: str) -> str | None:
+    """Why `module`, declared in `rel`, is not an ABI module — or `None`.
+
+    Opens the module's own file, which is the whole point: a gated `pub mod` is
+    a Rust path, and the only thing that makes it an ABI path instead is what is
+    inside it. Reads the SIBLING file (`src/x.rs`) and the directory form
+    (`src/x/mod.rs`), because either spelling is a module.
+
+    A module whose file cannot be found is a finding, not a pass — the same rule
+    the rest of this file follows for anything it could not read.
+    """
+    src = (root / rel).parent
+    for candidate in (src / f"{module}.rs", src / module / "mod.rs"):
+        if not candidate.is_file():
+            continue
+        lines = candidate.read_text(encoding="utf-8", errors="replace").split("\n")
+        for i, line in enumerate(lines):
+            if not ABI_PUB_FN.match(line):
+                continue
+            # Walk BACK over the attribute / doc stack in front of the fn. The
+            # attributes are what carry `#[no_mangle]`, and they sit above the
+            # signature rather than on it.
+            j = i - 1
+            marked = False
+            while j >= 0:
+                s = lines[j].strip()
+                if s.startswith("#["):
+                    marked = marked or "no_mangle" in s
+                elif s.startswith("//") or s == "":
+                    pass
+                else:
+                    break
+                j -= 1
+            if not marked:
+                rel_c = candidate.relative_to(root).as_posix()
+                return (
+                    f"`{rel_c}:{i + 1}` is a strictly-`pub` fn with no "
+                    f"`#[no_mangle]`, so `{module}` is a Rust path a caller can "
+                    f"reach, not a C ABI module"
+                )
+        return None
+    return f"the file for `pub mod {module}` was not found beside `{rel}`"
+
+
+def abi_contract_findings(root: pathlib.Path, sites: dict[tuple[str, str], list[Shape]]) -> list[str]:
+    """R2260 — hold every `ABI_CONTRACT` package's `OFF_AXIS` reason to the source.
+
+    The reason claims the crate's feature-gated public surface is a C ABI. This
+    reads every site that surface actually has and refuses anything a Rust
+    caller could name.
+    """
+    findings: list[str] = []
+    reached = 0
+    for pkg in sorted(ABI_CONTRACT):
+        if pkg not in OFF_AXIS:
+            findings.append(
+                f"`{pkg}` claims an ABI contract in `ABI_CONTRACT` but has no "
+                f"`OFF_AXIS` row, so the claim excuses nothing and is unread"
+            )
+            continue
+        _why, feats = OFF_AXIS[pkg]
+        for feat in sorted(feats):
+            for shape in sites.get((pkg, feat), []):
+                rel, ln = shape.where.rsplit(":", 1)
+                path = root / rel
+                if not path.is_file():
+                    findings.append(f"`{shape.where}` no longer exists")
+                    continue
+                lines = path.read_text(encoding="utf-8", errors="replace").split("\n")
+                item = attached(lines, int(ln) - 1)
+                if item is None:
+                    findings.append(f"`{shape.where}` has no item after its attribute")
+                    continue
+                reached += 1
+                mod = ABI_PUB_MOD.match(item)
+                if mod:
+                    why = abi_module_is_abi(root, rel, mod.group(1))
+                    if why:
+                        findings.append(
+                            f"`{pkg}` / `{feat}` is excused as a C ABI contract, but {why} "
+                            f"(`{shape.where}`)"
+                        )
+                    continue
+                if ABI_PUB_FN.match(item):
+                    stack = []
+                    j = int(ln)
+                    while j < len(lines) and lines[j].strip().startswith("#["):
+                        stack.append(lines[j])
+                        j += 1
+                    if not any("no_mangle" in a for a in stack):
+                        findings.append(
+                            f"`{pkg}` / `{feat}` is excused as a C ABI contract, but "
+                            f"`{shape.where}` gates a strictly-`pub` fn with no "
+                            f"`#[no_mangle]` — a Rust caller can name it"
+                        )
+                    continue
+                if ABI_USE.match(item):
+                    findings.append(
+                        f"`{pkg}` / `{feat}` is excused as a C ABI contract, but "
+                        f"`{shape.where}` gates a `pub use` — a re-export IS a Rust path"
+                    )
+                    continue
+                if ABI_DECLARATION.match(item):
+                    continue
+                findings.append(
+                    f"`{pkg}` / `{feat}` is excused as a C ABI contract, but "
+                    f"`{shape.where}` gates an item shape this check does not know "
+                    f"(`{item.strip()[:60]}`) — unclassified is RED, not a pass"
+                )
+    # An excuse held to an EMPTY population excuses everything. The packages in
+    # `ABI_CONTRACT` are there because they gate a public surface; a run that
+    # reached none of it has measured nothing and must say so.
+    if ABI_CONTRACT and reached == 0:
+        findings.append(
+            "no `ABI_CONTRACT` package has a single public-item site to hold its "
+            "reason to, so this arm graded nothing while reporting clean"
+        )
+    return findings
+
+
 def defer_findings(sites: dict[tuple[str, str], list[Shape]]) -> list[str]:
     """R2207 — hold every `DEFERRED` reason to what its marker obliges.
 
@@ -673,6 +862,7 @@ def check() -> int:
             f"listed as unprobed, and those cannot both be true"
         )
     findings.extend(defer_findings(sites))
+    findings.extend(abi_contract_findings(ROOT, sites))
 
     if findings:
         print(f"feature-public-surface: FAIL -- {len(findings)} finding(s)")
@@ -733,6 +923,100 @@ def _fixture() -> dict[str, str]:
         # attached to nothing this gate can name
         "demo/src/weird.rs": f"{a}\n@@@ not rust @@@\n",
     }
+
+
+def abi_selftest() -> int:
+    """R2260 — drive `abi_contract_findings` through every way it refuses.
+
+    Two of these are CONTROLS that must PASS, and they are the half that makes
+    the rest mean anything: a predicate that refused an `extern "C"` fn or a C
+    constant would be refusing exactly what an ABI crate is made of, and the row
+    would have to come back out.
+    """
+    nm = '#[no_mangle]\npub unsafe extern "C" fn ok() {}\n'
+    bare = "pub fn a_rust_caller_can_name() {}\n"
+    files = {
+        "demo/src/lib.rs": (
+            '#[cfg(feature = "abi")]\n#[no_mangle]\npub extern "C" fn direct() {}\n'
+            '#[cfg(feature = "abi")]\npub const Z_THING: u32 = 1;\n'
+            '#[cfg(feature = "abi")]\npub mod good;\n'
+            '#[cfg(feature = "abi")]\npub mod bad;\n'
+            '#[cfg(feature = "abi")]\npub fn loose() {}\n'
+            '#[cfg(feature = "abi")]\npub use crate::good::ok as Alias;\n'
+            '#[cfg(feature = "abi")]\npub mod missing;\n'
+            # a public item shape the predicate has no rule for. It must be a
+            # FINDING rather than fall through the bottom as a pass — the
+            # unclassified-is-RED rule this file applies to its own scanner,
+            # applied to this arm too.
+            '#[cfg(feature = "abi")]\npub trait NotAnAbiThing {}\n'
+        ),
+        "demo/src/good.rs": nm,
+        # the shape the whole predicate exists for: a module that LOOKS like an
+        # ABI module from `lib.rs` and is a Rust path once opened
+        "demo/src/bad.rs": nm + bare,
+    }
+    dirs = {"demo": "demo"}
+    nondefault = {"demo": {"abi"}}
+    real_off, real_abi = OFF_AXIS.get("demo"), ABI_CONTRACT.get("demo")
+    with tempfile.TemporaryDirectory() as tmp:
+        home = pathlib.Path(tmp)
+        for rel, body in files.items():
+            (home / rel).parent.mkdir(parents=True, exist_ok=True)
+            (home / rel).write_text(body, encoding="utf-8")
+        _c, _d, _u, sites = scan(home, sorted(files), dirs, nondefault)
+        try:
+            OFF_AXIS["demo"] = ("fixture", frozenset({"abi"}))
+            ABI_CONTRACT["demo"] = "fixture"
+            findings = abi_contract_findings(home, sites)
+            # An `ABI_CONTRACT` package with no `OFF_AXIS` row excuses nothing.
+            del OFF_AXIS["demo"]
+            orphan = abi_contract_findings(home, {})
+        finally:
+            OFF_AXIS.pop("demo", None)
+            ABI_CONTRACT.pop("demo", None)
+            if real_off is not None:
+                OFF_AXIS["demo"] = real_off
+            if real_abi is not None:
+                ABI_CONTRACT["demo"] = real_abi
+
+    got = set()
+    for f in findings:
+        if "gates a strictly-`pub` fn" in f:
+            got.add("loose-fn")
+        elif "is a strictly-`pub` fn with no" in f:
+            got.add("bad-module")
+        elif "`pub use`" in f:
+            got.add("reexport")
+        elif "was not found beside" in f:
+            got.add("missing-module")
+        elif "does not know" in f:
+            got.add("unknown-shape")
+    want = {"loose-fn", "bad-module", "reexport", "missing-module", "unknown-shape"}
+    if got != want:
+        print(
+            f"feature-public-surface: SELFTEST FAIL -- the ABI-contract "
+            f"predicate must refuse exactly {sorted(want)} and it refused "
+            f"{sorted(got)} (from {findings}). The `extern \"C\"` fn, the "
+            f"`pub const` and the module whose every `pub fn` is `#[no_mangle]` "
+            f"are the CONTROLS: refusing those would refuse what an ABI crate "
+            f"is made of."
+        )
+        return 1
+    if not any("has no `OFF_AXIS` row" in f for f in orphan):
+        print(
+            "feature-public-surface: SELFTEST FAIL -- an `ABI_CONTRACT` entry "
+            "whose package has no `OFF_AXIS` row excuses nothing and must be "
+            "reported, or the two tables can drift apart unread"
+        )
+        return 1
+    if not any("graded nothing" in f for f in abi_contract_findings(pathlib.Path("/"), {})):
+        print(
+            "feature-public-surface: SELFTEST FAIL -- an empty population must "
+            "FAIL rather than report clean; a reason held to nothing excuses "
+            "everything"
+        )
+        return 1
+    return 0
 
 
 def selftest() -> int:
@@ -823,6 +1107,15 @@ def selftest() -> int:
         )
         return 1
 
+    # R2260 — AND THE ABI-CONTRACT PREDICATE, driven the same way and for the
+    # same reason: the tree is clean, so every FAIL path here is one the real
+    # run never takes. Each shape below is one the OLD prose-only `OFF_AXIS`
+    # reason swallowed in silence — which is not hypothetical, because the row
+    # this predicate replaces asserted "rather than adding or removing a Rust
+    # path" while gating five `pub mod` declarations.
+    if abi_selftest() != 0:
+        return 1
+
     print(
         "feature-public-surface: selftest OK -- separates a public item, a "
         "macro call, a restricted item, a private item, a field, a statement "
@@ -830,7 +1123,11 @@ def selftest() -> int:
         "to guess at a shape it does not know; and holds each `@defer` marker "
         "to what its sites say, refusing a simple-cfg site under "
         "`compound-cfg`, a module-level one under `impl-method`, a missing "
-        "marker and an unknown word -- past two clean controls"
+        "marker and an unknown word -- past two clean controls; and holds "
+        "each `ABI_CONTRACT` row to the source, refusing a loose `pub fn`, a "
+        "module that is one once opened, a `pub use`, a module file that is "
+        "not there, a shape it has no rule for, a row with no `OFF_AXIS` "
+        "entry and an empty population -- past three clean controls"
     )
     return 0
 

@@ -2814,6 +2814,19 @@ PY
     # citation resolves".
     python3 scripts/lib/upstream_citation_anchor_gate.py --selftest || return 1
     python3 scripts/lib/upstream_citation_anchor_gate.py --check || return 1
+    # R2260 (open-debt item 593's residue) — wz's per-protocol `is_streamed` /
+    # `is_reliable`, which answer zenoh-c's `z_link_is_streamed` /
+    # `z_link_reliability` and are therefore UPSTREAM'S values rather than wz's
+    # design decisions. R2259 derived them from wz's own framing and got two
+    # links wrong in a way nothing in this tree could have caught.
+    #
+    # Same split as the citation gate directly above, for the same reason: the
+    # AGREEMENT arm (code against wz's own doc table) needs no checkout and runs
+    # here; the ORACLE arm needs a zenoh source tree and is REQUIRED in Layer Z,
+    # which provisions one. Without a checkout this run says so rather than
+    # reporting a green that would read as "wz agrees with upstream".
+    python3 scripts/lib/upstream_link_axis_gate.py --selftest || return 1
+    python3 scripts/lib/upstream_link_axis_gate.py --check || return 1
     return 0
 }
 
@@ -12936,6 +12949,15 @@ layer_z_zenohd_interop() {
     # checkout) and prints that it deferred this half.
     if ! python3 scripts/lib/upstream_citation_anchor_gate.py --check --resolve; then
         echo "  Layer Z FAIL: an upstream citation no longer resolves at the pin" >&2
+        return 1
+    fi
+    # R2260 (open-debt item 593's residue) — the ORACLE arm of the link-axis
+    # gate, here for the reason the resolution arm above is: it needs a zenoh
+    # SOURCE tree. `--require` is what makes a missing checkout a FAIL instead of
+    # the skip C0 prints — a skip that reported green here would be the shape
+    # open-debt 581 condition 3 names, and this is the lane that has no excuse.
+    if ! python3 scripts/lib/upstream_link_axis_gate.py --check --require; then
+        echo "  Layer Z FAIL: wz's link streamed/reliable axes disagree with upstream" >&2
         return 1
     fi
     # R2080 (open-debt item 503) — the COMPLETENESS audit of the acceptance

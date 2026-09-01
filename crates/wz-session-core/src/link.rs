@@ -113,35 +113,70 @@ impl InterceptorLink {
 
     /// R2259 (open-debt item 593) — whether this protocol carries a BYTE STREAM
     /// rather than framed datagrams, which is what zenoh-c's `z_link_is_streamed`
-    /// reports and what wz's own framing already branches on.
+    /// reports.
     ///
-    /// Derived from the protocol rather than recorded per link, because it IS a
-    /// property of the protocol: every wz link of a given scheme frames the same
-    /// way. The two datagram schemes are the ones whose drivers deliver a whole
-    /// batch per receive — `udp` and the RFC9221 `quic-datagram` — and every
-    /// other one hands the session an unframed stream that COBS, a length prefix
-    /// or a WebSocket message boundary re-frames.
+    /// ⛔ R2260 CORRECTED THIS AGAINST UPSTREAM AND IT WAS WRONG IN TWO ARMS.
+    /// R2259 derived it from what wz's own framing does — "the two datagram
+    /// schemes are the unstreamed ones" — and asserted in prose that `Ws` was
+    /// streamed "as upstream classifies it". Read at the pin, upstream says the
+    /// opposite for `Ws`, and for `Serial` too. This is `z_link_is_streamed`, a
+    /// zenoh-c accessor, so upstream's answer IS the specification and a
+    /// derivation from wz's framing is not a second opinion — it is a bug.
     ///
-    /// ⚠ `Ws` is STREAMED here even though a WebSocket delivers discrete BINARY
-    /// messages, and that is upstream's classification rather than a slip: zenoh
-    /// builds its ws link on `LinkUnicastTrait` with `is_streamed() == true`
-    /// (`io/zenoh-link-ws/src/unicast.rs`), because the transport layer above it
-    /// must still prefix each batch with its length.
+    /// The table below is TRANSCRIBED from each link's own `LinkUnicastTrait`
+    /// impl at the pin and is held to it by
+    /// `upstream_link_axes_match` in
+    /// `crates/wz-integration-tests/tests/upstream_link_axis_oracle.rs`, so it
+    /// cannot drift back into prose:
+    ///
+    /// | link             | streamed | reliable |
+    /// |------------------|----------|----------|
+    /// | tcp              | true     | true     |
+    /// | udp              | false    | false    |
+    /// | tls              | true     | true     |
+    /// | quic             | true     | true     |
+    /// | quic-datagram    | false    | false    |
+    /// | serial           | false    | false    |
+    /// | unixpipe         | true     | true     |
+    /// | unixsock-stream  | true     | true     |
+    /// | vsock            | true     | true     |
+    /// | ws               | false    | TRUE     |
+    ///
+    /// ⚠ `udp` is upstream's one CONDITIONAL: its impl matches on a variant and
+    /// answers `true` only for the reliable-UDP one, `false` for the connected
+    /// and unconnected forms. wz has no reliable-UDP link, so `false` is the
+    /// row that describes what wz can actually be.
     pub fn is_streamed(&self) -> bool {
-        !matches!(self, InterceptorLink::Udp | InterceptorLink::QuicDatagram)
+        !matches!(
+            self,
+            InterceptorLink::Udp
+                | InterceptorLink::QuicDatagram
+                | InterceptorLink::Serial
+                | InterceptorLink::Ws
+        )
     }
 
     /// R2259 (open-debt item 593) — whether this protocol delivers RELIABLY,
     /// the input to zenoh-c's `z_link_reliability`.
     ///
-    /// The same two datagram schemes are the unreliable ones, and for the same
-    /// reason they are unstreamed: neither retransmits. They are nevertheless
-    /// two questions rather than one — a protocol could frame and still not
-    /// retransmit — so this is written as its own match instead of delegating to
-    /// [`is_streamed`](Self::is_streamed), which would make the coincidence look
-    /// like a definition.
+    /// ⛔⛔ R2259 wrote this as its own match "so the coincidence does not look
+    /// like a definition", and then gave it the SAME arms as
+    /// [`is_streamed`](Self::is_streamed) anyway. R2260 read upstream and the
+    /// coincidence is not one: **`ws` is the link where the two axes disagree**
+    /// — unstreamed and reliable, because a WebSocket delivers discrete BINARY
+    /// messages over a TCP connection that retransmits. Writing two matches was
+    /// right; filling them identically was the mistake, and only reading
+    /// upstream could have caught it.
+    ///
+    /// Upstream keeps this as a per-crate `IS_RELIABLE` constant rather than a
+    /// method body (except `udp`, which matches on its variant like its
+    /// streamed twin) — `io/zenoh-links/zenoh-link-ws/src/lib.rs`
+    /// @ `IS_RELIABLE`. The table on `is_streamed` carries both columns.
     pub fn is_reliable(&self) -> bool {
-        !matches!(self, InterceptorLink::Udp | InterceptorLink::QuicDatagram)
+        !matches!(
+            self,
+            InterceptorLink::Udp | InterceptorLink::QuicDatagram | InterceptorLink::Serial
+        )
     }
 
     /// R311y473 — the DIALABLE LOCATOR for this protocol at `address`: the string
