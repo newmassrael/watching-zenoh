@@ -15727,7 +15727,7 @@ layer_c1ce_api_compat_c_shm_oracle() {
         upstream_z_advanced_pub_on_wz_capi_c_puts_the_same_sample_and_no_adv_leak \
         upstream_z_sub_shm_on_wz_capi_c_reports_the_same_buffer_type_on_both_arms \
         upstream_z_advanced_sub_on_wz_capi_c_receives_the_same_samples_from_real_pico \
-        upstream_z_get_shm_on_wz_capi_c_is_answered_identically_by_a_real_pico_queryable; do
+        upstream_z_get_shm_on_wz_capi_c_is_answered_by_real_pico_where_the_reference_arm_aborts; do
         WZ_ZENOH_C_PREFIX="$shm" _runci_guarded_test "C1ce $leg" 1 \
             cargo test -p wz-integration-tests \
             --test zenoh_c_shm_and_advanced_on_wz_capi_c -- --ignored --quiet --test-threads=1 \

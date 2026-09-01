@@ -76,7 +76,7 @@
 //! test that proved nothing. `WZ_C1CE_REQUIRE=1` makes Layer C1ce fail instead.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
@@ -295,15 +295,12 @@ fn keyexpr_and_tag(line: &str) -> Option<(String, String)> {
     Some((ke, tag))
 }
 
-/// Assert both arms of a two-arm run agree, with the difference spelled out.
-fn assert_arms_agree(what: &str, wz: &[String], reference: &[String]) {
-    assert_eq!(
-        wz, reference,
-        "{what}: the two arms of the SAME compiled program disagree. wz linked \
-         against its own cdylib reported {wz:?}; the same source linked against \
-         the real libzenohc reported {reference:?}."
-    );
-}
+// R2245 removed `assert_arms_agree`, the two-arm stdout equality helper. Its
+// caller count was measured, not assumed: leg 5 was the ONLY one, and leg 5 no
+// longer has two comparable arms because upstream's own `z_get_shm.c` cannot
+// run at the pin. Left in place it would be dead code, which `-D warnings`
+// refuses and which reads as coverage that is not there. Leg 5's pin says what
+// to restore, and this commit is where the four lines come back from.
 
 /// LEG 1 — upstream's `z_pub_shm.c`, which allocates every payload out of an SHM
 /// provider, publishes the same bytes on both arms.
@@ -699,18 +696,54 @@ fn upstream_z_advanced_sub_on_wz_capi_c_receives_the_same_samples_from_real_pico
 }
 
 /// LEG 5 — upstream's `z_get_shm.c` sends an SHM-allocated query payload that a
-/// REAL zenoh-pico queryable reads, and both arms print the same reply.
+/// REAL zenoh-pico queryable reads and answers ON WZ'S ABI, and CANNOT RUN AT
+/// ALL on upstream's own library at the pinned version.
 ///
-/// The witness is doubled here: the C program's stdout must match across arms,
-/// AND the foreign queryable is the party that decoded the SHM-allocated payload,
-/// so the bytes wz put on the wire were read by something that shares no code
-/// with it.
+/// ## The doubled witness this leg used to make, and why half of it is gone
+///
+/// It compared the two arms' stdout AND had a foreign queryable decode the
+/// SHM-allocated payload. R2245 measured that the first half is unavailable at
+/// zenoh-c 1.10.0: the REFERENCE arm aborts before it opens a session, so there
+/// is nothing to compare against. The surviving half is not the weaker one —
+/// the foreign queryable is still the party that decoded wz's SHM-allocated
+/// bytes, and it shares no code with wz.
+///
+/// ## The upstream defect, derived from source and measured on the axis
+///
+/// `examples/z_get_shm.c` sizes its provider at exactly `strlen(payload)` and
+/// then asks that same provider for exactly `strlen(payload)` bytes. Upstream's
+/// own convention one file over is the opposite — `z_pub_shm.c` takes a 4096-byte
+/// provider and allocates `total_size / 4` from it. And `z_get_shm.c` does not
+/// check the result: `z_shm_provider_default_new` returns `Z_EINVAL` on failure
+/// and leaves its out-parameter UNINITIALISED, so the next `z_loan` reads
+/// uninitialised memory and the process dies on a signal rather than at the
+/// `exit(-1)` every other call in that file gets.
+///
+/// The refusal is `commons/zenoh-shm/src/api/protocol_implementations/posix/posix_shm_provider_backend_talc.rs`
+/// @ `Error initializing Talc backend!` — `talc.claim` over a span too small for
+/// its own bookkeeping.
+///
+/// MEASURED on the payload-size axis, every size argv can carry, against the
+/// same oracle this lane installs: 1 / 15 / 18 (the example's own shipped
+/// default) / 1024 all abort in Talc init; 2048 / 4096 / 8192 / 16384 / 32768 /
+/// 65536 / 100000 / 131071 all get past Talc and then fail the allocation. There
+/// is no serviceable size. Upstream CI only BUILDS its examples, never runs
+/// them, which is how this ships.
+///
+/// ## Why this is PINNED rather than skipped
+///
+/// A skip would report green over a claim nobody is checking. The reference arm
+/// is therefore asserted to fail IN THE MEASURED WAY, so the day upstream fixes
+/// it this test reds and whoever sees it restores the cross-arm comparison.
+/// The control is intrinsic: same C source, same argv, same queryable, same
+/// oracle installation — only the library differs, and the four sibling legs in
+/// this file drive that same oracle green.
 // wz-proves: api-compat-c wz->pico partial
 #[test]
 #[ignore = "compiles an upstream zenoh-c example with cc and spawns the real \
             zenoh-pico z_queryable CLI; needs the machine-local SHARED-MEMORY \
             zenoh-c oracle; run-ci Layer C1ce drives it"]
-fn upstream_z_get_shm_on_wz_capi_c_is_answered_identically_by_a_real_pico_queryable() {
+fn upstream_z_get_shm_on_wz_capi_c_is_answered_by_real_pico_where_the_reference_arm_aborts() {
     let Some((include, libdir_ref, examples)) = oracle_or_note() else {
         return;
     };
@@ -735,7 +768,12 @@ fn upstream_z_get_shm_on_wz_capi_c_is_answered_identically_by_a_real_pico_querya
     let reply = "REPLY-FROM-REAL-PICO";
     let sent = "GET-SHM-PAYLOAD";
 
-    let run = |program: &Path, libdir: &Path, arm: Arm| -> (String, String) {
+    // Returns the arm's EXIT STATUS as well as its output. R2245 moved the
+    // success assertion out to the caller, because the two arms no longer make
+    // the same claim: the wz arm must succeed, and the reference arm must fail
+    // in one measured way. A closure that asserted success for both could only
+    // express the claim that stopped being true.
+    let run = |program: &Path, libdir: &Path, arm: Arm| -> (ExitStatus, String, String, String) {
         let label = arm.label();
         let reservation = PortReservation::pick();
         let port = reservation.port();
@@ -790,36 +828,55 @@ fn upstream_z_get_shm_on_wz_capi_c_is_answered_identically_by_a_real_pico_querya
             .unwrap_or_else(|e| panic!("failed to run the {label} z_get_shm: {e}"));
         let queryable_saw = read_captured(&mut qbl_out);
         graceful_terminate(queryable.child_mut(), TERMINATE_TIMEOUT);
-        assert!(
-            out.status.success(),
-            "the {label} z_get_shm exited {:?}\n--- stdout ---\n{}\n--- stderr ---\n{}",
-            out.status.code(),
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr),
-        );
-        (
-            String::from_utf8_lossy(&out.stdout).into_owned(),
-            queryable_saw,
-        )
+        // BOTH streams, because the two arms fail in different places: the wz
+        // arm would report on stdout, and the reference arm's Talc refusal is a
+        // tracing line on stdout while the abort's panic lands on stderr.
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        let mut both = stdout.clone();
+        both.push_str(&String::from_utf8_lossy(&out.stderr));
+        (out.status, stdout, both, queryable_saw)
     };
 
-    let (ref_stdout, ref_queryable) = run(&on_ref, &libdir_r, Arm::Reference);
-    let (wz_stdout, wz_queryable) = run(&on_wz, &libdir_wz, Arm::Wz);
+    let (ref_status, _ref_stdout, ref_both, _ref_queryable) =
+        run(&on_ref, &libdir_r, Arm::Reference);
+    let (wz_status, wz_stdout, wz_both, wz_queryable) = run(&on_wz, &libdir_wz, Arm::Wz);
 
-    assert_arms_agree(
-        "z_get_shm",
-        &report_lines(&wz_stdout),
-        &report_lines(&ref_stdout),
+    // ── THE PROOF: wz's ABI runs upstream's example end to end ──────────
+    assert!(
+        wz_status.success(),
+        "upstream z_get_shm.c on wz's C ABI exited {:?}\n{wz_both}",
+        wz_status.code(),
     );
     assert!(
         report_lines(&wz_stdout).iter().any(|l| l.contains(reply)),
-        "neither arm printed the reply the real pico queryable sent: {wz_stdout:?}"
+        "the wz arm did not print the reply the real pico queryable sent: {wz_stdout:?}"
     );
-    for (arm, saw) in [("reference", &ref_queryable), ("wz", &wz_queryable)] {
-        assert!(
-            saw.contains(sent),
-            "the real pico queryable did not read the SHM-allocated query payload \
-             from the {arm} arm — it saw:\n{saw}"
-        );
-    }
+    assert!(
+        wz_queryable.contains(sent),
+        "the real pico queryable did not read the SHM-allocated query payload \
+         from the wz arm — it saw:\n{wz_queryable}"
+    );
+
+    // ── THE PIN: upstream's own library cannot run its own example ──────
+    //
+    // Asserted in BOTH halves on purpose. A status check alone would be
+    // satisfied by any failure at all — a missing library, a busy port — and
+    // this leg is claiming something much narrower. The marker is what makes it
+    // that claim, and `arm_binary` above has already established the binary
+    // built and linked, so "it never ran" cannot satisfy either half.
+    assert!(
+        !ref_status.success(),
+        "the REFERENCE z_get_shm SUCCEEDED. Upstream has repaired \
+         examples/z_get_shm.c (or the pin moved): restore the cross-arm stdout \
+         comparison this leg carried before R2245, and delete this pin."
+    );
+    assert!(
+        ref_both.contains("Error initializing Talc backend"),
+        "the REFERENCE z_get_shm failed, but NOT in the way R2245 measured \
+         (exit {:?}). This pin is about one upstream defect — a provider sized \
+         at strlen(payload) that Talc will not claim — so a different failure \
+         is a different problem and must be attributed, not absorbed here.\n\
+         {ref_both}",
+        ref_status.code(),
+    );
 }
