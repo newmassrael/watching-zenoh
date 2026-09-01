@@ -83,15 +83,16 @@ use wz_capi_core::faces::{AdvPubId, AdvSubId, SharedSession};
 
 /// `true` when this build targets a zenoh-c compiled WITH
 /// `Z_FEATURE_SHARED_MEMORY`. The advanced PUBLISHER is one of the types that
-/// moves with it (224 without, 232 with — measured by upstream's own opaque-type
-/// generator under zenoh-c's pinned toolchain; see
-/// `scripts/check-capi-c-opaque-arms.sh`), and the advanced SUBSCRIBER is not.
+/// moves with it — measured by upstream's own opaque-type generator under
+/// zenoh-c's pinned toolchain (`scripts/check-capi-c-opaque-arms.sh`), with the
+/// delta carried as data in `crate::abi_origin::WZ_CAPI_C_ABI_COMPOSITION` —
+/// and the advanced SUBSCRIBER is not.
 const SHM: bool = cfg!(feature = "zenoh-c-shared-memory");
 
 /// `ze_owned_advanced_publisher_t` / `ze_loaned_advanced_publisher_t`.
-const ADV_PUB_SIZE: usize = if SHM { 232 } else { 224 };
+const ADV_PUB_SIZE: usize = if SHM { 248 } else { 240 };
 /// `ze_owned_advanced_subscriber_t` — unmoved by either axis.
-const ADV_SUB_SIZE: usize = 152;
+const ADV_SUB_SIZE: usize = 176;
 /// `ze_owned_sample_miss_listener_t` — three pointers.
 const MISS_LISTENER_SIZE: usize = 24;
 

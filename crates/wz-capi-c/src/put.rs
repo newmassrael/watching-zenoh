@@ -64,7 +64,7 @@ pub struct z_put_options_t {
     /// need the source-info family first"; that family is
     /// [`crate::source_info`] now.
     #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
-    pub source_info: *mut crate::source_info::z_moved_source_info_t,
+    pub source_info: *const crate::source_info::z_source_info_t,
     /// Attachment to carry alongside the payload.
     pub attachment: *mut z_moved_bytes_t,
 }
@@ -187,7 +187,7 @@ unsafe fn resolve_put_options(options: *mut z_put_options_t) -> PublishOptions {
     // `#[cfg]` in the middle of an expression cannot do.
     #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
     // SAFETY: the caller's contract for the pointer.
-    let taken_source_info = unsafe { crate::source_info::take_moved_source_info(opts.source_info) };
+    let taken_source_info = unsafe { crate::source_info::borrowed_source_info(opts.source_info) };
     #[cfg(feature = "zenoh-c-no-unstable-api")]
     let taken_source_info: Option<wz_runtime_tokio::sample::SourceInfo> = None;
     let with_source_info = match taken_source_info {

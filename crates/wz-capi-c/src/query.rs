@@ -181,7 +181,7 @@ unsafe fn reply_source_info(
     options: *mut z_query_reply_options_t,
 ) -> Option<wz_runtime_tokio::sample::SourceInfo> {
     // SAFETY: the caller's contract.
-    unsafe { crate::source_info::take_moved_source_info((*options).source_info) }
+    unsafe { crate::source_info::borrowed_source_info((*options).source_info) }
 }
 
 /// The no-unstable arm: upstream does not declare the field there.
@@ -1076,7 +1076,7 @@ pub struct z_query_reply_options_t {
     /// Source info — present only under `Z_FEATURE_UNSTABLE_API`. R311y563:
     /// READ and CONSUMED, stamped onto the reply body's source_info ext.
     #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
-    pub source_info: *mut crate::source_info::z_moved_source_info_t,
+    pub source_info: *const crate::source_info::z_source_info_t,
     /// Reply attachment. CARRIED, unlike the fields above: it rides the reply's
     /// own body and a queryable that attaches metadata is answering a different
     /// question than one that does not.
@@ -1201,7 +1201,7 @@ pub struct z_query_reply_del_options_t {
     pub timestamp: *mut crate::timestamp::z_timestamp_t,
     /// Source info — present only under `Z_FEATURE_UNSTABLE_API`. TAKEN.
     #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
-    pub source_info: *mut crate::source_info::z_moved_source_info_t,
+    pub source_info: *const crate::source_info::z_source_info_t,
     /// Reply attachment. TAKEN and carried.
     pub attachment: *mut z_moved_bytes_t,
 }
@@ -1320,7 +1320,7 @@ unsafe fn reply_del_source_info(
     options: *mut z_query_reply_del_options_t,
 ) -> Option<wz_runtime_tokio::sample::SourceInfo> {
     // SAFETY: the caller's contract.
-    unsafe { crate::source_info::take_moved_source_info((*options).source_info) }
+    unsafe { crate::source_info::borrowed_source_info((*options).source_info) }
 }
 
 /// The no-unstable arm: upstream does not declare the field there.

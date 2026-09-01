@@ -590,15 +590,32 @@ fn the_wz_capi_c_type_footprints_equal_upstreams_on_this_installation() {
         )
     };
 
+    let mut disagreements: Vec<String> = Vec::new();
     for (i, (name, _)) in probes.iter().enumerate() {
-        assert_eq!(
-            mine[i], upstream[i],
-            "{name}: wz says {} and this installation's zenoh-c header says {}. A \
-             drop-in whose types are a different SIZE is not a drop-in — the C side \
-             stack-allocates these. {advice}.",
-            mine[i], upstream[i]
-        );
+        if mine[i] != upstream[i] {
+            disagreements.push(format!(
+                "  {name}: wz says {}, this installation's zenoh-c header says {}",
+                mine[i], upstream[i]
+            ));
+        }
     }
+    // R2239 — REPORT ALL OF THEM, not the first.
+    //
+    // This was an `assert_eq!` inside the loop, so an upstream version bump
+    // that moved N footprints surfaced as ONE name per run. Moving the zenoh-c
+    // pin to 1.10.0 moved eleven opaque types and a transparent one, and
+    // finding them one build at a time is how a single version bump becomes
+    // several rounds. The sibling `capi_c_opaque_arms.py` already collects
+    // before it fails; this now matches it.
+    assert!(
+        disagreements.is_empty(),
+        "{} of {} type footprint(s) disagree with this installation's zenoh-c \
+         header. A drop-in whose types are a different SIZE is not a drop-in — \
+         the C side stack-allocates these. {advice}.\n{}",
+        disagreements.len(),
+        probes.len(),
+        disagreements.join("\n")
+    );
 }
 
 /// R311y545 — the OPTION DEFAULTS gate: one C probe, compiled once, LINKED

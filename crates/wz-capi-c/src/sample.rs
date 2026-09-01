@@ -158,17 +158,15 @@ pub(crate) struct SampleMarshal {
     /// `z_sample_attachment` has, reached the same way.
     timestamp: Option<crate::timestamp::z_timestamp_t>,
     /// R311y563 — the sample's `(zid, eid, sn)`, or `None` when it carries
-    /// none. Stored as the wz type and VIEWED through `loaned_source_info`
-    /// rather than boxed: `z_sample_source_info` hands out a borrowed pointer
-    /// whose lifetime is the marshal's, the same contract
-    /// `z_sample_timestamp` has.
+    /// none. Stored as the wz type and VIEWED through `source_info_c` rather
+    /// than boxed: `z_sample_source_info` hands out a borrowed pointer whose
+    /// lifetime is the marshal's, the same contract `z_sample_timestamp` has.
     source_info: Option<wz_runtime_tokio::sample::SourceInfo>,
-    /// The loaned view `z_sample_source_info` returns. Its handle points at
-    /// THIS marshal's `source_info`, so there is nothing to free — a C program
-    /// can only ever obtain the loaned form, and `z_source_info_drop` takes an
-    /// owned one.
+    /// The C view `z_sample_source_info` returns a pointer to. R2239 — a VALUE
+    /// since zenoh-c 1.10.0 retired the owned/loaned split; there is nothing to
+    /// free either way, and now nothing to loan from either.
     #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
-    loaned_source_info: crate::source_info::z_loaned_source_info_t,
+    source_info_c: crate::source_info::z_source_info_t,
     /// R311y568 — the sample's value encoding, ALWAYS present.
     ///
     /// `Option` would be the obvious shape and it is the wrong one: upstream's
@@ -208,7 +206,7 @@ impl SampleMarshal {
             timestamp: meta.timestamp,
             source_info: meta.source_info,
             #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
-            loaned_source_info: crate::source_info::z_loaned_source_info_t::null_value(),
+            source_info_c: crate::source_info::z_source_info_t::empty(),
             encoding: match meta.encoding.as_ref() {
                 Some(hint) => EncodingState::from_hint(hint),
                 None => EncodingState::default_encoding(),
@@ -237,9 +235,9 @@ impl SampleMarshal {
             z_loaned_encoding_t::from_handle(&self.encoding as *const EncodingState as *mut c_void);
         #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
         {
-            self.loaned_source_info = match self.source_info.as_ref() {
-                Some(info) => crate::source_info::z_loaned_source_info_t::from_borrowed(info),
-                None => crate::source_info::z_loaned_source_info_t::null_value(),
+            self.source_info_c = match self.source_info.as_ref() {
+                Some(info) => crate::source_info::z_source_info_t::from_runtime(info),
+                None => crate::source_info::z_source_info_t::empty(),
             };
         }
     }
@@ -420,12 +418,12 @@ pub unsafe extern "C" fn z_sample_timestamp(
 #[no_mangle]
 pub unsafe extern "C" fn z_sample_source_info(
     this_: *const z_loaned_sample_t,
-) -> *const crate::source_info::z_loaned_source_info_t {
+) -> *const crate::source_info::z_source_info_t {
     guard_val(std::ptr::null(), || {
         // SAFETY: the caller's contract, delegated.
         match unsafe { marshal(this_) } {
             Some(m) if m.source_info.is_some() => {
-                &m.loaned_source_info as *const crate::source_info::z_loaned_source_info_t
+                &m.source_info_c as *const crate::source_info::z_source_info_t
             }
             _ => std::ptr::null(),
         }
@@ -772,7 +770,7 @@ impl SampleMarshal {
             // must own its identity, not borrow the source marshal's.
             source_info: self.source_info.clone(),
             #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
-            loaned_source_info: crate::source_info::z_loaned_source_info_t::null_value(),
+            source_info_c: crate::source_info::z_source_info_t::empty(),
             // A copy that OWNS its label. Cloning the `Cow` would share a
             // `Borrowed` static (fine) or duplicate an `Owned` (also fine) —
             // what must not happen is the copy pointing into the source

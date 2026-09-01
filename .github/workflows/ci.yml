@@ -3988,6 +3988,23 @@ jobs:
           WZ_CAPI_C_ARMS_REQUIRE: "1"
         run: bash scripts/check-capi-c-opaque-arms.sh
 
+      - name: api-compat-c — WHY each footprint is that number (R2239, item 586)
+        # The step above answers "is the number right". This answers "is it
+        # right for the reason the crate states", which is a different question
+        # and the one that went unasked: `REPLY_ERR_SIZE` was
+        # `BYTES_SIZE + ENCODING_SIZE`, justified by a COMMENT naming upstream's
+        # two-field `ReplyError`. zenoh 1.10.0 gave that struct a third field
+        # under `unstable`, the comment stayed, and nothing reads a comment —
+        # the size error surfaced two rounds later as this job going red.
+        #
+        # It runs HERE because it is the only job carrying both inputs: zenoh-c's
+        # source checkout (upstream's own `get_opaque_type_data!` declarations)
+        # and the four generator tables the step above leaves on disk. Absent
+        # either it FAILS rather than skipping, and it refuses a read of three
+        # tables out of four, because the moving-type population is derived from
+        # all of them and a partial derivation under-reports it.
+        run: python3 scripts/lib/capi_c_abi_provenance.py
+
       - name: Layer C1cc — §5.27 api-compat-c, the zenoh-c drop-in
         # R311y498, and R311y865 MOVED IT HERE from the `ci` job. It cost 202s of
         # a job that was running at 91% of its 1800s ceiling, and every

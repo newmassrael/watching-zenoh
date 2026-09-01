@@ -446,9 +446,23 @@ int main(void) {
     printf("consolidation.latest=%d\n", (int)z_query_consolidation_latest().mode);
     printf("default.cc.push=%d\n", (int)z_internal_congestion_control_default_push());
     printf("default.cc.request=%d\n", (int)z_internal_congestion_control_default_request());
-    printf("default.cc.response=%d\n", (int)z_internal_congestion_control_default_response());
+    /* R2239 — `z_internal_congestion_control_default_response` was called here
+       until zenoh-c 1.10.0 RETIRED it: the pinned header declares it nowhere
+       and the pinned libzenohc.so exports no such symbol (measured with
+       `nm -D`, 2 of the family remain, not 3). Calling a function the reference
+       no longer has cannot be a comparison — it was a link error. The
+       `every_function_this_probe_calls_is_declared_by_the_pinned_header` check
+       below is what turns the next such retirement into that sentence instead
+       of into `undefined reference`. */
     printf("default.priority=%d\n", (int)z_priority_default());
     printf("default.locality=%d\n", (int)zc_locality_default());
+    /* R2239 — upstream's newer spellings. `z_locality_default` is a SECOND
+       entry point to the same answer (upstream ships both), and
+       `z_reply_keyexpr_default` REPLACED `zc_reply_keyexpr_default`; driving
+       both here is what makes each a measured value rather than a symbol that
+       merely links. */
+    printf("default.locality.z=%d\n", (int)z_locality_default());
+    printf("default.reply_keyexpr=%d\n", (int)z_reply_keyexpr_default());
 
     /* The two option structs that were NOT DECLARED before this round. Their
        defaults are the whole observable content of an 8-byte struct. */
@@ -754,8 +768,112 @@ int main(void) {
 }
 "#;
 
+/// Every `z_*` / `ze_*` / `zc_*` name [`PROBE`] CALLS, derived from the source
+/// rather than listed beside it.
+///
+/// A name is a call only when the next non-space character after it is `(`, so
+/// the type names in declarations (`z_owned_reply_err_t re;`) and the `sizeof`
+/// operands stay out.
+fn probe_calls(src: &str) -> Vec<&str> {
+    let b = src.as_bytes();
+    let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'z' && (i == 0 || !ident(b[i - 1])) {
+            let mut j = i;
+            while j < b.len() && ident(b[j]) {
+                j += 1;
+            }
+            let name = &src[i..j];
+            let mut k = j;
+            while k < b.len() && (b[k] as char).is_whitespace() {
+                k += 1;
+            }
+            if k < b.len()
+                && b[k] == b'('
+                && (name.starts_with("z_") || name.starts_with("ze_") || name.starts_with("zc_"))
+            {
+                out.push(name);
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// `true` when `hay` carries `needle` as a whole identifier.
+fn declares(hay: &str, needle: &str) -> bool {
+    let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let b = hay.as_bytes();
+    let mut from = 0;
+    while let Some(rel) = hay[from..].find(needle) {
+        let at = from + rel;
+        let before_ok = at == 0 || !ident(b[at - 1]);
+        let end = at + needle.len();
+        let after_ok = end == b.len() || !ident(b[end]);
+        if before_ok && after_ok {
+            return true;
+        }
+        from = at + 1;
+    }
+    false
+}
+
+/// R2239 — REFUSE a probe that calls something the pinned header does not
+/// declare, with the name, instead of leaving it to `ld`.
+///
+/// zenoh-c 1.10.0 retired `z_internal_congestion_control_default_response`, and
+/// this probe went on calling it. What that produced was
+/// `undefined reference to ...` out of `collect2` — a diagnostic that names the
+/// symbol but says nothing about WHY, and arrives only when the reference build
+/// is present. A version bump retires functions the way it moves footprints,
+/// so this reads the same header the probe compiles against and says so.
+fn every_probe_call_is_declared(include: &Path) {
+    let mut headers = String::new();
+    for entry in std::fs::read_dir(include).expect("read the oracle's include dir") {
+        let p = entry.expect("dir entry").path();
+        if p.extension().is_some_and(|e| e == "h") {
+            headers.push_str(&std::fs::read_to_string(&p).unwrap_or_default());
+            headers.push('\n');
+        }
+    }
+    assert!(
+        !headers.is_empty(),
+        "no zenoh header text under {}; a probe checked against no declarations \
+         would pass by having read nothing",
+        include.display()
+    );
+    let calls = probe_calls(PROBE);
+    assert!(
+        !calls.is_empty(),
+        "the probe source parsed to ZERO upstream calls, so this check graded \
+         nothing — the scanner is broken, not the probe"
+    );
+    let undeclared: Vec<&str> = calls
+        .iter()
+        .copied()
+        .filter(|n| !declares(&headers, n))
+        .collect();
+    assert!(
+        undeclared.is_empty(),
+        "{} of {} function(s) this probe calls are NOT declared by the pinned \
+         zenoh-c headers in {}: {:?}. Upstream retired them; a probe cannot \
+         COMPARE against a function the reference does not have.",
+        undeclared.len(),
+        calls.len(),
+        include.display(),
+        undeclared
+    );
+}
+
 /// Compile the probe once, link it twice, and return the two stdouts.
 fn run_both_arms(include: &Path, libdir_ref: &Path) -> (String, String) {
+    every_probe_call_is_declared(include);
     let dir = tempfile::tempdir().expect("tempdir for the compiled probes");
     let src_dir = dir.path().join("src");
     std::fs::create_dir_all(&src_dir).expect("probe source dir");

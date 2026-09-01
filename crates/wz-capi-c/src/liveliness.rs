@@ -375,15 +375,30 @@ pub unsafe extern "C" fn z_liveliness_declare_subscriber(
 
 // --- R311y539: the liveliness GET ------------------------------------------
 
-/// zenoh-c `z_liveliness_get_options_t` (`zenoh_commons.h:866-870`) — 8 bytes.
+/// zenoh-c `z_liveliness_get_options_t`, mirrored field for field on both arms.
 #[repr(C)]
 pub struct z_liveliness_get_options_t {
     /// Snapshot timeout in milliseconds. `0` means "use the default", NOT
     /// "never expire" — the runtime resolves it, as upstream does.
     pub timeout_ms: u64,
+    /// Cancellation token — unstable-only, NEW at zenoh 1.10.0. IGNORED, for
+    /// the reason given on [`crate::get::z_get_options_t`]'s copy: this slice
+    /// declares no cancellation-token family, and the field is here so the
+    /// struct's footprint matches upstream's.
+    #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+    pub cancellation_token: *mut core::ffi::c_void,
 }
 
 const _: () = {
+    // Two arms, because the unstable field is what makes them differ. Written
+    // as `8 + one pointer` rather than as the literal so the arithmetic says
+    // WHY, the same discipline `abi.rs` uses for the opaque families.
+    #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+    assert!(
+        std::mem::size_of::<z_liveliness_get_options_t>()
+            == 8 + std::mem::size_of::<*mut core::ffi::c_void>()
+    );
+    #[cfg(feature = "zenoh-c-no-unstable-api")]
     assert!(std::mem::size_of::<z_liveliness_get_options_t>() == 8);
     assert!(std::mem::align_of::<z_liveliness_get_options_t>() == 8);
 };
@@ -404,7 +419,14 @@ pub unsafe extern "C" fn z_liveliness_get_options_default(this_: *mut z_liveline
     // `z_get` default is 0; wz had 0 on both. This tree already carried "the
     // 10 s default is matched by INSPECTION, not measurement" as a residual,
     // and the measurement says it was not matched.
-    unsafe { *this_ = z_liveliness_get_options_t { timeout_ms: 10_000 } };
+    unsafe {
+        *this_ = z_liveliness_get_options_t {
+            timeout_ms: 10_000,
+            // Null, which is what upstream's own default writes: no token.
+            #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+            cancellation_token: std::ptr::null_mut(),
+        }
+    };
 }
 
 /// Query the liveliness tokens currently alive under `key_expr` (zenoh-c

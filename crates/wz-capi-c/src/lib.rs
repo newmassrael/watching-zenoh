@@ -59,6 +59,11 @@
 #![allow(non_camel_case_types)]
 
 pub mod abi;
+// WHERE each footprint in `abi` comes from, as data rather than as a comment.
+// Separate module because the two answer different questions and rot at
+// different rates: `abi` is the layout, this is its provenance, and only the
+// latter is checked against upstream's own declaration of the correspondence.
+pub mod abi_origin;
 // The `ze_advanced_*` plane is `#if defined(Z_FEATURE_UNSTABLE_API)` in
 // upstream's header, so it exists on the unstable arms and nowhere else. The
 // `cfg` mirrors upstream's `#if` rather than exporting symbols a program

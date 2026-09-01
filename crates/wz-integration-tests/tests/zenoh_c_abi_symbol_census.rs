@@ -126,13 +126,49 @@ use wz_integration_tests::common::{wz_capi_c_cdylib, zenoh_c_oracle};
 /// why it is a recorded number here instead of work a round absorbs. That the
 /// remainder is now exactly ONE plane — with no scattered leftovers — is what
 /// makes this row a scoped debt rather than a tally.
-const BASELINES: &[(&str, usize)] = &[
-    // `~/.local`, upstream's published standalone archive. CLOSED at R311y568.
-    ("nounstable", 0),
-    // `target/zenoh-c-shm`, built by `scripts/install-zenoh-c-shm.sh`; the arm
-    // hosted CI provisions. 83 -> 65 at R311y573 (the zenoh-ext plane closed);
-    // what remains is the SHM ALLOCATOR half and nothing else.
-    ("unstable-shm", 65),
+/// ## R2239 — a row now records WHICH zenoh-c it was measured against
+///
+/// The rows above were all measured against zenoh-c 1.5.0. R2228 moved the pin
+/// to 1.10.0, which GREW upstream's surface by three whole planes, and nothing
+/// in this file noticed: three of the four rows still carry a 1.5.0 number and
+/// the arm they describe has no 1.10.0 oracle on any machine, so they cannot be
+/// re-measured until one exists. A stale ceiling that reads as a measurement is
+/// the exact shape this gate's own header calls "a gate measuring nothing".
+///
+/// So each row carries the version it was measured at, and the gate refuses
+/// when the INSTALLED oracle is a different one. Nothing has to remember to
+/// re-measure: provisioning a 1.10.0 oracle for an arm whose row says 1.5.0
+/// fails with that sentence.
+const BASELINES: &[(&str, usize, &str)] = &[
+    // `~/.local`, upstream's published standalone archive. Reached ZERO at
+    // R311y568 — against 1.5.0, and no 1.10.0 oracle for this arm exists yet.
+    ("nounstable", 0, "1.5.0"),
+    // The arm hosted CI provisions. 83 -> 65 at R311y573 against 1.5.0; 65 ->
+    // 189 at R2239, and every one of the 124 is upstream GROWING rather than wz
+    // regressing. Re-measured, the remainder is FOUR planes and three strays,
+    // and the classification is a measurement:
+    //
+    //   86  the SHM provider / allocator surface (was 65 at 1.5.0)
+    //   47  the LINK-events plane        — `z_link_*`, `z_closure_link*`
+    //   40  the TRANSPORT-events plane   — `z_transport_*`, `z_closure_transport*`
+    //    9  the CANCELLATION-token plane — `z_cancellation_token_*`
+    //    4  the `z_internal_*_check` / `_null` pairs of the two event planes
+    //    3  strays: `z_query_accepts_replies`, `z_query_source_info`,
+    //       `z_session_id` — accessors, each needing a value wz's marshals do
+    //       not carry yet
+    //
+    // Three of those planes did not exist at 1.5.0. They are FEATURES rather
+    // than accessors — each needs a runtime surface wz has not built — which is
+    // why this is a recorded number and a filed debt rather than work this
+    // round absorbs.
+    //
+    // 191 -> 189 in this same round, and the two are named because a ratchet
+    // that moves without saying why is a number: upstream's newer spellings
+    // `z_locality_default` and `z_reply_keyexpr_default` are now exported (an
+    // addition and a rename respectively — upstream kept the `zc_` locality and
+    // dropped the `zc_` reply-keyexpr), and both are driven by the
+    // pure-function oracle rather than merely defined.
+    ("unstable-shm", 189, "1.10.0"),
     // R311y614 — the two arms that had NO oracle on any machine, and therefore
     // no row: the gate hard-FAILED on them rather than guessing a ceiling from
     // a neighbour. `scripts/install-zenoh-c-arm.sh` builds any of the four, so
@@ -153,16 +189,46 @@ const BASELINES: &[(&str, usize)] = &[
     // shared-memory-with-unstable, and the 65 wz is missing is the ALLOCATOR
     // half of it and nothing else. That is a sharper statement of the same
     // debt: the gap is not "SHM", it is one plane on one of four arms.
-    ("unstable", 0),
-    ("nounstable-shm", 0),
+    //
+    // R2239 — that last sentence was true AT 1.5.0 and these two rows are still
+    // its numbers. Both arms' oracles under `target/` are 1.5.0 builds, so
+    // neither has been re-measured at the pin; the version column is what says
+    // so, and provisioning either at 1.10.0 now fails until it is.
+    ("unstable", 0, "1.5.0"),
+    ("nounstable-shm", 0, "1.5.0"),
 ];
 
+/// The zenoh-c version an oracle prefix declares, out of its own
+/// `zenoh_configure.h`.
+///
+/// The same `#define` `install-zenoh-c.sh` asserts its install against, read
+/// here for the other half of that idea: the installer checks that the oracle
+/// IS the pinned version, and this checks that a committed measurement was
+/// taken against the oracle in front of it.
+fn oracle_version(include: &Path) -> String {
+    let text = std::fs::read_to_string(include.join("zenoh_configure.h"))
+        .expect("the oracle carries a zenoh_configure.h");
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("#define ZENOH_C \"") {
+            if let Some(v) = rest.strip_suffix('"') {
+                return v.to_string();
+            }
+        }
+    }
+    panic!(
+        "no `#define ZENOH_C \"...\"` in {}/zenoh_configure.h — the oracle does \
+         not say which version it is, and a baseline cannot be checked against \
+         a version nothing states",
+        include.display()
+    );
+}
+
 /// The committed ceiling for `arm`, or a FAILURE naming what to measure.
-fn baseline_for(arm: &str) -> usize {
+fn baseline_for(arm: &str) -> (usize, &'static str) {
     BASELINES
         .iter()
-        .find(|(name, _)| *name == arm)
-        .map(|(_, n)| *n)
+        .find(|(name, _, _)| *name == arm)
+        .map(|(_, n, v)| (*n, *v))
         .unwrap_or_else(|| {
             panic!(
                 "no census baseline recorded for the '{arm}' ABI arm. The gap is \
@@ -392,7 +458,20 @@ fn the_wz_capi_c_drop_in_surface_gap_does_not_grow() {
         return;
     };
     let arm = oracle_arm(&include);
-    let baseline = baseline_for(&arm);
+    let (baseline, measured_at) = baseline_for(&arm);
+    // R2239 — the row must have been measured against THIS oracle's version.
+    // Upstream's surface is version-dependent (1.5.0 -> 1.10.0 added three
+    // whole planes), so a ceiling from another version bounds a different
+    // library.
+    let installed = oracle_version(&include);
+    assert_eq!(
+        installed, measured_at,
+        "the '{arm}' census baseline of {baseline} was measured against zenoh-c \
+         {measured_at} and the installed oracle is {installed}. Upstream's public \
+         surface moves with its version, so that ceiling bounds a different \
+         library. Re-measure this arm against {installed} and move BOTH the count \
+         and the version in its BASELINES row."
+    );
     let (wz, reference) = both_surfaces(&include, &libdir);
     let missing: Vec<&str> = reference
         .difference(&wz)

@@ -6,8 +6,11 @@
 //!
 //! ## What a config is here
 //!
-//! zenoh-c's `z_owned_config_t` is a 1960-byte INLINE struct the C side
-//! stack-allocates. wz stores a handle to a [`ConfigState`] in its leading
+//! zenoh-c's `z_owned_config_t` is an INLINE struct the C side stack-allocates
+//! — by far the largest of them, and its size is a pure function of upstream's
+//! `Config`, so it moves whenever that type does (1.5.0 -> 1.10.0 moved it).
+//! The number lives once, in [`crate::abi`]. wz stores a handle to a
+//! [`ConfigState`] in its leading
 //! pointer slot and zero-pads the rest — the C side never reads inside, it only
 //! hands the struct back through `z_loan_mut` / `z_move`.
 //!

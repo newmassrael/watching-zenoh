@@ -212,14 +212,17 @@ int main(int argc, char **argv) {
         printf("declare_publisher=FAILED\n"); return 1;
     }
     z_entity_global_id_t gid = z_publisher_id(z_publisher_loan(&pub_));
-    z_owned_source_info_t info;
-    z_result_t si_rc = z_source_info_new(&info, &gid, 28784u);
-    printf("source_info.new.rc=%d\n", (int)si_rc);
-    printf("source_info.check=%d\n", (int)z_internal_source_info_check(&info));
+    /* R2239 — zenoh-c 1.10.0 made this a VALUE: `z_source_info_new` returns one
+       and there is no owned / loaned / moved sibling, so there is no result
+       code to print and no `z_internal_source_info_check` to call. The probe
+       used the 1.5.0 owned form until the pin moved, and what that produced was
+       `unknown type name 'z_owned_source_info_t'` against the reference — the
+       diff never ran. */
+    z_source_info_t info = z_source_info_new(&gid, 28784u);
     /* The id a publisher reports must round-trip through the source info the
        program builds from it. The zid halves are per-session, so only the
        AGREEMENT is printed, never the bytes. */
-    z_entity_global_id_t back = z_source_info_id(z_source_info_loan(&info));
+    z_entity_global_id_t back = z_source_info_id(&info);
     z_id_t back_zid = z_entity_global_id_zid(&back);
     z_id_t gid_zid = z_entity_global_id_zid(&gid);
     printf("source_info.zid_matches_publisher=%d\n",
@@ -228,8 +231,8 @@ int main(int argc, char **argv) {
            memcmp(&back_zid, &id, sizeof id) == 0);
     printf("source_info.eid_round_trips=%d\n",
            z_entity_global_id_eid(&back) == z_entity_global_id_eid(&gid));
-    printf("source_info.sn=%u\n", (unsigned)z_source_info_sn(z_source_info_loan(&info)));
-    opts.source_info = z_source_info_move(&info);
+    printf("source_info.sn=%u\n", (unsigned)z_source_info_sn(&info));
+    opts.source_info = &info;
 #endif
 
     z_result_t put_rc = z_put(z_session_loan(&session), z_view_keyexpr_loan(&ke),
@@ -237,8 +240,12 @@ int main(int argc, char **argv) {
     printf("put.rc=%d\n", (int)put_rc);
     if (put_rc != 0) { return 1; }
 #if defined(Z_FEATURE_UNSTABLE_API)
-    /* A MOVED field is consumed on return: the caller's value is a gravestone. */
-    printf("source_info.check_after_put=%d\n", (int)z_internal_source_info_check(&info));
+    /* R2239 — a BORROWED field is NOT consumed: the caller's value survives the
+       call. Printed rather than asserted here on purpose, because this probe's
+       whole point is that BOTH libraries print it and the two stdouts are
+       diffed — an implementation that took the value would print a different
+       sequence number and the diff would say so. */
+    printf("source_info.sn_after_put=%u\n", (unsigned)z_source_info_sn(&info));
 #endif
 
     z_owned_sample_t sample;
@@ -251,7 +258,7 @@ int main(int argc, char **argv) {
                (int)z_string_len(z_view_string_loan(&ke_str)),
                z_string_data(z_view_string_loan(&ke_str)));
 #if defined(Z_FEATURE_UNSTABLE_API)
-        const z_loaned_source_info_t *got = z_sample_source_info(z_sample_loan(&sample));
+        const z_source_info_t *got = z_sample_source_info(z_sample_loan(&sample));
         printf("sample.source_info_present=%d\n", got != NULL);
         if (got != NULL) {
             z_entity_global_id_t sample_gid = z_source_info_id(got);
@@ -392,7 +399,16 @@ fn a_patched_upstream_put_carries_source_info_identically_on_wz_and_libzenohc() 
     );
     if unstable {
         for expected in [
-            "source_info.new.rc=0",
+            // R2239 — this used to look for `source_info.new.rc=0`. That line
+            // is GONE rather than renamed: zenoh-c 1.10.0's
+            // `z_source_info_new` returns the value itself and has no result
+            // code, so the probe no longer prints one. Re-spelling a needle
+            // whose SUBJECT was retired would have gone looking for a line
+            // nothing emits; the replacement asserts the same thing the old one
+            // did — that the constructor ran and produced a usable value — off
+            // a line that still exists.
+            "source_info.sn=28784",
+            "source_info.sn_after_put=28784",
             "source_info.zid_matches_publisher=1",
             "source_info.eid_round_trips=1",
             "sample.source_info_present=1",

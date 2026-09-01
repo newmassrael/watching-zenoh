@@ -47,22 +47,25 @@
 //!   `zenoh_configure.h` has no `Z_FEATURE_UNSTABLE_API` line at all, and
 //!   `install-zenoh-c.sh` installs that archive — so the arm CI provisions is
 //!   the one the `zenoh-c-no-unstable-api` feature selects, NOT the default.
-//! - `z_owned_bytes_t` is **32 on BOTH arms**. There is no 40-byte
-//!   `z_owned_bytes_t` at zenoh-c 1.5.0 under either arm.
-//! - Exactly **four** opaque types move with `Z_FEATURE_UNSTABLE_API`:
+//! - `z_owned_bytes_t` does not move with unstable at all; it moves with
+//!   SHARED-MEMORY. There is no `Z_FEATURE_UNSTABLE_API`-driven 40-byte
+//!   `z_owned_bytes_t` under either arm, at either pinned version.
+//! - Which types move, and by how much, is NOT restated here. It is a table
+//!   that rots — R2239 found this doc claiming an unstable delta of 32 for
+//!   `z_owned_sample_t` when zenoh 1.10.0 makes it 56 — and it is already
+//!   carried as data, in [`crate::abi_origin::WZ_CAPI_C_ABI_COMPOSITION`],
+//!   where `scripts/lib/capi_c_abi_provenance.py` evaluates every row against
+//!   upstream's four generated tables and derives the population of moving
+//!   types from those tables rather than from the list.
 //!
-//! | type (LP64)                          | no-unstable | unstable |
-//! |--------------------------------------|------------:|---------:|
-//! | `z_owned_sample_t` / `z_loaned_*`    |         184 |  **216** |
-//! | `z_owned_reply_t` / `z_loaned_*`     |         184 |  **240** |
-//!
-//! The generator is a VALIDATED oracle rather than an assumed one: its
-//! no-unstable arm reproduces the installed `zenoh_opaque.h` on **62 of 62**
-//! types. Getting there took removing two variables — the exact feature list
-//! (which turned out not to matter: `zenoh/default` and the archive's list give
-//! identical tables) and the TOOLCHAIN (which did: `z_owned_task_t` is 32 under
-//! the pinned 1.85.0 and 24 under 1.97.0, and that single disagreement was the
-//! whole gap).
+//! The generator is a VALIDATED oracle rather than an assumed one: the arm the
+//! installed oracle actually IS reproduces its `zenoh_opaque.h` exactly, and
+//! the calibration step refuses to compare anything until it does. Getting
+//! there took removing two variables — the exact feature list (which turned out
+//! not to matter: `zenoh/default` and the archive's list give identical tables)
+//! and the TOOLCHAIN (which did, and still does: `z_owned_task_t` is 32 bytes
+//! under zenoh-c 1.5.0's pinned 1.85.0 and 24 under the 1.97.1 that 1.10.0
+//! pins, which is why the channel is read out of the checkout).
 //!
 //! So "wz is a zenoh-c drop-in" is still not a complete sentence — it has to
 //! name the build — but the sentence now names the right builds. Layer C1cc
@@ -83,38 +86,45 @@ const UNSTABLE: bool = !cfg!(feature = "zenoh-c-no-unstable-api");
 /// (what `install-zenoh-c.sh` provisions) is built without it.
 const SHM: bool = cfg!(feature = "zenoh-c-shared-memory");
 
-// The eight sizes that MOVE across the two-axis feature space, written as
-// explicit measured constants rather than arithmetic on a base. Every number
-// below came out of upstream's own opaque-type generator under zenoh-c's pinned
-// toolchain (R311y540); `scripts/check-capi-c-opaque-arms.sh` re-measures them.
+// The sizes that MOVE across the two-axis feature space. Every number below
+// came out of upstream's own opaque-type generator under zenoh-c's pinned
+// toolchain; `scripts/check-capi-c-opaque-arms.sh` re-measures them on all four
+// arms, and `scripts/lib/capi_c_abi_provenance.py` re-derives each expression
+// below from those same four tables — including WHICH types belong in this
+// block, so a type that starts moving cannot stay a plain literal further down.
 //
-// The two axes are INDEPENDENT and their deltas ADD — `z_owned_sample_t` is 184
-// plain, +16 for shared-memory, +32 for unstable and +48 for both — but the
-// deltas are per-type (8 for most, 16 for sample and reply), so expressing them
-// as one shared constant would be a coincidence waiting to break.
+// The two axes are INDEPENDENT and their deltas ADD, but the deltas are
+// PER-TYPE, so expressing them as one shared constant would be a coincidence
+// waiting to break. The deltas are also per-VERSION: 1.5.0 -> 1.10.0 moved
+// `z_owned_sample_t`'s unstable delta from 32 to 56 and gave
+// `z_owned_reply_err_t` an unstable axis it did not have.
 const BYTES_SIZE: usize = if SHM { 40 } else { 32 };
-const PUBLISHER_SIZE: usize = if SHM { 112 } else { 104 };
+const PUBLISHER_SIZE: usize = if SHM { 120 } else { 112 };
 pub(crate) const ENCODING_SIZE: usize = if SHM { 48 } else { 40 };
 const QUERY_SIZE: usize = if SHM { 144 } else { 136 };
 const BYTES_WRITER_SIZE: usize = if SHM { 64 } else { 56 };
 const SERIALIZER_SIZE: usize = BYTES_WRITER_SIZE;
-const SAMPLE_SIZE: usize = 184 + if SHM { 16 } else { 0 } + if UNSTABLE { 32 } else { 0 };
-const REPLY_SIZE: usize = 184 + if SHM { 16 } else { 0 } + if UNSTABLE { 56 } else { 0 };
-// R311y568 — the reply ERROR, and the ONE of this round's seven new opaque types
-// that moves at all: 72 on the published archive, 88 against the SHM oracle.
-// (`z_owned_task_t` 32, `z_task_attr_t` 8, `zc_owned_closure_log_t` 24,
-// `z_loaned_closure_matching_status_t` 24, and the three option structs are
-// identical on both — measured, not assumed.)
+const SAMPLE_SIZE: usize = 184 + if SHM { 16 } else { 0 } + if UNSTABLE { 56 } else { 0 };
+const REPLY_SIZE: usize = 184 + if SHM { 16 } else { 0 } + if UNSTABLE { 80 } else { 0 };
+// The reply ERROR. DERIVED rather than a measured literal, and the derivation
+// is upstream's own struct rather than a fitted delta: `ReplyError` is
+// `{ ZBytes payload, Encoding encoding }` plus, since zenoh 1.10.0 and only
+// under `unstable`, `Option<TimestampStack>` — so its footprint IS the two
+// footprints this file already carries, plus that field.
 //
-// DERIVED rather than a ninth measured literal, and the derivation is upstream's
-// own struct rather than a fitted delta: `z_owned_reply_err_t` is
-// `{ ZBytes payload, Encoding encoding }`, so its footprint IS the two
-// footprints this file already carries. Both arms confirm it — 32+40=72 and
-// 40+48=88 — which is what makes this a composition rather than the "coincidence
-// waiting to break" the note above warns about for a shared DELTA. It also means
-// the two unmeasured arms are already right: whatever moves `z_owned_bytes_t`
-// moves this by the same amount, because it is that field.
-const REPLY_ERR_SIZE: usize = BYTES_SIZE + ENCODING_SIZE;
+// R2239 — the third term is the round's lesson, not decoration. Until 1.10.0
+// the derivation was the first two terms and a COMMENT saying why, and when
+// upstream added the field the comment stayed true-looking while the sum went
+// wrong on both unstable arms. A composition stated in prose is not checked by
+// anything, which is why this one is also a row in
+// `crate::abi_origin::WZ_CAPI_C_ABI_COMPOSITION`, evaluated against upstream's
+// four generated tables on every §5.27 run.
+const REPLY_ERR_SIZE: usize =
+    BYTES_SIZE + ENCODING_SIZE + if UNSTABLE { TIMESTAMP_STACK_SIZE } else { 0 };
+/// `Option<TimestampStack>` — the THIRD field zenoh 1.10.0 gives `ReplyError`
+/// behind `feature = "unstable"`, and the reason `REPLY_ERR_SIZE` stopped being
+/// `BYTES_SIZE + ENCODING_SIZE` alone at that version.
+const TIMESTAMP_STACK_SIZE: usize = 32;
 
 /// A raw pointer used as an FFI handle slot. Null = "gravestone / not present",
 /// which is zenoh-c's own word for a moved-from or failed-to-construct value.
@@ -281,16 +291,16 @@ define_opaque!(
     z_moved_bytes_t,
     BYTES_SIZE
 );
-define_opaque!(z_owned_config_t, z_loaned_config_t, z_moved_config_t, 1960);
-// The subscriber family — 48 bytes at align 8, and `z_sub.c` stack-allocates
-// the owned one, so this is a size the C side genuinely depends on. Unlike
-// `z_owned_bytes_t` it does NOT move with `Z_FEATURE_UNSTABLE_API` (measured on
-// both oracle builds), so there is one arm rather than two.
+define_opaque!(z_owned_config_t, z_loaned_config_t, z_moved_config_t, 2064);
+// The subscriber family — align 8, and `z_sub.c` stack-allocates the owned one,
+// so this is a size the C side genuinely depends on. Unlike `z_owned_bytes_t`
+// it moves with NEITHER axis (measured on all four generated tables), which is
+// why the size is a literal here and carries no composition row.
 define_opaque!(
     z_owned_subscriber_t,
     z_loaned_subscriber_t,
     z_moved_subscriber_t,
-    48
+    56
 );
 // The liveliness token family — 16 bytes at align 8 (`zenoh_opaque.h:345-347`),
 // and `z_liveliness.c` stack-allocates the owned one.
@@ -308,9 +318,9 @@ define_opaque!(
     z_moved_encoding_t,
     ENCODING_SIZE
 );
-// The publisher family — 104 bytes at align 8 (`zenoh_opaque.h:226-228`).
-// `z_pub.c` / `z_pong.c` / `z_pub_thr.c` all stack-allocate the owned one, so
-// this is the largest size the C side depends on outside the config.
+// The publisher family — align 8, size in `PUBLISHER_SIZE` above. `z_pub.c` /
+// `z_pong.c` / `z_pub_thr.c` all stack-allocate the owned one, so this is the
+// largest size the C side depends on outside the config.
 define_opaque!(
     z_owned_publisher_t,
     z_loaned_publisher_t,
@@ -327,31 +337,29 @@ define_opaque!(
 // with nothing to check it — the failure mode this file's own header warns
 // about. See the crate's residual list.
 
-// The owned sample — one of the FOUR types that move with
-// `Z_FEATURE_UNSTABLE_API` (184 without, 216 with; measured R311y540). Its
+// The owned sample — a type that moves on BOTH axes; see `SAMPLE_SIZE`. Its
 // handle points at a heap `SampleMarshal`, which is the SAME type the borrowed
 // `z_loaned_sample_t` aims at, so every existing sample accessor serves the
 // owned form with no second path. `z_pull.c` / `z_storage.c` stack-allocate it,
 // so the size is a size the C side genuinely depends on.
 define_opaque_owned!(z_owned_sample_t, z_moved_sample_t, SAMPLE_SIZE);
-// The queryable family — 48 bytes; `z_queryable.c` stack-allocates the owned one.
+// The queryable family; `z_queryable.c` stack-allocates the owned one.
 define_opaque!(
     z_owned_queryable_t,
     z_loaned_queryable_t,
     z_moved_queryable_t,
-    48
+    56
 );
-// The querier family — 80 bytes; `z_querier.c` stack-allocates the owned one.
-define_opaque!(z_owned_querier_t, z_loaned_querier_t, z_moved_querier_t, 80);
-// The owned query — 136 bytes; `z_queryable_with_channels.c` stack-allocates it
-// to receive an ESCAPED query off its fifo.
+// The querier family; `z_querier.c` stack-allocates the owned one.
+define_opaque!(z_owned_querier_t, z_loaned_querier_t, z_moved_querier_t, 88);
+// The owned query; `z_queryable_with_channels.c` stack-allocates it to receive
+// an ESCAPED query off its fifo.
 define_opaque_owned!(z_owned_query_t, z_moved_query_t, QUERY_SIZE);
-// The owned reply — the other moving pair (184 without `Z_FEATURE_UNSTABLE_API`,
-// 240 with). Every channel-based get stack-allocates it.
+// The owned reply — the sample's moving partner; see `REPLY_SIZE`. Every
+// channel-based get stack-allocates it.
 define_opaque_owned!(z_owned_reply_t, z_moved_reply_t, REPLY_SIZE);
-// The reply ERROR — 72 bytes on the published archive and 88 against the SHM
-// oracle (`zenoh_opaque.h:357-359`); see `REPLY_ERR_SIZE` for why that is a
-// derivation rather than a second literal.
+// The reply ERROR — see `REPLY_ERR_SIZE` for why its size is a derivation from
+// upstream's field composition rather than a literal per arm.
 //
 // R311y568 — until this round the family was BORROW-ONLY, justified by
 // `z_reply_err` handing back a pointer into the reply's own marshal so that
@@ -360,16 +368,19 @@ define_opaque_owned!(z_owned_reply_t, z_moved_reply_t, REPLY_SIZE);
 // is a type a C program can declare, and its eleven functions were eleven link
 // errors. It was the single largest blocker on the zenoh-c arm.
 //
-// OWNED-only, like `z_owned_reply_t` next door: upstream declares a 72-byte
-// `z_loaned_reply_err_t` too, but every producer of one in this crate aims it at
-// a `ReplyMarshal`, so the loaned form stays the zero-sized TAG defined below.
+// OWNED-only, like `z_owned_reply_t` next door: upstream declares a
+// `z_loaned_reply_err_t` of the same footprint too, but every producer of one in
+// this crate aims it at a `ReplyMarshal`, so the loaned form stays the
+// zero-sized TAG defined below.
 define_opaque_owned!(z_owned_reply_err_t, z_moved_reply_err_t, REPLY_ERR_SIZE);
-// The TASK — 32 bytes (`zenoh_opaque.h:387-389`), and the one type whose size
-// the TOOLCHAIN moves rather than a feature: 32 under zenoh-c's pinned 1.85.0
-// and 24 under 1.97.0 (R311y540 measured it, and that single disagreement was
-// the whole gap between upstream's generator and the installed header).
+// The TASK — the one type whose size the TOOLCHAIN moves rather than a feature.
+// It is `Option<JoinHandle<()>>`, so its footprint is std's: 32 bytes under the
+// 1.85.0 that zenoh-c 1.5.0 pinned, 24 under the 1.97.1 that 1.10.0 pins. That
+// is why `check-capi-c-opaque-arms.sh` reads the channel out of the checkout
+// instead of hardcoding one, and why moving the zenoh-c pin moved this number
+// without any zenoh type changing.
 // OWNED-only: upstream declares no loaned form for a task.
-define_opaque_owned!(z_owned_task_t, z_moved_task_t, 32);
+define_opaque_owned!(z_owned_task_t, z_moved_task_t, 24);
 // The hello family — 48 bytes; `z_scout.c` never stack-allocates one (the
 // callback receives a pointer), but the owned form is what a hello channel
 // would hand back and the size is measured either way.
@@ -695,7 +706,7 @@ const _: () = {
 /// which keeps the marshal's fields directly reachable instead of hidden behind a
 /// handle slot the C side would then be free to mis-size.
 ///
-/// [`z_owned_sample_t`] (184 bytes, genuinely stack-allocated by `z_pull.c` and
+/// [`z_owned_sample_t`] (genuinely stack-allocated by `z_pull.c` and
 /// `z_storage.c`) is defined above and stores a handle to a HEAP marshal of the
 /// same type — so a loan is `handle as *const z_loaned_sample_t` and every
 /// accessor below serves both forms unchanged.

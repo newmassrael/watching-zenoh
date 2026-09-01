@@ -1,267 +1,163 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! R311y563 — the zenoh-c `source_info` family: the owned/loaned/moved type
-//! plus its seven functions, and the reason six option structs could not read
-//! their `source_info` field until now.
+//! The zenoh-c `source_info` family: one 24-byte VALUE type and its three
+//! functions.
 //!
-//! ## Why this is not the pico family under another name
+//! ## R2239 — this used to be an owned family, and upstream retired that shape
 //!
-//! zenoh-pico's `z_source_info_t` is a PLAIN struct passed by pointer: a C
-//! program declares one on its stack, `z_source_info_new` fills it in place,
-//! and the option field is a borrow the callee reads and forgets. wz mirrored
-//! that at R311y559 in twenty lines.
+//! At zenoh-c 1.5.0 `z_source_info_t` was an OWNED OPAQUE with move semantics:
+//! `z_source_info_new` constructed into a `z_owned_source_info_t`, every option
+//! field was a `z_moved_source_info_t*` the callee CONSUMED, and reading one
+//! back needed `z_source_info_loan` to a distinct loaned type. R311y563
+//! mirrored all seven functions of it.
 //!
-//! zenoh-c's is an OWNED OPAQUE with a move semantics: `z_source_info_new`
-//! constructs into a `z_owned_source_info_t`, the option field is a
-//! `z_moved_source_info_t*` the callee CONSUMES, and reading it back needs a
-//! `z_source_info_loan` to a distinct `z_loaned_source_info_t`. So the shape is
-//! the whole owned family — `_new` / `_loan` / `_drop` / `_id` / `_sn` /
-//! `z_internal_source_info_check` / `_null` — not a struct plus a getter, which
-//! is why "mirror the pico work" understated it.
+//! zenoh-c 1.10.0 collapsed that to a plain value. Measured against the pinned
+//! oracle rather than read off a changelog:
 //!
-//! ## The alignment, which is the one fact that shapes the type
+//! - `zenoh_opaque.h` declares `ALIGN(4) z_source_info_t { uint8_t _0[24]; }`
+//!   and NO owned / loaned / moved sibling;
+//! - `z_source_info_new` RETURNS one by value
+//!   (`z_source_info_new(const z_entity_global_id_t*, uint32_t)`);
+//! - `z_source_info_id` / `_sn` take a `const z_source_info_t*`;
+//! - the six option structs carry `const struct z_source_info_t *source_info`,
+//!   a BORROW rather than a move;
+//! - `nm -D` on the pinned `libzenohc.so` defines no `z_source_info_drop`,
+//!   `z_source_info_loan`, `z_internal_source_info_check` or `_null`.
 //!
-//! `z_owned_source_info_t` is `ALIGN(4) { uint8_t _0[32] }`
-//! (`zenoh_opaque.h:588-590`), and the loaned form is identical (`:768-770`).
-//! FOUR, not eight — every other opaque family in this crate is align 8, which
-//! is why [`crate::abi`]'s `define_opaque!` hard-asserts that and cannot be
-//! reused here.
+//! So the four functions this module used to export were four symbols wz
+//! defined and the reference did not — which
+//! `zenoh_c_abi_symbol_census.rs::wz_exports_nothing_the_reference_does_not`
+//! reads as a surface that is not the ABI it claims to be, and rightly.
 //!
-//! A Rust struct with a `*mut c_void` field is align 8 and `#[repr(align(4))]`
-//! cannot lower that — alignment attributes only raise. So the handle is stored
-//! as BYTES inside the blob and read back with `from_ne_bytes`, which is
-//! unaligned-safe by construction. That is not a workaround for the compiler:
-//! align 4 means a C program may legally place one of these at an address that
-//! is 4- but not 8-aligned (inside a packed or 4-aligned aggregate), and a
-//! pointer-typed field would then be an unaligned load that happens to work on
-//! x86-64 and is undefined everywhere.
-
-use std::ffi::c_void;
+//! ## The alignment is still the fact that shapes the type
+//!
+//! FOUR, not eight, which is why [`crate::abi`]'s `define_opaque!` — which
+//! hard-asserts align 8 — cannot be reused here. As a value type that costs
+//! nothing: the fields ARE the content, so there is no handle whose alignment
+//! could be wrong. That is the second thing the collapse bought, after the four
+//! symbols.
 
 use wz_runtime_tokio::sample::SourceInfo;
 
 use crate::advanced::z_entity_global_id_t;
-use crate::ffi::{guard_val, guarded};
-use crate::result::{ZResult, Z_ENULL, Z_OK};
+use crate::ffi::guard_val;
 use crate::zid::Z_ID_SIZE;
 
-/// The C footprint of the whole family: 32 bytes at align 4.
-const SOURCE_INFO_SIZE: usize = 32;
-
-/// How many leading bytes of the blob hold our handle.
-const HANDLE_BYTES: usize = std::mem::size_of::<usize>();
-
-/// zenoh-c `z_owned_source_info_t` (`zenoh_opaque.h:588-590`) — 32 bytes at
-/// ALIGNMENT 4.
+/// zenoh-c `z_source_info_t` — 24 bytes at ALIGNMENT 4, carried BY VALUE.
 ///
-/// The first [`HANDLE_BYTES`] carry a `Box<SourceInfo>` pointer as raw bytes
-/// (see the module note on why not a pointer field); the rest is zero padding
-/// to upstream's size. All-zero is the gravestone, which is what
-/// `z_internal_source_info_null` writes and what `z_internal_source_info_check`
-/// reports as absent.
-#[repr(C, align(4))]
-pub struct z_owned_source_info_t {
-    pub(crate) _0: [u8; SOURCE_INFO_SIZE],
-}
-
-/// zenoh-c `z_loaned_source_info_t` (`zenoh_opaque.h:768-770`) — the same
-/// layout, so `z_source_info_loan` is a pointer cast.
-#[repr(C, align(4))]
-pub struct z_loaned_source_info_t {
-    pub(crate) _0: [u8; SOURCE_INFO_SIZE],
-}
-
-/// zenoh-c `z_moved_source_info_t` — literally
-/// `struct { z_owned_source_info_t _this; }`.
+/// Upstream declares it opaque, so the field split here is wz's own; what is
+/// ABI is the footprint, which `zenoh_c_abi_symbol_census.rs` and the arms gate
+/// both measure. Splitting it into the fields it actually holds beats a
+/// `[u8; 24]` blob for the ordinary reason: the accessors below read fields
+/// instead of decoding bytes.
 #[repr(C)]
-pub struct z_moved_source_info_t {
-    pub(crate) _this: z_owned_source_info_t,
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct z_source_info_t {
+    /// The source zid, right-zero-padded to 16 bytes exactly as `z_id_t` is.
+    pub(crate) zid: [u8; Z_ID_SIZE],
+    /// The source entity id.
+    pub(crate) eid: u32,
+    /// The source sequence number.
+    pub(crate) sn: u32,
 }
 
 const _: () = {
-    assert!(std::mem::size_of::<z_owned_source_info_t>() == SOURCE_INFO_SIZE);
-    assert!(std::mem::align_of::<z_owned_source_info_t>() == 4);
-    assert!(std::mem::size_of::<z_loaned_source_info_t>() == SOURCE_INFO_SIZE);
-    assert!(std::mem::align_of::<z_loaned_source_info_t>() == 4);
-    // The moved wrapper is a newtype; it must not add a byte.
-    assert!(std::mem::size_of::<z_moved_source_info_t>() == SOURCE_INFO_SIZE);
+    assert!(std::mem::size_of::<z_source_info_t>() == 24);
+    assert!(std::mem::align_of::<z_source_info_t>() == 4);
 };
 
-impl z_owned_source_info_t {
-    /// The gravestone: all zero, which is upstream's own null representation
-    /// and what a failed [`z_source_info_new`] leaves behind.
-    pub(crate) fn null_value() -> Self {
-        Self {
-            _0: [0u8; SOURCE_INFO_SIZE],
-        }
-    }
-
-    /// Pack a `Box::into_raw` pointer into the blob's leading bytes.
-    pub(crate) fn from_boxed(info: Box<SourceInfo>) -> Self {
-        let mut this = Self::null_value();
-        let bits = Box::into_raw(info) as usize;
-        this._0[..HANDLE_BYTES].copy_from_slice(&bits.to_ne_bytes());
-        this
-    }
-
-    /// The handle, or `None` when this value is a gravestone.
-    pub(crate) fn handle(&self) -> Option<*mut SourceInfo> {
-        let mut bytes = [0u8; HANDLE_BYTES];
-        bytes.copy_from_slice(&self._0[..HANDLE_BYTES]);
-        let bits = usize::from_ne_bytes(bytes);
-        if bits == 0 {
-            None
-        } else {
-            Some(bits as *mut SourceInfo)
-        }
-    }
-}
-
-impl z_loaned_source_info_t {
-    /// The gravestone: all zero.
-    pub(crate) fn null_value() -> Self {
-        Self {
-            _0: [0u8; SOURCE_INFO_SIZE],
-        }
-    }
-
-    /// A loaned view over a [`SourceInfo`] the CALLER owns — the sample
-    /// marshal's own field, not a box.
+impl z_source_info_t {
+    /// The all-zero value, which is what an absent source info reads as.
     ///
-    /// Sound because the loaned form is the only one a C program can obtain
-    /// from a sample, and the two functions that would free the pointee
-    /// (`z_source_info_drop` / [`take_moved_source_info`]) both take an OWNED
-    /// value. There is no path from a loaned view to a `Box::from_raw`.
-    pub(crate) fn from_borrowed(info: &SourceInfo) -> Self {
-        let mut this = Self::null_value();
-        let bits = info as *const SourceInfo as usize;
-        this._0[..HANDLE_BYTES].copy_from_slice(&bits.to_ne_bytes());
-        this
-    }
-
-    /// The handle behind a loaned view. Same slot as the owned form, because
-    /// the two share a layout.
-    pub(crate) fn handle(&self) -> Option<*mut SourceInfo> {
-        let mut bytes = [0u8; HANDLE_BYTES];
-        bytes.copy_from_slice(&self._0[..HANDLE_BYTES]);
-        let bits = usize::from_ne_bytes(bytes);
-        if bits == 0 {
-            None
-        } else {
-            Some(bits as *mut SourceInfo)
+    /// Upstream has no gravestone for a value type — absence is a NULL pointer
+    /// in the option field — so this is wz's own filler for the slot a sample
+    /// marshal keeps whether or not the sample carried one.
+    pub(crate) fn empty() -> Self {
+        Self {
+            zid: [0u8; Z_ID_SIZE],
+            eid: 0,
+            sn: 0,
         }
     }
+
+    /// The C form of a runtime source info.
+    pub(crate) fn from_runtime(info: &SourceInfo) -> Self {
+        let mut zid = [0u8; Z_ID_SIZE];
+        // The wire form strips trailing zeros; re-pad LEFT-aligned, the same
+        // convention `z_timestamp_t::_id` follows.
+        let prefix = info.zid_prefix();
+        let n = prefix.len().min(Z_ID_SIZE);
+        zid[..n].copy_from_slice(&prefix[..n]);
+        Self {
+            zid,
+            eid: info.eid,
+            sn: info.sn,
+        }
+    }
+
+    /// The runtime form, or `None` for an all-zero zid.
+    ///
+    /// An all-zero zid is not a source: `SourceInfo::default()` uses
+    /// `zid_len = 0` as exactly that sentinel, and a caller who zeroed the
+    /// struct rather than filling it means "none".
+    pub(crate) fn to_runtime(self) -> Option<SourceInfo> {
+        let len = self.zid.iter().rposition(|b| *b != 0).map(|i| i + 1)?;
+        Some(SourceInfo::new(&self.zid[..len], self.eid, self.sn))
+    }
 }
 
-/// Borrow the [`SourceInfo`] behind a loaned pointer.
+/// Read an option struct's borrowed `source_info` field.
+///
+/// The BORROW is the 1.10.0 shape: upstream types the field
+/// `const z_source_info_t *`, so the callee copies what it needs and leaves the
+/// caller's value alone. The pre-1.10.0 sibling of this function was
+/// `take_moved_source_info`, which nulled the caller's slot and reclaimed a
+/// box — the move semantics upstream retired.
 ///
 /// # Safety
-/// `this_` must be null or a live loaned source info.
-pub(crate) unsafe fn loaned_ref<'a>(
-    this_: *const z_loaned_source_info_t,
-) -> Option<&'a SourceInfo> {
-    if this_.is_null() {
+/// `ptr` must be null or a valid, readable `z_source_info_t`.
+pub(crate) unsafe fn borrowed_source_info(ptr: *const z_source_info_t) -> Option<SourceInfo> {
+    if ptr.is_null() {
         return None;
     }
     // SAFETY: the caller's contract.
-    let handle = unsafe { (*this_).handle() }?;
-    // SAFETY: the handle came from `Box::into_raw` in `z_source_info_new` and
-    // is only freed by `z_source_info_drop`, which nulls the slot.
-    Some(unsafe { &*handle })
+    unsafe { *ptr }.to_runtime()
 }
 
-/// R311y563 — CONSUME a caller's `z_moved_source_info_t*` option field into a wz
-/// [`SourceInfo`].
+/// Construct a source info (zenoh-c `z_source_info_new`).
 ///
-/// The zenoh-c option fields are MOVED, not borrowed: upstream's
-/// `z_put_options_t::source_info` is a `z_moved_source_info_t*` and the callee
-/// takes ownership. So every fold must run this on EVERY path — including the
-/// error ones — exactly as it already does for the moved payload / attachment,
-/// or the caller's value leaks and its `z_owned_source_info_t` stays non-null,
-/// which is worse than a leak because ownership becomes ambiguous.
-///
-/// A NULL pointer, a gravestone value, and an all-zero zid all read as absent.
-/// The last of those matches zenoh's own `_z_source_info_check`, which is a
-/// zero-zid test: an unset identity must not reach the wire as "a publisher
-/// whose zid is 0".
+/// Returns BY VALUE, which is upstream's 1.10.0 signature. A null `source_id`
+/// yields the all-zero value rather than a diagnostic: the C signature has no
+/// result channel, and every accessor reads that value as absent.
 ///
 /// # Safety
-/// `moved` must be null or a valid moved source info.
-pub(crate) unsafe fn take_moved_source_info(
-    moved: *mut z_moved_source_info_t,
-) -> Option<SourceInfo> {
-    if moved.is_null() {
-        return None;
-    }
-    // SAFETY: the caller's contract.
-    let owned = unsafe { &mut (*moved)._this };
-    let handle = owned.handle();
-    *owned = z_owned_source_info_t::null_value();
-    let handle = handle?;
-    // SAFETY: the handle came from `Box::into_raw`; taking it back here is the
-    // move the C signature promises.
-    let info = unsafe { Box::from_raw(handle) };
-    if info.zid_prefix().iter().all(|b| *b == 0) {
-        return None;
-    }
-    Some(*info)
-}
-
-/// Construct a source info (zenoh-c `z_source_info_new`,
-/// `zenoh_commons.h:5213`).
-///
-/// # Safety
-/// `this_` must be a valid, writable owned slot; `source_id` must be null or a
-/// valid entity global id.
+/// `source_id` must be null or a valid entity global id.
 #[no_mangle]
 pub unsafe extern "C" fn z_source_info_new(
-    this_: *mut z_owned_source_info_t,
     source_id: *const z_entity_global_id_t,
     source_sn: u32,
-) -> ZResult {
-    guarded(|| {
-        if this_.is_null() {
-            return Z_ENULL;
-        }
-        // Write the gravestone FIRST, so an early return still leaves the
-        // caller's slot in a state `z_internal_source_info_check` can read.
-        // SAFETY: checked non-null.
-        unsafe { *this_ = z_owned_source_info_t::null_value() };
+) -> z_source_info_t {
+    guard_val(z_source_info_t::empty(), || {
         if source_id.is_null() {
-            return Z_ENULL;
+            return z_source_info_t::empty();
         }
         // SAFETY: checked non-null.
         let gid = unsafe { &*source_id };
-        let info = SourceInfo::new(&gid.zid.id, gid.eid, source_sn);
-        // SAFETY: checked non-null.
-        unsafe { *this_ = z_owned_source_info_t::from_boxed(Box::new(info)) };
-        Z_OK
+        z_source_info_t {
+            zid: gid.zid.id,
+            eid: gid.eid,
+            sn: source_sn,
+        }
     })
-}
-
-/// Borrow a source info (zenoh-c `z_source_info_loan`).
-///
-/// # Safety
-/// `this_` must be null or a valid owned source info.
-#[no_mangle]
-pub unsafe extern "C" fn z_source_info_loan(
-    this_: *const z_owned_source_info_t,
-) -> *const z_loaned_source_info_t {
-    this_ as *const z_loaned_source_info_t
 }
 
 /// The `(zid, eid)` half of a source info (zenoh-c `z_source_info_id`).
 ///
-/// Returns the all-zero id for a gravestone, which is what upstream's own
-/// accessor reports for one.
-///
 /// # Safety
-/// `this_` must be null or a valid loaned source info.
+/// `this_` must be null or a valid source info.
 #[no_mangle]
-pub unsafe extern "C" fn z_source_info_id(
-    this_: *const z_loaned_source_info_t,
-) -> z_entity_global_id_t {
+pub unsafe extern "C" fn z_source_info_id(this_: *const z_source_info_t) -> z_entity_global_id_t {
     let empty = z_entity_global_id_t {
         zid: crate::zid::z_id_t {
             id: [0u8; Z_ID_SIZE],
@@ -269,21 +165,14 @@ pub unsafe extern "C" fn z_source_info_id(
         eid: 0,
     };
     guard_val(empty, || {
-        // SAFETY: the caller's contract, delegated.
-        match unsafe { loaned_ref(this_) } {
-            Some(info) => {
-                let mut zid = [0u8; Z_ID_SIZE];
-                // The wire form strips trailing zeros; re-pad LEFT-aligned, the
-                // same convention `z_timestamp_t::_id` follows.
-                let prefix = info.zid_prefix();
-                let n = prefix.len().min(Z_ID_SIZE);
-                zid[..n].copy_from_slice(&prefix[..n]);
-                z_entity_global_id_t {
-                    zid: crate::zid::z_id_t { id: zid },
-                    eid: info.eid,
-                }
-            }
-            None => empty,
+        if this_.is_null() {
+            return empty;
+        }
+        // SAFETY: checked non-null.
+        let info = unsafe { &*this_ };
+        z_entity_global_id_t {
+            zid: crate::zid::z_id_t { id: info.zid },
+            eid: info.eid,
         }
     })
 }
@@ -291,67 +180,65 @@ pub unsafe extern "C" fn z_source_info_id(
 /// The sequence number of a source info (zenoh-c `z_source_info_sn`).
 ///
 /// # Safety
-/// `this_` must be null or a valid loaned source info.
+/// `this_` must be null or a valid source info.
 #[no_mangle]
-pub unsafe extern "C" fn z_source_info_sn(this_: *const z_loaned_source_info_t) -> u32 {
+pub unsafe extern "C" fn z_source_info_sn(this_: *const z_source_info_t) -> u32 {
     guard_val(0, || {
-        // SAFETY: the caller's contract, delegated.
-        unsafe { loaned_ref(this_) }.map_or(0, |info| info.sn)
-    })
-}
-
-/// Free a source info and reset the source slot to a gravestone (zenoh-c
-/// `z_source_info_drop`).
-///
-/// # Safety
-/// `this_` must be null or a valid moved source info.
-#[no_mangle]
-pub unsafe extern "C" fn z_source_info_drop(this_: *mut z_moved_source_info_t) {
-    guarded(|| {
-        // SAFETY: the caller's contract, delegated. `take_moved_source_info`
-        // nulls the source and RECLAIMS THE BOX — that reclaim is the free, and
-        // it happens inside the call rather than at this binding. `let _ =`
-        // rather than `drop(..)`: the returned `SourceInfo` owns no heap of its
-        // own, so clippy is right that dropping it does nothing, and writing
-        // `drop` would suggest the free happens here when it does not.
-        let _ = unsafe { take_moved_source_info(this_) };
-        Z_OK
-    });
-}
-
-/// Whether an owned source info holds a live value (zenoh-c
-/// `z_internal_source_info_check`).
-///
-/// # Safety
-/// `this_` must be null or a valid owned source info.
-#[no_mangle]
-pub unsafe extern "C" fn z_internal_source_info_check(this_: *const z_owned_source_info_t) -> bool {
-    guard_val(false, || {
-        // SAFETY: the caller's contract.
-        !this_.is_null() && unsafe { (*this_).handle() }.is_some()
-    })
-}
-
-/// Zero an owned source info (zenoh-c `z_internal_source_info_null`).
-///
-/// # Safety
-/// `this_` must be null or a valid, writable owned source info.
-#[no_mangle]
-pub unsafe extern "C" fn z_internal_source_info_null(this_: *mut z_owned_source_info_t) {
-    if !this_.is_null() {
+        if this_.is_null() {
+            return 0;
+        }
         // SAFETY: checked non-null.
-        unsafe { *this_ = z_owned_source_info_t::null_value() };
-    }
+        unsafe { (*this_).sn }
+    })
 }
 
-/// A `*mut c_void` view of the moved pointer, for the option structs that
-/// declared their field opaque before this family existed.
-///
-/// Not a compatibility shim: `z_put_options_t::source_info` and its five
-/// siblings are typed `*mut z_moved_source_info_t` now. This exists because
-/// `z_source_info_drop`'s `guarded` wrapper wants a `ZResult` and the cast is
-/// clearer named than inline.
-#[allow(dead_code)]
-pub(crate) fn as_moved(ptr: *mut c_void) -> *mut z_moved_source_info_t {
-    ptr as *mut z_moved_source_info_t
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The two conversions are inverse for a real source info.
+    #[test]
+    fn the_c_value_round_trips_a_runtime_source_info() {
+        let info = SourceInfo::new(&[1, 2, 3, 4], 7, 99);
+        let c = z_source_info_t::from_runtime(&info);
+        let back = c.to_runtime().expect("a non-zero zid is a source");
+        assert_eq!(back.zid_prefix(), &[1, 2, 3, 4]);
+        assert_eq!(back.eid, 7);
+        assert_eq!(back.sn, 99);
+    }
+
+    /// An all-zero value is ABSENCE, not a source with a zero zid.
+    ///
+    /// The distinction is load-bearing: a sample marshal keeps this slot
+    /// whether or not the sample carried a source, so a conversion that
+    /// answered `Some` for the filler would stamp a zero source onto every
+    /// outbound message built from one.
+    #[test]
+    fn an_all_zero_value_is_absence() {
+        assert!(z_source_info_t::empty().to_runtime().is_none());
+        // And a zid that is zero only in its TAIL is still a source.
+        let tail = z_source_info_t {
+            zid: [9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            eid: 1,
+            sn: 2,
+        };
+        assert_eq!(
+            tail.to_runtime()
+                .expect("a one-byte zid is a source")
+                .zid_prefix(),
+            &[9]
+        );
+    }
+
+    /// A null argument answers the empty value rather than dereferencing.
+    #[test]
+    fn the_accessors_answer_null_without_dereferencing_it() {
+        // SAFETY: passing NULL is exactly what these guards exist for.
+        unsafe {
+            let made = z_source_info_new(std::ptr::null(), 5);
+            assert!(made.to_runtime().is_none());
+            assert_eq!(z_source_info_sn(std::ptr::null()), 0);
+            assert_eq!(z_source_info_id(std::ptr::null()).eid, 0);
+        }
+    }
 }

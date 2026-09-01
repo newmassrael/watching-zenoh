@@ -164,14 +164,12 @@ pub extern "C" fn z_internal_congestion_control_default_request() -> z_congestio
     Z_CONGESTION_CONTROL_BLOCK
 }
 
-/// zenoh's default congestion control for RESPONSE messages — a reply (zenoh-c
-/// `z_internal_congestion_control_default_response`).
-///
-/// `Z_CONGESTION_CONTROL_BLOCK` (0), measured.
-#[no_mangle]
-pub extern "C" fn z_internal_congestion_control_default_response() -> z_congestion_control_t {
-    Z_CONGESTION_CONTROL_BLOCK
-}
+// R2239 — `z_internal_congestion_control_default_response` used to be here.
+// zenoh-c 1.10.0 RETIRED it: the pinned header declares two of the family and
+// the pinned `libzenohc.so` exports two (`nm -D`, push and request). A symbol
+// wz defines and the reference does not is a surface that is not the ABI it
+// claims to be, which is what `wz_exports_nothing_the_reference_does_not`
+// measures — and nothing in this crate called it.
 
 /// zenoh's default priority (zenoh-c `z_priority_default`).
 ///
@@ -197,6 +195,19 @@ pub extern "C" fn z_reliability_default() -> z_reliability_t {
 #[no_mangle]
 pub extern "C" fn zc_locality_default() -> zc_locality_t {
     ZC_LOCALITY_ANY
+}
+
+/// The SAME default under upstream's newer spelling (zenoh-c
+/// `z_locality_default`).
+///
+/// R2239 — zenoh-c 1.10.0 defines BOTH `z_locality_default` and
+/// `zc_locality_default` (measured with `nm -D` on the pinned
+/// `libzenohc.so`), so this is an addition rather than the rename its
+/// `reply_keyexpr` neighbour needed. Delegates rather than repeating the
+/// constant: two entry points to one answer, which is what upstream ships.
+#[no_mangle]
+pub extern "C" fn z_locality_default() -> zc_locality_t {
+    zc_locality_default()
 }
 
 /// zenoh-c's `z_congestion_control_t` as wz's typed [`CongestionControl`].
@@ -272,7 +283,7 @@ pub struct z_publisher_put_options_t {
     /// R311y563 — READ and CONSUMED (a `z_moved_*` field transfers ownership on
     /// every path, including the error ones).
     #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
-    pub source_info: *mut crate::source_info::z_moved_source_info_t,
+    pub source_info: *const crate::source_info::z_source_info_t,
     /// Attachment to carry alongside the payload.
     pub attachment: *mut z_moved_bytes_t,
 }
@@ -420,7 +431,7 @@ impl PutOverrides {
         // `z_moved_*` field transfers ownership on return, so a second put
         // through the same options struct must not see it again.
         let taken_source_info =
-            unsafe { crate::source_info::take_moved_source_info(opts.source_info) };
+            unsafe { crate::source_info::borrowed_source_info(opts.source_info) };
         #[cfg(feature = "zenoh-c-no-unstable-api")]
         let taken_source_info: Option<wz_runtime_tokio::sample::SourceInfo> = None;
         Self {

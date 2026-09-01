@@ -66,8 +66,7 @@ use wz_capi_c::result::Z_OK;
 use wz_capi_c::sample::z_sample_source_info;
 use wz_capi_c::session::{z_close, z_open, z_session_drop, z_session_loan, z_session_loan_mut};
 use wz_capi_c::source_info::{
-    z_internal_source_info_check, z_moved_source_info_t, z_owned_source_info_t, z_source_info_id,
-    z_source_info_new, z_source_info_sn,
+    z_source_info_id, z_source_info_new, z_source_info_sn, z_source_info_t,
 };
 use wz_capi_c::sub::{z_closure_sample, z_declare_subscriber, z_undeclare_subscriber};
 use wz_capi_c::zid::z_id_t;
@@ -123,7 +122,7 @@ unsafe fn open_listen(port: u16) -> z_owned_session_t {
 
 /// Build the probe identity through the exported constructors rather than by
 /// struct literal — the ABI path is what is under test, not the Rust type.
-unsafe fn probe_source_info() -> z_owned_source_info_t {
+unsafe fn probe_source_info() -> z_source_info_t {
     let mut zid_bytes = [0u8; 16];
     for (i, b) in zid_bytes.iter_mut().enumerate() {
         *b = PROBE_ZID0 + i as u8;
@@ -132,16 +131,11 @@ unsafe fn probe_source_info() -> z_owned_source_info_t {
         zid: z_id_t { id: zid_bytes },
         eid: PROBE_EID,
     };
-    let mut owned: z_owned_source_info_t = std::mem::zeroed();
-    assert_eq!(z_source_info_new(&mut owned, &gid, PROBE_SN), Z_OK);
-    owned
+    z_source_info_new(&gid, PROBE_SN)
 }
 
 /// One `z_put` carrying `source_info` (NULL = the option unset).
-unsafe fn put_with_source_info(
-    session: &z_owned_session_t,
-    source_info: *mut z_moved_source_info_t,
-) {
+unsafe fn put_with_source_info(session: &z_owned_session_t, source_info: *const z_source_info_t) {
     let ke = CString::new(KEYEXPR).unwrap();
     let mut view: z_view_keyexpr_t = std::mem::zeroed();
     assert_eq!(z_view_keyexpr_from_str(&mut view, ke.as_ptr()), Z_OK);
@@ -202,31 +196,34 @@ fn put_options_source_info_crosses_the_wire_and_is_consumed() {
         );
 
         // ARM 1 — the option is SET.
-        let mut owned = probe_source_info();
-        assert!(
-            z_internal_source_info_check(&owned),
+        let info = probe_source_info();
+        assert_eq!(
+            z_source_info_sn(&info),
+            PROBE_SN,
             "CALIBRATION: the constructor produced a live value, so the \
-             gravestone assertion below measures the MOVE rather than a \
+             assertion below measures what `z_put` did to it rather than a \
              constructor that never worked"
         );
-        put_with_source_info(
-            &session,
-            (&mut owned as *mut z_owned_source_info_t).cast::<z_moved_source_info_t>(),
-        );
+        put_with_source_info(&session, &info);
 
-        // ARM 3 — the MOVE. Upstream consumes every owned options field on
-        // return, so the caller's value is a gravestone now. This is the arm a
-        // read-only implementation fails.
-        assert!(
-            !z_internal_source_info_check(&owned),
-            "z_put CONSUMED the moved source info, leaving the caller's owned \
-             value a gravestone"
+        // ARM 3 — the BORROW. R2239: zenoh-c 1.10.0 types this field
+        // `const z_source_info_t *`, so the callee READS it and the caller's
+        // value is untouched afterwards. This was the opposite assertion until
+        // that version — upstream consumed a `z_moved_source_info_t*` and the
+        // caller was left a gravestone — and the arm is kept, inverted, because
+        // it is still the one an implementation with the WRONG ownership
+        // discipline fails: a callee that took the value would leave this
+        // zeroed.
+        assert_eq!(
+            (z_source_info_sn(&info), z_source_info_id(&info).eid),
+            (PROBE_SN, PROBE_EID),
+            "z_put BORROWED the source info: the caller's value is unchanged"
         );
 
         wait_for(&count, 1);
 
         // ARM 2 — the NEGATIVE arm: the same path with the option unset.
-        put_with_source_info(&session, std::ptr::null_mut());
+        put_with_source_info(&session, std::ptr::null());
         wait_for(&count, 2);
 
         let got = seen.lock().unwrap().clone();

@@ -81,15 +81,23 @@ pub const Z_CONSOLIDATION_MODE_MONOTONIC: c_int = 1;
 pub const Z_CONSOLIDATION_MODE_LATEST: c_int = 2;
 
 /// zenoh's default accepted reply-keyexpr policy (zenoh-c
-/// `zc_reply_keyexpr_default`).
+/// `z_reply_keyexpr_default`).
 ///
 /// `ZC_REPLY_KEYEXPR_MATCHING_QUERY` (1) — upstream's
 /// `ReplyKeyExpr::default()`, and the value R311y545 MEASURED against the real
 /// `libzenohc.so` after this crate had it as 0. Read from the constant rather
 /// than restated, so the two cannot drift.
+///
+/// R2239 — RENAMED from `zc_reply_keyexpr_default`. zenoh-c 1.10.0 defines
+/// `z_reply_keyexpr_default` and NO `zc_` spelling (measured with `nm -D` on
+/// the pinned `libzenohc.so`), so the old name was a symbol wz exported and the
+/// reference did not while the new one was a symbol a C program could name and
+/// not link. One rename closes both halves. Note the contrast with its
+/// neighbour: upstream kept BOTH spellings of `locality_default`, which is why
+/// that one is an addition below rather than a rename.
 #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
 #[no_mangle]
-pub extern "C" fn zc_reply_keyexpr_default() -> c_int {
+pub extern "C" fn z_reply_keyexpr_default() -> c_int {
     ZC_REPLY_KEYEXPR_MATCHING_QUERY
 }
 
@@ -151,12 +159,15 @@ pub extern "C" fn z_query_consolidation_latest() -> z_query_consolidation_t {
     }
 }
 
-/// zenoh-c `z_get_options_t` (`zenoh_commons.h:801-831`).
+/// zenoh-c `z_get_options_t`.
 ///
 /// Mirrored FIELD FOR FIELD, both feature arms, so rustc computes the size from
 /// the same list the header declares — the discipline R311y538 established for
-/// the publisher options structs, and the reason this type is 56 bytes on the
-/// no-unstable oracle and 72 with `Z_FEATURE_UNSTABLE_API`.
+/// the publisher options structs. That discipline is what made zenoh 1.10.0's
+/// new `cancellation_token` a one-line addition rather than a re-derived
+/// literal, and the size is deliberately not restated here: a transcribed one
+/// is what Layer C1cc's footprint leg exists to catch, and it caught the two
+/// siblings of this struct at that version bump.
 #[repr(C)]
 pub struct z_get_options_t {
     /// Reply target hint. CARRIED.
@@ -186,11 +197,22 @@ pub struct z_get_options_t {
     /// Querier source info — unstable-only. R311y563: READ and CONSUMED,
     /// stamped onto the outbound Query body's source_info ext.
     #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
-    pub source_info: *mut crate::source_info::z_moved_source_info_t,
+    pub source_info: *const crate::source_info::z_source_info_t,
     /// Query attachment. CARRIED — consumed by [`z_get`].
     pub attachment: *mut z_moved_bytes_t,
     /// Timeout in milliseconds. CARRIED.
     pub timeout_ms: u64,
+    /// Cancellation token — unstable-only, and NEW at zenoh 1.10.0
+    /// (`z_moved_cancellation_token_t *` in upstream's header). IGNORED: this
+    /// slice declares no cancellation-token family, so there is nothing a
+    /// caller could construct to put here, and the field exists to keep the
+    /// struct's FOOTPRINT and the offsets before it right. `*mut c_void`
+    /// rather than a typed pointer for exactly that reason — inventing a
+    /// `z_moved_cancellation_token_t` here would declare a type whose eleven
+    /// upstream functions are eleven link errors, which is the census's
+    /// question and not this one.
+    #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+    pub cancellation_token: *mut core::ffi::c_void,
 }
 
 /// The default target (zenoh-c `z_query_target_default`).
@@ -243,6 +265,9 @@ pub unsafe extern "C" fn z_get_options_default(this_: *mut z_get_options_t) {
             // 0 means "use the default", not "never expire" — the runtime
             // resolves it, exactly as upstream does.
             timeout_ms: 0,
+            // Null, which is what upstream's own default writes: no token.
+            #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+            cancellation_token: std::ptr::null_mut(),
         }
     };
 }
@@ -1102,7 +1127,7 @@ unsafe fn get_options(options: *mut z_get_options_t) -> QueryOptions {
     // `#[cfg]` in the middle of an expression cannot do.
     #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
     // SAFETY: the caller's contract.
-    let taken_source_info = unsafe { crate::source_info::take_moved_source_info(o.source_info) };
+    let taken_source_info = unsafe { crate::source_info::borrowed_source_info(o.source_info) };
     #[cfg(feature = "zenoh-c-no-unstable-api")]
     let taken_source_info: Option<wz_runtime_tokio::sample::SourceInfo> = None;
     if let Some(info) = taken_source_info {
@@ -1365,6 +1390,8 @@ mod tests {
             source_info: std::ptr::null_mut(),
             attachment: std::ptr::null_mut(),
             timeout_ms: 0,
+            #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+            cancellation_token: std::ptr::null_mut(),
         };
         // No encoding set: the slot stays empty, so the assertion below cannot
         // pass on a build that hard-codes one.
@@ -1440,6 +1467,8 @@ mod tests {
             source_info: std::ptr::null_mut(),
             attachment: std::ptr::null_mut(),
             timeout_ms: 0,
+            #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+            cancellation_token: std::ptr::null_mut(),
         };
         // SAFETY: a live local.
         let resolved = unsafe { get_options(&mut opts) };
@@ -1486,9 +1515,15 @@ mod tests {
             source_info: std::ptr::null_mut(),
             attachment: std::ptr::null_mut(),
             timeout_ms: 99,
+            // Non-null, so `z_get_options_default` writing the null back is a
+            // real observation rather than a value that was already there.
+            #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+            cancellation_token: 99 as *mut core::ffi::c_void,
         };
         // SAFETY: `opts` is a live local.
         unsafe { z_get_options_default(&mut opts) };
+        #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+        assert!(opts.cancellation_token.is_null());
         assert_eq!(opts.target, Z_QUERY_TARGET_BEST_MATCHING);
         assert_eq!(opts.consolidation.mode, Z_CONSOLIDATION_MODE_AUTO);
         assert_eq!(opts.timeout_ms, 0);

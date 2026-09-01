@@ -179,7 +179,7 @@ pub unsafe extern "C" fn ze_querying_subscriber_options_default(
         (*this_).query_selector = std::ptr::null();
         (*this_).query_target = crate::get::z_query_target_default();
         (*this_).query_consolidation = crate::get::z_query_consolidation_none();
-        (*this_).query_accept_replies = crate::get::zc_reply_keyexpr_default();
+        (*this_).query_accept_replies = crate::get::z_reply_keyexpr_default();
         (*this_).query_timeout_ms = 0;
     }
 }

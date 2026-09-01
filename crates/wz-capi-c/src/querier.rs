@@ -103,8 +103,7 @@ pub unsafe extern "C" fn z_querier_options_default(this_: *mut z_querier_options
     };
 }
 
-/// zenoh-c `z_querier_get_options_t` (`zenoh_commons.h:993-1006`) — 24 bytes on
-/// the no-unstable oracle, 32 with `Z_FEATURE_UNSTABLE_API`.
+/// zenoh-c `z_querier_get_options_t`, mirrored field for field on both arms.
 #[repr(C)]
 pub struct z_querier_get_options_t {
     /// Query VALUE payload. CARRIED — consumed by [`z_querier_get`].
@@ -115,9 +114,13 @@ pub struct z_querier_get_options_t {
     /// Querier source info — unstable-only. R311y563: READ and CONSUMED,
     /// stamped onto the outbound Query body's source_info ext.
     #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
-    pub source_info: *mut crate::source_info::z_moved_source_info_t,
+    pub source_info: *const crate::source_info::z_source_info_t,
     /// Query attachment. CARRIED — consumed by [`z_querier_get`].
     pub attachment: *mut z_moved_bytes_t,
+    /// Cancellation token — unstable-only, NEW at zenoh 1.10.0. IGNORED, for
+    /// the reason given on [`crate::get::z_get_options_t`]'s copy.
+    #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+    pub cancellation_token: *mut core::ffi::c_void,
 }
 
 /// Fill default per-get querier options (zenoh-c
@@ -138,6 +141,9 @@ pub unsafe extern "C" fn z_querier_get_options_default(this_: *mut z_querier_get
             #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
             source_info: std::ptr::null_mut(),
             attachment: std::ptr::null_mut(),
+            // Null, which is what upstream's own default writes: no token.
+            #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+            cancellation_token: std::ptr::null_mut(),
         }
     };
 }
@@ -159,7 +165,7 @@ unsafe fn querier_get_source_info(
     options: *mut z_querier_get_options_t,
 ) -> Option<wz_runtime_tokio::sample::SourceInfo> {
     // SAFETY: the caller's contract.
-    unsafe { crate::source_info::take_moved_source_info((*options).source_info) }
+    unsafe { crate::source_info::borrowed_source_info((*options).source_info) }
 }
 
 /// The no-unstable arm: the field does not exist, so the answer is always
@@ -613,13 +619,17 @@ mod tests {
             payload: 1 as *mut z_moved_bytes_t,
             encoding: 1 as *mut crate::abi::z_moved_encoding_t,
             #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
-            source_info: 1 as *mut crate::source_info::z_moved_source_info_t,
+            source_info: 1 as *const crate::source_info::z_source_info_t,
             attachment: 1 as *mut z_moved_bytes_t,
+            #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+            cancellation_token: 1 as *mut core::ffi::c_void,
         };
         // SAFETY: live locals.
         unsafe { z_querier_get_options_default(&mut get_opts) };
         assert!(get_opts.payload.is_null());
         assert!(get_opts.attachment.is_null());
+        #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+        assert!(get_opts.cancellation_token.is_null());
     }
 
     /// Every export answers a NULL without dereferencing it.

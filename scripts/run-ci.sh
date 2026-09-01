@@ -2445,6 +2445,17 @@ PY
     # `.githooks/pre-push`, which is what makes it the LOCAL gate item 224 asks
     # for -- this lane is the hosted half.
     python3 scripts/lib/config_key_fixture_gate.py || return 1
+    # R2239 (open-debt item 586) — the ABI-provenance gate's OWN soundness.
+    #
+    # Its `--check` half needs zenoh-c's source checkout and the four generator
+    # tables, which only the §5.27 api-compat-c job provisions, so that half
+    # runs there. The selftest needs nothing on disk and is what keeps the gate
+    # from going quietly vacuous between those runs: its fixture is the shape
+    # the crate ACTUALLY had — `z_owned_reply_err_t` composed without the
+    # unstable term that zenoh 1.10.0's `ReplyError` third field added — plus
+    # the four population-zero shapes (empty origin table, an upstream source
+    # declaring nothing, tables in which nothing moves, three tables of four).
+    python3 scripts/lib/capi_c_abi_provenance.py --selftest || return 1
     # R2142 (open-debt item 225) — WHICH axes of the scouting socket config can
     # move, and which are witnessed BOTH-ENDED. Here for the same reason as the
     # gate above: the whole population is on disk — the scalar parameters of
@@ -15490,6 +15501,11 @@ layer_c1cc_api_compat_c() {
     # provisions it.
     if [[ -n "${WZ_C1CC_OPAQUE_ARMS:-}" ]]; then
         bash scripts/check-capi-c-opaque-arms.sh || return 1
+        # R2239 (open-debt item 586) — WHY each of those numbers is that number.
+        # Run HERE and not on its own because the script above is what leaves
+        # the four generator tables on disk, and this gate refuses a partial
+        # read of them: the moving-type population is derived from all four.
+        python3 scripts/lib/capi_c_abi_provenance.py || return 1
     fi
 }
 
