@@ -52,6 +52,38 @@ BUILD="$ROOT/target/zenoh-c-$ARM-build"
 
 say() { printf '[install-zenoh-c-arm %s] %s\n' "$ARM" "$*"; }
 
+# ─── the VERSION an install carries, and the version its SOURCE says ─────────
+#
+# R2256 (open-debt item 594). The already-installed check below verified the
+# ARM and nothing else, so moving the source pin left every previously built
+# prefix in place and every consumer pointed at a build of the OLD upstream.
+# Measured when this was written: `target/zenoh-c-unstable` and
+# `target/zenoh-c-nounstable-shm` were 1.5.0 builds while `$REF` was 1.10.0,
+# and three of the four rows in `zenoh_c_abi_symbol_census.rs::BASELINES` still
+# carried 1.5.0 numbers because of it.
+#
+# `install-zenoh-c.sh` -- the OTHER installer, the one that unpacks upstream's
+# published archive -- has asserted its install's version since it was written,
+# and the census's doc comment points at that one. This script builds from
+# source and never had the equivalent, so the arms it owns were the three that
+# drifted. Same rule, both routes, now.
+#
+# Neither side is a constant written here. The install states its version in
+# `zenoh_configure.h`, the source states its own in `version.txt`, and the
+# check is that they agree -- so the pin is wherever the operator points `$REF`
+# and there is no third place to drift.
+_installed_version() {
+    local h="$1/include/zenoh_configure.h"
+    [[ -f "$h" ]] || return 1
+    sed -n 's/^#define ZENOH_C "\(.*\)"$/\1/p' "$h" | head -1
+}
+
+_source_version() {
+    local v="$REF/version.txt"
+    [[ -f "$v" ]] || return 1
+    tr -d '[:space:]' < "$v"
+}
+
 # The arm NAMES are the shared resolver's, not a second list. Spelling them
 # again here is how the two would come to disagree about what `nounstable-shm`
 # means, and the resolver already exists precisely because a guessed arm was a
@@ -80,7 +112,33 @@ if [[ -f "$PREFIX/include/zenoh.h" && -f "$PREFIX/lib/libzenohc.so" ]]; then
         say "      not '$ARM'. Remove it and re-run, or pass a different prefix."
         exit 1
     fi
-    say "already installed at $PREFIX (verified: $got)"
+    # R2256 — and it must be the version the SOURCE is at. Without this the
+    # prefix survives a pin move and every consumer measures the old upstream
+    # while believing it measured the new one. An unreadable version on either
+    # side is a FAIL, not a pass: a check that cannot read its input must not
+    # report green.
+    inst="$(_installed_version "$PREFIX" || true)"
+    want="$(_source_version || true)"
+    if [[ -z "$want" ]]; then
+        say "FAIL: $REF/version.txt is absent or empty, so the version this"
+        say "      install should carry cannot be established. Point"
+        say "      WZ_ZENOH_C_REF at a zenoh-c checkout."
+        exit 1
+    fi
+    if [[ -z "$inst" ]]; then
+        say "FAIL: $PREFIX has no readable version in"
+        say "      include/zenoh_configure.h, so it cannot be told apart from a"
+        say "      build of another upstream. Remove it and re-run."
+        exit 1
+    fi
+    if [[ "$inst" != "$want" ]]; then
+        say "FAIL: $PREFIX is a $inst build and $REF is at $want. Moving the"
+        say "      source pin does not move an installed artifact, so this"
+        say "      prefix would answer for the wrong upstream. Remove it and"
+        say "      re-run:  rm -rf $PREFIX $BUILD $SRC"
+        exit 1
+    fi
+    say "already installed at $PREFIX (verified: $got, $inst)"
     exit 0
 fi
 
@@ -157,5 +215,18 @@ if [[ "$got" != "$ARM" ]]; then
     exit 1
 fi
 
-say "installed: $PREFIX (verified: $got)"
+# R2256 — the freshly built artifact must carry its source's version too. The
+# already-installed path above catches a stale prefix; this catches a build that
+# somehow produced a different one, so the same rule holds on both routes into
+# a usable oracle rather than only on the cheap one.
+inst="$(_installed_version "$PREFIX" || true)"
+want="$(_source_version || true)"
+if [[ -z "$inst" || -z "$want" || "$inst" != "$want" ]]; then
+    say "FAIL: the build installed version '${inst:-<unreadable>}' from a source"
+    say "      at '${want:-<unreadable>}'. Those must agree; an oracle that does"
+    say "      not say which upstream it is cannot bound anything."
+    exit 1
+fi
+
+say "installed: $PREFIX (verified: $got, $inst)"
 say "point a lane at it with WZ_ZENOH_C_PREFIX=$PREFIX"

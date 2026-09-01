@@ -140,9 +140,15 @@ use wz_integration_tests::common::{wz_capi_c_cdylib, zenoh_c_oracle};
 /// re-measure: provisioning a 1.10.0 oracle for an arm whose row says 1.5.0
 /// fails with that sentence.
 const BASELINES: &[(&str, usize, &str)] = &[
-    // `~/.local`, upstream's published standalone archive. Reached ZERO at
-    // R311y568 — against 1.5.0, and no 1.10.0 oracle for this arm exists yet.
-    ("nounstable", 0, "1.5.0"),
+    // Reached ZERO at R311y568 against 1.5.0. R2256 re-measured it at 1.10.0
+    // and it is TWO: upstream's no-unstable surface went 568 -> 570 and wz's
+    // stayed at 568.
+    //
+    // ⚠ The provenance this row used to carry — "`~/.local`, upstream's
+    // published standalone archive" — no longer names this arm. That archive is
+    // at 1.10.0 and resolves as `unstable-shm`, so `install-zenoh-c-arm.sh`
+    // building from source is the only route to a `nounstable` oracle now.
+    ("nounstable", 2, "1.10.0"),
     // The arm hosted CI provisions. 83 -> 65 at R311y573 against 1.5.0; 65 ->
     // 189 at R2239, and every one of the 124 is upstream GROWING rather than wz
     // regressing. Re-measured, the remainder is FOUR planes and three strays,
@@ -184,18 +190,44 @@ const BASELINES: &[(&str, usize, &str)] = &[
     //
     // `nounstable-shm` DEFINES exactly what `nounstable` does, so
     // `Z_FEATURE_SHARED_MEMORY` adds no public symbol on its own — upstream
-    // gates the SHM surface behind UNSTABLE as well. The whole 101-symbol
-    // difference between `unstable` and `unstable-shm` is therefore
-    // shared-memory-with-unstable, and the 65 wz is missing is the ALLOCATOR
-    // half of it and nothing else. That is a sharper statement of the same
-    // debt: the gap is not "SHM", it is one plane on one of four arms.
+    // gates the SHM surface behind UNSTABLE as well. At 1.5.0 the whole
+    // 101-symbol difference between `unstable` and `unstable-shm` was therefore
+    // shared-memory-with-unstable, and the 65 wz was missing was the ALLOCATOR
+    // half of it and nothing else: the gap was not "SHM", it was one plane on
+    // one of four arms.
     //
-    // R2239 — that last sentence was true AT 1.5.0 and these two rows are still
-    // its numbers. Both arms' oracles under `target/` are 1.5.0 builds, so
-    // neither has been re-measured at the pin; the version column is what says
-    // so, and provisioning either at 1.10.0 now fails until it is.
-    ("unstable", 0, "1.5.0"),
-    ("nounstable-shm", 0, "1.5.0"),
+    // ⚠ R2256 re-measured that at 1.10.0 and it no longer holds. The
+    // shm-with-unstable plane is 122, and of the 189 wz is missing on this arm
+    // only 86 are SHM-only — 103 are missing from the `unstable` arm as well.
+    // The gap is now FOUR planes on two arms, which the block below the rows
+    // sets out.
+    //
+    // R2239 — that last sentence was true AT 1.5.0. R2256 provisioned all four
+    // arms at 1.10.0 and re-measured, and the shape it describes has MOVED:
+    //
+    //   arm             reference  wz   missing        (1.5.0 was)
+    //   nounstable            570  568        2         568/568/0
+    //   nounstable-shm        570  568        2         568/568/0
+    //   unstable              757  653      104         657/657/0
+    //   unstable-shm          878  689      189         758/693/65
+    //
+    // `nounstable-shm` still DEFINES exactly what `nounstable` does — the set
+    // difference is empty at 1.10.0 too, so upstream still gates its SHM
+    // surface behind UNSTABLE as well.
+    //
+    // ⚠ But the containment claim is GONE: `unstable` is no longer a subset of
+    // `unstable-shm`. One symbol is in the first and not the second at 1.10.0,
+    // where at 1.5.0 the difference ran one way only. The planes are 187
+    // (unstable-only) and 122 (shm-with-unstable).
+    //
+    // And the 189 is not "the allocator half and nothing else" any more: 103 of
+    // it is missing from the `unstable` arm too — the LINK (25), TRANSPORT (19),
+    // closure (18), internal-check (23) and cancellation-token (7) planes, none
+    // of which is about shared memory. Only 86 are SHM-only. Three whole planes
+    // that did not exist at 1.5.0 are what grew, which is why every one of these
+    // numbers moved and why the version column exists.
+    ("unstable", 104, "1.10.0"),
+    ("nounstable-shm", 2, "1.10.0"),
 ];
 
 /// The zenoh-c version an oracle prefix declares, out of its own

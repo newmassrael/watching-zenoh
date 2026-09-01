@@ -20,7 +20,11 @@
 # None of them is a wz dependency, so this script provisions them on demand,
 # mirroring `build-zenohd.sh`'s role for the zenohd oracle.
 #
-# The version is PINNED to the same 1.5.0 the rest of the tree mirrors. A
+# The version is PINNED, and the pin is the `ZENOH_C_VERSION` default below --
+# 1.10.0 as this is written. R2256 found this sentence still saying 1.5.0 long
+# after the constant moved, which is the failure mode a pin written twice
+# always has: the reader believes the prose and the script obeys the constant.
+# Do not restate the number here again; the assertion at the bottom reads it. A
 # different zenoh-c is not a worse oracle, it is a DIFFERENT ABI — `zenoh_opaque.h`
 # is generated per version and per `Z_FEATURE_*` set, and Layer C1cc's layout leg
 # compares wz's footprints against whatever is installed. So the pin is asserted
