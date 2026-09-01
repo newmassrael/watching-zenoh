@@ -220,7 +220,15 @@ const BASELINES: &[(&str, usize, &str)] = &[
     // were aligned inside the segment and arbitrary in memory (measured:
     // `addr % 64 == 48`). Segments are page-aligned now, which is what
     // upstream's `mmap`ed ones give for free.
-    ("unstable-shm", 73, "1.10.0"),
+    // R2265 lowered this 73 -> 51: the LAYOUT family, twenty-two functions over
+    // ONE type. `z_owned_alloc_layout_t` is a typedef of
+    // `z_owned_precomputed_layout_t` upstream, so wz typedefs it too and every
+    // `z_alloc_layout_*` delegates to its `z_precomputed_layout_*` twin — the
+    // census lists two family names and there is one implementation.
+    //
+    // ⚠ The two `_async` spellings are NOT here: they take
+    // `zc_threadsafe_context_t`, which this crate does not declare.
+    ("unstable-shm", 51, "1.10.0"),
     // R311y614 — the two arms that had NO oracle on any machine, and therefore
     // no row: the gate hard-FAILED on them rather than guessing a ceiling from
     // a neighbour. `scripts/install-zenoh-c-arm.sh` builds any of the four, so

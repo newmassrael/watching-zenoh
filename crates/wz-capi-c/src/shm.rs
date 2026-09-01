@@ -429,6 +429,26 @@ define_shm_opaque!(
     MEMORY_LAYOUT_SIZE
 );
 
+/// zenoh-c `z_owned_precomputed_layout_t` (`zenoh_opaque.h`: `ALIGN(8) uint8_t
+/// _0[40]`) — MEASURED off the shm-arm header.
+const PRECOMPUTED_LAYOUT_SIZE: usize = 40;
+
+define_shm_opaque!(
+    z_owned_precomputed_layout_t,
+    z_loaned_precomputed_layout_t,
+    z_moved_precomputed_layout_t,
+    PRECOMPUTED_LAYOUT_SIZE
+);
+
+/// zenoh-c makes `z_owned_alloc_layout_t` a TYPEDEF of
+/// `z_owned_precomputed_layout_t`, so wz does the same rather than declaring a
+/// second type that would have to be kept identical by hand.
+pub type z_owned_alloc_layout_t = z_owned_precomputed_layout_t;
+/// See [`z_owned_alloc_layout_t`].
+pub type z_loaned_alloc_layout_t = z_loaned_precomputed_layout_t;
+/// See [`z_owned_alloc_layout_t`].
+pub type z_moved_alloc_layout_t = z_moved_precomputed_layout_t;
+
 define_shm_opaque!(z_owned_shm_t, z_loaned_shm_t, z_moved_shm_t, SHM_SIZE);
 define_shm_opaque!(
     z_owned_shm_mut_t,
@@ -735,6 +755,424 @@ pub unsafe extern "C" fn z_shm_provider_alloc_gc_defrag_blocking(
         // SAFETY: the caller's contract, delegated.
         unsafe { provider_alloc(out_result, provider, size, ALIGN_BYTE, true) };
     });
+}
+
+// ---------------------------------------------------------------------------
+// the PRECOMPUTED LAYOUT — R2265 (open-debt item 607)
+// ---------------------------------------------------------------------------
+//
+// A layout BOUND TO A PROVIDER: `(provider, size, alignment)` decided once and
+// allocated from many times. `z_memory_layout_t` (R2263) is the unbound half —
+// a `(size, alignment)` pair with no provider — and this is what upstream hands
+// a program that wants to skip re-deriving the layout on every allocation.
+//
+// ⛔ `z_owned_alloc_layout_t` IS `z_owned_precomputed_layout_t`. Upstream makes
+// the first a `typedef` of the second (`zenoh_opaque.h`), so the twenty-two
+// functions the census lists under two family names are ONE type under two
+// spellings, and every `z_alloc_layout_*` below delegates to its
+// `z_precomputed_layout_*` twin rather than reimplementing it. A reader who
+// took the census grouping for two planes would build the same thing twice.
+//
+// ⚠ The result type is `z_buf_alloc_result_t`, NOT the
+// `z_buf_layout_alloc_result_t` the provider entry points fill. That is
+// upstream's own distinction and it is load-bearing: a precomputed layout was
+// already validated when it was built, so an allocation through it can fail to
+// ALLOCATE but can no longer fail to LAYOUT — which is exactly the arm the
+// narrower result type drops.
+
+/// What an owned precomputed layout's handle points at.
+struct PrecomputedLayoutState {
+    segment: Arc<Segment>,
+    size: usize,
+    alignment: z_alloc_alignment_t,
+}
+
+/// Borrow the state behind a loaned precomputed layout.
+///
+/// # Safety
+/// `this_` must be null or a live loaned layout whose handle this crate minted.
+#[inline]
+unsafe fn precomputed_state<'a>(
+    this_: *const z_loaned_precomputed_layout_t,
+) -> Option<&'a PrecomputedLayoutState> {
+    if this_.is_null() {
+        return None;
+    }
+    // SAFETY: the caller's contract.
+    let handle = unsafe { (*this_).handle };
+    if handle.is_null() {
+        return None;
+    }
+    // SAFETY: a live `Box<PrecomputedLayoutState>` this module leaked.
+    Some(unsafe { &*(handle as *const PrecomputedLayoutState) })
+}
+
+/// Build a layout bound to `provider`, shared by all four constructor names.
+///
+/// # Safety
+/// `this_` must be null or writable; `provider` null or a live loaned provider.
+unsafe fn precomputed_new(
+    this_: *mut z_owned_precomputed_layout_t,
+    provider: *const z_loaned_shm_provider_t,
+    size: usize,
+    alignment: z_alloc_alignment_t,
+) -> ZResult {
+    if this_.is_null() {
+        return Z_ENULL;
+    }
+    // Gravestone first, so a refusal never leaves the caller's stack value.
+    // SAFETY: the caller's contract.
+    unsafe { *this_ = z_owned_precomputed_layout_t::null_value() };
+    // SAFETY: the caller's contract, delegated.
+    let Some(segment) = (unsafe { provider_segment(provider) }) else {
+        return Z_ENULL;
+    };
+    // The SAME two refusals `z_memory_layout_new` makes, and for the same
+    // reason: a layout is a precondition, so a nonsense one must not become an
+    // allocation failure later that cannot say what was wrong.
+    if size == 0 || usize::from(alignment.pow) >= usize::BITS as usize {
+        return Z_EINVAL;
+    }
+    let state = PrecomputedLayoutState {
+        segment: segment.clone(),
+        size,
+        alignment,
+    };
+    let handle = Box::into_raw(Box::new(state)) as Handle;
+    // SAFETY: the caller's contract.
+    unsafe { *this_ = z_owned_precomputed_layout_t::from_handle(handle) };
+    Z_OK
+}
+
+/// Allocate through a precomputed layout, shared by all ten alloc spellings.
+///
+/// # Safety
+/// `out_result` must be null or writable; `layout` null or a live loaned layout.
+unsafe fn precomputed_alloc(
+    out_result: *mut z_buf_alloc_result_t,
+    layout: *const z_loaned_precomputed_layout_t,
+    blocking: bool,
+) {
+    if out_result.is_null() {
+        return;
+    }
+    // The failure shape first, as `provider_alloc` does and for the same
+    // reason — the C side hands in an uninitialised stack struct.
+    // SAFETY: the caller's contract.
+    unsafe {
+        (*out_result).status = ZC_BUF_ALLOC_STATUS_ALLOC_ERROR;
+        (*out_result).buf = z_owned_shm_mut_t::null_value();
+        (*out_result).error = Z_ALLOC_ERROR_OTHER;
+    }
+    // SAFETY: the caller's contract, delegated.
+    let Some(state) = (unsafe { precomputed_state(layout) }) else {
+        return;
+    };
+    // Allocate through the PROVIDER path, so there is one allocator and one
+    // blocking policy rather than a second copy that could drift from it. The
+    // wider result is then narrowed: a layout-error arm cannot be reached from
+    // here, because `precomputed_new` refused those inputs when the layout was
+    // built.
+    let mut wide = z_buf_layout_alloc_result_t {
+        status: ZC_BUF_LAYOUT_ALLOC_STATUS_ALLOC_ERROR,
+        buf: z_owned_shm_mut_t::null_value(),
+        alloc_error: Z_ALLOC_ERROR_OTHER,
+        layout_error: Z_LAYOUT_ERROR_INCORRECT_LAYOUT_ARGS,
+    };
+    let provider = z_owned_shm_provider_t::from_handle(Box::into_raw(Box::new(
+        state.segment.clone(),
+    )) as Handle);
+    // SAFETY: `wide` is a live local and `provider` a live owned provider.
+    unsafe {
+        provider_alloc(
+            &mut wide,
+            z_shm_provider_loan(&provider),
+            state.size,
+            state.alignment,
+            blocking,
+        )
+    };
+    let mut moved = z_moved_shm_provider_t { _this: provider };
+    // SAFETY: dropped exactly once; the segment itself is kept alive by the
+    // layout's own `Arc`.
+    unsafe { z_shm_provider_drop(&mut moved) };
+
+    if wide.status == ZC_BUF_LAYOUT_ALLOC_STATUS_OK {
+        // SAFETY: `out_result` was checked non-null above.
+        unsafe {
+            (*out_result).status = ZC_BUF_ALLOC_STATUS_OK;
+            (*out_result).buf = wide.buf;
+        }
+    } else {
+        // SAFETY: as above.
+        unsafe { (*out_result).error = wide.alloc_error };
+    }
+}
+
+/// Emit one alloc spelling for each of the two family names.
+macro_rules! precomputed_alloc_spelling {
+    ($precomputed:ident, $alloc_layout:ident, $blocking:expr, $what:literal) => {
+        #[doc = concat!("Allocate through a precomputed layout, ", $what, " (zenoh-c `")]
+        #[doc = stringify!($precomputed)]
+        /// `).
+        ///
+        /// # Safety
+        /// `out_result` must be null or writable; `layout` null or live.
+        #[no_mangle]
+        pub unsafe extern "C" fn $precomputed(
+            out_result: *mut z_buf_alloc_result_t,
+            layout: *const z_loaned_precomputed_layout_t,
+        ) {
+            guard_val((), || {
+                // SAFETY: the caller's contract, delegated.
+                unsafe { precomputed_alloc(out_result, layout, $blocking) };
+            });
+        }
+
+        #[doc = concat!("The `alloc_layout` spelling of [`", stringify!($precomputed), "`] (zenoh-c `")]
+        #[doc = stringify!($alloc_layout)]
+        /// `).
+        ///
+        /// Upstream typedefs the two layout types together, so this is the same
+        /// function under the name the older API used.
+        ///
+        /// # Safety
+        /// As its twin.
+        #[no_mangle]
+        pub unsafe extern "C" fn $alloc_layout(
+            out_result: *mut z_buf_alloc_result_t,
+            layout: *const z_loaned_alloc_layout_t,
+        ) {
+            guard_val((), || {
+                // SAFETY: the caller's contract, delegated.
+                unsafe { precomputed_alloc(out_result, layout, $blocking) };
+            });
+        }
+    };
+}
+
+precomputed_alloc_spelling!(
+    z_precomputed_layout_alloc,
+    z_alloc_layout_alloc,
+    false,
+    "failing rather than waiting"
+);
+precomputed_alloc_spelling!(
+    z_precomputed_layout_alloc_gc,
+    z_alloc_layout_alloc_gc,
+    false,
+    "reclaiming first"
+);
+precomputed_alloc_spelling!(
+    z_precomputed_layout_alloc_gc_defrag,
+    z_alloc_layout_alloc_gc_defrag,
+    false,
+    "reclaiming and defragmenting"
+);
+precomputed_alloc_spelling!(
+    z_precomputed_layout_alloc_gc_defrag_blocking,
+    z_alloc_layout_alloc_gc_defrag_blocking,
+    true,
+    "blocking rather than failing"
+);
+precomputed_alloc_spelling!(
+    z_precomputed_layout_alloc_gc_defrag_dealloc,
+    z_alloc_layout_alloc_gc_defrag_dealloc,
+    false,
+    "with the third reclaim step wz has nothing to take"
+);
+
+/// Build a precomputed layout at the provider's default alignment (zenoh-c
+/// `z_alloc_layout_new`).
+///
+/// # Safety
+/// `this_` must be null or writable; `provider` null or live.
+#[no_mangle]
+pub unsafe extern "C" fn z_alloc_layout_new(
+    this_: *mut z_owned_alloc_layout_t,
+    provider: *const z_loaned_shm_provider_t,
+    size: usize,
+) -> ZResult {
+    guarded(|| {
+        // SAFETY: the caller's contract, delegated.
+        unsafe { precomputed_new(this_, provider, size, ALIGN_BYTE) }
+    })
+}
+
+/// Build a precomputed layout at the caller's alignment (zenoh-c
+/// `z_alloc_layout_with_alignment_new`).
+///
+/// # Safety
+/// As [`z_alloc_layout_new`].
+#[no_mangle]
+pub unsafe extern "C" fn z_alloc_layout_with_alignment_new(
+    this_: *mut z_owned_alloc_layout_t,
+    provider: *const z_loaned_shm_provider_t,
+    size: usize,
+    alignment: z_alloc_alignment_t,
+) -> ZResult {
+    guarded(|| {
+        // SAFETY: the caller's contract, delegated.
+        unsafe { precomputed_new(this_, provider, size, alignment) }
+    })
+}
+
+/// Build a precomputed layout from a provider (zenoh-c
+/// `z_shm_provider_alloc_layout`) — the provider-side spelling of
+/// [`z_alloc_layout_new`].
+///
+/// # Safety
+/// As [`z_alloc_layout_new`].
+#[no_mangle]
+pub unsafe extern "C" fn z_shm_provider_alloc_layout(
+    this_: *mut z_owned_precomputed_layout_t,
+    provider: *const z_loaned_shm_provider_t,
+    size: usize,
+) -> ZResult {
+    guarded(|| {
+        // SAFETY: the caller's contract, delegated.
+        unsafe { precomputed_new(this_, provider, size, ALIGN_BYTE) }
+    })
+}
+
+/// The aligned twin of [`z_shm_provider_alloc_layout`] (zenoh-c
+/// `z_shm_provider_alloc_layout_aligned`).
+///
+/// # Safety
+/// As [`z_alloc_layout_new`].
+#[no_mangle]
+pub unsafe extern "C" fn z_shm_provider_alloc_layout_aligned(
+    this_: *mut z_owned_precomputed_layout_t,
+    provider: *const z_loaned_shm_provider_t,
+    size: usize,
+    alignment: z_alloc_alignment_t,
+) -> ZResult {
+    guarded(|| {
+        // SAFETY: the caller's contract, delegated.
+        unsafe { precomputed_new(this_, provider, size, alignment) }
+    })
+}
+
+/// Borrow an owned precomputed layout (zenoh-c `z_precomputed_layout_loan`).
+///
+/// # Safety
+/// `this_` must be null or a valid owned layout.
+#[no_mangle]
+pub unsafe extern "C" fn z_precomputed_layout_loan(
+    this_: *const z_owned_precomputed_layout_t,
+) -> *const z_loaned_precomputed_layout_t {
+    this_.cast()
+}
+
+/// The `alloc_layout` spelling of [`z_precomputed_layout_loan`] (zenoh-c
+/// `z_alloc_layout_loan`).
+///
+/// # Safety
+/// As its twin.
+#[no_mangle]
+pub unsafe extern "C" fn z_alloc_layout_loan(
+    this_: *const z_owned_alloc_layout_t,
+) -> *const z_loaned_alloc_layout_t {
+    this_.cast()
+}
+
+/// Free a precomputed layout, shared by both drop names.
+///
+/// # Safety
+/// `this_` must be null or a valid moved layout whose handle is live.
+#[inline]
+unsafe fn precomputed_drop(this_: *mut z_moved_precomputed_layout_t) {
+    if this_.is_null() {
+        return;
+    }
+    // SAFETY: the caller's contract.
+    let taken = unsafe {
+        std::mem::replace(
+            &mut (*this_)._this,
+            z_owned_precomputed_layout_t::null_value(),
+        )
+    };
+    if !taken.handle.is_null() {
+        // SAFETY: a `Box<PrecomputedLayoutState>` this module leaked, dropped
+        // once because the source was gravestoned above.
+        drop(unsafe { Box::from_raw(taken.handle as *mut PrecomputedLayoutState) });
+    }
+}
+
+/// Free a precomputed layout (zenoh-c `z_precomputed_layout_drop`).
+///
+/// # Safety
+/// `this_` must be null or a valid moved layout.
+#[no_mangle]
+pub unsafe extern "C" fn z_precomputed_layout_drop(this_: *mut z_moved_precomputed_layout_t) {
+    guard_val((), || {
+        // SAFETY: the caller's contract, delegated.
+        unsafe { precomputed_drop(this_) };
+    });
+}
+
+/// The `alloc_layout` spelling of [`z_precomputed_layout_drop`] (zenoh-c
+/// `z_alloc_layout_drop`).
+///
+/// # Safety
+/// As its twin.
+#[no_mangle]
+pub unsafe extern "C" fn z_alloc_layout_drop(this_: *mut z_moved_alloc_layout_t) {
+    guard_val((), || {
+        // SAFETY: the caller's contract, delegated.
+        unsafe { precomputed_drop(this_) };
+    });
+}
+
+/// `true` iff the owned layout holds a live handle (zenoh-c
+/// `z_internal_precomputed_layout_check`).
+///
+/// # Safety
+/// `this_` must be null or a valid owned layout.
+#[no_mangle]
+pub unsafe extern "C" fn z_internal_precomputed_layout_check(
+    this_: *const z_owned_precomputed_layout_t,
+) -> bool {
+    guard_val(false, || {
+        // SAFETY: the caller's contract.
+        !this_.is_null() && !unsafe { (*this_).handle }.is_null()
+    })
+}
+
+/// The `alloc_layout` spelling (zenoh-c `z_internal_alloc_layout_check`).
+///
+/// # Safety
+/// As its twin.
+#[no_mangle]
+pub unsafe extern "C" fn z_internal_alloc_layout_check(
+    this_: *const z_owned_alloc_layout_t,
+) -> bool {
+    // SAFETY: the caller's contract, delegated.
+    unsafe { z_internal_precomputed_layout_check(this_) }
+}
+
+/// Gravestone an owned layout (zenoh-c `z_internal_precomputed_layout_null`).
+///
+/// # Safety
+/// `this_` must be null or writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_internal_precomputed_layout_null(
+    this_: *mut z_owned_precomputed_layout_t,
+) {
+    if !this_.is_null() {
+        // SAFETY: the caller's contract.
+        unsafe { *this_ = z_owned_precomputed_layout_t::null_value() };
+    }
+}
+
+/// The `alloc_layout` spelling (zenoh-c `z_internal_alloc_layout_null`).
+///
+/// # Safety
+/// As its twin.
+#[no_mangle]
+pub unsafe extern "C" fn z_internal_alloc_layout_null(this_: *mut z_owned_alloc_layout_t) {
+    // SAFETY: the caller's contract, delegated.
+    unsafe { z_internal_precomputed_layout_null(this_) };
 }
 
 // --- R2264 (open-debt item 607): the ALIGNED and DEALLOC spellings ----------
@@ -1646,6 +2084,243 @@ const _: () = {
 };
 
 #[cfg(test)]
+mod precomputed_layout_tests {
+    use super::*;
+
+    /// # Safety
+    /// The returned provider is the caller's to drop.
+    unsafe fn provider(total: usize) -> z_owned_shm_provider_t {
+        let mut p = z_owned_shm_provider_t::null_value();
+        assert_eq!(z_shm_provider_default_new(&mut p, total), Z_OK);
+        p
+    }
+
+    /// ⛔⛔ SKEW THE SEGMENT FIRST, or the alignment assertion is VACUOUS.
+    ///
+    /// Since R2264 a segment's base is page-aligned, so the FIRST allocation
+    /// sits at offset 0 and satisfies every alignment by accident. MEASURED: a
+    /// mutation that made `precomputed_new` store `ALIGN_BYTE` instead of the
+    /// caller's alignment PASSED the first draft of these tests. Claiming one
+    /// odd byte first moves the free list off the boundary, so the next
+    /// allocation is aligned only if the code aligns it.
+    ///
+    /// The returned buffer must be held for the duration — dropping it returns
+    /// the byte and re-coalesces the free list.
+    ///
+    /// # Safety
+    /// `p` must be a live owned provider.
+    pub(super) unsafe fn skew(p: &z_owned_shm_provider_t) -> z_owned_shm_mut_t {
+        let mut out: z_buf_layout_alloc_result_t = unsafe { std::mem::zeroed() };
+        // SAFETY: `out` is writable and `p` is live.
+        unsafe { z_shm_provider_alloc(&mut out, z_shm_provider_loan(p), 1) };
+        assert_eq!(
+            out.status, ZC_BUF_LAYOUT_ALLOC_STATUS_OK,
+            "the skew allocation must succeed or the fixture proves nothing"
+        );
+        out.buf
+    }
+
+    /// R2265 — a layout allocates at the size AND alignment it was built with,
+    /// through every one of the ten alloc spellings.
+    ///
+    /// ⛔ The assertion is on the ADDRESS and the LENGTH, not on the status.
+    /// R2264 measured what a status-only test misses: five aligned entry points
+    /// were green while returning `addr % 64 == 48`. A layout that forgot its
+    /// alignment, or that allocated its provider's default size instead of its
+    /// own, would pass `status == OK` on all ten of these.
+    #[test]
+    fn a_layout_allocates_at_its_own_size_and_alignment() {
+        const POW: u8 = 6;
+        const SIZE: usize = 300;
+        type Alloc =
+            unsafe extern "C" fn(*mut z_buf_alloc_result_t, *const z_loaned_precomputed_layout_t);
+        let spellings: [(&str, Alloc); 10] = [
+            ("precomputed_alloc", z_precomputed_layout_alloc),
+            ("precomputed_alloc_gc", z_precomputed_layout_alloc_gc),
+            (
+                "precomputed_alloc_gc_defrag",
+                z_precomputed_layout_alloc_gc_defrag,
+            ),
+            (
+                "precomputed_alloc_gc_defrag_blocking",
+                z_precomputed_layout_alloc_gc_defrag_blocking,
+            ),
+            (
+                "precomputed_alloc_gc_defrag_dealloc",
+                z_precomputed_layout_alloc_gc_defrag_dealloc,
+            ),
+            ("alloc_layout_alloc", z_alloc_layout_alloc),
+            ("alloc_layout_alloc_gc", z_alloc_layout_alloc_gc),
+            (
+                "alloc_layout_alloc_gc_defrag",
+                z_alloc_layout_alloc_gc_defrag,
+            ),
+            (
+                "alloc_layout_alloc_gc_defrag_blocking",
+                z_alloc_layout_alloc_gc_defrag_blocking,
+            ),
+            (
+                "alloc_layout_alloc_gc_defrag_dealloc",
+                z_alloc_layout_alloc_gc_defrag_dealloc,
+            ),
+        ];
+        for (name, f) in spellings {
+            // SAFETY: a live provider this frame owns.
+            let mut p = unsafe { provider(64 * 1024) };
+            // SAFETY: `p` is live; the buffer is held until the end of the
+            // iteration so the free list stays skewed.
+            let skewed = unsafe { skew(&p) };
+            let mut layout = z_owned_precomputed_layout_t::null_value();
+            // SAFETY: `layout` is writable and `p` is live.
+            assert_eq!(
+                unsafe {
+                    z_alloc_layout_with_alignment_new(
+                        &mut layout,
+                        z_shm_provider_loan(&p),
+                        SIZE,
+                        z_alloc_alignment_t { pow: POW },
+                    )
+                },
+                Z_OK,
+                "{name}: the layout must build"
+            );
+            assert!(unsafe { z_internal_precomputed_layout_check(&layout) });
+
+            let mut out: z_buf_alloc_result_t = unsafe { std::mem::zeroed() };
+            // SAFETY: `out` is writable and `layout` is live.
+            unsafe { f(&mut out, z_precomputed_layout_loan(&layout)) };
+            assert_eq!(out.status, ZC_BUF_ALLOC_STATUS_OK, "{name}: must allocate");
+            // SAFETY: the status says the buffer is live.
+            let loaned = unsafe { z_shm_mut_loan(&out.buf) };
+            let data = unsafe { z_shm_mut_data(loaned) };
+            assert!(!data.is_null(), "{name}: OK with no data");
+            assert_eq!(
+                unsafe { z_shm_mut_len(loaned) },
+                SIZE,
+                "{name}: allocated a length that is not the layout's"
+            );
+            assert_eq!(
+                data as usize % (1usize << POW),
+                0,
+                "{name}: the layout's alignment did not reach the allocation"
+            );
+
+            let mut moved = z_moved_shm_mut_t { _this: out.buf };
+            // SAFETY: dropped once.
+            unsafe { z_shm_mut_drop(&mut moved) };
+            let mut moved_skew = z_moved_shm_mut_t { _this: skewed };
+            // SAFETY: dropped once, after the assertions it was holding open.
+            unsafe { z_shm_mut_drop(&mut moved_skew) };
+            let mut moved_l = z_moved_precomputed_layout_t { _this: layout };
+            // SAFETY: as above.
+            unsafe { z_precomputed_layout_drop(&mut moved_l) };
+            assert!(!unsafe { z_internal_precomputed_layout_check(&moved_l._this) });
+            let mut moved_p = z_moved_shm_provider_t { _this: p };
+            // SAFETY: as above.
+            unsafe { z_shm_provider_drop(&mut moved_p) };
+            p = z_owned_shm_provider_t::null_value();
+            let _ = p;
+        }
+    }
+
+    /// A layout OUTLIVES the provider handle it was built from, and still
+    /// allocates.
+    ///
+    /// The layout holds an `Arc<Segment>`, not the provider's box, and this is
+    /// the only assertion that can tell those apart: a layout that kept a raw
+    /// pointer into the provider would allocate fine until the provider was
+    /// dropped and then read freed memory.
+    #[test]
+    fn a_layout_outlives_the_provider_handle() {
+        // SAFETY: a live provider this frame owns.
+        let mut p = unsafe { provider(8192) };
+        let mut layout = z_owned_precomputed_layout_t::null_value();
+        // SAFETY: both are live.
+        assert_eq!(
+            unsafe { z_alloc_layout_new(&mut layout, z_shm_provider_loan(&p), 128) },
+            Z_OK
+        );
+        let mut moved_p = z_moved_shm_provider_t { _this: p };
+        // SAFETY: dropped once; the layout keeps the segment alive.
+        unsafe { z_shm_provider_drop(&mut moved_p) };
+        p = z_owned_shm_provider_t::null_value();
+        let _ = p;
+
+        let mut out: z_buf_alloc_result_t = unsafe { std::mem::zeroed() };
+        // SAFETY: `layout` is still live.
+        unsafe { z_precomputed_layout_alloc(&mut out, z_precomputed_layout_loan(&layout)) };
+        assert_eq!(
+            out.status, ZC_BUF_ALLOC_STATUS_OK,
+            "the layout must still allocate after its provider handle is gone"
+        );
+        let mut moved = z_moved_shm_mut_t { _this: out.buf };
+        // SAFETY: dropped once.
+        unsafe { z_shm_mut_drop(&mut moved) };
+        let mut moved_l = z_moved_precomputed_layout_t { _this: layout };
+        // SAFETY: as above.
+        unsafe { z_precomputed_layout_drop(&mut moved_l) };
+    }
+
+    /// A nonsense layout is refused at construction, and NULL is tolerated
+    /// everywhere.
+    #[test]
+    fn a_nonsense_layout_is_refused_and_null_is_tolerated() {
+        // SAFETY: a live provider this frame owns.
+        let mut p = unsafe { provider(4096) };
+        let mut layout = z_owned_precomputed_layout_t::null_value();
+        assert_eq!(
+            unsafe { z_alloc_layout_new(&mut layout, z_shm_provider_loan(&p), 0) },
+            Z_EINVAL,
+            "a zero-size layout is not a layout"
+        );
+        assert!(!unsafe { z_internal_alloc_layout_check(&layout) });
+        assert_eq!(
+            unsafe {
+                z_alloc_layout_with_alignment_new(
+                    &mut layout,
+                    z_shm_provider_loan(&p),
+                    64,
+                    z_alloc_alignment_t {
+                        pow: usize::BITS as u8,
+                    },
+                )
+            },
+            Z_EINVAL
+        );
+        // A layout with no provider is refused too.
+        assert_eq!(
+            unsafe { z_alloc_layout_new(&mut layout, std::ptr::null(), 64) },
+            Z_ENULL
+        );
+        // CONTROL: the same size against the same provider is accepted.
+        assert_eq!(
+            unsafe { z_alloc_layout_new(&mut layout, z_shm_provider_loan(&p), 64) },
+            Z_OK
+        );
+
+        // NULL everywhere else.
+        assert!(!unsafe { z_internal_precomputed_layout_check(std::ptr::null()) });
+        let mut out: z_buf_alloc_result_t = unsafe { std::mem::zeroed() };
+        unsafe { z_precomputed_layout_alloc(&mut out, std::ptr::null()) };
+        assert_eq!(
+            out.status, ZC_BUF_ALLOC_STATUS_ALLOC_ERROR,
+            "a null layout must leave a well-formed failure, not the caller's stack"
+        );
+        unsafe { z_precomputed_layout_drop(std::ptr::null_mut()) };
+        unsafe { z_alloc_layout_drop(std::ptr::null_mut()) };
+
+        let mut moved_l = z_moved_precomputed_layout_t { _this: layout };
+        // SAFETY: dropped once.
+        unsafe { z_precomputed_layout_drop(&mut moved_l) };
+        let mut moved_p = z_moved_shm_provider_t { _this: p };
+        // SAFETY: as above.
+        unsafe { z_shm_provider_drop(&mut moved_p) };
+        p = z_owned_shm_provider_t::null_value();
+        let _ = p;
+    }
+}
+
+#[cfg(test)]
 mod aligned_alloc_tests {
     use super::*;
 
@@ -1692,6 +2367,13 @@ mod aligned_alloc_tests {
         for (name, f) in spellings {
             // SAFETY: a live provider this frame owns.
             let mut p = unsafe { provider(64 * 1024) };
+            // ⛔ R2265 — SKEW FIRST. R2264 wrote this test when segments were
+            // alignment-1, so a wrong answer showed up as `addr % 64 == 48`.
+            // Page-aligning the segment (the repair R2264 itself made) turned
+            // the FIRST allocation into one that satisfies any alignment by
+            // accident, which would have made this assertion vacuous from the
+            // next round on. Claiming one odd byte first is what keeps it real.
+            let skewed = unsafe { super::precomputed_layout_tests::skew(&p) };
             let mut out: z_buf_layout_alloc_result_t = unsafe { std::mem::zeroed() };
             // SAFETY: `out` is writable and `p` is live.
             unsafe { f(&mut out, z_shm_provider_loan(&p), 128, align) };
@@ -1711,6 +2393,9 @@ mod aligned_alloc_tests {
             let mut moved = z_moved_shm_mut_t { _this: out.buf };
             // SAFETY: dropped once.
             unsafe { z_shm_mut_drop(&mut moved) };
+            let mut moved_skew = z_moved_shm_mut_t { _this: skewed };
+            // SAFETY: as above.
+            unsafe { z_shm_mut_drop(&mut moved_skew) };
             let mut moved_p = z_moved_shm_provider_t { _this: p };
             // SAFETY: as above.
             unsafe { z_shm_provider_drop(&mut moved_p) };
