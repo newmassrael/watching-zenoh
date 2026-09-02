@@ -379,13 +379,6 @@ pub struct SubscriberRegistry<C: SampleSink> {
     /// [`crate::response_sink::DeclareReplySink`].
     #[cfg(feature = "declare-subscriber")]
     pending_sub_interest_replies: BoundedVec<SubInterestReply, { caps::MAX_PENDING_DECLARES }>,
-    /// R311y530 — monotonic source for the wire `DeclSubscriber.id` this
-    /// session answers an AGGREGATE interest with. Non-zero and STABLE per
-    /// registered interest: pico dedups a filter target by `(peer, decl_id)`
-    /// (`net/filtering.c` `_z_filter_target_eq`), so a re-answered interest
-    /// must reuse its id rather than stack a second target.
-    #[cfg(feature = "declare-subscriber")]
-    next_sub_interest_decl_id: u64,
 }
 
 /// R311y530 — whether a session-local subscription `pattern` intersects an
@@ -432,8 +425,37 @@ struct InboundSubInterest {
     /// so a reply carrying a concrete subscription keyexpr matches nothing.
     aggregate: bool,
     /// The `DeclSubscriber.id` this session answers this interest with when the
-    /// reply is aggregate (see `next_sub_interest_decl_id`).
+    /// reply is aggregate. Non-zero and STABLE per registered interest: pico
+    /// dedups a filter target by `(peer, decl_id)` (`net/filtering.c`
+    /// `_z_filter_target_eq`), so a re-answered interest must reuse its id
+    /// rather than stack a second target. R2292 draws it from the registry's
+    /// ONE id counter — see the allocation site for why a second counter was
+    /// a defect rather than a detail.
     aggregate_decl_id: u64,
+    /// R2292 (open-debt item 627) — whether a `DeclSubscriber` carrying
+    /// [`aggregate_decl_id`](Self::aggregate_decl_id) has actually reached the
+    /// wire and has not been retracted since.
+    ///
+    /// It is what makes the retraction retract only what was ANNOUNCED. The
+    /// declare-rollback path unregisters a subscription whose reply was staged
+    /// and then dropped (R2291), so a purely structural "the last match went
+    /// away" rule would emit an `UndeclSubscriber` for an id no peer was ever
+    /// told about. Upstream needs no such flag because its declare and its
+    /// table insert are one transaction; wz stages and drains on two threads,
+    /// so the fact has to be recorded.
+    ///
+    /// Only meaningful when [`aggregate`](Self::aggregate) is set: a
+    /// non-aggregate interest is answered per subscription, and each of those
+    /// replies is retracted by its own subscription's teardown.
+    ///
+    /// GATED AS THE UNION OF ITS CONSUMERS — every one of them is behind
+    /// `declare-undeclare`, because without that feature this session emits no
+    /// `UndeclSubscriber` at all and there is nothing for the flag to arm. A
+    /// `declare-subscriber`-without-`declare-undeclare` build was measured
+    /// dying at `-D dead-code` on Layer C1c, which is the same shape R2290's
+    /// probe fixture died in one round earlier.
+    #[cfg(feature = "declare-undeclare")]
+    announced: bool,
 }
 
 /// R311y530 — one staged item of a session-local subscriber interest-response
@@ -458,6 +480,25 @@ pub enum SubInterestReply {
     /// so the peer's CURRENT interest always resolves.
     Final {
         /// Echoed on the terminator.
+        interest_id: u64,
+    },
+    /// R2292 (open-debt item 627) — retract the AGGREGATE declaration this
+    /// session answered `interest_id` with, because the last local
+    /// subscription it stood for has gone away.
+    ///
+    /// The counterpart of [`Aggregate`](Self::Aggregate), and the only item in
+    /// this enum that is staged by a RETIREMENT rather than by a declaration.
+    /// zenoh emits exactly this transition: its aggregated resource's info is
+    /// `Some` iff at least one simple resource is aggregated into it, and
+    /// `remove_simple_resource` reports the aggregate's own id when that flips
+    /// to `None`, which `maybe_unpropagate_subscriber` turns into an
+    /// `UndeclareSubscriber { id }`
+    /// (`zenoh/src/net/routing/{dispatcher/local_resources.rs:244-275,
+    /// hat/broker/pubsub.rs:115-143}`, 1.10.0).
+    #[cfg(feature = "declare-undeclare")]
+    AggregateRetract {
+        /// Resolves to the interest row holding the decl id, RE-CHECKED at
+        /// drain: what a retraction says has to be true when it is SENT.
         interest_id: u64,
     },
 }
@@ -502,10 +543,6 @@ impl<C: SampleSink> SubscriberRegistry<C> {
             inbound_sub_interests: BoundedVec::new(),
             #[cfg(feature = "declare-subscriber")]
             pending_sub_interest_replies: BoundedVec::new(),
-            // Starts at 1: id 0 is zenoh's "current dump, no future id"
-            // (`make_sub_id`), and reusing it here would collide with that.
-            #[cfg(feature = "declare-subscriber")]
-            next_sub_interest_decl_id: 1,
         }
     }
 
@@ -689,7 +726,102 @@ impl<C: SampleSink> SubscriberRegistry<C> {
     pub fn unregister(&mut self, id: SubscriptionId) -> bool {
         let before = self.subscribers.len();
         self.subscribers.retain(|s| s.id != id);
-        before != self.subscribers.len()
+        let removed = before != self.subscribers.len();
+        // R2292 (open-debt item 627) — an aggregate declaration this session
+        // announced stands for "some local subscription matches your
+        // interest", so the retirement that makes that false has to retract
+        // it. Placed HERE, on the single table-removal path, for the same
+        // reason `stage_future_subscriber_pushes` sits on the single
+        // table-insert path: `retain` above is the only line in this crate
+        // that shrinks `subscribers`, so no retirement route can skip the
+        // retraction.
+        #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
+        if removed {
+            self.stage_emptied_aggregate_retracts();
+        }
+        removed
+    }
+
+    /// R2292 (open-debt item 627) — stage a retraction for every ANNOUNCED
+    /// aggregate declaration that no local subscription stands for any more.
+    ///
+    /// Called from [`unregister`](Self::unregister) after the removal, so
+    /// `any_subscription_matches` already reads the post-removal table: the
+    /// `1 -> 0` transition is the whole trigger, exactly as upstream's
+    /// `Some -> None` on the aggregated resource's info is.
+    ///
+    /// A row that was never announced stages nothing, which is what keeps the
+    /// declare-rollback path silent — it unregisters a subscription whose
+    /// reply was staged and then dropped, so no peer was ever told an id.
+    ///
+    /// ⚠ MEASURED, R2292: the `any_subscription_matches` test here is a
+    /// PRESSURE FILTER, not the correctness guard. Deleting it leaves every
+    /// wire assertion green, because
+    /// [`take_aggregate_retract`](Self::take_aggregate_retract) re-checks the
+    /// same predicate at DRAIN time and that is the one a retraction's
+    /// truthfulness rests on. What deleting it does cost is the staging
+    /// buffer: an unregister that matches no interest would then push one item
+    /// per announced aggregate into a `BoundedVec` only for the drain to throw
+    /// them away. `an_unrelated_unregister_stages_no_aggregate_retraction` is
+    /// the red that keeps this line honest; the wire tests are not.
+    #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
+    fn stage_emptied_aggregate_retracts(&mut self) {
+        let mut hits: BoundedVec<u64, { caps::MAX_INBOUND_SUB_INTERESTS }> = BoundedVec::new();
+        for row in self.inbound_sub_interests.iter() {
+            if row.aggregate
+                && row.announced
+                && !self.any_subscription_matches(Some(row.keyexpr.as_str()))
+                && hits.push(row.interest_id).is_err()
+            {
+                break;
+            }
+        }
+        for interest_id in hits.iter().copied() {
+            let _ = self
+                .pending_sub_interest_replies
+                .push(SubInterestReply::AggregateRetract { interest_id });
+        }
+    }
+
+    /// R2292 (open-debt item 627) — record that the drain actually put a
+    /// `DeclSubscriber` for this interest's AGGREGATE declaration on the wire.
+    ///
+    /// Separate from [`sub_interest_reply`](Self::sub_interest_reply) because
+    /// that one resolves under a shared borrow whose `&str` is still alive
+    /// while the sink encodes; this runs after that borrow has ended.
+    #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
+    pub fn mark_aggregate_announced(&mut self, interest_id: u64) {
+        if let Some(row) = self
+            .inbound_sub_interests
+            .iter_mut()
+            .find(|row| row.interest_id == interest_id && row.aggregate)
+        {
+            row.announced = true;
+        }
+    }
+
+    /// R2292 (open-debt item 627) — resolve a staged
+    /// [`SubInterestReply::AggregateRetract`] to the `UndeclSubscriber.id` the
+    /// sink should emit, or `None` when it must not be emitted after all.
+    ///
+    /// The re-check mirrors the AGGREGATE declare arm's
+    /// (R2290): a subscription declared between the stage and the drain makes
+    /// the aggregate TRUE again, and a retraction announcing otherwise would
+    /// be a lie at the moment it is sent. Clearing `announced` here rather
+    /// than at stage time is what makes the pair idempotent — two staged
+    /// retractions for one interest emit once.
+    #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
+    pub fn take_aggregate_retract(&mut self, interest_id: u64) -> Option<u64> {
+        let idx = self
+            .inbound_sub_interests
+            .iter()
+            .position(|row| row.interest_id == interest_id && row.aggregate && row.announced)?;
+        if self.any_subscription_matches(Some(self.inbound_sub_interests[idx].keyexpr.as_str())) {
+            return None;
+        }
+        let row = &mut self.inbound_sub_interests[idx];
+        row.announced = false;
+        Some(row.aggregate_decl_id)
     }
 
     /// Number of currently-registered subscribers across all keyexpr
@@ -968,8 +1100,22 @@ impl<C: SampleSink> SubscriberRegistry<C> {
                         .push(SubInterestReply::Final { interest_id });
                     return 0;
                 }
-                let decl_id = self.next_sub_interest_decl_id;
-                self.next_sub_interest_decl_id = decl_id.saturating_add(1);
+                // R2292 (open-debt item 627) — ONE id space per session, drawn
+                // from the SAME counter `register_sink` uses for a
+                // `SubscriptionId`. It used to be a second counter that also
+                // started at 1, so a session announced an aggregate reply and
+                // a routed subscriber under the SAME `DeclSubscriber.id`; the
+                // peer's registry is keyed by that id with same-id-replaces,
+                // so it saw one declaration where two were sent. Harmless
+                // while nothing retracted an aggregate id and NOT harmless
+                // once something does — an `UndeclSubscriber(1)` would be
+                // ambiguous. Upstream has no such second counter: zenoh draws
+                // the simple AND the aggregated resource id from one
+                // per-face `next_id`
+                // (`zenoh/src/net/routing/hat/broker/interests.rs:118-130`,
+                // 1.10.0).
+                let decl_id = self.next_id;
+                self.next_id = self.next_id.saturating_add(1);
                 // A full table loses only the FUTURE half for this publisher —
                 // the CURRENT dump below still answers, because it reads the
                 // row we would have pushed only for the aggregate keyexpr, and
@@ -979,6 +1125,8 @@ impl<C: SampleSink> SubscriberRegistry<C> {
                     keyexpr,
                     aggregate,
                     aggregate_decl_id: decl_id,
+                    #[cfg(feature = "declare-undeclare")]
+                    announced: false,
                 });
                 decl_id
             }
@@ -1141,6 +1289,12 @@ impl<C: SampleSink> SubscriberRegistry<C> {
                 .find(|sub| sub.id.0 == *subscription_id)
                 .map(|sub| (sub.id.0, sub.pattern.as_str())),
             SubInterestReply::Final { .. } => None,
+            // R2292 — a retraction is not a reply: it resolves through
+            // `take_aggregate_retract`, which needs `&mut self` to clear the
+            // announced flag. Answering `None` here is the honest projection,
+            // not a skip.
+            #[cfg(feature = "declare-undeclare")]
+            SubInterestReply::AggregateRetract { .. } => None,
         }
     }
 

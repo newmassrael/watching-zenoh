@@ -143,4 +143,16 @@ impl<Q: MulticastReplyEnqueue> crate::response_sink::DeclareReplySink for Multic
             });
         }
     }
+    #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
+    fn send_undeclare_subscriber_reply(&self, subscriber_id: u64) {
+        // Same id-only retraction the unicast sink emits, through this
+        // transport's own enqueue. Infallible where the declare twin is not:
+        // an `UndeclSubscriber` carries no keyexpr, so there is no bounded
+        // field to overflow.
+        self.queue.enqueue(MulticastTxItem::DeclareReply {
+            declare: Box::new(crate::declare_build::build_undeclare_subscriber(
+                subscriber_id,
+            )),
+        });
+    }
 }

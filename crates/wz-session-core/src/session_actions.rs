@@ -1537,6 +1537,15 @@ impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R
             self.send_declare(declare);
         }
     }
+    #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
+    fn send_undeclare_subscriber_reply(&self, subscriber_id: u64) {
+        // The inherent emit a routed subscriber's own teardown uses, reached
+        // with the AGGREGATE decl id instead of a subscription id. One
+        // emitter, so the retraction of an aggregate declaration is
+        // byte-identical to any other id-only `UndeclSubscriber` — and, since
+        // R2292 put both ids in one space, unambiguous on the peer.
+        Self::send_undeclare_subscriber(self, subscriber_id);
+    }
 }
 
 // F3/R311ka — drain target for the registry's staged get

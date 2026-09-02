@@ -6069,6 +6069,196 @@ fn drain_one_drive_iteration(session: &TokioSession) {
     session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&outcome));
 }
 
+/// R2292 (open-debt item 627) — every `DeclSubscriber.id` and
+/// `UndeclSubscriber.id` this session has actually put on the wire, in emit
+/// order, read back by DECODING the recorded frames.
+///
+/// Decoded rather than asked of the registry on purpose: these ids exist to be
+/// the PEER's view of what this session declared, so the peer's own input is
+/// what has to be measured. It is also what lets the tests below DERIVE the
+/// aggregate's id instead of hardcoding one — a literal would pass just as
+/// well if the two id counters were still separate and merely offset.
+#[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
+fn wire_subscriber_declarations(driver: &RecordingLinkDriver) -> (Vec<u64>, Vec<u64>) {
+    let mut declared = Vec::new();
+    let mut undeclared = Vec::new();
+    for idx in 0..driver.frame_count() {
+        let bytes = driver.frame_bytes(idx);
+        let Ok(wz_session_core::inbound::InboundFrame::Frame { payload, .. }) =
+            wz_session_core::inbound::parse_inbound(&bytes)
+        else {
+            continue;
+        };
+        let Ok(messages) = wz_session_core::network_message::parse_frame_payload(&payload) else {
+            continue;
+        };
+        for message in messages {
+            let wz_session_core::network_message::NetworkMessage::Declare(declare) = message else {
+                continue;
+            };
+            match declare.body {
+                wz_codecs::declare::DeclareOwnedVariant::CodecZenohDeclSubscriber(s) => {
+                    declared.push(s.id)
+                }
+                wz_codecs::declare::DeclareOwnedVariant::CodecZenohUndeclSubscriber(u) => {
+                    undeclared.push(u.id)
+                }
+                _ => {}
+            }
+        }
+    }
+    (declared, undeclared)
+}
+
+/// R2292 (open-debt item 627) — an aggregate declaration's own retraction,
+/// through the product door and measured on the wire.
+///
+/// An aggregate `DeclSubscriber` stands for "some local subscription matches
+/// your interest". When the last such subscription goes away that sentence
+/// becomes false, and until this round wz never took it back: the peer's
+/// `declared` map is keyed by id and only ever cleared wholesale on link loss,
+/// so the entry survived as a GHOST remote subscriber for the life of the link
+/// — a publisher's write filter stayed released against a subscriber that no
+/// longer existed. zenoh emits exactly this transition
+/// (`zenoh/src/net/routing/{dispatcher/local_resources.rs:244-275,
+/// hat/broker/pubsub.rs:115-143}`, 1.10.0).
+///
+/// The aggregate's id is DERIVED, not written down: it is the declared id that
+/// is not the subscription's. That derivation is also item 627's head sentence
+/// under test — with the two id counters this round merged, both declarations
+/// carried id 1 and the `find` below has nothing to return.
+#[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
+#[test]
+fn dropping_the_last_subscription_retracts_the_aggregate_declaration_on_the_wire() {
+    let (session, driver) = build_session();
+    deliver_future_subscriber_interest(&session, /*aggregate=*/ true);
+
+    let sub = session
+        .declare_subscriber("home/temp", SubscribeOptions::default(), |_| {})
+        .expect("remote declare against the test link succeeds");
+    let subscription_id = sub.id().as_u64();
+    drain_one_drive_iteration(&session);
+
+    let (declared, undeclared) = wire_subscriber_declarations(&driver);
+    assert_eq!(
+        declared.len(),
+        2,
+        "the subscription's own announce and the interest's aggregate reply \
+         must BOTH have reached the wire, else this test has no declaration to \
+         watch being retracted: {declared:?}"
+    );
+    assert!(
+        undeclared.is_empty(),
+        "nothing has been retracted yet: {undeclared:?}"
+    );
+    let aggregate_id = *declared.iter().find(|id| **id != subscription_id).expect(
+        "the aggregate declaration must carry an id of its OWN — two \
+                 counters both starting at 1 made a session announce the \
+                 aggregate and the subscription under one id, and a peer keyed \
+                 by id then sees ONE declaration where two were sent",
+    );
+
+    drop(sub);
+    drain_one_drive_iteration(&session);
+
+    let (_, undeclared) = wire_subscriber_declarations(&driver);
+    assert_eq!(
+        undeclared,
+        vec![subscription_id, aggregate_id],
+        "both declarations must be retracted, each exactly once and in that \
+         order: the subscription by its own teardown, the aggregate because \
+         the last subscription it stood for is gone"
+    );
+}
+
+/// R2292 (open-debt item 627) — the DISCRIMINATOR, and the reason the rule is
+/// a TRANSITION rather than "a subscription was dropped".
+///
+/// A second subscription still matches the peer's interest, so the aggregate
+/// declaration is still TRUE and must stay standing. Retracting it here would
+/// re-arm the peer's write filter against a subscriber this session still
+/// holds — the same class of harm the ghost causes, in the other direction.
+///
+/// The sibling exists BEFORE the drop, so it is the STAGING-time filter in
+/// `stage_emptied_aggregate_retracts` that this pins. The drain-time re-check
+/// has its own window and its own test below — MEASURED, R2292: deleting
+/// either one alone leaves this green, because the other still catches this
+/// scenario, and a guard whose red comes from someone else's window is not
+/// pinned at all.
+#[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
+#[test]
+fn an_aggregate_declaration_stands_on_the_wire_while_a_sibling_still_matches() {
+    let (session, driver) = build_session();
+    deliver_future_subscriber_interest(&session, /*aggregate=*/ true);
+
+    let first = session
+        .declare_subscriber("home/temp", SubscribeOptions::default(), |_| {})
+        .expect("remote declare against the test link succeeds");
+    let _second = session
+        .declare_subscriber("home/humidity", SubscribeOptions::default(), |_| {})
+        .expect("remote declare against the test link succeeds");
+    let first_id = first.id().as_u64();
+    drain_one_drive_iteration(&session);
+
+    drop(first);
+    drain_one_drive_iteration(&session);
+
+    let (_, undeclared) = wire_subscriber_declarations(&driver);
+    assert_eq!(
+        undeclared,
+        vec![first_id],
+        "only the dropped subscription's own declaration may be retracted — \
+         `home/humidity` still matches the interest, so the aggregate is still \
+         true and retracting it would blind the peer to a subscriber this \
+         session still holds"
+    );
+}
+
+/// R2292 (open-debt item 627) — the DRAIN-TIME re-check's own window, and the
+/// only test that pins it.
+///
+/// The retraction is staged on the application thread when the last matching
+/// subscription goes, and emitted by the drive thread later. A subscription
+/// declared BETWEEN those two makes the aggregate true again, and a retraction
+/// emitted after that is a lie at the moment it is sent — the identical
+/// argument R2290 made for the declare direction, in reverse. On the wire it
+/// would land as `Undecl` then `Decl` for one id, and a pico publisher's write
+/// filter re-arms on the `Undecl`: the puts it drops in that gap are gone.
+///
+/// The staging-time filter cannot see this window: it ran before the new
+/// subscription existed. That is why deleting the drain-time re-check leaves
+/// every OTHER test here green and fails only this one — MEASURED, R2292,
+/// after the first attempt at a discriminator failed to redden either check.
+#[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
+#[test]
+fn a_subscription_declared_inside_the_retraction_window_keeps_the_aggregate() {
+    let (session, driver) = build_session();
+    deliver_future_subscriber_interest(&session, /*aggregate=*/ true);
+
+    let first = session
+        .declare_subscriber("home/temp", SubscribeOptions::default(), |_| {})
+        .expect("remote declare against the test link succeeds");
+    let first_id = first.id().as_u64();
+    drain_one_drive_iteration(&session);
+
+    // The window opens here: the retraction is STAGED, nothing has drained.
+    drop(first);
+    let _second = session
+        .declare_subscriber("home/humidity", SubscribeOptions::default(), |_| {})
+        .expect("remote declare against the test link succeeds");
+    drain_one_drive_iteration(&session);
+
+    let (_, undeclared) = wire_subscriber_declarations(&driver);
+    assert_eq!(
+        undeclared,
+        vec![first_id],
+        "the aggregate was true again before the staged retraction reached the \
+         wire, so it must not be sent: emitting it here retracts a declaration \
+         this session is standing behind, and the re-declare that follows does \
+         not give back the puts the peer's re-armed filter drops in between"
+    );
+}
+
 /// R2291 (open-debt item 628) — THE DEFECT, through the product door, over the
 /// whole population.
 ///

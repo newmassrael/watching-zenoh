@@ -812,10 +812,32 @@ impl ApplicationLayerObserver {
                 crate::pubsub::SubInterestReply::Aggregate { interest_id }
                 | crate::pubsub::SubInterestReply::Concrete { interest_id, .. } => {
                     let interest_id = *interest_id;
+                    let mut announced_aggregate = false;
                     if let Some((subscriber_id, keyexpr)) =
                         self.subscribers.sub_interest_reply(&item)
                     {
                         sink.send_declare_subscriber_reply(subscriber_id, keyexpr, interest_id);
+                        announced_aggregate =
+                            matches!(item, crate::pubsub::SubInterestReply::Aggregate { .. });
+                    }
+                    // R2292 (open-debt item 627) — recorded AFTER the emit and
+                    // outside the borrow above, and only when the reply
+                    // actually left: the retraction this arms is allowed to
+                    // retract exactly what a peer was told.
+                    #[cfg(feature = "declare-undeclare")]
+                    if announced_aggregate {
+                        self.subscribers.mark_aggregate_announced(interest_id);
+                    }
+                    let _ = announced_aggregate;
+                }
+                // R2292 (open-debt item 627) — the aggregate declaration's own
+                // retraction, resolved against the SAME tables the declare arm
+                // reads and re-checked at send time (see
+                // `take_aggregate_retract`).
+                #[cfg(feature = "declare-undeclare")]
+                crate::pubsub::SubInterestReply::AggregateRetract { interest_id } => {
+                    if let Some(decl_id) = self.subscribers.take_aggregate_retract(*interest_id) {
+                        sink.send_undeclare_subscriber_reply(decl_id);
                     }
                 }
             }
@@ -1732,6 +1754,10 @@ mod sub_interest_reply_tests {
     struct RecordingSink {
         subscriber_replies: Mutex<Vec<(u64, String, u64)>>,
         finals: Mutex<Vec<u64>>,
+        /// R2292 (open-debt item 627) — the `UndeclSubscriber.id`s this drain
+        /// emitted, in order.
+        #[cfg(feature = "declare-undeclare")]
+        subscriber_retracts: Mutex<Vec<u64>>,
     }
 
     impl DeclareReplySink for RecordingSink {
@@ -1753,6 +1779,11 @@ mod sub_interest_reply_tests {
                 keyexpr.to_string(),
                 interest_id,
             ));
+        }
+
+        #[cfg(feature = "declare-undeclare")]
+        fn send_undeclare_subscriber_reply(&self, subscriber_id: u64) {
+            self.subscriber_retracts.lock().unwrap().push(subscriber_id);
         }
     }
 
@@ -1859,6 +1890,20 @@ mod sub_interest_reply_tests {
     fn every_announcing_reply_arm_drops_when_its_subject_is_gone() {
         let mut reached_aggregate = 0usize;
         let mut reached_concrete = 0usize;
+        // R2292 (open-debt item 627) — the enum grew a RETRACTING arm, and
+        // this is the decision the exhaustive match above demanded: it is not
+        // in this test's population, and it must not be STAGED here either.
+        // The fixture never drains, so no row is `announced`, so
+        // `unregister` has nothing to retract — which is the same rule that
+        // keeps the declare-rollback path silent.
+        //
+        // `mut` only where the arm that writes it exists: without
+        // `declare-undeclare` the enum has no such variant, and an
+        // unconditional `mut` is `-D unused-mut` in that subset.
+        #[cfg(feature = "declare-undeclare")]
+        let mut reached_retract = 0usize;
+        #[cfg(not(feature = "declare-undeclare"))]
+        let reached_retract = 0usize;
 
         for aggregate in [true, false] {
             let (mut observer, id) = staged(aggregate);
@@ -1887,6 +1932,14 @@ mod sub_interest_reply_tests {
                     SubInterestReply::Final { .. } => {
                         assert!(resolved.is_none(), "a Final carries no declaration")
                     }
+                    #[cfg(feature = "declare-undeclare")]
+                    SubInterestReply::AggregateRetract { .. } => {
+                        reached_retract += 1;
+                        assert!(
+                            resolved.is_none(),
+                            "a retraction resolves through take_aggregate_retract, not here"
+                        );
+                    }
                 }
             }
         }
@@ -1896,6 +1949,251 @@ mod sub_interest_reply_tests {
             (1, 1),
             "every announcing arm must have been reached — a population of zero \
              would report green without checking anything"
+        );
+        assert_eq!(
+            reached_retract, 0,
+            "an unannounced aggregate must stage NO retraction: nothing drained \
+             here, so no peer was told an id, and retracting one would name an \
+             id that was never sent"
+        );
+    }
+
+    // ── R2292 (open-debt item 627) — an aggregate declaration's own
+    //    retraction, and the one id space that makes it unambiguous ──
+
+    /// R2292 — THE DEFECT. An aggregate `DeclSubscriber` stands for "some
+    /// local subscription matches your interest". When the last such
+    /// subscription goes away that sentence becomes false, and until this
+    /// round nothing on wz took it back: the peer's `declared` map is keyed by
+    /// id and is only ever cleared wholesale by
+    /// `flush_declarations_on_link_loss`, so the entry survived as a GHOST
+    /// remote subscriber for the rest of the link's life.
+    ///
+    /// zenoh emits exactly this transition. Its aggregated resource holds
+    /// `info: Option<SubscriberInfo>` where `SubscriberInfo` is a UNIT struct,
+    /// so `aggregate_many` yields `Some` iff at least one simple resource is
+    /// aggregated into it; `remove_simple_resource` reports the AGGREGATE's own
+    /// id when that flips to `None`
+    /// (`zenoh/src/net/routing/dispatcher/local_resources.rs:244-275`), and
+    /// `maybe_unpropagate_subscriber` turns every such report into an
+    /// `UndeclareSubscriber { id }`
+    /// (`zenoh/src/net/routing/hat/broker/pubsub.rs:115-143`, 1.10.0).
+    #[cfg(feature = "declare-undeclare")]
+    #[test]
+    fn an_aggregate_declaration_is_retracted_when_its_last_subscription_goes() {
+        let (mut observer, id) = staged(/*aggregate=*/ true);
+        let sink = RecordingSink::default();
+        observer.flush_declare_replies(&sink);
+        let announced = sink.subscriber_replies.lock().unwrap().clone();
+        assert_eq!(
+            announced.len(),
+            1,
+            "the fixture must ANNOUNCE the aggregate first — a retraction test \
+             whose declaration never reached the wire measures nothing"
+        );
+        let announced_id = announced[0].0;
+
+        assert!(observer.subscribers.unregister(id));
+        observer.flush_declare_replies(&sink);
+
+        assert_eq!(
+            *sink.subscriber_retracts.lock().unwrap(),
+            alloc::vec![announced_id],
+            "the aggregate declaration must be retracted with ITS OWN id once \
+             the last subscription it stood for is gone — anything else leaves \
+             a ghost remote subscriber on the peer until the link dies"
+        );
+    }
+
+    /// R2292 — the DISCRIMINATOR, and the reason the rule is a TRANSITION
+    /// rather than "an unregister happened": a second subscription still
+    /// matches the interest, so the aggregate declaration is still TRUE and
+    /// must stay standing.
+    ///
+    /// Reverting the drain-time `any_subscription_matches` re-check in
+    /// `take_aggregate_retract` fails this while leaving the test above green.
+    /// MEASURED, R2292 — and the STAGING-time twin of that predicate is NOT
+    /// the guard: deleting it leaves this green, because the drain-time one
+    /// still catches the item. That check is a pressure filter with its own
+    /// red in `an_unrelated_unregister_stages_no_aggregate_retraction`.
+    #[cfg(feature = "declare-undeclare")]
+    #[test]
+    fn an_aggregate_declaration_survives_while_another_subscription_matches() {
+        let mut observer = ApplicationLayerObserver::new();
+        let first = observer.subscribers.register("reenter/a", |_| {});
+        let _second = observer.subscribers.register("reenter/b", |_| {});
+        let staged_count = observer
+            .subscribers
+            .respond_to_subscriber_interest_borrowed(
+                INTEREST,
+                Some("reenter/**"),
+                /*aggregate=*/ true,
+                /*current=*/ true,
+                /*future=*/ true,
+            );
+        assert_eq!(
+            staged_count, 1,
+            "an aggregate interest answers ONCE however many subscriptions match"
+        );
+
+        let sink = RecordingSink::default();
+        observer.flush_declare_replies(&sink);
+        assert_eq!(
+            sink.subscriber_replies.lock().unwrap().len(),
+            1,
+            "the aggregate must be announced before the retraction can be the \
+             thing under test"
+        );
+
+        assert!(observer.subscribers.unregister(first));
+        observer.flush_declare_replies(&sink);
+
+        assert!(
+            sink.subscriber_retracts.lock().unwrap().is_empty(),
+            "`reenter/b` still matches `reenter/**`, so the aggregate \
+             declaration is still true and retracting it would blind the peer's \
+             write filter to a subscriber this session still holds: {:?}",
+            sink.subscriber_retracts.lock().unwrap()
+        );
+    }
+
+    /// R2292 — the STAGING-time filter's own red, and the reason it is a
+    /// separate test from the wire ones above.
+    ///
+    /// `stage_emptied_aggregate_retracts` tests `any_subscription_matches`
+    /// before pushing, and MEASURED that test is not what makes a retraction
+    /// truthful — the drain re-checks the same predicate, so deleting the
+    /// staging one leaves every wire assertion green. What it does buy is the
+    /// staging buffer: `pending_sub_interest_replies` is a `BoundedVec`, and
+    /// an unregister that empties no interest would otherwise push one item
+    /// per announced aggregate into it for the drain to discard.
+    ///
+    /// So the claim is made where it is observable — on the staged items, not
+    /// on the wire.
+    #[cfg(feature = "declare-undeclare")]
+    #[test]
+    fn an_unrelated_unregister_stages_no_aggregate_retraction() {
+        let mut observer = ApplicationLayerObserver::new();
+        let unrelated = observer.subscribers.register("elsewhere/a", |_| {});
+        let _matching = observer.subscribers.register("reenter/a", |_| {});
+        observer
+            .subscribers
+            .respond_to_subscriber_interest_borrowed(
+                INTEREST,
+                Some("reenter/**"),
+                /*aggregate=*/ true,
+                /*current=*/ true,
+                /*future=*/ true,
+            );
+        let sink = RecordingSink::default();
+        observer.flush_declare_replies(&sink);
+        assert_eq!(
+            sink.subscriber_replies.lock().unwrap().len(),
+            1,
+            "the aggregate must be ANNOUNCED first — an unannounced row is \
+             filtered by a different clause, so this test would then be \
+             measuring the wrong one"
+        );
+
+        assert!(observer.subscribers.unregister(unrelated));
+
+        assert!(
+            observer
+                .subscribers
+                .take_staged_sub_interest_replies()
+                .is_empty(),
+            "dropping a subscription that stands for no interest must stage \
+             NOTHING: `reenter/a` still matches, so the aggregate is untouched, \
+             and pushing an item the drain will discard only spends the bounded \
+             staging buffer"
+        );
+    }
+
+    /// R2292 — a NON-aggregate interest has no aggregate declaration to
+    /// retract. Its replies carry each subscription's own id, and each is
+    /// retracted by that subscription's own `UndeclSubscriber` on teardown, so
+    /// staging one here would emit a second retraction for the same id.
+    ///
+    /// The population argument, not a spot check: `aggregate` is a `bool`, the
+    /// test above drives `true` and this one drives `false`.
+    #[cfg(feature = "declare-undeclare")]
+    #[test]
+    fn a_concrete_interest_stages_no_aggregate_retraction() {
+        let (mut observer, id) = staged(/*aggregate=*/ false);
+        let sink = RecordingSink::default();
+        observer.flush_declare_replies(&sink);
+        assert_eq!(
+            sink.subscriber_replies.lock().unwrap().len(),
+            1,
+            "the concrete reply must have been announced, else this test's \
+             `unregister` has nothing to react to"
+        );
+
+        assert!(observer.subscribers.unregister(id));
+        observer.flush_declare_replies(&sink);
+
+        assert!(
+            sink.subscriber_retracts.lock().unwrap().is_empty(),
+            "a concrete interest's replies are retracted by their own \
+             subscriptions' teardown; an aggregate retraction here would be a \
+             second `UndeclSubscriber` for an id already retracted"
+        );
+    }
+
+    /// R2292 — item 627's HEAD SENTENCE: one session must never announce two
+    /// different things under one `DeclSubscriber.id`.
+    ///
+    /// The aggregate decl id used to come from a second counter that also
+    /// started at 1, so a session's first subscription and its first aggregate
+    /// reply were both announced as id 1. The peer's registry is keyed by that
+    /// id with same-id-replaces, so it saw ONE declaration where two were
+    /// sent — and R2292's retraction makes that ambiguity harmful rather than
+    /// merely wrong. Upstream draws both from one per-face counter
+    /// (`zenoh/src/net/routing/hat/broker/interests.rs:118-130`, 1.10.0).
+    ///
+    /// The assertion is over the SET of announced ids, derived from the
+    /// declarations the drain actually emitted rather than from a literal:
+    /// pinning `decl_id == 2` would pass just as well if the counters were
+    /// still separate and merely offset.
+    #[test]
+    fn one_session_never_announces_two_things_under_one_id() {
+        let mut observer = ApplicationLayerObserver::new();
+        let sub = observer.subscribers.register("reenter/a", |_| {});
+        observer
+            .subscribers
+            .respond_to_subscriber_interest_borrowed(
+                INTEREST,
+                Some("reenter/**"),
+                /*aggregate=*/ true,
+                /*current=*/ true,
+                /*future=*/ true,
+            );
+        let sink = RecordingSink::default();
+        observer.flush_declare_replies(&sink);
+
+        let aggregate_ids: Vec<u64> = sink
+            .subscriber_replies
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, _, _)| *id)
+            .collect();
+        assert_eq!(
+            aggregate_ids.len(),
+            1,
+            "exactly one aggregate declaration must have been emitted — with \
+             none, the disjointness below holds vacuously"
+        );
+
+        let mut all = aggregate_ids;
+        all.push(sub.as_u64());
+        let unique: alloc::collections::BTreeSet<u64> = all.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            all.len(),
+            "the aggregate declaration and the subscription were announced \
+             under the same id {all:?} — one session, two id counters, and a \
+             peer keyed by id sees one declaration where two were sent"
         );
     }
 }

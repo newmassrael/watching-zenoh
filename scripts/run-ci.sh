@@ -4320,14 +4320,27 @@ layer_c1b_cargo_test_alloc() {
 # The counts are pinned rather than `+` because a population of zero is what
 # this class fails as: the aggregate arm's defect (a `DeclSubscriber` emitted
 # after its subscription's `UndeclSubscriber`) reached hosted CI as a 1-2%
-# `wz-capi-pico` flake precisely because nothing deterministic named it. `4`
+# `wz-capi-pico` flake precisely because nothing deterministic named it. `5`
 # is the interest-reply contract's whole module, so a new `SubInterestReply`
 # arm has to move this number; `1` is the liveliness twin, pinned narrow so
 # it does not churn with its module.
+#
+# R2292 (open-debt item 627) — a THIRD invocation, and the reason it is not a
+# wider feature list on the second. The aggregate declaration's own retraction
+# is gated `all(declare-subscriber, declare-undeclare)`, because without the
+# latter this session has no `UndeclSubscriber` emit for it to ride on. That
+# makes the module's population FEATURE-DEPENDENT: 5 tests under
+# `declare-subscriber` alone, 9 with the retraction's own gate added. Pinning
+# only the wider leg would let the narrower one rot into a compile the lane
+# never runs; pinning only the narrower one is what this lane already had, and
+# it would have counted 5 while four new tests never ran anywhere.
 layer_c1c_cargo_test_codec_declare() {
     (cd crates && cargo test -p wz-session-core --features codec-declare --quiet) || return 1
-    _runci_guarded_test C1c 4 \
+    _runci_guarded_test C1c 5 \
         cargo test -p wz-session-core --features declare-subscriber \
+        --lib sub_interest_reply_tests --quiet || return 1
+    _runci_guarded_test C1c 9 \
+        cargo test -p wz-session-core --features declare-subscriber,declare-undeclare \
         --lib sub_interest_reply_tests --quiet || return 1
     _runci_guarded_test C1c 1 \
         cargo test -p wz-session-core --features liveliness-token \

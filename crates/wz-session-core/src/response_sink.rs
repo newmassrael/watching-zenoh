@@ -133,6 +133,24 @@ pub trait DeclareReplySink {
     /// that choice; the sink just encodes what it is handed.
     #[cfg(feature = "declare-subscriber")]
     fn send_declare_subscriber_reply(&self, subscriber_id: u64, keyexpr: &str, interest_id: u64);
+
+    /// R2292 (open-debt item 627) — encode + enqueue the `Declare(
+    /// UndeclSubscriber)` that retracts an AGGREGATE interest-response
+    /// declaration whose last matching local subscription has gone away.
+    ///
+    /// The counterpart of
+    /// [`send_declare_subscriber_reply`](Self::send_declare_subscriber_reply),
+    /// and the reason it is a SEPARATE seam rather than a flag on that one:
+    /// the retraction carries no keyexpr and no `interest_id`. A peer routes
+    /// an id-only undeclare by id alone, which is also why R2292 had to put
+    /// the aggregate decl id and the subscription id in ONE space first —
+    /// two counters both starting at 1 make this call ambiguous.
+    ///
+    /// Gated on `declare-undeclare` as well: without it this session has no
+    /// `UndeclSubscriber` emit at all (a routed subscriber's own teardown is
+    /// gated the same way), so the retraction has nothing to ride on.
+    #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
+    fn send_undeclare_subscriber_reply(&self, subscriber_id: u64);
 }
 
 /// Terminated liveliness-get reconnect-cache prune. NOT a wire emit — a
@@ -190,6 +208,10 @@ impl<S: DeclareReplySink + ?Sized> DeclareReplySink for &S {
     fn send_declare_subscriber_reply(&self, subscriber_id: u64, keyexpr: &str, interest_id: u64) {
         (**self).send_declare_subscriber_reply(subscriber_id, keyexpr, interest_id)
     }
+    #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
+    fn send_undeclare_subscriber_reply(&self, subscriber_id: u64) {
+        (**self).send_undeclare_subscriber_reply(subscriber_id)
+    }
 }
 
 impl<S: LivelinessGetPrune + ?Sized> LivelinessGetPrune for &S {
@@ -234,6 +256,10 @@ impl<S: DeclareReplySink + ?Sized> DeclareReplySink for alloc::sync::Arc<S> {
     #[cfg(feature = "declare-subscriber")]
     fn send_declare_subscriber_reply(&self, subscriber_id: u64, keyexpr: &str, interest_id: u64) {
         (**self).send_declare_subscriber_reply(subscriber_id, keyexpr, interest_id)
+    }
+    #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
+    fn send_undeclare_subscriber_reply(&self, subscriber_id: u64) {
+        (**self).send_undeclare_subscriber_reply(subscriber_id)
     }
 }
 
