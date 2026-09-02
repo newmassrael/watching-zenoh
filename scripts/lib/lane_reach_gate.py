@@ -43,15 +43,23 @@ by the wrong lane. This one closes the direction where it is run by none.
 ## Why the question is not asked of the prose
 
 The obvious reading is the `#[ignore]` reason: it usually names an owner, in
-prose, by a convention. Measured across this crate, 362 `#[ignore]` attributes
-carry 183 distinct reasons; 157 mention a `Layer` and only 114 of those match
-R311y838's `Layer X runs via` spelling, while a wider `Layer <token>` match
-picks up sentences that mention a lane without claiming one -- it reports
-`wz_static_scout_open_to_pico_zsub` as owned by Layer C0 because its doc says
-"Layer C0 scopes the #[ignore] discipline to the FILE". A matcher loose enough
-to see every ownership spelling is loose enough to invent owners, and this
-tree's standing finding is that such a matcher yields a confidently wrong
-number.
+prose, by a convention. Re-measured R2280 with the reason reader that now owns
+that string (`crossimpl_corpus.ignore_reason_at`, which unlike the line-oriented
+one this paragraph was first written against can read a `\\`-continued
+attribute): 449 `#[ignore]` attributes carry 235 distinct reasons; 402 mention a
+`Layer` and only 229 of those match R311y838's `Layer X runs via` spelling. So a
+wider `Layer <token>` match would invent an owner for 173 tests out of sentences
+that mention a lane without claiming one -- it reads `Layer E` off
+`static_scout_dead_only_list_is_no_reachable`, whose reason says it "rides Layer
+E with the sibling whose precondition it guards" and then explains that "Layer
+C0 scopes the #[ignore] discipline to the file". A matcher loose enough to see
+every ownership spelling is loose enough to invent owners, and this tree's
+standing finding is that such a matcher yields a confidently wrong number.
+
+(The four figures above were 362 / 183 / 157 / 114 when this was written, all
+counted line-wise; every one of them was stale by R2280, which is why they are
+now re-derivable by command -- `crossimpl_corpus.py --count-reasons` -- rather
+than only assertable.)
 
 So no reason string is read here. Reachability is derived from structure alone:
 the fn names, the `#[ignore]` attributes, the token list scraped out of Layer

@@ -64,6 +64,7 @@ a first-class class, not an afterthought.
 from __future__ import annotations
 
 import argparse
+import bisect
 import re
 import sys
 from pathlib import Path
@@ -266,6 +267,99 @@ KIND_CLASS = {
 }
 
 TEST_ATTR_RE = re.compile(r"^\s*#\[(?:tokio::)?test\b")
+
+# R2280 (open-debt item 619) — the `#[ignore]` REASON, read ACROSS LINES.
+#
+# Layer C0's ownership arm used to carry its own line-oriented
+# `#\[ignore\s*=\s*"(.*?)"\s*\]`, which cannot see an attribute whose string
+# literal is `\`-continued onto the next line. Measured R2280 over
+# `crates/wz-integration-tests/tests`: 78 of the 449 reasons are written that
+# way, and `--count-reasons` re-derives both numbers at any later date. The
+# reason is what names the owning lane, so a reader blind to 78 of them is one
+# that would swallow a future declaration whole. Two parsers for one predicate
+# is the shape R2279 removed from the arm above it; this is the module's answer
+# and the arm consumes it.
+#
+# `pos`-anchored rather than `^`-anchored: `pattern.match(s, pos)` starts AT pos,
+# and a leading `\s*` would skip blank lines forward onto an unrelated attribute,
+# so the leading run is `[ \t]*`.
+IGNORE_REASON_RE = re.compile(
+    r'[ \t]*#\[\s*ignore\s*=\s*"(?P<reason>(?:[^"\\]|\\.)*)"\s*\]', re.S)
+
+_RUST_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "0": "\0",
+                 '"': '"', "'": "'", "\\": "\\"}
+
+
+def unescape_rust_string(lit: str) -> str:
+    """Resolve the escapes a Rust string literal carries, line continuation included.
+
+    A `\\` at end of line drops the newline AND the next line's leading
+    whitespace, which is how every multi-line reason in this crate is written.
+    Without that rule the joined reason would carry the source's indentation, and
+    a matcher keyed on word spacing would read a different sentence than rustc
+    does.
+    """
+    out: list[str] = []
+    i, n = 0, len(lit)
+    while i < n:
+        c = lit[i]
+        if c != "\\":
+            out.append(c)
+            i += 1
+            continue
+        i += 1
+        if i >= n:
+            break
+        e = lit[i]
+        i += 1
+        if e == "\n":
+            while i < n and lit[i] in " \t\r":
+                i += 1
+            continue
+        out.append(_RUST_ESCAPES.get(e, e))
+    return "".join(out)
+
+
+def line_starts_of(text: str) -> list[int]:
+    """Offset of every line start, index-aligned with `text.splitlines()`."""
+    starts = [0]
+    for m in re.finditer("\n", text):
+        starts.append(m.end())
+    return starts
+
+
+def attribute_spans(code: str) -> dict[int, int]:
+    """`#[...]` attributes as {first line index: last line index}, read from CODE.
+
+    From the comment- and string-stripped view, so a `[` inside a reason string
+    or a doc comment cannot unbalance the count. The attribute walk around a
+    `#[test]` moves by LINES, and a `\\`-continued `#[ignore = ".."]` occupies
+    two of them; the second is blank in the stripped view, which is what stopped
+    the upward walk dead.
+    """
+    starts = line_starts_of(code)
+    spans: dict[int, int] = {}
+    n = len(code)
+    for m in re.finditer(r"#\[", code):
+        i, depth = m.end(), 1
+        while i < n and depth:
+            if code[i] == "[":
+                depth += 1
+            elif code[i] == "]":
+                depth -= 1
+            i += 1
+        if depth:
+            continue
+        first = bisect.bisect_right(starts, m.start()) - 1
+        last = bisect.bisect_right(starts, i - 1) - 1
+        spans[first] = last
+    return spans
+
+
+def ignore_reason_at(raw: str, starts: list[int], idx: int) -> str | None:
+    """The reason of the `#[ignore = ".."]` that begins on raw line `idx`."""
+    m = IGNORE_REASON_RE.match(raw, starts[idx])
+    return unescape_rust_string(m.group("reason")) if m else None
 
 
 def strip_code(src: str) -> str:
@@ -579,6 +673,11 @@ class TestFn:
         self.claims: list[tuple[str, str, bool]] = []  # (atom, kind, partial)
         self.none_reason: str | None = None
         self.has_ignore = False
+        # R2280 — the reason string of that `#[ignore]`, joined across `\`
+        # continuations, or None for a bare `#[ignore]` / no attribute at all.
+        # `has_ignore` alone cannot answer WHO runs the test, which is the
+        # question Layer C0's ownership arm asks.
+        self.ignore_reason: str | None = None
         self.bad_claim_lines: list[tuple[int, str]] = []
         # R311y571 — the classes THIS test reaches, as opposed to the ones its
         # FILE reaches. See `CorpusFile.classes`.
@@ -647,6 +746,15 @@ def scan_file(path: Path, by_helper: dict[str, set[str]],
     while len(code_lines) < len(lines):
         code_lines.append("")
 
+    # R2280 — the two indexes the `#[ignore]` reason reader needs: where each raw
+    # line begins (the reason is read from RAW, since strip_code blanks string
+    # literals) and which attribute a given LAST line belongs to (the reason may
+    # be `\`-continued, so an attribute is not one line).
+    line_starts = line_starts_of(raw)
+    while len(line_starts) < len(lines):
+        line_starts.append(len(raw))
+    attr_first_line = {last: first for first, last in attribute_spans(code).items()}
+
     pending: list[tuple[int, str, str, bool]] = []
     pending_none: str | None = None
     pending_bad: list[tuple[int, str]] = []
@@ -669,24 +777,40 @@ def scan_file(path: Path, by_helper: dict[str, set[str]],
             j = idx
             fn_name = "?"
             has_ignore = False
+            ignore_reason: str | None = None
             # Attributes ABOVE the #[test] line count too: `#[ignore]` written first
             # would otherwise leave has_ignore False, and the test would be reported as
             # executing on every push via Layer C1 while cargo skipped it.
+            #
+            # R2280 — the walk moves attribute by attribute, not line by line. A
+            # `\`-continued `#[ignore = ".."]` above a `#[test]` ends on a line
+            # that is BLANK in the stripped view, and the old `startswith("#[")`
+            # test stopped there, reading the attribute as absent. Measured R2280:
+            # all 449 `#[ignore]`s in this crate sit BELOW their `#[test]`, so
+            # that arm is a latent hole, not a live one -- which is the reason to
+            # fix it while the shared reader is being written rather than to claim
+            # a gate over an empty population.
             k = idx - 1
-            while k >= 0 and code_lines[k].strip().startswith("#["):
-                if code_lines[k].strip().startswith("#[ignore"):
+            while k >= 0:
+                start = attr_first_line.get(k)
+                if start is None:
+                    break
+                if code_lines[start].strip().startswith("#[ignore"):
                     has_ignore = True
-                k -= 1
+                    ignore_reason = ignore_reason_at(raw, line_starts, start) or ignore_reason
+                k = start - 1
             while j < len(code_lines):
                 s = code_lines[j].strip()
                 if s.startswith("#[ignore"):
                     has_ignore = True
+                    ignore_reason = ignore_reason_at(raw, line_starts, j) or ignore_reason
                 fm = re.match(r"(?:pub )?(?:async )?fn ([A-Za-z0-9_]+)", s)
                 if fm:
                     fn_name = fm.group(1)
                     break
                 j += 1
             t = TestFn(fn_name, idx + 1)
+            t.ignore_reason = ignore_reason
             t.classes = reachable_classes(fn_name, local_bodies, by_helper, ffi_names, edges)
             t.spawns_external = reachable_external(
                 fn_name, local_bodies, by_helper, pkgs_by_helper, edges)
@@ -718,6 +842,123 @@ def scan_all() -> list[CorpusFile]:
     ]
 
 
+# R2280 (open-debt item 619) — the reason reader's own fixture.
+#
+# Every shape here is one the LINE-oriented reader Layer C0 used to carry would
+# have got wrong, plus the two directions in which a looser reader would invent a
+# reason. A fixture that only holds shapes the old code already handled proves
+# the new code compiles, not that it fixed anything -- so the selftest asserts,
+# for the continuation cases, that the line-wise spelling really does miss them.
+_SELFTEST_FIXTURE = '''\
+#[test]
+#[ignore = "single line; Layer Z runs via --ignored"]
+fn one_line_reason() {}
+
+#[test]
+#[ignore = "continued; \\
+            Layer Q runs via --ignored"]
+fn continued_reason() {}
+
+#[test]
+#[ignore = "three; \\
+            parts; \\
+            Layer M runs via --ignored"]
+fn thrice_continued_reason() {}
+
+#[test]
+#[ignore]
+fn bare_ignore() {}
+
+#[ignore = "above the test; \\
+            Layer Ewire runs via --ignored"]
+#[test]
+fn reason_above_the_test() {}
+
+#[test]
+#[ignore = "carries a \\"quoted\\" word; Layer G runs via --ignored"]
+fn escaped_quote_in_reason() {}
+
+#[test]
+#[ignore = "mentions [a bracket] before Layer F runs via --ignored"]
+fn bracket_in_reason() {}
+
+/// A doc comment that merely writes #[ignore = "Layer Z runs via --ignored"]
+/// must not become this test's reason.
+#[test]
+fn documented_but_not_ignored() {}
+
+#[test]
+fn plain_test() {}
+'''
+
+_SELFTEST_EXPECTED = {
+    "one_line_reason": "single line; Layer Z runs via --ignored",
+    "continued_reason": "continued; Layer Q runs via --ignored",
+    "thrice_continued_reason": "three; parts; Layer M runs via --ignored",
+    "bare_ignore": None,
+    "reason_above_the_test": "above the test; Layer Ewire runs via --ignored",
+    "escaped_quote_in_reason": 'carries a "quoted" word; Layer G runs via --ignored',
+    "bracket_in_reason": "mentions [a bracket] before Layer F runs via --ignored",
+    "documented_but_not_ignored": None,
+    "plain_test": None,
+}
+# The tests whose reason the old reader could not see AT ALL. The selftest
+# re-runs that reader over the fixture and requires it to still miss them --
+# otherwise the fixture has drifted into shapes that never needed fixing.
+_SELFTEST_LINE_BLIND = {"continued_reason", "thrice_continued_reason",
+                        "reason_above_the_test"}
+_SELFTEST_MUST_IGNORE = {"one_line_reason", "continued_reason",
+                         "thrice_continued_reason", "bare_ignore",
+                         "reason_above_the_test", "escaped_quote_in_reason",
+                         "bracket_in_reason"}
+
+
+def selftest() -> bool:
+    import tempfile
+
+    by_helper, pkgs_by_helper = helper_classes()
+    ok = True
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "reason_reader_fixture.rs"
+        path.write_text(_SELFTEST_FIXTURE)
+        cf = scan_file(path, by_helper, pkgs_by_helper)
+        seen = {t.name: t.ignore_reason for t in cf.tests}
+        if set(seen) != set(_SELFTEST_EXPECTED):
+            print("SELFTEST the fixture's tests were not all found: got %s"
+                  % sorted(seen), file=sys.stderr)
+            return False
+        for name, want in _SELFTEST_EXPECTED.items():
+            if seen[name] != want:
+                ok = False
+                print("SELFTEST %s: reason is %r, expected %r"
+                      % (name, seen[name], want), file=sys.stderr)
+        for t in cf.tests:
+            want_ignored = t.name in _SELFTEST_MUST_IGNORE
+            if t.has_ignore != want_ignored:
+                ok = False
+                print("SELFTEST %s: has_ignore is %s, expected %s"
+                      % (t.name, t.has_ignore, want_ignored), file=sys.stderr)
+
+    # The CONTROL. A line-oriented reader over the same fixture must still be
+    # blind to exactly the continued shapes; if it is not, this fixture has
+    # stopped exercising the defect it was written for.
+    line_re = re.compile(r'#\[ignore\s*=\s*"(.*?)"\s*\]')
+    for name in sorted(_SELFTEST_LINE_BLIND):
+        reason = _SELFTEST_EXPECTED[name]
+        assert reason is not None
+        if any(line_re.search(ln) and reason in line_re.search(ln).group(1)
+               for ln in _SELFTEST_FIXTURE.splitlines()):
+            ok = False
+            print("SELFTEST CONTROL %s: a line-oriented reader CAN read this "
+                  "reason, so the fixture no longer covers the defect" % name,
+                  file=sys.stderr)
+    if ok:
+        print("crossimpl_corpus selftest: %d reason shape(s) read, %d of them "
+              "invisible to a line-oriented reader"
+              % (len(_SELFTEST_EXPECTED), len(_SELFTEST_LINE_BLIND)))
+    return ok
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--list-corpus", action="store_true",
@@ -729,9 +970,64 @@ def main() -> int:
                          "in a spawn-class file (Layer C0 predicate, R2279)")
     ap.add_argument("--list-claims", action="store_true",
                     help="<path>\\t<fn>\\t<atom>\\t<kind>\\t<partial>")
+    ap.add_argument("--list-ignore-reasons", action="store_true",
+                    help="<path>\\t<line>\\t<fn>\\t<reason> for every #[ignore] test "
+                         "that carries a reason, continuations joined (R2280)")
+    ap.add_argument("--count-reasons", action="store_true",
+                    help="the reason census this module's header quotes: how many "
+                         "reasons exist and how many a LINE-oriented reader misses")
+    ap.add_argument("--selftest", action="store_true",
+                    help="drive the reason reader over the shapes the old "
+                         "line-oriented one swallowed (R2280)")
     args = ap.parse_args()
 
+    if args.selftest:
+        return 0 if selftest() else 1
+
     files = scan_all()
+    if args.list_ignore_reasons:
+        for cf in files:
+            for t in cf.tests:
+                if t.ignore_reason is None:
+                    continue
+                print("%s\t%d\t%s\t%s" % (
+                    cf.path.relative_to(REPO_ROOT), t.line, t.name, t.ignore_reason))
+    if args.count_reasons:
+        # The measurement the module header and Layer C0's ownership arm both
+        # quote, re-derived rather than restated. `line_only` is what a reader
+        # that matched `#[ignore = ".."]` within a single line would have found;
+        # the gap between it and `reasons` is the blind spot item 619 was filed
+        # for, and it is a number that can move in either direction.
+        line_re = re.compile(r'#\[ignore\s*=\s*"(.*?)"\s*\]')
+        owner_re = re.compile(r"Layer\s+([A-Za-z0-9]+)\s+runs via")
+        wide_re = re.compile(r"Layer\s+([A-Za-z0-9]+)")
+        tests = reasons = line_only = bare = owned = mentions = 0
+        distinct: set[str] = set()
+        for cf in files:
+            raw_lines = cf.path.read_text().splitlines()
+            for t in cf.tests:
+                tests += 1
+                if t.ignore_reason is None:
+                    bare += 1 if t.has_ignore else 0
+                    continue
+                reasons += 1
+                distinct.add(t.ignore_reason)
+                if owner_re.search(t.ignore_reason):
+                    owned += 1
+                if wide_re.search(t.ignore_reason):
+                    mentions += 1
+                if any(line_re.search(ln) for ln in raw_lines[t.line - 1:t.line + 4]):
+                    line_only += 1
+        print("tests=%d ignore_with_reason=%d readable_line_wise=%d "
+              "continuation_only=%d bare_ignore=%d"
+              % (tests, reasons, line_only, reasons - line_only, bare))
+        # The four figures `lane_reach_gate.py`'s header argues from, so that
+        # header can be re-derived instead of re-asserted. `wide` minus `owned`
+        # is the number of tests a matcher loose enough to see every spelling
+        # would invent an owner for.
+        print("distinct_reasons=%d mention_a_layer=%d declare_an_owner=%d "
+              "would_be_invented=%d"
+              % (len(distinct), mentions, owned, mentions - owned))
     if args.list_spawn:
         for cf in files:
             if cf.spawns_external:

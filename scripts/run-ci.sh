@@ -1713,6 +1713,13 @@ layer_c0_test_discipline() {
     # `/* */`. Measured before the switch over all 447 tests in the 188
     # spawn-class files: the two spellings flagged the SAME single test, with
     # neither difference non-empty.
+    # R2280 (open-debt item 619) — the corpus's own fixture, run BEFORE the three
+    # arms that consume it. Its `#[ignore]` reason reader is now the single
+    # spelling of a predicate two of those arms ask, and a reader that has
+    # stopped reading answers "no reason" for every test -- which is silence, not
+    # a violation. The fixture holds the shapes the line-oriented reader this
+    # replaced would have got wrong, and asserts that reader still misses them.
+    python3 scripts/lib/crossimpl_corpus.py --selftest || return 1
     local spawn_tests
     spawn_tests="$(mktemp)"
     if ! python3 scripts/lib/crossimpl_corpus.py --list-spawn-tests >"$spawn_tests"; then
@@ -1829,28 +1836,21 @@ if actual != set(TOKENS):
           f"swept-not-declared={sorted(actual - set(TOKENS))}")
     sys.exit(0)
 
-TEST_ATTR = re.compile(r"#\[(?:tokio::)?test\b")
-FN_NAME = re.compile(r"^\s*(?:async\s+)?fn\s+([A-Za-z0-9_]+)")
-# R2221 — a COMMENT line is prose, not code. Both loops below arm on a `#[test]`
-# / `#[ignore = ..]` line and then blame the next `fn`, and neither could tell a
-# real attribute from a doc comment that MENTIONS one. Measured: a module doc
-# reading "the `#[test]`s keep everything the arm cannot claim" armed the first
-# loop, and the next ordinary helper `fn` in that file was reported as an
-# unskipped test. Skipping comment lines cannot hide a real case in the other
-# direction -- an attribute inside a comment is never an attribute, and a `fn`
-# inside one is never a function.
-COMMENT = re.compile(r"^\s*(?://|/\*|\*)")
-
 # SCOPE: Layer E runs `cargo test -p wz-integration-tests` and nothing else
 # (see the invocation in layer_e_ap_demo_round_trip). A `--skip` cannot reach a
 # fixture in another crate, so checking one would be a false gate -- and a false
 # gate that fails the build is worse than no gate. Calibrated against this fact
-# after a first draft flagged 29 sites of which 28 were not hazards.
-TESTS = sorted(pathlib.Path("crates/wz-integration-tests/tests").glob("*.rs"))
-if not TESTS:
-    print("SELFCHECK no wz-integration-tests fixtures found; this check "
-          "asserted nothing")
-    sys.exit(0)
+# after a first draft flagged 29 sites of which 28 were not hazards. The corpus
+# module scans exactly that directory, so consuming it keeps the scope and drops
+# the second glob that used to state it here.
+#
+# R2221's comment-skipping regexes lived here, for two hand loops that armed on a
+# `#[test]` / `#[ignore = ..]` LINE and blamed the next `fn` -- a doc comment
+# reading "the `#[test]`s keep everything the arm cannot claim" armed one of
+# them. R2279 and R2280 replaced both loops with `crossimpl_corpus`, which reads
+# attributes from the comment- and string-stripped view instead of skipping
+# comment lines by shape, so the regexes had no callers left and are gone rather
+# than kept warm.
 
 # R2279 (open-debt item 618) — the obligation reaches only tests the sweep CAN
 # run, and the parser is the shared one.
@@ -1873,8 +1873,12 @@ if not TESTS:
 sys.path.insert(0, "scripts/lib")
 import crossimpl_corpus as _corpus  # noqa: E402
 
-_scanned = [cf for cf in _corpus.scan_all()
-            if any(t in cf.path.stem for t in TOKENS)]
+_all = _corpus.scan_all()
+if not _all:
+    print("SELFCHECK no wz-integration-tests fixture was scanned; this check "
+          "asserted nothing")
+    sys.exit(0)
+_scanned = [cf for cf in _all if any(t in cf.path.stem for t in TOKENS)]
 if not _scanned:
     print("SELFCHECK no token-named fixture was scanned; this check asserted "
           "nothing")
@@ -1901,39 +1905,61 @@ for cf in _scanned:
 # E's sweep adopted that leg, Layer E does not build `wz-e2e-queryable`, and the
 # hosted run for d2a31d08 died in the helper that looks for the binary.
 #
-# Each test states its own owner in its `#[ignore]` reason, by the convention
-# every fixture in this crate follows: `...; Layer <X> runs via --ignored`. That
-# string is the authority this check reads. A test that names a lane OTHER than
-# E is asserting E does not run it -- so it owes a token that makes the
-# assertion true, exactly as the filename-driven case does.
-IGNORE_REASON = re.compile(r'#\[ignore\s*=\s*"(.*?)"\s*\]')
+# SOME tests state their own owner in the `#[ignore]` reason, spelled
+# `...; Layer <X> runs via --ignored`, and that string is the authority this
+# check reads. A test that names a lane OTHER than E is asserting E does not run
+# it -- so it owes a token that makes the assertion true, exactly as the
+# filename-driven case does. A test that names no lane has made no assertion for
+# this arm to grade; `lane_reach_gate.py` a few lines below closes THAT direction
+# structurally, and deliberately gives prose no vote (its header says why).
+#
+# R2280 (open-debt item 619) — the reason is read by `crossimpl_corpus`, not by a
+# second parser living here. The one that lived here was line-oriented, and a
+# `#[ignore = ".."]` whose string is `\`-continued onto the next line matches
+# nothing line-wise: measured R2280, 78 of the 449 reasons in this crate are
+# written that way, so the old reader saw 371 of them. None of the 78 declared an
+# owner, so the blind spot was hiding no red today -- it was a place a future
+# declaration would have gone unread, which is exactly how the two hosted reds
+# this arm exists for were written in the first place.
+#
+# `--count-reasons` on that module re-derives every number in this comment; the
+# claim the CHECK depends on is not any of them but the graded count below, which
+# is measured on each run and refuses to be zero.
 OWNING_LANE = re.compile(r"Layer\s+([A-Za-z0-9]+)\s+runs via")
 
-for path in TESTS:
-    reason = None
-    for line in path.read_text().splitlines():
-        if COMMENT.match(line):
+graded = 0
+for cf in _all:
+    for t in cf.tests:
+        if not t.ignore_reason:
             continue
-        m = IGNORE_REASON.search(line)
-        if m:
-            reason = m.group(1)
+        lane = OWNING_LANE.search(t.ignore_reason)
+        if not lane:
             continue
-        fm = FN_NAME.match(line)
-        if reason and fm:
-            fn = fm.group(1)
-            lane = OWNING_LANE.search(reason)
-            if lane and lane.group(1) != "E" and not any(t in fn for t in TOKENS):
-                print(f"{path}::{fn} declares `Layer {lane.group(1)} runs via "
-                      f"--ignored` but carries NO Layer E skip token, so Layer "
-                      f"E's default sweep runs it as well -- against whatever "
-                      f"binaries THAT lane happens to build; the token set is "
-                      f"{TOKENS}")
-            reason = None
+        graded += 1
+        if lane.group(1) != "E" and not any(tok in t.name for tok in TOKENS):
+            print(f"{cf.path}::{t.name} declares `Layer {lane.group(1)} runs via "
+                  f"--ignored` but carries NO Layer E skip token, so Layer "
+                  f"E's default sweep runs it as well -- against whatever "
+                  f"binaries THAT lane happens to build; the token set is "
+                  f"{TOKENS}")
+
+# The DISCRIMINATING population, the same shape the binary-dep arm above states.
+# Printed LAST so an early SELFCHECK exit cannot leave a count behind, and read by
+# the caller: a run that graded no ownership declaration adjudicated nothing, and
+# the way that happens is the reader breaking, not the crate going quiet.
+print(f"GRADED {graded}")
 PY
 )" || {
         echo "Layer C0 FAIL: the skip-token naming check errored" >&2
         return 1
     }
+    # R2280 (open-debt item 619) — split the check's own census off its findings.
+    # A SELFCHECK bail prints its reason and no census, so it still lands in the
+    # violations branch below and fails there; only a run that reached the end
+    # carries a GRADED line, and only then is a zero meaningful.
+    local naming_graded
+    naming_graded="$(printf '%s\n' "$naming_violations" | sed -n 's/^GRADED //p')"
+    naming_violations="$(printf '%s\n' "$naming_violations" | grep -v '^GRADED ' || true)"
     if [[ -n "$naming_violations" ]]; then
         echo "Layer C0 FAIL: skip-token NAMING OBLIGATION violated" >&2
         echo "" >&2
@@ -1955,6 +1981,19 @@ PY
         echo "  inert families already stay covered." >&2
         return 1
     fi
+    if [[ -z "$naming_graded" || "$naming_graded" -eq 0 ]]; then
+        echo "Layer C0 FAIL: the skip-token ownership arm graded" \
+             "${naming_graded:-NO} ownership declaration(s)." >&2
+        echo "  Every test that names its owning lane in the #[ignore] reason is" >&2
+        echo "  one this arm adjudicates; a count of zero is the reader having" >&2
+        echo "  stopped reading, not the crate having stopped declaring. The" >&2
+        echo "  reason parser is crossimpl_corpus.ignore_reason_at -- run" >&2
+        echo "  'python3 scripts/lib/crossimpl_corpus.py --selftest' and" >&2
+        echo "  '--count-reasons' before touching this list." >&2
+        return 1
+    fi
+    echo "  skip-token ownership: $naming_graded test(s) declare an owning lane" \
+         "in their #[ignore] reason; every one carries a token that makes it true"
     # R2222 (open-debt items 568 + 569) — the MIRROR of the obligation above.
     # That one keeps Layer E from running a fixture another lane owns; this one
     # asks whether ANY lane runs it. Nothing had, four times: R311y528's drop-in
