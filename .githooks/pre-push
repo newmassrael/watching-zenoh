@@ -90,7 +90,7 @@ fi
 # list FAILS rather than skipping, on the same rule the schema pin follows.
 # shellcheck disable=SC1091  # constant path, resolved at run time
 if ! source scripts/lib/nda-scan.sh; then
-    echo "pre-push: scripts/lib/nda-scan.sh missing or unreadable." >&2
+    echo "pre-push: [gate 0] scripts/lib/nda-scan.sh missing or unreadable." >&2
     exit 1
 fi
 nda_base="${remote_sha:-}"
@@ -102,7 +102,7 @@ fi
 if [[ -n "$nda_base" ]]; then
     if ! wz_nda_scan "$nda_base..$local_sha"; then
         echo "" >&2
-        echo "pre-push: confidential-vocabulary gate FAILED — push refused." >&2
+        echo "pre-push: [gate 0] confidential-vocabulary gate FAILED — push refused." >&2
         exit 1
     fi
 else
@@ -122,11 +122,11 @@ fi
 # the atomic store's ceiling is a property of the file and not of the push.
 # shellcheck disable=SC1091  # constant path, resolved at run time
 if ! source scripts/lib/home-path-scan.sh; then
-    echo "pre-push: scripts/lib/home-path-scan.sh missing or unreadable." >&2
+    echo "pre-push: [gate 0b] scripts/lib/home-path-scan.sh missing or unreadable." >&2
     exit 1
 fi
 if ! wz_home_path_scan "$(git rev-parse --show-toplevel)"; then
-    echo "pre-push: a tracked file names this machine's home directory." >&2
+    echo "pre-push: [gate 0b] a tracked file names this machine's home directory." >&2
     echo "          Origin is public and a push does not un-publish." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
     exit 1
@@ -156,7 +156,7 @@ fi
 # identity would otherwise be republished wholesale.
 # shellcheck disable=SC1091  # constant path, resolved at run time
 if ! source scripts/lib/ident-gate.sh; then
-    echo "pre-push: scripts/lib/ident-gate.sh missing or unreadable." >&2
+    echo "pre-push: [gate 0c] scripts/lib/ident-gate.sh missing or unreadable." >&2
     exit 1
 fi
 for sha in "${push_shas[@]}"; do
@@ -166,7 +166,7 @@ for sha in "${push_shas[@]}"; do
     fi
     if ! wz_ident_gate_range 'pre-push' "$ident_range"; then
         echo "" >&2
-        echo "pre-push: origin is public and a push does not un-publish." >&2
+        echo "pre-push: [gate 0c] origin is public and a push does not un-publish." >&2
         echo "          Rewrite the offending commits before pushing:" >&2
         echo "            git rebase -r --exec 'git commit --amend --no-edit --reset-author' <base>" >&2
         echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
@@ -189,12 +189,13 @@ done
 # must not smuggle a migrated store in on the ref that got overwritten.
 # shellcheck disable=SC1091  # constant path, resolved at run time
 if ! source scripts/lib/schema-pin-gate.sh; then
-    echo "pre-push: scripts/lib/schema-pin-gate.sh missing or unreadable." >&2
+    echo "pre-push: [gate 1] scripts/lib/schema-pin-gate.sh missing or unreadable." >&2
     exit 1
 fi
 for sha in "${push_shas[@]}"; do
     if ! wz_schema_pin_gate "${sha}:" 'pre-push' "pushed commit ${sha:0:12}"; then
         echo "" >&2
+        echo "pre-push: [gate 1] the schema pin refused a pushed commit." >&2
         echo "pre-push: bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
         exit 1
     fi
@@ -208,6 +209,7 @@ done
 # bash 4.3+, and this hook is being made bash 3.2-clean in the same commit.
 if ! wz_local_cli_pin_gate 'pre-push' "${push_shas[$((${#push_shas[@]} - 1))]}:"; then
     echo "" >&2
+    echo "pre-push: [gate 1] the mnemosyne-cli on PATH disagrees with the pin." >&2
     echo "pre-push: bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
     exit 1
 fi
@@ -228,7 +230,7 @@ fi
 # cherry-pick, hooks installed after the fact). It bought nothing and cost
 # the gate; a SKIP is green.
 if ! command -v mnemosyne-cli >/dev/null 2>&1; then
-    echo "pre-push: mnemosyne-cli not on PATH — install with" >&2
+    echo "pre-push: [gate 2] mnemosyne-cli not on PATH — install with" >&2
     echo "  cargo install --path /path/to/mnemosyne/crates/mnemosyne-cli" >&2
     echo "  Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
     exit 1
@@ -236,7 +238,7 @@ fi
 echo "pre-push: mnemosyne-cli validate-workspace (SSOT gate) ..."
 if ! mnemosyne-cli validate-workspace; then
     echo "" >&2
-    echo "pre-push: validate-workspace FAILED — fix before push." >&2
+    echo "pre-push: [gate 2] validate-workspace FAILED — fix before push." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
     exit 1
 fi
@@ -294,7 +296,7 @@ if [[ -n "$diff_base" ]]; then
         echo "pre-push: cross-impl proof audit ($a4_reason) ..."
         if ! WZ_A4_REQUIRE=1 bash scripts/audit-crossimpl-proof.sh; then
             echo "" >&2
-            echo "pre-push: cross-impl proof audit FAILED — this is hosted Layer A4," >&2
+            echo "pre-push: [gate 2b] cross-impl proof audit FAILED — hosted Layer A4," >&2
             echo "          run early because a claim moved in this push." >&2
             echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
             exit 1
@@ -321,7 +323,7 @@ fi
 # the one hosted CI has had time to judge.
 # shellcheck disable=SC1091  # constant path, resolved at run time
 if ! source scripts/lib/previous-run-gate.sh; then
-    echo "pre-push: scripts/lib/previous-run-gate.sh missing or unreadable." >&2
+    echo "pre-push: [gate 2c] scripts/lib/previous-run-gate.sh missing or unreadable." >&2
     exit 1
 fi
 prev_sha=""
@@ -331,6 +333,7 @@ elif git rev-parse --verify --quiet origin/main >/dev/null; then
     prev_sha="$(git rev-parse origin/main)"
 fi
 if ! wz_previous_run_gate "$prev_sha" 'pre-push'; then
+    echo "pre-push: [gate 2c] the previous push's hosted verdict refuses this one." >&2
     echo "pre-push: bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
     exit 1
 fi
@@ -366,7 +369,7 @@ fi
 # scoping for.
 if ! python3 scripts/lib/config_key_fixture_gate.py; then
     echo "" >&2
-    echo "pre-push: config-key/fixture gate FAILED — the key set and a" >&2
+    echo "pre-push: [gate 2d] config-key/fixture gate FAILED — the key set and a" >&2
     echo "          fixture that owes it have drifted. The line above says" >&2
     echo "          WHICH of the three sites; do not assume the drop-in one." >&2
     echo "          Hosted Layer Z is the only other thing that checks this," >&2
@@ -389,7 +392,7 @@ fi
 # the same reason too: a scope predicate that is wrong reads exactly like a pass.
 if ! python3 scripts/lib/scouting_socket_axis_census.py > /dev/null; then
     echo "" >&2
-    echo "pre-push: scouting-socket axis census FAILED — a movable axis is" >&2
+    echo "pre-push: [gate 2e] scouting-socket axis census FAILED — a movable axis is" >&2
     echo "          unjudged, a witness it names no longer exists, or the" >&2
     echo "          derivation read an EMPTY population." >&2
     echo "          Run \`python3 scripts/lib/scouting_socket_axis_census.py\`" >&2
@@ -419,7 +422,7 @@ fi
 # added to `args.rs` reaches origin with no local signal otherwise.
 if ! python3 scripts/lib/flag_precondition_gate.py > /dev/null; then
     echo "" >&2
-    echo "pre-push: flag-precondition gate FAILED — the expansion emits a flag" >&2
+    echo "pre-push: [gate 2f] flag-precondition gate FAILED — the expansion emits a flag" >&2
     echo "          the binary refuses without a partner, and the emission site" >&2
     echo "          carries no guard; or an anchor this reader needs is gone." >&2
     echo "          Run \`python3 scripts/lib/flag_precondition_gate.py\` for the" >&2
@@ -445,7 +448,7 @@ fi
 # the two lists reaches origin with no local signal at all otherwise.
 if ! python3 scripts/lib/unhonoured_kind_evidence_gate.py > /dev/null; then
     echo "" >&2
-    echo "pre-push: unhonoured-kind evidence gate FAILED — a key's KIND of" >&2
+    echo "pre-push: [gate 2g] unhonoured-kind evidence gate FAILED — a key's KIND of" >&2
     echo "          unhonoured is unevidenced: wz's source names a key no" >&2
     echo "          citation row explains, a row explains a key nothing names," >&2
     echo "          or a row's anchor is not in wz's code." >&2
@@ -492,7 +495,7 @@ fi
 # refuses a feature-only test claimed by neither scope.
 if ! bash scripts/lib/nondefault-tests-gate.sh; then
     echo "" >&2
-    echo "pre-push: non-default-feature TESTS FAILED — a check that only a" >&2
+    echo "pre-push: [gate 2h] non-default-feature TESTS FAILED — a check that only a" >&2
     echo "          feature build can run is red, or a leg's filter matched no" >&2
     echo "          test. Gate 7 compiles these; this one runs them." >&2
     echo "          Run \`bash scripts/lib/nondefault-tests-gate.sh\` for the" >&2
@@ -583,7 +586,7 @@ if [[ -n "$path_lanes" ]]; then
     echo "          (rustfmt + actionlint + shellcheck; the only local gate those paths have)."
     if ! bash scripts/run-ci.sh --layer "$path_lanes"; then
         echo "" >&2
-        echo "pre-push: Layer $path_lanes failed — fix before push." >&2
+        echo "pre-push: [gate 5] Layer $path_lanes failed — fix before push." >&2
         echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
         exit 1
     fi
@@ -686,7 +689,7 @@ done
 
 if [[ $fail -ne 0 ]]; then
     echo "" >&2
-    echo "pre-push: changed-crate tests failed — fix before push." >&2
+    echo "pre-push: [gate 3] changed-crate tests failed — fix before push." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
     exit 1
 fi
@@ -728,14 +731,14 @@ while IFS= read -r _p; do
     [[ -n "$_p" ]] && doc_pkgs+=("$_p")
 done < <(python3 scripts/lib/doclink_dependents.py "${pkgs[@]}")
 if [[ ${#doc_pkgs[@]} -eq 0 ]]; then
-    echo "pre-push: doc-link expansion produced NO crate — refusing to report clean." >&2
+    echo "pre-push: [gate 4] doc-link expansion produced NO crate — refusing to report clean." >&2
     exit 1
 fi
 
 echo "pre-push: checking doc links (Layer C1bz, subset): ${doc_pkgs[*]}"
 if ! WZ_C1BZ_ONLY="${doc_pkgs[*]}" bash scripts/run-ci.sh --layer C1bz; then
     echo "" >&2
-    echo "pre-push: changed-crate doc links failed — fix before push." >&2
+    echo "pre-push: [gate 4] changed-crate doc links failed — fix before push." >&2
     echo "          A count ABOVE budget is a link this push added: fix the link," >&2
     echo "          do not raise the budget. A count BELOW it is a link this push" >&2
     echo "          removed: lower the budget in this same commit." >&2
@@ -772,7 +775,7 @@ echo "pre-push: checking the count guards this push's test set moves (gate 4b)"
 if ! BX="${BX:-}" python3 scripts/lib/guarded_count_gate.py \
     --range "$diff_base..$local_sha"; then
     echo "" >&2
-    echo "pre-push: a run-ci count guard disagrees with the tests this push" >&2
+    echo "pre-push: [gate 4b] a run-ci count guard disagrees with the tests this push" >&2
     echo "          leaves behind. Move the constant IN THIS COMMIT, to what" >&2
     echo "          the command PRINTED — the module's other cases are" >&2
     echo "          \`#[cfg]\`-gated, so counting the diff has produced the" >&2
@@ -802,7 +805,7 @@ fi
 echo "pre-push: reduced feature combination (Layer C1cf, subset): ${pkgs[*]}"
 if ! bash scripts/lib/reduced-features-gate.sh "${pkgs[@]}"; then
     echo "" >&2
-    echo "pre-push: a changed crate does not build with its default features" >&2
+    echo "pre-push: [gate 6] a changed crate does not build with its default features" >&2
     echo "          off — fix the reduced combination, or place the crate in a" >&2
     echo "          named tier in scripts/lib/reduced-features-gate.sh." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
@@ -840,7 +843,7 @@ fi
 echo "pre-push: non-default feature clippy (Layer C1cn, subset): ${pkgs[*]}"
 if ! bash scripts/lib/nondefault-features-gate.sh "${pkgs[@]}"; then
     echo "" >&2
-    echo "pre-push: a changed crate is not CLEAN with its non-default" >&2
+    echo "pre-push: [gate 7] a changed crate is not CLEAN with its non-default" >&2
     echo "          features on — this is code no other local gate judges" >&2
     echo "          (gate 3 is default features and runs no clippy), so fix" >&2
     echo "          it, or place the crate in a named tier in" >&2
@@ -874,7 +877,7 @@ fi
 echo "pre-push: workspace type-check (open-debt item 475)"
 if ! bash scripts/lib/workspace-check-gate.sh; then
     echo "" >&2
-    echo "pre-push: the workspace no longer type-checks — a crate this push" >&2
+    echo "pre-push: [gate 8] the workspace no longer type-checks — a crate this push" >&2
     echo "          did NOT change has stopped compiling. Every other gate" >&2
     echo "          here is scoped to the changed crates and structurally" >&2
     echo "          cannot see this." >&2
