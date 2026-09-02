@@ -289,9 +289,17 @@ _CASES = [
      _sec("Check 1", "index-content",
           _SELECT + _READ_BLOB +
           '    echo "  fix: (cd crates && cargo fmt --all) && git add -u" >&2\n')),
+    # R2284 — the fixture's comment used to BACKTICK the command it names, and
+    # `gate_reason_claims.py` reads a backticked token inside a module-level
+    # table as a CITATION that must resolve in `crates/**`. This one is a
+    # fixture line, not a claim about the tree, so it loses the backticks
+    # rather than the gate losing the rule. It went unseen for a round because
+    # that gate's corpus is `git ls-files`, and this file was untracked when
+    # R2283 ran Layer C0 over it -- the R2191 class, again: a new script is
+    # invisible to the gates that scan tracked files until it is staged.
     ("a COMMENT that names the worktree command", True,
      _sec("Check 1", "index-content",
-          "# this replaced `cargo fmt --all -- --check`\n" + _READ_BLOB)),
+          "# this replaced cargo fmt --all -- --check\n" + _READ_BLOB)),
     ("a presence PROBE for the formatter", True,
      _sec("Check 1", "index-content",
           '    if ! command -v rustfmt >/dev/null 2>&1; then\n' + _READ_BLOB)),

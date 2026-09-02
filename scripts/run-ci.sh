@@ -2447,6 +2447,18 @@ PY
     # In Layer C0 with its siblings: `--check` reads nothing but the tree.
     python3 scripts/lib/hook_graded_surface_gate.py --selftest || return 1
     python3 scripts/lib/hook_graded_surface_gate.py --check || return 1
+    # R2284 (open-debt item 622) — the same question for `pre-push`, which could
+    # not be asked until its SECTIONS were true. Its gates are delimited by
+    # comment headers alone, and one header sat on a precondition while its
+    # gate's own body sat below a neighbour: gate 3 owned five lines and no
+    # refusal, gate 5 owned two gates' worth. A `# grades:` line attached there
+    # would have described the wrong code. So this gate holds the boundary
+    # first — a gate that cannot refuse is a header whose gate is elsewhere, and
+    # a refusal outside a gate is a gate nobody named — and then the surface,
+    # in a vocabulary that is NOT the commit hook's: `pre-commit`'s four values
+    # cannot cover gate 2c, which reads the previous hosted run and no file.
+    python3 scripts/lib/hook_gate_boundary_gate.py --selftest || return 1
+    python3 scripts/lib/hook_gate_boundary_gate.py --check || return 1
     # R2192 (open-debt item 530, the FIRST measured case) — a dependency this
     # tree's prose names is one cargo resolves, and one it DENIES is one
     # nothing reaches.

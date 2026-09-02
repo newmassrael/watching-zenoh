@@ -76,6 +76,7 @@ if [[ $has_work -eq 0 ]]; then
 fi
 
 # ─── gate 0 — confidential vocabulary (R311y619) ────────────────────
+# grades: pushed-range
 # FIRST, because it is the only failure here that a revert does not undo:
 # origin is public, so material that reaches it is published even if the commit
 # is removed afterwards. This repo has leaked a client document once already and
@@ -113,6 +114,7 @@ else
 fi
 
 # ─── gate 0b — home-directory paths (R2064) ─────────────────────────
+# grades: worktree
 # The sibling of gate 0 and the same argument one notch smaller: origin is
 # PUBLIC, a push cannot be un-published, and CLAUDE.md's ban on machine-local
 # absolute paths was until now enforced by an agent remembering it. Unlike
@@ -131,6 +133,7 @@ if ! wz_home_path_scan "$(git rev-parse --show-toplevel)"; then
 fi
 
 # ─── gate 0c — the identities being published (2026-08-25) ──────────
+# grades: pushed-range
 # Third in the gate-0 family and the same argument again: origin is PUBLIC
 # and a push cannot be un-published. This one is here because that sentence
 # stopped being a caution and became a bill. Eight commits authored with a
@@ -172,6 +175,7 @@ for sha in "${push_shas[@]}"; do
 done
 
 # ─── gate 1 — schema pin, on the COMMITS BEING PUSHED (R311y418) ────
+# grades: pushed-range
 # pre-commit grades the index, which covers `git commit` and nothing else:
 # cherry-pick, rebase, merge and --no-verify all reach origin without ever
 # running it (all three reproduced during the R311y418 review — a store
@@ -209,6 +213,7 @@ if ! wz_local_cli_pin_gate 'pre-push' "${push_shas[$((${#push_shas[@]} - 1))]}:"
 fi
 
 # ─── gate 2 — SSOT integrity (validate-workspace, seconds) ──────────
+# grades: worktree
 # Fast and load-bearing: catches a bypassed typed-mutate primitive (raw
 # Edit on the sidecar JSON, a frozen-ledger violation, a new T1 orphan)
 # BEFORE it reaches origin. pre-commit runs this too, but pre-push re-runs
@@ -248,6 +253,7 @@ elif git rev-parse --verify --quiet origin/main >/dev/null; then
 fi
 
 # ─── gate 2b — cross-impl proof audit, WHEN A CLAIM MOVED (R311y764) ─
+# grades: worktree
 # The narrowest gate in this file, and it exists because of a measured
 # three-round failure rather than a hypothetical one.
 #
@@ -297,6 +303,7 @@ if [[ -n "$diff_base" ]]; then
 fi
 
 # ─── gate 2c — the PREVIOUS push's hosted verdict (R311y765) ────────
+# grades: not-a-file
 # Gate 2b above mechanises ONE lane. This is the lane-agnostic half, and it is
 # the one carry N70 actually names: the feature-subset matrix, Layers F / G / Q
 # / Z / B2 and every other hosted-only lane are deliberately not mirrored here
@@ -329,6 +336,7 @@ if ! wz_previous_run_gate "$prev_sha" 'pre-push'; then
 fi
 
 # ─── gate 2d — the config key set vs the fixtures that owe it ───────
+# grades: worktree
 #
 # THREE sites now, each added by the round that found it: the drop-in fixture
 # must NAME every honoured key (R2138, item 224); the defaults leg must CLASS
@@ -368,6 +376,7 @@ if ! python3 scripts/lib/config_key_fixture_gate.py; then
 fi
 
 # ─── gate 2e — the scouting socket's movable axes (R2142, item 225) ──
+# grades: worktree
 #
 # Which axes of the scouting socket config can move, and which are witnessed
 # BOTH-ENDED. Derived from the socket's own surface: the scalar parameters of
@@ -390,6 +399,7 @@ if ! python3 scripts/lib/scouting_socket_axis_census.py > /dev/null; then
 fi
 
 # ─── gate 2f — a flag's precondition SET, derived (R2144, item 218) ──
+# grades: worktree
 #
 # R311y844 found this class by TRIPPING OVER IT: the expansion emitted
 # `--scout-timeout-ms` unconditionally, `main` refuses that flag without
@@ -419,6 +429,7 @@ if ! python3 scripts/lib/flag_precondition_gate.py > /dev/null; then
 fi
 
 # ─── gate 2g — the KIND of unhonoured, evidenced (R2150, item 539) ──
+# grades: worktree
 #
 # R2148 split the unhonoured config keys into "wz genuinely cannot act on this"
 # and "wz ALREADY DOES and the reader was never taught the key". Four checks
@@ -445,6 +456,7 @@ if ! python3 scripts/lib/unhonoured_kind_evidence_gate.py > /dev/null; then
 fi
 
 # ─── gate 2h — the RUST half of the static gates, RUN (R2153, item 542) ──
+# grades: worktree
 #
 # Gate 2g above runs the PYTHON half of the two instruments R2150 and R2151
 # built. Their RUST half — the `#[test]`s that own the list shape — had no local
@@ -514,7 +526,17 @@ if command -v cargo-sweep >/dev/null 2>&1; then
         echo "pre-push: target GC skipped (non-fatal)" >&2
 fi
 
-# ─── gate 3 — changed-crate tests (default features, fast) ──────────
+# ─── the diff-base precondition, hoisted (guards gates 5 and 3) ─────
+#
+# R2284 (open-debt item 622, condition 0) — LABEL ONLY, no behaviour changed.
+# This block carried the `gate 3` header, and it is not gate 3: it is the
+# precondition BOTH gate 5 and gate 3's body need, which is why it sits above
+# gate 5 while gate 3's own code sits below it. The header made the section
+# boundaries untrue — gate 3 appeared to own five lines and no refusal, and
+# gate 5 appeared to own two gates' worth. `hook_gate_boundary_gate.py` refuses
+# that arrangement now: a `gate N` section that owns no `exit 1` is a header
+# whose gate lives somewhere else.
+#
 # Diff range: `diff_base..<local_sha>`, computed above (gate 2b shares it). An
 # empty diff_base is a new ref with no remote base — nothing to diff against, so
 # skip. Only crates/<name>/ changes map to a test target; everything else is
@@ -526,6 +548,7 @@ if [[ -z "$diff_base" ]]; then
 fi
 
 # ─── gate 5 — the lanes that own the paths OUTSIDE crates/ (R311y793) ──
+# grades: worktree
 #
 # The rule this hook had only in prose: a round owes the lanes that own the
 # FILES it touched. Gates 3 and 4 know `crates/` and nothing else, so a push
@@ -574,6 +597,14 @@ fi
 # forms that are genuinely awkward to express portably, and rewriting a
 # working script for a platform nobody has asked for would be the wrong trade.
 # The hooks are the part a macOS clone must run before it can commit at all.
+
+# ─── gate 3 — changed-crate tests (default features, fast) ──────────
+# grades: worktree
+#
+# R2284 moved this header DOWN to the code it names; the precondition it used
+# to sit above is labelled as one. Gate 5 is deliberately between the two —
+# "Placed BEFORE gate 3 on purpose", as its own header says, because the
+# no-crates early exit below is exactly the push shape gate 5 exists for.
 changed_dirs=()
 while IFS= read -r _d; do
     [[ -n "$_d" ]] && changed_dirs+=("$_d")
@@ -663,6 +694,7 @@ fi
 echo "pre-push: changed-crate tests passed."
 
 # ─── gate 4 — changed-crate DOC LINKS (R311y792) ────────────────────
+# grades: worktree
 # The rule this encodes: a round that writes a doc comment owes Layer C1bz.
 # Nothing said so, and the class has now been paid for TWICE — R311y787 fixed
 # doc links it had just added, and R311y790 added two more (a link to a private
@@ -712,6 +744,7 @@ if ! WZ_C1BZ_ONLY="${doc_pkgs[*]}" bash scripts/run-ci.sh --layer C1bz; then
 fi
 
 # ─── gate 4b — the COUNT GUARDS this push's test set moves (R2167) ───
+# grades: worktree
 # Gate 4's argument, applied to a different constant. `run-ci.sh` asserts an
 # exact `test result: ok. N passed` for 291 commands, and the number is written
 # by hand at the moment a test is added — the one moment nothing local reads it.
@@ -749,6 +782,7 @@ if ! BX="${BX:-}" python3 scripts/lib/guarded_count_gate.py \
 fi
 
 # ─── gate 6 — changed-crate REDUCED FEATURE COMBINATION (R311y821) ──
+# grades: worktree
 # The rule this encodes: a round that edits a crate owes the SHRUNKEN build of
 # it, not only the default one. `cargo clippy --all-features` cannot see a
 # cfg-gated import behind an ungated signature — the feature is on — and the
@@ -776,6 +810,7 @@ if ! bash scripts/lib/reduced-features-gate.sh "${pkgs[@]}"; then
 fi
 
 # ─── gate 7 — changed-crate NON-DEFAULT FEATURE JUDGEMENT (R2133, ────
+# grades: worktree
 #              widened to clippy by R2243)
 # The mirror of gate 6, and the one that closes unregistered item 176. Gate 6
 # asks whether a changed crate survives its defaults being OFF; nothing asked
@@ -815,6 +850,7 @@ if ! bash scripts/lib/nondefault-features-gate.sh "${pkgs[@]}"; then
 fi
 
 # ─── gate 8 — the WORKSPACE still TYPE-CHECKS (R2134) ───────────────
+# grades: worktree
 # Unregistered item 475, and the one blind spot none of the gates above can
 # cover by construction: every one of them is scoped to the crates the push
 # CHANGED, and this class breaks a crate the push did not touch. Widen a public
