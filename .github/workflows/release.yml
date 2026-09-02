@@ -41,6 +41,12 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # R2276 (open-debt item 614) — the same arming ci.yml carries, for the same
+  # reason. This file mirrors nine run-ci lanes, and item 614's own "location"
+  # bullet named ci.yml ONLY: measured at that round, these nine were the part
+  # of the population the item did not see. An empty value is the assertion
+  # "no lane in this job runs nothing", asserted both ways by run-ci.sh.
+  WZ_DECLINED_EXPECT: ""
 
 jobs:
   release:

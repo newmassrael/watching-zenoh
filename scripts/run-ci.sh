@@ -2241,6 +2241,22 @@ PY
     # 615 was the residue of it being merely counted.
     python3 scripts/lib/lane_decline_read.py --selftest || return 1
     python3 scripts/lib/lane_decline_read.py --audit || return 1
+    # R2276 (open-debt item 614) — AND SOMETHING ARMS IT. The reading above can
+    # name a lane that ran nothing, but `WZ_DECLINED_EXPECT` is what turns that
+    # name into a verdict, and until this round NOTHING set it: `git grep
+    # WZ_DECLINED_EXPECT -- .github .githooks` returned zero. A pin a caller has
+    # to switch on is not a gate until a gate holds the caller to it.
+    #
+    # The population is DERIVED from the workflows — every `run:` step whose
+    # script executes run-ci.sh, which is 165 of them across BOTH workflow
+    # files, one of which a text sweep misses because its `run:` block is
+    # multi-line. Both directions are red: a HOSTED caller that does not arm,
+    # and a LOCAL (`.githooks/`) caller that DOES — the hooks are fail-open by
+    # design, and arming there turns "this machine has no shellcheck" into a
+    # refused push. A call site under neither directory is unclassified, which
+    # is also red.
+    python3 scripts/lib/decline_arming_gate.py --selftest || return 1
+    python3 scripts/lib/decline_arming_gate.py --check || return 1
     # R2199 (open-debt item 557) — EVERY HANDSHAKE-NEGOTIATED AXIS IS ASSERTED.
     #
     # The consuming surface reported that no test measured `sn_resolution` or

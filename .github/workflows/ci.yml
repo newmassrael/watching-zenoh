@@ -119,6 +119,33 @@ env:
   # checkout v4's submodule support honors .gitmodules per the
   # `submodules: recursive` flag below.
   RUST_BACKTRACE: 1
+  # R2276 (open-debt item 614) — ARM R2274's `ran nothing` assertion, for every
+  # job, from one place.
+  #
+  # `run-ci.sh` reads each lane's own output on the pass path and can tell a
+  # lane that DID something from one that declined. Until this line nothing
+  # turned that reading into a verdict: a provisioning regression — item 598 in
+  # C1ce and item 562 in C1bn each shipped one — passed hosted as a green with
+  # a footnote, which is the whole of item 614.
+  #
+  # The EMPTY STRING is the assertion, and it is not the same as leaving the
+  # variable unset: it says "no lane in this job runs nothing". Unset says
+  # nothing at all. DERIVED, not assumed — the `ran nothing:` lines of run
+  # 33572616358 (the first hosted run to carry the reading) name exactly one
+  # lane in exactly two jobs, Layer C2, and that reading was itself the defect
+  # R2275 repaid: C2 had just finished a full workspace clippy and its only
+  # output was the deploy arm's SKIP. With C2 printing its own evidence, no
+  # hosted job declines anything, so the honest set is empty everywhere.
+  #
+  # It is asserted BOTH ways, which is why a value cannot be used to silence
+  # it: a lane that runs nothing outside the set is a red, and a lane INSIDE
+  # the set that did work is a stale-expectation red. A job that legitimately
+  # declines a lane names it in a step-level `env:` override — and then has to
+  # keep that name true.
+  #
+  # Held to both files and both directions by scripts/lib/decline_arming_gate.py
+  # (Layer C0), which derives the call sites from the workflows themselves.
+  WZ_DECLINED_EXPECT: ""
 
 jobs:
   ci:
