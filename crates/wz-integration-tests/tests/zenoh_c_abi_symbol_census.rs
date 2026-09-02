@@ -141,7 +141,25 @@ use wz_integration_tests::common::{wz_capi_c_cdylib, zenoh_c_oracle};
 /// when the INSTALLED oracle is a different one. Nothing has to remember to
 /// re-measure: provisioning a 1.10.0 oracle for an arm whose row says 1.5.0
 /// fails with that sentence.
-const BASELINES: &[(&str, usize, &str)] = &[
+///
+/// ## R2282 — a row now records WHO EXECUTES it, and a `none` is judged
+///
+/// The version field says what a row was measured against. It does not say
+/// whether anything ever runs it, and open-debt item 620 is that: for most of
+/// this file's life exactly ONE of the four rows was executed, because the
+/// census runs in Layer C1cc alone and C1cc's oracle is the published archive.
+/// The other three were measured by hand and re-measured by nothing — a
+/// committed number outliving what it describes, which is the same defect the
+/// version field was added for, one level up.
+///
+/// The fourth field is therefore either the LANE that executes the row or
+/// `none -- <why>`, and `scripts/lib/zenoh_c_census_arm_reach.py` judges it in
+/// BOTH directions: it derives which run-ci lanes invoke this test and which
+/// oracle arm each of them points at, then reds on a row naming a lane that
+/// does not reach that arm AND on a `none` for an arm a lane does reach. The
+/// second direction is not hypothetical — R2281 re-aimed Layer C1ce at the
+/// `unstable` oracle, and the `unstable` row's `none` became false that round.
+const BASELINES: &[(&str, usize, &str, &str)] = &[
     // Reached ZERO at R311y568 against 1.5.0. R2256 re-measured it at 1.10.0
     // and it is TWO: upstream's no-unstable surface went 568 -> 570 and wz's
     // stayed at 568.
@@ -152,7 +170,14 @@ const BASELINES: &[(&str, usize, &str)] = &[
     // building from source is the only route to a `nounstable` oracle now.
     // R2258 lowered this 2 -> 1: `z_query_accepts_replies` is one of the two
     // upstream defines on the no-unstable arm as well.
-    ("nounstable", 1, "1.10.0"),
+    (
+        "nounstable",
+        1,
+        "1.10.0",
+        "none -- no lane points an oracle at this arm, and giving it one costs a \
+      whole zenoh graph build for a ceiling no consumer reads: upstream does \
+      not publish this arm and wz-capi-c's default features do not model it",
+    ),
     // The arm hosted CI provisions. 83 -> 65 at R311y573 against 1.5.0; 65 ->
     // 189 at R2239, and every one of the 124 is upstream GROWING rather than wz
     // regressing. Re-measured, the remainder is FOUR planes and three strays,
@@ -230,7 +255,7 @@ const BASELINES: &[(&str, usize, &str)] = &[
     //
     // ⚠ The two `_async` spellings are NOT here: they take
     // `zc_threadsafe_context_t`, which this crate does not declare.
-    ("unstable-shm", 51, "1.10.0"),
+    ("unstable-shm", 51, "1.10.0", "C1cc"),
     // R311y614 — the two arms that had NO oracle on any machine, and therefore
     // no row: the gate hard-FAILED on them rather than guessing a ceiling from
     // a neighbour. `scripts/install-zenoh-c-arm.sh` builds any of the four, so
@@ -323,8 +348,15 @@ const BASELINES: &[(&str, usize, &str)] = &[
     // really did not carry the value — but the TREE did: `QueryView::source_info`
     // is filled by the receive path out of the query's own ext, so the work was
     // one layer of wiring rather than a new wire feature.
-    ("unstable", 0, "1.10.0"),
-    ("nounstable-shm", 1, "1.10.0"),
+    ("unstable", 0, "1.10.0", "C1ce"),
+    (
+        "nounstable-shm",
+        1,
+        "1.10.0",
+        "none -- no lane points an oracle at this arm, and giving it one costs a \
+      whole zenoh graph build for a ceiling no consumer reads: upstream does \
+      not publish this arm and wz-capi-c's default features do not model it",
+    ),
 ];
 
 /// The zenoh-c version an oracle prefix declares, out of its own
@@ -356,8 +388,11 @@ fn oracle_version(include: &Path) -> String {
 fn baseline_for(arm: &str) -> (usize, &'static str) {
     BASELINES
         .iter()
-        .find(|(name, _, _)| *name == arm)
-        .map(|(_, n, v)| (*n, *v))
+        .find(|(name, _, _, _)| *name == arm)
+        // The fourth field says WHO EXECUTES this row and is not read here on
+        // purpose: it is a claim about `run-ci.sh`, and a test cannot know
+        // which lane invoked it. `zenoh_c_census_arm_reach.py` adjudicates it.
+        .map(|(_, n, v, _)| (*n, *v))
         .unwrap_or_else(|| {
             panic!(
                 "no census baseline recorded for the '{arm}' ABI arm. The gap is \

@@ -2421,6 +2421,19 @@ PY
     # green wherever no oracle happens to be installed.
     python3 scripts/lib/zenoh_c_oracle_arms.py --selftest || return 1
     python3 scripts/lib/zenoh_c_oracle_arms.py --check || return 1
+    # R2282 (open-debt item 620) — and a per-arm CEILING no lane runs is a
+    # number nobody re-measures. The sibling above asks what each oracle prefix
+    # is FOR; this one asks which of `zenoh_c_abi_symbol_census.rs::BASELINES`'s
+    # four rows any lane actually executes. The answer was ONE, and the other
+    # three were hand-measured numbers with nothing re-deriving them — the same
+    # class the version field in that file was added for, one level up. Each row
+    # now names its lane or declares `none -- <why>`, and this judges the
+    # declaration in BOTH directions, which is what keeps it from being an
+    # escape hatch.
+    #
+    # In Layer C0 with its two siblings: `--check` reads nothing but the tree.
+    python3 scripts/lib/zenoh_c_census_arm_reach.py --selftest || return 1
+    python3 scripts/lib/zenoh_c_census_arm_reach.py --check || return 1
     # R2192 (open-debt item 530, the FIRST measured case) — a dependency this
     # tree's prose names is one cargo resolves, and one it DENIES is one
     # nothing reaches.
@@ -16304,9 +16317,27 @@ layer_c1ce_api_compat_c_unstable_oracle() {
     fi
 
     local rc=0
-    # Build the arm THIS oracle selects — which is the default plus
-    # `zenoh-c-shared-memory`, resolved by reading both defines rather than one.
+    # Build the arm THIS oracle selects — resolved by reading both defines
+    # rather than one.
     WZ_ZENOH_C_PREFIX="$shm" _runci_build_capi_c_for_oracle C1ce || return 1
+    # R2282 (open-debt item 620) — the SYMBOL CENSUS on this arm. Its ceilings
+    # are committed PER ARM (`zenoh_c_abi_symbol_census.rs::BASELINES`) and the
+    # test hard-FAILs on an arm it has no row for, so all four rows exist; but
+    # the census ran in Layer C1cc alone, whose oracle is the published archive,
+    # so ONE of the four was ever executed and the other three were hand-measured
+    # numbers nothing re-measured. This lane already builds an `unstable` oracle
+    # and a matching cdylib, so executing that row here costs seconds and no
+    # provisioning at all. `scripts/lib/zenoh_c_census_arm_reach.py` is what
+    # keeps the rows honest about which lane reaches them, in both directions.
+    for leg in \
+        the_wz_capi_c_drop_in_surface_gap_does_not_grow \
+        wz_exports_nothing_the_reference_does_not \
+        the_census_reads_both_libraries_rather_than_nothing; do
+        WZ_ZENOH_C_PREFIX="$shm" _runci_guarded_test "C1ce $leg" 1 \
+            cargo test -p wz-integration-tests \
+            --test zenoh_c_abi_symbol_census -- --ignored --quiet --test-threads=1 \
+            --exact "$leg" || rc=1
+    done
     # The OBSERVER the publishing legs adjudicate with. Built here rather than
     # inherited from Layer C1cc, because `--layer C1ce` on its own is a supported
     # invocation and because a STALE observer is not a missing one: this lane's

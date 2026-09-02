@@ -383,8 +383,12 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
 ABI_CONTRACT: dict[str, str] = {
     "wz-capi-c": (
         "the zenoh-c drop-in cdylib; its symbol set is graded against "
-        "upstream's own libzenohc.so on all four ABI arms by "
-        "`crates/wz-integration-tests/tests/zenoh_c_abi_symbol_census.rs`"
+        "upstream's own libzenohc.so by "
+        "`crates/wz-integration-tests/tests/zenoh_c_abi_symbol_census.rs`, "
+        "which holds a ceiling for each of the four ABI arms and is RUN on the "
+        "arms a lane provisions an oracle for -- how many that is is derived "
+        "per push by `scripts/lib/zenoh_c_census_arm_reach.py`, not asserted "
+        "here (R2282 found this sentence claiming all four while one was run)"
     ),
 }
 
