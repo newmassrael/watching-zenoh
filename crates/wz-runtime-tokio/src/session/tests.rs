@@ -5911,6 +5911,14 @@ fn routed_subscriber_drop_emits_undecl_subscriber() {
 
 /// R2290 (open-debt item 626) — build a session whose link driver reports, per
 /// emitted frame, whether the observer mutex was free at that instant.
+///
+/// Gated as the union of the two tests below, for the reason the fixture it
+/// calls carries the same union: a `--no-default-features` subset that
+/// compiles neither test must not see this as dead code under `-D warnings`.
+#[cfg(any(
+    all(feature = "declare-subscriber", feature = "declare-undeclare"),
+    feature = "liveliness-token"
+))]
 fn build_probing_session() -> (
     TokioSession,
     Arc<crate::test_fixtures::ObserverProbeLinkDriver>,

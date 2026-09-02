@@ -28,6 +28,13 @@ use std::sync::{Arc, Mutex};
 
 use wz_runtime_tokio_test_support::fixture_session_init_params;
 
+// R2290 — imported for `ObserverProbeLinkDriver` only, so it carries that
+// type's feature union: an unused import is `-D warnings` in the
+// `--no-default-features` subsets, exactly as the type itself was dead code.
+#[cfg(any(
+    all(feature = "declare-subscriber", feature = "declare-undeclare"),
+    feature = "liveliness-token"
+))]
 use crate::observer::ApplicationLayerObserver;
 use crate::runtime_impl::TokioTime;
 use crate::session_glue::{
@@ -142,6 +149,20 @@ pub(crate) fn recording_driver() -> Arc<RecordingLinkDriver> {
 /// Deliberately a link driver rather than a probe wired into one handle: the
 /// retract reaches the wire the same way on every plane (subscriber, token,
 /// queryable), so ONE probe covers the population instead of one per handle.
+///
+/// GATED AS THE UNION OF ITS CONSUMERS, exactly like `recording_driver`'s
+/// `session-reconnect` sibling and `RecordingLinkDriver::reset`'s
+/// `routing-peer` one: the two tests that use it are
+/// `all(declare-subscriber, declare-undeclare)` and `liveliness-token`, and a
+/// `--no-default-features` subset that compiles neither must not see this as
+/// dead code. Measured: gate 4b refused a push because nine such legs died at
+/// `-D dead-code` rather than printing a libtest summary — the failure is a
+/// COMPILE one in a feature combination no default-feature lane builds, which
+/// is why `cargo test -p wz-runtime-tokio` was green the whole time.
+#[cfg(any(
+    all(feature = "declare-subscriber", feature = "declare-undeclare"),
+    feature = "liveliness-token"
+))]
 pub(crate) struct ObserverProbeLinkDriver {
     /// The observer to probe, installed AFTER the session exists (a driver is
     /// built before the session it belongs to). `None` = not yet armed, and an
@@ -153,6 +174,10 @@ pub(crate) struct ObserverProbeLinkDriver {
     lockable: Mutex<Vec<bool>>,
 }
 
+#[cfg(any(
+    all(feature = "declare-subscriber", feature = "declare-undeclare"),
+    feature = "liveliness-token"
+))]
 impl ObserverProbeLinkDriver {
     /// Start probing against `observer`. Call after the set-up emits so the
     /// recorded population is exactly the frames under test.
@@ -169,6 +194,10 @@ impl ObserverProbeLinkDriver {
     }
 }
 
+#[cfg(any(
+    all(feature = "declare-subscriber", feature = "declare-undeclare"),
+    feature = "liveliness-token"
+))]
 impl BoxedLinkDriver for ObserverProbeLinkDriver {
     fn send_blocking(&self, _bytes: &[u8], _reliability: Reliability) {
         let armed = self.armed.lock().expect("probe arm mutex poisoned");
@@ -186,7 +215,13 @@ impl BoxedLinkDriver for ObserverProbeLinkDriver {
     fn close_blocking(&self) {}
 }
 
-/// [`recording_actions`] twin backed by an [`ObserverProbeLinkDriver`].
+/// [`recording_actions`] twin backed by an `ObserverProbeLinkDriver` (a code
+/// span, not a link: the type is behind the same feature union as this fn, and
+/// a doc link into a `cfg`-absent item is a BROKEN one Layer C1bz counts).
+#[cfg(any(
+    all(feature = "declare-subscriber", feature = "declare-undeclare"),
+    feature = "liveliness-token"
+))]
 pub(crate) fn probing_actions() -> (Arc<SessionLinkActions>, Arc<ObserverProbeLinkDriver>) {
     let driver = Arc::new(ObserverProbeLinkDriver {
         armed: Mutex::new(None),
