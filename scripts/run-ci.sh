@@ -529,17 +529,15 @@ FAILED_LAYERS=()
 #   NOWORK_LAYERS  — "<lane>(<VERDICT>)" for each lane whose own output PROVES
 #                    it ran nothing: a decline with no work beside it, or a
 #                    libtest total of zero
-#   QUIET_LAYERS   — lanes that printed NOTHING. Counted and named, never
-#                    claimed as "ran nothing": measured over 15189 historical
-#                    lane runs, 9 lanes are silent on success to this day
-#                    (C2, C3, C1h, C1bl, C1bm, C1bq, C1br, C1own, B2) because a
-#                    clean clippy prints nothing — and it did the work. The
-#                    reading cannot separate those from a lane that did nothing,
-#                    so it says so instead of guessing.
 #   UNREAD_LAYERS  — lanes whose output could NOT be read; never a green
+#
+# R2275 (open-debt item 615) removed a fourth, QUIET_LAYERS — the lanes that
+# printed NOTHING, which R2274 could only count and name because seven of them
+# were legitimately silent on success. Those seven now end on a derived evidence
+# line (`_runci_lane_did`), so silence is no longer a state a working lane can
+# be in and it is FAILED where it is read, not deferred to an armed expectation.
 RAN_LAYERS=()
 NOWORK_LAYERS=()
-QUIET_LAYERS=()
 UNREAD_LAYERS=()
 # Why the reading could not be armed at all, if so. Named in the verdict rather
 # than silently skipped: a gate that cannot read its input must not report green.
@@ -666,6 +664,32 @@ _runci_unreached_report() {
          "$((total - reached)) did not run. That is what this red is covering" >&2
 }
 
+# ─── lane evidence (R2275, open-debt item 615) ─────────────────────────────
+#
+# The success-path counterpart of the decline reading below. A lane whose every
+# command is `--quiet`, captured into a variable or piped into `grep -q` exits 0
+# having printed NOTHING, and R2274's reading could not tell that from a lane
+# that did nothing at all — it had to report those lanes as undecided, which is
+# the escape hatch item 615 was filed against. This is where such a lane says,
+# in one line, what it just did.
+#
+# The count is DERIVED from the work — a leg counter incremented after each
+# invocation actually returns 0, or a number lifted out of the tool's own
+# output. A constant string would print whether the work happened or not, which
+# is the same defect one level down: evidence that cannot fail is not evidence.
+#
+#   _runci_lane_did <lane> <n> <what>   ->   `  C3: OK (8 isolated clippy run(s))`
+_runci_lane_did() {
+    printf '  %s: OK (%s %s)\n' "$1" "$2" "$3"
+}
+
+# The libtest count out of a captured `cargo test` run, summed over every
+# summary line it printed. `0` when there is none, which the callers treat as a
+# failure of the filter rather than as a number — the N42 shape.
+_runci_passed_count() {
+    awk '/^test result: (ok|FAILED)\./ { for (i = 1; i <= NF; i++) if ($(i+1) ~ /^passed/) n += $i } END { print n + 0 }'
+}
+
 # ─── the decline reading (R2274, debt-carry-N57 + N42) ─────────────────────
 #
 # Called on `run_layer`'s PASS path, AFTER the verdict line has been echoed.
@@ -702,11 +726,19 @@ _runci_read_lane() {
             return 0
             ;;
         0:SILENT*)
-            # The lane printed nothing. NOT claimed as "ran nothing" — a clean
-            # clippy prints nothing too, and this reading cannot tell the two
-            # apart. Named so the pass is not read as evidence, and left out of
-            # the armed expectation for the same reason.
-            QUIET_LAYERS+=("$name")
+            # R2275 (open-debt item 615) — a FAILURE of this lane, and not a
+            # note beside its pass. R2274 could only name it: seven lanes were
+            # then silent on success because a clean `cargo clippy --quiet`
+            # prints nothing, and this reading cannot separate those from a lane
+            # that did nothing. Those seven now end on a derived evidence line,
+            # so silence means the lane's pass carries no evidence AT ALL — and
+            # unlike a decline, which is a lane SAYING it did not run and which
+            # a caller may legitimately expect, there is no configuration in
+            # which that is the intended shape. Hence a red here rather than a
+            # row in the armed expectation.
+            echo "[$(_runci_ts)] ERROR Layer $name printed NOTHING between its header and its verdict — its pass is not evidence that it ran. Every lane ends its success path on one derived line (see \`_runci_lane_did\`); add this lane's." >&2
+            FAILED_LAYERS+=("$name (printed nothing)")
+            return 1
             ;;
         0:*)
             # DECLINED / ZEROTEST — the lane's OWN OUTPUT proves it ran nothing.
@@ -756,7 +788,11 @@ run_layer() {
         trap - DEBUG
         set +T
         echo "[$(_runci_ts)] INFO  Layer $name pass ($((SECONDS - start))s)"
-        _runci_read_lane "$name"
+        # R2275 — the reading can REFUSE the pass it just read (a lane that
+        # printed nothing at all). It has already named the lane in
+        # FAILED_LAYERS; not checkpointing it is the other half, so a `--resume`
+        # cannot carry an unevidenced pass forward.
+        _runci_read_lane "$name" || return 1
         _ckpt_mark "$name"
         return 0
     else
@@ -2193,10 +2229,16 @@ PY
     # FAIL line that it does NOT. An empty family is RED: a vocabulary gate whose
     # subject has vanished has lost its subject, it has not passed.
     #
-    # The selftest's last arm drives `run-ci.sh --layer Qz` with its Zephyr venv
-    # pointed at a path that does not exist — N57's own reproduction — and fails
-    # unless the run says the lane ran nothing. That is the arm that proves the
-    # reading is WIRED rather than merely written.
+    # The selftest's last two arms drive `run-ci.sh` itself, which is what
+    # proves the reading is WIRED rather than merely written. The first points
+    # Layer Qz's Zephyr venv at a path that does not exist — N57's own
+    # reproduction — and fails unless the run says the lane ran nothing AND
+    # still exits 0, because a decline is a lane SAYING it did not run and a
+    # caller may legitimately expect one. The second (R2275, open-debt item 615)
+    # runs a MUTATED copy of this script with the one `echo` that is Qz's whole
+    # output deleted, and fails unless that run goes RED naming the lane as
+    # having printed nothing. That is the arm that keeps SILENT a finding: item
+    # 615 was the residue of it being merely counted.
     python3 scripts/lib/lane_decline_read.py --selftest || return 1
     python3 scripts/lib/lane_decline_read.py --audit || return 1
     # R2199 (open-debt item 557) — EVERY HANDSHAKE-NEGOTIATED AXIS IS ASSERTED.
@@ -6501,12 +6543,38 @@ layer_c1bl_cargo_test_router_failfast() {
 # R311y413 — HOSTED on ci.yml's feature-gates job. Both discriminators already carry
 # anchored `^test result: ok\. 1 passed` count-guards (no run-ci change), so hosting
 # converts an already-falsification-proven lane from local-only to enforced.
+#
+# R2275 (item 615): the two test arms used to end in `| grep -qE`, which threw
+# the run's output away on success AND on failure — the lane printed nothing at
+# all (SILENT in hosted run 33568402673, jobs 6 and 22, and at every local
+# observation), and a red gave the reader a bare rc with no libtest line to look
+# at. Captured instead: the count comes out of libtest's own summary, so the
+# evidence line moves the moment either binary stops selecting its case.
 layer_c1bm_cargo_test_pico_failfast() {
-    (cd crates \
-        && cargo test -p wz-capi-pico --features transport-link-unixpipe --test unixpipe_listen_multiclient --quiet 2>&1 | grep -qE '^test result: ok\. 1 passed' \
-        && cargo clippy -p wz-capi-pico --all-targets --features transport-link-unixpipe --quiet -- -D warnings \
-        && cargo test -p wz-capi-pico --features transport-link-quic --test quic_listen_cert --quiet 2>&1 | grep -qE '^test result: ok\. 1 passed' \
-        && cargo clippy -p wz-capi-pico --all-targets --features transport-link-quic --quiet -- -D warnings)
+    local link suite out passed total=0
+    for link in unixpipe quic; do
+        case "$link" in
+            unixpipe) suite=unixpipe_listen_multiclient ;;
+            quic) suite=quic_listen_cert ;;
+        esac
+        out="$(cd crates && cargo test -p wz-capi-pico \
+            --features "transport-link-$link" --test "$suite" --quiet 2>&1)" || {
+            echo "  C1bm FAIL: $suite did not pass under transport-link-$link" >&2
+            echo "$out" >&2
+            return 1
+        }
+        passed="$(_runci_passed_count <<<"$out")"
+        if (( passed != 1 )); then
+            echo "  C1bm FAIL: $suite reported $passed passing test(s), expected 1 —" \
+                 "a filter that selects nothing still exits 0" >&2
+            echo "$out" >&2
+            return 1
+        fi
+        total=$((total + passed))
+        (cd crates && cargo clippy -p wz-capi-pico --all-targets \
+            --features "transport-link-$link" --quiet -- -D warnings) || return 1
+    done
+    _runci_lane_did C1bm "$total" "fail-fast listen test(s) over 2 link(s), each clippy-gated"
 }
 
 # ─── Layer C1x — routing-routes: forwarding kernel + forwarder unit + clippy ─
@@ -7360,10 +7428,26 @@ layer_c1own_own_space_witnesses() {
         rm -f "$log"
         return 1
     fi
-    local rc=0
-    python3 scripts/lib/own_space_witness_lint.py --executed "$log" >/dev/null || rc=1
+    # R2275 (item 615) — the `--executed` reading's own summary is this lane's
+    # evidence, and it was being thrown at /dev/null. Every other command here
+    # already writes to a temp log, so C1own exited 0 having printed NOTHING
+    # (SILENT in hosted run 33568402673, jobs 7 and 22, and at every local
+    # observation the archived logs hold). The number is derived twice over: the
+    # lint counts the witness set it built from the code, and `--executed` has
+    # just proved every member of that set appears in cargo's executed-test
+    # list, so a witness that stopped running cannot leave the count standing.
+    # Only the summary is echoed; the per-witness `WITNESS <name>` lines stay
+    # out of the run log, which is what `>/dev/null` was really there for.
+    local rc=0 lint
+    lint="$(python3 scripts/lib/own_space_witness_lint.py --executed "$log" 2>&1)" || rc=1
     rm -f "$log"
-    return "$rc"
+    if (( rc != 0 )); then
+        echo "$lint" >&2
+        return 1
+    fi
+    _runci_lane_did C1own "$(grep -c '^WITNESS ' <<<"$lint")" \
+        "own-space witness(es) present in the source AND in cargo's executed list"
+    return 0
 }
 
 # ─── Layer C1h — wz-session-core arbitrary-subset composability matrix ─
@@ -7465,28 +7549,52 @@ layer_c1own_own_space_witnesses() {
 #   18. the same +session-unicast                     (POSITIVE arm — 17 must
 #                                                      not pass by deleting the
 #                                                      helper)
+#
+# R2275 (item 615): a LIST, for the same two reasons Layer C3 was rewritten into
+# one. Every subset here is `--quiet`, so the lane exited 0 having printed
+# nothing — SILENT at every observation the archived logs hold and in both jobs
+# of hosted run 33568402673 — and a twenty-arm `&&` chain named neither the
+# subset that failed nor the number that ran. The `#` prefix on each arm is the
+# subcommand, so the build arms and the clippy arms live in ONE list and the
+# count in the evidence line is that list's own length.
 layer_c1h_arbitrary_subset_matrix() {
-    (cd crates \
-        && cargo build -p wz-session-core --no-default-features --features alloc --quiet \
-        && cargo build -p wz-session-core --no-default-features --features alloc,codec-push,pubsub-put,pubsub-delete,pubsub-attachment,pubsub-timestamp --quiet \
-        && cargo build -p wz-session-core --no-default-features --features alloc,query-queryable,query-attachment,query-selector-parameters,query-reply-err,query-source-info --quiet \
-        && cargo build -p wz-session-core --no-default-features --features alloc,codec-push,codec-response,codec-response-final,pubsub-put,pubsub-delete --quiet \
-        && cargo build -p wz-session-core --no-default-features --features alloc,codec-declare,declare-subscriber,declare-queryable,liveliness-token,liveliness-subscriber --quiet \
-        && cargo build -p wz-session-core --no-default-features --features alloc,codec-declare --quiet \
-        && cargo clippy -p wz-session-core --no-default-features --features alloc,session-unicast,declare-interest,codec-frame --all-targets --quiet -- -D warnings \
-        && cargo clippy -p wz-session-core --no-default-features --features alloc,session-unicast,codec-declare --all-targets --quiet -- -D warnings \
-        && cargo build -p wz-session-core --no-default-features --features alloc,transport-batching --quiet \
-        && cargo build -p wz-session-core --no-default-features --quiet \
-        && cargo build -p wz-session-core --no-default-features --features codec-declare,declare-subscriber,declare-queryable,liveliness-token,liveliness-subscriber --quiet \
-        && cargo build -p wz-session-core --no-default-features --features codec-push,pubsub-put,pubsub-delete,pubsub-attachment,pubsub-timestamp --quiet \
-        && cargo build -p wz-session-core --no-default-features --features codec-request,query-queryable,query-attachment,query-selector-parameters,query-reply-err,query-source-info --quiet \
-        && cargo build -p wz-session-core --no-default-features --features codec-response,codec-response-final,query-reply --quiet \
-        && cargo build -p wz-session-core --no-default-features --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,query-reply,liveliness-token,liveliness-subscriber,declare-subscriber,declare-queryable,pubsub-put,pubsub-delete,pubsub-attachment,pubsub-timestamp,pubsub-source-info,query-attachment,query-selector-parameters,query-reply-err,query-source-info --quiet \
-        && cargo clippy -p wz-session-core --no-default-features --features session-extqos,codec-init-body --quiet -- -D warnings \
-        && cargo clippy -p wz-session-core --no-default-features --features codec-open-body --quiet -- -D warnings \
-        && cargo clippy -p wz-session-core --no-default-features --features codec-init-body,session-unicast-open --quiet -- -D warnings \
-        && cargo clippy -p wz-session-core --no-default-features --features alloc,codec-frame,codec-push,codec-declare,codec-request,codec-response,codec-response-final,codec-init-body,codec-open-body,codec-close,codec-keep-alive,codec-fragment,reassembly,codec-linkstate --quiet -- -D warnings \
-        && cargo clippy -p wz-session-core --no-default-features --features alloc,codec-frame,codec-push,codec-declare,codec-request,codec-response,codec-response-final,codec-init-body,codec-open-body,codec-close,codec-keep-alive,codec-fragment,reassembly,codec-linkstate,session-unicast --quiet -- -D warnings)
+    local subsets=(
+        "build -p wz-session-core --no-default-features --features alloc"
+        "build -p wz-session-core --no-default-features --features alloc,codec-push,pubsub-put,pubsub-delete,pubsub-attachment,pubsub-timestamp"
+        "build -p wz-session-core --no-default-features --features alloc,query-queryable,query-attachment,query-selector-parameters,query-reply-err,query-source-info"
+        "build -p wz-session-core --no-default-features --features alloc,codec-push,codec-response,codec-response-final,pubsub-put,pubsub-delete"
+        "build -p wz-session-core --no-default-features --features alloc,codec-declare,declare-subscriber,declare-queryable,liveliness-token,liveliness-subscriber"
+        "build -p wz-session-core --no-default-features --features alloc,codec-declare"
+        "clippy -p wz-session-core --no-default-features --features alloc,session-unicast,declare-interest,codec-frame --all-targets"
+        "clippy -p wz-session-core --no-default-features --features alloc,session-unicast,codec-declare --all-targets"
+        "build -p wz-session-core --no-default-features --features alloc,transport-batching"
+        "build -p wz-session-core --no-default-features"
+        "build -p wz-session-core --no-default-features --features codec-declare,declare-subscriber,declare-queryable,liveliness-token,liveliness-subscriber"
+        "build -p wz-session-core --no-default-features --features codec-push,pubsub-put,pubsub-delete,pubsub-attachment,pubsub-timestamp"
+        "build -p wz-session-core --no-default-features --features codec-request,query-queryable,query-attachment,query-selector-parameters,query-reply-err,query-source-info"
+        "build -p wz-session-core --no-default-features --features codec-response,codec-response-final,query-reply"
+        "build -p wz-session-core --no-default-features --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,query-reply,liveliness-token,liveliness-subscriber,declare-subscriber,declare-queryable,pubsub-put,pubsub-delete,pubsub-attachment,pubsub-timestamp,pubsub-source-info,query-attachment,query-selector-parameters,query-reply-err,query-source-info"
+        "clippy -p wz-session-core --no-default-features --features session-extqos,codec-init-body"
+        "clippy -p wz-session-core --no-default-features --features codec-open-body"
+        "clippy -p wz-session-core --no-default-features --features codec-init-body,session-unicast-open"
+        "clippy -p wz-session-core --no-default-features --features alloc,codec-frame,codec-push,codec-declare,codec-request,codec-response,codec-response-final,codec-init-body,codec-open-body,codec-close,codec-keep-alive,codec-fragment,reassembly,codec-linkstate"
+        "clippy -p wz-session-core --no-default-features --features alloc,codec-frame,codec-push,codec-declare,codec-request,codec-response,codec-response-final,codec-init-body,codec-open-body,codec-close,codec-keep-alive,codec-fragment,reassembly,codec-linkstate,session-unicast"
+    )
+    local subset ran=0 rc
+    for subset in "${subsets[@]}"; do
+        # shellcheck disable=SC2086  # each subset is a deliberate argument list
+        if [[ "$subset" == clippy* ]]; then
+            (cd crates && cargo $subset --quiet -- -D warnings); rc=$?
+        else
+            (cd crates && cargo $subset --quiet); rc=$?
+        fi
+        if (( rc != 0 )); then
+            echo "  C1h FAIL: cargo $subset" >&2
+            return 1
+        fi
+        ran=$((ran + 1))
+    done
+    _runci_lane_did C1h "$ran" "arbitrary subset(s) of ${#subsets[@]}"
 }
 
 # ─── Layer C1i — cargo test -p wz-runtime-tokio --features scouting-active ─
@@ -8503,7 +8611,9 @@ layer_c1br_uring_fixed_buffers() {
     # to exactly what one registration needs.
     out="$(cd crates && cargo test -p wz-runtime-tokio --features runtime-tokio-uring \
         --lib uring:: --quiet -- --test-threads=1 2>&1)" || { echo "$out"; return 1; }
-    grep -qE '^test result: ok\. [1-9][0-9]* passed' <<<"$out" || {
+    local tests
+    tests="$(_runci_passed_count <<<"$out")"
+    (( tests > 0 )) || {
         echo "  C1br FAIL: the uring filter matched no test"; echo "$out"; return 1; }
 
     # The subset that has NO transport. R311y589 found a pre-existing dead-code
@@ -8512,7 +8622,12 @@ layer_c1br_uring_fixed_buffers() {
     # this feature implied one.
     (cd crates && cargo build -p wz-runtime-tokio --no-default-features \
         --features runtime-tokio-uring --quiet) || return 1
-    return 0
+    # R2275 (item 615). Everything above is captured or `--quiet`, so on a box
+    # whose memlock IS provisioned this lane printed nothing at all (SILENT in
+    # hosted run 33568402673, jobs 6 and 39). Its DECLINE path already spoke for
+    # itself — the `C1br SKIP` line above — which is why only the success path
+    # needed a line. The count is libtest's own.
+    _runci_lane_did C1br "$tests" "fixed-buffer test(s), serialized, plus clippy + the transportless build"
 }
 
 # ─── Layer C1bs — live-capture, the AF_PACKET tap (R311y594 / B1) ────
@@ -9306,21 +9421,30 @@ _c1bs_has_net_raw() {
 }
 
 layer_c1bq_zero_copy_arena() {
-    local out
+    # R2275 (item 615) — `tests` carries this lane's evidence. Every arm below
+    # captures or quiets its output, so the lane exited 0 printing nothing at
+    # all (SILENT in hosted run 33568402673, jobs 6 and 38). The number is
+    # libtest's own, summed over both suites, so it cannot survive a filter that
+    # stops selecting them — which is precisely what the two greps guard.
+    local out tests=0 n
     (cd crates && cargo clippy -p wz-runtime-tokio \
         --features runtime-zero-copy --all-targets --quiet -- -D warnings) || return 1
 
     out="$(cd crates && cargo test -p wz-runtime-tokio --features runtime-zero-copy \
         --lib zero_copy:: --quiet 2>&1)" || { echo "$out"; return 1; }
-    grep -qE '^test result: ok\. [1-9][0-9]* passed' <<<"$out" || {
+    n="$(_runci_passed_count <<<"$out")"
+    (( n > 0 )) || {
         echo "  C1bq FAIL: the zero_copy filter matched no test"; echo "$out"; return 1; }
+    tests=$((tests + n))
 
     # The DEFAULT arena, which every other Router in the tree runs. The seam
     # moved `reassembly_dispatch`'s staging out from under all of them.
     out="$(cd crates && cargo test -p wz-session-core --features reassembly \
         --lib reassembly_dispatch:: --quiet 2>&1)" || { echo "$out"; return 1; }
-    grep -qE '^test result: ok\. [1-9][0-9]* passed' <<<"$out" || {
+    n="$(_runci_passed_count <<<"$out")"
+    (( n > 0 )) || {
         echo "  C1bq FAIL: the reassembly_dispatch filter matched no test"; echo "$out"; return 1; }
+    tests=$((tests + n))
 
     # The feature must compose with the transports that actually drive a Router,
     # not only standalone: the unicast and multicast loops each thread the
@@ -9331,7 +9455,7 @@ layer_c1bq_zero_copy_arena() {
 
     # The facade arm the preset actually ships.
     (cd crates && cargo build -p wz --features preset-ap-full --quiet) || return 1
-    return 0
+    _runci_lane_did C1bq "$tests" "arena test(s) over 2 suite(s), plus 2 clippy + 1 preset build"
 }
 
 layer_c1bo_dissect_c_abi() {
@@ -10211,6 +10335,15 @@ layer_c1bh_cargo_test_storage_host_dir() {
         && cargo clippy -p wz-ap-demo --quiet -- -D warnings)
 }
 layer_c2_cargo_clippy() {
+    # R2275 (item 615) — `legs` is why this lane's pass is evidence. Every
+    # invocation below is `--quiet` and a clean clippy prints nothing, so before
+    # this counter the lane's whole output on a hosted runner was the ONE
+    # `C2 deploy SKIP` line: MEASURED on run 33568402673, where the reading
+    # classified C2 DECLINED — "the lane ran nothing" — in both jobs that ran
+    # it, while a full workspace clippy had in fact just succeeded. The counter
+    # is incremented only after an invocation actually returns 0, so the number
+    # it reports cannot outlive the work.
+    local legs=0
     # Stage 4b — exclude wz-session-lwip (no_std-engine crate, mutually
     # exclusive with tokio's http-send in a unified graph; isolated clippy
     # is in Layer C1m). Stage 5 — exclude wz-mcu-session-acceptor for the
@@ -10224,15 +10357,18 @@ layer_c2_cargo_clippy() {
         --exclude wz-mcu-session-acceptor \
         --exclude wz-mcu-multicast-e2e \
         --exclude wz-runtime-tokio-multicast-tests --quiet -- -D warnings) || return 1
+    legs=$((legs + 1))
 
     local installed
     installed="$(rustup target list --installed 2>/dev/null)"
     if ! grep -q "^thumbv7m-none-eabi$" <<< "$installed"; then
         echo "  C2 deploy SKIP (thumbv7m-none-eabi target absent)"
+        _runci_lane_did C2 "$legs" "clippy run(s); the deploy arm declined"
         return 0
     fi
     if ! command -v arm-none-eabi-gcc >/dev/null 2>&1; then
         echo "  C2 deploy SKIP (arm-none-eabi-gcc not on PATH)"
+        _runci_lane_did C2 "$legs" "clippy run(s); the deploy arm declined"
         return 0
     fi
 
@@ -10240,7 +10376,9 @@ layer_c2_cargo_clippy() {
     lwip_port="$(realpath crates/lwip-sys/port/cross-test)"
     WZ_LWIP_PORT="$lwip_port" cargo clippy --release \
         --manifest-path deploy/mcu-qemu-demo/Cargo.toml \
-        --target thumbv7m-none-eabi --quiet -- -D warnings
+        --target thumbv7m-none-eabi --quiet -- -D warnings || return 1
+    legs=$((legs + 1))
+    _runci_lane_did C2 "$legs" "clippy run(s), the mcu-qemu deploy arm included"
 }
 
 # ─── Layer C3 — per-package isolated --all-targets ──────────────────
@@ -10270,21 +10408,37 @@ layer_c2_cargo_clippy() {
 # its cfg-gated RX/TX arms — before R311ls that left the whole module
 # clippy-uncovered in run-ci (the gap that hid drive_multicast_session's
 # too_many_arguments until it was collapsed into MulticastDriveConfig).
+#
+# R2275 (item 615): the arms are a LIST rather than one `&&` chain, and the
+# reason is not style. The chain printed nothing on success — every arm is
+# `--quiet` and a clean clippy is silent — so the lane's pass carried no
+# evidence at all (MEASURED: SILENT in hosted run 33568402673 job 9, and at
+# every local observation the archived logs hold). It also placed a failure
+# nowhere: `&&` reports which COMMAND failed only through clippy's own output,
+# never which arm of the eight. The loop fixes both — the count in the evidence
+# line is the array's own length, so an arm that stops being run cannot leave
+# the number where it was.
 layer_c3_per_pkg_isolated_lint() {
-    (cd crates \
-        && cargo clippy -p wz-ap-demo --all-targets --quiet -- -D warnings \
-        && cargo clippy -p wz --no-default-features --features preset-ap-client \
-            --all-targets --quiet -- -D warnings \
-        && cargo clippy -p wz-runtime-tokio --all-targets --quiet -- -D warnings \
-        && cargo clippy -p wz-runtime-tokio --features transport-multicast \
-            --all-targets --quiet -- -D warnings \
-        && cargo clippy -p wz-runtime-tokio --features transport-multicast,reassembly \
-            --all-targets --quiet -- -D warnings \
-        && cargo clippy -p wz-runtime-tokio --features transport-multicast,transport-fragmentation \
-            --all-targets --quiet -- -D warnings \
-        && cargo clippy -p wz-runtime-coop --all-targets --quiet -- -D warnings \
-        && cargo clippy -p wz-runtime-coop --features alloc \
-            --all-targets --quiet -- -D warnings)
+    local arms=(
+        "-p wz-ap-demo --all-targets"
+        "-p wz --no-default-features --features preset-ap-client --all-targets"
+        "-p wz-runtime-tokio --all-targets"
+        "-p wz-runtime-tokio --features transport-multicast --all-targets"
+        "-p wz-runtime-tokio --features transport-multicast,reassembly --all-targets"
+        "-p wz-runtime-tokio --features transport-multicast,transport-fragmentation --all-targets"
+        "-p wz-runtime-coop --all-targets"
+        "-p wz-runtime-coop --features alloc --all-targets"
+    )
+    local arm ran=0
+    for arm in "${arms[@]}"; do
+        # shellcheck disable=SC2086  # each arm is a deliberate argument list
+        if ! (cd crates && cargo clippy $arm --quiet -- -D warnings); then
+            echo "  C3 FAIL: cargo clippy $arm" >&2
+            return 1
+        fi
+        ran=$((ran + 1))
+    done
+    _runci_lane_did C3 "$ran" "isolated clippy run(s) of ${#arms[@]}"
 }
 
 # ─── Layer C4 — wz facade preset composability matrix ───────────────
@@ -16607,12 +16761,6 @@ _runci_nowork_suffix() {
     if (( ${#NOWORK_LAYERS[@]} > 0 )); then
         printf ' — but %d of the %d lane(s) that ran did NOTHING: %s' \
             "${#NOWORK_LAYERS[@]}" "${#RAN_LAYERS[@]}" "${NOWORK_LAYERS[*]}"
-    fi
-    # Reported beside it, never folded into it: a silent lane is one this
-    # reading cannot decide, not one it has decided against.
-    if (( ${#QUIET_LAYERS[@]} > 0 )); then
-        printf ' — and %d lane(s) printed nothing, so their pass is not evidence either: %s' \
-            "${#QUIET_LAYERS[@]}" "${QUIET_LAYERS[*]}"
     fi
 }
 if [[ $overall -eq 0 ]]; then

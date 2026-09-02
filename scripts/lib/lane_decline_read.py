@@ -49,31 +49,39 @@ arise here, because nothing can fall outside the four.
 ZEROTEST outranks WORKED deliberately: a lane that builds, prints progress, and
 then selects zero tests has work lines and is still the defect N42 names.
 
-## Only TWO of the four are FINDINGS, and a measurement is why
+## All THREE non-WORKED classes are FINDINGS -- R2275 removed the fourth
 
-The first draft called SILENT a finding too -- a lane that printed nothing is
-surely as indistinguishable as one that printed a SKIP. MEASURED before that
-claim was allowed to stand, by running this classifier over every historical
-run log this tree keeps (`crates/target/run-ci-logs`, 4878 logs, 15189
-(log,lane) pairs that reached a pass verdict):
+R2274 shipped this file with SILENT held OUT of the findings, in an UNDECIDED
+bucket that was reported and counted but never asserted on. The reason was
+honest and measured: 9 lanes were silent on success at that round, so calling
+their pass "ran nothing" would have been false. The residue was filed as
+open-debt item 615 rather than papered over.
 
-    WORKED   14032  92.4%   144 lane(s)
-    SILENT    1055   6.9%    12 lane(s)
-    DECLINED   102   0.7%     6 lane(s)   M, C1br, C1ce, Qz, Z, C1bs
-    ZEROTEST     0   0.0%     0 lane(s)
+R2275 repaid it, and the bucket is gone. Two things were re-measured first,
+because the item's own numbers turned out to be partly the READING's fault:
 
-and then, per lane, at its MOST RECENT observation: 9 of those 12 are silent
-STILL -- C2, C3, C1h, C1bl, C1bm, C1bq, C1br, C1own, B2. They are legitimate:
-`cargo clippy` that finds nothing prints nothing, and it did the work.
+  * Over the archived corpus (4882 logs, 15183 (log,lane) pass pairs) with the
+    slice boundary fixed -- see `find_slice` -- the tally is WORKED 14178,
+    SILENT 902, DECLINED 103, ZEROTEST 0, and per lane at its MOST RECENT
+    observation exactly SEVEN are silent: C2, C3, C1h, C1bm, C1bq, C1br, C1own.
+    B2, the ninth name in item 615, was NEVER silent; the substring boundary
+    was cutting its slice at its own evidence line. C1bl had already been fixed.
 
-So SILENT is REPORTED and COUNTED but is NOT claimed as "ran nothing" and does
-NOT enter the armed expectation. The reading genuinely cannot separate "worked
-quietly" from "did nothing quietly" for those lanes, and asserting a
-discrimination it does not have would be the same defect one level up. The
-repayment that WOULD separate them is for each of those lanes to print one line
-of evidence; that residue is filed rather than papered over.
+  * Over hosted run 33568402673 (266 (job,lane) pass pairs, the whole matrix):
+    WORKED 253, SILENT 11 -- C1bm, C1bq, C1br, C1h, C1own, C3 -- DECLINED 2,
+    and both declines were C2, which had just run a full workspace clippy and
+    printed only its `C2 deploy SKIP` line. The reading was making a FALSE claim
+    about C2 on every hosted run, not merely an undecided one.
 
-ZEROTEST firing 0 times in 15189 real lane runs is the other half of that
+Those seven lanes now end their success path on a line whose count they derived
+from the work (`_runci_lane_did` in `run-ci.sh`). So silence no longer means
+"quiet but working" anywhere in this tree, and it is classified as what it now
+is: a lane whose pass carries no evidence at all. `run_layer` FAILS such a lane
+outright rather than routing it through `WZ_DECLINED_EXPECT` -- a decline is a
+lane SAYING it did not run, which a caller may legitimately expect, whereas
+there is no configuration in which "printed nothing" is the expected shape.
+
+ZEROTEST firing 0 times in 15183 real lane runs is the other half of that
 measurement: the N42 reading does not fire spuriously on real output, including
 the `cargo test --workspace` runs whose per-target summaries are individually
 `0 passed`. It is the SUM over the lane that decides.
@@ -150,13 +158,14 @@ LIBTEST = re.compile(r"^\s*test result: (?:ok|FAILED)\.\s+(\d+)\s+passed\b")
 HEADER_OF = "──── Layer {name} ────"
 VERDICT_OF = "Layer {name} pass ("
 
-# The classes whose evidence PROVES the lane ran nothing. SILENT is deliberately
-# not among them -- see the header's measurement: 9 lanes are silent on success
-# to this day, and calling their pass "ran nothing" would be false.
-FINDINGS = ("ZEROTEST", "DECLINED")
-# Classified, counted and reported, but not claimed either way.
-UNDECIDED = ("SILENT",)
-CLASSES = (*FINDINGS, *UNDECIDED, "WORKED")
+# The classes whose evidence says the lane's pass is not evidence of work.
+# R2275 put SILENT among them and deleted the UNDECIDED bucket it used to sit
+# in: every lane in this tree now prints one derived line on its success path,
+# so "printed nothing" is no longer a state a working lane can be in. An
+# unclassified pass is the escape hatch this repo keeps finding, and a bucket
+# that is reported but never asserted on is exactly that hatch.
+FINDINGS = ("ZEROTEST", "DECLINED", "SILENT")
+CLASSES = (*FINDINGS, "WORKED")
 
 
 class ReadError(RuntimeError):
@@ -199,6 +208,37 @@ def classify(slice_text: str) -> tuple[str, str]:
     return ("SILENT", "no output at all -- the lane left no evidence it ran")
 
 
+def find_slice(text: str, lane: str) -> str | None:
+    """The lane's own lines out of a whole run log, or None if not complete yet.
+
+    BOTH boundaries must be RUN_LAYER's own lines, not merely lines that contain
+    the words. R2275: `layer_b2_regen_diff` ends its success path with
+    `echo "Layer B2 pass (committed out/** == regenerated, ...)"`, and a bare
+    substring search stopped the slice THERE -- at the lane's own evidence line,
+    leaving an empty slice that read as SILENT. The lane was never silent; the
+    reading was. The framing prefix is what only `run_layer` writes, so requiring
+    it makes the boundary unambiguous.
+
+    This is the ONE place the boundary is decided. R2275 found the first draft
+    with the same rule spelled a second time inside a measurement script, which
+    is how the B2 defect survived its own fix for a turn.
+    """
+    header = HEADER_OF.format(name=lane)
+    verdict = VERDICT_OF.format(name=lane)
+    lines = text.split("\n")
+    h = v = -1
+    for i, ln in enumerate(lines):
+        if not FRAMING.match(ln):
+            continue
+        if header in ln:
+            h, v = i, -1
+        elif v < 0 and h >= 0 and verdict in ln:
+            v = i
+    if h >= 0 and v > h:
+        return "\n".join(lines[h + 1 : v]) + "\n"
+    return None
+
+
 def slice_from_log(log: Path, lane: str, wait_s: float) -> str:
     """The lane's slice, waiting for the verdict sentinel to be flushed.
 
@@ -207,21 +247,18 @@ def slice_from_log(log: Path, lane: str, wait_s: float) -> str:
     before this runs, which makes it a sentinel: once IT is in the file, so is
     everything the lane wrote before it.
     """
-    header = HEADER_OF.format(name=lane)
-    verdict = VERDICT_OF.format(name=lane)
     deadline = time.monotonic() + wait_s
     while True:
         try:
             text = log.read_text(errors="replace")
         except OSError as exc:  # pragma: no cover - unreadable log
             raise ReadError(f"cannot read {log}: {exc}") from exc
-        h = text.rfind(header)
-        if h >= 0:
-            v = text.find(verdict, h)
-            if v >= 0:
-                return text[text.find("\n", h) + 1 : text.rfind("\n", h, v) + 1]
+        got = find_slice(text, lane)
+        if got is not None:
+            return got
         if time.monotonic() >= deadline:
-            missing = "header" if h < 0 else "verdict"
+            header = HEADER_OF.format(name=lane)
+            missing = "header" if header not in text else "verdict"
             raise ReadError(
                 f"lane {lane}: the {missing} line never reached {log} within "
                 f"{wait_s}s -- the decline reading could not be performed, "
@@ -341,16 +378,20 @@ def _selftest_classify() -> list[str]:
         bad.append(f"FIXTURE_REASON documents cases no arm runs: {sorted(missing)}")
     # Both directions over the class set: every class must be produced by at
     # least one fixture, or the table could pass while a whole class is
-    # unreachable -- including SILENT, which is not a finding but is still a
-    # verdict this file hands back and run-ci.sh routes on.
+    # unreachable -- including SILENT, which R2275 promoted into FINDINGS.
     produced = {classify(t)[0] for _, t, _ in CASES}
     for cls in CLASSES:
         if cls not in produced:
             bad.append(f"no fixture reaches the {cls} class -- it is never exercised")
-    # And the partition itself: FINDINGS and UNDECIDED must not overlap, and
-    # together with WORKED must cover exactly what `classify` can return.
-    if set(FINDINGS) & set(UNDECIDED):
-        bad.append("FINDINGS and UNDECIDED overlap -- a class cannot be both")
+    # And the partition itself: exactly one class is not a finding. R2275's
+    # repayment IS the shrinking of this residue, so a later round that quietly
+    # re-opens an undecided bucket -- any second non-finding class -- reopens
+    # item 615 and has to say so here first.
+    if set(CLASSES) - set(FINDINGS) != {"WORKED"}:
+        bad.append(
+            "the only class that is not a finding must be WORKED; a second "
+            f"un-asserted class is the escape hatch item 615 closed: {sorted(set(CLASSES) - set(FINDINGS))}"
+        )
     if produced - set(CLASSES):
         bad.append(f"classify returned a class no table names: {produced - set(CLASSES)}")
     return bad
@@ -372,6 +413,23 @@ def _selftest_slice() -> list[str]:
             got, _ = classify(slice_from_log(log, lane, 1.0))
             if got != want:
                 bad.append(f"slice[{lane}]: want {want}, got {got}")
+        # R2275, and this is the shape the FIRST implementation swallowed:
+        # a lane whose own evidence line CONTAINS the verdict sentence. Layer B2
+        # really does end with `echo "Layer B2 pass (committed out/** == ...)"`,
+        # and a substring boundary stopped the slice there and called the lane
+        # SILENT. Only the FRAMED line is run_layer's.
+        collide = Path(td) / "collide.log"
+        collide.write_text(
+            "[2026-01-01T00:00:00+0900] INFO  ──── Layer B2 ────\n"
+            "Layer B2 pass (committed out/** == regenerated, no absolute path)\n"
+            "[2026-01-01T00:00:01+0900] INFO  Layer B2 pass (2s)\n"
+        )
+        got, _ = classify(slice_from_log(collide, "B2", 1.0))
+        if got != "WORKED":
+            bad.append(
+                f"slice[B2 collision]: want WORKED, got {got} -- a lane whose own "
+                "evidence line contains the verdict sentence must not read as SILENT"
+            )
         # A slice that never arrives must RAISE, not return an empty lane --
         # which would classify as SILENT and read as a finding about the lane
         # rather than about the reading.
@@ -467,6 +525,71 @@ def _selftest_witness(root: Path) -> list[str]:
             "the run still ended on an unqualified `all required layers pass` "
             "while a lane had run nothing"
         )
+    if proc.returncode != 0:
+        bad.append(
+            "a DECLINE failed the run outright. It must not: a decline is a "
+            "lane saying it did not run, which a caller may legitimately "
+            "expect, and `WZ_DECLINED_EXPECT` is where that is asserted"
+        )
+    bad += _selftest_silent_lane_reds(root, runci, env)
+    return bad
+
+
+def _selftest_silent_lane_reds(root: Path, runci: Path, env: dict) -> list[str]:
+    """R2275 (item 615): a lane that prints NOTHING must FAIL, by mutation.
+
+    The subject is `run-ci.sh` itself, so the probe is a mutated COPY of it run
+    from the repo root -- deleting the one `echo` that is Layer Qz's entire
+    output turns a DECLINED lane into a SILENT one without touching anything
+    else. Asserting the class membership in `CLASSES` alone would prove only
+    that this file's table was edited; this proves the RUN goes red.
+
+    The copy lives outside the tree. `run-ci.sh` resolves its lane spans from
+    `BASH_SOURCE`, which follows the copy, while every path it uses for work is
+    relative to the working directory, which stays the repository root. The one
+    thing it reaches for beside itself is `lib/`, which it `source`s from its
+    OWN directory -- hence the symlink, without which the probe runs with a
+    library the real script has and prints a spurious error while doing it.
+    """
+    text = runci.read_text()
+    needle = 'echo "  Qz SKIP ($1)"'
+    if needle not in text:
+        return [
+            f"the mutation probe's subject is gone from run-ci.sh ({needle!r}) "
+            "-- it is not a probe any more"
+        ]
+    mutant_dir = tempfile.mkdtemp(prefix="lane-decline-silent-")
+    mutant = Path(mutant_dir) / "run-ci-silent-mutant.sh"
+    mutant.write_text(text.replace(needle, ":", 1))
+    (Path(mutant_dir) / "lib").symlink_to(runci.parent / "lib")
+    env = dict(env)
+    env["RUNCI_LOG_DIR"] = tempfile.mkdtemp(prefix="lane-decline-silent-log-")
+    try:
+        proc = subprocess.run(
+            ["bash", str(mutant), "--layer", "Qz"],
+            cwd=root,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    except subprocess.TimeoutExpired:  # pragma: no cover
+        return ["the silent-lane mutation arm timed out"]
+    finally:
+        shutil.rmtree(mutant_dir, ignore_errors=True)
+        shutil.rmtree(env["RUNCI_LOG_DIR"], ignore_errors=True)
+    out = proc.stdout + proc.stderr
+    bad = []
+    if proc.returncode == 0:
+        bad.append(
+            "a lane mutated to print NOTHING still passed the run -- silence is "
+            "back to being an un-asserted class, which is item 615"
+        )
+    if "printed NOTHING" not in out:
+        bad.append(
+            "the run did not say the lane printed nothing, so its red (if any) "
+            "does not name the defect"
+        )
     return bad
 
 
@@ -484,9 +607,11 @@ def selftest(root: Path) -> int:
         return 1
     print(
         "  lane decline read: selftest OK "
-        f"({len(CASES)} classification fixture(s) over 4 classes, "
-        "slice + refusal, 4 audit mutations, and run-ci.sh --layer Qz driven "
-        "with its oracle removed)"
+        f"({len(CASES)} classification fixture(s) over {len(CLASSES)} classes, "
+        f"{len(FINDINGS)} of them findings, slice + collision + refusal, "
+        "4 audit mutations, run-ci.sh --layer Qz driven with its oracle "
+        "removed, and a run-ci.sh mutated to make that lane print NOTHING, "
+        "which must go red)"
     )
     return 0
 
