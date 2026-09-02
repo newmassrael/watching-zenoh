@@ -2459,6 +2459,15 @@ PY
     # cannot cover gate 2c, which reads the previous hosted run and no file.
     python3 scripts/lib/hook_gate_boundary_gate.py --selftest || return 1
     python3 scripts/lib/hook_gate_boundary_gate.py --check || return 1
+    # R2288 (open-debt item 611) — the four SN-resolution words are upstream's,
+    # and only two of them reached any oracle: the zenohd interop lane feeds
+    # `"16bit"` and `"32bit"` to a real router, and what tied ANY of them to
+    # `sn_res_word` was a prose line in the label census. The mapping is DATA
+    # bound to the router pin here, because the source that decides it is
+    # machine-local and a gate requiring it would SKIP green on a clone that
+    # has none. `--derive` re-reads it from upstream where that exists.
+    python3 scripts/lib/sn_resolution_words.py --selftest || return 1
+    python3 scripts/lib/sn_resolution_words.py --check || return 1
     # R2192 (open-debt item 530, the FIRST measured case) — a dependency this
     # tree's prose names is one cargo resolves, and one it DENIES is one
     # nothing reaches.

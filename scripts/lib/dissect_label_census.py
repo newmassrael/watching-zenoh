@@ -96,16 +96,23 @@ DECIDED_BY_FUNCTION = {
     # A rename upstream would make the router reject that config and the lane go
     # red, so those two spellings are pinned ON THE WIRE by a real router.
     #
-    # RESIDUE, stated rather than hidden: that is TWO of four -- "8bit" and
-    # "64bit" are exercised nowhere -- and the tie between those constants and
-    # this function is prose here, not a predicate. Open-debt item 611.
+    # R2288 (item 611) — the residue this paragraph used to end on is closed,
+    # and by a PREDICATE rather than by a longer sentence.
+    # `scripts/lib/sn_resolution_words.py` carries the code -> word mapping as
+    # DATA bound to the router pin, holds `sn_res_word`'s own match arms to it
+    # in both directions, holds the interop lane's (word, code) constant PAIRS
+    # to it, and re-derives the whole thing from upstream's `Bits` under
+    # `--derive`. So all four words now have an oracle; what remains at TWO is
+    # the WIRE half, which is the interop lane's two arms and is named in that
+    # gate's own header rather than here.
     "sn_res_word(sn_res)": (
-        "crate::dissect::sn_res_word, upstream's Bits::S8..S64 vocabulary; "
-        '"16bit" and "32bit" are pinned on the wire by a genuine zenohd in '
-        "wz_negotiated_axes_zenohd_interop.rs, the other two by nothing (item 611)"
+        "crate::dissect::sn_res_word, upstream's Bits::S8..S64 vocabulary, "
+        "adjudicated by scripts/lib/sn_resolution_words.py (Layer C0): the "
+        "mapping is pinned to the router version and checked against this "
+        "function and against the zenohd interop lane's constants"
     ),
     "sn_res_word(sn_res >> 2)": (
-        "the same sn_res_word at the request-ID shift, same pin and same residue"
+        "the same sn_res_word at the request-ID shift, same adjudicator"
     ),
 }
 
