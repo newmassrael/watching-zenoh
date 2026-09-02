@@ -1092,6 +1092,38 @@ impl<C: SampleSink> SubscriberRegistry<C> {
     /// between stage and drain (an interest cancelled, or a subscription
     /// dropped): that reply is skipped and its chain's `Final` still
     /// terminates the peer's solicitation.
+    ///
+    /// R2290 (open-debt item 626) — "or a subscription dropped" is a promise
+    /// EVERY announcing arm has to keep, and the AGGREGATE arm did not keep
+    /// it. It resolves through the peer's INTEREST row, which an undeclare
+    /// never touches, so a reply staged while a subscription matched was
+    /// still emitted after that subscription had been undeclared — a
+    /// `DeclSubscriber` announcing a subscription this session no longer has.
+    /// On the wire that lands AFTER the undeclare's `UndeclSubscriber` (the
+    /// staging is on the drive thread, the undeclare on the application's),
+    /// so the peer re-inserts the entry it has just been told to drop and its
+    /// matching verdict flips back to `true` and stays there until the link
+    /// dies. Measured as a 1-2% `wz-capi-pico` `matching_multiface` failure
+    /// delivering `[true, false, true, false]` where `[true, false]` is the
+    /// contract.
+    ///
+    /// The re-check is the SAME predicate the staging used
+    /// (`any_subscription_matches` over the interest's keyexpr — a code span,
+    /// not a link: it is private, and a doc link to it is a BROKEN one this
+    /// crate's Layer C1bz budget counts), for the
+    /// same reason the `Concrete` arm re-resolves through `subscribers`:
+    /// what a reply announces has to be true when it is SENT, not when it was
+    /// queued.
+    ///
+    /// TWO live routes retire a subscription inside that window, and only one
+    /// of them was the flake. `Subscriber::teardown` is now atomic with its
+    /// wire retract (wz-runtime-tokio), which closes that one at the source.
+    /// The other is the DECLARE ROLLBACK: `declare_subscriber` registers
+    /// locally FIRST — which stages a future-push reply against any standing
+    /// interest — and unregisters again when the wire announce is rejected, so
+    /// a reply can outlive a subscription that was never announced at all.
+    /// Nothing makes that path atomic, which is why this arm is a live guard
+    /// rather than a belt on a closed hazard.
     #[cfg(feature = "declare-subscriber")]
     pub fn sub_interest_reply(&self, item: &SubInterestReply) -> Option<(u64, &str)> {
         match item {
@@ -1099,6 +1131,7 @@ impl<C: SampleSink> SubscriberRegistry<C> {
                 .inbound_sub_interests
                 .iter()
                 .find(|row| row.interest_id == *interest_id)
+                .filter(|row| self.any_subscription_matches(Some(row.keyexpr.as_str())))
                 .map(|row| (row.aggregate_decl_id, row.keyexpr.as_str())),
             SubInterestReply::Concrete {
                 subscription_id, ..

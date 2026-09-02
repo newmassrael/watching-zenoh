@@ -28,6 +28,7 @@ use std::sync::{Arc, Mutex};
 
 use wz_runtime_tokio_test_support::fixture_session_init_params;
 
+use crate::observer::ApplicationLayerObserver;
 use crate::runtime_impl::TokioTime;
 use crate::session_glue::{
     new_session_actions, BoxedLinkDriver, SessionInitParams, SessionLinkActions,
@@ -122,6 +123,81 @@ pub(crate) fn recording_driver() -> Arc<RecordingLinkDriver> {
     Arc::new(RecordingLinkDriver {
         frames: Mutex::new(Vec::new()),
     })
+}
+
+/// R2290 (open-debt item 626) — a link driver that answers ONE question per
+/// emitted frame: was the session's observer mutex LOCKABLE at the instant
+/// those bytes left?
+///
+/// A handle's teardown emits its wire retraction and then retires its local
+/// registry entry. Between those two the registry still holds an entity the
+/// peer has already been told is gone, and the drive thread's
+/// `drain_declare_replies` reads exactly those registries — under this same
+/// mutex — to answer a peer's Interest. So the pair has to be ONE transition,
+/// and "the retract was emitted while this thread held the observer mutex" is
+/// the property that says so. A same-thread `try_lock` on a `std::sync::Mutex`
+/// reports `WouldBlock`, which is what makes `false` here mean "held" rather
+/// than "contended".
+///
+/// Deliberately a link driver rather than a probe wired into one handle: the
+/// retract reaches the wire the same way on every plane (subscriber, token,
+/// queryable), so ONE probe covers the population instead of one per handle.
+pub(crate) struct ObserverProbeLinkDriver {
+    /// The observer to probe, installed AFTER the session exists (a driver is
+    /// built before the session it belongs to). `None` = not yet armed, and an
+    /// unarmed frame records nothing, which is how set-up emits are kept out
+    /// of the population.
+    armed: Mutex<Option<Arc<Mutex<ApplicationLayerObserver>>>>,
+    /// One entry per frame emitted while armed: `true` = the observer mutex
+    /// was free, i.e. the emit was NOT inside the acquisition.
+    lockable: Mutex<Vec<bool>>,
+}
+
+impl ObserverProbeLinkDriver {
+    /// Start probing against `observer`. Call after the set-up emits so the
+    /// recorded population is exactly the frames under test.
+    pub(crate) fn arm(&self, observer: Arc<Mutex<ApplicationLayerObserver>>) {
+        *self.armed.lock().expect("probe arm mutex poisoned") = Some(observer);
+    }
+
+    /// One flag per frame emitted since [`Self::arm`], in emit order.
+    pub(crate) fn lockable_flags(&self) -> Vec<bool> {
+        self.lockable
+            .lock()
+            .expect("probe log mutex poisoned")
+            .clone()
+    }
+}
+
+impl BoxedLinkDriver for ObserverProbeLinkDriver {
+    fn send_blocking(&self, _bytes: &[u8], _reliability: Reliability) {
+        let armed = self.armed.lock().expect("probe arm mutex poisoned");
+        if let Some(observer) = armed.as_ref() {
+            // `try_lock`'s guard is dropped at the end of this statement, so
+            // the probe never holds the observer past the measurement.
+            let lockable = observer.try_lock().is_ok();
+            self.lockable
+                .lock()
+                .expect("probe log mutex poisoned")
+                .push(lockable);
+        }
+    }
+    fn open_blocking(&self) {}
+    fn close_blocking(&self) {}
+}
+
+/// [`recording_actions`] twin backed by an [`ObserverProbeLinkDriver`].
+pub(crate) fn probing_actions() -> (Arc<SessionLinkActions>, Arc<ObserverProbeLinkDriver>) {
+    let driver = Arc::new(ObserverProbeLinkDriver {
+        armed: Mutex::new(None),
+        lockable: Mutex::new(Vec::new()),
+    });
+    let actions = new_session_actions(
+        driver.clone(),
+        fixture_session_init_params(),
+        TokioTime::new(),
+    );
+    (actions, driver)
 }
 
 /// A4 — [`recording_actions`] variant that accepts the caller's driver

@@ -534,6 +534,50 @@ mod tests {
         ));
     }
 
+    /// R2290 (open-debt item 626) — the NEGATIVE twin of the assertion just
+    /// above, and the reason it is worth writing separately: the population
+    /// this round derived is "every staged interest-reply arm that ANNOUNCES a
+    /// declaration", and each such arm has to resolve to `None` once what it
+    /// announces is gone. The subscriber plane's AGGREGATE arm did not, and
+    /// re-announced a subscription after its `UndeclSubscriber` had already
+    /// gone out. This arm resolves through the token table, so it does — but
+    /// only the positive half was ever asserted, and "resolves correctly while
+    /// the token lives" is exactly the half a broken arm also passes.
+    #[test]
+    fn a_token_unregistered_between_stage_and_drain_resolves_to_none() {
+        let mut reg = LocalTokenRegistry::new();
+        assert!(reg.register(1, "group1/zenoh-pico").unwrap());
+        let mut pending = new_pending();
+        assert_eq!(
+            reg.respond_to_interest_borrowed(Some("group1/**"), 42, &mut pending),
+            1,
+            "a matching token must stage exactly one reply — a fixture that \
+             stages none would make the assertion below vacuous"
+        );
+
+        // The application drops the token inside the stage/drain window.
+        assert!(reg.unregister(1));
+
+        match pending.iter().next() {
+            Some(DeclResponseItem::Token { token_id, .. }) => {
+                assert_eq!(
+                    reg.keyexpr_for(*token_id),
+                    None,
+                    "a staged DeclToken must not announce a token this session \
+                     no longer holds"
+                );
+            }
+            other => panic!("expected Token first, got {:?}", other.is_some()),
+        }
+        assert!(
+            matches!(
+                pending.iter().last(),
+                Some(DeclResponseItem::Final { interest_id: 42 })
+            ),
+            "the chain's Final still terminates the peer's solicitation"
+        );
+    }
+
     #[test]
     fn match_all_pattern_stages_every_token() {
         let mut reg = LocalTokenRegistry::new();

@@ -1704,3 +1704,198 @@ mod tests {
         }
     }
 }
+
+// R2290 (open-debt item 626) — the SUBSCRIBER interest-response chain's
+// stage/drain window, exercised through `flush_declare_replies` (the door the
+// session tier actually calls) rather than through the resolver alone.
+//
+// The staging and the drain are deliberately separated so no C callback runs
+// under the observer lock, which means the application can undeclare a
+// subscription BETWEEN them. What a reply announces therefore has to be true
+// when it is SENT, and until this round the AGGREGATE arm checked only that
+// the peer's INTEREST row still existed — a row an undeclare never touches.
+#[cfg(all(test, feature = "declare-subscriber", feature = "alloc"))]
+mod sub_interest_reply_tests {
+    use super::*;
+    use crate::pubsub::SubInterestReply;
+    use crate::response_sink::DeclareReplySink;
+    use alloc::string::{String, ToString};
+    use alloc::vec::Vec;
+    use std::sync::Mutex;
+
+    /// The peer's interest id, echoed on every reply of its chain.
+    const INTEREST: u64 = 7;
+
+    /// Records what a drain actually emitted, so an assertion can name the
+    /// wire message rather than a resolver's return value.
+    #[derive(Default)]
+    struct RecordingSink {
+        subscriber_replies: Mutex<Vec<(u64, String, u64)>>,
+        finals: Mutex<Vec<u64>>,
+    }
+
+    impl DeclareReplySink for RecordingSink {
+        #[cfg(feature = "liveliness-token")]
+        fn send_declare_token_reply(&self, _token_id: u64, _keyexpr: &str, _interest_id: u64) {}
+
+        fn send_declare_final_reply(&self, interest_id: u64) {
+            self.finals.lock().unwrap().push(interest_id);
+        }
+
+        fn send_declare_subscriber_reply(
+            &self,
+            subscriber_id: u64,
+            keyexpr: &str,
+            interest_id: u64,
+        ) {
+            self.subscriber_replies.lock().unwrap().push((
+                subscriber_id,
+                keyexpr.to_string(),
+                interest_id,
+            ));
+        }
+    }
+
+    /// One observer holding one subscription on `reenter/**`, with the peer's
+    /// CURRENT+FUTURE interest already staged. `aggregate` picks which arm of
+    /// [`SubInterestReply`] the chain stages.
+    fn staged(aggregate: bool) -> (ApplicationLayerObserver, crate::pubsub::SubscriptionId) {
+        let mut observer = ApplicationLayerObserver::new();
+        let id = observer.subscribers.register("reenter/**", |_| {});
+        let count = observer
+            .subscribers
+            .respond_to_subscriber_interest_borrowed(
+                INTEREST,
+                Some("reenter/**"),
+                aggregate,
+                /*current=*/ true,
+                /*future=*/ true,
+            );
+        assert_eq!(
+            count, 1,
+            "a matching subscription must stage exactly one reply — a fixture \
+             that stages none would make every assertion below vacuous"
+        );
+        (observer, id)
+    }
+
+    /// THE DEFECT: the subscription is undeclared inside the stage/drain
+    /// window, so the reply must never reach the wire.
+    ///
+    /// Without the drain-time re-check the emitted `DeclSubscriber` lands
+    /// AFTER the undeclare's `UndeclSubscriber` (the drain runs on the drive
+    /// thread, the undeclare on the application's), so the peer re-inserts the
+    /// entry it was just told to drop and its matching verdict flips back to
+    /// `true` for the rest of the link's life.
+    #[test]
+    fn an_aggregate_reply_is_not_emitted_once_its_subscription_is_undeclared() {
+        let (mut observer, id) = staged(/*aggregate=*/ true);
+        assert!(observer.subscribers.unregister(id));
+
+        let sink = RecordingSink::default();
+        observer.flush_declare_replies(&sink);
+
+        let replies = sink.subscriber_replies.lock().unwrap().clone();
+        assert!(
+            replies.is_empty(),
+            "an aggregate reply survived the undeclare of the only subscription \
+             it could have been announcing: {replies:?}"
+        );
+        assert_eq!(
+            *sink.finals.lock().unwrap(),
+            alloc::vec![INTEREST],
+            "the chain's Final must still terminate the peer's solicitation"
+        );
+    }
+
+    /// The CONTROL, and it is what stops the guard above from being satisfied
+    /// by never emitting anything: with the subscription still held, the
+    /// aggregate reply IS emitted, carrying the INTEREST's keyexpr (pico
+    /// associates an aggregate interest's replies by `_z_keyexpr_equals`).
+    #[test]
+    fn an_aggregate_reply_is_emitted_while_its_subscription_lives() {
+        let (mut observer, _id) = staged(/*aggregate=*/ true);
+
+        let sink = RecordingSink::default();
+        observer.flush_declare_replies(&sink);
+
+        let replies = sink.subscriber_replies.lock().unwrap().clone();
+        assert_eq!(
+            replies.len(),
+            1,
+            "a live subscription must still answer the peer's CURRENT interest"
+        );
+        assert_eq!(replies[0].1, "reenter/**".to_string());
+        assert_eq!(replies[0].2, INTEREST);
+    }
+
+    /// The CONCRETE arm's twin of the two above — it already re-resolved
+    /// through the subscription table, and stating it here is what makes the
+    /// contract a property of the whole enum rather than of one arm.
+    #[test]
+    fn a_concrete_reply_is_not_emitted_once_its_subscription_is_undeclared() {
+        let (mut observer, id) = staged(/*aggregate=*/ false);
+        assert!(observer.subscribers.unregister(id));
+
+        let sink = RecordingSink::default();
+        observer.flush_declare_replies(&sink);
+
+        assert!(
+            sink.subscriber_replies.lock().unwrap().is_empty(),
+            "a concrete reply survived its own subscription's undeclare"
+        );
+    }
+
+    /// The POPULATION is the enum, not a list somebody typed: every
+    /// ANNOUNCING arm of [`SubInterestReply`] must resolve to `None` once what
+    /// it announces is gone. The match is exhaustive, so a new arm cannot join
+    /// this contract without a decision being recorded here — which is a
+    /// compile-time obligation, not a claim that the new arm is exercised.
+    ///
+    /// The reached-arm count is asserted for the reason a zero population is
+    /// always the trap: a fixture that staged nothing would satisfy every
+    /// `is_none()` below by having nothing to check.
+    #[test]
+    fn every_announcing_reply_arm_drops_when_its_subject_is_gone() {
+        let mut reached_aggregate = 0usize;
+        let mut reached_concrete = 0usize;
+
+        for aggregate in [true, false] {
+            let (mut observer, id) = staged(aggregate);
+            assert!(observer.subscribers.unregister(id));
+
+            let items = observer.subscribers.take_staged_sub_interest_replies();
+            for item in items.iter() {
+                let resolved = observer.subscribers.sub_interest_reply(item);
+                match item {
+                    SubInterestReply::Aggregate { .. } => {
+                        reached_aggregate += 1;
+                        assert!(
+                            resolved.is_none(),
+                            "the aggregate arm announced a subscription that is gone"
+                        );
+                    }
+                    SubInterestReply::Concrete { .. } => {
+                        reached_concrete += 1;
+                        assert!(
+                            resolved.is_none(),
+                            "the concrete arm announced a subscription that is gone"
+                        );
+                    }
+                    // Not an announcing arm: it terminates the chain and
+                    // carries no declaration, so it resolves to `None` always.
+                    SubInterestReply::Final { .. } => {
+                        assert!(resolved.is_none(), "a Final carries no declaration")
+                    }
+                }
+            }
+        }
+
+        assert_eq!(
+            (reached_aggregate, reached_concrete),
+            (1, 1),
+            "every announcing arm must have been reached — a population of zero \
+             would report green without checking anything"
+        );
+    }
+}

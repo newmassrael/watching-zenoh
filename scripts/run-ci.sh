@@ -4306,8 +4306,32 @@ layer_c1b_cargo_test_alloc() {
 # gated tests (54 R311ds declare behavioural + 4 R311dm liveliness thin)
 # explicitly so they cannot silently drop out of CI if wz-runtime-tokio
 # ever stops enabling codec-declare by default.
+#
+# R2290 (open-debt item 626) — two PINNED invocations added below, for the
+# reason this lane exists in the first place. The interest-response chain's
+# "announce only what still exists" contract lives behind
+# `declare-subscriber` / `liveliness-token`, NEITHER of which is in
+# wz-session-core's default features, so Layer C1 reaches both only through
+# the same cross-crate coincidence the paragraph above distrusts. Measured
+# 2026-09-03 under `cargo test -p wz-session-core --features codec-declare`:
+# the `sub_interest_reply_tests` module is NOT among those 512 tests, so the
+# unguarded invocation above does not cover it either.
+#
+# The counts are pinned rather than `+` because a population of zero is what
+# this class fails as: the aggregate arm's defect (a `DeclSubscriber` emitted
+# after its subscription's `UndeclSubscriber`) reached hosted CI as a 1-2%
+# `wz-capi-pico` flake precisely because nothing deterministic named it. `4`
+# is the interest-reply contract's whole module, so a new `SubInterestReply`
+# arm has to move this number; `1` is the liveliness twin, pinned narrow so
+# it does not churn with its module.
 layer_c1c_cargo_test_codec_declare() {
-    (cd crates && cargo test -p wz-session-core --features codec-declare --quiet)
+    (cd crates && cargo test -p wz-session-core --features codec-declare --quiet) || return 1
+    _runci_guarded_test C1c 4 \
+        cargo test -p wz-session-core --features declare-subscriber \
+        --lib sub_interest_reply_tests --quiet || return 1
+    _runci_guarded_test C1c 1 \
+        cargo test -p wz-session-core --features liveliness-token \
+        --lib a_token_unregistered_between_stage_and_drain --quiet
 }
 
 # ─── Layer C1t — SERIAL link: wz-session-core logic + wz-runtime-tokio tty ─

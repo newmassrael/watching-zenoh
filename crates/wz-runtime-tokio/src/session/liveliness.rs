@@ -246,34 +246,48 @@ impl<R: SessionRuntime, T: TimeSource> LivelinessToken<R, T> {
         // transport-unicast build without `declare-undeclare` still compiles
         // this teardown. declare-token ⟹ codec-declare, so the seam's Declare
         // arm is present whenever this block is.
-        #[cfg(all(feature = "declare-token", feature = "declare-undeclare"))]
-        {
-            let declare = wz_session_core::declare_build::build_undeclare_token(self.id);
-            let _ = self.session.send_network_message(
-                wz_session_core::network_message::NetworkMessage::Declare(Box::new(declare)),
-                /*reliable=*/ true,
-                /*express=*/ false,
-            );
-            // R311nf — the handle owns a `Session<R, T, Unicast>`, so
-            // `actions()` is the infallible unicast bundle borrow (the R311nc
-            // `if let Ok` guard for a possible multicast session is gone — a
-            // LivelinessToken cannot exist on a multicast session).
-            self.session.actions().prune_token_declaration(self.id);
-        }
-        // R311mw — a transport-unicast build without `declare-undeclare`
-        // cannot emit an UndeclToken (the seam block above is cfg'd out) and
-        // is not `liveliness-token` (the observer read below is cfg'd out), so
-        // nothing else reads `self.session` in such a build. `liveliness-token`
-        // implies both `declare-token` + `declare-undeclare`, so this discard
-        // only fires when no LivelinessToken can actually be constructed — the
-        // struct still compiles there, and the prior signature-stable
-        // `send_undeclare_token` likewise read `self.session` unconditionally.
-        #[cfg(not(all(feature = "declare-token", feature = "declare-undeclare")))]
-        let _ = &self.session;
+        //
+        // R2290 (open-debt item 626) — the emit and the local retirement are
+        // ONE transition, so the emit moved INSIDE the observer acquisition
+        // that retires the token. The order pico documents (send, then
+        // unregister) is unchanged; what is gone is the WINDOW between them.
+        // `LocalTokenRegistry` is one of exactly two tables the drive thread's
+        // `drain_declare_replies` resolves staged interest replies against
+        // (`local_tokens.keyexpr_for`, the twin of the subscriber plane's
+        // `sub_interest_reply`), and it takes this same mutex to do it. A
+        // drain landing in the window read a table still holding this token
+        // and emitted a `Declare(DeclToken)` for it AFTER the `UndeclToken`
+        // had already gone out — the subscriber plane's measured defect, on
+        // the liveliness plane. Found by deriving the population from the
+        // drain rather than from the one handle that was caught.
         #[cfg(feature = "liveliness-token")]
         R::with_mutex_mut(&self.session.observer, |obs| {
+            #[cfg(all(feature = "declare-token", feature = "declare-undeclare"))]
+            {
+                let declare = wz_session_core::declare_build::build_undeclare_token(self.id);
+                let _ = self.session.send_network_message(
+                    wz_session_core::network_message::NetworkMessage::Declare(Box::new(declare)),
+                    /*reliable=*/ true,
+                    /*express=*/ false,
+                );
+                // R311nf — the handle owns a `Session<R, T, Unicast>`, so
+                // `actions()` is the infallible unicast bundle borrow (the
+                // R311nc `if let Ok` guard for a possible multicast session is
+                // gone — a LivelinessToken cannot exist on a multicast
+                // session).
+                self.session.actions().prune_token_declaration(self.id);
+            }
             obs.local_tokens.unregister(self.id);
         });
+        // R311mw / R2290 — `liveliness-token` implies `declare-token` +
+        // `declare-undeclare`, and it is also what gates the CONSTRUCTOR, so a
+        // build without it can hold no `LivelinessToken` and never reaches this
+        // teardown. The discard keeps the field used there; it is the same
+        // signature-stability shape the prior `send_undeclare_token` body had,
+        // widened from the emit's gate to the block's because the emit now
+        // lives inside the `liveliness-token` arm.
+        #[cfg(not(feature = "liveliness-token"))]
+        let _ = &self.session;
     }
 }
 

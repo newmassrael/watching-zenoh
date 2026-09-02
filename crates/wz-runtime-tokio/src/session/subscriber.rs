@@ -233,15 +233,35 @@ impl<R: SessionRuntime> Subscriber<R> {
         // skips the wire emit, the same gating pico applies via
         // `_z_locality_allows_remote`. `take()` so a hypothetical second
         // teardown (already guarded by `armed`) cannot double-emit.
-        if let Some(mut retract) = self.retraction.take() {
-            retract();
-        }
+        //
+        // R2290 (open-debt item 626) — the emit and the local retirement are
+        // ONE transition, and the emit now happens INSIDE the observer
+        // acquisition below rather than before it. pico's order is preserved
+        // (send, then unregister); what is removed is the WINDOW between them,
+        // which on wz is not empty: the drive thread drains the staged
+        // interest-response chain under this same mutex and resolves each
+        // staged reply against `observer.subscribers`. A drain landing in that
+        // window read a table still holding this subscription and emitted a
+        // `Declare(DeclSubscriber)` for it — AFTER the `UndeclSubscriber` this
+        // call had already put on the wire. The peer then re-inserts the
+        // remote subscriber it was just told to drop, and its matching verdict
+        // is stuck `true` for the rest of the link's life. Measured as a 1-2%
+        // `wz-capi-pico::matching_multiface` failure delivering
+        // `[true, false, true, false]`.
+        //
+        // Taken out of `self` FIRST so the closure captures a local rather
+        // than reborrowing `self` across `&self.observer`.
+        let mut retract = self.retraction.take();
+        let id = self.id;
         // R311de — observer access via R::with_mutex_mut closure form;
         // per-profile poison-recovery lives inside the runtime impl (AP:
         // PoisonError::into_inner; MCU: no poison concept under panic =
         // abort).
         R::with_mutex_mut(&self.observer, |observer| {
-            let removed = observer.subscribers.unregister(self.id);
+            if let Some(retract) = retract.as_mut() {
+                retract();
+            }
+            let removed = observer.subscribers.unregister(id);
             // R311y788 — the undeclare twin of the declare-side
             // re-evaluation (pico `_z_write_filter_ctx_remove_local_match`,
             // `vendor/zenoh-pico/src/net/filtering.c:94-101`): dropping the

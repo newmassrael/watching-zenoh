@@ -5909,6 +5909,77 @@ fn routed_subscriber_drop_emits_undecl_subscriber() {
     );
 }
 
+/// R2290 (open-debt item 626) — build a session whose link driver reports, per
+/// emitted frame, whether the observer mutex was free at that instant.
+fn build_probing_session() -> (
+    TokioSession,
+    Arc<crate::test_fixtures::ObserverProbeLinkDriver>,
+) {
+    let (actions, driver) = crate::test_fixtures::probing_actions();
+    let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let clock = Arc::new(TokioTime::new());
+    (TokioSession::new(actions, observer, clock), driver)
+}
+
+/// R2290 (open-debt item 626) — the SUBSCRIBER plane's half of "a wire
+/// retraction and the local retirement it belongs to are ONE transition".
+///
+/// The window between them is not theoretical: the drive thread drains the
+/// staged interest-response chain under this very mutex and resolves each
+/// staged reply against `observer.subscribers`, so a drain landing in the
+/// window announced a subscription whose `UndeclSubscriber` had already gone
+/// out. Measured before the fix as a 1-2% `wz-capi-pico::matching_multiface`
+/// failure delivering `[true, false, true, false]`; 0 in 300 after it.
+///
+/// The probe is deterministic where that leg is statistical: a same-thread
+/// `try_lock` reports `WouldBlock`, so `false` here means the emitting thread
+/// held the observer — which is exactly what denies the drain the window.
+#[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
+#[test]
+fn a_routed_subscribers_wire_retract_is_emitted_under_the_observer_lock() {
+    let (session, driver) = build_probing_session();
+    let sub = session
+        .declare_subscriber("home/temp", SubscribeOptions::default(), |_| {})
+        .expect("remote declare against the test link succeeds");
+    // Armed AFTER the declare so the population is the retract frame alone.
+    driver.arm(session.observer().clone());
+    drop(sub);
+
+    assert_eq!(
+        driver.lockable_flags(),
+        vec![false],
+        "exactly one frame (the UndeclSubscriber) must leave while armed, and \
+         it must leave with the observer mutex HELD — `true` means the retract \
+         was emitted outside the acquisition that retires the subscription, \
+         which is the window a concurrent interest drain re-announces into, \
+         and an empty vec means no retract was emitted at all"
+    );
+}
+
+/// R2290 (open-debt item 626) — the LIVELINESS-TOKEN plane's half of the same
+/// property, and the reason it is here at all: the population was derived from
+/// the DRAIN, not from the handle that was caught. `drain_declare_replies`
+/// resolves staged replies against exactly two tables — `subscribers` and
+/// `local_tokens` — so exactly two handles retire an entity a staged reply can
+/// still announce, and both had the same emit-then-retire shape.
+#[cfg(feature = "liveliness-token")]
+#[test]
+fn a_liveliness_tokens_wire_retract_is_emitted_under_the_observer_lock() {
+    let (session, driver) = build_probing_session();
+    let token = session
+        .declare_token("group1/wz", LivelinessOptions::new())
+        .expect("token declare against the test link succeeds");
+    driver.arm(session.observer().clone());
+    drop(token);
+
+    assert_eq!(
+        driver.lockable_flags(),
+        vec![false],
+        "exactly one frame (the UndeclToken) must leave while armed, and it \
+         must leave with the observer mutex HELD — see the subscriber twin"
+    );
+}
+
 #[cfg(feature = "declare-subscriber")]
 #[test]
 fn declare_subscriber_invalid_keyexpr_rejects_and_rolls_back_local_registration() {
