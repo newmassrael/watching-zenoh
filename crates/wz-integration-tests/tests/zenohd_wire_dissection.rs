@@ -108,7 +108,12 @@ use wz_integration_tests::wire_tap::{
     sweep_single_byte_damage, synthesise_pcap, tap_proxy, Recording, Side,
 };
 use wz_session_core::inbound::InboundFrame;
-use wz_session_core::network_message::{parse_frame_payload, NetworkMessage};
+// R2277 (open-debt item 613) — `NetworkMessage` is no longer named here. It was
+// imported for a `record_name` helper whose eight `match` arms each spelled a
+// message name, which is the defect item 613 filed: `dissect_batch` supplies the
+// words now, and the decoder is used only for its COUNT, as the dissector's
+// independent second opinion.
+use wz_session_core::network_message::parse_frame_payload;
 use wz_session_core::passive::Direction;
 
 /// The synthesised endpoint ports. They are NOT the real ones (the real dialer
@@ -129,23 +134,109 @@ fn frame_name(frame: &InboundFrame) -> &'static str {
     frame.kind_name()
 }
 
-/// A short name for a decoded RECORD — the layer inside a `Frame`.
+/// The vocabulary every name this witness reports has to belong to.
 ///
-/// EXHAUSTIVE for the same reason as [`frame_name`], and with one arm that
-/// deliberately reads differently: `Unknown` renders its MID rather than a bare
-/// word, because a record wz cannot name is the single outcome here that is a
-/// finding about wz's decoder rather than a description of the router.
-fn record_name(record: &NetworkMessage) -> String {
-    match record {
-        NetworkMessage::Request(..) => "Request".to_string(),
-        NetworkMessage::Push(..) => "Push".to_string(),
-        NetworkMessage::ResponseFinal(..) => "ResponseFinal".to_string(),
-        NetworkMessage::Oam(..) => "Oam".to_string(),
-        NetworkMessage::Interest(..) => "Interest".to_string(),
-        NetworkMessage::Response(..) => "Response".to_string(),
-        NetworkMessage::Declare(..) => "Declare".to_string(),
-        NetworkMessage::Unknown { mid, .. } => format!("Unknown(mid={mid:#04x})"),
-    }
+/// R2277 (open-debt item 613). `wz-capture`'s `MESSAGE_R5` is the declared
+/// `fields.message` family — fourteen words, no `#[cfg]` on the constant — and
+/// it is the ONE population this file may be held to. The three other candidate
+/// sets were measured and refused: `InboundFrame::kind_name` has nine arms of
+/// which seven are `#[cfg]`-gated, so a grep sees more than rustc does (R2272's
+/// lesson exactly); `ScoutingFrame::kind_name` names three messages that travel
+/// on a MID space this TCP tap never carries; and this file's own literals were
+/// the defect. It is also the constant the CONSUMER's linter pins, so the day it
+/// moves both sides go red together.
+const VOCABULARY: &[&str] = wz_capture::doc_revision::MESSAGE_R5;
+
+/// What each leg's names ARE, per leg, measured — and asserted as EQUALITY.
+///
+/// Item 613's done-when ③: a name the genuine article never sends must not be
+/// asserted, or the witness is red forever. So the pin is per leg and it is
+/// exact in BOTH directions. A name appearing that this leg never carried is a
+/// new observation; a name in the pin that stops appearing is a leg that lost
+/// coverage — and a one-directional `⊆` would have let the second through,
+/// which is how a pin turns into decoration.
+///
+/// MEASURED at R2277 on this harness, with `--nocapture`, over both halves of
+/// each flow:
+///
+/// * idle     — transport `[Init, Open, Frame]`, no records on either half.
+/// * routing  — the same transport set, plus `Push` inside zenohd's Frames.
+/// * interest — the same transport set, plus `Declare`, which is wz's: the
+///   subscriber declaration it sends. zenohd's half of that leg carries no
+///   record at all, which is why the `Interest` row below says so.
+const IDLE_LEG_NAMES: &[&str] = &["Frame", "Init", "Open"];
+/// See [`IDLE_LEG_NAMES`]. `Push` is the routed sample, re-encoded by zenohd.
+const ROUTING_LEG_NAMES: &[&str] = &["Frame", "Init", "Open", "Push"];
+/// See [`IDLE_LEG_NAMES`]. `Declare` is wz's subscriber declaration.
+const INTEREST_LEG_NAMES: &[&str] = &["Declare", "Frame", "Init", "Open"];
+
+/// The other half of the partition: a declared word this tap does NOT carry,
+/// each with the reason it cannot.
+///
+/// Item 613's done-when ③ asked for the absent names to be "written down as a
+/// fact rather than inferred", and a comment would not be measured. This is a
+/// TABLE the test compares against the vocabulary, so a message that becomes
+/// observable reds here — in the one place that records why it used to be
+/// absent — instead of silently widening a per-leg pin.
+const NOT_CARRIED_HERE: &[(&str, &str)] = &[
+    (
+        "Close",
+        "sent at teardown; these legs kill the child instead",
+    ),
+    (
+        "Fragment",
+        "needs a message larger than one batch, which nothing here sends",
+    ),
+    (
+        "Interest",
+        "neither half sends one: wz declares its subscriber with a Declare, and \
+         zenohd's half of that leg carries no record at all (measured)",
+    ),
+    ("Join", "a MULTICAST announcement; this tap is TCP unicast"),
+    (
+        "KeepAlive",
+        "sent on an idle lease; every leg here finishes inside one",
+    ),
+    (
+        "Oam",
+        "a control-plane envelope neither side has a reason to send on these legs",
+    ),
+    ("Request", "no leg issues a query"),
+    ("Response", "no leg issues a query, so nothing replies"),
+    (
+        "ResponseFinal",
+        "no leg issues a query, so nothing closes one",
+    ),
+];
+
+/// Every record name in a `Frame` payload, taken from the DISSECTOR.
+///
+/// R2277 (open-debt item 613) — this used to be a `record_name` helper whose
+/// eight `match` arms each spelled their own literal, and item 613 is what that
+/// cost: a name in a `match` arm says the word OCCURS, never that it is the
+/// right word. MEASURED before the fix, as a command: renaming the `Declare`
+/// arm to `Xeclare` left all three witnesses GREEN, because this tap carries no
+/// Declare and nothing else read that arm. Only `Push` was load-bearing, held
+/// by one `any(|r| r == "Push")` below.
+///
+/// So the literals are gone rather than asserted. `dissect_batch` names each
+/// record through `MessageName`, which
+/// `the_message_vocabulary_is_the_one_the_dispatchers_produce` already holds to
+/// the dispatchers over all thirty-two MID values, and `MessageName::names` is
+/// the population `MESSAGE_R5` is declared from. A word this witness prints is
+/// now the library's, and there is no arm here left to move.
+fn dissected_record_names(payload: &[u8]) -> (Vec<String>, Option<String>) {
+    let batch = wz_session_core::dissect::dissect_batch(payload, 0);
+    let names = batch
+        .records
+        .iter()
+        .map(|f| f.name.to_string())
+        .collect::<Vec<_>>();
+    let halt = batch
+        .halt
+        .as_ref()
+        .map(|h| format!("{h:?} ({} byte(s) unparsed)", batch.unparsed_bytes));
+    (names, halt)
 }
 
 /// Decode the record batch inside every `Frame` a chosen half sent.
@@ -162,9 +253,21 @@ fn record_name(record: &NetworkMessage) -> String {
 /// list mean "the router sent no records", while a non-empty failure list is a
 /// defect report against `parse_frame_payload`. Collapsing them would let the
 /// second read as the first.
-fn records_on(flow: &wz_capture::FlowDissection, side: Direction) -> (Vec<String>, Vec<String>) {
+///
+/// R2277 (open-debt item 613) — TWO INDEPENDENT READINGS of the same payload,
+/// and their disagreement is a third finding. `parse_frame_payload` is the
+/// CODEC decoder (it builds `NetworkMessage` values) and `dissect_batch` is the
+/// DISSECTOR walk (it names records from the MID); they are separate tables, so
+/// a payload one of them reads as two records and the other as one is a defect
+/// in whichever is wrong, and neither could report it alone. The names come from
+/// the dissector because that is the word a consumer is actually handed.
+fn records_on(
+    flow: &wz_capture::FlowDissection,
+    side: Direction,
+) -> (Vec<String>, Vec<String>, Vec<String>) {
     let mut names = Vec::new();
     let mut failures = Vec::new();
+    let mut disagreements = Vec::new();
     for frame in flow.frames.iter() {
         if frame.direction != side {
             continue;
@@ -172,16 +275,71 @@ fn records_on(flow: &wz_capture::FlowDissection, side: Direction) -> (Vec<String
         let Ok(InboundFrame::Frame { payload, .. }) = &frame.frame else {
             continue;
         };
-        match parse_frame_payload(payload) {
-            Ok(records) => names.extend(records.iter().map(record_name)),
-            Err(e) => failures.push(format!(
-                "stream_offset {} ({} payload byte(s)): {e:?}",
+        let decoded = match parse_frame_payload(payload) {
+            Ok(records) => records,
+            Err(e) => {
+                failures.push(format!(
+                    "stream_offset {} ({} payload byte(s)): {e:?}",
+                    frame.stream_offset,
+                    payload.len()
+                ));
+                continue;
+            }
+        };
+        let (walked, halt) = dissected_record_names(payload);
+        if let Some(halt) = halt {
+            disagreements.push(format!(
+                "stream_offset {}: the codec decoded {} record(s) but the \
+                 dissector HALTED: {halt}",
                 frame.stream_offset,
-                payload.len()
-            )),
+                decoded.len()
+            ));
+        } else if walked.len() != decoded.len() {
+            disagreements.push(format!(
+                "stream_offset {}: the codec decoded {} record(s), the dissector \
+                 walked {} ({walked:?})",
+                frame.stream_offset,
+                decoded.len(),
+                walked.len()
+            ));
         }
+        names.extend(walked);
     }
-    (names, failures)
+    (names, failures, disagreements)
+}
+
+/// Every name this witness reports must be a word [`VOCABULARY`] declares.
+///
+/// Item 613's done-when ①, and the reason it is a function rather than a line in
+/// each leg: three legs report names and the rule is ONE fact. An `Unknown`
+/// transport kind or a record MID the dissector cannot name reaches here as a
+/// word the vocabulary does not carry, which is exactly the finding — a message
+/// the genuine article sent and this build cannot name.
+fn assert_named_by_the_vocabulary(observed: &[&str], pinned: &[&str], what: &str) {
+    let stranger: Vec<&&str> = observed
+        .iter()
+        .filter(|n| !VOCABULARY.contains(n))
+        .collect();
+    assert!(
+        stranger.is_empty(),
+        "{what}: {stranger:?} is not a word `MESSAGE_R5` declares, so a consumer \
+         handed this listing would receive a message name with no vocabulary \
+         behind it. Observed: {observed:?}; vocabulary: {VOCABULARY:?}"
+    );
+    // EQUALITY OF SETS, both directions. A `⊆` would pass a pin that has gone
+    // wider than the wire, which is the shape that makes a pin decoration.
+    let mut seen: Vec<&str> = observed.to_vec();
+    seen.sort_unstable();
+    seen.dedup();
+    let mut want: Vec<&str> = pinned.to_vec();
+    want.sort_unstable();
+    assert_eq!(
+        seen, want,
+        "{what}: the set of message names this leg put on the wire moved. \
+         Extra names are a NEW observation (widen the pin, and say what \
+         produced them); missing ones are coverage this leg used to have and \
+         no longer does. Observed in wire order: {observed:?}"
+    );
 }
 
 /// Wait until BOTH directions have carried bytes, which is the earliest point a
@@ -404,11 +562,16 @@ fn the_analyzer_parses_every_message_a_real_zenohd_puts_on_the_wire() {
     // router build, one difference: nothing to route — produces no such record.
     // Asserted rather than left implied: if a stock zenohd emitted records to
     // an idle face, the second leg's Push would not be evidence of routing.
-    let (idle_records, idle_failures) = records_on(flow, zenohd_side);
+    let (idle_records, idle_failures, idle_disagreements) = records_on(flow, zenohd_side);
     eprintln!("zenohd -> wz (idle) RECORD set: {idle_records:?}");
     assert!(
         idle_failures.is_empty(),
         "the idle router's Frames failed to decode: {idle_failures:?}"
+    );
+    assert!(
+        idle_disagreements.is_empty(),
+        "the codec decoder and the dissector disagree about the idle router's \
+         batches: {idle_disagreements:?}"
     );
     assert!(
         idle_records.is_empty(),
@@ -416,6 +579,14 @@ fn the_analyzer_parses_every_message_a_real_zenohd_puts_on_the_wire() {
          {idle_records:?}. The routing witness reads a `Push` here as proof of \
          routing, and that reading depends on this half being silent"
     );
+
+    // R2277 (open-debt item 613) — AND EVERY NAME THIS LEG REPORTED IS A WORD
+    // THE VOCABULARY DECLARES. Both halves, because a name is a name whichever
+    // encoder wrote it, and `Unknown` on either would arrive here as a stranger.
+    let mut said: Vec<&str> = named(zenohd_side);
+    said.extend(named(wz_side));
+    said.extend(idle_records.iter().map(String::as_str));
+    assert_named_by_the_vocabulary(&said, IDLE_LEG_NAMES, "the idle leg's names");
 
     // ── AND IS THE Err ARM REACHABLE ON THESE BYTES? (R311y764, N64) ──────
     // The same question the pico witness asks, asked separately because the
@@ -668,8 +839,13 @@ fn the_analyzer_parses_what_a_real_zenohd_sends_when_it_actually_routes() {
     // same census whether those Frames carried the routed publication or two
     // records the decoder cannot name. The transport layer was proven against
     // a real router; the record layer had never been graded against one at all.
-    let (records, record_failures) = records_on(flow, Direction::A);
+    let (records, record_failures, record_disagreements) = records_on(flow, Direction::A);
     eprintln!("zenohd -> wz (routing) RECORD set: {records:?}");
+    assert!(
+        record_disagreements.is_empty(),
+        "the codec decoder and the dissector disagree about the routing \
+         router's batches: {record_disagreements:?}"
+    );
 
     assert!(
         record_failures.is_empty(),
@@ -710,6 +886,89 @@ fn the_analyzer_parses_what_a_real_zenohd_sends_when_it_actually_routes() {
         "a real zenohd sent record(s) this decoder has no envelope for: \
          {unknown:?} (whole set: {records:?})"
     );
+
+    // R2277 (open-debt item 613) — the transport names AND the record names of
+    // this leg, held to the declared vocabulary. This is the leg that reaches
+    // the record layer at all, so it is the one whose `Push` is checked as a
+    // WORD rather than only as a presence.
+    let mut said: Vec<&str> = named(Direction::A);
+    said.extend(named(Direction::B));
+    said.extend(records.iter().map(String::as_str));
+    assert_named_by_the_vocabulary(&said, ROUTING_LEG_NAMES, "the routing leg's names");
+}
+
+/// R2277 (open-debt item 613) — WHICH WORDS THIS WITNESS CAN AND CANNOT REACH.
+///
+/// The two legs above assert that every name they observed is declared. This
+/// asserts the other half of item 613's done-when ③: that the pinned set of
+/// observable names is itself a subset of the vocabulary, and it NAMES the
+/// words the vocabulary carries that this tap does not.
+///
+/// Written as a test rather than a comment because a sentence about which
+/// messages a TCP unicast tap cannot carry is exactly the kind of claim this
+/// tree keeps finding to have rotted. Nine of the fourteen are absent for a
+/// structural reason (`Join` is a multicast announcement; `Fragment` needs a
+/// message larger than the batch; `Close` and `KeepAlive` come at teardown and
+/// idle, which these legs do not reach), and one is absent only because no leg
+/// declares a subscription to zenohd — which is a gap a future leg could close
+/// and this list would then have to move, loudly.
+///
+/// It carries no `#[ignore]`: it needs no zenohd, and the count guard on the
+/// Ewirez lane reads the `--ignored` run, so this one runs under Layer C1
+/// instead. Both are real lanes; neither can silently stop.
+#[test]
+fn the_names_this_witness_reports_are_the_declared_vocabulary() {
+    // The carried half is DERIVED from the three per-leg pins, never written a
+    // fourth time. A leg that gains a message widens this by construction, so
+    // the partition below then fails against `NOT_CARRIED_HERE` and the round
+    // that widened it has to say which row it took out and why.
+    let mut carried: Vec<&str> = IDLE_LEG_NAMES
+        .iter()
+        .chain(ROUTING_LEG_NAMES.iter())
+        .chain(INTEREST_LEG_NAMES.iter())
+        .copied()
+        .collect();
+    carried.sort_unstable();
+    carried.dedup();
+    assert!(
+        !carried.is_empty(),
+        "no leg pins any name, so `assert_named_by_the_vocabulary` compares \
+         against nothing and every leg would pass on an empty wire -- a \
+         population of zero is not a pass here either"
+    );
+    let stranger: Vec<&&str> = carried.iter().filter(|n| !VOCABULARY.contains(n)).collect();
+    assert!(
+        stranger.is_empty(),
+        "the per-leg pins name {stranger:?}, which `MESSAGE_R5` does not \
+         declare. Those pins are a SUBSET of the vocabulary by construction; a \
+         word outside it is a typo or a message the library no longer names"
+    );
+    // THE PARTITION, which is what makes the "not carried" half a measurement
+    // rather than a remark. Every declared word is in exactly one of the two
+    // sets; a word in neither is UNCLASSIFIED, and unclassified is not a pass.
+    let mut partitioned: Vec<&str> = carried
+        .iter()
+        .chain(NOT_CARRIED_HERE.iter().map(|(n, _)| n))
+        .copied()
+        .collect();
+    partitioned.sort_unstable();
+    let mut declared: Vec<&str> = VOCABULARY.to_vec();
+    declared.sort_unstable();
+    assert_eq!(
+        partitioned, declared,
+        "the carried names and `NOT_CARRIED_HERE` must PARTITION `MESSAGE_R5`. \
+         A word in neither is one nobody has decided about, and a word in both \
+         is a claim that it is simultaneously carried and not"
+    );
+    eprintln!(
+        "carried by this tap ({} of {}): {carried:?}",
+        carried.len(),
+        VOCABULARY.len()
+    );
+    eprintln!("declared but NOT carried:");
+    for (name, why) in NOT_CARRIED_HERE {
+        eprintln!("  {name}: {why}");
+    }
 }
 
 /// ITEM 271 — THE INTEREST PLANE, OVER BYTES THIS WORKSPACE DID NOT WRITE.
@@ -824,6 +1083,40 @@ fn the_interest_plane_reads_a_real_zenohd_session() {
         decoded > 0,
         "the capture decoded no transport message at all:\n{sub_captured}"
     );
+
+    // R2277 (open-debt item 613) — WHICH NAMES THIS LEG PUTS ON THE WIRE.
+    // The interest plane reads declarations through `wz_capture::interest`, an
+    // API that never touches this file's naming, so before this the leg's own
+    // message vocabulary was unobserved: `INTEREST_LEG_NAMES` could not be derived
+    // from it, and whether a stock zenohd answers a subscription with a
+    // `Declare` was a guess. Now it is a reading.
+    let flow = &flows[0];
+    let mut transport: Vec<&'static str> = Vec::new();
+    for frame in flow.frames.iter() {
+        if let Ok(f) = &frame.frame {
+            transport.push(frame_name(f));
+        }
+    }
+    let (subscriber_records, subscriber_failures, subscriber_disagreements) =
+        records_on(flow, Direction::A);
+    let (dialer_records, dialer_failures, dialer_disagreements) = records_on(flow, Direction::B);
+    eprintln!("interest leg transport names: {transport:?}");
+    eprintln!("interest leg RECORD set (A): {subscriber_records:?}");
+    eprintln!("interest leg RECORD set (B): {dialer_records:?}");
+    assert!(
+        subscriber_failures.is_empty() && dialer_failures.is_empty(),
+        "the interest leg's Frames failed to decode: {subscriber_failures:?} \
+         {dialer_failures:?}"
+    );
+    assert!(
+        subscriber_disagreements.is_empty() && dialer_disagreements.is_empty(),
+        "the codec decoder and the dissector disagree about the interest leg's \
+         batches: {subscriber_disagreements:?} {dialer_disagreements:?}"
+    );
+    let mut said: Vec<&str> = transport.clone();
+    said.extend(subscriber_records.iter().map(String::as_str));
+    said.extend(dialer_records.iter().map(String::as_str));
+    assert_named_by_the_vocabulary(&said, INTEREST_LEG_NAMES, "the interest leg's names");
 
     let census = wz_capture::interest::interests(&dissection);
     eprintln!(

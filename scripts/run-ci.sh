@@ -11236,6 +11236,21 @@ EWIREZ_WITNESS_BUDGET="${EWIREZ_WITNESS_BUDGET:-180}"
 layer_ewirez_zenohd_wire_dissection() {
     local zenohd="${WZ_ZENOHD_BIN:-$PWD/target/zenohd/zenohd}"
     (cd crates && cargo build -p wz-ap-demo --quiet) || return 1
+    # R2277 (open-debt item 613) — THE VOCABULARY PARTITION, and it runs BEFORE
+    # the zenohd guard because it needs no zenohd. The three witnesses below pin
+    # the exact set of message names each leg puts on the wire; this one asserts
+    # those pins are a subset of `MESSAGE_R5` and that they PARTITION it against
+    # a table of the words this TCP unicast tap cannot carry. A word in neither
+    # half is unclassified, which is not a pass.
+    #
+    # Its own count guard, and not folded into the `3` below: that one runs
+    # `--ignored`, where this test is filtered out, so without a leg of its own
+    # it would be a test no lane runs — and on a developer's box without zenohd
+    # the whole lane declines, taking the one check that did not need it.
+    _runci_guarded_test "Ewirez vocabulary partition" 1 \
+        cargo test -p wz-integration-tests --test zenohd_wire_dissection \
+        the_names_this_witness_reports_are_the_declared_vocabulary --quiet \
+        || return 1
     if [[ ! -x "$zenohd" ]]; then
         _z_unavailable "zenohd not built ($zenohd; run: bash scripts/build-zenohd.sh)" || return 1
         return 0
