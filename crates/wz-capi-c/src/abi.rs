@@ -91,8 +91,12 @@ const UNSTABLE: bool = !cfg!(feature = "zenoh-c-no-unstable-api");
 /// `true` when this build targets a zenoh-c compiled WITH
 /// `Z_FEATURE_SHARED_MEMORY`. OFF by default, which R2278 measured to be a
 /// DIVERGENCE from what a consumer installs: the published archive (what
-/// `install-zenoh-c.sh` provisions) is the `unstable-shm` build. Open-debt
-/// item 616 carries whether the default should move.
+/// `install-zenoh-c.sh` provisions) is the `unstable-shm` build. R2286 settled
+/// that the default stays put: cargo features are additive, so it has to sit at
+/// the origin or an arm leaves additive reach. That archive's `unstable-shm`
+/// build is reached by adding this feature, and the divergence is PRICED rather
+/// than declared -- `scripts/lib/zenoh_c_archive_arm.py` reds if no lane leg
+/// runs it.
 const SHM: bool = cfg!(feature = "zenoh-c-shared-memory");
 
 // The sizes that MOVE across the two-axis feature space. Every number below

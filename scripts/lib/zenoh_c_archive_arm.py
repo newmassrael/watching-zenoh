@@ -430,7 +430,16 @@ def shell_function(path: pathlib.Path, name: str) -> str:
 
 
 def capi_c_test_feature_sets(text: str) -> list[set[str]]:
-    """The feature set of every `cargo test -p wz-capi-c` invocation in `text`."""
+    """The feature set of every `cargo test -p wz-capi-c` invocation in `text`.
+
+    COMMENT lines are dropped first. R2287 (item 624): the divergence arm pays
+    its bill from this list, and a commented-out leg is not a leg -- the same
+    confusion `hook_gate_boundary_gate.py` records for a fix hint that PRINTS a
+    command. Measured on the shipped `run-ci.sh`: dropping comments leaves the
+    verdict identical (2 legs, 1 paying), and only the vacuous branch closes.
+    """
+    text = "\n".join(line for line in text.splitlines()
+                     if not re.match(r"^\s*#", line))
     out: list[set[str]] = []
     for call in re.finditer(r"cargo test -p wz-capi-c([^\n]*)", text):
         feats: set[str] = set()
@@ -965,6 +974,16 @@ def cmd_selftest() -> int:
             "    cargo test -p wz-capi-c --features zenoh-c-shared-memory "
             "--quiet\n", ""))
         case("an unpriced divergence is refused",
+             rc_bad == 1 and "no `cargo test -p wz-capi-c` leg" in why)
+
+        # R2287 (item 624). The leg that pays the divergence has to RUN. A
+        # commented-out one satisfied the first cut of this arm, which is the
+        # vacuity that made the bill payable with a string.
+        rc_bad, why = lattice(good_manifest, good_runci.replace(
+            "    cargo test -p wz-capi-c --features zenoh-c-shared-memory "
+            "--quiet\n",
+            "    # cargo test -p wz-capi-c --features zenoh-c-shared-memory\n"))
+        case("a COMMENTED-OUT leg does not pay the divergence",
              rc_bad == 1 and "no `cargo test -p wz-capi-c` leg" in why)
 
         rc_bad, why = lattice(good_manifest, good_runci.replace(
