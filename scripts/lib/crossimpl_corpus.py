@@ -520,6 +520,58 @@ def reachable_classes(fn_name: str, local: dict[str, str],
     return classes
 
 
+def reachable_external(fn_name: str, local: dict[str, str],
+                       by_helper: dict[str, set[str]],
+                       pkgs_by_helper: dict[str, set[str]],
+                       edges: dict[str, set[str]] | None = None) -> bool:
+    """Q1, ONE LEVEL FINER — does THIS TEST reach an external binary?
+
+    R2279 (open-debt item 618). `CorpusFile.spawns_external` answers Q1 for the
+    FILE, and Layer C0 held every `#[test]` in such a file to `#[ignore]`. That
+    over-approximates for exactly the reason [`TestFn.classes`] was split out of
+    `CorpusFile.classes` one question over: a file that spawns a binary
+    somewhere made every test in it a binary-dep test, whether or not the test
+    calls anything that spawns.
+
+    The cost was not hypothetical. R2277 added a pure vocabulary assertion —
+    it spawns nothing, needs no oracle, and belongs in Layer C1 — to a file
+    that spawns zenohd, and the file-scoped rule had no way to say so: adding
+    `#[ignore]` to satisfy it reds C0's OWN skip-token gate instead, because an
+    ignored test in a `zenohd`-named fixture must carry a Layer E token, and
+    then Layer E would sweep a test Layer E cannot run. There was no edit that
+    made both gates green, which is what a rule stated one level too coarse
+    looks like from inside.
+
+    The ROOT SET is `CorpusFile.spawns_external`'s, unchanged, so this is a
+    refinement rather than a different question: a test this returns True for
+    always sits in a file that predicate is also True for. The linked-library
+    (`codec`) route is deliberately NOT a root here, exactly as it is not one
+    there -- linking pico needs no binary on disk, which is why codec tests run
+    unignored in Layer C1 and are the only foreign proof every push executes.
+    """
+    seen: set[str] = set()
+    stack = [fn_name]
+    while stack:
+        name = stack.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        body = local.get(name)
+        if body is None:
+            continue
+        for ident in set(re.findall(r"[A-Za-z0-9_]+", body)):
+            if ident in FOREIGN_ROOTS or ident in by_helper:
+                return True
+            if ident in WZ_BINARY_ROOTS or ident in pkgs_by_helper:
+                return True
+            if ident in local and ident not in seen:
+                stack.append(ident)
+        for target in (edges or {}).get(name, ()):
+            if target not in seen:
+                stack.append(target)
+    return False
+
+
 class TestFn:
     def __init__(self, name: str, line: int):
         self.name = name
@@ -531,6 +583,8 @@ class TestFn:
         # R311y571 — the classes THIS test reaches, as opposed to the ones its
         # FILE reaches. See `CorpusFile.classes`.
         self.classes: set[str] = set()
+        # R2279 — Q1 at the same resolution. See `reachable_external`.
+        self.spawns_external = False
 
     @property
     def declared(self) -> bool:
@@ -634,6 +688,8 @@ def scan_file(path: Path, by_helper: dict[str, set[str]],
                 j += 1
             t = TestFn(fn_name, idx + 1)
             t.classes = reachable_classes(fn_name, local_bodies, by_helper, ffi_names, edges)
+            t.spawns_external = reachable_external(
+                fn_name, local_bodies, by_helper, pkgs_by_helper, edges)
             t.has_ignore = has_ignore
             t.claims = [(a, k, p) for (_, a, k, p) in pending]
             t.none_reason = pending_none
@@ -667,7 +723,10 @@ def main() -> int:
     ap.add_argument("--list-corpus", action="store_true",
                     help="foreign-corpus files: <path>\\t<classes>")
     ap.add_argument("--list-spawn", action="store_true",
-                    help="files spawning an external binary (Layer C0 predicate)")
+                    help="files spawning an external binary (the coarse Q1)")
+    ap.add_argument("--list-spawn-tests", action="store_true",
+                    help="<path>\\t<line>\\t<fn>\\t<reaches>\\t<ignored> for every test "
+                         "in a spawn-class file (Layer C0 predicate, R2279)")
     ap.add_argument("--list-claims", action="store_true",
                     help="<path>\\t<fn>\\t<atom>\\t<kind>\\t<partial>")
     args = ap.parse_args()
@@ -677,6 +736,19 @@ def main() -> int:
         for cf in files:
             if cf.spawns_external:
                 print(cf.path.relative_to(REPO_ROOT))
+    if args.list_spawn_tests:
+        # EVERY test in a spawn-class file, both verdicts spelled out, because
+        # the consumer has to be able to count its own population and refuse an
+        # empty one. Printing only the violations would make "nothing to check"
+        # and "nothing wrong" the same output.
+        for cf in files:
+            if not cf.spawns_external:
+                continue
+            for t in cf.tests:
+                print("%s\t%d\t%s\t%d\t%d" % (
+                    cf.path.relative_to(REPO_ROOT), t.line, t.name,
+                    1 if t.spawns_external else 0,
+                    1 if t.has_ignore else 0))
     if args.list_corpus:
         for cf in files:
             if cf.classes:

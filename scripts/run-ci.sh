@@ -1693,46 +1693,66 @@ layer_c0_test_discipline() {
         echo "Layer C0 FAIL: python3 not on PATH (needed by scripts/lib/crossimpl_corpus.py)" >&2
         return 1
     fi
-    local spawn_list
-    spawn_list="$(mktemp)"
-    if ! python3 scripts/lib/crossimpl_corpus.py --list-spawn >"$spawn_list"; then
-        rm -f "$spawn_list"
-        echo "Layer C0 FAIL: crossimpl_corpus.py --list-spawn errored" >&2
+    # R2279 (open-debt item 618) — the obligation is PER TEST, not per file.
+    #
+    # This read the FILE list and held every `#[test]` in a spawn-class file to
+    # `#[ignore]`. The rule's own reason is narrower than that: Layer C1 runs
+    # the tests cargo does not skip, so what must not reach a binary is a
+    # NON-IGNORED TEST. A file that spawns zenohd somewhere says nothing about
+    # a test in it that calls no spawning helper.
+    #
+    # R2277 hit the gap and there was no edit that satisfied both gates: its
+    # pure vocabulary assertion spawns nothing, and adding `#[ignore]` to
+    # satisfy THIS check reds the skip-token obligation below instead. A rule
+    # stated one level too coarse looks exactly like that from inside.
+    #
+    # The awk that used to live here is gone rather than narrowed, and that is
+    # the point of the module's own header (one predicate, two consumers): the
+    # `#[ignore]` reading is `crossimpl_corpus.py`'s, which already handles an
+    # attribute written ABOVE the `#[test]` and a test commented out with
+    # `/* */`. Measured before the switch over all 447 tests in the 188
+    # spawn-class files: the two spellings flagged the SAME single test, with
+    # neither difference non-empty.
+    local spawn_tests
+    spawn_tests="$(mktemp)"
+    if ! python3 scripts/lib/crossimpl_corpus.py --list-spawn-tests >"$spawn_tests"; then
+        rm -f "$spawn_tests"
+        echo "Layer C0 FAIL: crossimpl_corpus.py --list-spawn-tests errored" >&2
         return 1
     fi
-    if [[ ! -s "$spawn_list" ]]; then
-        rm -f "$spawn_list"
+    if [[ ! -s "$spawn_tests" ]]; then
+        rm -f "$spawn_tests"
         echo "Layer C0 FAIL: the spawn-class corpus came back EMPTY -- the predicate is" >&2
         echo "  broken, not the tree (there are binary-dep tests). Refusing to pass green." >&2
         return 1
     fi
-    while IFS= read -r f; do
-        local report
-        # Both #[test] and #[tokio::test(...)] mark a test; the old awk matched only the
-        # former, so ~20 corpus files' #[ignore] discipline rode on convention, not a gate.
-        # The `^[[:space:]]*` anchor matches the shared parser's, so C0 and A4 agree on
-        # what a test IS -- an indented #[test] (inside a mod / proptest! block) must not
-        # be a test to one gate and invisible to the other.
-        report=$(awk '
-            /^[[:space:]]*#\[(test|tokio::test)/ {
-                test_line = NR
-                if ((getline next_line) > 0 && next_line ~ /^[[:space:]]*#\[ignore/) {
-                    next
-                }
-                print FILENAME ":" test_line ": #[test] missing adjacent #[ignore]"
-            }
-        ' "$f")
-        if [[ -n "$report" ]]; then
-            echo "$report" >&2
+    local c0_total=0 c0_reaching=0
+    while IFS=$'\t' read -r f ln fn reaches ignored; do
+        c0_total=$((c0_total + 1))
+        [[ "$reaches" == "1" ]] || continue
+        c0_reaching=$((c0_reaching + 1))
+        if [[ "$ignored" != "1" ]]; then
+            echo "$f:$ln: $fn reaches an external binary and carries no #[ignore]" >&2
             violations_count=$((violations_count + 1))
             exit_code=1
         fi
-    done <"$spawn_list"
-    rm -f "$spawn_list"
+    done <"$spawn_tests"
+    rm -f "$spawn_tests"
+
+    # The DISCRIMINATING population, not just the read one. If no test reaches a
+    # binary the check adjudicated nothing, and a green there would mean the
+    # call-graph resolver had stopped resolving rather than that the tree was
+    # clean.
+    if [[ $c0_reaching -eq 0 ]]; then
+        echo "Layer C0 FAIL: not one of $c0_total test(s) in the spawn-class corpus" >&2
+        echo "  reaches an external binary. That is the resolver failing, not the" >&2
+        echo "  tree being clean -- a population of zero is not a pass." >&2
+        return 1
+    fi
 
     if [[ $exit_code -ne 0 ]]; then
         echo "" >&2
-        echo "Layer C0: $violations_count binary-dep test file(s) violate the" >&2
+        echo "Layer C0: $violations_count binary-dep test(s) violate the" >&2
         echo "  #[test] + #[ignore] discipline. Layer C1 (cargo test" >&2
         echo "  --workspace) would panic on these on fresh CI checkouts" >&2
         echo "  where wz-ap-demo + zenoh-pico CLI binaries are not yet" >&2
@@ -1742,6 +1762,8 @@ layer_c0_test_discipline() {
         echo "  #[ignore = \"binary-dep e2e (wz-ap-demo + zenoh-pico CLI); Layer E runs via --ignored\"]" >&2
         return 1
     fi
+    echo "  binary-dep discipline: $c0_reaching of $c0_total test(s) in the" \
+         "spawn-class corpus reach an external binary; every one carries #[ignore]"
 
     # R311y455 — the SKIP-TOKEN NAMING OBLIGATION, now enforced.
     #
@@ -1830,30 +1852,46 @@ if not TESTS:
           "asserted nothing")
     sys.exit(0)
 
-for path in TESTS:
+# R2279 (open-debt item 618) — the obligation reaches only tests the sweep CAN
+# run, and the parser is the shared one.
+#
+# Layer E sweeps with `-- --ignored`, and libtest's `--ignored` runs ONLY the
+# ignored tests (`--include-ignored` is the one that runs both). A test without
+# `#[ignore]` is therefore not something "Layer E's default sweep does not
+# skip" -- it is something the sweep never enumerates, so a skip token over it
+# asserts nothing. This loop blamed it anyway, which is the same shape as the
+# binary-dep check above: an obligation stated over a wider population than its
+# own reason reaches. Measured over the 310 tests in token-named fixtures: 309
+# carry `#[ignore]` and one does not, so this narrowing drops exactly the one
+# obligation that could not have been true.
+#
+# The `#[ignore]` reading comes from `crossimpl_corpus`, whose header is "one
+# predicate, two consumers" and which now has three. It handles an attribute
+# written ABOVE the `#[test]` and a test commented out with `/* */`, neither of
+# which a line scanner here did. Measured before the switch: the two spellings
+# enumerate the SAME 310 tests, with neither difference non-empty.
+sys.path.insert(0, "scripts/lib")
+import crossimpl_corpus as _corpus  # noqa: E402
+
+_scanned = [cf for cf in _corpus.scan_all()
+            if any(t in cf.path.stem for t in TOKENS)]
+if not _scanned:
+    print("SELFCHECK no token-named fixture was scanned; this check asserted "
+          "nothing")
+    sys.exit(0)
+for cf in _scanned:
     # A basename carrying a token declares the fixture part of an excluded
     # family. Only then is anything owed.
-    if not any(t in path.stem for t in TOKENS):
-        continue
-    lines = path.read_text().splitlines()
-    pending = False
-    for line in lines:
-        if COMMENT.match(line):
+    for t in cf.tests:
+        if not t.has_ignore:
             continue
-        if TEST_ATTR.search(line):
-            pending = True
-            continue
-        m = FN_NAME.match(line)
-        if pending and m:
-            fn = m.group(1)
-            # ANY token suffices: one match is enough for libtest to exclude the
-            # test, and it need not be the same token the filename carries --
-            # `wz_gossip_autoconnect_zenohd_interop`'s fns are excluded by their
-            # `wz_peer` prefix, not by `zenohd`.
-            if not any(t in fn for t in TOKENS):
-                print(f"{path}::{fn} carries NO Layer E skip token while its "
-                      f"filename declares the family; the token set is {TOKENS}")
-            pending = False
+        # ANY token suffices: one match is enough for libtest to exclude the
+        # test, and it need not be the same token the filename carries --
+        # `wz_gossip_autoconnect_zenohd_interop`'s fns are excluded by their
+        # `wz_peer` prefix, not by `zenohd`.
+        if not any(tok in t.name for tok in TOKENS):
+            print(f"{cf.path}::{t.name} carries NO Layer E skip token while its "
+                  f"filename declares the family; the token set is {TOKENS}")
 
 # R311y838 — the OWNERSHIP obligation. The check above keys on the FILE
 # basename, so a fixture with a neutral name whose individual tests belong to

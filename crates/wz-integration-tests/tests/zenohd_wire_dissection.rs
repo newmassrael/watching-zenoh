@@ -916,6 +916,13 @@ fn the_analyzer_parses_what_a_real_zenohd_sends_when_it_actually_routes() {
 /// It carries no `#[ignore]`: it needs no zenohd, and the count guard on the
 /// Ewirez lane reads the `--ignored` run, so this one runs under Layer C1
 /// instead. Both are real lanes; neither can silently stop.
+///
+/// R2279 — that is now a DERIVED verdict rather than a convention it broke.
+/// Layer C0 held every `#[test]` in this file to `#[ignore]` because the FILE
+/// spawns zenohd; the obligation is per TEST, and this one reaches no spawning
+/// helper. It witnesses no atom either: the words it partitions are wz's own
+/// declared vocabulary, not anything a foreign encoder put on a wire.
+// wz-proves: none -- partitions this tree's own vocabulary; reaches no foreign encoder
 #[test]
 fn the_names_this_witness_reports_are_the_declared_vocabulary() {
     // The carried half is DERIVED from the three per-leg pins, never written a
