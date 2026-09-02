@@ -104,6 +104,7 @@ _staged_matching() {
 }
 
 # ─── Check 1: Cargo.toml ↔ Cargo.lock sync ─────────────────────────
+# grades: index-paths
 #
 # `git diff --cached --name-only` lists every path the current commit
 # stages. We grep for `crates/**/Cargo.toml` and separately for
@@ -137,32 +138,90 @@ if [[ -n "$staged_manifests" && -z "$staged_lockfile" ]]; then
     fi
 fi
 
-# ─── Check 2: cargo fmt --check on staged .rs (R311au-prep-hook) ───
+# ─── Check 2: rustfmt on the STAGED BYTES of crates/**.rs (R311au) ──
+# grades: index-content
 #
 # Filter to staged `crates/**.rs` so mnemosyne-only commits skip
-# silently (no rustfmt boot cost). When any .rs is staged, the gate
-# runs `cargo fmt --all -- --check` in the workspace root — same
-# command as scripts/run-ci.sh Layer 0 (R64.1 mirror). The --all
-# scope is intentional: incidental drift accumulated in unstaged
-# files is *also* surfaced, which is the same defense-in-depth shape
-# the CI lane provides remotely.
+# silently (no rustfmt boot cost).
+#
+# R2283 (open-debt item 621) — this ran `cargo fmt --all -- --check`
+# in the workspace root, which reads the WORKING TREE while the paths
+# came from the INDEX. Those are different artifacts and R2282 walked
+# into the gap: the tree had been formatted, an intervening `git add`
+# failed, and a commit carrying an unformatted blob passed this check.
+# Reproduced afterwards in a throwaway repo, in both directions —
+#   index unformatted + tree formatted -> the old form PASSED
+#   index formatted + tree drifted     -> the old form FAILED
+# — which is the same pair Check 3 below already records for the same
+# mistake. The `--all` scope was called defense-in-depth here; the
+# second line is what that actually bought: a red about drift no
+# commit carries, whose only escapes are `git checkout` or
+# `--no-verify`. Unstaged drift is in no commit, so it can red nothing
+# downstream; there was nothing to defend.
+#
+# So the bytes are read from the index. The edition is DERIVED per
+# file from the owning package's manifest (also out of the index),
+# falling back to the workspace's `[workspace.package]`, because a
+# guessed edition formats differently and a constant here would rot
+# the first time a crate moves.
+#
+# ⚠ rustfmt reading STDIN exits 0 even when it prints a diff, so the
+# verdict is its OUTPUT, never its status. Measured while writing this.
 staged_rs=$(_staged_matching '^crates/.+\.rs$' ACM) || exit 1
 
 if [[ -n "$staged_rs" ]]; then
-    if ! (cd crates && cargo fmt --all -- --check); then
+    if ! command -v rustfmt >/dev/null 2>&1; then
+        echo "pre-commit: rustfmt not on PATH — needed to grade the staged" >&2
+        echo "  crates/**.rs. A check that cannot read its input must not" >&2
+        echo "  report green." >&2
+        exit 1
+    fi
+    _wz_edition_for() {
+        local path="$1" pkg manifest ed
+        pkg="${path#crates/}"
+        pkg="${pkg%%/*}"
+        manifest="crates/${pkg}/Cargo.toml"
+        ed="$(git show ":${manifest}" 2>/dev/null |
+              sed -n 's/^[[:space:]]*edition[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' |
+              head -1)"
+        if [[ -z "$ed" ]]; then
+            ed="$(git show ':crates/Cargo.toml' 2>/dev/null |
+                  sed -n 's/^[[:space:]]*edition[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' |
+                  head -1)"
+        fi
+        [[ -n "$ed" ]] || return 1
+        printf '%s' "$ed"
+    }
+    fmt_bad=""
+    while IFS= read -r path; do
+        [[ -n "$path" ]] || continue
+        if ! edition="$(_wz_edition_for "$path")"; then
+            echo "pre-commit: cannot resolve the Rust edition for ${path} from" >&2
+            echo "  the index — neither its package manifest nor" >&2
+            echo "  crates/Cargo.toml states one. A guessed edition formats" >&2
+            echo "  differently, so this refuses rather than assumes." >&2
+            exit 1
+        fi
+        if [[ -n "$(git show ":${path}" | rustfmt --check --edition "$edition" 2>&1)" ]]; then
+            fmt_bad="${fmt_bad}${path}"$'\n'
+        fi
+    done <<< "$staged_rs"
+    if [[ -n "$fmt_bad" ]]; then
         echo "" >&2
-        echo "pre-commit: cargo fmt --check FAIL" >&2
-        echo "  staged crates/**.rs files:" >&2
+        echo "pre-commit: rustfmt FAIL on the bytes this commit would carry" >&2
         # shellcheck disable=SC2001  # per-LINE prefix; see the note on the
         # matching sed in Check 1.
-        echo "$staged_rs" | sed 's/^/    /' >&2
-        echo "" >&2
+        echo "$fmt_bad" | sed 's/^/    /' >&2
         echo "  fix: (cd crates && cargo fmt --all) && git add -u" >&2
+        echo "  ⚠ the second half is not optional — formatting the working" >&2
+        echo "    tree without staging it leaves the commit unchanged, which" >&2
+        echo "    is exactly how open-debt item 621 was found." >&2
         exit 1
     fi
 fi
 
 # ─── Check 3: store schema vs the pinned CI reader (R311y418) ──────
+# grades: index-content
 #
 # Graded on the INDEX — what this commit will contain — for both halves.
 # Hosted CI runs the COMMITTED tree, so that is the artifact to grade. The
@@ -194,6 +253,7 @@ wz_schema_pin_cochange_gate 'pre-commit' || exit 1
 wz_local_cli_pin_gate 'pre-commit' ':' || exit 1
 
 # ─── Check 5: the identity this commit will carry (2026-08-25) ─────
+# grades: not-a-file
 #
 # The rule, the allow-list and the refusal all live in
 # scripts/lib/ident-gate.sh, because pre-push needs the very same list
@@ -214,6 +274,16 @@ fi
 wz_ident_gate_pending 'pre-commit' || exit 1
 
 # ─── Check 4: Mnemosyne SSOT gate ──────────────────────────────────
+# grades: worktree
+#
+# R2283 (open-debt item 621) — declared, not repaired, and the two are
+# different. `validate-workspace` reads the store off the CHECKOUT and
+# has no index mode, so this check is subject to the very asymmetry
+# Check 2 was just moved off: stage a store, revert the worktree copy,
+# and this grades the file that is NOT being committed. Check 3's own
+# header already records that shape ("Check 4 is blind to the schema
+# case in the shape that has actually fired") — this line makes it a
+# declaration the gate holds rather than a note in a neighbour.
 if ! command -v mnemosyne-cli >/dev/null 2>&1; then
     echo "pre-commit: mnemosyne-cli not on PATH — install with" >&2
     echo "  cargo install --path /path/to/mnemosyne/crates/mnemosyne-cli" >&2

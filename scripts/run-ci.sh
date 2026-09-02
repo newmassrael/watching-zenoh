@@ -2434,6 +2434,19 @@ PY
     # In Layer C0 with its two siblings: `--check` reads nothing but the tree.
     python3 scripts/lib/zenoh_c_census_arm_reach.py --selftest || return 1
     python3 scripts/lib/zenoh_c_census_arm_reach.py --check || return 1
+    # R2283 (open-debt item 621) — and a COMMIT HOOK CHECK must say which
+    # artifact it grades. `pre-commit`'s Check 2 picked its files out of the
+    # index and then ran `cargo fmt` over the CHECKOUT; R2282 committed an
+    # unformatted blob through that gap, and both directions of the
+    # disagreement were reproduced afterwards in a throwaway repo. Check 3 had
+    # recorded the same pair, for the same mistake, in the same file — a
+    # principle written down beside code that did not follow it. Each check now
+    # declares its surface and the declaration is judged against the section's
+    # own code.
+    #
+    # In Layer C0 with its siblings: `--check` reads nothing but the tree.
+    python3 scripts/lib/hook_graded_surface_gate.py --selftest || return 1
+    python3 scripts/lib/hook_graded_surface_gate.py --check || return 1
     # R2192 (open-debt item 530, the FIRST measured case) — a dependency this
     # tree's prose names is one cargo resolves, and one it DENIES is one
     # nothing reaches.
