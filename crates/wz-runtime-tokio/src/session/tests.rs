@@ -6015,6 +6015,210 @@ fn declare_subscriber_invalid_keyexpr_rejects_and_rolls_back_local_registration(
     );
 }
 
+// ── R2291 (open-debt item 628) — the interest-reply stage/drain guard,
+//    reached through the door the PRODUCT opens ──
+
+/// The peer's interest id for the rollback-window tests below.
+#[cfg(feature = "declare-subscriber")]
+const ROLLBACK_WINDOW_INTEREST: u64 = 7;
+
+/// Deliver a peer's standing subscriber `Interest` through the drive loop's
+/// dispatch SSOT, rather than poking the registry.
+///
+/// FUTURE-only (`c` clear, `f` set) on purpose: a CURRENT interest answers
+/// itself on arrival, and the population the tests below measure has to be
+/// exactly what the declare stages afterwards. `"**"` is the interest keyexpr,
+/// carried as a literal with `id = 0`, so it resolves with no peer mapping
+/// installed.
+///
+/// `aggregate` is the whole population axis of these tests: it is the bit
+/// `stage_future_subscriber_pushes` reads to choose which arm of
+/// `SubInterestReply` to stage, and those two arms are exactly the ANNOUNCING
+/// arms of that enum (the third, `Final`, announces nothing and terminates the
+/// chain unconditionally).
+#[cfg(feature = "declare-subscriber")]
+fn deliver_future_subscriber_interest(session: &TokioSession, aggregate: bool) {
+    let outcome = wz_session_core::driver_loop::DriverLoopOutcome::FramePayload {
+        priority: wz_session_core::qos::Priority::DEFAULT,
+        reliable: true,
+        sn: 0,
+        messages: vec![wz_session_core::network_message::NetworkMessage::Interest(
+            wz_session_core_test_support::interest_subscriber(
+                ROLLBACK_WINDOW_INTEREST,
+                "**",
+                /*current=*/ false,
+                /*future=*/ true,
+                aggregate,
+            ),
+        )],
+        has_ext: false,
+        extensions: Vec::new(),
+    };
+    session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&outcome));
+}
+
+/// One drive-loop iteration carrying no application message.
+///
+/// Not a test-only door: `dispatch_iteration_event` runs
+/// `flush_pending_replies` on EVERY iteration, which is precisely why a reply
+/// staged on the application thread is emitted later, by the drive thread —
+/// the window both tests below are about.
+#[cfg(feature = "declare-subscriber")]
+fn drain_one_drive_iteration(session: &TokioSession) {
+    let outcome = wz_session_core::driver_loop::DriverLoopOutcome::SideEffectOnly;
+    session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&outcome));
+}
+
+/// R2291 (open-debt item 628) — THE DEFECT, through the product door, over the
+/// whole population.
+///
+/// R2290 made `Subscriber::teardown` atomic with its wire retract, which closed
+/// the UNDECLARE route into the stage/drain window. It left the DECLARE
+/// ROLLBACK open: `declare_subscriber` registers the subscription LOCALLY first
+/// — and that table insert stages a future-push reply against every standing
+/// interest the new pattern matches — then unregisters it again when the R300
+/// outbound gate rejects the keyexpr (the `announce_subscriber` `Err` arm in
+/// this module). Nothing makes that pair atomic, so a staged reply can outlive
+/// a subscription that was never announced at all.
+///
+/// R2290's four witnesses opened the window by calling
+/// `subscribers.unregister` themselves. This one lets the product open it.
+///
+/// The population is the interest's `aggregate` BIT, driven over both of its
+/// inhabitants rather than over a list somebody typed: that bit is what
+/// `stage_future_subscriber_pushes` reads to pick between the two ANNOUNCING
+/// arms of `SubInterestReply`, and the arms resolve through DIFFERENT tables —
+/// `Aggregate` re-checks `any_subscription_matches` over the interest's
+/// keyexpr, `Concrete` re-resolves the subscription id — so covering one says
+/// nothing about the other. `covered` is asserted because a loop that ran zero
+/// times would satisfy every assertion inside it.
+///
+/// Each half is kept honest by its own vehicle proof below.
+#[cfg(feature = "declare-subscriber")]
+#[test]
+fn a_rolled_back_declare_leaves_no_reply_on_the_wire_for_either_interest_kind() {
+    let mut covered = 0usize;
+    for aggregate in [false, true] {
+        let (session, driver) = build_session();
+        deliver_future_subscriber_interest(&session, aggregate);
+
+        let rejected = session.declare_subscriber("**/c/*", SubscribeOptions::default(), |_| {});
+        assert!(
+            matches!(rejected, Err(SubscribeError::InvalidKeyexpr(_))),
+            "the R299 bug-#3 keyexpr must be REJECTED by the R300 outbound gate \
+             — that rejection is what makes this a rollback rather than a \
+             declare (aggregate = {aggregate})"
+        );
+        let before_drain = driver.frame_count();
+
+        drain_one_drive_iteration(&session);
+
+        assert_eq!(
+            driver.frame_count(),
+            before_drain,
+            "the rolled-back declare staged a reply against the peer's standing \
+             interest and the drain emitted it — a DeclSubscriber announcing a \
+             subscription this session never had and never will, which re-arms \
+             the peer's write filter for the life of the link (aggregate = \
+             {aggregate})"
+        );
+        covered += 1;
+    }
+    assert_eq!(
+        covered, 2,
+        "both inhabitants of the interest's aggregate bit must be driven — a \
+         loop that ran fewer times proves nothing about the arm it skipped"
+    );
+}
+
+/// R2291 (open-debt item 628) — the AGGREGATE half's VEHICLE PROOF.
+///
+/// Same peer interest, same rejected declare as the test above; one difference
+/// — an unrelated subscription on `home/temp` is live across the whole window.
+/// The aggregate guard is `any_subscription_matches` over the INTEREST's
+/// keyexpr (an aggregate reply carries the interest's own keyexpr because pico
+/// associates the replies of an aggregate interest by `_z_keyexpr_equals`,
+/// `vendor/zenoh-pico/src/session/interest.c` 274-276), so `home/temp` keeps
+/// the staged reply TRUE and it is emitted.
+///
+/// That emission is the proof that the ROLLED-BACK declare stages a reply at
+/// all. Were `register_subscriber_local` to stage nothing in that window, the
+/// test above would see no frame either — and would be passing on an empty
+/// population rather than on the guard.
+///
+/// It is also the DISCRIMINATOR: reverting the drain-time re-check (the
+/// `Aggregate` arm of `sub_interest_reply`, `wz-session-core/src/pubsub.rs`)
+/// fails the test above and leaves this one green. MEASURED, R2291.
+#[cfg(feature = "declare-subscriber")]
+#[test]
+fn a_rolled_back_declare_still_answers_an_aggregate_interest_a_live_subscription_matches() {
+    let (session, driver) = build_session();
+    let _live = session
+        .declare_subscriber("home/temp", SubscribeOptions::default(), |_| {})
+        .expect("remote declare against the test link succeeds");
+    deliver_future_subscriber_interest(&session, /*aggregate=*/ true);
+
+    let rejected = session.declare_subscriber("**/c/*", SubscribeOptions::default(), |_| {});
+    assert!(
+        matches!(rejected, Err(SubscribeError::InvalidKeyexpr(_))),
+        "the same rejection as the test above — the two differ only in whether \
+         an unrelated subscription survives the window"
+    );
+    let before_drain = driver.frame_count();
+
+    drain_one_drive_iteration(&session);
+
+    assert_eq!(
+        driver.frame_count(),
+        before_drain + 1,
+        "the rollback window must stage exactly one aggregate reply, and a live \
+         matching subscription must let it through: no frame here means the \
+         product door stages nothing, and the aggregate half above is measuring \
+         an empty population"
+    );
+}
+
+/// R2291 (open-debt item 628) — the CONCRETE half's VEHICLE PROOF.
+///
+/// The aggregate proof above cannot be mirrored arm-for-arm: a `Concrete` reply
+/// resolves by SUBSCRIPTION ID, so once the rollback has removed that id no
+/// live sibling can make it resolve, and there is no way to show the rejected
+/// declare's own concrete item reaching the wire. What CAN be shown is that the
+/// staging branch fires at all for a concrete interest — the `else` half of
+/// `stage_future_subscriber_pushes`'s `if aggregate` — by declaring a keyexpr
+/// the gate ACCEPTS under the same standing interest and watching the future
+/// push leave on the next drive iteration.
+///
+/// Without this, a `stage_future_subscriber_pushes` that silently staged
+/// nothing on the concrete branch would leave the concrete half of the test
+/// above green for the wrong reason.
+///
+/// The frame counted here is the FUTURE push, not the declare's own announce:
+/// the baseline is taken after the declare has returned, and the drain is a
+/// separate drive iteration.
+#[cfg(feature = "declare-subscriber")]
+#[test]
+fn a_surviving_declare_emits_its_concrete_future_push() {
+    let (session, driver) = build_session();
+    deliver_future_subscriber_interest(&session, /*aggregate=*/ false);
+
+    let _live = session
+        .declare_subscriber("home/temp", SubscribeOptions::default(), |_| {})
+        .expect("remote declare against the test link succeeds");
+    let before_drain = driver.frame_count();
+
+    drain_one_drive_iteration(&session);
+
+    assert_eq!(
+        driver.frame_count(),
+        before_drain + 1,
+        "a subscription declared AFTER a peer's FUTURE concrete interest must \
+         stage exactly one unsolicited DeclSubscriber and the drain must emit \
+         it — no frame here means the concrete staging branch never fires, and \
+         the concrete half of the rollback test above is vacuous"
+    );
+}
+
 #[cfg(all(feature = "declare-subscriber", feature = "pubsub-allow-loop"))]
 #[test]
 fn declared_subscriber_fires_on_loopback_publish() {
