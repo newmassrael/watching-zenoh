@@ -2,8 +2,21 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-"""R2288 (open-debt item 610) -- every refusal the framing loop can return has
+"""R2288 (no register item) -- every refusal the framing loop can return has
 a test that fires it, and an unmarked refusal is RED.
+
+## The citation, and why it is the escape hatch rather than a number
+
+This answers the numeric open-debt register's item 610, which lives in the
+operator's notes rather than in the store, so `gate_provenance_lint`'s item
+grammar cannot resolve it -- `_ITEM` admits `§...`, `N<n>`, a lowercase
+`debt-<name>`, `CENSUS` or `no register item`, and a bare `610` is none of
+those. `zenoh_c_archive_arm.py` (item 612) and `sn_resolution_words.py`
+(item 611) hold the same position: declare the escape hatch on the first line
+and name the item in the body, because a citation the lint cannot check is not
+a citation. This file opened with `(open-debt item 610)` instead, which parses
+as nothing at all, so Layer C0 read it as a gate that names nothing -- and that
+red masked the other 97 legs of `layer_c0_test_discipline`.
 
 ## The class this exists for, which has now leaked twice
 
