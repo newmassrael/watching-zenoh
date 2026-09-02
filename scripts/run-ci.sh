@@ -2398,10 +2398,29 @@ PY
     # answers the tree carried at once; both readings had been written as
     # timeless when the fact is per-release.
     #
-    # In Layer 0 because `--check` reads nothing but the tree: it is the half
-    # that can run on every push, and the half that would otherwise SKIP-green.
+    # Here — in Layer C0 — because `--check` reads nothing but the tree: it is
+    # the half that can run on every push, and the half that would otherwise
+    # SKIP-green. (This line said "In Layer 0" until R2281 read the enclosing
+    # function: the call has always been inside `layer_c0_test_discipline`, and
+    # the run-ci log confirms which lane prints `archive-arm:`. A sentence that
+    # names a lane is checkable by running that lane, which is why it is worth
+    # correcting rather than deleting.)
     python3 scripts/lib/zenoh_c_archive_arm.py --selftest || return 1
     python3 scripts/lib/zenoh_c_archive_arm.py --check || return 1
+    # R2281 (open-debt item 617) — and TWO ORACLES AT ONE ARM measure one thing
+    # twice. The sibling above says which arm upstream publishes; this one asks
+    # what every oracle prefix in the tree is FOR, by deriving each prefix's arm
+    # from the installer that provisions it. Layer C1ce had been pointed at a
+    # second build of Layer C1cc's arm for its whole life, and no sentence could
+    # have caught it: the arm of a prefix was readable only off a directory on
+    # one machine, so a clone checked nothing and "nothing installed" read as
+    # "no duplicate".
+    #
+    # Beside the archive gate, in Layer C0, for the same reason it is: `--check`
+    # reads nothing but the tree, so it runs on every push instead of skipping
+    # green wherever no oracle happens to be installed.
+    python3 scripts/lib/zenoh_c_oracle_arms.py --selftest || return 1
+    python3 scripts/lib/zenoh_c_oracle_arms.py --check || return 1
     # R2192 (open-debt item 530, the FIRST measured case) — a dependency this
     # tree's prose names is one cargo resolves, and one it DENIES is one
     # nothing reaches.
@@ -16182,6 +16201,23 @@ layer_c1cc_api_compat_c() {
             --test zenoh_c_capi_c_pico_interop -- --ignored --quiet --test-threads=1 \
             --exact "$leg" || return 1
     done
+    # R2281 (open-debt item 617) — the SHARED-MEMORY legs, which lived on Layer
+    # C1ce while that lane was believed to hold the only SHM header. It does not
+    # and never did: `install-zenoh-c.sh` unpacks upstream's published archive
+    # and R2278 measured that archive as `unstable-shm`, so THIS lane's oracle
+    # declares `Z_FEATURE_SHARED_MEMORY` and C1ce's re-aimed one does not.
+    # `z_pub_shm` and `z_get_shm` do not compile against a no-SHM header at all
+    # (`cc -fsyntax-only`, measured); `z_sub_shm` does, and belongs with them
+    # because its subject is the SHM buffer type.
+    for leg in \
+        upstream_z_pub_shm_on_wz_capi_c_publishes_the_same_shm_chunk_on_both_arms \
+        upstream_z_sub_shm_on_wz_capi_c_reports_the_same_buffer_type_on_both_arms \
+        upstream_z_get_shm_on_wz_capi_c_is_answered_by_real_pico_where_the_reference_arm_aborts; do
+        _runci_guarded_test "C1cc $leg" 1 \
+            cargo test -p wz-integration-tests \
+            --test zenoh_c_shm_and_advanced_on_wz_capi_c -- --ignored --quiet --test-threads=1 \
+            --exact "$leg" || return 1
+    done
     # REPORTED, never enforced — see the script's own header for why a ratchet
     # needs a committed baseline and is a separate decision.
     python3 scripts/lib/capi_c_coverage.py || return 1
@@ -16206,51 +16242,51 @@ layer_c1cc_api_compat_c() {
     fi
 }
 
-# ─── Layer C1ce — §5.27 api-compat-c against the SHARED-MEMORY oracle ───
+# ─── Layer C1ce — §5.27 api-compat-c against the UNSTABLE oracle ────────
 #
-# R311y541. Layer C1cc measures wz against whatever zenoh-c is INSTALLED, and
-# `install-zenoh-c.sh` installs upstream's published archive — which R2278
-# measured to be the `unstable-shm` build, both axes on, at 1.5.0 and 1.10.0
-# alike.
+# R311y541, RE-AIMED at R2281 (open-debt item 617).
 #
-# ⛔ THIS LANE'S STATED REASON RESTED ON THE OTHER READING and does not survive
-# it. The paragraph here said the installed header declares neither axis, so
-# SEVEN of upstream's 29 examples could not COMPILE against it and C1cc kept
-# them ORACLE-ONLY. R2278 probed four of those seven — `z_advanced_pub`,
-# `z_advanced_sub`, `z_pub_shm`, `z_sub_shm` — against the installed header
-# with `cc -fsyntax-only` and all four compiled. The classification itself is
-# DERIVED per run by `scripts/lib/capi_c_coverage.py`, which compiles each
-# example and sorts it, so no number here goes stale; what went stale is the
-# argument for running a second oracle at all, since the arm
-# `install-zenoh-c-shm.sh` builds is the arm the package already is. Open-debt
-# item 617 carries the re-measurement.
+# This lane exists to measure wz against a SECOND zenoh-c ABI arm, and for most
+# of its life it measured the FIRST one twice. Its original rationale rested on
+# R311y540's reading that the installed oracle declared neither
+# `Z_FEATURE_UNSTABLE_API` nor `Z_FEATURE_SHARED_MEMORY`, so a second oracle
+# built with both was the other arm. R2278 measured upstream's published archive
+# — the thing `install-zenoh-c.sh` unpacks into that prefix — and it is
+# `unstable-shm` at 1.5.0 and 1.10.0 alike. The lane was therefore pointed at
+# the arm Layer C1cc already had, built a second way and taking minutes to
+# build.
 #
-# The paragraph below is kept as the lane's ORIGINAL rationale, unedited except
-# where it stated the arm, because rewriting it would erase what this lane was
-# built to do while the re-measurement is still owed.
+# `scripts/lib/zenoh_c_oracle_arms.py` is the gate that holds the repair: it
+# derives every oracle prefix in the tree and the arm its INSTALLER puts there,
+# and REDs when two distinct prefixes carry one arm. It reds on the arrangement
+# this paragraph describes, which is how the re-aim was verified.
 #
-# `install-zenoh-c-shm.sh` builds the other oracle from source, and against it
-# the denominator becomes the whole corpus. The measured effect of turning it on
-# is the point of this lane: 22 of 22 becomes 21 of 29, which is NOT a
-# regression — it is the same library measured against a corpus that no longer
-# hides the part it does not implement. `z_sub_shm` moving from LINKS to
-# MISSING(3) is the same thing at one example's scale: against an SHM header it
-# needs three symbols it did not need before.
+# WHY `unstable` AND NOT one of the other two. `wz-capi-c`'s own default feature
+# set models `unstable` (`zenoh_c_archive_arm.py --check` prints both facts in
+# one line: what upstream publishes, and what wz's default models). So the arm
+# wz BUILDS BY DEFAULT was measured against no real zenoh-c at all, while
+# `nounstable` and `nounstable-shm` are neither published nor modelled by wz.
+# One of the four arms had a lane, one had a reason to want one, and this is it.
+#
+# WHAT MOVED WITH IT. The three `*_shm` legs need an SHM header and now run on
+# Layer C1cc, whose oracle has one; `z_advanced_pub` / `z_advanced_sub` need
+# only `Z_FEATURE_UNSTABLE_API` and stay here. Measured with
+# `cc -fsyntax-only` against this arm's header before moving any of them.
 #
 # SKIPs when that oracle is absent, because building it takes minutes and pulls
 # the whole zenoh graph; WZ_C1CE_REQUIRE=1 turns the skip into a failure on a
 # job that provisions it.
-layer_c1ce_api_compat_c_shm_oracle() {
-    local shm="${WZ_ZENOH_C_SHM_PREFIX:-$repo_root/target/zenoh-c-shm}"
+layer_c1ce_api_compat_c_unstable_oracle() {
+    local shm="${WZ_ZENOH_C_UNSTABLE_PREFIX:-$repo_root/target/zenoh-c-unstable}"
     if [[ ! -f "$shm/include/zenoh.h" || ! -f "$shm/lib/libzenohc.so" ]]; then
         if [[ -n "${WZ_C1CE_REQUIRE:-}" ]]; then
             echo "  Layer C1ce FAIL — required (WZ_C1CE_REQUIRE set) but the" >&2
-            echo "  shared-memory zenoh-c oracle is absent at $shm." >&2
-            echo "  Provision it with: bash scripts/install-zenoh-c-shm.sh" >&2
+            echo "  unstable-arm zenoh-c oracle is absent at $shm." >&2
+            echo "  Provision it with: bash scripts/install-zenoh-c-arm.sh unstable" >&2
             return 1
         fi
-        echo "  Layer C1ce SKIP (no shared-memory zenoh-c oracle at $shm;"
-        echo "  provision with: bash scripts/install-zenoh-c-shm.sh)"
+        echo "  Layer C1ce SKIP (no unstable-arm zenoh-c oracle at $shm;"
+        echo "  provision with: bash scripts/install-zenoh-c-arm.sh unstable)"
         return 0
     fi
     # The examples corpus still comes from the reference clone; only the headers
@@ -16315,22 +16351,26 @@ layer_c1ce_api_compat_c_shm_oracle() {
         --test zenoh_c_source_info_twice_and_diff -- --ignored --quiet --test-threads=1 \
         --exact a_patched_upstream_put_carries_source_info_identically_on_wz_and_libzenohc \
         || rc=1
-    # R311y543 — the RUN legs for the two planes this oracle is what makes
-    # reachable. Layer C1cc cannot host them: against the INSTALLED header
-    # (neither Z_FEATURE_SHARED_MEMORY nor Z_FEATURE_UNSTABLE_API) these six
-    # examples do not COMPILE, which is why they sat ORACLE-ONLY for so long.
+    # R311y543 — the RUN legs for the ADVANCED plane, which is what this arm is
+    # what makes reachable. Named --exact one per invocation, as C1cc does: a
+    # rename or a silently dropped test then fails the lane instead of shrinking
+    # it.
     #
-    # Named --exact one per invocation, as C1cc does: a rename or a silently
-    # dropped test then fails the lane instead of shrinking it.
+    # R2281 (open-debt item 617) — the three `*_shm` legs that used to sit here
+    # moved to Layer C1cc. This lane's oracle no longer declares
+    # `Z_FEATURE_SHARED_MEMORY`, and C1cc's does, so an SHM leg here would not
+    # compile and there measures exactly what it did before. The split is by
+    # what the leg NEEDS from a header, measured with `cc -fsyntax-only` against
+    # this arm's own: `z_advanced_pub` and `z_advanced_sub` compile against it
+    # and `z_pub_shm` / `z_get_shm` do not. `z_sub_shm` compiles, and went with
+    # the other two anyway — its subject is the SHM buffer type, so running it
+    # where no buffer can be SHM would leave the assertion true and empty.
     #
-    # Two of them additionally need the zenoh-pico CLIs as the foreign
+    # One of them additionally needs the zenoh-pico CLIs as the foreign
     # counterparty; ci.yml's capi-c-arms job builds them ahead of this lane.
     for leg in \
-        upstream_z_pub_shm_on_wz_capi_c_publishes_the_same_shm_chunk_on_both_arms \
         upstream_z_advanced_pub_on_wz_capi_c_puts_the_same_sample_and_no_adv_leak \
-        upstream_z_sub_shm_on_wz_capi_c_reports_the_same_buffer_type_on_both_arms \
-        upstream_z_advanced_sub_on_wz_capi_c_receives_the_same_samples_from_real_pico \
-        upstream_z_get_shm_on_wz_capi_c_is_answered_by_real_pico_where_the_reference_arm_aborts; do
+        upstream_z_advanced_sub_on_wz_capi_c_receives_the_same_samples_from_real_pico; do
         WZ_ZENOH_C_PREFIX="$shm" _runci_guarded_test "C1ce $leg" 1 \
             cargo test -p wz-integration-tests \
             --test zenoh_c_shm_and_advanced_on_wz_capi_c -- --ignored --quiet --test-threads=1 \
@@ -16783,7 +16823,7 @@ run_layer L layer_l_lockfile_freshness || overall=1
 run_layer C1bp layer_c1bp_plugin_dynamic_loading || overall=1
 run_layer C1bv layer_c1bv_dynamic_volume_loading || overall=1
 run_layer C1cc layer_c1cc_api_compat_c || overall=1
-run_layer C1ce layer_c1ce_api_compat_c_shm_oracle || overall=1
+run_layer C1ce layer_c1ce_api_compat_c_unstable_oracle || overall=1
 run_layer C1cd layer_c1cd_api_compat_c_attachment || overall=1
 run_layer C1by layer_c1by_replay_engine || overall=1
 run_layer Epico layer_epico_library_oracles || overall=1

@@ -32,11 +32,13 @@
 //! ## This lane needs an UNSTABLE oracle
 //!
 //! Both families sit behind `Z_FEATURE_UNSTABLE_API`, so the oracle has to be
-//! a build that carries that axis. Two do: the published archive is the
-//! `unstable-shm` build (R2278 measured it, at both pins), and so is
-//! `scripts/install-zenoh-c-shm.sh`'s, which is the arm Layer C1ce runs. This
-//! header named only the second until R2278, on the reading that the first one
-//! was a no-unstable build; it never was.
+//! a build that carries that axis. Two of the four arms do, and both are
+//! provisioned: the published archive is the `unstable-shm` build (R2278
+//! measured it, at both pins) and Layer C1cc runs against it, while R2281
+//! re-aimed Layer C1ce at the `unstable` arm — which carries the axis without
+//! shared memory, and is what `wz-capi-c`'s default features model. This header
+//! named only a second oracle until R2278, on a reading that has never been
+//! true of the archive at any measured pin: it is the `unstable-shm` build.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -228,7 +230,7 @@ fn oracle_prefix() -> Option<(PathBuf, PathBuf)> {
         "skip: no zenoh-c oracle is installed. Both families sit behind \
          Z_FEATURE_UNSTABLE_API, so the oracle must be a build that carries it — \
          run scripts/install-zenoh-c.sh for the published package, or \
-         scripts/install-zenoh-c-shm.sh for the arm Layer C1ce provisions."
+         scripts/install-zenoh-c-arm.sh unstable for the arm Layer C1ce provisions."
     );
     None
 }

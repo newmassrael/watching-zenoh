@@ -3880,7 +3880,7 @@ jobs:
         run: bash scripts/run-ci.sh --layer C1by
 
   capi-c-arms:
-    name: §5.27 api-compat-c — the ABI arms and the SHM oracle (C1ce + arms gate)
+    name: §5.27 api-compat-c — the ABI arms and the second oracle (C1ce + arms gate)
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -3890,7 +3890,7 @@ jobs:
       # ─── why this is its OWN job ─────────────────────────────────────────
       #
       # R311y542. Both checks below need zenoh-c built from SOURCE, which pulls
-      # the whole zenoh dependency graph: the SHM oracle is one such build and
+      # the whole zenoh dependency graph: the second oracle is one such build and
       # the four-arm size gate is four more. On a COLD cache that is tens of
       # minutes, and putting it in the `ci` job would add all of it to the lane
       # every other gate waits behind. Warm it is free — both artifacts are pure
@@ -3902,7 +3902,9 @@ jobs:
       # binary on the far side as the foreign counterparty — which is what makes
       # their agreement an agreement on the wire rather than on a library. The
       # earlier form of this note said "NO pico CLIs"; that is why the build step
-      # below now exists.
+      # below now exists. R2281 moved three of those five to Layer C1cc, which
+      # runs in this same job and needs the CLIs for its own legs anyway, so the
+      # build step's reason is unchanged by the move.
 
       - name: Restore apt archives (R311y882 — keep the mirror off the path)
         # R311y881 MEASURED azure.archive.ubuntu.com at ~27 kB/s sustained on
@@ -4006,21 +4008,26 @@ jobs:
           echo "zenoh-c pins $channel"
           rustup toolchain install "$channel" --profile minimal
 
-      - name: Cache the shared-memory zenoh-c oracle
-        id: zenoh-c-shm-cache
+      - name: Cache the unstable-arm zenoh-c oracle
+        id: zenoh-c-unstable-cache
         uses: actions/cache@v4
         with:
-          path: target/zenoh-c-shm
-          key: zenoh-c-shm-1.10.0-ubuntu-22.04-${{ hashFiles('scripts/install-zenoh-c-shm.sh') }}
+          # R2281 (open-debt item 617) — this was `target/zenoh-c-shm`, the
+          # `unstable-shm` arm, which is the arm `install-zenoh-c.sh` already
+          # unpacks into `~/.local` for Layer C1cc. Two prefixes, one arm: the
+          # second oracle was minutes of build for a second copy of the first.
+          # `scripts/lib/zenoh_c_oracle_arms.py` REDs on that arrangement now.
+          path: target/zenoh-c-unstable
+          key: zenoh-c-unstable-1.10.0-ubuntu-22.04-${{ hashFiles('scripts/install-zenoh-c-arm.sh') }}
 
-      - name: Provision the shared-memory zenoh-c oracle (cache miss only)
-        if: steps.zenoh-c-shm-cache.outputs.cache-hit != 'true'
+      - name: Provision the unstable-arm zenoh-c oracle (cache miss only)
+        if: steps.zenoh-c-unstable-cache.outputs.cache-hit != 'true'
         # The colour-vs-parser trap that reded this job from R311y542 to
         # R311y559 is fixed inside the SCRIPT, not here — see
-        # `scripts/install-zenoh-c-shm.sh`. Left as a pointer so a future
+        # `scripts/install-zenoh-c-arm.sh`. Left as a pointer so a future
         # reader of the workflow-wide `CARGO_TERM_COLOR: always` (line 56)
         # finds the interaction instead of rediscovering it.
-        run: bash scripts/install-zenoh-c-shm.sh
+        run: bash scripts/install-zenoh-c-arm.sh unstable
 
       - name: Cache the opaque-type size tables
         # Only the generator's STDERR is cached, not its target dirs. The stderr
@@ -4113,11 +4120,15 @@ jobs:
           WZ_C1CC_REQUIRE: "1"
         run: bash scripts/run-ci.sh --layer C1cc
 
-      - name: Layer C1ce — api-compat-c against the SHARED-MEMORY oracle
-        # WZ_C1CE_REQUIRE=1 for the same reason, and the number this prints is
-        # the honest one: against this oracle the denominator is the WHOLE
-        # corpus (21 of 29 at R311y541), where the default oracle can only ever
-        # report 22 of 22 with seven examples excluded for not compiling.
+      - name: Layer C1ce — api-compat-c against the UNSTABLE oracle
+        # WZ_C1CE_REQUIRE=1 for the same reason. R2281 (open-debt item 617)
+        # re-aimed this lane: it used to run against an `unstable-shm` build,
+        # which is the arm `install-zenoh-c.sh` already unpacks for C1cc, so the
+        # two lanes measured one arm. It now runs against `unstable` — the arm
+        # `wz-capi-c`'s own default feature set models, which no real zenoh-c
+        # had ever been compared against. The coverage number it prints is a
+        # measurement per run (`capi_c_coverage.py` compiles each example and
+        # sorts it), not a figure stated here.
         env:
           WZ_C1CE_REQUIRE: "1"
         run: bash scripts/run-ci.sh --layer C1ce

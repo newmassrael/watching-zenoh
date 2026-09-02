@@ -5,32 +5,36 @@
 # install-zenoh-c-arm.sh — provision ANY ONE of the four §5.27 api-compat-c
 # ORACLE arms from source (R311y614).
 #
-# ## Why this generalises `install-zenoh-c-shm.sh`
+# ## Why ONE script builds any arm
 #
 # `Z_FEATURE_UNSTABLE_API` and `Z_FEATURE_SHARED_MEMORY` are INDEPENDENT axes
 # (`scripts/lib/zenoh-c-oracle-arm.sh`), so "the installed zenoh-c" names one of
 # FOUR builds, and every gate that compares wz against it is arm-scoped. Two of
 # the four were believed to have a provisioning path — the published archive
-# via `install-zenoh-c.sh`, whose arm R2278 measured as `unstable-shm`, and the
-# hosted CI build via `install-zenoh-c-shm.sh`, which builds that same arm — so
-# ONE of the four had a path and three had none. That is why
-# `zenoh_c_abi_symbol_census.rs::BASELINES` carries two rows and hard-FAILS on
-# the other two arms: a ceiling from another arm would measure nothing, so the
-# gate refuses rather than guesses, and the refusal stood because nothing could
-# build the oracle it was refusing without.
+# via `install-zenoh-c.sh`, whose arm R2278 measured as `unstable-shm`, and a
+# hosted CI build via the former `install-zenoh-c-shm.sh`, which built that SAME
+# arm — so ONE of the four had a path and three had none. Copying that wrapper
+# twice more was the alternative to this script; it would have put the toolchain
+# pin, the source-copy rule and the CARGO_TERM_COLOR fix in four places that can
+# drift, and each of those three is a measured fix with a round behind it.
 #
-# Copying the shm installer twice more was the alternative. It would have put
-# the toolchain pin, the source-copy rule and the CARGO_TERM_COLOR fix in four
-# places that can drift, and each of those three is a measured fix with a round
-# behind it.
+# R2281 (open-debt item 617) retired that wrapper. Its whole content was "build
+# `unstable-shm` at `target/zenoh-c-shm`", and once Layer C1ce was re-aimed at
+# the `unstable` arm nothing read that prefix — a build nobody consumes, which
+# `scripts/lib/zenoh_c_oracle_arms.py` now REDs on. Callers name the arm:
+# `install-zenoh-c-arm.sh unstable`.
+#
+# `zenoh_c_abi_symbol_census.rs::BASELINES` carries a row PER ARM and hard-FAILS
+# on an arm it has no row for: a ceiling from another arm would measure nothing,
+# so the gate refuses rather than guesses. It had two rows while two arms could
+# be built; it has four now, one of which — `unstable` — is the one Layer C1ce
+# reaches since R2281. The other two are buildable here and reached by no lane.
 #
 # ## What is NOT generalised
 #
-# The prefix. `install-zenoh-c-shm.sh` keeps owning `target/zenoh-c-shm`,
-# because that literal path is what `run-ci.sh`'s Layer C1ce and the CI
-# provisioning step name. This script's own default is the uniform
-# `target/zenoh-c-<arm>`, and the wrapper passes its historical path explicitly
-# — one rule here, the exception where it is already owned.
+# The prefix stays a parameter with the uniform default `target/zenoh-c-<arm>`.
+# One rule, no per-arm row, and nothing to keep in step with a caller: a caller
+# that wants another location passes it.
 #
 # Usage:
 #   scripts/install-zenoh-c-arm.sh <arm> [prefix]

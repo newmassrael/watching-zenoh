@@ -5,12 +5,16 @@
 //!
 //! ## Why these legs are separate from the other two files
 //!
-//! Every example driven here needs a zenoh-c built with BOTH
-//! `Z_FEATURE_SHARED_MEMORY` and `Z_FEATURE_UNSTABLE_API`. The oracle
-//! `install-zenoh-c.sh` provisions has neither, so against it these six programs
-//! do not COMPILE and Layer C1cc could never have run them. `install-zenoh-c-shm.sh`
-//! builds the other oracle and Layer C1ce measures against it — which is where
-//! these legs belong.
+//! The examples driven here split by what they need from a HEADER, and R2281
+//! measured the split with `cc -fsyntax-only` rather than restating it: the
+//! three `*_shm` legs need `Z_FEATURE_SHARED_MEMORY` and run on Layer C1cc,
+//! whose oracle is the published archive — `unstable-shm`, both axes, as R2278
+//! measured; the two `z_advanced_*` legs need only `Z_FEATURE_UNSTABLE_API` and
+//! run on Layer C1ce against the `unstable` arm.
+//!
+//! This header used to say `install-zenoh-c.sh`'s oracle has NEITHER axis, so
+//! C1cc could never host any of them. That reading was R311y540's and it was
+//! wrong about the archive; the split above is what replaces it.
 //!
 //! ## Linking is the weaker half of the claim, and these legs are the other half
 //!
@@ -117,11 +121,14 @@ fn oracle_or_note() -> Option<(PathBuf, PathBuf, PathBuf)> {
         Some(o) => Some(o),
         None => {
             eprintln!(
-                "skip: the SHARED-MEMORY zenoh-c ORACLE is absent. These legs need a \
-                 zenoh-c built with Z_FEATURE_SHARED_MEMORY and Z_FEATURE_UNSTABLE_API \
-                 (`bash scripts/install-zenoh-c-shm.sh`, then WZ_ZENOH_C_PREFIX=\
-                 target/zenoh-c-shm) AND a clone of its examples. Layer C1ce with \
-                 WZ_C1CE_REQUIRE=1 fails instead of skipping."
+                "skip: no zenoh-c ORACLE is installed. The `*_shm` legs need a build \
+                 carrying Z_FEATURE_SHARED_MEMORY (`bash scripts/install-zenoh-c.sh`, \
+                 the published archive Layer C1cc runs against) and the z_advanced_* \
+                 legs need Z_FEATURE_UNSTABLE_API (`bash \
+                 scripts/install-zenoh-c-arm.sh unstable`, then \
+                 WZ_ZENOH_C_PREFIX=target/zenoh-c-unstable, which is Layer C1ce's). \
+                 A clone of the examples is needed either way. Layers C1cc / C1ce with \
+                 WZ_C1CC_REQUIRE=1 / WZ_C1CE_REQUIRE=1 fail instead of skipping."
             );
             None
         }
