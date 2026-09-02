@@ -176,6 +176,17 @@ pub const WZ_CAPI_C_ABI_ORIGIN: &[(&str, &str)] = &[
     ("z_alloc_alignment_t", "@transparent"),
     ("z_buf_layout_alloc_result_t", "@transparent"),
     ("z_buf_alloc_result_t", "@transparent"),
+    // R2289 (open-debt item 607) — the C-supplied backend plane. The five
+    // by-value structs are declared field-by-field in `zenoh_opaque.h`, so the
+    // C probe in Layer C1cc is what measures them; the two opaque families come
+    // from upstream's own generator.
+    ("zc_context_t", "@transparent"),
+    ("zc_threadsafe_context_t", "@transparent"),
+    ("z_chunk_descriptor_t", "@transparent"),
+    ("z_allocated_chunk_t", "@transparent"),
+    ("zc_shm_provider_backend_callbacks_t", "@transparent"),
+    ("z_owned_ptr_in_segment_t", "Option<PtrInSegment>"),
+    ("z_owned_chunk_alloc_result_t", "Option<ChunkAllocResult>"),
 ];
 
 /// How this crate DERIVES each footprint that moves across the four feature

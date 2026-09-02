@@ -494,6 +494,26 @@ fn the_wz_capi_c_type_footprints_equal_upstreams_on_this_installation() {
             "sizeof(z_buf_layout_alloc_result_t)",
         ),
         ("z_buf_alloc_result_t", "sizeof(z_buf_alloc_result_t)"),
+        // R2289 (open-debt item 607) — the C-supplied backend plane. The first
+        // five are passed BY VALUE across the ABI, which is why they are worth
+        // probing against a C compiler rather than trusting wz's own
+        // `const _` assertions: those compare this crate to itself.
+        ("zc_context_t", "sizeof(zc_context_t)"),
+        ("zc_threadsafe_context_t", "sizeof(zc_threadsafe_context_t)"),
+        ("z_chunk_descriptor_t", "sizeof(z_chunk_descriptor_t)"),
+        ("z_allocated_chunk_t", "sizeof(z_allocated_chunk_t)"),
+        (
+            "zc_shm_provider_backend_callbacks_t",
+            "sizeof(zc_shm_provider_backend_callbacks_t)",
+        ),
+        (
+            "z_owned_ptr_in_segment_t",
+            "sizeof(z_owned_ptr_in_segment_t)",
+        ),
+        (
+            "z_owned_chunk_alloc_result_t",
+            "sizeof(z_owned_chunk_alloc_result_t)",
+        ),
     ];
     let probes: Vec<(&str, &str)> = base
         .iter()

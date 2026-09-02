@@ -63,6 +63,7 @@
 //! [`crate`](crate). On any other arm these symbols would name types no header
 //! declares.
 
+use std::ffi::c_void;
 use std::sync::{Arc, Condvar, Mutex};
 
 use crate::abi::{z_loaned_bytes_t, z_owned_bytes_t, Handle};
@@ -224,6 +225,12 @@ struct Segment {
     /// invariant is what makes that sound, and it is stated at each use.
     base: *mut u8,
     len: usize,
+    /// The alignment `base` was allocated at, so `Drop` can name the same
+    /// layout `new` did. R2289 made this a FIELD rather than reading
+    /// [`SEGMENT_ALIGN`] in both places: `z_posix_shm_provider_with_layout_new`
+    /// lets a caller ask for more than a page, and a `dealloc` at a different
+    /// alignment than the `alloc` is undefined behaviour rather than a leak.
+    align: usize,
     books: Mutex<SegmentBooks>,
     /// Signalled whenever a chunk is released — what the BLOCKING allocation
     /// waits on.
@@ -255,6 +262,21 @@ impl Segment {
     /// `z_get_shm.c` builds its provider from `strlen(value)`, which is 0 when
     /// the example is run without a payload.
     fn new(len: usize) -> Arc<Self> {
+        Self::with_alignment(len, SEGMENT_ALIGN)
+    }
+
+    /// Allocate a segment of `len` bytes whose base is aligned to at least
+    /// `align`.
+    ///
+    /// R2289 — `z_posix_shm_provider_with_layout_new` takes a
+    /// `z_loaned_memory_layout_t`, which carries an alignment the caller chose,
+    /// and upstream's backend honours it when it maps the segment. A request
+    /// BELOW a page is widened to [`SEGMENT_ALIGN`] rather than narrowed: the
+    /// page bound is what every other constructor already promises, and giving
+    /// one provider a weaker base than its siblings would make the alignment
+    /// tests pass or fail depending on which constructor built the provider.
+    fn with_alignment(len: usize, align: usize) -> Arc<Self> {
+        let align = align.max(SEGMENT_ALIGN);
         // R2264 — the segment is allocated at PAGE alignment, and that is a
         // correctness requirement rather than a tidiness one.
         //
@@ -272,7 +294,7 @@ impl Segment {
         let base = if len == 0 {
             std::ptr::null_mut()
         } else {
-            let layout = std::alloc::Layout::from_size_align(len, SEGMENT_ALIGN)
+            let layout = std::alloc::Layout::from_size_align(len, align)
                 .expect("a segment layout at page alignment");
             // SAFETY: `len` is non-zero, so the layout is non-zero-sized.
             let p = unsafe { std::alloc::alloc_zeroed(layout) };
@@ -284,6 +306,7 @@ impl Segment {
         Arc::new(Self {
             base,
             len,
+            align,
             books: Mutex::new(SegmentBooks {
                 free: if len == 0 {
                     Vec::new()
@@ -312,16 +335,45 @@ impl Drop for Segment {
         // layout, and no chunk can outlive the `Arc` that owns this. R2264 — the
         // matching `dealloc`; it was `Box::from_raw` while `new` used `vec!`,
         // and both had to move together when the segment gained an alignment.
-        let layout = std::alloc::Layout::from_size_align(self.len, SEGMENT_ALIGN)
+        let layout = std::alloc::Layout::from_size_align(self.len, self.align)
             .expect("the layout `new` allocated with");
         unsafe { std::alloc::dealloc(self.base, layout) };
     }
 }
 
-/// One allocated chunk. Dropping it returns the range to the segment.
+/// Where one allocated chunk's bytes live, and what returning them means.
+///
+/// R2289 — TWO arms, because a provider now has two backends (see [`Provider`])
+/// and a chunk must be released to the one that issued it: wz's own allocator
+/// takes the range back into its free list, a C-supplied backend is told through
+/// its `free_fn`. Nothing above [`ShmChunk`] branches on which — the buffer
+/// plane asks for a pointer and a length and gets the same answers either way.
+enum ChunkBacking {
+    /// A range of a segment wz allocated.
+    Native {
+        segment: Arc<Segment>,
+        /// The chunk's offset into `segment`.
+        start: usize,
+    },
+    /// A chunk a C backend allocated and is the only one able to free.
+    Foreign {
+        backend: Arc<ForeignBackend>,
+        /// What `free_fn` is handed back. Upstream's `free` takes the
+        /// DESCRIPTOR rather than the pointer, so the descriptor is the part
+        /// that has to survive.
+        descriptor: z_chunk_descriptor_t,
+        /// The pointer the backend handed over, and the segment context it
+        /// keeps alive. Held for its `Drop` as much as for its address: the
+        /// context's `delete_fn` must not run while a chunk still points into
+        /// the memory that context owns.
+        ptr: PtrInSegment,
+    },
+}
+
+/// One allocated chunk. Dropping it returns the memory to whichever backend
+/// issued it.
 struct ShmChunk {
-    segment: Arc<Segment>,
-    start: usize,
+    backing: ChunkBacking,
     len: usize,
     /// `false` once the chunk has been frozen into an immutable `z_owned_shm_t`.
     /// The flag is what [`z_shm_try_reloan_mut`] answers with, so it has to
@@ -332,29 +384,54 @@ struct ShmChunk {
 impl ShmChunk {
     /// The chunk's bytes.
     fn as_slice(&self) -> &[u8] {
-        // SAFETY: the range was handed out by `claim` and is not handed out
-        // again until this chunk drops, so no other live chunk aliases it.
-        unsafe { std::slice::from_raw_parts(self.segment.base.add(self.start), self.len) }
+        if self.len == 0 {
+            return &[];
+        }
+        // SAFETY: a native range was handed out by `claim` and is not handed
+        // out again until this chunk drops; a foreign one is the backend's
+        // promise for the life of the descriptor. No other live chunk aliases
+        // either.
+        unsafe { std::slice::from_raw_parts(self.as_mut_ptr(), self.len) }
     }
 
     /// The chunk's bytes, mutably.
     fn as_mut_ptr(&self) -> *mut u8 {
-        // SAFETY: as `as_slice` — exclusive by the allocator's invariant.
-        unsafe { self.segment.base.add(self.start) }
+        match &self.backing {
+            // SAFETY: as `as_slice` — exclusive by the allocator's invariant.
+            ChunkBacking::Native { segment, start } => unsafe { segment.base.add(*start) },
+            ChunkBacking::Foreign { ptr, .. } => ptr.ptr,
+        }
+    }
+
+    /// The provider this chunk came out of, so a copy can be taken from the
+    /// same place ([`z_shm_clone`]).
+    fn provider(&self) -> Provider {
+        match &self.backing {
+            ChunkBacking::Native { segment, .. } => Provider::Native(segment.clone()),
+            ChunkBacking::Foreign { backend, .. } => Provider::Foreign(backend.clone()),
+        }
     }
 }
 
 impl Drop for ShmChunk {
     fn drop(&mut self) {
-        if self.len > 0 {
-            self.segment
-                .books()
-                .release(self.start, self.start + self.len);
+        match &self.backing {
+            ChunkBacking::Native { segment, start } => {
+                if self.len > 0 {
+                    segment.books().release(*start, *start + self.len);
+                }
+                // Woken even for a zero-length chunk: a waiter blocked on a
+                // request this release cannot satisfy re-checks and blocks
+                // again, which is cheaper than reasoning about which releases
+                // are worth a notify.
+                segment.released.notify_all();
+            }
+            ChunkBacking::Foreign {
+                backend,
+                descriptor,
+                ..
+            } => backend.free(descriptor),
         }
-        // Woken even for a zero-length chunk: a waiter blocked on a request this
-        // release cannot satisfy re-checks and blocks again, which is cheaper
-        // than reasoning about which releases are worth a notify.
-        self.segment.released.notify_all();
     }
 }
 
@@ -367,6 +444,50 @@ impl Drop for ShmChunk {
 /// produces, repeated here because these families are `cfg`-gated and that
 /// macro's invocations are not.
 macro_rules! define_shm_opaque {
+    // R2289 — the OWNED + MOVED half on its own, for a family upstream gives no
+    // `_loan`: `z_chunk_alloc_result_t` has no `z_loaned_` spelling in any
+    // header and no function that would take one, and declaring the type anyway
+    // would put a name in wz's surface that the reference does not have.
+    ($Owned:ident, $Moved:ident, $size:expr) => {
+        /// Owned value: our handle in slot 0, zero padding to the C size.
+        #[repr(C)]
+        pub struct $Owned {
+            pub(crate) handle: Handle,
+            pub(crate) _pad: [u8; $size - std::mem::size_of::<Handle>()],
+        }
+
+        /// Moved wrapper — upstream's `z_moved_X_t` is `struct { z_owned_X_t; }`.
+        #[repr(C)]
+        pub struct $Moved {
+            pub(crate) _this: $Owned,
+        }
+
+        impl $Owned {
+            /// The gravestone value: a null handle and zeroed padding.
+            #[inline]
+            pub(crate) fn null_value() -> Self {
+                Self {
+                    handle: std::ptr::null_mut(),
+                    _pad: [0u8; $size - std::mem::size_of::<Handle>()],
+                }
+            }
+
+            /// Wrap a `Box::into_raw` pointer.
+            #[inline]
+            pub(crate) fn from_handle(handle: Handle) -> Self {
+                Self {
+                    handle,
+                    _pad: [0u8; $size - std::mem::size_of::<Handle>()],
+                }
+            }
+        }
+
+        const _: () = {
+            assert!(std::mem::size_of::<$Owned>() == $size);
+            assert!(std::mem::align_of::<$Owned>() == 8);
+            assert!(std::mem::size_of::<$Moved>() == $size);
+        };
+    };
     ($Owned:ident, $Loaned:ident, $Moved:ident, $size:expr) => {
         /// Owned value: our handle in slot 0, zero padding to the C size.
         #[repr(C)]
@@ -501,12 +622,12 @@ pub struct z_buf_alloc_result_t {
 // handle plumbing
 // ---------------------------------------------------------------------------
 
-/// Read the segment behind a loaned provider.
+/// Read the backend behind a loaned provider.
 ///
 /// # Safety
 /// `this_` must be null, or a valid loaned provider whose handle slot holds a
-/// live `Arc<Segment>` pointer.
-unsafe fn provider_segment<'a>(this_: *const z_loaned_shm_provider_t) -> Option<&'a Arc<Segment>> {
+/// live [`Provider`] pointer.
+unsafe fn provider_of<'a>(this_: *const z_loaned_shm_provider_t) -> Option<&'a Provider> {
     if this_.is_null() {
         return None;
     }
@@ -515,8 +636,79 @@ unsafe fn provider_segment<'a>(this_: *const z_loaned_shm_provider_t) -> Option<
     if handle.is_null() {
         return None;
     }
-    // SAFETY: as above — a live `Box<Arc<Segment>>` this crate leaked.
-    Some(unsafe { &*(handle as *const Arc<Segment>) })
+    // SAFETY: as above — a live `Box<Provider>` this crate leaked.
+    Some(unsafe { &*(handle as *const Provider) })
+}
+
+/// Mint an owned provider handle from a backend.
+fn provider_handle(provider: Provider) -> Handle {
+    Box::into_raw(Box::new(provider)) as Handle
+}
+
+/// Where a provider's memory comes from.
+///
+/// R2289 (open-debt item 607) — until this round there was one answer and the
+/// type did not exist: every provider owned a [`Segment`] wz allocated. Upstream
+/// has FOUR arms (`CSHMProvider::{Posix, SharedPosix, Dynamic,
+/// DynamicThreadsafe}`) and the two that matter here are the split between
+/// memory wz manages and memory a C program manages, because
+/// `z_shm_provider_new` hands the whole allocator to the caller.
+///
+/// The `threadsafe` flag lives inside [`ForeignBackend`] rather than being a
+/// third arm: it changes what the callbacks are allowed to do, not where the
+/// memory is.
+#[derive(Clone)]
+enum Provider {
+    /// wz's own segment allocator — `z_shm_provider_default_new`,
+    /// `z_posix_shm_provider_new`, `z_posix_shm_provider_with_layout_new`.
+    Native(Arc<Segment>),
+    /// A backend the C caller supplied — `z_shm_provider_new`,
+    /// `z_shm_provider_threadsafe_new`.
+    Foreign(Arc<ForeignBackend>),
+}
+
+impl Provider {
+    /// Allocate `size` bytes at `align`, blocking for a release if asked.
+    fn alloc(
+        &self,
+        size: usize,
+        align: usize,
+        blocking: bool,
+    ) -> Result<Box<ShmChunk>, z_alloc_error_t> {
+        match self {
+            Provider::Native(segment) => native_alloc(segment, size, align, blocking),
+            Provider::Foreign(backend) => backend.alloc(size, align, blocking),
+        }
+    }
+
+    /// Bytes still allocatable.
+    fn available(&self) -> usize {
+        match self {
+            Provider::Native(segment) => segment.books().available(),
+            Provider::Foreign(backend) => backend.available(),
+        }
+    }
+
+    /// Defragment, reporting what that leaves reachable.
+    fn defragment(&self) -> usize {
+        match self {
+            Provider::Native(segment) => segment.books().largest(),
+            Provider::Foreign(backend) => backend.defragment(),
+        }
+    }
+
+    /// Whether the caller promised this provider's callbacks may run
+    /// concurrently — what the `_async` spellings refuse on.
+    ///
+    /// TRUE for the native arm: wz's own allocator is behind a mutex and has
+    /// always been callable from any thread, and upstream agrees (its `Posix`
+    /// and `SharedPosix` arms both accept an async allocation).
+    fn is_threadsafe(&self) -> bool {
+        match self {
+            Provider::Native(_) => true,
+            Provider::Foreign(backend) => backend.threadsafe,
+        }
+    }
 }
 
 /// Read the chunk behind a loaned SHM buffer, in either mutability spelling.
@@ -556,8 +748,7 @@ pub unsafe extern "C" fn z_shm_provider_default_new(
         // The gravestone contract, written before any fallible work.
         // SAFETY: the caller's contract.
         unsafe { *this_ = z_owned_shm_provider_t::null_value() };
-        let segment = Segment::new(size);
-        let handle = Box::into_raw(Box::new(segment)) as Handle;
+        let handle = provider_handle(Provider::Native(Segment::new(size)));
         // SAFETY: `this_` was checked non-null above.
         unsafe { *this_ = z_owned_shm_provider_t::from_handle(handle) };
         Z_OK
@@ -598,7 +789,7 @@ unsafe fn provider_alloc(
         (*out).layout_error = Z_LAYOUT_ERROR_INCORRECT_LAYOUT_ARGS;
     }
     // SAFETY: the caller's contract.
-    let Some(segment) = (unsafe { provider_segment(provider) }) else {
+    let Some(backend) = (unsafe { provider_of(provider) }) else {
         return;
     };
     if alignment.pow >= usize::BITS as u8 {
@@ -613,6 +804,37 @@ unsafe fn provider_alloc(
     }
     let align = 1usize << alignment.pow;
 
+    match backend.alloc(size, align, blocking) {
+        Ok(chunk) => {
+            // SAFETY: `out` was checked non-null above.
+            unsafe {
+                (*out).status = ZC_BUF_LAYOUT_ALLOC_STATUS_OK;
+                (*out).buf = z_owned_shm_mut_t::from_handle(Box::into_raw(chunk) as Handle);
+                (*out).alloc_error = Z_ALLOC_ERROR_OTHER;
+                (*out).layout_error = Z_LAYOUT_ERROR_INCORRECT_LAYOUT_ARGS;
+            }
+        }
+        Err(reason) => {
+            // SAFETY: `out` was checked non-null above.
+            unsafe {
+                (*out).status = ZC_BUF_LAYOUT_ALLOC_STATUS_ALLOC_ERROR;
+                (*out).alloc_error = reason;
+            }
+        }
+    }
+}
+
+/// Claim `size` bytes at `align` out of wz's own segment.
+///
+/// Split out of [`provider_alloc`] by R2289 so the two backends are two
+/// functions rather than two arms inside one — the entry point now decides
+/// WHICH allocator runs and nothing else.
+fn native_alloc(
+    segment: &Arc<Segment>,
+    size: usize,
+    align: usize,
+    blocking: bool,
+) -> Result<Box<ShmChunk>, z_alloc_error_t> {
     let mut books = segment.books();
     let start = loop {
         if let Some(start) = books.claim(size, align) {
@@ -622,18 +844,12 @@ unsafe fn provider_alloc(
         // matter who releases what, so blocking on it would be the deadlock
         // rather than the wait. Reported as out-of-memory on both policies.
         if size > segment.len || !blocking {
-            let reason = if size > segment.len || books.available() < size {
+            return Err(if size > segment.len || books.available() < size {
                 Z_ALLOC_ERROR_OUT_OF_MEMORY
             } else {
                 // Enough total room, but no single range holds it.
                 Z_ALLOC_ERROR_NEED_DEFRAGMENT
-            };
-            // SAFETY: `out` was checked non-null above.
-            unsafe {
-                (*out).status = ZC_BUF_LAYOUT_ALLOC_STATUS_ALLOC_ERROR;
-                (*out).alloc_error = reason;
-            }
-            return;
+            });
         }
         books = segment
             .released
@@ -641,20 +857,14 @@ unsafe fn provider_alloc(
             .unwrap_or_else(|e| e.into_inner());
     };
     drop(books);
-
-    let boxed = Box::new(ShmChunk {
-        segment: segment.clone(),
-        start,
+    Ok(Box::new(ShmChunk {
+        backing: ChunkBacking::Native {
+            segment: segment.clone(),
+            start,
+        },
         len: size,
         mutable: true,
-    });
-    // SAFETY: `out` was checked non-null above.
-    unsafe {
-        (*out).status = ZC_BUF_LAYOUT_ALLOC_STATUS_OK;
-        (*out).buf = z_owned_shm_mut_t::from_handle(Box::into_raw(boxed) as Handle);
-        (*out).alloc_error = Z_ALLOC_ERROR_OTHER;
-        (*out).layout_error = Z_LAYOUT_ERROR_INCORRECT_LAYOUT_ARGS;
-    }
+    }))
 }
 
 /// The default alignment upstream's unaligned spellings imply: byte alignment.
@@ -782,7 +992,11 @@ pub unsafe extern "C" fn z_shm_provider_alloc_gc_defrag_blocking(
 
 /// What an owned precomputed layout's handle points at.
 struct PrecomputedLayoutState {
-    segment: Arc<Segment>,
+    /// The BACKEND, not the provider handle: a layout outlives the
+    /// `z_owned_shm_provider_t` it was built from (`z_pub_shm.c` relies on it),
+    /// so it holds its own reference to the allocator rather than a pointer to
+    /// the caller's box.
+    provider: Provider,
     size: usize,
     alignment: z_alloc_alignment_t,
 }
@@ -824,7 +1038,7 @@ unsafe fn precomputed_new(
     // SAFETY: the caller's contract.
     unsafe { *this_ = z_owned_precomputed_layout_t::null_value() };
     // SAFETY: the caller's contract, delegated.
-    let Some(segment) = (unsafe { provider_segment(provider) }) else {
+    let Some(backend) = (unsafe { provider_of(provider) }) else {
         return Z_ENULL;
     };
     // The SAME two refusals `z_memory_layout_new` makes, and for the same
@@ -834,7 +1048,7 @@ unsafe fn precomputed_new(
         return Z_EINVAL;
     }
     let state = PrecomputedLayoutState {
-        segment: segment.clone(),
+        provider: backend.clone(),
         size,
         alignment,
     };
@@ -879,9 +1093,7 @@ unsafe fn precomputed_alloc(
         alloc_error: Z_ALLOC_ERROR_OTHER,
         layout_error: Z_LAYOUT_ERROR_INCORRECT_LAYOUT_ARGS,
     };
-    let provider = z_owned_shm_provider_t::from_handle(Box::into_raw(Box::new(
-        state.segment.clone(),
-    )) as Handle);
+    let provider = z_owned_shm_provider_t::from_handle(provider_handle(state.provider.clone()));
     // SAFETY: `wide` is a live local and `provider` a live owned provider.
     unsafe {
         provider_alloc(
@@ -1301,8 +1513,8 @@ pub unsafe extern "C" fn z_shm_provider_available(
 ) -> usize {
     guard_val(0, || {
         // SAFETY: the caller's contract.
-        match unsafe { provider_segment(provider) } {
-            Some(segment) => segment.books().available(),
+        match unsafe { provider_of(provider) } {
+            Some(backend) => backend.available(),
             None => 0,
         }
     })
@@ -1325,7 +1537,7 @@ pub unsafe extern "C" fn z_shm_provider_garbage_collect(
         // next call: a function that ignores its argument would report success
         // for a gravestone provider.
         // SAFETY: the caller's contract.
-        let _ = unsafe { provider_segment(provider) };
+        let _ = unsafe { provider_of(provider) };
         0
     })
 }
@@ -1341,8 +1553,8 @@ pub unsafe extern "C" fn z_shm_provider_defragment(
 ) -> usize {
     guard_val(0, || {
         // SAFETY: the caller's contract.
-        match unsafe { provider_segment(provider) } {
-            Some(segment) => segment.books().largest(),
+        match unsafe { provider_of(provider) } {
+            Some(backend) => backend.defragment(),
             None => 0,
         }
     })
@@ -1385,8 +1597,8 @@ pub unsafe extern "C" fn z_shm_provider_drop(this_: *mut z_moved_shm_provider_t)
         // SAFETY: the caller's contract.
         let handle = unsafe { (*this_)._this.handle };
         if !handle.is_null() {
-            // SAFETY: a live `Box<Arc<Segment>>` this crate leaked.
-            drop(unsafe { Box::from_raw(handle as *mut Arc<Segment>) });
+            // SAFETY: a live `Box<Provider>` this crate leaked.
+            drop(unsafe { Box::from_raw(handle as *mut Provider) });
             // SAFETY: the caller's contract.
             unsafe { (*this_)._this = z_owned_shm_provider_t::null_value() };
         }
@@ -1933,23 +2145,20 @@ pub unsafe extern "C" fn z_shm_clone(out: *mut z_owned_shm_t, this_: *const z_lo
         let Some(source) = (unsafe { chunk((*this_).handle) }) else {
             return;
         };
-        let segment = source.segment.clone();
-        let Some(start) = segment.books().claim(source.len, 1) else {
+        // Through the SAME allocator the source came out of, so a foreign
+        // backend's copy is its own memory rather than a range of a segment wz
+        // would then try to free through the wrong route.
+        let Ok(mut copy) = source.provider().alloc(source.len, 1, false) else {
             return;
         };
-        let copy = ShmChunk {
-            segment,
-            start,
-            len: source.len,
-            mutable: false,
-        };
+        copy.mutable = false;
         // SAFETY: both ranges are live and, being distinct allocator ranges, do
         // not overlap.
         unsafe {
             std::ptr::copy_nonoverlapping(source.as_slice().as_ptr(), copy.as_mut_ptr(), copy.len)
         };
         // SAFETY: `out` was checked non-null above.
-        unsafe { *out = z_owned_shm_t::from_handle(Box::into_raw(Box::new(copy)) as Handle) };
+        unsafe { *out = z_owned_shm_t::from_handle(Box::into_raw(copy) as Handle) };
     });
 }
 
@@ -2075,12 +2284,1144 @@ pub unsafe extern "C" fn z_bytes_as_mut_loaned_shm(
     })
 }
 
+// ---------------------------------------------------------------------------
+// the C-SUPPLIED BACKEND — R2289 (open-debt item 607)
+// ---------------------------------------------------------------------------
+//
+// Everything above answers "wz owns a segment and hands pieces of it out". This
+// section answers the other half of upstream's provider surface: a C program
+// supplies the allocator, and zenoh-c calls INTO it. The plane is taken whole
+// rather than a verb at a time, for R2259's reason — the value types
+// (`z_ptr_in_segment_t`, `z_chunk_alloc_result_t`) exist ONLY to cross the
+// callback boundary, so shipping them without `z_shm_provider_new` would leave
+// a header promising a link that goes nowhere.
+//
+// What the plane is, and why these twenty symbols are one thing:
+//
+//   * `zc_context_t` / `zc_threadsafe_context_t` — the C-owned state every
+//     callback is handed back, with the destructor wz owes it. NOT symbols;
+//     they are the reason the rest could not be built before.
+//   * `z_ptr_in_segment_*` (6) — a pointer plus the segment context that keeps
+//     it valid. Upstream's is `(*mut u8, Arc<dyn Segment>)`, so a clone SHARES
+//     the segment and the destructor fires once; wz's is the same shape.
+//   * `z_chunk_alloc_result_*` (5) — what `alloc_fn` writes: an allocated chunk
+//     or an alloc error. The one type the callback returns.
+//   * `z_shm_provider_new` / `_threadsafe_new` / `_map` (3) — install a backend,
+//     and hand a chunk it allocated back as a buffer.
+//   * `z_posix_shm_provider_new` / `_with_layout_new` (2) — upstream's named
+//     spellings of the BUILT-IN backend, the second sized by a memory layout.
+//   * the four `_async` spellings — the only place the threadsafe / not
+//     distinction is OBSERVABLE, which is why they are in this round and not a
+//     later one. Without them `z_shm_provider_new` and
+//     `z_shm_provider_threadsafe_new` would differ only in a flag nothing reads,
+//     and a stored-but-unread flag is a dead arm.
+//
+// ⚠ THREE named divergences from upstream, each of them a deliberate strictening
+// rather than a shortcut, and each witnessed by a test in `foreign_backend_tests`:
+//
+//   1. wz gravestones the `z_owned_chunk_alloc_result_t` BEFORE calling
+//      `alloc_fn`. Upstream passes `MaybeUninit` and calls `assume_init()`, so a
+//      callback that writes nothing has it reading uninitialised memory; here it
+//      reads a gravestone and the allocation fails cleanly.
+//   2. A BLOCKING allocation against a foreign backend that has NOTHING
+//      outstanding fails instead of waiting. Upstream's `BlockOn` waits for a
+//      buffer release that, with no live buffer, can never come — a deadlock
+//      rather than a wait. wz keeps the count that makes the difference sayable.
+//   3. The `_async` spellings CLONE the provider (an `Arc` bump) rather than
+//      requiring the `&'static` upstream's signature demands, so a caller that
+//      drops the provider handle while the allocation is in flight is not a
+//      use-after-free.
+
+/// zenoh-c `z_segment_id_t` (`zenoh_opaque.h:290`).
+pub type z_segment_id_t = u32;
+/// zenoh-c `z_chunk_id_t` (`zenoh_opaque.h:297`).
+pub type z_chunk_id_t = u32;
+/// zenoh-c `z_protocol_id_t` (`zenoh_opaque.h:910`).
+pub type z_protocol_id_t = u32;
+
+/// zenoh-c `zc_context_t` (`zenoh_opaque.h:975-978`) — a C-owned pointer and the
+/// destructor wz must run for it.
+///
+/// The NON-thread-safe spelling: upstream's own header promises that callbacks
+/// sharing one instance are never executed concurrently, which is why
+/// [`ForeignBackend`] serialises them.
+#[repr(C)]
+pub struct zc_context_t {
+    /// The caller's state, handed back to every callback.
+    pub context: *mut c_void,
+    /// Run once, when the last holder of this context drops.
+    pub delete_fn: Option<unsafe extern "C" fn(*mut c_void)>,
+}
+
+/// zenoh-c `zc_threadsafe_context_data_t` (`zenoh_opaque.h:157-159`).
+///
+/// A one-field struct rather than a bare pointer because upstream nests it, and
+/// the nesting is what makes `zc_threadsafe_context_t` a different C type from
+/// `zc_context_t` at the same size.
+#[repr(C)]
+pub struct zc_threadsafe_context_data_t {
+    /// The caller's state.
+    pub ptr: *mut c_void,
+}
+
+/// zenoh-c `zc_threadsafe_context_t` (`zenoh_opaque.h:177-180`).
+///
+/// The caller PROMISES the associated callbacks are thread-safe, and that
+/// promise is the only difference between [`z_shm_provider_new`] and
+/// [`z_shm_provider_threadsafe_new`] — see [`Provider::is_threadsafe`] for what
+/// reads it.
+#[repr(C)]
+pub struct zc_threadsafe_context_t {
+    /// The caller's state.
+    pub context: zc_threadsafe_context_data_t,
+    /// Run once, when the last holder of this context drops.
+    pub delete_fn: Option<unsafe extern "C" fn(*mut c_void)>,
+}
+
+/// zenoh-c `z_chunk_descriptor_t` (`zenoh_opaque.h`) — how a backend NAMES one
+/// of its chunks.
+///
+/// `free_fn` is handed this rather than the pointer, so it is the part a chunk
+/// must carry for its whole life.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct z_chunk_descriptor_t {
+    /// Which of the backend's segments.
+    pub segment: z_segment_id_t,
+    /// Which chunk within it.
+    pub chunk: z_chunk_id_t,
+    /// The chunk's capacity in bytes.
+    pub len: usize,
+}
+
+/// zenoh-c `z_allocated_chunk_t` (`zenoh_opaque.h:322-325`).
+///
+/// ⚠ `descriptpr` is upstream's spelling, typo and all. It is kept because a
+/// reader diffing this file against `zenoh_opaque.h` must see the same field
+/// name; the name crosses no ABI boundary, so correcting it here would buy
+/// nothing and cost that.
+#[repr(C)]
+pub struct z_allocated_chunk_t {
+    /// How the backend names this chunk.
+    pub descriptpr: z_chunk_descriptor_t,
+    /// The pointer, MOVED: taking a chunk gravestones the caller's value.
+    pub ptr: *mut z_moved_ptr_in_segment_t,
+}
+
+/// zenoh-c `zc_shm_provider_backend_callbacks_t` — the whole allocator, as six
+/// function pointers.
+///
+/// Mirrored field for field and in upstream's order: this struct is passed BY
+/// VALUE across the ABI, so a reordering here is a wild call rather than a
+/// compile error. `wz_capi_c_layout` carries its footprint for that reason.
+#[repr(C)]
+pub struct zc_shm_provider_backend_callbacks_t {
+    /// Allocate for `layout`, writing an owned result.
+    pub alloc_fn: Option<
+        unsafe extern "C" fn(
+            *mut z_owned_chunk_alloc_result_t,
+            *const z_loaned_memory_layout_t,
+            *mut c_void,
+        ),
+    >,
+    /// Release a chunk this backend allocated.
+    pub free_fn: Option<unsafe extern "C" fn(*const z_chunk_descriptor_t, *mut c_void)>,
+    /// Defragment, reporting what that made reachable.
+    pub defragment_fn: Option<unsafe extern "C" fn(*mut c_void) -> usize>,
+    /// Bytes still allocatable.
+    pub available_fn: Option<unsafe extern "C" fn(*mut c_void) -> usize>,
+    /// Adjust a layout in place to one this backend can serve.
+    pub layout_for_fn: Option<unsafe extern "C" fn(*mut z_owned_memory_layout_t, *mut c_void)>,
+    /// This backend's SHM protocol id.
+    pub id_fn: Option<unsafe extern "C" fn(*mut c_void) -> z_protocol_id_t>,
+}
+
+/// zenoh-c `z_owned_ptr_in_segment_t` (`zenoh_opaque.h:314-316`): 24 bytes at
+/// align 8 — upstream stores a pointer plus a fat `Arc<dyn Segment>`.
+const PTR_IN_SEGMENT_SIZE: usize = 24;
+
+define_shm_opaque!(
+    z_owned_ptr_in_segment_t,
+    z_loaned_ptr_in_segment_t,
+    z_moved_ptr_in_segment_t,
+    PTR_IN_SEGMENT_SIZE
+);
+
+/// zenoh-c `z_owned_chunk_alloc_result_t` (`zenoh_opaque.h`): 48 bytes at
+/// align 8.
+const CHUNK_ALLOC_RESULT_SIZE: usize = 48;
+
+define_shm_opaque!(
+    z_owned_chunk_alloc_result_t,
+    z_moved_chunk_alloc_result_t,
+    CHUNK_ALLOC_RESULT_SIZE
+);
+
+/// A C-owned context and the destructor wz owes it.
+///
+/// One type for both spellings: `zc_context_t` and `zc_threadsafe_context_t`
+/// differ in what the CALLER promises, not in what wz has to store, and the
+/// promise is recorded separately (see [`ForeignBackend::threadsafe`]) so this
+/// stays one destructor and one place that runs it.
+struct DroppableContext {
+    ptr: *mut c_void,
+    delete_fn: Option<unsafe extern "C" fn(*mut c_void)>,
+}
+
+impl Drop for DroppableContext {
+    fn drop(&mut self) {
+        if let Some(delete_fn) = self.delete_fn {
+            // SAFETY: the caller handed this pair over together and upstream's
+            // header states the contract — `delete_fn` runs once, after the last
+            // associated callback returns. Holding the context behind an `Arc`
+            // is what makes "the last" well defined here.
+            unsafe { delete_fn(self.ptr) };
+        }
+    }
+}
+
+// SAFETY: the pointer is opaque to wz; it is only ever handed back to the
+// caller's own callbacks. Whether those may run on another thread is the
+// caller's promise, recorded in `ForeignBackend::threadsafe` and enforced there
+// by serialising when the promise was not made.
+unsafe impl Send for DroppableContext {}
+// SAFETY: as above.
+unsafe impl Sync for DroppableContext {}
+
+/// What an owned `z_owned_ptr_in_segment_t`'s handle points at.
+///
+/// The context is `Arc`-shared, which is the whole content of
+/// [`z_ptr_in_segment_clone`] being a SHALLOW copy: two pointers into one
+/// segment, and the segment released once when the second of them goes.
+struct PtrInSegment {
+    ptr: *mut u8,
+    /// Kept for its `Drop`, not for reading.
+    _segment: Arc<DroppableContext>,
+}
+
+impl PtrInSegment {
+    /// A shallow copy: the same address, one more owner of the segment.
+    fn shallow_clone(&self) -> Self {
+        Self {
+            ptr: self.ptr,
+            _segment: self._segment.clone(),
+        }
+    }
+}
+
+/// What an owned `z_owned_chunk_alloc_result_t`'s handle points at: upstream's
+/// `Result<AllocatedChunk, ZAllocError>`.
+enum ChunkAllocResult {
+    /// The backend allocated a chunk.
+    Ok {
+        descriptor: z_chunk_descriptor_t,
+        ptr: PtrInSegment,
+    },
+    /// The backend could not, and said why.
+    Err(z_alloc_error_t),
+}
+
+/// A backend the C caller supplied, and the book-keeping wz keeps around it.
+struct ForeignBackend {
+    context: Arc<DroppableContext>,
+    callbacks: zc_shm_provider_backend_callbacks_t,
+    /// `true` when the caller used [`z_shm_provider_threadsafe_new`].
+    threadsafe: bool,
+    /// Held across every callback when `threadsafe` is false.
+    ///
+    /// Upstream keeps the same promise a different way — its non-threadsafe
+    /// provider is `!Sync`, so RUST cannot share it — which does not reach a C
+    /// caller with two threads and one `z_loaned_shm_provider_t`. wz's callbacks
+    /// are reachable from C on any thread, so the promise the header prints is
+    /// kept here by holding this.
+    serialise: Mutex<()>,
+    /// Chunks this backend has issued and not yet had freed.
+    ///
+    /// Read for ONE decision: whether a blocking allocation has anything to wait
+    /// for. See divergence 2 in this section's banner.
+    live: Mutex<usize>,
+    /// Signalled by [`ForeignBackend::free`].
+    released: Condvar,
+}
+
+impl ForeignBackend {
+    /// Run `f` with the caller's context pointer, serialised when the caller did
+    /// not promise thread safety.
+    fn with_context<T>(&self, f: impl FnOnce(*mut c_void) -> T) -> T {
+        if self.threadsafe {
+            f(self.context.ptr)
+        } else {
+            let _guard = self.serialise.lock().unwrap_or_else(|e| e.into_inner());
+            f(self.context.ptr)
+        }
+    }
+
+    /// One call into `alloc_fn`, with the result decoded.
+    fn try_alloc(
+        self: &Arc<Self>,
+        size: usize,
+        align: usize,
+    ) -> Result<Box<ShmChunk>, z_alloc_error_t> {
+        let Some(alloc_fn) = self.callbacks.alloc_fn else {
+            return Err(Z_ALLOC_ERROR_OTHER);
+        };
+        let layout =
+            z_owned_memory_layout_t::from_handle(Box::into_raw(Box::new(MemoryLayoutState {
+                size,
+                alignment: z_alloc_alignment_t {
+                    pow: align.trailing_zeros() as u8,
+                },
+            })) as Handle);
+        // Divergence 1: a GRAVESTONE, not `MaybeUninit`. A callback that writes
+        // nothing then leaves a readable "no result" rather than whatever was on
+        // the stack.
+        let mut out = z_owned_chunk_alloc_result_t::null_value();
+        self.with_context(|ctx| {
+            // SAFETY: `out` and `layout` are live locals this frame owns, and
+            // `ctx` is the caller's own pointer.
+            unsafe {
+                alloc_fn(
+                    &mut out,
+                    &layout as *const z_owned_memory_layout_t as *const z_loaned_memory_layout_t,
+                    ctx,
+                )
+            }
+        });
+        let mut moved_layout = z_moved_memory_layout_t { _this: layout };
+        // SAFETY: dropped exactly once; the callback borrowed it and does not
+        // own it, which is what `_loaned_` says.
+        unsafe { z_memory_layout_drop(&mut moved_layout) };
+
+        let handle = out.handle;
+        out = z_owned_chunk_alloc_result_t::null_value();
+        let _ = out;
+        if handle.is_null() {
+            return Err(Z_ALLOC_ERROR_OTHER);
+        }
+        // SAFETY: a live `Box<ChunkAllocResult>` minted by this module's own
+        // constructors, which are the only way a callback can fill this out.
+        let result = unsafe { Box::from_raw(handle as *mut ChunkAllocResult) };
+        let (descriptor, ptr) = match *result {
+            ChunkAllocResult::Ok { descriptor, ptr } => (descriptor, ptr),
+            ChunkAllocResult::Err(reason) => return Err(reason),
+        };
+        if descriptor.len < size || ptr.ptr.is_null() {
+            // The backend said OK and delivered less than was asked for, or
+            // nothing. Reported rather than trusted: the buffer plane hands this
+            // pointer and length straight to the caller.
+            self.free(&descriptor);
+            return Err(Z_ALLOC_ERROR_OTHER);
+        }
+        *self.live.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+        Ok(Box::new(ShmChunk {
+            backing: ChunkBacking::Foreign {
+                backend: self.clone(),
+                descriptor,
+                ptr,
+            },
+            len: size,
+            mutable: true,
+        }))
+    }
+
+    /// Allocate, retrying while a blocking caller still has something
+    /// outstanding that could be released.
+    fn alloc(
+        self: &Arc<Self>,
+        size: usize,
+        align: usize,
+        blocking: bool,
+    ) -> Result<Box<ShmChunk>, z_alloc_error_t> {
+        loop {
+            let reason = match self.try_alloc(size, align) {
+                Ok(chunk) => return Ok(chunk),
+                Err(reason) => reason,
+            };
+            if !blocking {
+                return Err(reason);
+            }
+            let live = self.live.lock().unwrap_or_else(|e| e.into_inner());
+            // Divergence 2: with nothing outstanding, no release can ever come,
+            // so waiting would be a deadlock rather than a wait.
+            if *live == 0 {
+                return Err(reason);
+            }
+            drop(self.released.wait(live).unwrap_or_else(|e| e.into_inner()));
+        }
+    }
+
+    /// Hand a chunk back to the backend that issued it.
+    fn free(&self, descriptor: &z_chunk_descriptor_t) {
+        if let Some(free_fn) = self.callbacks.free_fn {
+            // SAFETY: the descriptor is a live local and `ctx` the caller's own
+            // pointer.
+            self.with_context(|ctx| unsafe { free_fn(descriptor, ctx) });
+        }
+        let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
+        *live = live.saturating_sub(1);
+        drop(live);
+        self.released.notify_all();
+    }
+
+    /// `available_fn`, or 0 when the caller supplied none.
+    fn available(&self) -> usize {
+        match self.callbacks.available_fn {
+            // SAFETY: `ctx` is the caller's own pointer.
+            Some(f) => self.with_context(|ctx| unsafe { f(ctx) }),
+            None => 0,
+        }
+    }
+
+    /// `defragment_fn`, or 0 when the caller supplied none.
+    fn defragment(&self) -> usize {
+        match self.callbacks.defragment_fn {
+            // SAFETY: `ctx` is the caller's own pointer.
+            Some(f) => self.with_context(|ctx| unsafe { f(ctx) }),
+            None => 0,
+        }
+    }
+}
+
+/// Borrow the state behind a loaned pointer-in-segment.
+///
+/// # Safety
+/// `this_` must be null or a live loaned value whose handle this crate minted.
+#[inline]
+unsafe fn ptr_in_segment<'a>(this_: *const z_loaned_ptr_in_segment_t) -> Option<&'a PtrInSegment> {
+    if this_.is_null() {
+        return None;
+    }
+    // SAFETY: the caller's contract.
+    let handle = unsafe { (*this_).handle };
+    if handle.is_null() {
+        return None;
+    }
+    // SAFETY: a live `Box<PtrInSegment>` this module leaked.
+    Some(unsafe { &*(handle as *const PtrInSegment) })
+}
+
+/// Construct a pointer in an SHM segment (zenoh-c `z_ptr_in_segment_new`,
+/// `zenoh_commons.h:4911-4915`). The context is CONSUMED.
+///
+/// # Safety
+/// `this_` must be null or writable. `ptr` is the caller's, and `segment` names
+/// state whose `delete_fn` wz runs once the last copy of this value is gone.
+#[no_mangle]
+pub unsafe extern "C" fn z_ptr_in_segment_new(
+    this_: *mut z_owned_ptr_in_segment_t,
+    ptr: *mut u8,
+    segment: zc_threadsafe_context_t,
+) {
+    let context = Arc::new(DroppableContext {
+        ptr: segment.context.ptr,
+        delete_fn: segment.delete_fn,
+    });
+    guard_val((), || {
+        if this_.is_null() {
+            // The context is still consumed — it was passed by value, so
+            // returning without dropping it would leak the caller's state with
+            // no way to reach it again.
+            return;
+        }
+        let state = PtrInSegment {
+            ptr,
+            _segment: context,
+        };
+        // SAFETY: `this_` was checked non-null above.
+        unsafe {
+            *this_ = z_owned_ptr_in_segment_t::from_handle(Box::into_raw(Box::new(state)) as Handle)
+        };
+    });
+}
+
+/// Zero an owned pointer-in-segment (zenoh-c
+/// `z_internal_ptr_in_segment_null`).
+///
+/// # Safety
+/// `this_` must be null or valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_internal_ptr_in_segment_null(this_: *mut z_owned_ptr_in_segment_t) {
+    if !this_.is_null() {
+        // SAFETY: the caller's contract.
+        unsafe { *this_ = z_owned_ptr_in_segment_t::null_value() };
+    }
+}
+
+/// `true` iff the value holds a live pointer (zenoh-c
+/// `z_internal_ptr_in_segment_check`).
+///
+/// # Safety
+/// `this_` must be null or a valid owned value.
+#[no_mangle]
+pub unsafe extern "C" fn z_internal_ptr_in_segment_check(
+    this_: *const z_owned_ptr_in_segment_t,
+) -> bool {
+    guard_val(false, || {
+        // SAFETY: the caller's contract.
+        !this_.is_null() && !unsafe { (*this_).handle }.is_null()
+    })
+}
+
+/// Borrow a pointer-in-segment (zenoh-c `z_ptr_in_segment_loan`).
+///
+/// # Safety
+/// `this_` must be null or a valid owned value.
+#[no_mangle]
+pub unsafe extern "C" fn z_ptr_in_segment_loan(
+    this_: *const z_owned_ptr_in_segment_t,
+) -> *const z_loaned_ptr_in_segment_t {
+    this_ as *const z_loaned_ptr_in_segment_t
+}
+
+/// SHALLOW-copy a pointer-in-segment (zenoh-c `z_ptr_in_segment_clone`).
+///
+/// The copy is the SAME address with one more owner of the segment, which is
+/// what upstream's `Arc<dyn Segment>` gives and what makes the destructor fire
+/// exactly once however many copies were taken.
+///
+/// # Safety
+/// `out` must be null or writable; `this_` null or a valid loaned value.
+#[no_mangle]
+pub unsafe extern "C" fn z_ptr_in_segment_clone(
+    out: *mut z_owned_ptr_in_segment_t,
+    this_: *const z_loaned_ptr_in_segment_t,
+) {
+    guard_val((), || {
+        if out.is_null() {
+            return;
+        }
+        // SAFETY: the caller's contract.
+        unsafe { *out = z_owned_ptr_in_segment_t::null_value() };
+        // SAFETY: the caller's contract.
+        let Some(source) = (unsafe { ptr_in_segment(this_) }) else {
+            return;
+        };
+        let copy = source.shallow_clone();
+        // SAFETY: `out` was checked non-null above.
+        unsafe {
+            *out = z_owned_ptr_in_segment_t::from_handle(Box::into_raw(Box::new(copy)) as Handle)
+        };
+    });
+}
+
+/// Drop a pointer-in-segment (zenoh-c `z_ptr_in_segment_drop`).
+///
+/// # Safety
+/// `this_` must be null or a valid moved value.
+#[no_mangle]
+pub unsafe extern "C" fn z_ptr_in_segment_drop(this_: *mut z_moved_ptr_in_segment_t) {
+    let _ = guarded(|| {
+        if this_.is_null() {
+            return Z_OK;
+        }
+        // SAFETY: the caller's contract.
+        let handle = unsafe { (*this_)._this.handle };
+        if !handle.is_null() {
+            // SAFETY: a live `Box<PtrInSegment>` this module leaked.
+            drop(unsafe { Box::from_raw(handle as *mut PtrInSegment) });
+            // SAFETY: the caller's contract.
+            unsafe { (*this_)._this = z_owned_ptr_in_segment_t::null_value() };
+        }
+        Z_OK
+    });
+}
+
+/// Take the pointer out of a moved value, leaving a gravestone.
+///
+/// Shared by [`z_chunk_alloc_result_new_ok`] and [`z_shm_provider_map`], which
+/// are the two places upstream's `z_allocated_chunk_t` is consumed.
+///
+/// # Safety
+/// `this_` must be null or a valid moved value.
+unsafe fn take_ptr_in_segment(this_: *mut z_moved_ptr_in_segment_t) -> Option<PtrInSegment> {
+    if this_.is_null() {
+        return None;
+    }
+    // SAFETY: the caller's contract.
+    let handle = unsafe { (*this_)._this.handle };
+    if handle.is_null() {
+        return None;
+    }
+    // SAFETY: the caller's contract.
+    unsafe { (*this_)._this = z_owned_ptr_in_segment_t::null_value() };
+    // SAFETY: a live `Box<PtrInSegment>` this module leaked.
+    Some(*unsafe { Box::from_raw(handle as *mut PtrInSegment) })
+}
+
+/// Report a successful backend allocation (zenoh-c
+/// `z_chunk_alloc_result_new_ok`). The chunk's pointer is CONSUMED.
+///
+/// # Safety
+/// `this_` must be null or writable, and `allocated_chunk.ptr` null or a valid
+/// moved pointer-in-segment.
+#[no_mangle]
+pub unsafe extern "C" fn z_chunk_alloc_result_new_ok(
+    this_: *mut z_owned_chunk_alloc_result_t,
+    allocated_chunk: z_allocated_chunk_t,
+) -> ZResult {
+    guarded(|| {
+        // SAFETY: the caller's contract.
+        let Some(ptr) = (unsafe { take_ptr_in_segment(allocated_chunk.ptr) }) else {
+            // A chunk with no pointer is not a chunk. Refused HERE rather than
+            // at the allocation that would use it, which could not say what was
+            // wrong.
+            if !this_.is_null() {
+                // SAFETY: the caller's contract.
+                unsafe { *this_ = z_owned_chunk_alloc_result_t::null_value() };
+            }
+            return Z_EINVAL;
+        };
+        if this_.is_null() {
+            return Z_ENULL;
+        }
+        let state = ChunkAllocResult::Ok {
+            descriptor: allocated_chunk.descriptpr,
+            ptr,
+        };
+        // SAFETY: `this_` was checked non-null above.
+        unsafe {
+            *this_ =
+                z_owned_chunk_alloc_result_t::from_handle(Box::into_raw(Box::new(state)) as Handle)
+        };
+        Z_OK
+    })
+}
+
+/// Report a failed backend allocation (zenoh-c
+/// `z_chunk_alloc_result_new_error`).
+///
+/// # Safety
+/// `this_` must be null or writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_chunk_alloc_result_new_error(
+    this_: *mut z_owned_chunk_alloc_result_t,
+    alloc_error: z_alloc_error_t,
+) {
+    guard_val((), || {
+        if this_.is_null() {
+            return;
+        }
+        let state = ChunkAllocResult::Err(alloc_error);
+        // SAFETY: `this_` was checked non-null above.
+        unsafe {
+            *this_ =
+                z_owned_chunk_alloc_result_t::from_handle(Box::into_raw(Box::new(state)) as Handle)
+        };
+    });
+}
+
+/// Zero an owned chunk-alloc result (zenoh-c
+/// `z_internal_chunk_alloc_result_null`).
+///
+/// # Safety
+/// `this_` must be null or valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_internal_chunk_alloc_result_null(
+    this_: *mut z_owned_chunk_alloc_result_t,
+) {
+    if !this_.is_null() {
+        // SAFETY: the caller's contract.
+        unsafe { *this_ = z_owned_chunk_alloc_result_t::null_value() };
+    }
+}
+
+/// `true` iff the result holds an outcome (zenoh-c
+/// `z_internal_chunk_alloc_result_check`).
+///
+/// # Safety
+/// `this_` must be null or a valid owned result.
+#[no_mangle]
+pub unsafe extern "C" fn z_internal_chunk_alloc_result_check(
+    this_: *const z_owned_chunk_alloc_result_t,
+) -> bool {
+    guard_val(false, || {
+        // SAFETY: the caller's contract.
+        !this_.is_null() && !unsafe { (*this_).handle }.is_null()
+    })
+}
+
+/// Drop a chunk-alloc result (zenoh-c `z_chunk_alloc_result_drop`).
+///
+/// ⚠ Dropping an `Ok` result drops the pointer-in-segment it holds, which
+/// releases that segment's context if this was the last copy. It does NOT call
+/// the backend's `free_fn`: the chunk was never handed to a provider, so nothing
+/// took ownership of it.
+///
+/// # Safety
+/// `this_` must be null or a valid moved result.
+#[no_mangle]
+pub unsafe extern "C" fn z_chunk_alloc_result_drop(this_: *mut z_moved_chunk_alloc_result_t) {
+    let _ = guarded(|| {
+        if this_.is_null() {
+            return Z_OK;
+        }
+        // SAFETY: the caller's contract.
+        let handle = unsafe { (*this_)._this.handle };
+        if !handle.is_null() {
+            // SAFETY: a live `Box<ChunkAllocResult>` this module leaked.
+            drop(unsafe { Box::from_raw(handle as *mut ChunkAllocResult) });
+            // SAFETY: the caller's contract.
+            unsafe { (*this_)._this = z_owned_chunk_alloc_result_t::null_value() };
+        }
+        Z_OK
+    });
+}
+
+/// Install a C-supplied backend (zenoh-c `z_shm_provider_new`,
+/// `zenoh_commons.h:6134-6137`). The context is CONSUMED.
+///
+/// The callbacks are SERIALISED — see [`ForeignBackend::serialise`] for why that
+/// is what upstream's header promises rather than a wz addition.
+///
+/// # Safety
+/// `this_` must be null or writable; the callbacks must be valid for as long as
+/// any buffer from this provider is alive.
+#[no_mangle]
+pub unsafe extern "C" fn z_shm_provider_new(
+    this_: *mut z_owned_shm_provider_t,
+    context: zc_context_t,
+    callbacks: zc_shm_provider_backend_callbacks_t,
+) {
+    // SAFETY: the caller's contract, delegated.
+    unsafe { foreign_provider_new(this_, context.context, context.delete_fn, callbacks, false) };
+}
+
+/// Install a C-supplied backend whose callbacks the caller promises are
+/// thread-safe (zenoh-c `z_shm_provider_threadsafe_new`). The context is
+/// CONSUMED.
+///
+/// The promise is what the `_async` spellings require: a provider built here
+/// accepts [`z_shm_provider_alloc_gc_defrag_async`], one built by
+/// [`z_shm_provider_new`] refuses it with `Z_EINVAL`.
+///
+/// # Safety
+/// As [`z_shm_provider_new`].
+#[no_mangle]
+pub unsafe extern "C" fn z_shm_provider_threadsafe_new(
+    this_: *mut z_owned_shm_provider_t,
+    context: zc_threadsafe_context_t,
+    callbacks: zc_shm_provider_backend_callbacks_t,
+) {
+    // SAFETY: the caller's contract, delegated.
+    unsafe {
+        foreign_provider_new(
+            this_,
+            context.context.ptr,
+            context.delete_fn,
+            callbacks,
+            true,
+        )
+    };
+}
+
+/// The shared body of the two foreign-backend constructors.
+///
+/// # Safety
+/// As [`z_shm_provider_new`].
+unsafe fn foreign_provider_new(
+    this_: *mut z_owned_shm_provider_t,
+    context: *mut c_void,
+    delete_fn: Option<unsafe extern "C" fn(*mut c_void)>,
+    callbacks: zc_shm_provider_backend_callbacks_t,
+    threadsafe: bool,
+) {
+    let backend = Arc::new(ForeignBackend {
+        context: Arc::new(DroppableContext {
+            ptr: context,
+            delete_fn,
+        }),
+        callbacks,
+        threadsafe,
+        serialise: Mutex::new(()),
+        live: Mutex::new(0),
+        released: Condvar::new(),
+    });
+    guard_val((), || {
+        if this_.is_null() {
+            // The context is consumed either way — `backend` drops here and its
+            // `delete_fn` runs, rather than leaking state the caller can no
+            // longer reach.
+            return;
+        }
+        // SAFETY: `this_` was checked non-null above.
+        unsafe {
+            *this_ =
+                z_owned_shm_provider_t::from_handle(provider_handle(Provider::Foreign(backend)))
+        };
+    });
+}
+
+/// Create a provider on the built-in POSIX backend (zenoh-c
+/// `z_posix_shm_provider_new`, `zenoh_commons.h:4792-4793`).
+///
+/// Identical to [`z_shm_provider_default_new`] here, and upstream agrees: its
+/// `default_backend` IS the POSIX one, and both constructors produce the same
+/// `CSHMProvider::Posix` arm. The two names exist because upstream's default may
+/// one day not be POSIX, and a program that needs the POSIX one specifically can
+/// say so.
+///
+/// # Safety
+/// `this_` must be valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_posix_shm_provider_new(
+    this_: *mut z_owned_shm_provider_t,
+    size: usize,
+) -> ZResult {
+    // SAFETY: the caller's contract, delegated.
+    unsafe { z_shm_provider_default_new(this_, size) }
+}
+
+/// Create a POSIX-backend provider sized and ALIGNED by a memory layout
+/// (zenoh-c `z_posix_shm_provider_with_layout_new`).
+///
+/// The layout's alignment reaches the segment's BASE, not just the offsets
+/// inside it — the R2264 finding, applied to the one constructor that lets a
+/// caller ask for more than a page.
+///
+/// # Safety
+/// `this_` must be valid and writable; `layout` null or a valid loaned layout.
+#[no_mangle]
+pub unsafe extern "C" fn z_posix_shm_provider_with_layout_new(
+    this_: *mut z_owned_shm_provider_t,
+    layout: *const z_loaned_memory_layout_t,
+) -> ZResult {
+    guarded(|| {
+        if this_.is_null() {
+            return Z_ENULL;
+        }
+        // SAFETY: the caller's contract.
+        unsafe { *this_ = z_owned_shm_provider_t::null_value() };
+        // SAFETY: the caller's contract.
+        let Some(state) = (unsafe { memory_layout_state(layout) }) else {
+            return Z_ENULL;
+        };
+        if usize::from(state.alignment.pow) >= usize::BITS as usize {
+            return Z_EINVAL;
+        }
+        let segment = Segment::with_alignment(state.size, 1usize << state.alignment.pow);
+        // SAFETY: `this_` was checked non-null above.
+        unsafe {
+            *this_ = z_owned_shm_provider_t::from_handle(provider_handle(Provider::Native(segment)))
+        };
+        Z_OK
+    })
+}
+
+/// Hand a chunk the BACKEND allocated back as a buffer (zenoh-c
+/// `z_shm_provider_map`). The chunk's pointer is CONSUMED.
+///
+/// ⛔ REFUSES on a native provider, and that is not a gap: nothing in wz issues a
+/// `z_allocated_chunk_t` for a segment wz owns, so a descriptor handed in here
+/// names a chunk this allocator never made. Upstream refuses the same call for
+/// the same reason — its POSIX backend cannot resolve a descriptor it did not
+/// issue either.
+///
+/// # Safety
+/// `out_result` must be null or writable; `provider` null or a valid loaned
+/// provider; `allocated_chunk.ptr` null or a valid moved pointer-in-segment.
+#[no_mangle]
+pub unsafe extern "C" fn z_shm_provider_map(
+    out_result: *mut z_owned_shm_mut_t,
+    provider: *const z_loaned_shm_provider_t,
+    allocated_chunk: z_allocated_chunk_t,
+    len: usize,
+) -> ZResult {
+    guarded(|| {
+        // SAFETY: the caller's contract. Taken FIRST and unconditionally: the
+        // chunk was passed by value, so every exit below owns it.
+        let ptr = unsafe { take_ptr_in_segment(allocated_chunk.ptr) };
+        if !out_result.is_null() {
+            // SAFETY: the caller's contract.
+            unsafe { *out_result = z_owned_shm_mut_t::null_value() };
+        }
+        let Some(ptr) = ptr else {
+            return Z_EINVAL;
+        };
+        if out_result.is_null() {
+            return Z_ENULL;
+        }
+        // SAFETY: the caller's contract.
+        let Some(Provider::Foreign(backend)) = (unsafe { provider_of(provider) }) else {
+            return Z_EINVAL;
+        };
+        let descriptor = allocated_chunk.descriptpr;
+        if ptr.ptr.is_null() || len > descriptor.len {
+            return Z_EINVAL;
+        }
+        *backend.live.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+        let chunk = Box::new(ShmChunk {
+            backing: ChunkBacking::Foreign {
+                backend: backend.clone(),
+                descriptor,
+                ptr,
+            },
+            len,
+            mutable: true,
+        });
+        // SAFETY: `out_result` was checked non-null above.
+        unsafe { *out_result = z_owned_shm_mut_t::from_handle(Box::into_raw(chunk) as Handle) };
+        Z_OK
+    })
+}
+
+/// A raw pointer an allocation thread carries.
+///
+/// The C caller owns the storage and upstream's signature says so with
+/// `&'static mut`; wz cannot express that through a raw pointer, so the promise
+/// is restated here and the wrapper is what lets the pointer cross the spawn.
+struct AsyncOut<T>(*mut T);
+// SAFETY: the C caller promised the storage outlives the callback, which is the
+// same contract upstream's `&'static mut` states. wz adds nothing to it and
+// takes nothing away.
+unsafe impl<T> Send for AsyncOut<T> {}
+
+/// The caller's result context, carried to the allocation thread.
+struct AsyncContext {
+    ptr: *mut c_void,
+    delete_fn: Option<unsafe extern "C" fn(*mut c_void)>,
+}
+// SAFETY: the caller used the THREADSAFE context spelling, which is exactly the
+// promise that its state may be touched from another thread.
+unsafe impl Send for AsyncContext {}
+
+impl Drop for AsyncContext {
+    fn drop(&mut self) {
+        if let Some(delete_fn) = self.delete_fn {
+            // SAFETY: run once, after the result callback has returned.
+            unsafe { delete_fn(self.ptr) };
+        }
+    }
+}
+
+/// The shared body of the two provider `_async` spellings.
+///
+/// # Safety
+/// `out_result` must outlive the callback; `provider` null or a valid loaned
+/// provider.
+unsafe fn provider_alloc_async(
+    out_result: *mut z_buf_layout_alloc_result_t,
+    provider: *const z_loaned_shm_provider_t,
+    size: usize,
+    alignment: z_alloc_alignment_t,
+    result_context: AsyncContext,
+    result_callback: Option<unsafe extern "C" fn(*mut c_void, *mut z_buf_layout_alloc_result_t)>,
+) -> ZResult {
+    guarded(|| {
+        if out_result.is_null() || result_callback.is_none() {
+            return Z_ENULL;
+        }
+        // SAFETY: the caller's contract.
+        let Some(backend) = (unsafe { provider_of(provider) }) else {
+            return Z_ENULL;
+        };
+        if !backend.is_threadsafe() {
+            // Upstream's own answer for a non-threadsafe provider, and the only
+            // place the two constructors differ observably.
+            return Z_EINVAL;
+        }
+        // Divergence 3: the BACKEND is cloned, so the caller may drop the
+        // provider handle while this is in flight.
+        let backend = backend.clone();
+        let out = AsyncOut(out_result);
+        let callback = result_callback;
+        std::thread::spawn(move || {
+            let out = out;
+            let context = result_context;
+            let mut wide = z_buf_layout_alloc_result_t {
+                status: ZC_BUF_LAYOUT_ALLOC_STATUS_ALLOC_ERROR,
+                buf: z_owned_shm_mut_t::null_value(),
+                alloc_error: Z_ALLOC_ERROR_OTHER,
+                layout_error: Z_LAYOUT_ERROR_INCORRECT_LAYOUT_ARGS,
+            };
+            if usize::from(alignment.pow) >= usize::BITS as usize {
+                wide.status = ZC_BUF_LAYOUT_ALLOC_STATUS_LAYOUT_ERROR;
+            } else {
+                match backend.alloc(size, 1usize << alignment.pow, true) {
+                    Ok(chunk) => {
+                        wide.status = ZC_BUF_LAYOUT_ALLOC_STATUS_OK;
+                        wide.buf = z_owned_shm_mut_t::from_handle(Box::into_raw(chunk) as Handle);
+                    }
+                    Err(reason) => wide.alloc_error = reason,
+                }
+            }
+            // SAFETY: the caller's storage, which outlives this callback by the
+            // contract restated on `AsyncOut`.
+            unsafe { *out.0 = wide };
+            if let Some(callback) = callback {
+                // SAFETY: as above; the context is the caller's own.
+                unsafe { callback(context.ptr, out.0) };
+            }
+        });
+        Z_OK
+    })
+}
+
+/// Allocate on another thread, calling back with the result (zenoh-c
+/// `z_shm_provider_alloc_gc_defrag_async`). The context is CONSUMED.
+///
+/// # Safety
+/// As [`provider_alloc_async`].
+#[no_mangle]
+pub unsafe extern "C" fn z_shm_provider_alloc_gc_defrag_async(
+    out_result: *mut z_buf_layout_alloc_result_t,
+    provider: *const z_loaned_shm_provider_t,
+    size: usize,
+    result_context: zc_threadsafe_context_t,
+    result_callback: Option<unsafe extern "C" fn(*mut c_void, *mut z_buf_layout_alloc_result_t)>,
+) -> ZResult {
+    let context = AsyncContext {
+        ptr: result_context.context.ptr,
+        delete_fn: result_context.delete_fn,
+    };
+    // SAFETY: the caller's contract, delegated.
+    unsafe {
+        provider_alloc_async(
+            out_result,
+            provider,
+            size,
+            ALIGN_BYTE,
+            context,
+            result_callback,
+        )
+    }
+}
+
+/// The aligned twin of [`z_shm_provider_alloc_gc_defrag_async`] (zenoh-c
+/// `z_shm_provider_alloc_gc_defrag_aligned_async`). The context is CONSUMED.
+///
+/// # Safety
+/// As [`provider_alloc_async`].
+#[no_mangle]
+pub unsafe extern "C" fn z_shm_provider_alloc_gc_defrag_aligned_async(
+    out_result: *mut z_buf_layout_alloc_result_t,
+    provider: *const z_loaned_shm_provider_t,
+    size: usize,
+    alignment: z_alloc_alignment_t,
+    result_context: zc_threadsafe_context_t,
+    result_callback: Option<unsafe extern "C" fn(*mut c_void, *mut z_buf_layout_alloc_result_t)>,
+) -> ZResult {
+    let context = AsyncContext {
+        ptr: result_context.context.ptr,
+        delete_fn: result_context.delete_fn,
+    };
+    // SAFETY: the caller's contract, delegated.
+    unsafe {
+        provider_alloc_async(
+            out_result,
+            provider,
+            size,
+            alignment,
+            context,
+            result_callback,
+        )
+    }
+}
+
+/// Allocate through a precomputed layout on another thread (zenoh-c
+/// `z_precomputed_layout_threadsafe_alloc_gc_defrag_async`). The context is
+/// CONSUMED.
+///
+/// `Z_EINVAL` when the layout's provider is not threadsafe, which is the same
+/// refusal [`z_shm_provider_alloc_gc_defrag_async`] makes and for the same
+/// reason: the layout carries the backend, so it carries the promise too.
+///
+/// # Safety
+/// `out_result` must outlive the callback; `layout` null or a valid loaned
+/// layout.
+#[no_mangle]
+pub unsafe extern "C" fn z_precomputed_layout_threadsafe_alloc_gc_defrag_async(
+    out_result: *mut z_buf_alloc_result_t,
+    layout: *const z_loaned_precomputed_layout_t,
+    result_context: zc_threadsafe_context_t,
+    result_callback: Option<unsafe extern "C" fn(*mut c_void, *mut z_buf_alloc_result_t)>,
+) -> ZResult {
+    let context = AsyncContext {
+        ptr: result_context.context.ptr,
+        delete_fn: result_context.delete_fn,
+    };
+    guarded(|| {
+        if out_result.is_null() || result_callback.is_none() {
+            return Z_ENULL;
+        }
+        // SAFETY: the caller's contract.
+        let Some(state) = (unsafe { precomputed_state(layout) }) else {
+            return Z_ENULL;
+        };
+        if !state.provider.is_threadsafe() {
+            return Z_EINVAL;
+        }
+        let backend = state.provider.clone();
+        let (size, align) = (state.size, 1usize << state.alignment.pow);
+        let out = AsyncOut(out_result);
+        let callback = result_callback;
+        std::thread::spawn(move || {
+            let out = out;
+            let context = context;
+            let mut narrow = z_buf_alloc_result_t {
+                status: ZC_BUF_ALLOC_STATUS_ALLOC_ERROR,
+                buf: z_owned_shm_mut_t::null_value(),
+                error: Z_ALLOC_ERROR_OTHER,
+            };
+            match backend.alloc(size, align, true) {
+                Ok(chunk) => {
+                    narrow.status = ZC_BUF_ALLOC_STATUS_OK;
+                    narrow.buf = z_owned_shm_mut_t::from_handle(Box::into_raw(chunk) as Handle);
+                }
+                Err(reason) => narrow.error = reason,
+            }
+            // SAFETY: the caller's storage, per `AsyncOut`.
+            unsafe { *out.0 = narrow };
+            if let Some(callback) = callback {
+                // SAFETY: as above.
+                unsafe { callback(context.ptr, out.0) };
+            }
+        });
+        Z_OK
+    })
+}
+
+/// The `alloc_layout` spelling of
+/// [`z_precomputed_layout_threadsafe_alloc_gc_defrag_async`] (zenoh-c
+/// `z_alloc_layout_threadsafe_alloc_gc_defrag_async`).
+///
+/// ⛔ Upstream makes `z_owned_alloc_layout_t` a TYPEDEF of
+/// `z_owned_precomputed_layout_t`, so this is one implementation under two
+/// names — see the layout section for the whole family.
+///
+/// # Safety
+/// As [`z_precomputed_layout_threadsafe_alloc_gc_defrag_async`].
+#[no_mangle]
+pub unsafe extern "C" fn z_alloc_layout_threadsafe_alloc_gc_defrag_async(
+    out_result: *mut z_buf_alloc_result_t,
+    layout: *const z_loaned_alloc_layout_t,
+    result_context: zc_threadsafe_context_t,
+    result_callback: Option<unsafe extern "C" fn(*mut c_void, *mut z_buf_alloc_result_t)>,
+) -> ZResult {
+    // SAFETY: the caller's contract, delegated.
+    unsafe {
+        z_precomputed_layout_threadsafe_alloc_gc_defrag_async(
+            out_result,
+            layout,
+            result_context,
+            result_callback,
+        )
+    }
+}
+
 const _: () = {
     use std::mem::{align_of, size_of};
     assert!(size_of::<z_alloc_alignment_t>() == 1);
     assert!(size_of::<z_buf_layout_alloc_result_t>() == 96);
     assert!(align_of::<z_buf_layout_alloc_result_t>() == 8);
     assert!(size_of::<z_buf_alloc_result_t>() == 96);
+    // R2289 — the by-VALUE structs of the backend plane. These cross the ABI as
+    // arguments rather than behind a handle, so a field this file added or
+    // reordered is a wild call at run time and nothing else would catch it.
+    assert!(size_of::<zc_context_t>() == 16);
+    assert!(size_of::<zc_threadsafe_context_t>() == 16);
+    assert!(size_of::<z_chunk_descriptor_t>() == 16);
+    assert!(size_of::<z_allocated_chunk_t>() == 24);
+    assert!(size_of::<zc_shm_provider_backend_callbacks_t>() == 48);
 };
 
 #[cfg(test)]
@@ -2547,8 +3888,10 @@ mod segment_tests {
                 .claim(1024, 1)
                 .expect("a 1024-byte chunk fits in a 4096-byte segment");
             let chunk = ShmChunk {
-                segment: segment.clone(),
-                start,
+                backing: ChunkBacking::Native {
+                    segment: segment.clone(),
+                    start,
+                },
                 len: 1024,
                 mutable: true,
             };
@@ -2568,8 +3911,10 @@ mod segment_tests {
             .map(|_| {
                 let start = segment.books().claim(1024, 1).expect("quarter fits");
                 ShmChunk {
-                    segment: segment.clone(),
-                    start,
+                    backing: ChunkBacking::Native {
+                        segment: segment.clone(),
+                        start,
+                    },
                     len: 1024,
                     mutable: true,
                 }
@@ -2629,14 +3974,1362 @@ mod segment_tests {
         let segment = Segment::new(64);
         let start = segment.books().claim(8, 1).expect("fits");
         let mut chunk = ShmChunk {
-            segment: segment.clone(),
-            start,
+            backing: ChunkBacking::Native {
+                segment: segment.clone(),
+                start,
+            },
             len: 8,
             mutable: true,
         };
         assert!(chunk.mutable);
         chunk.mutable = false;
-        assert_eq!(chunk.start, start);
+        assert!(matches!(
+            chunk.backing,
+            ChunkBacking::Native { start: at, .. } if at == start
+        ));
         assert_eq!(segment.books().available(), 56);
+    }
+}
+
+#[cfg(test)]
+mod foreign_backend_tests {
+    //! R2289 (open-debt item 607) — the C-SUPPLIED backend, driven the way a C
+    //! program drives it.
+    //!
+    //! Every test here goes through the exported entry points and a backend
+    //! written as six `extern "C"` callbacks over one opaque context, because
+    //! that is the only shape in which the plane's claim is testable: wz calls
+    //! OUT, and a test that called wz's internals instead would be asserting
+    //! about a function nobody reaches.
+    //!
+    //! The harness records what it was asked and what it was told, so each test
+    //! can assert the two directions separately — that the request reached the
+    //! backend intact, and that the backend's answer reached the caller intact.
+    //! Status codes alone would pass for a wz that allocated out of its OWN
+    //! segment and never called the callbacks at all, which is why every
+    //! allocation test also asserts the returned pointer lies inside the
+    //! BACKEND's arena.
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use super::*;
+
+    /// The segment id this backend stamps into every descriptor, so a test can
+    /// tell its own descriptors from a zeroed struct.
+    const SEGMENT_ID: z_segment_id_t = 7;
+    /// How long the concurrency probe waits for a second caller before deciding
+    /// there is not going to be one.
+    const PEER_WAIT: Duration = Duration::from_millis(400);
+    /// What `defragment_fn` returns: a number no wz book-keeping path could
+    /// produce, so an answer that did not come from the backend is visible.
+    const DEFRAGMENT_ANSWER: usize = 0xDEF7A6;
+
+    /// The book-keeping the callbacks share.
+    struct HarnessState {
+        /// Which slots of the arena are handed out.
+        used: Vec<bool>,
+        alloc_calls: usize,
+        free_calls: usize,
+        defragment_calls: usize,
+        available_calls: usize,
+        /// The `(size, alignment exponent)` of every layout `alloc_fn` saw.
+        layouts_seen: Vec<(usize, u8)>,
+        /// Every descriptor `free_fn` was handed.
+        freed: Vec<(z_segment_id_t, z_chunk_id_t, usize)>,
+        in_flight: usize,
+        concurrent_max: usize,
+    }
+
+    /// A backend a C program could have written, with the counters a test needs.
+    struct Harness {
+        /// The memory this backend hands out. The `Box` is what owns it; the raw
+        /// pointer is what the callbacks compute chunk addresses from while the
+        /// book-keeping is locked.
+        _arena: Box<[u8]>,
+        arena: *mut u8,
+        slot_len: usize,
+        state: Mutex<HarnessState>,
+        peer: Condvar,
+        /// Bumped by this backend's own `delete_fn`.
+        deleted: Arc<AtomicUsize>,
+        /// Bumped when a chunk's segment context is released.
+        segment_drops: Arc<AtomicUsize>,
+        /// When set, `alloc_fn` waits for a second caller so a test can see
+        /// whether wz let one in.
+        probe_concurrency: bool,
+        /// When set, every allocation fails — for the blocking-path tests.
+        always_fail: bool,
+        /// When set, `alloc_fn` hands out a slot even when it is SMALLER than
+        /// the request — a misbehaving backend, which is the only way to reach
+        /// wz's check that the chunk covers what was asked for.
+        ///
+        /// ⚠ Added after the first draft of `a_backend_that_under_delivers…`
+        /// PASSED with wz's check deleted: the harness refused the oversized
+        /// request itself, so the branch under test was never entered and the
+        /// test was measuring nothing.
+        under_deliver: bool,
+    }
+
+    // SAFETY: the arena is owned for the harness's whole life and every chunk
+    // handed out of it is a distinct range; `state` serialises the book-keeping.
+    unsafe impl Send for Harness {}
+    // SAFETY: as above.
+    unsafe impl Sync for Harness {}
+
+    impl Harness {
+        fn new(slots: usize, slot_len: usize) -> Box<Self> {
+            let mut arena = vec![0u8; slots * slot_len].into_boxed_slice();
+            let ptr = arena.as_mut_ptr();
+            Box::new(Self {
+                _arena: arena,
+                arena: ptr,
+                slot_len,
+                state: Mutex::new(HarnessState {
+                    used: vec![false; slots],
+                    alloc_calls: 0,
+                    free_calls: 0,
+                    defragment_calls: 0,
+                    available_calls: 0,
+                    layouts_seen: Vec::new(),
+                    freed: Vec::new(),
+                    in_flight: 0,
+                    concurrent_max: 0,
+                }),
+                peer: Condvar::new(),
+                deleted: Arc::new(AtomicUsize::new(0)),
+                segment_drops: Arc::new(AtomicUsize::new(0)),
+                probe_concurrency: false,
+                always_fail: false,
+                under_deliver: false,
+            })
+        }
+
+        fn lock(&self) -> std::sync::MutexGuard<'_, HarnessState> {
+            self.state.lock().unwrap_or_else(|e| e.into_inner())
+        }
+
+        /// The address of slot `n`.
+        fn slot_ptr(&self, n: usize) -> *mut u8 {
+            // SAFETY: `n` is a slot index this harness handed out.
+            unsafe { self.arena.add(n * self.slot_len) }
+        }
+
+        /// Whether `p` points inside this backend's arena — the assertion that
+        /// separates "wz called the backend" from "wz allocated its own memory
+        /// and returned a plausible status".
+        fn owns(&self, p: *const u8, len: usize) -> bool {
+            let base = self.arena as usize;
+            let end = base + self._arena.len();
+            let p = p as usize;
+            p >= base && p + len <= end
+        }
+    }
+
+    /// What a chunk's segment context points at: nothing but a counter to bump
+    /// when wz releases it.
+    struct SegmentTag(Arc<AtomicUsize>);
+
+    unsafe extern "C" fn segment_delete(ctx: *mut c_void) {
+        // SAFETY: the pointer this module handed to `z_ptr_in_segment_new`.
+        let tag = unsafe { Box::from_raw(ctx as *mut SegmentTag) };
+        tag.0.fetch_add(1, Ordering::SeqCst);
+    }
+
+    unsafe extern "C" fn backend_delete(ctx: *mut c_void) {
+        // SAFETY: the pointer this module handed to the provider constructor.
+        let harness = unsafe { Box::from_raw(ctx as *mut Harness) };
+        harness.deleted.fetch_add(1, Ordering::SeqCst);
+    }
+
+    unsafe extern "C" fn backend_alloc(
+        out: *mut z_owned_chunk_alloc_result_t,
+        layout: *const z_loaned_memory_layout_t,
+        ctx: *mut c_void,
+    ) {
+        // SAFETY: the harness pointer, alive for the provider's whole life.
+        let harness = unsafe { &*(ctx as *const Harness) };
+        let mut size = 0usize;
+        let mut alignment = z_alloc_alignment_t { pow: 0 };
+        // SAFETY: `layout` is the loaned layout wz built for this call.
+        unsafe { z_memory_layout_get_data(layout, &mut size, &mut alignment) };
+
+        let mut state = harness.lock();
+        state.alloc_calls += 1;
+        state.layouts_seen.push((size, alignment.pow));
+        state.in_flight += 1;
+        state.concurrent_max = state.concurrent_max.max(state.in_flight);
+        harness.peer.notify_all();
+        if harness.probe_concurrency {
+            // Wait, briefly, for a second caller. Two threads that wz let in
+            // together both see `in_flight == 2`; two that wz serialised each
+            // time out alone.
+            while state.in_flight < 2 {
+                let (guard, timeout) = harness
+                    .peer
+                    .wait_timeout(state, PEER_WAIT)
+                    .unwrap_or_else(|e| e.into_inner());
+                state = guard;
+                if timeout.timed_out() {
+                    break;
+                }
+            }
+        }
+        state.in_flight -= 1;
+
+        let slot = if harness.always_fail {
+            None
+        } else {
+            state
+                .used
+                .iter()
+                .position(|used| !used)
+                .filter(|_| harness.under_deliver || size <= harness.slot_len)
+        };
+        let Some(slot) = slot else {
+            drop(state);
+            // SAFETY: `out` is wz's own gravestoned local.
+            unsafe { z_chunk_alloc_result_new_error(out, Z_ALLOC_ERROR_OUT_OF_MEMORY) };
+            return;
+        };
+        state.used[slot] = true;
+        drop(state);
+
+        let tag = Box::into_raw(Box::new(SegmentTag(harness.segment_drops.clone())));
+        let mut ptr = z_owned_ptr_in_segment_t::null_value();
+        // SAFETY: `ptr` is a live local and the context pair is well formed.
+        unsafe {
+            z_ptr_in_segment_new(
+                &mut ptr,
+                harness.slot_ptr(slot),
+                zc_threadsafe_context_t {
+                    context: zc_threadsafe_context_data_t {
+                        ptr: tag as *mut c_void,
+                    },
+                    delete_fn: Some(segment_delete),
+                },
+            )
+        };
+        let mut moved = z_moved_ptr_in_segment_t { _this: ptr };
+        // SAFETY: `out` is wz's gravestoned local and `moved` a live local whose
+        // pointer this call consumes.
+        unsafe {
+            z_chunk_alloc_result_new_ok(
+                out,
+                z_allocated_chunk_t {
+                    descriptpr: z_chunk_descriptor_t {
+                        segment: SEGMENT_ID,
+                        chunk: slot as z_chunk_id_t,
+                        len: harness.slot_len,
+                    },
+                    ptr: &mut moved,
+                },
+            )
+        };
+    }
+
+    unsafe extern "C" fn backend_free(chunk: *const z_chunk_descriptor_t, ctx: *mut c_void) {
+        // SAFETY: the harness pointer.
+        let harness = unsafe { &*(ctx as *const Harness) };
+        // SAFETY: wz hands back a live descriptor.
+        let desc = unsafe { *chunk };
+        let mut state = harness.lock();
+        state.free_calls += 1;
+        state.freed.push((desc.segment, desc.chunk, desc.len));
+        if let Some(used) = state.used.get_mut(desc.chunk as usize) {
+            *used = false;
+        }
+    }
+
+    unsafe extern "C" fn backend_defragment(ctx: *mut c_void) -> usize {
+        // SAFETY: the harness pointer.
+        let harness = unsafe { &*(ctx as *const Harness) };
+        let mut state = harness.lock();
+        state.defragment_calls += 1;
+        // A number nothing else in the harness produces, so a wz that answered
+        // from its own book-keeping instead of calling here is visible.
+        DEFRAGMENT_ANSWER
+    }
+
+    unsafe extern "C" fn backend_available(ctx: *mut c_void) -> usize {
+        // SAFETY: the harness pointer.
+        let harness = unsafe { &*(ctx as *const Harness) };
+        let mut state = harness.lock();
+        state.available_calls += 1;
+        state.used.iter().filter(|used| !**used).count() * harness.slot_len
+    }
+
+    unsafe extern "C" fn backend_layout_for(
+        _layout: *mut z_owned_memory_layout_t,
+        _ctx: *mut c_void,
+    ) {
+        // This backend serves any layout it is given unchanged.
+    }
+
+    unsafe extern "C" fn backend_id(_ctx: *mut c_void) -> z_protocol_id_t {
+        0x77
+    }
+
+    fn callbacks() -> zc_shm_provider_backend_callbacks_t {
+        zc_shm_provider_backend_callbacks_t {
+            alloc_fn: Some(backend_alloc),
+            free_fn: Some(backend_free),
+            defragment_fn: Some(backend_defragment),
+            available_fn: Some(backend_available),
+            layout_for_fn: Some(backend_layout_for),
+            id_fn: Some(backend_id),
+        }
+    }
+
+    /// Install `harness` as a provider, returning the provider and a borrow of
+    /// the harness that stays valid until the provider is dropped.
+    ///
+    /// # Safety
+    /// The caller must drop the returned provider before reading the harness's
+    /// `deleted` counter through anything but the `Arc` it was cloned from.
+    unsafe fn install(
+        harness: Box<Harness>,
+        threadsafe: bool,
+    ) -> (z_owned_shm_provider_t, &'static Harness) {
+        let deleted = harness.deleted.clone();
+        let _ = deleted;
+        let raw = Box::into_raw(harness);
+        // SAFETY: the box outlives the provider, which is what `delete_fn`
+        // enforces — it is the only thing that frees it.
+        let borrow = unsafe { &*raw };
+        let mut provider = z_owned_shm_provider_t::null_value();
+        if threadsafe {
+            // SAFETY: `provider` is a live local.
+            unsafe {
+                z_shm_provider_threadsafe_new(
+                    &mut provider,
+                    zc_threadsafe_context_t {
+                        context: zc_threadsafe_context_data_t {
+                            ptr: raw as *mut c_void,
+                        },
+                        delete_fn: Some(backend_delete),
+                    },
+                    callbacks(),
+                )
+            };
+        } else {
+            // SAFETY: as above.
+            unsafe {
+                z_shm_provider_new(
+                    &mut provider,
+                    zc_context_t {
+                        context: raw as *mut c_void,
+                        delete_fn: Some(backend_delete),
+                    },
+                    callbacks(),
+                )
+            };
+        }
+        assert!(unsafe { z_internal_shm_provider_check(&provider) });
+        (provider, borrow)
+    }
+
+    /// Drop a provider once.
+    ///
+    /// # Safety
+    /// `provider` must be live.
+    unsafe fn drop_provider(provider: z_owned_shm_provider_t) {
+        let mut moved = z_moved_shm_provider_t { _this: provider };
+        // SAFETY: dropped exactly once.
+        unsafe { z_shm_provider_drop(&mut moved) };
+    }
+
+    /// Drop a mutable buffer once.
+    ///
+    /// # Safety
+    /// `buf` must be live.
+    unsafe fn drop_buf(buf: z_owned_shm_mut_t) {
+        let mut moved = z_moved_shm_mut_t { _this: buf };
+        // SAFETY: dropped exactly once.
+        unsafe { z_shm_mut_drop(&mut moved) };
+    }
+
+    /// The whole round trip: the request reaches the backend as a layout, the
+    /// backend's memory reaches the caller, and the release reaches the backend
+    /// as the descriptor it issued.
+    ///
+    /// Each of the four assertions fails on a different wrong implementation: a
+    /// wz that never called `alloc_fn`, one that called it and returned its own
+    /// memory, one that lost the descriptor, and one that never called
+    /// `free_fn`.
+    #[test]
+    fn a_foreign_backend_serves_the_allocation_and_the_release() {
+        // SAFETY: the provider owns the harness until it is dropped.
+        let (provider, harness) = unsafe { install(Harness::new(4, 256), false) };
+        let mut out: z_buf_layout_alloc_result_t = unsafe { std::mem::zeroed() };
+        // SAFETY: `out` is writable and the provider live.
+        unsafe { z_shm_provider_alloc(&mut out, z_shm_provider_loan(&provider), 64) };
+        assert_eq!(out.status, ZC_BUF_LAYOUT_ALLOC_STATUS_OK);
+
+        // SAFETY: the status says the buffer is live.
+        let loaned = unsafe { z_shm_mut_loan_mut(&mut out.buf) };
+        // SAFETY: as above.
+        let data = unsafe { z_shm_mut_data_mut(loaned) };
+        assert!(
+            harness.owns(data, 64),
+            "the buffer must be the BACKEND's memory — a pointer outside its \
+             arena means wz allocated its own and never asked"
+        );
+        // SAFETY: 64 bytes of the backend's own arena, exclusively ours.
+        unsafe { std::ptr::write_bytes(data, 0xA5, 64) };
+        // SAFETY: as above.
+        assert_eq!(unsafe { z_shm_mut_len(loaned) }, 64);
+        // SAFETY: as above.
+        let read = unsafe { std::slice::from_raw_parts(z_shm_mut_data(loaned), 64) };
+        assert!(read.iter().all(|b| *b == 0xA5), "the bytes must flow back");
+
+        {
+            let state = harness.lock();
+            assert_eq!(state.alloc_calls, 1);
+            assert_eq!(
+                state.layouts_seen,
+                vec![(64usize, 0u8)],
+                "the caller's size must reach the backend as a layout"
+            );
+            assert_eq!(state.free_calls, 0, "nothing is released while it is held");
+        }
+
+        // SAFETY: dropped once.
+        unsafe { drop_buf(out.buf) };
+        {
+            let state = harness.lock();
+            assert_eq!(state.free_calls, 1);
+            assert_eq!(
+                state.freed,
+                vec![(SEGMENT_ID, 0, 256)],
+                "the backend must get back the descriptor it issued, not a \
+                 reconstruction"
+            );
+        }
+        assert_eq!(
+            harness.segment_drops.load(Ordering::SeqCst),
+            1,
+            "the chunk's segment context is released with the chunk"
+        );
+
+        let deleted = harness.deleted.clone();
+        // SAFETY: dropped once; `harness` must not be read after this.
+        unsafe { drop_provider(provider) };
+        assert_eq!(
+            deleted.load(Ordering::SeqCst),
+            1,
+            "the provider owes the context exactly one delete_fn"
+        );
+    }
+
+    /// `available` and `defragment` are the BACKEND's answers, not wz's.
+    ///
+    /// Both return values a wz book-keeping path could not produce, so an
+    /// implementation that answered from its own free list rather than calling
+    /// out fails here rather than looking plausible.
+    #[test]
+    fn available_and_defragment_are_answered_by_the_backend() {
+        // SAFETY: the provider owns the harness.
+        let (provider, harness) = unsafe { install(Harness::new(4, 256), false) };
+        // SAFETY: the provider is live.
+        let loan = unsafe { z_shm_provider_loan(&provider) };
+        // SAFETY: as above.
+        assert_eq!(unsafe { z_shm_provider_available(loan) }, 4 * 256);
+        // SAFETY: as above.
+        assert_eq!(
+            unsafe { z_shm_provider_defragment(loan) },
+            DEFRAGMENT_ANSWER
+        );
+        {
+            let state = harness.lock();
+            assert_eq!(state.available_calls, 1);
+            assert_eq!(state.defragment_calls, 1);
+        }
+
+        let mut out: z_buf_layout_alloc_result_t = unsafe { std::mem::zeroed() };
+        // SAFETY: `out` is writable and the provider live.
+        unsafe { z_shm_provider_alloc(&mut out, loan, 16) };
+        assert_eq!(out.status, ZC_BUF_LAYOUT_ALLOC_STATUS_OK);
+        // SAFETY: the provider is live.
+        assert_eq!(
+            unsafe { z_shm_provider_available(loan) },
+            3 * 256,
+            "the backend's own accounting must be what is reported"
+        );
+        // SAFETY: dropped once.
+        unsafe { drop_buf(out.buf) };
+        // SAFETY: dropped once.
+        unsafe { drop_provider(provider) };
+    }
+
+    /// The caller's ALIGNMENT reaches the backend, and it reaches it as an
+    /// exponent rather than being flattened to the default.
+    #[test]
+    fn the_callers_alignment_reaches_the_backend() {
+        // SAFETY: the provider owns the harness.
+        let (provider, harness) = unsafe { install(Harness::new(2, 512), false) };
+        let mut out: z_buf_layout_alloc_result_t = unsafe { std::mem::zeroed() };
+        // SAFETY: `out` is writable and the provider live.
+        unsafe {
+            z_shm_provider_alloc_aligned(
+                &mut out,
+                z_shm_provider_loan(&provider),
+                128,
+                z_alloc_alignment_t { pow: 6 },
+            )
+        };
+        assert_eq!(out.status, ZC_BUF_LAYOUT_ALLOC_STATUS_OK);
+        assert_eq!(
+            harness.lock().layouts_seen,
+            vec![(128usize, 6u8)],
+            "an entry point that forwarded ALIGN_BYTE would show pow = 0 here"
+        );
+        // SAFETY: dropped once.
+        unsafe { drop_buf(out.buf) };
+        // SAFETY: dropped once.
+        unsafe { drop_provider(provider) };
+    }
+
+    /// The BACKEND's error code is what the caller sees.
+    ///
+    /// wz's own exhaustion answer is `Z_ALLOC_ERROR_OUT_OF_MEMORY` too, so the
+    /// discriminating half is the second request: this backend refuses an
+    /// oversized request with the same code while `available` still reports room,
+    /// which wz's native allocator would call a defragmentation problem.
+    #[test]
+    fn the_backends_refusal_is_the_callers_refusal() {
+        // SAFETY: the provider owns the harness.
+        let (provider, harness) = unsafe { install(Harness::new(1, 128), false) };
+        // SAFETY: the provider is live.
+        let loan = unsafe { z_shm_provider_loan(&provider) };
+        let mut out: z_buf_layout_alloc_result_t = unsafe { std::mem::zeroed() };
+        // SAFETY: `out` is writable and the provider live.
+        unsafe { z_shm_provider_alloc(&mut out, loan, 4096) };
+        assert_eq!(out.status, ZC_BUF_LAYOUT_ALLOC_STATUS_ALLOC_ERROR);
+        assert_eq!(out.alloc_error, Z_ALLOC_ERROR_OUT_OF_MEMORY);
+        assert_eq!(
+            harness.lock().alloc_calls,
+            1,
+            "the refusal must come from the backend, not from a size check wz \
+             made on its behalf"
+        );
+        // SAFETY: the provider is live.
+        assert_eq!(unsafe { z_shm_provider_available(loan) }, 128);
+        // SAFETY: dropped once.
+        unsafe { drop_provider(provider) };
+    }
+
+    /// A backend that says OK and delivers a chunk SMALLER than was asked for is
+    /// refused, and the chunk is handed back rather than leaked.
+    ///
+    /// The buffer plane passes this pointer and length straight to the caller,
+    /// so trusting the backend here would hand a C program a 64-byte window on
+    /// a 16-byte chunk.
+    #[test]
+    fn a_backend_that_under_delivers_is_refused_and_the_chunk_returned() {
+        let mut harness = Harness::new(1, 16);
+        // The backend hands out a 16-byte slot for a 64-byte request. Without
+        // this the harness refuses the request ITSELF and wz's check is never
+        // reached — which is how the first draft of this test passed with that
+        // check deleted.
+        harness.under_deliver = true;
+        // SAFETY: the provider owns the harness.
+        let (provider, borrow) = unsafe { install(harness, false) };
+        let mut out: z_buf_layout_alloc_result_t = unsafe { std::mem::zeroed() };
+        // SAFETY: `out` is writable and the provider live.
+        unsafe { z_shm_provider_alloc(&mut out, z_shm_provider_loan(&provider), 64) };
+        assert_eq!(
+            borrow.lock().alloc_calls,
+            1,
+            "the backend must have been ASKED — a refusal wz made on its own \
+             would leave this at zero and the rest of the test vacuous"
+        );
+        assert_eq!(out.status, ZC_BUF_LAYOUT_ALLOC_STATUS_ALLOC_ERROR);
+        assert!(
+            !unsafe { z_internal_shm_mut_check(&out.buf) },
+            "a refused allocation must leave a gravestone"
+        );
+        assert_eq!(
+            borrow.lock().freed,
+            vec![(SEGMENT_ID, 0, 16)],
+            "the chunk wz refused must go back to the backend, not be dropped"
+        );
+        // SAFETY: dropped once.
+        unsafe { drop_provider(provider) };
+    }
+
+    /// A blocking allocation with NOTHING outstanding fails instead of waiting
+    /// — divergence 2 — and the CONTROL shows the waiting path is live.
+    ///
+    /// Without the control this test would pass on a wz that never blocked at
+    /// all, which is the failure it is meant to be about.
+    #[test]
+    fn a_blocking_request_waits_only_when_a_release_can_come() {
+        // Nothing outstanding: the call must return rather than wait forever.
+        let mut harness = Harness::new(1, 64);
+        harness.always_fail = true;
+        // SAFETY: the provider owns the harness.
+        let (provider, _borrow) = unsafe { install(harness, false) };
+        let (tx, rx) = mpsc::channel();
+        let loan = unsafe { z_shm_provider_loan(&provider) } as usize;
+        std::thread::spawn(move || {
+            let mut out: z_buf_layout_alloc_result_t = unsafe { std::mem::zeroed() };
+            // SAFETY: the provider outlives this thread — the test joins on the
+            // channel before dropping it.
+            unsafe {
+                z_shm_provider_alloc_gc_defrag_blocking(
+                    &mut out,
+                    loan as *const z_loaned_shm_provider_t,
+                    32,
+                )
+            };
+            let status = out.status;
+            if status == ZC_BUF_LAYOUT_ALLOC_STATUS_OK {
+                // SAFETY: dropped once, on the thread that made it.
+                unsafe { drop_buf(out.buf) };
+            }
+            let _ = tx.send(status);
+        });
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(5)),
+            Ok(ZC_BUF_LAYOUT_ALLOC_STATUS_ALLOC_ERROR),
+            "a blocking allocation with no live chunk has nothing to wait for"
+        );
+        // SAFETY: dropped once, after the thread signalled.
+        unsafe { drop_provider(provider) };
+
+        // CONTROL: with a chunk outstanding, the same call WAITS and then
+        // succeeds when that chunk is released.
+        // SAFETY: the provider owns the harness.
+        let (provider, harness) = unsafe { install(Harness::new(1, 64), false) };
+        let mut held: z_buf_layout_alloc_result_t = unsafe { std::mem::zeroed() };
+        // SAFETY: `held` is writable and the provider live.
+        unsafe { z_shm_provider_alloc(&mut held, z_shm_provider_loan(&provider), 32) };
+        assert_eq!(held.status, ZC_BUF_LAYOUT_ALLOC_STATUS_OK);
+
+        let (tx, rx) = mpsc::channel();
+        let loan = unsafe { z_shm_provider_loan(&provider) } as usize;
+        let waiter = std::thread::spawn(move || {
+            let mut out: z_buf_layout_alloc_result_t = unsafe { std::mem::zeroed() };
+            // SAFETY: as above.
+            unsafe {
+                z_shm_provider_alloc_gc_defrag_blocking(
+                    &mut out,
+                    loan as *const z_loaned_shm_provider_t,
+                    32,
+                )
+            };
+            let status = out.status;
+            if status == ZC_BUF_LAYOUT_ALLOC_STATUS_OK {
+                // SAFETY: dropped once, on the thread that made it.
+                unsafe { drop_buf(out.buf) };
+            }
+            let _ = tx.send(status);
+        });
+        // The waiter cannot succeed while the only slot is held.
+        assert_eq!(
+            rx.recv_timeout(Duration::from_millis(200)),
+            Err(mpsc::RecvTimeoutError::Timeout),
+            "the blocking call must WAIT while a release is still possible"
+        );
+        // SAFETY: dropped once.
+        unsafe { drop_buf(held.buf) };
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(5)),
+            Ok(ZC_BUF_LAYOUT_ALLOC_STATUS_OK),
+            "the release must wake the waiter"
+        );
+        waiter.join().expect("the waiting thread finished");
+        assert!(harness.lock().alloc_calls >= 2);
+        // SAFETY: dropped once.
+        unsafe { drop_provider(provider) };
+    }
+
+    /// A pointer-in-segment CLONE shares the segment: the destructor runs once,
+    /// after the last copy.
+    ///
+    /// A deep copy would run it twice and a copy that dropped the context would
+    /// run it early — the intermediate assertion is what tells those apart.
+    #[test]
+    fn a_pointer_in_segment_clone_shares_its_segment() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let tag = Box::into_raw(Box::new(SegmentTag(drops.clone())));
+        let mut byte = 0u8;
+        let mut owned = z_owned_ptr_in_segment_t::null_value();
+        assert!(!unsafe { z_internal_ptr_in_segment_check(&owned) });
+        // SAFETY: `owned` is a live local and the context pair well formed.
+        unsafe {
+            z_ptr_in_segment_new(
+                &mut owned,
+                &mut byte,
+                zc_threadsafe_context_t {
+                    context: zc_threadsafe_context_data_t {
+                        ptr: tag as *mut c_void,
+                    },
+                    delete_fn: Some(segment_delete),
+                },
+            )
+        };
+        assert!(unsafe { z_internal_ptr_in_segment_check(&owned) });
+
+        let mut copy = z_owned_ptr_in_segment_t::null_value();
+        // SAFETY: both are live locals.
+        unsafe { z_ptr_in_segment_clone(&mut copy, z_ptr_in_segment_loan(&owned)) };
+        assert!(unsafe { z_internal_ptr_in_segment_check(&copy) });
+
+        let mut moved = z_moved_ptr_in_segment_t { _this: owned };
+        // SAFETY: dropped once.
+        unsafe { z_ptr_in_segment_drop(&mut moved) };
+        assert!(!unsafe { z_internal_ptr_in_segment_check(&moved._this) });
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            0,
+            "the segment is still held by the clone"
+        );
+
+        let mut moved_copy = z_moved_ptr_in_segment_t { _this: copy };
+        // SAFETY: dropped once.
+        unsafe { z_ptr_in_segment_drop(&mut moved_copy) };
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            1,
+            "and released exactly once when the last copy goes"
+        );
+
+        // NULL is tolerated everywhere.
+        assert!(!unsafe { z_internal_ptr_in_segment_check(std::ptr::null()) });
+        unsafe { z_ptr_in_segment_drop(std::ptr::null_mut()) };
+        let mut grave = z_owned_ptr_in_segment_t::null_value();
+        unsafe { z_ptr_in_segment_clone(&mut grave, std::ptr::null()) };
+        assert!(!unsafe { z_internal_ptr_in_segment_check(&grave) });
+        unsafe { z_internal_ptr_in_segment_null(&mut grave) };
+    }
+
+    /// A chunk-alloc result carries EITHER outcome, and taking the chunk
+    /// gravestones the caller's pointer.
+    #[test]
+    fn a_chunk_alloc_result_carries_either_outcome() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let tag = Box::into_raw(Box::new(SegmentTag(drops.clone())));
+        let mut byte = 0u8;
+        let mut ptr = z_owned_ptr_in_segment_t::null_value();
+        // SAFETY: `ptr` is a live local.
+        unsafe {
+            z_ptr_in_segment_new(
+                &mut ptr,
+                &mut byte,
+                zc_threadsafe_context_t {
+                    context: zc_threadsafe_context_data_t {
+                        ptr: tag as *mut c_void,
+                    },
+                    delete_fn: Some(segment_delete),
+                },
+            )
+        };
+        let mut moved = z_moved_ptr_in_segment_t { _this: ptr };
+
+        let mut ok = z_owned_chunk_alloc_result_t::null_value();
+        assert!(!unsafe { z_internal_chunk_alloc_result_check(&ok) });
+        // SAFETY: both are live locals; the pointer is consumed.
+        let rc = unsafe {
+            z_chunk_alloc_result_new_ok(
+                &mut ok,
+                z_allocated_chunk_t {
+                    descriptpr: z_chunk_descriptor_t {
+                        segment: SEGMENT_ID,
+                        chunk: 3,
+                        len: 32,
+                    },
+                    ptr: &mut moved,
+                },
+            )
+        };
+        assert_eq!(rc, Z_OK);
+        assert!(unsafe { z_internal_chunk_alloc_result_check(&ok) });
+        assert!(
+            !unsafe { z_internal_ptr_in_segment_check(&moved._this) },
+            "taking the chunk must gravestone the caller's pointer, or it will \
+             be dropped twice"
+        );
+
+        // A second take of the SAME (now empty) pointer is refused.
+        let mut again = z_owned_chunk_alloc_result_t::null_value();
+        // SAFETY: `moved` is a live gravestone.
+        let rc = unsafe {
+            z_chunk_alloc_result_new_ok(
+                &mut again,
+                z_allocated_chunk_t {
+                    descriptpr: z_chunk_descriptor_t {
+                        segment: SEGMENT_ID,
+                        chunk: 3,
+                        len: 32,
+                    },
+                    ptr: &mut moved,
+                },
+            )
+        };
+        assert_eq!(rc, Z_EINVAL);
+        assert!(!unsafe { z_internal_chunk_alloc_result_check(&again) });
+
+        let mut moved_ok = z_moved_chunk_alloc_result_t { _this: ok };
+        // SAFETY: dropped once.
+        unsafe { z_chunk_alloc_result_drop(&mut moved_ok) };
+        assert!(!unsafe { z_internal_chunk_alloc_result_check(&moved_ok._this) });
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            1,
+            "dropping the result releases the pointer it took"
+        );
+
+        let mut err = z_owned_chunk_alloc_result_t::null_value();
+        // SAFETY: a live local.
+        unsafe { z_chunk_alloc_result_new_error(&mut err, Z_ALLOC_ERROR_NEED_DEFRAGMENT) };
+        assert!(unsafe { z_internal_chunk_alloc_result_check(&err) });
+        let mut moved_err = z_moved_chunk_alloc_result_t { _this: err };
+        // SAFETY: dropped once.
+        unsafe { z_chunk_alloc_result_drop(&mut moved_err) };
+
+        // NULL is tolerated.
+        assert!(!unsafe { z_internal_chunk_alloc_result_check(std::ptr::null()) });
+        unsafe { z_chunk_alloc_result_drop(std::ptr::null_mut()) };
+        unsafe { z_chunk_alloc_result_new_error(std::ptr::null_mut(), Z_ALLOC_ERROR_OTHER) };
+        let mut grave = z_owned_chunk_alloc_result_t::null_value();
+        unsafe { z_internal_chunk_alloc_result_null(&mut grave) };
+        assert!(!unsafe { z_internal_chunk_alloc_result_check(&grave) });
+    }
+
+    /// `z_shm_provider_map` adopts a chunk the BACKEND allocated, and refuses
+    /// one aimed at a provider that could not have issued it.
+    #[test]
+    fn map_adopts_a_backend_chunk_and_refuses_a_native_provider() {
+        // SAFETY: the provider owns the harness.
+        let (provider, harness) = unsafe { install(Harness::new(2, 128), false) };
+        let drops = Arc::new(AtomicUsize::new(0));
+
+        let make_chunk = |slot: usize| {
+            let tag = Box::into_raw(Box::new(SegmentTag(drops.clone())));
+            let mut ptr = z_owned_ptr_in_segment_t::null_value();
+            // SAFETY: `ptr` is a live local.
+            unsafe {
+                z_ptr_in_segment_new(
+                    &mut ptr,
+                    harness.slot_ptr(slot),
+                    zc_threadsafe_context_t {
+                        context: zc_threadsafe_context_data_t {
+                            ptr: tag as *mut c_void,
+                        },
+                        delete_fn: Some(segment_delete),
+                    },
+                )
+            };
+            z_moved_ptr_in_segment_t { _this: ptr }
+        };
+
+        let mut moved = make_chunk(0);
+        let mut buf = z_owned_shm_mut_t::null_value();
+        // SAFETY: all three are live locals.
+        let rc = unsafe {
+            z_shm_provider_map(
+                &mut buf,
+                z_shm_provider_loan(&provider),
+                z_allocated_chunk_t {
+                    descriptpr: z_chunk_descriptor_t {
+                        segment: SEGMENT_ID,
+                        chunk: 0,
+                        len: 128,
+                    },
+                    ptr: &mut moved,
+                },
+                96,
+            )
+        };
+        assert_eq!(rc, Z_OK);
+        // SAFETY: the result says the buffer is live.
+        let loaned = unsafe { z_shm_mut_loan(&buf) };
+        // SAFETY: as above.
+        assert_eq!(unsafe { z_shm_mut_len(loaned) }, 96);
+        // SAFETY: as above.
+        assert_eq!(
+            unsafe { z_shm_mut_data(loaned) },
+            harness.slot_ptr(0) as *const u8,
+            "the mapped buffer must be the chunk's own memory"
+        );
+        // SAFETY: dropped once.
+        unsafe { drop_buf(buf) };
+        assert_eq!(
+            harness.lock().freed,
+            vec![(SEGMENT_ID, 0, 128)],
+            "a mapped chunk is released to the backend like an allocated one"
+        );
+
+        // A length beyond the chunk is refused.
+        let mut moved = make_chunk(1);
+        let mut buf = z_owned_shm_mut_t::null_value();
+        // SAFETY: as above.
+        let rc = unsafe {
+            z_shm_provider_map(
+                &mut buf,
+                z_shm_provider_loan(&provider),
+                z_allocated_chunk_t {
+                    descriptpr: z_chunk_descriptor_t {
+                        segment: SEGMENT_ID,
+                        chunk: 1,
+                        len: 128,
+                    },
+                    ptr: &mut moved,
+                },
+                129,
+            )
+        };
+        assert_eq!(rc, Z_EINVAL);
+        assert!(!unsafe { z_internal_shm_mut_check(&buf) });
+
+        // A NATIVE provider cannot have issued this descriptor, and says so.
+        let mut native = z_owned_shm_provider_t::null_value();
+        assert_eq!(
+            unsafe { z_shm_provider_default_new(&mut native, 4096) },
+            Z_OK
+        );
+        let mut moved = make_chunk(1);
+        let mut buf = z_owned_shm_mut_t::null_value();
+        // SAFETY: as above.
+        let rc = unsafe {
+            z_shm_provider_map(
+                &mut buf,
+                z_shm_provider_loan(&native),
+                z_allocated_chunk_t {
+                    descriptpr: z_chunk_descriptor_t {
+                        segment: SEGMENT_ID,
+                        chunk: 1,
+                        len: 128,
+                    },
+                    ptr: &mut moved,
+                },
+                96,
+            )
+        };
+        assert_eq!(rc, Z_EINVAL);
+        assert!(
+            !unsafe { z_internal_ptr_in_segment_check(&moved._this) },
+            "the pointer was passed by value, so a refusal must still consume it"
+        );
+        // SAFETY: dropped once each.
+        unsafe { drop_provider(native) };
+        unsafe { drop_provider(provider) };
+    }
+
+    /// The `_async` spellings are the only place the two constructors differ,
+    /// and they differ in BOTH directions: refused on a non-threadsafe provider,
+    /// served on a threadsafe one.
+    #[test]
+    fn the_async_spellings_split_on_the_threadsafe_promise() {
+        struct Signals {
+            called: mpsc::Sender<isize>,
+            deleted: mpsc::Sender<()>,
+        }
+        unsafe extern "C" fn on_result(ctx: *mut c_void, result: *mut z_buf_layout_alloc_result_t) {
+            // SAFETY: the context this test handed to the async call.
+            let signals = unsafe { &*(ctx as *const Signals) };
+            // SAFETY: wz wrote the caller's own storage before calling back.
+            let status = unsafe { (*result).status };
+            let _ = signals.called.send(status as isize);
+        }
+        unsafe extern "C" fn on_delete(ctx: *mut c_void) {
+            // SAFETY: as above; this is the last use of the context.
+            let signals = unsafe { Box::from_raw(ctx as *mut Signals) };
+            let _ = signals.deleted.send(());
+        }
+
+        // The NON-threadsafe provider refuses, and still consumes the context.
+        // SAFETY: the provider owns the harness.
+        let (provider, harness) = unsafe { install(Harness::new(2, 256), false) };
+        let (called_tx, called_rx) = mpsc::channel();
+        let (deleted_tx, deleted_rx) = mpsc::channel();
+        let signals = Box::into_raw(Box::new(Signals {
+            called: called_tx,
+            deleted: deleted_tx,
+        }));
+        let mut out: z_buf_layout_alloc_result_t = unsafe { std::mem::zeroed() };
+        // SAFETY: `out` is writable and the provider live.
+        let rc = unsafe {
+            z_shm_provider_alloc_gc_defrag_async(
+                &mut out,
+                z_shm_provider_loan(&provider),
+                64,
+                zc_threadsafe_context_t {
+                    context: zc_threadsafe_context_data_t {
+                        ptr: signals as *mut c_void,
+                    },
+                    delete_fn: Some(on_delete),
+                },
+                Some(on_result),
+            )
+        };
+        assert_eq!(
+            rc, Z_EINVAL,
+            "a provider built by z_shm_provider_new made no thread-safety promise"
+        );
+        assert_eq!(
+            deleted_rx.recv_timeout(Duration::from_secs(5)),
+            Ok(()),
+            "the context is passed by value, so a refusal must still delete it"
+        );
+        assert_eq!(
+            called_rx.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected),
+            "a refused async call must not run the result callback"
+        );
+        assert_eq!(harness.lock().alloc_calls, 0);
+        // SAFETY: dropped once.
+        unsafe { drop_provider(provider) };
+
+        // The THREADSAFE provider serves it, and the alignment travels.
+        // SAFETY: the provider owns the harness.
+        let (provider, harness) = unsafe { install(Harness::new(2, 256), true) };
+        let (called_tx, called_rx) = mpsc::channel();
+        let (deleted_tx, deleted_rx) = mpsc::channel();
+        let signals = Box::into_raw(Box::new(Signals {
+            called: called_tx,
+            deleted: deleted_tx,
+        }));
+        let mut out: z_buf_layout_alloc_result_t = unsafe { std::mem::zeroed() };
+        // SAFETY: `out` outlives the callback — the test waits for both signals
+        // before this frame ends.
+        let rc = unsafe {
+            z_shm_provider_alloc_gc_defrag_aligned_async(
+                &mut out,
+                z_shm_provider_loan(&provider),
+                64,
+                z_alloc_alignment_t { pow: 5 },
+                zc_threadsafe_context_t {
+                    context: zc_threadsafe_context_data_t {
+                        ptr: signals as *mut c_void,
+                    },
+                    delete_fn: Some(on_delete),
+                },
+                Some(on_result),
+            )
+        };
+        assert_eq!(rc, Z_OK);
+        assert_eq!(
+            called_rx.recv_timeout(Duration::from_secs(5)),
+            Ok(ZC_BUF_LAYOUT_ALLOC_STATUS_OK as isize)
+        );
+        assert_eq!(deleted_rx.recv_timeout(Duration::from_secs(5)), Ok(()));
+        assert_eq!(
+            harness.lock().layouts_seen,
+            vec![(64usize, 5u8)],
+            "the async spelling must forward the caller's alignment too"
+        );
+        // SAFETY: the status said the buffer is live, and nothing touches `out`
+        // after both signals.
+        unsafe { drop_buf(out.buf) };
+        // SAFETY: dropped once.
+        unsafe { drop_provider(provider) };
+    }
+
+    /// The LAYOUT `_async` spellings split the same way, and the two names are
+    /// one implementation.
+    #[test]
+    fn the_layout_async_spellings_split_on_the_same_promise() {
+        struct Signals {
+            called: mpsc::Sender<isize>,
+            deleted: mpsc::Sender<()>,
+        }
+        unsafe extern "C" fn on_result(ctx: *mut c_void, result: *mut z_buf_alloc_result_t) {
+            // SAFETY: the context this test handed to the async call.
+            let signals = unsafe { &*(ctx as *const Signals) };
+            // SAFETY: wz wrote the caller's own storage before calling back.
+            let status = unsafe { (*result).status };
+            let _ = signals.called.send(status as isize);
+        }
+        unsafe extern "C" fn on_delete(ctx: *mut c_void) {
+            // SAFETY: as above; the last use of the context.
+            let signals = unsafe { Box::from_raw(ctx as *mut Signals) };
+            let _ = signals.deleted.send(());
+        }
+
+        for (threadsafe, expected) in [(false, Z_EINVAL), (true, Z_OK)] {
+            // SAFETY: the provider owns the harness.
+            let (provider, _harness) = unsafe { install(Harness::new(2, 256), threadsafe) };
+            let mut layout = z_owned_precomputed_layout_t::null_value();
+            // SAFETY: both are live locals.
+            assert_eq!(
+                unsafe { z_alloc_layout_new(&mut layout, z_shm_provider_loan(&provider), 48) },
+                Z_OK
+            );
+            let (called_tx, called_rx) = mpsc::channel();
+            let (deleted_tx, deleted_rx) = mpsc::channel();
+            let signals = Box::into_raw(Box::new(Signals {
+                called: called_tx,
+                deleted: deleted_tx,
+            }));
+            let mut out: z_buf_alloc_result_t = unsafe { std::mem::zeroed() };
+            // SAFETY: `out` outlives the callback — both signals are awaited
+            // before this iteration ends.
+            let rc = unsafe {
+                z_alloc_layout_threadsafe_alloc_gc_defrag_async(
+                    &mut out,
+                    z_alloc_layout_loan(&layout),
+                    zc_threadsafe_context_t {
+                        context: zc_threadsafe_context_data_t {
+                            ptr: signals as *mut c_void,
+                        },
+                        delete_fn: Some(on_delete),
+                    },
+                    Some(on_result),
+                )
+            };
+            assert_eq!(rc, expected, "threadsafe = {threadsafe}");
+            assert_eq!(deleted_rx.recv_timeout(Duration::from_secs(5)), Ok(()));
+            if expected == Z_OK {
+                assert_eq!(
+                    called_rx.recv_timeout(Duration::from_secs(5)),
+                    Ok(ZC_BUF_ALLOC_STATUS_OK as isize)
+                );
+                // SAFETY: the status said the buffer is live.
+                unsafe { drop_buf(out.buf) };
+            } else {
+                assert_eq!(called_rx.try_recv(), Err(mpsc::TryRecvError::Disconnected));
+            }
+            let mut moved = z_moved_precomputed_layout_t { _this: layout };
+            // SAFETY: dropped once.
+            unsafe { z_precomputed_layout_drop(&mut moved) };
+            // SAFETY: dropped once.
+            unsafe { drop_provider(provider) };
+        }
+    }
+
+    /// A NON-threadsafe backend's callbacks are serialised; a threadsafe one's
+    /// are not.
+    ///
+    /// The second half is the CONTROL and it is what makes the first half mean
+    /// anything: `concurrent_max == 1` is also what a wz that ran both calls on
+    /// one thread would report, and a probe that could never observe 2 would
+    /// pass on any implementation at all.
+    #[test]
+    fn a_non_threadsafe_backend_sees_one_callback_at_a_time() {
+        for (threadsafe, expected_max) in [(false, 1usize), (true, 2usize)] {
+            let mut harness = Harness::new(4, 128);
+            harness.probe_concurrency = true;
+            // SAFETY: the provider owns the harness.
+            let (provider, borrow) = unsafe { install(harness, threadsafe) };
+            let loan = unsafe { z_shm_provider_loan(&provider) } as usize;
+            let threads: Vec<_> = (0..2)
+                .map(|_| {
+                    std::thread::spawn(move || {
+                        let mut out: z_buf_layout_alloc_result_t = unsafe { std::mem::zeroed() };
+                        // SAFETY: the provider outlives every thread — they are
+                        // joined below.
+                        unsafe {
+                            z_shm_provider_alloc(
+                                &mut out,
+                                loan as *const z_loaned_shm_provider_t,
+                                32,
+                            )
+                        };
+                        if out.status == ZC_BUF_LAYOUT_ALLOC_STATUS_OK {
+                            // SAFETY: dropped once, on the thread that made it.
+                            unsafe { drop_buf(out.buf) };
+                        }
+                    })
+                })
+                .collect();
+            for thread in threads {
+                thread.join().expect("an allocating thread finished");
+            }
+            assert_eq!(
+                borrow.lock().concurrent_max,
+                expected_max,
+                "threadsafe = {threadsafe}"
+            );
+            // SAFETY: dropped once, after every thread joined.
+            unsafe { drop_provider(provider) };
+        }
+    }
+
+    /// The two POSIX constructors: `_new` is the default backend under its other
+    /// name, and `_with_layout_new` carries the layout's ALIGNMENT into the
+    /// segment's base.
+    ///
+    /// ⚠ The address assertion alone would be probabilistic — a 4096-aligned
+    /// allocation is sometimes 8192-aligned by luck — so the segment's own
+    /// alignment is asserted as well. That one is deterministic, and it is the
+    /// half a constructor that ignored the layout fails.
+    #[test]
+    fn the_posix_constructors_size_and_align_their_segment() {
+        let mut plain = z_owned_shm_provider_t::null_value();
+        assert_eq!(unsafe { z_posix_shm_provider_new(&mut plain, 4096) }, Z_OK);
+        // SAFETY: the provider is live.
+        assert_eq!(
+            unsafe { z_shm_provider_available(z_shm_provider_loan(&plain)) },
+            4096
+        );
+        // SAFETY: dropped once.
+        unsafe { drop_provider(plain) };
+
+        const POW: u8 = 13; // 8192, deliberately wider than SEGMENT_ALIGN
+        let mut layout = z_owned_memory_layout_t::null_value();
+        assert_eq!(
+            unsafe {
+                z_memory_layout_new(&mut layout, 64 * 1024, z_alloc_alignment_t { pow: POW })
+            },
+            Z_OK
+        );
+        let mut provider = z_owned_shm_provider_t::null_value();
+        // SAFETY: both are live locals.
+        assert_eq!(
+            unsafe {
+                z_posix_shm_provider_with_layout_new(&mut provider, z_memory_layout_loan(&layout))
+            },
+            Z_OK
+        );
+        // SAFETY: the provider is live and this crate minted its handle.
+        let backend =
+            unsafe { provider_of(z_shm_provider_loan(&provider)) }.expect("a live provider");
+        match backend {
+            Provider::Native(segment) => {
+                assert_eq!(segment.len, 64 * 1024);
+                assert_eq!(
+                    segment.align,
+                    1usize << POW,
+                    "a constructor that ignored the layout would leave SEGMENT_ALIGN"
+                );
+                assert_eq!(segment.base as usize % (1usize << POW), 0);
+            }
+            Provider::Foreign(_) => panic!("the POSIX constructor builds a native provider"),
+        }
+
+        // And an allocation at that alignment reaches an aligned ADDRESS, with a
+        // skew first so the answer is not the base's by accident.
+        let mut skew: z_buf_layout_alloc_result_t = unsafe { std::mem::zeroed() };
+        // SAFETY: `skew` is writable and the provider live.
+        unsafe { z_shm_provider_alloc(&mut skew, z_shm_provider_loan(&provider), 1) };
+        assert_eq!(skew.status, ZC_BUF_LAYOUT_ALLOC_STATUS_OK);
+        let mut out: z_buf_layout_alloc_result_t = unsafe { std::mem::zeroed() };
+        // SAFETY: as above.
+        unsafe {
+            z_shm_provider_alloc_aligned(
+                &mut out,
+                z_shm_provider_loan(&provider),
+                128,
+                z_alloc_alignment_t { pow: POW },
+            )
+        };
+        assert_eq!(out.status, ZC_BUF_LAYOUT_ALLOC_STATUS_OK);
+        // SAFETY: the status says the buffer is live.
+        let data = unsafe { z_shm_mut_data(z_shm_mut_loan(&out.buf)) };
+        assert_eq!(data as usize % (1usize << POW), 0);
+        // SAFETY: dropped once each.
+        unsafe { drop_buf(out.buf) };
+        unsafe { drop_buf(skew.buf) };
+        unsafe { drop_provider(provider) };
+        let mut moved = z_moved_memory_layout_t { _this: layout };
+        // SAFETY: dropped once.
+        unsafe { z_memory_layout_drop(&mut moved) };
+
+        // NULL and a nonsense layout are refused.
+        let mut grave = z_owned_shm_provider_t::null_value();
+        assert_eq!(
+            unsafe { z_posix_shm_provider_with_layout_new(&mut grave, std::ptr::null()) },
+            Z_ENULL
+        );
+        assert!(!unsafe { z_internal_shm_provider_check(&grave) });
+        assert_eq!(
+            unsafe { z_posix_shm_provider_new(std::ptr::null_mut(), 8) },
+            Z_ENULL
+        );
+    }
+
+    /// A foreign provider's BUFFER outlives the provider handle, and the
+    /// backend is not released until the last buffer is gone.
+    ///
+    /// `z_pub_shm.c`'s teardown order relies on this for the native provider;
+    /// the foreign one has the sharper version of it, because releasing the
+    /// context early would run a C destructor over memory a live buffer still
+    /// points into.
+    #[test]
+    fn a_foreign_buffer_outlives_its_provider_handle() {
+        // SAFETY: the provider owns the harness.
+        let (provider, harness) = unsafe { install(Harness::new(2, 128), false) };
+        let deleted = harness.deleted.clone();
+        let mut out: z_buf_layout_alloc_result_t = unsafe { std::mem::zeroed() };
+        // SAFETY: `out` is writable and the provider live.
+        unsafe { z_shm_provider_alloc(&mut out, z_shm_provider_loan(&provider), 64) };
+        assert_eq!(out.status, ZC_BUF_LAYOUT_ALLOC_STATUS_OK);
+        // SAFETY: dropped once.
+        unsafe { drop_provider(provider) };
+        assert_eq!(
+            deleted.load(Ordering::SeqCst),
+            0,
+            "a live buffer still holds the backend"
+        );
+        // SAFETY: the buffer is still live, and so is the memory behind it.
+        let data = unsafe { z_shm_mut_data(z_shm_mut_loan(&out.buf)) };
+        // SAFETY: 64 bytes of the backend's arena, still ours.
+        assert_eq!(unsafe { std::slice::from_raw_parts(data, 64) }.len(), 64);
+        // SAFETY: dropped once.
+        unsafe { drop_buf(out.buf) };
+        assert_eq!(deleted.load(Ordering::SeqCst), 1);
+    }
+
+    /// A NULL `this_` still consumes the context both constructors take by
+    /// value, so a caller that passed a bad output does not leak its own state.
+    #[test]
+    fn a_refused_constructor_still_deletes_the_context() {
+        let deleted = Arc::new(AtomicUsize::new(0));
+        struct Tag(Arc<AtomicUsize>);
+        unsafe extern "C" fn tag_delete(ctx: *mut c_void) {
+            // SAFETY: the pointer this test handed over.
+            let tag = unsafe { Box::from_raw(ctx as *mut Tag) };
+            tag.0.fetch_add(1, Ordering::SeqCst);
+        }
+        let tag = Box::into_raw(Box::new(Tag(deleted.clone())));
+        // SAFETY: a deliberate null output.
+        unsafe {
+            z_shm_provider_new(
+                std::ptr::null_mut(),
+                zc_context_t {
+                    context: tag as *mut c_void,
+                    delete_fn: Some(tag_delete),
+                },
+                callbacks(),
+            )
+        };
+        assert_eq!(deleted.load(Ordering::SeqCst), 1);
+
+        let tag = Box::into_raw(Box::new(Tag(deleted.clone())));
+        // SAFETY: as above.
+        unsafe {
+            z_shm_provider_threadsafe_new(
+                std::ptr::null_mut(),
+                zc_threadsafe_context_t {
+                    context: zc_threadsafe_context_data_t {
+                        ptr: tag as *mut c_void,
+                    },
+                    delete_fn: Some(tag_delete),
+                },
+                callbacks(),
+            )
+        };
+        assert_eq!(deleted.load(Ordering::SeqCst), 2);
+
+        let tag = Box::into_raw(Box::new(Tag(deleted.clone())));
+        let mut byte = 0u8;
+        // SAFETY: as above.
+        unsafe {
+            z_ptr_in_segment_new(
+                std::ptr::null_mut(),
+                &mut byte,
+                zc_threadsafe_context_t {
+                    context: zc_threadsafe_context_data_t {
+                        ptr: tag as *mut c_void,
+                    },
+                    delete_fn: Some(tag_delete),
+                },
+            )
+        };
+        assert_eq!(deleted.load(Ordering::SeqCst), 3);
     }
 }

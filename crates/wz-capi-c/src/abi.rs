@@ -1190,6 +1190,20 @@ pub const WZ_CAPI_C_LAYOUT_NAMES_SHM: &[&str] = &[
     "z_alloc_alignment_t",
     "z_buf_layout_alloc_result_t",
     "z_buf_alloc_result_t",
+    // R2289 (open-debt item 607) — the C-supplied backend plane. These five
+    // cross the ABI BY VALUE rather than behind a handle, so a field this tree
+    // added, dropped or reordered is a wild call at run time; the in-file
+    // `const _` assertions can only check this crate against itself, which is
+    // the half that cannot see upstream's header move.
+    "zc_context_t",
+    "zc_threadsafe_context_t",
+    "z_chunk_descriptor_t",
+    "z_allocated_chunk_t",
+    "zc_shm_provider_backend_callbacks_t",
+    // And the two opaque families the callbacks pass, whose SIZE is the part a
+    // C caller allocates on its own stack.
+    "z_owned_ptr_in_segment_t",
+    "z_owned_chunk_alloc_result_t",
 ];
 
 /// Empty on every arm whose header declares no SHM plane.
@@ -1313,6 +1327,13 @@ fn layout_values() -> Vec<usize> {
         size_of::<crate::shm::z_alloc_alignment_t>(),
         size_of::<crate::shm::z_buf_layout_alloc_result_t>(),
         size_of::<crate::shm::z_buf_alloc_result_t>(),
+        size_of::<crate::shm::zc_context_t>(),
+        size_of::<crate::shm::zc_threadsafe_context_t>(),
+        size_of::<crate::shm::z_chunk_descriptor_t>(),
+        size_of::<crate::shm::z_allocated_chunk_t>(),
+        size_of::<crate::shm::zc_shm_provider_backend_callbacks_t>(),
+        size_of::<crate::shm::z_owned_ptr_in_segment_t>(),
+        size_of::<crate::shm::z_owned_chunk_alloc_result_t>(),
     ]);
     values
 }

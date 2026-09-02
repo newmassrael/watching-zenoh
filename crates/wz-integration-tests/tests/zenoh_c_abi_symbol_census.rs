@@ -255,7 +255,28 @@ const BASELINES: &[(&str, usize, &str, &str)] = &[
     //
     // ⚠ The two `_async` spellings are NOT here: they take
     // `zc_threadsafe_context_t`, which this crate does not declare.
-    ("unstable-shm", 51, "1.10.0", "C1cc"),
+    // R2289 lowered this 51 -> 31: the C-SUPPLIED BACKEND plane, taken whole —
+    // the two context types (which is what "this crate does not declare" above
+    // stopped being true of), `z_ptr_in_segment_*` (6),
+    // `z_chunk_alloc_result_*` (5), `z_shm_provider_new` / `_threadsafe_new` /
+    // `_map`, the two `z_posix_shm_provider_*` constructors, and the FOUR
+    // `_async` spellings.
+    //
+    // The async four are in this round rather than a later one for a reason
+    // that is about the other sixteen: `z_shm_provider_new` and
+    // `z_shm_provider_threadsafe_new` differ ONLY in a thread-safety promise,
+    // and `_async` is the one place upstream reads it (`Z_EINVAL` on a
+    // non-threadsafe provider). Shipping the constructors without them would
+    // have left the flag stored and unread, which is a dead arm.
+    //
+    // What remains is 31 in ONE chain plus five strays: the SHM CLIENT side —
+    // `z_shm_client_*` (4), `zc_shm_client_list_*` (7),
+    // `z_shm_client_storage_*` (7) + `z_ref_shm_client_storage_global`,
+    // `z_posix_shm_client_new`, `z_open_with_custom_shm_clients` — plus
+    // `z_shared_shm_provider_*` (6) with `z_obtain_shm_provider`, and
+    // `z_bytes_to_owned_shm`, `z_shm_mut_try_from_immut`,
+    // `zc_cleanup_orphaned_shm_segments`.
+    ("unstable-shm", 31, "1.10.0", "C1cc"),
     // R311y614 — the two arms that had NO oracle on any machine, and therefore
     // no row: the gate hard-FAILED on them rather than guessing a ceiling from
     // a neighbour. `scripts/install-zenoh-c-arm.sh` builds any of the four, so
