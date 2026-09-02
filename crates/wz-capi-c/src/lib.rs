@@ -144,8 +144,8 @@ pub mod timestamp;
 /// R311y573 — zenoh-ext's DEPRECATED standalone families
 /// (`ze_publication_cache` / `ze_querying_subscriber`). Upstream declares BOTH
 /// behind `#if defined(Z_FEATURE_UNSTABLE_API)` (`zenoh_commons.h:6083,6101,
-/// 6120,6350-6371,6400-6435,6727-6737`) and its archive build exports neither,
-/// so this module carries the same gate. Without it wz would OVER-export 18
+/// 6120,6350-6371,6400-6435,6727-6737`) and a build without that axis exports
+/// neither, so this module carries the same gate. Without it wz would OVER-export 18
 /// symbols on the no-unstable arm — the direction R311y570's reverse census
 /// exists to catch, and the y536 rule read forwards: every user of the option
 /// structs' unstable fields is gated, so the module is.

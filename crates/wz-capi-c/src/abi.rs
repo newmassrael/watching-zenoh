@@ -28,25 +28,32 @@
 //! Two gates, because they answer different questions: "is this file
 //! self-consistent" and "is this file still true of the ABI".
 //!
-//! ## The footprints are FEATURE-DEPENDENT — and R311y540 MEASURED which ones
+//! ## The footprints are FEATURE-DEPENDENT, and WHICH BUILD IS SHIPPED IS DERIVED
 //!
-//! This section said, from R311y498 until R311y540, that zenoh-c's published
-//! standalone archive is built WITH `Z_FEATURE_UNSTABLE_API` and that
-//! `z_owned_bytes_t` is 40 bytes there against 32 without. **Both halves were
-//! wrong**, and the way they were wrong is instructive: the OBSERVATION (two
-//! builds exist, and their type sizes differ) was right, while the ATTRIBUTION
-//! (which build is which, and which type moves) was not — the failure mode this
-//! project has hit repeatedly.
+//! Two claims used to live in this paragraph and neither survived measurement.
+//! R311y498 wrote that `z_owned_bytes_t` is 40 bytes with
+//! `Z_FEATURE_UNSTABLE_API` and 32 without; R311y540 refuted that with
+//! upstream's own generator — the 40 is the SHARED-MEMORY number — and put a
+//! second claim in its place, that what upstream publishes is the no-unstable
+//! build. R2278 refuted THAT one: the published archive is the `unstable-shm`
+//! build, at 1.5.0 and at 1.10.0 alike, measured by fetching both packages and
+//! reading the `zenoh_configure.h` inside each, and confirmed against the
+//! `-DZENOHC_BUILD_WITH_*=ON` pair on upstream's own release workflow.
 //!
-//! What is true, measured by running UPSTREAM'S OWN opaque-type generator
-//! (`build-resources/opaque-types`, which emits `type: X, align: N, size: M` as
-//! compilation errors) under zenoh-c's PINNED toolchain and the exact feature
-//! list the archive's `zenoh_configure.h` declares:
+//! The PATTERN is worth more than either claim. The observation was right both
+//! times — two builds exist and their type sizes differ — and the attribution
+//! was wrong both times. R311y540 read its arm off a `~/.local` nobody had
+//! established was the package, which is the same mistake one place over.
 //!
-//! - The published archive is the **no-unstable** build. Its
-//!   `zenoh_configure.h` has no `Z_FEATURE_UNSTABLE_API` line at all, and
-//!   `install-zenoh-c.sh` installs that archive — so the arm CI provisions is
-//!   the one the `zenoh-c-no-unstable-api` feature selects, NOT the default.
+//! So the arm is not asserted here any more. `scripts/lib/zenoh_c_archive_arm.py`
+//! derives it, from upstream and from the install, and adjudicates every
+//! sentence in this tree that states it — this one included.
+//!
+//! What is true of the SIZES, measured by running UPSTREAM'S OWN opaque-type
+//! generator (`build-resources/opaque-types`, which emits
+//! `type: X, align: N, size: M` as compilation errors) under zenoh-c's PINNED
+//! toolchain:
+//!
 //! - `z_owned_bytes_t` does not move with unstable at all; it moves with
 //!   SHARED-MEMORY. There is no `Z_FEATURE_UNSTABLE_API`-driven 40-byte
 //!   `z_owned_bytes_t` under either arm, at either pinned version.
@@ -82,8 +89,10 @@ use std::ffi::c_void;
 /// `zenoh-c-no-unstable-api` feature selects the other.
 const UNSTABLE: bool = !cfg!(feature = "zenoh-c-no-unstable-api");
 /// `true` when this build targets a zenoh-c compiled WITH
-/// `Z_FEATURE_SHARED_MEMORY`. OFF by default, because the published archive
-/// (what `install-zenoh-c.sh` provisions) is built without it.
+/// `Z_FEATURE_SHARED_MEMORY`. OFF by default, which R2278 measured to be a
+/// DIVERGENCE from what a consumer installs: the published archive (what
+/// `install-zenoh-c.sh` provisions) is the `unstable-shm` build. Open-debt
+/// item 616 carries whether the default should move.
 const SHM: bool = cfg!(feature = "zenoh-c-shared-memory");
 
 // The sizes that MOVE across the two-axis feature space. Every number below

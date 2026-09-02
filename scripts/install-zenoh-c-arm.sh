@@ -10,9 +10,10 @@
 # `Z_FEATURE_UNSTABLE_API` and `Z_FEATURE_SHARED_MEMORY` are INDEPENDENT axes
 # (`scripts/lib/zenoh-c-oracle-arm.sh`), so "the installed zenoh-c" names one of
 # FOUR builds, and every gate that compares wz against it is arm-scoped. Two of
-# the four had a provisioning path — the published archive (`nounstable`, via
-# `install-zenoh-c.sh`) and the hosted CI build (`unstable-shm`, via
-# `install-zenoh-c-shm.sh`) — and the other two had NONE. That is why
+# the four were believed to have a provisioning path — the published archive
+# via `install-zenoh-c.sh`, whose arm R2278 measured as `unstable-shm`, and the
+# hosted CI build via `install-zenoh-c-shm.sh`, which builds that same arm — so
+# ONE of the four had a path and three had none. That is why
 # `zenoh_c_abi_symbol_census.rs::BASELINES` carries two rows and hard-FAILS on
 # the other two arms: a ceiling from another arm would measure nothing, so the
 # gate refuses rather than guesses, and the refusal stood because nothing could

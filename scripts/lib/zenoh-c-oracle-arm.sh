@@ -11,9 +11,11 @@
 # R311y566 — this exists as its own file because it was previously a default
 # rather than a reading. `check-capi-c-opaque-arms.sh` calibrated its generator
 # against the `nounstable` table unconditionally; that matched the author's
-# `~/.local` (a plain archive) and could NEVER match hosted CI's unstable+SHM
-# oracle, so the `capi-c-arms` job redded on a check structurally unable to pass
-# and the four-arm comparison behind it went unrun for rounds.
+# `~/.local`, which then held a plain `nounstable` install, and could NEVER
+# match hosted CI's unstable+SHM oracle, so the `capi-c-arms` job redded on a
+# check structurally unable to pass and the four-arm comparison behind it went
+# unrun for rounds. R2278: that install was NOT upstream's published package,
+# which is the `unstable-shm` build at every release measured.
 #
 # Split out rather than inlined so it can be DRIVEN on all four combinations by
 # `scripts/lib/test-zenoh-c-oracle-arm.sh` — a probe against an inlined copy of

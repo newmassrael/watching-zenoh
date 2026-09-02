@@ -10,10 +10,11 @@
 # Layer C1cc's footprint leg compares wz against the INSTALLED `zenoh_opaque.h`.
 # That header exists for exactly ONE feature arm — whichever build the machine
 # provisioned — and `install-zenoh-c.sh` provisions the published standalone
-# archive, which is the NO-unstable build. So the arm wz selects by default has
-# never been measured against anything, and that is where a 40-byte
+# archive, which R2278 measured to be the `unstable-shm` build. wz's DEFAULT
+# feature set models the `unstable` arm, so the arm wz selects by default is
+# still not the one any installed header describes, and that is where a 40-byte
 # `z_owned_bytes_t` sat unchallenged from R311y498 to R311y540: a size no
-# zenoh-c 1.5.0 build has, on the arm nothing looked at.
+# zenoh-c 1.5.0 build has, on an arm nothing looked at.
 #
 # The fix is to stop needing an installed header. zenoh-c GENERATES its opaque
 # header from `build-resources/opaque-types`, a crate whose entire purpose is to
@@ -29,11 +30,16 @@
 #
 # ## Two variables had to be removed before the generator was an oracle
 #
-# Calibration, not assumption: the no-unstable arm must reproduce the installed
-# `zenoh_opaque.h` EXACTLY, and getting there took pinning two things.
+# Calibration, not assumption: the arm the installed oracle actually IS — read
+# off its own `zenoh_configure.h` since R311y566, not fixed at `nounstable` as
+# this paragraph used to say — must reproduce the installed `zenoh_opaque.h`
+# EXACTLY, and getting there took pinning two things.
 #
-#   1. The FEATURE LIST. Passed explicitly below, matching what the installed
-#      `zenoh_configure.h` declares. (Measured: this turned out NOT to matter —
+#   1. The FEATURE LIST. Passed explicitly below as `BASE_FEATURES`, which is
+#      what the installed `zenoh_configure.h` declares APART from the two axis
+#      features each arm adds; R2278 renamed it, because a base list that
+#      claimed to be the whole list is a list that cannot be checked against
+#      the header it names. (Measured: this turned out NOT to matter —
 #      `zenoh/default` gives an identical table — but it is pinned anyway,
 #      because "it did not matter on the machine I checked" is not a contract.)
 #   2. The TOOLCHAIN. This one DID matter: `z_owned_task_t` is 32 bytes under
@@ -99,9 +105,13 @@ if ! rustup toolchain list 2>/dev/null | grep -q "^${CHANNEL}"; then
 fi
 say "upstream pins toolchain $CHANNEL"
 
-# The feature list the installed archive's zenoh_configure.h declares. See the
-# header for why it is pinned even though it measured as not mattering.
-ARCHIVE_FEATURES=(
+# The NON-AXIS part of the feature list: what the published package declares
+# MINUS the two features the four arms below add. It is not the package's whole
+# list and R2278 renamed it for saying it was — the package carries
+# `Z_FEATURE_SHARED_MEMORY` and `Z_FEATURE_UNSTABLE_API` too, and adding them
+# here would make every arm the same build. See the header for why the base is
+# pinned even though it measured as not mattering.
+BASE_FEATURES=(
     -F auth_pubkey -F auth_usrpwd -F transport_multilink -F transport_quic
     -F transport_tcp -F transport_tls -F transport_udp
     -F transport_unixsock-stream -F transport_ws
@@ -139,10 +149,10 @@ generate() {
 # with shared-memory, 2 move with unstable, and 2 move with each (additively).
 # Checking only the unstable axis would leave the one that was actually wrong.
 rc=0
-generate nounstable "${ARCHIVE_FEATURES[@]}" || rc=1
-generate unstable "${ARCHIVE_FEATURES[@]}" -F unstable || rc=1
-generate nounstable-shm "${ARCHIVE_FEATURES[@]}" -F shared-memory || rc=1
-generate unstable-shm "${ARCHIVE_FEATURES[@]}" -F unstable -F shared-memory || rc=1
+generate nounstable "${BASE_FEATURES[@]}" || rc=1
+generate unstable "${BASE_FEATURES[@]}" -F unstable || rc=1
+generate nounstable-shm "${BASE_FEATURES[@]}" -F shared-memory || rc=1
+generate unstable-shm "${BASE_FEATURES[@]}" -F unstable -F shared-memory || rc=1
 [[ $rc -eq 0 ]] || exit 1
 
 # CALIBRATION FIRST. ONE generator arm must reproduce the INSTALLED header
@@ -152,9 +162,10 @@ generate unstable-shm "${ARCHIVE_FEATURES[@]}" -F unstable -F shared-memory || r
 #
 # R311y566 — WHICH arm is READ OFF THE ORACLE, not assumed. This calibrated the
 # `nounstable` table unconditionally, which is blind on any machine whose
-# installed zenoh-c is a different build: the author's `~/.local` is a plain
-# archive (no unstable, no shared-memory) and the arm matched, while hosted CI
-# provisions an unstable+SHM oracle where that arm CANNOT match and never could.
+# installed zenoh-c is a different build: the author's `~/.local` then held a
+# plain `nounstable` install and the arm matched, while hosted CI provisions an
+# unstable+SHM oracle where that arm CANNOT match and never could. (R2278: that
+# install was not the published package, which is the `unstable-shm` build.)
 # So the job redded on a calibration structurally unable to pass, and the
 # four-arm comparison below it -- the whole point of the script -- has not run on
 # hosted since R311y542.

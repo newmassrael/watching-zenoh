@@ -103,9 +103,11 @@ if [[ "$installed" != "$ZENOH_C_VERSION" ]]; then
     exit 1
 fi
 
-# The Z_FEATURE set the archive was built with decides `z_put_options_t`'s layout
-# (its fields are `#if defined(Z_FEATURE_UNSTABLE_API)`-gated) and which examples
-# compile at all. Printed so a hosted log records WHICH ABI the run validated —
+# The Z_FEATURE set the archive was built with (the `unstable-shm` pair, derived
+# by `scripts/lib/zenoh_c_archive_arm.py` rather than asserted here) decides
+# `z_put_options_t`'s layout — its fields are
+# `#if defined(Z_FEATURE_UNSTABLE_API)`-gated — and which examples compile at
+# all. Printed so a hosted log records WHICH ABI the run validated —
 # "wz is a zenoh-c drop-in" is not a complete sentence without it.
 say "oracle ready: zenoh-c $installed at $PREFIX, examples at $EXAMPLES_PARENT/examples"
 say "feature set:"

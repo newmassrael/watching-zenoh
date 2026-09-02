@@ -1237,8 +1237,9 @@ layer_0_preflight_lints() {
     #
     # R311y566. `check-capi-c-opaque-arms.sh` calibrated its generator against
     # the `nounstable` table unconditionally. That matched the author's
-    # `~/.local` (a plain archive) and could never match hosted CI's
-    # unstable+SHM oracle, so the `capi-c-arms` job redded on a check
+    # `~/.local`, which then held a plain `nounstable` install — R2278
+    # established it was not upstream's published package — and could never
+    # match hosted CI's unstable+SHM oracle, so the job redded on a check
     # structurally unable to pass and the four-arm comparison behind it went
     # unrun from R311y542. The arm is now READ from the oracle's own
     # `zenoh_configure.h`, and this drives that resolver rather than a copy of
@@ -2309,6 +2310,21 @@ PY
     # which quoted it three times to describe the rename.
     python3 scripts/lib/prose_feature_gate.py --selftest || return 1
     python3 scripts/lib/prose_feature_gate.py --check || return 1
+    # R2278 (open-debt item 612) — WHICH build of zenoh-c upstream publishes is
+    # a per-release fact, and no sentence in this tree may state it wrong.
+    #
+    # The sibling above adjudicates a cargo invocation against `cargo
+    # metadata`. This adjudicates a claim about UPSTREAM, which nothing in any
+    # clone can resolve — so the fact is data in one file, bound to the version
+    # pin, and re-derived from upstream's own release workflow in Layer C1cc
+    # where a checkout exists. Item 612 was a consumer reading the older of two
+    # answers the tree carried at once; both readings had been written as
+    # timeless when the fact is per-release.
+    #
+    # In Layer 0 because `--check` reads nothing but the tree: it is the half
+    # that can run on every push, and the half that would otherwise SKIP-green.
+    python3 scripts/lib/zenoh_c_archive_arm.py --selftest || return 1
+    python3 scripts/lib/zenoh_c_archive_arm.py --check || return 1
     # R2192 (open-debt item 530, the FIRST measured case) — a dependency this
     # tree's prose names is one cargo resolves, and one it DENIES is one
     # nothing reaches.
@@ -15992,6 +16008,17 @@ layer_c1cc_api_compat_c() {
         echo "  Layer C1cc SKIP (zenoh-c oracle absent: headers + examples clone)"
         return 0
     fi
+    # R2278 (open-debt item 612) — RE-DERIVE which build upstream publishes,
+    # now that this lane has established an oracle is present. `--require`
+    # rather than the bare form on purpose: past this point the checkout and
+    # the install both exist, so an absent input is a broken provision rather
+    # than a machine without one, and a SKIP here would be the green-having-
+    # read-nothing shape the arming flags above exist for.
+    #
+    # Layer C0 already adjudicated the tree's SENTENCES against the constant.
+    # This is the other half — the constant against UPSTREAM — and it can only
+    # run where upstream is, which is here.
+    python3 scripts/lib/zenoh_c_archive_arm.py --derive --require || return 1
     # Named --exact one per invocation, like the E lanes: a rename or a silently
     # dropped test then fails the lane instead of shrinking it.
     for leg in \
@@ -16105,12 +16132,25 @@ layer_c1cc_api_compat_c() {
 # ─── Layer C1ce — §5.27 api-compat-c against the SHARED-MEMORY oracle ───
 #
 # R311y541. Layer C1cc measures wz against whatever zenoh-c is INSTALLED, and
-# `install-zenoh-c.sh` installs upstream's published archive — the build with
-# neither `Z_FEATURE_SHARED_MEMORY` nor `Z_FEATURE_UNSTABLE_API`. Against that
-# header SEVEN of upstream's 29 examples do not COMPILE at all, so C1cc reports
-# them ORACLE-ONLY and keeps them out of its denominator. That is honest and it
-# is also permanent: no amount of wz work moves a number whose denominator
-# excludes them.
+# `install-zenoh-c.sh` installs upstream's published archive — which R2278
+# measured to be the `unstable-shm` build, both axes on, at 1.5.0 and 1.10.0
+# alike.
+#
+# ⛔ THIS LANE'S STATED REASON RESTED ON THE OTHER READING and does not survive
+# it. The paragraph here said the installed header declares neither axis, so
+# SEVEN of upstream's 29 examples could not COMPILE against it and C1cc kept
+# them ORACLE-ONLY. R2278 probed four of those seven — `z_advanced_pub`,
+# `z_advanced_sub`, `z_pub_shm`, `z_sub_shm` — against the installed header
+# with `cc -fsyntax-only` and all four compiled. The classification itself is
+# DERIVED per run by `scripts/lib/capi_c_coverage.py`, which compiles each
+# example and sorts it, so no number here goes stale; what went stale is the
+# argument for running a second oracle at all, since the arm
+# `install-zenoh-c-shm.sh` builds is the arm the package already is. Open-debt
+# item 617 carries the re-measurement.
+#
+# The paragraph below is kept as the lane's ORIGINAL rationale, unedited except
+# where it stated the arm, because rewriting it would erase what this lane was
+# built to do while the re-measurement is still owed.
 #
 # `install-zenoh-c-shm.sh` builds the other oracle from source, and against it
 # the denominator becomes the whole corpus. The measured effect of turning it on

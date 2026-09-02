@@ -648,8 +648,12 @@ pub const Z_KEYEXPR_INTERSECTION_LEVEL_EQUALS: std::ffi::c_int = 3;
 /// answer `INTERSECTS` for an equal pair.
 ///
 /// UNSTABLE-gated, because upstream gates it: `zenoh_commons.h:3697` wraps the
-/// declaration in `#if defined(Z_FEATURE_UNSTABLE_API)`, so the published
-/// archive neither declares nor defines it. Exporting it unconditionally — which
+/// declaration in `#if defined(Z_FEATURE_UNSTABLE_API)`, so a zenoh-c built
+/// without that axis neither declares nor defines it. That arm is the one
+/// `zenoh-c-no-unstable-api` selects, and R2278 measured that it is NOT what a
+/// consumer installs — the published archive is the `unstable-shm` build — so
+/// this gate serves an arm wz can be BUILT for rather than the shipped one.
+/// Exporting it unconditionally — which
 /// this did for the length of one damage probe — makes wz's surface a SUPERSET
 /// of the reference's on that arm, and the drop-in census cannot see that: it
 /// measures reference-minus-wz and is blind by construction to the other

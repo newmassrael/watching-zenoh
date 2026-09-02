@@ -29,11 +29,14 @@
 //! drop-in corpus could never have caught a defect here, and why the probe is
 //! written rather than borrowed.
 //!
-//! ## This lane needs the SHM oracle
+//! ## This lane needs an UNSTABLE oracle
 //!
-//! Both families sit behind `Z_FEATURE_UNSTABLE_API`, which the installed
-//! standalone archive does not define. The oracle is
-//! `scripts/install-zenoh-c-shm.sh`'s build, i.e. the arm Layer C1ce runs.
+//! Both families sit behind `Z_FEATURE_UNSTABLE_API`, so the oracle has to be
+//! a build that carries that axis. Two do: the published archive is the
+//! `unstable-shm` build (R2278 measured it, at both pins), and so is
+//! `scripts/install-zenoh-c-shm.sh`'s, which is the arm Layer C1ce runs. This
+//! header named only the second until R2278, on the reading that the first one
+//! was a no-unstable build; it never was.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -222,9 +225,10 @@ fn oracle_prefix() -> Option<(PathBuf, PathBuf)> {
         }
     }
     eprintln!(
-        "skip: the SHARED-MEMORY zenoh-c oracle is absent. Both families sit behind \
-         Z_FEATURE_UNSTABLE_API, which the installed standalone archive does not \
-         define — run scripts/install-zenoh-c-shm.sh. Layer C1ce provisions it."
+        "skip: no zenoh-c oracle is installed. Both families sit behind \
+         Z_FEATURE_UNSTABLE_API, so the oracle must be a build that carries it — \
+         run scripts/install-zenoh-c.sh for the published package, or \
+         scripts/install-zenoh-c-shm.sh for the arm Layer C1ce provisions."
     );
     None
 }

@@ -62,7 +62,9 @@ use wz_integration_tests::common::{wz_capi_c_cdylib, zenoh_c_oracle};
 /// # R311y566 — one number was blind on its own machine
 ///
 /// This was a single `const BASELINE = 90`, measured against the author's
-/// `~/.local` (a plain no-unstable archive). Hosted CI provisions an
+/// `~/.local`, which was then a `nounstable` install — R2278 established it was
+/// not the published package, which is and was the `unstable-shm` build.
+/// Hosted CI provisions an
 /// unstable+SHM oracle, which DEFINES 758 public symbols to that one's 568 — so
 /// the same wz cdylib is missing 197 there and 90 here, and the gate redded on
 /// hosted for a difference that is not a regression. Exactly the class this

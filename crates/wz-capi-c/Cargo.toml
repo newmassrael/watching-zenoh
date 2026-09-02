@@ -62,11 +62,26 @@ wz-cdylib-build = { path = "../wz-cdylib-build" }
 
 [features]
 # zenoh-c's own build flags change its ABI, so wz's must be able to follow.
-# `z_owned_bytes_t` is 40 bytes in upstream's published standalone archive (built
-# WITH Z_FEATURE_UNSTABLE_API) and 32 in a build without it — measured, by
-# provisioning the archive beside a local install and asking a C compiler.
-# DEFAULT = the published archive, because that is what a consumer installs and
-# what CI provisions. This feature selects the other.
+# `Z_FEATURE_UNSTABLE_API` and `Z_FEATURE_SHARED_MEMORY` are INDEPENDENT axes,
+# so "zenoh-c" names one of FOUR builds; the id for each is the argument
+# `scripts/install-zenoh-c-arm.sh` takes.
+#
+# ⚠ WHICH ONE UPSTREAM SHIPS IS NOT RESTATED HERE, and open-debt item 612 is
+# why: this table asserted it, the assertion was wrong, and a consumer opening
+# this file to choose a feature read the wrong one. It has ONE home now —
+# `scripts/lib/zenoh_c_archive_arm.py`, which derives it from upstream's own
+# release workflow and from the installed header, and which adjudicates every
+# sentence in this tree that states it, this paragraph included.
+#
+# ⚠⚠ R2278 MEASURED the pairing, and it does not match. The default feature
+# set models the `unstable` arm; the published archive is the `unstable-shm`
+# build (both axes on, at 1.5.0 and at 1.10.0 alike — the two packages were
+# fetched and their `zenoh_configure.h` read). A default-featured build linked
+# against that package's headers therefore pairs one arm's declarations with
+# another arm's footprints. Add `zenoh-c-shared-memory` to match it.
+# Whether the DEFAULT should move instead is open-debt item 616.
+#
+# This feature selects the no-unstable axis.
 zenoh-c-no-unstable-api = []
 # R311y540 — the OTHER axis. `Z_FEATURE_SHARED_MEMORY` moves EIGHT of the types
 # this crate declares (`z_owned_bytes_t` 32 -> 40, `z_owned_sample_t` +16, ...),
@@ -90,7 +105,9 @@ zenoh-c-no-unstable-api = []
 # `zenoh_commons.h`. The 85 SHM symbols that remain missing on this arm are the
 # provider/allocator plane, which is still not exported and is still item 593's.
 #
-# OFF by default, because the published standalone archive is built without it.
+# OFF by default, and R2278 measured that this is a DIVERGENCE rather than a
+# match: the published standalone archive is the `unstable-shm` build, which
+# carries this axis. See the ⚠⚠ paragraph at the head of this table.
 zenoh-c-shared-memory = []
 
 [dependencies]
