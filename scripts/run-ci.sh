@@ -2886,6 +2886,20 @@ PY
     # `.githooks/pre-push`, which is what makes it the LOCAL gate item 224 asks
     # for -- this lane is the hosted half.
     python3 scripts/lib/config_key_fixture_gate.py || return 1
+    # R2288 (open-debt item 610) — every refusal the framing loop can return is
+    # named by a test that fires it, and the population is DERIVED from the
+    # function body rather than listed.
+    #
+    # The hosted half of `.githooks/pre-push` gate 2i. It belongs on both for
+    # the reason item 610 exists: a dead arm survives every lane this repo has,
+    # because `cargo test` can only assert what a function does for the inputs
+    # a test supplies and so can never notice the arm nobody supplied one for.
+    # The selftest runs beside the check because a gate over source text goes
+    # vacuous silently — its five mutations are shapes the PRE-R2288 tree either
+    # contained or would have accepted, so a parser that stopped understanding
+    # the body reds here instead of reporting a clean function.
+    python3 scripts/lib/framing_refusal_reachability_gate.py || return 1
+    python3 scripts/lib/framing_refusal_reachability_gate.py --selftest >/dev/null || return 1
     # R2239 (open-debt item 586) — the ABI-provenance gate's OWN soundness.
     #
     # Its `--check` half needs zenoh-c's source checkout and the four generator

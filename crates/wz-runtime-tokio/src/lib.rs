@@ -22,8 +22,6 @@
 // tokio::net dependency at the driver-construction site (the tokio
 // dep stays unconditional because session_glue.rs uses tokio::time +
 // tokio::sync regardless of which link kind is enabled).
-#[cfg(feature = "transport-link-tcp")]
-use sce_forge_runtime::codec::SceCursor;
 use std::io;
 #[cfg(any(feature = "transport-link-tcp", feature = "transport-link-udp"))]
 use std::net::SocketAddr;
@@ -1620,8 +1618,33 @@ pub(crate) enum ReadState {
 /// Extracted from the pre-R311et `TcpDriver::poll_event` body verbatim so
 /// the framing state machine has a single home. `wz-ap-demo`'s duplicated
 /// `InboundReadDriver` copy retires when the demo consumes `link_pipeline`
-/// (R311ev); the wire shape stays codec-routed (the [`StreamEnvelope`]
-/// decode is the single source of truth, not a hand-rolled prefix strip).
+/// (R311ev).
+///
+/// R2288 (open-debt item 610) — WHERE THE CODEC OWNS THE WIRE SHAPE, AND WHERE
+/// THIS FUNCTION DOES. This comment used to claim the read half was
+/// "codec-routed (the `StreamEnvelope` decode is the single source of truth,
+/// not a hand-rolled prefix strip)". Measured, the opposite was true in both
+/// halves of that sentence: this loop reads the length prefix by hand
+/// (`u16::from_le_bytes`) because a stream cannot be framed without doing so
+/// first, and the `StreamEnvelope::decode` that followed re-read that same
+/// number off the buffer this loop had just sized from it, returning a payload
+/// byte-identical to the frame tail. It adjudicated nothing, and its `Err` arm
+/// could not fire.
+///
+/// The codec is still the single source of truth for the shape -- on the WRITE
+/// side, where it is the thing that emits the bytes ([`TcpDriver::send`] and
+/// [`stream_link::StreamWriteDriver::send_blocking`] both encode through it).
+/// What binds this reader to that writer is a test rather than a dead runtime
+/// arm: `the_writers_codec_frames_what_this_reader_unframes` feeds this
+/// function exactly what the codec encodes, so a codegen change to the prefix
+/// width or endianness reds a lane instead of silently desynchronising the two
+/// halves.
+///
+/// Every `LinkEvent::Lost` this function can return carries a `REACHED-BY:`
+/// marker naming the test that fires it, and
+/// `scripts/lib/framing_refusal_reachability_gate.py` derives the population
+/// from this body rather than from a list -- an unmarked refusal is RED, which
+/// is what item 610 was: an arm nobody could reach and nobody was measuring.
 #[cfg(feature = "transport-link-tcp")]
 pub(crate) async fn poll_framed<S>(
     read_state: &mut ReadState,
@@ -1654,6 +1677,7 @@ where
             } => match src.read(&mut prefix[*offset..*width]).await {
                 Ok(0) => {
                     *read_state = ReadState::Idle;
+                    // REACHED-BY: a_stream_that_ends_before_the_prefix_loses_the_link (PeerClosed)
                     return LinkEvent::Lost {
                         cause: LostCause::PeerClosed,
                     };
@@ -1679,6 +1703,7 @@ where
                         // never rejects a well-formed peer.
                         if payload_len > u16::MAX as usize {
                             *read_state = ReadState::Idle;
+                            // REACHED-BY: lowlatency_rx_rejects_oversize_u32_prefix (PeerClosed)
                             return LinkEvent::Lost {
                                 cause: LostCause::PeerClosed,
                             };
@@ -1694,6 +1719,7 @@ where
                 }
                 Err(_) => {
                     *read_state = ReadState::Idle;
+                    // REACHED-BY: an_io_error_reading_the_prefix_loses_the_link (OsError)
                     return LinkEvent::Lost {
                         cause: LostCause::OsError,
                     };
@@ -1705,65 +1731,95 @@ where
                 prefix_width,
             } => {
                 if *offset == frame.len() {
-                    // Frame complete. Take the buffer out before decoding
-                    // so the state reset is visible if the codec rejects.
+                    // Frame complete. Take the buffer out before reading it so
+                    // the state reset is visible on every exit from this arm.
                     let w = *prefix_width;
                     let bytes = std::mem::take(frame);
                     *read_state = ReadState::Idle;
-                    if w == 4 {
-                        // transport-lowlatency — the 4-byte u32 prefix is NOT the
-                        // u16 StreamEnvelope shape; the payload is the frame tail.
-                        let payload = &bytes[4..];
-                        if payload.is_empty() {
-                            continue;
-                        }
-                        return LinkEvent::Rx(RxFrame::new(payload.to_vec()));
+                    // R2288 (open-debt item 610) — THE PAYLOAD IS THE FRAME TAIL,
+                    // AT BOTH PREFIX WIDTHS. Until this round the 2-byte arm
+                    // re-decoded the completed frame through
+                    // `StreamEnvelope::decode` and mapped its `Err` to
+                    // `Lost { PeerClosed }`, which read as "wz refuses a malformed
+                    // batch here". MEASURED, it refused nothing:
+                    //
+                    //   * `env.payload` came back BYTE-IDENTICAL to `&bytes[2..]`,
+                    //     because the length the codec re-reads is the length this
+                    //     loop just wrote into `bytes[..2]` and sized the buffer
+                    //     from. Two reads of one number always agree.
+                    //   * so the `Err` arm had no path to being true, and a guard
+                    //     that cannot fire documents a check nobody performs --
+                    //     R2268's dead guard, in another file.
+                    //
+                    // The other repair item 610 offered -- keep the arm and make
+                    // it reachable by handing the codec a PARTIAL buffer so it
+                    // adjudicates the length mismatch -- was measured and is NOT
+                    // available: `decode` indexes `raw[2..2 + payload_len]` after
+                    // checking only `remaining() >= 2`, so a short frame PANICS
+                    // instead of returning `NeedMoreBytes`. A framing layer cannot
+                    // ask it that question.
+                    //
+                    // ⚠ THIS IS NOT "malformed input can no longer lose the link",
+                    // which would diverge from upstream: zenoh answers a batch it
+                    // cannot decode with `zerror!("{}: decoding error")`, and the
+                    // `?` on it ends the rx task (`unicast/universal/rx.rs`). It is
+                    // that the refusal lives ONE LAYER UP, where the bytes mean
+                    // something -- `parse_inbound` -> `InboundParseError` is wz's
+                    // counterpart to upstream's `batch.decode()`, and it is fatal
+                    // there for the same reason. What THIS layer owns is FRAMING,
+                    // and a completed frame is by construction well framed; its
+                    // only failures are running out of bytes and the OS, both of
+                    // which still return `Lost`.
+                    //
+                    // The wire shape stays codec-owned where a codec can own it:
+                    // `TcpDriver::send` and `StreamWriteDriver::send_blocking` both
+                    // ENCODE through `StreamEnvelope`, and
+                    // `the_writers_codec_frames_what_this_reader_unframes` pins the
+                    // two halves together -- so a codegen change to the prefix
+                    // width or endianness reds a test instead of silently
+                    // desynchronising them. That is a live contract; the deleted
+                    // arm was not one.
+                    let payload = &bytes[w..];
+                    // R2271 (open-debt item 577) — A ZERO-LENGTH BATCH IS A BATCH
+                    // OF NO MESSAGES, and reading it means doing nothing. Passing
+                    // the empty payload up made the parser meet it as
+                    // `InboundParseError::Empty` and the link go
+                    // `LinkLost(PeerClosed)`: one harmless malformed batch from a
+                    // peer ended the session.
+                    //
+                    // MEASURED against both implementations this one replaces,
+                    // because "whose defect is it" is not the question -- "must a
+                    // receiver survive it" is:
+                    //
+                    //   * zenoh (Rust) reads a batch with `while !batch.is_empty()`
+                    //     (`zenoh-transport`, `unicast/universal/rx.rs`),
+                    //     `while reader.can_read()` on the lowlatency path, and
+                    //     `while !batch.is_empty()` again for multicast. An empty
+                    //     batch runs the body zero times and returns `Ok(())`.
+                    //   * zenoh-pico reads one with `while (_z_zbuf_len(&zbuf) > 0)`
+                    //     (`src/transport/unicast/read.c`,
+                    //     `_z_unicast_process_messages`, which is what the
+                    //     steady-state read task calls). Zero iterations,
+                    //     `_Z_RES_OK`, session kept.
+                    //
+                    // Both survive; only this did not. Skipping back to the next
+                    // frame is the same sentence as their `while`, and it loses
+                    // nothing: no transport message is zero bytes long, so an
+                    // empty payload can only mean "no messages".
+                    //
+                    // ⚠ NOT a busy loop. Every pass through `Idle` reaches an
+                    // awaited `src.read()`, so an endless stream of empty batches
+                    // costs one syscall each and stays cancel-safe -- exactly what
+                    // it costs the two implementations above.
+                    if payload.is_empty() {
+                        continue;
                     }
-                    let mut cursor = SceCursor::new(&bytes);
-                    return match StreamEnvelope::decode(&mut cursor) {
-                        // R2271 (open-debt item 577) — A ZERO-LENGTH BATCH IS A
-                        // BATCH OF NO MESSAGES, and reading it means doing
-                        // nothing. Passing the empty payload up made the parser
-                        // meet it as `InboundParseError::Empty` and the link go
-                        // `LinkLost(PeerClosed)`: one harmless malformed batch
-                        // from a peer ended the session.
-                        //
-                        // MEASURED against both implementations this one
-                        // replaces, because "whose defect is it" is not the
-                        // question -- "must a receiver survive it" is:
-                        //
-                        //   * zenoh (Rust) reads a batch with
-                        //     `while !batch.is_empty()` (`zenoh-transport`,
-                        //     `unicast/universal/rx.rs`), `while reader.can_read()`
-                        //     on the lowlatency path, and `while !batch.is_empty()`
-                        //     again for multicast. An empty batch runs the body
-                        //     zero times and returns `Ok(())`.
-                        //   * zenoh-pico reads one with
-                        //     `while (_z_zbuf_len(&zbuf) > 0)`
-                        //     (`src/transport/unicast/read.c`,
-                        //     `_z_unicast_process_messages`, which is what the
-                        //     steady-state read task calls). Zero iterations,
-                        //     `_Z_RES_OK`, session kept.
-                        //
-                        // Both survive; only this did not. Skipping back to the
-                        // next frame is the same sentence as their `while`, and
-                        // it loses nothing: no transport message is zero bytes
-                        // long, so an empty payload can only mean "no messages".
-                        //
-                        // ⚠ NOT a busy loop. Every pass through `Idle` reaches an
-                        // awaited `src.read()`, so an endless stream of empty
-                        // batches costs one syscall each and stays cancel-safe --
-                        // exactly what it costs the two implementations above.
-                        Ok(env) if env.payload.is_empty() => continue,
-                        Ok(env) => LinkEvent::Rx(RxFrame::new(env.payload.to_vec())),
-                        Err(_) => LinkEvent::Lost {
-                            cause: LostCause::PeerClosed,
-                        },
-                    };
+                    return LinkEvent::Rx(RxFrame::new(payload.to_vec()));
                 }
                 match src.read(&mut frame[*offset..]).await {
                     Ok(0) => {
                         *read_state = ReadState::Idle;
+                        // REACHED-BY: a_frame_truncated_mid_payload_loses_the_link (PeerClosed)
                         return LinkEvent::Lost {
                             cause: LostCause::PeerClosed,
                         };
@@ -1773,6 +1829,7 @@ where
                     }
                     Err(_) => {
                         *read_state = ReadState::Idle;
+                        // REACHED-BY: an_io_error_reading_the_payload_loses_the_link (OsError)
                         return LinkEvent::Lost {
                             cause: LostCause::OsError,
                         };
@@ -2276,7 +2333,20 @@ mod poll_framed_lowlatency_tests {
         let mut src: &[u8] = &bytes;
         let mut st = ReadState::Idle;
         let ev = poll_framed(&mut st, &mut src, true).await;
-        assert!(matches!(ev, LinkEvent::Lost { .. }));
+        // R2288 — the CAUSE is asserted, not just the refusal. `Lost { .. }`
+        // was what this test checked until the reachability gate derived that
+        // nothing tied it to the `PeerClosed` the site actually returns: a
+        // wildcard passes equally well if the site is changed to `OsError`, and
+        // the two causes exist to be told apart by a caller.
+        assert!(
+            matches!(
+                ev,
+                LinkEvent::Lost {
+                    cause: LostCause::PeerClosed
+                }
+            ),
+            "an over-max lowlatency prefix is refused as PeerClosed, got {ev:?}"
+        );
     }
 
     /// R2271 (open-debt item 577) — a zero-length batch is SKIPPED, and the
@@ -2345,14 +2415,17 @@ mod poll_framed_lowlatency_tests {
         // ⚠ This is not the control that was written FIRST, and the difference
         // is a finding rather than a detail. The first attempt fed a "malformed
         // but non-empty" batch and expected the envelope decode to refuse it --
-        // and it did not, because `StreamEnvelope::decode` fails on exactly one
-        // condition, fewer than two bytes remaining, and this call site always
-        // hands it `2 + payload_len` bytes taken from those very two. So the
-        // `Err(_) => Lost` arm below has NO PATH TO BEING TRUE here: R2268's
-        // dead guard, in another file. Filed as its own open-debt item rather
-        // than quietly deleted, because whether the repair is dropping the arm
-        // or not pre-sizing the buffer from an untrusted length is a judgement
-        // of its own. EOF is the reachable fatal case, so EOF is the control.
+        // and it did not, because this call site always hands the codec
+        // `2 + payload_len` bytes taken from those very two, so the two reads of
+        // one number always agree. R2271 recorded the reason as "`decode` fails
+        // on exactly one condition, fewer than two bytes remaining"; R2288
+        // measured that and it is WRONG -- `decode` has four failure exits, and
+        // on a SHORT frame it does not take any of them, it panics indexing
+        // `raw[2..2 + payload_len]`. The conclusion R2271 drew from it survived
+        // the correction: the arm had no path to being true. R2288 removed it
+        // (item 610) and gave every surviving refusal a `REACHED-BY:` marker
+        // plus the test named there. EOF is a reachable fatal case, so EOF is
+        // the control here; the other four have tests of their own below.
         let wire = [0x03u8, 0x00, 0xAA];
         let mut src: &[u8] = &wire;
         let mut st = ReadState::Idle;
@@ -2361,6 +2434,176 @@ mod poll_framed_lowlatency_tests {
             matches!(ev, LinkEvent::Lost { .. }),
             "a truncated batch must still lose the link, got {ev:?}"
         );
+    }
+
+    /// R2288 (open-debt item 610) — a reader that always fails, so the two
+    /// `Err(_) => Lost { OsError }` refusals in [`poll_framed`] have an input
+    /// that reaches them.
+    ///
+    /// Both were unmeasured before this round for the same reason item 610's
+    /// arm was: nothing in the suite could produce an IO error from a `&[u8]`,
+    /// which is what every other test here reads from. They differ from the
+    /// dead arm in the way that matters -- the OS really can fail a read
+    /// mid-frame, so the path exists and only the INPUT was missing.
+    /// `failing_after` distinguishes the prefix site from the payload site:
+    /// bytes flow until that many have been handed over, then every read errors.
+    struct FailingReader {
+        bytes: Vec<u8>,
+        cursor: usize,
+        failing_after: usize,
+    }
+
+    impl tokio::io::AsyncRead for FailingReader {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            if self.cursor >= self.failing_after {
+                return std::task::Poll::Ready(Err(io::Error::other("injected read failure")));
+            }
+            let end = (self.cursor + buf.remaining())
+                .min(self.failing_after)
+                .min(self.bytes.len());
+            let chunk = &self.bytes[self.cursor..end];
+            buf.put_slice(chunk);
+            self.cursor = end;
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    /// R2288 (item 610) — the `Ok(0)` refusal while reading the LENGTH PREFIX.
+    /// A peer that closes between frames delivers zero bytes at frame start.
+    #[tokio::test]
+    async fn a_stream_that_ends_before_the_prefix_loses_the_link() {
+        let mut src: &[u8] = &[];
+        let mut st = ReadState::Idle;
+        let ev = poll_framed(&mut st, &mut src, false).await;
+        assert!(
+            matches!(
+                ev,
+                LinkEvent::Lost {
+                    cause: LostCause::PeerClosed
+                }
+            ),
+            "EOF at frame start is PeerClosed, got {ev:?}"
+        );
+        assert!(
+            matches!(st, ReadState::Idle),
+            "the state machine must reset so a retry inherits no partial buffer"
+        );
+    }
+
+    /// R2288 (item 610) — the `Err(_)` refusal while reading the LENGTH PREFIX,
+    /// which is `OsError` rather than `PeerClosed`: the distinction is the whole
+    /// point of having two causes, and nothing measured it until this round.
+    #[tokio::test]
+    async fn an_io_error_reading_the_prefix_loses_the_link() {
+        let mut src = FailingReader {
+            bytes: vec![0x02, 0x00],
+            cursor: 0,
+            failing_after: 0,
+        };
+        let mut st = ReadState::Idle;
+        let ev = poll_framed(&mut st, &mut src, false).await;
+        assert!(
+            matches!(
+                ev,
+                LinkEvent::Lost {
+                    cause: LostCause::OsError
+                }
+            ),
+            "a failed prefix read is OsError, not PeerClosed, got {ev:?}"
+        );
+    }
+
+    /// R2288 (item 610) — the `Ok(0)` refusal MID-PAYLOAD. Distinct from the
+    /// prefix site above: the length was accepted, the buffer allocated, and the
+    /// peer then stopped short of filling it.
+    #[tokio::test]
+    async fn a_frame_truncated_mid_payload_loses_the_link() {
+        // Declared 4 bytes of payload, two delivered, then EOF.
+        let wire = [0x04u8, 0x00, 0xAA, 0xBB];
+        let mut src: &[u8] = &wire;
+        let mut st = ReadState::Idle;
+        let ev = poll_framed(&mut st, &mut src, false).await;
+        assert!(
+            matches!(
+                ev,
+                LinkEvent::Lost {
+                    cause: LostCause::PeerClosed
+                }
+            ),
+            "a payload that ends early is PeerClosed, got {ev:?}"
+        );
+        assert!(
+            matches!(st, ReadState::Idle),
+            "a half-filled frame must not survive into the next read"
+        );
+    }
+
+    /// R2288 (item 610) — the `Err(_)` refusal MID-PAYLOAD, the fifth and last
+    /// way this function can refuse. `failing_after: 2` lets the whole prefix
+    /// through and fails the read that would have filled the payload.
+    #[tokio::test]
+    async fn an_io_error_reading_the_payload_loses_the_link() {
+        let mut src = FailingReader {
+            bytes: vec![0x04, 0x00, 0xAA, 0xBB, 0xCC, 0xDD],
+            cursor: 0,
+            failing_after: 2,
+        };
+        let mut st = ReadState::Idle;
+        let ev = poll_framed(&mut st, &mut src, false).await;
+        assert!(
+            matches!(
+                ev,
+                LinkEvent::Lost {
+                    cause: LostCause::OsError
+                }
+            ),
+            "a failed payload read is OsError, got {ev:?}"
+        );
+    }
+
+    /// R2288 (open-debt item 610) — THE CONTRACT THAT REPLACES THE DEAD ARM.
+    ///
+    /// [`poll_framed`] no longer routes the completed 2-byte frame back through
+    /// `StreamEnvelope::decode`, because that decode re-read a number this loop
+    /// had just written and could not disagree with it. What the codec still
+    /// owns is the shape ITSELF, on the write side -- so the binding that keeps
+    /// the two halves in step is this: whatever `StreamEnvelope::encode_to_vec`
+    /// emits, this reader must unframe back to the same payload.
+    ///
+    /// ⛔ THE ASSERTION IS THE ROUND TRIP, not the byte layout. Pinning
+    /// `wire[0..2]` to a hand-written little-endian pair would pass even if the
+    /// reader were changed to read big-endian, since the test would then be
+    /// checking the codec against a literal instead of against the reader. Two
+    /// payload lengths whose LE and BE encodings differ (`0x0102`) are what make
+    /// an endianness flip on either side fail here.
+    #[tokio::test]
+    async fn the_writers_codec_frames_what_this_reader_unframes() {
+        for payload in [
+            vec![0xAAu8],
+            vec![0x01, 0x02, 0x03],
+            // 258 bytes: payload_len 0x0102, whose LE and BE encodings differ,
+            // so a width or endianness change on either half is visible here.
+            vec![0x5A; 258],
+        ] {
+            let wire = StreamEnvelope {
+                payload_len: payload.len() as u16,
+                payload: &payload,
+            }
+            .encode_to_vec();
+            let mut src: &[u8] = &wire;
+            let mut st = ReadState::Idle;
+            match poll_framed(&mut st, &mut src, false).await {
+                LinkEvent::Rx(rx) => assert_eq!(
+                    rx.bytes, payload,
+                    "the reader must unframe exactly what the codec framed"
+                ),
+                other => panic!("codec-framed wire must arrive as Rx, not {other:?}"),
+            }
+        }
     }
 }
 

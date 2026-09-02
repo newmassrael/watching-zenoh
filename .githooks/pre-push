@@ -458,6 +458,38 @@ if ! python3 scripts/lib/unhonoured_kind_evidence_gate.py > /dev/null; then
     exit 1
 fi
 
+# ─── gate 2i — every framing refusal is named by a test (R2288, item 610) ──
+# grades: worktree
+#
+# A guard that cannot fire compiles, passes `cargo test`, and reads in review as
+# "we handle that case". Nothing in this repo could tell it from a guard that
+# works, because a `return LinkEvent::Lost { .. }` is well-typed whether or not
+# any input reaches it — and the cost is not the dead code, it is the false
+# statement the dead code makes about what wz checks.
+#
+# Measured twice before it got a gate: R2268 in the pico plane, and R2271 in
+# `poll_framed`, where the control group for item 577 could not be built at all
+# because the arm it needed to exercise had no path to being true. R2288 removed
+# that arm and this is the instrument, so the third instance reds instead of
+# being discovered by whoever next tries to write a control.
+#
+# Here rather than only hosted, for gate 2d's reason: both sides are on disk —
+# the refusals and the tests are the same file — and reading them costs well
+# under a second with nothing built. Gate 3 cannot cover it even when it runs
+# this crate: a test suite asserts what the function DOES for the inputs it
+# supplies, and so structurally cannot notice the arm nobody supplied one for.
+if ! python3 scripts/lib/framing_refusal_reachability_gate.py; then
+    echo "" >&2
+    echo "pre-push: [gate 2i] framing-refusal reachability gate FAILED — a" >&2
+    echo "          \`LinkEvent::Lost\` in \`poll_framed\` is not named by a test" >&2
+    echo "          that fires it, names one that does not exist, or declares a" >&2
+    echo "          \`LostCause\` the site does not return. The line above says" >&2
+    echo "          which. Add the test and its \`// REACHED-BY:\` marker, or" >&2
+    echo "          remove the refusal — an arm that cannot fire is item 610." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+
 # ─── gate 2h — the RUST half of the static gates, RUN (R2153, item 542) ──
 # grades: worktree
 #
