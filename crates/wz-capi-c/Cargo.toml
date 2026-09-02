@@ -79,7 +79,21 @@ wz-cdylib-build = { path = "../wz-cdylib-build" }
 # fetched and their `zenoh_configure.h` read). A default-featured build linked
 # against that package's headers therefore pairs one arm's declarations with
 # another arm's footprints. Add `zenoh-c-shared-memory` to match it.
-# Whether the DEFAULT should move instead is open-debt item 616.
+#
+# ⚠⚠⚠ R2286 (open-debt item 616) — the DEFAULT does NOT move, and the reason
+# is structural rather than a preference. Cargo features are ADDITIVE, so this
+# set has to sit at the ORIGIN of both axes: with it empty every one of the
+# four builds is `default + <features>`; with `zenoh-c-shared-memory` in it,
+# the two builds without that axis would be reachable only through
+# `--no-default-features`, which any dependent enabling the default hands
+# straight back — so the library would be the wrong SIZE in exactly the
+# configuration a consumer assembles by accident.
+# The divergence that leaves is therefore INTENT, and it is PRICED rather
+# than merely declared: `scripts/lib/zenoh_c_archive_arm.py` refuses a default
+# that puts a build out of additive reach, refuses a feature in this table it
+# cannot classify, refuses a selector that subtracts instead of adding, and
+# refuses all of it unless a named lane leg RUNS the set that reaches what
+# upstream ships.
 #
 # This feature selects the no-unstable axis.
 zenoh-c-no-unstable-api = []

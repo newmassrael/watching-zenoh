@@ -232,6 +232,14 @@ MANIFEST_FEATURES = {
 
 CAPI_C_MANIFEST = "crates/wz-capi-c/Cargo.toml"
 
+# Where the arm is SELECTED and where it is RUN. Both are read rather than
+# assumed: the selector expresses an oracle's arm as ADDITIONS to the default,
+# which is only correct while the default sits at the origin of both axes, and
+# the lane legs are what make a default that differs from the published build
+# cost something instead of merely being declared.
+RUNCI = "scripts/run-ci.sh"
+ORACLE_FN = "_runci_build_capi_c_for_oracle"
+
 # A period/question/bang that ends a sentence: followed by space and something
 # that starts one. `install-zenoh-c.sh` and `1.10.0` do not match, which is the
 # whole reason for the lookahead.
@@ -350,23 +358,21 @@ def scan(files: list[pathlib.Path], arm: str) -> tuple[int, int, list[str]]:
     return mentions, adjudicated, findings
 
 
-def manifest_default_arm(manifest: pathlib.Path) -> str:
-    """The arm `wz-capi-c`'s DEFAULT feature set models, from the table itself.
-
-    Read out of the `[features]` table rather than out of the prose beside it,
-    which is the whole point: the prose is what this file adjudicates.
-    """
+def features_table(manifest: pathlib.Path) -> dict[str, list[str]]:
+    """The `[features]` table: each feature and the list it enables."""
     text = manifest.read_text(encoding="utf-8")
     section = re.search(r"^\[features\]$(.*?)(?=^\[|\Z)", text, re.M | re.S)
     if not section:
         raise ValueError(f"{manifest}: no [features] table")
-    body = section.group(1)
     table: dict[str, list[str]] = {}
-    for m in re.finditer(r"^([A-Za-z0-9_-]+)\s*=\s*\[(.*?)\]", body, re.M | re.S):
+    for m in re.finditer(r"^([A-Za-z0-9_-]+)\s*=\s*\[(.*?)\]",
+                         section.group(1), re.M | re.S):
         table[m.group(1)] = re.findall(r'"([^"]+)"', m.group(2))
+    return table
 
-    # The transitive closure of `default`, so a feature reached through another
-    # one counts exactly as cargo would count it.
+
+def default_closure(table: dict[str, list[str]]) -> set[str]:
+    """What `default` enables, transitively -- as cargo would count it."""
     closure: set[str] = set()
     pending = list(table.get("default", []))
     while pending:
@@ -375,14 +381,64 @@ def manifest_default_arm(manifest: pathlib.Path) -> str:
             continue
         closure.add(name)
         pending.extend(table.get(name, []))
+    return closure
 
+
+def arm_of(enabled: set[str]) -> str:
+    """The arm a build with exactly `enabled` features models."""
     axes = {"UNSTABLE_API": True, "SHARED_MEMORY": False}
     for feature, (axis, sense) in MANIFEST_FEATURES.items():
-        if feature not in table:
-            raise ValueError(f"{manifest}: [features] has no `{feature}`")
-        if feature in closure:
+        if feature in enabled:
             axes[axis] = sense
     return arm_id(axes["UNSTABLE_API"], axes["SHARED_MEMORY"])
+
+
+def arm_features(arm: str) -> set[str]:
+    """The manifest features a build must enable to BE `arm`.
+
+    Derived by matching each feature's (axis, sense) against the arm's axes, so
+    it cannot drift from `MANIFEST_FEATURES` the way a second table would.
+    """
+    want = arm_axes(arm)
+    return {feature for feature, (axis, sense) in MANIFEST_FEATURES.items()
+            if want[axis] == sense}
+
+
+def manifest_default_arm(manifest: pathlib.Path) -> str:
+    """The arm `wz-capi-c`'s DEFAULT feature set models, from the table itself.
+
+    Read out of the `[features]` table rather than out of the prose beside it,
+    which is the whole point: the prose is what this file adjudicates.
+    """
+    table = features_table(manifest)
+    for feature in MANIFEST_FEATURES:
+        if feature not in table:
+            raise ValueError(f"{manifest}: [features] has no `{feature}`")
+    return arm_of(default_closure(table))
+
+
+def shell_function(path: pathlib.Path, name: str) -> str:
+    """One shell function's body: `name() {` to the closing brace in column 0."""
+    text = path.read_text(encoding="utf-8")
+    head = re.search(rf"^{re.escape(name)}\(\)\s*\{{\s*$", text, re.M)
+    if not head:
+        raise ValueError(f"{path}: no function `{name}`")
+    tail = re.compile(r"^\}$", re.M).search(text, head.end())
+    if not tail:
+        raise ValueError(f"{path}: `{name}` has no closing brace in column 0")
+    return text[head.end():tail.start()]
+
+
+def capi_c_test_feature_sets(text: str) -> list[set[str]]:
+    """The feature set of every `cargo test -p wz-capi-c` invocation in `text`."""
+    out: list[set[str]] = []
+    for call in re.finditer(r"cargo test -p wz-capi-c([^\n]*)", text):
+        feats: set[str] = set()
+        for spelled in re.finditer(r"--features\s+([A-Za-z0-9_,-]+)",
+                                   call.group(1)):
+            feats |= {f for f in spelled.group(1).split(",") if f}
+        out.append(feats)
+    return out
 
 
 # ── the two derivations ──────────────────────────────────────────────────────
@@ -455,6 +511,108 @@ def installer_pin() -> str:
     return m.group(1)
 
 
+# ── the arm lattice (open-debt item 616) ─────────────────────────────────────
+
+def check_lattice(manifest: pathlib.Path,
+                  runci: pathlib.Path) -> tuple[int, list[str], list[str]]:
+    """Where the DEFAULT sits, and what the divergence it accepts has to cost.
+
+    Item 616 asked whether the default should move to the build upstream ships.
+    It cannot, and the reason is a property of cargo rather than a preference:
+    features are ADDITIVE, so every arm has to be `default + <features>`. With
+    the default empty all four arms are reachable that way; with the shm axis in
+    it, the two no-shm arms would need `--no-default-features` -- which a
+    dependent enabling the default takes straight back, so the crate would be
+    the wrong size in exactly the build a consumer assembles by accident.
+
+    That decision leaves a DIVERGENCE, and a divergence nobody exercises is a
+    declaration. So it is priced: a named lane leg has to RUN the feature set
+    that reaches upstream's build, and the selector that turns an installed
+    header into a build has to name every axis and add rather than subtract.
+
+    Returns `(rc, report, failures)` so the selftest can read the verdict
+    instead of parsing what was printed.
+    """
+    rc = 0
+    report: list[str] = []
+    fail: list[str] = []
+
+    table = features_table(manifest)
+    declared = set(table) - {"default"}
+    # No exemption list on purpose. An unclassified feature is a decision a
+    # round has to make -- the lattice below is SIZED from MANIFEST_FEATURES,
+    # so a feature that table does not know makes it the wrong size.
+    for extra in sorted(declared - set(MANIFEST_FEATURES)):
+        fail.append(f"  archive-arm FAIL: {CAPI_C_MANIFEST} declares `{extra}`, "
+                    f"which\n    MANIFEST_FEATURES does not classify. The arm "
+                    f"lattice is sized from that\n    table, so an unclassified "
+                    f"feature makes it the wrong size: classify it,\n    or move "
+                    f"it out of this crate.")
+        rc = 1
+    for gone in sorted(set(MANIFEST_FEATURES) - declared):
+        fail.append(f"  archive-arm FAIL: MANIFEST_FEATURES carries `{gone}` and "
+                    f"the\n    manifest no longer declares it.")
+        rc = 1
+
+    closure = default_closure(table)
+    default_arm = arm_of(closure)
+    lost = sorted(arm for arm in ARMS if not arm_features(arm) >= closure)
+    if lost:
+        fail.append(f"  archive-arm FAIL: the default feature set "
+                    f"{sorted(closure)} puts\n    "
+                    f"{', '.join('`%s`' % a for a in lost)} out of ADDITIVE reach "
+                    f"-- those arms would need\n    `--no-default-features`, and a "
+                    f"dependent that enables the default takes\n    it back. The "
+                    f"default has to sit at the ORIGIN of every axis.")
+        rc = 1
+
+    divergence = arm_features(ARCHIVE_ARM) - closure
+    legs = capi_c_test_feature_sets(runci.read_text(encoding="utf-8"))
+    paying = [feats for feats in legs if feats >= divergence]
+    if not divergence:
+        report.append(f"  archive-arm: the default models `{default_arm}`, the "
+                      f"build upstream ships -- nothing to price")
+    elif not paying:
+        fail.append(f"  archive-arm FAIL: the default models `{default_arm}`, "
+                    f"upstream ships\n    `{ARCHIVE_ARM}`, and no `cargo test -p "
+                    f"wz-capi-c` leg in {RUNCI} enables\n    {sorted(divergence)}. "
+                    f"The divergence is accepted BECAUSE the other arm is\n    "
+                    f"exercised; with no leg running it, moving the default is "
+                    f"the only\n    honest option left.")
+        rc = 1
+
+    try:
+        selector = shell_function(runci, ORACLE_FN)
+    except ValueError as exc:
+        fail.append(f"  archive-arm FAIL: {exc}. The selector is what turns an "
+                    f"installed\n    header into a build; a selector this gate "
+                    f"cannot find is one it cannot\n    grade.")
+        rc = 1
+        selector = None
+    if selector is not None:
+        for feature in sorted(MANIFEST_FEATURES):
+            if not re.search(rf"--features\s+{re.escape(feature)}\b", selector):
+                fail.append(f"  archive-arm FAIL: `{ORACLE_FN}` never adds\n"
+                            f"    `--features {feature}`, so an oracle on that "
+                            f"axis is served the default\n    build -- a size "
+                            f"mismatch, which is a corrupted caller frame rather "
+                            f"than\n    a link error.")
+                rc = 1
+        if "--no-default-features" in selector:
+            fail.append(f"  archive-arm FAIL: `{ORACLE_FN}` uses "
+                        f"`--no-default-features`.\n    Selecting an arm by "
+                        f"SUBTRACTION means the default is no longer the\n    "
+                        f"origin, and cargo hands a dependent the default back.")
+            rc = 1
+
+    report.append(f"  archive-arm: {len(ARMS)} arm(s) from "
+                  f"{len(MANIFEST_FEATURES)} axis(es), all additively reachable "
+                  f"from the default {sorted(closure)}; divergence "
+                  f"{sorted(divergence)} run by {len(paying)} of {len(legs)} "
+                  f"wz-capi-c test leg(s)")
+    return rc, report, fail
+
+
 # ── modes ────────────────────────────────────────────────────────────────────
 
 def cmd_check() -> int:
@@ -515,6 +673,18 @@ def cmd_check() -> int:
                 file=sys.stderr,
             )
             rc = 1
+
+    # 3b-3e. The arm LATTICE. Its own function so the selftest can drive the
+    #        SAME verdict over mutated manifests and mutated lane scripts --
+    #        grading the shipped path rather than a restatement of it.
+    lattice_rc, lattice_report, lattice_fail = check_lattice(manifest,
+                                                             ROOT / RUNCI)
+    for line in lattice_fail:
+        print(line, file=sys.stderr)
+    for line in lattice_report:
+        print(line)
+    if lattice_rc:
+        rc = 1
 
     # 4. The prose.
     mentions, adjudicated, findings = scan(files, ARCHIVE_ARM)
@@ -736,6 +906,88 @@ def cmd_selftest() -> int:
              len(sentences("Run install-zenoh-c.sh first. Then build.")) == 2)
         case("a version is not a sentence end",
              len(sentences("The pin is 1.10.0 today.")) == 1)
+
+        # ── the lattice arms (item 616) ──────────────────────────────────
+        #
+        # Driven through `check_lattice`, the SAME function `--check` calls,
+        # over mutated copies of the two files it reads. Each mutation is one
+        # a round could plausibly make, and each case pins the phrase its own
+        # arm produces -- a case that reds for a neighbour's reason is not a
+        # control.
+        good_manifest = (
+            "[features]\n"
+            "zenoh-c-no-unstable-api = []\n"
+            "zenoh-c-shared-memory = []\n"
+            "\n[dependencies]\n"
+        )
+        good_runci = (
+            "_runci_build_capi_c_for_oracle() {\n"
+            "    local capi_c_features=()\n"
+            '    if ! grep -q UNSTABLE "$h"; then\n'
+            "        capi_c_features+=(--features zenoh-c-no-unstable-api)\n"
+            "    fi\n"
+            '    if grep -q SHARED "$h"; then\n'
+            "        capi_c_features+=(--features zenoh-c-shared-memory)\n"
+            "    fi\n"
+            "}\n"
+            "layer_c1cc() {\n"
+            "    cargo test -p wz-capi-c --quiet\n"
+            "    cargo test -p wz-capi-c --features zenoh-c-shared-memory "
+            "--quiet\n"
+            "}\n"
+        )
+
+        def lattice(manifest_text: str, runci_text: str) -> tuple[int, str]:
+            (d / "lat.toml").write_text(manifest_text)
+            (d / "lat.sh").write_text(runci_text)
+            code, _, failures = check_lattice(d / "lat.toml", d / "lat.sh")
+            return code, "\n".join(failures)
+
+        rc_ok, _ = lattice(good_manifest, good_runci)
+        case("the shipped shape passes", rc_ok == 0)
+
+        rc_bad, why = lattice(
+            good_manifest.replace("[features]\n",
+                                  '[features]\ndefault = ["zenoh-c-shared-memory"]\n'),
+            good_runci)
+        case("a default off the origin loses two arms",
+             rc_bad == 1 and "out of ADDITIVE reach" in why
+             and "`nounstable`" in why and "`unstable`" in why)
+
+        rc_bad, why = lattice(
+            good_manifest.replace("\n[dependencies]",
+                                  "zenoh-c-something-else = []\n\n[dependencies]"),
+            good_runci)
+        case("an unclassified feature is refused",
+             rc_bad == 1 and "does not classify" in why)
+
+        rc_bad, why = lattice(good_manifest, good_runci.replace(
+            "    cargo test -p wz-capi-c --features zenoh-c-shared-memory "
+            "--quiet\n", ""))
+        case("an unpriced divergence is refused",
+             rc_bad == 1 and "no `cargo test -p wz-capi-c` leg" in why)
+
+        rc_bad, why = lattice(good_manifest, good_runci.replace(
+            "        capi_c_features+=(--features zenoh-c-shared-memory)\n", ""))
+        case("a selector blind to an axis is refused",
+             rc_bad == 1 and "never adds" in why)
+
+        rc_bad, why = lattice(good_manifest, good_runci.replace(
+            "    local capi_c_features=()\n",
+            "    local capi_c_features=(--no-default-features)\n"))
+        case("selecting an arm by subtraction is refused",
+             rc_bad == 1 and "SUBTRACTION" in why)
+
+        rc_bad, why = lattice(good_manifest, good_runci.replace(
+            "_runci_build_capi_c_for_oracle() {", "_some_other_name() {"))
+        case("a selector this gate cannot find is not a pass",
+             rc_bad == 1 and "no function" in why)
+
+        # The lattice itself, so the two derivations cannot drift apart.
+        case("arm_features round-trips through arm_of",
+             all(arm_of(arm_features(a)) == a for a in ARMS))
+        case("the shipped default is the origin",
+             arm_features("unstable") == set())
 
     print(f"  archive-arm selftest: {passed}/{passed + failed} arm(s) pass")
     return 1 if failed else 0
