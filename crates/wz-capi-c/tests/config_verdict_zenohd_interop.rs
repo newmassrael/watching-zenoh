@@ -238,11 +238,6 @@ fn wait_for_exit(child: &mut Child) -> Result<std::process::ExitStatus, String> 
     }
 }
 
-/// A port nothing is listening on, released before zenohd is asked to bind it.
-fn free_port() -> u16 {
-    wz_runtime_tokio_test_support::free_port()
-}
-
 // wz-proves: none -- the same REGISTRATION gap `zenoh_config_emit_zenohd_interop`
 // records for itself: zenohd genuinely adjudicates wz here (it parses a document
 // the C door emitted and echoes back the values it resolved), but `zenoh-config`
@@ -260,7 +255,7 @@ fn free_port() -> u16 {
 #[test]
 #[ignore = "binary-dep e2e: needs target/zenohd/zenohd (scripts/build-zenohd.sh)"]
 fn wz_capi_c_config_to_json5_starts_a_real_zenohd() {
-    let port = free_port();
+    let port = wz_runtime_tokio_test_support::free_port();
     let endpoint = format!("tcp/127.0.0.1:{port}");
     let listen = format!("[\"{endpoint}\"]");
     let document = emitted_document(&[
@@ -322,7 +317,7 @@ fn wz_capi_c_config_to_json5_starts_a_real_zenohd() {
 #[ignore = "binary-dep e2e: needs target/zenohd/zenohd (scripts/build-zenohd.sh)"]
 fn a_real_zenohd_refuses_what_the_c_validator_rejects() {
     // THE POSITIVE CONTROL.
-    let control_port = free_port();
+    let control_port = wz_runtime_tokio_test_support::free_port();
     let control = [
         ("mode", "\"router\""),
         ("scouting/multicast/enabled", "false"),
