@@ -2943,6 +2943,20 @@ PY
     # decisive. It also runs in `.githooks/pre-push` as gate 2l.
     python3 scripts/lib/foreign_query_readiness_gate.py --selftest || return 1
     python3 scripts/lib/foreign_query_readiness_gate.py || return 1
+    # R2313 (open-debt item 47) — an inventory REASON may not outlive the code
+    # it cites. Item 47 is the register's oldest unpaid entry and names three
+    # shapes, of which only the first is mechanizable; this is that lower
+    # bound, and measuring it found shape 1 CLEAN (382 citations resolve to one
+    # tracked file, none past its end; 0 name a path wz deleted). What it does
+    # catch is the third rule: 104 citations name a path matching several
+    # tracked files, and a citation nobody can resolve can never go red.
+    #
+    # BOTH SIDES ARE ON DISK -- the reasons are in the store and the paths are
+    # in git -- so it belongs here with its neighbours. `--selftest` first,
+    # because two of its four rules have NO live instance and would otherwise
+    # never execute.
+    python3 scripts/lib/reason_citation_gate.py --selftest || return 1
+    python3 scripts/lib/reason_citation_gate.py || return 1
     # R2293 (unregistered open-debt item 625) — the TEST-DOUBLE WITNESS gate.
     # A test whose fixture cannot construct the input its branch needs measures
     # nothing, and R2289 walked into exactly that: nine mutations of the SHM
