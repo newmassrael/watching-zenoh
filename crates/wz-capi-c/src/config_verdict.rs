@@ -47,13 +47,28 @@
 //! This crate holds two, they answer different questions, and R2300 found them
 //! not meeting:
 //!
-//!   * `zc_config_to_string` renders `ConfigState` — the keys THIS CALLER
-//!     INSERTED, in the flat spelling it inserted them in. It is a round trip:
-//!     what comes out re-inserts identically. It is upstream's door and keeps
-//!     upstream's meaning.
+//!   * `zc_config_to_string` renders `ConfigState` — EXACTLY the keys THIS
+//!     CALLER STATED, and nothing else. It is a round trip: what comes out
+//!     re-inserts identically. It is upstream's door and answers upstream's
+//!     question.
 //!   * [`wz_capi_c_config_to_json5`] renders `ZenohNodeConfig` — the config a
 //!     STOCK ZENOH NODE would have been started with, every honoured key
-//!     resolved, in the nested spelling `zenohd -c` reads.
+//!     RESOLVED, including the ones the caller never mentioned.
+//!
+//! # STATED versus RESOLVED, and R2303 corrected this paragraph
+//!
+//! Until then it said the difference was one of SPELLING — that the first door
+//! answered flat and the second nested. That was true of wz and false of the
+//! contract: upstream's `zc_config_to_string` emits a NESTED document and its
+//! `zc_config_from_str` refuses a flat one, both measured, so wz's flat emit was
+//! a defect (open-debt item 636) rather than the other half of a pair. BOTH
+//! doors nest now.
+//!
+//! The difference that survives is what each one is ABOUT, and it is measured
+//! rather than asserted — `the_two_emit_doors_differ_by_what_they_RESOLVE`
+//! states it as a predicate. For a config stating two keys: the first door
+//! emits two leaves in 82 bytes; the second emits thirteen in 560, eleven of
+//! them keys the caller never wrote.
 //!
 //! A caller writing a file for a real zenoh node wants the second; a caller
 //! echoing back what it configured wants the first. Neither is a copy of the
@@ -1055,6 +1070,69 @@ mod tests {
             back.named.contains(&"listen/endpoints"),
             "the emit must NAME the endpoint key; it named {:?}",
             back.named
+        );
+    }
+
+    /// R2303 (open-debt item 636) — the two emit doors differ by what they
+    /// RESOLVE, and this is the module header's claim as a predicate.
+    ///
+    /// That header used to say they differed by SPELLING — flat versus nested —
+    /// and item 636 measured upstream and refuted it: upstream's
+    /// `zc_config_to_string` nests and refuses a flat document, so wz's flat
+    /// emit was a defect rather than the other half of a pair. BOTH doors nest
+    /// now, and a header sentence that nothing measures is how the first claim
+    /// survived four rounds. This runs.
+    ///
+    /// The population is DERIVED from the fixture: whatever keys are stated
+    /// below are the set the first door must emit EXACTLY, and the set the
+    /// second must strictly exceed. Adding a key to the fixture extends both
+    /// halves with no edit here, and an empty fixture fails rather than passing
+    /// on two empty leaf sets.
+    #[test]
+    fn the_two_emit_doors_differ_by_what_they_resolve() {
+        use wz_runtime_tokio::json5;
+
+        const STATED: &[(&str, &str)] = &[
+            ("mode", "\"router\""),
+            ("listen/endpoints", "[\"tcp/127.0.0.1:17457\"]"),
+        ];
+        assert!(
+            !STATED.is_empty(),
+            "an empty fixture makes both comparisons below vacuous"
+        );
+        let stated: BTreeSet<&str> = STATED.iter().map(|(k, _)| *k).collect();
+
+        let leaves = |text: &str| -> BTreeSet<String> {
+            json5::parse(text)
+                .unwrap_or_else(|e| panic!("a door emitted unreadable json5: {e}\n{text}"))
+                .leaf_paths()
+                .into_iter()
+                .collect()
+        };
+
+        // SAFETY: a fixture config and a stack out slot.
+        let (rc, echoed) = unsafe { ask(crate::config::zc_config_to_string, STATED) };
+        assert_eq!(rc, Z_OK, "the echo door refused: {echoed}");
+        let echoed: BTreeSet<String> = leaves(&echoed);
+        let want: BTreeSet<String> = stated.iter().map(|k| (*k).to_owned()).collect();
+        assert_eq!(
+            echoed, want,
+            "zc_config_to_string must emit EXACTLY the stated keys"
+        );
+
+        // SAFETY: as above.
+        let (rc, resolved) = unsafe { ask(wz_capi_c_config_to_json5, STATED) };
+        assert_eq!(rc, Z_OK, "the resolving door refused: {resolved}");
+        let resolved: BTreeSet<String> = leaves(&resolved);
+        assert!(
+            resolved.is_superset(&want),
+            "the resolving door must still carry every stated key; it emitted {resolved:?}"
+        );
+        let unstated: BTreeSet<&String> = resolved.difference(&want).collect();
+        assert!(
+            !unstated.is_empty(),
+            "the resolving door emitted only the stated keys, so it RESOLVED nothing \
+             and the two doors are not distinguishable by this test"
         );
     }
 

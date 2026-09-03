@@ -120,11 +120,16 @@ const char *wz_capi_c_config_honoured(size_t index);
 /* Render the config a STOCK ZENOH NODE would have been started with,
  * as the JSON5 `zenohd -c` reads.
  *
- * NOT zc_config_to_string, which echoes back the keys YOU inserted in
- * the flat spelling you inserted them in. This resolves them into the
- * nested document a real zenoh node reads. A caller writing a file for
- * zenohd wants this one; a caller echoing its own configuration wants
- * that one.
+ * NOT zc_config_to_string, which echoes back EXACTLY the keys YOU
+ * stated and nothing else. This one RESOLVES them, so the document it
+ * writes also carries every honoured key you never mentioned -- which
+ * is what a real zenoh node would have run with. A caller writing a
+ * file for zenohd wants this one; a caller echoing its own
+ * configuration wants that one.
+ *
+ * (Both nest. R2303 corrected the older claim that the two differed by
+ * SPELLING: upstream's zc_config_to_string emits a nested document and
+ * refuses a flat one, so wz's flat emit was a defect, not a variant.)
  *
  * If you write the result to a file for `zenohd -c`, THE FILE MUST HAVE
  * A .json5, .json OR .yaml EXTENSION. zenoh dispatches its config
