@@ -559,7 +559,16 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # (`api-compat-c wz->zenoh-c partial`), because it links the real `libzenohc.so`
 # as the second arm; `partial` is the config plane and nothing else. Measured,
 # not guessed: the audit read `882, declared 881` with the annotation in place.
-FOREIGN_ADJUDICATOR_LINKS = 882
+# R2307 (open-debt item 515) — 882 -> 885, in
+# `zenohd_scouts_wz_config_router_interop.rs`. THREE links, and they are the
+# three its argv sibling already claims: an atom's proof is a claim about a
+# REACHABLE path, and until this file the only path a foreign adjudicator had
+# walked to `scouting-responder` / `scouting-multicast` / `router-hat-router`
+# was wz's own command line. The spelling an operator types is
+# `--config their.json5`, and item 515 is the record that nothing foreign had
+# read the role it selects. Measured, not guessed: the audit read
+# `885, declared 882` with the file staged, which is exactly its three lines.
+FOREIGN_ADJUDICATOR_LINKS = 885
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
