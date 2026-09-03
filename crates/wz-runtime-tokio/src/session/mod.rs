@@ -3613,8 +3613,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 // read gate was the one half of the pair that denied SILENTLY while
                 // the config-write host logged — an asymmetry with itself.
                 log::error!(
-                    "Received GET on '{}' but adminspace.permissions.read=false in configuration",
-                    view.keyexpr()
+                    "{}",
+                    wz_session_core::adminspace::denied_read_diagnostic(view.keyexpr())
                 );
             }
         };

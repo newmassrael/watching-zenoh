@@ -4664,8 +4664,8 @@ async fn run_peer_until(
                 // below has always logged its deny; the read host denied silently,
                 // so an operator who revoked reads saw nothing in the log.
                 log::error!(
-                    "Received GET on '{}' but adminspace.permissions.read=false in configuration",
-                    view.keyexpr()
+                    "{}",
+                    wz::runtime_tokio::adminspace::denied_read_diagnostic(view.keyexpr())
                 );
             }
         };
@@ -6038,8 +6038,8 @@ async fn run_router_hat_until(
                 == AdminAnswerOutcome::DeniedRead
             {
                 log::error!(
-                    "Received GET on '{}' but adminspace.permissions.read=false in configuration",
-                    view.keyexpr()
+                    "{}",
+                    wz::runtime_tokio::adminspace::denied_read_diagnostic(view.keyexpr())
                 );
             }
             // The ROUTER-tier legs, rendered LIVE from the two nets per GET.
@@ -6057,8 +6057,8 @@ async fn run_router_hat_until(
             };
             if answer_router_admin_query(view, out, &rctx) == AdminAnswerOutcome::DeniedRead {
                 log::error!(
-                    "Received GET on '{}' but adminspace.permissions.read=false in configuration",
-                    view.keyexpr()
+                    "{}",
+                    wz::runtime_tokio::adminspace::denied_read_diagnostic(view.keyexpr())
                 );
             }
         };
@@ -6992,9 +6992,8 @@ pub(crate) async fn run_storage_host(
                     == wz::runtime_tokio::adminspace::AdminAnswerOutcome::DeniedRead
                 {
                     log::error!(
-                        "Received GET on '{}' but adminspace.permissions.read=false in \
-                         configuration",
-                        view.keyexpr()
+                        "{}",
+                        wz::runtime_tokio::adminspace::denied_read_diagnostic(view.keyexpr())
                     );
                 }
             },

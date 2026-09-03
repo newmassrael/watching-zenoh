@@ -354,6 +354,41 @@ pub enum AdminAnswerOutcome {
     DeniedRead,
 }
 
+/// The deny diagnostic itself, worded ONCE.
+///
+/// R2329 (unregistered open-debt item 13). The `#[must_use]` above forces a
+/// host to CONSUME the outcome; it cannot force the host to say the right
+/// thing, and until this round every host said it by hand. MEASURED: the same
+/// sentence was written out at FIVE sites — four in `wz-ap-demo/src/runner.rs`
+/// and one in `wz-runtime-tokio/src/session/mod.rs` — with no shared source.
+///
+/// That is the copies-of-one-needle hazard this workspace has already paid for
+/// once (R2230: one predicate inlined four times, two of them fixed, leaving a
+/// finder that found and a counter that counted zero). It is worse here than a
+/// wording drift, because the sentence is also what any future witness would
+/// have to grep for: five spellings mean a witness can match some hosts and
+/// silently miss others. One of the five already wraps across a line
+/// continuation, so a literal grep for the whole sentence does not even find it
+/// today.
+///
+/// The wording is zenoh's, deliberately — same severity, same cause, same text
+/// — so an operator moving between the two implementations reads one sentence.
+/// [`AdminAnswerOutcome`]'s own doc above carries the upstream citation; this
+/// one deliberately does not repeat it, because a second copy of a citation is
+/// a second thing to keep resolving.
+///
+/// It returns a `String` rather than being a `const` format string because
+/// `log::error!` requires a literal at the macro site; hosts call
+/// `log::error!("{}", denied_read_diagnostic(k))`, which keeps the wording here
+/// and the log facade there. That split is the same one the enum's own doc
+/// describes: this crate is `no_std` + `alloc` and links no logger.
+#[must_use]
+pub fn denied_read_diagnostic(keyexpr: &str) -> alloc::string::String {
+    alloc::format!(
+        "Received GET on '{keyexpr}' but adminspace.permissions.read=false in configuration"
+    )
+}
+
 impl AdminLocalData {
     /// Serialize to the faithful zenoh `local_data` JSON object. zenoh builds
     /// it with the `json!` macro then `serde_json::to_vec`

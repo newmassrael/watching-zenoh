@@ -3320,6 +3320,31 @@ PY
     # is why the control group names a crate the sweep proved has none.
     python3 scripts/lib/workspace_exclude_lane_gate.py --selftest || return 1
     python3 scripts/lib/workspace_exclude_lane_gate.py --check || return 1
+    # R2329 (unregistered open-debt item 13) — `#[must_use] AdminAnswerOutcome`
+    # forces a host to LOOK at the deny outcome; it cannot force the host to
+    # say anything. Until this round every host said it BY HAND: the same
+    # sentence written out at FIVE sites (four in wz-ap-demo/src/runner.rs, one
+    # in wz-runtime-tokio/src/session/mod.rs) with no shared source, one of
+    # them wrapped across a line continuation so a literal grep did not even
+    # find it. That is R2230's copies-of-one-needle hazard, and it matters
+    # doubly because the sentence is what any future witness must grep for.
+    #
+    # R2329 hoisted the wording into `denied_read_diagnostic` and this gate
+    # keeps it there. The POPULATION is derived structurally with no file list:
+    # a host COMPARES against `DeniedRead` (5 sites), while the library RETURNS
+    # it (2) and its unit tests ASSERT it (2) — only a host asks "was it
+    # denied?" in order to act. Zero hosts is a HARD FAIL, and so is the
+    # wording function going missing.
+    #
+    # It checks that the code EMITS, not that the line reaches stderr — item
+    # 13's own complaint, and its residue. What it buys over prose is that a
+    # SIXTH site is covered the day it lands.
+    #
+    # Enforcement MEASURED on the LIVE tree: deleting the emit from the
+    # wz-runtime-tokio host reds it with SILENT and names that file:line;
+    # restoring it returns rc=0.
+    python3 scripts/lib/deny_diagnostic_gate.py --selftest || return 1
+    python3 scripts/lib/deny_diagnostic_gate.py --check || return 1
     # R2241 (unregistered open-debt item 581) — an upstream claim must still
     # MEAN something after upstream moves. `CLAUDE.md` asks for `file:line` on
     # every source claim, which is right for OUR sources (we move those lines

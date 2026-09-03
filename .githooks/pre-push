@@ -647,6 +647,45 @@ if ! python3 scripts/lib/workspace_exclude_lane_gate.py; then
     exit 1
 fi
 
+# ─── gate 2q — the deny diagnostic is emitted, once-worded (R2329, item 13) ──
+# grades: worktree
+#
+# `#[must_use] AdminAnswerOutcome` makes a host LOOK at the deny outcome; it
+# cannot make the host say anything. A read gate that denies SILENTLY is the
+# asymmetry the enum was added to remove — the write host has always logged.
+#
+# The sentence was hand-written at five sites before R2329 hoisted it into
+# `denied_read_diagnostic`. Five spellings also mean a future stderr witness can
+# match some hosts and miss others, which is why the gate demands the shared
+# function rather than merely "some log call".
+#
+# Why the hook: adding a sixth admin host is a Rust edit that COMPILES and
+# PASSES its tests while saying nothing — gate 3 cannot fail on a missing log
+# line. MEASURED here the expensive way: at DEFAULT features none of the four
+# demo sites even compile, so a `cargo check -p wz-ap-demo` reports green over
+# code it never read.
+#
+# UNCONDITIONAL, for gate 2d's reason: it reads the crate tree once and costs
+# milliseconds.
+if ! python3 scripts/lib/deny_diagnostic_gate.py --selftest; then
+    echo "" >&2
+    echo "pre-push: [gate 2q] deny-diagnostic SELFTEST failed — it can no longer" >&2
+    echo "          tell a silent host from an emitting one, or it has started" >&2
+    echo "          counting the library's own returns as hosts, so its verdict" >&2
+    echo "          on this push means nothing." >&2
+    exit 1
+fi
+if ! python3 scripts/lib/deny_diagnostic_gate.py; then
+    echo "" >&2
+    echo "pre-push: [gate 2q] deny-diagnostic FAILED — a host branches on" >&2
+    echo "          \`AdminAnswerOutcome::DeniedRead\` and emits nothing, or it" >&2
+    echo "          re-inlined the sentence instead of calling" >&2
+    echo "          \`denied_read_diagnostic\`. Emit through that function: a" >&2
+    echo "          witness greps for ONE spelling." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+
 # ─── gate 2e — the scouting socket's movable axes (R2142, item 225) ──
 # grades: worktree
 #
