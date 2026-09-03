@@ -204,6 +204,26 @@ vendored_oracle_recipe_token() {
     printf '%s-%s\n' "$base" "$recipe"
 }
 
+# vendored_oracle_release_token <installer-script> <var-name> <prefix>
+#
+# `<prefix>-<version>` for the version an installer PINS, read back out of that
+# script's own `VAR="${VAR:-<value>}"` default.
+#
+# It re-reads the file rather than taking the caller's variable, and that is the
+# same independence `vendored_oracle_assert_fresh` requires: the installer's
+# stamp is written from its shell variable, so verifying against that variable
+# would compare a value with itself. This is also byte-for-byte the route the
+# Rust consumer takes (`mbedtls_pinned_token` parses the same default), so what
+# it produces is what a consumer will demand.
+vendored_oracle_release_token() {
+    local script="$1" var="$2" prefix="$3"
+    [[ -r "$script" ]] || return 1
+    local version
+    version="$(sed -n "s/^[[:space:]]*${var}=\"\\\${${var}:-\\([^}\"]*\\)}\"/\\1/p" "$script" | head -1)"
+    [[ -n "$version" ]] || return 1
+    printf '%s-%s\n' "$prefix" "$version"
+}
+
 # vendored_oracle_stamp_path <oracle-root>
 #
 # Where the stamp for an oracle output root lives. One place computes this so
@@ -265,6 +285,80 @@ vendored_oracle_stamp_root() {
     local root="$1" token="$2"
     [[ -d "$root" ]] || return 0
     vendored_oracle_write_stamp "$(vendored_oracle_stamp_path "$root")" "$token"
+}
+
+# vendored_oracle_assert_fresh <oracle-root> <label> <recompute-cmd> [args...]
+#
+# ⚠ THE ARGUMENT IS A COMMAND, NOT A TOKEN, and that is the whole point.
+#
+# The first version of this function took the wanted token as a STRING, and
+# every provisioner passed the same variable it had just stamped with. So it
+# compared a value against itself and could not fail: the control group that
+# re-introduced R2326's defect on purpose came back rc=0. That is this
+# workspace's R2185 class -- a gate that checks its own written-down answer
+# against a literal can never be red -- and it was caught here only because the
+# control group was run rather than assumed.
+#
+# So the caller supplies the RECOMPUTATION, and this function runs it. What it
+# compares is the stamp on disk against a token derived FRESH from the tree, by
+# the same route a consumer takes. `want` and `have` now have independent
+# provenance, which is the property that makes disagreement possible.
+#
+# R2327b — a provisioner must not report success while leaving behind an oracle
+# that reads STALE. Called by each provisioner on its own roots, AFTER the
+# stamp is written and after any transient source modification has been undone.
+#
+# ## Why this exists, and what it cost not to have it
+#
+# R2326 built the stamp scheme and verified the LIBRARY: every control group
+# called `vendored_oracle_stamp_root` by hand. Nothing ran the provisioners, so
+# nothing checked the one contract that matters -- that what a provisioner
+# stamps is what a consumer recomputes. R2326b then found, by running
+# `build-zenoh-pico-cli.sh` for real, that the two disagreed permanently: the
+# token was taken inside the window where this script's example patches are
+# applied, and the `EXIT` trap reverted them afterwards.
+#
+# MEASURED on hosted CI, which became that instrument by accident of ordering
+# and charged three jobs for it. Run 33807238918 failed
+# `demo-spawning e2e lanes`, `cross-impl proof lanes` and
+# `§5.27 api-compat-c` with
+#
+#     provisioned from: 3b3ab65c…-fb30c26bffb878d999945524cfb903a4f897ed6f
+#     this tree carries: 3b3ab65c…-e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+#
+# -- a dirty digest against git's empty-blob digest, which is the patch window
+# in two hexadecimal strings. Run 33808315542 with R2326b's fix passed all
+# three. So the class is real, the fix is confirmed, and the reason it took a
+# hosted round is that the check below did not exist.
+#
+# It is deliberately in the PROVISIONER and not in a lane: a lane step has to
+# be added beside every call site, and there are several, so forgetting one is
+# the same class of miss. The provisioner is the single place that knows it has
+# just finished.
+vendored_oracle_assert_fresh() {
+    local root="$1" label="$2"
+    shift 2
+    local want
+    want="$("$@" || true)"
+    # An unestablishable token is not a failure here — the provisioner already
+    # left the root UNSTAMPED for that case, and reporting "cannot verify" as
+    # "stale" would fail every host without git.
+    if [[ -z "$want" ]]; then
+        echo "$label: provenance unverifiable (no token); $root left unstamped" >&2
+        return 0
+    fi
+    local verdict
+    verdict="$(vendored_oracle_verdict "$root" "$want")" && return 0
+    echo "$label: FAIL — this run stamped $root and it does NOT read fresh." >&2
+    echo "  verdict: $verdict" >&2
+    echo "  want:    $want" >&2
+    echo "  A provisioner that reports success while leaving an oracle its own" >&2
+    echo "  consumers will refuse is the lie the stamp exists to prevent." >&2
+    echo "  Most likely the token was taken while a TRANSIENT source edit was" >&2
+    echo "  in effect (this is exactly R2326's defect: patches applied, token" >&2
+    echo "  taken, patches reverted). Take it from the committed shape and fold" >&2
+    echo "  the recipe in — see vendored_oracle_recipe_token." >&2
+    return 1
 }
 
 # vendored_oracle_verdict <oracle-root> <want-token>

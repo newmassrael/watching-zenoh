@@ -83,6 +83,11 @@ if [[ -f "$PREFIX/lib/pkgconfig/mbedtls.pc" ]]; then
         # path would leave every such tree permanently unstamped while its
         # version has just been verified by pkg-config above.
         vendored_oracle_stamp_root "$PREFIX" "$MBEDTLS_TOKEN"
+        # R2327b — verify what was just stamped, for the reason
+        # `vendored_oracle_assert_fresh` documents. No patch window here, so
+        # immediately after the write is already the consumer's view.
+        vendored_oracle_assert_fresh "$PREFIX" install-mbedtls \
+    vendored_oracle_release_token "$0" MBEDTLS_VERSION mbedtls || exit 1
         say "Mbed TLS $MBEDTLS_VERSION already provisioned at $PREFIX"
         exit 0
     fi
@@ -171,6 +176,8 @@ fi
 # AFTER every verification above, never before: the checks are what make the
 # token a fact rather than a restatement of the pin.
 vendored_oracle_stamp_root "$PREFIX" "$MBEDTLS_TOKEN"
+vendored_oracle_assert_fresh "$PREFIX" install-mbedtls \
+    vendored_oracle_release_token "$0" MBEDTLS_VERSION mbedtls || exit 1
 
 say "Mbed TLS $MBEDTLS_VERSION installed at $PREFIX"
 say "  pkg-config: $PREFIX/lib/pkgconfig"

@@ -593,6 +593,23 @@ done
 vendored_oracle_stamp_root "$INSTALL_DIR" "$_wzpico_token"
 vendored_oracle_stamp_root "$BUILD_DIR" "$_wzpico_token"
 
+# R2327b — verify the contract this script has just asserted, HERE, rather than
+# leaving a hosted lane to discover it. R2326 shipped a stamp that could never
+# match and three hosted jobs paid for it (run 33807238918); this is ~0.1s.
+#
+# The explicit restore is load-bearing and not belt-and-braces. The example
+# patches are still applied at this point — the `EXIT` trap has not fired — so
+# recomputing the token now would see the dirty tree and MISS-match against a
+# token correctly taken from the committed shape. Undoing them first is what
+# makes the comparison the one a consumer will actually make. The call is
+# idempotent by design (it is the same function the top of this script runs for
+# the same reason), and the trap stays as the failure-path net.
+restore_pico_example_patches
+vendored_oracle_assert_fresh "$INSTALL_DIR" build-zenoh-pico-cli \
+    vendored_oracle_recipe_token "$VENDOR_DIR" "${BASH_SOURCE[0]}" || exit 1
+vendored_oracle_assert_fresh "$BUILD_DIR" build-zenoh-pico-cli \
+    vendored_oracle_recipe_token "$VENDOR_DIR" "${BASH_SOURCE[0]}" || exit 1
+
 echo "build-zenoh-pico-cli: installed ${#TARGETS[@]} binaries to $INSTALL_DIR" >&2
 echo "build-zenoh-pico-cli: pin = ${_wzpico_token:-<unstamped: no git in $VENDOR_DIR>}" >&2
 ls -la "$INSTALL_DIR" >&2
