@@ -596,16 +596,59 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
     "wz-runtime-coop": frozenset(
         {"alloc", "reassembly", "scouting-static", "session-unicast"}
     ),
+    # R2298 — the last three, and they failed R2297's first clause on ONE
+    # feature each for the SAME derivable reason. See the second clause of
+    # `axis_reachable_findings`: `wz-runtime-core/alloc` gates a `cfg_attr(not(
+    # ..))` enum and an `impl` method, `wz-link-lwip/test-support` an
+    # `any(test, feature = ..)`, `wz/session-lwip` an `all(feature = ..,
+    # lwip_real_build)` whose second conjunct is a BUILD cfg and not a feature
+    # at all. None is a simple crate-root item, so none is a shape the
+    # derivation could have named.
+    "wz-link-lwip": frozenset({"buffer-pool-session-rx-slim", "test-support"}),
+    "wz-runtime-core": frozenset({"alloc"}),
+    "wz": frozenset(
+        {
+            "api-compat-c",
+            "api-compat-pico",
+            "platform-freertos",
+            "platform-zephyr",
+            "rest-http-bridge",
+            "runtime-coop",
+            "runtime-tokio",
+            "session-lwip",
+        }
+    ),
 }
 
-#: the crate path each `AXIS_REACHABLE` package is named by in Rust. The
-#: derivation needs it and cannot guess it: `wz-capture` is `wz_capture`, but a
-#: package is free to rename its lib target, so this is read from the manifest
-#: nowhere and stated here instead — `axis_reachable_findings` refuses a name
-#: that produces no probe at all, which is what a wrong one does.
-AXIS_REACHABLE_CRATE: dict[str, str] = {
-    "wz-runtime-coop": "wz_runtime_coop",
-}
+def axis_reachable_crate(pkg: str) -> str | None:
+    """The Rust crate path `pkg` is named by, READ from its manifest.
+
+    R2298b — this replaces a four-row table that stated the same four names,
+    whose docstring claimed `axis_reachable_findings` would refuse a wrong one
+    "because it produces no probe at all". Mutated, that was FALSE: the crate
+    path only spells the probe's `use` line, so `derived_probes` returns the
+    same KEYS for `wz_link_lwip` and for `wz_link_lwipZZZ` and every arm of the
+    file stayed green. A declared fact no check can read is exactly the class
+    item 606 is about, so the fix is to stop declaring it -- derived, "wrong"
+    is not a state this can be in.
+
+    Cargo's rule, and the one applied here: an explicit `[lib] name` wins,
+    otherwise the package name with `-` mapped to `_`. Returns `None` when the
+    manifest is missing, which IS a finding -- the package named in the row
+    does not exist.
+    """
+    manifest = ROOT / "crates" / pkg / "Cargo.toml"
+    if not manifest.is_file():
+        return None
+    section, text = None, manifest.read_text(encoding="utf-8")
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if line.startswith("["):
+            section = line
+        elif section == "[lib]" and line.startswith("name"):
+            _, _, value = line.partition("=")
+            return value.strip().strip('"').strip("'")
+    return pkg.replace("-", "_")
 
 # The residue of item 606, as a SET so that it is derived rather than recounted.
 # Every `OFF_AXIS` row is in exactly one of three places: `ABI_CONTRACT`,
@@ -623,13 +666,12 @@ AXIS_REACHABLE_CRATE: dict[str, str] = {
 # R2294b took `wz-packet-socket` out of here into `PLATFORM_GATED`: its claim
 # was about the PLATFORM deciding the surface, which is a third kind again and
 # is read off the attribute rather than the reason.
-PROSE_ONLY: frozenset[str] = frozenset(
-    {
-        "wz",
-        "wz-link-lwip",
-        "wz-runtime-core",
-    }
-)
+# R2298 — EMPTY. Every `OFF_AXIS` row is now held to a predicate, which is what
+# item 606 asked for. The set stays rather than being deleted: it is the place a
+# row added tomorrow lands while its reason is still prose, and the
+# both/neither rule below is what forces that landing to be deliberate. An
+# empty residue is not the same as no residue mechanism.
+PROSE_ONLY: frozenset[str] = frozenset()
 
 
 class Dep(typing.NamedTuple):
@@ -1003,6 +1045,8 @@ def abi_module_is_abi(root: pathlib.Path, rel: str, module: str) -> str | None:
 
 def axis_reachable_findings(
     derive: typing.Callable[[str, str], dict[str, object]] | None = None,
+    sites: dict[tuple[str, str], list[Shape]] | None = None,
+    crate_of: typing.Callable[[str], str | None] | None = None,
 ) -> list[str]:
     """R2297 — hold every `AXIS_REACHABLE` row to the axis's own derivation.
 
@@ -1011,6 +1055,36 @@ def axis_reachable_findings(
     a probe for every feature the row names. `derive` is injectable so the
     selftest can drive the refusals; the real run uses the two derivations the
     diagnostic merges, in the same order it merges them.
+
+    # R2298 — the second clause, and why "the derivation misses it" is not
+    # automatically a finding
+
+    Three rows were left after R2297 and all three failed on ONE feature each:
+    `wz-runtime-core/alloc`, `wz-link-lwip/test-support`, `wz/session-lwip`.
+    Measured, every site those three have is either a COMPOUND cfg
+    (`any(test, feature = ..)`, `all(feature = .., lwip_real_build)`) or sits
+    inside an `impl` rather than at the crate root. The crate-root derivation
+    cannot name either shape -- which is not a gap in this row, it is the same
+    fact `feature_gate_diagnostic.DEFERRED` already spells `@defer compound-cfg`
+    and `@defer impl-method` for the packages the axis DID take.
+
+    So a feature the derivation misses is excused only when the SITES say it
+    could not have been derived, and that is read off the sites rather than
+    declared: every public-item site of that feature must be compound or nested.
+    A feature with even one SIMPLE crate-root site that the derivation still
+    missed is a real gap and stays a finding -- which is the direction that
+    keeps this clause from becoming the escape hatch "or it was hard".
+
+    ⚠ MEASURED, and recorded rather than left implied: that gap arm has NO
+    instance in today's tree, and a mutation is why it is known. Adding a
+    simple `#[cfg(feature = "alloc")] pub use` at column 0 of
+    `wz-runtime-core/src/lib.rs` did NOT produce it -- `submodule_probes`
+    reaches a `lib.rs` site even though `derived_probes` skips it (`if not
+    chain: continue`), so the merged derivation covered the new item and the
+    excuse simply stopped being needed. The arm is therefore driven by the
+    selftest's injected derivation, like every other predicate arm in this
+    file. What holds the three rows to something today is the OTHER arms: the
+    both/neither ratchet, partial coverage, and the STALE arm.
     """
 
     def real(pkg: str, crate: str) -> dict[str, object]:
@@ -1036,12 +1110,12 @@ def axis_reachable_findings(
                 f"the fact it rested on"
             )
             continue
-        crate = AXIS_REACHABLE_CRATE.get(pkg)
+        crate = (crate_of or axis_reachable_crate)(pkg)
         if crate is None:
             findings.append(
-                f"`{pkg}` is in `AXIS_REACHABLE` with no crate path in "
-                f"`AXIS_REACHABLE_CRATE`, so the derivation cannot be run and "
-                f"the claim is untested"
+                f"`{pkg}` is in `AXIS_REACHABLE` but `crates/{pkg}/Cargo.toml` "
+                f"does not exist, so its crate path cannot be read and the "
+                f"derivation cannot be run against anything"
             )
             continue
         _why, row = OFF_AXIS[pkg]
@@ -1054,23 +1128,46 @@ def axis_reachable_findings(
                 f"reads as measured"
             )
             continue
+        # R2298 — an EMPTY derivation is not itself a finding. It was, until
+        # `wz-runtime-core` measured it: that package's one row feature gates a
+        # `cfg_attr(not(..))` enum and an `impl` method, so there is nothing for
+        # the crate-root derivation to name and producing nothing is the RIGHT
+        # answer. This comment used to add "a wrong crate path still surfaces,
+        # through the per-feature clause below". MEASURED, that was false --
+        # `derived_probes` returns the same KEYS whatever path it is handed,
+        # because the path only spells the probe's `use` line. The path is now
+        # READ from the manifest (`axis_reachable_crate`) instead of declared,
+        # so there is no wrong one to catch.
         produced = set(derive(pkg, crate))
-        if not produced:
-            findings.append(
-                f"the axis's derivation produces NO probe at all for `{pkg}` as "
-                f"`{crate}`, so the claim that it could be probed today is held "
-                f"to an empty population -- the crate path is likely wrong"
-            )
-            continue
         reached += len(feats)
         for feat in sorted(feats - produced):
-            findings.append(
-                f"`{pkg}` / `{feat}` is excused because the axis could take this "
-                f"row for free, and the derivation produces no probe for it. "
-                f"Extending the axis would cost a hand-written probe, so the "
-                f"reason no longer holds -- write it, or say what the row is "
-                f"really waiting for"
-            )
+            # R2298 — the derivation missed it. That is a FINDING only when the
+            # sites say it could have been derived: a SIMPLE cfg on a
+            # crate-root item is exactly what `derived_probes` reads, so one of
+            # those left unprobed is a real gap. Everything else -- a compound
+            # cfg, or an item inside an `impl` -- is a shape the crate-root
+            # derivation cannot name at all, and the axis spells that
+            # `@defer compound-cfg` / `@defer impl-method` for the packages it
+            # took. Same fact, so the same verdict.
+            found = (sites or {}).get((pkg, feat), [])
+            if not found:
+                findings.append(
+                    f"`{pkg}` / `{feat}` is in an `AXIS_REACHABLE` row and gates "
+                    f"no public item at all, so nothing here was graded -- the "
+                    f"row and the site table disagree about what this feature is"
+                )
+                continue
+            nameable = [s for s in found if not s.compound and s.column == 0]
+            if nameable:
+                findings.append(
+                    f"`{pkg}` / `{feat}` is excused because the axis could take "
+                    f"this row for free, and the derivation produces no probe "
+                    f"for it while it has {len(nameable)} SIMPLE crate-root "
+                    f"site(s) ({', '.join(s.where for s in nameable[:3])}) -- "
+                    f"which is the shape the derivation reads. Extending the "
+                    f"axis would cost a hand-written probe, so the reason no "
+                    f"longer holds"
+                )
     if AXIS_REACHABLE and reached == 0:
         findings.append(
             "no `AXIS_REACHABLE` row had a single feature to hold its reason "
@@ -1659,7 +1756,7 @@ def check() -> int:
     findings.extend(abi_contract_findings(ROOT, sites))
     findings.extend(platform_gated_findings(ROOT, sites))
     findings.extend(facade_only_findings())
-    findings.extend(axis_reachable_findings())
+    findings.extend(axis_reachable_findings(sites=sites))
     findings.extend(test_only_reach_findings())
     findings.extend(test_only_feature_findings())
 
@@ -1745,10 +1842,11 @@ def axis_reachable_selftest() -> int:
     """
     pkg, crate = "demo", "demo_crate"
     real_row, real_ar = OFF_AXIS.get(pkg), dict(AXIS_REACHABLE)
-    real_crate = dict(AXIS_REACHABLE_CRATE)
     real_axis = pkg in fgd.AXIS
     AXIS_REACHABLE.clear()
-    AXIS_REACHABLE_CRATE.clear()
+
+    def named(_p: str) -> str | None:
+        return crate
 
     def covers_all(_p: str, _c: str) -> dict[str, object]:
         return {"one": [], "two": []}
@@ -1759,24 +1857,49 @@ def axis_reachable_selftest() -> int:
     def covers_none(_p: str, _c: str) -> dict[str, object]:
         return {}
 
+    # R2298 — the sites decide whether an unprobed feature is a gap. `two` has a
+    # SIMPLE crate-root site, so the derivation missing it is a real gap;
+    # `deferred_shape` has only a compound one and an `impl` one, which the
+    # crate-root derivation cannot name and the axis defers for the packages it
+    # took. Both shapes are here because the clause has to separate them.
+    nameable = Shape(where="demo/src/lib.rs:1", compound=False, column=0)
+    site_map = {
+        (pkg, "one"): [nameable],
+        (pkg, "two"): [nameable],
+    }
+    undeferrable = {
+        (pkg, "one"): [nameable],
+        (pkg, "two"): [
+            Shape(where="demo/src/lib.rs:2", compound=True, column=0),
+            Shape(where="demo/src/lib.rs:3", compound=False, column=4),
+        ],
+    }
+
     try:
         OFF_AXIS[pkg] = ("fixture", frozenset({"one", "two"}))
         AXIS_REACHABLE[pkg] = frozenset({"one", "two"})
-        AXIS_REACHABLE_CRATE[pkg] = crate
-        control = axis_reachable_findings(covers_all)
-        gap = axis_reachable_findings(covers_some)
-        empty = axis_reachable_findings(covers_none)
-        del AXIS_REACHABLE_CRATE[pkg]
-        no_crate = axis_reachable_findings(covers_all)
-        AXIS_REACHABLE_CRATE[pkg] = crate
+        control = axis_reachable_findings(covers_all, site_map, named)
+        gap = axis_reachable_findings(covers_some, site_map, named)
+        # THE SECOND CONTROL: the same miss, but every site of the missed
+        # feature is a shape the derivation could not have named. Must PASS.
+        deferrable = axis_reachable_findings(covers_some, undeferrable, named)
+        # A feature in the row that the SITE TABLE does not know at all.
+        no_sites = axis_reachable_findings(
+            covers_some, {(pkg, "one"): [nameable]}, named
+        )
+        empty = axis_reachable_findings(covers_none, site_map, named)
+        # R2298b — the crate path is READ, not declared, so this case drives the
+        # REAL reader: `crates/demo/Cargo.toml` does not exist, and a row naming
+        # a package that is not in the tree must be refused rather than skipped.
+        no_crate = axis_reachable_findings(covers_all, site_map)
         OFF_AXIS[pkg] = ("fixture", frozenset({"one", "two", "three"}))
-        partial = axis_reachable_findings(covers_all)
+        partial = axis_reachable_findings(covers_all, site_map, named)
         del OFF_AXIS[pkg]
-        orphan = axis_reachable_findings(covers_all)
+        orphan = axis_reachable_findings(covers_all, site_map, named)
         # THE STALE CASE: the axis took the package, so the excuse is spent.
         OFF_AXIS[pkg] = ("fixture", frozenset({"one", "two"}))
         fgd.AXIS[pkg] = crate
-        stale = axis_reachable_findings(covers_all)
+        stale = axis_reachable_findings(covers_all, site_map, named)
     finally:
         OFF_AXIS.pop(pkg, None)
         if not real_axis:
@@ -1785,20 +1908,29 @@ def axis_reachable_selftest() -> int:
             OFF_AXIS[pkg] = real_row
         AXIS_REACHABLE.clear()
         AXIS_REACHABLE.update(real_ar)
-        AXIS_REACHABLE_CRATE.clear()
-        AXIS_REACHABLE_CRATE.update(real_crate)
 
     checks = (
         (not control, "the CONTROL -- a row the derivation covers entirely -- "
                       "must PASS, or the predicate refuses the shape the excuse "
                       "is for"),
-        (any("produces no probe for it" in f for f in gap),
-         "a feature the derivation cannot reach must be reported"),
-        (any("empty population" in f for f in empty),
-         "a derivation that produces nothing means the crate path is wrong and "
-         "must FAIL rather than pass"),
-        (any("no crate path" in f for f in no_crate),
-         "a row with no crate path cannot be tested and must be reported"),
+        (any("SIMPLE crate-root site" in f for f in gap),
+         "a feature the derivation missed while it HAS a simple crate-root "
+         "site is a real gap and must be reported"),
+        (not deferrable,
+         "the SECOND CONTROL -- the same miss, on a feature whose every site is "
+         "compound or nested -- must PASS. The crate-root derivation cannot "
+         "name those shapes at all, and refusing them would make this clause "
+         "demand a probe nobody could write"),
+        (any("gates\nno public item" in f or "gates no public item at all" in f
+             for f in no_sites),
+         "a row feature the SITE TABLE does not know was graded against "
+         "nothing, and that must be reported rather than pass"),
+        (any("SIMPLE crate-root site" in f for f in empty),
+         "a derivation that produces NOTHING while the sites ARE nameable is a "
+         "row the axis cannot in fact reach, and must FAIL rather than pass"),
+        (any("does not exist" in f for f in no_crate),
+         "a row naming a package with no manifest in the tree cannot have its "
+         "crate path read, and must be reported rather than skipped"),
         (any("PART of a row" in f for f in partial),
          "a predicate covering part of a row must be reported"),
         (any("has no `OFF_AXIS` row" in f for f in orphan),
@@ -2434,11 +2566,15 @@ def selftest() -> int:
         "facade row that pulls no `dep:` in, a row covered only in part, a row "
         "with no `OFF_AXIS` entry and a facade with no row of its own -- past "
         "one clean control; and holds each `AXIS_REACHABLE` row to the axis's "
-        "OWN derivation, refusing a feature it produces no probe for, a crate "
-        "path that produces none at all, a row with no crate path, a row "
-        "covered only in part, a row with no `OFF_AXIS` entry, and -- the one "
-        "no other arm could make -- a row the axis has since TAKEN, whose "
-        "excuse is spent -- past one clean control"
+        "OWN derivation, refusing a feature it missed that HAS a simple "
+        "crate-root site, a row feature the site table does not know, a "
+        "derivation that produces nothing while the sites are nameable, a row "
+        "naming a package with no manifest in the tree (the crate path is READ "
+        "from it, not declared), a row covered only in part, a row with no "
+        "`OFF_AXIS` entry, and -- the one no other arm could make -- a row the "
+        "axis has since TAKEN, whose excuse is spent -- past TWO clean "
+        "controls, the second being a miss on a feature whose every site is "
+        "compound or nested, which the crate-root derivation cannot name"
     )
     return 0
 
