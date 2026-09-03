@@ -109,6 +109,18 @@ it, and an abbreviated spelling that was never a directory name at all cannot
 be derived by anything. Both are measured residues, filed rather than papered
 over.
 
+## WHERE A ROOT-LESS CITATION RESOLVES -- the pin answers, per citation
+
+A declared segment can name several directories at the pin, and the citation
+is resolved only when EXACTLY ONE of them holds the file. That is R2322's
+change (open debt 649) and it is a relocation of a rule, not a relaxation of
+one: the demand for uniqueness used to fall on the SEGMENT, which made 37% of
+the residue permanently undeclarable and the item unable to reach zero; it now
+falls on the CITATION, which is the thing that actually makes a claim. Two
+hits is refused with "write it with its root" -- the gate does not pick -- and
+zero hits is the ordinary gone-path finding. Every occurrence therefore has a
+route out of the residue, which is what a closing condition needs.
+
 ## ⛔ A GATE THAT CANNOT MEASURE MUST NOT REPORT GREEN
 
 Item 581 condition (3). Three ways this refuses instead of passing:
@@ -236,7 +248,54 @@ GONE_CITE = re.compile(
 #: judged for completeness by `rootless_candidates()` -- see the module doc.
 #: `hat` is the segment R2317 made visible and repaired; the rest of the
 #: derived candidate set is held down by `ROOTLESS_UNDECLARED_BUDGET` below.
-ROOTLESS_SEGMENTS = ("hat",)
+#:
+#: ⚠ WHAT A DECLARATION MEANS CHANGED IN R2322 (open debt 649), and the reason
+#: is a measurement rather than a preference. Until then a segment could only
+#: be declared if it was a UNIQUE directory at the pin, because
+#: `rootless_locations` resolved the SEGMENT to one place and every citation
+#: under it inherited that answer. Seven of the residue's segments are not
+#: unique there -- `net` 2, `api` 3, `transport` 2, `core` 3, `common` 5,
+#: `shm` 3, `client` 2 -- so 271 of the 731 residue occurrences (37%) could
+#: never be declared, and the item could not reach zero in that form.
+#:
+#: The repair is NOT to relax uniqueness, which would be the gate guessing.
+#: It is to notice that uniqueness was being demanded of the wrong thing. A
+#: segment is not a claim; a CITATION is. So the location is derived PER
+#: CITATION across every directory the pin gives the segment, and the rule is
+#: EXACTLY ONE of them holds that file. Measured over the whole 731:
+#:
+#:   * 658 resolve under exactly one -- graded, no repair;
+#:   *  56 exist under two -- the transport module head is carried by both
+#:     zenoh-codec and zenoh-protocol, the net module head by both zenoh-util
+#:     and zenoh -- REFUSED, per occurrence, with "write it with its root";
+#:   *  17 exist under none -- the ordinary gone-path finding.
+#:
+#: So the refusal survives intact and moves to where the ambiguity actually
+#: is, and every occurrence has a route out of the residue: declare it, or
+#: give it its root. That is a closing condition that reaches zero.
+#:
+#: ⚠ The OTHER hypothesis in item 649 -- declare a LONGER PREFIX, the routing
+#: subtree rather than the net segment that contains it -- was measured and
+#: does not reach zero: 149 of the 271 name a file sitting DIRECTLY under the
+#: ambiguous segment (the api session module 44, the transport module head 8,
+#: the core module head 5, …), so there is no longer prefix to lengthen to. It
+#: covers `net` and nothing else.
+#:
+#: ⚠ Nor is the per-citation rule expressible as a declared segment -> location
+#: TABLE, the item's first hypothesis: `api` alone resolves into TWO different
+#: pin directories -- its session module under the zenoh crate, its
+#: protocol-implementations subtree under zenoh-shm -- and one declared
+#: location would have to be wrong for one of them. A table would also be a
+#: second copy of upstream's layout, which is the thing `rootless_locations`
+#: says it will not keep.
+#:
+#: ⚠⚠ EVERY upstream path in the paragraphs above is DESCRIBED, never written.
+#: This file is tracked, so it is inside the population it scans, and a
+#: literal here is indistinguishable from a citation someone made -- it would
+#: move the very budgets this comment is explaining. The first draft of this
+#: block wrote five of them out; `selftest` case 8b is what catches it, and
+#: this is the third round to walk into the class (R2241, R2318, here).
+ROOTLESS_SEGMENTS = ("hat", "api", "shm")
 
 _ROOTLESS_PATH = rf"(?:{'|'.join(ROOTLESS_SEGMENTS)})/[\w/.-]+\.rs"
 #: The SAME lookbehind as `_PATH`, and it is what makes this axis safe to add:
@@ -259,8 +318,14 @@ LINE_BUDGET = 300
 BARE_BUDGET = 60
 #: The root-less axis, after R2317 repaired the 49 citations that named a file
 #: gone at the pin. Same two-directional ratchet as LINE and BARE.
-ROOTLESS_LINE_BUDGET = 59
-ROOTLESS_BARE_BUDGET = 16
+#:
+#: ⚠ These two ROSE in R2322 (59 -> 98, 16 -> 36) and that is a BASELINE, not
+#: a raise. Declaring `api` and `shm` wrote no citation: it moved 59
+#: occurrences that already existed out of the residue, which fell by exactly
+#: 59 in the same commit. `ROOTLESS_TOTAL_BUDGET` below is what makes that a
+#: measurement rather than a claim -- see its comment.
+ROOTLESS_LINE_BUDGET = 98
+ROOTLESS_BARE_BUDGET = 36
 #: Root-less LINE citations whose file EXISTS at the pin but whose line number
 #: is past its end -- 1.5.0 line numbers on files that shrank. Measured, not
 #: chosen, and graded only by the RESOLUTION arm (it takes a checkout to know).
@@ -276,7 +341,37 @@ ROOTLESS_STALE_LINE_BUDGET = 1
 #: This is the residue of open debt 647 made monotone rather than argued: it
 #: can only shrink, so declaring a segment forces it down in the same commit,
 #: and writing a NEW root-less citation of an undeclared segment reds.
-ROOTLESS_UNDECLARED_BUDGET = 731
+ROOTLESS_UNDECLARED_BUDGET = 672
+#: EVERY root-less occurrence, graded or not: `rootless_line + rootless_bare +
+#: residue`. One ratchet over the union of the three above, and it exists
+#: because those three CANNOT express the invariant that matters.
+#:
+#: Item 649 recorded the hole precisely: "this is a distinction the gate cannot
+#: draw mechanically". A round that DECLARES a segment makes existing citations
+#: visible, so the two root-less budgets rise -- and a round that WRITES a new
+#: root-less citation of a declared segment raises exactly the same numbers.
+#: The gate's own message says only "never raise the budget", so telling the
+#: two apart was left to a human writing a sentence in a commit, which is the
+#: shape rule (10) exists to refuse.
+#:
+#: The two are not alike at all under this total. A DECLARATION conserves it:
+#: the occurrence leaves the residue and arrives in a bucket, one out and one
+#: in. A NEW CITATION does not: nothing leaves, so the total rises and the
+#: gate reds whatever the individual budgets were set to. So a declaring round
+#: no longer argues -- it moves three numbers and leaves this one alone, and
+#: that IS the proof. R2322 is the first: 731 -> 672 residue against 59 -> 98
+#: and 16 -> 36, and 806 unchanged.
+#:
+#: Down is the direction we want and it means a citation was REPAIRED -- given
+#: its root (it becomes an ordinary rooted citation) or marked `@ REMOVED`
+#: (the absence arm grades it instead). Lower this in that same commit.
+#:
+#: ⚠ It can also move when the CANDIDATE SET does, since the residue is
+#: derived: a new rooted citation naming a directory this tree had never cited
+#: promotes that segment to a candidate and its root-less tokens become
+#: visible. That is a real event and reds correctly -- it is R2317's finding
+#: happening again, one segment at a time.
+ROOTLESS_TOTAL_BUDGET = 806
 
 #: A LIVE invocation of the RESOLUTION arm. R2242 split this gate in two and,
 #: in doing so, made `--resolve` a flag someone can simply stop passing: delete
@@ -365,9 +460,13 @@ def rootless_candidates(root: pathlib.Path, files: list[str]) -> set[str]:
     return {s for s in seen if s not in own_dirs and s not in roots}
 
 
-def rootless_undeclared(root: pathlib.Path, files: list[str]) -> int:
-    """How many occurrences sit under a candidate segment this axis does not
-    grade? The residue, sized rather than described.
+def first_segment_occurrences(
+    root: pathlib.Path, files: list[str]
+) -> collections.Counter[str]:
+    """How often does each FIRST SEGMENT begin a path-like token? One pass,
+    because two callers want slices of the same tally: the residue wants the
+    segments this axis does not grade, and `run` wants the ones it does, to
+    check that each declaration has a subject in this tree.
 
     ⚠ A path marked `@ REMOVED` is EXCLUDED, because it is graded -- by the
     absence arm, which reds if upstream brings it back. Leaving it in would make
@@ -376,10 +475,7 @@ def rootless_undeclared(root: pathlib.Path, files: list[str]) -> int:
     Measured when this was missed: marking the five live sites left the residue
     unchanged at 736 instead of dropping it to 731.
     """
-    cands = rootless_candidates(root, files) - set(ROOTLESS_SEGMENTS)
-    if not cands:
-        return 0
-    n = 0
+    tally: collections.Counter[str] = collections.Counter()
     for rel in files:
         try:
             text = (root / rel).read_text(errors="replace")
@@ -387,9 +483,19 @@ def rootless_undeclared(root: pathlib.Path, files: list[str]) -> int:
             continue
         text = GONE_CITE.sub(lambda m: " " * len(m.group(0)), text)
         for m in _ANY_TOKEN.finditer(text):
-            if m.group(1) in cands:
-                n += 1
-    return n
+            tally[m.group(1)] += 1
+    return tally
+
+
+def rootless_undeclared(root: pathlib.Path, files: list[str]) -> int:
+    """How many occurrences sit under a candidate segment this axis does not
+    grade? The residue, sized rather than described.
+    """
+    cands = rootless_candidates(root, files) - set(ROOTLESS_SEGMENTS)
+    if not cands:
+        return 0
+    tally = first_segment_occurrences(root, files)
+    return sum(tally[seg] for seg in cands)
 
 
 def upstream_roots_missing(
@@ -434,20 +540,28 @@ def upstream_roots_missing(
     return seen
 
 
-def rootless_locations(ref: pathlib.Path) -> dict[str, pathlib.Path | None]:
-    """Where does each DECLARED segment live at the pin? Globbed, never
+def rootless_locations(ref: pathlib.Path) -> dict[str, tuple[pathlib.Path, ...]]:
+    """Where COULD each DECLARED segment live at the pin? Globbed, never
     written down -- a location constant here would be a second copy of
     upstream's layout, and the one thing this gate knows about upstream is
     that it moves.
 
-    `None` means the segment is not a UNIQUE directory at the pin, which is a
-    FAIL rather than a skip: a declared segment the gate cannot place is a
-    population it cannot resolve, and this gate does not report green on those.
+    EVERY directory is returned, not the unique one, and that is the R2322
+    change (open debt 649). This function used to answer `None` for a segment
+    the pin carries twice, which made the whole segment undeclarable; the
+    per-citation rule in `_rootless_finding` is what replaced it, and it needs
+    the candidates rather than a verdict about them. The refusal did not go
+    away -- it moved to the citation, which is the thing that makes a claim.
+
+    An EMPTY tuple means the pin has no such directory at all. That is a
+    declaration with no subject and `run` fails on it whether or not the tree
+    cites anything under it: a segment the pin does not have grades nothing,
+    and a population of zero must not report green.
     """
-    out: dict[str, pathlib.Path | None] = {}
+    out: dict[str, tuple[pathlib.Path, ...]] = {}
     for seg in ROOTLESS_SEGMENTS:
         hits = sorted({p.parent for p in ref.glob(f"**/{seg}") if p.is_dir()})
-        out[seg] = hits[0] if len(hits) == 1 else None
+        out[seg] = tuple(hits)
     return out
 
 
@@ -514,13 +628,13 @@ def scan(
     files: list[str],
     root: pathlib.Path,
     ref: pathlib.Path,
-    rootless_loc: dict[str, pathlib.Path | None] | None = None,
+    rootless_loc: dict[str, tuple[pathlib.Path, ...]] | None = None,
 ):
     """Every occurrence, in exactly one bucket. Returns (counts, findings).
 
-    `rootless_loc` is the DECLARED segments' locations at the pin, and `None`
-    means "do not resolve the root-less axis" -- the form arm's shape, where
-    the counts are still wanted but no path can be looked up.
+    `rootless_loc` is every directory the pin gives each DECLARED segment, and
+    `None` means "do not resolve the root-less axis" -- the form arm's shape,
+    where the counts are still wanted but no path can be looked up.
     """
     counts = {"anchored": 0, "line": 0, "bare": 0, "rootless_line": 0,
               "rootless_bare": 0, "rootless_stale_line": 0, "gone": 0}
@@ -656,7 +770,7 @@ def _rootless_finding(
     path: str,
     n: int | None,
     ref: pathlib.Path,
-    rootless_loc: dict[str, pathlib.Path | None] | None,
+    rootless_loc: dict[str, tuple[pathlib.Path, ...]] | None,
     nlines,
 ) -> tuple[list[Finding], int]:
     """Resolve ONE root-less citation. Returns (findings, stale-line count).
@@ -680,6 +794,15 @@ def _rootless_finding(
     BARE: the number is printed every run, it is checked in both directions,
     and nothing can raise it.
 
+    THREE VERDICTS, not two, since R2322 (open debt 649). The pin can carry a
+    declared segment in several directories, and the citation is resolved only
+    when EXACTLY ONE of them holds the file. Zero is the gone-path finding
+    above; MORE THAN ONE is a citation that does not say which it meant, and
+    it is refused rather than guessed at. The rule the old shape enforced --
+    "a declared segment must be a unique directory" -- is the same rule, moved
+    off the segment and onto the claim, which is what let 37% of the residue
+    become declarable at all.
+
     `rootless_loc is None` is the form arm and yields nothing -- the counts are
     the form arm's whole product. It is NOT a skip that reports green: `run()`
     prints that the arm resolved nothing and refuses to be the only arm wired.
@@ -687,31 +810,49 @@ def _rootless_finding(
     if rootless_loc is None:
         return [], 0
     seg = path.split("/", 1)[0]
-    loc = rootless_loc.get(seg)
-    if loc is None:
-        # A declared segment with no unique directory at the pin. Reported per
-        # occurrence rather than once, because the repair is per citation: each
-        # one has to name where it went, and upstream deleting a directory is
-        # exactly when every claim under it needs re-reading.
-        return [
-            Finding(
-                rel,
-                f"`{path}` is root-less and its segment `{seg}/` is not a "
-                "unique directory at the pin, so nothing can resolve it. "
-                "Write the citation with its root, in the `path` @ `needle` "
-                "form",
-            )
-        ], 0
-    full = (loc / path).as_posix()
+    bases = rootless_loc.get(seg, ())
     shown = f"`{path}`" + (f":{n}" if n is not None else "")
-    if not (ref / full).is_file():
+    # THE PIN DECIDES, PER CITATION -- R2322, open debt 649. Every directory
+    # the pin gives this segment is tried, and the citation is resolved only
+    # when EXACTLY ONE of them holds the file. Two hits is the case the
+    # segment-level uniqueness rule used to catch, and it is still refused;
+    # what changed is that a segment living in two places no longer condemns
+    # the citations that are unambiguous anyway. Reported per occurrence
+    # rather than once per segment, because the repair is per citation: each
+    # one has to say which of the two it meant.
+    hits = [b for b in bases if (b / path).is_file()]
+    if len(hits) > 1:
+        where = ", ".join(f"`{h.relative_to(ref).as_posix()}`" for h in hits)
         return [
             Finding(
                 rel,
-                f"{shown} is root-less and resolves to `{full}`, which does "
-                "not exist at the pin",
+                f"{shown} is root-less and the pin carries that file under "
+                f"{len(hits)} of `{seg}/`'s directories ({where}), so this "
+                "citation does not say which one it means. Write it with its "
+                "root, in the `path` @ `needle` form",
             )
         ], 0
+    if not hits:
+        if not bases:
+            return [
+                Finding(
+                    rel,
+                    f"{shown} is root-less under declared segment `{seg}/`, "
+                    "which is not a directory at the pin at all -- the "
+                    "declaration has no subject there and nothing can resolve "
+                    "under it",
+                )
+            ], 0
+        tried = ", ".join(f"`{b.relative_to(ref).as_posix()}`" for b in bases)
+        return [
+            Finding(
+                rel,
+                f"{shown} is root-less and exists under none of `{seg}/`'s "
+                f"{len(bases)} director{'y' if len(bases) == 1 else 'ies'} at "
+                f"the pin ({tried})",
+            )
+        ], 0
+    full = (hits[0] / path).relative_to(ref).as_posix()
     if n is not None and n > nlines(full):
         return [], 1
     return [], 0
@@ -763,8 +904,12 @@ def run(root: pathlib.Path, ref: pathlib.Path | None, resolve: bool) -> int:
     total = (counts["anchored"] + counts["line"] + counts["bare"]
              + counts["rootless_line"] + counts["rootless_bare"]
              + counts["gone"])
-    undeclared = rootless_undeclared(root, files)
     candidates = rootless_candidates(root, files)
+    # ONE pass over the tree for both slices of the same tally -- the residue
+    # (candidate segments this axis does not grade) and the declared segments,
+    # which have to have a subject here to be worth declaring.
+    tally = first_segment_occurrences(root, files)
+    undeclared = sum(tally[seg] for seg in candidates - set(ROOTLESS_SEGMENTS))
 
     where = f"pin at {ref}" if resolve else "FORM arm only"
     print(
@@ -781,7 +926,11 @@ def run(root: pathlib.Path, ref: pathlib.Path | None, resolve: bool) -> int:
         f"  upstream-citation-anchor: root-less residue -- {undeclared} "
         f"occurrence(s) under {len(candidates - set(ROOTLESS_SEGMENTS))} derived "
         f"candidate segment(s) this axis does not yet grade "
-        f"(budget {ROOTLESS_UNDECLARED_BUDGET}); open debt 647"
+        f"(budget {ROOTLESS_UNDECLARED_BUDGET}); open debt 647. "
+        f"{counts['rootless_line'] + counts['rootless_bare'] + undeclared} "
+        f"root-less occurrence(s) in all (budget {ROOTLESS_TOTAL_BUDGET}) -- "
+        "declaring a segment moves an occurrence between these, it never "
+        "changes the total"
     )
     if resolve:
         print(
@@ -872,9 +1021,20 @@ def run(root: pathlib.Path, ref: pathlib.Path | None, resolve: bool) -> int:
     # axis is citations written WITHOUT a root. Requiring the derivation to
     # re-propose it tests the tree's prose, not the declaration, and it reds on
     # any tree whose root-less citations are the only ones it has. What DOES
-    # validate a declaration is `rootless_locations` -- the pin, not our prose --
-    # and it FAILs per occurrence when a declared segment is not a unique
-    # directory there.
+    # validate a declaration is the pin's own answer, per citation, about which
+    # of the segment's directories holds the file.
+    #
+    # ⚠ NOR IS THERE a "every declared segment must have a SUBJECT" check --
+    # neither "this tree cites it" nor "the pin has a directory for it" -- and
+    # R2322 wrote both before measuring and then deleted them. The reason they
+    # looked necessary was wrong: a declaration was supposed to be able to make
+    # the residue fall without repairing anything. It cannot. The residue is
+    # `sum(tally[seg] for seg in candidates - declared)`, so declaring a
+    # segment nobody cites subtracts exactly ZERO, and declaring one the pin
+    # lost changes no number either -- any citation under it reds per
+    # occurrence, which is where the real consequence lives. A check whose
+    # stated failure cannot happen is the thing this file keeps refusing
+    # elsewhere, so it does not get to exist here because it reads well.
     for name, budget in (
         ("line", LINE_BUDGET),
         ("bare", BARE_BUDGET),
@@ -926,6 +1086,34 @@ def run(root: pathlib.Path, ref: pathlib.Path | None, resolve: bool) -> int:
             file=sys.stderr,
         )
         rc = 1
+    # THE CONSERVATION CHECK. The three numbers above partition every root-less
+    # occurrence in the tree, so their sum is what a DECLARATION cannot change
+    # and a NEW CITATION cannot help changing. See ROOTLESS_TOTAL_BUDGET.
+    rootless_total = counts["rootless_line"] + counts["rootless_bare"] + undeclared
+    if rootless_total != ROOTLESS_TOTAL_BUDGET:
+        if rootless_total > ROOTLESS_TOTAL_BUDGET:
+            print(
+                f"  upstream-citation-anchor: FAIL -- {rootless_total} "
+                f"root-less occurrence(s) in all, budget "
+                f"{ROOTLESS_TOTAL_BUDGET}. This commit ADDED one. Declaring a "
+                "segment CANNOT move this number -- an occurrence only leaves "
+                "the residue for a bucket -- so the two root-less budgets "
+                "rising while this one rises too is a new citation, not a new "
+                "baseline. Give it its root, in the `path` @ `needle` form; "
+                "never raise this budget.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"  upstream-citation-anchor: FAIL -- {rootless_total} "
+                f"root-less occurrence(s) in all, budget "
+                f"{ROOTLESS_TOTAL_BUDGET}. This commit REMOVED one, which is "
+                "the direction we want: a citation was given its root or "
+                "marked @ REMOVED. Lower ROOTLESS_TOTAL_BUDGET to "
+                f"{rootless_total} in this same commit so the ratchet holds.",
+                file=sys.stderr,
+            )
+        rc = 1
     if not resolve and not resolution_arm_is_wired(root):
         print(
             "  upstream-citation-anchor: FAIL -- this run DEFERRED resolution "
@@ -944,9 +1132,10 @@ def run(root: pathlib.Path, ref: pathlib.Path | None, resolve: bool) -> int:
         print(
             "  upstream-citation-anchor: OK -- every anchored citation resolves "
             "against the pinned checkout, every root-less path resolves under "
-            "the location the pin gives its segment, every path marked "
-            "@ REMOVED is still ABSENT there, and all four legacy forms plus "
-            "the two root-less ratchets sit exactly on their budget."
+            "EXACTLY ONE of the directories the pin gives its segment, every "
+            "path marked @ REMOVED is still ABSENT there, and all four legacy "
+            "forms plus the three root-less ratchets sit exactly on their "
+            "budget."
             if resolve
             else "  upstream-citation-anchor: OK (FORM) -- every occurrence is "
             "classified and all four legacy forms sit exactly on their budget. "
@@ -1019,29 +1208,51 @@ def selftest() -> int:
         (ref / ROOTED_RL).write_text("fn hat_keeper() {}\nfn b() {}\n")
         (ref / "zenoh" / "src" / "net" / "routing" / OTHER).mkdir(parents=True)
         (ref / ROOTED_OTHER).write_text("fn other_keeper() {}\n")
-        # A SECOND ref where the declared segment is NOT a unique directory, so
-        # `rootless_locations` has to answer None and the gate has to refuse.
+        # A SECOND ref where the declared segment is TWO directories and BOTH
+        # carry the cited file. That is the R2322 shape: the segment is now
+        # declarable, and it is the CITATION that must be refused, because the
+        # pin gives it two answers. The file is written into both on purpose --
+        # a fixture with two empty directories reds for the GONE reason instead
+        # and would pass while testing nothing (the R2317 class: a control that
+        # cannot fail the way the rule says).
         ref2 = base / "ref2"
         for extra in ("a", "b"):
-            (ref2 / extra / SEG).mkdir(parents=True)
+            (ref2 / extra / SEG / "peer").mkdir(parents=True)
+            (ref2 / extra / RL).write_text("fn twin() {}\n")
+        # A THIRD ref that has no such directory at all, so the DECLARATION
+        # itself has no subject at the pin.
+        ref3 = base / "ref3"
+        (ref3 / "unrelated").mkdir(parents=True)
         floc = rootless_locations(ref)
-        if floc.get(SEG) is None:
+        if len(floc.get(SEG, ())) != 1:
             failures.append(
                 f"the fixture ref has one `{SEG}` directory but "
-                "rootless_locations() could not place it"
+                f"rootless_locations() reported {floc.get(SEG)}"
             )
-        if rootless_locations(ref2).get(SEG) is not None:
+        if len(rootless_locations(ref2).get(SEG, ())) != 2:
             failures.append(
-                f"two `{SEG}` directories must be UNPLACEABLE, not resolved to "
-                "the first one -- a gate that guesses which of two it meant has "
-                "stopped measuring"
+                f"two `{SEG}` directories must BOTH be returned -- collapsing "
+                "them to one is the gate guessing which was meant, and "
+                "dropping them both would make the segment undeclarable again "
+                "(open debt 649)"
+            )
+        if rootless_locations(ref3).get(SEG) != ():
+            failures.append(
+                f"a pin with no `{SEG}` directory must yield an EMPTY tuple, "
+                "which is what `run` fails the declaration on"
             )
 
-        def scan_text(body: str, loc=None):
+        def scan_text(body: str, loc=None, pin: pathlib.Path | None = None):
+            # `pin` defaults to the one-directory ref. It is an argument at all
+            # because a location map and the checkout it was globbed from must
+            # be the SAME tree -- `_rootless_finding` renders a hit relative to
+            # the pin and would raise if they disagreed. Production cannot
+            # disagree (`run` derives both from one `ref`); only a fixture can,
+            # and a fixture that did would be testing an impossible state.
             src = base / "src"
             src.mkdir(exist_ok=True)
             (src / "f.rs").write_text(body)
-            return scan(["f.rs"], src, ref, loc)
+            return scan(["f.rs"], src, pin if pin is not None else ref, loc)
 
         # 1. The root-anchoring defect: a path matched from the middle of a
         #    longer one must NOT be reported as a missing file.
@@ -1139,12 +1350,52 @@ def selftest() -> int:
         c, f = scan_text(f"// {RL_GONE}:1\n", None)
         if c["rootless_line"] != 1 or f:
             failures.append(f"the form arm resolved the root-less axis: {c} {f}")
-        # A declared segment the pin cannot place must RED per occurrence.
-        c, f = scan_text(f"// {RL}:1\n", rootless_locations(ref2))
+        # 6b. THE THREE-WAY VERDICT (R2322, open debt 649). The pin decides per
+        #     citation, and only EXACTLY ONE hit resolves.
+        #
+        #     Two hits: the citation does not say which it meant, and the gate
+        #     refuses rather than picking. This is the rule the segment-level
+        #     uniqueness demand used to carry, relocated onto the claim; the
+        #     assertion names the reason so that a future round cannot satisfy
+        #     it with the GONE branch, which is the way this fixture would rot.
+        loc2 = rootless_locations(ref2)
+        c, f = scan_text(f"// {RL}:1\n", loc2, ref2)
         if not f:
             failures.append(
-                "a declared segment that is not a unique directory at the pin "
-                "did not red -- an unplaceable population reported green"
+                "a root-less citation whose file exists under BOTH of its "
+                "segment's pin directories did not red -- the gate resolved an "
+                "ambiguous claim, which is guessing"
+            )
+        elif "does not say which one it means" not in f[0].detail:
+            failures.append(
+                f"an ambiguous root-less citation red for the wrong reason: "
+                f"{f[0].detail}"
+            )
+        #     A path under the SAME two-directory segment that neither carries
+        #     is still the ordinary gone finding, so the ambiguity branch has
+        #     not swallowed it.
+        c, f = scan_text(f"// {RL_GONE}:1\n", loc2, ref2)
+        if not f or "exists under none of" not in f[0].detail:
+            failures.append(
+                f"a gone path under a multi-directory segment did not red as "
+                f"gone: {f}"
+            )
+        #     Zero directories: the DECLARATION has no subject at the pin.
+        c, f = scan_text(f"// {RL}:1\n", rootless_locations(ref3), ref3)
+        if not f or "not a directory at the pin at all" not in f[0].detail:
+            failures.append(
+                f"a declared segment absent from the pin did not red as a "
+                f"subjectless declaration: {f}"
+            )
+        #     And the control: with the single-directory ref, that same
+        #     citation resolves and produces nothing. Without this row every
+        #     assertion above is satisfiable by a `_rootless_finding` that
+        #     always reds.
+        c, f = scan_text(f"// {RL}:1\n", floc)
+        if f:
+            failures.append(
+                f"the unambiguous control citation red under a one-directory "
+                f"segment: {f}"
             )
 
         # 6c. THE CANDIDATE DERIVATION, both directions. It reads the directory
@@ -1469,6 +1720,7 @@ def selftest() -> int:
             "ROOTLESS_BARE_BUDGET",
             "ROOTLESS_STALE_LINE_BUDGET",
             "ROOTLESS_UNDECLARED_BUDGET",
+            "ROOTLESS_TOTAL_BUDGET",
         )
         keep = {name: globals()[name] for name in _BUDGETS}
 
@@ -1504,21 +1756,37 @@ def selftest() -> int:
              verdict(dead_needle_repo, ref, True, 0, 0), 1),
             ("no checkout, resolving", verdict(anchor_repo, None, True, 0, 0), 1),
             ("a clean tree", verdict(anchor_repo, ref, True, 0, 0), 0),
-            # R2317 -- the root-less axis's five verdicts. Each fixture is built
-            # so the row's own guard is the only one that can fire.
+            # R2317 -- the root-less axis's six verdicts, R2322's conservation
+            # pair below them. Each fixture is built so the row's own guard is
+            # the only one that can fire.
             ("a root-less tree on all four budgets",
-             verdict(rootless_repo, ref, True, 0, 0, ROOTLESS_LINE_BUDGET=1), 0),
+             verdict(rootless_repo, ref, True, 0, 0, ROOTLESS_LINE_BUDGET=1,
+                     ROOTLESS_TOTAL_BUDGET=1), 0),
             ("the root-less line budget exceeded",
              verdict(rootless_repo, ref, True, 0, 0), 1),
             ("the root-less line budget undershot",
              verdict(rootless_repo, ref, True, 0, 0, ROOTLESS_LINE_BUDGET=9), 1),
             ("the root-less stale-line ratchet, off by one",
              verdict(rootless_repo, ref, True, 0, 0, ROOTLESS_LINE_BUDGET=1,
-                     ROOTLESS_STALE_LINE_BUDGET=1), 1),
+                     ROOTLESS_STALE_LINE_BUDGET=1, ROOTLESS_TOTAL_BUDGET=1), 1),
             ("the residue ratchet on budget",
-             verdict(residue_repo, ref, True, 0, 0, ROOTLESS_UNDECLARED_BUDGET=1), 0),
+             verdict(residue_repo, ref, True, 0, 0, ROOTLESS_UNDECLARED_BUDGET=1,
+                     ROOTLESS_TOTAL_BUDGET=1), 0),
             ("the residue ratchet off budget",
              verdict(residue_repo, ref, True, 0, 0), 1),
+            # R2322 -- THE CONSERVATION RATCHET, and these two rows are the only
+            # ones that can exercise it. Every other guard is satisfied here:
+            # line, bare, stale and residue all sit exactly on their number, so
+            # the sum is fully determined and nothing but ROOTLESS_TOTAL_BUDGET
+            # itself can disagree with it. That is the point of the check --
+            # it sees the move the four individual budgets cannot, a
+            # declaration's transfer versus a newly written citation.
+            ("the conservation ratchet, total too low",
+             verdict(rootless_repo, ref, True, 0, 0, ROOTLESS_LINE_BUDGET=1,
+                     ROOTLESS_TOTAL_BUDGET=0), 1),
+            ("the conservation ratchet, total too high",
+             verdict(residue_repo, ref, True, 0, 0, ROOTLESS_UNDECLARED_BUDGET=1,
+                     ROOTLESS_TOTAL_BUDGET=2), 1),
             # R2318 -- the absence arm's two population guards. Both were DEAD
             # when first written and a control run said so; these are the rows
             # that make them live.
@@ -1599,13 +1867,15 @@ def selftest() -> int:
         "BARE, which the live population cannot exercise; a marker on a path "
         "the pin STILL HAS reding, which is the arm's other direction; the "
         "root-less form; and the form arm counting without resolving), plus "
-        "20 run() "
+        "22 run() "
         "verdicts -- zero population, no anchored citation, a budget exceeded, "
         "a budget undershot, a mixed tree otherwise clean, a dead needle with "
         "findings as the only live guard, no checkout while resolving, a clean "
-        "tree returning 0, SIX on the root-less budgets (all four on budget, "
+        "tree returning 0, EIGHT on the root-less budgets (all four on budget, "
         "the line budget exceeded and undershot, the stale-line ratchet off by "
-        "one, the residue ratchet on and off budget), the form arm passing "
+        "one, the residue ratchet on and off budget, and the R2322 "
+        "conservation total off in each direction while all four of the "
+        "others sit exactly on their number), the form arm passing "
         "with no checkout, and FOUR on the deferral itself: the other arm "
         "wired (0), named only in a run-ci comment (1), no run-ci.sh at all "
         "(1), and the resolution arm unaffected by any of it (0). "
