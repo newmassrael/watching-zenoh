@@ -2440,6 +2440,7 @@ dependencies = [
 name = "wz-capi-c"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "wz-capi-core",
  "wz-cdylib-build",
  "wz-runtime-tokio",

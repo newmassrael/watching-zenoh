@@ -279,18 +279,42 @@ const BASELINES: &[(&str, usize, &str, &str)] = &[
     // none. Building `z_shared_shm_provider_clone` / `_loan` / `_loan_as` on
     // top of a type nothing can construct is the dead arm R2288 named.
     //
-    // What remains is 29 in ONE chain plus three strays: the SHM CLIENT side —
-    // `z_shm_client_*` (4), `zc_shm_client_list_*` (7),
-    // `z_shm_client_storage_*` (7) + `z_ref_shm_client_storage_global`,
-    // `z_posix_shm_client_new`, `z_open_with_custom_shm_clients` — plus
-    // `z_shared_shm_provider_*` (6, and the six are `clone`, `drop`, `loan`,
-    // `loan_as` and the `z_internal_*_check` / `_null` pair; `_move` and
-    // `_take` are `static inline` in `zenoh_macros.h` and export no symbol)
-    // with `z_obtain_shm_provider`, and `zc_cleanup_orphaned_shm_segments` —
-    // which is `void f(void)` over POSIX segment FILES, and wz's segments are
-    // process-local `Vec`s, so it has no value to carry and no witness to
-    // build. It is left rather than closed as a no-op.
-    ("unstable-shm", 29, "1.10.0", "C1cc"),
+    // R2299 lowered this 29 -> 10: the SHM CLIENT REGISTRY, taken as ONE plane
+    // because its four types only mean something together — `z_shm_client_*`
+    // (4), `zc_shm_client_list_*` (7), `z_shm_client_storage_*` (7) and
+    // `z_posix_shm_client_new`. A client alone has no caller, a list alone is
+    // never consulted, and a storage with no clients resolves nothing, so
+    // splitting them across rounds would have put three dead arms in the
+    // surface. The witness drives the whole chain: a real `/dev/shm` segment,
+    // attached through the default client set, read back byte-exact through
+    // `map_fn`.
+    //
+    // ⚠ That round REFUTED the premise this table used to rest on. The client
+    // half's witness was called weak "unless wz negotiates SHM transport", and
+    // wz DOES: `wz-session-core/src/drive.rs` @ `ShmChallengeRejected` is a
+    // live driver arm running `shm_recv_init_syn` / `shm_recv_init_ack`, with
+    // both roles deciding `is_shm` at the Open phase, and
+    // `wz-runtime-tokio/src/shm_auth_segment.rs` publishes a real POSIX auth
+    // segment for it. What is inert is the PAYLOAD path, which
+    // `wz-session-core/src/extshm.rs` says in its own banner (R3a landed the
+    // codec and the trait; R3b never wired the RX resolver). Two sentences,
+    // and the ledger had merged them.
+    //
+    // What remains is 10, and each needs something this workspace has not
+    // decided rather than something it has not written:
+    //   * `z_shared_shm_provider_*` (6) + `z_obtain_shm_provider` — still the
+    //     dead arm R2294 measured: `z_obtain_shm_provider` is the only producer
+    //     of the type and it reads a provider off the SESSION, which wz's does
+    //     not own. The open question is whether it should.
+    //   * `z_open_with_custom_shm_clients` + `z_ref_shm_client_storage_global`
+    //     — the two SESSION couplings of the plane above. They are what make a
+    //     storage reach a session, so they land in the round that answers the
+    //     same question.
+    //   * `zc_cleanup_orphaned_shm_segments` — `void f(void)` over POSIX
+    //     segment FILES. The provider's segments are process-local `Vec`s, so
+    //     it has no value to carry and no witness to build. Left rather than
+    //     closed as a no-op.
+    ("unstable-shm", 10, "1.10.0", "C1cc"),
     // R311y614 — the two arms that had NO oracle on any machine, and therefore
     // no row: the gate hard-FAILED on them rather than guessing a ceiling from
     // a neighbour. `scripts/install-zenoh-c-arm.sh` builds any of the four, so

@@ -122,9 +122,19 @@ zenoh-c-no-unstable-api = []
 # OFF by default, and R2278 measured that this is a DIVERGENCE rather than a
 # match: the published standalone archive is the `unstable-shm` build, which
 # carries this axis. See the ⚠⚠ paragraph at the head of this table.
-zenoh-c-shared-memory = []
+#
+# R2299 (open-debt item 607) — this arm pulls `libc` in. The SHM CLIENT
+# registry's POSIX member ATTACHES to a segment another process published, and
+# an attach is `mmap` — there is no std spelling for a shared read-only view of
+# a file. The dependency is optional and named only here, so the default build's
+# footprint is unchanged, which is what Layer F measures.
+zenoh-c-shared-memory = ["dep:libc"]
 
 [dependencies]
+# R2299 — `mmap`/`munmap` for the SHM client registry's POSIX attach. Optional:
+# only `zenoh-c-shared-memory` needs it. Same major as wz-runtime-tokio's, which
+# is the other half of this workspace that maps a /dev/shm segment.
+libc = { version = "0.2", optional = true }
 # The ABI-neutral session model, shared with wz-capi-pico.
 wz-capi-core = { path = "../wz-capi-core" }
 # `query-reply-err` is DECLARED rather than inherited from the default set, and
