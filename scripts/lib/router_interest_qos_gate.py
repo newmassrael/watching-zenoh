@@ -88,6 +88,7 @@ import pathlib
 import re
 import subprocess
 import sys
+import tempfile
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 
@@ -131,10 +132,15 @@ ATTR_OPEN = re.compile(r"^\s*#\[")
 MODULE_END = re.compile(r"^\}")
 
 
-def tracked_rust() -> list[pathlib.Path]:
-    """Every tracked Rust source under `crates/`."""
+def tracked_rust(repo: pathlib.Path = REPO) -> list[pathlib.Path]:
+    """Every tracked Rust source under `crates/`.
+
+    `repo` is a parameter so `findings()` can be driven against a FIXTURE tree
+    (R2320, open debt 648). It defaults to this checkout, so every production
+    caller is unchanged.
+    """
     out = subprocess.run(
-        ["git", "-C", str(REPO), "ls-files", "crates/**/*.rs", "crates/*.rs"],
+        ["git", "-C", str(repo), "ls-files", "crates/**/*.rs", "crates/*.rs"],
         capture_output=True,
         text=True,
         check=True,
@@ -234,20 +240,24 @@ def is_router_plane(path: pathlib.Path, lines: list[str], in_test: set[int]) -> 
     return False
 
 
-def call_sites() -> tuple[list[tuple[str, int, str, bool]], list[str]]:
+def call_sites(
+    repo: pathlib.Path = REPO,
+) -> tuple[list[tuple[str, int, str, bool]], list[str]]:
     """Every production builder call outside the builder file.
 
     Returns `(sites, direct)` where a site is
     `(file, line, builder_name, router_plane)` and `direct` names the
     router-plane files constructing an `InterestOwned` literal in production.
+
+    `repo` threads through to `tracked_rust` for the same reason -- see there.
     """
     sites: list[tuple[str, int, str, bool]] = []
     direct: list[str] = []
-    for rel in tracked_rust():
+    for rel in tracked_rust(repo):
         key = rel.as_posix()
         if key == BUILDER_FILE:
             continue
-        path = REPO / rel
+        path = repo / rel
         try:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
@@ -267,9 +277,21 @@ def call_sites() -> tuple[list[tuple[str, int, str, bool]], list[str]]:
     return sites, direct
 
 
-def findings() -> tuple[list[str], dict[str, int]]:
+def findings(repo: pathlib.Path = REPO) -> tuple[list[str], dict[str, int]]:
+    """Every problem this gate can report, and the counts it prints.
+
+    ⚠ `repo` EXISTS SO THE SELFTEST CAN DRIVE THIS FUNCTION. Open debt 648: for
+    its whole life `findings()` was reachable only from `main()`, so its TWELVE
+    failure branches were exercised by nothing that would run again -- two had
+    ever fired at all, and those two by a control group on the real tree, not by
+    a test. Among the ten that had never run were FOUR "the population is empty,
+    so FAIL" guards, which exist precisely to stop a zero population reporting
+    green: the device against that trap had itself never been tripped.
+
+    The parameter defaults to this checkout, so `main()` is unchanged.
+    """
     out: list[str] = []
-    builder_path = REPO / BUILDER_FILE
+    builder_path = repo / BUILDER_FILE
     if not builder_path.is_file():
         return ([f"{BUILDER_FILE} does not exist; the builders have moved"], {})
     stamping, bare = classify_builders(builder_path.read_text(encoding="utf-8"))
@@ -289,7 +311,7 @@ def findings() -> tuple[list[str], dict[str, int]]:
             f"stamp has been applied a layer too low."
         )
 
-    sites, direct = call_sites()
+    sites, direct = call_sites(repo)
     router_sites = [s for s in sites if s[3]]
     api_sites = [s for s in sites if not s[3]]
 
@@ -566,12 +588,190 @@ def selftest() -> int:
     ):
         failures.append("the direct-construction ratchet did not fire on its own fixture")
 
+    reported, branch_total = _findings_branches(failures)
+
     if failures:
         for line in failures:
             print(f"  router-interest-qos SELFTEST FAIL: {line}", file=sys.stderr)
         return 1
-    print(f"  router-interest-qos: selftest {len(CASES) + 3} case(s) OK")
+    print(
+        f"  router-interest-qos: selftest {len(CASES) + 3} predicate case(s) OK, "
+        f"plus every one of {branch_total} `findings()` failure branch(es) fired "
+        f"from a fixture ({reported} message(s) collected). The branch population "
+        "is DERIVED from this file's own syntax tree, not counted by hand"
+    )
     return 0
+
+
+#: The fixture trees that drive `findings()`. Each is (label, files, expected
+#: branch-prefix) where `files` maps a repo-relative path to its content; the
+#: builder file's own path is `BUILDER_FILE`.
+#:
+#: ⚠ WHY THIS EXISTS AT ALL (open debt 648). `findings()` was reachable only
+#: from `main()`, so its twelve failure branches were exercised by nothing that
+#: would run again. TWO had ever fired, and by a control group on the real tree
+#: rather than by a test. Four of the ten that had never fired are "the
+#: population is empty, so FAIL" guards -- the device that stops a zero
+#: population reporting green, itself never once tripped.
+#:
+#: ⛔ Counting the branches and comparing to a literal would be the R2185 trap
+#: ("a gate that checks its own table against its own number can never fail"),
+#: so `_findings_branches` DERIVES the branch set from this module's AST and
+#: requires every one to have been produced by some fixture below.
+_STAMPING_BUILDER = (
+    "/// Stamps via `set_interest_qos(..)`.\n"
+    "pub fn build_interest_propagated(\n) -> R {\n"
+    "    let mut i = inner()?;\n"
+    "    set_interest_qos(&mut i, QOS_DECLARE);\n"
+    "    Ok(i)\n}\n"
+)
+_BARE_BUILDER = "pub fn build_interest_bare(\n) -> R {\n    inner()\n}\n"
+_ROUTER_CALL = (
+    "fn p(&self, f: FaceId) {\n    let _ = build_interest_propagated();\n}\n"
+)
+_API_CALL = "fn q(&self) {\n    let _ = build_interest_bare();\n}\n"
+
+
+def _findings_branches(failures: list[str]) -> tuple[int, int]:
+    """Fire every `findings()` failure branch from a fixture tree.
+
+    Returns `(messages produced, branches derived)`. Appends to `failures` for
+    any branch the fixtures did not reach, which is the only way this can pass:
+    the population comes from the AST, so ADDING a thirteenth branch and not
+    covering it reds this row.
+    """
+    import ast
+
+    src = pathlib.Path(__file__).read_text(encoding="utf-8")
+    fn = next(
+        n
+        for n in ast.parse(src).body
+        if isinstance(n, ast.FunctionDef) and n.name == "findings"
+    )
+    wanted: list[str] = []
+    for node in ast.walk(fn):
+        head = None
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "append"
+            and node.args
+        ):
+            head = node.args[0]
+        elif isinstance(node, ast.Return) and isinstance(node.value, ast.Tuple):
+            first = node.value.elts[0]
+            if isinstance(first, ast.List) and first.elts:
+                head = first.elts[0]
+        if head is None:
+            continue
+        chunks = (
+            [v.value for v in head.values if isinstance(v, ast.Constant)]
+            if isinstance(head, ast.JoinedStr)
+            else [head.value] if isinstance(head, ast.Constant) else []
+        )
+        text = "".join(c for c in chunks if isinstance(c, str)).strip()
+        # A distinctive, position-independent fragment of the message. Short
+        # ones (`:`, `` ` ``) come from f-strings that OPEN with a substitution,
+        # so fall through to the next literal chunk that carries words.
+        frag = next(
+            (c.strip() for c in chunks
+             if isinstance(c, str) and len(c.strip()) >= 12),
+            text,
+        )
+        if frag:
+            wanted.append(frag[:40])
+
+    produced: list[str] = []
+    with tempfile.TemporaryDirectory() as td:
+        base = pathlib.Path(td)
+
+        def tree(name: str, files: dict[str, str]) -> pathlib.Path:
+            d = base / name
+            d.mkdir()
+            subprocess.run(["git", "-C", str(d), "init", "-q"], check=True)
+            for rel, body in files.items():
+                p = d / rel
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(body, encoding="utf-8")
+                subprocess.run(["git", "-C", str(d), "add", rel], check=True)
+            return d
+
+        # Each fixture is shaped so it produces the branch(es) it is named for.
+        FIXTURES: list[tuple[str, dict[str, str]]] = [
+            # the builder file itself is gone -> the early return
+            ("gone", {"crates/x/src/a.rs": "fn a() {}\n"}),
+            # no builder stamps; no calls at all -> NO stamping + both empty
+            # populations + stale baseline
+            ("nostamp", {BUILDER_FILE: _BARE_BUILDER}),
+            # every builder stamps -> EVERY builder stamps, and the router
+            # builder is reached, leaving the api plane empty
+            ("allstamp", {
+                BUILDER_FILE: _STAMPING_BUILDER,
+                "crates/x/src/y_forward.rs": _ROUTER_CALL,
+            }),
+            # a router-plane call through a BARE builder, plus an api call, so
+            # neither plane is empty
+            ("bare_router", {
+                BUILDER_FILE: _STAMPING_BUILDER + "\n" + _BARE_BUILDER,
+                "crates/x/src/y_forward.rs":
+                    "fn p(&self, f: FaceId) {\n"
+                    "    let _ = build_interest_bare();\n}\n",
+                "crates/x/src/api.rs": _API_CALL,
+            }),
+            # a router-plane call through a builder the builder file does not
+            # define at all -> unclassified
+            ("unclassified", {
+                BUILDER_FILE: _STAMPING_BUILDER,
+                "crates/x/src/y_forward.rs":
+                    "fn p(&self, f: FaceId) {\n"
+                    "    let _ = build_interest_unknown();\n"
+                    "    let _ = build_interest_propagated();\n}\n",
+            }),
+            # the router builder exists but does NOT stamp
+            ("router_bare", {
+                BUILDER_FILE:
+                    "pub fn build_interest_propagated(\n) -> R {\n"
+                    "    inner()\n}\n" + _STAMPING_BUILDER.replace(
+                        "build_interest_propagated", "build_interest_other"
+                    ),
+                "crates/x/src/y_forward.rs": _ROUTER_CALL,
+                "crates/x/src/api.rs": _API_CALL,
+            }),
+            # the api plane calls the ROUTER builder
+            ("api_calls_router", {
+                BUILDER_FILE: _STAMPING_BUILDER + "\n" + _BARE_BUILDER,
+                "crates/x/src/y_forward.rs": _ROUTER_CALL,
+                "crates/x/src/api.rs":
+                    "fn q(&self) {\n"
+                    "    let _ = build_interest_propagated();\n}\n",
+            }),
+            # a direct envelope construction in router-plane production code
+            ("direct", {
+                BUILDER_FILE: _STAMPING_BUILDER + "\n" + _BARE_BUILDER,
+                "crates/x/src/y_forward.rs":
+                    "fn p(&self, f: FaceId) {\n"
+                    "    let _ = build_interest_propagated();\n"
+                    "    let i = InterestOwned {\n    };\n}\n",
+                "crates/x/src/api.rs": _API_CALL,
+            }),
+        ]
+        for label, files in FIXTURES:
+            got, _counts = findings(tree(label, files))
+            if not got:
+                failures.append(
+                    f"fixture `{label}` produced NO finding -- it was built to "
+                    "drive a branch and drove nothing"
+                )
+            produced.extend(got)
+
+    for frag in wanted:
+        if not any(frag in m for m in produced):
+            failures.append(
+                f"no fixture fired the `findings()` branch beginning {frag!r} -- "
+                "the branch population is derived from this file's AST, so a "
+                "branch added without a fixture reds here"
+            )
+    return len(produced), len(wanted)
 
 
 def main() -> int:
