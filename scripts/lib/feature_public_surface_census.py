@@ -494,6 +494,36 @@ TEST_ONLY_FEATURE: dict[str, frozenset[str]] = {
     "wz-tls-record": frozenset({"fixtures"}),
 }
 
+# R2294b (open-debt item 606) — the PLATFORM form, and the third kind of claim
+# these rows make.
+#
+# `wz-packet-socket` reads "one feature, gating a Linux-only capture path". The
+# two halves are separately checkable and the row is only excused when BOTH
+# hold, so this predicate reads them separately:
+#
+#   * every public item the named feature gates is ALSO gated on a `target_os`
+#     cfg, in the same `cfg(all(..))` as the feature. That is what makes the
+#     probe the axis would run a probe of the PLATFORM rather than of the
+#     feature: on any other target the item is absent whatever the feature
+#     says, and on the named one the feature is the only remaining variable —
+#     which is a claim about a build the axis does not have;
+#   * the row is covered ENTIRELY, for the reason `TEST_ONLY_FEATURE` gives.
+#     A predicate that held one of two features would leave the other excused
+#     by prose while the banner counted the row as measured.
+#
+# ⚠ What it deliberately does NOT check is that the platform named is Linux.
+# The reason string says Linux and the source says `target_os = "linux"`, but
+# holding the check to that literal would make it a spelling test: a row that
+# moved to `target_os = "macos"` would still be off-axis for the same reason,
+# and the sentence this predicate answers is "is the item's presence decided by
+# the platform", not "which platform". The cfg's own text is reported in the
+# finding so a reader can see which one it is.
+#: package -> the features of its `OFF_AXIS` row whose public items are
+#: platform-gated
+PLATFORM_GATED: dict[str, frozenset[str]] = {
+    "wz-packet-socket": frozenset({"tap"}),
+}
+
 # The residue of item 606, as a SET so that it is derived rather than recounted.
 # Every `OFF_AXIS` row is in exactly one of three places: `ABI_CONTRACT`,
 # `TEST_ONLY_REACH`, or here -- meaning its reason is still prose that nothing
@@ -503,14 +533,17 @@ TEST_ONLY_FEATURE: dict[str, frozenset[str]] = {
 # ⛔ These are NOT one kind of claim, which is why one predicate does not take
 # them: `wz` re-exports whole subtrees, `wz-runtime-coop` points at the facade
 # row, `wz-link-lwip` / `wz-session-lwip` point at deploy probes, and
-# `wz-packet-socket` / `wz-runtime-core` / `wz-tls-record` each assert what
-# their one feature gates. Retiring one is a round's work, and the round that
-# does it moves the name out of this set in the same edit.
+# `wz-runtime-core` asserts what its one feature gates. Retiring one is a
+# round's work, and the round that does it moves the name out of this set in
+# the same edit.
+#
+# R2294b took `wz-packet-socket` out of here into `PLATFORM_GATED`: its claim
+# was about the PLATFORM deciding the surface, which is a third kind again and
+# is read off the attribute rather than the reason.
 PROSE_ONLY: frozenset[str] = frozenset(
     {
         "wz",
         "wz-link-lwip",
-        "wz-packet-socket",
         "wz-runtime-coop",
         "wz-runtime-core",
         "wz-session-lwip",
@@ -887,6 +920,83 @@ def abi_module_is_abi(root: pathlib.Path, rel: str, module: str) -> str | None:
     return f"the file for `pub mod {module}` was not found beside `{rel}`"
 
 
+#: the `target_os = "..."` a platform-gated site must carry, in the SAME
+#: attribute as the feature. The value is captured so a finding can name it.
+PLATFORM_CFG = re.compile(r'target_os\s*=\s*"([a-z0-9_]+)"')
+
+
+def platform_gated_findings(
+    root: pathlib.Path, sites: dict[tuple[str, str], list[Shape]]
+) -> list[str]:
+    """R2294b — hold every `PLATFORM_GATED` row to the attribute in the source.
+
+    The reason claims the feature's public surface is decided by the PLATFORM,
+    which is why probing the feature would be probing a build this axis does
+    not have. That is true only when every public item the feature gates
+    carries a `target_os` in the same attribute, so this reads the attribute
+    line rather than the reason.
+    """
+    findings: list[str] = []
+    reached = 0
+    for pkg in sorted(PLATFORM_GATED):
+        if pkg not in OFF_AXIS:
+            findings.append(
+                f"`{pkg}` claims a platform gate in `PLATFORM_GATED` but has no "
+                f"`OFF_AXIS` row, so the claim excuses nothing and is unread"
+            )
+            continue
+        _why, row = OFF_AXIS[pkg]
+        feats = set(PLATFORM_GATED[pkg])
+        if feats != set(row):
+            findings.append(
+                f"`{pkg}`'s `OFF_AXIS` row names {sorted(row)} and "
+                f"`PLATFORM_GATED` holds {sorted(feats)}. A predicate covering "
+                f"PART of a row leaves the rest excused by prose while the row "
+                f"reads as measured, which is worse than prose that admits "
+                f"what it is"
+            )
+            continue
+        for feat in sorted(feats):
+            found = sites.get((pkg, feat), [])
+            if not found:
+                findings.append(
+                    f"`{pkg}` / `{feat}` is excused as platform-gated and gates "
+                    f"no public item at all, so the excuse is held to an empty "
+                    f"population -- either the row belongs elsewhere or this "
+                    f"read of the sites is wrong"
+                )
+                continue
+            for shape in found:
+                rel, ln = shape.where.rsplit(":", 1)
+                path = root / rel
+                if not path.is_file():
+                    findings.append(f"`{shape.where}` no longer exists")
+                    continue
+                lines = path.read_text(encoding="utf-8", errors="replace").split("\n")
+                attr = lines[int(ln) - 1]
+                reached += 1
+                platform = PLATFORM_CFG.search(attr)
+                if not platform:
+                    findings.append(
+                        f"`{pkg}` / `{feat}` is excused because the platform "
+                        f"decides its surface, but `{shape.where}` gates a "
+                        f"public item on the FEATURE ALONE "
+                        f"(`{attr.strip()[:70]}`) — on every target that item "
+                        f"appears and disappears with the feature, which is "
+                        f"exactly what this axis probes"
+                    )
+    # An excuse held to an empty population excuses everything, and here the
+    # per-feature branch above already reports a row that reached nothing. This
+    # is the whole-table twin: a table whose every row vanished would otherwise
+    # report clean.
+    if PLATFORM_GATED and reached == 0:
+        findings.append(
+            "no `PLATFORM_GATED` package has a single public-item site to hold "
+            "its reason to, so this arm graded nothing while reporting clean"
+        )
+    return findings
+
+
 def abi_contract_findings(root: pathlib.Path, sites: dict[tuple[str, str], list[Shape]]) -> list[str]:
     """R2260 — hold every `ABI_CONTRACT` package's `OFF_AXIS` reason to the source.
 
@@ -1041,7 +1151,12 @@ def test_only_reach_findings(
     # THE RESIDUE, DERIVED. Every `OFF_AXIS` row is measured by one of the
     # predicates or declared prose-only; a row in neither is unclassified, and
     # unclassified is RED here for the same reason it is in `classify`.
-    measured = set(ABI_CONTRACT) | set(TEST_ONLY_REACH) | set(TEST_ONLY_FEATURE)
+    measured = (
+        set(ABI_CONTRACT)
+        | set(TEST_ONLY_REACH)
+        | set(TEST_ONLY_FEATURE)
+        | set(PLATFORM_GATED)
+    )
     for pkg in sorted(set(OFF_AXIS) - measured - PROSE_ONLY):
         findings.append(
             f"`{pkg}` has an `OFF_AXIS` row and is in neither predicate table "
@@ -1059,7 +1174,7 @@ def test_only_reach_findings(
             f"`{pkg}` is declared prose-only and has no `OFF_AXIS` row, so the "
             f"residue it reports is work nobody has. Delete the name"
         )
-    tables = (ABI_CONTRACT, TEST_ONLY_REACH, TEST_ONLY_FEATURE)
+    tables = (ABI_CONTRACT, TEST_ONLY_REACH, TEST_ONLY_FEATURE, PLATFORM_GATED)
     for i, first in enumerate(tables):
         for second in tables[i + 1 :]:
             for pkg in sorted(set(first) & set(second)):
@@ -1298,6 +1413,7 @@ def check() -> int:
         )
     findings.extend(defer_findings(sites))
     findings.extend(abi_contract_findings(ROOT, sites))
+    findings.extend(platform_gated_findings(ROOT, sites))
     findings.extend(test_only_reach_findings())
     findings.extend(test_only_feature_findings())
 
@@ -1326,7 +1442,8 @@ def check() -> int:
         f"    off-axis reasons: {len(set(ABI_CONTRACT) & set(OFF_AXIS))} held to "
         f"`ABI_CONTRACT`, {len(set(TEST_ONLY_REACH) & set(OFF_AXIS))} to "
         f"`TEST_ONLY_REACH`, {len(set(TEST_ONLY_FEATURE) & set(OFF_AXIS))} to "
-        f"`TEST_ONLY_FEATURE`, {len(PROSE_ONLY)} still prose (item 606)"
+        f"`TEST_ONLY_FEATURE`, {len(set(PLATFORM_GATED) & set(OFF_AXIS))} to "
+        f"`PLATFORM_GATED`, {len(PROSE_ONLY)} still prose (item 606)"
     )
     for kind in (
         "public-item",
@@ -1368,6 +1485,89 @@ def _fixture() -> dict[str, str]:
         # attached to nothing this gate can name
         "demo/src/weird.rs": f"{a}\n@@@ not rust @@@\n",
     }
+
+
+def platform_gated_selftest() -> int:
+    """R2294b — drive `platform_gated_findings` through every way it refuses.
+
+    The CONTROL is the first site, and it is the half that makes the rest mean
+    anything: a predicate that refused `all(feature, target_os)` would be
+    refusing exactly the shape the row is excused for, and the row would have to
+    come back out.
+    """
+    files = {
+        "demo/src/lib.rs": (
+            # CONTROL — the shape the excuse is about. Must NOT be refused.
+            '#[cfg(all(feature = "tap", target_os = "linux"))]\npub mod capture;\n'
+            # THE DEFECT — the feature alone decides whether this path exists,
+            # on every target, which is what the axis probes.
+            '#[cfg(feature = "tap")]\npub fn portable() {}\n'
+        ),
+        "demo/src/capture.rs": "pub fn go() {}\n",
+    }
+    dirs = {"demo": "demo"}
+    nondefault = {"demo": {"tap"}}
+    real_off = OFF_AXIS.get("demo")
+    real_pg = PLATFORM_GATED.get("demo")
+    with tempfile.TemporaryDirectory() as tmp:
+        home = pathlib.Path(tmp)
+        for rel, body in files.items():
+            (home / rel).parent.mkdir(parents=True, exist_ok=True)
+            (home / rel).write_text(body, encoding="utf-8")
+        _c, _d, _u, sites = scan(home, sorted(files), dirs, nondefault)
+        try:
+            OFF_AXIS["demo"] = ("fixture", frozenset({"tap"}))
+            PLATFORM_GATED["demo"] = frozenset({"tap"})
+            findings = platform_gated_findings(home, sites)
+            # A row whose predicate covers only PART of it.
+            OFF_AXIS["demo"] = ("fixture", frozenset({"tap", "other"}))
+            partial = platform_gated_findings(home, sites)
+            # A `PLATFORM_GATED` package with no `OFF_AXIS` row excuses nothing.
+            del OFF_AXIS["demo"]
+            orphan = platform_gated_findings(home, {})
+            # A row that gates NO public item is an excuse held to nothing.
+            OFF_AXIS["demo"] = ("fixture", frozenset({"tap"}))
+            empty = platform_gated_findings(home, {})
+        finally:
+            OFF_AXIS.pop("demo", None)
+            PLATFORM_GATED.pop("demo", None)
+            if real_off is not None:
+                OFF_AXIS["demo"] = real_off
+            if real_pg is not None:
+                PLATFORM_GATED["demo"] = real_pg
+
+    feature_alone = [f for f in findings if "on the FEATURE ALONE" in f]
+    if len(feature_alone) != 1:
+        print(
+            f"feature-public-surface: SELFTEST FAIL -- the platform predicate "
+            f"must refuse exactly the one feature-alone site and it produced "
+            f"{len(feature_alone)} ({findings}). The `all(feature, target_os)` "
+            f"site is the CONTROL: refusing it would refuse the very shape the "
+            f"row is excused for."
+        )
+        return 1
+    if not any("covering\nPART" in f or "PART of a row" in f for f in partial):
+        print(
+            "feature-public-surface: SELFTEST FAIL -- a predicate covering part "
+            "of an `OFF_AXIS` row must be reported; half a row measured reads "
+            "as a whole row measured"
+        )
+        return 1
+    if not any("has no `OFF_AXIS` row" in f for f in orphan):
+        print(
+            "feature-public-surface: SELFTEST FAIL -- a `PLATFORM_GATED` entry "
+            "whose package has no `OFF_AXIS` row excuses nothing and must be "
+            "reported"
+        )
+        return 1
+    if not any("empty\npopulation" in f or "empty" in f for f in empty):
+        print(
+            "feature-public-surface: SELFTEST FAIL -- a row that gates no "
+            "public item must FAIL rather than report clean; a reason held to "
+            "nothing excuses everything"
+        )
+        return 1
+    return 0
 
 
 def abi_selftest() -> int:
@@ -1768,6 +1968,15 @@ def selftest() -> int:
     if abi_selftest() != 0:
         return 1
 
+    # R2294b — AND THE PLATFORM PREDICATE. Its CONTROL is what makes it a
+    # measurement: `all(feature, target_os)` must PASS, because refusing it
+    # would refuse the shape the row is excused for and the excuse would have
+    # to come back out. The defect it must catch is the same row gaining a
+    # second, portable public path — which is how a platform excuse silently
+    # widens into a feature the axis should have probed.
+    if platform_gated_selftest() != 0:
+        return 1
+
     # R2266 — AND THE TEST-ONLY-REACH PREDICATE, on an injected dependency
     # graph and for the same reason. The row this one replaces said "same
     # reason as the other one" while a `lib` target consumed it as a normal
@@ -1800,7 +2009,11 @@ def selftest() -> int:
         "non-dev edge that enables the feature, a feature no edge enables, a "
         "feature another package's feature turns on, a row covered only in "
         "part, a row with no `OFF_AXIS` entry and an empty graph -- past one "
-        "clean control"
+        "clean control; and holds each `PLATFORM_GATED` row to the ATTRIBUTE, "
+        "refusing a public item the feature alone decides, a row covered only "
+        "in part, a row with no `OFF_AXIS` entry and a row that gates nothing "
+        "-- past one clean control, the `all(feature, target_os)` site the "
+        "excuse is about"
     )
     return 0
 
