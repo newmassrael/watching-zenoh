@@ -1096,6 +1096,40 @@ def selftest() -> int:
             1,
             "does not name the head",
         ),
+        # R2324 -- CLOSING the head discharges the RANK claim, which R2315's
+        # own comment denied ("the RANK claim's own discharge, which is NOT a
+        # close"). It was never tested either way, and R2323 found out the hard
+        # way by closing the live head and watching the claim move to the next
+        # item. The pair below is the control: the SAME fixture with the SAME
+        # baseline, differing only in whether the lowest item carries a verdict.
+        (
+            "an open item below the head becomes the head",
+            {
+                "priority": "",
+                "extra": "- **9. an open item below the head.**",
+                "r13": " @rank: ordinary",
+                "unranked_baseline": "3",
+                "k19": "ordinary",
+                "v20": "✅ CLOSED (R2001) -- ",
+                "d20x": "",
+            },
+            3,
+            "so rank item 9 next",
+        ),
+        (
+            "CLOSING the head discharges the claim onto the next item",
+            {
+                "priority": "",
+                "extra": "- **9. ✅ CLOSED (R2001) -- the round that took it paid it.**",
+                "r13": " @rank: ordinary",
+                "unranked_baseline": "2",
+                "k19": "ordinary",
+                "v20": "✅ CLOSED (R2001) -- ",
+                "d20x": "",
+            },
+            3,
+            "so rank item 10 next",
+        ),
         (
             "a standing CRITICAL take suppresses the RANK claim",
             {"priority": ""},
@@ -1941,16 +1975,34 @@ def main() -> int:
             f"WZ_DEBT_PRIORITY_ACK={priority[0]} while the round is doing that."
         )
     elif outstanding:
-        # R2315 (item 644): the RANK claim's own discharge, which is NOT a
-        # close. Writing the priority sentence here would have told the round
-        # to close an item the claim never named -- and it crashed instead,
-        # because that sentence reads `priority[0]` and the queue is empty
-        # exactly when this claim stands.
+        # R2315 (item 644): the RANK claim's own discharge. Writing the priority
+        # sentence here would have told the round to close an item the claim
+        # never named -- and it crashed instead, because that sentence reads
+        # `priority[0]` and the queue is empty exactly when this claim stands.
+        #
+        # R2324 -- IT HAS TWO DISCHARGES, NOT ONE, and R2315's comment here used
+        # to say "which is NOT a close". That is false and the file's own
+        # derivation says so: `unranked` is built from `openn`, so an item that
+        # CLOSES leaves the set exactly as one that gains a `@rank:` does, and
+        # the head moves on. R2323 found this by accident -- it closed the live
+        # head as REFUTED and the claim moved to the next item -- and it was
+        # untested in either direction until the selftest pair added with this
+        # comment. MEASURED both ways there: with the lowest item open the claim
+        # names it, and with the SAME fixture closing it the claim names the
+        # next one.
+        #
+        # Naming both matters because they are not equal work. Ranking ORDERS an
+        # item; closing PAYS it, and the loop's north star is payment. An old
+        # item's premises are also the likeliest to be stale (rule 47), so
+        # re-measuring the head is the move most likely to end with a close --
+        # which is why the cheaper-sounding verb is named second here.
         print(
-            f"  exit 3: a claim is outstanding. It is discharged by RANKING item "
-            f"{rank_head} -- write `@rank: critical` or `@rank: ordinary` into "
-            f"its title and lower `unranked_baseline` in the same edit -- not by "
-            f"running this again. Set WZ_DEBT_RANK_ACK={rank_head} while the "
+            f"  exit 3: a claim is outstanding. It is discharged EITHER by "
+            f"CLOSING item {rank_head} -- re-measure its premises first, an old "
+            f"item's reasons go stale -- OR by RANKING it: write `@rank: "
+            f"critical` or `@rank: ordinary` into its title. Both lower "
+            f"`unranked_baseline`, so lower it in the same edit either way. Not "
+            f"by running this again. Set WZ_DEBT_RANK_ACK={rank_head} while the "
             f"round is doing that."
         )
     return outstanding
