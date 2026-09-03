@@ -740,7 +740,7 @@ SELFTEST_ROSTER = """\
 
 - **17. ✅ CLOSED (R{r17}) -- a title quoting `wz_surfaces(char **buf)` in code.**
 - **18. ✅ CLOSED{s18} -- a root at the ranking frontier. `@from: none` · ordinary**
-- **19. a child of 18. `@from: {p19}` · critical{r19}**
+- **19. a child of 18. `@from: {p19}` · {k19}{r19}**
 - **20. {v20}a grandchild of 19. `@from: 19` · ordinary{d20x}**
 {extra}
 {begin}
@@ -1054,10 +1054,69 @@ def selftest() -> int:
             1,
             "does not say `deferred`",
         ),
+        # R2315 (open-debt item 644) -- the RANK claim. It stands only when
+        # every other ordering axis is silent, so each arm has to put the
+        # fixture in that state or prove the claim yields.
+        (
+            "an all-silent census claims the lowest unranked item",
+            {
+                "priority": "",
+                "r13": " @rank: ordinary",
+                "unranked_baseline": "2",
+                "k19": "ordinary",
+                "v20": "✅ CLOSED (R2001) -- ",
+                "d20x": "",
+            },
+            3,
+            "RANK -- every ordering axis is silent, so rank item",
+        ),
+        (
+            "acking the RANK head clears the claim",
+            {
+                "priority": "",
+                "r13": " @rank: ordinary",
+                "unranked_baseline": "2",
+                "k19": "ordinary",
+                "v20": "✅ CLOSED (R2001) -- ",
+                "d20x": "",
+            },
+            0,
+            "acknowledged: this round is ranking item",
+        ),
+        (
+            "acking a NON-head RANK item fails",
+            {
+                "priority": "",
+                "r13": " @rank: ordinary",
+                "unranked_baseline": "2",
+                "k19": "ordinary",
+                "v20": "✅ CLOSED (R2001) -- ",
+                "d20x": "",
+            },
+            1,
+            "does not name the head",
+        ),
+        (
+            "a standing CRITICAL take suppresses the RANK claim",
+            {"priority": ""},
+            0,
+            "CRITICAL -- take item",
+        ),
+        (
+            "a standing PRIORITY queue suppresses the RANK claim",
+            {"priority": "10", "r13": " @rank: ordinary", "unranked_baseline": "2"},
+            3,
+            "PRIORITY -- take item 10 next",
+        ),
     ]
     env_for = {
         "ack of the head clears it": {"WZ_DEBT_PRIORITY_ACK": "10"},
         "ack of a NON-head fails": {"WZ_DEBT_PRIORITY_ACK": "11"},
+        # The fixture's lowest open unranked item once 13 is ranked and 19/20
+        # are quiet: item 10. READ OFF the arm above rather than assumed -- the
+        # first guess had 10 and 11 the wrong way round, and the arms caught it.
+        "acking the RANK head clears the claim": {"WZ_DEBT_RANK_ACK": "10"},
+        "acking a NON-head RANK item fails": {"WZ_DEBT_RANK_ACK": "11"},
     }
     args_for = {
         "a folded original does not reopen its item": ["--count"],
@@ -1085,6 +1144,11 @@ def selftest() -> int:
             # a CLOSED one so R2314's fix -- both deferral rules are about OPEN
             # work -- has an arm; `d20x` carries the deferral clause so an arm
             # can drop it.
+            # Item 19's ranking is a FIELD so an arm can quiet the CRITICAL
+            # line: the RANK claim stands only when every other axis is silent,
+            # and a fixture that always has a critical take can never reach
+            # that state.
+            k19=fields.get("k19", "critical"),
             v20=fields.get("v20", ""),
             d20x=fields.get(
                 "d20x", " ·\n  ⚠ **deferred**(사슬 깊이 " + fields.get("d20", "2") + ")"
@@ -1796,6 +1860,55 @@ def main() -> int:
         )
     else:
         print("  debt-plane-census: DEFERRED -- none; no chain is past the cap.")
+    # R2315 (open-debt item 644) -- THE TRIGGER THAT MAKES THE SPEED NON-ZERO.
+    #
+    # R2310 made an old item rankable one at a time and item 644 recorded what
+    # that left: `unranked_baseline` follows the tail down, so a round is free
+    # to rank nothing and the ratchet stays green. Measured on starting, the
+    # count sat at 308 for four consecutive rounds.
+    #
+    # The item sketched R2308's `reaim_ttl` shape -- "red if it has not shrunk
+    # in N rounds" -- and named the constraint that stops it: the register is
+    # outside this repository, so there is no history and no previous value to
+    # compare against. MEASURED: no `.git` anywhere at or above the memory
+    # folder, and no snapshot beside it. The constraint holds.
+    #
+    # So this does not work around the missing history; it removes the need for
+    # it. The claim is DERIVED FRESH each run -- the lowest-numbered open
+    # unranked item below the frontier -- so the reader recomputes the same
+    # answer without remembering anything. And it stands only when every other
+    # ordering axis is silent, which is why it is not the per-round tax the
+    # item warns against: it spends a judgement exactly when nothing else is
+    # queued, and yields the moment anything is.
+    #
+    # It ADJUDICATES rather than advises, which is R2308's lesson: an exit-3
+    # claim with an ack, the same mechanism R2101 built for PRIORITY, because a
+    # line that only speaks leaves the deciding to a person and that is the
+    # defect itself.
+    # The tail is what the ratchet already counts, so the claim and the number
+    # it is judged against are the SAME derivation rather than two spellings.
+    tail = sorted(n for n in rank.unranked if n < rst.ranked_from)
+    rank_head: int | None = None
+    if not priority and not hold.released and not takeable and not hold.held and tail:
+        rank_head = tail[0]
+    if rank_head is not None:
+        rack = os.environ.get("WZ_DEBT_RANK_ACK", "").strip()
+        print(
+            f"  debt-plane-census: RANK -- every ordering axis is silent, so rank "
+            f"item {rank_head} next ({len(tail)} unranked below "
+            f"`ranked_from = {rst.ranked_from}`)."
+        )
+        if rack and rack != str(rank_head):
+            print(
+                f"    FAIL -- WZ_DEBT_RANK_ACK={rack} does not name the head. The "
+                f"claim is item {rank_head}; acking anything else would be a way "
+                f"to acknowledge the claim while ranking something easier."
+            )
+            return 1
+        if rack:
+            print(f"    acknowledged: this round is ranking item {rank_head}.")
+        else:
+            outstanding = 3
     print(
         f"  debt-plane-census: RANKED -- critical {len(rank.critical)} / ordinary "
         f"{len(rank.ordinary)} / unranked {len(rank.unranked)} (baseline "
@@ -1821,11 +1934,24 @@ def main() -> int:
     )
     if remaining:
         print(f"  remaining: {' '.join(str(n) for n in remaining)}")
-    if outstanding:
+    if outstanding and priority:
         print(
             f"  exit 3: a claim is outstanding. It is discharged by CLOSING item "
             f"{priority[0]}, not by running this again -- set "
             f"WZ_DEBT_PRIORITY_ACK={priority[0]} while the round is doing that."
+        )
+    elif outstanding:
+        # R2315 (item 644): the RANK claim's own discharge, which is NOT a
+        # close. Writing the priority sentence here would have told the round
+        # to close an item the claim never named -- and it crashed instead,
+        # because that sentence reads `priority[0]` and the queue is empty
+        # exactly when this claim stands.
+        print(
+            f"  exit 3: a claim is outstanding. It is discharged by RANKING item "
+            f"{rank_head} -- write `@rank: critical` or `@rank: ordinary` into "
+            f"its title and lower `unranked_baseline` in the same edit -- not by "
+            f"running this again. Set WZ_DEBT_RANK_ACK={rank_head} while the "
+            f"round is doing that."
         )
     return outstanding
 
