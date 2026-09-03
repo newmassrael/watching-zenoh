@@ -82,6 +82,15 @@
 # free — run-ci.sh and the wrapper scripts source it, and a sourced file that
 # builds is how a wrapper starts compiling before it has parsed its arguments.
 # Do not add top-level statements beyond these constants.
+#
+# R2326 (unregistered open-debt item 10) — the token construction moved to
+# `scripts/lib/vendored-oracle.sh` when zenoh-pico became a second oracle
+# needing the identical string. This file keeps its three public names and
+# delegates: a second implementation of one token is the open-debt item 47
+# shape, and the Rust side already has to reproduce it byte for byte, which is
+# copy number two and the ceiling.
+# shellcheck source=scripts/lib/vendored-oracle.sh
+source "$(dirname "${BASH_SOURCE[0]}")/vendored-oracle.sh"
 
 WZ_SCE_DIR="vendor/sce"
 WZ_SCE_CODEGEN_BIN="vendor/sce/target/release/sce-codegen"
@@ -114,21 +123,7 @@ WZ_SCE_CODEGEN_STAMP="vendor/sce/target/release/.sce-codegen.pin"
 # vendor/sce happens to ignore `target/` is a fact about upstream's .gitignore,
 # not a property of this gate, and it is not something to depend on.
 sce_codegen_source_token() {
-    local dir="${1:-$WZ_SCE_DIR}"
-    [[ -e "$dir/.git" ]] || return 1
-    command -v git >/dev/null 2>&1 || return 1
-
-    local rev
-    rev="$(git -C "$dir" rev-parse HEAD 2>/dev/null)" || return 1
-    [[ -n "$rev" ]] || return 1
-
-    local digest
-    digest="$( { git -C "$dir" status --porcelain -- . ':(exclude)target' 2>/dev/null | LC_ALL=C sort
-                 git -C "$dir" diff HEAD -- . ':(exclude)target' 2>/dev/null; } \
-               | git hash-object --stdin 2>/dev/null)" || return 1
-    [[ -n "$digest" ]] || return 1
-
-    printf '%s-%s\n' "$rev" "$digest"
+    vendored_oracle_git_token "${1:-$WZ_SCE_DIR}"
 }
 
 # sce_codegen_stamped_token [stamp-path]
@@ -138,12 +133,7 @@ sce_codegen_source_token() {
 # every binary this repo builds has been stamped since this file landed, so an
 # unstamped one predates the gate and is exactly the case it exists to catch.
 sce_codegen_stamped_token() {
-    local stamp="${1:-$WZ_SCE_CODEGEN_STAMP}"
-    [[ -r "$stamp" ]] || return 1
-    local token
-    read -r token <"$stamp" || return 1
-    [[ -n "$token" ]] || return 1
-    printf '%s\n' "$token"
+    vendored_oracle_stamped_token "${1:-$WZ_SCE_CODEGEN_STAMP}"
 }
 
 # sce_codegen_write_stamp <sce-dir> <stamp-path>
@@ -153,14 +143,10 @@ sce_codegen_stamped_token() {
 # cannot leave behind a stamp asserting freshness it does not have.
 sce_codegen_write_stamp() {
     local dir="$1" stamp="$2"
-    local token
-    if ! token="$(sce_codegen_source_token "$dir")"; then
-        # No git to read: leave the binary UNSTAMPED rather than stamp it with a
-        # guess. Unstamped reads as stale, which is the safe direction.
-        rm -f "$stamp" 2>/dev/null || true
-        return 0
-    fi
-    printf '%s\n' "$token" >"$stamp"
+    # No git to read: leave the binary UNSTAMPED rather than stamp it with a
+    # guess — which is what an empty token asks the writer to do. Unstamped
+    # reads as stale, which is the safe direction.
+    vendored_oracle_write_stamp "$stamp" "$(sce_codegen_source_token "$dir" || true)"
 }
 
 # sce_codegen_ensure <label>

@@ -54,6 +54,20 @@ MBEDTLS_SHA256="${MBEDTLS_SHA256:-ec35b18a6c593cf98c3e30db8b98ff93e8940a8c4e690e
 
 PREFIX="${WZ_MBEDTLS_PREFIX:-$ROOT/target/mbedtls}"
 
+# R2326 (unregistered open-debt item 10) — the provenance stamp this prefix
+# carries, in the same shape and the same filename as every other foreign-oracle
+# root under `target/`. See scripts/lib/vendored-oracle.sh.
+#
+# This oracle's source state is a PINNED RELEASE, not a git checkout, so its
+# token is the version and not a rev — which is why that library carries two
+# token kinds rather than assuming git. The version is not taken on trust
+# either: it is written only after pkg-config has been asked what is actually
+# installed and agreed with the pin, both on the fresh-install path and on the
+# idempotent one.
+# shellcheck source=scripts/lib/vendored-oracle.sh
+source "$ROOT/scripts/lib/vendored-oracle.sh"
+MBEDTLS_TOKEN="mbedtls-$MBEDTLS_VERSION"
+
 say() { printf '[install-mbedtls] %s\n' "$*" >&2; }
 
 # Idempotence is keyed on the PKG-CONFIG FILE and its reported version, not on
@@ -62,6 +76,13 @@ say() { printf '[install-mbedtls] %s\n' "$*" >&2; }
 if [[ -f "$PREFIX/lib/pkgconfig/mbedtls.pc" ]]; then
     have="$(PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig" pkg-config --modversion mbedtls 2>/dev/null || echo unknown)"
     if [[ "$have" == "$MBEDTLS_VERSION" ]]; then
+        # Stamp on THIS path too, not only after a fresh install. The prefix
+        # this branch found is untracked build output that predates the stamp
+        # on every existing tree, and an idempotent run is the ONLY thing that
+        # ever visits an already-correct prefix — so stamping only the install
+        # path would leave every such tree permanently unstamped while its
+        # version has just been verified by pkg-config above.
+        vendored_oracle_stamp_root "$PREFIX" "$MBEDTLS_TOKEN"
         say "Mbed TLS $MBEDTLS_VERSION already provisioned at $PREFIX"
         exit 0
     fi
@@ -146,6 +167,10 @@ if [[ ! -f "$PREFIX/include/mbedtls/entropy.h" ]]; then
     say "FAIL: $PREFIX/include/mbedtls/entropy.h missing after install"
     exit 1
 fi
+
+# AFTER every verification above, never before: the checks are what make the
+# token a fact rather than a restatement of the pin.
+vendored_oracle_stamp_root "$PREFIX" "$MBEDTLS_TOKEN"
 
 say "Mbed TLS $MBEDTLS_VERSION installed at $PREFIX"
 say "  pkg-config: $PREFIX/lib/pkgconfig"

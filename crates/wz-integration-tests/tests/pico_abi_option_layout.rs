@@ -44,7 +44,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use wz_integration_tests::common::project_root;
+use wz_integration_tests::common::{mbedtls_prefix, project_root, zenoh_pico_build_root};
 
 /// One struct's measured layout: `(size, [(field, offset)])`.
 struct Layout {
@@ -121,7 +121,10 @@ const PINNED: &[(&str, &[&str])] = &[
 /// The reference build's generated config directory — the one whose `config.h`
 /// records what `scripts/build-zenoh-pico-cli.sh` actually configured.
 fn reference_config_include() -> PathBuf {
-    let dir = project_root().join("target/zenoh-pico-build/zenohpico/include");
+    // R2326 — through the resolver, not `project_root().join(..)`: the resolver
+    // is where the root's provenance is graded, and a direct join is a route
+    // that silently skips that grading.
+    let dir = zenoh_pico_build_root().join("zenohpico/include");
     assert!(
         dir.join("zenoh-pico/config.h").is_file(),
         "reference pico config.h missing under {}; run \
@@ -134,7 +137,9 @@ fn reference_config_include() -> PathBuf {
 /// mbedtls headers, which the vendored pico headers include unconditionally on
 /// the TLS link path.
 fn mbedtls_include() -> PathBuf {
-    let dir = project_root().join("target/mbedtls/include");
+    // R2326 — through the resolver, for the same reason
+    // `reference_config_include` above is.
+    let dir = mbedtls_prefix().join("include");
     assert!(
         dir.join("mbedtls/entropy.h").is_file(),
         "mbedtls headers missing under {}; run \

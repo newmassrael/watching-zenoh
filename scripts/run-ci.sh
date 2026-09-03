@@ -3235,6 +3235,34 @@ PY
     # binary beside it, an all-absent population armed and unarmed).
     python3 scripts/lib/oracle_pin_gate.py --selftest || return 1
     python3 scripts/lib/oracle_pin_gate.py --check || return 1
+    # R2326 (unregistered open-debt item 10) — the gate above judges the four
+    # zenohd oracles. It cannot judge the other three roots this tree resolves,
+    # because those oracles CANNOT ANSWER: measured 2026-09-04, `strings` finds
+    # no version in `target/zenoh-pico-cli/z_put` and libzenohpico.so's soname
+    # is unversioned, while the submodule they came from is at
+    # `1.9.0-10-g3b3ab65c` — a state no release number names. So they carry a
+    # provenance STAMP instead, and this gate asks the two questions a stamp
+    # scheme can be wrong in: is every resolved root judged by SOME mechanism,
+    # and does every route to a stamped root reach the runtime assertion.
+    #
+    # Both populations are DERIVED — the roots from the resolver crate's own
+    # `project_root().join("target/…")` sites, the coverage from each
+    # mechanism's own derivation (`oracle_pin_gate.py --roots` is ASKED, never
+    # copied) — and a population of zero is a HARD FAIL rather than a green.
+    # It judges ROUTES and RECORDS only, never a particular host's freshness:
+    # the roots are untracked build output and a runner that never provisioned
+    # them is the normal case, so a static reading of them would report on
+    # whichever machine ran it. Freshness is the runtime question and
+    # `assert_oracle_provenance` is where it is answered.
+    #
+    # Enforcement MEASURED both ways, live rather than by fixture: pointing
+    # `build-zenoh-pico-cli.sh`'s stamp calls at a different variable reds this
+    # with both pico roots UNJUDGED, and reverting `pico_abi_option_layout.rs`
+    # to join `target/mbedtls/include` itself reds it with that route UNCHECKED.
+    # The selftest additionally drives the two population-zero refusals, which
+    # a live tree cannot produce on demand.
+    python3 scripts/lib/oracle_provenance_gate.py --selftest || return 1
+    python3 scripts/lib/oracle_provenance_gate.py --check || return 1
     # R2241 (unregistered open-debt item 581) — an upstream claim must still
     # MEAN something after upstream moves. `CLAUDE.md` asks for `file:line` on
     # every source claim, which is right for OUR sources (we move those lines

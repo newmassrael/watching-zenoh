@@ -49,6 +49,23 @@ path = "src/lib.rs"
 # lane; `libc` was already in `crates/Cargo.lock` via wz-runtime-tokio.
 [dependencies]
 libc = "0.2"
+# tests/link_emitter_b6.rs spawns the vendored sce-codegen binary directly, so
+# it needs the same provenance verdict every other consumer of that binary
+# uses. Depending on the helper crate rather than re-deriving the token here is
+# the point: a second implementation of "which SCE was this built from" is a
+# second thing that can drift from build-sce.sh's stamp.
+#
+# R2326 (unregistered open-debt item 10) promoted it from dev-dependencies to
+# LIB scope, for the same reason wz-capture below carries: the FOREIGN-ORACLE
+# provenance check now lives in `src/lib.rs`, beside the resolvers it guards,
+# because a check in `tests/` can only cover the fixture that remembers to call
+# it. The token construction is deliberately NOT re-derived here — the shell
+# provisioner and this crate must produce byte-identical strings, which is
+# already two implementations by necessity, and a third would be the open-debt
+# item 47 shape. This crate is test-only (`publish = false`, no reverse
+# dependency in the workspace), so the promotion reaches no footprint / MCU /
+# no_std lane.
+wz-codegen-build = { path = "../wz-codegen-build" }
 # R311y760 — the analyzer, promoted from dev-dependencies because the wire-tap
 # harness in `src/lib.rs` synthesises the pcap envelope and therefore needs it at
 # LIB scope. It lives in one place on purpose: the envelope rules (link type,
@@ -90,12 +107,6 @@ wz-session-core = { path = "../wz-session-core", features = ["dissect"] }
 # `z_*` exports would collide with the real zenoh-pico symbols this crate links
 # for the layer3 codec-parity tests.
 libloading = "0.8"
-# tests/link_emitter_b6.rs spawns the vendored sce-codegen binary directly, so
-# it needs the same provenance verdict every other consumer of that binary
-# uses. Depending on the helper crate rather than re-deriving the token here is
-# the point: a second implementation of "which SCE was this built from" is a
-# second thing that can drift from build-sce.sh's stamp.
-wz-codegen-build = { path = "../wz-codegen-build" }
 # R311nx — `codec-serial` pinned so tests/layer3_serial_framing.rs can
 # build the wz serial framing primitives (`wz_codecs::{cobs_encode,
 # cobs_decode, crc32, serial_envelope}`) for the byte-parity compare

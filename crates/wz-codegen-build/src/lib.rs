@@ -60,6 +60,90 @@ pub fn sce_codegen_stamp(sce_workspace: &Path) -> PathBuf {
     sce_workspace.join("target/release/.sce-codegen.pin")
 }
 
+/// The one stamp filename every foreign-oracle output root under this tree's
+/// `target/` carries — the Rust reading of `WZ_ORACLE_STAMP_NAME` in
+/// `scripts/lib/vendored-oracle.sh`.
+///
+/// `vendor/sce` is deliberately not one of them: its output lives outside
+/// `target/` and keeps the older [`sce_codegen_stamp`] name, because renaming
+/// it would invalidate every stamp already written for no gain.
+pub const ORACLE_STAMP_NAME: &str = ".wz-oracle.pin";
+
+/// Where the provenance stamp for a foreign-oracle output root lives.
+pub fn oracle_stamp(root: &Path) -> PathBuf {
+    root.join(ORACLE_STAMP_NAME)
+}
+
+/// R2326 (unregistered open-debt item 10) — what an oracle output root's stamp
+/// says, relative to what this tree's source state produces.
+///
+/// Distinct from [`Provenance`], which folds "unstamped" into `Mismatch`
+/// because for `sce-codegen` those really are one answer: every binary that
+/// script produces has been stamped since R1994, so an unstamped one predates
+/// the gate and is exactly what it exists to catch, and `sce_codegen_ensure`
+/// repairs it before any consumer sees it.
+///
+/// The zenoh-pico and Mbed TLS oracles are in the opposite position. Their
+/// roots are untracked build output that no host has ever stamped before this
+/// round, there is no cheap `ensure` that rebuilds them (a cmake build of the
+/// pico example set, and a release-tarball install), and they are resolved by
+/// dozens of integration fixtures. Folding unstamped into stale there would
+/// red every pico lane on every developer machine at once for a question the
+/// tree could not yet answer — so it is its own verdict, refused where the
+/// oracle is declared REQUIRED and reported as a warning elsewhere, while a
+/// MISMATCHING stamp is refused unconditionally.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StampVerdict {
+    /// The root provably came from the source state this tree carries.
+    Match,
+    /// It carries a stamp naming a different source state.
+    Stale {
+        /// The token the root carries.
+        have: String,
+        /// The token this tree's source state produces.
+        want: String,
+    },
+    /// The root carries no stamp: its origin is UNKNOWN, which is neither a
+    /// match nor a proven mismatch.
+    Unstamped {
+        /// The token this tree's source state produces.
+        want: String,
+    },
+    /// The wanted token cannot be computed here — no checkout, no git.
+    /// A verdict that cannot be computed must not be invented in either
+    /// direction.
+    Unverifiable,
+}
+
+/// Grade one oracle output root against a source token.
+///
+/// `want` is `None` when the caller could not establish the source state,
+/// which is [`StampVerdict::Unverifiable`] and not a failure by itself.
+pub fn oracle_stamp_verdict(root: &Path, want: Option<&str>) -> StampVerdict {
+    let Some(want) = want else {
+        return StampVerdict::Unverifiable;
+    };
+    match read_stamp(&oracle_stamp(root)) {
+        None => StampVerdict::Unstamped {
+            want: want.to_owned(),
+        },
+        Some(have) if have == want => StampVerdict::Match,
+        Some(have) => StampVerdict::Stale {
+            have,
+            want: want.to_owned(),
+        },
+    }
+}
+
+/// First non-empty line of a stamp file, or `None` when it is absent, empty or
+/// unreadable — all of which mean the same thing: no record.
+fn read_stamp(stamp: &Path) -> Option<String> {
+    std::fs::read_to_string(stamp)
+        .ok()
+        .and_then(|s| s.lines().next().map(str::to_owned))
+        .filter(|s| !s.is_empty())
+}
+
 /// What the built `sce-codegen` was built from, relative to what this tree
 /// pins. Returned rather than asserted so each caller can apply its own
 /// policy: a build script panics, a test that cannot rebuild refuses, and a
@@ -122,14 +206,11 @@ impl Provenance {
 /// library's — see `scripts/lib/sce-codegen-oracle.sh` for the format and for
 /// why the digest is a `git hash-object` rather than an md5.
 pub fn sce_codegen_provenance(sce_workspace: &Path) -> Provenance {
-    let want = match sce_source_token(sce_workspace) {
+    let want = match vendored_source_token(sce_workspace) {
         Some(t) => t,
         None => return Provenance::Unverifiable,
     };
-    let have = std::fs::read_to_string(sce_codegen_stamp(sce_workspace))
-        .ok()
-        .and_then(|s| s.lines().next().map(str::to_owned))
-        .filter(|s| !s.is_empty());
+    let have = read_stamp(&sce_codegen_stamp(sce_workspace));
 
     if have.as_deref() == Some(want.as_str()) {
         Provenance::Matches
@@ -188,31 +269,39 @@ fn assert_sce_codegen_provenance(sce_workspace: &Path) {
     }
 }
 
-/// The `<rev>-<digest>` token identifying the SCE source state a build of
-/// `sce-codegen` would consume. `None` when git cannot answer.
+/// The `<rev>-<digest>` token identifying the source state a build from a
+/// vendored git checkout would consume. `None` when git cannot answer.
 ///
-/// Byte-for-byte the shell library's construction: `git status --porcelain`
-/// sorted bytewise (what `LC_ALL=C sort` does), then `git diff HEAD` appended
-/// raw, the pair fed to `git hash-object --stdin`. The two streams are both
-/// needed — a status listing cannot see an edit that leaves the path list
-/// unchanged, and a diff cannot see a new untracked template.
+/// Byte-for-byte the shell library's construction (`vendored_oracle_git_token`
+/// in `scripts/lib/vendored-oracle.sh`): `git status --porcelain` sorted
+/// bytewise (what `LC_ALL=C sort` does), then `git diff HEAD` appended raw, the
+/// pair fed to `git hash-object --stdin`. The two streams are both needed — a
+/// status listing cannot see an edit that leaves the path list unchanged, and a
+/// diff cannot see a new untracked source file.
 ///
 /// `target/` is excluded from both, for the reason spelled out in the shell
-/// library: it holds the binary and the stamp, so counting it would make the
-/// record change the thing it records and no stamp could ever match.
-fn sce_source_token(sce_workspace: &Path) -> Option<String> {
-    if !sce_workspace.join(".git").exists() {
+/// library: a checkout's `target/` holds build output and, for an oracle whose
+/// stamp lands inside the checkout, counting it would make the record change
+/// the thing it records so no stamp could ever match.
+///
+/// R2326 generalised this from `sce_source_token`: `vendor/zenoh-pico` needs
+/// the identical string, and it is already one of exactly two implementations
+/// (this one and the shell's) by necessity rather than accident — the two
+/// languages must agree, so neither can be derived from the other. A third for
+/// a second submodule would be the open-debt item 47 shape.
+pub fn vendored_source_token(checkout: &Path) -> Option<String> {
+    if !checkout.join(".git").exists() {
         return None;
     }
 
-    let rev_out = git_stdout(sce_workspace, &["rev-parse", "HEAD"])?;
+    let rev_out = git_stdout(checkout, &["rev-parse", "HEAD"])?;
     let rev = String::from_utf8(rev_out).ok()?.trim().to_owned();
     if rev.is_empty() {
         return None;
     }
 
     let status = git_stdout(
-        sce_workspace,
+        checkout,
         &["status", "--porcelain", "--", ".", ":(exclude)target"],
     )?;
     let mut lines: Vec<&[u8]> = status
@@ -227,11 +316,11 @@ fn sce_source_token(sce_workspace: &Path) -> Option<String> {
         input.push(b'\n');
     }
     input.extend_from_slice(&git_stdout(
-        sce_workspace,
+        checkout,
         &["diff", "HEAD", "--", ".", ":(exclude)target"],
     )?);
 
-    let digest = git_hash_object(sce_workspace, &input)?;
+    let digest = git_hash_object(checkout, &input)?;
     Some(format!("{rev}-{digest}"))
 }
 

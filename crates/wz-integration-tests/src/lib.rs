@@ -930,11 +930,47 @@ pub mod common {
     /// pico CMake configure fails there regardless) would fail much later with a
     /// confusing message. Naming the provisioned prefix makes the dependency the
     /// same fact on every machine.
-    pub fn mbedtls_include_dir() -> PathBuf {
-        let dir = std::env::var("WZ_MBEDTLS_PREFIX")
+    /// The Mbed TLS prefix `scripts/install-mbedtls.sh` provisions, graded
+    /// against the version that script pins.
+    ///
+    /// R2326 — the pin is PARSED OUT OF THE INSTALLER, never copied here. It is
+    /// the same rule `scripts/lib/oracle_pin_gate.py` states for the zenohd
+    /// version: a constant duplicated into the consumer is one fact in two
+    /// places with nothing measuring the gap, and the direction that rots is
+    /// always the copy. When the installer cannot be read the wanted token is
+    /// `None`, which is `Unverifiable` and warns rather than inventing one.
+    pub fn mbedtls_prefix() -> PathBuf {
+        let prefix = std::env::var("WZ_MBEDTLS_PREFIX")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| project_root().join("target/mbedtls"))
-            .join("include");
+            .unwrap_or_else(|_| project_root().join("target/mbedtls"));
+        assert_oracle_provenance(
+            &prefix,
+            mbedtls_pinned_token().as_deref(),
+            "bash scripts/install-mbedtls.sh",
+        );
+        prefix
+    }
+
+    /// `mbedtls-<version>` for the version `scripts/install-mbedtls.sh` pins,
+    /// matching the token that script stamps. `None` when the installer cannot
+    /// be read or carries no such default.
+    fn mbedtls_pinned_token() -> Option<String> {
+        let script =
+            std::fs::read_to_string(project_root().join("scripts/install-mbedtls.sh")).ok()?;
+        // `MBEDTLS_VERSION="${MBEDTLS_VERSION:-3.6.4}"`. Anchored on the
+        // assignment's default so a mention of the variable in a comment
+        // cannot answer for the pin.
+        let needle = "MBEDTLS_VERSION=\"${MBEDTLS_VERSION:-";
+        let version = script
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix(needle))
+            .find_map(|rest| rest.split_once("}\"").map(|(v, _)| v))
+            .filter(|v| !v.is_empty())?;
+        Some(format!("mbedtls-{version}"))
+    }
+
+    pub fn mbedtls_include_dir() -> PathBuf {
+        let dir = mbedtls_prefix().join("include");
         assert!(
             dir.join("mbedtls/entropy.h").is_file(),
             "Mbed TLS headers missing at {}; run scripts/install-mbedtls.sh \
@@ -1165,8 +1201,12 @@ pub mod common {
     /// The directory [`zenoh_pico_shared_library`] lives in — what a `cc -L`
     /// needs when an upstream example is linked against REAL pico as the
     /// reference arm of a compile-twice differential.
+    /// R2326 — grades the build root's provenance, not the `lib/` subdirectory:
+    /// the stamp sits at the root a resolver's script OWNS, and one script run
+    /// produces `lib/` and the generated `zenohpico/include/` together.
     pub fn zenoh_pico_library_dir() -> PathBuf {
-        let dir = project_root().join("target/zenoh-pico-build/lib");
+        let root = zenoh_pico_build_root();
+        let dir = root.join("lib");
         assert!(
             dir.is_dir(),
             "zenoh-pico build lib dir missing at {}; run \
@@ -1176,17 +1216,140 @@ pub mod common {
         dir
     }
 
+    /// The `target/zenoh-pico-build` root `scripts/build-zenoh-pico-cli.sh`
+    /// configures — the CMake build tree, as distinct from the
+    /// `target/zenoh-pico-cli` install tree.
+    ///
+    /// Every consumer of anything under it comes through here so the provenance
+    /// question is asked once per root rather than once per caller who
+    /// remembered. Its generated `zenohpico/include/config.h` is the reason the
+    /// distinction matters: that header is what the pico ABI layout probe reads,
+    /// and it is written by CMake's CONFIGURE step from the submodule's
+    /// `CMakeLists.txt`, so it goes stale with the submodule exactly as the
+    /// binaries do.
+    pub fn zenoh_pico_build_root() -> PathBuf {
+        let root = project_root().join("target/zenoh-pico-build");
+        assert_zenoh_pico_oracle_fresh(&root);
+        root
+    }
+
+    /// R2326 (unregistered open-debt item 10) — refuse a FOREIGN ORACLE that
+    /// was provisioned from a different source state than the one this tree
+    /// carries.
+    ///
+    /// EXISTENCE WAS THE ONLY QUESTION ASKED until this round, and it is the
+    /// wrong one. Every foreign-oracle root under `target/` is untracked build
+    /// output, so it survives a submodule pin bump, a branch switch and a
+    /// rebase without changing, and nothing about a stale one looks stale: the
+    /// pico CLI answers the same handshake and prints the same lines whichever
+    /// revision built it. The failure mode is the worst kind — a wire-parity
+    /// verdict rendered against an implementation the tree no longer claims to
+    /// target, read as "wz got it wrong". R2240 measured exactly that for the
+    /// SHM zenohd oracle: the lane was GREEN against a v1.5.0 binary and goes
+    /// RED the moment the oracle is built at the pin.
+    ///
+    /// MTIME IS NOT THE QUESTION EITHER, which is why this compares STRINGS
+    /// with no clock involved. mtime says when a file was written, never what
+    /// from — move a pin backwards and a binary built yesterday is "newer" than
+    /// a pin committed last week. `bx` rsyncs this tree to build hosts without
+    /// `-t`, so mtimes there are transfer times and the defeat is the normal
+    /// case here rather than the exotic one.
+    ///
+    /// The three non-matching verdicts are NOT one verdict:
+    ///
+    /// * `Stale` is refused unconditionally. The root states which source
+    ///   state produced it and it is not this one; there is nothing to weigh.
+    /// * `Unstamped` is refused only where the oracle is declared REQUIRED
+    ///   (`WZ_PICO_REQUIRE` — hosted CI sets it, and every hosted job that
+    ///   consumes the pico oracle runs `build-zenoh-pico-cli.sh` in the same
+    ///   job with no cache in between, so a stamp is always there). Elsewhere
+    ///   it warns. On the day this lands every root in every existing tree is
+    ///   unstamped, and turning that into a hard failure would red every pico
+    ///   lane on every machine at once for a question the tree cannot yet
+    ///   answer. The arming is what keeps that from becoming an escape hatch.
+    /// * `Unverifiable` — no readable checkout, no git — warns for the reason
+    ///   `wz_codegen_build::StampVerdict` gives: a verdict that cannot be
+    ///   computed must not be invented in either direction.
+    fn assert_oracle_provenance(root: &Path, want: Option<&str>, repair: &str) {
+        use wz_codegen_build::StampVerdict;
+
+        let required = std::env::var("WZ_PICO_REQUIRE").is_ok_and(|v| !v.is_empty());
+        match wz_codegen_build::oracle_stamp_verdict(root, want) {
+            StampVerdict::Match => {}
+            StampVerdict::Stale { have, want } => panic!(
+                "foreign oracle at {} is STALE.\n\
+                 \x20 provisioned from: {have}\n\
+                 \x20 this tree carries: {want}\n\
+                 A fixture that uses it would render a wire-parity verdict against an \
+                 implementation this tree no longer carries, which reads as \"wz got it \
+                 wrong\" and sends the diagnosis somewhere else entirely (R2240 paid \
+                 exactly that for the SHM zenohd oracle).\n\
+                 Fix: {repair}",
+                root.display(),
+            ),
+            StampVerdict::Unstamped { want } => {
+                assert!(
+                    !required,
+                    "foreign oracle at {} carries NO provenance stamp, so which source \
+                     state produced it is unknown; this tree carries {want}. \
+                     WZ_PICO_REQUIRE is set, which forbids proceeding on an oracle whose \
+                     origin is not established.\nFix: {repair}",
+                    root.display(),
+                );
+                eprintln!(
+                    "oracle provenance: {} carries no stamp (predates the R2326 gate); \
+                     proceeding unverified. Run `{repair}` to establish it, or set \
+                     WZ_PICO_REQUIRE=1 to make this a failure.",
+                    root.display(),
+                );
+            }
+            StampVerdict::Unverifiable => eprintln!(
+                "oracle provenance: cannot establish what {} should have been built from \
+                 (no readable checkout, or no git); check SKIPPED.",
+                root.display(),
+            ),
+        }
+    }
+
+    /// The `vendor/zenoh-pico` source state every pico oracle root must have
+    /// been provisioned from, or `None` when git cannot answer.
+    ///
+    /// One function so the wanted token is computed the same way for the CLI
+    /// root and the build root — they are provisioned by one script run from
+    /// one checkout, and asking twice in two ways is how the two answers start
+    /// disagreeing.
+    fn zenoh_pico_source_token() -> Option<String> {
+        wz_codegen_build::vendored_source_token(&project_root().join("vendor/zenoh-pico"))
+    }
+
+    /// Grade one `target/zenoh-pico-*` root against the vendored submodule.
+    fn assert_zenoh_pico_oracle_fresh(root: &Path) {
+        assert_oracle_provenance(
+            root,
+            zenoh_pico_source_token().as_deref(),
+            "bash scripts/build-zenoh-pico-cli.sh",
+        );
+    }
+
     /// Locate a zenoh-pico CLI binary under `target/zenoh-pico-cli/`.
     /// `scripts/build-zenoh-pico-cli.sh` produces `z_put`, `z_sub`,
     /// `z_get`, `z_queryable`; pass the bare name and this helper
     /// panics with the install hint if the binary is missing.
+    ///
+    /// R2326 — and refuses one built from a different `vendor/zenoh-pico`
+    /// state; see `assert_oracle_provenance` for why existence was the wrong
+    /// question. A code span rather than an intra-doc link deliberately: that
+    /// function is private, and a public item linking a private one resolves
+    /// only under `--document-private-items` and reds `-D warnings` otherwise.
     pub fn zenoh_pico_cli_binary(name: &str) -> PathBuf {
-        let path = project_root().join("target/zenoh-pico-cli").join(name);
+        let root = project_root().join("target/zenoh-pico-cli");
+        let path = root.join(name);
         assert!(
             path.is_file(),
             "{name} binary missing at {}; run scripts/build-zenoh-pico-cli.sh first",
             path.display()
         );
+        assert_zenoh_pico_oracle_fresh(&root);
         path
     }
 

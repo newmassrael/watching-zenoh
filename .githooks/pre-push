@@ -520,6 +520,54 @@ if ! python3 scripts/lib/router_interest_qos_gate.py; then
     exit 1
 fi
 
+# ─── gate 2n — every foreign oracle root is judged (R2326, item 10) ──
+# grades: worktree
+#
+# A foreign oracle whose provenance nothing records survives a submodule pin
+# bump, a branch switch and a rebase unchanged, and a stale one does not look
+# stale: it renders a confident wire-parity verdict against an implementation
+# this tree no longer carries, which reads as "wz got it wrong". R2240 measured
+# that on the SHM zenohd oracle — GREEN for months against a v1.5.0 binary
+# after the pin moved to 1.10.0.
+#
+# This is the LOCAL half of the class R2240 closed for the zenohd family only.
+# The other three roots this tree resolves — `target/zenoh-pico-cli`,
+# `target/zenoh-pico-build`, `target/mbedtls` — could not use that mechanism:
+# it reads the binary's `--version`, and MEASURED 2026-09-04 the pico artefacts
+# state nothing about themselves (no version string, an unversioned soname), so
+# they carry a stamp written by their provisioner instead.
+#
+# Why the hook and not only Layer C0: the shape it catches is a NEW resolver or
+# a NEW provisioner arriving, which is an edit to `scripts/` or to a `tests/`
+# file — and gate 3 below runs the CHANGED CRATES' tests, which cannot fail on
+# either. A fixture that joins `target/mbedtls/include` itself compiles and
+# passes; it just never asks the question. Two sites in
+# `pico_abi_option_layout.rs` were exactly that before R2326.
+#
+# UNCONDITIONAL, for gate 2d's reason: MEASURED 0.09s, so a scope predicate
+# would cost more than it saves and is one more thing that can be silently
+# wrong — a wrong "this push does not touch it" reads exactly like a pass.
+if ! python3 scripts/lib/oracle_provenance_gate.py --selftest; then
+    echo "" >&2
+    echo "pre-push: [gate 2n] oracle-provenance gate SELFTEST failed — it can no" >&2
+    echo "          longer tell an unjudged root from a covered one, or a route" >&2
+    echo "          that skips the assertion from one that reaches it, so its" >&2
+    echo "          verdict on this push means nothing." >&2
+    exit 1
+fi
+if ! python3 scripts/lib/oracle_provenance_gate.py; then
+    echo "" >&2
+    echo "pre-push: [gate 2n] oracle-provenance gate FAILED — a foreign-oracle" >&2
+    echo "          root this tree resolves is judged by NO provenance" >&2
+    echo "          mechanism, a route to a stamped root skips the runtime" >&2
+    echo "          assertion, or a derived population came back EMPTY." >&2
+    echo "          A new provisioner stamps its root with" >&2
+    echo "          \`vendored_oracle_stamp_root \"\$VAR\" \"\$token\"\`; a new" >&2
+    echo "          resolver goes through the one that grades its root." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+
 # ─── gate 2e — the scouting socket's movable axes (R2142, item 225) ──
 # grades: worktree
 #

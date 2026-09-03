@@ -354,11 +354,25 @@ def main() -> int:
         action="store_true",
         help="a population with no oracle present is a FAIL, not a skip",
     )
+    ap.add_argument(
+        "--roots",
+        action="store_true",
+        help=(
+            "print the `target/…` oracle roots this gate judges, one per line, and exit. "
+            "R2326: `oracle_provenance_gate.py` asks this rather than carrying a copy of "
+            "the four directory names -- a coverage claim derived from the mechanism's own "
+            "population cannot go stale when a fifth zenohd variant is added."
+        ),
+    )
     args = ap.parse_args()
     if args.selftest:
         return selftest()
     if not BUILD_SCRIPT.exists():
         raise SystemExit(f"oracle-pin-gate: FAIL -- {BUILD_SCRIPT} is missing")
+    if args.roots:
+        for directory in population(BUILD_SCRIPT.read_text()):
+            print(directory)
+        return 0
     return run(ROOT, BUILD_SCRIPT.read_text(), require=args.require)
 
 

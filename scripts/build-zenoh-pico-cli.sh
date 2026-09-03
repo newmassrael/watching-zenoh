@@ -30,6 +30,14 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# R2326 (unregistered open-debt item 10) — the provenance stamp these artefacts
+# carry. A pico binary states nothing about itself (no version string, an
+# unversioned soname), so the record this writes is the only answer there is to
+# "which submodule state is this oracle". See scripts/lib/vendored-oracle.sh.
+# shellcheck source=scripts/lib/vendored-oracle.sh
+source "$ROOT/scripts/lib/vendored-oracle.sh"
+
 VENDOR_DIR="$ROOT/vendor/zenoh-pico"
 EXAMPLES_DIR="$VENDOR_DIR/examples"
 BUILD_DIR="$ROOT/target/zenoh-pico-build"
@@ -547,5 +555,26 @@ for bin in "${TARGETS[@]}"; do
     install -m 0755 "$src" "$INSTALL_DIR/$bin"
 done
 
+# R2326 (unregistered open-debt item 10) — record WHICH vendor/zenoh-pico state
+# produced these artefacts.
+#
+# AFTER the build and the install, never before: a stamp written up front would
+# assert freshness for artefacts that a failed cmake run left at their previous
+# revision — the exact lie this record exists to prevent.
+#
+# BOTH roots are stamped because a resolver names both and they can diverge:
+# `zenoh_pico_cli_binary` reads $INSTALL_DIR while `zenoh_pico_library_dir` and
+# the pico ABI layout probe read $BUILD_DIR (its `lib/` and its generated
+# `zenohpico/include/`). Deleting one of the two leaves the other in place, so
+# one stamp covering both would answer for a root it had not seen.
+#
+# An unreadable submodule leaves them UNSTAMPED rather than stamped with a
+# guess; `vendored_oracle_stamp_root` is what implements that, and the
+# consumers report unstamped as its own verdict rather than as a match.
+_wzpico_token="$(vendored_oracle_git_token "$VENDOR_DIR" || true)"
+vendored_oracle_stamp_root "$INSTALL_DIR" "$_wzpico_token"
+vendored_oracle_stamp_root "$BUILD_DIR" "$_wzpico_token"
+
 echo "build-zenoh-pico-cli: installed ${#TARGETS[@]} binaries to $INSTALL_DIR" >&2
+echo "build-zenoh-pico-cli: pin = ${_wzpico_token:-<unstamped: no git in $VENDOR_DIR>}" >&2
 ls -la "$INSTALL_DIR" >&2
