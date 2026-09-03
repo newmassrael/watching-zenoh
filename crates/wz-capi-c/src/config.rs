@@ -32,7 +32,7 @@ use std::ffi::{c_char, CStr};
 
 use crate::abi::{z_loaned_config_t, z_moved_config_t, z_owned_config_t, Handle};
 use crate::ffi::guarded;
-use crate::result::{ZResult, Z_EIO, Z_ENULL, Z_EPARSE, Z_OK};
+use crate::result::{ZResult, Z_EGENERIC, Z_EIO, Z_ENULL, Z_EPARSE, Z_OK};
 
 /// zenoh-c's `mode` key (`Z_CONFIG_MODE_KEY`, `zenoh_constants.h:23`).
 pub(crate) const MODE_KEY: &str = "mode";
@@ -50,26 +50,42 @@ pub(crate) const SCOUTING_TIMEOUT_KEY: &str = "scouting/timeout";
 /// out here rather than cited to a `#define` that does not exist.
 pub(crate) const SESSION_ZID_KEY: &str = "id";
 
-/// One stored value: the strings it denotes, and whether the caller wrote them
-/// as a LIST.
+/// How a stored value was SPELLED in the json5 the caller wrote.
 ///
-/// R2300 (open-debt item 631) added the second field, and it is a defect fix
-/// rather than a widening. A `Vec<String>` alone cannot tell `["tcp/a"]` from
-/// `"tcp/a"` — both arrive as one string — so a one-element list re-rendered as
-/// a bare scalar. That was harmless for as long as the only reader was this
-/// crate's own re-parser, which reads a scalar back as a one-element list;
-/// `render_nested` broke the symmetry by feeding a DIFFERENT reader, and wz's
-/// stock-config reader requires an ARRAY at `listen/endpoints` (`endpoints_of`
-/// rejects anything else). A single-endpoint config — upstream `parse_args.h`'s
-/// most common shape by far — was therefore refused. The boundary is kept where
-/// it is known instead of guessed at render time.
+/// R2303 (open-debt item 636) replaced a `bracketed: bool` with this, and the
+/// generalisation is the same argument R2300 made for the bool: the spelling is
+/// KNOWN at parse time and only GUESSABLE at render time, so it is recorded
+/// rather than re-derived. The bool could carry one bit of that — list or not —
+/// and [`render_stored`] had to reconstruct the rest by inspecting the stored
+/// text, which it got wrong for every value this parser does not decompose. A
+/// `null` re-rendered as the STRING `"null"` and an object as the string
+/// `"{\"enabled\":true}"`, both measured through the C ABI; neither re-parses to
+/// what went in, and the second is not even json5.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Spelling {
+    /// A quoted scalar (`"tcp/a"`). One value, and it renders re-quoted.
+    Quoted,
+    /// A `[...]` list of quoted scalars. Renders bracketed whatever its length,
+    /// INCLUDING empty — which is the case a count could never recover, and the
+    /// whole of R2300's fix: `["tcp/a"]` is upstream `parse_args.h`'s commonest
+    /// shape and wz's stock-config reader requires an ARRAY at
+    /// `listen/endpoints`.
+    List,
+    /// Anything this parser did NOT decompose: a bare literal (`true`, `4`,
+    /// `null`), an object, or an array that is not a list of quoted scalars.
+    /// The single value is the SOURCE TEXT and renders verbatim, because the
+    /// text is the only faithful spelling of a value nothing here took apart.
+    Verbatim,
+}
+
+/// One stored value: the strings it denotes, and how it was written.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StoredValue {
-    /// The strings the json5 value denotes.
+    /// The strings the json5 value denotes — or, for [`Spelling::Verbatim`],
+    /// the one source text.
     values: Vec<String>,
-    /// Whether the json5 was `[...]`. An empty list is bracketed too, which is
-    /// why this is not `values.len() != 1`.
-    bracketed: bool,
+    /// The spelling it arrived in.
+    spelling: Spelling,
 }
 
 /// The key/value store behind an owned config.
@@ -97,46 +113,81 @@ impl ConfigState {
     }
 
     /// Render one key's value back in the json5 form the insert path accepts,
-    /// or `None` when the key is absent.
+    /// or `None` when the key names nothing.
     ///
-    /// The round trip is the contract: a scalar renders bare and a list renders
-    /// bracketed with quoted elements, so `get` of an inserted value re-inserts
-    /// identically. A renderer that could not be re-parsed would make the pair
-    /// of exports lossy in a way only a caller would notice.
+    /// The round trip is the contract: a value renders in the spelling it
+    /// arrived in, so `get` of an inserted value re-inserts identically. A
+    /// renderer that could not be re-parsed would make the pair of exports lossy
+    /// in a way only a caller would notice.
+    ///
+    /// # A key is a QUERY OVER THE TREE, not a map lookup
+    ///
+    /// R2303 (open-debt item 636). Upstream holds its config as a tree and
+    /// `zc_config_get_from_str` walks it, so an INTERIOR path answers with the
+    /// subtree beneath it — measured on `libzenohc.so` 1.10.0, `get("scouting")`
+    /// returns `{"timeout":null,"delay":99,…}`. This store holds the same tree
+    /// as its LEAF SET, so the same question has to be answered by re-nesting
+    /// rather than by finding an entry, and a lookup alone would have made a key
+    /// unreadable at its own path the moment `zc_config_from_str` had read it
+    /// out of a nested document: `{"timestamping":{"enabled":true}}` stores one
+    /// leaf at `timestamping/enabled`, and `get("timestamping")` matches no
+    /// entry at all.
+    ///
+    /// COMPACT, because that is one value rather than a document — the layout
+    /// `zc_config_to_string` writes is for a human diffing a file, and upstream
+    /// answers a `get` with no whitespace either.
+    ///
+    /// A subtree that cannot be re-nested is `None` rather than a partial
+    /// answer. `NestConflict` is reachable here for the same reason it is
+    /// reachable from `render_nested` — this store is a flat map and a tree is
+    /// not — and half a subtree would be a value the caller could re-insert to
+    /// silently lose the rest.
     fn render(&self, key: &str) -> Option<String> {
-        Some(render_stored(self.entries.get(key)?))
-    }
-
-    /// Render every entry as a json5 object.
-    fn render_all(&self) -> String {
-        let body: Vec<String> = self
+        if let Some(value) = self.entries.get(key) {
+            return Some(render_stored(value));
+        }
+        let prefix = format!("{key}/");
+        let mut root = NestNode::default();
+        let mut found = false;
+        for (stored, value) in self
             .entries
-            .iter()
-            .map(|(key, value)| format!("  \"{key}\": {}", render_stored(value)))
-            .collect();
-        format!("{{\n{}\n}}", body.join(",\n"))
+            .range(prefix.clone()..)
+            .take_while(|(k, _)| k.starts_with(&prefix))
+        {
+            let segments: Vec<&str> = stored[prefix.len()..].split('/').collect();
+            root.insert(&segments, value, stored).ok()?;
+            found = true;
+        }
+        if !found {
+            return None;
+        }
+        let mut out = String::new();
+        root.write(&mut out, 1, Layout::Compact);
+        Some(out)
     }
 
-    /// Render every entry as the NESTED json5 document wz's stock-config
-    /// reader takes, or name the pair of keys that cannot both be nested.
+    /// Render every entry as the NESTED json5 document — the ONE document this
+    /// store emits — or name the pair of keys that cannot both be nested.
     ///
-    /// This is NOT a second emitter beside `render_all`, and the difference is
-    /// exactly one of STRUCTURE: both spell their values through
-    /// `render_stored`, so what a value looks like is decided in one place and
-    /// this function decides only where it sits. A renderer of its own would
-    /// have been the second copy the config surface already carries one of.
+    /// R2303 (open-debt item 636) made it the only one. A `render_all` stood
+    /// beside it emitting the flat key map, on the belief that the flat
+    /// spelling was what upstream's `zc_config_to_string` answers with; upstream
+    /// was then MEASURED and emits nested, so the flat renderer answered a
+    /// question no door of either implementation asks. Two emitters for one
+    /// document is a place for the two to disagree, and they had.
     ///
     /// The nesting is load-bearing rather than cosmetic, and R2300 measured why
     /// before writing it. `ConfigState` stores upstream's FLAT key spelling
     /// (`"listen/endpoints"`, the `Z_CONFIG_LISTEN_KEY` a C caller inserts),
     /// while `ZenohNodeConfig::from_json5` reads values through
     /// `Json5Value::get`, which SPLITS the path on `/` and walks nested
-    /// objects. Handed `render_all`'s output the reader would ACCEPT the
-    /// document — `leaf_paths` joins segments with the same `/`, so
-    /// `wz_accepts` matches the flat key against the honoured table and raises
-    /// nothing — and then find NONE of the values, silently returning a config
-    /// carrying every zenoh default. Green, and meaning nothing: the exact
-    /// shape the doors this feeds exist to refuse.
+    /// objects. Handed a FLAT document the reader would ACCEPT it —
+    /// `leaf_paths` joins segments with the same `/`, so `wz_accepts` matches
+    /// the flat key against the honoured table and raises nothing — and then
+    /// find NONE of the values, silently returning a config carrying every
+    /// zenoh default. Green, and meaning nothing: the exact shape the doors
+    /// this feeds exist to refuse. The test named for that loss still asserts
+    /// it, over a document it builds itself.
     ///
     /// A CONFLICT is refused rather than resolved. Two stored keys where one is
     /// a prefix of the other (`"mode"` and `"mode/router"`) cannot both be
@@ -151,7 +202,7 @@ impl ConfigState {
             root.insert(&segments, value, key)?;
         }
         let mut out = String::new();
-        root.write(&mut out, 1);
+        root.write(&mut out, 1, Layout::Indented);
         Ok(out)
     }
 
@@ -267,8 +318,8 @@ impl<'a> NestNode<'a> {
         child.insert(rest, value, key)
     }
 
-    /// Write this node at `depth`, two spaces per level.
-    fn write(&self, out: &mut String, depth: usize) {
+    /// Write this node at `depth`, in `layout`.
+    fn write(&self, out: &mut String, depth: usize, layout: Layout) {
         match self {
             NestNode::Leaf(value) => out.push_str(&render_stored(value)),
             NestNode::Branch(children) => {
@@ -276,64 +327,91 @@ impl<'a> NestNode<'a> {
                     out.push_str("{}");
                     return;
                 }
-                let pad = "  ".repeat(depth);
-                let closing = "  ".repeat(depth - 1);
-                out.push_str("{\n");
+                let (open, sep, pad, tail) = match layout {
+                    Layout::Indented => (
+                        "{\n",
+                        ",\n",
+                        "  ".repeat(depth),
+                        format!("\n{}", "  ".repeat(depth - 1)),
+                    ),
+                    Layout::Compact => ("{", ",", String::new(), String::new()),
+                };
+                out.push_str(open);
                 for (i, (name, child)) in children.iter().enumerate() {
                     if i > 0 {
-                        out.push_str(",\n");
+                        out.push_str(sep);
                     }
                     out.push_str(&pad);
                     out.push('"');
                     out.push_str(name);
-                    out.push_str("\": ");
-                    child.write(out, depth + 1);
+                    out.push_str("\":");
+                    if matches!(layout, Layout::Indented) {
+                        out.push(' ');
+                    }
+                    child.write(out, depth + 1, layout);
                 }
-                out.push('\n');
-                out.push_str(&closing);
+                out.push_str(&tail);
                 out.push('}');
             }
         }
     }
 }
 
+/// How a nested document is laid out.
+///
+/// Two call sites, one writer, because the STRUCTURE is the thing that has to
+/// be decided once and the whitespace is not: a second writer for the compact
+/// form would be a second place for the nesting to be wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Layout {
+    /// Two spaces per level and a newline per member — the DOCUMENT
+    /// `zc_config_to_string` writes, which a human diffs against the reference
+    /// config.
+    Indented,
+    /// No whitespace — one VALUE handed back through `zc_config_get_from_str`,
+    /// where upstream is compact too and layout would be noise the caller has to
+    /// strip before comparing.
+    Compact,
+}
+
 /// Render a stored value in the json5 form [`parse_json5_value`] accepts.
 ///
-/// A BRACKETED value renders bracketed whatever its length, which is the whole
-/// of R2300's fix: the list-ness is read off [`StoredValue`] rather than
-/// inferred from the element count, so a one-endpoint `["tcp/a"]` survives the
-/// round trip as a list instead of decaying into the scalar `"tcp/a"`. The
-/// count can never carry that fact — `[]` and `["a"]` are both lists and one of
-/// them has no elements to count.
+/// The contract is `parse_json5_value(render_stored(v)) == Some(v)`, and R2303
+/// (open-debt item 636) is what made it hold rather than nearly hold. Each arm
+/// below is decided by the [`Spelling`] the parser RECORDED, so this function
+/// inspects no text and infers nothing.
 ///
-/// An unbracketed single entry that parsed from a bare literal renders bare;
-/// anything else renders quoted. That one case still cannot distinguish "was a
-/// bare literal" from "was a quoted scalar" after the fact, so it renders bare
-/// when the text is literal-shaped and quoted otherwise — which re-parses to
-/// the same value either way, and unlike the list case has no reader that can
-/// tell the two apart.
+/// The version this replaced guessed. It asked whether the stored text "looked
+/// like" a bare literal — `true`, `false`, or digits — and quoted whatever did
+/// not, which is right for a quoted scalar and wrong for every other value the
+/// parser stores whole: `null` came back as the string `"null"`, and an object
+/// as the string `"{\"enabled\":true}"`, which is not even json5 and made the
+/// document unreadable by anything, this crate's own reader included. The
+/// guess could not have been fixed in place, because after the fact the text
+/// `{a:1}` is indistinguishable from a caller's string that happens to spell an
+/// object.
 fn render_stored(value: &StoredValue) -> String {
-    let is_bare = |text: &str| {
-        text == "true"
-            || text == "false"
-            || (!text.is_empty()
-                && text
-                    .chars()
-                    .all(|c| c.is_ascii_digit() || c == '.' || c == '-' || c == '+'))
-    };
-    if !value.bracketed {
-        return match value.values.as_slice() {
-            [one] if is_bare(one) => one.clone(),
+    match value.spelling {
+        // The one source text, exactly as it arrived.
+        Spelling::Verbatim => value
+            .values
+            .first()
+            .cloned()
+            // A `Verbatim` with no text cannot be produced by
+            // `parse_json5_value`. Rendered as an empty object rather than
+            // panicked on: a future writer of this store gets a re-parseable
+            // value, not an abort across the C boundary.
+            .unwrap_or_else(|| String::from("{}")),
+        Spelling::Quoted => match value.values.as_slice() {
+            // `unquote` refuses a value containing its own quote character, so
+            // re-quoting here cannot produce an unbalanced literal.
             [one] => format!("\"{one}\""),
-            // An unbracketed multi-entry value cannot be produced by
-            // `parse_json5_value`, which only ever yields more than one element
-            // from a `[...]`. Rendered as a list rather than panicked on: a
-            // future writer of this store gets a re-parseable value, not an
-            // abort across the C boundary.
+            // A `Quoted` with any other length cannot be produced either; same
+            // reasoning as above, rendered as a list so it re-parses.
             many => bracket(many),
-        };
+        },
+        Spelling::List => bracket(&value.values),
     }
-    bracket(&value.values)
 }
 
 /// `["a", "b"]`, and `[]` for nothing.
@@ -347,11 +425,19 @@ fn bracket(values: &[String]) -> String {
 /// Returns `None` for a shape this slice does not implement — see the module
 /// doc for why that is a refusal rather than a passthrough.
 fn parse_json5_value(raw: &str) -> Option<StoredValue> {
-    /// A value that was not written as a list.
-    fn scalar(one: String) -> Option<StoredValue> {
+    /// A value stored exactly as it was written, because nothing here took it
+    /// apart.
+    fn verbatim(text: String) -> Option<StoredValue> {
         Some(StoredValue {
-            values: vec![one],
-            bracketed: false,
+            values: vec![text],
+            spelling: Spelling::Verbatim,
+        })
+    }
+    /// A quoted scalar, holding the text INSIDE the quotes.
+    fn quoted(inner: String) -> Option<StoredValue> {
+        Some(StoredValue {
+            values: vec![inner],
+            spelling: Spelling::Quoted,
         })
     }
     let text = raw.trim();
@@ -373,54 +459,77 @@ fn parse_json5_value(raw: &str) -> Option<StoredValue> {
     // object early. A value whose braces do not balance is still rejected —
     // accepting it would turn a malformed insert into a silent success.
     if text.starts_with('{') {
-        return if braces_balance(text) {
-            scalar(text.to_owned())
+        return if delimiters_balance(text) {
+            verbatim(text.to_owned())
         } else {
             None
         };
     }
-    // A bare literal: `false` / `true` / a number. Stored verbatim; the open path
-    // reads only the keys it knows.
+    // A bare literal: `false` / `true` / `null` / a number. Stored verbatim; the
+    // open path reads only the keys it knows.
     if !text.starts_with('[') && !text.starts_with('"') && !text.starts_with('\'') {
         return if text
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
         {
-            scalar(text.to_owned())
+            verbatim(text.to_owned())
         } else {
             None
         };
     }
     // A quoted scalar.
     if let Some(inner) = unquote(text) {
-        return scalar(inner);
+        return quoted(inner);
     }
-    // A list of quoted scalars. `bracketed` from here down, INCLUDING the empty
+    // A list of quoted scalars. `List` from here down, INCLUDING the empty
     // list: `[]` denotes no strings and is still a list, which is the case a
     // length test could never recover.
     let body = text.strip_prefix('[')?.strip_suffix(']')?.trim();
     if body.is_empty() {
         return Some(StoredValue {
             values: Vec::new(),
-            bracketed: true,
+            spelling: Spelling::List,
         });
     }
     let mut out = Vec::new();
     for item in body.split(',') {
-        out.push(unquote(item.trim())?);
+        // R2303 (open-debt item 636) — an element this slice cannot take apart
+        // sends the WHOLE array to the verbatim arm, on R311y573's reasoning one
+        // delimiter over: an array is an object's case with `[` instead of `{`,
+        // and refusing it would make this parser a whitelist of the SHAPES a
+        // caller may store. Upstream's own `zc_config_to_string` emits one —
+        // `plugins_loading/search_dirs` mixes an object with strings — so
+        // refusing it meant wz could not read a document upstream had just
+        // written, which is exactly the drop-in claim.
+        let Some(element) = unquote(item.trim()) else {
+            return if delimiters_balance(text) {
+                verbatim(text.to_owned())
+            } else {
+                None
+            };
+        };
+        out.push(element);
     }
     Some(StoredValue {
         values: out,
-        bracketed: true,
+        spelling: Spelling::List,
     })
 }
 
-/// Whether `text` is a brace-balanced object, ignoring braces inside strings.
+/// Whether `text` closes every `{` and `[` it opens, ignoring delimiters inside
+/// strings.
 ///
 /// Deliberately NOT a JSON5 parser: wz's open path reads a handful of known
 /// keys and stores everything else verbatim, so the only question this has to
 /// answer is whether the caller handed over a complete value or a truncated one.
-fn braces_balance(text: &str) -> bool {
+///
+/// R2303 (open-debt item 636) added the BRACKETS, because the verbatim arm they
+/// guard now takes arrays as well as objects. Counting only braces would have
+/// let `[{"a":1}` through as a complete value on the strength of its balanced
+/// object — a truncated array admitted by the check meant to refuse truncation.
+/// The two kinds share one depth counter rather than getting one each: `{"a":[}`
+/// is malformed and a per-kind count calls it balanced.
+fn delimiters_balance(text: &str) -> bool {
     let mut depth = 0i32;
     let mut quote: Option<char> = None;
     let mut escaped = false;
@@ -437,8 +546,8 @@ fn braces_balance(text: &str) -> bool {
         }
         match c {
             '"' | '\'' => quote = Some(c),
-            '{' => depth += 1,
-            '}' => {
+            '{' | '[' => depth += 1,
+            '}' | ']' => {
                 depth -= 1;
                 if depth < 0 {
                     return false;
@@ -511,9 +620,15 @@ pub unsafe extern "C" fn z_config_default(this_: *mut z_owned_config_t) -> ZResu
 /// Read a configuration from a json5 FILE (zenoh-c `zc_config_from_file`).
 ///
 /// This slice reads the file so a missing or unreadable path is reported as
-/// [`Z_EIO`] exactly as upstream would, and then applies the same value parser
-/// the insert path uses to any `key: value` lines it recognises. A file using
-/// json5 nesting is REFUSED, not partially applied — see the module doc.
+/// [`Z_EIO`] exactly as upstream would, and hands the text to `install_parsed`
+/// — the one document reader every door here shares. (A CODE SPAN, not a link:
+/// this item is public and that one is not, which the doc-link budget lane
+/// counts as a broken link. The budget is not the thing to move.)
+///
+/// R2303 (open-debt item 636) made that true. This function used to carry its
+/// OWN copy of the line scanner `install_parsed` held, so the two doors could
+/// drift and did: this is the door a `zenohd -c` config file arrives at, and
+/// every such file is NESTED, which the scanner refused.
 ///
 /// # Safety
 /// `this_` must be valid and writable; `path` must be a NUL-terminated string.
@@ -537,23 +652,11 @@ pub unsafe extern "C" fn zc_config_from_file(
             unsafe { *this_ = z_owned_config_t::null_value() };
             return Z_EIO;
         };
-        let mut state = ConfigState::default();
-        for line in text.lines() {
-            let line = line.trim().trim_end_matches(',');
-            if line.is_empty() || line.starts_with("//") || line == "{" || line == "}" {
-                continue;
-            }
-            let Some((key, value)) = line.split_once(':') else {
-                return Z_EPARSE;
-            };
-            let key = key.trim().trim_matches(['"', '\'']).to_owned();
-            let Some(values) = parse_json5_value(value) else {
-                return Z_EPARSE;
-            };
-            state.entries.insert(key, values);
-        }
-        install(this_, state);
-        Z_OK
+        // SAFETY: `this_` is valid; the gravestone above and the caller's
+        // contract leave it in the state `install_parsed` requires.
+        unsafe { *this_ = z_owned_config_t::null_value() };
+        // SAFETY: as above.
+        unsafe { install_parsed(this_, &text) }
     })
 }
 
@@ -756,25 +859,75 @@ pub unsafe extern "C" fn zc_config_from_env(this_: *mut z_owned_config_t) -> ZRe
     })
 }
 
-/// Parse `text` into a fresh state and install it, or leave the gravestone.
+/// Read a json5 DOCUMENT into a fresh state and install it, or leave the
+/// gravestone.
+///
+/// The one reader behind every document door — `zc_config_from_str`,
+/// `zc_config_from_substr`, `zc_config_from_file`, `zc_config_from_file_substr`
+/// and, through the last of those, `zc_config_from_env`. R2303 (open-debt item
+/// 636) made it one: `zc_config_from_file` carried a second copy of the parser
+/// this replaced, so a fix applied here reached three of the five doors and the
+/// other two kept reading the old way.
+///
+/// # It parses; it does not scan lines
+///
+/// What it replaced split the text on newlines and each line on its first `:`,
+/// which meant wz accepted only a FLAT document — one `"key": value` per line,
+/// the key spelled with the `/` path separators the insert door takes. Every
+/// zenoh configuration a deployment actually holds is NESTED (`zenohd -c` reads
+/// one, and upstream's own `zc_config_to_string` writes one), and upstream's
+/// `zc_config_from_str` refuses the flat spelling outright — measured, at
+/// `libzenohc.so` 1.10.0, `Z_EPARSE`. So the two implementations' document
+/// doors could not read each other in EITHER direction, and a drop-in whose
+/// config door cannot read the deployment's config file is not a drop-in.
+///
+/// `Json5Value::leaf_entries` joins nested segments with `/`, which is the same
+/// spelling `ConfigState` stores and `zc_config_get_from_str` queries — so the
+/// nesting is undone exactly once, here, and the flat path keys the rest of the
+/// crate works in are unchanged. `leaf_entries` rather than `leaf_paths`
+/// because the walk has to CARRY the value: a re-lookup through
+/// `Json5Value::get` splits the path on `/` again, so a flat key would resolve
+/// to nothing and the door would refuse a document it had just parsed. That is
+/// not hypothetical — it is what the first draft of this function did, measured
+/// through the C ABI before the walk was changed.
+///
+/// A document written FLAT therefore still reads, and that is a deliberate
+/// superset rather than an accident: a top-level key containing `/` yields the
+/// same leaf path as the nesting it spells. Upstream refuses the flat spelling
+/// and wz accepts it, which costs the drop-in claim nothing — a program written
+/// for zenoh-c never emits one, because upstream cannot read one back — while
+/// refusing it would strand every config file wz's OWN `zc_config_to_string`
+/// wrote before this round.
+///
+/// # Each leaf goes through the INSERT door's value parser
+///
+/// [`parse_json5_value`] is called on each leaf's json5 text rather than a
+/// second value reader being written here, so "a value this config can hold" is
+/// one rule and not two. A leaf it refuses fails the whole document, which is
+/// the same answer `zc_config_insert_json5` gives for that same value; a
+/// document that silently dropped the key would be the hollow-config shape this
+/// module's own header names.
 ///
 /// # Safety
 /// `this_` must be valid, writable, and currently a gravestone.
 unsafe fn install_parsed(this_: *mut z_owned_config_t, text: &str) -> ZResult {
+    let Ok(document) = wz_runtime_tokio::json5::parse(text) else {
+        return Z_EPARSE;
+    };
+    // The ROOT must be an object. `leaf_paths` yields nothing for a scalar root
+    // — `5` is a leaf at no path — so without this a document of `5` would
+    // install an EMPTY config and report success, which is the vacuous accept
+    // this crate refuses everywhere else. Upstream refuses it too: its
+    // `json5::from_str::<Config>` cannot make a struct out of a number.
+    if !matches!(document, wz_runtime_tokio::json5::Json5Value::Object(_)) {
+        return Z_EPARSE;
+    }
     let mut state = ConfigState::default();
-    for line in text.lines() {
-        let line = line.trim().trim_end_matches(',');
-        if line.is_empty() || line.starts_with("//") || line == "{" || line == "}" {
-            continue;
-        }
-        let Some((key, value)) = line.split_once(':') else {
+    for (path, leaf) in document.leaf_entries() {
+        let Some(value) = parse_json5_value(&leaf.to_json5_text()) else {
             return Z_EPARSE;
         };
-        let key = key.trim().trim_matches(['"', '\'']).to_owned();
-        let Some(values) = parse_json5_value(value) else {
-            return Z_EPARSE;
-        };
-        state.insert(key, values);
+        state.insert(path, value);
     }
     install(this_, state);
     Z_OK
@@ -916,6 +1069,43 @@ pub unsafe extern "C" fn zc_config_insert_json5_from_substr(
 
 /// Render the whole configuration as json5 (zenoh-c `zc_config_to_string`).
 ///
+/// # The document is NESTED, and R2303 (open-debt item 636) is why
+///
+/// This door used to emit the flat key map `ConfigState` stores —
+/// `{"connect/endpoints": [...], "mode": "client"}` — on the belief that
+/// echoing back the caller's own spelling was upstream's meaning. It is not.
+/// Upstream serializes zenoh's `Config`, a TREE, so its output nests
+/// (`{"mode":"client","connect":{"endpoints":[...]}}`), and its
+/// `zc_config_from_str` REFUSES the flat spelling — both measured against
+/// `libzenohc.so` 1.10.0 rather than read off a doc comment, which had the
+/// example but not the whole.
+///
+/// A flat document is therefore not a variant spelling; it is one no zenoh
+/// component can read, and this is the door whose output a program hands to
+/// `zenohd -c` or to another zenoh library. The path spelling is not lost by
+/// nesting: a `/` key is a QUERY over the tree, which is why
+/// `zc_config_get_from_str("connect/endpoints")` resolves through upstream's
+/// nested document and through this one.
+///
+/// # BYTE identity with upstream is not the contract, and cannot be
+///
+/// Upstream emits every field of zenoh's whole `Config` — 2,916 bytes for a
+/// default at 1.10.0, most of them `null` — because that struct is what it
+/// serializes. `ConfigState` holds only what a caller inserted and models no
+/// schema, so the two can never agree byte for byte. What they can be held to,
+/// and what `zenoh_c_config_document_oracle` holds them to, is that each side's
+/// document is READ by the other with every value arriving intact.
+///
+/// # A config that cannot be a document is refused
+///
+/// `ConfigState` is a flat map, so it can hold `"mode"` and `"mode/router"` at
+/// once; a tree cannot. Upstream never reaches that state (it refuses the
+/// second insert, `Z_EGENERIC`), and this crate stores what the caller said
+/// rather than adjudicating zenoh's schema, so the refusal lands here instead —
+/// naming both keys, via `NestConflict`. [`Z_EGENERIC`] because that is what
+/// upstream's own `zc_config_to_string` returns when serialization fails; a
+/// parse code would claim the caller's input was malformed, and it was not.
+///
 /// # Safety
 /// `config` must be null or a valid loaned config; `out_config_string` must be
 /// valid and writable.
@@ -934,10 +1124,11 @@ pub unsafe extern "C" fn zc_config_to_string(
         let Some(state) = (unsafe { config_state(config as *mut z_loaned_config_t) }) else {
             return Z_ENULL;
         };
-        // SAFETY: the caller's contract.
-        unsafe {
-            *out_config_string = crate::string::owned_string_from(state.render_all().as_bytes())
+        let Ok(document) = state.render_nested() else {
+            return Z_EGENERIC;
         };
+        // SAFETY: the caller's contract.
+        unsafe { *out_config_string = crate::string::owned_string_from(document.as_bytes()) };
         Z_OK
     })
 }
@@ -995,11 +1186,12 @@ pub unsafe extern "C" fn z_internal_config_null(this_: *mut z_owned_config_t) {
 mod tests {
     use super::*;
 
-    /// A value the caller did NOT write as a list.
+    /// A value the caller wrote as a QUOTED scalar, holding the text inside the
+    /// quotes.
     fn scalar_of(values: &[&str]) -> Option<StoredValue> {
         Some(StoredValue {
             values: values.iter().map(|s| String::from(*s)).collect(),
-            bracketed: false,
+            spelling: Spelling::Quoted,
         })
     }
 
@@ -1007,8 +1199,39 @@ mod tests {
     fn list_of(values: &[&str]) -> Option<StoredValue> {
         Some(StoredValue {
             values: values.iter().map(|s| String::from(*s)).collect(),
-            bracketed: true,
+            spelling: Spelling::List,
         })
+    }
+
+    /// A value this parser did not take apart, holding its source text.
+    fn verbatim_of(text: &str) -> Option<StoredValue> {
+        Some(StoredValue {
+            values: vec![String::from(text)],
+            spelling: Spelling::Verbatim,
+        })
+    }
+
+    /// The flat document `zc_config_to_string` emitted before R2303, built from
+    /// the state's own entries so the test that needs it is not holding a
+    /// literal that could stop describing this store.
+    ///
+    /// It lives here, in the control group, because that is the only thing it
+    /// was ever good for: no door of either implementation asks for the flat
+    /// spelling, which is what open-debt item 636 established. It is composed
+    /// from `ConfigState::render` — the surviving PER-KEY renderer, which
+    /// `zc_config_get_from_str` uses — rather than being a second emitter.
+    fn flat_document(state: &ConfigState) -> String {
+        let body: Vec<String> = state
+            .entries
+            .keys()
+            .map(|key| {
+                format!(
+                    "  \"{key}\": {}",
+                    state.render(key).expect("the key is in this state")
+                )
+            })
+            .collect();
+        format!("{{\n{}\n}}", body.join(",\n"))
     }
 
     #[test]
@@ -1093,17 +1316,11 @@ mod tests {
         let mut state = ConfigState::default();
         state.insert(
             String::from(LISTEN_KEY),
-            StoredValue {
-                values: vec![String::from("tcp/127.0.0.1:7447")],
-                bracketed: true,
-            },
+            list_of(&["tcp/127.0.0.1:7447"]).expect("a list"),
         );
         state.insert(
             String::from(MODE_KEY),
-            StoredValue {
-                values: vec![String::from("client")],
-                bracketed: false,
-            },
+            scalar_of(&["client"]).expect("a scalar"),
         );
         // The population is DERIVED from the keys under test rather than
         // spelled: whichever of them carries a `/` is the one the flat spelling
@@ -1119,7 +1336,7 @@ mod tests {
         );
 
         // THE DEFECT, stated as an assertion rather than as a comment.
-        let flat = ZenohNodeConfig::from_json5(&state.render_all())
+        let flat = ZenohNodeConfig::from_json5(&flat_document(&state))
             .expect("the flat spelling is ACCEPTED -- that is the whole problem");
         assert!(
             flat.config.listen.is_empty(),
@@ -1170,17 +1387,11 @@ mod tests {
         let mut state = ConfigState::default();
         state.insert(
             String::from("mode"),
-            StoredValue {
-                values: vec![String::from("client")],
-                bracketed: false,
-            },
+            scalar_of(&["client"]).expect("a scalar"),
         );
         state.insert(
             String::from("mode/router"),
-            StoredValue {
-                values: vec![String::from("peer")],
-                bracketed: false,
-            },
+            scalar_of(&["peer"]).expect("a scalar"),
         );
         let conflict = state
             .render_nested()
@@ -1195,13 +1406,7 @@ mod tests {
         // the PAIR and not about either spelling.
         for key in ["mode", "mode/router"] {
             let mut one = ConfigState::default();
-            one.insert(
-                String::from(key),
-                StoredValue {
-                    values: vec![String::from("client")],
-                    bracketed: false,
-                },
-            );
+            one.insert(String::from(key), scalar_of(&["client"]).expect("a scalar"));
             assert!(
                 one.render_nested().is_ok(),
                 "{key} alone must render; only the pair conflicts"
@@ -1212,7 +1417,13 @@ mod tests {
     #[test]
     fn a_bare_literal_is_kept_verbatim() {
         // `scouting/multicast/enabled` is inserted as the bare word `false`.
-        assert_eq!(parse_json5_value("false"), scalar_of(&["false"]));
+        assert_eq!(parse_json5_value("false"), verbatim_of("false"));
+        // R2303 (open-debt item 636) — `null` too, and it is here because the
+        // renderer used to get it wrong: it recognised `true`/`false`/digits as
+        // bare and QUOTED everything else, so `null` came back out as the
+        // string `"null"`. Upstream writes `null` at 100 of the 116 leaf paths
+        // its own `zc_config_to_string` emits, so this is not an edge.
+        assert_eq!(parse_json5_value("null"), verbatim_of("null"));
     }
 
     /// The REFUSAL is the load-bearing half: a shape this slice cannot honour
@@ -1227,6 +1438,10 @@ mod tests {
     /// probe, not argued. A balanced object now stores VERBATIM, which is what
     /// the bare-literal branch beside it has always done; an UNBALANCED one is
     /// still refused, and that case is what keeps this test discriminating.
+    ///
+    /// R2303 (open-debt item 636) moved `["a", bare]` out on the SAME argument
+    /// one delimiter over — see the test below. What stays here is truncation,
+    /// which is the only thing this parser was ever meant to catch.
     #[test]
     fn an_unimplemented_shape_is_refused_rather_than_stored() {
         for raw in [
@@ -1234,7 +1449,9 @@ mod tests {
             "nested: 1}",
             "{\"quote: \"still open\"",
             "[\"unterminated",
-            "[\"a\", bare]",
+            // R2303 — a `[` closed by a `}`. The delimiter counter is shared
+            // across both kinds precisely so this is not "balanced".
+            "{\"a\":[}",
             "\"unbalanced'",
             "",
         ] {
@@ -1246,18 +1463,317 @@ mod tests {
     /// open path reads the handful of keys it knows and ignores the rest, so the
     /// parser's job is to tell a complete value from a truncated one, never to
     /// whitelist the shapes a caller may store.
+    ///
+    /// R2303 (open-debt item 636) added the ARRAYS, and they are the same case:
+    /// an array whose elements are not all quoted scalars is one this slice does
+    /// not take apart, exactly as an object is. Upstream's own
+    /// `zc_config_to_string` writes one — `plugins_loading/search_dirs` mixes an
+    /// object with strings, and it is the ONLY leaf of 116 in a default
+    /// document that this parser refused — so the refusal meant wz could not
+    /// read a document upstream had just written.
     #[test]
-    fn a_balanced_object_is_stored_verbatim() {
+    fn a_balanced_object_or_array_is_stored_verbatim() {
         for raw in [
             "{nested: 1}",
             "{\"enabled\":{\"router\":true,\"peer\":true,\"client\":true}}",
             // A brace INSIDE a string must not close the object early.
             "{\"body\":\"}\"}",
+            // R2303 — upstream's `plugins_loading/search_dirs`, trimmed.
+            "[{\"kind\":\"current_exe_parent\",\"value\":null},\".\"]",
+            "[1,2,3]",
+            "[[\"a\"],[\"b\"]]",
         ] {
             assert_eq!(
                 parse_json5_value(raw),
-                scalar_of(&[raw]),
+                verbatim_of(raw),
                 "must store {raw:?} verbatim"
+            );
+        }
+    }
+
+    /// Build an owned config through the C doors, as a caller does.
+    unsafe fn config_of(entries: &[(&str, &str)]) -> z_owned_config_t {
+        // SAFETY: a zeroed owned config is the gravestone this ABI defines.
+        let mut cfg: z_owned_config_t = unsafe { std::mem::zeroed() };
+        // SAFETY: a writable owned slot.
+        assert_eq!(unsafe { z_config_default(&mut cfg) }, Z_OK);
+        for (key, value) in entries {
+            let k = std::ffi::CString::new(*key).expect("key has no NUL");
+            let v = std::ffi::CString::new(*value).expect("value has no NUL");
+            // SAFETY: a live config and two NUL-terminated strings.
+            let rc = unsafe {
+                zc_config_insert_json5(z_config_loan_mut(&mut cfg), k.as_ptr(), v.as_ptr())
+            };
+            assert_eq!(rc, Z_OK, "the C insert path refused {key} = {value}");
+        }
+        cfg
+    }
+
+    /// Read an owned string out and free it, the way a C caller must.
+    unsafe fn take_text(out: &mut crate::abi::z_owned_string_t) -> String {
+        let text = if out.ptr.is_null() {
+            String::new()
+        } else {
+            // SAFETY: an owned string this crate minted, `len` bytes long.
+            let bytes = unsafe { std::slice::from_raw_parts(out.ptr, out.len) };
+            String::from_utf8(bytes.to_vec()).expect("wz emits UTF-8")
+        };
+        // SAFETY: a live owned string; freeing it is the caller's contract.
+        unsafe {
+            crate::string::z_string_drop(
+                (out as *mut crate::abi::z_owned_string_t).cast::<crate::abi::z_moved_string_t>(),
+            );
+        }
+        text
+    }
+
+    /// `zc_config_get_from_str`, as a C caller reads it.
+    unsafe fn get_text(cfg: &z_owned_config_t, key: &str) -> (ZResult, String) {
+        let k = std::ffi::CString::new(key).expect("key has no NUL");
+        // SAFETY: a zeroed owned string is this ABI's gravestone.
+        let mut out: crate::abi::z_owned_string_t = unsafe { std::mem::zeroed() };
+        // SAFETY: a live config, a NUL-terminated key, a writable out-param.
+        let rc = unsafe { zc_config_get_from_str(z_config_loan(cfg), k.as_ptr(), &mut out) };
+        // SAFETY: the out-param the call just wrote.
+        (rc, unsafe { take_text(&mut out) })
+    }
+
+    /// The keys THIS MODULE declares as upstream's `Z_CONFIG_*`, paired with a
+    /// value each. The population is the constant list itself, so a key added
+    /// beside them is covered here without an edit; the cross-implementation
+    /// half derives its own population from upstream's header instead
+    /// (`zenoh_c_config_document_oracle`).
+    fn declared_keys() -> Vec<(&'static str, &'static str)> {
+        vec![
+            (MODE_KEY, "\"client\""),
+            (CONNECT_KEY, "[\"tcp/127.0.0.1:17447\"]"),
+            (LISTEN_KEY, "[\"tcp/127.0.0.1:17448\"]"),
+            (MULTICAST_LOCATOR_KEY, "\"224.0.0.224:7446\""),
+            (SCOUTING_TIMEOUT_KEY, "1234"),
+            (SESSION_ZID_KEY, "\"0102030405\""),
+        ]
+    }
+
+    /// R2303 (open-debt item 636) — the DOCUMENT round trip through the C
+    /// doors: what `zc_config_to_string` writes, `zc_config_from_str` reads,
+    /// with every value intact.
+    ///
+    /// Asserted per KEY rather than by comparing the two documents, because a
+    /// document comparison passes when both are empty. The multi-segment keys
+    /// are what carry the test: those are the ones the flat spelling used to
+    /// emit and the nested reader now has to walk back, and the assertion below
+    /// refuses to run if the population has lost them.
+    #[test]
+    fn the_emitted_document_reads_back_through_the_c_doors() {
+        let keys = declared_keys();
+        assert!(
+            keys.iter().filter(|(k, _)| k.contains('/')).count() >= 2,
+            "without multi-segment keys this proves nothing about nesting"
+        );
+        // SAFETY: the fixture drives the same doors a C caller does.
+        let cfg = unsafe { config_of(&keys) };
+
+        // SAFETY: a zeroed owned string is this ABI's gravestone.
+        let mut doc: crate::abi::z_owned_string_t = unsafe { std::mem::zeroed() };
+        // SAFETY: a live config and a writable out-param.
+        assert_eq!(
+            unsafe { zc_config_to_string(z_config_loan(&cfg), &mut doc) },
+            Z_OK
+        );
+        // SAFETY: the out-param just written.
+        let document = unsafe { take_text(&mut doc) };
+        assert!(
+            document.contains("\"connect\": {"),
+            "the emitted document must NEST, got {document}"
+        );
+
+        let text = std::ffi::CString::new(document.clone()).expect("no interior NUL");
+        // SAFETY: a zeroed owned config is the gravestone this ABI defines.
+        let mut back: z_owned_config_t = unsafe { std::mem::zeroed() };
+        // SAFETY: a writable slot and a NUL-terminated document.
+        assert_eq!(
+            unsafe { zc_config_from_str(&mut back, text.as_ptr()) },
+            Z_OK,
+            "wz must read its own document back:\n{document}"
+        );
+        for (key, _) in &keys {
+            // SAFETY: two live configs.
+            let (want_rc, want) = unsafe { get_text(&cfg, key) };
+            // SAFETY: as above.
+            let (got_rc, got) = unsafe { get_text(&back, key) };
+            assert_eq!((want_rc, &want), (got_rc, &got), "{key} did not survive");
+        }
+        // SAFETY: both configs are live and owned here.
+        unsafe {
+            z_config_drop((&mut { cfg } as *mut z_owned_config_t).cast());
+            z_config_drop((&mut { back } as *mut z_owned_config_t).cast());
+        }
+    }
+
+    /// R2303 (open-debt item 636) — the FLAT spelling still loads, and loads to
+    /// the same state as the nested one.
+    ///
+    /// A deliberate superset over upstream, which refuses flat: every config
+    /// file wz's own `zc_config_to_string` wrote before this round is flat, and
+    /// a reader that could not open them would strand them. Stated as a
+    /// predicate here rather than as a sentence in the door's doc, because a
+    /// sentence is what nobody re-measures.
+    #[test]
+    fn the_flat_spelling_this_crate_used_to_emit_still_loads() {
+        let keys = declared_keys();
+        // SAFETY: the fixture drives the C doors.
+        let nested_src = unsafe { config_of(&keys) };
+        let state =
+            unsafe { config_state(z_config_loan(&nested_src) as *mut _) }.expect("a live state");
+        let flat = flat_document(state);
+        assert!(
+            flat.contains("\"connect/endpoints\""),
+            "the fixture must be FLAT, got {flat}"
+        );
+
+        let text = std::ffi::CString::new(flat.clone()).expect("no interior NUL");
+        // SAFETY: a zeroed owned config is the gravestone this ABI defines.
+        let mut back: z_owned_config_t = unsafe { std::mem::zeroed() };
+        // SAFETY: a writable slot and a NUL-terminated document.
+        assert_eq!(
+            unsafe { zc_config_from_str(&mut back, text.as_ptr()) },
+            Z_OK,
+            "the flat spelling must still load:\n{flat}"
+        );
+        for (key, _) in &keys {
+            // SAFETY: two live configs.
+            let (want_rc, want) = unsafe { get_text(&nested_src, key) };
+            // SAFETY: as above.
+            let (got_rc, got) = unsafe { get_text(&back, key) };
+            assert_eq!((want_rc, &want), (got_rc, &got), "{key} did not survive");
+        }
+        // SAFETY: both configs are live and owned here.
+        unsafe {
+            z_config_drop((&mut { nested_src } as *mut z_owned_config_t).cast());
+            z_config_drop((&mut { back } as *mut z_owned_config_t).cast());
+        }
+    }
+
+    /// R2303 (open-debt item 636) — an INTERIOR path answers with the subtree
+    /// beneath it, as upstream's does.
+    ///
+    /// This is what makes the document round trip observationally faithful
+    /// rather than merely successful: reading `{"connect":{"endpoints":[…]}}`
+    /// stores one leaf at `connect/endpoints`, so a store that answered only
+    /// exact entries would have lost `connect` — a key the document plainly
+    /// states — the moment the reader learned to nest.
+    ///
+    /// The three cases are asserted together because each one alone can pass
+    /// with the others broken: an exact leaf, an interior node above it, and a
+    /// path that names nothing at all.
+    #[test]
+    fn an_interior_path_answers_with_the_subtree_beneath_it() {
+        // SAFETY: the fixture drives the C doors.
+        let cfg = unsafe {
+            config_of(&[
+                (CONNECT_KEY, "[\"tcp/127.0.0.1:17447\"]"),
+                (SCOUTING_TIMEOUT_KEY, "1234"),
+                (MULTICAST_LOCATOR_KEY, "\"224.0.0.224:7446\""),
+            ])
+        };
+        // The exact leaf.
+        // SAFETY: a live config.
+        assert_eq!(
+            unsafe { get_text(&cfg, CONNECT_KEY) },
+            (Z_OK, String::from("[\"tcp/127.0.0.1:17447\"]"))
+        );
+        // The interior node ABOVE two leaves, re-nested and compact.
+        // SAFETY: as above.
+        assert_eq!(
+            unsafe { get_text(&cfg, "scouting") },
+            (
+                Z_OK,
+                String::from("{\"multicast\":{\"address\":\"224.0.0.224:7446\"},\"timeout\":1234}")
+            )
+        );
+        // And a path naming nothing is still absent — the widening must not
+        // turn every string into a hit.
+        // SAFETY: as above.
+        assert_eq!(unsafe { get_text(&cfg, "scout") }.0, Z_EPARSE);
+        // SAFETY: as above.
+        assert_eq!(unsafe { get_text(&cfg, "connect/endpoints/0") }.0, Z_EPARSE);
+        // SAFETY: the config is live and owned here.
+        unsafe { z_config_drop((&mut { cfg } as *mut z_owned_config_t).cast()) };
+    }
+
+    /// R2303 (open-debt item 636) — a config that cannot BE a document is
+    /// refused by the emit door rather than emitted lossily.
+    ///
+    /// The state is reachable only because `ConfigState` is a flat map, which
+    /// upstream's tree is not; `render_nested`'s refusal is what keeps the door
+    /// from picking a winner between two keys the caller stated.
+    #[test]
+    fn a_config_that_cannot_nest_is_refused_by_the_emit_door() {
+        // SAFETY: the fixture drives the C doors.
+        let cfg = unsafe { config_of(&[("mode", "\"client\""), ("mode/router", "\"peer\"")]) };
+        // SAFETY: a zeroed owned string is this ABI's gravestone.
+        let mut out: crate::abi::z_owned_string_t = unsafe { std::mem::zeroed() };
+        // SAFETY: a live config and a writable out-param.
+        let rc = unsafe { zc_config_to_string(z_config_loan(&cfg), &mut out) };
+        assert_eq!(rc, Z_EGENERIC, "a config that cannot nest must not emit");
+        // SAFETY: the out-param, left as the gravestone the door installed.
+        assert!(unsafe { take_text(&mut out) }.is_empty());
+        // SAFETY: the config is live and owned here.
+        unsafe { z_config_drop((&mut { cfg } as *mut z_owned_config_t).cast()) };
+    }
+
+    /// R2303 (open-debt item 636) — the RENDERER is the parser's inverse, over
+    /// a population DERIVED from the two tests above rather than restated.
+    ///
+    /// `parse_json5_value(render_stored(v)) == Some(v)` is what every document
+    /// door depends on and what nothing asserted: the renderer inferred a
+    /// value's spelling from its text after the fact, which is right for a
+    /// quoted scalar and wrong for the three shapes it does not decompose. A
+    /// `null` re-rendered as the string `"null"`; an object as the string
+    /// `"{\"enabled\":true}"`, which is not json5 at all and made the whole
+    /// document unreadable.
+    ///
+    /// The witnesses are the accepted inputs of the tests above, gathered here,
+    /// so a shape added to either is covered by this without an edit. Every
+    /// [`Spelling`] must be reached, asserted rather than assumed — a witness
+    /// list that lost its only object would leave the arm that was broken
+    /// ungated, which is precisely how this defect survived.
+    #[test]
+    fn every_stored_spelling_renders_back_to_what_it_parsed_from() {
+        let witnesses = [
+            "\"client\"",
+            "'peer'",
+            "[]",
+            "[\"tcp/127.0.0.1:7447\"]",
+            "[\"tcp/a\",\"tcp/b\"]",
+            "false",
+            "null",
+            "65535",
+            "{nested: 1}",
+            "{\"body\":\"}\"}",
+            "[{\"kind\":\"current_exe_parent\",\"value\":null},\".\"]",
+        ];
+        let mut reached = Vec::new();
+        for raw in witnesses {
+            let parsed = parse_json5_value(raw).unwrap_or_else(|| panic!("{raw:?} must parse"));
+            reached.push(parsed.spelling);
+            let rendered = render_stored(&parsed);
+            assert_eq!(
+                parse_json5_value(&rendered),
+                Some(parsed.clone()),
+                "{raw:?} rendered to {rendered:?}, which is a different value"
+            );
+            // And STABLE: rendering the re-parse must give the same bytes, or
+            // two round trips through a document would drift.
+            assert_eq!(
+                render_stored(&parse_json5_value(&rendered).expect("re-parsed")),
+                rendered
+            );
+        }
+        for spelling in [Spelling::Quoted, Spelling::List, Spelling::Verbatim] {
+            assert!(
+                reached.contains(&spelling),
+                "no witness reaches {spelling:?}, so its render arm is ungated"
             );
         }
     }

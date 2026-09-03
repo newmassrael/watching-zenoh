@@ -645,7 +645,7 @@ pub mod common {
         ];
         for c in &candidates {
             if c.is_file() {
-                assert_capi_cdylib_is_not_stale(c, &crates_dir);
+                assert_capi_cdylib_is_not_stale(c, &crates_dir, "wz-capi-pico");
                 return c.clone();
             }
         }
@@ -656,6 +656,16 @@ pub mod common {
     }
 
     /// R311y498 — the §5.27 `api-compat-c` cdylib, the zenoh-c ABI's artifact.
+    ///
+    /// R2303 (open-debt item 636) gave it the same STALENESS guard the pico
+    /// sibling has carried since R311y482, and for the same reason measured a
+    /// second time: this crate does not depend on `wz-capi-c`, so
+    /// `cargo test -p wz-integration-tests` never rebuilds the artifact and a
+    /// run silently witnesses whatever `.so` is already there. That round's
+    /// mutation control hit it — the first mutation ran against a library built
+    /// before the edit and the oracle reported PASS, which is the exact shape
+    /// R311y482 named: a damage probe reading green because the damage never
+    /// reached the artifact.
     pub fn wz_capi_c_cdylib() -> PathBuf {
         let crates_dir = project_root().join("crates");
         let candidates = [
@@ -664,6 +674,7 @@ pub mod common {
         ];
         for c in &candidates {
             if c.is_file() {
+                assert_capi_cdylib_is_not_stale(c, &crates_dir, "wz-capi-c");
                 return c.clone();
             }
         }
@@ -746,6 +757,20 @@ pub mod common {
         let out = Command::new(&cc)
             .arg(&src)
             .arg("-std=c11")
+            // R2303 (open-debt item 636) — an implicit declaration is an ERROR
+            // here, not a warning nobody reads. C89 lets a call to an undeclared
+            // function through by assuming it returns `int`, which TRUNCATES a
+            // returned pointer on LP64 and segfaults at the first dereference.
+            // That is not a hypothesis: the config-document probe called
+            // `strdup` (POSIX, hidden by `-std=c11`) and crashed on the wz arm,
+            // which read as a wz ABI defect until the probe was compiled by hand
+            // and the warning was seen. Every diagnostic this helper produces on
+            // a SUCCESSFUL compile is discarded, so a warning here is invisible
+            // by construction and the only way to surface it is to refuse.
+            //
+            // MEASURED before turning on: all 29 of upstream's examples at
+            // zenoh-c 1.10.0 compile clean under it.
+            .arg("-Werror=implicit-function-declaration")
             .arg(format!("-I{}", include.display()))
             // upstream's examples include their own `parse_args.h` from the
             // example directory.
@@ -785,12 +810,24 @@ pub mod common {
     /// (`feedback_damage_must_build_before_you_read_it`), so this is a HARD panic
     /// naming the command, not a warning.
     ///
-    /// Compares against the newest mtime under `wz-capi-pico/src` plus its
+    /// Compares against the newest mtime under `<crate>/src` plus its
     /// `Cargo.toml`. A missing mtime is treated as "cannot establish freshness"
     /// and passes — the check exists to catch the stale-artifact case, and a
     /// filesystem that will not report mtimes is a different problem that should
     /// not turn every run of this crate red.
-    fn assert_capi_cdylib_is_not_stale(cdylib: &Path, crates_dir: &Path) {
+    ///
+    /// R2303 (open-debt item 636) made it take the CRATE NAME, because the
+    /// sibling C ABI had the same hazard and no guard. The proof is that round's
+    /// own control group: a mutation to `wz-capi-c/src/config.rs` was run
+    /// against a cdylib built before it and the oracle reported exit 0 — a
+    /// mutation control that measured the un-mutated library and would have
+    /// been read as "the gate does not catch this".
+    ///
+    /// ⚠ It watches the named crate's own sources ONLY, not its dependency
+    /// closure. An edit in `wz-runtime-tokio` also staleness the artifact and
+    /// this cannot see it; the case it exists for is the one that has actually
+    /// happened twice, which is an edit to the ABI crate itself.
+    fn assert_capi_cdylib_is_not_stale(cdylib: &Path, crates_dir: &Path, krate: &str) {
         fn newest_mtime(dir: &Path) -> Option<std::time::SystemTime> {
             let mut newest = None;
             let mut stack = vec![dir.to_path_buf()];
@@ -812,8 +849,8 @@ pub mod common {
             newest
         }
 
-        let src = crates_dir.join("wz-capi-pico/src");
-        let manifest = crates_dir.join("wz-capi-pico/Cargo.toml");
+        let src = crates_dir.join(format!("{krate}/src"));
+        let manifest = crates_dir.join(format!("{krate}/Cargo.toml"));
         let Ok(lib_mtime) = std::fs::metadata(cdylib).and_then(|m| m.modified()) else {
             return;
         };
@@ -824,12 +861,12 @@ pub mod common {
         let Some(newest_src) = newest_src else { return };
         assert!(
             lib_mtime >= newest_src,
-            "{} is OLDER than the wz-capi-pico sources it links.\n\
-             `cargo test -p wz-integration-tests` does NOT rebuild it (wz-capi-pico \
+            "{} is OLDER than the {krate} sources it links.\n\
+             `cargo test -p wz-integration-tests` does NOT rebuild it ({krate} \
              is not a dependency of this crate), so this run would witness code that \
              is no longer in the tree -- including a damage edit that would read as \
              'not load-bearing'.\n\
-             run: cargo build -p wz-capi-pico",
+             run: cargo build -p {krate}",
             cdylib.display(),
         );
     }

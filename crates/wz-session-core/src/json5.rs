@@ -122,13 +122,33 @@ impl Json5Value {
     /// empty document, and the one that did not treated `{}` as an unknown key
     /// (measured, on the first run of the config reader's own tests).
     pub fn leaf_paths(&self) -> Vec<String> {
-        let mut out = Vec::new();
-        self.walk_leaves(&mut String::new(), &mut out);
+        let mut out: Vec<String> = self.leaf_entries().into_iter().map(|(p, _)| p).collect();
         out.sort();
         out
     }
 
-    fn walk_leaves(&self, prefix: &mut String, out: &mut Vec<String>) {
+    /// Every leaf of this document as `(path, value)`, in DOCUMENT ORDER.
+    ///
+    /// The same walk [`leaf_paths`](Self::leaf_paths) reports, carrying the
+    /// value it found instead of only where it was. That difference is
+    /// load-bearing rather than a convenience: a caller holding only the paths
+    /// has to look each one back up with [`get`](Self::get), which SPLITS on
+    /// `/` — so a leaf whose own key CONTAINS a slash (`{"connect/endpoints":
+    /// [...]}`, the flat spelling a C caller's `Z_CONFIG_*` keys are written
+    /// in) yields a path that then resolves to nothing. The walk knows the
+    /// value; a re-lookup has to guess how the path was spelled, and the two
+    /// spellings are indistinguishable once joined.
+    ///
+    /// Order is the document's, not sorted, because a caller loading these into
+    /// a store wants last-wins on a duplicate to mean the same thing it means in
+    /// [`get`](Self::get) — the LAST one written.
+    pub fn leaf_entries(&self) -> Vec<(String, &Json5Value)> {
+        let mut out = Vec::new();
+        self.walk_leaves(&mut String::new(), &mut out);
+        out
+    }
+
+    fn walk_leaves<'a>(&'a self, prefix: &mut String, out: &mut Vec<(String, &'a Json5Value)>) {
         match self {
             Json5Value::Object(entries) if !entries.is_empty() => {
                 for (k, v) in entries {
@@ -143,8 +163,64 @@ impl Json5Value {
             }
             _ => {
                 if !prefix.is_empty() {
-                    out.push(prefix.clone());
+                    out.push((prefix.clone(), self));
                 }
+            }
+        }
+    }
+
+    /// This value as JSON5 TEXT — the inverse of [`parse`], and what makes it
+    /// one is the property `parse(v.to_json5_text()) == Ok(v)` rather than a
+    /// resemblance.
+    ///
+    /// COMPACT, with no whitespace between tokens, because the caller this
+    /// exists for is a machine: a config door handing ONE value back across a C
+    /// ABI, which would otherwise have to strip layout it never asked for. The
+    /// document a HUMAN reads is `ZenohNodeConfig::to_json5`'s job — it lays
+    /// out zenoh's own key order and carries its comments — and the two are
+    /// different products rather than two spellings of one.
+    ///
+    /// Strings and object keys go through [`crate::json::escape_into`], the
+    /// workspace's one JSON string escaper, rather than a local `format!`: an
+    /// emitter that hand-rolls its escaping is precisely what that module's
+    /// header was written to prevent, and a config value can carry any byte a
+    /// caller wrote. `Number` is emitted as the SOURCE TEXT it holds, so `0x1f`
+    /// comes back as `0x1f` — the parser kept the spelling exactly so a re-emit
+    /// would not have to invent one.
+    pub fn to_json5_text(&self) -> String {
+        let mut out = String::new();
+        self.write_json5(&mut out);
+        out
+    }
+
+    fn write_json5(&self, out: &mut String) {
+        match self {
+            Json5Value::Null => out.push_str("null"),
+            Json5Value::Bool(true) => out.push_str("true"),
+            Json5Value::Bool(false) => out.push_str("false"),
+            Json5Value::Number(text) => out.push_str(text),
+            Json5Value::String(text) => crate::json::escape_into(text, out),
+            Json5Value::Array(items) => {
+                out.push('[');
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    item.write_json5(out);
+                }
+                out.push(']');
+            }
+            Json5Value::Object(entries) => {
+                out.push('{');
+                for (i, (key, value)) in entries.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    crate::json::escape_into(key, out);
+                    out.push(':');
+                    value.write_json5(out);
+                }
+                out.push('}');
             }
         }
     }
@@ -615,5 +691,101 @@ mod tests {
         assert_eq!(v.get("a/b"), None);
         assert_eq!(v.get("nope"), None);
         assert_eq!(v.get(""), Some(&v));
+    }
+
+    /// The variant a node IS, named by an EXHAUSTIVE match so a variant added
+    /// to the enum cannot slip past the coverage assertion below by simply not
+    /// being thought of.
+    fn variant_of(v: &Json5Value) -> &'static str {
+        match v {
+            Json5Value::Null => "Null",
+            Json5Value::Bool(_) => "Bool",
+            Json5Value::Number(_) => "Number",
+            Json5Value::String(_) => "String",
+            Json5Value::Array(_) => "Array",
+            Json5Value::Object(_) => "Object",
+        }
+    }
+
+    /// Every variant occurring anywhere in `v`, itself included.
+    fn variants_reached(v: &Json5Value, out: &mut Vec<&'static str>) {
+        out.push(variant_of(v));
+        match v {
+            Json5Value::Array(items) => items.iter().for_each(|i| variants_reached(i, out)),
+            Json5Value::Object(entries) => {
+                entries.iter().for_each(|(_, i)| variants_reached(i, out));
+            }
+            _ => {}
+        }
+    }
+
+    /// R2303 (open-debt item 636) — [`Json5Value::to_json5_text`] is the
+    /// parser's INVERSE, asserted as the round trip rather than against a
+    /// transcribed string.
+    ///
+    /// A transcription would have frozen this author's idea of the output —
+    /// where the spaces go, whether a key is quoted — none of which is the
+    /// contract. The contract is that the text re-reads as the same value, and
+    /// only a re-parse can say so.
+    ///
+    /// The witness carries EVERY variant, and the test proves that rather than
+    /// claiming it: an exhaustive `match` names the variants and the walk
+    /// counts the ones the document actually reached, so a variant added to the
+    /// enum fails to compile in `variant_of` and a variant merely FORGOTTEN in
+    /// the witness fails here. An emitter is a per-variant surface, so a
+    /// witness missing one leaves that one entirely ungated — which is how
+    /// `null` and an object value came to re-render as the STRINGS `"null"` and
+    /// `"{...}"` in this workspace's C config store.
+    #[test]
+    fn to_json5_text_is_the_parsers_inverse_over_every_variant() {
+        let src = r#"{
+            nothing: null,
+            yes: true,
+            no: false,
+            int: 65535,
+            hex: 0x1f,
+            exp: -1.5e3,
+            plain: "tcp/127.0.0.1:7447",
+            awkward: "a \" b \\ c \n d é",
+            empty_list: [],
+            mixed: [{kind: "current_exe_parent", value: null}, ".", 7],
+            empty_object: {},
+            nested: {deep: {deeper: ["x"]}},
+        }"#;
+        let parsed = parse(src).expect("the witness must parse");
+
+        let mut reached = Vec::new();
+        variants_reached(&parsed, &mut reached);
+        for variant in ["Null", "Bool", "Number", "String", "Array", "Object"] {
+            assert!(
+                reached.contains(&variant),
+                "the witness reaches no {variant}, so the emitter's {variant} arm is ungated"
+            );
+        }
+
+        let text = parsed.to_json5_text();
+        let reparsed =
+            parse(&text).unwrap_or_else(|e| panic!("re-emit does not re-read: {e}\n{text}"));
+        assert_eq!(
+            reparsed, parsed,
+            "the round trip changed the value:\n{text}"
+        );
+
+        // And it is STABLE, not merely equal once: a second pass over the
+        // emitter's own output must produce the same bytes, which is what a
+        // consumer diffing two configs relies on.
+        assert_eq!(reparsed.to_json5_text(), text);
+    }
+
+    /// A string value is ESCAPED by the emitter, not pasted.
+    ///
+    /// Separate from the round trip above because a paste-through emitter can
+    /// still round-trip: `"a\"b"` emitted raw produces text that fails to parse
+    /// — caught there — but a value whose escape merely CHANGES form would not
+    /// be. This pins the escaper is the shared one, by its output.
+    #[test]
+    fn to_json5_text_escapes_a_string_rather_than_pasting_it() {
+        let v = Json5Value::String(String::from("a\"b\\c\nd"));
+        assert_eq!(v.to_json5_text(), "\"a\\\"b\\\\c\\nd\"");
     }
 }

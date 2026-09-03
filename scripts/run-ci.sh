@@ -16327,6 +16327,24 @@ layer_c1cc_api_compat_c() {
         cargo test -p wz-integration-tests \
         --test zenoh_c_pure_function_oracle -- --ignored --quiet --test-threads=1 \
         --exact upstream_pure_functions_on_wz_capi_c_match_real_libzenohc || return 1
+    # R2303 (open-debt item 636) — the CONFIG DOCUMENT, in all four directions.
+    # A separate binary again, and for the same kind of reason: the pure-function
+    # oracle diffs two stdouts produced INDEPENDENTLY, so it can never see a
+    # document one implementation writes and the other cannot read. wz emitted a
+    # FLAT key map where upstream emits a nested document and refuses flat, so
+    # the two config surfaces were mutually unreadable while every leg above
+    # passed.
+    #
+    # It drives every DOCUMENT READER upstream declares, not the one the debt
+    # item named: `zc_config_from_file` held a second copy of the parser and had
+    # drifted from `zc_config_from_str`, which a single-door probe would have
+    # left broken behind a closed item.
+    _runci_guarded_test \
+        "C1cc a_config_document_written_by_either_implementation_is_read_by_the_other" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_config_document_oracle -- --ignored --quiet --test-threads=1 \
+        --exact a_config_document_written_by_either_implementation_is_read_by_the_other \
+        || return 1
     # R311y564 — the DROP-IN CENSUS, the question the corpus report cannot ask.
     # `capi_c_coverage.py` above counts upstream EXAMPLES that link (29 of 29);
     # this counts SYMBOLS the real library defines and wz does not (180 of 568 at

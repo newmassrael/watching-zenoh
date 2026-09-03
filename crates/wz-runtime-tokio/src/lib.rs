@@ -166,6 +166,17 @@ pub use wz_session_core::keyexpr_canon;
 /// parameter whose type they cannot name would not be a reachable API.
 pub use wz_session_core::reply_acceptance;
 
+/// R2303 (open-debt item 636) — the JSON5 READER, on the same precedent.
+///
+/// `zenoh_config::ZenohNodeConfig::from_json5` already parses through it, but
+/// only ever hands back a `ZenohNodeConfig`. The C ABI's config doors need the
+/// DOCUMENT itself — a `zc_config_from_str` has to place every key a caller
+/// wrote, including the ones zenoh's own schema does not name — and a consumer
+/// that cannot name `Json5Value` would have to carry a second parser to do it.
+/// One reader is the whole reason this module exists (`json5`'s own header),
+/// and a second copy in `wz-capi-c` is exactly what the re-export prevents.
+pub use wz_session_core::json5;
+
 // R311y294 — the keyexpr MATCHING SSOT, re-exported on the `keyexpr_canon`
 // precedent above (unconditional: the module is alloc-gated in wz-session-core
 // and this crate is always-alloc). An AP consumer that must answer "does key A
