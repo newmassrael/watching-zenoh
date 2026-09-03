@@ -4,11 +4,25 @@
 //! R311y9 — per-session transport byte/message counters (the `transport-stats`
 //! atom).
 //!
-//! The wz analogue of zenoh's `zenoh-transport` `stats` feature
-//! (`common/stats.rs` `TransportStats`): additive instrumentation that counts
-//! the wire bytes + messages crossing a session in each direction, gated behind
-//! the off-default `transport-stats` feature so a build that does not want the
-//! ~4 atomic adds per message pays nothing.
+//! The wz analogue of zenoh's `zenoh-transport` `stats` feature: additive
+//! instrumentation that counts the wire bytes + messages crossing a session in
+//! each direction, gated behind the off-default `transport-stats` feature so a
+//! build that does not want the ~4 atomic adds per message pays nothing.
+//!
+//! R2332 — the anchor this module was written against is GONE at the pin:
+//! `io/zenoh-transport/src/common/stats.rs` @ REMOVED. 1.10.0 moved the whole
+//! surface into a new `commons/zenoh-stats` crate, and it is not a rename —
+//! `TransportStatsInner` is a label-indexed histogram registry
+//! (`commons/zenoh-stats/src/transport.rs` @ `pub struct TransportStatsInner`)
+//! over direction x priority x message-kind x shm x space, with per-key
+//! filtering, where the old type was a flat set of atomic counters.
+//!
+//! The citation was previously written ROOT-LESS (`common/stats.rs`), which is
+//! why nothing caught it going stale: a root-less citation lands in the residue
+//! `upstream_citation_anchor_gate.py` does not yet grade (open debt 647), so
+//! its path was never resolved against the pin. Rooted and marked `@ REMOVED`,
+//! it is now graded in BOTH directions — if upstream ever restores that path,
+//! this line reds.
 //!
 //! ## Where it counts (the two single-site seams)
 //!
@@ -38,9 +52,31 @@
 //! counters readable WITHOUT the adminspace `@/<zid>/.../stats` queryable, which
 //! stays P4-deferred (zenoh exposes the same `get_stats()` independent of
 //! adminspace). Counting `tx/rx` bytes + messages is the faithful minimal set;
-//! per-priority and dropped-message splits are a deliberate later extension
-//! (a wz link driver drops oversize datagrams internally without a return
-//! signal, so a faithful `dropped` counter needs a driver-level hook first).
+//! the splits are a deliberate later extension (a wz link driver drops oversize
+//! datagrams internally without a return signal, so a faithful `dropped`
+//! counter needs a driver-level hook first).
+//!
+//! R2332 — WHAT THE SPLITS ACTUALLY ARE, measured at the pin rather than
+//! remembered. This module's own prose, and the atom's residual clause, both
+//! described the 1.5.0-era shape: "`tx/rx_n_dropped`, per-priority splits, and
+//! per-network-message-type (z_put/z_del/z_query) breakdowns". Read against
+//! 1.10.0 (`commons/zenoh-stats/src/stats.rs` @ `fn init_stats`) that
+//! enumeration is both stale and INCOMPLETE. Upstream now carries:
+//!
+//! - link stats `bytes` / `t_msgs` / `n_msgs` / `n_dropped`, where `n_msgs`
+//!   itself splits by MEDIUM (`net` / `shm`);
+//! - payload stats for FOUR message kinds, not three — `z_put`, `z_del`,
+//!   `z_query` and **`z_reply`** — each as `_msgs` + `_pl_bytes`, and each
+//!   split by SPACE (`admin` / `user`);
+//! - three interceptor-drop counters the old enumeration named none of:
+//!   `downsampler_dropped_msgs`, `low_pass_dropped_bytes`,
+//!   `low_pass_dropped_msgs`.
+//!
+//! So an implementation that had followed the recorded clause would have built
+//! three of four kinds, missed both axis splits, and missed the drop counters —
+//! toward a struct upstream no longer has. That is the standing warning of the
+//! PARTIAL-atom track ("never grade or implement off the recorded reason
+//! alone") arriving in its own right.
 //!
 //! AP-only: `transport-stats` is never enabled on an MCU lane, so the
 //! [`core::sync::atomic`] counters here never reach a target without 64-bit /
