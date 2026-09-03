@@ -142,14 +142,65 @@ can never fail. It is judged in BOTH directions, the doc-link-budget idiom
 this workspace already uses -- above it means an item arrived unranked, below
 it means lower the number in the same commit.
 
+### Lifting a hold -- `reaim_ttl` (R2308, open-debt item 641)
+
+R2302 made `deferred` a real hold: item 637 stopped being takeable the moment
+the depth derivation started running. What it did NOT give that hold was an
+END. Rule (14) says a held item is "the first candidate when the cap lifts"
+and NOTHING said when the cap lifts, so 637 was held indefinitely -- filed as
+"registered, not unpaid" while being, in effect, unpayable.
+
+The mismatch is that DEPTH IS STATIC and rule (14)'s reason is DYNAMIC. A
+chain's depth never falls: `@from:` is written once and stays, so an item past
+the cap is past it forever. But what the cap defends against is a round chasing
+its own residue while older debt sinks, and that danger passes -- once other
+rounds have run on other chains, taking the held item is no longer chasing
+anything. So the hold needs a clock, and the clock is rounds.
+
+* WHEN the hold started: the round stamp of the nearest ancestor on the item's
+  `@from:` chain that is CLOSED and dated. Not the parent specifically --
+  `@from: n` means "the round paying n created this", and that round may have
+  filed the residue without managing to close n, which leaves the parent open
+  and undated. Walking up to the nearest DATED ancestor is the derivation that
+  survives that case; finding none is RED, below.
+* WHAT time it is now: the highest round stamp on any closed item in the
+  register. The register dates its own closures (`✅ CLOSED (R2301, ...)`), so
+  this clock is read from the same file and needs no ledger, no `git`, and no
+  second source that could disagree. MEASURED: 242 of 321 closed items carry a
+  stamp, spanning R1834..R2307; the 79 without predate the convention and only
+  ever lower a maximum, never raise it.
+* The hold EXPIRES when `now - started >= reaim_ttl`, and this reader then
+  prints the item on a RELEASED line ABOVE the critical line and puts it at the
+  FRONT of the take order -- which is rule (14)'s "first candidate", turned
+  from a sentence into the line a round actually reads.
+
+Is 0 reachable (rule 5)? Yes, and structurally: `started` is fixed at the round
+that filed the item and `now` only rises, so EVERY hold expires. Indefinite
+deferral -- the thing item 641 was filed for -- is no longer a state this
+reader can produce.
+
+A hold nobody can date is RED, not a quiet hold. If no ancestor on the chain is
+closed and dated, this reader has no start date, cannot expire the hold, and
+says so with exit 1. That is the direction that matters: a hold that cannot be
+dated is exactly a hold that cannot be lifted, which is the defect being paid
+here, and letting it pass silently would rebuild it one item at a time.
+
+`reaim_ttl` is DECLARED in the roster, like `ranked_from` and
+`unranked_baseline` and for R2301's reason -- a ttl derived from the holds it
+measures would follow them and could never expire anything. Its value is a
+judgement about how long a chain stays hot: the deepest chain this register has
+ever derived is 2 (631 -> 634 -> 637), so a chain occupies at most a couple of
+consecutive rounds, and 5 is comfortably past that.
+
 ### Why the critical line does NOT change the exit code
 
 The PRIORITY queue exits 3 because it is a claim on ONE round. A ranking is an
 ordering over the whole open set, so making `critical` non-empty exit non-zero
 would mean this census can never report clean while any critical item is open
 -- a value with no path to 0, which is the trap rule (5) exists to catch. The
-critical and deferred lines are printed, above the count, where rules (11) and
-(14) say to read them. What DOES exit 1 is an axis nobody classified.
+critical, released and deferred lines are printed, above the count, where rules
+(11) and (14) say to read them. What DOES exit 1 is an axis nobody classified,
+and a hold nobody can date.
 
 ## What it deliberately does NOT do
 
@@ -322,6 +373,27 @@ RANK_WORDS = ("critical", "ordinary")
 DEFER_RE = re.compile(r"\bdeferred\b")
 DECLARED_DEPTH_RE = re.compile(r"(?:사슬 깊이|chain depth)\s*(\d+)")
 
+#: The round a closed item was discharged in, as the register itself writes it:
+#: `✅ CLOSED (R2301, 원장 `Round 2301`)`. Both spellings, because the second is
+#: the ledger's own and some titles carry only one of them. The `\b` after the
+#: digits is what excludes the pre-2026-08 `R311yNNN` numbering -- `R311y919`
+#: has a word character where this pattern needs a boundary, so it never reads
+#: as round 311. MEASURED over the register: 242 stamps, R1834..R2307, and
+#: nothing below 100, i.e. no false positive from an ordinary number in a title.
+ROUND_RE = re.compile(r"\bR(\d{1,5})\b|\bRound\s+(\d{1,5})\b")
+
+
+def round_stamp(header: str) -> int | None:
+    """The round number a closed item's header is dated by, or `None`.
+
+    FIRST match, not the largest: the discharge stamp opens the title, and a
+    later round quoted in the same header is context rather than the date.
+    """
+    m = ROUND_RE.search(header)
+    if not m:
+        return None
+    return int(m.group(1) or m.group(2))
+
 
 def outside_code(blob: str) -> str:
     """`blob` with every inline-code span removed.
@@ -443,9 +515,9 @@ def chain_depth(
 
 
 class Roster(typing.NamedTuple):
-    """What the roster block declares, as four independent facts.
+    """What the roster block declares, as independent named facts.
 
-    A tuple rather than four returns, because R2101 added the fourth and a
+    A tuple rather than separate returns, because R2101 added the fourth and a
     positional 4-tuple is how a caller silently reads `priority` as `swept`.
     """
 
@@ -456,17 +528,24 @@ class Roster(typing.NamedTuple):
     ranked_from: int
     unranked_baseline: int
     reaim_cap: int
+    reaim_ttl: int
 
 
 #: The roster keys that carry a single integer. Named in ONE place because a
 #: key parsed but not required, or required but not parsed, is how a declared
 #: baseline quietly stops being read.
-SCALAR_KEYS = ("swept_through", "ranked_from", "unranked_baseline", "reaim_cap")
+SCALAR_KEYS = (
+    "swept_through",
+    "ranked_from",
+    "unranked_baseline",
+    "reaim_cap",
+    "reaim_ttl",
+)
 
 
 def roster(text: str) -> Roster:
     """The rostered target set, the owner-decision set, the ORDERED priority
-    queue, and the four declared scalars."""
+    queue, and the declared scalars named by `SCALAR_KEYS`."""
     try:
         block = text.split(BEGIN, 1)[1].split(END, 1)[0]
     except IndexError:
@@ -513,6 +592,7 @@ def roster(text: str) -> Roster:
         scalars["ranked_from"],
         scalars["unranked_baseline"],
         scalars["reaim_cap"],
+        scalars["reaim_ttl"],
     )
 
 
@@ -562,6 +642,12 @@ def unclosed_folds(text: str) -> list[int]:
 #: subject. Item 17 carries a literal `char **` inside backticks: without the
 #: code-span rule its header runs into the body, which is the shape MEASURED on
 #: the real register at item 435.
+#: R2308 (item 641) dates two of the closures. 18 is CLOSED and stamped -- it
+#: is 20's nearest DATED ancestor, and 19 between them stays OPEN and undated so
+#: the walk has to pass through a parent it cannot date, which is the case a
+#: parent-only reader gets wrong. 17's stamp is the clock handle: raising it
+#: moves `now` without touching the hold's start, which is what drives the
+#: released / boundary / still-held arms apart.
 SELFTEST_ROSTER = """\
 - **10. an open analyzer item.**
 - **11. another open one.**
@@ -577,8 +663,8 @@ SELFTEST_ROSTER = """\
 
   </details>
 
-- **17. ✅ CLOSED -- a title quoting `wz_surfaces(char **buf)` in code.**
-- **18. a root at the ranking frontier. `@from: none` · ordinary**
+- **17. ✅ CLOSED (R{r17}) -- a title quoting `wz_surfaces(char **buf)` in code.**
+- **18. ✅ CLOSED{s18} -- a root at the ranking frontier. `@from: none` · ordinary**
 - **19. a child of 18. `@from: {p19}` · critical**
 - **20. a grandchild of 19. `@from: 19` · ordinary ·
   ⚠ **deferred**(사슬 깊이 {d20})**
@@ -591,6 +677,7 @@ swept_through = {swept}
 ranked_from = {ranked_from}
 unranked_baseline = {unranked_baseline}
 reaim_cap = {reaim_cap}
+reaim_ttl = {reaim_ttl}
 {end}
 """
 
@@ -624,7 +711,7 @@ def selftest() -> int:
         # R2250b (item 603). A folded original must not reopen its item: 10, 11,
         # 13 and the three ranked items are the open ones, and 16's archived
         # wording is the shape that used to win.
-        ("a folded original does not reopen its item", {"priority": ""}, 0, "open = 6  closed = 5"),
+        ("a folded original does not reopen its item", {"priority": ""}, 0, "open = 5  closed = 6"),
         # The verdict vocabulary, forward: a mark with a word this reader does
         # not know is a FAIL rather than an open item.
         (
@@ -721,13 +808,74 @@ def selftest() -> int:
         # The lines rules (11) and (14) are told to read. Printed, not exiting:
         # see the module doc on why a ranking must not move the exit code.
         ("the critical line names the take", {"priority": ""}, 0, "CRITICAL -- take item 19 next"),
-        ("the deferred line names the held", {"priority": ""}, 0, "DEFERRED -- 1 item(s) held"),
+        (
+            "the deferred line names the held and counts down",
+            {"priority": ""},
+            0,
+            "DEFERRED -- 1 item(s) still held by `reaim_cap = 1`: 20(R2000, 5 round(s) to go)",
+        ),
+        # R2308 (item 641) -- the deferral CLOCK, both directions plus its
+        # boundary. Item 20's parent 19 is OPEN and undated on purpose: the
+        # hold has to date from the nearest CLOSED ancestor (18) or a residue
+        # filed by a round that could not close its parent is undatable forever.
+        (
+            "a hold dates from the nearest CLOSED ancestor, not the parent",
+            {"priority": ""},
+            0,
+            "20(R2000, 5 round(s) to go)",
+        ),
+        (
+            "a hold past the ttl is RELEASED and named as the take",
+            {"priority": "", "r17": "2010"},
+            0,
+            "RELEASED -- take item 20 next; 1 hold(s) expired at `reaim_ttl = 5` "
+            "with the register now at R2010: 20(held from R2000, 10 rounds)",
+        ),
+        (
+            "the ttl boundary releases AT the ttl",
+            {"priority": "", "r17": "2005"},
+            0,
+            "RELEASED -- take item 20 next",
+        ),
+        (
+            "one round short of the ttl is still held",
+            {"priority": "", "r17": "2004"},
+            0,
+            "DEFERRED -- 1 item(s) still held by `reaim_cap = 1`: 20(R2000, 1 round(s) to go)",
+        ),
+        (
+            "raising the ttl puts an expired hold back under it",
+            {"priority": "", "r17": "2010", "reaim_ttl": "20"},
+            0,
+            "DEFERRED -- 1 item(s) still held by `reaim_cap = 1`: 20(R2000, 10 round(s) to go)",
+        ),
+        (
+            "a hold with no dated ancestor fails",
+            {"priority": "", "s18": ""},
+            1,
+            "no ancestor on its `@from:` chain is a CLOSED item carrying a round stamp",
+        ),
+        (
+            "a released hold does not suppress the critical take",
+            {"priority": "", "r17": "2010"},
+            0,
+            "CRITICAL -- take item 19 next",
+        ),
+        (
+            "the counting mode splits held from released",
+            {"priority": "", "r17": "2010"},
+            0,
+            "deferred = 0 held / 1 released",
+        ),
     ]
     env_for = {
         "ack of the head clears it": {"WZ_DEBT_PRIORITY_ACK": "10"},
         "ack of a NON-head fails": {"WZ_DEBT_PRIORITY_ACK": "11"},
     }
-    args_for = {"a folded original does not reopen its item": ["--count"]}
+    args_for = {
+        "a folded original does not reopen its item": ["--count"],
+        "the counting mode splits held from released": ["--count"],
+    }
 
     failures = 0
     for label, fields, want_rc, want_text in cases:
@@ -740,8 +888,11 @@ def selftest() -> int:
             ranked_from=fields.get("ranked_from", "18"),
             unranked_baseline=fields.get("unranked_baseline", "3"),
             reaim_cap=fields.get("reaim_cap", "1"),
+            reaim_ttl=fields.get("reaim_ttl", "5"),
             p19=fields.get("p19", "18"),
             d20=fields.get("d20", "2"),
+            r17=fields.get("r17", "2000"),
+            s18=fields.get("s18", " (R2000)"),
         )
         with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as fh:
             fh.write(body)
@@ -895,6 +1046,79 @@ def axis_findings(
     return findings, Ranking(critical, ordinary, unranked, deferred)
 
 
+class Holds(typing.NamedTuple):
+    """The deferral clock, once derived: which holds still stand and which the
+    ttl has lifted, plus the `now` every one of them was judged against."""
+
+    held: list[int]
+    released: list[int]
+    started: dict[int, int]  # item -> the round its hold started in
+    now: int | None  # the register's latest closure, or None when it dates none
+
+
+def deferral_status(
+    headers: dict[int, str], found: dict[int, str], rst: Roster, deferred: list[int]
+) -> tuple[list[str], Holds]:
+    """R2308 (open-debt item 641) -- every hold, dated and judged against
+    `reaim_ttl`.
+
+    The population is DERIVED: it is the deferred list rule (14) already
+    produces, never a hand-written set of items to check. An undatable hold is
+    a finding rather than a skip, because a hold that cannot be dated is
+    precisely a hold that cannot be lifted -- the defect this pays.
+    """
+    table = axes(headers)
+    stamps = {
+        n: round_stamp(h)
+        for n, h in headers.items()
+        if n in found and not is_open(found[n])
+    }
+    dated = {n: r for n, r in stamps.items() if r is not None}
+    now = max(dated.values()) if dated else None
+
+    findings: list[str] = []
+    held: list[int] = []
+    released: list[int] = []
+    started: dict[int, int] = {}
+
+    for number in sorted(deferred):
+        # Walk the chain the same way `chain_depth` does -- the frontier ends
+        # it, because an ancestor below the frontier was never asked for
+        # lineage and cannot be relied on to carry a stamp either.
+        cur = number
+        seen = {number}
+        start: int | None = None
+        while True:
+            axis = table.get(cur)
+            if axis is None or axis.parent is None or axis.parent == "none":
+                break
+            parent = int(axis.parent)
+            if parent < rst.ranked_from or parent in seen or parent not in table:
+                break
+            seen.add(parent)
+            if parent in dated:
+                start = dated[parent]
+                break
+            cur = parent
+        if start is None:
+            findings.append(
+                f"item {number} says `deferred` and no ancestor on its `@from:` "
+                f"chain is a CLOSED item carrying a round stamp, so the hold has "
+                f"no start date. A hold nothing can date is a hold nothing can "
+                f"lift -- close the ancestor with its round, or drop the `@from:` "
+                f"that puts this item on a chain nobody finished"
+            )
+            continue
+        started[number] = start
+        assert now is not None  # a dated ancestor is itself a dated closure
+        if now - start >= rst.reaim_ttl:
+            released.append(number)
+        else:
+            held.append(number)
+
+    return findings, Holds(held, released, started, now)
+
+
 def main() -> int:
     if "--selftest" in sys.argv:
         return selftest()
@@ -938,11 +1162,15 @@ def main() -> int:
         # the operator's round-start recipe reads, and `unranked` is the number
         # rule (12) ratchets. Its FINDINGS stay with the default mode, which is
         # where the roster the ratchet is judged against is parsed.
-        _, rank = axis_findings(text, found, roster(text))
+        rst = roster(text)
+        _, rank = axis_findings(text, found, rst)
+        h_live, h_arch, _ = item_headers(text)
+        heads, hold = deferral_status({**h_arch, **h_live}, found, rst, rank.deferred)
         print(
             f"  debt-ranking: critical = {len(rank.critical)}  ordinary = "
             f"{len(rank.ordinary)}  unranked = {len(rank.unranked)}  deferred = "
-            f"{len(rank.deferred)}"
+            f"{len(hold.held)} held / {len(hold.released)} released"
+            f"{' / ' + str(len(heads)) + ' undatable' if heads else ''}"
         )
         return 1 if verdict_findings(live) else 0
 
@@ -953,6 +1181,9 @@ def main() -> int:
     findings.extend(verdict_findings(live))
     axis_lines, rank = axis_findings(text, found, rst)
     findings.extend(axis_lines)
+    h_live, h_arch, _ = item_headers(text)
+    hold_lines, hold = deferral_status({**h_arch, **h_live}, found, rst, rank.deferred)
+    findings.extend(hold_lines)
     for line_no in unclosed_folds(text):
         findings.append(
             f"the `<details>` opened at line {line_no} is never closed, so every "
@@ -1049,7 +1280,26 @@ def main() -> int:
     # matching the roster's own "most recent, because an old item's reason has
     # gone stale" order, and DEFERRED items are withheld because rule (14) says
     # they are registered and not paid.
-    takeable = [n for n in reversed(rank.critical) if n not in set(rank.deferred)]
+    # R2308 (item 641) -- printed ABOVE the critical line and taken BEFORE it,
+    # because rule (14) calls a lifted hold the first candidate. Newest first,
+    # for the same staleness reason the critical line is.
+    if hold.released:
+        first = sorted(hold.released, reverse=True)
+        detail = " ".join(
+            f"{n}(held from R{hold.started[n]}, {hold.now - hold.started[n]} rounds)"
+            for n in first
+        )
+        print(
+            f"  debt-plane-census: RELEASED -- take item {first[0]} next; "
+            f"{len(first)} hold(s) expired at `reaim_ttl = {rst.reaim_ttl}` "
+            f"with the register now at R{hold.now}: {detail}."
+        )
+    else:
+        # SAID, for the same reason the empty queue is: a reader must be able
+        # to tell "no hold has expired" from "this reader never looked".
+        print("  debt-plane-census: RELEASED -- none; no hold has reached its ttl.")
+
+    takeable = [n for n in reversed(rank.critical) if n not in set(hold.held)]
     if takeable:
         print(
             f"  debt-plane-census: CRITICAL -- take item {takeable[0]} next "
@@ -1058,11 +1308,17 @@ def main() -> int:
     else:
         # SAID, for the same reason the empty queue is.
         print("  debt-plane-census: CRITICAL -- none open; take by rule (11)'s fallback.")
-    if rank.deferred:
+    if hold.held:
         print(
-            f"  debt-plane-census: DEFERRED -- {len(rank.deferred)} item(s) held by "
-            f"`reaim_cap = {rst.reaim_cap}`: {' '.join(str(n) for n in rank.deferred)}. "
-            f"Registered, not unpaid; first candidates when the cap lifts."
+            f"  debt-plane-census: DEFERRED -- {len(hold.held)} item(s) still held by "
+            f"`reaim_cap = {rst.reaim_cap}`: "
+            f"{' '.join(f'{n}(R{hold.started[n]}, {rst.reaim_ttl - (hold.now - hold.started[n])} round(s) to go)' for n in hold.held)}. "
+            f"Registered, not unpaid; each lifts on its own at `reaim_ttl`."
+        )
+    elif hold.released:
+        print(
+            "  debt-plane-census: DEFERRED -- none still held; every chain past "
+            "the cap has expired its hold."
         )
     else:
         print("  debt-plane-census: DEFERRED -- none; no chain is past the cap.")
