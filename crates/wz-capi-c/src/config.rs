@@ -50,25 +50,50 @@ pub(crate) const SCOUTING_TIMEOUT_KEY: &str = "scouting/timeout";
 /// out here rather than cited to a `#define` that does not exist.
 pub(crate) const SESSION_ZID_KEY: &str = "id";
 
+/// One stored value: the strings it denotes, and whether the caller wrote them
+/// as a LIST.
+///
+/// R2300 (open-debt item 631) added the second field, and it is a defect fix
+/// rather than a widening. A `Vec<String>` alone cannot tell `["tcp/a"]` from
+/// `"tcp/a"` — both arrive as one string — so a one-element list re-rendered as
+/// a bare scalar. That was harmless for as long as the only reader was this
+/// crate's own re-parser, which reads a scalar back as a one-element list;
+/// `render_nested` broke the symmetry by feeding a DIFFERENT reader, and wz's
+/// stock-config reader requires an ARRAY at `listen/endpoints` (`endpoints_of`
+/// rejects anything else). A single-endpoint config — upstream `parse_args.h`'s
+/// most common shape by far — was therefore refused. The boundary is kept where
+/// it is known instead of guessed at render time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredValue {
+    /// The strings the json5 value denotes.
+    values: Vec<String>,
+    /// Whether the json5 was `[...]`. An empty list is bracketed too, which is
+    /// why this is not `values.len() != 1`.
+    bracketed: bool,
+}
+
 /// The key/value store behind an owned config.
 ///
-/// A `BTreeMap<String, Vec<String>>` rather than `String`: every value upstream
+/// A map of [`StoredValue`] rather than of `String`: every value upstream
 /// inserts is either a scalar or a LIST of endpoints, and flattening a list into
 /// one string would lose the boundary the open path needs.
 #[derive(Debug, Default)]
 pub(crate) struct ConfigState {
-    entries: BTreeMap<String, Vec<String>>,
+    entries: BTreeMap<String, StoredValue>,
 }
 
 impl ConfigState {
     /// The first value stored under `key`, if any.
     pub(crate) fn first(&self, key: &str) -> Option<&str> {
-        self.entries.get(key).and_then(|v| v.first()).map(|s| &**s)
+        self.entries
+            .get(key)
+            .and_then(|v| v.values.first())
+            .map(|s| &**s)
     }
 
-    /// Store `values` under `key`, replacing whatever was there.
-    fn insert(&mut self, key: String, values: Vec<String>) {
-        self.entries.insert(key, values);
+    /// Store `value` under `key`, replacing whatever was there.
+    fn insert(&mut self, key: String, value: StoredValue) {
+        self.entries.insert(key, value);
     }
 
     /// Render one key's value back in the json5 form the insert path accepts,
@@ -79,8 +104,7 @@ impl ConfigState {
     /// identically. A renderer that could not be re-parsed would make the pair
     /// of exports lossy in a way only a caller would notice.
     fn render(&self, key: &str) -> Option<String> {
-        let values = self.entries.get(key)?;
-        Some(render_values(values))
+        Some(render_stored(self.entries.get(key)?))
     }
 
     /// Render every entry as a json5 object.
@@ -88,9 +112,47 @@ impl ConfigState {
         let body: Vec<String> = self
             .entries
             .iter()
-            .map(|(key, values)| format!("  \"{key}\": {}", render_values(values)))
+            .map(|(key, value)| format!("  \"{key}\": {}", render_stored(value)))
             .collect();
         format!("{{\n{}\n}}", body.join(",\n"))
+    }
+
+    /// Render every entry as the NESTED json5 document wz's stock-config
+    /// reader takes, or name the pair of keys that cannot both be nested.
+    ///
+    /// This is NOT a second emitter beside `render_all`, and the difference is
+    /// exactly one of STRUCTURE: both spell their values through
+    /// `render_stored`, so what a value looks like is decided in one place and
+    /// this function decides only where it sits. A renderer of its own would
+    /// have been the second copy the config surface already carries one of.
+    ///
+    /// The nesting is load-bearing rather than cosmetic, and R2300 measured why
+    /// before writing it. `ConfigState` stores upstream's FLAT key spelling
+    /// (`"listen/endpoints"`, the `Z_CONFIG_LISTEN_KEY` a C caller inserts),
+    /// while `ZenohNodeConfig::from_json5` reads values through
+    /// `Json5Value::get`, which SPLITS the path on `/` and walks nested
+    /// objects. Handed `render_all`'s output the reader would ACCEPT the
+    /// document — `leaf_paths` joins segments with the same `/`, so
+    /// `wz_accepts` matches the flat key against the honoured table and raises
+    /// nothing — and then find NONE of the values, silently returning a config
+    /// carrying every zenoh default. Green, and meaning nothing: the exact
+    /// shape the doors this feeds exist to refuse.
+    ///
+    /// A CONFLICT is refused rather than resolved. Two stored keys where one is
+    /// a prefix of the other (`"mode"` and `"mode/router"`) cannot both be
+    /// nested — one place would have to be an object and a scalar at once — and
+    /// picking a winner would drop a value the caller stated. The pair is named
+    /// instead, because a config engine that silently discards an instruction
+    /// is the failure this module's own header calls hollow.
+    pub(crate) fn render_nested(&self) -> Result<String, NestConflict> {
+        let mut root = NestNode::default();
+        for (key, value) in &self.entries {
+            let segments: Vec<&str> = key.split('/').collect();
+            root.insert(&segments, value, key)?;
+        }
+        let mut out = String::new();
+        root.write(&mut out, 1);
+        Ok(out)
     }
 
     /// An independent copy — the config is a plain value, so this is a clone.
@@ -101,14 +163,156 @@ impl ConfigState {
     }
 }
 
-/// Render a stored value list in the json5 form [`parse_json5_value`] accepts.
+/// Two stored keys that cannot both be nested, because one's path runs THROUGH
+/// the other's leaf.
 ///
-/// A single entry that parsed from a bare literal renders bare; anything else
-/// renders as a quoted string or a bracketed list. The one-entry case cannot
-/// distinguish "was a bare literal" from "was a quoted scalar" after the fact,
-/// so it renders bare when the text is literal-shaped and quoted otherwise —
-/// which re-parses to the same value either way.
-fn render_values(values: &[String]) -> String {
+/// Carries both spellings rather than only the second: a caller told
+/// `"mode/router"` conflicts has to go looking for what it conflicts WITH,
+/// and the answer is already in hand at the moment of refusal.
+#[derive(Debug)]
+pub(crate) struct NestConflict {
+    /// The key already stored at the place the second one needs.
+    pub(crate) held: String,
+    /// The key that could not be placed.
+    pub(crate) wanted: String,
+}
+
+impl core::fmt::Display for NestConflict {
+    /// Names BOTH keys, because a refusal that named only the loser would send
+    /// the caller looking for the other half of a collision this type is
+    /// already holding.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "config key `{}` cannot be nested: `{}` already occupies that path",
+            self.wanted, self.held
+        )
+    }
+}
+
+/// One node of the nested document [`ConfigState::render_nested`] builds.
+///
+/// A branch keeps its children in a `BTreeMap` so the emitted document is a
+/// pure function of the entries — two states holding the same keys render
+/// byte-identically whatever order they were inserted in, which is what lets a
+/// caller diff two configs at all.
+enum NestNode<'a> {
+    /// A stored value, rendered by [`render_stored`] like any other.
+    Leaf(&'a StoredValue),
+    /// Named children, in key order.
+    Branch(std::collections::BTreeMap<&'a str, NestNode<'a>>),
+}
+
+impl Default for NestNode<'_> {
+    fn default() -> Self {
+        NestNode::Branch(std::collections::BTreeMap::new())
+    }
+}
+
+impl<'a> NestNode<'a> {
+    /// Place `values` at `segments`, or name the key already sitting in the way.
+    ///
+    /// Both directions of the collision are caught, and they are NOT the same
+    /// event: walking INTO a leaf means the shorter key was stored first
+    /// (`"mode"` then `"mode/router"`), while finding a leaf's place already
+    /// occupied by a branch means the longer one was (`"mode/router"` then
+    /// `"mode"`). A check written for only the first would pass the second
+    /// silently, which is why the leaf arm below refuses rather than
+    /// overwrites.
+    fn insert(
+        &mut self,
+        segments: &[&'a str],
+        value: &'a StoredValue,
+        key: &str,
+    ) -> Result<(), NestConflict> {
+        let NestNode::Branch(children) = self else {
+            // Unreachable through `render_nested`, whose root is a branch and
+            // which only ever recurses through the branch arm below. Stated as
+            // a refusal rather than an `unreachable!` because this type is
+            // reachable from a future caller, and a panic in a config renderer
+            // crosses the C boundary as an abort.
+            return Err(NestConflict {
+                held: String::from("<a value>"),
+                wanted: String::from(key),
+            });
+        };
+        let (head, rest) = segments
+            .split_first()
+            .expect("a stored key splits into at least one segment");
+        if rest.is_empty() {
+            // Tested BEFORE inserting. Replacing first and reporting afterwards
+            // would leave the tree holding the loser of a collision this
+            // function is refusing to adjudicate — harmless only for as long as
+            // every caller drops the tree on `Err`, which is a promise the type
+            // cannot make.
+            if children.contains_key(head) {
+                // A branch already stands here (a `BTreeMap` cannot hold the
+                // same key twice, so it is never a second leaf), which means a
+                // LONGER key claimed this place first.
+                return Err(NestConflict {
+                    held: format!("{key}/…"),
+                    wanted: String::from(key),
+                });
+            }
+            children.insert(head, NestNode::Leaf(value));
+            return Ok(());
+        }
+        let child = children.entry(head).or_default();
+        if matches!(child, NestNode::Leaf(_)) {
+            return Err(NestConflict {
+                held: String::from(*head),
+                wanted: String::from(key),
+            });
+        }
+        child.insert(rest, value, key)
+    }
+
+    /// Write this node at `depth`, two spaces per level.
+    fn write(&self, out: &mut String, depth: usize) {
+        match self {
+            NestNode::Leaf(value) => out.push_str(&render_stored(value)),
+            NestNode::Branch(children) => {
+                if children.is_empty() {
+                    out.push_str("{}");
+                    return;
+                }
+                let pad = "  ".repeat(depth);
+                let closing = "  ".repeat(depth - 1);
+                out.push_str("{\n");
+                for (i, (name, child)) in children.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(",\n");
+                    }
+                    out.push_str(&pad);
+                    out.push('"');
+                    out.push_str(name);
+                    out.push_str("\": ");
+                    child.write(out, depth + 1);
+                }
+                out.push('\n');
+                out.push_str(&closing);
+                out.push('}');
+            }
+        }
+    }
+}
+
+/// Render a stored value in the json5 form [`parse_json5_value`] accepts.
+///
+/// A BRACKETED value renders bracketed whatever its length, which is the whole
+/// of R2300's fix: the list-ness is read off [`StoredValue`] rather than
+/// inferred from the element count, so a one-endpoint `["tcp/a"]` survives the
+/// round trip as a list instead of decaying into the scalar `"tcp/a"`. The
+/// count can never carry that fact — `[]` and `["a"]` are both lists and one of
+/// them has no elements to count.
+///
+/// An unbracketed single entry that parsed from a bare literal renders bare;
+/// anything else renders quoted. That one case still cannot distinguish "was a
+/// bare literal" from "was a quoted scalar" after the fact, so it renders bare
+/// when the text is literal-shaped and quoted otherwise — which re-parses to
+/// the same value either way, and unlike the list case has no reader that can
+/// tell the two apart.
+fn render_stored(value: &StoredValue) -> String {
     let is_bare = |text: &str| {
         text == "true"
             || text == "false"
@@ -117,21 +321,39 @@ fn render_values(values: &[String]) -> String {
                     .chars()
                     .all(|c| c.is_ascii_digit() || c == '.' || c == '-' || c == '+'))
     };
-    match values {
-        [one] if is_bare(one) => one.clone(),
-        [one] => format!("\"{one}\""),
-        many => {
-            let items: Vec<String> = many.iter().map(|v| format!("\"{v}\"")).collect();
-            format!("[{}]", items.join(", "))
-        }
+    if !value.bracketed {
+        return match value.values.as_slice() {
+            [one] if is_bare(one) => one.clone(),
+            [one] => format!("\"{one}\""),
+            // An unbracketed multi-entry value cannot be produced by
+            // `parse_json5_value`, which only ever yields more than one element
+            // from a `[...]`. Rendered as a list rather than panicked on: a
+            // future writer of this store gets a re-parseable value, not an
+            // abort across the C boundary.
+            many => bracket(many),
+        };
     }
+    bracket(&value.values)
+}
+
+/// `["a", "b"]`, and `[]` for nothing.
+fn bracket(values: &[String]) -> String {
+    let items: Vec<String> = values.iter().map(|v| format!("\"{v}\"")).collect();
+    format!("[{}]", items.join(", "))
 }
 
 /// Parse one json5 VALUE into the strings it denotes.
 ///
 /// Returns `None` for a shape this slice does not implement — see the module
 /// doc for why that is a refusal rather than a passthrough.
-fn parse_json5_value(raw: &str) -> Option<Vec<String>> {
+fn parse_json5_value(raw: &str) -> Option<StoredValue> {
+    /// A value that was not written as a list.
+    fn scalar(one: String) -> Option<StoredValue> {
+        Some(StoredValue {
+            values: vec![one],
+            bracketed: false,
+        })
+    }
     let text = raw.trim();
     if text.is_empty() {
         return None;
@@ -152,7 +374,7 @@ fn parse_json5_value(raw: &str) -> Option<Vec<String>> {
     // accepting it would turn a malformed insert into a silent success.
     if text.starts_with('{') {
         return if braces_balance(text) {
-            Some(vec![text.to_owned()])
+            scalar(text.to_owned())
         } else {
             None
         };
@@ -164,25 +386,33 @@ fn parse_json5_value(raw: &str) -> Option<Vec<String>> {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
         {
-            Some(vec![text.to_owned()])
+            scalar(text.to_owned())
         } else {
             None
         };
     }
     // A quoted scalar.
     if let Some(inner) = unquote(text) {
-        return Some(vec![inner]);
+        return scalar(inner);
     }
-    // A list of quoted scalars.
+    // A list of quoted scalars. `bracketed` from here down, INCLUDING the empty
+    // list: `[]` denotes no strings and is still a list, which is the case a
+    // length test could never recover.
     let body = text.strip_prefix('[')?.strip_suffix(']')?.trim();
     if body.is_empty() {
-        return Some(Vec::new());
+        return Some(StoredValue {
+            values: Vec::new(),
+            bracketed: true,
+        });
     }
     let mut out = Vec::new();
     for item in body.split(',') {
         out.push(unquote(item.trim())?);
     }
-    Some(out)
+    Some(StoredValue {
+        values: out,
+        bracketed: true,
+    })
 }
 
 /// Whether `text` is a brace-balanced object, ignoring braces inside strings.
@@ -765,10 +995,26 @@ pub unsafe extern "C" fn z_internal_config_null(this_: *mut z_owned_config_t) {
 mod tests {
     use super::*;
 
+    /// A value the caller did NOT write as a list.
+    fn scalar_of(values: &[&str]) -> Option<StoredValue> {
+        Some(StoredValue {
+            values: values.iter().map(|s| String::from(*s)).collect(),
+            bracketed: false,
+        })
+    }
+
+    /// A value the caller wrote as `[...]`.
+    fn list_of(values: &[&str]) -> Option<StoredValue> {
+        Some(StoredValue {
+            values: values.iter().map(|s| String::from(*s)).collect(),
+            bracketed: true,
+        })
+    }
+
     #[test]
     fn a_quoted_scalar_parses_to_one_value() {
-        assert_eq!(parse_json5_value("\"client\""), Some(vec!["client".into()]));
-        assert_eq!(parse_json5_value("  'peer' "), Some(vec!["peer".into()]));
+        assert_eq!(parse_json5_value("\"client\""), scalar_of(&["client"]));
+        assert_eq!(parse_json5_value("  'peer' "), scalar_of(&["peer"]));
     }
 
     #[test]
@@ -776,18 +1022,197 @@ mod tests {
         // The shape upstream's parse_args.h builds for connect/listen.
         assert_eq!(
             parse_json5_value("[\"tcp/127.0.0.1:7447\",\"tcp/127.0.0.1:7448\"]"),
-            Some(vec![
-                "tcp/127.0.0.1:7447".into(),
-                "tcp/127.0.0.1:7448".into()
-            ])
+            list_of(&["tcp/127.0.0.1:7447", "tcp/127.0.0.1:7448"])
         );
-        assert_eq!(parse_json5_value("[]"), Some(Vec::new()));
+        assert_eq!(parse_json5_value("[]"), list_of(&[]));
+    }
+
+    /// R2300 (open-debt item 631) — A ONE-ELEMENT LIST IS A LIST, and this is
+    /// the assertion the count could not carry.
+    ///
+    /// `["tcp/a"]` is upstream `parse_args.h`'s most common shape (one `-e`, one
+    /// `-l`), and until this round it parsed to the same value as the scalar
+    /// `"tcp/a"` and re-rendered as one. That was invisible while the only
+    /// reader was this crate's own re-parser, which turns a scalar back into a
+    /// one-element list; it stopped being invisible when `render_nested` began
+    /// feeding wz's stock-config reader, whose `endpoints_of` REFUSES anything
+    /// that is not an array. The two cases are asserted side by side because
+    /// their `values` are identical — `bracketed` is the whole difference.
+    #[test]
+    fn a_one_element_list_is_not_the_same_value_as_a_scalar() {
+        let list = parse_json5_value("[\"tcp/127.0.0.1:7447\"]");
+        let scalar = parse_json5_value("\"tcp/127.0.0.1:7447\"");
+        assert_eq!(list, list_of(&["tcp/127.0.0.1:7447"]));
+        assert_eq!(scalar, scalar_of(&["tcp/127.0.0.1:7447"]));
+        assert_ne!(list, scalar, "the shape must survive the parse");
+        // And it survives the RENDER, which is where the defect showed.
+        assert_eq!(
+            render_stored(&list.expect("parsed")),
+            "[\"tcp/127.0.0.1:7447\"]"
+        );
+        assert_eq!(
+            render_stored(&scalar.expect("parsed")),
+            "\"tcp/127.0.0.1:7447\""
+        );
+    }
+
+    /// R2300 (open-debt item 631) — THE FLAT SPELLING IS ACCEPTED AND SILENTLY
+    /// DROPS EVERY MULTI-SEGMENT KEY, which is why `render_nested` exists and
+    /// is the control group for it.
+    ///
+    /// `render_all` is not a worse renderer; it answers a different question,
+    /// and this test is what pins the difference so a later round cannot
+    /// "simplify" the doors onto it. Handed `render_all`'s output, wz's
+    /// stock-config reader:
+    ///
+    ///   * ACCEPTS the document — `leaf_paths` joins nested segments with `/`
+    ///     and `wz_accepts` compares the result against the honoured table, so
+    ///     the flat key `"listen/endpoints"` matches an honoured key exactly and
+    ///     raises no unknown-key error;
+    ///   * and then finds no value there, because `Json5Value::get` SPLITS its
+    ///     path on `/` and walks nested objects, where nothing is nested.
+    ///
+    /// # The loss is PARTIAL, and R2300 measured that rather than assuming it
+    ///
+    /// The first draft of this test asserted that NOTHING is read, and it went
+    /// red on `mode`. A SINGLE-SEGMENT key has the same spelling flat and
+    /// nested — there is no `/` to split on — so `mode`, `id` and `namespace`
+    /// survive `render_all` intact while every path key is dropped. That makes
+    /// the defect worse rather than milder, and the two halves are asserted
+    /// together here because the surviving half is exactly what would make a
+    /// hand-check believe the document had been read: a caller inspecting the
+    /// result sees its mode came through and has no reason to look further.
+    ///
+    /// Asserting the ACCEPTANCE as well as the empty read is deliberate — an
+    /// error would have been a survivable defect, and what makes this one worth
+    /// a test is that there is nothing to catch.
+    #[test]
+    fn the_flat_spelling_parses_clean_and_drops_every_path_key() {
+        use wz_runtime_tokio::zenoh_config::ZenohNodeConfig;
+
+        let mut state = ConfigState::default();
+        state.insert(
+            String::from(LISTEN_KEY),
+            StoredValue {
+                values: vec![String::from("tcp/127.0.0.1:7447")],
+                bracketed: true,
+            },
+        );
+        state.insert(
+            String::from(MODE_KEY),
+            StoredValue {
+                values: vec![String::from("client")],
+                bracketed: false,
+            },
+        );
+        // The population is DERIVED from the keys under test rather than
+        // spelled: whichever of them carries a `/` is the one the flat spelling
+        // cannot deliver. A fixture changed to use only single-segment keys
+        // would empty this and fail here rather than pass vacuously.
+        let path_keys: Vec<&str> = [LISTEN_KEY, MODE_KEY]
+            .into_iter()
+            .filter(|k| k.contains('/'))
+            .collect();
+        assert!(
+            !path_keys.is_empty(),
+            "no multi-segment key under test, so this proves nothing"
+        );
+
+        // THE DEFECT, stated as an assertion rather than as a comment.
+        let flat = ZenohNodeConfig::from_json5(&state.render_all())
+            .expect("the flat spelling is ACCEPTED -- that is the whole problem");
+        assert!(
+            flat.config.listen.is_empty(),
+            "the flat document must carry no endpoints; it carried {:?}",
+            flat.config.listen
+        );
+        for key in &path_keys {
+            assert!(
+                !flat.named.contains(key),
+                "the flat document must not name the path key {key}; it named {:?}",
+                flat.named
+            );
+        }
+        // And the half that SURVIVES, which is what makes the loss deceptive.
+        assert!(
+            flat.named.contains(&MODE_KEY),
+            "a single-segment key spells the same either way and must survive; \
+             the flat document named {:?}",
+            flat.named
+        );
+
+        // THE FIX, over the same state.
+        let nested =
+            ZenohNodeConfig::from_json5(&state.render_nested().expect("no conflicting keys here"))
+                .expect("the nested spelling is accepted too");
+        assert_eq!(
+            nested.config.listen,
+            vec![String::from("tcp/127.0.0.1:7447")]
+        );
+        assert!(
+            nested.named.contains(&LISTEN_KEY),
+            "the nested document must NAME the key it states; it named {:?}",
+            nested.named
+        );
+    }
+
+    /// R2300 (open-debt item 631) — a key whose path runs through another key's
+    /// leaf is REFUSED, in both orders of arrival.
+    ///
+    /// Both orders, because they are different events in the tree walk and a
+    /// check written for one passes the other silently: arriving `"mode"` then
+    /// `"mode/router"` walks INTO a leaf, while `"mode/router"` then `"mode"`
+    /// finds a leaf's place already held by a branch. `BTreeMap` iteration puts
+    /// the shorter key first whatever the insertion order, so the second case
+    /// is reached by making the LONGER key the one that cannot be placed.
+    #[test]
+    fn two_keys_that_cannot_both_be_nested_are_refused_by_name() {
+        let mut state = ConfigState::default();
+        state.insert(
+            String::from("mode"),
+            StoredValue {
+                values: vec![String::from("client")],
+                bracketed: false,
+            },
+        );
+        state.insert(
+            String::from("mode/router"),
+            StoredValue {
+                values: vec![String::from("peer")],
+                bracketed: false,
+            },
+        );
+        let conflict = state
+            .render_nested()
+            .expect_err("a key cannot be both a value and an object");
+        let text = conflict.to_string();
+        assert!(
+            text.contains("mode/router") && text.contains("mode"),
+            "the refusal must name BOTH keys, got {text:?}"
+        );
+
+        // The control: neither key alone is a conflict, so the refusal is about
+        // the PAIR and not about either spelling.
+        for key in ["mode", "mode/router"] {
+            let mut one = ConfigState::default();
+            one.insert(
+                String::from(key),
+                StoredValue {
+                    values: vec![String::from("client")],
+                    bracketed: false,
+                },
+            );
+            assert!(
+                one.render_nested().is_ok(),
+                "{key} alone must render; only the pair conflicts"
+            );
+        }
     }
 
     #[test]
     fn a_bare_literal_is_kept_verbatim() {
         // `scouting/multicast/enabled` is inserted as the bare word `false`.
-        assert_eq!(parse_json5_value("false"), Some(vec!["false".into()]));
+        assert_eq!(parse_json5_value("false"), scalar_of(&["false"]));
     }
 
     /// The REFUSAL is the load-bearing half: a shape this slice cannot honour
@@ -831,7 +1256,7 @@ mod tests {
         ] {
             assert_eq!(
                 parse_json5_value(raw),
-                Some(vec![raw.to_owned()]),
+                scalar_of(&[raw]),
                 "must store {raw:?} verbatim"
             );
         }

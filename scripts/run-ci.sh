@@ -2699,6 +2699,37 @@ PY
     # another file.
     python3 scripts/lib/analysis_surface_config_free.py || return 1
     python3 scripts/lib/analysis_surface_config_free.py --selftest >/dev/null || return 1
+    # R2300 (open-debt item 631) — THE OTHER SIDE OF THE SAME RULING, and it
+    # runs here because the two are one decision read in two directions.
+    #
+    # The gate above holds up "the analysis surfaces do not reach
+    # configuration". Its own refusal text names where such a door DOES belong
+    # -- `wz-capi-c` -- and item 631 is a consumer asking for four of them
+    # there: emit a stock-zenoh config, and judge one node, this build, and a
+    # whole topology. The verdict was yes, on the ground that the 08-31 ruling's
+    # subject was the analysis surface and this crate is the place that ruling
+    # points at. These two gates therefore have to agree, and keeping them in
+    # one block is what makes a later round see both when it moves either.
+    #
+    # POPULATION: every `ConfigDefect` / `TopologyDefect` variant is reached by
+    # a C-door test, with the variant list derived from the enums that define
+    # them. The consumer named the vacuity by hand -- feed only clean configs
+    # and the defect `Vec` is always empty and everything passes -- so a count
+    # of assertions was never going to be the check. There is NO exemption
+    # table: three topology variants were unreachable through the closed door,
+    # and R2300 widened the surface (an external-listener door) rather than
+    # writing down why they did not count.
+    python3 scripts/lib/capi_c_config_verdict_population.py || return 1
+    python3 scripts/lib/capi_c_config_verdict_population.py --selftest >/dev/null || return 1
+    # HEADER: every wz-own door of that library is declared in its header, both
+    # directions. Item 631 (다) asked for the header because the crate shipped
+    # none; a header is a hand-kept second spelling of a symbol list, and
+    # nothing in this tree compiles a C program against it, so a door added and
+    # not declared is invisible to every compiler. Both differences are errors
+    # and they differ: an undeclared door makes a consumer write its own
+    # extern, while a declaration with no door LINKS and fails at load.
+    python3 scripts/lib/capi_c_wz_door_header.py || return 1
+    python3 scripts/lib/capi_c_wz_door_header.py --selftest >/dev/null || return 1
     # R2213 (open-debt item 566) — and the same question asked of EVERY gate,
     # not only of the one that learned to ask it.
     #
@@ -14103,6 +14134,29 @@ layer_z_zenohd_interop() {
     # crates' tests, not the lanes.
     _runci_guarded_test Z 3 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test zenoh_config_emit_zenohd_interop -- --ignored --quiet --test-threads=1 \
+        || return 1
+    # R2300 (open-debt item 631) — THE SAME QUESTION ASKED OF THE C EMITTER.
+    #
+    # The leg above adjudicates `zenoh_config`'s RUST emitter. R2300 put a C ABI
+    # door in front of the same module (`wz_capi_c_config_to_json5`), and the
+    # claim a real zenohd has to settle is the door's, not the module's: the two
+    # do not share a rendering path, because the C door has to nest a config a
+    # caller inserted in upstream's FLAT key spelling before wz's reader sees it.
+    #
+    # It is a SEPARATE cargo test target and cannot be a case in the file above:
+    # `wz-capi-c` is deliberately not a normal dependency of
+    # `wz-integration-tests` (its `#[no_mangle]` symbols would collide), and this
+    # door is reachable only by linking it.
+    #
+    # 2 legs: a real zenohd starts on the emitted document and REPORTS BACK ITS
+    # VALUES (asserting the values, not the start -- a key at the wrong path is
+    # silently ignored by zenoh and the node comes up on defaults), and a real
+    # zenohd refuses what the C validator rejects. MEASURED at R2300 on this
+    # exact command: 2 passed; and both go red on a mutation that renders the
+    # document flat, with the first failing on the VALUE assertion while zenohd
+    # started perfectly -- which is the whole reason the assertion is there.
+    _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-capi-c \
+        --test config_verdict_zenohd_interop -- --ignored --quiet --test-threads=1 \
         || return 1
     # The READ direction, which is the one that bears on replacement: an operator
     # standing wz up in place of a zenoh node already HAS the config file, and

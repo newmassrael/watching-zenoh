@@ -86,6 +86,12 @@ pub mod bytes;
 #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
 pub mod cancellation;
 pub mod config;
+// R2300 (open-debt item 631) — EMITTING a stock-zenoh config and JUDGING one.
+// A wz-own surface rather than a drop-in one, so it carries no
+// `zenoh-c-no-unstable-api` gate: upstream has no validator at all, and gating
+// wz's own doors on an upstream capability flag would key them to a question
+// about zenoh-c that has no bearing on whether they work.
+pub mod config_verdict;
 pub mod encoding;
 // R2259 (open-debt item 593) — the LINK and TRANSPORT event planes. Gated for
 // the reason `cancellation` above is, and measured the same way: upstream's

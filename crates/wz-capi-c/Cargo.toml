@@ -164,6 +164,12 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
 # red on run 32198505957. This crate already depends on wz-runtime-tokio, so the
 # dev-dep adds no graph the tests were not already building.
 wz-runtime-tokio-test-support = { path = "../wz-runtime-tokio-test-support" }
+# R2300 (open-debt item 631) — for `config_verdict_zenohd_interop`, which has to
+# hand a real zenohd a config FILE: zenoh dispatches its parser on the file
+# extension, so the document cannot go over a pipe. Dev-only, and already in
+# `crates/Cargo.lock` via wz-integration-tests, which stages its configs the
+# same way for the same reason.
+tempfile = "3"
 
 [lints]
 workspace = true
