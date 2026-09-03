@@ -3294,6 +3294,32 @@ PY
     # population-zero refusals.
     python3 scripts/lib/guarded_count_lattice_gate.py --selftest || return 1
     python3 scripts/lib/guarded_count_lattice_gate.py --check || return 1
+    # R2328 (unregistered open-debt item 12) — a member EXCLUDED from Layer C1's
+    # `cargo test --workspace` runs nowhere unless some other lane names it with
+    # `-p`, and nothing required that. The exclusion is what makes the hole
+    # silent: `cargo test` cannot fail on a crate it was told to skip.
+    #
+    # Item 12 asked for a lint over "test modules no guarded filter names". That
+    # framing is refuted — 2766 of 4567 `#[test]` fns under `crates/*/src/**`
+    # are named by no guarded `--lib` filter, and the number is meaningless
+    # because `--workspace` runs them. The hazard its two finds actually shared
+    # is "runs in NO lane", and that splits: feature-only-reachable tests are
+    # already covered by `nondefault-tests-gate.sh --census` (derived
+    # population, leg-or-SKIPS, 11 crates / 2568 tests), and default-reachable
+    # ones by this `--workspace` call — except for what it excludes. This is
+    # that corner.
+    #
+    # All four of today's exclusions DO have an isolated lane; the gate exists
+    # so a fifth cannot arrive without one. It also refuses an `--exclude` for a
+    # non-member, which excludes nothing while suggesting the crate is handled.
+    #
+    # Enforcement MEASURED both ways on the LIVE tree: adding
+    # `--exclude wz-access-control` (a member no `-p` names) reds it with
+    # UNRUN, and removing it returns rc=0 byte-identically. An earlier attempt
+    # with `wz-tls-record` did NOT red — that crate already has a lane — which
+    # is why the control group names a crate the sweep proved has none.
+    python3 scripts/lib/workspace_exclude_lane_gate.py --selftest || return 1
+    python3 scripts/lib/workspace_exclude_lane_gate.py --check || return 1
     # R2241 (unregistered open-debt item 581) — an upstream claim must still
     # MEAN something after upstream moves. `CLAUDE.md` asks for `file:line` on
     # every source claim, which is right for OUR sources (we move those lines

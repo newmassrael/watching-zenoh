@@ -611,6 +611,42 @@ if ! python3 scripts/lib/guarded_count_lattice_gate.py; then
     exit 1
 fi
 
+# ─── gate 2p — an excluded member still runs somewhere (R2328, item 12) ──
+# grades: worktree
+#
+# Layer C1's `cargo test --workspace` excludes four members for real reasons
+# (they force `no_std` on a shared dep, or reach a `not(transport-unicast)`
+# API). Each has an isolated lane today. A fifth exclusion added without one
+# leaves that crate's whole default test set running nowhere, and NOTHING reds:
+# `cargo test` cannot fail on a crate it was told to skip.
+#
+# Why the hook and not only Layer C0: the edit that causes it is a line in
+# `run-ci.sh`, and gate 3's changed-crate tests cannot fail on that — the crate
+# that stops being tested is not the crate whose files moved. R311y780 paid for
+# this class at one-module scale (`admin_read_permit_tests` "was running in no
+# lane"); this is the whole-crate shape.
+#
+# UNCONDITIONAL, for gate 2d's reason: it reads two files and costs
+# milliseconds, and a scope predicate is one more thing that can be silently
+# wrong.
+if ! python3 scripts/lib/workspace_exclude_lane_gate.py --selftest; then
+    echo "" >&2
+    echo "pre-push: [gate 2p] workspace-exclude-lane SELFTEST failed — it can no" >&2
+    echo "          longer tell an excluded-and-unrun member from a covered one," >&2
+    echo "          so its verdict on this push means nothing." >&2
+    exit 1
+fi
+if ! python3 scripts/lib/workspace_exclude_lane_gate.py; then
+    echo "" >&2
+    echo "pre-push: [gate 2p] workspace-exclude-lane FAILED — a member excluded" >&2
+    echo "          from \`cargo test --workspace\` is named by no \`-p\` test" >&2
+    echo "          call anywhere else, so its tests run NOWHERE; or an" >&2
+    echo "          \`--exclude\` names a package that is not a member." >&2
+    echo "          Give it an isolated lane, the way the others have one." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+
 # ─── gate 2e — the scouting socket's movable axes (R2142, item 225) ──
 # grades: worktree
 #
