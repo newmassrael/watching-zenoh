@@ -95,9 +95,14 @@ pub fn build_interest_liveliness_subscriber(
         keyexpr_suffix,
     )?;
     // R311y801 — the `ext_qos` upstream stamps on THIS Interest and on no other
-    // api-level one (`api/session.rs:1812`; the subscribers / queryables /
-    // liveliness-get / Final interests are all left at DEFAULT and so write
-    // nothing). Applied HERE rather than in the shared
+    // api-level one: `zenoh/src/api/session.rs`
+    // @ `ext_qos: interest::ext::QoSType::INTEREST` occurs there exactly once.
+    // R2316 re-read that file at the pin — seven `send_interest` sites, the other
+    // six at `QoSType::DEFAULT`, so the subscribers / queryables /
+    // liveliness-get / two Finals all write nothing. (The line number this
+    // comment used to carry was a 1.5.0-era offset; upstream moves and we do not
+    // move with it, which is why the citation is now an anchor.) Applied HERE
+    // rather than in the shared
     // `build_liveliness_token_interest` precisely because the GET arm shares
     // that body and must NOT carry it — the two builders differ in the C/F bits
     // and now in this, and folding it down would have made wz uniform where
@@ -131,6 +136,62 @@ pub fn build_interest_liveliness_get(
         keyexpr_mapping_id,
         keyexpr_suffix,
     )
+}
+
+/// R2316 — the ROUTER-plane copy of a downstream client's CURRENT token
+/// interest: what this node re-emits UPSTREAM on that client's behalf, as
+/// opposed to what it originates for an api caller of its own.
+///
+/// WHY A SEPARATE BUILDER, and not a reuse of the two above. The plane is what
+/// decides `ext_qos`, and the two planes decide it differently, so no single
+/// builder can be right for both. Upstream leaves it at `QoSType::DEFAULT` on
+/// six of its seven api-level Interests and stamps it on the seventh, the
+/// liveliness subscriber — `zenoh/src/api/session.rs`
+/// @ `ext_qos: interest::ext::QoSType::INTEREST`, which occurs there exactly
+/// once. A routing HAT stamps it on ALL SIX of its propagation sites with no
+/// exception: the same needle occurs three times in
+/// `zenoh/src/net/routing/hat/client/interests.rs`
+/// @ `ext_qos: interest::ext::QoSType::INTEREST` and three more in
+/// `zenoh/src/net/routing/hat/peer/interests.rs`
+/// @ `ext_qos: interest::ext::QoSType::INTEREST`, the CURRENT-only mode the
+/// api plane emits bare included. The propagation this serves used to reach
+/// for [`build_interest_liveliness_subscriber`] for its `CurrentFuture` arm
+/// and [`build_interest_liveliness_get`] for its `Current` arm, which made the
+/// first arm right BY ACCIDENT (it inherited a stamp meant for the api plane)
+/// and the second arm wrong: a propagated CURRENT copy left this tree with no
+/// `ext_qos` at all where every upstream hat writes one.
+///
+/// `QOS_DECLARE` is the constant applied, and it is upstream's `INTEREST`
+/// value: `QoSType::INTEREST` and `QoSType::DECLARE` are both
+/// `Priority::Control` with `CongestionControl::Block`, because
+/// `commons/zenoh-protocol/src/core/mod.rs`
+/// @ `pub const DEFAULT_INTEREST: Self = Self::Block;` sits beside the same
+/// declaration for `DEFAULT_DECLARE`. The names differ upstream and the byte
+/// does not; wz holds one constant for the byte.
+///
+/// `current_future` is the caller's own mode, propagated rather than
+/// re-decided: the hat forwards `zenoh/src/net/routing/hat/peer/interests.rs`
+/// @ `mode: msg.mode` unchanged, so CURRENT is never narrowed away — C is
+/// unconditionally set here and only F follows the flag.
+///
+/// Kinds stay [`InterestKinds::TOKENS`]: the broker this serves is the
+/// liveliness one, and propagating a wider kind set than the node can itself
+/// answer is a separate decision from the QoS one this builder exists for.
+pub fn build_interest_propagated(
+    interest_id: u64,
+    current_future: bool,
+    keyexpr_mapping_id: u64,
+    keyexpr_suffix: Option<&str>,
+) -> Result<InterestOwned, CodecError> {
+    let mut interest = build_liveliness_token_interest(
+        interest_id,
+        /*current=*/ true,
+        /*future=*/ current_future,
+        keyexpr_mapping_id,
+        keyexpr_suffix,
+    )?;
+    crate::declare_ext_qos::set_interest_qos(&mut interest, crate::declare_ext_qos::QOS_DECLARE);
+    Ok(interest)
 }
 
 /// WHICH DECLARATION KINDS an `Interest` asks the peer for — the `S`, `Q`
@@ -627,6 +688,100 @@ mod tests {
             "FUTURE (F) bit MUST be clear — a get is one-shot, not an ongoing subscription",
         );
         assert_eq!(get.header & 0x20, 0x20, "CURRENT (C) bit must be set");
+    }
+
+    /// R2316 — the ROUTER-plane builder stamps `ext_qos` in BOTH propagated
+    /// modes, and the api-plane pair it replaced does so in only one.
+    ///
+    /// The two mode vectors are the point, not one of them: upstream's six hat
+    /// propagation sites all write the same stamp — three occurrences in
+    /// `zenoh/src/net/routing/hat/client/interests.rs`
+    /// @ `ext_qos: interest::ext::QoSType::INTEREST` and three in
+    /// `zenoh/src/net/routing/hat/peer/interests.rs`
+    /// @ `ext_qos: interest::ext::QoSType::INTEREST` — with no
+    /// Current/CurrentFuture split, while the api plane splits: the same needle
+    /// occurs exactly once across upstream's seven api-level `send_interest`
+    /// sites, on the liveliness SUBSCRIBER, and its liveliness GET is one of
+    /// the six left at `QoSType::DEFAULT` (the builder doc above carries the
+    /// anchored citation). Asserting only the CurrentFuture arm would have
+    /// passed against the defect this closes, because that arm was already
+    /// right by borrowing the subscriber builder's stamp.
+    ///
+    /// The C/F bits are asserted alongside so a future edit cannot buy the
+    /// `ext_qos` by collapsing the two modes into one.
+    #[cfg(feature = "codec-declare")]
+    #[test]
+    fn a_propagated_interest_carries_ext_qos_in_both_modes() {
+        use crate::declare_ext_qos::{read_interest_qos, QOS_DECLARE};
+
+        // Current-only — the arm that used to go out bare.
+        //   outer header = MID(0x19) | C(0x20) | Z(0x80) = 0xB9
+        let current = build_interest_propagated(
+            7,
+            /*current_future=*/ false,
+            /*mapping_id=*/ 0,
+            Some("demo/**"),
+        )
+        .unwrap();
+        let mut expected = vec![
+            0xB9u8, // outer: MID | C | Z   (F clear — a propagated CURRENT copy)
+            0x07,   // VLE(interest_id=7)
+            0x79,   // body: KE | TO | R | N | M
+            0x00,   // wireexpr.id VLE(0) literal sentinel
+            0x07,   // suffix_len VLE(7)
+        ];
+        expected.extend_from_slice(b"demo/**");
+        expected.extend_from_slice(&QOS_EXT_TAIL);
+        assert_eq!(
+            current.wire(),
+            expected,
+            "a propagated CURRENT interest must carry the ext_qos every upstream \
+             routing hat writes",
+        );
+        assert_eq!(
+            current.header & 0x40,
+            0,
+            "F stays clear in the Current mode"
+        );
+
+        // CurrentFuture — the arm that was already right, now by decision.
+        //   outer header = MID | C | F(0x40) | Z = 0xF9
+        let current_future = build_interest_propagated(
+            7,
+            /*current_future=*/ true,
+            /*mapping_id=*/ 0,
+            Some("demo/**"),
+        )
+        .unwrap();
+        let mut expected_cf = vec![0xF9u8, 0x07, 0x79, 0x00, 0x07];
+        expected_cf.extend_from_slice(b"demo/**");
+        expected_cf.extend_from_slice(&QOS_EXT_TAIL);
+        assert_eq!(
+            current_future.wire(),
+            expected_cf,
+            "a propagated CurrentFuture interest must carry the same ext_qos",
+        );
+        assert_eq!(
+            current_future.header & 0x40,
+            0x40,
+            "F is set in the CurrentFuture mode",
+        );
+
+        // Read back through the chain reader rather than only off the bytes:
+        // the wire vectors pin the ENCODING, this pins the VALUE.
+        assert_eq!(read_interest_qos(&current), QOS_DECLARE);
+        assert_eq!(read_interest_qos(&current_future), QOS_DECLARE);
+
+        // The api plane is the control: its get arm must stay bare, or the fix
+        // has been applied one layer too low and made wz uniform where upstream
+        // is not.
+        let api_get = build_interest_liveliness_get(7, 0, Some("demo/**")).unwrap();
+        assert_eq!(
+            read_interest_qos(&api_get),
+            crate::sample::QosLevel::DEFAULT,
+            "the api-plane liveliness GET mirrors upstream's own, which is one \
+             of the six `send_interest` sites left at QoSType::DEFAULT",
+        );
     }
 
     /// R279 — `build_interest_final` produces an `Interest` envelope

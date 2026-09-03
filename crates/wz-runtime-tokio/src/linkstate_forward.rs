@@ -106,9 +106,7 @@ use wz_session_core::declare_ext_keyexpr::resolve_ext_keyexpr;
 use wz_session_core::declare_routing_context::{read_declare_source, set_declare_source};
 use wz_session_core::driver_loop::DriverLoopOutcome;
 #[cfg(feature = "routing-interest-pending-gc")]
-use wz_session_core::interest_build::{
-    build_interest_liveliness_get, build_interest_liveliness_subscriber,
-};
+use wz_session_core::interest_build::build_interest_propagated;
 use wz_session_core::keyexpr_match::{
     keyexpr_includes_target, keyexpr_intersects_target, keyexpr_pattern_matches,
 };
@@ -4567,11 +4565,14 @@ impl LinkstateForwarder {
             // CurrentFuture is propagated as CurrentFuture, Current as Current —
             // zenoh's `propagated_mode` (`interests.rs:149-153`), which only ever
             // WIDENS Future to CurrentFuture and never narrows the CURRENT bit.
-            let built = if current_future {
-                build_interest_liveliness_subscriber(up_id, true, 0, Some(target))
-            } else {
-                build_interest_liveliness_get(up_id, 0, Some(target))
-            };
+            //
+            // R2316 — through the ROUTER-plane builder, not the two api-plane
+            // ones this used to pick between. A propagated copy carries
+            // `ext_qos` in BOTH modes (every one of upstream's six hat
+            // propagation sites writes it), and reusing the api builders made
+            // that true only for the CurrentFuture arm, by inheritance rather
+            // than by decision.
+            let built = build_interest_propagated(up_id, current_future, 0, Some(target));
             let Ok(msg) = built else {
                 continue; // a keyexpr this node cannot re-encode is not brokered
             };
@@ -8225,6 +8226,27 @@ mod tests {
         }
     }
 
+    /// R2316 — the `Interest` twin of `forwarded_declare`: what a face actually
+    /// received, DECODED from its bytes rather than counted.
+    ///
+    /// Counting frames is what let a propagated copy go out with no `ext_qos`:
+    /// `a_brokered_interest_reaches_the_upstream_and_withholds_the_clients_final`
+    /// asserts `frame_count == 1`, and that stayed true whatever the copy carried.
+    #[cfg(feature = "routing-interest-pending-gc")]
+    fn forwarded_interest(frame: &[u8]) -> InterestOwned {
+        use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
+        let InboundFrame::Frame { payload, .. } =
+            parse_inbound(frame).expect("parse forwarded frame")
+        else {
+            panic!("forwarded bytes are not a Frame");
+        };
+        let msgs = parse_frame_payload(&payload).expect("parse frame payload");
+        match msgs.into_iter().next() {
+            Some(NetworkMessage::Interest(i)) => i,
+            other => panic!("expected a forwarded Interest, got {other:?}"),
+        }
+    }
+
     /// An `Interest` with the C/F/SUBSCRIBERS/QUERYABLES/AGGREGATE bits a test
     /// picks, RESTRICTED to a literal `keyexpr` (mapping id 0) — the wz peer's
     /// test twin of the router's interest builder.
@@ -10110,6 +10132,96 @@ mod tests {
              upstream copy is outstanding; sending it here would close the get \
              before the upstream could answer"
         );
+    }
+
+    /// R2316 — a propagated copy carries the ROUTER-plane `ext_qos` in BOTH
+    /// modes, read off the WIRE the upstream face received.
+    ///
+    /// The defect this pins: `propagate_current_interest` used to pick between
+    /// the two API-plane builders by mode, and only one of them stamps. So the
+    /// CurrentFuture arm inherited an `ext_qos` meant for upstream's api-plane
+    /// liveliness SUBSCRIBER, while the Current arm — the one the R311y513
+    /// witness above already drives — went out bare. Upstream makes no such
+    /// split: all six routing-hat propagation sites write the same stamp,
+    /// three occurrences in `zenoh/src/net/routing/hat/client/interests.rs`
+    /// @ `ext_qos: interest::ext::QoSType::INTEREST` and three in
+    /// `zenoh/src/net/routing/hat/peer/interests.rs`
+    /// @ `ext_qos: interest::ext::QoSType::INTEREST`.
+    ///
+    /// BOTH arms are driven on purpose. A witness on the CurrentFuture arm
+    /// alone passes against the defect, and one on the Current arm alone would
+    /// not notice a fix applied so low that it stamped the api plane too — the
+    /// unit test in `interest_build.rs` holds that second direction, and this
+    /// one holds that the ROUTER actually reaches the stamping builder.
+    #[cfg(feature = "routing-interest-pending-gc")]
+    #[test]
+    fn a_propagated_interest_reaches_the_wire_carrying_the_router_plane_qos() {
+        use wz_session_core::declare_ext_qos::{read_interest_qos, QOS_DECLARE};
+        use wz_session_core::interest_build::{
+            build_interest_liveliness_get, build_interest_liveliness_subscriber,
+        };
+
+        // Line UP(peer) - S(self) - C(client), as in the R311y513 witness.
+        for (mode, inbound) in [
+            (
+                "Current",
+                build_interest_liveliness_get(7, 0, Some("demo/**")).expect("build get"),
+            ),
+            (
+                "CurrentFuture",
+                build_interest_liveliness_subscriber(7, /*history=*/ true, 0, Some("demo/**"))
+                    .expect("build subscriber"),
+            ),
+        ] {
+            let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+            let (upstream, sink_up) = peer_face(zid(0x0B));
+            let (client, _sink_client) = peer_face_whatami(zid(0x0C), 2);
+            fwd.register(FaceId(0), &upstream);
+            fwd.register(FaceId(1), &client);
+            sink_up.reset();
+
+            let wants_future = inbound.header & 0x40 == 0x40;
+            fwd.forward(
+                FaceId(1),
+                IterationEvent::Poll(&DriverLoopOutcome::FramePayload {
+                    priority: wz_session_core::qos::Priority::DEFAULT,
+                    reliable: true,
+                    sn: 0,
+                    messages: vec![NetworkMessage::Interest(inbound)],
+                    has_ext: false,
+                    extensions: Vec::new(),
+                }),
+            );
+
+            assert_eq!(
+                sink_up.frame_count(),
+                1,
+                "{mode}: the propagated Interest must reach the upstream's wire",
+            );
+            let propagated = forwarded_interest(&sink_up.frame_bytes(0));
+            assert_eq!(
+                read_interest_qos(&propagated),
+                QOS_DECLARE,
+                "{mode}: a propagated copy must carry the ext_qos every upstream \
+                 routing hat writes; DEFAULT here means the router reached an \
+                 api-plane builder",
+            );
+            assert_eq!(
+                propagated.header & 0x80,
+                0x80,
+                "{mode}: the outer Z bit must follow the extension chain onto the wire",
+            );
+            assert_eq!(
+                propagated.header & 0x20,
+                0x20,
+                "{mode}: CURRENT is never narrowed by propagation",
+            );
+            assert_eq!(
+                propagated.header & 0x40,
+                if wants_future { 0x40 } else { 0 },
+                "{mode}: FUTURE follows the client's own mode (zenoh's propagated_mode)",
+            );
+        }
     }
 
     // R311y509 — the MESH tier: a token declared by ANOTHER peer reaches a client

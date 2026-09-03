@@ -177,7 +177,10 @@ fn set_qos_chain(exts: &mut Option<Vec<ExtEntryOwned>>, header: &mut u8, qos: Qo
 }
 
 /// Read an `Interest`'s `ext_qos`. Absent means `QosLevel::DEFAULT`, which is
-/// what five of upstream's six api-level Interests mean on the wire.
+/// what six of upstream's seven api-level Interests mean on the wire — and what
+/// NONE of its six routing-hat propagation sites mean, every one of which
+/// stamps `QoSType::INTEREST` (R2316 re-measured both populations against the
+/// pinned 1.10.0 reference; the earlier "five of six" was the 1.5.0-era count).
 pub fn read_interest_qos(interest: &InterestOwned) -> QosLevel {
     read_qos_chain(interest.extensions.as_ref())
 }

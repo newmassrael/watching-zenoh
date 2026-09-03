@@ -2973,6 +2973,25 @@ PY
     # and the fixtures are what say this one can.
     python3 scripts/lib/test_double_knob_gate.py --selftest >/dev/null || return 1
     python3 scripts/lib/test_double_knob_gate.py || return 1
+    # R2316 (unregistered open-debt item 4) — which PLANE may reach which
+    # `Interest` builder. The `ext_qos` an Interest carries is a plane
+    # decision, and the two planes decide it opposite ways: upstream leaves it
+    # at DEFAULT on six of its seven `api/session.rs` Interests and stamps
+    # `QoSType::INTEREST` on all six routing-hat propagation sites -- three in
+    # the client hat's `interests.rs` and three in the peer hat's.
+    # wz's own propagation picked between the two API-plane builders BY MODE, so
+    # its CurrentFuture arm was right only by borrowing a stamp meant for the
+    # api plane and its Current arm went out bare.
+    #
+    # It belongs here for its neighbours' reason: BOTH SIDES ARE ON DISK. The
+    # stamping/bare split is read out of the builder bodies, the plane split
+    # out of which files speak in `FaceId`, and deriving both costs under a
+    # second with nothing built. Nothing else local could see it — the two
+    # sides are in different crates, the propagation is behind a NON-DEFAULT
+    # feature, and the seam's own witness counted frames. `--selftest` first,
+    # because a gate that cannot fail is worth nothing. Also `pre-push` gate 2m.
+    python3 scripts/lib/router_interest_qos_gate.py --selftest >/dev/null || return 1
+    python3 scripts/lib/router_interest_qos_gate.py || return 1
     # R2306 (unregistered open-debt item 156) — how many places READ `_anyke`.
     # It had grown THREE readers and only two were ever compared, so the third
     # drifted: `wz-capi-c` split the selector parameter list on `&` where

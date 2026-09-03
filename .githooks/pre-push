@@ -480,6 +480,46 @@ if ! python3 scripts/lib/foreign_query_readiness_gate.py; then
     exit 1
 fi
 
+# ─── gate 2m — which plane may reach which Interest builder (R2316) ──
+# grades: worktree
+#
+# Unregistered open-debt item 4. The `ext_qos` an Interest carries is decided by
+# the PLANE that emits it, and the two planes decide it opposite ways: upstream
+# leaves it at DEFAULT on six of its seven `api/session.rs` Interests, and
+# stamps `QoSType::INTEREST` on all six of its routing-hat propagation sites.
+# wz's own propagation reached for the two API-plane builders by mode, so its
+# CurrentFuture arm was right by BORROWING a stamp meant for the api plane and
+# its Current arm went out bare.
+#
+# The changed-crates gate could not have caught it: the builders are in
+# `wz-session-core` and the propagation is in `wz-runtime-tokio`, and the seam's
+# own witness counted frames — `frame_count == 1` is true of a copy carrying
+# anything at all. The propagation is also behind a NON-DEFAULT feature
+# (`routing-interest-pending-gc`), so gate 3 never compiles it.
+#
+# UNCONDITIONAL and unscoped, like gates 2d/2j/2k/2l: it reads tracked Rust,
+# derives both populations, and costs well under a second. Selftest first,
+# because a gate that cannot fail is worth nothing.
+if ! python3 scripts/lib/router_interest_qos_gate.py --selftest >/dev/null; then
+    echo "" >&2
+    echo "pre-push: [gate 2m] router-interest-qos gate SELFTEST failed — it can" >&2
+    echo "          no longer tell a stamping builder from a bare one, or a" >&2
+    echo "          router-plane file from an api-plane one, so its verdict on" >&2
+    echo "          this push means nothing." >&2
+    exit 1
+fi
+if ! python3 scripts/lib/router_interest_qos_gate.py; then
+    echo "" >&2
+    echo "pre-push: [gate 2m] router-interest-qos gate FAILED — a router-plane" >&2
+    echo "          emit reaches an Interest builder that writes no \`ext_qos\`," >&2
+    echo "          an api-plane one reaches the router builder, or one of the" >&2
+    echo "          four derived populations came back EMPTY." >&2
+    echo "          Every upstream routing hat stamps \`QoSType::INTEREST\`;" >&2
+    echo "          propagate through \`build_interest_propagated\`." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+
 # ─── gate 2e — the scouting socket's movable axes (R2142, item 225) ──
 # grades: worktree
 #
