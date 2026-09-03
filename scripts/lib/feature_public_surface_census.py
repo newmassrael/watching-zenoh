@@ -560,6 +560,53 @@ FACADE_ONLY: dict[str, frozenset[str]] = {
     "wz-session-lwip": frozenset({"transport-multicast"}),
 }
 
+# R2297 (open-debt item 606) — the AXIS-REACH form, and the fifth kind of claim.
+#
+# `wz-runtime-coop`'s reason said "reached through the facade's `runtime-coop`,
+# so the facade row above is where a consumer-facing probe would sit". R2296
+# refuted the first half against the graph: `wz-runtime-freertos`,
+# `wz-runtime-zephyr` and `wz-session-lwip` all consume it on NORMAL edges, and
+# two of them turn on `alloc` — a feature IN THE ROW. This round measured the
+# second half and it is false too: `wz`'s forwarding features gate no public
+# item in `wz` at all, so no probe sits at the facade either.
+#
+# What IS true is about the axis rather than about the crate, and it took three
+# measurements to find:
+#
+#   * the crate builds standalone on the host at the row's own feature set, so
+#     "it needs a target the lanes do not have" is not the reason;
+#   * its gated sites are ordinary `pub mod` / `pub use` / `pub fn`, so
+#     "nothing here is nameable" is not the reason either;
+#   * `feature_gate_diagnostic.AXIS` is THREE packages. Everything else is off
+#     the axis because the axis has not been extended, not because the package
+#     resists it — and for this one the extension would cost nothing, because
+#     the DERIVATION already produces a probe for every feature in the row.
+#
+# So the predicate asserts exactly that, and it is a ratchet in the useful
+# direction: the row is excused only while the axis could take it for free. A
+# feature added tomorrow that the derivation cannot reach makes this row RED,
+# which is the moment the excuse stops being true.
+#
+# ⚠ It does NOT say the row should stay off the axis. It says the reason is a
+# fact about `AXIS`'s reach, so the work it names is "extend the axis", which is
+# a decision about `feature_gate_diagnostic` and not a sentence about this
+# crate.
+#: package -> the features of its `OFF_AXIS` row the axis could probe today
+AXIS_REACHABLE: dict[str, frozenset[str]] = {
+    "wz-runtime-coop": frozenset(
+        {"alloc", "reassembly", "scouting-static", "session-unicast"}
+    ),
+}
+
+#: the crate path each `AXIS_REACHABLE` package is named by in Rust. The
+#: derivation needs it and cannot guess it: `wz-capture` is `wz_capture`, but a
+#: package is free to rename its lib target, so this is read from the manifest
+#: nowhere and stated here instead — `axis_reachable_findings` refuses a name
+#: that produces no probe at all, which is what a wrong one does.
+AXIS_REACHABLE_CRATE: dict[str, str] = {
+    "wz-runtime-coop": "wz_runtime_coop",
+}
+
 # The residue of item 606, as a SET so that it is derived rather than recounted.
 # Every `OFF_AXIS` row is in exactly one of three places: `ABI_CONTRACT`,
 # `TEST_ONLY_REACH`, or here -- meaning its reason is still prose that nothing
@@ -580,7 +627,6 @@ PROSE_ONLY: frozenset[str] = frozenset(
     {
         "wz",
         "wz-link-lwip",
-        "wz-runtime-coop",
         "wz-runtime-core",
     }
 )
@@ -955,6 +1001,84 @@ def abi_module_is_abi(root: pathlib.Path, rel: str, module: str) -> str | None:
     return f"the file for `pub mod {module}` was not found beside `{rel}`"
 
 
+def axis_reachable_findings(
+    derive: typing.Callable[[str, str], dict[str, object]] | None = None,
+) -> list[str]:
+    """R2297 — hold every `AXIS_REACHABLE` row to the axis's own derivation.
+
+    The claim is that the axis could probe this row today, so the check runs the
+    derivation `feature_gate_diagnostic` would run and asks whether it produces
+    a probe for every feature the row names. `derive` is injectable so the
+    selftest can drive the refusals; the real run uses the two derivations the
+    diagnostic merges, in the same order it merges them.
+    """
+
+    def real(pkg: str, crate: str) -> dict[str, object]:
+        merged: dict[str, object] = dict(fgd.submodule_probes(pkg, crate))
+        merged.update(fgd.derived_probes(pkg, crate))
+        return merged
+
+    derive = derive or real
+    findings: list[str] = []
+    reached = 0
+    for pkg in sorted(AXIS_REACHABLE):
+        if pkg not in OFF_AXIS:
+            findings.append(
+                f"`{pkg}` claims axis reach in `AXIS_REACHABLE` but has no "
+                f"`OFF_AXIS` row, so the claim excuses nothing and is unread"
+            )
+            continue
+        if pkg in fgd.AXIS:
+            findings.append(
+                f"`{pkg}` is excused because the axis has not been extended to "
+                f"it, and `feature_gate_diagnostic.AXIS` now names it. The row "
+                f"is stale: the axis took the package and this excuse outlived "
+                f"the fact it rested on"
+            )
+            continue
+        crate = AXIS_REACHABLE_CRATE.get(pkg)
+        if crate is None:
+            findings.append(
+                f"`{pkg}` is in `AXIS_REACHABLE` with no crate path in "
+                f"`AXIS_REACHABLE_CRATE`, so the derivation cannot be run and "
+                f"the claim is untested"
+            )
+            continue
+        _why, row = OFF_AXIS[pkg]
+        feats = set(AXIS_REACHABLE[pkg])
+        if feats != set(row):
+            findings.append(
+                f"`{pkg}`'s `OFF_AXIS` row names {sorted(row)} and "
+                f"`AXIS_REACHABLE` holds {sorted(feats)}. A predicate covering "
+                f"PART of a row leaves the rest excused by prose while the row "
+                f"reads as measured"
+            )
+            continue
+        produced = set(derive(pkg, crate))
+        if not produced:
+            findings.append(
+                f"the axis's derivation produces NO probe at all for `{pkg}` as "
+                f"`{crate}`, so the claim that it could be probed today is held "
+                f"to an empty population -- the crate path is likely wrong"
+            )
+            continue
+        reached += len(feats)
+        for feat in sorted(feats - produced):
+            findings.append(
+                f"`{pkg}` / `{feat}` is excused because the axis could take this "
+                f"row for free, and the derivation produces no probe for it. "
+                f"Extending the axis would cost a hand-written probe, so the "
+                f"reason no longer holds -- write it, or say what the row is "
+                f"really waiting for"
+            )
+    if AXIS_REACHABLE and reached == 0:
+        findings.append(
+            "no `AXIS_REACHABLE` row had a single feature to hold its reason "
+            "to, so this arm graded nothing while reporting clean"
+        )
+    return findings
+
+
 def facade_only_findings(
     graph: tuple[dict[str, list[Dep]], set[str], set[str]] | None = None,
     defs: dict[str, dict[str, list[str]]] | None = None,
@@ -1268,6 +1392,7 @@ def test_only_reach_findings(
         | set(TEST_ONLY_FEATURE)
         | set(PLATFORM_GATED)
         | set(FACADE_ONLY)
+        | set(AXIS_REACHABLE)
     )
     for pkg in sorted(set(OFF_AXIS) - measured - PROSE_ONLY):
         findings.append(
@@ -1292,6 +1417,7 @@ def test_only_reach_findings(
         TEST_ONLY_FEATURE,
         PLATFORM_GATED,
         FACADE_ONLY,
+        AXIS_REACHABLE,
     )
     for i, first in enumerate(tables):
         for second in tables[i + 1 :]:
@@ -1533,6 +1659,7 @@ def check() -> int:
     findings.extend(abi_contract_findings(ROOT, sites))
     findings.extend(platform_gated_findings(ROOT, sites))
     findings.extend(facade_only_findings())
+    findings.extend(axis_reachable_findings())
     findings.extend(test_only_reach_findings())
     findings.extend(test_only_feature_findings())
 
@@ -1563,7 +1690,8 @@ def check() -> int:
         f"`TEST_ONLY_REACH`, {len(set(TEST_ONLY_FEATURE) & set(OFF_AXIS))} to "
         f"`TEST_ONLY_FEATURE`, {len(set(PLATFORM_GATED) & set(OFF_AXIS))} to "
         f"`PLATFORM_GATED`, {len(set(FACADE_ONLY) & set(OFF_AXIS))} to "
-        f"`FACADE_ONLY`, {len(PROSE_ONLY)} still prose (item 606)"
+        f"`FACADE_ONLY`, {len(set(AXIS_REACHABLE) & set(OFF_AXIS))} to "
+        f"`AXIS_REACHABLE`, {len(PROSE_ONLY)} still prose (item 606)"
     )
     for kind in (
         "public-item",
@@ -1605,6 +1733,85 @@ def _fixture() -> dict[str, str]:
         # attached to nothing this gate can name
         "demo/src/weird.rs": f"{a}\n@@@ not rust @@@\n",
     }
+
+
+def axis_reachable_selftest() -> int:
+    """R2297 — drive `axis_reachable_findings` through every way it refuses.
+
+    The CONTROL is a row the derivation covers entirely, and it is what makes
+    the rest a measurement: refusing it would refuse the shape the excuse is
+    for. The sharpest refusal is the STALE one — the axis taking the package is
+    the event that makes this excuse false, and nothing else would notice.
+    """
+    pkg, crate = "demo", "demo_crate"
+    real_row, real_ar = OFF_AXIS.get(pkg), dict(AXIS_REACHABLE)
+    real_crate = dict(AXIS_REACHABLE_CRATE)
+    real_axis = pkg in fgd.AXIS
+    AXIS_REACHABLE.clear()
+    AXIS_REACHABLE_CRATE.clear()
+
+    def covers_all(_p: str, _c: str) -> dict[str, object]:
+        return {"one": [], "two": []}
+
+    def covers_some(_p: str, _c: str) -> dict[str, object]:
+        return {"one": []}
+
+    def covers_none(_p: str, _c: str) -> dict[str, object]:
+        return {}
+
+    try:
+        OFF_AXIS[pkg] = ("fixture", frozenset({"one", "two"}))
+        AXIS_REACHABLE[pkg] = frozenset({"one", "two"})
+        AXIS_REACHABLE_CRATE[pkg] = crate
+        control = axis_reachable_findings(covers_all)
+        gap = axis_reachable_findings(covers_some)
+        empty = axis_reachable_findings(covers_none)
+        del AXIS_REACHABLE_CRATE[pkg]
+        no_crate = axis_reachable_findings(covers_all)
+        AXIS_REACHABLE_CRATE[pkg] = crate
+        OFF_AXIS[pkg] = ("fixture", frozenset({"one", "two", "three"}))
+        partial = axis_reachable_findings(covers_all)
+        del OFF_AXIS[pkg]
+        orphan = axis_reachable_findings(covers_all)
+        # THE STALE CASE: the axis took the package, so the excuse is spent.
+        OFF_AXIS[pkg] = ("fixture", frozenset({"one", "two"}))
+        fgd.AXIS[pkg] = crate
+        stale = axis_reachable_findings(covers_all)
+    finally:
+        OFF_AXIS.pop(pkg, None)
+        if not real_axis:
+            fgd.AXIS.pop(pkg, None)
+        if real_row is not None:
+            OFF_AXIS[pkg] = real_row
+        AXIS_REACHABLE.clear()
+        AXIS_REACHABLE.update(real_ar)
+        AXIS_REACHABLE_CRATE.clear()
+        AXIS_REACHABLE_CRATE.update(real_crate)
+
+    checks = (
+        (not control, "the CONTROL -- a row the derivation covers entirely -- "
+                      "must PASS, or the predicate refuses the shape the excuse "
+                      "is for"),
+        (any("produces no probe for it" in f for f in gap),
+         "a feature the derivation cannot reach must be reported"),
+        (any("empty population" in f for f in empty),
+         "a derivation that produces nothing means the crate path is wrong and "
+         "must FAIL rather than pass"),
+        (any("no crate path" in f for f in no_crate),
+         "a row with no crate path cannot be tested and must be reported"),
+        (any("PART of a row" in f for f in partial),
+         "a predicate covering part of a row must be reported"),
+        (any("has no `OFF_AXIS` row" in f for f in orphan),
+         "an `AXIS_REACHABLE` entry whose package has no row excuses nothing"),
+        (any("The row is stale" in f for f in stale),
+         "the axis TAKING the package is what makes this excuse false, and "
+         "nothing else in this file would notice"),
+    )
+    for ok, why in checks:
+        if not ok:
+            print(f"feature-public-surface: SELFTEST FAIL -- {why}")
+            return 1
+    return 0
 
 
 def facade_only_selftest() -> int:
@@ -2179,6 +2386,13 @@ def selftest() -> int:
     if facade_only_selftest() != 0:
         return 1
 
+    # R2297 — AND THE AXIS-REACH PREDICATE. Its subject is the axis rather than
+    # the crate, so its sharpest refusal is the one no other arm could make: the
+    # axis EXTENDING to the package is what spends this excuse, and a row left
+    # behind after that would read as measured forever.
+    if axis_reachable_selftest() != 0:
+        return 1
+
     # R2266 — AND THE TEST-ONLY-REACH PREDICATE, on an injected dependency
     # graph and for the same reason. The row this one replaces said "same
     # reason as the other one" while a `lib` target consumed it as a normal
@@ -2219,7 +2433,12 @@ def selftest() -> int:
         "graph, refusing a second consumer, a package nothing consumes, a "
         "facade row that pulls no `dep:` in, a row covered only in part, a row "
         "with no `OFF_AXIS` entry and a facade with no row of its own -- past "
-        "one clean control"
+        "one clean control; and holds each `AXIS_REACHABLE` row to the axis's "
+        "OWN derivation, refusing a feature it produces no probe for, a crate "
+        "path that produces none at all, a row with no crate path, a row "
+        "covered only in part, a row with no `OFF_AXIS` entry, and -- the one "
+        "no other arm could make -- a row the axis has since TAKEN, whose "
+        "excuse is spent -- past one clean control"
     )
     return 0
 
