@@ -551,7 +551,15 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # and undeclares it, and the census must report the row under the path pico
 # serialised. Measured, not guessed: the audit read `881, declared 880` with the
 # file staged, which is exactly its one `wz-proves:` line.
-FOREIGN_ADJUDICATOR_LINKS = 881
+# R2306 (open-debt item 156) — 881 -> 882, in `zenoh_c_config_document_oracle.rs`.
+# ONE link, and it is a debt R2303 left rather than new ground: that round added
+# the file and no annotation, so hosted A4 refused it on two consecutive pushes
+# with `corpus test declares nothing: 1` — the ANNOTATION was missing, which is
+# the other half of the same gate. The claim it now carries is its siblings'
+# (`api-compat-c wz->zenoh-c partial`), because it links the real `libzenohc.so`
+# as the second arm; `partial` is the config plane and nothing else. Measured,
+# not guessed: the audit read `882, declared 881` with the annotation in place.
+FOREIGN_ADJUDICATOR_LINKS = 882
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

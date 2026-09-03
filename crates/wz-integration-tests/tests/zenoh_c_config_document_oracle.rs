@@ -479,6 +479,16 @@ fn build_arms(include: &Path, dir: &Path) -> [Arm; 2] {
     ]
 }
 
+/// R2306 — the proof annotation R2303 owed and Layer A4 collected. This file
+/// links zenoh's OWN library as the second arm and drives a config document
+/// through it, so the claim is the same kind its two siblings make; `partial`
+/// because it covers the CONFIG plane and nothing else — no session, no
+/// encoding, no keyexpr.
+///
+/// (The token is spelled ONLY on the annotation line below. Naming it in prose
+/// makes the scanner read the prose as a second, unattached annotation — which
+/// is how this comment first failed A4.)
+// wz-proves: api-compat-c wz->zenoh-c partial
 #[test]
 #[ignore = "reads the installed zenoh-c oracle; run by run-ci Layer C1cc"]
 fn a_config_document_written_by_either_implementation_is_read_by_the_other() {
