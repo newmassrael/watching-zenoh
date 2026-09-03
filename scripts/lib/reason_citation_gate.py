@@ -81,21 +81,35 @@ CITE = re.compile(
 )
 
 
+class InventoryUnreadable(Exception):
+    """`mnemosyne-cli` could not be run, or answered with an error.
+
+    A distinct type because the CALLER decides what an unreadable store means,
+    and the answer differs by job -- see `main`.
+    """
+
+
 def inventory() -> list[dict]:
     """The store's inventory rows, or a fixture when one is named."""
     fixture = os.environ.get("WZ_REASON_INVENTORY")
     if fixture:
         with open(fixture, encoding="utf-8") as fh:
             return json.load(fh)
-    run = subprocess.run(
-        ["mnemosyne-cli", "query", "--list-inventory", "--json"],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        run = subprocess.run(
+            ["mnemosyne-cli", "query", "--list-inventory", "--json"],
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        # The tool is not on PATH at all. Until R2324 this raised
+        # `FileNotFoundError` out of the gate, which is a CRASH rather than a
+        # verdict: `subprocess.run` never returns, so the `returncode` guard
+        # below could not see it.
+        raise InventoryUnreadable(str(exc)) from exc
     if run.returncode != 0:
-        raise SystemExit(
-            f"reason-citation: FAIL - mnemosyne-cli exited {run.returncode}. A gate "
-            f"that cannot read its input must not report green.\n{run.stderr[:400]}"
+        raise InventoryUnreadable(
+            f"mnemosyne-cli exited {run.returncode}: {run.stderr[:400]}"
         )
     return json.loads(run.stdout)
 
@@ -174,7 +188,41 @@ def audit() -> tuple[list[str], dict[str, int]]:
 def main() -> int:
     if "--selftest" in sys.argv[1:]:
         return selftest()
-    findings, counts = audit()
+    # THIS GATE'S ONLY INPUT IS THE STORE, and Layer C0 runs on TWO hosted jobs
+    # -- one that deliberately does not provision `mnemosyne-cli` (the install
+    # was split out to Layers A+B for its ~88s) and one that does and sets
+    # `WZ_C0_REQUIRE`. So an absent tool is a SKIP where nothing provisions it
+    # and a FAIL where something does, which is this tree's own arming idiom
+    # (`gate_provenance_lint`, WZ_A3_REQUIRE / WZ_A5_REQUIRE): a lane that
+    # skips where its input IS provisioned is a provisioning regression wearing
+    # a green badge.
+    #
+    # Unlike `gate_provenance_lint` there is no shape half to keep running --
+    # every finding here is about an inventory row -- so the skip covers the
+    # whole gate, and the armed run is what grades it. Before R2324 this path
+    # was an uncaught `FileNotFoundError`, which reddened the unarmed job on
+    # every hosted run; it was invisible while a count guard failed earlier in
+    # the same layer, and surfaced the moment R2323 fixed that.
+    try:
+        findings, counts = audit()
+    except InventoryUnreadable as exc:
+        if os.environ.get("WZ_C0_REQUIRE"):
+            print(
+                f"reason-citation: FAIL -- required (WZ_C0_REQUIRE set) but the "
+                f"store inventory cannot be read ({exc}). A gate that cannot "
+                f"read its input must not pass where that input is provisioned.",
+                file=sys.stderr,
+            )
+            return 1
+        # STDERR for the reason `gate_provenance_lint` records: run-ci discards
+        # this gate's stdout, so a skip announced there is a skip nobody sees.
+        print(
+            f"reason-citation: SKIPPED -- the store inventory is unreadable "
+            f"here ({exc}); the hosted job that provisions mnemosyne-cli runs "
+            f"this gate under WZ_C0_REQUIRE",
+            file=sys.stderr,
+        )
+        return 0
 
     if counts["total"] == 0:
         print(
