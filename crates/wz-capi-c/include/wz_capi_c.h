@@ -56,6 +56,37 @@ extern "C" {
 #endif
 
 /* ------------------------------------------------------------------ *
+ * THE REVISION OF THIS DOOR SET (R2301, open-debt item 634).
+ *
+ * WHAT THIS NUMBER IS ABOUT, which is narrower than the library: it
+ * moves when the set of wz_capi_c_* symbols changes, or when the
+ * memory rule stated above changes. It says NOTHING about the drop-in
+ * z_* / zc_* / ze_* surface — that is upstream zenoh-c's contract and
+ * upstream's header declares it. A number minted here could only be a
+ * second, disagreeing opinion about somebody else's ABI.
+ *
+ * HOW TO USE THE PAIR. The macro is what you COMPILED against; the
+ * function is what you are RUNNING against. They differ only when a
+ * build is linked to a library it was not compiled for, which is the
+ * one failure a header cannot detect on its own:
+ *
+ *     if (wz_capi_c_abi_version() != WZ_CAPI_C_ABI_REVISION) { ... }
+ *
+ * Starts at 1: this door set had no revision before R2301, so there is
+ * no earlier number to be compatible with.
+ *
+ * `capi_c_abi_pin.py` is what keeps it honest. It reads the symbol set
+ * out of the BUILT library and the number by CALLING it, so a symbol
+ * added without moving this number is red rather than shipped.
+ * ------------------------------------------------------------------ */
+
+#define WZ_CAPI_C_ABI_REVISION 1
+
+/* The revision the LOADED library reports. See the block above for why
+ * this exists beside the macro. */
+int32_t wz_capi_c_abi_version(void);
+
+/* ------------------------------------------------------------------ *
  * The layout report — the drop-in's half of the ABI layout gate.
  * ------------------------------------------------------------------ */
 

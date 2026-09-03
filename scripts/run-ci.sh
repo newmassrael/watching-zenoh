@@ -8026,6 +8026,30 @@ layer_c1ch_capi_c_config_surface() {
     (cd crates && cargo build -p wz-capi-c --quiet) || return 1
     python3 scripts/lib/capi_c_config_surface.py \
         crates/target/debug/libwz_capi_c.so || return 1
+    # R2301 (open-debt item 634) — and the SYMBOL SET of those wz-own doors is
+    # pinned to a REVISION NUMBER, the way `capi_abi_pin.py` pins the dissect
+    # library's in C1bo.
+    #
+    # Placed HERE for the same reason the gate above is: this is where the
+    # cdylib exists, and both halves of the pin have to come out of the ARTIFACT
+    # -- `nm` for the set, a ctypes call for the number -- rather than out of the
+    # source an author has just edited. It needs no zenoh-c oracle, so it must
+    # not sit in the C1cc cluster that SKIPs without one.
+    #
+    # WHAT IT CLOSES: R2300 shipped `wz_capi_c.h` and thirteen doors with no way
+    # for a consumer to ask which build of the library their header was for.
+    # Adding a door and leaving the number alone compiled, linked and shipped.
+    # NOT closed by reusing the dissect revision -- the two libraries move
+    # independently, and one number covering both would force a bump on every
+    # consumer of either whenever either moved. The mechanism is shared; the
+    # numbers are not.
+    command -v nm >/dev/null 2>&1 || {
+        echo "  C1ch FAIL: nm is absent, so the wz door set cannot be read"
+        return 1
+    }
+    python3 scripts/lib/capi_c_abi_pin.py \
+        crates/target/debug/libwz_capi_c.so || return 1
+    python3 scripts/lib/capi_c_abi_pin.py --selftest >/dev/null || return 1
     return 0
 }
 

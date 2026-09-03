@@ -1368,6 +1368,45 @@ pub unsafe extern "C" fn wz_capi_c_layout_name(index: usize) -> *const std::ffi:
         .map_or(std::ptr::null(), |name| name.as_ptr())
 }
 
+/// R2301 (open-debt item 634) — THE REVISION OF THIS LIBRARY'S OWN (wz) DOOR
+/// SET, as a number a consumer receives at run time.
+///
+/// # What it is a number ABOUT, which is narrower than the library
+///
+/// It moves when the set of `wz_capi_c_*` symbols changes, or when the memory
+/// rule `wz_capi_c.h` states changes. It says NOTHING about the drop-in
+/// `z_*` / `zc_*` / `ze_*` surface: that one is upstream zenoh-c's contract,
+/// upstream's header declares it, and a number minted here could only ever be a
+/// second, disagreeing opinion about it. `wz_capi_c_layout` answers the other
+/// question a drop-in raises — whether the STRUCTS are the size upstream's are.
+///
+/// # Why a door and not only a `#define`
+///
+/// `wz_capi_c.h` carries `WZ_CAPI_C_ABI_REVISION` as well, and the two exist
+/// for opposite moments. The macro is what a consumer compiled against; this is
+/// what it is running against. Comparing them is how a consumer detects the one
+/// failure a header cannot: a build linked to a library it was not compiled
+/// for. Item 634 is exactly that gap — the header shipped in R2300 with no way
+/// to answer "which build of the library is this".
+///
+/// # Safety
+/// None; takes no arguments and touches no memory.
+#[no_mangle]
+pub extern "C" fn wz_capi_c_abi_version() -> i32 {
+    WZ_CAPI_C_ABI_REVISION
+}
+
+/// The revision [`wz_capi_c_abi_version`] reports, and the value
+/// `wz_capi_c.h`'s `WZ_CAPI_C_ABI_REVISION` must equal.
+///
+/// R2301 starts it at 1: the wz door set of `wz-capi-c` had no revision at all
+/// before this round, so there is no earlier number to be compatible with. The
+/// pin that keeps it honest is `scripts/lib/capi_c_abi_pin.py`, which reads
+/// this number by CALLING the built library rather than by finding this
+/// literal — a gate that read this line would be pinning the text an author had
+/// just edited.
+pub const WZ_CAPI_C_ABI_REVISION: i32 = 1;
+
 /// Report this build's footprints — the drop-in's half of the layout gate.
 ///
 /// Writes at most `cap` entries through `out` (ignored when null) and returns
