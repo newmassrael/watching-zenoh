@@ -120,21 +120,57 @@ frontier and this reader pins it from both sides:
 
 * every item at or above it must carry `@from:`, and every OPEN one must carry
   a ranking -- unclassified is RED, never a pass;
-* no item BELOW it may carry an annotation -- which is what stops a round from
-  raising the frontier to dodge. Raising it leaves annotated items underneath;
-  stripping those annotations to fix that pushes the unranked count above its
+* no item BELOW it may carry a LINEAGE -- which is what stops a round from
+  raising the frontier to dodge. Raising it leaves `@from:`-carrying items
+  underneath; stripping those to fix that pushes the unranked count off its
   baseline. The two rules interlock, so the frontier has exactly one value the
   data admits and moving it means doing the work.
+* below it a RANKING is welcome (R2310, see below). A ranking cannot be used
+  to dodge anything: it makes the unranked count SMALLER, which is the
+  direction the ratchet already wants.
 
 ### The `unranked` ratchet, and whether 0 is reachable
 
 Rule (12) says the unranked count only falls. Rule (5) says to ask whether a
 completion predicate has any path to 0 at all before trusting it, so: the
-population is the OPEN items below the frontier, 314 of them when this was
-written. It falls when one of them closes and when one of them is annotated
-(which pulls the frontier down to it), and nothing but filing an item below
-the frontier -- impossible, numbers only grow -- can raise it. The path to 0
-exists and is the ordinary course of the repayment loop.
+population is the OPEN items below the frontier, 312 of them when R2310
+rewrote this paragraph. It falls when one of them closes, and -- since R2310 --
+when one of them is given a `@rank:`, one item at a time. Nothing but filing an
+item below the frontier can raise it, which numbers only growing makes
+impossible. The path to 0 exists and is the ordinary course of the loop.
+
+### Ranking an item that has no lineage -- `@rank:` (R2310, open-debt item 640)
+
+Item 640's charge was that nothing was lowering the unranked count, and the
+reason turned out to be structural rather than anyone's neglect: an item below
+the frontier COULD NOT BE RANKED AT ALL. `ranks` was read only from the run
+after a valued `@from:`, and giving an item below the frontier a `@from:` is
+refused by the rule above. So the only way to rank one old item was to lower
+the frontier over the whole span between, which means reconstructing a lineage
+for every item in it -- and the lineages of closed items are history nobody
+kept. "Not a round's work", as the item said, and in fact not any number of
+rounds' work at that price.
+
+`@rank: critical` / `@rank: ordinary` is the way down. It is read from the
+whole header (outside inline code) rather than from after `@from:`, which is
+why it needs to be a TOKEN: R2302 anchored the reading on `@from:` precisely
+because item 639's own title listed the axis names and a whole-header word
+scan read it as both rankings at once. MEASURED before choosing this, over
+today's register: of the 312 open items below the frontier, a whole-header
+scan outside inline code would call ZERO of them ranked. The token is not
+needed to avoid a false positive today; it is needed so the next title that
+DISCUSSES ranking does not become one.
+
+What this actually buys is rule (11)'s field of view. The take order reads the
+critical line, the critical line is the ranked items, and until R2310 nothing
+below 625 could be on it -- so an old, urgent debt was invisible to the
+mechanism that picks work, however loudly its own text shouted. R2310 ranked
+four of them (47 and 328 critical, 83 and 85 ordinary) and the take order
+printed "take item 328 next" for the first time.
+
+Both spellings feed ONE set, so an item that says `critical` after its
+`@from:` and again as a token is ranked once, while `critical` and `ordinary`
+together still order nothing and stay a FAIL.
 
 The baseline is DECLARED in the roster, not derived, for R2301's reason: a
 baseline derived from the population it measures follows that population and
@@ -368,6 +404,24 @@ FROM_RE = re.compile(r"@from:\s*(none|\d{1,3})")
 #: The two ranking words. A header carrying BOTH is a FAIL, not a coin toss.
 RANK_WORDS = ("critical", "ordinary")
 
+#: R2310 (open-debt item 640) — the ranking's OWN token, so an item can be
+#: ranked WITHOUT being given a lineage. Before this, `ranks` was read only
+#: from the run after a valued `@from:`, which meant the 312 open items below
+#: the frontier could not be ranked at all: giving one a `@from:` is refused
+#: below the frontier (that refusal is what stops a round raising the frontier
+#: to dodge), so the only way down was to lower the frontier over a whole
+#: span and reconstruct every lineage in it. `@rank: <word>` is that way down,
+#: one item at a time.
+#:
+#: A TOKEN and not a bare word, for R2302's reason: item 639's title listed
+#: the axis NAMES and a whole-header word scan read it as both rankings at
+#: once. MEASURED over today's register before choosing this: of the 312 open
+#: items below the frontier, a whole-header scan outside inline code would
+#: call ZERO of them ranked -- so the token is not needed to avoid a false
+#: positive today, it is needed so that the next title which discusses ranking
+#: does not become one.
+RANK_RE = re.compile(r"@rank:\s*(critical|ordinary)")
+
 #: The deferral marker and the hand-written depth beside it. The depth is
 #: OPTIONAL -- what is not optional is that it agree with the derivation.
 DEFER_RE = re.compile(r"\bdeferred\b")
@@ -462,23 +516,41 @@ class Axis(typing.NamedTuple):
 
 
 def axes(headers: dict[int, str]) -> dict[int, Axis]:
-    """Every item's axis values, read from the run AFTER `@from: <value>`."""
+    """Every item's axis values.
+
+    Lineage, deferral and the declared depth are read from the run AFTER a
+    valued `@from:`. The RANKING is read from that run too AND from the
+    `@rank:` token anywhere in the header (R2310), because an item below the
+    frontier has no `@from:` to hang a word off and must still be rankable.
+    Both spellings feed ONE set, so saying `critical` twice is not "both".
+    """
     out: dict[int, Axis] = {}
     for number, header in headers.items():
+        tokened = {m.group(1) for m in RANK_RE.finditer(outside_code(header))}
         m = FROM_RE.search(header)
         if not m:
-            out[number] = Axis(None, (), False, None)
+            out[number] = Axis(None, _ranks(tokened), False, None)
             continue
         run = header[m.end() :]
-        ranks = tuple(w for w in RANK_WORDS if re.search(rf"\b{w}\b", run))
+        worded = {w for w in RANK_WORDS if re.search(rf"\b{w}\b", run)}
         depth_m = DECLARED_DEPTH_RE.search(run)
         out[number] = Axis(
             m.group(1),
-            ranks,
+            _ranks(tokened | worded),
             bool(DEFER_RE.search(run)),
             int(depth_m.group(1)) if depth_m else None,
         )
     return out
+
+
+def _ranks(words: set[str]) -> tuple[str, ...]:
+    """The ranking words present, in `RANK_WORDS` order and without repeats.
+
+    A tuple so `Axis` stays hashable, deduplicated so a header that says
+    `ordinary` in both spellings is ranked once rather than reported as a
+    header claiming two rankings.
+    """
+    return tuple(w for w in RANK_WORDS if w in words)
 
 
 def chain_depth(
@@ -652,7 +724,7 @@ SELFTEST_ROSTER = """\
 - **10. an open analyzer item.**
 - **11. another open one.**
 - **12. ✅ CLOSED -- a discharged item.**
-- **13. an open item nobody put on any list.**
+- **13. an open item nobody put on any list.{r13}**
 - **14. ⛔ DUPLICATE of 10 -- kept under its own number on purpose.**
 - **15. ✅ REFUTED (Round 1) -- the round that filed it disproved it.**
 - **16. ✅ CLOSED -- discharged, with its original folded below.**
@@ -665,7 +737,7 @@ SELFTEST_ROSTER = """\
 
 - **17. ✅ CLOSED (R{r17}) -- a title quoting `wz_surfaces(char **buf)` in code.**
 - **18. ✅ CLOSED{s18} -- a root at the ranking frontier. `@from: none` · ordinary**
-- **19. a child of 18. `@from: {p19}` · critical**
+- **19. a child of 18. `@from: {p19}` · critical{r19}**
 - **20. a grandchild of 19. `@from: 19` · ordinary ·
   ⚠ **deferred**(사슬 깊이 {d20})**
 {extra}
@@ -867,6 +939,51 @@ def selftest() -> int:
             0,
             "deferred = 0 held / 1 released",
         ),
+        # R2310 (item 640) — the `@rank:` token, which is the ONLY way an item
+        # below the frontier can be ranked. Item 13 is one of the three open
+        # unranked items down there, so ranking it must move the baseline.
+        (
+            "a `@rank:` below the frontier is READ and lowers the baseline",
+            {"priority": "", "r13": " @rank: critical"},
+            1,
+            "lower it to 2 in this same edit",
+        ),
+        (
+            "a ranked item below the frontier is CLEAN once the baseline follows",
+            {"priority": "", "r13": " @rank: critical", "unranked_baseline": "2"},
+            0,
+            "CRITICAL -- take item 19 next (2 open: 19 13)",
+        ),
+        # The point of the whole change: rule (11)'s take order can now SEE an
+        # old item. Before R2310 item 13 could not carry a ranking at all.
+        (
+            "an OLD critical item appears in the take order",
+            {"priority": "", "r13": " @rank: critical", "unranked_baseline": "2"},
+            0,
+            "13)",
+        ),
+        # A lineage down there is still refused -- that refusal is what stops a
+        # round raising the frontier to dodge, and the ranking must not weaken it.
+        (
+            "a `@from:` below the frontier still fails",
+            {"priority": "", "ranked_from": "19"},
+            1,
+            "carries a lineage annotation and sits BELOW",
+        ),
+        # The two spellings feed one set: the same word twice is one ranking...
+        (
+            "the same ranking in both spellings is not `both`",
+            {"priority": "", "r19": " @rank: critical"},
+            0,
+            "CRITICAL -- take item 19 next",
+        ),
+        # ...and two DIFFERENT words still order nothing.
+        (
+            "a `@rank:` disagreeing with the worded ranking fails",
+            {"priority": "", "r19": " @rank: ordinary"},
+            1,
+            "a ranking that says both orders nothing",
+        ),
     ]
     env_for = {
         "ack of the head clears it": {"WZ_DEBT_PRIORITY_ACK": "10"},
@@ -893,6 +1010,8 @@ def selftest() -> int:
             d20=fields.get("d20", "2"),
             r17=fields.get("r17", "2000"),
             s18=fields.get("s18", " (R2000)"),
+            r13=fields.get("r13", ""),
+            r19=fields.get("r19", ""),
         )
         with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as fh:
             fh.write(body)
@@ -955,15 +1074,22 @@ def axis_findings(
     frontier = rst.ranked_from
     for number in sorted(found):
         axis = table.get(number, Axis(None, (), False, None))
-        annotated = axis.parent is not None or bool(axis.ranks) or axis.deferred
+        # R2310 (item 640) — below the frontier a RANKING is welcome and a
+        # LINEAGE is still refused. The refusal is what stops a round raising
+        # the frontier to dodge: doing so leaves `@from:`-carrying items
+        # underneath, and stripping those to fix it pushes the unranked count
+        # off its baseline. A ranking cannot be used that way -- an item
+        # ranked below the frontier is one FEWER unranked item, which moves
+        # the baseline DOWN, which is the direction this gate wants.
         if number < frontier:
-            if annotated:
+            if axis.parent is not None or axis.deferred:
                 findings.append(
-                    f"item {number} carries a ranking/lineage annotation and sits "
-                    f"BELOW `ranked_from = {frontier}`. Lower the frontier to "
-                    f"include it -- and every item in between -- or drop the "
-                    f"annotation; a frontier with annotated items underneath is "
-                    f"one a later round can raise to dodge this gate"
+                    f"item {number} carries a lineage annotation and sits BELOW "
+                    f"`ranked_from = {frontier}`. Lower the frontier to include "
+                    f"it -- and every item in between -- or drop the `@from:`; a "
+                    f"frontier with lineage underneath is one a later round can "
+                    f"raise to dodge this gate. (A `@rank:` down here is fine and "
+                    f"is how the unranked baseline comes down one item at a time.)"
                 )
             continue
         if axis.parent is None:
