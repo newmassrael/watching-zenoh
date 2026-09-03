@@ -601,6 +601,7 @@ class Roster(typing.NamedTuple):
     unranked_baseline: int
     reaim_cap: int
     reaim_ttl: int
+    unstamped_baseline: int
 
 
 #: The roster keys that carry a single integer. Named in ONE place because a
@@ -612,6 +613,7 @@ SCALAR_KEYS = (
     "unranked_baseline",
     "reaim_cap",
     "reaim_ttl",
+    "unstamped_baseline",
 )
 
 
@@ -665,6 +667,7 @@ def roster(text: str) -> Roster:
         scalars["unranked_baseline"],
         scalars["reaim_cap"],
         scalars["reaim_ttl"],
+        scalars["unstamped_baseline"],
     )
 
 
@@ -750,6 +753,7 @@ ranked_from = {ranked_from}
 unranked_baseline = {unranked_baseline}
 reaim_cap = {reaim_cap}
 reaim_ttl = {reaim_ttl}
+unstamped_baseline = {unstamped_baseline}
 {end}
 """
 
@@ -1016,6 +1020,26 @@ def selftest() -> int:
             1,
             "lost its subject",
         ),
+        # R2313b (open-debt item 643) -- the stamp axis. The clock only moves
+        # when a close is dated, so an undated close is what these arms catch.
+        (
+            "an undated CLOSE above the baseline fails",
+            {"priority": "", "unstamped_baseline": "2"},
+            1,
+            "carry no round stamp, 1 above",
+        ),
+        (
+            "an undated count BELOW the baseline fails too",
+            {"priority": "", "unstamped_baseline": "4"},
+            1,
+            "BELOW `unstamped_baseline",
+        ),
+        (
+            "the clock is printed beside the count it comes from",
+            {"priority": ""},
+            0,
+            "STAMPED -- clock at R2000, 3 undated close(s)",
+        ),
     ]
     env_for = {
         "ack of the head clears it": {"WZ_DEBT_PRIORITY_ACK": "10"},
@@ -1038,6 +1062,10 @@ def selftest() -> int:
             unranked_baseline=fields.get("unranked_baseline", "3"),
             reaim_cap=fields.get("reaim_cap", "1"),
             reaim_ttl=fields.get("reaim_ttl", "5"),
+            # The fixture's six closed items carry three stamps, so 3 is the
+            # value every other arm is judged at -- derived from the fixture,
+            # not chosen, or the stamp axis would red under all of them.
+            unstamped_baseline=fields.get("unstamped_baseline", "3"),
             p19=fields.get("p19", "18"),
             d20=fields.get("d20", "2"),
             r17=fields.get("r17", "2000"),
@@ -1463,6 +1491,71 @@ def claim_findings() -> tuple[list[str], str]:
     return findings, f"total {total} / active {active} / deprecated {deprecated} ({note})"
 
 
+def stamp_findings(
+    headers: dict[int, str], found: dict[int, str], rst: Roster
+) -> tuple[list[str], int, int | None]:
+    """R2313b (open-debt item 643) -- the clock only moves when a close is dated.
+
+    `deferral_status` reads "now" as the LARGEST round stamp on any closed
+    item, so a round that closes something and forgets the stamp leaves the
+    clock where it was and every hold waits that much longer. Nothing required
+    the stamp; it was a convention.
+
+    THE LINE THIS DRAWS, AND WHY IT IS NOT THE ONE THE ITEM SKETCHED. Item 643
+    proposed requiring the stamp only at or above `ranked_from`, on the ground
+    that the 79 undated closes are old-format entries far below it -- and it
+    added that drawing the line is itself a judgement, to be re-measured on
+    starting. Measured: of the eighteen items closed since R2290, FIVE are
+    below the frontier, including both of the two most recent rounds, because
+    the ranking axis now points the take order at old items. A frontier rule
+    would have exempted exactly the closes that matter most and gated almost
+    nothing. So the requirement is on EVERY close, and the 79 already there are
+    held by a baseline instead -- which is also what the item's second
+    condition asks for: what is being measured is whether the next close
+    carries a stamp, not whether the past ones do.
+    """
+    closed = [n for n, title in found.items() if not is_open(title)]
+    if not closed:
+        return (
+            [
+                "no item in the register is CLOSED, so the stamp axis has no "
+                "population. A count of zero must not read as a pass"
+            ],
+            0,
+            None,
+        )
+    stamps = {n: round_stamp(headers.get(n, "")) for n in closed}
+    unstamped = sorted(n for n, r in stamps.items() if r is None)
+    dated = [r for r in stamps.values() if r is not None]
+    clock = max(dated) if dated else None
+
+    findings: list[str] = []
+    if len(unstamped) > rst.unstamped_baseline:
+        # NOT "the highest-numbered ones are the new ones". The ranking axis
+        # points the take order at OLD items, so the close that just lost its
+        # stamp is as likely to be item 47 as item 645 -- a control group that
+        # stripped exactly that stamp had this message naming 465/511/523, none
+        # of them the culprit. The round knows which item it closed; this says
+        # so instead of guessing.
+        findings.append(
+            f"{len(unstamped)} CLOSED item(s) carry no round stamp, "
+            f"{len(unstamped) - rst.unstamped_baseline} above "
+            f"`unstamped_baseline = {rst.unstamped_baseline}`. A close nobody "
+            f"dated leaves this reader's clock where it was, so every hold waits "
+            f"that much longer. Stamp the item THIS round closed -- write "
+            f"`(R<round>, 원장 `Round <round>`)` into its title; do NOT raise "
+            f"the baseline"
+        )
+    elif len(unstamped) < rst.unstamped_baseline:
+        findings.append(
+            f"{len(unstamped)} undated CLOSED item(s), BELOW "
+            f"`unstamped_baseline = {rst.unstamped_baseline}`. Lower it to "
+            f"{len(unstamped)} in this same edit, or the ratchet stops holding "
+            f"the ground you just took"
+        )
+    return findings, len(unstamped), clock
+
+
 def main() -> int:
     if "--selftest" in sys.argv:
         return selftest()
@@ -1528,6 +1621,8 @@ def main() -> int:
     claim_lines, store_line = claim_findings()
     findings.extend(claim_lines)
     h_live, h_arch, _ = item_headers(text)
+    stamp_lines, undated, clock = stamp_findings({**h_arch, **h_live}, found, rst)
+    findings.extend(stamp_lines)
     hold_lines, hold = deferral_status({**h_arch, **h_live}, found, rst, rank.deferred)
     findings.extend(hold_lines)
     for line_no in unclosed_folds(text):
@@ -1683,6 +1778,12 @@ def main() -> int:
     # round for free rather than left to be asked for.
     if store_line:
         print(f"  debt-plane-census: STORE -- {store_line}")
+    # R2313b (item 643): the clock is PRINTED beside the count it is derived
+    # from, because a clock nobody sees is a clock nobody notices standing still.
+    print(
+        f"  debt-plane-census: STAMPED -- clock at R{clock}, "
+        f"{undated} undated close(s) (baseline {rst.unstamped_baseline})"
+    )
 
     remaining = sorted(n for n in target if n in found and is_open(found[n]))
     print(
