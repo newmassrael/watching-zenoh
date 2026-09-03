@@ -3263,6 +3263,37 @@ PY
     # a live tree cannot produce on demand.
     python3 scripts/lib/oracle_provenance_gate.py --selftest || return 1
     python3 scripts/lib/oracle_provenance_gate.py --check || return 1
+    # R2327 (unregistered open-debt item 11) — several guarded calls run the
+    # SAME cargo-test filter under DIFFERENT feature unions, and nothing
+    # required their asserted counts to be consistent with each other. R311y772
+    # bumped three of the four `--lib multicast_glue` sites and left `C1AX`
+    # behind; R311y775 wrote a PROSE prescription; R311y782 repeated the
+    # identical miss one round later and R311y783 caught it on hosted CI. A
+    # prose prescription failing on its very next outing is this workspace's
+    # standing argument for a gate.
+    #
+    # The item asked for a SAME-DELTA lint. That is refuted and this does
+    # something else: a test added under one feature legitimately moves only
+    # the sites carrying it, so same-delta reds the ordinary case. What is
+    # derivable is the feature LATTICE — enabling a feature compiles tests IN,
+    # never out, so a strict superset cannot assert FEWER (47 pairs), and calls
+    # selecting identical cases must agree (3 pairs). Both purely static.
+    #
+    # Near-disjoint from `count_guard_lint.py`, and measured rather than
+    # assumed: that lint declares 194 of 305 guards out of scope because
+    # `#[cfg]` makes their sets feature-dependent, and 45 of these 47 pairs
+    # have BOTH sites in that out-of-scope set (53 of 56 sites). It reaches the
+    # hole precisely because it derives no count — it relates the hand-written
+    # numbers to each other.
+    #
+    # Enforcement MEASURED both ways on the LIVE tree: setting `C1AX` back to
+    # its pre-R311y772 22 while `C1q` holds 23 reds this and names both sites,
+    # and restoring 26 returns OK; moving one of the two `C1ce`/`C1cc`
+    # symbol-census guards off 1 reds the AGREE axis. The selftest drives
+    # R311y772's real numbers, the shell-tail and continuation hazards, and both
+    # population-zero refusals.
+    python3 scripts/lib/guarded_count_lattice_gate.py --selftest || return 1
+    python3 scripts/lib/guarded_count_lattice_gate.py --check || return 1
     # R2241 (unregistered open-debt item 581) — an upstream claim must still
     # MEAN something after upstream moves. `CLAUDE.md` asks for `file:line` on
     # every source claim, which is right for OUR sources (we move those lines

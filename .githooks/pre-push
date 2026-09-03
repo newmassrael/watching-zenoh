@@ -568,6 +568,49 @@ if ! python3 scripts/lib/oracle_provenance_gate.py; then
     exit 1
 fi
 
+# ─── gate 2o — guarded counts vs the feature lattice (R2327, item 11) ──
+# grades: worktree
+#
+# `run-ci.sh` asserts an exact `N passed` per guarded call, and several calls
+# select the SAME test module under DIFFERENT feature unions. Bumping some of a
+# group and not the others has leaked TWICE, one round apart: R311y772 raised
+# three `--lib multicast_glue` sites and left `C1AX`; R311y775 wrote a prose
+# prescription; R311y782 repeated it exactly and R311y783 paid for it on hosted
+# CI. The prescription failed on its very next outing.
+#
+# The check is the feature lattice, not the item's proposed same-delta rule
+# (which reds the legitimate cfg-gated case): a strict feature SUPERSET cannot
+# assert FEWER, and calls selecting identical cases must agree.
+#
+# Why the hook and not only Layer C0 — the same argument gate 4b makes for its
+# sibling: this constant is written by hand at the moment a test is added, and
+# gate 3's changed-crate tests cannot fail on a number in a shell script.
+# NEAR-DISJOINT from gate 4b, measured: `count_guard_lint.py` declares 194 of
+# 305 guards out of scope for `#[cfg]` feature-dependence, and 45 of this
+# gate's 47 pairs have BOTH sites in that set.
+#
+# UNCONDITIONAL, for gate 2d's reason: MEASURED 0.08s, and a scope predicate is
+# one more thing that can be silently wrong.
+if ! python3 scripts/lib/guarded_count_lattice_gate.py --selftest; then
+    echo "" >&2
+    echo "pre-push: [gate 2o] guarded-count-lattice SELFTEST failed — it can no" >&2
+    echo "          longer catch R311y772's real miss, or it has stopped" >&2
+    echo "          parsing continuations / the shell tail, so its verdict on" >&2
+    echo "          this push means nothing." >&2
+    exit 1
+fi
+if ! python3 scripts/lib/guarded_count_lattice_gate.py; then
+    echo "" >&2
+    echo "pre-push: [gate 2o] guarded-count-lattice FAILED — two guarded calls" >&2
+    echo "          on one filter disagree with the feature lattice: a feature" >&2
+    echo "          SUPERSET asserts fewer than a subset, or two calls" >&2
+    echo "          selecting the same cases assert different counts." >&2
+    echo "          RUN both commands and use what they PRINT; do not average," >&2
+    echo "          and do not move only the one that reds." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+
 # ─── gate 2e — the scouting socket's movable axes (R2142, item 225) ──
 # grades: worktree
 #
