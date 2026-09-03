@@ -449,6 +449,81 @@ def strip_code(src: str) -> str:
     return "".join(out)
 
 
+def _helper_chunks() -> dict[str, str]:
+    """Every `common::*` helper, mapped to its source text.
+
+    Extracted from [`helper_classes`] at R2325 so the SECOND question asked of
+    the same parse — [`helper_idents`], which resolves what a helper can REACH
+    rather than which class it belongs to — cannot drift into a second spelling
+    of the fn-indent split. The module header's warning about C0 and A4 growing
+    two greps of one question applies to this parse just as much: it is the
+    single place that knows a helper is `fn` at one indent inside
+    `pub mod common { .. }`.
+    """
+    src = strip_code(LIB_RS.read_text())
+    chunks: dict[str, str] = {}
+    parts = re.split(r"\n    (?:pub )?fn ", src)
+    for part in parts[1:]:
+        m = re.match(r"([A-Za-z0-9_]+)", part)
+        if m:
+            chunks[m.group(1)] = part
+    return chunks
+
+
+def helper_idents() -> dict[str, frozenset[str]]:
+    """Every `common::*` helper, mapped to the identifiers it can REACH.
+
+    R2325 (open-debt item 9). [`helper_classes`] answers "which foreign class /
+    wz package does this helper resolve", which is the two questions this module
+    was built for. A third consumer needs a different projection of the same
+    call graph: `binary_freshness_lint` has to know whether a fixture's route to
+    `wz-ap-demo` ever reaches `Command::spawn`, because a demo run to COMPLETION
+    and a demo held ALIVE are two different exposures to a stale binary, and the
+    fixture names only the helper.
+
+    Returning the identifier set rather than a boolean is deliberate: the
+    predicate belongs to the consumer that has the reason for it, and a second
+    consumer asking a different question of the same helper does not need a
+    second traversal here. The same guard as `helper_classes` — an empty parse
+    is a FAILURE, not an empty answer, because every derived number would
+    silently shrink with the corpus.
+    """
+    chunks = _helper_chunks()
+    if not chunks:
+        raise RuntimeError(
+            "crossimpl_corpus: resolved NO harness helpers from %s. The `pub mod common`"
+            " fn-indent split has broken (a reformat?), and every derived number would"
+            " silently shrink with the corpus. Fix the parser -- do not let this pass."
+            % LIB_RS
+        )
+
+    memo: dict[str, frozenset[str]] = {}
+
+    def resolve(name: str, seen: frozenset[str]) -> frozenset[str]:
+        if name in seen:
+            return frozenset()
+        cached = memo.get(name)
+        if cached is not None:
+            return cached
+        body = chunks.get(name)
+        if body is None:
+            return frozenset()
+        seen = seen | {name}
+        idents = set(re.findall(r"[A-Za-z0-9_]+", body))
+        out = set(idents)
+        for ident in idents:
+            if ident in chunks and ident != name:
+                out |= resolve(ident, seen)
+        frozen = frozenset(out)
+        # Only a resolution that saw the WHOLE subtree is cacheable: one cut
+        # short by `seen` is correct for its caller and wrong for everyone else.
+        if not (seen - {name}):
+            memo[name] = frozen
+        return frozen
+
+    return {name: resolve(name, frozenset()) for name in chunks}
+
+
 def helper_classes() -> tuple[dict[str, set[str]], dict[str, set[str]]]:
     """Resolve every `common::*` helper transitively to what it can reach.
 
@@ -459,14 +534,8 @@ def helper_classes() -> tuple[dict[str, set[str]], dict[str, set[str]]]:
     every caller look like an in-process test, and A4-5 would then check the WRONG
     binary's feature closure (the two closures are not nested).
     """
-    src = strip_code(LIB_RS.read_text())
     # Every helper is a fn at one indent level inside `pub mod common { ... }`.
-    chunks: dict[str, str] = {}
-    parts = re.split(r"\n    (?:pub )?fn ", src)
-    for part in parts[1:]:
-        m = re.match(r"([A-Za-z0-9_]+)", part)
-        if m:
-            chunks[m.group(1)] = part
+    chunks = _helper_chunks()
 
     def resolve(name: str, seen: frozenset[str]) -> tuple[set[str], set[str]]:
         if name in seen:
@@ -612,6 +681,44 @@ def reachable_classes(fn_name: str, local: dict[str, str],
             if target not in seen:
                 stack.append(target)
     return classes
+
+
+def reachable_idents(fn_name: str, local: dict[str, str],
+                     edges: dict[str, set[str]] | None = None) -> frozenset[str]:
+    """Every identifier ONE function can reach, through the same call graph.
+
+    R2325 (open-debt item 9). [`reachable_classes`] and [`reachable_external`]
+    each walk this graph and fold it into their own answer as they go, which is
+    right for them and useless to a third question. `binary_freshness_lint` asks
+    TWO things of one walk — does this fixture reach the demo, and does its route
+    hold the demo ALIVE — and folding either into the traversal would mean
+    walking twice or teaching this module a predicate that is not its business.
+
+    Deliberately identifiers and not classes: the caller owns the meaning. What
+    is shared is the graph — local fns, plus the string-literal re-exec edges
+    [`reexec_edges`] resolves, which is exactly the hole that made three
+    self-witnessed claims look proven.
+    """
+    seen: set[str] = set()
+    stack = [fn_name]
+    idents: set[str] = set()
+    while stack:
+        name = stack.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        body = local.get(name)
+        if body is None:
+            continue
+        here = set(re.findall(r"[A-Za-z0-9_]+", body))
+        idents |= here
+        for ident in here:
+            if ident in local and ident not in seen:
+                stack.append(ident)
+        for target in (edges or {}).get(name, ()):
+            if target not in seen:
+                stack.append(target)
+    return frozenset(idents)
 
 
 def reachable_external(fn_name: str, local: dict[str, str],

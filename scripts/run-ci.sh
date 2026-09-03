@@ -2173,14 +2173,27 @@ PY
     # exactly that red as a feature-closure defect that did not exist, and
     # R311y776 retracted the round.
     #
-    # A COUNT rather than a blanket requirement, because not every spawning
+    # COUNTS rather than a blanket requirement, because not every spawning
     # fixture can be misled -- Layer E4's negative twin only checks that the demo
     # REJECTS `--router`, and staleness says nothing about that. So the carried
-    # number is a standing statement of how much of the corpus can still be
+    # numbers are a standing statement of how much of the corpus can still be
     # fooled, watched in BOTH directions like the C1bz doc budget: a new
-    # unchecked fixture raises it, fixing one lowers it, and either way the
+    # unchecked fixture raises one, fixing one lowers it, and either way the
     # number has to move in the same commit. Enforcement measured both ways.
-    python3 scripts/lib/binary_freshness_lint.py || return 1
+    #
+    # R2325 (open-debt item 9) TRIAGED that into four numbers and moved the
+    # resolution from FILES to FIXTURES. One integer was answering two questions
+    # -- "exposed" and "still to do" -- and the file resolution broke the gate's
+    # own contract: a misleadable fixture added to a file already in the corpus
+    # moved NOTHING, and 110 of the 131 files were uncovered, so that is where a
+    # new fixture normally lands. Measured on the live tree both ways: adding one
+    # reds 232->233 while the retired per-file reader still reports (131, 110).
+    # The selftest is the control group and runs FIRST -- it drives the RETIRED
+    # reader over the same synthetic corpus with the blind fixtures deleted and
+    # requires it to report the IDENTICAL pair across the mutation while the
+    # fixture reader drops by exactly 2. Both arms were mutation-tested to fail.
+    python3 scripts/lib/binary_freshness_lint.py --selftest || return 1
+    python3 scripts/lib/binary_freshness_lint.py --check || return 1
     # R311y750 (carry N40, carry N41) — the SELF-REPORT gate, the expired-blocker
     # lint's sibling one axis over: that one asks whether a stated blocker has
     # DISSOLVED, in three C-ABI crates; this one asks whether a comment declaring
