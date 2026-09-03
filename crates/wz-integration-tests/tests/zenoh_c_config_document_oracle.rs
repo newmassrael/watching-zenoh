@@ -135,6 +135,24 @@ static int mode_try(int argc, char **argv) {
     return 0;
 }
 
+/* Insert ONE value at `argv[2]` and read back a DIFFERENT path, `argv[4]`.
+
+   The axis open-debt item 642 is about: a caller may state a subtree as one
+   object (`insert("connect", "{\"endpoints\":[...]}")`) instead of stating its
+   leaf, and upstream answers `get("connect/endpoints")` either way. Reading the
+   SAME key back could never see that, which is why this mode exists beside
+   `try` rather than as a flag on it. */
+static int mode_try_at(int argc, char **argv) {
+    if (argc < 5) return 2;
+    const char *key = argv[2], *value = argv[3], *read_path = argv[4];
+    z_owned_config_t cfg;
+    if (z_config_default(&cfg) != 0) return 3;
+    z_result_t rc = zc_config_insert_json5(z_config_loan_mut(&cfg), key, value);
+    printf("insert.rc=%d\n", (int)rc);
+    if (rc == 0) show_get("get", z_config_loan(&cfg), read_path);
+    return 0;
+}
+
 static int mode_emit(int argc, char **argv) {
     if (argc < 3) return 2;
     const char *out_path = argv[2];
@@ -222,6 +240,7 @@ static int mode_read(int argc, char **argv) {
 int main(int argc, char **argv) {
     if (argc < 2) return 2;
     if (strcmp(argv[1], "try") == 0) return mode_try(argc, argv);
+    if (strcmp(argv[1], "try_at") == 0) return mode_try_at(argc, argv);
     if (strcmp(argv[1], "emit") == 0) return mode_emit(argc, argv);
     if (strcmp(argv[1], "read") == 0) return mode_read(argc, argv);
     return 2;
@@ -683,5 +702,80 @@ fn a_config_document_written_by_either_implementation_is_read_by_the_other() {
             .chars()
             .take(400)
             .collect::<String>(),
+    );
+
+    // THE INSERT SHAPE (open-debt item 642). A caller may state a subtree as one
+    // OBJECT rather than stating its leaf, and upstream answers the leaf path
+    // either way — so a store that only answers the key it was handed diverges
+    // on an insert upstream accepts. The two spellings of the SAME config must
+    // read alike.
+    //
+    // Derived from the corpus: every witness path with a `/` splits at its last
+    // separator into the object's key and its member. A corpus of only
+    // single-segment keys would leave nothing to check and fails here.
+    // WHICH object spellings are legal is decided by UPSTREAM, per run, not by a
+    // table here. Not every parent takes a one-member object — `usrpwd` wants
+    // its user and password together and refuses either alone (`Z_EGENERIC`,
+    // measured) — and a config upstream will not accept is not part of a
+    // drop-in contract. Naming those keys in an exemption list would be the
+    // escape hatch this file refuses everywhere else; asking the reference is
+    // the same move the witness ladder already makes.
+    let mut shape_failures: Vec<String> = Vec::new();
+    let mut checked = 0usize;
+    let mut declined_upstream: Vec<String> = Vec::new();
+    for (path, witness) in &witnesses {
+        let Some((parent, leaf)) = path.rsplit_once('/') else {
+            continue;
+        };
+        let object = format!("{{\"{leaf}\": {witness}}}");
+        let on_ref = reference.run(&["try_at", parent, &object, path]);
+        if on_ref.get("insert.rc").map(String::as_str) != Some("0") {
+            declined_upstream.push(format!("{parent} <- {object}"));
+            continue;
+        }
+        checked += 1;
+        // The PREMISE, asserted rather than assumed: upstream answers the leaf
+        // path the same whether the caller stated the leaf or the object above
+        // it. If this ever fails, the contract below is not upstream's.
+        let expect_ref_here = &expect_ref[path];
+        if on_ref.get("get").map(String::as_str) != Some(expect_ref_here.as_str()) {
+            shape_failures.push(format!(
+                "  reference: stated `{object}` at {parent}, then {path} reads {:?}, \
+                 want {expect_ref_here:?} — the premise of this axis does not hold",
+                on_ref.get("get").map_or("<no line>", String::as_str)
+            ));
+            continue;
+        }
+        let on_wz = wz.run(&["try_at", parent, &object, path]);
+        if on_wz.get("insert.rc").map(String::as_str) != Some("0") {
+            shape_failures.push(format!(
+                "  wz refused `{object}` at {parent} — upstream accepts it: rc {}",
+                on_wz.get("insert.rc").map_or("<no line>", String::as_str)
+            ));
+            continue;
+        }
+        let expect_wz_here = &expect_wz[path];
+        let got = on_wz.get("get").map(String::as_str);
+        if got != Some(expect_wz_here.as_str()) {
+            shape_failures.push(format!(
+                "  wz: stated `{object}` at {parent}, then {path} reads {:?}, want \
+                 {expect_wz_here:?}",
+                got.unwrap_or("<no line>")
+            ));
+        }
+    }
+    assert!(
+        checked >= 5,
+        "only {checked} object spelling(s) survived upstream's own acceptance, so this \
+         axis proves little. Declined upstream: {declined_upstream:?}"
+    );
+    assert!(
+        shape_failures.is_empty(),
+        "{} insert-shape divergence(s) over {checked} spelling(s) upstream accepts: the \
+         same config answers differently depending on whether the caller stated a leaf \
+         or the object above it.\n{}\n(upstream itself declined {}: {declined_upstream:?})",
+        shape_failures.len(),
+        shape_failures.join("\n"),
+        declined_upstream.len(),
     );
 }

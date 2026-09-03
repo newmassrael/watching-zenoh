@@ -33,6 +33,7 @@ use std::ffi::{c_char, CStr};
 use crate::abi::{z_loaned_config_t, z_moved_config_t, z_owned_config_t, Handle};
 use crate::ffi::guarded;
 use crate::result::{ZResult, Z_EGENERIC, Z_EIO, Z_ENULL, Z_EPARSE, Z_OK};
+use wz_runtime_tokio::json5::Json5Value;
 
 /// zenoh-c's `mode` key (`Z_CONFIG_MODE_KEY`, `zenoh_constants.h:23`).
 pub(crate) const MODE_KEY: &str = "mode";
@@ -52,64 +53,78 @@ pub(crate) const SESSION_ZID_KEY: &str = "id";
 
 /// How a stored value was SPELLED in the json5 the caller wrote.
 ///
-/// R2303 (open-debt item 636) replaced a `bracketed: bool` with this, and the
-/// generalisation is the same argument R2300 made for the bool: the spelling is
-/// KNOWN at parse time and only GUESSABLE at render time, so it is recorded
-/// rather than re-derived. The bool could carry one bit of that — list or not —
-/// and [`render_stored`] had to reconstruct the rest by inspecting the stored
-/// text, which it got wrong for every value this parser does not decompose. A
-/// `null` re-rendered as the STRING `"null"` and an object as the string
-/// `"{\"enabled\":true}"`, both measured through the C ABI; neither re-parses to
-/// what went in, and the second is not even json5.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Spelling {
-    /// A quoted scalar (`"tcp/a"`). One value, and it renders re-quoted.
-    Quoted,
-    /// A `[...]` list of quoted scalars. Renders bracketed whatever its length,
-    /// INCLUDING empty — which is the case a count could never recover, and the
-    /// whole of R2300's fix: `["tcp/a"]` is upstream `parse_args.h`'s commonest
-    /// shape and wz's stock-config reader requires an ARRAY at
-    /// `listen/endpoints`.
-    List,
-    /// Anything this parser did NOT decompose: a bare literal (`true`, `4`,
-    /// `null`), an object, or an array that is not a list of quoted scalars.
-    /// The single value is the SOURCE TEXT and renders verbatim, because the
-    /// text is the only faithful spelling of a value nothing here took apart.
-    Verbatim,
-}
-
-/// One stored value: the strings it denotes, and how it was written.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct StoredValue {
-    /// The strings the json5 value denotes — or, for [`Spelling::Verbatim`],
-    /// the one source text.
-    values: Vec<String>,
-    /// The spelling it arrived in.
-    spelling: Spelling,
-}
-
-/// The key/value store behind an owned config.
+/// The key/value store behind an owned config: THE DOCUMENT, held as its LEAF
+/// SET.
 ///
-/// A map of [`StoredValue`] rather than of `String`: every value upstream
-/// inserts is either a scalar or a LIST of endpoints, and flattening a list into
-/// one string would lose the boundary the open path needs.
+/// # One representation, because two of them answered differently
+///
+/// R2304 (open-debt item 642) settled the shape. Upstream holds a TREE and its
+/// path keys are queries over it, so `insert("connect", "{\"endpoints\":[…]}")`
+/// and `insert("connect/endpoints", "[…]")` build the same config and
+/// `get("connect/endpoints")` answers both — measured on `libzenohc.so` 1.10.0.
+/// This store kept a flat map of whatever key it was HANDED, so the two
+/// spellings produced different states: the object went in as one opaque entry
+/// at `connect` and nothing answered the leaf beneath it. That is not a missing
+/// convenience. `session.rs`'s open path reads `connect/endpoints`, so a program
+/// upstream configures correctly opened a wz session with NO endpoints and
+/// connected nowhere, silently.
+///
+/// Leaves are the fixed point of both doors: `zc_config_insert_json5`
+/// decomposes an object into them, `zc_config_from_str` walks a document into
+/// them, and `render_nested` puts them back. There is no second representation
+/// for the two to disagree about.
+///
+/// # The value type is the READER's, not a second parser's
+///
+/// It holds `Json5Value` — what `wz_session_core::json5::parse` produces —
+/// rather than a hand-rolled `StoredValue`. R2303 left this crate with TWO
+/// json5 value readers, and the hand-rolled one was LAXER: it accepted
+/// `{enabled: bare}`, which is not json5, and the door then emitted a document
+/// wz's own reader refused (`Z_EPARSE`, measured through the C ABI, where
+/// upstream refuses the same insert at the door). One reader cannot disagree
+/// with itself.
 #[derive(Debug, Default)]
 pub(crate) struct ConfigState {
-    entries: BTreeMap<String, StoredValue>,
+    entries: BTreeMap<String, Json5Value>,
 }
 
 impl ConfigState {
-    /// The first value stored under `key`, if any.
+    /// The first string the value at `key` denotes, if any.
+    ///
+    /// A string denotes itself; an array denotes its first STRING element. The
+    /// open path reads endpoints and a mode this way, and both are spelled
+    /// either bare or as a one-element list by upstream's own `parse_args.h`.
+    /// Anything else — an object, a number, a bool — denotes no string, and
+    /// `None` is the honest answer rather than its rendered text.
     pub(crate) fn first(&self, key: &str) -> Option<&str> {
-        self.entries
-            .get(key)
-            .and_then(|v| v.values.first())
-            .map(|s| &**s)
+        match self.entries.get(key)? {
+            Json5Value::String(text) => Some(text),
+            Json5Value::Array(items) => items.iter().find_map(|item| match item {
+                Json5Value::String(text) => Some(&**text),
+                _ => None,
+            }),
+            _ => None,
+        }
     }
 
-    /// Store `value` under `key`, replacing whatever was there.
-    fn insert(&mut self, key: String, value: StoredValue) {
-        self.entries.insert(key, value);
+    /// Store one json5 VALUE at `key`, decomposing an object into the leaves it
+    /// states and REPLACING whatever stood at or beneath that key.
+    ///
+    /// Replacing rather than merging is upstream's own semantics, measured:
+    /// `insert("scouting", "{\"delay\":99}")` then
+    /// `insert("scouting", "{\"timeout\":77}")` leaves `delay` back at `null`.
+    /// A merge here would make wz remember an instruction upstream forgot.
+    fn insert_value(&mut self, key: &str, value: Json5Value) {
+        let under = format!("{key}/");
+        self.entries
+            .retain(|stored, _| stored != key && !stored.starts_with(&under));
+        if matches!(&value, Json5Value::Object(entries) if !entries.is_empty()) {
+            for (path, leaf) in value.leaf_entries() {
+                self.entries.insert(format!("{key}/{path}"), leaf.clone());
+            }
+        } else {
+            self.entries.insert(key.to_owned(), value);
+        }
     }
 
     /// Render one key's value back in the json5 form the insert path accepts,
@@ -144,7 +159,7 @@ impl ConfigState {
     /// silently lose the rest.
     fn render(&self, key: &str) -> Option<String> {
         if let Some(value) = self.entries.get(key) {
-            return Some(render_stored(value));
+            return Some(value.to_json5_text());
         }
         let prefix = format!("{key}/");
         let mut root = NestNode::default();
@@ -248,8 +263,8 @@ impl core::fmt::Display for NestConflict {
 /// byte-identically whatever order they were inserted in, which is what lets a
 /// caller diff two configs at all.
 enum NestNode<'a> {
-    /// A stored value, rendered by [`render_stored`] like any other.
-    Leaf(&'a StoredValue),
+    /// A stored value, rendered by its own `to_json5_text` like any other.
+    Leaf(&'a Json5Value),
     /// Named children, in key order.
     Branch(std::collections::BTreeMap<&'a str, NestNode<'a>>),
 }
@@ -273,7 +288,7 @@ impl<'a> NestNode<'a> {
     fn insert(
         &mut self,
         segments: &[&'a str],
-        value: &'a StoredValue,
+        value: &'a Json5Value,
         key: &str,
     ) -> Result<(), NestConflict> {
         let NestNode::Branch(children) = self else {
@@ -321,7 +336,7 @@ impl<'a> NestNode<'a> {
     /// Write this node at `depth`, in `layout`.
     fn write(&self, out: &mut String, depth: usize, layout: Layout) {
         match self {
-            NestNode::Leaf(value) => out.push_str(&render_stored(value)),
+            NestNode::Leaf(value) => out.push_str(&value.to_json5_text()),
             NestNode::Branch(children) => {
                 if children.is_empty() {
                     out.push_str("{}");
@@ -374,206 +389,23 @@ enum Layout {
     Compact,
 }
 
-/// Render a stored value in the json5 form [`parse_json5_value`] accepts.
+/// Parse one json5 VALUE, or `None` when it is not json5.
 ///
-/// The contract is `parse_json5_value(render_stored(v)) == Some(v)`, and R2303
-/// (open-debt item 636) is what made it hold rather than nearly hold. Each arm
-/// below is decided by the [`Spelling`] the parser RECORDED, so this function
-/// inspects no text and infers nothing.
+/// R2304 (open-debt item 642) made this ONE LINE over the workspace's reader.
+/// What stood here was a hand-rolled half-parser — a brace-balance scan, an
+/// `unquote`, a comma split — and it was LAXER than the reader the document
+/// doors use: it stored `{enabled: bare}`, which no json5 grammar admits, and
+/// `zc_config_to_string` then emitted a document `zc_config_from_str` refused.
+/// Measured through the C ABI at the real schema key `timestamping`, where
+/// upstream refuses that same insert AT THE DOOR (`Z_EGENERIC`) and wz returned
+/// `Z_OK` then `Z_EPARSE` on its own output.
 ///
-/// The version this replaced guessed. It asked whether the stored text "looked
-/// like" a bare literal — `true`, `false`, or digits — and quoted whatever did
-/// not, which is right for a quoted scalar and wrong for every other value the
-/// parser stores whole: `null` came back as the string `"null"`, and an object
-/// as the string `"{\"enabled\":true}"`, which is not even json5 and made the
-/// document unreadable by anything, this crate's own reader included. The
-/// guess could not have been fixed in place, because after the fact the text
-/// `{a:1}` is indistinguishable from a caller's string that happens to spell an
-/// object.
-fn render_stored(value: &StoredValue) -> String {
-    match value.spelling {
-        // The one source text, exactly as it arrived.
-        Spelling::Verbatim => value
-            .values
-            .first()
-            .cloned()
-            // A `Verbatim` with no text cannot be produced by
-            // `parse_json5_value`. Rendered as an empty object rather than
-            // panicked on: a future writer of this store gets a re-parseable
-            // value, not an abort across the C boundary.
-            .unwrap_or_else(|| String::from("{}")),
-        Spelling::Quoted => match value.values.as_slice() {
-            // `unquote` refuses a value containing its own quote character, so
-            // re-quoting here cannot produce an unbalanced literal.
-            [one] => format!("\"{one}\""),
-            // A `Quoted` with any other length cannot be produced either; same
-            // reasoning as above, rendered as a list so it re-parses.
-            many => bracket(many),
-        },
-        Spelling::List => bracket(&value.values),
-    }
-}
-
-/// `["a", "b"]`, and `[]` for nothing.
-fn bracket(values: &[String]) -> String {
-    let items: Vec<String> = values.iter().map(|v| format!("\"{v}\"")).collect();
-    format!("[{}]", items.join(", "))
-}
-
-/// Parse one json5 VALUE into the strings it denotes.
-///
-/// Returns `None` for a shape this slice does not implement — see the module
-/// doc for why that is a refusal rather than a passthrough.
-fn parse_json5_value(raw: &str) -> Option<StoredValue> {
-    /// A value stored exactly as it was written, because nothing here took it
-    /// apart.
-    fn verbatim(text: String) -> Option<StoredValue> {
-        Some(StoredValue {
-            values: vec![text],
-            spelling: Spelling::Verbatim,
-        })
-    }
-    /// A quoted scalar, holding the text INSIDE the quotes.
-    fn quoted(inner: String) -> Option<StoredValue> {
-        Some(StoredValue {
-            values: vec![inner],
-            spelling: Spelling::Quoted,
-        })
-    }
-    let text = raw.trim();
-    if text.is_empty() {
-        return None;
-    }
-    // An OBJECT value, stored VERBATIM. R311y573 — found by running an upstream
-    // program rather than by reading: `zc_config_insert_json5(cfg,
-    // "timestamping", "{\"enabled\":{...}}")` is what `ze_publication_cache`
-    // requires of its session, upstream accepts it, and this parser returned
-    // `None` for it, i.e. `Z_EPARSE`. Upstream's config takes ANY JSON5 value at
-    // ANY path; this parser exists to give wz's own open path a list of strings
-    // for the handful of keys it reads, and it must not become a whitelist of
-    // the SHAPES a caller may store. The bare-literal branch below already
-    // stores verbatim on exactly that reasoning; an object is the same case with
-    // a delimiter.
-    //
-    // The brace scan is QUOTE-AWARE, so a `}` inside a string does not close the
-    // object early. A value whose braces do not balance is still rejected —
-    // accepting it would turn a malformed insert into a silent success.
-    if text.starts_with('{') {
-        return if delimiters_balance(text) {
-            verbatim(text.to_owned())
-        } else {
-            None
-        };
-    }
-    // A bare literal: `false` / `true` / `null` / a number. Stored verbatim; the
-    // open path reads only the keys it knows.
-    if !text.starts_with('[') && !text.starts_with('"') && !text.starts_with('\'') {
-        return if text
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
-        {
-            verbatim(text.to_owned())
-        } else {
-            None
-        };
-    }
-    // A quoted scalar.
-    if let Some(inner) = unquote(text) {
-        return quoted(inner);
-    }
-    // A list of quoted scalars. `List` from here down, INCLUDING the empty
-    // list: `[]` denotes no strings and is still a list, which is the case a
-    // length test could never recover.
-    let body = text.strip_prefix('[')?.strip_suffix(']')?.trim();
-    if body.is_empty() {
-        return Some(StoredValue {
-            values: Vec::new(),
-            spelling: Spelling::List,
-        });
-    }
-    let mut out = Vec::new();
-    for item in body.split(',') {
-        // R2303 (open-debt item 636) — an element this slice cannot take apart
-        // sends the WHOLE array to the verbatim arm, on R311y573's reasoning one
-        // delimiter over: an array is an object's case with `[` instead of `{`,
-        // and refusing it would make this parser a whitelist of the SHAPES a
-        // caller may store. Upstream's own `zc_config_to_string` emits one —
-        // `plugins_loading/search_dirs` mixes an object with strings — so
-        // refusing it meant wz could not read a document upstream had just
-        // written, which is exactly the drop-in claim.
-        let Some(element) = unquote(item.trim()) else {
-            return if delimiters_balance(text) {
-                verbatim(text.to_owned())
-            } else {
-                None
-            };
-        };
-        out.push(element);
-    }
-    Some(StoredValue {
-        values: out,
-        spelling: Spelling::List,
-    })
-}
-
-/// Whether `text` closes every `{` and `[` it opens, ignoring delimiters inside
-/// strings.
-///
-/// Deliberately NOT a JSON5 parser: wz's open path reads a handful of known
-/// keys and stores everything else verbatim, so the only question this has to
-/// answer is whether the caller handed over a complete value or a truncated one.
-///
-/// R2303 (open-debt item 636) added the BRACKETS, because the verbatim arm they
-/// guard now takes arrays as well as objects. Counting only braces would have
-/// let `[{"a":1}` through as a complete value on the strength of its balanced
-/// object — a truncated array admitted by the check meant to refuse truncation.
-/// The two kinds share one depth counter rather than getting one each: `{"a":[}`
-/// is malformed and a per-kind count calls it balanced.
-fn delimiters_balance(text: &str) -> bool {
-    let mut depth = 0i32;
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    for c in text.chars() {
-        if let Some(q) = quote {
-            if escaped {
-                escaped = false;
-            } else if c == '\\' {
-                escaped = true;
-            } else if c == q {
-                quote = None;
-            }
-            continue;
-        }
-        match c {
-            '"' | '\'' => quote = Some(c),
-            '{' | '[' => depth += 1,
-            '}' | ']' => {
-                depth -= 1;
-                if depth < 0 {
-                    return false;
-                }
-            }
-            _ => {}
-        }
-    }
-    quote.is_none() && depth == 0
-}
-
-/// Strip one matching pair of `"` or `'`, or `None` if `text` is not quoted.
-fn unquote(text: &str) -> Option<String> {
-    let mut chars = text.chars();
-    let open = chars.next()?;
-    if open != '"' && open != '\'' {
-        return None;
-    }
-    let rest = text.get(1..)?;
-    let inner = rest.strip_suffix(open)?;
-    // A quote inside would mean escaping rules this slice does not implement;
-    // refuse rather than mis-split.
-    if inner.contains(open) {
-        return None;
-    }
-    Some(inner.to_owned())
+/// One reader cannot disagree with itself, and the deleted code is the whole of
+/// the disagreement: 155 lines of `parse_json5_value`, `render_stored`,
+/// `bracket`, `delimiters_balance`, `unquote`, plus the `StoredValue` /
+/// `Spelling` pair they existed to fill.
+fn parse_json5_value(raw: &str) -> Option<Json5Value> {
+    wz_runtime_tokio::json5::parse(raw).ok()
 }
 
 /// Install a fresh [`ConfigState`] into `out`, returning its handle slot.
@@ -685,10 +517,10 @@ pub unsafe extern "C" fn zc_config_insert_json5(
         let Some(state) = (unsafe { config_state(this_) }) else {
             return Z_ENULL;
         };
-        let Some(values) = parse_json5_value(value) else {
+        let Some(parsed) = parse_json5_value(value) else {
             return Z_EPARSE;
         };
-        state.entries.insert(key.to_owned(), values);
+        state.insert_value(key, parsed);
         Z_OK
     })
 }
@@ -924,10 +756,7 @@ unsafe fn install_parsed(this_: *mut z_owned_config_t, text: &str) -> ZResult {
     }
     let mut state = ConfigState::default();
     for (path, leaf) in document.leaf_entries() {
-        let Some(value) = parse_json5_value(&leaf.to_json5_text()) else {
-            return Z_EPARSE;
-        };
-        state.insert(path, value);
+        state.insert_value(&path, leaf.clone());
     }
     install(this_, state);
     Z_OK
@@ -935,9 +764,13 @@ unsafe fn install_parsed(this_: *mut z_owned_config_t, text: &str) -> ZResult {
 
 /// Read one config value back as a string (zenoh-c `zc_config_get_from_str`).
 ///
-/// The rendering is json5-ish and MATCHES what the insert path accepts, so a
-/// `get` of an inserted value round-trips: a scalar renders bare and a list
-/// renders bracketed with quoted elements.
+/// The rendering is json5 and MATCHES what the insert path accepts, so a `get`
+/// of an inserted value round-trips. R2304 (open-debt item 642) made that exact
+/// rather than approximate: the store holds the READER's own value type, so a
+/// value comes back through the emitter that is `parse`'s inverse instead of
+/// through a renderer reconstructing a spelling from stored text. The sentence
+/// this replaced said "a scalar renders bare", which was true of a bare literal
+/// and false of a string.
 ///
 /// # Safety
 /// `this_` must be null or a valid loaned config; `key` must be null or
@@ -1059,10 +892,10 @@ pub unsafe extern "C" fn zc_config_insert_json5_from_substr(
         let Some(state) = (unsafe { config_state(this_) }) else {
             return Z_ENULL;
         };
-        let Some(values) = parse_json5_value(value) else {
+        let Some(parsed) = parse_json5_value(value) else {
             return Z_EPARSE;
         };
-        state.insert(key.to_owned(), values);
+        state.insert_value(key, parsed);
         Z_OK
     })
 }
@@ -1186,29 +1019,19 @@ pub unsafe extern "C" fn z_internal_config_null(this_: *mut z_owned_config_t) {
 mod tests {
     use super::*;
 
-    /// A value the caller wrote as a QUOTED scalar, holding the text inside the
-    /// quotes.
-    fn scalar_of(values: &[&str]) -> Option<StoredValue> {
-        Some(StoredValue {
-            values: values.iter().map(|s| String::from(*s)).collect(),
-            spelling: Spelling::Quoted,
-        })
+    /// A json5 STRING value.
+    fn scalar_of(text: &str) -> Option<Json5Value> {
+        Some(Json5Value::String(String::from(text)))
     }
 
-    /// A value the caller wrote as `[...]`.
-    fn list_of(values: &[&str]) -> Option<StoredValue> {
-        Some(StoredValue {
-            values: values.iter().map(|s| String::from(*s)).collect(),
-            spelling: Spelling::List,
-        })
-    }
-
-    /// A value this parser did not take apart, holding its source text.
-    fn verbatim_of(text: &str) -> Option<StoredValue> {
-        Some(StoredValue {
-            values: vec![String::from(text)],
-            spelling: Spelling::Verbatim,
-        })
+    /// A json5 ARRAY of strings.
+    fn list_of(values: &[&str]) -> Option<Json5Value> {
+        Some(Json5Value::Array(
+            values
+                .iter()
+                .map(|s| Json5Value::String(String::from(*s)))
+                .collect(),
+        ))
     }
 
     /// The flat document `zc_config_to_string` emitted before R2303, built from
@@ -1236,8 +1059,8 @@ mod tests {
 
     #[test]
     fn a_quoted_scalar_parses_to_one_value() {
-        assert_eq!(parse_json5_value("\"client\""), scalar_of(&["client"]));
-        assert_eq!(parse_json5_value("  'peer' "), scalar_of(&["peer"]));
+        assert_eq!(parse_json5_value("\"client\""), scalar_of("client"));
+        assert_eq!(parse_json5_value("  'peer' "), scalar_of("peer"));
     }
 
     #[test]
@@ -1260,21 +1083,26 @@ mod tests {
     /// one-element list; it stopped being invisible when `render_nested` began
     /// feeding wz's stock-config reader, whose `endpoints_of` REFUSES anything
     /// that is not an array. The two cases are asserted side by side because
-    /// their `values` are identical — `bracketed` is the whole difference.
+    /// they denote the same ONE string and differ only in shape.
+    ///
+    /// R2304 (open-debt item 642) kept the test and deleted what made it hard:
+    /// the store holds a `Json5Value` now, so `Array([String])` and `String` are
+    /// different values by construction and no `bracketed` flag has to carry
+    /// the difference by hand.
     #[test]
     fn a_one_element_list_is_not_the_same_value_as_a_scalar() {
         let list = parse_json5_value("[\"tcp/127.0.0.1:7447\"]");
         let scalar = parse_json5_value("\"tcp/127.0.0.1:7447\"");
         assert_eq!(list, list_of(&["tcp/127.0.0.1:7447"]));
-        assert_eq!(scalar, scalar_of(&["tcp/127.0.0.1:7447"]));
+        assert_eq!(scalar, scalar_of("tcp/127.0.0.1:7447"));
         assert_ne!(list, scalar, "the shape must survive the parse");
         // And it survives the RENDER, which is where the defect showed.
         assert_eq!(
-            render_stored(&list.expect("parsed")),
+            list.expect("parsed").to_json5_text(),
             "[\"tcp/127.0.0.1:7447\"]"
         );
         assert_eq!(
-            render_stored(&scalar.expect("parsed")),
+            scalar.expect("parsed").to_json5_text(),
             "\"tcp/127.0.0.1:7447\""
         );
     }
@@ -1314,14 +1142,11 @@ mod tests {
         use wz_runtime_tokio::zenoh_config::ZenohNodeConfig;
 
         let mut state = ConfigState::default();
-        state.insert(
-            String::from(LISTEN_KEY),
+        state.insert_value(
+            LISTEN_KEY,
             list_of(&["tcp/127.0.0.1:7447"]).expect("a list"),
         );
-        state.insert(
-            String::from(MODE_KEY),
-            scalar_of(&["client"]).expect("a scalar"),
-        );
+        state.insert_value(MODE_KEY, scalar_of("client").expect("a scalar"));
         // The population is DERIVED from the keys under test rather than
         // spelled: whichever of them carries a `/` is the one the flat spelling
         // cannot deliver. A fixture changed to use only single-segment keys
@@ -1385,13 +1210,17 @@ mod tests {
     #[test]
     fn two_keys_that_cannot_both_be_nested_are_refused_by_name() {
         let mut state = ConfigState::default();
-        state.insert(
-            String::from("mode"),
-            scalar_of(&["client"]).expect("a scalar"),
-        );
-        state.insert(
+        // NOT through `insert_value`, which REPLACES the subtree at a key and so
+        // cannot hold both halves of this collision at once. The pair is
+        // reachable through the document reader instead — a caller can write
+        // `{"mode": "client"}` into a config that already carries
+        // `mode/router` — so the state under test is built directly.
+        state
+            .entries
+            .insert(String::from("mode"), scalar_of("client").expect("a scalar"));
+        state.entries.insert(
             String::from("mode/router"),
-            scalar_of(&["peer"]).expect("a scalar"),
+            scalar_of("peer").expect("a scalar"),
         );
         let conflict = state
             .render_nested()
@@ -1406,7 +1235,7 @@ mod tests {
         // the PAIR and not about either spelling.
         for key in ["mode", "mode/router"] {
             let mut one = ConfigState::default();
-            one.insert(String::from(key), scalar_of(&["client"]).expect("a scalar"));
+            one.insert_value(key, scalar_of("client").expect("a scalar"));
             assert!(
                 one.render_nested().is_ok(),
                 "{key} alone must render; only the pair conflicts"
@@ -1414,16 +1243,32 @@ mod tests {
         }
     }
 
+    /// A bare literal keeps its own type, and re-renders as itself.
+    ///
+    /// R2303 (open-debt item 636) put `null` here because the renderer used to
+    /// get it wrong: it recognised `true`/`false`/digits as bare and QUOTED
+    /// everything else, so `null` came back out as the STRING `"null"`.
+    /// Upstream writes `null` at 100 of the 116 leaf paths its own
+    /// `zc_config_to_string` emits, so this is not an edge. R2304 (item 642)
+    /// kept the assertion and removed the class of bug: `Json5Value` has a
+    /// `Null` and a `Bool`, so no renderer has to guess which it is looking at.
     #[test]
-    fn a_bare_literal_is_kept_verbatim() {
-        // `scouting/multicast/enabled` is inserted as the bare word `false`.
-        assert_eq!(parse_json5_value("false"), verbatim_of("false"));
-        // R2303 (open-debt item 636) — `null` too, and it is here because the
-        // renderer used to get it wrong: it recognised `true`/`false`/digits as
-        // bare and QUOTED everything else, so `null` came back out as the
-        // string `"null"`. Upstream writes `null` at 100 of the 116 leaf paths
-        // its own `zc_config_to_string` emits, so this is not an edge.
-        assert_eq!(parse_json5_value("null"), verbatim_of("null"));
+    fn a_bare_literal_keeps_its_type_and_re_renders_as_itself() {
+        for (raw, want) in [
+            // `scouting/multicast/enabled` is inserted as the bare word `false`.
+            ("false", Json5Value::Bool(false)),
+            ("true", Json5Value::Bool(true)),
+            ("null", Json5Value::Null),
+            ("65535", Json5Value::Number(String::from("65535"))),
+        ] {
+            let parsed = parse_json5_value(raw).unwrap_or_else(|| panic!("{raw:?} must parse"));
+            assert_eq!(parsed, want, "{raw:?}");
+            assert_eq!(
+                parsed.to_json5_text(),
+                raw,
+                "{raw:?} must re-render as itself"
+            );
+        }
     }
 
     /// The REFUSAL is the load-bearing half: a shape this slice cannot honour
@@ -1440,53 +1285,62 @@ mod tests {
     /// still refused, and that case is what keeps this test discriminating.
     ///
     /// R2303 (open-debt item 636) moved `["a", bare]` out on the SAME argument
-    /// one delimiter over — see the test below. What stays here is truncation,
-    /// which is the only thing this parser was ever meant to catch.
+    /// one delimiter over. R2304 (item 642) moved it BACK, and the reversal is
+    /// the whole of that item: `["a", bare]` is not json5 — an identifier is a
+    /// KEY spelling, never a value — and the hand-rolled parser that admitted it
+    /// was the second, laxer reader this crate carried. Upstream refuses the
+    /// same insert at the door (`Z_EGENERIC`, measured at a real schema key);
+    /// wz accepted it, emitted it, and then refused its own document.
     #[test]
-    fn an_unimplemented_shape_is_refused_rather_than_stored() {
+    fn a_value_that_is_not_json5_is_refused_rather_than_stored() {
         for raw in [
             "{unbalanced: 1",
             "nested: 1}",
             "{\"quote: \"still open\"",
             "[\"unterminated",
-            // R2303 — a `[` closed by a `}`. The delimiter counter is shared
-            // across both kinds precisely so this is not "balanced".
+            // A `[` closed by a `}`.
             "{\"a\":[}",
             "\"unbalanced'",
             "",
+            // R2304 — an identifier where a VALUE belongs. Both delimiters.
+            "{enabled: bare}",
+            "[\"a\", bare]",
         ] {
             assert_eq!(parse_json5_value(raw), None, "must refuse {raw:?}");
         }
     }
 
-    /// R311y573 — a BALANCED object is stored verbatim, braces and all. wz's
-    /// open path reads the handful of keys it knows and ignores the rest, so the
-    /// parser's job is to tell a complete value from a truncated one, never to
-    /// whitelist the shapes a caller may store.
+    /// A value this crate does not decompose still round-trips, because the
+    /// reader keeps its structure rather than its source text.
     ///
-    /// R2303 (open-debt item 636) added the ARRAYS, and they are the same case:
-    /// an array whose elements are not all quoted scalars is one this slice does
-    /// not take apart, exactly as an object is. Upstream's own
-    /// `zc_config_to_string` writes one — `plugins_loading/search_dirs` mixes an
-    /// object with strings, and it is the ONLY leaf of 116 in a default
-    /// document that this parser refused — so the refusal meant wz could not
-    /// read a document upstream had just written.
+    /// R311y573 established the rule — upstream accepts an object at any config
+    /// path and `ze_publication_cache` REQUIRES one (`timestamping`), so
+    /// refusing objects made a whole upstream family unusable on wz. R2303
+    /// added arrays: upstream's own `zc_config_to_string` writes
+    /// `plugins_loading/search_dirs`, which mixes an object with strings, and it
+    /// was the ONLY leaf of 116 in a default document wz refused.
+    ///
+    /// The assertion is now the ROUND TRIP rather than "stored verbatim",
+    /// because R2304 stopped storing text: what comes back is the same VALUE,
+    /// whose spelling is the emitter's canonical one.
     #[test]
-    fn a_balanced_object_or_array_is_stored_verbatim() {
+    fn a_compound_value_survives_the_round_trip() {
         for raw in [
             "{nested: 1}",
             "{\"enabled\":{\"router\":true,\"peer\":true,\"client\":true}}",
             // A brace INSIDE a string must not close the object early.
             "{\"body\":\"}\"}",
-            // R2303 — upstream's `plugins_loading/search_dirs`, trimmed.
+            // Upstream's `plugins_loading/search_dirs`, trimmed.
             "[{\"kind\":\"current_exe_parent\",\"value\":null},\".\"]",
             "[1,2,3]",
             "[[\"a\"],[\"b\"]]",
         ] {
+            let parsed = parse_json5_value(raw).unwrap_or_else(|| panic!("{raw:?} must parse"));
+            let rendered = parsed.to_json5_text();
             assert_eq!(
-                parse_json5_value(raw),
-                verbatim_of(raw),
-                "must store {raw:?} verbatim"
+                parse_json5_value(&rendered),
+                Some(parsed),
+                "{raw:?} rendered to {rendered:?}, which is a different value"
             );
         }
     }
@@ -1722,59 +1576,87 @@ mod tests {
         unsafe { z_config_drop((&mut { cfg } as *mut z_owned_config_t).cast()) };
     }
 
-    /// R2303 (open-debt item 636) — the RENDERER is the parser's inverse, over
-    /// a population DERIVED from the two tests above rather than restated.
+    /// R2304 (open-debt item 642) — STATING A SUBTREE AS AN OBJECT AND STATING
+    /// ITS LEAF BUILD THE SAME CONFIG.
     ///
-    /// `parse_json5_value(render_stored(v)) == Some(v)` is what every document
-    /// door depends on and what nothing asserted: the renderer inferred a
-    /// value's spelling from its text after the fact, which is right for a
-    /// quoted scalar and wrong for the three shapes it does not decompose. A
-    /// `null` re-rendered as the string `"null"`; an object as the string
-    /// `"{\"enabled\":true}"`, which is not json5 at all and made the whole
-    /// document unreadable.
+    /// This is what the item was about, at the store rather than at the ABI.
+    /// `ConfigState` used to keep whatever key it was HANDED, so
+    /// `insert("connect", "{\"endpoints\":[…]}")` left one opaque entry at
+    /// `connect` and nothing answered `connect/endpoints` — the very key
+    /// `session.rs` reads to find where to connect. Upstream answers either
+    /// spelling, measured.
     ///
-    /// The witnesses are the accepted inputs of the tests above, gathered here,
-    /// so a shape added to either is covered by this without an edit. Every
-    /// [`Spelling`] must be reached, asserted rather than assumed — a witness
-    /// list that lost its only object would leave the arm that was broken
-    /// ungated, which is precisely how this defect survived.
+    /// The population is DERIVED: every key here that carries a `/` is split at
+    /// its last separator and stated both ways, and a fixture with no such key
+    /// fails rather than passing on nothing.
     #[test]
-    fn every_stored_spelling_renders_back_to_what_it_parsed_from() {
-        let witnesses = [
-            "\"client\"",
-            "'peer'",
-            "[]",
-            "[\"tcp/127.0.0.1:7447\"]",
-            "[\"tcp/a\",\"tcp/b\"]",
-            "false",
-            "null",
-            "65535",
-            "{nested: 1}",
-            "{\"body\":\"}\"}",
-            "[{\"kind\":\"current_exe_parent\",\"value\":null},\".\"]",
+    fn stating_an_object_and_stating_its_leaf_build_the_same_config() {
+        let cases = [
+            (CONNECT_KEY, "[\"tcp/127.0.0.1:17447\"]"),
+            (LISTEN_KEY, "[\"tcp/127.0.0.1:17448\"]"),
+            (SCOUTING_TIMEOUT_KEY, "1234"),
+            (MULTICAST_LOCATOR_KEY, "\"224.0.0.224:7446\""),
         ];
-        let mut reached = Vec::new();
-        for raw in witnesses {
-            let parsed = parse_json5_value(raw).unwrap_or_else(|| panic!("{raw:?} must parse"));
-            reached.push(parsed.spelling);
-            let rendered = render_stored(&parsed);
+        let multi = cases.iter().filter(|(k, _)| k.contains('/')).count();
+        assert!(
+            multi >= 3,
+            "only {multi} multi-segment key(s), so this proves little"
+        );
+
+        for (path, value) in cases {
+            let Some((parent, leaf)) = path.rsplit_once('/') else {
+                continue;
+            };
+            let mut by_leaf = ConfigState::default();
+            by_leaf.insert_value(path, parse_json5_value(value).expect("a value"));
+
+            let mut by_object = ConfigState::default();
+            let object = format!("{{\"{leaf}\": {value}}}");
+            by_object.insert_value(parent, parse_json5_value(&object).expect("an object"));
+
             assert_eq!(
-                parse_json5_value(&rendered),
-                Some(parsed.clone()),
-                "{raw:?} rendered to {rendered:?}, which is a different value"
+                by_object.render(path),
+                by_leaf.render(path),
+                "stating `{object}` at {parent} must reach {path}"
             );
-            // And STABLE: rendering the re-parse must give the same bytes, or
-            // two round trips through a document would drift.
             assert_eq!(
-                render_stored(&parse_json5_value(&rendered).expect("re-parsed")),
-                rendered
+                by_object.first(path),
+                by_leaf.first(path),
+                "the OPEN path reads {path}, and it must see the same either way"
+            );
+            assert_eq!(
+                by_object.render_nested().expect("no conflict"),
+                by_leaf.render_nested().expect("no conflict"),
+                "the two spellings must emit the same document"
             );
         }
-        for spelling in [Spelling::Quoted, Spelling::List, Spelling::Verbatim] {
-            assert!(
-                reached.contains(&spelling),
-                "no witness reaches {spelling:?}, so its render arm is ungated"
-            );
-        }
+    }
+
+    /// R2304 (open-debt item 642) — re-stating a key REPLACES its subtree,
+    /// which is upstream's own semantics rather than a choice made here.
+    ///
+    /// Measured on `libzenohc.so` 1.10.0: `insert("scouting", "{\"delay\":99}")`
+    /// then `insert("scouting", "{\"timeout\":77}")` leaves `delay` back at
+    /// `null`. A merge would make wz remember an instruction upstream forgot,
+    /// and a caller clearing a subtree by re-stating it would find the old
+    /// members still there.
+    #[test]
+    fn re_stating_a_key_replaces_its_subtree() {
+        let mut state = ConfigState::default();
+        state.insert_value(
+            "scouting",
+            parse_json5_value("{\"delay\": 99, \"timeout\": 1}").expect("an object"),
+        );
+        assert_eq!(state.render("scouting/delay").as_deref(), Some("99"));
+        state.insert_value(
+            "scouting",
+            parse_json5_value("{\"timeout\": 77}").expect("an object"),
+        );
+        assert_eq!(
+            state.render("scouting/delay"),
+            None,
+            "a member the second statement did not mention must be gone"
+        );
+        assert_eq!(state.render("scouting/timeout").as_deref(), Some("77"));
     }
 }
