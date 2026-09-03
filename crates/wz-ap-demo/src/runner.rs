@@ -1723,7 +1723,8 @@ fn install_session_handles(
     // log line carries, because the interesting case is the LATER subscriber:
     // against a zenoh router the second CURRENT token interest from one face is
     // answered with the id the router already used for that resource
-    // (`make_token_id` reuses `local_tokens[res]`, hat/router/token.rs:978-990),
+    // (upstream reuses its per-face token id,
+    // `zenoh/src/net/routing/hat/router/token.rs` @ `router_tokens`),
     // so wz's first-declaration-wins guard drops that reply and everything the
     // later subscriber sees comes from the R311y790 local replay.
     // R311y791 — `--liveliness-subscribe-on-sample <keyexpr>`: the LATE

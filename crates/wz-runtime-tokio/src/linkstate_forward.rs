@@ -2640,7 +2640,9 @@ impl LinkstateForwarder {
     /// downgrade re-declare (`zenoh/src/net/routing/hat/peer/queries.rs`
     /// @ `unregister_queryable`, which
     /// unpropagates only when the qabl set empties; contrast
-    /// the ROUTER hat's re-declare arm at hat/router/queries.rs:930-940). Wiring the
+    /// the ROUTER hat's re-declare arm
+    /// (`zenoh/src/net/routing/hat/router/queries.rs` @ `fn unregister_queryable`).
+    /// Wiring the
     /// downgrade re-push into the peer closes the same ALL_COMPLETE-downgrade hole the
     /// linkstate_peer hat leaves open — a valid CLIENT-directed re-declare pico handles
     /// via drop-first + conditional-readd (`net/filtering.c`), never sent to a real peer.

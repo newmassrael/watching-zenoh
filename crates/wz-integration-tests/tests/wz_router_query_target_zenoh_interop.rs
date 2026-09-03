@@ -61,7 +61,8 @@ use wz_integration_tests::common::{
 /// queryables declare the pattern and the query names a concrete key, so
 /// `demo/query-target/**` COVERS `demo/query-target/x` — the `includes`
 /// relation zenoh's per-query completeness is computed from
-/// (`hat/router/queries.rs:1464`). Distinct from every other Layer E keyexpr so
+/// (`zenoh/src/net/routing/hat/router/queries.rs` @ `fn insert_target_for_qabls`).
+/// Distinct from every other Layer E keyexpr so
 /// parallel runs never cross-match.
 const QABL_KEY: &str = "demo/query-target/**";
 const QUERY_KEY: &str = "demo/query-target/x";

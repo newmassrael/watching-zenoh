@@ -256,7 +256,8 @@ fn wz_liveliness_history_replays_a_zenohd_routed_pico_token() {
 /// ## Why zenohd cannot serve the late one, established by direct read
 ///
 /// zenohd DOES answer the late CURRENT interest — `declare_token_interest`
-/// (`hat/router/token.rs:992-1071`) walks `router_tokens` and sends a
+/// (`zenoh/src/net/routing/hat/router/token.rs` @ `router_tokens`) walks
+/// `router_tokens` and sends a
 /// `DeclareToken` per match, with no "already declared to this face" guard.
 /// What it cannot do is make that a NEW token: `make_token_id`
 /// (`:978-990`) reuses `local_tokens[res]` whenever the mode is future-bearing,

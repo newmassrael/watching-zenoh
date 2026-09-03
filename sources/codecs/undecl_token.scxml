@@ -17,7 +17,8 @@
                   bytes). The Z=1 form is the SOURCED cross-tier
                   retraction's keyexpr carrier (zenoh
                   `UndeclareToken { id, ext_wire_expr }`,
-                  hat/router/token.rs:930-933) — the token twin of
+                  `zenoh/src/net/routing/hat/router/token.rs`
+                  @ `fn propagate_token`) — the token twin of
                   undecl_subscriber's ext chain; the default wire omits
                   it (Z=0).
 

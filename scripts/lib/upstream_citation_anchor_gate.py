@@ -259,14 +259,19 @@ LINE_BUDGET = 300
 BARE_BUDGET = 60
 #: The root-less axis, after R2317 repaired the 49 citations that named a file
 #: gone at the pin. Same two-directional ratchet as LINE and BARE.
-ROOTLESS_LINE_BUDGET = 104
+ROOTLESS_LINE_BUDGET = 59
 ROOTLESS_BARE_BUDGET = 16
 #: Root-less LINE citations whose file EXISTS at the pin but whose line number
 #: is past its end -- 1.5.0 line numbers on files that shrank. Measured, not
 #: chosen, and graded only by the RESOLUTION arm (it takes a checkout to know).
 #: See `_rootless_finding` for why this is a ratchet and the gone-path case is
 #: a finding.
-ROOTLESS_STALE_LINE_BUDGET = 46
+#: R2321 repaid 45 of the 46 this started at. The ONE that remains is in
+#: `scripts/lib/crossimpl_audit.py`, which has been another session's in-flight
+#: file since R2317 (open debt 515, and 646 for the red it causes): editing it
+#: would either publish their unreviewed constant change or red their gate. The
+#: ratchet is why leaving it is safe -- it can only shrink from here.
+ROOTLESS_STALE_LINE_BUDGET = 1
 #: Occurrences under a DERIVED candidate segment this axis does not yet grade.
 #: This is the residue of open debt 647 made monotone rather than argued: it
 #: can only shrink, so declaring a segment forces it down in the same commit,

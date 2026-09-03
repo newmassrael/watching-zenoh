@@ -871,7 +871,8 @@ mod tests {
     /// sent a declaration for a token that predates it, so when that token dies
     /// there is no advertised id to name — upstream sends a one-shot
     /// `UndeclareToken` carrying the keyexpr in `ext_wire_expr` instead
-    /// (`hat/router/token.rs:438-457`), and so does this.
+    /// (`zenoh/src/net/routing/hat/router/token.rs` @ `fn unregister_token`),
+    /// and so does this.
     ///
     /// The driver is a real shape rather than a constructed one: pico's
     /// `z_liveliness_declare_subscriber` sends exactly `FUTURE` alone when
@@ -2579,7 +2580,8 @@ mod tests {
     }
 
     /// zenoh's BestMatching takes the FIRST complete entry out of a set the
-    /// router sorted by distance (`hat/router/queries.rs:1520`), so "best" means
+    /// router sorted by distance (`zenoh/src/net/routing/hat/router/queries.rs`
+    /// @ `distance`), so "best" means
     /// NEAREST-complete, not merely any-complete. The witness needs the nearer
     /// queryable declared SECOND, otherwise a first-wins implementation passes.
     #[test]
@@ -2683,7 +2685,8 @@ mod tests {
     /// COMPLETENESS IS PER-QUERY, NOT PER-QUERYABLE. zenoh computes
     /// `complete && qabl_info.complete` where the left operand is
     /// `DEFAULT_INCLUDER.includes(queryable_ke, queried_ke)`
-    /// (`hat/router/queries.rs:1464`): a queryable that only INTERSECTS the
+    /// (`zenoh/src/net/routing/hat/router/queries.rs` @ `fn insert_target_for_qabls`):
+    /// a queryable that only INTERSECTS the
     /// query cannot answer the whole of it however complete it declared itself.
     /// The discriminator is that both halves of this test use the SAME
     /// declaration and differ only in what was asked.

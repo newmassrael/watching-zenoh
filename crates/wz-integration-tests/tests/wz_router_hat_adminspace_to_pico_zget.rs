@@ -11,7 +11,8 @@
 //! (`@/<zid>/router/**`): `linkstate/routers` + `linkstate/peers` (GraphViz DOT of
 //! the two link-state nets) and `route/successor/**` (the computed
 //! `(src, dst) -> next-hop` table). The successor table is rendered from the
-//! ROUTERS net (zenoh `hat/router/mod.rs:910`), so it is empty on a lone router or
+//! ROUTERS net (zenoh `zenoh/src/net/routing/hat/router/mod.rs` @ `fn net`), so
+//! it is empty on a lone router or
 //! a router-with-peers — a next hop only exists once there is a SECOND router to
 //! forward toward. So this drives a real federation: R1 `--router-hat`, R2
 //! `--router-hat --connect R1`. With both up, all three legs carry content, and a

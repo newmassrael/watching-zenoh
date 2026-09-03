@@ -700,7 +700,8 @@ mod tests {
     /// R311xx (diagnose-first) — a FUTURE-only tokens Interest (the
     /// history=false subscriber's declare) must NOT trigger a
     /// current-token replay. zenoh gates the replay on `mode.current()`
-    /// (`hat/client/token.rs:354`); the FUTURE path is covered by the
+    /// (`zenoh/src/net/routing/hat/client/token.rs` @ `fn propagate_token`);
+    /// the FUTURE path is covered by the
     /// declarer's proactive `Declare(DeclToken)` at token-declare time,
     /// not by replaying current state to a future-only subscriber. The
     /// pre-fix gate was "non-final" (C|F), which wrongly replied to a

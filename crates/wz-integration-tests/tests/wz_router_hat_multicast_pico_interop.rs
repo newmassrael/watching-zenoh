@@ -11,7 +11,8 @@
 //! `router.rs:181`) and broadcasts EVERY routed `Push` to it, UNCONDITIONALLY —
 //! outside the sub-gated fan-out (`RouterForwarder::route_push` tail,
 //! `router_forward.rs:2316`, the wz analog of zenoh's flat append
-//! `hat/router/pubsub.rs:1334`). This test proves that egress reaches a FOREIGN
+//! `zenoh/src/net/routing/hat/router/pubsub.rs` @ `fn insert_faces_for_subs`).
+//! This test proves that egress reaches a FOREIGN
 //! zenoh-pico `z_sub -m peer` joined to the same UDP group.
 //!
 //! Topology (three separate processes; the ONLY shared medium between the router

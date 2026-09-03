@@ -6701,7 +6701,8 @@ pub(crate) struct DeclareEmitSpec {
     /// a zenoh router answers a second CURRENT token interest from the same
     /// face with the id it already used for that resource (`make_token_id`
     /// reuses `local_tokens[res]` whenever the mode is future-bearing,
-    /// `hat/router/token.rs:978-990`), so wz's own first-declaration-wins
+    /// `zenoh/src/net/routing/hat/router/token.rs` @ `router_tokens`), so wz's
+    /// own first-declaration-wins
     /// guard drops the reply and the second subscriber is served entirely by
     /// the local replay (R311y790).
     pub(crate) liveliness_subscriber_keyexpr: Vec<String>,

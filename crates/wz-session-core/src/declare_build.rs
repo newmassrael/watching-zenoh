@@ -784,7 +784,8 @@ pub fn build_undeclare_token(token_id: u64) -> DeclareOwned {
 /// [`build_undeclare_queryable_with_keyexpr`]. zenoh retracts a sourced token by
 /// keyexpr, not id (`id == 0`), carrying the keyexpr in the `ext_wire_expr`
 /// extension (zenoh `UndeclareToken { id, ext_wire_expr }`,
-/// `hat/router/token.rs:930-933`). The `id` is 0 and the inner declaration
+/// `zenoh/src/net/routing/hat/router/token.rs` @ `fn propagate_token`). The
+/// `id` is 0 and the inner declaration
 /// header sets `Z` (bit 7) to flag the ext chain; the keyexpr ext is built by the
 /// [`declare_ext_keyexpr`](crate::declare_ext_keyexpr) SSOT (identical wire to the
 /// subscriber/queryable retraction, only the inner MID differs — 0x07). Fallible

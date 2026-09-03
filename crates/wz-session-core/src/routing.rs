@@ -425,7 +425,8 @@ mod imp {
         /// ANDed with the declared flag — zenoh's
         /// `complete && qabl_info.complete` where the left operand is
         /// `DEFAULT_INCLUDER.includes(queryable_ke, queried_ke)`
-        /// (`hat/router/queries.rs:1464`, `:1510`). The distinction is
+        /// (`zenoh/src/net/routing/hat/router/queries.rs`
+        /// @ `fn insert_target_for_qabls`). The distinction is
         /// load-bearing: a queryable on `demo/a` that declared itself complete
         /// still cannot serve all of `demo/*`, and treating it as if it could
         /// would silence every other answerer.
@@ -1250,7 +1251,8 @@ mod imp {
         /// The CURRENT half of a TOKENS interest: the liveliness tokens already
         /// held on OTHER faces that match `interest_ke`, each sent back as a
         /// `Declare(DeclToken)` stamped with the soliciting `interest_id`
-        /// (zenoh's `declare_token_interest`, `hat/router/token.rs:992`).
+        /// (zenoh's token-interest replay,
+        /// `zenoh/src/net/routing/hat/router/token.rs` @ `router_tokens`).
         ///
         /// `future` decides the ADVERTISED ID, and it is not cosmetic. Upstream's
         /// `make_token_id` (`token.rs:977-990`) returns 0 for a CURRENT-only
@@ -1759,7 +1761,8 @@ mod imp {
                 .collect();
             // NEAREST-COMPLETE FIRST, then by face id. The first key is zenoh's
             // `route.sort_by_key(|qabl| qabl.info.map_or(u16::MAX, |i| i.distance))`
-            // (`hat/router/queries.rs:1520`); a face that cannot answer alone
+            // (`zenoh/src/net/routing/hat/router/queries.rs` @ `distance`);
+            // a face that cannot answer alone
             // sorts to the end, which selects the same element as zenoh's
             // sort-then-find because that find skips it anyway. The SECOND key
             // has no zenoh counterpart and needs one here: zenoh's stable sort

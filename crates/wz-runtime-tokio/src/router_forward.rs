@@ -146,7 +146,8 @@
 //! ([`bridge_push_cross_mesh`](RouterForwarder::bridge_push_cross_mesh)) — a
 //! self-origination into the target net via [`compute_self_publish_forward`], the
 //! zenoh `compute_data_route` cross-tier legs (blocks 1 & 2 for a non-native
-//! source, `hat/router/pubsub.rs:1291`/`:1307`). The master is elected per-keyexpr
+//! source, `zenoh/src/net/routing/hat/router/pubsub.rs`
+//! @ `fn compute_data_route`). The master is elected per-keyexpr
 //! by HRW ([`elect_router`], a port of zenoh `Hat::elect_router`,
 //! `hat/router/mod.rs:245`) over the SHARED nodes — the routers present in BOTH
 //! meshes ([`shared_nodes`](RouterForwarder::shared_nodes), zenoh
@@ -165,7 +166,8 @@
 //!
 //! An inbound `Request` (a Query) is ROUTED
 //! ([`route_request`](RouterForwarder::route_request)) through the router's full
-//! zenoh `compute_query_route` (`hat/router/queries.rs:1426`) +
+//! zenoh `compute_query_route`
+//! (`zenoh/src/net/routing/hat/router/queries.rs` @ `fn compute_query_route`) +
 //! `compute_final_route` (`dispatcher/queries.rs:205`) — the query-plane twin of
 //! [`route_push`](RouterForwarder::route_push). The SAME 3-block master-gated
 //! structure (routers_net qabls / linkstatepeers_net qabls / client queryables),
@@ -257,7 +259,8 @@
 //! - **Per-peer ingress/egress master filter + source-dimensioned route cache
 //!   (C4 tail)** — zenoh ALSO elects a master per-peer over
 //!   `get_router_links(face.zid)` in its `ingress_filter`/`egress_filter`
-//!   (`hat/router/mod.rs:793`/`:815`), a DIFFERENT candidate set than the global
+//!   (`zenoh/src/net/routing/hat/router/mod.rs` @ `fn gateways_of`), a
+//!   DIFFERENT candidate set than the global
 //!   `shared_nodes` route master — a real asymmetry. wz has no interceptor
 //!   ingress/egress plane yet, so C4 implements the global route master only; the
 //!   per-peer filter + `router_peers_failover_brokering` (off by default in zenoh)
@@ -458,7 +461,8 @@ fn elect_router<'a>(
 /// One mesh tier's query-route parameters, resolved by
 /// [`RouterForwarder::mesh_query_block`] — zenoh `compute_query_route`'s block-1
 /// (routers_net) / block-2 (linkstatepeers_net) AFTER the master gate + source
-/// selection (`hat/router/queries.rs:1465-1497`). Carries the tree ROOT to route
+/// selection (`zenoh/src/net/routing/hat/router/queries.rs`
+/// @ `fn insert_target_for_qabls`). Carries the tree ROOT to route
 /// the Query along, the `node_id` to stamp on the outbound Request, and the inbound
 /// neighbour to exclude in THIS net.
 struct MeshQueryBlock {
@@ -560,7 +564,8 @@ impl LinkstateNetView {
     /// Every `(source, destination, successor)` triple, each zid in zenoh-hex —
     /// the wz mirror of zenoh `route_successors()` (`net/protocol/network.rs:
     /// 1187`). Rendered from THIS net (the router adminspace uses `routers_net`
-    /// for the `route/successor` legs, zenoh `hat/router/mod.rs:910`).
+    /// for the `route/successor` legs, zenoh
+    /// `zenoh/src/net/routing/hat/router/mod.rs` @ `fn route_successors`).
     pub fn route_successors_hex(&self) -> Vec<(String, String, String)> {
         self.0
             .borrow()
@@ -601,7 +606,8 @@ pub struct RouterForwarder {
     /// zenoh's separate `mcast_groups` Vec (the egress polymorphism is WHICH
     /// collection a face lives in, not a `dyn EPrimitives`). A routed `Push` is
     /// broadcast to every group UNCONDITIONALLY at the [`route_push`](Self::route_push)
-    /// tail — zenoh's flat append (`hat/router/pubsub.rs:1334`) sits OUTSIDE the
+    /// tail — zenoh's flat append (`zenoh/src/net/routing/hat/router/pubsub.rs`
+    /// @ `fn insert_faces_for_subs`) sits OUTSIDE the
     /// sub-gated graph walk, so a Put with zero matched local subs still reaches
     /// the group. Empty until a run-mode [`attach_mcast_group`](Self::attach_mcast_group)s
     /// a drive loop's sender (the reserved→active wiring, a later slice).
@@ -715,7 +721,8 @@ pub struct RouterForwarder {
     /// queryable cannot live in a Zid-keyed tier table (`router_qabls` /
     /// `linkstatepeer_qabls`); it lands here instead. [`route_request`](Self::route_request)
     /// routes a Request TOWARD these client queryables (zenoh `compute_query_route`
-    /// block 3, `hat/router/queries.rs:1499`, gated `master || source == Router`);
+    /// block 3, `zenoh/src/net/routing/hat/router/queries.rs`
+    /// @ `fn compute_query_route`, gated `master || source == Router`);
     /// their completeness feeds the GLOBAL BestMatching at distance 1. FaceId-keyed
     /// leaf state, so [`deregister`](FaceForwarder::deregister) MUST purge it BEFORE
     /// its linkless early-return (OBLIGATION 1), like `client_subs`. A3 landed the
@@ -1602,7 +1609,8 @@ impl RouterForwarder {
         // undeclare_push_subs/qabls seam re-arms its pico write-filter here — zenoh's
         // node-removal forget-to-simple-face `propagate_forget_simple_subscription`,
         // reached on a node drop (router hat via `unregister_router_subscription`,
-        // hat/router/pubsub.rs:568; linkstate_peer hat via `unregister_peer_subscription`,
+        // `zenoh/src/net/routing/hat/router/pubsub.rs` @ `fn unregister_subscriber`;
+        // the peer hat via its own twin,
         // `zenoh/src/net/routing/hat/peer/pubsub.rs` @ `fn unregister_subscriber`),
         // and the queryable twin beside it.
         // The two per-keyexpr retraction actions are co-located: the cross-tier mesh
@@ -1624,7 +1632,8 @@ impl RouterForwarder {
         // folded completeness) — is CLOSED (R311y153): undeclare_push_qabls fires BOTH
         // the full-undeclare AND the value-aware downgrade re-push here, matching zenoh's
         // ROUTER hat register_router_queryable-via-local_router_qabl_info re-declare on
-        // partial node-removal (hat/router/queries.rs:930-940). See undeclare_push_qabls.
+        // partial node-removal (`zenoh/src/net/routing/hat/router/queries.rs`
+        // @ `fn unregister_queryable`). See undeclare_push_qabls.
         // Pre-existing + benign (named, not introduced here): any_sub/qabl_matches fold
         // with NO destination-face exclusion (vs zenoh loop-2's remote_*_subs(&m, &face)),
         // so a client that both publishes AND subscribes a ke keeps its OWN filter OFF
@@ -2580,7 +2589,9 @@ impl RouterForwarder {
     }
 
     /// Route an inbound data `Push` through the router's full zenoh
-    /// `compute_data_route` structure (`hat/router/pubsub.rs:1215`): resolve the
+    /// `compute_data_route` structure
+    /// (`zenoh/src/net/routing/hat/router/pubsub.rs` @ `fn compute_data_route`):
+    /// resolve the
     /// keyexpr and elect the per-keyexpr route master ONCE, then apply the three
     /// route blocks —
     /// - blocks 1 & 2, the two meshes' subs: the WITHIN-tier transit
@@ -2694,11 +2705,13 @@ impl RouterForwarder {
         }
         // EGRESS to any attached multicast group — UNCONDITIONAL, OUTSIDE the
         // sub-gated fan-out above (zenoh's flat `mcast_groups` append,
-        // `hat/router/pubsub.rs:1334`): a Put with zero matched local subs still
+        // `zenoh/src/net/routing/hat/router/pubsub.rs`
+        // @ `fn insert_faces_for_subs`): a Put with zero matched local subs still
         // reaches the group. The resolved `keyexpr` is threaded so the egress
         // reliteralizes an aliased id-only push (the group shares no alias table).
         // `inbound_is_mcast` is the echo guard (zenoh `egress_filter` both-multicast
-        // deny, `hat/router/mod.rs:812`): a Push that ARRIVED on the multicast
+        // deny, `zenoh/src/net/routing/dispatcher/tables.rs`
+        // @ `fn egress_filter`): a Push that ARRIVED on the multicast
         // ingress face is NOT re-broadcast to a group — `false` on the unicast path
         // here, `true` on the [`route_mcast_ingress`](Self::route_mcast_ingress) path.
         #[cfg(feature = "transport-multicast")]
@@ -2726,10 +2739,12 @@ impl RouterForwarder {
 
     /// Broadcast a routed `Push` to every attached multicast group. UNCONDITIONAL
     /// by design (zenoh appends `mcast_groups` to every data route outside the
-    /// graph walk, `hat/router/pubsub.rs:1334`), so it must NOT be folded into the
+    /// graph walk, `zenoh/src/net/routing/hat/router/pubsub.rs`
+    /// @ `fn insert_faces_for_subs`), so it must NOT be folded into the
     /// sub-gated [`self_publish_into_tier`](Self::self_publish_into_tier) /
     /// [`forward_push_tier`](Self::forward_push_tier) (which drop when no local sub
-    /// matched). Echo guard (zenoh `egress_filter`, `hat/router/mod.rs:813`): a
+    /// matched). Echo guard (zenoh `zenoh/src/net/routing/dispatcher/tables.rs`
+    /// @ `fn egress_filter`; 1.10.0 moved it out of the router hat): a
     /// Push whose source is itself a multicast face is NOT re-broadcast to a group
     /// (`inbound_is_mcast` ⇒ return; mcast→mcast is the both-multicast deny). The
     /// group sink only ENQUEUES a [`MulticastTxItem::Push`]; the drive loop mints
@@ -2894,7 +2909,8 @@ impl RouterForwarder {
     }
 
     /// Whether SELF is the elected route master for `keyexpr` — the zenoh
-    /// `compute_data_route` master decision (`hat/router/pubsub.rs:1284`): master
+    /// `compute_data_route` master decision
+    /// (`zenoh/src/net/routing/hat/router/pubsub.rs` @ `fn compute_data_route`): master
     /// IFF self wins the HRW election ([`elect_router`]) over the SHARED nodes
     /// (routers present in BOTH meshes, [`shared_nodes`](Self::shared_nodes)).
     /// `shared_nodes` ALWAYS contains self (seeded in both nets), so a
@@ -3619,7 +3635,8 @@ impl RouterForwarder {
     ///   dropped (case c, R311y153), so an ALL_COMPLETE querier's filter re-arms. The
     ///   client-facing twin of zenoh's `register_router_queryable(local_router_qabl_info)`
     ///   partial-removal re-declare — reached from a graceful undeclare via
-    ///   `undeclare_simple_queryable` (hat/router/queries.rs:808-809) and from a
+    ///   the queryable retract (`zenoh/src/net/routing/hat/router/queries.rs`
+    ///   @ `fn unregister_queryable`) and from a
     ///   node-removal via `queries_remove_node` (:930-940); both route through the same
     ///   `propagate_simple_queryable` value-diff gate (:255). Uses the SAME
     ///   `merged_qabl_info` fold `push_future_queryable` uses (excludes self + dest).
@@ -4030,7 +4047,8 @@ impl RouterForwarder {
     /// A Client-tier `UndeclareToken` is ID-KEYED (`build_undeclare_token(id)`, no
     /// ext — the form wz's own liveliness `Drop` and pico emit), so the retracted
     /// keyexpr is resolved BY ID (zenoh `forget_simple_token` id-first,
-    /// `hat/client/token.rs:276`), NOT by an `ext_wire_expr` the client never sends.
+    /// `zenoh/src/net/routing/hat/client/token.rs` @ `ext_wire_expr`), NOT by an
+    /// `ext_wire_expr` the client never sends.
     /// The sourced (`id == 0`, ext) form is a MESH peer's and routes through
     /// [`withdraw_token`](Self::withdraw_token) instead.
     #[cfg(feature = "routing-token-tables")]
@@ -4624,7 +4642,8 @@ impl RouterForwarder {
     }
 
     /// Route an inbound `Request` (a Query) through the router's full zenoh
-    /// `compute_query_route` (`hat/router/queries.rs:1426`) + `compute_final_route`
+    /// `compute_query_route` (`zenoh/src/net/routing/hat/router/queries.rs`
+    /// @ `fn compute_query_route`) + `compute_final_route`
     /// (`dispatcher/queries.rs:205`) — the FORWARD (Request) half of the query
     /// route (C5b), the query-plane twin of [`route_push`](Self::route_push).
     ///
@@ -4807,7 +4826,8 @@ impl RouterForwarder {
 
     /// The per-mesh-tier query-route parameters for a Request whose inbound source
     /// role is `src_tier` — zenoh `compute_query_route`'s block-1 / block-2 gate +
-    /// source selection (`hat/router/queries.rs:1465-1497`). `None` when the block
+    /// source selection (`zenoh/src/net/routing/hat/router/queries.rs`
+    /// @ `fn insert_target_for_qabls`). `None` when the block
     /// is master-gated OFF; else a [`MeshQueryBlock`]:
     /// - the block's OWN tier is the source's tier (within-tier leg): route along
     ///   the QUERIER's tree, stamp its psid, exclude the real inbound neighbour —
@@ -4896,7 +4916,8 @@ impl RouterForwarder {
             ) {
                 // Truncate the jittered graph distance to u16, exactly as zenoh
                 // stamps `distance: net.distances[qabl_idx] as u16`
-                // (`hat/router/queries.rs:1107`): the per-net `select_best_matching`
+                // (`zenoh/src/net/routing/hat/router/queries.rs` @ `distance`):
+                // the per-net best-matching pick
                 // picks the truly-nearest by the full f64 (jitter breaks a same-cost
                 // tie deterministically WITHIN a net), but the CROSS-block compare
                 // must be on the same integer scale zenoh sorts by. With the DEFAULT
@@ -4939,7 +4960,8 @@ impl RouterForwarder {
     /// The first client face (other than `inbound`) hosting a queryable COMPLETE
     /// for `keyexpr` — the client candidate for the GLOBAL BestMatching (distance 1,
     /// zenoh `compute_query_route` block 3's `distance: 1`,
-    /// `hat/router/queries.rs:1512`). "Complete for the query" is the declared
+    /// `zenoh/src/net/routing/hat/router/queries.rs` @ `qabl_info`).
+    /// "Complete for the query" is the declared
     /// `complete` AND the declaration keyexpr INCLUDING the full query keyexpr — the
     /// same test [`complete_for_query_peers`] applies to a mesh queryable.
     fn first_complete_client(&self, inbound: FaceId, keyexpr: &str) -> Option<FaceId> {
@@ -5055,7 +5077,8 @@ impl RouterForwarder {
     }
 
     /// Forward the Query to CLIENT faces hosting a matching queryable — zenoh
-    /// `compute_query_route` block 3 fanned (`hat/router/queries.rs:1499`): every
+    /// `compute_query_route` block 3 fanned
+    /// (`zenoh/src/net/routing/hat/router/queries.rs` @ `fn compute_query_route`): every
     /// client (other than `inbound`) whose stored queryable INTERSECTS the query
     /// (`complete_only == false`, `QueryTarget::All`) or is COMPLETE-for-the-query
     /// (`complete_only == true`, `QueryTarget::AllComplete`), allocating a
@@ -5534,7 +5557,9 @@ impl FaceForwarder for RouterForwarder {
     /// federate it into the unicast linkstate mesh. Classified Client-tier like
     /// zenoh's mcast peer (`WhatAmI::Client`, `new_peer_multicast` router.rs:226).
     /// The echo guard keeps it OFF every multicast group (`inbound_is_mcast = true`
-    /// — zenoh both-multicast deny, `hat/router/mod.rs:812`). Mesh federation is
+    /// — zenoh both-multicast deny,
+    /// `zenoh/src/net/routing/dispatcher/tables.rs` @ `fn egress_filter`). Mesh
+    /// federation is
     /// gated by the per-keyexpr HRW Designated-Router election
     /// ([`mcast_ingress_may_federate`](Self::mcast_ingress_may_federate) →
     /// [`is_group_dr`](Self::is_group_dr)): exactly one on-group router federates a
@@ -7684,7 +7709,8 @@ mod tests {
         // (forgets_for_withdrawn's any_qabl_matches is true), but a RE-PUSH of the
         // DOWNGRADED complete=false carrying the SAME id, so the querier's ALL_COMPLETE
         // filter re-arms. The client-facing twin of zenoh's register_router_queryable(
-        // local_router_qabl_info) partial-removal re-declare (hat/router/queries.rs:930-940).
+        // local_router_qabl_info) partial-removal re-declare
+        // (`zenoh/src/net/routing/hat/router/queries.rs` @ `fn unregister_queryable`).
         let fwd = RouterForwarder::new(zid(0x01));
         let (router, _sr) = face(zid(0xAA), WIRE_ROUTER);
         let (client, sink_c) = face(zid(0xCC), WIRE_CLIENT);
@@ -12538,7 +12564,8 @@ mod tests {
     /// R311wt-mc slice 1 — the EGRESS-only multicast group plane: an attached
     /// group receives a routed Put as a `MulticastTxItem::Push` (carrying the
     /// reliable flag), and the echo guard suppresses a multicast-sourced Push
-    /// (zenoh's both-multicast egress deny, `hat/router/mod.rs:813`). The
+    /// (zenoh's both-multicast egress deny,
+    /// `zenoh/src/net/routing/dispatcher/tables.rs` @ `fn egress_filter`). The
     /// broadcast is UNCONDITIONAL — no subscriber is registered here, yet the
     /// group still receives it (zenoh's flat append, `pubsub.rs:1334`).
     #[cfg(feature = "transport-multicast")]
@@ -12572,7 +12599,8 @@ mod tests {
     /// call as slice 1's unit did) reaches an attached multicast group at the
     /// `route_push` tail — UNCONDITIONALLY, with no subscriber registered for the
     /// keyexpr (zenoh's flat `mcast_groups` append outside the sub-gated walk,
-    /// `hat/router/pubsub.rs:1334`). This closes the forwarder->sender half of the
+    /// `zenoh/src/net/routing/hat/router/pubsub.rs` @ `fn insert_faces_for_subs`).
+    /// This closes the forwarder->sender half of the
     /// egress composition; the sender->group socket half is the Layer M loopback
     /// e2e `router_egress_helper_reaches_group_subscriber`.
     #[cfg(feature = "transport-multicast")]
@@ -12978,7 +13006,8 @@ mod tests {
         );
     }
 
-    /// R311y194 — echo guard (zenoh both-multicast deny, `hat/router/mod.rs:812`):
+    /// R311y194 — echo guard (zenoh both-multicast deny,
+    /// `zenoh/src/net/routing/dispatcher/tables.rs` @ `fn egress_filter`):
     /// a Push RECEIVED on the multicast ingress face is NOT re-broadcast to an
     /// attached multicast group (mcast->mcast is denied), so `route_mcast_ingress`
     /// threads `inbound_is_mcast = true` into the group-broadcast tail.

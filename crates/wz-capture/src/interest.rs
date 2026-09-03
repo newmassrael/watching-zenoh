@@ -112,7 +112,8 @@
 //!   branches (`zenoh/src/net/routing/hat/router/interests.rs:60,71,82`), so a
 //!   `DeclareQueryable` answering a subscribers-only ask is not one of them;
 //! * the KEYEXPR — a current dump is filtered by `sub.matches(res)`
-//!   (`hat/router/pubsub.rs:986`), so a declaration whose keyexpr cannot
+//!   (`zenoh/src/net/routing/hat/router/pubsub.rs`
+//!   @ `fn remote_subscribers_matching`), so a declaration whose keyexpr cannot
 //!   intersect the restriction is not one either.
 //!
 //! Upstream sends neither, which is what makes each a FINDING about the peer
@@ -704,7 +705,8 @@ impl InterestCensus {
     /// `demo/**` ask with an `other/thing` subscriber, or to a subscribers-only
     /// ask with a queryable, has answered the id and not the QUESTION — and
     /// every plane that counted the reply reported the exchange as served.
-    /// Upstream sends neither (`hat/router/pubsub.rs:986`,
+    /// Upstream sends neither (`zenoh/src/net/routing/hat/router/pubsub.rs`
+    /// @ `fn remote_subscribers_matching`,
     /// `hat/router/interests.rs:60`), so each one is a divergence rather than
     /// a shape this reader must tolerate.
     ///
