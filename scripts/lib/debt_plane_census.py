@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-"""R311y919 (no register item) — how many ANALYZER-PLANE debts are still open,
+r"""R311y919 (no register item) — how many ANALYZER-PLANE debts are still open,
 as a number a command produces rather than one a session remembers.
 
 It closes no register item on purpose: it is the INSTRUMENT a repayment loop
@@ -72,12 +72,95 @@ still work the owner can put at the front. What priority DOES require is that
 the item was judged (`<= swept_through`) and is not held for an owner
 decision -- a queue cannot order a round to take something nobody decided.
 
+## The RANKING and LINEAGE axes (R2302, open-debt item 639)
+
+The round discipline names four more axes and, until this round, NOTHING read
+any of them -- they were prose, which is the failure the operator's standing
+rule (10) names ("a reason written in prose is one nobody measures"). MEASURED
+before the change: `grep -n 'critical\|ordinary\|unranked\|@from\|deferred'`
+over this file returned ZERO lines, while the register already carried the
+annotations on fifteen items. Declared, never judged.
+
+* `critical` / `ordinary` -- which open item to take first. Rule (11) says to
+  take from the critical line when it is not empty; there was no such line.
+* `@from: <n>` / `@from: none` -- whether the item was CREATED by the round
+  paying item `<n>`, or merely ENCOUNTERED while paying something. Rule (13)
+  turns on that distinction, because charging an encountered debt to the round
+  that tripped over it lengthens every chain and sinks old debt.
+* chain depth -- DERIVED here from `@from:`, never read from prose. Item 637
+  wrote "chain depth 2: 631 -> 634 -> 637" by hand; a hand-written depth is a
+  second copy of a derivable fact, so this reader derives it and judges the
+  hand-written one against the derivation rather than trusting it.
+* `deferred` -- an item whose chain is deeper than `reaim_cap` is registered
+  but NOT paid this round (rule 14). Declared deferral and derived deferral
+  must agree in BOTH directions.
+
+### Where an annotation lives, and why that is structural
+
+An item's HEADER is its bold title span: from the item line to the line where
+the `**` balance closes, counting only `**` OUTSIDE inline-code spans. That
+last clause is not decoration -- item 435's title contains a literal
+`char **` inside backticks, and a balance that counted it ran the header 15
+lines into the body. MEASURED with the code-span rule: 662 of 662 item lines
+close cleanly, 0 runaway.
+
+The annotation RUN is what follows the first `@from:` that carries a VALUE.
+That is also structural rather than tidy: item 639's own title lists the four
+axis names, including a backticked `` `deferred` `` and a valueless
+`` `@from:` ``, and any reader that scanned the whole header would have marked
+the item that FILED this debt as deferred. Anchoring on `@from: <value>` and
+reading only what follows excludes the axis-name prose by construction.
+
+### `ranked_from`, and why the frontier is DECLARED but pinned
+
+Hundreds of open items predate the discipline. Requiring a ranking on all of
+them would make this gate red forever, and exempting them by a hand-written
+list would be the escape hatch rule (6) forbids. So the roster DECLARES a
+frontier and this reader pins it from both sides:
+
+* every item at or above it must carry `@from:`, and every OPEN one must carry
+  a ranking -- unclassified is RED, never a pass;
+* no item BELOW it may carry an annotation -- which is what stops a round from
+  raising the frontier to dodge. Raising it leaves annotated items underneath;
+  stripping those annotations to fix that pushes the unranked count above its
+  baseline. The two rules interlock, so the frontier has exactly one value the
+  data admits and moving it means doing the work.
+
+### The `unranked` ratchet, and whether 0 is reachable
+
+Rule (12) says the unranked count only falls. Rule (5) says to ask whether a
+completion predicate has any path to 0 at all before trusting it, so: the
+population is the OPEN items below the frontier, 314 of them when this was
+written. It falls when one of them closes and when one of them is annotated
+(which pulls the frontier down to it), and nothing but filing an item below
+the frontier -- impossible, numbers only grow -- can raise it. The path to 0
+exists and is the ordinary course of the repayment loop.
+
+The baseline is DECLARED in the roster, not derived, for R2301's reason: a
+baseline derived from the population it measures follows that population and
+can never fail. It is judged in BOTH directions, the doc-link-budget idiom
+this workspace already uses -- above it means an item arrived unranked, below
+it means lower the number in the same commit.
+
+### Why the critical line does NOT change the exit code
+
+The PRIORITY queue exits 3 because it is a claim on ONE round. A ranking is an
+ordering over the whole open set, so making `critical` non-empty exit non-zero
+would mean this census can never report clean while any critical item is open
+-- a value with no path to 0, which is the trap rule (5) exists to catch. The
+critical and deferred lines are printed, above the count, where rules (11) and
+(14) say to read them. What DOES exit 1 is an axis nobody classified.
+
 ## What it deliberately does NOT do
 
 It does not judge. Nothing here decides whether an item is analyzer-plane -- the
 roster is a human judgement recorded in the register, and a script that
 re-derived it from keywords would reintroduce exactly the floor this file
 exists to replace.
+
+It also does not decide a RANKING. `critical` and `ordinary` are the operator's
+words in the register; this file reads them, counts what carries neither, and
+refuses to guess.
 
 ## Why it is NOT wired into a CI layer
 
@@ -227,6 +310,138 @@ def verdict_findings(live: dict[int, str]) -> list[str]:
     return out
 
 
+#: The lineage token, and it REQUIRES a value. A bare `` `@from:` `` occurs in
+#: item 639's own title, which lists the axis names -- see the module doc.
+FROM_RE = re.compile(r"@from:\s*(none|\d{1,3})")
+
+#: The two ranking words. A header carrying BOTH is a FAIL, not a coin toss.
+RANK_WORDS = ("critical", "ordinary")
+
+#: The deferral marker and the hand-written depth beside it. The depth is
+#: OPTIONAL -- what is not optional is that it agree with the derivation.
+DEFER_RE = re.compile(r"\bdeferred\b")
+DECLARED_DEPTH_RE = re.compile(r"(?:사슬 깊이|chain depth)\s*(\d+)")
+
+
+def outside_code(blob: str) -> str:
+    """`blob` with every inline-code span removed.
+
+    An UNCLOSED backtick swallows the rest, which is exactly what a header cut
+    mid-span looks like and is why this is a split rather than a regex over
+    matched pairs. Markdown agrees: `**` inside backticks is literal text.
+    """
+    parts = blob.split("`")
+    return "".join(parts[i] for i in range(0, len(parts), 2))
+
+
+def item_headers(text: str) -> tuple[dict[int, str], dict[int, str], list[int]]:
+    """`(live headers, archived headers, unbalanced item numbers)`.
+
+    A header is the item's bold title span, joined into one string. It ends at
+    the line where the `**` balance outside inline code first closes; a blank
+    line or the next item line stops it too, and reaching either without a
+    close is reported rather than swallowed -- a runaway header would read an
+    item's BODY as its annotation run.
+    """
+    lines = text.split("\n")
+    starts: set[int] = set()
+    marks: list[tuple[int, int, int]] = []  # (line index, number, fold depth)
+    depth = 0
+    for i, line in enumerate(lines):
+        if "<details>" in line:
+            depth += 1
+        for form in ITEM_FORMS:
+            m = form.match(line)
+            if m:
+                starts.add(i)
+                marks.append((i, int(m.group(1)), depth))
+                break
+        if "</details>" in line:
+            depth = max(0, depth - 1)
+
+    live: dict[int, str] = {}
+    archived: dict[int, str] = {}
+    unbalanced: list[int] = []
+    for i, number, fold in marks:
+        got: list[str] = []
+        closed = False
+        for j in range(i, len(lines)):
+            if j > i and (j in starts or not lines[j].strip()):
+                break
+            got.append(lines[j].strip())
+            if outside_code(" ".join(got)).count("**") >= 2 and (
+                outside_code(" ".join(got)).count("**") % 2 == 0
+            ):
+                closed = True
+                break
+        if not closed:
+            unbalanced.append(number)
+        (archived if fold > 0 else live)[number] = " ".join(got)
+    return live, archived, sorted(set(unbalanced))
+
+
+class Axis(typing.NamedTuple):
+    """One item's four axis values, read from its annotation run."""
+
+    parent: str | None  # "none", a number as text, or None when unannotated
+    ranks: tuple[str, ...]  # the ranking words present; not exactly one is a FAIL
+    deferred: bool
+    declared_depth: int | None
+
+
+def axes(headers: dict[int, str]) -> dict[int, Axis]:
+    """Every item's axis values, read from the run AFTER `@from: <value>`."""
+    out: dict[int, Axis] = {}
+    for number, header in headers.items():
+        m = FROM_RE.search(header)
+        if not m:
+            out[number] = Axis(None, (), False, None)
+            continue
+        run = header[m.end() :]
+        ranks = tuple(w for w in RANK_WORDS if re.search(rf"\b{w}\b", run))
+        depth_m = DECLARED_DEPTH_RE.search(run)
+        out[number] = Axis(
+            m.group(1),
+            ranks,
+            bool(DEFER_RE.search(run)),
+            int(depth_m.group(1)) if depth_m else None,
+        )
+    return out
+
+
+def chain_depth(
+    number: int, table: dict[int, Axis], frontier: int
+) -> tuple[int | None, str | None]:
+    """`(depth, error)` -- derived from `@from:`, never read from prose.
+
+    A parent BELOW the frontier is a ROOT, by the frontier's definition: the
+    discipline starts there and an older ancestor was never asked for lineage.
+    A parent that does not exist, or a cycle, is an error rather than a depth,
+    because a chain that does not terminate cannot answer rule (14).
+    """
+    depth = 0
+    seen: list[int] = [number]
+    cur = number
+    while True:
+        axis = table.get(cur)
+        if axis is None or axis.parent is None or axis.parent == "none":
+            return depth, None
+        parent = int(axis.parent)
+        if parent < frontier:
+            return depth, None
+        if parent not in table:
+            return None, (
+                f"item {cur} declares `@from: {parent}` and the register has no "
+                f"such item -- a lineage that points at nothing cannot be walked"
+            )
+        if parent in seen:
+            chain = " -> ".join(str(n) for n in seen + [parent])
+            return None, f"the `@from:` chain {chain} is a CYCLE"
+        seen.append(parent)
+        cur = parent
+        depth += 1
+
+
 class Roster(typing.NamedTuple):
     """What the roster block declares, as four independent facts.
 
@@ -238,11 +453,20 @@ class Roster(typing.NamedTuple):
     owner: set[int]
     swept: int
     priority: list[int]
+    ranked_from: int
+    unranked_baseline: int
+    reaim_cap: int
+
+
+#: The roster keys that carry a single integer. Named in ONE place because a
+#: key parsed but not required, or required but not parsed, is how a declared
+#: baseline quietly stops being read.
+SCALAR_KEYS = ("swept_through", "ranked_from", "unranked_baseline", "reaim_cap")
 
 
 def roster(text: str) -> Roster:
-    """The rostered target set, the owner-decision set, `swept_through`, and
-    the ORDERED priority queue."""
+    """The rostered target set, the owner-decision set, the ORDERED priority
+    queue, and the four declared scalars."""
     try:
         block = text.split(BEGIN, 1)[1].split(END, 1)[0]
     except IndexError:
@@ -253,11 +477,11 @@ def roster(text: str) -> Roster:
         )
     target: set[int] = set()
     owner: set[int] = set()
-    swept: int | None = None
     # A LIST, not a set: the head is the claim, so order is the whole content
     # of this line. Reading it into a set would leave the queue looking right
     # and pointing at whichever number happened to sort first.
     priority: list[int] = []
+    scalars: dict[str, int] = {}
     for line in block.splitlines():
         line = line.strip()
         if line.startswith("plane:analyzer-owner-decision"):
@@ -266,11 +490,30 @@ def roster(text: str) -> Roster:
             target |= {int(n) for n in re.findall(r"\d{1,3}", line.split("=", 1)[1])}
         elif line.startswith("priority"):
             priority += [int(n) for n in re.findall(r"\d{1,3}", line.split("=", 1)[1])]
-        elif line.startswith("swept_through"):
-            swept = int(line.split("=", 1)[1].strip())
-    if swept is None:
-        raise SystemExit("debt-plane-census: FAIL -- the roster names no `swept_through`")
-    return Roster(target, owner, swept, priority)
+        else:
+            for key in SCALAR_KEYS:
+                if line.startswith(key):
+                    scalars[key] = int(line.split("=", 1)[1].strip())
+                    break
+    missing = [k for k in SCALAR_KEYS if k not in scalars]
+    if missing:
+        # A declared baseline that is ABSENT must not read as satisfied. Each
+        # of these pins something the reader below would otherwise have to
+        # invent, and an invented baseline follows its population.
+        raise SystemExit(
+            f"debt-plane-census: FAIL -- the roster names no "
+            f"{', '.join('`' + k + '`' for k in missing)}"
+        )
+    swept = scalars["swept_through"]
+    return Roster(
+        target,
+        owner,
+        swept,
+        priority,
+        scalars["ranked_from"],
+        scalars["unranked_baseline"],
+        scalars["reaim_cap"],
+    )
 
 
 def unclosed_folds(text: str) -> list[int]:
@@ -312,6 +555,13 @@ def unclosed_folds(text: str) -> list[int]:
 #: folded below. Without those shapes the vocabulary arms are never executed,
 #: and item 16 is the exact case item 603 was filed for -- under the previous
 #: reader its folded original won and the item read back as open.
+#: R2302 (item 639) adds items 18-20, the RANKED frontier. 18 is a root, 19 its
+#: child, 20 its grandchild -- the shortest fixture that reaches a chain past a
+#: `reaim_cap` of 1, which is the arm no shallower fixture can execute. 20 also
+#: writes its depth by hand so the "declared disagrees with derived" arm has a
+#: subject. Item 17 carries a literal `char **` inside backticks: without the
+#: code-span rule its header runs into the body, which is the shape MEASURED on
+#: the real register at item 435.
 SELFTEST_ROSTER = """\
 - **10. an open analyzer item.**
 - **11. another open one.**
@@ -326,12 +576,21 @@ SELFTEST_ROSTER = """\
 - **16. the open-looking wording this item had before it was closed.**
 
   </details>
+
+- **17. ✅ CLOSED -- a title quoting `wz_surfaces(char **buf)` in code.**
+- **18. a root at the ranking frontier. `@from: none` · ordinary**
+- **19. a child of 18. `@from: {p19}` · critical**
+- **20. a grandchild of 19. `@from: 19` · ordinary ·
+  ⚠ **deferred**(사슬 깊이 {d20})**
 {extra}
 {begin}
 plane:analyzer = 10 11
 plane:analyzer-owner-decision = 13
 priority = {priority}
 swept_through = {swept}
+ranked_from = {ranked_from}
+unranked_baseline = {unranked_baseline}
+reaim_cap = {reaim_cap}
 {end}
 """
 
@@ -362,18 +621,107 @@ def selftest() -> int:
         ("a DUPLICATE on the queue fails", {"priority": "10 10"}, 1, "appears twice"),
         ("an UNJUDGED item on the queue fails", {"priority": "10", "swept": "9"}, 1, "past `swept_through"),
         ("an OWNER-DECISION item on the queue fails", {"priority": "13"}, 1, "held for an OWNER DECISION"),
-        # R2250b (item 603). A folded original must not reopen its item: 10, 11
-        # and 13 are the only open ones, and 16's archived wording is the shape
-        # that used to win.
-        ("a folded original does not reopen its item", {"priority": ""}, 0, "open = 3  closed = 4"),
+        # R2250b (item 603). A folded original must not reopen its item: 10, 11,
+        # 13 and the three ranked items are the open ones, and 16's archived
+        # wording is the shape that used to win.
+        ("a folded original does not reopen its item", {"priority": ""}, 0, "open = 6  closed = 5"),
         # The verdict vocabulary, forward: a mark with a word this reader does
         # not know is a FAIL rather than an open item.
         (
             "a discharge mark with an unknown word fails",
-            {"priority": "", "extra": "- **17. ✅ DISCHARGED -- a word nobody taught this reader.**"},
+            {"priority": "", "extra": "- **21. ✅ DISCHARGED -- a word nobody taught this reader.**"},
             1,
             "no verdict this reader knows",
         ),
+        # R2302 (item 639) -- the ranking and lineage axes. Every arm below was
+        # unreachable before this round because nothing read the axes at all.
+        (
+            "an item past the frontier with no `@from:` fails",
+            {"priority": "", "extra": "- **21. no lineage at all. ordinary**"},
+            1,
+            "carries no `@from:`",
+        ),
+        (
+            "an OPEN item past the frontier with no ranking fails",
+            {"priority": "", "extra": "- **21. lineage but no ranking. `@from: none`**"},
+            1,
+            "carries no ranking",
+        ),
+        (
+            "a header claiming BOTH rankings fails",
+            {"priority": "", "extra": "- **21. `@from: none` · critical · ordinary**"},
+            1,
+            "a ranking that says both orders nothing",
+        ),
+        # The frontier is pinned from BELOW as well: raising it past an
+        # annotated item is the dodge this arm forbids.
+        (
+            "an annotated item BELOW the frontier fails",
+            {"priority": "", "ranked_from": "19"},
+            1,
+            "sits BELOW `ranked_from = 19`",
+        ),
+        (
+            "a `@from:` pointing at no item fails",
+            {"priority": "", "extra": "- **21. `@from: 99` · ordinary**"},
+            1,
+            "the register has no such item",
+        ),
+        (
+            "a lineage CYCLE fails",
+            {
+                "priority": "",
+                "extra": "- **21. `@from: 22` · ordinary**\n- **22. `@from: 21` · ordinary**",
+            },
+            1,
+            "is a CYCLE",
+        ),
+        # Depth is DERIVED. Both directions of the deferral rule, and the
+        # hand-written depth judged against the derivation.
+        (
+            "a chain past the cap that does not say `deferred` fails",
+            {"priority": "", "extra": "- **21. `@from: 20` · ordinary**"},
+            1,
+            "does not say `deferred`",
+        ),
+        (
+            "a `deferred` the derivation does not support fails",
+            {"priority": "", "reaim_cap": "2"},
+            1,
+            "a deferral the derivation does not support",
+        ),
+        (
+            "a hand-written chain depth that disagrees fails",
+            {"priority": "", "d20": "5"},
+            1,
+            "the derivation is the fact",
+        ),
+        # The ratchet, both directions. 10, 11 and 13 are the open unranked
+        # items below the frontier.
+        (
+            "an unranked count ABOVE the baseline fails",
+            {"priority": "", "unranked_baseline": "2"},
+            1,
+            "an item arrived unranked",
+        ),
+        (
+            "an unranked count BELOW the baseline fails",
+            {"priority": "", "unranked_baseline": "4"},
+            1,
+            "lower it to 3 in this same edit",
+        ),
+        # The header derivation itself. A title whose bold never closes would
+        # otherwise read its own BODY as an annotation run.
+        (
+            "a title whose bold never closes fails",
+            {"priority": "", "extra": "- **21. `@from: none` · ordinary, and no closing mark."},
+            1,
+            "bold title span never closes",
+        ),
+        # The lines rules (11) and (14) are told to read. Printed, not exiting:
+        # see the module doc on why a ranking must not move the exit code.
+        ("the critical line names the take", {"priority": ""}, 0, "CRITICAL -- take item 19 next"),
+        ("the deferred line names the held", {"priority": ""}, 0, "DEFERRED -- 1 item(s) held"),
     ]
     env_for = {
         "ack of the head clears it": {"WZ_DEBT_PRIORITY_ACK": "10"},
@@ -387,8 +735,13 @@ def selftest() -> int:
             begin=BEGIN,
             end=END,
             priority=fields.get("priority", ""),
-            swept=fields.get("swept", "20"),
+            swept=fields.get("swept", "30"),
             extra=fields.get("extra", ""),
+            ranked_from=fields.get("ranked_from", "18"),
+            unranked_baseline=fields.get("unranked_baseline", "3"),
+            reaim_cap=fields.get("reaim_cap", "1"),
+            p19=fields.get("p19", "18"),
+            d20=fields.get("d20", "2"),
         )
         with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as fh:
             fh.write(body)
@@ -417,6 +770,129 @@ def selftest() -> int:
 
     print(f"debt-plane-census selftest: {len(cases) - failures}/{len(cases)} arm(s) pass")
     return 1 if failures else 0
+
+
+class Ranking(typing.NamedTuple):
+    """What the axes say once derived, for the lines rules (11) and (14) read."""
+
+    critical: list[int]
+    ordinary: list[int]
+    unranked: list[int]
+    deferred: list[int]
+
+
+def axis_findings(
+    text: str, found: dict[int, str], rst: Roster
+) -> tuple[list[str], Ranking]:
+    """The four axes, judged. Unclassified is RED -- never a quiet pass.
+
+    `found` is the open/closed map the caller already built, so open-ness is
+    read from the same title line every other rule here reads it from.
+    """
+    live, archived, unbalanced = item_headers(text)
+    headers = {**archived, **live}
+    table = axes(headers)
+    findings: list[str] = []
+
+    for number in unbalanced:
+        findings.append(
+            f"item {number}'s bold title span never closes, so its header runs "
+            f"into its body and whatever the body says would be read as its "
+            f"annotation run -- close the `**` on the title"
+        )
+
+    frontier = rst.ranked_from
+    for number in sorted(found):
+        axis = table.get(number, Axis(None, (), False, None))
+        annotated = axis.parent is not None or bool(axis.ranks) or axis.deferred
+        if number < frontier:
+            if annotated:
+                findings.append(
+                    f"item {number} carries a ranking/lineage annotation and sits "
+                    f"BELOW `ranked_from = {frontier}`. Lower the frontier to "
+                    f"include it -- and every item in between -- or drop the "
+                    f"annotation; a frontier with annotated items underneath is "
+                    f"one a later round can raise to dodge this gate"
+                )
+            continue
+        if axis.parent is None:
+            findings.append(
+                f"item {number} is at or above `ranked_from = {frontier}` and its "
+                f"title carries no `@from:` -- write `@from: <n>` when the round "
+                f"paying <n> CREATED it, `@from: none` when the round merely met "
+                f"it. Unclassified is RED: read as `none` it would shorten every "
+                f"chain that runs through it"
+            )
+        if len(axis.ranks) > 1:
+            findings.append(
+                f"item {number}'s annotation run carries {' and '.join(axis.ranks)}; "
+                f"a ranking that says both orders nothing"
+            )
+        elif not axis.ranks and is_open(found[number]):
+            findings.append(
+                f"open item {number} is at or above `ranked_from = {frontier}` and "
+                f"carries no ranking -- write `critical` or `ordinary` beside its "
+                f"`@from:`. Rule (12) makes `unranked` a ratchet, and a ratchet "
+                f"that admits new entries is not one"
+            )
+
+    # Depth, DERIVED. The declared depth beside a `deferred` marker is judged
+    # against it rather than trusted -- a hand-written depth is a second copy.
+    for number in sorted(n for n in found if n >= frontier):
+        axis = table.get(number, Axis(None, (), False, None))
+        if axis.parent is None:
+            continue
+        depth, error = chain_depth(number, table, frontier)
+        if error is not None:
+            findings.append(error)
+            continue
+        assert depth is not None
+        if axis.declared_depth is not None and axis.declared_depth != depth:
+            findings.append(
+                f"item {number} writes chain depth {axis.declared_depth} and its "
+                f"`@from:` chain derives {depth} -- the derivation is the fact, so "
+                f"correct the sentence"
+            )
+        over = depth > rst.reaim_cap
+        if over and not axis.deferred:
+            findings.append(
+                f"item {number} has derived chain depth {depth}, past "
+                f"`reaim_cap = {rst.reaim_cap}`, and does not say `deferred`. "
+                f"Rule (14) registers it and does NOT pay it this round; say so "
+                f"in the title or the next round picks it up as ordinary work"
+            )
+        if axis.deferred and not over:
+            findings.append(
+                f"item {number} says `deferred` and its derived chain depth is "
+                f"{depth}, within `reaim_cap = {rst.reaim_cap}` -- a deferral the "
+                f"derivation does not support is work being held for no reason"
+            )
+
+    openn = [n for n in sorted(found) if is_open(found[n])]
+    critical = [n for n in openn if "critical" in table.get(n, Axis(None, (), False, None)).ranks]
+    ordinary = [n for n in openn if "ordinary" in table.get(n, Axis(None, (), False, None)).ranks]
+    unranked = [n for n in openn if not table.get(n, Axis(None, (), False, None)).ranks]
+    deferred = [n for n in openn if table.get(n, Axis(None, (), False, None)).deferred]
+
+    # The ratchet, judged in BOTH directions. Below the frontier only: at and
+    # above it the ranking is REQUIRED outright, so folding those in would let
+    # a missing ranking read as a budget line rather than as the RED it is.
+    tail = [n for n in unranked if n < frontier]
+    if len(tail) > rst.unranked_baseline:
+        findings.append(
+            f"{len(tail)} open items below `ranked_from = {frontier}` carry no "
+            f"ranking and `unranked_baseline` says {rst.unranked_baseline}. The "
+            f"count only falls (rule 12); a rise means an item arrived unranked"
+        )
+    elif len(tail) < rst.unranked_baseline:
+        findings.append(
+            f"only {len(tail)} open items below `ranked_from = {frontier}` carry "
+            f"no ranking and `unranked_baseline` still says "
+            f"{rst.unranked_baseline} -- lower it to {len(tail)} in this same "
+            f"edit, or the ratchet stops ratcheting"
+        )
+
+    return findings, Ranking(critical, ordinary, unranked, deferred)
 
 
 def main() -> int:
@@ -458,12 +934,25 @@ def main() -> int:
         )
         if opened:
             print(f"  newest open: {' '.join(str(n) for n in opened[-8:])}")
+        # The ranking axes belong in the counting mode too: this is the output
+        # the operator's round-start recipe reads, and `unranked` is the number
+        # rule (12) ratchets. Its FINDINGS stay with the default mode, which is
+        # where the roster the ratchet is judged against is parsed.
+        _, rank = axis_findings(text, found, roster(text))
+        print(
+            f"  debt-ranking: critical = {len(rank.critical)}  ordinary = "
+            f"{len(rank.ordinary)}  unranked = {len(rank.unranked)}  deferred = "
+            f"{len(rank.deferred)}"
+        )
         return 1 if verdict_findings(live) else 0
 
-    target, owner, swept, priority = roster(text)
+    rst = roster(text)
+    target, owner, swept, priority = rst.target, rst.owner, rst.swept, rst.priority
 
     findings: list[str] = []
     findings.extend(verdict_findings(live))
+    axis_lines, rank = axis_findings(text, found, rst)
+    findings.extend(axis_lines)
     for line_no in unclosed_folds(text):
         findings.append(
             f"the `<details>` opened at line {line_no} is never closed, so every "
@@ -555,6 +1044,33 @@ def main() -> int:
         # SAID, not silent. An empty queue is a state a reader must be able to
         # tell apart from a queue this script failed to read.
         print("  debt-plane-census: PRIORITY -- queue empty; pick from the roster.")
+
+    # Rule (11) reads this line; before R2302 nothing printed it. Newest first,
+    # matching the roster's own "most recent, because an old item's reason has
+    # gone stale" order, and DEFERRED items are withheld because rule (14) says
+    # they are registered and not paid.
+    takeable = [n for n in reversed(rank.critical) if n not in set(rank.deferred)]
+    if takeable:
+        print(
+            f"  debt-plane-census: CRITICAL -- take item {takeable[0]} next "
+            f"({len(takeable)} open: {' '.join(str(n) for n in takeable)})."
+        )
+    else:
+        # SAID, for the same reason the empty queue is.
+        print("  debt-plane-census: CRITICAL -- none open; take by rule (11)'s fallback.")
+    if rank.deferred:
+        print(
+            f"  debt-plane-census: DEFERRED -- {len(rank.deferred)} item(s) held by "
+            f"`reaim_cap = {rst.reaim_cap}`: {' '.join(str(n) for n in rank.deferred)}. "
+            f"Registered, not unpaid; first candidates when the cap lifts."
+        )
+    else:
+        print("  debt-plane-census: DEFERRED -- none; no chain is past the cap.")
+    print(
+        f"  debt-plane-census: RANKED -- critical {len(rank.critical)} / ordinary "
+        f"{len(rank.ordinary)} / unranked {len(rank.unranked)} (baseline "
+        f"{rst.unranked_baseline} below `ranked_from = {rst.ranked_from}`)."
+    )
 
     remaining = sorted(n for n in target if n in found and is_open(found[n]))
     print(
