@@ -158,6 +158,21 @@ trap restore_pico_example_patches EXIT
 # shape even if a previous run aborted mid-build (leftover patches).
 restore_pico_example_patches
 
+# R2326 — the provenance token, taken HERE and not beside the write.
+#
+# The checkout is at its COMMITTED shape at exactly this point: the restore
+# above has just undone any leftover patch, and the patches this script applies
+# start on the next line. Taking the token after the build instead folds those
+# patches into its dirty digest, the `EXIT` trap then reverts them, and the
+# stamp can never match again — MEASURED on this file's first real run, which
+# left a correct, fresh oracle reading STALE.
+#
+# The recipe is folded in for the other half of the same fact: the patches ARE
+# what this script says they are, so editing one changes what the binaries
+# embody and the token has to move. This script is the recipe, so it hashes
+# itself. See scripts/lib/vendored-oracle.sh.
+_wzpico_token="$(vendored_oracle_recipe_token "$VENDOR_DIR" "${BASH_SOURCE[0]}" || true)"
+
 z_put_src="$EXAMPLES_DIR/unix/c11/z_put.c"
 if grep -q "z_put(z_loan(s), z_loan(ke), z_move(payload), NULL)" "$z_put_src"; then
     # Insert the BLOCK options struct just before the "Putting Data"
@@ -571,7 +586,10 @@ done
 # An unreadable submodule leaves them UNSTAMPED rather than stamped with a
 # guess; `vendored_oracle_stamp_root` is what implements that, and the
 # consumers report unstamped as its own verdict rather than as a match.
-_wzpico_token="$(vendored_oracle_git_token "$VENDOR_DIR" || true)"
+#
+# `$_wzpico_token` was computed at the top of this script, BEFORE the example
+# patches were applied — see the comment there for why taking it here instead
+# makes the stamp permanently unmatchable.
 vendored_oracle_stamp_root "$INSTALL_DIR" "$_wzpico_token"
 vendored_oracle_stamp_root "$BUILD_DIR" "$_wzpico_token"
 

@@ -1318,8 +1318,19 @@ pub mod common {
     /// root and the build root — they are provisioned by one script run from
     /// one checkout, and asking twice in two ways is how the two answers start
     /// disagreeing.
+    ///
+    /// The RECIPE is part of the answer, not decoration:
+    /// `scripts/build-zenoh-pico-cli.sh` patches four vendored examples in
+    /// place and reverts them on exit, so the committed checkout alone does not
+    /// determine what the binaries embody — the script's own text does the
+    /// rest. `wz_codegen_build::vendored_recipe_token` carries the reasoning
+    /// and the measurement that forced it.
     fn zenoh_pico_source_token() -> Option<String> {
-        wz_codegen_build::vendored_source_token(&project_root().join("vendor/zenoh-pico"))
+        let root = project_root();
+        wz_codegen_build::vendored_recipe_token(
+            &root.join("vendor/zenoh-pico"),
+            &[root.join("scripts/build-zenoh-pico-cli.sh")],
+        )
     }
 
     /// Grade one `target/zenoh-pico-*` root against the vendored submodule.

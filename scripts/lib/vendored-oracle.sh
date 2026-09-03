@@ -145,6 +145,65 @@ vendored_oracle_git_token() {
     printf '%s-%s\n' "$rev" "$digest"
 }
 
+# vendored_oracle_recipe_digest <recipe-file>...
+#
+# The digest of the PROVISIONER RECIPE — the tracked script text that decides
+# what the build makes out of the checkout. Nothing, and return 1, when a file
+# cannot be read.
+#
+# R2326 added this after the first real provisioner run FAILED its own gate,
+# and the finding is worth the space because it is not obvious:
+# `build-zenoh-pico-cli.sh` PATCHES four vendored examples in place, builds,
+# and reverts them in an `EXIT` trap. A token taken after the install therefore
+# folded those patches into the dirty digest, the trap then reverted them, and
+# the stamp could never match again — a correct, fresh oracle read STALE. That
+# is the "the record changes the thing it records" trap this file already warns
+# about for `target/`, in a variant with a deliberate transient modification
+# instead of a build artefact.
+#
+# The repair is not to move the write later. It is to say what the source state
+# of such an oracle actually IS: the checkout AS COMMITTED, plus the recipe
+# that transforms it. The patches are not submodule state — they are derived
+# from the script's own text, deterministically, on every run. So the token is
+# taken from the clean checkout and the recipe is folded in ALONGSIDE it, which
+# also closes the hole the naive reading would have left: edit a patch and the
+# binaries change, so the token MUST move, and with only the checkout in it, it
+# would not have.
+#
+# `git hash-object` over the concatenated file bytes, in the order given, for
+# the reason the git token gives: git is the only dependency, so the Rust side
+# reproduces the identical string by reading the same files in the same order.
+#
+# `build-sce.sh` needs none of this and does not use it — it patches nothing,
+# which is why R1994's plain checkout token was right there and is still right.
+vendored_oracle_recipe_digest() {
+    (($# > 0)) || return 1
+    command -v git >/dev/null 2>&1 || return 1
+    local f
+    for f in "$@"; do
+        [[ -r "$f" ]] || return 1
+    done
+    local digest
+    digest="$(cat -- "$@" | git hash-object --stdin 2>/dev/null)" || return 1
+    [[ -n "$digest" ]] || return 1
+    printf '%s\n' "$digest"
+}
+
+# vendored_oracle_recipe_token <checkout-dir> <recipe-file>...
+#
+# `<checkout token>-<recipe digest>`: what an oracle built by a PATCHING
+# provisioner was made from. Callers must take this BEFORE applying any patch,
+# so the checkout half describes the committed state; the stamp is still
+# WRITTEN only after the build succeeds.
+vendored_oracle_recipe_token() {
+    local checkout="$1"
+    shift
+    local base recipe
+    base="$(vendored_oracle_git_token "$checkout")" || return 1
+    recipe="$(vendored_oracle_recipe_digest "$@")" || return 1
+    printf '%s-%s\n' "$base" "$recipe"
+}
+
 # vendored_oracle_stamp_path <oracle-root>
 #
 # Where the stamp for an oracle output root lives. One place computes this so

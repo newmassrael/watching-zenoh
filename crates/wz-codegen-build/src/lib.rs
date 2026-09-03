@@ -324,6 +324,37 @@ pub fn vendored_source_token(checkout: &Path) -> Option<String> {
     Some(format!("{rev}-{digest}"))
 }
 
+/// `<checkout token>-<recipe digest>` — what an oracle built by a PATCHING
+/// provisioner was made from. `None` when either half cannot be computed.
+///
+/// Byte-for-byte `vendored_oracle_recipe_token` in
+/// `scripts/lib/vendored-oracle.sh`: the checkout token from
+/// [`vendored_source_token`], then `git hash-object --stdin` over the recipe
+/// files' bytes concatenated in the order given.
+///
+/// R2326 — why the recipe is in the token at all, which is not obvious and was
+/// paid for. `scripts/build-zenoh-pico-cli.sh` PATCHES four vendored examples
+/// in place, builds, and reverts them in an `EXIT` trap, so the checkout's
+/// state during the build is not its state before or after. A token folding
+/// those patches in can never be matched afterwards (measured: a correct,
+/// fresh oracle read STALE); a token ignoring the recipe entirely would let an
+/// EDITED patch produce different binaries under an unchanged token, which is
+/// the very class this whole mechanism exists for. So the source state of such
+/// an oracle is the checkout AS COMMITTED plus the recipe that transforms it,
+/// and both halves are here.
+pub fn vendored_recipe_token(checkout: &Path, recipes: &[PathBuf]) -> Option<String> {
+    let base = vendored_source_token(checkout)?;
+    if recipes.is_empty() {
+        return None;
+    }
+    let mut bytes: Vec<u8> = Vec::new();
+    for recipe in recipes {
+        bytes.extend_from_slice(&std::fs::read(recipe).ok()?);
+    }
+    let digest = git_hash_object(checkout, &bytes)?;
+    Some(format!("{base}-{digest}"))
+}
+
 /// Run `git <args>` in `dir`, returning stdout on success. `None` on any
 /// failure — a missing git, a non-repository, a non-zero exit — because every
 /// one of them means the same thing here: the question cannot be answered.
