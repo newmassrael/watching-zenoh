@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
-"""Layer C0 gate - a foreign one-shot query may not be believed on one attempt.
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+"""R2311 (no register item) - a foreign one-shot query is not a verdict.
 
-R2311 (open-debt item 645). Hosted Layer Ewirez failed in 0.17s with "the stock
-querier got no reply" while every local run passed, and the mechanism is an
-ORDERING, not a flake:
+The citation is `no register item` for the reason `config_key_fixture_gate.py`
+and `test_double_knob_gate.py` give for theirs: the item this closes --
+unregistered open-debt item 645 -- lives in the operator's register file
+outside this repository, not under the store's `debt-` prefix, so there is no
+id here for `--emit` to resolve. The item is named in prose throughout.
+
+Hosted Layer Ewirez failed in 0.17s with "the stock querier got no reply"
+while every local run passed, and the mechanism is an ORDERING, not a flake:
 
   * Both foreign example families print their readiness line BEFORE the call
     that declares. Upstream `examples/examples/z_queryable.rs` prints

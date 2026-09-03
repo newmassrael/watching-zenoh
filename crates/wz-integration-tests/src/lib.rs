@@ -4024,9 +4024,9 @@ pub mod common {
     /// had already written but only once, inline, at
     /// `wz_to_zenohd_router.rs`'s pico-`z_get` leg:
     ///
-    /// > a SINGLE query arriving before [the] DeclQueryable has propagated
-    /// > returns final-only (no reply) and exits [...] a query fires once — so
-    /// > retry the whole one-shot until a reply lands.
+    /// > a SINGLE query arriving before wz's DeclQueryable has propagated to
+    /// > zenohd returns final-only (no reply) and exits ... a query fires
+    /// > once — so retry the whole one-shot until a reply lands.
     ///
     /// WHY A DECLARER'S OWN READY LINE IS NOT THAT PREDICATE. Both foreign
     /// families print their marker BEFORE the call that declares: upstream
