@@ -741,8 +741,7 @@ SELFTEST_ROSTER = """\
 - **17. ✅ CLOSED (R{r17}) -- a title quoting `wz_surfaces(char **buf)` in code.**
 - **18. ✅ CLOSED{s18} -- a root at the ranking frontier. `@from: none` · ordinary**
 - **19. a child of 18. `@from: {p19}` · critical{r19}**
-- **20. a grandchild of 19. `@from: 19` · ordinary ·
-  ⚠ **deferred**(사슬 깊이 {d20})**
+- **20. {v20}a grandchild of 19. `@from: 19` · ordinary{d20x}**
 {extra}
 {begin}
 plane:analyzer = 10 11
@@ -1040,6 +1039,21 @@ def selftest() -> int:
             0,
             "STAMPED -- clock at R2000, 3 undated close(s)",
         ),
+        # R2314 (item 643) -- a CLOSED item past the cap is PAID, not deferred.
+        # Found by closing item 643 itself: dropping its `deferred` clause,
+        # exactly as closing should, redded the round that paid it.
+        (
+            "a CLOSED item past the cap need not say `deferred`",
+            {"priority": "", "v20": "✅ CLOSED (R2001) -- ", "d20x": "", "unstamped_baseline": "3"},
+            0,
+            "queue empty",
+        ),
+        (
+            "an OPEN item past the cap still must say `deferred`",
+            {"priority": "", "d20x": ""},
+            1,
+            "does not say `deferred`",
+        ),
     ]
     env_for = {
         "ack of the head clears it": {"WZ_DEBT_PRIORITY_ACK": "10"},
@@ -1067,6 +1081,14 @@ def selftest() -> int:
             # not chosen, or the stamp axis would red under all of them.
             unstamped_baseline=fields.get("unstamped_baseline", "3"),
             p19=fields.get("p19", "18"),
+            # Item 20 is the fixture's DEFERRED grandchild. `v20` turns it into
+            # a CLOSED one so R2314's fix -- both deferral rules are about OPEN
+            # work -- has an arm; `d20x` carries the deferral clause so an arm
+            # can drop it.
+            v20=fields.get("v20", ""),
+            d20x=fields.get(
+                "d20x", " ·\n  ⚠ **deferred**(사슬 깊이 " + fields.get("d20", "2") + ")"
+            ),
             d20=fields.get("d20", "2"),
             r17=fields.get("r17", "2000"),
             s18=fields.get("s18", " (R2000)"),
@@ -1214,14 +1236,21 @@ def axis_findings(
                 f"correct the sentence"
             )
         over = depth > rst.reaim_cap
-        if over and not axis.deferred:
+        # R2314 (open-debt item 643): BOTH deferral rules are about OPEN work.
+        # A deferral says "registered, not paid this round", which a CLOSED
+        # item has answered by being paid -- requiring it to keep saying
+        # `deferred` demands that a discharged item still describe itself as
+        # waiting. Found by closing item 643 itself: its title stopped saying
+        # `deferred`, exactly as it should, and this rule redded the round that
+        # paid it. It would have fired for every deferred item ever closed.
+        if over and not axis.deferred and is_open(found[number]):
             findings.append(
-                f"item {number} has derived chain depth {depth}, past "
+                f"open item {number} has derived chain depth {depth}, past "
                 f"`reaim_cap = {rst.reaim_cap}`, and does not say `deferred`. "
                 f"Rule (14) registers it and does NOT pay it this round; say so "
                 f"in the title or the next round picks it up as ordinary work"
             )
-        if axis.deferred and not over:
+        if axis.deferred and not over and is_open(found[number]):
             findings.append(
                 f"item {number} says `deferred` and its derived chain depth is "
                 f"{depth}, within `reaim_cap = {rst.reaim_cap}` -- a deferral the "
