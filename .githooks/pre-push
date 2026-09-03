@@ -378,6 +378,38 @@ if ! python3 scripts/lib/config_key_fixture_gate.py; then
     exit 1
 fi
 
+# ─── gate 2j — the test-double witness (R2293, item 625) ────────────
+# grades: worktree
+#
+# A test whose FIXTURE cannot construct the input its branch needs measures
+# nothing. R2289 ran ten mutations of the SHM provider plane; nine were caught
+# and the tenth was not, because the harness's own `alloc_fn` refused the
+# oversized request before wz's check could be reached. The repair was a
+# harness that could misbehave plus an assertion, inside the same test, that
+# the harness had been ASKED.
+#
+# UNCONDITIONAL and unscoped, exactly like gate 2d above: it reads tracked Rust
+# and derives both sides, costing under a second, and a scope predicate is one
+# more thing that can be silently wrong. The selftest runs first because a gate
+# that cannot fail is worth nothing.
+if ! python3 scripts/lib/test_double_knob_gate.py --selftest >/dev/null; then
+    echo "" >&2
+    echo "pre-push: [gate 2j] test-double witness gate SELFTEST failed — the" >&2
+    echo "          gate can no longer tell a witnessed test from a vacuous" >&2
+    echo "          one, so its verdict on this push means nothing." >&2
+    exit 1
+fi
+if ! python3 scripts/lib/test_double_knob_gate.py; then
+    echo "" >&2
+    echo "pre-push: [gate 2j] test-double witness gate FAILED — a test switches" >&2
+    echo "          a fixture into misbehaving and then never asks whether the" >&2
+    echo "          fixture was called. It cannot tell the code's refusal from" >&2
+    echo "          the fixture's, which is how a deleted check stayed green in" >&2
+    echo "          R2289. Assert one of the counters the double records." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+
 # ─── gate 2e — the scouting socket's movable axes (R2142, item 225) ──
 # grades: worktree
 #

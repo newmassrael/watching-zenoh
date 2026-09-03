@@ -2895,6 +2895,22 @@ PY
     # `.githooks/pre-push`, which is what makes it the LOCAL gate item 224 asks
     # for -- this lane is the hosted half.
     python3 scripts/lib/config_key_fixture_gate.py || return 1
+    # R2293 (unregistered open-debt item 625) — the TEST-DOUBLE WITNESS gate.
+    # A test whose fixture cannot construct the input its branch needs measures
+    # nothing, and R2289 walked into exactly that: nine mutations of the SHM
+    # provider plane were caught and the tenth was not, because the harness's
+    # own `alloc_fn` refused the oversized request before wz's check could.
+    # The repair was a harness that could misbehave plus an assertion that it
+    # had been ASKED, and this gate is that repair as a rule.
+    #
+    # It belongs here for the same reason its two neighbours do: BOTH SIDES ARE
+    # ON DISK. The knob is a `bool` field a test double branches on, the witness
+    # is a read of what the double records, and deriving both costs under a
+    # second with nothing built. `--selftest` first, for the reason the
+    # count-guard gate runs its own: a gate that cannot fail is worth nothing,
+    # and the fixtures are what say this one can.
+    python3 scripts/lib/test_double_knob_gate.py --selftest >/dev/null || return 1
+    python3 scripts/lib/test_double_knob_gate.py || return 1
     # R2288 (open-debt item 610) — every refusal the framing loop can return is
     # named by a test that fires it, and the population is DERIVED from the
     # function body rather than listed.
