@@ -48,7 +48,17 @@ layout it pins: "two pins that move together are one pin".
              the library exports, and the reason the population is not read from
              Rust alone: a gate reading the source would pin the text its author
              had just edited, which is not evidence. It is also the only corner
-             that can see a `#[no_mangle]` that a feature gate or LTO removed.
+             that can see a `#[no_mangle]` a CFG removed.
+
+             ⚠ WHICH PROFILE, and what that costs. The lane hands this the DEBUG
+             cdylib, so `lto` — `thin` in `[profile.release]` and off here —
+             never runs over what this reads. A symbol that only LTO could drop
+             would therefore pass. Measured at R2301 and it is zero today: the
+             debug and release builds export the same 14 `wz_capi_c_*` symbols,
+             and running this gate against the release artifact reports the same
+             revision and set. Open-debt item 637 carries the widening; this
+             paragraph exists so the claim above cannot be read as more than it
+             is, which is the failure the sentence it replaced actually had.
   SOURCE     `capi_c_wz_door_header.exported`, IMPORTED rather than
              reimplemented. Two derivations of one population is the second copy
              this file exists to prevent, and the item names that gate's
@@ -194,8 +204,8 @@ def run(cdylib: pathlib.Path) -> int:
     for name in sorted(from_source - built):
         findings.append(
             f"{name} is declared `#[no_mangle]` in source and ABSENT from the "
-            "artifact. A feature gate or LTO removed it, so a consumer linking "
-            "against this build cannot call it however the source reads."
+            "artifact. A cfg removed it, so a consumer linking against this "
+            "build cannot call it however the source reads."
         )
 
     for name in sorted(built - EXPECTED_SYMBOLS):
