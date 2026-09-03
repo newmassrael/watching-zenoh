@@ -2942,6 +2942,21 @@ PY
     # and the fixtures are what say this one can.
     python3 scripts/lib/test_double_knob_gate.py --selftest >/dev/null || return 1
     python3 scripts/lib/test_double_knob_gate.py || return 1
+    # R2306 (unregistered open-debt item 156) — how many places READ `_anyke`.
+    # It had grown THREE readers and only two were ever compared, so the third
+    # drifted: `wz-capi-c` split the selector parameter list on `&` where
+    # zenoh's separator is `;`, found the flag only when it was the entire
+    # string, and the reply-coverage gate it feeds then dropped replies the
+    # querier had asked for. Its own test asserted `a=1&_anyke&b=2`, so the
+    # parser and its test agreed with each other and with nothing else.
+    #
+    # It belongs beside its neighbours for their reason: BOTH SIDES ARE ON DISK.
+    # The population is every `_anyke` literal in tracked Rust, the baseline is
+    # the two files allowed to hold one, and the baseline bites BOTH ways — an
+    # unlisted holder fails, and a listed file that stopped holding one fails
+    # too. `--selftest` first, on the count-guard gate's reasoning.
+    python3 scripts/lib/anyke_reader_gate.py --selftest >/dev/null || return 1
+    python3 scripts/lib/anyke_reader_gate.py || return 1
     # R2288 (open-debt item 610) — every refusal the framing loop can return is
     # named by a test that fires it, and the population is DERIVED from the
     # function body rather than listed.

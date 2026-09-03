@@ -410,6 +410,37 @@ if ! python3 scripts/lib/test_double_knob_gate.py; then
     exit 1
 fi
 
+# ─── gate 2k — how many places read `_anyke` (R2306, item 156) ────────
+# grades: worktree
+#
+# `_anyke` had THREE readers and only two were ever compared, so the third
+# drifted: `wz-capi-c` split the selector parameter list on `&` where zenoh's
+# separator is `;`, found the flag only when it was the entire string, and the
+# reply-coverage gate it feeds then dropped replies the querier had asked for.
+# Its own test asserted the same wrong separator, so the parser and its test
+# agreed with each other and with nothing else.
+#
+# UNCONDITIONAL and unscoped, like its two neighbours: it reads tracked Rust and
+# derives its population, costing well under a second. The selftest runs first
+# because a gate that cannot fail is worth nothing.
+if ! python3 scripts/lib/anyke_reader_gate.py --selftest >/dev/null; then
+    echo "" >&2
+    echo "pre-push: [gate 2k] anyke-reader gate SELFTEST failed — it can no" >&2
+    echo "          longer tell a reader from a test fixture, so its verdict" >&2
+    echo "          on this push means nothing." >&2
+    exit 1
+fi
+if ! python3 scripts/lib/anyke_reader_gate.py; then
+    echo "" >&2
+    echo "pre-push: [gate 2k] anyke-reader gate FAILED — a place outside the" >&2
+    echo "          two declared readers holds an \`_anyke\` literal in code, or" >&2
+    echo "          a declared reader stopped holding one. A fourth copy is how" >&2
+    echo "          this drifted before; call the SSOT for the implementation" >&2
+    echo "          your ABI mirrors." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+
 # ─── gate 2e — the scouting socket's movable axes (R2142, item 225) ──
 # grades: worktree
 #
