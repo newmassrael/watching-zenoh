@@ -984,6 +984,38 @@ def selftest() -> int:
             1,
             "a ranking that says both orders nothing",
         ),
+        # R2311b (open-debt item 328) -- the claims axis. Each arm is a shape
+        # that reached a reader WITHOUT the sentence that dated it.
+        (
+            "a description quoting a STALE count fails",
+            {"priority": "", "mem_desc": "store 부채는 active 36 이다"},
+            1,
+            "states `active 36` and the live store says 4",
+        ),
+        (
+            "a description quoting the CURRENT count passes",
+            {"priority": "", "mem_desc": "store 부채는 active 4 이다"},
+            0,
+            "STORE -- total 9 / active 4 / deprecated 5",
+        ),
+        (
+            "a description naming the command instead of the count passes",
+            {"priority": "", "mem_desc": "수는 여기서 읽지 마라 — --list-inventory 를 돌려라"},
+            0,
+            "queue empty",
+        ),
+        (
+            "a description quoting a stale TOTAL fails",
+            {"priority": "", "mem_desc": "총 85 / active 4"},
+            1,
+            "states `총 85` and the live store says 9",
+        ),
+        (
+            "an EMPTY population fails rather than passing",
+            {"priority": "", "mem_empty": "1"},
+            1,
+            "lost its subject",
+        ),
     ]
     env_for = {
         "ack of the head clears it": {"WZ_DEBT_PRIORITY_ACK": "10"},
@@ -1016,9 +1048,32 @@ def selftest() -> int:
         with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as fh:
             fh.write(body)
             fixture = fh.name
+        # R2311b (item 328) -- THE MEMORY FOLDER IS PINNED, not inherited.
+        # Left to default it is the fixture's parent, i.e. the system temp
+        # directory, and a stray copy of the real register left there by an
+        # earlier probe supplied this axis's whole population by accident: all
+        # 39 arms passed for a reason that had nothing to do with their
+        # fixtures. A population the ENVIRONMENT can provide is the trap
+        # R2185 named, met again here.
+        memdir = tempfile.mkdtemp()
+        if not fields.get("mem_empty"):
+            pathlib.Path(memdir, "base_claims.md").write_text(
+                "---\nname: base_claims\n"
+                "description: \"counts live in the command, not here\"\n"
+                "---\n\n총 9 / active 4 / deprecated 5.\n",
+                encoding="utf-8",
+            )
+        if fields.get("mem_desc"):
+            pathlib.Path(memdir, "quoting.md").write_text(
+                f"---\nname: quoting\ndescription: \"{fields['mem_desc']}\"\n"
+                "---\n\n총 9 / active 4 / deprecated 5.\n",
+                encoding="utf-8",
+            )
         env = dict(os.environ)
         env.pop("WZ_DEBT_PRIORITY_ACK", None)
         env["WZ_DEBT_REGISTER"] = fixture
+        env["WZ_DEBT_MEMORY_DIR"] = memdir
+        env["WZ_DEBT_STORE_COUNTS"] = "9/4/5"
         env.update(env_for.get(label, {}))
         run = subprocess.run(
             [sys.executable, __file__, *args_for.get(label, [])],
@@ -1245,6 +1300,169 @@ def deferral_status(
     return findings, Holds(held, released, started, now)
 
 
+# R2311b (open-debt item 328) -- a store-`debt-` inventory count claim.
+#
+# The SHAPE, derived from the corpus rather than chosen: a store claim pairs a
+# count of `active` rows with the total or the deprecated half. The A3 atom
+# claims that also say `active N` say `atoms N` beside it and never `총`/
+# `deprecated`, which is what keeps them out of this population -- measured
+# across the whole memory folder: 3 files, 12 lines, no A3 line among them.
+_ACTIVE = re.compile(r"active\s*\*{0,2}\s*(\d+)")
+_TOTAL = re.compile(r"총\s*(?:inventory\s*)?\*{0,2}\s*(\d+)")
+_DEPRECATED = re.compile(r"deprecated\s*(?:\([^)]*\))?\s*\*{0,2}\s*(\d+)")
+
+
+def store_claim(line: str) -> bool:
+    """Does this line state a store-`debt-` inventory count?"""
+    return bool(_ACTIVE.search(line) and (_TOTAL.search(line) or _DEPRECATED.search(line)))
+
+
+def front_matter_description(text: str) -> str:
+    """The `description:` value, which is what recall surfaces WITHOUT the file.
+
+    Returned as one blob: YAML folds it over several lines and the numbers this
+    axis judges are wherever the fold put them.
+    """
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return ""
+    out: list[str] = []
+    taking = False
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*\s*:", line):
+            taking = line.startswith("description:")
+            if taking:
+                out.append(line.split(":", 1)[1])
+            continue
+        if taking:
+            out.append(line)
+    return "\n".join(out)
+
+
+def live_store_counts() -> tuple[tuple[int, int, int] | None, str]:
+    """`((total, active, deprecated), note)` measured from the live store.
+
+    `WZ_DEBT_STORE_COUNTS` ("total/active/deprecated") replaces the
+    measurement so the selftest can drive both verdicts on a runner that has no
+    store at all. It replaces the MEASUREMENT and nothing else: the comparison,
+    the population and every finding below stay exactly as they are, which is
+    what keeps the override from being a way to make this axis agree with
+    whatever a description happens to say.
+    """
+    override = os.environ.get("WZ_DEBT_STORE_COUNTS", "").strip()
+    if override:
+        try:
+            t, a, d = (int(p) for p in override.split("/"))
+            return (t, a, d), "WZ_DEBT_STORE_COUNTS"
+        except ValueError:
+            return None, f"WZ_DEBT_STORE_COUNTS={override!r} is not `total/active/deprecated`"
+    import subprocess
+
+    try:
+        run = subprocess.run(
+            ["mnemosyne-cli", "query", "--list-inventory"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, f"mnemosyne-cli could not be run ({exc})"
+    if run.returncode != 0:
+        return None, f"mnemosyne-cli exited {run.returncode}"
+    total = active = deprecated = 0
+    for row in run.stdout.splitlines():
+        parts = row.split()
+        if len(parts) < 2 or not parts[0].startswith("debt-"):
+            continue
+        total += 1
+        if parts[1] == "active":
+            active += 1
+        elif parts[1] == "deprecated":
+            deprecated += 1
+    if total == 0:
+        return None, "the store lists no `debt-` rows at all"
+    return (total, active, deprecated), "mnemosyne-cli"
+
+
+def memory_dir() -> pathlib.Path:
+    """The folder the register lives in, overridable for the selftest."""
+    override = os.environ.get("WZ_DEBT_MEMORY_DIR")
+    return pathlib.Path(override) if override else register_path().parent
+
+
+def claim_findings() -> tuple[list[str], str]:
+    """R2311b (open-debt item 328) -- a number in the place read WITHOUT context.
+
+    Item 328 is not a coverage defect and not a stale number as such. It is
+    that `project_open_debt_classified` said the store's counts were
+    "수도 집합도 불변" -- invariant in count AND in set -- and that word read as
+    a reason to SKIP re-measuring, for 71 rounds. A stale number invites doubt;
+    an invariance claim retires it.
+
+    So this axis does not chase every stale number in agent memory, which would
+    be unpayable. It judges the ONE place a number is read without the sentence
+    that dated it: the front-matter `description`, which is what recall surfaces
+    when nobody has opened the file. A count there must agree with the LIVE
+    store or not be there at all -- the sibling register's description shows the
+    form that never goes stale, naming the command instead of the number.
+
+    The population is DERIVED: every memory file whose BODY states a store
+    inventory count. Fixing a description does not remove its file from the
+    population, so the check cannot be silenced by the repair -- and a population
+    of zero is a FAILURE, not a pass.
+    """
+    root = memory_dir()
+    if not root.is_dir():
+        return [f"the memory folder {root} is absent, so this axis graded nothing"], ""
+
+    population: list[pathlib.Path] = []
+    for path in sorted(root.glob("*.md")):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        body = text.split("\n---\n", 2)[-1] if text.startswith("---") else text
+        if any(store_claim(line) for line in body.splitlines()):
+            population.append(path)
+    if not population:
+        return [
+            "no memory file states a store `debt-` inventory count, so this axis "
+            "lost its subject. A population of zero must not read as a pass -- "
+            "either the claim shape moved or the folder is wrong"
+        ], ""
+
+    live, note = live_store_counts()
+    if live is None:
+        return [
+            f"the live store could not be measured ({note}), so the claims below "
+            f"cannot be judged. A gate that cannot read its input must not report "
+            f"green -- item 328 is precisely about a claim nobody re-measured"
+        ], ""
+    total, active, deprecated = live
+
+    findings: list[str] = []
+    for path in population:
+        desc = front_matter_description(
+            path.read_text(encoding="utf-8", errors="replace")
+        )
+        if not desc:
+            continue
+        for label, pattern, want in (
+            ("active", _ACTIVE, active),
+            ("총", _TOTAL, total),
+            ("deprecated", _DEPRECATED, deprecated),
+        ):
+            for got in pattern.findall(desc):
+                if int(got) != want:
+                    findings.append(
+                        f"{path.name}'s description states `{label} {got}` and the "
+                        f"live store says {want}. A description is read WITHOUT the "
+                        f"sentence that dated it, so a number there is read as "
+                        f"current. Name the command instead of the count -- "
+                        f"`project_open_debt_unregistered` already does"
+                    )
+    return findings, f"total {total} / active {active} / deprecated {deprecated} ({note})"
+
+
 def main() -> int:
     if "--selftest" in sys.argv:
         return selftest()
@@ -1307,6 +1525,8 @@ def main() -> int:
     findings.extend(verdict_findings(live))
     axis_lines, rank = axis_findings(text, found, rst)
     findings.extend(axis_lines)
+    claim_lines, store_line = claim_findings()
+    findings.extend(claim_lines)
     h_live, h_arch, _ = item_headers(text)
     hold_lines, hold = deferral_status({**h_arch, **h_live}, found, rst, rank.deferred)
     findings.extend(hold_lines)
@@ -1373,7 +1593,11 @@ def main() -> int:
         print("debt-plane-census: FAIL")
         for f in findings:
             print(f"  - {f}")
-        print("\n  Edit the ANALYZER-ROSTER block in the register in the same round.")
+        # R2311b (item 328): the footer names the roster because every finding
+        # used to come from it. The claims axis reads a DIFFERENT file, so a
+        # footer that sends the reader to the roster would send them to the
+        # wrong edit -- it now names the round instead of the place.
+        print("\n  Fix what each line above names, in this same round.")
         return 1
 
     # The claim is printed FIRST, above the count -- a reader must see what to
@@ -1453,6 +1677,12 @@ def main() -> int:
         f"{len(rank.ordinary)} / unranked {len(rank.unranked)} (baseline "
         f"{rst.unranked_baseline} below `ranked_from = {rst.ranked_from}`)."
     )
+
+    # R2311b (item 328) -- PRINTED, not only judged. The defect was that
+    # re-measuring felt optional, so the measurement is put in front of every
+    # round for free rather than left to be asked for.
+    if store_line:
+        print(f"  debt-plane-census: STORE -- {store_line}")
 
     remaining = sorted(n for n in target if n in found and is_open(found[n]))
     print(
