@@ -8062,8 +8062,27 @@ layer_c1ch_capi_c_config_surface() {
         echo "  C1ch FAIL: nm is absent, so the wz door set cannot be read"
         return 1
     }
+    # R2309 (open-debt item 637) — the pin is shown BOTH profiles, because a
+    # door set read from one build is a claim about that build. `lto = "thin"`
+    # runs in release and not in debug, so a `#[no_mangle]` LTO drops was
+    # structurally invisible to this lane until now; the gate requires the two
+    # sets to be IDENTICAL rather than picking a side, since a door present
+    # only in release is an ABI event too.
+    #
+    # MEASURED before deciding, which is what the item asked for: on the build
+    # machine (31 cores) from an empty CARGO_TARGET_DIR, debug is 17.88 s and
+    # release 24.99 s — 1.40x, not an order of magnitude. The hosted workflow
+    # is ONE job and C1bo builds `wz-capi-dissect --release` later in it, so
+    # this warms the release profile rather than paying for it twice.
+    #
+    # `capi_c_config_surface.py` above stays on debug deliberately: it CALLS
+    # `wz_capi_c_config_honoured` through the library, so a door LTO removed
+    # makes it fail outright rather than pass quietly, and the pin below is
+    # what proves no door differs between the two builds in the first place.
+    (cd crates && cargo build -p wz-capi-c --release --quiet) || return 1
     python3 scripts/lib/capi_c_abi_pin.py \
-        crates/target/debug/libwz_capi_c.so || return 1
+        crates/target/debug/libwz_capi_c.so \
+        crates/target/release/libwz_capi_c.so || return 1
     python3 scripts/lib/capi_c_abi_pin.py --selftest >/dev/null || return 1
     return 0
 }
@@ -13257,6 +13276,21 @@ PY
     _runci_guarded_test "M router-hat answers a scout" 1 \
         cargo test -p wz-integration-tests \
         --test wz_router_hat_answers_a_scout -- --ignored || return 1
+    # R2307 (open-debt item 515) — THE SAME CLAIM WITH A FOREIGN ADJUDICATOR.
+    # The leg above proves the config spelling wz<->wz, and A4-3 refuses it a
+    # cross-impl marker for exactly that; R2094's foreign leg proves the ARGV
+    # spelling. The invocation an operator replacing a zenohd actually performs
+    # is `--config their.json5`, and nothing foreign had ever read the role it
+    # selects.
+    #
+    # NO new build, and that is the resolution item 515 asked this round to
+    # decide. Folding a config arm into R2094's leg would make ITS build grow
+    # `zenoh-config` and stop proving `router-hat-router` minimally; standing
+    # here reuses the build above, whose four features ARE the minimal set for a
+    # claim about what a config document selects.
+    _runci_guarded_test "M zenohd->wz config-router scout" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenohd_scouts_wz_config_router_interop -- --ignored || return 1
     (cd crates && cargo test -p wz-runtime-tokio \
         --features transport-multicast,transport-fragmentation \
         --test multicast_pubsub_loopback -- --ignored --quiet) || return 1
