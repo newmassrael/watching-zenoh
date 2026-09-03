@@ -524,6 +524,42 @@ PLATFORM_GATED: dict[str, frozenset[str]] = {
     "wz-packet-socket": frozenset({"tap"}),
 }
 
+#: the one facade in this workspace. Named rather than derived because "which
+#: crate re-exports the others" is a fact about this repository's shape, not
+#: about any file's contents -- but `FACADE_ONLY` refuses to lean on it unless
+#: it has an `OFF_AXIS` row of its own, so the name cannot silently point at
+#: nothing.
+FACADE = "wz"
+
+# R2296 (open-debt item 606) — the REACH form, and the fourth kind of claim.
+#
+# Three rows read as claims about who consumes the crate: `wz-link-lwip` and
+# `wz-session-lwip` said "consumers are the deploy probes", `wz-runtime-coop`
+# said "reached through the facade". MEASURED against the dependency graph, ALL
+# THREE ARE FALSE as written -- the refutations are recorded in item 606 -- and
+# only one of the three has a true claim of this shape underneath it:
+#
+#   * every workspace edge into the package comes from the FACADE. Not "mostly",
+#     and not "the others are deploy probes": one consumer, so the path a Rust
+#     caller names into this crate is the facade's re-export of it;
+#   * the facade has an `OFF_AXIS` row of its own -- otherwise this excuse
+#     forwards to a row that does not exist and excuses nothing;
+#   * that row names a feature whose definition pulls the package in
+#     (`dep:<pkg>`), so the forwarding is the row's OWN subject rather than a
+#     coincidence of names;
+#   * at least one edge exists. A package nothing consumes satisfies "every
+#     consumer is the facade" vacuously, which is the zero-population trap this
+#     file refuses everywhere else.
+#
+# ⚠ It does NOT assert that probing the facade row would be equivalent. The
+# facade's own row is `OFF_AXIS` too, so the probe does not exist there either;
+# what this predicate says is narrower and true — the consumer-facing surface
+# is the facade's, so THAT row is where the question belongs.
+#: package -> the features of its `OFF_AXIS` row reached only through the facade
+FACADE_ONLY: dict[str, frozenset[str]] = {
+    "wz-session-lwip": frozenset({"transport-multicast"}),
+}
+
 # The residue of item 606, as a SET so that it is derived rather than recounted.
 # Every `OFF_AXIS` row is in exactly one of three places: `ABI_CONTRACT`,
 # `TEST_ONLY_REACH`, or here -- meaning its reason is still prose that nothing
@@ -546,7 +582,6 @@ PROSE_ONLY: frozenset[str] = frozenset(
         "wz-link-lwip",
         "wz-runtime-coop",
         "wz-runtime-core",
-        "wz-session-lwip",
     }
 )
 
@@ -920,6 +955,82 @@ def abi_module_is_abi(root: pathlib.Path, rel: str, module: str) -> str | None:
     return f"the file for `pub mod {module}` was not found beside `{rel}`"
 
 
+def facade_only_findings(
+    graph: tuple[dict[str, list[Dep]], set[str], set[str]] | None = None,
+    defs: dict[str, dict[str, list[str]]] | None = None,
+) -> list[str]:
+    """R2296 — hold every `FACADE_ONLY` row to the dependency graph.
+
+    Both inputs are injectable for the reason the sibling arms give: the
+    selftest has to drive the refusals, and the tree is clean, so every FAIL
+    path here is one the real run never takes.
+    """
+    into, _libs, _unpublishable = graph if graph is not None else dep_graph()
+    tables = defs if defs is not None else feature_defs()
+    findings: list[str] = []
+    examined = 0
+    for pkg in sorted(FACADE_ONLY):
+        if pkg not in OFF_AXIS:
+            findings.append(
+                f"`{pkg}` claims facade-only reach in `FACADE_ONLY` but has no "
+                f"`OFF_AXIS` row, so the claim excuses nothing and is unread"
+            )
+            continue
+        _why, row = OFF_AXIS[pkg]
+        feats = set(FACADE_ONLY[pkg])
+        if feats != set(row):
+            findings.append(
+                f"`{pkg}`'s `OFF_AXIS` row names {sorted(row)} and "
+                f"`FACADE_ONLY` holds {sorted(feats)}. A predicate covering "
+                f"PART of a row leaves the rest excused by prose while the row "
+                f"reads as measured"
+            )
+            continue
+        edges = into.get(pkg, [])
+        if not edges:
+            findings.append(
+                f"nothing in this workspace consumes `{pkg}`, so the claim that "
+                f"only `{FACADE}` does is held to an empty population -- which "
+                f"every such claim satisfies"
+            )
+            continue
+        examined += len(edges)
+        others = sorted({d.consumer for d in edges if d.consumer != FACADE})
+        if others:
+            findings.append(
+                f"`{pkg}` is excused because `{FACADE}` is its only consumer, "
+                f"but {others} also depend on it. A crate a second package "
+                f"names is one whose paths that package reaches directly, and "
+                f"the facade's row does not speak for it"
+            )
+        if FACADE not in OFF_AXIS:
+            findings.append(
+                f"`{pkg}` forwards its excuse to `{FACADE}`, which has no "
+                f"`OFF_AXIS` row -- the excuse points at nothing"
+            )
+            continue
+        _facade_why, facade_row = OFF_AXIS[FACADE]
+        pulling = sorted(
+            f
+            for f in facade_row
+            if any(e == f"dep:{pkg}" for e in tables.get(FACADE, {}).get(f, []))
+        )
+        if not pulling:
+            findings.append(
+                f"`{pkg}` forwards its excuse to `{FACADE}`'s row, and no "
+                f"feature in that row pulls `dep:{pkg}` in. The row named is "
+                f"not about this crate, so the forwarding is a coincidence of "
+                f"names rather than a route"
+            )
+    if FACADE_ONLY and examined == 0:
+        findings.append(
+            "no `FACADE_ONLY` package has a single workspace dependency edge to "
+            "hold its reason to, so this arm graded nothing while reporting "
+            "clean"
+        )
+    return findings
+
+
 #: the `target_os = "..."` a platform-gated site must carry, in the SAME
 #: attribute as the feature. The value is captured so a finding can name it.
 PLATFORM_CFG = re.compile(r'target_os\s*=\s*"([a-z0-9_]+)"')
@@ -1156,6 +1267,7 @@ def test_only_reach_findings(
         | set(TEST_ONLY_REACH)
         | set(TEST_ONLY_FEATURE)
         | set(PLATFORM_GATED)
+        | set(FACADE_ONLY)
     )
     for pkg in sorted(set(OFF_AXIS) - measured - PROSE_ONLY):
         findings.append(
@@ -1174,7 +1286,13 @@ def test_only_reach_findings(
             f"`{pkg}` is declared prose-only and has no `OFF_AXIS` row, so the "
             f"residue it reports is work nobody has. Delete the name"
         )
-    tables = (ABI_CONTRACT, TEST_ONLY_REACH, TEST_ONLY_FEATURE, PLATFORM_GATED)
+    tables = (
+        ABI_CONTRACT,
+        TEST_ONLY_REACH,
+        TEST_ONLY_FEATURE,
+        PLATFORM_GATED,
+        FACADE_ONLY,
+    )
     for i, first in enumerate(tables):
         for second in tables[i + 1 :]:
             for pkg in sorted(set(first) & set(second)):
@@ -1414,6 +1532,7 @@ def check() -> int:
     findings.extend(defer_findings(sites))
     findings.extend(abi_contract_findings(ROOT, sites))
     findings.extend(platform_gated_findings(ROOT, sites))
+    findings.extend(facade_only_findings())
     findings.extend(test_only_reach_findings())
     findings.extend(test_only_feature_findings())
 
@@ -1443,7 +1562,8 @@ def check() -> int:
         f"`ABI_CONTRACT`, {len(set(TEST_ONLY_REACH) & set(OFF_AXIS))} to "
         f"`TEST_ONLY_REACH`, {len(set(TEST_ONLY_FEATURE) & set(OFF_AXIS))} to "
         f"`TEST_ONLY_FEATURE`, {len(set(PLATFORM_GATED) & set(OFF_AXIS))} to "
-        f"`PLATFORM_GATED`, {len(PROSE_ONLY)} still prose (item 606)"
+        f"`PLATFORM_GATED`, {len(set(FACADE_ONLY) & set(OFF_AXIS))} to "
+        f"`FACADE_ONLY`, {len(PROSE_ONLY)} still prose (item 606)"
     )
     for kind in (
         "public-item",
@@ -1485,6 +1605,80 @@ def _fixture() -> dict[str, str]:
         # attached to nothing this gate can name
         "demo/src/weird.rs": f"{a}\n@@@ not rust @@@\n",
     }
+
+
+def facade_only_selftest() -> int:
+    """R2296 — drive `facade_only_findings` through every way it refuses.
+
+    The CONTROL is the first case and it is what makes the rest a measurement:
+    a package the facade alone consumes, whose facade row pulls it in, must
+    PASS. Refusing that would refuse the shape the row is excused for.
+    """
+    pkg, other = "demo", "demo-other"
+    libs: set[str] = set()
+    unpub: set[str] = set()
+    row = ("fixture", frozenset({"feat"}))
+    good_defs = {FACADE: {"take-demo": [f"dep:{pkg}"]}}
+    real_off_pkg, real_off_facade = OFF_AXIS.get(pkg), OFF_AXIS.get(FACADE)
+    # The REAL rows are lifted out for the duration: the injected graph knows
+    # only the fixture, so leaving a production row in the table would grade it
+    # against a graph that does not contain it and report an empty population
+    # for a package the workspace really does consume.
+    real_fo = dict(FACADE_ONLY)
+    FACADE_ONLY.clear()
+    only = {pkg: [Dep(FACADE, "normal", frozenset())]}
+    two = {pkg: [Dep(FACADE, "normal", frozenset()), Dep(other, "normal", frozenset())]}
+    try:
+        OFF_AXIS[pkg] = row
+        OFF_AXIS[FACADE] = ("fixture facade", frozenset({"take-demo"}))
+        FACADE_ONLY[pkg] = frozenset({"feat"})
+        control = facade_only_findings((only, libs, unpub), good_defs)
+        second = facade_only_findings((two, libs, unpub), good_defs)
+        empty = facade_only_findings(({}, libs, unpub), good_defs)
+        # the facade row exists but names no feature that pulls this dep in
+        wrong_row = facade_only_findings((only, libs, unpub), {FACADE: {"take-demo": []}})
+        # the predicate covers only part of the row
+        OFF_AXIS[pkg] = ("fixture", frozenset({"feat", "another"}))
+        partial = facade_only_findings((only, libs, unpub), good_defs)
+        # the package has no `OFF_AXIS` row at all
+        del OFF_AXIS[pkg]
+        orphan = facade_only_findings((only, libs, unpub), good_defs)
+        # the facade itself has no row, so the excuse forwards to nothing
+        OFF_AXIS[pkg] = row
+        del OFF_AXIS[FACADE]
+        no_facade = facade_only_findings((only, libs, unpub), good_defs)
+    finally:
+        OFF_AXIS.pop(pkg, None)
+        OFF_AXIS.pop(FACADE, None)
+        FACADE_ONLY.clear()
+        FACADE_ONLY.update(real_fo)
+        if real_off_pkg is not None:
+            OFF_AXIS[pkg] = real_off_pkg
+        if real_off_facade is not None:
+            OFF_AXIS[FACADE] = real_off_facade
+
+    checks = (
+        (not control, "the CONTROL -- facade-only reach with a row that pulls "
+                      "the dep in -- must PASS, or the predicate refuses the "
+                      "very shape the excuse is for"),
+        (any("also depend on it" in f for f in second),
+         "a second consumer must be reported"),
+        (any("empty population" in f for f in empty),
+         "a package nothing consumes satisfies the claim vacuously and must FAIL"),
+        (any("coincidence of\nnames" in f or "coincidence of" in f for f in wrong_row),
+         "a facade row that pulls no `dep:` in is not a route and must be reported"),
+        (any("PART of a row" in f for f in partial),
+         "a predicate covering part of a row must be reported"),
+        (any("has no `OFF_AXIS` row" in f for f in orphan),
+         "a `FACADE_ONLY` entry whose package has no row excuses nothing"),
+        (any("points at nothing" in f for f in no_facade),
+         "an excuse forwarded to a facade with no row must be reported"),
+    )
+    for ok, why in checks:
+        if not ok:
+            print(f"feature-public-surface: SELFTEST FAIL -- {why}")
+            return 1
+    return 0
 
 
 def platform_gated_selftest() -> int:
@@ -1977,6 +2171,14 @@ def selftest() -> int:
     if platform_gated_selftest() != 0:
         return 1
 
+    # R2296 — AND THE FACADE-REACH PREDICATE. The three rows it was written for
+    # all claimed something about consumers, and the graph refuted all three as
+    # written; only one had a true claim of this shape underneath. So the
+    # refusals below are the shapes that refutation is made of — a second
+    # consumer, a facade row that pulls nothing in, an empty graph.
+    if facade_only_selftest() != 0:
+        return 1
+
     # R2266 — AND THE TEST-ONLY-REACH PREDICATE, on an injected dependency
     # graph and for the same reason. The row this one replaces said "same
     # reason as the other one" while a `lib` target consumed it as a normal
@@ -2013,7 +2215,11 @@ def selftest() -> int:
         "refusing a public item the feature alone decides, a row covered only "
         "in part, a row with no `OFF_AXIS` entry and a row that gates nothing "
         "-- past one clean control, the `all(feature, target_os)` site the "
-        "excuse is about"
+        "excuse is about; and holds each `FACADE_ONLY` row to the dependency "
+        "graph, refusing a second consumer, a package nothing consumes, a "
+        "facade row that pulls no `dep:` in, a row covered only in part, a row "
+        "with no `OFF_AXIS` entry and a facade with no row of its own -- past "
+        "one clean control"
     )
     return 0
 
