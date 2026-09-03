@@ -3989,6 +3989,123 @@ pub mod common {
         );
     }
 
+    /// How many times [`run_query_until_answered`] may ask.
+    ///
+    /// R2311 (open-debt item 645) — A ONE-SHOT IS A DECISION AND HAS TO SAY SO.
+    /// Some legs genuinely must ask once: a DENY leg, where the absence of a
+    /// reply is the finding, and a leg that already closed the
+    /// declaration-propagation window another way and then counts exactly how
+    /// many queries its queryable saw. Both are correct and neither is
+    /// distinguishable, in a bare `1`, from the oversight this type exists to
+    /// stop. So the single-attempt form carries its reason in the code rather
+    /// than in a comment beside it, and the compiler is what requires it.
+    #[derive(Debug, Clone, Copy)]
+    pub enum QueryAttempts<'a> {
+        /// Ask exactly once, `because` the window is already closed (or an
+        /// unanswered query is the very thing being measured).
+        Once { because: &'a str },
+        /// Ask up to `n` times, crossing the declaration-propagation window.
+        UpTo(usize),
+    }
+
+    impl QueryAttempts<'_> {
+        fn count(self) -> usize {
+            match self {
+                QueryAttempts::Once { .. } => 1,
+                QueryAttempts::UpTo(n) => n,
+            }
+        }
+    }
+
+    /// Run a foreign ONE-SHOT querier until its reply lands, or give up loudly.
+    ///
+    /// R2311 (open-debt item 645) — THE READINESS PREDICATE FOR A DECLARATION
+    /// THAT HAS NOT PROPAGATED YET, and the SSOT for a prescription this tree
+    /// had already written but only once, inline, at
+    /// `wz_to_zenohd_router.rs`'s pico-`z_get` leg:
+    ///
+    /// > a SINGLE query arriving before [the] DeclQueryable has propagated
+    /// > returns final-only (no reply) and exits [...] a query fires once — so
+    /// > retry the whole one-shot until a reply lands.
+    ///
+    /// WHY A DECLARER'S OWN READY LINE IS NOT THAT PREDICATE. Both foreign
+    /// families print their marker BEFORE the call that declares: upstream
+    /// `examples/examples/z_queryable.rs:28` prints `Declaring Queryable on`
+    /// and declares on line 30, and zenoh-pico's `z_queryable.c:107` /
+    /// `z_sub.c:71` / `z_querier.c:72` print theirs above the matching
+    /// `z_declare_*`. So the marker proves the session is OPEN and nothing
+    /// about the ROUTER having registered anything. A querier that dials the
+    /// router directly can therefore be answered "no such queryable" while the
+    /// declarer's `Declare` is still in flight — the router finalizes the query
+    /// at once, the one-shot prints no reply and exits, and the test reads a
+    /// lost race as a routing failure. That is the shape hosted Layer Ewirez
+    /// failed in 0.17s on run 33737007770 while every local run passed.
+    ///
+    /// WHY NOT A SLEEP. The window is a scheduling quantity, not a duration:
+    /// measured on this tree's own binaries an idle host closes it before the
+    /// querier's process spawn finishes (40/40 one-shots answered on the first
+    /// attempt), while a loaded runner inverts the same ordering. A sleep long
+    /// enough to cover the bad case is dead time in every good one and still
+    /// guesses; polling the CONDITION does neither.
+    ///
+    /// `needle` is what counts as answered — the caller's reply marker, not a
+    /// generic one, because a final-notification line lands on a zero-reply
+    /// query too and would retire the retry budget on attempt 1 (the mistake
+    /// R311pb paid for at the site this was lifted from). `attempts` is the
+    /// budget, and [`QueryAttempts::Once`] is how a leg that must ask exactly
+    /// once records why. `mk_child` builds one fresh attempt and returns its
+    /// guard plus the capture to read.
+    ///
+    /// On success the ANSWERING attempt is handed back ALIVE, with its reader
+    /// and the capture so far, because several callers wait for a second line
+    /// after the reply — pico's `z_get` prints its query-final notification
+    /// after the reply value, and a leg that measures the gap between them
+    /// would read a killed child as a missing final. Only the attempts that
+    /// went unanswered are reaped here. `Err` carries the last capture, so the
+    /// caller keeps its own panic text.
+    pub fn run_query_until_answered(
+        label: &str,
+        attempts: QueryAttempts<'_>,
+        needle: &str,
+        budget: Duration,
+        mut mk_child: impl FnMut() -> (ChildGuard, File),
+    ) -> Result<(ChildGuard, File, String), String> {
+        let attempts = attempts.count();
+        assert!(
+            attempts >= 1,
+            "{label}: a query budget of zero attempts asks nothing and would \
+             report the absence of a reply it never sought"
+        );
+        let mut captured = String::new();
+        for attempt in 1..=attempts {
+            let (mut child, mut reader) = mk_child();
+            // LIVENESS-AWARE, not a plain substring wait: a one-shot that missed
+            // the route is finalized by the router and EXITS at once, so
+            // `wait_for_substring` would charge the whole budget to a corpse and
+            // multiply it by `attempts`. `wait_for_capture_alive` re-reads the
+            // capture before it checks liveness, so a reply flushed just before
+            // exit still counts.
+            let seen =
+                wait_for_capture_alive(child.child_mut(), &mut reader, budget, needle, |c| {
+                    c.contains(needle).then_some(())
+                });
+            if seen.is_ok() {
+                let captured = read_captured(&mut reader);
+                return Ok((child, reader, captured));
+            }
+            let _ = child.child_mut().kill();
+            let _ = child.child_mut().wait();
+            captured = read_captured(&mut reader);
+            if attempt < attempts {
+                eprintln!(
+                    "{label}: attempt {attempt}/{attempts} saw no {needle:?} \
+                     (the declaration may not have propagated yet); retrying"
+                );
+            }
+        }
+        Err(captured)
+    }
+
     /// Spawn a zenoh-pico `z_liveliness` (a client + liveliness-TOKEN declarer)
     /// against `endpoint`, blocking until it has declared its token (the
     /// `Declaring liveliness token '<keyexpr>'...` readiness line). No `-t` is

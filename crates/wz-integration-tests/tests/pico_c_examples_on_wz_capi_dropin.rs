@@ -96,12 +96,22 @@ use std::time::Duration;
 
 use wz_integration_tests::common::{
     compile_pico_example_against_wz_capi, compile_pico_example_against_wz_capi_with_includes,
-    graceful_terminate, project_root, read_captured,
+    graceful_terminate, project_root, read_captured, run_query_until_answered,
     spawn_zenohd_multicast_scouting_on_any_interface, wait_for_capture_alive, wait_for_exit,
     wait_for_substring, wait_for_tcp_accept_alive, zenoh_pico_cli_binary, zenoh_pico_include_dirs,
     zenoh_pico_include_dirs_single_threaded, zenoh_pico_library_dir, zenohd_binary, ChildGuard,
-    PortReservation,
+    PortReservation, QueryAttempts,
 };
+
+/// How many one-shot queries the declaration-propagation window may eat.
+///
+/// R2311 (open-debt item 645) — every query leg in this file is gated on
+/// `wait_for_tcp_accept_alive`, which fires when the queryable's socket
+/// accepts: that is inside `z_open` and BEFORE `z_declare_queryable`. A query
+/// that lands in the gap is finalized against an empty route, the one-shot
+/// prints its final notification with no reply and exits successfully, and the
+/// leg reads a lost race as a drop-in that did not answer.
+const GET_ATTEMPTS: usize = 6;
 
 /// How long a compiled drop-in gets to bind its listener. Generous relative to
 /// the sub-100 ms observed path: the gate is a TCP connect, so a slow bind
@@ -401,20 +411,49 @@ fn pico_zqueryable_source_on_wz_capi_answers_real_pico_zget() {
     drop(reservation);
 
     // A one-shot `z_get`: it prints its replies and the final notification, then
-    // exits — which is what flushes its capture.
-    let mut get_out = tempfile::tempfile().expect("z_get stdout capture");
-    let get_writer = get_out.try_clone().expect("dup z_get stdout handle");
-    let get = Command::new("stdbuf")
-        .args(["-oL", "-eL"])
-        .arg(&z_get)
-        .args(["-e", &endpoint, "-m", "client", "-k", selector])
-        .stdout(Stdio::from(get_writer))
-        .stderr(Stdio::from(get_out.try_clone().expect("dup stderr handle")))
-        .status()
-        .expect("run the real zenoh-pico z_get");
+    // exits — which is what flushes its capture. Retried as a whole (R2311,
+    // open-debt item 645) because the accept barrier above is not a
+    // declaration barrier.
+    let (mut get_child, mut get_reader, _) = run_query_until_answered(
+        "real zenoh-pico z_get against the z_queryable.c drop-in",
+        QueryAttempts::UpTo(GET_ATTEMPTS),
+        reply,
+        EXCHANGE_TIMEOUT,
+        || {
+            let get_out = tempfile::tempfile().expect("z_get stdout capture");
+            let get_writer = get_out.try_clone().expect("dup z_get stdout handle");
+            let child = ChildGuard::wrap(
+                "real zenoh-pico z_get",
+                Command::new("stdbuf")
+                    .args(["-oL", "-eL"])
+                    .arg(&z_get)
+                    .args(["-e", &endpoint, "-m", "client", "-k", selector])
+                    .stdout(Stdio::from(get_writer))
+                    .stderr(Stdio::from(get_out.try_clone().expect("dup stderr handle")))
+                    .spawn()
+                    .expect("run the real zenoh-pico z_get"),
+            );
+            (child, get_out)
+        },
+    )
+    .unwrap_or_else(|captured| {
+        panic!(
+            "the REAL zenoh-pico z_get never decoded the reply that upstream's \
+             z_queryable.c produced while running on wz's C-ABI, in {GET_ATTEMPTS} \
+             attempts.\nexpected substring: {reply}\n\
+             --- REAL pico z_get stdout ---\n{captured}"
+        )
+    });
+    // The exit status still matters, and the capture is still read after the
+    // process is gone: the reply line is what ends the wait, the final
+    // notification comes after it.
+    let get = get_child
+        .child_mut()
+        .wait()
+        .expect("wait on the real pico z_get");
     assert!(get.success(), "real zenoh-pico z_get exited {get:?}");
 
-    let foreign = read_captured(&mut get_out);
+    let foreign = read_captured(&mut get_reader);
     // Ordering note: the reply assertion comes FIRST and is the verdict. The
     // "final notification" line below prints even when no reply arrived, so
     // asserting it first would let a silent drop-in pass a leg that reads as
@@ -1033,24 +1072,48 @@ fn pico_zget_source_on_wz_capi_queries_real_pico_zqueryable() {
     drop(reservation);
 
     // `z_get.c` is a one-shot: it waits on its condvar for the final
-    // notification, then exits — which is what flushes its capture.
-    let mut get_out = tempfile::tempfile().expect("z_get stdout capture");
-    let get_writer = get_out.try_clone().expect("dup z_get stdout handle");
-    let get = Command::new("stdbuf")
-        .args(["-oL", "-eL"])
-        .arg(&dropin)
-        .args(["-e", &endpoint, "-m", "client", "-k", selector])
-        .stdout(Stdio::from(get_writer))
-        .stderr(Stdio::from(get_out.try_clone().expect("dup stderr handle")))
-        .status()
-        .expect("run upstream z_get.c on wz's C ABI");
+    // notification, then exits — which is what flushes its capture. Retried as
+    // a whole (R2311, open-debt item 645) because the accept barrier above is
+    // not a declaration barrier.
+    let (mut get_child, mut get_reader, _) = run_query_until_answered(
+        "upstream z_get.c on wz's C ABI against the REAL pico queryable",
+        QueryAttempts::UpTo(GET_ATTEMPTS),
+        "Queryable from Pico!",
+        EXCHANGE_TIMEOUT,
+        || {
+            let get_out = tempfile::tempfile().expect("z_get stdout capture");
+            let get_writer = get_out.try_clone().expect("dup z_get stdout handle");
+            let child = ChildGuard::wrap(
+                "upstream z_get.c on wz's C ABI",
+                Command::new("stdbuf")
+                    .args(["-oL", "-eL"])
+                    .arg(&dropin)
+                    .args(["-e", &endpoint, "-m", "client", "-k", selector])
+                    .stdout(Stdio::from(get_writer))
+                    .stderr(Stdio::from(get_out.try_clone().expect("dup stderr handle")))
+                    .spawn()
+                    .expect("run upstream z_get.c on wz's C ABI"),
+            );
+            (child, get_out)
+        },
+    )
+    .unwrap_or_else(|captured| {
+        panic!(
+            "upstream z_get.c on wz never decoded the REAL pico queryable's reply \
+             payload in {GET_ATTEMPTS} attempts.\n--- z_get.c (on wz) stdout ---\n{captured}"
+        )
+    });
+    let get = get_child
+        .child_mut()
+        .wait()
+        .expect("wait on upstream z_get.c");
     assert!(
         get.success(),
         "upstream z_get.c on wz's C ABI exited {get:?}\n--- its stdout+stderr ---\n{}",
-        read_captured(&mut get_out)
+        read_captured(&mut get_reader)
     );
 
-    let local = read_captured(&mut get_out);
+    let local = read_captured(&mut get_reader);
     // The REPLY is the verdict and is asserted FIRST. "Received query final
     // notification" prints even when no reply arrived, so asserting the final
     // first would let a silent path pass as green.
@@ -2566,24 +2629,52 @@ fn pico_zqueryablechannel_source_on_wz_capi_answers_real_pico_zget_after_the_dis
     }
     drop(reservation);
 
-    let mut get_out = tempfile::tempfile().expect("foreign z_get stdout capture");
-    let get_writer = get_out.try_clone().expect("dup foreign z_get handle");
-    let get = Command::new("stdbuf")
-        .args(["-oL", "-eL"])
-        .arg(&z_get)
-        .args(["-e", &endpoint, "-m", "client", "-k", key])
-        .stdout(Stdio::from(get_writer))
-        .stderr(Stdio::from(get_out.try_clone().expect("dup stderr handle")))
-        .status()
-        .expect("run the real zenoh-pico z_get");
+    // Retried as a whole (R2311, open-debt item 645) because the accept barrier
+    // above is not a declaration barrier.
+    let (mut get_child, mut get_reader, _) = run_query_until_answered(
+        "real zenoh-pico z_get against the z_queryable_channel.c drop-in",
+        QueryAttempts::UpTo(GET_ATTEMPTS),
+        value,
+        EXCHANGE_TIMEOUT,
+        || {
+            let get_out = tempfile::tempfile().expect("foreign z_get stdout capture");
+            let get_writer = get_out.try_clone().expect("dup foreign z_get handle");
+            let child = ChildGuard::wrap(
+                "real zenoh-pico z_get",
+                Command::new("stdbuf")
+                    .args(["-oL", "-eL"])
+                    .arg(&z_get)
+                    .args(["-e", &endpoint, "-m", "client", "-k", key])
+                    .stdout(Stdio::from(get_writer))
+                    .stderr(Stdio::from(get_out.try_clone().expect("dup stderr handle")))
+                    .spawn()
+                    .expect("run the real zenoh-pico z_get"),
+            );
+            (child, get_out)
+        },
+    )
+    .unwrap_or_else(|captured| {
+        panic!(
+            "the REAL zenoh-pico z_get never reported the reply that upstream's \
+             z_queryable_channel.c produced ON wz, in {GET_ATTEMPTS} attempts. The \
+             reply is issued from the application thread AFTER the dispatch \
+             returned, so a ResponseFinal emitted at dispatch time would close the \
+             querier before it arrived — which is exactly this shape.\n\
+             expected substring: {value}\n--- REAL pico z_get stdout ---\n{captured}"
+        )
+    });
+    let get = get_child
+        .child_mut()
+        .wait()
+        .expect("wait on the real pico z_get");
     assert!(
         get.success(),
         "real zenoh-pico z_get exited {get:?}\n--- its stdout+stderr ---\n{}",
-        read_captured(&mut get_out)
+        read_captured(&mut get_reader)
     );
 
     // The verdict comes from the FOREIGN process: it decoded the reply itself.
-    let foreign = read_captured(&mut get_out);
+    let foreign = read_captured(&mut get_reader);
     let responder = read_captured(&mut qbl_out);
     assert!(
         foreign.contains(value),
@@ -3041,20 +3132,51 @@ fn pico_zquerier_source_on_wz_capi_gets_a_reply_from_real_pico_zqueryable() {
     }
     drop(reservation);
 
-    let mut get_out = tempfile::tempfile().expect("querier drop-in capture");
-    let get_writer = get_out.try_clone().expect("dup querier drop-in handle");
-    let get_err = get_out.try_clone().expect("dup querier stderr handle");
-    // `-n 1`: one query, then exit — which is what flushes the capture.
-    let get = Command::new("stdbuf")
-        .args(["-oL", "-eL"])
-        .arg(&dropin)
-        .args(["-e", &endpoint, "-m", "client", "-s", key, "-n", "1"])
-        .stdout(Stdio::from(get_writer))
-        .stderr(Stdio::from(get_err))
-        .spawn()
-        .expect("spawn the compiled z_querier drop-in");
-    let get = bounded_exit("z_querier.c on wz", get, &mut get_out);
-    let captured = read_captured(&mut get_out);
+    // `-n 1`: one query, then exit — which is what flushes the capture. Retried
+    // as a whole (R2311, open-debt item 645) because the accept barrier above
+    // is not a declaration barrier.
+    let (get_child, mut get_reader, _) = run_query_until_answered(
+        "upstream z_querier.c on wz's C-ABI against the REAL pico queryable",
+        QueryAttempts::UpTo(GET_ATTEMPTS),
+        value,
+        EXCHANGE_TIMEOUT,
+        || {
+            let get_out = tempfile::tempfile().expect("querier drop-in capture");
+            let get_writer = get_out.try_clone().expect("dup querier drop-in handle");
+            let get_err = get_out.try_clone().expect("dup querier stderr handle");
+            let child = ChildGuard::wrap(
+                "z_querier.c on wz",
+                Command::new("stdbuf")
+                    .args(["-oL", "-eL"])
+                    .arg(&dropin)
+                    .args(["-e", &endpoint, "-m", "client", "-s", key, "-n", "1"])
+                    .stdout(Stdio::from(get_writer))
+                    .stderr(Stdio::from(get_err))
+                    .spawn()
+                    .expect("spawn the compiled z_querier drop-in"),
+            );
+            (child, get_out)
+        },
+    )
+    .unwrap_or_else(|captured| {
+        panic!(
+            "upstream z_querier.c on wz's C-ABI never reported the reply the REAL \
+             zenoh-pico z_queryable sent, in {GET_ATTEMPTS} attempts.\n\
+             expected substring: {value}\n\
+             --- z_querier.c (on wz) stdout+stderr ---\n{captured}"
+        )
+    });
+    // `bounded_exit` takes an owned `Child`; the guard owns this one, so the
+    // same bounded wait is taken through it.
+    let mut get_child = get_child;
+    let get = wait_for_exit(get_child.child_mut(), EXIT_TIMEOUT).unwrap_or_else(|why| {
+        let captured = read_captured(&mut get_reader);
+        panic!(
+            "z_querier.c on wz did not exit within {EXIT_TIMEOUT:?} — {why}\n\
+             --- its stdout+stderr ---\n{captured}"
+        )
+    });
+    let captured = read_captured(&mut get_reader);
     assert!(
         get.success(),
         "upstream z_querier.c on wz's C-ABI exited {get:?}\n--- its stdout+stderr ---\n{captured}"

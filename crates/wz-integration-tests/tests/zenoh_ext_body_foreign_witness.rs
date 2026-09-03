@@ -96,8 +96,8 @@ use std::time::{Duration, Instant};
 
 use wz_capture::Dissection;
 use wz_integration_tests::common::{
-    read_captured, wait_for_tcp_accept_alive, zenoh_core_example_binary, zenohd_binary, ChildGuard,
-    PortReservation, ZENOHD_TCP_ACCEPT_BUDGET,
+    read_captured, run_query_until_answered, wait_for_tcp_accept_alive, zenoh_core_example_binary,
+    zenohd_binary, ChildGuard, PortReservation, QueryAttempts, ZENOHD_TCP_ACCEPT_BUDGET,
 };
 use wz_integration_tests::wire_tap::{synthesise_pcap, tap_proxy, Recording, Side};
 use wz_session_core::passive::Direction;
@@ -130,6 +130,16 @@ const GET_RECEIVED: &str = ">> Received (";
 /// alike, so a generous deadline reads both as success.
 const GET_TIMEOUT_MS: &str = "3000";
 const GET_WALL_CLOCK: Duration = Duration::from_secs(15);
+
+/// How many one-shot queries the route-install window is allowed to eat.
+///
+/// R2311 (open-debt item 645) — the same budget the sibling prescription uses
+/// at `wz_to_zenohd_router.rs`'s pico-`z_get` leg. Six rather than two because
+/// the cost of an unnecessary attempt is a few milliseconds (a query that
+/// missed the route is finalized by the router and the process exits at once,
+/// which [`run_query_until_answered`] detects rather than waits out) while the
+/// cost of too small a budget is the hosted red this replaces.
+const GET_ATTEMPTS: usize = 6;
 
 /// The extension bodies this capture is asserted to carry, by `ext_name`.
 ///
@@ -266,12 +276,18 @@ fn spawn_declared_queryable(
     panic!("stock zenoh z_queryable failed to declare through the tap after {ATTEMPTS} attempts");
 }
 
-/// Run one stock `z_get` to completion, straight at the router, and return its
-/// stdout.
-fn run_zget(z_get: &std::path::Path, endpoint: &str) -> String {
+/// Spawn ONE stock `z_get` attempt, straight at the router, and hand back the
+/// child with the capture to read.
+///
+/// R2311 (open-debt item 645) — ONE ATTEMPT, NOT A VERDICT. This used to run
+/// the querier to completion and return its stdout, and the caller asserted on
+/// that single result; [`run_query_until_answered`] is now what turns attempts
+/// into a verdict, because the queryable's readiness marker is printed before
+/// its declaration reaches the router (see that helper's own note).
+fn spawn_zget(z_get: &std::path::Path, endpoint: &str) -> (ChildGuard, std::fs::File) {
     let out = tempfile::tempfile().expect("tempfile for z_get stdout");
     let out_writer = out.try_clone().expect("dup z_get stdout handle");
-    let mut out_reader = out;
+    let out_reader = out;
     let mut cmd = Command::new("stdbuf");
     cmd.args(["-oL", "-eL"]).arg(z_get).args([
         "-s",
@@ -289,7 +305,7 @@ fn run_zget(z_get: &std::path::Path, endpoint: &str) -> String {
         "-t",
         "ALL_COMPLETE",
     ]);
-    let mut child = ChildGuard::wrap(
+    let child = ChildGuard::wrap(
         "z_get (stock zenoh, off the tap)",
         cmd.stderr(Stdio::from(
             out_writer.try_clone().expect("dup stderr handle"),
@@ -298,20 +314,7 @@ fn run_zget(z_get: &std::path::Path, endpoint: &str) -> String {
         .spawn()
         .expect("spawn z_get via stdbuf"),
     );
-    let deadline = Instant::now() + GET_WALL_CLOCK;
-    loop {
-        match child.child_mut().try_wait().expect("try_wait on z_get") {
-            Some(_) => break,
-            None if Instant::now() >= deadline => {
-                panic!(
-                    "stock z_get did not finish within {GET_WALL_CLOCK:?}; captured so far:\n{}",
-                    read_captured(&mut out_reader)
-                );
-            }
-            None => std::thread::sleep(Duration::from_millis(50)),
-        }
-    }
-    read_captured(&mut out_reader)
+    (child, out_reader)
 }
 
 /// Wait until BOTH directions have carried bytes — the earliest point a
@@ -424,14 +427,23 @@ fn the_z64_body_walkers_read_what_a_stock_zenohd_and_queryable_wrote() {
     // is recorded; whatever reaches the tap because of it was written by the
     // ROUTER, which is what makes the `target` reading foreign twice over --
     // the flag was a stock client's and the bytes are a stock router's.
-    let get_out = run_zget(&z_get, &format!("tcp/127.0.0.1:{zenohd_port}"));
-    let qabl_out = read_captured(&mut qabl_reader);
-    assert!(
-        get_out.contains(GET_RECEIVED),
-        "the stock querier got no reply, so the router never forwarded the \
-         query through the tap and this capture holds a handshake only.\n\
-         --- z_get ---\n{get_out}\n--- z_queryable ---\n{qabl_out}"
+    let answered = run_query_until_answered(
+        "stock z_get straight at zenohd",
+        QueryAttempts::UpTo(GET_ATTEMPTS),
+        GET_RECEIVED,
+        GET_WALL_CLOCK,
+        || spawn_zget(&z_get, &format!("tcp/127.0.0.1:{zenohd_port}")),
     );
+    let qabl_out = read_captured(&mut qabl_reader);
+    let (mut get_child, _get_reader, get_out) = answered.unwrap_or_else(|captured| {
+        panic!(
+            "the stock querier got no reply in {GET_ATTEMPTS} attempts, so the router never \
+             forwarded the query through the tap and this capture holds a handshake only.\n\
+             --- z_get ---\n{captured}\n--- z_queryable ---\n{qabl_out}"
+        )
+    });
+    let _ = get_child.child_mut().kill();
+    let _ = get_child.child_mut().wait();
 
     std::thread::sleep(Duration::from_millis(300));
     let _ = queryable.child_mut().kill();
@@ -446,7 +458,8 @@ fn the_z64_body_walkers_read_what_a_stock_zenohd_and_queryable_wrote() {
     assert!(
         !segments.is_empty(),
         "the tap recorded NOTHING -- an empty capture satisfies every field \
-         assertion below.\n--- z_queryable ---\n{qabl_out}"
+         assertion below.\n--- z_get (answered) ---\n{get_out}\n\
+         --- z_queryable ---\n{qabl_out}"
     );
     let from_qabl: usize = segments
         .iter()

@@ -441,6 +441,45 @@ if ! python3 scripts/lib/anyke_reader_gate.py; then
     exit 1
 fi
 
+# ─── gate 2l — a foreign one-shot query is not a verdict (R2311, item 645) ──
+# grades: worktree
+#
+# Both foreign example families print their readiness line BEFORE the call that
+# declares — upstream `z_queryable.rs` prints "Declaring Queryable on" and
+# declares on the next statement, zenoh-pico's `z_queryable.c` / `z_sub.c` /
+# `z_querier.c` print theirs above the matching `z_declare_*`. So that line
+# proves the declarer's SESSION is open and nothing about the ROUTER having
+# registered anything, and a querier that dials separately can arrive first: the
+# router finalizes against an empty route, the one-shot prints no reply and
+# exits, and the test reads a lost race as a routing failure.
+#
+# Hosted Layer Ewirez failed exactly that way in 0.17s (run 33737007770) while
+# every local run passed, which is why this cannot be left to the tests: on an
+# idle host the window closes before the querier's process spawn finishes.
+#
+# UNCONDITIONAL and unscoped, like gates 2d/2j/2k: it reads tracked Rust,
+# derives its population from the resolver call sites, and costs well under a
+# second. Selftest first, because a gate that cannot fail is worth nothing —
+# and this one could not, twice, before its fixtures were made decisive.
+if ! python3 scripts/lib/foreign_query_readiness_gate.py --selftest >/dev/null; then
+    echo "" >&2
+    echo "pre-push: [gate 2l] foreign-query readiness gate SELFTEST failed —" >&2
+    echo "          it can no longer tell a retried query from a one-shot, so" >&2
+    echo "          its verdict on this push means nothing." >&2
+    exit 1
+fi
+if ! python3 scripts/lib/foreign_query_readiness_gate.py; then
+    echo "" >&2
+    echo "pre-push: [gate 2l] foreign-query readiness gate FAILED — a test" >&2
+    echo "          spawns a foreign querier and believes its single result." >&2
+    echo "          The declarer's own ready line is printed BEFORE it declares," >&2
+    echo "          so that is not a readiness barrier. Route the spawn through" >&2
+    echo "          \`run_query_until_answered(...)\`; a leg that must ask once" >&2
+    echo "          passes \`QueryAttempts::Once { because: .. }\` and says why." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+
 # ─── gate 2e — the scouting socket's movable axes (R2142, item 225) ──
 # grades: worktree
 #

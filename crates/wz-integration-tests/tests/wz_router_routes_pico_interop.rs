@@ -57,8 +57,9 @@ use std::time::Duration;
 
 use wz_integration_tests::common::{
     assert_demo_binary_newer_than_sources, graceful_terminate, read_captured,
-    spawn_on_ephemeral_port, spawn_publishing_zpub, spawn_subscribed_zsub, wait_for_substring,
-    wz_ap_demo_binary, zenoh_pico_cli_binary,
+    run_query_until_answered, spawn_on_ephemeral_port, spawn_publishing_zpub,
+    spawn_subscribed_zsub, wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary,
+    QueryAttempts,
 };
 
 /// The literal keyexpr the pico clients agree on — distinct per test so parallel
@@ -371,6 +372,13 @@ const GET_FINAL_BUDGET: Duration = Duration::from_secs(5);
 const QABL_READY: &str = "Creating Queryable on";
 const QABL_RECEIVED: &str = ">> [Queryable handler] Received Query";
 
+/// How many one-shot queries the declaration-propagation window may eat.
+///
+/// R2311 (open-debt item 645) — the same budget the sibling legs use. A query
+/// that missed the route is finalized by the router and the process exits at
+/// once, so an unnecessary attempt costs milliseconds, not the deadline.
+const GET_ATTEMPTS: usize = 6;
+
 /// Spawn a zenoh-pico `z_queryable` as a CLIENT of `endpoint`, returning once it
 /// has opened its session and declared the queryable. Same retry-on-transient-
 /// open-failure shape as `common::spawn_subscribed_zsub`, and for the same
@@ -470,14 +478,38 @@ fn wz_router_routes_a_pico_get_to_a_pico_queryable() {
     let face0 = wait_for_substring(&mut r_reader, "face 0 UP", Duration::from_secs(10));
 
     let query_sent = std::time::Instant::now();
-    let (mut get_child, mut get_reader) = spawn_zget(&z_get, KEY_QUERY, &endpoint);
+    // R2311 (open-debt item 645) — the `face 0 UP` barrier above proves the
+    // queryable's LINK is Established, which is one step short of its
+    // DeclareQueryable having been recorded; a query can still arrive between
+    // the two and be finalized against an empty route, which is this leg's
+    // failure mode and the OTHER leg's subject. So the one-shot is retried
+    // rather than believed.
+    let (get_child, get_reader, received) = match run_query_until_answered(
+        "pico z_get through the wz router",
+        QueryAttempts::UpTo(GET_ATTEMPTS),
+        GET_RECEIVED,
+        Duration::from_secs(15),
+        || spawn_zget(&z_get, KEY_QUERY, &endpoint),
+    ) {
+        Ok((child, reader, captured)) => (Some(child), Some(reader), Ok(captured)),
+        Err(captured) => (None, None, Err(captured)),
+    };
+    let (mut get_child, mut get_reader) = (get_child, get_reader);
 
-    let received = wait_for_substring(&mut get_reader, GET_RECEIVED, Duration::from_secs(15));
-    let finalized = wait_for_substring(&mut get_reader, GET_FINAL, GET_FINAL_BUDGET);
+    // Held, not unwrapped: this leg reports the reply verdict only after the
+    // router and queryable captures below, so a failure names all three.
+    let finalized = match get_reader.as_mut() {
+        Some(reader) => wait_for_substring(reader, GET_FINAL, GET_FINAL_BUDGET),
+        None => Err(String::from(
+            "no attempt was answered, so none was finalized",
+        )),
+    };
     let final_after = query_sent.elapsed();
 
-    let _ = get_child.child_mut().kill();
-    let _ = get_child.child_mut().wait();
+    if let Some(child) = get_child.as_mut() {
+        let _ = child.child_mut().kill();
+        let _ = child.child_mut().wait();
+    }
     let _ = qabl_child.child_mut().kill();
     let _ = qabl_child.child_mut().wait();
     graceful_terminate(r_guard.child_mut(), Duration::from_secs(5));
@@ -501,9 +533,10 @@ fn wz_router_routes_a_pico_get_to_a_pico_queryable() {
     );
     let received_text = received.unwrap_or_else(|c| {
         panic!(
-            "pico z_get never logged '{GET_RECEIVED}' within 15s — the foreign queryable's REPLY \
-             did not come back through the wz router\n--- pico z_get stdout ---\n{c}\n--- pico \
-             z_queryable stdout ---\n{qabl_captured}\n--- router stderr ---\n{r_captured}"
+            "pico z_get never logged '{GET_RECEIVED}' in {GET_ATTEMPTS} attempts of 15s — the \
+             foreign queryable's REPLY did not come back through the wz router\n--- pico z_get \
+             stdout ---\n{c}\n--- pico z_queryable stdout ---\n{qabl_captured}\n--- router \
+             stderr ---\n{r_captured}"
         )
     });
     assert!(
@@ -536,19 +569,35 @@ fn wz_router_finalizes_a_pico_get_that_matches_no_queryable() {
     let (mut r_guard, mut r_reader, endpoint) = spawn_wz_router();
 
     let query_sent = std::time::Instant::now();
-    let (mut get_child, mut get_reader) = spawn_zget(&z_get, KEY_QUERY_UNMATCHED, &endpoint);
-
     // BOUNDED BY `GET_FINAL_BUDGET`, NOT BY PATIENCE. pico closes its own query
     // at ten seconds and prints the identical line, so a generous deadline here
     // makes the leg pass whether or not wz did anything — measured: the first
     // version of this test used 15s and stayed GREEN under the probe that
     // deletes `route_query` outright.
-    let finalized = wait_for_substring(&mut get_reader, GET_FINAL, GET_FINAL_BUDGET);
+    let (get_child, finalized) = match run_query_until_answered(
+        "pico z_get on a keyexpr no queryable covers",
+        QueryAttempts::Once {
+            because: "an ABSENT reply is this leg's finding — the subject is the \
+                      router's own empty-route final, so a second ask would \
+                      measure nothing and spend the budget the deadline above \
+                      was measured to be tight against",
+        },
+        GET_FINAL,
+        GET_FINAL_BUDGET,
+        || spawn_zget(&z_get, KEY_QUERY_UNMATCHED, &endpoint),
+    ) {
+        Ok((child, _reader, captured)) => (Some(child), Ok(captured)),
+        Err(captured) => (None, Err(captured)),
+    };
     let final_after = query_sent.elapsed();
-    let get_captured = read_captured(&mut get_reader);
+    let get_captured = match &finalized {
+        Ok(captured) | Err(captured) => captured.clone(),
+    };
 
-    let _ = get_child.child_mut().kill();
-    let _ = get_child.child_mut().wait();
+    if let Some(mut child) = get_child {
+        let _ = child.child_mut().kill();
+        let _ = child.child_mut().wait();
+    }
     graceful_terminate(r_guard.child_mut(), Duration::from_secs(5));
 
     let r_captured = read_captured(&mut r_reader);

@@ -58,10 +58,19 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    compile_zenoh_c_example, graceful_terminate, read_captured, spawn_zenohd, wait_for_substring,
-    wait_for_tcp_accept_alive, wz_capi_c_cdylib, zenoh_c_oracle, zenoh_pico_cli_binary, ChildGuard,
-    PortReservation,
+    compile_zenoh_c_example, graceful_terminate, read_captured, run_query_until_answered,
+    spawn_zenohd, wait_for_substring, wait_for_tcp_accept_alive, wz_capi_c_cdylib, zenoh_c_oracle,
+    zenoh_pico_cli_binary, ChildGuard, PortReservation, QueryAttempts,
 };
+
+/// How many one-shot queries the declaration-propagation window may eat.
+///
+/// R2311 (open-debt item 645) — every barrier in this file that precedes a
+/// query is a LISTENER barrier (`wait_for_tcp_accept_alive`), which fires
+/// inside `z_open` and before the queryable is declared. A query that lands in
+/// that window is finalized against an empty route and the one-shot exits with
+/// no reply, so the attempts are what close it.
+const GET_ATTEMPTS: usize = 6;
 
 /// How long a listener gets to bind and accept.
 ///
@@ -1005,30 +1014,42 @@ fn upstream_z_queryable_on_wz_capi_c_answers_a_real_pico_zget() {
     }
     drop(reservation);
 
-    let mut get_out = tempfile::tempfile().expect("foreign querier stdout capture");
-    let get_writer = get_out.try_clone().expect("dup foreign querier handle");
-    let mut querier = ChildGuard::wrap(
-        "real zenoh-pico z_get",
-        Command::new("stdbuf")
-            .args(["-oL", "-eL"])
-            .arg(&z_get)
-            .args(["-e", &endpoint, "-m", "client", "-k", key])
-            .stdout(Stdio::from(get_writer))
-            .stderr(Stdio::from(get_out.try_clone().expect("dup stderr handle")))
-            .spawn()
-            .expect("spawn the real zenoh-pico z_get"),
-    );
-
-    let captured =
-        wait_for_substring(&mut get_out, value, EXCHANGE_TIMEOUT).unwrap_or_else(|captured| {
-            panic!(
-                "the REAL zenoh-pico z_get never reported a reply from upstream's \
-                 z_queryable.c on wz's zenoh-c ABI.\nexpected substring: {value}\n\
-                 --- REAL pico z_get stdout ---\n{captured}\n\
-                 --- z_queryable.c (on wz) stdout+stderr ---\n{}",
-                read_captured(&mut qbl_out),
-            )
-        });
+    // R2311 (open-debt item 645) — the barrier above is `wait_for_tcp_accept_alive`,
+    // which fires when the queryable's socket accepts, i.e. inside `z_open` and
+    // BEFORE `z_declare_queryable`. A query that lands in that window is
+    // answered against an empty route and the one-shot exits with no reply.
+    let (mut querier, _get_reader, captured) = run_query_until_answered(
+        "real zenoh-pico z_get against upstream z_queryable.c on wz's C ABI",
+        QueryAttempts::UpTo(GET_ATTEMPTS),
+        value,
+        EXCHANGE_TIMEOUT,
+        || {
+            let get_out = tempfile::tempfile().expect("foreign querier stdout capture");
+            let get_writer = get_out.try_clone().expect("dup foreign querier handle");
+            let child = ChildGuard::wrap(
+                "real zenoh-pico z_get",
+                Command::new("stdbuf")
+                    .args(["-oL", "-eL"])
+                    .arg(&z_get)
+                    .args(["-e", &endpoint, "-m", "client", "-k", key])
+                    .stdout(Stdio::from(get_writer))
+                    .stderr(Stdio::from(get_out.try_clone().expect("dup stderr handle")))
+                    .spawn()
+                    .expect("spawn the real zenoh-pico z_get"),
+            );
+            (child, get_out)
+        },
+    )
+    .unwrap_or_else(|captured| {
+        panic!(
+            "the REAL zenoh-pico z_get never reported a reply from upstream's \
+             z_queryable.c on wz's zenoh-c ABI in {GET_ATTEMPTS} attempts.\n\
+             expected substring: {value}\n\
+             --- REAL pico z_get stdout ---\n{captured}\n\
+             --- z_queryable.c (on wz) stdout+stderr ---\n{}",
+            read_captured(&mut qbl_out),
+        )
+    });
     assert!(
         captured.contains(key),
         "the foreign querier decoded a reply but under a different key than the \
@@ -1197,33 +1218,42 @@ fn upstream_z_queryable_with_channels_on_wz_capi_c_answers_from_its_own_thread()
     }
     drop(reservation);
 
-    let mut get_out = tempfile::tempfile().expect("foreign querier stdout capture");
-    let get_writer = get_out.try_clone().expect("dup foreign querier handle");
-    let mut querier = ChildGuard::wrap(
-        "real zenoh-pico z_get",
-        Command::new("stdbuf")
-            .args(["-oL", "-eL"])
-            .arg(&z_get)
-            .args(["-e", &endpoint, "-m", "client", "-k", key])
-            .stdout(Stdio::from(get_writer))
-            .stderr(Stdio::from(get_out.try_clone().expect("dup stderr handle")))
-            .spawn()
-            .expect("spawn the real zenoh-pico z_get"),
-    );
-
-    let captured =
-        wait_for_substring(&mut get_out, value, EXCHANGE_TIMEOUT).unwrap_or_else(|captured| {
-            panic!(
-                "the REAL zenoh-pico z_get never reported a reply from a query the \
-                 drop-in answered OFF the dispatch thread. Either the escaped query \
-                 lost its face/rid, or the ResponseFinal went out when the callback \
-                 returned — in which case the querier stopped listening before the \
-                 reply arrived.\nexpected substring: {value}\n\
-                 --- REAL pico z_get stdout ---\n{captured}\n\
-                 --- channel queryable (on wz) stdout+stderr ---\n{}",
-                read_captured(&mut qbl_out),
-            )
-        });
+    // R2311 (open-debt item 645) — same window as LEG 8: the accept barrier
+    // above fires inside `z_open`, before the queryable is declared.
+    let (mut querier, _get_reader, captured) = run_query_until_answered(
+        "real zenoh-pico z_get against the channel queryable on wz's C ABI",
+        QueryAttempts::UpTo(GET_ATTEMPTS),
+        value,
+        EXCHANGE_TIMEOUT,
+        || {
+            let get_out = tempfile::tempfile().expect("foreign querier stdout capture");
+            let get_writer = get_out.try_clone().expect("dup foreign querier handle");
+            let child = ChildGuard::wrap(
+                "real zenoh-pico z_get",
+                Command::new("stdbuf")
+                    .args(["-oL", "-eL"])
+                    .arg(&z_get)
+                    .args(["-e", &endpoint, "-m", "client", "-k", key])
+                    .stdout(Stdio::from(get_writer))
+                    .stderr(Stdio::from(get_out.try_clone().expect("dup stderr handle")))
+                    .spawn()
+                    .expect("spawn the real zenoh-pico z_get"),
+            );
+            (child, get_out)
+        },
+    )
+    .unwrap_or_else(|captured| {
+        panic!(
+            "the REAL zenoh-pico z_get never reported a reply from a query the \
+             drop-in answered OFF the dispatch thread, in {GET_ATTEMPTS} attempts. \
+             Either the escaped query lost its face/rid, or the ResponseFinal went \
+             out when the callback returned — in which case the querier stopped \
+             listening before the reply arrived.\nexpected substring: {value}\n\
+             --- REAL pico z_get stdout ---\n{captured}\n\
+             --- channel queryable (on wz) stdout+stderr ---\n{}",
+            read_captured(&mut qbl_out),
+        )
+    });
     assert!(
         captured.contains(key),
         "the foreign querier decoded a reply under the wrong key.\n\
@@ -1997,29 +2027,46 @@ int main(int argc, char **argv) {
             );
         }
 
-        let mut get_out = tempfile::tempfile().expect("foreign querier stdout capture");
-        let get_writer = get_out.try_clone().expect("dup foreign querier handle");
-        let mut get = ChildGuard::wrap(
-            format!("real zenoh-pico z_get_attachment ({arm})"),
-            Command::new("stdbuf")
-                .args(["-oL", "-eL"])
-                .arg(&z_get)
-                .args(["-k", key, "-e", &endpoint, "-m", "client"])
-                .stdout(Stdio::from(get_writer))
-                .stderr(Stdio::from(get_out.try_clone().expect("dup stderr handle")))
-                .spawn()
-                .expect("spawn the real zenoh-pico z_get_attachment"),
-        );
-        let captured = wait_for_substring(&mut get_out, "with encoding:", EXCHANGE_TIMEOUT)
-            .unwrap_or_else(|captured| {
-                panic!(
-                    "the REAL zenoh-pico z_get_attachment never printed an encoding line \
-                     for the {arm} queryable's reply.\n\
-                     --- REAL pico z_get_attachment stdout ---\n{captured}\n\
-                     --- {arm} queryable stdout ---\n{}",
-                    read_captured(&mut qbl_out)
-                )
-            });
+        let (mut get, _get_reader, captured) = run_query_until_answered(
+            "real zenoh-pico z_get_attachment",
+            // R2311 (open-debt item 645) — the ONE site in this file that had
+            // already closed the window, and the comment above says how it
+            // learned to: the driver prints "Queryable declared on" AFTER the
+            // declaration, unlike the upstream examples whose ready line comes
+            // before the call, and that line is the barrier. Retrying on top
+            // would only blur which arm answered.
+            QueryAttempts::Once {
+                because: "the barrier above is the driver's POST-declaration line, \
+                          not an upstream example's pre-declaration one",
+            },
+            "with encoding:",
+            EXCHANGE_TIMEOUT,
+            || {
+                let get_out = tempfile::tempfile().expect("foreign querier stdout capture");
+                let get_writer = get_out.try_clone().expect("dup foreign querier handle");
+                let child = ChildGuard::wrap(
+                    format!("real zenoh-pico z_get_attachment ({arm})"),
+                    Command::new("stdbuf")
+                        .args(["-oL", "-eL"])
+                        .arg(&z_get)
+                        .args(["-k", key, "-e", &endpoint, "-m", "client"])
+                        .stdout(Stdio::from(get_writer))
+                        .stderr(Stdio::from(get_out.try_clone().expect("dup stderr handle")))
+                        .spawn()
+                        .expect("spawn the real zenoh-pico z_get_attachment"),
+                );
+                (child, get_out)
+            },
+        )
+        .unwrap_or_else(|captured| {
+            panic!(
+                "the REAL zenoh-pico z_get_attachment never printed an encoding line \
+                 for the {arm} queryable's reply.\n\
+                 --- REAL pico z_get_attachment stdout ---\n{captured}\n\
+                 --- {arm} queryable stdout ---\n{}",
+                read_captured(&mut qbl_out)
+            )
+        });
         graceful_terminate(get.child_mut(), Duration::from_secs(5));
         graceful_terminate(qbl.child_mut(), Duration::from_secs(5));
         // Only the encoding lines, so the comparison below is not sensitive to

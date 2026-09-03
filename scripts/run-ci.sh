@@ -2926,6 +2926,23 @@ PY
     # `.githooks/pre-push`, which is what makes it the LOCAL gate item 224 asks
     # for -- this lane is the hosted half.
     python3 scripts/lib/config_key_fixture_gate.py || return 1
+    # R2311 (open-debt item 645) — the FOREIGN-QUERY READINESS gate. Both
+    # foreign example families print their readiness line BEFORE the call that
+    # declares, so a querier that dials the router separately can arrive first
+    # and be finalized against an empty route: the one-shot prints no reply and
+    # exits, and the test reads a lost race as a routing failure. Hosted Layer
+    # Ewirez failed that way in 0.17s (run 33737007770) while every local run
+    # passed, which is why the tests cannot be left to catch it themselves --
+    # on an idle host the window closes before the querier's spawn finishes.
+    #
+    # It belongs here for the same reason its neighbours do: BOTH SIDES ARE ON
+    # DISK. The population is read from the resolver call sites and the verdict
+    # from the spawn sites, and deriving both costs under a second with nothing
+    # built. `--selftest` first, because a gate that cannot fail is worth
+    # nothing -- and this one could not, twice, before its fixtures were made
+    # decisive. It also runs in `.githooks/pre-push` as gate 2l.
+    python3 scripts/lib/foreign_query_readiness_gate.py --selftest || return 1
+    python3 scripts/lib/foreign_query_readiness_gate.py || return 1
     # R2293 (unregistered open-debt item 625) — the TEST-DOUBLE WITNESS gate.
     # A test whose fixture cannot construct the input its branch needs measures
     # nothing, and R2289 walked into exactly that: nine mutations of the SHM

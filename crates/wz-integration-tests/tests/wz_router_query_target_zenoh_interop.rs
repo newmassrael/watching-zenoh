@@ -53,7 +53,8 @@ use std::time::Duration;
 
 use wz_integration_tests::common::{
     assert_demo_binary_newer_than_sources, graceful_terminate, read_captured,
-    spawn_on_ephemeral_port, wz_ap_demo_binary, zenoh_core_example_binary,
+    run_query_until_answered, spawn_on_ephemeral_port, wz_ap_demo_binary,
+    zenoh_core_example_binary, QueryAttempts,
 };
 
 /// The keyexpr both queryables cover and the querier asks INSIDE of. The
@@ -175,10 +176,14 @@ fn spawn_declared_zenoh_queryable(
 /// for the WIRE DEFAULT — upstream's own default is `BEST_MATCHING` and passing
 /// it explicitly would test a different byte sequence than a plain `z_get`
 /// emits, which is exactly the path this file exists to pin.
-fn run_zget(z_get: &std::path::Path, endpoint: &str, target: Option<&str>) -> String {
+fn spawn_zget(
+    z_get: &std::path::Path,
+    endpoint: &str,
+    target: Option<&str>,
+) -> (wz_integration_tests::common::ChildGuard, std::fs::File) {
     let out = tempfile::tempfile().expect("tempfile for z_get stdout");
     let out_writer = out.try_clone().expect("dup z_get stdout handle");
-    let mut out_reader = out;
+    let out_reader = out;
     let mut cmd = Command::new("stdbuf");
     cmd.args(["-oL", "-eL"]).arg(z_get).args([
         "-s",
@@ -194,7 +199,7 @@ fn run_zget(z_get: &std::path::Path, endpoint: &str, target: Option<&str>) -> St
     if let Some(t) = target {
         cmd.args(["-t", t]);
     }
-    let mut child = wz_integration_tests::common::ChildGuard::wrap(
+    let child = wz_integration_tests::common::ChildGuard::wrap(
         "z_get (zenoh)",
         cmd.stderr(Stdio::from(
             out_writer.try_clone().expect("dup stderr handle"),
@@ -203,6 +208,37 @@ fn run_zget(z_get: &std::path::Path, endpoint: &str, target: Option<&str>) -> St
         .spawn()
         .expect("spawn z_get via stdbuf"),
     );
+    (child, out_reader)
+}
+
+/// Run one `z_get` leg and return its stdout, once it has been answered.
+///
+/// R2311 (open-debt item 645) — ASKED EXACTLY ONCE, AND THAT IS A DECISION.
+/// The generic hazard this routes through [`run_query_until_answered`] is a
+/// query that beats the queryable's declaration to the router; here the caller
+/// has ALREADY closed that window, by polling the wz router's own stderr until
+/// it has logged both queryables before the first leg runs. Retrying on top of
+/// that would break the measurement the file exists for: leg 3 asserts the
+/// complete queryable was asked EXACTLY three times, so a fourth query — even
+/// a well-meant one — is a wrong answer rather than a slow one.
+fn run_zget(z_get: &std::path::Path, endpoint: &str, target: Option<&str>) -> String {
+    let (mut child, mut reader, _) = run_query_until_answered(
+        "zenoh z_get through the wz router",
+        QueryAttempts::Once {
+            because: "the caller polls the router's own stderr until both \
+                      queryables are declared, and leg 3 counts the complete \
+                      queryable's queries exactly",
+        },
+        GET_RECEIVED,
+        GET_WALL_CLOCK,
+        || spawn_zget(z_get, endpoint, target),
+    )
+    .unwrap_or_else(|captured| {
+        panic!("zenoh z_get was not answered within {GET_WALL_CLOCK:?}; captured:\n{captured}")
+    });
+    // The legs read the WHOLE reply line (target and payload both), so the
+    // capture is taken after the child has finished rather than at the instant
+    // the reply marker appeared.
     let deadline = std::time::Instant::now() + GET_WALL_CLOCK;
     loop {
         match child.child_mut().try_wait().expect("try_wait on z_get") {
@@ -210,13 +246,13 @@ fn run_zget(z_get: &std::path::Path, endpoint: &str, target: Option<&str>) -> St
             None if std::time::Instant::now() >= deadline => {
                 panic!(
                     "zenoh z_get did not finish within {GET_WALL_CLOCK:?}; captured so far:\n{}",
-                    read_captured(&mut out_reader)
+                    read_captured(&mut reader)
                 );
             }
             None => std::thread::sleep(Duration::from_millis(50)),
         }
     }
-    read_captured(&mut out_reader)
+    read_captured(&mut reader)
 }
 
 /// How many queries has this queryable been asked, over its whole life so far?
