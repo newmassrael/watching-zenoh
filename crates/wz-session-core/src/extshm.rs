@@ -14,7 +14,8 @@
 //! mis-reads the descriptor as data). The receiver mmaps the segment and reads
 //! the payload directly from /dev/shm
 //! (`io/zenoh-transport/src/common/shm/interop.rs` @ `fn supports_protocol`;
-//! 1.10.0 replaced the flat `zenoh-transport/src/shm.rs` with `common/shm/`).
+//! 1.10.0 replaced the flat `zenoh-transport/src/shm.rs` @ REMOVED
+//! with `common/shm/`).
 //!
 //! This module is the no_std SHM machinery: the descriptor type + its VLE codec,
 //! the 0x2 Put-body marker codec, and the [`ShmResolver`] trait seam. The actual
@@ -409,7 +410,8 @@ pub enum ShmAuthError {
 
 /// The SHM establishment challenge-response state machine — zenoh's `ShmFsm`
 /// (`io/zenoh-transport/src/unicast/establishment/ext/shm/auth.rs`
-/// @ `pub(crate) struct ShmFsm`; 1.10.0 split the old single `ext/shm.rs` into
+/// @ `pub(crate) struct ShmFsm`; 1.10.0 split the old single
+/// `ext/shm.rs` @ REMOVED into
 /// `ext/shm/{mod,auth,handoff,segment}.rs`) as a plain
 /// dispatch object, so the four steps can be driven and TESTED without a socket
 /// or a session.

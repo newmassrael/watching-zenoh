@@ -13,7 +13,8 @@
 //! only evidence that the two processes genuinely share memory rather than both
 //! merely claiming to. A token exchange would pass between two hosts that share
 //! nothing (`io/zenoh-transport/src/unicast/establishment/ext/shm/segment.rs`
-//! @ `pub struct TXAuthSegment`; 1.10.0 split the old single `ext/shm.rs` into
+//! @ `pub struct TXAuthSegment`; 1.10.0 split the old single
+//! `ext/shm.rs` @ REMOVED into
 //! `ext/shm/{mod,auth,handoff,segment}.rs` and moved the segment out of
 //! `zenoh-shm`'s `posix_shm/array.rs`).
 //!

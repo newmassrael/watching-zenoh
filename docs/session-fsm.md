@@ -590,8 +590,8 @@ reaches `Discovered`); they are diagnostic events on the session's
 Multicast has no `Closing`. When we stop, we simply cease emitting
 `Join`s and KeepAlives; peers time us out via their own lease
 monitors. Symmetrically, we time out silent peers. This is
-consistent with upstream — there is no `multicast/close.rs` with
-special logic.
+consistent with upstream — there is no `multicast/close.rs` @ REMOVED
+with special logic.
 
 ### §3.4 Client mode and multicast
 

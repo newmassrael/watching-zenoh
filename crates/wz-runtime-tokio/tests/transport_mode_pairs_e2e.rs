@@ -40,8 +40,8 @@
 //! Upstream's lean transport has no transmission pipeline AT ALL: `schedule`
 //! hands the message straight to `send`
 //! (`io/zenoh-transport/src/unicast/lowlatency/transport.rs`
-//! @ `self.send(msg).map(|_| true)`; 1.10.0 folded the old `lowlatency/tx.rs`
-//! into the transport), which serializes it
+//! @ `self.send(msg).map(|_| true)`; 1.10.0 folded the old
+//! `lowlatency/tx.rs` @ REMOVED into the transport), which serializes it
 //! behind a 4-byte length prefix and writes it (`lowlatency/link.rs:33-73`).
 //! There is no `WBatch` to accumulate into, so batching is not "disabled" on a
 //! lean link — it does not exist there. wz reproduces that by ORDERING: the lean

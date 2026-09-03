@@ -125,6 +125,7 @@ Item 581 condition (3). Three ways this refuses instead of passing:
 from __future__ import annotations
 
 import argparse
+import collections
 import pathlib
 import re
 import subprocess
@@ -160,6 +161,49 @@ ANCHOR_CITE = re.compile(
     rf"`({_PATH})`(?:\s*(?://[/!]?|#!?|\*)?\s*)@\s*`([^`\n]{{1,200}})`"
 )
 BARE_CITE = re.compile(rf"(?<![\w/.-])({_PATH})(?!:\d)")
+
+#: THE ABSENCE MARKER (R2318, unregistered open debt 651).
+#:
+#: Some citations name an upstream path BECAUSE IT IS GONE -- a sentence saying
+#: 1.10.0 folded the old lean-transport tx module into the transport, or that
+#: upstream has no multicast close module with special logic. Those sentences
+#: are TRUE, and every other form in this file would call them defects: the path
+#: does not resolve, so repairing them into an anchor would make them FALSE. The
+#: repair would run backwards.
+#:
+#: ⚠ THE TWO EXAMPLES ABOVE ARE DESCRIBED, NOT WRITTEN OUT, and that is not
+#: style. The first draft of this comment spelled both paths, and since this
+#: file is tracked it is INSIDE the population it scans -- the residue count
+#: rose by exactly two the moment they were typed. The R2241 defect, walked into
+#: again in the round that added a form for it; `selftest` case 8 now refuses
+#: residue-visible literals as well as bucket-visible ones, so the next draft
+#: cannot repeat it.
+#:
+#: So the claim gets a form of its own, and like the anchor it is DECLARED
+#: rather than inferred. Inferring it does not work, and that was measured:
+#: sweeping for the phrasings this tree actually uses (`the old`, `there is no`,
+#: `replaced the flat`, `folded`, …) over the 195 non-resolving tokens fires on
+#: 17, of which only 5 are absence claims -- 4 are ordinary stale citations and
+#: 8 are not citations at all (a gate's own fixture strings, a zenoh-c path).
+#: A keyword is a FLOOR and a false-positive generator at the same time.
+#:
+#: `@ REMOVED` was chosen the way `@` was: the tree had ZERO occurrences of it,
+#: so no legacy sentence can be mistaken for one. (`@@` was rejected on the same
+#: test -- it occurs twice.)
+#:
+#: THE CHECK RUNS BOTH WAYS, which is the whole point. The marker asserts an
+#: ABSENCE, so it is RED when the path EXISTS at the pin -- if upstream re-adds
+#: the file, the sentence has become false and says so. That is the same
+#: property the anchor form has for needles, pointing the other direction.
+#:
+#: The path pattern here is deliberately PERMISSIVE where the other buckets are
+#: strict: the marker DECLARES that this token is an upstream citation, so there
+#: is nothing to infer and no fragment to guard against. Resolution is by
+#: SUFFIX -- any pin file ending in this path falsifies the claim -- because a
+#: path named as absent frequently has no root to resolve against.
+GONE_CITE = re.compile(
+    r"`((?:[\w.-]+/)+[\w.-]+\.rs)`(?:\s*(?://[/!]?|#!?|\*)?\s*)@\s*REMOVED\b"
+)
 
 #: First segments that spell an upstream path WITHOUT its root. DECLARED, and
 #: judged for completeness by `rootless_candidates()` -- see the module doc.
@@ -200,7 +244,7 @@ ROOTLESS_STALE_LINE_BUDGET = 46
 #: This is the residue of open debt 647 made monotone rather than argued: it
 #: can only shrink, so declaring a segment forces it down in the same commit,
 #: and writing a NEW root-less citation of an undeclared segment reds.
-ROOTLESS_UNDECLARED_BUDGET = 736
+ROOTLESS_UNDECLARED_BUDGET = 731
 
 #: A LIVE invocation of the RESOLUTION arm. R2242 split this gate in two and,
 #: in doing so, made `--resolve` a flag someone can simply stop passing: delete
@@ -291,7 +335,15 @@ def rootless_candidates(root: pathlib.Path, files: list[str]) -> set[str]:
 
 def rootless_undeclared(root: pathlib.Path, files: list[str]) -> int:
     """How many occurrences sit under a candidate segment this axis does not
-    grade? The residue, sized rather than described."""
+    grade? The residue, sized rather than described.
+
+    ⚠ A path marked `@ REMOVED` is EXCLUDED, because it is graded -- by the
+    absence arm, which reds if upstream brings it back. Leaving it in would make
+    the residue mean two different things at once ("not graded" and "graded by
+    the other arm"), and would charge item 649 for work item 651 already did.
+    Measured when this was missed: marking the five live sites left the residue
+    unchanged at 736 instead of dropping it to 731.
+    """
     cands = rootless_candidates(root, files) - set(ROOTLESS_SEGMENTS)
     if not cands:
         return 0
@@ -301,6 +353,7 @@ def rootless_undeclared(root: pathlib.Path, files: list[str]) -> int:
             text = (root / rel).read_text(errors="replace")
         except (OSError, UnicodeError):
             continue
+        text = GONE_CITE.sub(lambda m: " " * len(m.group(0)), text)
         for m in _ANY_TOKEN.finditer(text):
             if m.group(1) in cands:
                 n += 1
@@ -396,7 +449,7 @@ def scan(
     the counts are still wanted but no path can be looked up.
     """
     counts = {"anchored": 0, "line": 0, "bare": 0, "rootless_line": 0,
-              "rootless_bare": 0, "rootless_stale_line": 0}
+              "rootless_bare": 0, "rootless_stale_line": 0, "gone": 0}
     findings: list[Finding] = []
     lens: dict[str, int] = {}
 
@@ -410,7 +463,49 @@ def scan(
             text = (root / rel).read_text(errors="replace")
         except (OSError, UnicodeError):
             continue
-        # ANCHORED first, and its spans are removed so the path inside an
+        # THE ABSENCE MARKER IS MASKED FIRST, before every other form.
+        #
+        # Its span has to go for the same reason an anchored span does: the path
+        # inside it would otherwise ALSO be counted as BARE (`ANCHOR_CITE` needs
+        # a backticked needle, so it does not match this form and cannot mask
+        # it). For the five live sites that would be harmless, since all five
+        # are root-less and land in the residue -- but a ROOTED absence claim
+        # would push `BARE_BUDGET`, which sits exactly on 60, up by one and red
+        # the gate for saying something true. Masking here is what stops that,
+        # and the selftest builds a ROOTED fixture precisely because the live
+        # population cannot exercise this line.
+        gone_spans: list[tuple[int, int]] = []
+        for m in GONE_CITE.finditer(text):
+            counts["gone"] += 1
+            gone_spans.append(m.span())
+            path = m.group(1)
+            # `rootless_loc is None` is this scan's FORM-ARM signal (see the
+            # parameter's docstring): count the occurrence, resolve nothing.
+            # Sniffing `ref` instead would be a second, disagreeing derivation
+            # of "is there a checkout", which is the mistake `upstream_root`
+            # exists to avoid one function over.
+            if rootless_loc is None:
+                continue
+            hits = list(ref.glob(f"**/{path}"))
+            if hits:
+                findings.append(
+                    Finding(
+                        rel,
+                        f"`{path}` is marked @ REMOVED, but the pin HAS it at "
+                        f"`{hits[0].relative_to(ref).as_posix()}`. The sentence "
+                        "asserts an absence that is no longer true -- upstream "
+                        "brought the path back, so re-read the claim (it is now "
+                        "an ordinary citation, or it is wrong)",
+                    )
+                )
+        if gone_spans:
+            masked_g = list(text)
+            for a, b in gone_spans:
+                for i in range(a, b):
+                    masked_g[i] = " "
+            text = "".join(masked_g)
+
+        # ANCHORED next, and its spans are removed so the path inside an
         # anchor is not counted a second time as BARE.
         anchored_spans: list[tuple[int, int]] = []
         for m in ANCHOR_CITE.finditer(text):
@@ -592,7 +687,8 @@ def run(root: pathlib.Path, ref: pathlib.Path | None, resolve: bool) -> int:
     if not resolve:
         findings = []
     total = (counts["anchored"] + counts["line"] + counts["bare"]
-             + counts["rootless_line"] + counts["rootless_bare"])
+             + counts["rootless_line"] + counts["rootless_bare"]
+             + counts["gone"])
     undeclared = rootless_undeclared(root, files)
     candidates = rootless_candidates(root, files)
 
@@ -604,7 +700,8 @@ def run(root: pathlib.Path, ref: pathlib.Path | None, resolve: bool) -> int:
         f"{counts['bare']} bare (budget {BARE_BUDGET}), "
         f"{counts['rootless_line']}/{counts['rootless_bare']} root-less "
         f"line/bare (budgets {ROOTLESS_LINE_BUDGET}/{ROOTLESS_BARE_BUDGET}) "
-        f"over {len(ROOTLESS_SEGMENTS)} declared segment(s); {where}"
+        f"over {len(ROOTLESS_SEGMENTS)} declared segment(s), "
+        f"{counts['gone']} marked @ REMOVED; {where}"
     )
     print(
         f"  upstream-citation-anchor: root-less residue -- {undeclared} "
@@ -654,6 +751,16 @@ def run(root: pathlib.Path, ref: pathlib.Path | None, resolve: bool) -> int:
             "not resolve against the pinned checkout. Repair the CITATION (move "
             "it to the `path` @ `needle` form, or correct the path); do not "
             "widen this gate.",
+            file=sys.stderr,
+        )
+        rc = 1
+    if counts["gone"] == 0:
+        print(
+            "  upstream-citation-anchor: FAIL -- no citation uses the "
+            "`path` @ REMOVED form, so the arm that checks an ASSERTED ABSENCE "
+            "has a population of zero and could never fail. That arm reds when "
+            "upstream brings a path BACK; with no subjects it grades nothing "
+            "(open debt 581 condition 3, and 651's own reason for existing).",
             file=sys.stderr,
         )
         rc = 1
@@ -746,8 +853,9 @@ def run(root: pathlib.Path, ref: pathlib.Path | None, resolve: bool) -> int:
         print(
             "  upstream-citation-anchor: OK -- every anchored citation resolves "
             "against the pinned checkout, every root-less path resolves under "
-            "the location the pin gives its segment, and all four legacy forms "
-            "plus the two root-less ratchets sit exactly on their budget."
+            "the location the pin gives its segment, every path marked "
+            "@ REMOVED is still ABSENT there, and all four legacy forms plus "
+            "the two root-less ratchets sit exactly on their budget."
             if resolve
             else "  upstream-citation-anchor: OK (FORM) -- every occurrence is "
             "classified and all four legacy forms sit exactly on their budget. "
@@ -802,6 +910,11 @@ def selftest() -> int:
     OTHER = "dispatcher"
     ROOTED_OTHER = _p("zenoh", "src", "net", "routing", OTHER, "tables.rs")
     RL_OTHER = _p(OTHER, "tables.rs")
+    #: A path under a RESIDUE-CANDIDATE segment that does not exist at the pin,
+    #: so it can be MARKED. This is what makes the residue's masking testable:
+    #: `GONE` is rooted at a known root and the residue never counted it either
+    #: way, so a fixture built on `GONE` cannot tell masked from unmasked.
+    RL_OTHER_GONE = _p(OTHER, "vanished.rs")
     with tempfile.TemporaryDirectory() as td:
         base = pathlib.Path(td)
         ref = base / "ref"
@@ -994,6 +1107,48 @@ def selftest() -> int:
                 "citation proposes -- that is how a non-upstream path gets in"
             )
 
+        # 6d. THE ABSENCE MARKER (R2318, open debt 651). Five rows.
+        #
+        #     Row 2 is the one the LIVE population cannot provide: all five
+        #     sentences in the tree are root-less, so only a fixture can ask
+        #     whether a ROOTED marker is masked out of BARE. Without the mask
+        #     that path counts as a bare mention and pushes a budget that sits
+        #     exactly on its value. R2317's lookbehind row was dead for exactly
+        #     this reason -- a fixture that cannot reach the branch.
+        c, f = scan_text(f"// `{GONE}` @ REMOVED\n", floc)
+        if c["gone"] != 1:
+            failures.append(f"an absence marker was not counted: {c}")
+        if f:
+            failures.append(f"a TRUE absence marker red: {f}")
+        if (c["bare"], c["line"], c["anchored"]) != (0, 0, 0):
+            failures.append(
+                f"a marked path was ALSO counted in another bucket: {c}"
+            )
+        # Row 2: the ROOTED form, masked out of BARE.
+        c, f = scan_text(f"// see `{GONE}` @ REMOVED for the fsm\n", floc)
+        if (c["gone"], c["bare"]) != (1, 0):
+            failures.append(
+                f"a ROOTED absence marker leaked into the bare bucket: {c}"
+            )
+        # Row 3: THE TWO-DIRECTIONAL CHECK. A marker on a path the pin HAS is
+        # a sentence that has become false, and it must red.
+        c, f = scan_text(f"// `{UNICAST}` @ REMOVED\n", floc)
+        if not f:
+            failures.append(
+                "a marker on a path the pin STILL HAS did not red -- the "
+                "absence arm only grades in one direction"
+            )
+        # Row 4: a root-less marker works too (the live population's shape).
+        c, f = scan_text(f"// `{RL_GONE}` @ REMOVED\n", floc)
+        if c["gone"] != 1 or f:
+            failures.append(f"a root-less absence marker misbehaved: {c} {f}")
+        # Row 5: the FORM arm counts it and resolves nothing.
+        c, f = scan_text(f"// `{UNICAST}` @ REMOVED\n", None)
+        if c["gone"] != 1 or f:
+            failures.append(
+                f"the form arm resolved an absence marker: {c} {f}"
+            )
+
         # 8. THE FIXTURE PATHS ARE ASSEMBLED, and this is the arm that keeps
         #    that true. A future edit that inlines one back as a literal makes
         #    this file cite upstream, which is exactly the R2241 defect; the
@@ -1012,6 +1167,30 @@ def selftest() -> int:
             failures.append(
                 f"this file writes upstream path literal(s) {sorted(set(leaked))}; "
                 "assemble them from segments so the gate does not cite upstream"
+            )
+        # 8b. THE RESIDUE HAS THE SAME HOLE, and R2318 fell in it. The rows
+        #     above check the patterns this file DECLARES -- but a literal under
+        #     an UNDECLARED candidate segment matches none of them while still
+        #     being counted by `rootless_undeclared`. Writing two such paths
+        #     into the new marker's own documentation raised the residue by
+        #     exactly two, and every check above stayed green. So this row asks
+        #     the residue counter itself, over THIS FILE, which is the only
+        #     question that could have caught it.
+        #     ⚠ It applies the SAME candidate filter `rootless_undeclared` does.
+        #     Without it the row flags this file's own prose examples of paths
+        #     that are OURS -- a session module, a crate root -- which are
+        #     exactly what the candidate rule excludes, and which the residue
+        #     therefore never counted.
+        own_cands = rootless_candidates(ROOT, tracked_files(ROOT))
+        own_seg = collections.Counter()
+        for m in _ANY_TOKEN.finditer(GONE_CITE.sub("", own)):
+            if m.group(1) in own_cands:
+                own_seg[m.group(0)] += 1
+        if own_seg:
+            failures.append(
+                "this file writes path literal(s) the RESIDUE counts "
+                f"{sorted(own_seg)}; describe them in prose or assemble them -- "
+                "a gate that cites upstream in its own comments grades itself"
             )
 
         # 7. A population of zero must FAIL, not pass vacuously.
@@ -1058,16 +1237,27 @@ def selftest() -> int:
 
         # The fixture REF, not the machine's checkout: this selftest has to be
         # runnable where no pinned tree exists, which is most of CI.
+        #
+        # ⚠ EVERY fixture below carries a `@ REMOVED` line (R2318), because the
+        # absence arm has a population guard like the anchored one: `gone == 0`
+        # is a FAIL. Without it each fixture would red for a second, unrelated
+        # reason and no row would pin the guard it was written for. `GONE` is
+        # the right path to mark: it does not exist in the fixture ref, so the
+        # assertion is TRUE and the marker adds nothing but its own count.
+        # `empty_repo` is the ONE exception -- its whole point is zero citations.
+        MARK = f"// `{GONE}` @ REMOVED\n"
         empty_repo = git_fixture("repo_empty", None)
-        line_repo = git_fixture("repo_line", f"// {UNICAST}:1\n")
-        anchor_repo = git_fixture("repo_anchor", f"// `{UNICAST}` @ `fn keeper()`\n")
+        line_repo = git_fixture("repo_line", f"// {UNICAST}:1\n" + MARK)
+        anchor_repo = git_fixture(
+            "repo_anchor", f"// `{UNICAST}` @ `fn keeper()`\n" + MARK
+        )
         # A fixture carrying BOTH forms, so a budget row is not shadowed by the
         # anchored==0 guard. Measured: with a line-only fixture, disabling the
         # budget guard left the selftest green because `anchored == 0` caught
         # the same run -- a control group that cannot separate two guards has
         # not tested either.
         mixed_repo = git_fixture(
-            "repo_mixed", f"// `{UNICAST}` @ `fn keeper()`\n// {UNICAST}:1\n"
+            "repo_mixed", f"// `{UNICAST}` @ `fn keeper()`\n// {UNICAST}:1\n" + MARK
         )
         # The FINDINGS guard is the resolution arm's whole verdict, and nothing
         # covered it until R2242 measured that too: disabling it left this
@@ -1077,20 +1267,37 @@ def selftest() -> int:
         # budgets sit at 0), one needle alive and one dead.
         dead_needle_repo = git_fixture(
             "repo_dead_needle",
-            f"// `{UNICAST}` @ `fn keeper()`\n// `{UNICAST}` @ `fn vanished()`\n",
+            f"// `{UNICAST}` @ `fn keeper()`\n// `{UNICAST}` @ `fn vanished()`\n"
+            + MARK,
         )
         # A fixture that EXERCISES the root-less axis through `run()`: one
         # root-anchored anchor (so `anchored != 0` and the derivation proposes
         # the segment) plus one root-less line citation.
         rootless_repo = git_fixture(
             "repo_rootless",
-            f"// `{ROOTED_RL}` @ `fn hat_keeper()`\n// {RL}:1\n",
+            f"// `{ROOTED_RL}` @ `fn hat_keeper()`\n// {RL}:1\n" + MARK,
         )
         # The same, with a root-less token under an UNDECLARED candidate segment,
         # so the residue ratchet has a population of one.
         residue_repo = git_fixture(
             "repo_residue",
-            f"// `{ROOTED_OTHER}` @ `fn other_keeper()`\n// {RL_OTHER}:1\n",
+            f"// `{ROOTED_OTHER}` @ `fn other_keeper()`\n// {RL_OTHER}:1\n" + MARK,
+        )
+        # An UNMARKED tree: citations, but no `@ REMOVED` anywhere. Built so the
+        # `gone == 0` population guard is the ONLY thing that can fire, because
+        # a control run proved nothing else asserted it -- forcing the count
+        # non-zero left this selftest green.
+        unmarked_repo = git_fixture(
+            "repo_unmarked", f"// `{UNICAST}` @ `fn keeper()`\n"
+        )
+        # A MARKED path whose segment IS a residue candidate. This is the only
+        # shape that can tell masked from unmasked in `rootless_undeclared`: the
+        # other fixtures mark a ROOTED path, which the residue never counted, so
+        # un-masking it changed nothing and that guard was dead too.
+        marked_residue_repo = git_fixture(
+            "repo_marked_residue",
+            f"// `{ROOTED_OTHER}` @ `fn other_keeper()`\n"
+            f"// `{RL_OTHER_GONE}` @ REMOVED\n",
         )
         #: EVERY budget this module carries, so a fixture cannot silently inherit
         #: the real tree's numbers. R2317 added four and the first selftest run
@@ -1153,6 +1360,13 @@ def selftest() -> int:
              verdict(residue_repo, ref, True, 0, 0, ROOTLESS_UNDECLARED_BUDGET=1), 0),
             ("the residue ratchet off budget",
              verdict(residue_repo, ref, True, 0, 0), 1),
+            # R2318 -- the absence arm's two population guards. Both were DEAD
+            # when first written and a control run said so; these are the rows
+            # that make them live.
+            ("an UNMARKED tree reds on the gone==0 guard alone",
+             verdict(unmarked_repo, ref, True, 0, 0), 1),
+            ("a MARKED residue-candidate path leaves the residue",
+             verdict(marked_residue_repo, ref, True, 0, 0), 0),
         ):
             if got != want:
                 failures.append(f"run() on {label}: expected rc={want}, got {got}")
@@ -1180,10 +1394,12 @@ def selftest() -> int:
             "echo 'the resolution arm used to run here'\n"
         )
         wired_repo = git_fixture(
-            "repo_wired", f"// `{UNICAST}` @ `fn keeper()`\n", runci=WIRED
+            "repo_wired", f"// `{UNICAST}` @ `fn keeper()`\n" + MARK, runci=WIRED
         )
         commented_repo = git_fixture(
-            "repo_commented", f"// `{UNICAST}` @ `fn keeper()`\n", runci=COMMENTED
+            "repo_commented",
+            f"// `{UNICAST}` @ `fn keeper()`\n" + MARK,
+            runci=COMMENTED,
         )
         for label, got, want in (
             ("the form arm, other arm wired, no checkout",
@@ -1219,7 +1435,12 @@ def selftest() -> int:
         "candidate derivation (it proposes a segment a rooted citation names, "
         "excludes a directory of the scanned tree, invents nothing from no "
         "citation, sizes the residue over UNDECLARED segments only, and leaves "
-        "a token no rooted citation proposes out of it), plus 18 run() "
+        "a token no rooted citation proposes out of it), FIVE on the absence "
+        "marker (counted and not double-counted; the ROOTED form masked out of "
+        "BARE, which the live population cannot exercise; a marker on a path "
+        "the pin STILL HAS reding, which is the arm's other direction; the "
+        "root-less form; and the form arm counting without resolving), plus "
+        "20 run() "
         "verdicts -- zero population, no anchored citation, a budget exceeded, "
         "a budget undershot, a mixed tree otherwise clean, a dead needle with "
         "findings as the only live guard, no checkout while resolving, a clean "
@@ -1239,7 +1460,11 @@ def selftest() -> int:
         "and BARE forms it reds. The other five red as written: dropping the "
         "gone-path finding, the stale count, the refusal to guess between two "
         "candidate directories, the residue count, and the component rule in "
-        "the candidate derivation"
+        "the candidate derivation. R2318 ran it again over the absence marker's "
+        "five guards and TWO came back green: nothing asserted that an UNMARKED "
+        "tree reds, and every marked fixture used a ROOTED path the residue "
+        "never counted, so un-masking it changed nothing. Both have rows now, "
+        "and all five red"
     )
     return 0
 
