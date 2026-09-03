@@ -1974,10 +1974,12 @@ mod sub_interest_reply_tests {
     /// so `aggregate_many` yields `Some` iff at least one simple resource is
     /// aggregated into it; `remove_simple_resource` reports the AGGREGATE's own
     /// id when that flips to `None`
-    /// (`zenoh/src/net/routing/dispatcher/local_resources.rs:244-275`), and
+    /// (`zenoh/src/net/routing/dispatcher/local_resources.rs`
+    /// @ `pub(crate) fn remove_simple_resource`), and
     /// `maybe_unpropagate_subscriber` turns every such report into an
     /// `UndeclareSubscriber { id }`
-    /// (`zenoh/src/net/routing/hat/broker/pubsub.rs:115-143`, 1.10.0).
+    /// (`zenoh/src/net/routing/hat/broker/pubsub.rs`
+    /// @ `fn maybe_unpropagate_subscriber`, 1.10.0).
     #[cfg(feature = "declare-undeclare")]
     #[test]
     fn an_aggregate_declaration_is_retracted_when_its_last_subscription_goes() {
@@ -2149,7 +2151,8 @@ mod sub_interest_reply_tests {
     /// id with same-id-replaces, so it saw ONE declaration where two were
     /// sent — and R2292's retraction makes that ambiguity harmful rather than
     /// merely wrong. Upstream draws both from one per-face counter
-    /// (`zenoh/src/net/routing/hat/broker/interests.rs:118-130`, 1.10.0).
+    /// (`zenoh/src/net/routing/hat/broker/interests.rs`
+    /// @ `local_subs.insert_aggregated_resource`, 1.10.0).
     ///
     /// The assertion is over the SET of announced ids, derived from the
     /// declarations the drain actually emitted rather than from a literal:

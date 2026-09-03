@@ -6120,8 +6120,10 @@ fn wire_subscriber_declarations(driver: &RecordingLinkDriver) -> (Vec<u64>, Vec<
 /// so the entry survived as a GHOST remote subscriber for the life of the link
 /// — a publisher's write filter stayed released against a subscriber that no
 /// longer existed. zenoh emits exactly this transition
-/// (`zenoh/src/net/routing/{dispatcher/local_resources.rs:244-275,
-/// hat/broker/pubsub.rs:115-143}`, 1.10.0).
+/// (`zenoh/src/net/routing/dispatcher/local_resources.rs`
+/// @ `pub(crate) fn remove_simple_resource` and
+/// `zenoh/src/net/routing/hat/broker/pubsub.rs`
+/// @ `fn maybe_unpropagate_subscriber`, 1.10.0).
 ///
 /// The aggregate's id is DERIVED, not written down: it is the declared id that
 /// is not the subscription's. That derivation is also item 627's head sentence

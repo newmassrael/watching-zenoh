@@ -493,8 +493,10 @@ pub enum SubInterestReply {
     /// `remove_simple_resource` reports the aggregate's own id when that flips
     /// to `None`, which `maybe_unpropagate_subscriber` turns into an
     /// `UndeclareSubscriber { id }`
-    /// (`zenoh/src/net/routing/{dispatcher/local_resources.rs:244-275,
-    /// hat/broker/pubsub.rs:115-143}`, 1.10.0).
+    /// (`zenoh/src/net/routing/dispatcher/local_resources.rs`
+    /// @ `pub(crate) fn remove_simple_resource` and
+    /// `zenoh/src/net/routing/hat/broker/pubsub.rs`
+    /// @ `fn maybe_unpropagate_subscriber`, 1.10.0).
     #[cfg(feature = "declare-undeclare")]
     AggregateRetract {
         /// Resolves to the interest row holding the decl id, RE-CHECKED at
@@ -1112,8 +1114,8 @@ impl<C: SampleSink> SubscriberRegistry<C> {
                 // ambiguous. Upstream has no such second counter: zenoh draws
                 // the simple AND the aggregated resource id from one
                 // per-face `next_id`
-                // (`zenoh/src/net/routing/hat/broker/interests.rs:118-130`,
-                // 1.10.0).
+                // (`zenoh/src/net/routing/hat/broker/interests.rs`
+                // @ `local_subs.insert_aggregated_resource`, 1.10.0).
                 let decl_id = self.next_id;
                 self.next_id = self.next_id.saturating_add(1);
                 // A full table loses only the FUTURE half for this publisher —
