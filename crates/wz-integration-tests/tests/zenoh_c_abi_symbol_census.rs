@@ -269,14 +269,28 @@ const BASELINES: &[(&str, usize, &str, &str)] = &[
     // non-threadsafe provider). Shipping the constructors without them would
     // have left the flag stored and unread, which is a dead arm.
     //
-    // What remains is 31 in ONE chain plus five strays: the SHM CLIENT side —
+    // R2294 lowered this 31 -> 29: `z_shm_mut_try_from_immut` and
+    // `z_bytes_to_owned_shm`, the two strays that need neither a session-owned
+    // provider nor the SHM client chain. Both were taken because they are
+    // REACHABLE — the round measured, before writing either, that the shared
+    // provider plane is not: `z_obtain_shm_provider` is upstream's ONLY
+    // producer of `z_owned_shared_shm_provider_t` (derived from the header, not
+    // assumed), it reads a provider off the SESSION, and a wz session owns
+    // none. Building `z_shared_shm_provider_clone` / `_loan` / `_loan_as` on
+    // top of a type nothing can construct is the dead arm R2288 named.
+    //
+    // What remains is 29 in ONE chain plus three strays: the SHM CLIENT side —
     // `z_shm_client_*` (4), `zc_shm_client_list_*` (7),
     // `z_shm_client_storage_*` (7) + `z_ref_shm_client_storage_global`,
     // `z_posix_shm_client_new`, `z_open_with_custom_shm_clients` — plus
-    // `z_shared_shm_provider_*` (6) with `z_obtain_shm_provider`, and
-    // `z_bytes_to_owned_shm`, `z_shm_mut_try_from_immut`,
-    // `zc_cleanup_orphaned_shm_segments`.
-    ("unstable-shm", 31, "1.10.0", "C1cc"),
+    // `z_shared_shm_provider_*` (6, and the six are `clone`, `drop`, `loan`,
+    // `loan_as` and the `z_internal_*_check` / `_null` pair; `_move` and
+    // `_take` are `static inline` in `zenoh_macros.h` and export no symbol)
+    // with `z_obtain_shm_provider`, and `zc_cleanup_orphaned_shm_segments` —
+    // which is `void f(void)` over POSIX segment FILES, and wz's segments are
+    // process-local `Vec`s, so it has no value to carry and no witness to
+    // build. It is left rather than closed as a no-op.
+    ("unstable-shm", 29, "1.10.0", "C1cc"),
     // R311y614 — the two arms that had NO oracle on any machine, and therefore
     // no row: the gate hard-FAILED on them rather than guessing a ceiling from
     // a neighbour. `scripts/install-zenoh-c-arm.sh` builds any of the four, so

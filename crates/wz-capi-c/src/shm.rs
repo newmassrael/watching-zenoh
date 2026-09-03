@@ -2058,6 +2058,83 @@ pub unsafe extern "C" fn z_shm_try_reloan_mut(
     })
 }
 
+/// Try to take an OWNED immutable buffer back as an OWNED mutable one (zenoh-c
+/// `z_shm_mut_try_from_immut`, `zenoh_commons.h:5909-5911`).
+///
+/// The three-argument shape is upstream's and it is what makes the refusal
+/// non-destructive: `that` is CONSUMED on every path, and on failure the buffer
+/// reappears in `immut` so the caller has not lost it. Success leaves `immut` a
+/// gravestone; failure leaves `this_` one.
+///
+/// The predicate is the SAME one [`z_shm_try_mut`] answers with — the chunk's
+/// own `mutable` flag — because both calls ask one question ("may this buffer
+/// be written again?") and a second, disagreeing answer to it would be a bug
+/// the two could not both be right about.
+///
+/// ⚠ MEASURED DIVERGENCE, R2294. Upstream succeeds when the buffer is UNIQUELY
+/// OWNED (a refcount), so a `z_shm_from_mut` result that nothing else holds can
+/// be taken back. wz freezes instead: every producer of a `z_owned_shm_t` in
+/// this crate — [`z_shm_from_mut`] and [`z_shm_clone`] — sets `mutable = false`,
+/// so through the C surface this call always refuses and always hands the
+/// buffer back. That is not an unimplemented arm: it is the same answer
+/// `z_shm_try_mut` already gives for the same buffers, and a success here would
+/// contradict it. The success arm is reached only by a chunk that still carries
+/// `mutable`, which is why its witness constructs one directly rather than
+/// pretending the C surface can.
+///
+/// # Safety
+/// `this_` must be null or valid and writable; `that` must be null or a valid
+/// moved buffer; `immut` must be null or valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_shm_mut_try_from_immut(
+    this_: *mut z_owned_shm_mut_t,
+    that: *mut z_moved_shm_t,
+    immut: *mut z_owned_shm_t,
+) -> ZResult {
+    guarded(|| {
+        if !this_.is_null() {
+            // SAFETY: the caller's contract.
+            unsafe { *this_ = z_owned_shm_mut_t::null_value() };
+        }
+        if !immut.is_null() {
+            // SAFETY: the caller's contract.
+            unsafe { *immut = z_owned_shm_t::null_value() };
+        }
+        if that.is_null() {
+            return Z_ENULL;
+        }
+        // SAFETY: the caller's contract.
+        let handle = unsafe { (*that)._this.handle };
+        // Consumed on every path, exactly as `z_shm_from_mut` consumes its
+        // source: the caller's `that` is dead whether or not the recovery took.
+        // SAFETY: the caller's contract.
+        unsafe { (*that)._this = z_owned_shm_t::null_value() };
+        if handle.is_null() {
+            return Z_ENULL;
+        }
+        // SAFETY: a live `Box<ShmChunk>` this crate leaked.
+        let recovered = unsafe { &*(handle as *const ShmChunk) }.mutable;
+        if recovered {
+            if this_.is_null() {
+                return Z_ENULL;
+            }
+            // SAFETY: `this_` was checked non-null just above.
+            unsafe { *this_ = z_owned_shm_mut_t::from_handle(handle) };
+            return Z_OK;
+        }
+        if immut.is_null() {
+            // Nowhere to hand it back to. Dropping is the only alternative to
+            // leaking, and it is what the caller asked for by passing null.
+            // SAFETY: a live `Box<ShmChunk>` this crate leaked.
+            drop(unsafe { Box::from_raw(handle as *mut ShmChunk) });
+            return Z_ENULL;
+        }
+        // SAFETY: `immut` was checked non-null just above.
+        unsafe { *immut = z_owned_shm_t::from_handle(handle) };
+        Z_EINVAL
+    })
+}
+
 /// Try to recover MUTABLE access to an OWNED buffer (zenoh-c `z_shm_try_mut`).
 ///
 /// # Safety
@@ -2253,6 +2330,45 @@ pub unsafe extern "C" fn z_bytes_as_loaned_shm(
         // Dereferenced so a gravestone payload is distinguished from a live one
         // that merely carries no SHM: a function that ignored its argument would
         // give the same answer for a null pointer.
+        // SAFETY: the caller's contract.
+        if unsafe { bytes_slice(this_) }.is_none() {
+            return Z_ENULL;
+        }
+        Z_EINVAL
+    })
+}
+
+/// Take an OWNED immutable SHM buffer out of a payload (zenoh-c
+/// `z_bytes_to_owned_shm`).
+///
+/// The owned twin of [`z_bytes_as_loaned_shm`], and it gives the same answer
+/// for the same reason: `Z_EINVAL` with `*dst` a gravestone. wz's transport
+/// negotiates no SHM segment, so no payload a wz session produces or receives
+/// is backed by one — and wz's own [`z_bytes_from_shm`] COPIES the chunk's
+/// bytes into an ordinary payload and returns the chunk, so even a payload
+/// built from an SHM buffer on this side is not SHM-backed afterwards. There
+/// is therefore no `z_owned_shm_t` this call could hand back, and answering
+/// `Z_OK` with a fabricated one would be a different library.
+///
+/// It is the TRUE answer rather than an unimplemented one; the module note
+/// carries the re-open trigger for the whole bridge.
+///
+/// # Safety
+/// `this_` must be null or a valid loaned payload; `dst` must be null or valid
+/// and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_bytes_to_owned_shm(
+    this_: *const z_loaned_bytes_t,
+    dst: *mut z_owned_shm_t,
+) -> ZResult {
+    guarded(|| {
+        if !dst.is_null() {
+            // SAFETY: the caller's contract.
+            unsafe { *dst = z_owned_shm_t::null_value() };
+        }
+        // Dereferenced for the reason `z_bytes_as_loaned_shm` gives: a function
+        // that ignored its argument would answer the same for a null pointer,
+        // and then the refusal would say nothing about the payload.
         // SAFETY: the caller's contract.
         if unsafe { bytes_slice(this_) }.is_none() {
             return Z_ENULL;
@@ -3988,6 +4104,208 @@ mod segment_tests {
             ChunkBacking::Native { start: at, .. } if at == start
         ));
         assert_eq!(segment.books().available(), 56);
+    }
+}
+
+#[cfg(test)]
+mod immutability_recovery_tests {
+    //! R2294 (open-debt item 607) — `z_shm_mut_try_from_immut` and
+    //! `z_bytes_to_owned_shm`, the two strays of the SHM residue that need
+    //! neither a session-owned provider nor the SHM client chain.
+    //!
+    //! Both arms of the recovery are driven. The REFUSING arm is what the C
+    //! surface can reach — every `z_owned_shm_t` this crate produces is frozen
+    //! by construction — and the SUCCEEDING one is reached by building a chunk
+    //! that still carries `mutable`, because a test whose fixture cannot
+    //! construct the input its branch needs measures nothing (R2289, item 625).
+
+    use super::*;
+    // The payload half of the bridge lives in `bytes`, and this module drives
+    // it through the same exported entry points a C program would.
+    use crate::abi::z_moved_bytes_t;
+    use crate::bytes::{z_bytes_drop, z_bytes_loan};
+
+    /// Build an OWNED immutable buffer over a real segment range, with the
+    /// mutability flag the caller asks for.
+    ///
+    /// `frozen = true` is what `z_shm_from_mut` and `z_shm_clone` both produce;
+    /// `false` is the shape upstream's refcount can still hand back and wz's
+    /// C surface cannot make, which is precisely why it is made here.
+    fn owned_shm(segment: &Arc<Segment>, frozen: bool) -> z_owned_shm_t {
+        let start = segment.books().claim(8, 1).expect("8 bytes fit");
+        let chunk = ShmChunk {
+            backing: ChunkBacking::Native {
+                segment: segment.clone(),
+                start,
+            },
+            len: 8,
+            mutable: !frozen,
+        };
+        z_owned_shm_t::from_handle(Box::into_raw(Box::new(chunk)) as Handle)
+    }
+
+    /// THE ARM THE C SURFACE REACHES: a frozen buffer is refused, and the
+    /// refusal HANDS IT BACK rather than dropping it.
+    ///
+    /// The returned buffer is the point. A refusal that consumed `that` and
+    /// wrote nothing to `immut` would free the chunk, and the caller — who
+    /// still believes it owns a buffer — would have neither the mutable one it
+    /// asked for nor the immutable one it started with. The segment's own
+    /// accounting is what says the range is still out.
+    #[test]
+    fn a_frozen_buffer_is_refused_and_handed_back() {
+        let segment = Segment::new(64);
+        let mut owned = owned_shm(&segment, /*frozen=*/ true);
+        assert_eq!(
+            segment.books().available(),
+            56,
+            "the fixture must hold a live 8-byte range, else the accounting \
+             below cannot tell a returned buffer from a dropped one"
+        );
+
+        let mut out = z_owned_shm_mut_t::null_value();
+        let mut back = z_owned_shm_t::null_value();
+        // SAFETY: all three are live locals.
+        let rc = unsafe {
+            z_shm_mut_try_from_immut(
+                &mut out,
+                &mut owned as *mut z_owned_shm_t as *mut z_moved_shm_t,
+                &mut back,
+            )
+        };
+
+        assert_eq!(rc, Z_EINVAL, "a frozen buffer cannot become mutable again");
+        assert!(
+            !unsafe { z_internal_shm_mut_check(&out) },
+            "the mutable out-parameter must be a gravestone on refusal"
+        );
+        assert!(
+            unsafe { z_internal_shm_check(&back) },
+            "the buffer must come BACK — a refusal that swallowed it would lose \
+             memory the caller still believes it holds"
+        );
+        assert!(
+            !unsafe { z_internal_shm_check(&owned) },
+            "`that` is consumed on every path, refusal included"
+        );
+        assert_eq!(
+            segment.books().available(),
+            56,
+            "the range is still out: the chunk moved to `immut`, it was not freed"
+        );
+
+        // SAFETY: dropped once, through the owner it was handed back to.
+        unsafe { z_shm_drop(&mut back as *mut z_owned_shm_t as *mut z_moved_shm_t) };
+        assert_eq!(
+            segment.books().available(),
+            64,
+            "and dropping THAT handle is what returns the range"
+        );
+    }
+
+    /// THE OTHER ARM, and the fixture is what makes it reachable: a chunk that
+    /// still carries `mutable` is recovered, and `immut` is left a gravestone.
+    ///
+    /// Without this the refusal above would be the whole test, and a wz that
+    /// refused unconditionally — ignoring the flag entirely — would pass it.
+    /// That is the vacuity item 625 is about, in the one place this round could
+    /// have walked into it.
+    #[test]
+    fn a_buffer_that_is_still_mutable_is_recovered() {
+        let segment = Segment::new(64);
+        let mut owned = owned_shm(&segment, /*frozen=*/ false);
+
+        let mut out = z_owned_shm_mut_t::null_value();
+        let mut back = z_owned_shm_t::null_value();
+        // SAFETY: all three are live locals.
+        let rc = unsafe {
+            z_shm_mut_try_from_immut(
+                &mut out,
+                &mut owned as *mut z_owned_shm_t as *mut z_moved_shm_t,
+                &mut back,
+            )
+        };
+
+        assert_eq!(rc, Z_OK, "a buffer still marked mutable is recoverable");
+        assert!(
+            unsafe { z_internal_shm_mut_check(&out) },
+            "the recovered buffer must be live"
+        );
+        assert!(
+            !unsafe { z_internal_shm_check(&back) },
+            "success leaves the hand-back parameter a gravestone — the buffer is \
+             in `this_`, and a live `immut` too would be two owners of one chunk"
+        );
+        assert_eq!(
+            segment.books().available(),
+            56,
+            "recovery moves the SAME chunk; it does not allocate a second one"
+        );
+
+        // SAFETY: dropped once, through the recovered handle.
+        unsafe { z_shm_mut_drop(&mut out as *mut z_owned_shm_mut_t as *mut z_moved_shm_mut_t) };
+        assert_eq!(segment.books().available(), 64);
+    }
+
+    /// R2294 — `z_bytes_to_owned_shm` refuses, and the refusal is ABOUT THE
+    /// PAYLOAD rather than about the argument being null.
+    ///
+    /// The payload handed in is built from a real SHM buffer through wz's own
+    /// `z_bytes_from_shm`, which is the strongest input the C surface can
+    /// construct: if any payload on this side were SHM-backed it would be this
+    /// one. It is not — `z_bytes_from_shm` copies the bytes and returns the
+    /// chunk — so `Z_EINVAL` is the true answer, and the same one
+    /// `z_bytes_as_loaned_shm` already gives.
+    #[test]
+    fn a_payload_built_from_an_shm_buffer_is_still_not_shm_backed() {
+        let segment = Segment::new(64);
+        let mut owned = owned_shm(&segment, /*frozen=*/ true);
+        let mut payload = z_owned_bytes_t::null_value();
+        // SAFETY: both are live locals.
+        let rc = unsafe {
+            z_bytes_from_shm(
+                &mut payload,
+                &mut owned as *mut z_owned_shm_t as *mut z_moved_shm_t,
+            )
+        };
+        assert_eq!(rc, Z_OK, "the payload must have been built");
+        assert_eq!(
+            segment.books().available(),
+            64,
+            "`z_bytes_from_shm` copied the bytes and returned the chunk — which \
+             is exactly why the payload is not SHM-backed"
+        );
+
+        let mut dst = z_owned_shm_t::null_value();
+        // SAFETY: the payload is live and `dst` is writable.
+        let rc = unsafe { z_bytes_to_owned_shm(z_bytes_loan(&payload), &mut dst) };
+        assert_eq!(rc, Z_EINVAL, "no wz payload is backed by an SHM segment");
+        assert!(
+            !unsafe { z_internal_shm_check(&dst) },
+            "a refused conversion must leave a gravestone, not an uninitialised \
+             struct a C caller would then drop"
+        );
+
+        // SAFETY: dropped once.
+        unsafe { z_bytes_drop(&mut payload as *mut z_owned_bytes_t as *mut z_moved_bytes_t) };
+    }
+
+    /// The discriminator for the refusal above: a NULL payload answers
+    /// `Z_ENULL`, not `Z_EINVAL`.
+    ///
+    /// Without it, a `z_bytes_to_owned_shm` that ignored its argument entirely
+    /// and returned `Z_EINVAL` unconditionally would pass — and the test above
+    /// would be asserting about a function that never looked at the payload.
+    #[test]
+    fn the_conversion_distinguishes_a_null_payload_from_a_live_one() {
+        let mut dst = z_owned_shm_t::null_value();
+        // SAFETY: `dst` is writable; the payload pointer is deliberately null.
+        let rc = unsafe { z_bytes_to_owned_shm(std::ptr::null(), &mut dst) };
+        assert_eq!(
+            rc, Z_ENULL,
+            "a null payload is a different refusal from a live one that carries \
+             no SHM"
+        );
     }
 }
 
