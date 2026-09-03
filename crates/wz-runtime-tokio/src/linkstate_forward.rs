@@ -10670,6 +10670,24 @@ mod tests {
         // schedule is base config on both sides of the port (zenoh's
         // `connect.retry` sits outside any feature), and it sorts between
         // `batch_size` and `downsampling`.
+        // R2330 (unregistered open-debt item 14) — the adminspace permit, behind
+        // the feature that owns the value. It sorts between `acl_rules` and
+        // `batch_size`, so it is pushed BEFORE the base literal's tail... which is
+        // why it cannot be: the literal above already ends at `batch_size`. This
+        // assembly appends in sort order, so the permit has to go into the literal
+        // itself when the feature is on, and that is what the cfg'd `insert_str`
+        // below does — the one place in this test where a field does not simply
+        // append.
+        #[cfg(feature = "adminspace-core")]
+        {
+            let at = expected
+                .find(r#","batch_size""#)
+                .expect("the base literal carries batch_size, which the permit sorts before");
+            expected.insert_str(
+                at,
+                r#","adminspace":{"permissions":{"read":true,"write":false}}"#,
+            );
+        }
         expected
             .push_str(r#","connect_retry":{"period_increase_factor":2.0,"period_init_ms":1000,"period_max_ms":4000}"#);
         #[cfg(all(feature = "routing-peer", feature = "access-downsampling"))]

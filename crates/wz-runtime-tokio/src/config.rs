@@ -344,12 +344,47 @@ impl WzConfig {
             self.connect_retry.period_init_ms,
             self.connect_retry.period_max_ms,
         );
+        // R2330 (unregistered open-debt item 14) — the LIVE adminspace permit,
+        // GET-observable for the same reason `max_links` (R311y473) and
+        // `connect_retry` (R311y786) are: an operator must be able to read the
+        // gate's CURRENT state off the wire rather than off the startup config.
+        //
+        // It is what makes the RUNTIME FLIP itself witnessable. `set_admin_permissions`
+        // changes this value while the node runs and every admin GET re-reads it, so
+        // before this field a foreign client could observe the flip's EFFECT (replies
+        // stop) but never the CAUSE. Two observations of this key across a flip are
+        // the difference between "the node went quiet" and "read was revoked".
+        //
+        // SHAPE mirrors the INBOUND config path rather than inventing a flat key:
+        // `zenoh_config.rs` already honours `adminspace/permissions/read` and
+        // `adminspace/permissions/write`, so an operator diffs this against the same
+        // JSON5 they wrote. Inner keys ALPHABETICAL, like `connect_retry` and
+        // `acl_rules`.
+        //
+        // GATED on `adminspace-core`, which is the feature that owns the VALUE —
+        // exactly the precedent this field follows: `acl_deny` is gated on
+        // `access-acl` and `max_links` on `transport-multilink`, each behind the
+        // feature owning what it reports. Without `adminspace-core` there is no
+        // `admin_permissions` field on this struct and no adminspace to permit, so
+        // reporting a permit would be inventing one.
         let mut fields: Vec<(&str, String)> = vec![
             ("batch_size", self.batch_size.to_string()),
             ("connect_retry", connect_retry),
             ("lease_ms", self.lease_ms.to_string()),
             ("whatami", whatami),
         ];
+
+        #[cfg(feature = "adminspace-core")]
+        {
+            let permits = self.admin_permissions;
+            fields.push((
+                "adminspace",
+                format!(
+                    "{{\"permissions\":{{\"read\":{},\"write\":{}}}}}",
+                    permits.read, permits.write
+                ),
+            ));
+        }
 
         // acl_default / acl_deny — the LIVE ACL view, present only on a build that
         // can carry an interceptor ACL. With no ACL the node admits all, so the
@@ -707,7 +742,11 @@ mod tests {
             feature = "access-quota"
         )),
         not(feature = "transport-multilink"),
-        not(feature = "transport-qos")
+        not(feature = "transport-qos"),
+        // R2330 — `adminspace-core` adds the `adminspace` permit object, which
+        // sorts between `acl_rules` and `batch_size`. These tests pin the exact
+        // byte sequence, so each must exclude every field-adding feature.
+        not(feature = "adminspace-core")
     ))]
     #[test]
     fn to_admin_json_base_alphabetical() {
@@ -724,7 +763,11 @@ mod tests {
         not(feature = "access-downsampling"),
         not(feature = "access-quota"),
         not(feature = "transport-multilink"),
-        not(feature = "transport-qos")
+        not(feature = "transport-qos"),
+        // R2330 — `adminspace-core` adds the `adminspace` permit object, which
+        // sorts between `acl_rules` and `batch_size`. These tests pin the exact
+        // byte sequence, so each must exclude every field-adding feature.
+        not(feature = "adminspace-core")
     ))]
     #[test]
     fn to_admin_json_acl_only_alphabetical() {
@@ -752,7 +795,11 @@ mod tests {
         not(feature = "access-acl"),
         not(feature = "access-quota"),
         not(feature = "transport-multilink"),
-        not(feature = "transport-qos")
+        not(feature = "transport-qos"),
+        // R2330 — `adminspace-core` adds the `adminspace` permit object, which
+        // sorts between `acl_rules` and `batch_size`. These tests pin the exact
+        // byte sequence, so each must exclude every field-adding feature.
+        not(feature = "adminspace-core")
     ))]
     #[test]
     fn to_admin_json_downsampling_only_alphabetical() {
@@ -769,7 +816,11 @@ mod tests {
         not(feature = "access-acl"),
         not(feature = "access-downsampling"),
         not(feature = "transport-multilink"),
-        not(feature = "transport-qos")
+        not(feature = "transport-qos"),
+        // R2330 — `adminspace-core` adds the `adminspace` permit object, which
+        // sorts between `acl_rules` and `batch_size`. These tests pin the exact
+        // byte sequence, so each must exclude every field-adding feature.
+        not(feature = "adminspace-core")
     ))]
     #[test]
     fn to_admin_json_quota_only_alphabetical() {
@@ -786,7 +837,11 @@ mod tests {
         feature = "access-downsampling",
         not(feature = "access-quota"),
         not(feature = "transport-multilink"),
-        not(feature = "transport-qos")
+        not(feature = "transport-qos"),
+        // R2330 — `adminspace-core` adds the `adminspace` permit object, which
+        // sorts between `acl_rules` and `batch_size`. These tests pin the exact
+        // byte sequence, so each must exclude every field-adding feature.
+        not(feature = "adminspace-core")
     ))]
     #[test]
     fn to_admin_json_acl_and_downsampling_alphabetical() {
@@ -802,7 +857,11 @@ mod tests {
         feature = "access-quota",
         not(feature = "access-downsampling"),
         not(feature = "transport-multilink"),
-        not(feature = "transport-qos")
+        not(feature = "transport-qos"),
+        // R2330 — `adminspace-core` adds the `adminspace` permit object, which
+        // sorts between `acl_rules` and `batch_size`. These tests pin the exact
+        // byte sequence, so each must exclude every field-adding feature.
+        not(feature = "adminspace-core")
     ))]
     #[test]
     fn to_admin_json_acl_and_quota_alphabetical() {
@@ -818,7 +877,11 @@ mod tests {
         feature = "access-downsampling",
         feature = "access-quota",
         not(feature = "transport-multilink"),
-        not(feature = "transport-qos")
+        not(feature = "transport-qos"),
+        // R2330 — `adminspace-core` adds the `adminspace` permit object, which
+        // sorts between `acl_rules` and `batch_size`. These tests pin the exact
+        // byte sequence, so each must exclude every field-adding feature.
+        not(feature = "adminspace-core")
     ))]
     #[test]
     fn to_admin_json_full_access_alphabetical() {
@@ -845,7 +908,10 @@ mod tests {
         feature = "access-downsampling",
         feature = "access-quota",
         feature = "transport-multilink",
-        feature = "transport-qos"
+        feature = "transport-qos",
+        // R2330 — see the sibling pins: `adminspace-core` adds a field, and this
+        // one pins the exact bytes too.
+        not(feature = "adminspace-core")
     ))]
     #[test]
     fn to_admin_json_ap_full_shape_alphabetical() {
@@ -875,6 +941,50 @@ mod tests {
         assert!(
             aggregating.contains(r#""max_links":2"#),
             "with_max_links(2) must be GET-observable, not just structurally held: {aggregating}"
+        );
+    }
+
+    /// R2330 (unregistered open-debt item 14) — the adminspace permit is
+    /// GET-observable, and it tracks the RUNTIME setter and not only the builder.
+    ///
+    /// That second half is the item's whole point and the reason this asserts
+    /// through `set_admin_permissions` rather than through the constructor: the
+    /// permit is re-read from the live config on EVERY admin GET, so a flip is a
+    /// thing that happens to a RUNNING node. Before this field a foreign client
+    /// could observe the flip's EFFECT (replies stop arriving) but never its
+    /// CAUSE; two reads of this key across the flip now distinguish "the node went
+    /// quiet" from "read was revoked", which is what makes the flip witnessable
+    /// from outside at all.
+    ///
+    /// Gated on `adminspace-core` because `set_admin_permissions` is: the FIELD is
+    /// unconditional (so the base assertion below holds on every build), but the
+    /// runtime setter that makes the second half meaningful is not.
+    #[cfg(feature = "adminspace-core")]
+    #[test]
+    fn to_admin_json_adminspace_permit_tracks_the_runtime_flip() {
+        let base = router_config().to_admin_json();
+        assert!(
+            base.contains(r#""adminspace":{"permissions":{"read":true,"write":false}}"#),
+            "zenoh's PermissionsConf default is permissive GET, default-deny \
+             config-WRITE, and the admin view must render exactly that: {base}"
+        );
+
+        let mut flipped = router_config();
+        flipped.set_admin_permissions(wz_session_core::adminspace::AdminSpacePermissions {
+            read: false,
+            write: true,
+        });
+        let after = flipped.to_admin_json();
+        assert!(
+            after.contains(r#""adminspace":{"permissions":{"read":false,"write":true}}"#),
+            "a RUNTIME flip must move the rendered value — the admin GET re-reads \
+             the live config, so a view that showed only the startup permit would \
+             report a state the node has left: {after}"
+        );
+        assert_ne!(
+            base, after,
+            "the two documents must DIFFER, which is the property a foreign witness \
+             actually depends on: it compares two GETs across the flip"
         );
     }
 
