@@ -10,15 +10,17 @@
 //! `routers_net` leg is already proven (`wz_router_hat_zenohd_interop`), but the
 //! wz-linkstatepeer <-> zenoh-peer wire was untested. Both tiers share the SAME
 //! `net::protocol::network::Network` codepath on zenohd's side (zenoh
-//! `hat/router/mod.rs` vs `hat/linkstate_peer/mod.rs`), so wz's peer path reuses
+//! `zenoh/src/net/routing/hat/router/mod.rs` @ `fn net` vs
+//! `zenoh/src/net/routing/hat/peer/mod.rs` @ `fn net`), so wz's peer path reuses
 //! the exact `LinkstateNetwork` ingest the router leg exercises — this test proves
 //! the PEER-tier wire specifically.
 //!
 //! ## The witness discriminator (linkstate vs gossip)
 //!
 //! A zenohd peer emits an `OAM_LINKSTATE` `LinkStateList` on transport-up in BOTH
-//! routing modes: full-linkstate (`hat/linkstate_peer`, via the shared `Network`)
-//! AND the default gossip `peer_to_peer` (`hat/p2p_peer/gossip.rs`). So the weak
+//! routing modes: full-linkstate (the peer hat's `Network` arm) AND the default
+//! gossip `peer_to_peer` (`zenoh/src/net/protocol/gossip.rs` @ `LinkStateList`;
+//! 1.10.0 unified the two peer hats and moved gossip out of the hat layer). So the weak
 //! witness `"learned mesh topology"` (wz `ingested() > 0`) fires against a gossip
 //! peer too — it proves only that wz decoded SOME LinkStateList, not that it
 //! federated at the linkstate tier.

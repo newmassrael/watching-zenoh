@@ -558,7 +558,8 @@ impl Link {
 ///   admits a node's locators only when
 ///   [`propagate_locators`](LinkstateNetwork::propagate_locators) does — self or
 ///   a direct neighbour — so a distant multihop node's locators are withheld
-///   (the A4b port of zenoh `hat/p2p_peer/gossip.rs:281`).
+///   (the A4b port of zenoh `zenoh/src/net/protocol/gossip.rs`
+///   @ `fn make_link_state`).
 /// - per TARGET face: the driver's link-state fan-out skips a face whose role is
 ///   outside the `gossip_target` set (a client), zenoh's per-target
 ///   `send_on_link` (the A4a port, threaded on the handshake whatami — "F1").
@@ -615,8 +616,9 @@ struct LocalLinkState {
 /// ensuing reachability prune dropped. The driver (step c3) re-floods `new`
 /// FULL and `updated` LINKS-ONLY (the D4 `Details` split — zenoh
 /// `network.rs:645-678`), and purges each `removed` node's subscription
-/// interest (zenoh `pubsub_remove_node` over `changes.removed_nodes`,
-/// `hat/linkstate_peer/mod.rs:418-422`). A NARROWED subset of zenoh `Changes`
+/// interest (zenoh's per-removed-node purge on a link-state OAM,
+/// `zenoh/src/net/routing/hat/peer/mod.rs` @ `fn handle_oam`). A NARROWED subset
+/// of zenoh `Changes`
 /// (`network.rs:110-114`, `(NodeIndex, Node)` pairs): wz carries only the zids
 /// (the node payloads land when gossip needs them).
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -1064,7 +1066,9 @@ impl LinkstateNetwork {
     /// `link_states` full path (`network.rs:705-808`: node update + edge
     /// rebuild). NOT the `!full_linkstate` `process_linkstates_peer_to_peer`
     /// (that path does no edge rebuild); the linkstate-peer HAT sets
-    /// `full_linkstate = true` (`hat/linkstate_peer/mod.rs:203`).
+    /// the mesh arm (`zenoh/src/net/routing/hat/peer/mod.rs` @ `Network {`;
+    /// 1.10.0 replaced the `full_linkstate` flag with the peer hat's
+    /// `Gossip`/`Network` enum).
     pub fn ingest_linkstate_list(
         &mut self,
         src_link_id: LinkId,
@@ -1173,7 +1177,8 @@ impl LinkstateNetwork {
     }
 
     /// Whether node `idx`'s dial locators may ride a FULL link-state entry this
-    /// peer floods — zenoh `propagate_locators` (`hat/p2p_peer/gossip.rs:281`).
+    /// peer floods — zenoh's own self-or-neighbour test
+    /// (`zenoh/src/net/protocol/gossip.rs` @ `fn make_link_state`).
     /// True for self (this peer advertises its own listen addresses) and for a
     /// DIRECT neighbour (a node self holds a link to); a distant multihop node's
     /// locators are withheld, so reachability data travels one hop — a receiver

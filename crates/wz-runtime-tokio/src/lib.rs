@@ -1497,7 +1497,8 @@ pub mod linkstate_pending;
 /// forwarded to never answers. zenoh
 /// `dispatcher/interests.rs` (`PendingCurrentInterest` /
 /// `finalize_pending_interest` / `CurrentInterestCleanup`) driven from
-/// `hat/p2p_peer/interests.rs`. Gated on `routing-interest-pending-gc`, which
+/// `zenoh/src/net/routing/hat/peer/interests.rs` @ `fn route_interest`. Gated on
+/// `routing-interest-pending-gc`, which
 /// pulls `routing-peer` (the forwarder that owns the table).
 #[cfg(feature = "routing-interest-pending-gc")]
 pub mod interest_broker;

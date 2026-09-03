@@ -19,7 +19,8 @@
 //! WHERE IT LIVES. zenoh defines `AutoConnect` in `net/common.rs` (a leaf
 //! shared module, sibling to the `network.rs` topology graph); the instance is a
 //! field of the gossip-side topology graph `Network` itself
-//! (`hat/p2p_peer/gossip.rs:101`), which is also where the gate + dial fire
+//! (`zenoh/src/net/protocol/gossip.rs` @ `pub(crate) autoconnect: AutoConnect`;
+//! 1.10.0 moved gossip out of the hat layer), which is also where the gate + dial fire
 //! (`should_autoconnect` then `connect_peer`, inside the graph's ingest). wz
 //! keeps the type here, in the routing-graph crate — the lowest crate that has
 //! both [`Zid`](crate::Zid) (for the zid tie-break) and [`WhatAmIMatcher`] (for

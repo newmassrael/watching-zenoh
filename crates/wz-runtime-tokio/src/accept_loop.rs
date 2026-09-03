@@ -240,7 +240,8 @@ pub struct Face {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DialIntentOrigin {
     /// A peer learned off a link-state / gossip flood — zenoh
-    /// `hat/p2p_peer/gossip.rs`, wz `linkstate_forward`'s discovery emit.
+    /// `zenoh/src/net/protocol/gossip.rs` @ `fn add_node`, wz
+    /// `linkstate_forward`'s discovery emit.
     Gossip,
     /// A node that answered this one's multicast Scout with a Hello — zenoh
     /// `Runtime::autoconnect_all`, wz `scouting_autoconnect`.
@@ -254,7 +255,8 @@ pub enum DialIntentOrigin {
 /// task that owns the in-flight-open [`FuturesUnordered`] — so it hands the loop
 /// this intent over an unbounded channel and the loop turns it into a `dial_face`
 /// (A5c). The wz analogue of the `(zid, locators)` pair zenoh passes to
-/// `runtime.connect_peer` (`hat/p2p_peer/gossip.rs:455` for gossip,
+/// `runtime.connect_peer` (`zenoh/src/net/protocol/gossip.rs` @ `connect_peer`
+/// for gossip,
 /// `orchestrator.rs`'s `autoconnect_all` for multicast), minus the per-dial task
 /// spawn — wz routes the dial back to its single drive task instead.
 ///

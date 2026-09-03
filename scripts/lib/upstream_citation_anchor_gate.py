@@ -48,7 +48,7 @@ findings about text nobody wrote as a citation. `@` was chosen because the tree
 had ZERO occurrences of it in this position, so no legacy sentence can be
 mistaken for an anchor.
 
-## The three buckets, and why there is no fourth
+## The buckets, and why the scanner places every occurrence in one
 
 Every occurrence of an upstream path lands in exactly ONE bucket, and the
 scanner FAILS rather than skipping anything it cannot place:
@@ -57,12 +57,57 @@ scanner FAILS rather than skipping anything it cannot place:
     LINE      path:N              -- the old form, held down by a budget
     BARE      a path, neither     -- named, and held down by its own budget
 
+    ROOTLESS-LINE  seg/...:N      -- a path written WITHOUT its root
+    ROOTLESS-BARE  seg/...        -- ditto, neither form
+
 BARE is not an exemption. It is the population that predates the convention,
 and like LINE it is locked by a ratchet that can only shrink: a count ABOVE
 budget means this commit ADDED one (fix the citation, never the budget), and a
 count BELOW means it removed one (lower the budget in the same commit). Open
 debt 581 condition (2) asks for exactly this -- gradual, never a bulk rewrite,
 but locked so the number cannot drift back up.
+
+## The ROOT-LESS axis (R2317, unregistered open debt 647)
+
+`_PATH` is root-anchored, and it has to be -- see its own comment. The cost is
+that a citation written WITHOUT its root is not LINE, not BARE, and not
+ANCHORED: it is INVISIBLE. It is counted in no budget, it never reaches the
+resolution arm, and so it can never go red no matter how far upstream moves
+away from it. Measured on this tree when the axis was added: 172 such
+occurrences, and 49 of them named a file that does not exist at the pin --
+while the gate printed "407 upstream citation(s)" as though that were the
+population.
+
+The invisible set is the one that rots fastest, because nothing grades it.
+
+Root-less citations therefore get their OWN two buckets and their OWN
+ratchets, rather than being folded into LINE and BARE. Folding them in would
+have meant raising those budgets from 300/60 to 447/85, which is the move this
+gate exists to refuse: a budget raised to admit a defect has stopped being a
+ratchet.
+
+⚠ THE POPULATION IS DERIVED, NOT LISTED. `ROOTLESS_SEGMENTS` declares which
+first segments this axis GRADES, but `rootless_candidates()` derives, from the
+tree's own root-anchored citations, every first segment that COULD be one --
+and the residue is itself ratcheted. So the declaration cannot quietly be the
+whole answer: a segment left undeclared shows up as a number that can only
+shrink. That is the R2194 shape -- a declared table is an escape hatch unless a
+separate derivation judges it.
+
+The derivation is pin-free on purpose: a directory component of a citation the
+tree ALREADY writes root-anchored is, by construction, an upstream directory
+name. That runs in both arms, so the FORM arm (which has no checkout) grades
+the residue too. Measured: the rule yields 50 candidate segments and admits
+none of the tree's non-upstream path-like tokens -- no SCE path, no gate
+fixture name, no `OUT_DIR` -- because none of those is a component of any
+zenoh path this tree cites.
+
+⚠ WHAT THIS AXIS DOES NOT SEE, stated rather than left implied: a root-less
+citation whose FIRST SEGMENT is itself gone upstream (a 1.5.0 directory name)
+is not a component of any current citation, so the derivation cannot propose
+it, and an abbreviated spelling that was never a directory name at all cannot
+be derived by anything. Both are measured residues, filed rather than papered
+over.
 
 ## ⛔ A GATE THAT CANNOT MEASURE MUST NOT REPORT GREEN
 
@@ -116,10 +161,46 @@ ANCHOR_CITE = re.compile(
 )
 BARE_CITE = re.compile(rf"(?<![\w/.-])({_PATH})(?!:\d)")
 
+#: First segments that spell an upstream path WITHOUT its root. DECLARED, and
+#: judged for completeness by `rootless_candidates()` -- see the module doc.
+#: `hat` is the segment R2317 made visible and repaired; the rest of the
+#: derived candidate set is held down by `ROOTLESS_UNDECLARED_BUDGET` below.
+ROOTLESS_SEGMENTS = ("hat",)
+
+_ROOTLESS_PATH = rf"(?:{'|'.join(ROOTLESS_SEGMENTS)})/[\w/.-]+\.rs"
+#: The SAME lookbehind as `_PATH`, and it is what makes this axis safe to add:
+#: it blocks a match that starts after a `/`, so the `hat/...` INSIDE a
+#: root-anchored citation is not counted a second time here. Measured on this
+#: tree: 172 root-less occurrences and 16 root-anchored ones naming a file
+#: under the same directory, with no overlap between the two counts.
+ROOTLESS_LINE_CITE = re.compile(rf"(?<![\w/.-])({_ROOTLESS_PATH}):(\d+)")
+ROOTLESS_BARE_CITE = re.compile(rf"(?<![\w/.-])({_ROOTLESS_PATH})(?!:\d)")
+
+#: Any path-like token, whatever its first segment. Used ONLY to size the
+#: undeclared residue; the lookbehind keeps it from matching from inside a
+#: longer path, so a root-anchored citation contributes its own first segment
+#: (a known root) and nothing else.
+_ANY_TOKEN = re.compile(r"(?<![\w/.-])(\w[\w-]*)/[\w/.-]+\.rs")
+
 #: BUDGETS. Measured, frozen, and checked in BOTH directions -- see the module
 #: doc. Not a threshold anyone chose.
 LINE_BUDGET = 300
 BARE_BUDGET = 60
+#: The root-less axis, after R2317 repaired the 49 citations that named a file
+#: gone at the pin. Same two-directional ratchet as LINE and BARE.
+ROOTLESS_LINE_BUDGET = 104
+ROOTLESS_BARE_BUDGET = 16
+#: Root-less LINE citations whose file EXISTS at the pin but whose line number
+#: is past its end -- 1.5.0 line numbers on files that shrank. Measured, not
+#: chosen, and graded only by the RESOLUTION arm (it takes a checkout to know).
+#: See `_rootless_finding` for why this is a ratchet and the gone-path case is
+#: a finding.
+ROOTLESS_STALE_LINE_BUDGET = 46
+#: Occurrences under a DERIVED candidate segment this axis does not yet grade.
+#: This is the residue of open debt 647 made monotone rather than argued: it
+#: can only shrink, so declaring a segment forces it down in the same commit,
+#: and writing a NEW root-less citation of an undeclared segment reds.
+ROOTLESS_UNDECLARED_BUDGET = 736
 
 #: A LIVE invocation of the RESOLUTION arm. R2242 split this gate in two and,
 #: in doing so, made `--resolve` a flag someone can simply stop passing: delete
@@ -165,6 +246,82 @@ def resolution_arm_is_wired(root: pathlib.Path) -> bool:
 class Finding(typing.NamedTuple):
     where: str
     detail: str
+
+
+def rootless_candidates(root: pathlib.Path, files: list[str]) -> set[str]:
+    """Which first segments COULD spell an upstream path without its root?
+
+    DERIVED, pin-free, from the tree's own root-anchored citations: every
+    directory component of a path this tree already writes with its root is an
+    upstream directory name by construction. Minus the roots themselves (they
+    are not root-LESS) and minus any directory name of THIS tree, because
+    `src/lib.rs` and `session/publisher.rs` are ours and naming them is not a
+    claim about upstream.
+
+    Pin-free is the point. The completeness check has to run in the FORM arm
+    too -- that arm is what every hosted C0 job runs, and a residue graded only
+    where a checkout exists is a residue graded almost nowhere.
+
+    ⚠ MEASURED, because the looser rule was tried first and is wrong: dropping
+    the "component of a rooted citation" requirement and keeping only "not a
+    directory of this tree" yields 80 segments and 203 tokens that match no
+    upstream file -- and almost all of that is not upstream at all (SCE's
+    `sce-build/...`, this repo's own gate fixtures `alpha/...` and `beta/...`,
+    `OUT_DIR/...`). A check that reports those has stopped being about
+    citations. The component rule admits none of them.
+    """
+    own_dirs: set[str] = set()
+    for f in files:
+        own_dirs.update(pathlib.PurePosixPath(f).parts[:-1])
+    roots = set(re.findall(r"\w+", _PATH.split("/")[0]))
+    seen: set[str] = set()
+    for rel in files:
+        try:
+            text = (root / rel).read_text(errors="replace")
+        except (OSError, UnicodeError):
+            continue
+        for m in BARE_CITE.finditer(text):
+            seen.update(pathlib.PurePosixPath(m.group(1)).parts[:-1])
+        for m in LINE_CITE.finditer(text):
+            seen.update(pathlib.PurePosixPath(m.group(1)).parts[:-1])
+        for m in ANCHOR_CITE.finditer(text):
+            seen.update(pathlib.PurePosixPath(m.group(1)).parts[:-1])
+    return {s for s in seen if s not in own_dirs and s not in roots}
+
+
+def rootless_undeclared(root: pathlib.Path, files: list[str]) -> int:
+    """How many occurrences sit under a candidate segment this axis does not
+    grade? The residue, sized rather than described."""
+    cands = rootless_candidates(root, files) - set(ROOTLESS_SEGMENTS)
+    if not cands:
+        return 0
+    n = 0
+    for rel in files:
+        try:
+            text = (root / rel).read_text(errors="replace")
+        except (OSError, UnicodeError):
+            continue
+        for m in _ANY_TOKEN.finditer(text):
+            if m.group(1) in cands:
+                n += 1
+    return n
+
+
+def rootless_locations(ref: pathlib.Path) -> dict[str, pathlib.Path | None]:
+    """Where does each DECLARED segment live at the pin? Globbed, never
+    written down -- a location constant here would be a second copy of
+    upstream's layout, and the one thing this gate knows about upstream is
+    that it moves.
+
+    `None` means the segment is not a UNIQUE directory at the pin, which is a
+    FAIL rather than a skip: a declared segment the gate cannot place is a
+    population it cannot resolve, and this gate does not report green on those.
+    """
+    out: dict[str, pathlib.Path | None] = {}
+    for seg in ROOTLESS_SEGMENTS:
+        hits = sorted({p.parent for p in ref.glob(f"**/{seg}") if p.is_dir()})
+        out[seg] = hits[0] if len(hits) == 1 else None
+    return out
 
 
 def tracked_files(root: pathlib.Path) -> list[str]:
@@ -226,9 +383,20 @@ def upstream_root() -> pathlib.Path | None:
     return None
 
 
-def scan(files: list[str], root: pathlib.Path, ref: pathlib.Path):
-    """Every occurrence, in exactly one bucket. Returns (counts, findings)."""
-    counts = {"anchored": 0, "line": 0, "bare": 0}
+def scan(
+    files: list[str],
+    root: pathlib.Path,
+    ref: pathlib.Path,
+    rootless_loc: dict[str, pathlib.Path | None] | None = None,
+):
+    """Every occurrence, in exactly one bucket. Returns (counts, findings).
+
+    `rootless_loc` is the DECLARED segments' locations at the pin, and `None`
+    means "do not resolve the root-less axis" -- the form arm's shape, where
+    the counts are still wanted but no path can be looked up.
+    """
+    counts = {"anchored": 0, "line": 0, "bare": 0, "rootless_line": 0,
+              "rootless_bare": 0, "rootless_stale_line": 0}
     findings: list[Finding] = []
     lens: dict[str, int] = {}
 
@@ -285,10 +453,19 @@ def scan(files: list[str], root: pathlib.Path, ref: pathlib.Path):
                         f"({nlines(path)} lines) at the pin",
                     )
                 )
+        for m in ROOTLESS_LINE_CITE.finditer(rest):
+            counts["rootless_line"] += 1
+            got, stale = _rootless_finding(
+                rel, m.group(1), int(m.group(2)), ref, rootless_loc, nlines
+            )
+            findings.extend(got)
+            counts["rootless_stale_line"] += stale
         # LINE spans are masked in turn, so `path.rs:12` is not ALSO counted as
         # a bare mention of `path.rs`. Masking with spaces rather than deleting
-        # keeps every offset stable across the three passes.
-        without_lines = LINE_CITE.sub(lambda _m: " " * len(_m.group(0)), rest)
+        # keeps every offset stable across the passes.
+        blank = lambda _m: " " * len(_m.group(0))  # noqa: E731
+        without_lines = LINE_CITE.sub(blank, rest)
+        without_lines = ROOTLESS_LINE_CITE.sub(blank, without_lines)
         for m in BARE_CITE.finditer(without_lines):
             counts["bare"] += 1
             path = m.group(1)
@@ -296,7 +473,79 @@ def scan(files: list[str], root: pathlib.Path, ref: pathlib.Path):
                 findings.append(
                     Finding(rel, f"`{path}` names a file that is gone at the pin")
                 )
+        for m in ROOTLESS_BARE_CITE.finditer(without_lines):
+            counts["rootless_bare"] += 1
+            got, _ = _rootless_finding(
+                rel, m.group(1), None, ref, rootless_loc, nlines
+            )
+            findings.extend(got)
     return counts, findings
+
+
+def _rootless_finding(
+    rel: str,
+    path: str,
+    n: int | None,
+    ref: pathlib.Path,
+    rootless_loc: dict[str, pathlib.Path | None] | None,
+    nlines,
+) -> tuple[list[Finding], int]:
+    """Resolve ONE root-less citation. Returns (findings, stale-line count).
+
+    THE PATH IS A FINDING; THE LINE NUMBER IS A RATCHET, and the split is
+    deliberate rather than convenient:
+
+    * a path that does not exist at the pin is a claim about a file that is
+      GONE, and there is no reading of it that is still true. Open debt 647's
+      own subject, and R2317 repaired all 49 of them.
+    * a line number past the end of a file that DOES exist is the ordinary rot
+      the LINE form was always going to suffer -- which is why the rooted
+      population has a budget rather than an amnesty. The root-less population
+      had no grading at all until this round, so it arrives with a backlog:
+      46 measured. Those are counted by `rootless_stale_line` and held by a
+      two-directional ratchet, so the backlog can only shrink and a NEW stale
+      line reds. Filed as its own debt rather than folded into 647, because it
+      is a different defect with a different repair.
+
+    A budget is not an exemption HERE for the same reason it is not one for
+    BARE: the number is printed every run, it is checked in both directions,
+    and nothing can raise it.
+
+    `rootless_loc is None` is the form arm and yields nothing -- the counts are
+    the form arm's whole product. It is NOT a skip that reports green: `run()`
+    prints that the arm resolved nothing and refuses to be the only arm wired.
+    """
+    if rootless_loc is None:
+        return [], 0
+    seg = path.split("/", 1)[0]
+    loc = rootless_loc.get(seg)
+    if loc is None:
+        # A declared segment with no unique directory at the pin. Reported per
+        # occurrence rather than once, because the repair is per citation: each
+        # one has to name where it went, and upstream deleting a directory is
+        # exactly when every claim under it needs re-reading.
+        return [
+            Finding(
+                rel,
+                f"`{path}` is root-less and its segment `{seg}/` is not a "
+                "unique directory at the pin, so nothing can resolve it. "
+                "Write the citation with its root, in the `path` @ `needle` "
+                "form",
+            )
+        ], 0
+    full = (loc / path).as_posix()
+    shown = f"`{path}`" + (f":{n}" if n is not None else "")
+    if not (ref / full).is_file():
+        return [
+            Finding(
+                rel,
+                f"{shown} is root-less and resolves to `{full}`, which does "
+                "not exist at the pin",
+            )
+        ], 0
+    if n is not None and n > nlines(full):
+        return [], 1
+    return [], 0
 
 
 def run(root: pathlib.Path, ref: pathlib.Path | None, resolve: bool) -> int:
@@ -336,18 +585,41 @@ def run(root: pathlib.Path, ref: pathlib.Path | None, resolve: bool) -> int:
     # and the budgets are what the form arm is -- but its findings are DROPPED
     # rather than reported, because without a real checkout every one of them
     # would be "this path is gone" about a path that is merely unreachable here.
-    counts, findings = scan(files, root, ref if ref is not None else root / ".git")
+    rootless_loc = rootless_locations(ref) if resolve and ref is not None else None
+    counts, findings = scan(
+        files, root, ref if ref is not None else root / ".git", rootless_loc
+    )
     if not resolve:
         findings = []
-    total = counts["anchored"] + counts["line"] + counts["bare"]
+    total = (counts["anchored"] + counts["line"] + counts["bare"]
+             + counts["rootless_line"] + counts["rootless_bare"])
+    undeclared = rootless_undeclared(root, files)
+    candidates = rootless_candidates(root, files)
 
     where = f"pin at {ref}" if resolve else "FORM arm only"
     print(
         f"  upstream-citation-anchor: {total} upstream citation(s) across "
         f"{len(files)} tracked file(s) -- {counts['anchored']} anchored, "
         f"{counts['line']} line-form (budget {LINE_BUDGET}), "
-        f"{counts['bare']} bare (budget {BARE_BUDGET}); {where}"
+        f"{counts['bare']} bare (budget {BARE_BUDGET}), "
+        f"{counts['rootless_line']}/{counts['rootless_bare']} root-less "
+        f"line/bare (budgets {ROOTLESS_LINE_BUDGET}/{ROOTLESS_BARE_BUDGET}) "
+        f"over {len(ROOTLESS_SEGMENTS)} declared segment(s); {where}"
     )
+    print(
+        f"  upstream-citation-anchor: root-less residue -- {undeclared} "
+        f"occurrence(s) under {len(candidates - set(ROOTLESS_SEGMENTS))} derived "
+        f"candidate segment(s) this axis does not yet grade "
+        f"(budget {ROOTLESS_UNDECLARED_BUDGET}); open debt 647"
+    )
+    if resolve:
+        print(
+            "  upstream-citation-anchor: root-less stale lines -- "
+            f"{counts['rootless_stale_line']} citation(s) name a line past the "
+            f"end of a file that still exists (budget "
+            f"{ROOTLESS_STALE_LINE_BUDGET}). The PATH of every root-less "
+            "citation resolved; these line NUMBERS did not."
+        )
     if not resolve:
         print(
             "  upstream-citation-anchor: the RESOLUTION arm (does each path and "
@@ -385,7 +657,32 @@ def run(root: pathlib.Path, ref: pathlib.Path | None, resolve: bool) -> int:
             file=sys.stderr,
         )
         rc = 1
-    for name, budget in (("line", LINE_BUDGET), ("bare", BARE_BUDGET)):
+    if not candidates:
+        print(
+            "  upstream-citation-anchor: FAIL -- the root-less candidate "
+            "derivation found NO segment. It reads the directory components of "
+            "this tree's own root-anchored citations, so an empty answer means "
+            "those stopped matching, not that the residue is clean.",
+            file=sys.stderr,
+        )
+        rc = 1
+    # ⚠ THERE IS DELIBERATELY NO "every DECLARED segment must also be DERIVED"
+    # check, and the reason is worth writing down because the first draft had
+    # one. The derivation exists to PROPOSE segments nobody declared -- that is
+    # what the residue ratchet is for -- and it proposes from root-anchored
+    # citations. A declared segment need not have one: the whole point of the
+    # axis is citations written WITHOUT a root. Requiring the derivation to
+    # re-propose it tests the tree's prose, not the declaration, and it reds on
+    # any tree whose root-less citations are the only ones it has. What DOES
+    # validate a declaration is `rootless_locations` -- the pin, not our prose --
+    # and it FAILs per occurrence when a declared segment is not a unique
+    # directory there.
+    for name, budget in (
+        ("line", LINE_BUDGET),
+        ("bare", BARE_BUDGET),
+        ("rootless_line", ROOTLESS_LINE_BUDGET),
+        ("rootless_bare", ROOTLESS_BARE_BUDGET),
+    ):
         got = counts[name]
         if got > budget:
             print(
@@ -404,6 +701,33 @@ def run(root: pathlib.Path, ref: pathlib.Path | None, resolve: bool) -> int:
                 file=sys.stderr,
             )
             rc = 1
+    if resolve and counts["rootless_stale_line"] != ROOTLESS_STALE_LINE_BUDGET:
+        got = counts["rootless_stale_line"]
+        moved = "ADDED" if got > ROOTLESS_STALE_LINE_BUDGET else "REMOVED"
+        print(
+            f"  upstream-citation-anchor: FAIL -- {got} root-less line-form "
+            f"citation(s) name a line past the end of a file that DOES exist "
+            f"at the pin, budget {ROOTLESS_STALE_LINE_BUDGET}. This commit "
+            f"{moved} one. Up means a new stale line was written: cite it as "
+            "`path` @ `needle` with its root instead. Down means one was "
+            "repaired: lower ROOTLESS_STALE_LINE_BUDGET to "
+            f"{got} in this same commit so the ratchet holds.",
+            file=sys.stderr,
+        )
+        rc = 1
+    if undeclared != ROOTLESS_UNDECLARED_BUDGET:
+        moved = "ADDED" if undeclared > ROOTLESS_UNDECLARED_BUDGET else "REMOVED"
+        print(
+            f"  upstream-citation-anchor: FAIL -- {undeclared} root-less "
+            f"occurrence(s) under an UNGRADED candidate segment, budget "
+            f"{ROOTLESS_UNDECLARED_BUDGET}. This commit {moved} one. "
+            "Up means a new root-less citation was written: give it its root, "
+            "in the `path` @ `needle` form. Down means one was repaired or its "
+            "segment declared: lower ROOTLESS_UNDECLARED_BUDGET to "
+            f"{undeclared} in this same commit so the ratchet holds.",
+            file=sys.stderr,
+        )
+        rc = 1
     if not resolve and not resolution_arm_is_wired(root):
         print(
             "  upstream-citation-anchor: FAIL -- this run DEFERRED resolution "
@@ -421,12 +745,14 @@ def run(root: pathlib.Path, ref: pathlib.Path | None, resolve: bool) -> int:
         # exists to avoid -- it graded no path and no needle.
         print(
             "  upstream-citation-anchor: OK -- every anchored citation resolves "
-            "against the pinned checkout, and both legacy forms sit exactly on "
-            "their budget."
+            "against the pinned checkout, every root-less path resolves under "
+            "the location the pin gives its segment, and all four legacy forms "
+            "plus the two root-less ratchets sit exactly on their budget."
             if resolve
             else "  upstream-citation-anchor: OK (FORM) -- every occurrence is "
-            "classified and both legacy forms sit exactly on their budget. "
-            "Nothing here was resolved against upstream."
+            "classified and all four legacy forms sit exactly on their budget. "
+            "Nothing here was resolved against upstream, so neither the "
+            "root-less paths nor the stale-line ratchet was graded."
         )
     return rc
 
@@ -461,6 +787,21 @@ def selftest() -> int:
 
     UNICAST = _p("io", "zenoh-link-commons", "src", "unicast.rs")
     GONE = _p("io", "zenoh-transport", "src", "shm.rs")
+    #: The root-less axis's fixtures. `SEG` is the declared segment, and it is
+    #: read from `ROOTLESS_SEGMENTS` rather than written, so a future round that
+    #: declares a different segment cannot leave these rows testing a name the
+    #: gate no longer grades.
+    SEG = ROOTLESS_SEGMENTS[0]
+    ROOTED_RL = _p("zenoh", "src", "net", "routing", SEG, "peer", "mod.rs")
+    RL = _p(SEG, "peer", "mod.rs")
+    RL_GONE = _p(SEG, "vanished", "mod.rs")
+    #: A SECOND segment, never declared, so the residue ratchet has a subject.
+    #: It has to be a component of a root-anchored citation the fixture also
+    #: carries -- otherwise the derivation does not propose it and the residue is
+    #: zero, which is the trap this pair exists to avoid.
+    OTHER = "dispatcher"
+    ROOTED_OTHER = _p("zenoh", "src", "net", "routing", OTHER, "tables.rs")
+    RL_OTHER = _p(OTHER, "tables.rs")
     with tempfile.TemporaryDirectory() as td:
         base = pathlib.Path(td)
         ref = base / "ref"
@@ -470,12 +811,33 @@ def selftest() -> int:
         (ref / "io" / "zenoh-link-commons" / "src" / "unicast.rs").write_text(
             "fn a() {}\nfn keeper() {}\n"
         )
+        (ref / "zenoh" / "src" / "net" / "routing" / SEG / "peer").mkdir(parents=True)
+        (ref / ROOTED_RL).write_text("fn hat_keeper() {}\nfn b() {}\n")
+        (ref / "zenoh" / "src" / "net" / "routing" / OTHER).mkdir(parents=True)
+        (ref / ROOTED_OTHER).write_text("fn other_keeper() {}\n")
+        # A SECOND ref where the declared segment is NOT a unique directory, so
+        # `rootless_locations` has to answer None and the gate has to refuse.
+        ref2 = base / "ref2"
+        for extra in ("a", "b"):
+            (ref2 / extra / SEG).mkdir(parents=True)
+        floc = rootless_locations(ref)
+        if floc.get(SEG) is None:
+            failures.append(
+                f"the fixture ref has one `{SEG}` directory but "
+                "rootless_locations() could not place it"
+            )
+        if rootless_locations(ref2).get(SEG) is not None:
+            failures.append(
+                f"two `{SEG}` directories must be UNPLACEABLE, not resolved to "
+                "the first one -- a gate that guesses which of two it meant has "
+                "stopped measuring"
+            )
 
-        def scan_text(body: str):
+        def scan_text(body: str, loc=None):
             src = base / "src"
             src.mkdir(exist_ok=True)
             (src / "f.rs").write_text(body)
-            return scan(["f.rs"], src, ref)
+            return scan(["f.rs"], src, ref, loc)
 
         # 1. The root-anchoring defect: a path matched from the middle of a
         #    longer one must NOT be reported as a missing file.
@@ -517,14 +879,135 @@ def selftest() -> int:
         if not f:
             failures.append("an anchor on a gone file did not red")
 
+        # 6b. THE ROOT-LESS AXIS (R2317). Six rows, and the FIRST is the one the
+        #     axis lives or dies on: adding `hat` to a pattern must not make the
+        #     `hat/...` INSIDE a root-anchored citation count twice. That is
+        #     case 1's defect on the new axis, and the lookbehind is what stops
+        #     it -- delete the lookbehind and this row reds while every other
+        #     row stays green.
+        #     ⚠ THE FIXTURE HAS TO USE THE **LINE** AND **BARE** FORMS, and that
+        #     was measured the hard way: the first draft used the ANCHORED form
+        #     and the row could not fail, because `scan` MASKS anchored spans
+        #     before the root-less passes run -- so the inner segment was
+        #     invisible whether the lookbehind was there or not. A control run
+        #     with the lookbehind deleted came back GREEN. These two forms are
+        #     NOT masked when the root-less passes see them, so they are the
+        #     only fixtures that can exercise it.
+        c, f = scan_text(f"// {ROOTED_RL}:1\n", floc)
+        if (c["line"], c["rootless_line"], c["rootless_bare"]) != (1, 0, 0):
+            failures.append(
+                f"a root-anchored LINE citation was also counted on the "
+                f"root-less axis: {c}"
+            )
+        c, f = scan_text(f"// see {ROOTED_RL} for it\n", floc)
+        if (c["bare"], c["rootless_line"], c["rootless_bare"]) != (1, 0, 0):
+            failures.append(
+                f"a root-anchored BARE citation was also counted on the "
+                f"root-less axis: {c}"
+            )
+        c, f = scan_text(f"// `{ROOTED_RL}` @ `fn hat_keeper()`\n", floc)
+        if (c["anchored"], c["rootless_line"], c["rootless_bare"]) != (1, 0, 0):
+            failures.append(
+                f"a ROOT-ANCHORED citation was also counted on the root-less "
+                f"axis: {c}"
+            )
+        # A root-less citation lands on the root-less axis and NOWHERE else.
+        c, f = scan_text(f"// {RL}:1\n", floc)
+        if (c["rootless_line"], c["line"], c["bare"], c["anchored"]) != (1, 0, 0, 0):
+            failures.append(f"a root-less line citation was misfiled: {c}")
+        if f:
+            failures.append(f"a resolving root-less citation red: {f}")
+        c, f = scan_text(f"// see {RL} for it\n", floc)
+        if (c["rootless_bare"], c["bare"]) != (1, 0):
+            failures.append(f"a root-less bare citation was misfiled: {c}")
+        # A root-less path that does not exist under the derived location REDS.
+        c, f = scan_text(f"// {RL_GONE}:1\n", floc)
+        if not f:
+            failures.append("a root-less citation of a GONE path did not red")
+        # A root-less line PAST EOF is the ratchet, not a finding -- the split
+        # `_rootless_finding` documents.
+        c, f = scan_text(f"// {RL}:99\n", floc)
+        if f:
+            failures.append(f"a root-less stale LINE produced a finding: {f}")
+        if c["rootless_stale_line"] != 1:
+            failures.append(f"a root-less stale LINE was not counted: {c}")
+        # `rootless_loc=None` is the FORM arm: counts, no resolution.
+        c, f = scan_text(f"// {RL_GONE}:1\n", None)
+        if c["rootless_line"] != 1 or f:
+            failures.append(f"the form arm resolved the root-less axis: {c} {f}")
+        # A declared segment the pin cannot place must RED per occurrence.
+        c, f = scan_text(f"// {RL}:1\n", rootless_locations(ref2))
+        if not f:
+            failures.append(
+                "a declared segment that is not a unique directory at the pin "
+                "did not red -- an unplaceable population reported green"
+            )
+
+        # 6c. THE CANDIDATE DERIVATION, both directions. It reads the directory
+        #     components of ROOT-ANCHORED citations, so a tree that cites one
+        #     proposes the segment, and a tree that cites none does not.
+        cand_src = base / "cand"
+        (cand_src / "src").mkdir(parents=True)
+        # The fixture file sits under `src/` on purpose: `src` is then a
+        # directory of the SCANNED tree, which is what the exclusion row below
+        # actually tests. With the file at the root there is no such directory
+        # and that row passes without exercising anything.
+        cand_f = cand_src / "src" / "f.rs"
+        CAND = ["src/f.rs"]
+        cand_f.write_text(f"// `{ROOTED_RL}` @ `fn hat_keeper()`\n")
+        got = rootless_candidates(cand_src, CAND)
+        if SEG not in got:
+            failures.append(
+                f"the derivation did not propose `{SEG}` from a root-anchored "
+                f"citation that names it: {sorted(got)}"
+            )
+        if "src" in got:
+            failures.append(
+                "the derivation proposed `src`, which is a directory of the "
+                "scanned tree -- ours, not upstream's"
+            )
+        cand_f.write_text("// nothing upstream here\n")
+        if rootless_candidates(cand_src, CAND):
+            failures.append("the derivation invented a candidate from no citation")
+        # The RESIDUE is sized from the tree, and only for UNDECLARED segments.
+        cand_f.write_text(
+            f"// `{ROOTED_RL}` @ `fn hat_keeper()`\n"
+            f"// `{ROOTED_OTHER}` @ `fn other_keeper()`\n"
+            f"// {RL}:1\n"
+            f"// {RL_OTHER}:1\n"
+        )
+        n = rootless_undeclared(cand_src, CAND)
+        if n != 1:
+            failures.append(
+                "the residue must count the UNDECLARED segment only (1 here: "
+                f"the `{OTHER}` token, not the declared `{SEG}` one), got {n}"
+            )
+        # And it must be ZERO when the only root-less token's segment was never
+        # proposed -- the arm that keeps SCE paths and gate fixtures out.
+        cand_f.write_text(
+            f"// `{ROOTED_RL}` @ `fn hat_keeper()`\n"
+            f"// {_p('sce-build', 'src', 'generator.rs')}:1\n"
+        )
+        if rootless_undeclared(cand_src, CAND) != 0:
+            failures.append(
+                "the residue counted a token whose segment no root-anchored "
+                "citation proposes -- that is how a non-upstream path gets in"
+            )
+
         # 8. THE FIXTURE PATHS ARE ASSEMBLED, and this is the arm that keeps
         #    that true. A future edit that inlines one back as a literal makes
         #    this file cite upstream, which is exactly the R2241 defect; the
         #    check is on THIS SOURCE, so it cannot be satisfied by the fixture.
+        #    R2317 extended it to the ROOT-LESS patterns for the same reason:
+        #    this file now defines a pattern that matches `<seg>/....rs`, so a
+        #    literal of that shape written here would be a citation too.
         own = pathlib.Path(__file__).read_text(errors="replace")
-        leaked = [m.group(1) for m in BARE_CITE.finditer(own)] + [
-            m.group(1) for m in LINE_CITE.finditer(own)
-        ]
+        leaked = (
+            [m.group(1) for m in BARE_CITE.finditer(own)]
+            + [m.group(1) for m in LINE_CITE.finditer(own)]
+            + [m.group(1) for m in ROOTLESS_BARE_CITE.finditer(own)]
+            + [m.group(1) for m in ROOTLESS_LINE_CITE.finditer(own)]
+        )
         if leaked:
             failures.append(
                 f"this file writes upstream path literal(s) {sorted(set(leaked))}; "
@@ -596,14 +1079,42 @@ def selftest() -> int:
             "repo_dead_needle",
             f"// `{UNICAST}` @ `fn keeper()`\n// `{UNICAST}` @ `fn vanished()`\n",
         )
-        keep = (LINE_BUDGET, BARE_BUDGET)
+        # A fixture that EXERCISES the root-less axis through `run()`: one
+        # root-anchored anchor (so `anchored != 0` and the derivation proposes
+        # the segment) plus one root-less line citation.
+        rootless_repo = git_fixture(
+            "repo_rootless",
+            f"// `{ROOTED_RL}` @ `fn hat_keeper()`\n// {RL}:1\n",
+        )
+        # The same, with a root-less token under an UNDECLARED candidate segment,
+        # so the residue ratchet has a population of one.
+        residue_repo = git_fixture(
+            "repo_residue",
+            f"// `{ROOTED_OTHER}` @ `fn other_keeper()`\n// {RL_OTHER}:1\n",
+        )
+        #: EVERY budget this module carries, so a fixture cannot silently inherit
+        #: the real tree's numbers. R2317 added four and the first selftest run
+        #: after that reported 120 failures for exactly this reason -- the helper
+        #: swapped two of six.
+        _BUDGETS = (
+            "LINE_BUDGET",
+            "BARE_BUDGET",
+            "ROOTLESS_LINE_BUDGET",
+            "ROOTLESS_BARE_BUDGET",
+            "ROOTLESS_STALE_LINE_BUDGET",
+            "ROOTLESS_UNDECLARED_BUDGET",
+        )
+        keep = {name: globals()[name] for name in _BUDGETS}
 
-        def verdict(root: pathlib.Path, r, resolve: bool, line_b: int, bare_b: int):
+        def verdict(root: pathlib.Path, r, resolve: bool, line_b: int, bare_b: int,
+                    **over: int):
             globals()["LINE_BUDGET"], globals()["BARE_BUDGET"] = line_b, bare_b
+            for name in _BUDGETS[2:]:
+                globals()[name] = over.get(name, 0)
             try:
                 return run(root, r, resolve=resolve)
             finally:
-                globals()["LINE_BUDGET"], globals()["BARE_BUDGET"] = keep
+                globals().update(keep)
 
         # ⚠ MEASURED OVERLAP, recorded rather than hidden: disabling the
         # zero-population guard does NOT make the first row fail, because an
@@ -615,7 +1126,10 @@ def selftest() -> int:
         # ever stops matching, both fire. The rows that ARE separable were
         # checked by mutation and each one reds alone.
         for label, got, want in (
-            ("a population of zero", verdict(empty_repo, ref, True, *keep), 1),
+            ("a population of zero",
+             verdict(empty_repo, ref, True, keep["LINE_BUDGET"],
+                     keep["BARE_BUDGET"],
+                     **{k: keep[k] for k in _BUDGETS[2:]}), 1),
             ("no anchored citation", verdict(line_repo, ref, True, 1, 0), 1),
             ("a budget exceeded", verdict(mixed_repo, ref, True, 0, 0), 1),
             ("a budget undershot", verdict(mixed_repo, ref, True, 9, 0), 1),
@@ -624,6 +1138,21 @@ def selftest() -> int:
              verdict(dead_needle_repo, ref, True, 0, 0), 1),
             ("no checkout, resolving", verdict(anchor_repo, None, True, 0, 0), 1),
             ("a clean tree", verdict(anchor_repo, ref, True, 0, 0), 0),
+            # R2317 -- the root-less axis's five verdicts. Each fixture is built
+            # so the row's own guard is the only one that can fire.
+            ("a root-less tree on all four budgets",
+             verdict(rootless_repo, ref, True, 0, 0, ROOTLESS_LINE_BUDGET=1), 0),
+            ("the root-less line budget exceeded",
+             verdict(rootless_repo, ref, True, 0, 0), 1),
+            ("the root-less line budget undershot",
+             verdict(rootless_repo, ref, True, 0, 0, ROOTLESS_LINE_BUDGET=9), 1),
+            ("the root-less stale-line ratchet, off by one",
+             verdict(rootless_repo, ref, True, 0, 0, ROOTLESS_LINE_BUDGET=1,
+                     ROOTLESS_STALE_LINE_BUDGET=1), 1),
+            ("the residue ratchet on budget",
+             verdict(residue_repo, ref, True, 0, 0, ROOTLESS_UNDECLARED_BUDGET=1), 0),
+            ("the residue ratchet off budget",
+             verdict(residue_repo, ref, True, 0, 0), 1),
         ):
             if got != want:
                 failures.append(f"run() on {label}: expected rc={want}, got {got}")
@@ -677,21 +1206,40 @@ def selftest() -> int:
     if failures:
         return 1
     print(
-        "  upstream-citation-anchor: selftest passed -- 8 scan cases (mid-path "
-        "match, line past EOF, gone path in both forms, a resolving anchor not "
-        "double-counted, a dead needle, a gone anchored file, an empty "
-        "population, and this file writing no upstream path literal of its own) "
-        "plus 13 run() verdicts -- zero population, no anchored citation, a "
-        "budget exceeded, a budget undershot, a mixed tree otherwise clean, a "
-        "dead needle with findings as the only live guard, no checkout while "
-        "resolving, a clean tree returning 0, the form arm passing with no "
-        "checkout, and FOUR on the deferral itself: the other arm wired (0), "
-        "named only in a run-ci comment (1), no run-ci.sh at all (1), and the "
-        "resolution arm unaffected by any of it (0). MUTATION-CHECKED, each "
-        "guard against the rows that exist for it: disabling the budget guard "
-        "reds the budget row, disabling the findings guard reds the dead-needle "
-        "row, and making `resolution_arm_is_wired` always answer True reds the "
-        "comment-only and absent rows and nothing else"
+        "  upstream-citation-anchor: selftest passed -- the rooted scan cases "
+        "(mid-path match, line past EOF, gone path in both forms, a resolving "
+        "anchor not double-counted, a dead needle, a gone anchored file, an "
+        "empty population, and this file writing no upstream path literal of "
+        "its own), NINE on the root-less axis (a root-anchored LINE, BARE and "
+        "ANCHORED citation each NOT double-counted on it; a root-less line and "
+        "a root-less bare filed there and nowhere else; a gone root-less path "
+        "as a finding; a stale root-less line as a RATCHET and not a finding; "
+        "the form arm counting without resolving; and a declared segment the "
+        "pin cannot uniquely place reding per occurrence), FIVE on the "
+        "candidate derivation (it proposes a segment a rooted citation names, "
+        "excludes a directory of the scanned tree, invents nothing from no "
+        "citation, sizes the residue over UNDECLARED segments only, and leaves "
+        "a token no rooted citation proposes out of it), plus 18 run() "
+        "verdicts -- zero population, no anchored citation, a budget exceeded, "
+        "a budget undershot, a mixed tree otherwise clean, a dead needle with "
+        "findings as the only live guard, no checkout while resolving, a clean "
+        "tree returning 0, SIX on the root-less budgets (all four on budget, "
+        "the line budget exceeded and undershot, the stale-line ratchet off by "
+        "one, the residue ratchet on and off budget), the form arm passing "
+        "with no checkout, and FOUR on the deferral itself: the other arm "
+        "wired (0), named only in a run-ci comment (1), no run-ci.sh at all "
+        "(1), and the resolution arm unaffected by any of it (0). "
+        "MUTATION-CHECKED, each guard against the rows that exist for it: "
+        "disabling the budget guard reds the budget row, disabling the findings "
+        "guard reds the dead-needle row, and making `resolution_arm_is_wired` "
+        "always answer True reds the comment-only and absent rows and nothing "
+        "else. R2317 ran the same control over its six new guards and one came "
+        "back GREEN -- the lookbehind row, whose fixture used the ANCHORED form, "
+        "which `scan` masks before the root-less passes; re-cast on the LINE "
+        "and BARE forms it reds. The other five red as written: dropping the "
+        "gone-path finding, the stale count, the refusal to guess between two "
+        "candidate directories, the residue count, and the component rule in "
+        "the candidate derivation"
     )
     return 0
 

@@ -12,7 +12,8 @@
 //!
 //! The wz analogue of zenoh's per-`Resource` `linkstatepeer_subs:
 //! HashSet<ZenohIdProto>` AND `linkstatepeer_qabls: HashMap<ZenohIdProto,
-//! QueryableInfoType>` (`hat/linkstate_peer/mod.rs:516-517`). zenoh DELIBERATELY
+//! QueryableInfoType>` (`zenoh/src/net/routing/hat/peer/mod.rs`
+//! @ `remote_qabls`). zenoh DELIBERATELY
 //! uses a value-less `HashSet` for subs and a value-bearing `HashMap` for qabls,
 //! because the queryable plane carries semantic per-peer state (completeness,
 //! distance) that BestMatching reads and the subscription plane does not. This
@@ -33,8 +34,9 @@
 //!
 //! VALUE-DIFF change-gate (zenoh-faithful, R311ul): `register` returns `true` on
 //! a NEW peer OR a CHANGED value — mirroring zenoh's
-//! `register_linkstatepeer_queryable` gate `current.is_none() ||
-//! current != qabl_info` (`hat/linkstate_peer/queries.rs:268`). The forwarder
+//! peer-hat queryable registration gate `current.is_none() ||
+//! current != qabl_info` (`zenoh/src/net/routing/hat/peer/queries.rs`
+//! @ `fn register_queryable`). The forwarder
 //! re-floods only on `true`, so a queryable that flips `complete: false -> true`
 //! (e.g. a storage finishing its load) DOES re-propagate, while a redundant
 //! re-declare of the same value does not loop. For `V = ()` the value never
@@ -201,7 +203,8 @@ impl<V> LinkstatepeerInterest<V> {
     /// discards. A peer that matches via several declarations yields one tuple
     /// PER declaration — no dedup (the per-declaration value is the point),
     /// mirroring zenoh's per-`(matched-resource, qabl)` iteration in
-    /// `insert_target_for_qabls` (`hat/linkstate_peer/queries.rs:710`), where each
+    /// query-route build (`zenoh/src/net/routing/hat/peer/queries.rs`
+    /// @ `fn compute_query_route`), where each
     /// matched resource carries its own `QueryableInfoType` and its own
     /// includes-the-query verdict. Borrowed (`&str` / `&V`) — the BestMatching
     /// select consumes them under the same table borrow.
@@ -279,9 +282,10 @@ impl<V: PartialEq> LinkstatepeerInterest<V> {
     /// QueryableInfo`) from the mesh, or a re-declare. Returns `true` if this was
     /// a real CHANGE — a NEW peer, OR an existing peer whose value DIFFERS — and
     /// `false` for a redundant re-declare of the same value. The VALUE-DIFF gate
-    /// (not just new-peer) is zenoh's `register_linkstatepeer_queryable`:
+    /// (not just new-peer) is zenoh's peer-hat queryable registration:
     /// `current.is_none() || current != qabl_info`
-    /// (`hat/linkstate_peer/queries.rs:268`), so a queryable flipping `complete`
+    /// (`zenoh/src/net/routing/hat/peer/queries.rs` @ `fn register_queryable`),
+    /// so a queryable flipping `complete`
     /// re-propagates. For `V = ()` the value never differs, so this is the prior
     /// "new peer only" subscription gate exactly. The caller re-floods only on
     /// `true` (the loop-bounding change-gate).

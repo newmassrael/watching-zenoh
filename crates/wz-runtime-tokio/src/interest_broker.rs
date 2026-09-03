@@ -7,10 +7,12 @@
 //!
 //! ## What the table is for
 //!
-//! zenoh's `p2p_peer` hat, on receiving a CURRENT interest from a **Client**
-//! face, does not answer it and close it: it PROPAGATES the interest to each
+//! zenoh's PEER hat, on receiving a CURRENT interest from a face on its southern
+//! boundary, does not answer it and close it: it PROPAGATES the interest to each
 //! upstream face and holds an `Arc<CurrentInterest>` shared across every
-//! propagated copy (`hat/p2p_peer/interests.rs:142-206` at 49c8a53). The
+//! propagated copy (`zenoh/src/net/routing/hat/peer/interests.rs`
+//! @ `fn route_interest`; 1.10.0 unified the `p2p_peer` and `linkstate_peer` hats
+//! into `hat/peer`). The
 //! terminating `DeclareFinal` to the client is emitted only when
 //! `Arc::into_inner` succeeds — that is, when the LAST upstream has answered
 //! (`dispatcher/interests.rs:106-129` `finalize_pending_interest`). Until then
@@ -68,7 +70,8 @@ pub(crate) struct CurrentInterest {
     pub(crate) src_interest_id: u64,
     /// Whether the client asked `CurrentFuture` (vs `Current` alone). zenoh
     /// registers an upstream-relayed token locally only in the CurrentFuture case
-    /// (`hat/p2p_peer/token.rs:200-202`); carried here so the caller can make the
+    /// (`zenoh/src/net/routing/hat/peer/token.rs` @ `fn register_token`); carried
+    /// here so the caller can make the
     /// same distinction without a second lookup.
     pub(crate) current_future: bool,
 }
@@ -134,7 +137,8 @@ impl PendingCurrentInterests {
     /// The downstream interest an inbound reply on `(upstream, up_id)` belongs
     /// to, WITHOUT retiring the entry — the lookup zenoh does before rewriting a
     /// `DeclareToken`'s `interest_id` to the client's own
-    /// (`hat/p2p_peer/token.rs:199-204`). A reply may arrive many times before
+    /// (`zenoh/src/net/routing/hat/peer/token.rs` @ `interest_id`). A reply may
+    /// arrive many times before
     /// the terminating final, so this must not consume.
     pub(crate) fn lookup(&self, upstream: FaceId, up_id: u64) -> Option<&CurrentInterest> {
         self.pending.get(&(upstream, up_id)).map(|e| &e.interest)

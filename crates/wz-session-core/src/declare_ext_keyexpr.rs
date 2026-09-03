@@ -7,8 +7,8 @@
 //!
 //! zenoh identifies a SOURCED subscription by its KEYEXPR, not a `SubscriberId`
 //! (`id == 0`, "Sourced subscriptions do not use ids" — zenoh
-//! `hat/linkstate_peer/pubsub.rs` `send_sourced_subscription_to_net_children` /
-//! `send_forget_sourced_subscription_to_net_children`). The `DeclareSubscriber`
+//! `zenoh/src/net/routing/hat/peer/pubsub.rs` @ `fn sourced_subscribers`, and its
+//! forget twin). The `DeclareSubscriber`
 //! carries the keyexpr in its body `wire_expr`; the `UndeclareSubscriber` —
 //! whose body is only `{ id }` — carries it in the optional `ext_wire_expr`
 //! extension (zenoh `UndeclareSubscriber { id, ext_wire_expr }`), so a transit

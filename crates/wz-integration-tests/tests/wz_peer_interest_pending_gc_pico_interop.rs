@@ -9,8 +9,10 @@
 //!
 //! R311y508 proposed this atom as a `FOREIGN_NON_OBSERVABLE` denominator
 //! exclusion, argued from a correct direct read: zenoh populates
-//! `pending_current_interests` in exactly two hats (`hat/client/interests.rs:136`,
-//! `hat/p2p_peer/interests.rs:174`), the hats wz mirrored held no pending table at
+//! `pending_current_interests` in exactly two hats
+//! (`zenoh/src/net/routing/hat/client/interests.rs` @ `pending_current_interests`
+//! and `zenoh/src/net/routing/hat/peer/interests.rs`
+//! @ `pending_current_interests`), the hats wz mirrored held no pending table at
 //! all, and in the only role wz HAD the mechanism the GC's output went to the
 //! LOCAL app. The exclusion carried its own re-open trigger, named rather than
 //! left implicit: *"the only role whose unwind DOES cross the wire is zenoh's

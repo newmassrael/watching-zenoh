@@ -1603,7 +1603,8 @@ impl RouterForwarder {
         // node-removal forget-to-simple-face `propagate_forget_simple_subscription`,
         // reached on a node drop (router hat via `unregister_router_subscription`,
         // hat/router/pubsub.rs:568; linkstate_peer hat via `unregister_peer_subscription`,
-        // hat/linkstate_peer/pubsub.rs:482), and the `queries_remove_node` twin.
+        // `zenoh/src/net/routing/hat/peer/pubsub.rs` @ `fn unregister_subscriber`),
+        // and the queryable twin beside it.
         // The two per-keyexpr retraction actions are co-located: the cross-tier mesh
         // WITHDRAW (opposite-mesh wire advertisement) and the client undeclare-push
         // (client-face pushed declarations) are DISJOINT and order-free. still_backed

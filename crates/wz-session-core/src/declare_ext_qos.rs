@@ -19,9 +19,13 @@
 //! "Effectively" is measured rather than assumed: across
 //! `zenoh/src/net/routing/` the pinned 1.5.0 tree (`49c8a53`) constructs a
 //! Declare with `ext_qos: ext::QoSType::DECLARE` at 127 sites and with
-//! `ext_qos: ext::QoSType::default()` at 3 — `hat/client/token.rs:135` and
-//! `:371`, `hat/p2p_peer/token.rs:215`, all of them token declares whose
-//! siblings in the same file use `DECLARE`. wz stamps `DECLARE` on every
+//! `ext_qos: ext::QoSType::default()` at 3 — two in the client hat's token
+//! declares and one in the `p2p_peer` hat's, all of them token declares whose
+//! siblings in the same file use `DECLARE`. (The three are named by HAT rather
+//! than by `path:line` on purpose: they were counted in `49c8a53`, which is no
+//! longer the pin, and `p2p_peer` is not a directory 1.10.0 has — a path written
+//! here would look like a claim about the pinned tree and could never resolve
+//! against it.) wz stamps `DECLARE` on every
 //! envelope: it is upstream's rule, the three outliers read as upstream drift
 //! against itself rather than a second class, and a Declare that says
 //! "Control priority, do not drop" is the one that survives a congested link.

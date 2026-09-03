@@ -53,7 +53,8 @@
 //! [`compute_trees`](wz_routing_graph::LinkstateNetwork::compute_trees) +
 //! re-advertise per window, so a burst (a join flood, a flapping cascade)
 //! collapses to a single recompute — zenoh's `TreesComputationWorker`
-//! (`hat/linkstate_peer/mod.rs:122-157`), translated to wz's single-task actor:
+//! (`zenoh/src/net/routing/hat/router/mod.rs` @ `struct TreesComputationWorker`;
+//! 1.10.0 moved the worker to the router hat), translated to wz's single-task actor:
 //! a coalescing tick on the loop, not a separate task (zenoh needs a task only
 //! because its tables are `Arc<RwLock>`-shared across many connection tasks; wz
 //! is one `!Send` task). The window is the
@@ -366,7 +367,7 @@ pub struct LinkstateForwarder {
     /// The linkstate-peer QUERYABLE interest table — the query-plane twin of
     /// [`subs`](Self#structfield.subs), learned from sourced `DeclareQueryable`s
     /// flooded across the mesh (zenoh's per-`Resource` `linkstatepeer_qabls`,
-    /// `hat/linkstate_peer/mod.rs:517`). The SAME generic
+    /// `zenoh/src/net/routing/hat/peer/mod.rs` @ `remote_qabls`). The SAME generic
     /// [`LinkstatepeerInterest`] type, a SEPARATE instance: subscriptions bound a
     /// Push fan-out, queryables bound a Query fan-out (the Request routing that
     /// reads this lands in the next atom). Populated by
@@ -533,7 +534,8 @@ pub struct LinkstateForwarder {
     /// instead of recomputing inline; the [`tick`](FaceForwarder::tick) flushes it
     /// ONCE per window, so a burst of changes collapses to a single
     /// `compute_trees` — zenoh's `TreesComputationWorker` debounce
-    /// (`hat/linkstate_peer/mod.rs:122-157`). Setting an already-set flag is the
+    /// (`zenoh/src/net/routing/hat/router/mod.rs`
+    /// @ `struct TreesComputationWorker`). Setting an already-set flag is the
     /// coalesce (N changes -> 1 recompute). `Cell` by the single-task contract.
     trees_dirty: Cell<bool>,
     /// The coalescing window: how long topology changes accumulate before the
@@ -552,7 +554,8 @@ pub struct LinkstateForwarder {
     /// `gossip_target`). A face whose handshake `whatami` is outside this set is
     /// skipped by every link-state flood ([`fan_out`](Self::fan_out)'s gossip
     /// gate), exactly like zenoh's per-target `send_on_link`
-    /// (`hat/p2p_peer/gossip.rs:238-252`). Seeded per THIS node's role via
+    /// (`zenoh/src/net/protocol/gossip.rs` @ `send_on_link`; 1.10.0 moved gossip
+    /// out of the hat layer). Seeded per THIS node's role via
     /// [`default_gossip_target`] (the zenoh `scouting.gossip.target` default: a
     /// router or peer gossips to `router|peer`, a client to nobody) and
     /// config-sourceable by a deploy through [`set_gossip_target`](Self::set_gossip_target).
@@ -1017,7 +1020,8 @@ impl LinkstateForwarder {
     /// and opens an outbound dial (A5c). Call ONCE at setup, before the drive
     /// loop starts; a driver that never calls this keeps the prior behaviour (no
     /// autoconnect, an empty matcher). zenoh's gossip holds the same policy and
-    /// dials inline (`hat/p2p_peer/gossip.rs:444`); wz routes the dial back to its
+    /// dials inline (`zenoh/src/net/protocol/gossip.rs` @ `connect_peer`); wz
+    /// routes the dial back to its
     /// single drive task over this channel instead of spawning it.
     pub fn enable_autoconnect(&self, policy: AutoConnect) -> DialIntentReceiver {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1317,7 +1321,8 @@ impl LinkstateForwarder {
         //      operational detail, not a steady-state event);
         //   2. (A5b) if the autoconnect policy admits it, emit a `DialIntent` the
         //      accept loop turns into an outbound dial (A5c). Gated exactly as
-        //      zenoh's gossip (`hat/p2p_peer/gossip.rs:444`): the role + zid
+        //      zenoh's gossip (`zenoh/src/net/protocol/gossip.rs`
+        //      @ `should_autoconnect`): the role + zid
         //      tie-break (`should_autoconnect`) AND advertised locators. With
         //      autoconnect disabled (the default, empty matcher) the gate is
         //      always false, so this stays log-only — the prior behaviour.
@@ -1554,7 +1559,8 @@ impl LinkstateForwarder {
     /// `gossip_gate` is the per-target whatami gate: a link-state gossip flood
     /// passes `Some(self.gossip_target.get())` so a face whose role is outside the
     /// gossip target (a `client`) is skipped entirely — zenoh's per-target
-    /// `send_on_link` (`hat/p2p_peer/gossip.rs:241`). A data-plane fan-out
+    /// `send_on_link` (`zenoh/src/net/protocol/gossip.rs` @ `send_on_link`). A
+    /// data-plane fan-out
     /// passes `None`: its selectivity is the tree/interest filter in the builder,
     /// not the role gate, so it must reach every held face the builder selects.
     /// Taken by value — the matcher is a `Copy` one-byte bitset, so the caller
@@ -2630,9 +2636,10 @@ impl LinkstateForwarder {
     /// `forgets` runs FIRST so `re_pushes` re-folds only survivors.
     ///
     /// SUPERSET over zenoh (intentional, north-star superset-not-mirror): zenoh's
-    /// linkstate_peer hat `queries_remove_node` is FULL-UNDECLARE-ONLY — no partial
-    /// downgrade re-declare (hat/linkstate_peer/queries.rs `unregister_linkstatepeer_queryable`
-    /// fires `propagate_forget_simple_queryable` only when the qabl set empties; contrast
+    /// peer-hat queryable removal is FULL-UNDECLARE-ONLY — no partial
+    /// downgrade re-declare (`zenoh/src/net/routing/hat/peer/queries.rs`
+    /// @ `unregister_queryable`, which
+    /// unpropagates only when the qabl set empties; contrast
     /// the ROUTER hat's re-declare arm at hat/router/queries.rs:930-940). Wiring the
     /// downgrade re-push into the peer closes the same ALL_COMPLETE-downgrade hole the
     /// linkstate_peer hat leaves open — a valid CLIENT-directed re-declare pico handles
@@ -3263,7 +3270,9 @@ impl LinkstateForwarder {
     /// ([`local_queryables`](Self#structfield.local_queryables)) and a co-attached
     /// client queryable ([`client_qabls`](Self#structfield.client_qabls)) declaring
     /// EXACTLY `keyexpr`. `None` = no self source (the advert must be withdrawn).
-    /// zenoh `local_peer_qabl_info` (`hat/linkstate_peer/queries.rs:67`): folds ONLY
+    /// zenoh's per-source fold (`zenoh/src/net/routing/hat/peer/queries.rs`
+    /// @ `merge_qabl_infos`; 1.10.0 unified the two peer hats into `hat/peer`
+    /// and named the fold after the helper): folds ONLY
     /// the peer's OWN sources (session_ctxs), NOT the remote-peer `linkstatepeer_qabls`
     /// and — single-net — NO cross-tier / `failover_brokering`. Deliberately NOT
     /// [`merged_qabl_info`](Self::merged_qabl_info), which folds `qabls` GLOBALLY
@@ -3302,7 +3311,7 @@ impl LinkstateForwarder {
     ///   client querier whose folded completeness dropped
     ///   ([`undeclare_push_qabls`](Self::undeclare_push_qabls)). zenoh
     ///   `undeclare_simple_queryable`'s "contributors remain" arm
-    ///   (`hat/linkstate_peer/queries.rs:559-569`).
+    ///   (`zenoh/src/net/routing/hat/peer/queries.rs` @ `unregister_queryable`).
     /// - `None` — the last source is gone: WITHDRAW self from `qabls`, re-arm the
     ///   filter, and flood the sourced `UndeclareQueryable`.
     ///
@@ -3681,7 +3690,8 @@ impl LinkstateForwarder {
     /// [`undeclare_subscription`](Self::undeclare_subscription). Withdraw self's own
     /// declaration from [`qabls`](Self#structfield.qabls), re-arm any waiting CLIENT
     /// querier (`undeclare_push_qabls`), and flood the sourced forget to tree children —
-    /// zenoh's `undeclare_linkstatepeer_queryable` (`hat/linkstate_peer/queries.rs:516`)
+    /// zenoh's peer-hat queryable retract
+    /// (`zenoh/src/net/routing/hat/peer/queries.rs` @ `unregister_queryable`)
     /// -> `unregister_linkstatepeer_queryable` (`propagate_forget_simple_queryable`, :512)
     /// + `propagate_forget_sourced_queryable` (:525). Returns the mesh flood reach.
     ///
@@ -4330,10 +4340,13 @@ impl LinkstateForwarder {
     /// pub-before-sub close (R311y146); an `Interest(Final)` tears the stored
     /// interest down.
     ///
-    /// FAITHFUL to zenoh's `linkstate_peer` HAT, which answers a CURRENT interest
-    /// ONLY from a CLIENT face (the `declare_sub_interest` / `declare_qabl_interest`
-    /// gate `mode.current() && face.whatami == WhatAmI::Client` in
-    /// `hat/linkstate_peer/pubsub.rs` + `queries.rs`) — a mesh peer/router learns
+    /// FAITHFUL to zenoh's PEER hat, which answers a CURRENT interest only from a
+    /// face on its southern boundary — a client leaf — and short-circuits one
+    /// arriving from another mesh peer
+    /// (`zenoh/src/net/routing/hat/peer/interests.rs`
+    /// @ `return ResolvedCurrentInterest`; 1.10.0 unified the two peer hats into
+    /// `hat/peer` and re-expressed the old `face.whatami == WhatAmI::Client` gate as
+    /// a region-boundary test) — a mesh peer/router learns
     /// declarations by proactive link-state flooding, never by soliciting. The
     /// terminating `DeclareFinal`
     /// is still sent for EVERY current interest (incl a non-client one) so the
@@ -4478,8 +4491,9 @@ impl LinkstateForwarder {
                 // not a grading question: a client asking a wz PEER for the CURRENT
                 // token snapshot got the terminating DeclareFinal and nothing else,
                 // so a foreign liveliness GET through a peer always read EMPTY.
-                // zenoh's linkstate_peer hat answers it (`hat/linkstate_peer/token.rs:659`
-                // declare_token_interest), and wz's own RouterForwarder already did;
+                // zenoh's peer hat answers it
+                // (`zenoh/src/net/routing/hat/peer/interests.rs`
+                // @ `fn send_current_tokens`), and wz's own RouterForwarder already did;
                 // only the peer forwarder was missing the plane.
                 if body.to() {
                     self.dump_interest_tokens(
@@ -4495,7 +4509,8 @@ impl LinkstateForwarder {
             // zenoh does not close a CLIENT's CURRENT token interest with what it
             // already knows: it PROPAGATES the interest upstream and withholds the
             // terminating DeclareFinal until the last upstream answers
-            // (`hat/p2p_peer/interests.rs:148-227`, where the inline
+            // (`zenoh/src/net/routing/hat/peer/interests.rs`
+            // @ `Arc::into_inner`, where the inline
             // `Arc::into_inner` FAILS while any propagated copy is outstanding).
             // `propagate_current_interest` returns the number of copies it placed
             // on the wire; a non-zero count means the client's final is now OWED
@@ -4522,7 +4537,8 @@ impl LinkstateForwarder {
     ///
     /// UPSTREAM here is every non-CLIENT face — the wz shape of zenoh's
     /// `f.whatami == Router || (Peer && !initial_interest finalized)` filter
-    /// (`hat/p2p_peer/interests.rs:154-160`). The inbound face is excluded (a
+    /// (`zenoh/src/net/routing/hat/peer/interests.rs` @ `fn route_interest`). The
+    /// inbound face is excluded (a
     /// client never brokers to itself), and so is any face that is itself a
     /// client: a client is a LEAF, and soliciting it would invert the tree.
     ///
@@ -4609,7 +4625,8 @@ impl LinkstateForwarder {
 
     /// R311y512 — an inbound `Declare` on an UPSTREAM face carrying an interest id
     /// THIS node minted: relay it DOWN to the client that is waiting, rewriting
-    /// the id to the client's own (zenoh `hat/p2p_peer/token.rs:199-221`).
+    /// the id to the client's own (zenoh
+    /// `zenoh/src/net/routing/hat/peer/token.rs` @ `interest_id`).
     ///
     /// Returns `true` when the declare was consumed by the broker, so the caller
     /// does not ALSO run it through the ordinary mesh-ingest path — a solicited
@@ -4712,8 +4729,9 @@ impl LinkstateForwarder {
     /// token, the same rule the router's twin follows.
     ///
     /// SCOPE, named rather than implied: this is the CLIENT-leaf half only. zenoh's
-    /// linkstate_peer also folds `linkstatepeer_tokens`, the MESH tier learned by
-    /// the link-state flood (`hat/linkstate_peer/token.rs:672`), which wz's peer
+    /// peer hat also folds the MESH tier learned by
+    /// the link-state flood (`zenoh/src/net/routing/hat/peer/token.rs`
+    /// @ `fn sourced_tokens`), which wz's peer
     /// does not carry yet — so a token held by a client of a DIFFERENT peer is
     /// still invisible here. That is the next slice, and it is what keeps
     /// `routing-token-tables` PARTIAL rather than complete.
@@ -4995,7 +5013,9 @@ impl LinkstateForwarder {
     /// [`tick`](FaceForwarder::tick) flushes it via
     /// [`recompute_and_advertise`](Self::recompute_and_advertise); setting an
     /// already-set flag coalesces (a burst of changes -> one recompute). Mirrors
-    /// zenoh's `schedule_compute_trees` (`hat/linkstate_peer/mod.rs:178`), which
+    /// zenoh's own deferred recompute
+    /// (`zenoh/src/net/routing/hat/router/mod.rs` @ `fn compute_trees_async`;
+    /// 1.10.0 left tree computation only in the router hat), which
     /// likewise only enqueues — the worker does the compute.
     fn schedule_recompute(&self) {
         self.trees_dirty.set(true);
@@ -5542,7 +5562,8 @@ pub(crate) fn select_best_matching(
 
 /// The peers offering a queryable COMPLETE for `keyexpr` — declared complete AND
 /// whose declaration keyexpr INCLUDES the full query keyexpr (zenoh's `complete
-/// && qabl_info.complete`, `hat/linkstate_peer/queries.rs:723`), excluding self.
+/// && qabl_info.complete`, `zenoh/src/net/routing/hat/peer/queries.rs`
+/// @ `fn compute_query_route`), excluding self.
 /// The shared candidate set for BestMatching (pick the nearest) AND AllComplete
 /// (route to every one). A peer matching via several declarations may appear more
 /// than once — harmless: BestMatching's min-distance and AllComplete's
@@ -5821,7 +5842,8 @@ impl FaceForwarder for LinkstateForwarder {
             let _ = self.flood_link_added(id, &neighbour, neighbour_was_new);
             // Self gained a link, so its spanning trees changed: SCHEDULE a
             // recompute (D2c coalesces it onto the tick), mirroring zenoh's
-            // schedule_compute_trees on link-up (`hat/linkstate_peer/mod.rs:275`).
+            // deferred recompute on link-up
+            // (`zenoh/src/net/routing/hat/peer/mod.rs` @ `fn add_link`).
             // Without it self's local trees would stay stale until the neighbour's
             // reciprocal inbound flood happened to trigger a recompute — a bounded
             // transient drop window toward a destination reachable only via the new
@@ -5837,8 +5859,8 @@ impl FaceForwarder for LinkstateForwarder {
         // the next tick flushes it, `forward_push` / `publish` may route along a
         // stale tree, but the dead face is already gone from `faces`, so a send
         // toward it simply drops (self-heal) — the same bounded window zenoh
-        // accepts by debouncing link-down too (`hat/linkstate_peer/mod.rs`
-        // `schedule_compute_trees`, the link-down path). The recompute's
+        // accepts by debouncing link-down too
+        // (`zenoh/src/net/routing/hat/peer/mod.rs` @ `fn remove_link`). The recompute's
         // re-advertise is deferred with it (D2c).
         //
         // atom 3 — drop this face's pending-query return entries (it is keyed by
@@ -5941,7 +5963,8 @@ impl FaceForwarder for LinkstateForwarder {
                 // node the link's loss DETACHED from the mesh (zenoh remove_link ->
                 // remove_detached_nodes, network.rs:948). Purge each pruned node's
                 // subscription interest — zenoh's `pubsub_remove_node` per removed
-                // node on link-down (`hat/linkstate_peer/mod.rs:378-387`). Without
+                // node on link-down (`zenoh/src/net/routing/hat/peer/mod.rs`
+                // @ `fn remove_link`). Without
                 // it a gone subscriber's interest lingers, keeping a publisher's
                 // any-interest gate spuriously armed. The departed neighbour is
                 // itself in the pruned set when it had no other path, so this both
@@ -6098,7 +6121,7 @@ impl FaceForwarder for LinkstateForwarder {
                         // c3c-3 D3 — purge the subscription interest of every node
                         // the ingest detached from the mesh (the same
                         // pubsub_remove_node action as the link-down path,
-                        // handle_oam hat/linkstate_peer/mod.rs:418-422).
+                        // `zenoh/src/net/routing/hat/peer/mod.rs` @ `fn handle_oam`).
                         self.purge_detached_interest(&changes.removed);
                         // c3c-3 D2c — coalesce the spanning-tree recompute (and its
                         // pubsub_tree_change re-advertise to new children) onto the
@@ -10007,17 +10030,18 @@ mod tests {
     }
 
     // R311y509 — a wz mesh PEER serves a CURRENT liveliness-TOKEN interest.
-    // zenoh's linkstate_peer hat does (`hat/linkstate_peer/token.rs:659`
-    // declare_token_interest, gated `mode.current() && face.whatami == Client`,
-    // dumping matching tokens), and wz's own RouterForwarder does under
+    // zenoh's peer hat does (`zenoh/src/net/routing/hat/peer/interests.rs`
+    // @ `fn send_current_tokens`, reached for a CURRENT interest from a southern
+    // face, dumping matching tokens), and wz's own RouterForwarder does under
     // routing-token-tables. This pins whether the PEER forwarder does.
     #[test]
     fn a_peer_answers_a_client_liveliness_token_interest() {
         use wz_session_core::declare_build::build_declare_token;
         use wz_session_core::interest_build::build_interest_liveliness_get;
 
-        // Both faces are CLIENT leaves: zenoh gates the token replay on
-        // `face.whatami == Client` (hat/linkstate_peer/token.rs:668), and a token
+        // Both faces are CLIENT leaves: zenoh gates the token replay on the face's
+        // region boundary (`zenoh/src/net/routing/hat/peer/token.rs`
+        // @ `bound().is_north()`), and a token
         // declared by a MESH peer travels by the link-state flood, not by replay.
         let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (face_a, _sink_a) = peer_face_whatami(zid(0x0A), 2);
@@ -10064,7 +10088,8 @@ mod tests {
         assert_eq!(
             tokens, 1,
             "the peer must answer a CURRENT token interest with the matching \
-             DeclareToken (zenoh hat/linkstate_peer/token.rs:659); got {bodies:?}"
+             DeclareToken (zenoh `zenoh/src/net/routing/hat/peer/token.rs` @ `DeclareToken`); \
+             got {bodies:?}"
         );
     }
 

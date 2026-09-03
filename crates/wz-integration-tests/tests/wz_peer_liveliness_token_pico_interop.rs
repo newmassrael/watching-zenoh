@@ -14,9 +14,10 @@
 //! PEER always read empty, because the peer's inbound Declare dispatch had no
 //! token arm (a client `DeclToken` fell through to the subscriber catch-all, whose
 //! body match rejects it and returns) and `respond_to_interest` answered only the
-//! `su()` and `qu()` planes. zenoh's own `linkstate_peer` hat answers it
-//! (`hat/linkstate_peer/token.rs:659` `declare_token_interest`, folding
-//! `linkstatepeer_tokens` at `:672` beside the client leaves).
+//! `su()` and `qu()` planes. zenoh's own PEER hat answers it
+//! (`zenoh/src/net/routing/hat/peer/interests.rs` @ `fn send_current_tokens`,
+//! folding the mesh tier from `zenoh/src/net/routing/hat/peer/token.rs`
+//! @ `fn sourced_tokens` beside the client leaves).
 //!
 //! R311y509 built both tiers on the peer. This file is the foreign witness, and it
 //! is deliberately the SAME shape as the router-hat file above so the two are

@@ -1041,7 +1041,8 @@ routing-token-tables = ["routing-router-hat"]
 # PROPAGATED to each upstream (non-client) face with a freshly minted id, a
 # pending entry is held per propagated copy, and the client's terminating
 # DeclareFinal is withheld until the LAST upstream answers -- zenoh
-# hat/p2p_peer/interests.rs:142-206 + dispatcher/interests.rs. The GC the atom is
+# `zenoh/src/net/routing/hat/peer/interests.rs` @ `Arc::into_inner` plus
+# `dispatcher/interests.rs`. The GC the atom is
 # named for is the timeout sweep on that table (CurrentInterestCleanup), which
 # finalizes the client when an upstream goes silent; zenoh-pico's CURRENT
 # interest carries NO timeout of its own (net/liveliness.c:348), so without the
