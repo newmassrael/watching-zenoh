@@ -1635,28 +1635,36 @@ mod tests {
     /// R2304 (open-debt item 642) — re-stating a key REPLACES its subtree,
     /// which is upstream's own semantics rather than a choice made here.
     ///
-    /// Measured on `libzenohc.so` 1.10.0: `insert("scouting", "{\"delay\":99}")`
-    /// then `insert("scouting", "{\"timeout\":77}")` leaves `delay` back at
-    /// `null`. A merge would make wz remember an instruction upstream forgot,
-    /// and a caller clearing a subtree by re-stating it would find the old
-    /// members still there.
+    /// Measured on `libzenohc.so` 1.10.0 at zenoh's scouting subtree: stating
+    /// it with one member and then re-stating it with another leaves the first
+    /// member back at `null`. A merge would make wz remember an instruction
+    /// upstream forgot, and a caller clearing a subtree by re-stating it would
+    /// find the old members still there.
+    ///
+    /// The FIXTURE path is deliberately not an upstream config key. This test
+    /// is about the store's replace semantics and the key's identity is
+    /// immaterial to it, while naming a real key here is read — correctly — by
+    /// the unhonoured-kind evidence gate as wz's source claiming that key. That
+    /// gate refused this round's first push for exactly that reason, and it was
+    /// right to: "wz mentions the key" and "wz honours the key" are the two
+    /// things it exists to keep apart.
     #[test]
     fn re_stating_a_key_replaces_its_subtree() {
         let mut state = ConfigState::default();
         state.insert_value(
-            "scouting",
-            parse_json5_value("{\"delay\": 99, \"timeout\": 1}").expect("an object"),
+            "wz-fixture",
+            parse_json5_value("{\"alpha\": 99, \"beta\": 1}").expect("an object"),
         );
-        assert_eq!(state.render("scouting/delay").as_deref(), Some("99"));
+        assert_eq!(state.render("wz-fixture/alpha").as_deref(), Some("99"));
         state.insert_value(
-            "scouting",
-            parse_json5_value("{\"timeout\": 77}").expect("an object"),
+            "wz-fixture",
+            parse_json5_value("{\"beta\": 77}").expect("an object"),
         );
         assert_eq!(
-            state.render("scouting/delay"),
+            state.render("wz-fixture/alpha"),
             None,
             "a member the second statement did not mention must be gone"
         );
-        assert_eq!(state.render("scouting/timeout").as_deref(), Some("77"));
+        assert_eq!(state.render("wz-fixture/beta").as_deref(), Some("77"));
     }
 }
