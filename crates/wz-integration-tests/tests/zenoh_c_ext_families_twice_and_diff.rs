@@ -117,7 +117,8 @@ int main(int argc, char **argv) {
     printf("config.listen.rc=%d\n", (int)listen_rc);
     /* UPSTREAM REQUIREMENT, found by running the reference arm rather than by
        reading: `PublicationCache::new` BAILS when the session has no HLC
-       (`zenoh-ext/src/publication_cache.rs:210-216`), and the first draft of
+       (`zenoh-ext/src/publication_cache.rs` @ `impl fmt::Debug for PublicationCache`),
+   and the first draft of
        this probe got rc=-128 on libzenohc for exactly that reason. A cache
        stores TIMESTAMPED samples, so a session that stamps nothing cannot back
        one. */
@@ -357,7 +358,8 @@ fn the_zenoh_ext_families_behave_identically_on_wz_and_libzenohc() {
 
     // ADJUDICATED vs REPORTED, and the split is a MEASUREMENT rather than a
     // convenience. Upstream's publication cache stores through a background task
-    // with no completion signal (`zenoh-ext/src/publication_cache.rs:249-256`),
+    // with no completion signal (`zenoh-ext/src/publication_cache.rs`
+    // @ `let mut local_sub`),
     // so how many of the four publications have landed when the query arrives is
     // a RACE on the reference arm: the first run of this probe saw
     // `get.replies=1` there against wz's 3, and re-running moved the number.

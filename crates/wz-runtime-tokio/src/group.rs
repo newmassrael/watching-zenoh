@@ -564,7 +564,7 @@ fn issue_member_query<R, T>(
     // IDENTICAL site: it builds the same per-member keyexpr
     // (`format!("{}/{}/{}", GROUP_PREFIX, &state.gid, kae.mid)`) and names the
     // mode right before the get — `let qc = zenoh::query::ConsolidationMode::None;`
-    // (`zenoh-ext/src/group.rs:304-307`).
+    // (`zenoh-ext/src/group.rs` @ `Received Keep Alive from unknown member`).
     //
     // HONEST ABOUT ITS OWN WEIGHT: no test in this tree discriminates this pin,
     // and that was MEASURED — a probe that dropped every caller's explicit mode

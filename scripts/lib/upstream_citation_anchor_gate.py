@@ -148,7 +148,34 @@ SKIP_PREFIXES = ("vendor/", "out/", "docs/.atomic/")
 #: were that artefact. (The fragment is DESCRIBED rather than written out: this
 #: file is inside the population it scans, so a literal here would be a citation
 #: -- see `selftest`'s case 8.)
-_PATH = r"(?:io|commons|zenoh|plugins)/[\w/.-]+\.rs"
+#: The pin's TOP-LEVEL directories, as this gate knows them. DECLARED, and
+#: judged against the pin by `upstream_roots_missing()` -- see its docstring for
+#: why the list cannot simply be derived at import time.
+#:
+#: R2319 (open debt 653) added the last three. Before that the list held four
+#: and the pin had eight, so a citation of `zenoh-ext/...` was ROOT-ANCHORED
+#: and yet in no bucket at all: not ANCHORED, not LINE, not BARE, and -- because
+#: `rootless_candidates` derives from paths that already match this pattern --
+#: not a root-less candidate either. Twenty-four citations, all of them correct
+#: at the time, graded by nothing. `ci` is deliberately absent: the tree cites
+#: no path under it, and a root with no subject is a rule with no subject.
+#:
+#: ⚠ A TUPLE, not a regex to be re-parsed. The previous code recovered this list
+#: with `re.findall(r"\w+", ...)` over the pattern's own alternation, and that
+#: silently splits a HYPHENATED root: adding `zenoh-ext` yielded `zenoh` and
+#: `ext`, which would have promoted `ext` to a known root and dropped its 17
+#: residue occurrences -- five of them wrong today -- back out of sight. One
+#: source, read directly.
+UPSTREAM_ROOTS = (
+    "io",
+    "commons",
+    "zenoh",
+    "plugins",
+    "zenoh-ext",
+    "zenohd",
+    "examples",
+)
+_PATH = rf"(?:{'|'.join(UPSTREAM_ROOTS)})/[\w/.-]+\.rs"
 LINE_CITE = re.compile(rf"(?<![\w/.-])({_PATH}):(\d+)")
 #: The two halves may sit on different COMMENT LINES, so the separator has to
 #: be allowed to cross a line's comment leader. Without this the anchor is
@@ -317,7 +344,7 @@ def rootless_candidates(root: pathlib.Path, files: list[str]) -> set[str]:
     own_dirs: set[str] = set()
     for f in files:
         own_dirs.update(pathlib.PurePosixPath(f).parts[:-1])
-    roots = set(re.findall(r"\w+", _PATH.split("/")[0]))
+    roots = set(UPSTREAM_ROOTS)
     seen: set[str] = set()
     for rel in files:
         try:
@@ -358,6 +385,48 @@ def rootless_undeclared(root: pathlib.Path, files: list[str]) -> int:
             if m.group(1) in cands:
                 n += 1
     return n
+
+
+def upstream_roots_missing(
+    root: pathlib.Path, files: list[str], ref: pathlib.Path
+) -> set[str]:
+    """Pin top-level directories this tree CITES but `UPSTREAM_ROOTS` omits.
+
+    The declared list is judged here rather than derived at import, and the
+    reason is the arm split: `_PATH` is a module constant the FORM arm needs,
+    and the form arm has no checkout to derive from. So the list is DECLARED and
+    this -- in the RESOLUTION arm, which has the pin -- is the separate
+    derivation that keeps the declaration honest. That is the R2194 shape: a
+    declared table is an escape hatch unless something else judges it.
+
+    ⚠ "CITES" is load-bearing. The condition is not "every pin top-level
+    directory is declared" but "every one the tree actually names is". `ci` is a
+    pin top-level directory with zero citations here, and demanding it would add
+    a root with no subject -- the residual R311y794 removed from the SPDX list
+    for the same reason. So a directory earns its place by being named.
+
+    The token scan is deliberately root-agnostic: it looks for `<dir>/...rs`
+    where `<dir>` is a pin top-level name, which is what a citation of an
+    undeclared root looks like BEFORE the root is declared. Declared roots are
+    excluded because their citations are already graded.
+    """
+    top = {p.name for p in ref.iterdir() if p.is_dir() and not p.name.startswith(".")}
+    undeclared = top - set(UPSTREAM_ROOTS)
+    if not undeclared:
+        return set()
+    pat = re.compile(
+        rf"(?<![\w/.-])({'|'.join(re.escape(d) for d in sorted(undeclared))})"
+        r"/[\w/.-]+\.rs"
+    )
+    seen: set[str] = set()
+    for rel in files:
+        try:
+            text = (root / rel).read_text(errors="replace")
+        except (OSError, UnicodeError):
+            continue
+        for m in pat.finditer(text):
+            seen.add(m.group(1))
+    return seen
 
 
 def rootless_locations(ref: pathlib.Path) -> dict[str, pathlib.Path | None]:
@@ -754,6 +823,23 @@ def run(root: pathlib.Path, ref: pathlib.Path | None, resolve: bool) -> int:
             file=sys.stderr,
         )
         rc = 1
+    if resolve and ref is not None:
+        missing_roots = upstream_roots_missing(root, files, ref)
+        if missing_roots:
+            print(
+                "  upstream-citation-anchor: FAIL -- this tree cites "
+                f"{sorted(missing_roots)}, which {'is' if len(missing_roots) == 1 else 'are'} "
+                "a TOP-LEVEL directory of the pin that `UPSTREAM_ROOTS` does not "
+                "list. Such a citation is root-anchored and yet lands in no "
+                "bucket at all -- not anchored, not line, not bare, and not a "
+                "root-less candidate either, since the candidate rule derives "
+                "from paths this pattern already matches. Add the root, and "
+                "move its citations to the `path` @ `needle` form in the same "
+                "commit so the LINE and BARE ratchets do not have to move "
+                "(open debt 653).",
+                file=sys.stderr,
+            )
+            rc = 1
     if counts["gone"] == 0:
         print(
             "  upstream-citation-anchor: FAIL -- no citation uses the "
@@ -1148,6 +1234,74 @@ def selftest() -> int:
             failures.append(
                 f"the form arm resolved an absence marker: {c} {f}"
             )
+
+        # 6e. THE DECLARED ROOT LIST, judged BOTH ways (R2319, open debt 653).
+        #
+        #     `UPSTREAM_ROOTS` is declared because `_PATH` is a module constant
+        #     the FORM arm needs and that arm has no checkout. So the RESOLUTION
+        #     arm carries this derivation instead -- and the condition is "every
+        #     pin top-level directory the tree CITES is declared", not "every one
+        #     exists". `ci` is the live proof of the difference: a pin top-level
+        #     directory with zero citations here, which must NOT be demanded.
+        (ref / "ci").mkdir()
+        (ref / "ci" / "x.rs").write_text("fn ci_keeper() {}\n")
+        roots_src = base / "roots"
+        (roots_src / "src").mkdir(parents=True)
+        ROOTS_F = ["src/f.rs"]
+        # (a) an UNDECLARED pin root the tree cites -> reported.
+        (roots_src / "src" / "f.rs").write_text(f"// {_p('ci', 'x.rs')}:1\n")
+        got_roots = upstream_roots_missing(roots_src, ROOTS_F, ref)
+        if got_roots != {"ci"}:
+            failures.append(
+                f"an undeclared pin root the tree cites was not reported: "
+                f"{sorted(got_roots)}"
+            )
+        # (b) the SAME undeclared root, NOT cited -> silent. This is the row that
+        #     keeps the check from demanding a root with no subject.
+        (roots_src / "src" / "f.rs").write_text("// nothing upstream here\n")
+        if upstream_roots_missing(roots_src, ROOTS_F, ref):
+            failures.append(
+                "an undeclared pin root with NO citation was reported -- that "
+                "demands a root with no subject, which is the residual R311y794 "
+                "removed from the SPDX list"
+            )
+        # (c) a DECLARED root, cited -> silent.
+        (roots_src / "src" / "f.rs").write_text(f"// {UNICAST}:1\n")
+        if upstream_roots_missing(roots_src, ROOTS_F, ref):
+            failures.append("a DECLARED root's citation was reported as missing")
+        # (d) THE HYPHEN HAZARD, pinned by its CONSEQUENCE rather than by its
+        #     shape. Recovering the root list with `\\w+` over the pattern's own
+        #     alternation splits a hyphenated root -- `zenoh-ext` yields `zenoh`
+        #     and `ext` -- and the stray tail is then treated as a KNOWN ROOT,
+        #     which silently drops that segment out of the candidate set and its
+        #     occurrences out of the residue.
+        #
+        #     ⚠ A first draft of this row asserted properties of the re-parse
+        #     itself and was DEAD: a control that made `rootless_candidates`
+        #     use the re-parse left it green, because the row never asked what
+        #     the CODE does. So it asks for the consequence: a rooted citation
+        #     whose path contains the stray tail as a directory component must
+        #     still PROPOSE that component as a candidate.
+        strays = sorted(
+            set(re.findall(r"\w+", _PATH.split("/")[0])) - set(UPSTREAM_ROOTS)
+        )
+        if not strays:
+            failures.append(
+                "no hyphenated root remains, so this row pins nothing -- either "
+                "restore one or delete the row rather than leaving it vacuous"
+            )
+        for stray in strays:
+            (roots_src / "src" / "f.rs").write_text(
+                f"// `{_p('io', 'zenoh-transport', 'src', stray, 'probe.rs')}`"
+                " @ `fn x()`\n"
+            )
+            if stray not in rootless_candidates(roots_src, ROOTS_F):
+                failures.append(
+                    f"`{stray}` is a stray tail of a hyphenated root and was "
+                    "NOT proposed as a candidate -- the root list is being "
+                    "re-parsed instead of read, which hides that segment's "
+                    "residue"
+                )
 
         # 8. THE FIXTURE PATHS ARE ASSEMBLED, and this is the arm that keeps
         #    that true. A future edit that inlines one back as a literal makes

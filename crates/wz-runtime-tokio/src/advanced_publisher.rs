@@ -634,7 +634,8 @@ mod tests {
     /// ("demo/data", [1]), ("demo/data", [2])]`. Once more the TEST was what
     /// diverged from production, not the cache — the real advanced subscriber
     /// pins `None` on every one of its recovery / history GETs, as zenoh-ext
-    /// (`zenoh-ext/src/advanced_subscriber.rs:636,743,806,882,946,1008,1137`) and
+    /// (`zenoh-ext/src/advanced_subscriber.rs` @ `global_pending_queries`, at every
+    /// site that issues one) and
     /// zenoh-pico (`vendor/zenoh-pico/src/api/advanced_subscriber.c:915`) do.
     /// Set as the FIELD for the same lane-preserving reason as `parameters`
     /// above; with `query-consolidation` off the field is inert, because

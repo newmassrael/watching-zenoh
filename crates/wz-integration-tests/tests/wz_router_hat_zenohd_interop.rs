@@ -239,7 +239,8 @@ fn spawn_router_hat_dialing(
 fn wz_router_hat_federates_with_zenohd_at_router_tier() {
     let port_res = PortReservation::pick();
     let zport = port_res.port();
-    // zenohd defaults to mode=router (zenohd/src/main.rs) — a bare `-l` router.
+    // zenohd defaults to mode=router (`zenohd/src/main.rs`
+    // @ `config.set_mode(Some(WhatAmI::Router))`) — a bare `-l` router.
     let _zenohd = spawn_zenohd(zport, tempfile);
     let zaddr = format!("127.0.0.1:{zport}");
 

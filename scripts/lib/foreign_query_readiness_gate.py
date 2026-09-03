@@ -13,7 +13,8 @@ Hosted Layer Ewirez failed in 0.17s with "the stock querier got no reply"
 while every local run passed, and the mechanism is an ORDERING, not a flake:
 
   * Both foreign example families print their readiness line BEFORE the call
-    that declares. Upstream `examples/examples/z_queryable.rs` prints
+    that declares. Upstream `examples/examples/z_queryable.rs`
+    @ `.declare_queryable(&key_expr)` prints
     "Declaring Queryable on" and calls `declare_queryable` on the NEXT
     statement; zenoh-pico's `examples/unix/c11/z_queryable.c`, `z_sub.c` and
     `z_querier.c` print theirs above the matching `z_declare_*`.

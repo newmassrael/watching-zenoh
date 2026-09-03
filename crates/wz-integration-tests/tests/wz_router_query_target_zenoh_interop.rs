@@ -82,7 +82,8 @@ const GET_RECEIVED: &str = ">> Received (";
 ///
 /// MEASURED, NOT CHOSEN — the R311y840 rule, which applies here in the same
 /// shape: zenoh's `z_get` gives every query its own timeout (default 10000ms,
-/// `examples/examples/z_get.rs`), and when it expires the reply channel closes
+/// `examples/examples/z_get.rs` @ `.timeout(timeout)`), and when it expires the
+/// reply channel closes
 /// and the process exits with exactly the status a router-terminated query
 /// produces. A generous deadline therefore reads "the router answered" and
 /// "the router ignored me" as one value. Three seconds is two hundred times a

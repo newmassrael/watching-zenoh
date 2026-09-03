@@ -956,7 +956,8 @@ fn recovery_query_timeout_ms(query_timeout: Duration) -> u32 {
 /// `_anyke` is an opt-OUT of the responder's reply-keyexpr guard, not a licence to
 /// take anything: upstream pairs `.accept_replies(ReplyKeyExpr::Any)` with a local
 /// `if key_expr.intersects(s.key_expr())` in EVERY one of its seven GET callbacks
-/// (zenoh-ext/src/advanced_subscriber.rs:633/637, 735/744, 792/807, 1128/1138).
+/// (`zenoh-ext/src/advanced_subscriber.rs` @ `global_pending_queries`, which
+/// every such pair guards).
 /// The round that added `_anyke` to wz's GETs took the opt-out at all three sites
 /// and added none of the narrowing, which made the RX path strictly more permissive
 /// than before the fix: a reply keyed outside the subscription — previously refused
@@ -1091,7 +1092,7 @@ fn issue_recovery_query<R, T>(
     // burst to one sample per keyexpr and silently unfix the very gap this GET
     // exists to close. Both upstreams pay exactly this cost explicitly and for
     // exactly this reason — zenoh-ext at every one of its recovery / history
-    // GETs (`zenoh-ext/src/advanced_subscriber.rs:636,743,806,882,946,1008,1137`)
+    // GETs (`zenoh-ext/src/advanced_subscriber.rs` @ `global_pending_queries`)
     // and zenoh-pico immediately after `z_get_options_default`
     // (`vendor/zenoh-pico/src/api/advanced_subscriber.c:915`). The `_time` arm of
     // the resolution would cover the history GETs below but NOT this one, which

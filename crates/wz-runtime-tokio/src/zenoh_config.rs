@@ -3088,7 +3088,8 @@ pub const LIBRARY_DEFAULT_MODE: WhatAmI = WhatAmI::Peer;
 ///
 /// R2109 (open-debt item 514) — `zenohd` overwrites an absent `mode` before it
 /// builds a runtime at all: `if config.mode().is_none() { config.set_mode(
-/// Some(WhatAmI::Router)) }` (`zenohd/src/main.rs` in the pinned checkout).
+/// Some(WhatAmI::Router)) }` (`zenohd/src/main.rs`
+/// @ `config.set_mode(Some(WhatAmI::Router))`).
 /// Measured rather than quoted: handed a one-line `{ listen: [..] }` document, a
 /// real zenohd prints `"mode":"router"` in its own resolved config.
 ///

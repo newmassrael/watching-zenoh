@@ -33,7 +33,8 @@
 //! 1. **PROOF (keep-alive + queryable).** wz joins FIRST, so the oracle arrives
 //!    to a member it never heard announce itself. wz's periodic `KeepAlive`
 //!    reveals the id; upstream does not know it, so it GETs the per-member
-//!    keyexpr (`zenoh-ext/src/group.rs:307`, the ONLY client-side get in its
+//!    keyexpr (`zenoh-ext/src/group.rs`
+//!    @ `Received Keep Alive from unknown member`, the ONLY client-side get in its
 //!    group protocol) and wz's queryable answers with the `Member` record. Both
 //!    encoders are load-bearing here — damaging either reds this leg.
 //! 2. **CONTROL.** The same fixture with wz joining a DIFFERENT group. wz is
@@ -86,8 +87,9 @@ const ORACLE_MEMBER: &str = "oracle";
 /// THIS IS A LATENCY BUDGET, NOT AN EVICTION SETTING, and the first version of
 /// this comment said the opposite ("matched to the oracle's 3s so wz refreshes
 /// before it evicts a member"). Upstream evicts a member on the lease THAT
-/// MEMBER ADVERTISED, not on its own (`zenoh-ext/src/group.rs:257`, `:295`,
-/// `:317` all take `m.lease` from the received record), which is exactly why leg
+/// MEMBER ADVERTISED, not on its own (`zenoh-ext/src/group.rs`
+/// @ `Instant::now().add(m.lease)` -- every site that computes an eviction
+/// deadline takes `m.lease` from the received record), which is exactly why leg
 /// 3 can advertise 60s with no ill effect. Matching the oracle's own 3s is
 /// therefore irrelevant to eviction.
 ///
@@ -105,7 +107,8 @@ const LEASE_SECS: u64 = 3;
 /// This is the mechanism that makes that isolation possible, and it was found by
 /// measurement after a first draft failed. Upstream does NOT need `Join` to learn
 /// a member: on a KeepAlive from an id it does not know it fires an
-/// unknown-member GET (`zenoh-ext/src/group.rs:300-307`) and recovers the record
+/// unknown-member GET (`zenoh-ext/src/group.rs` @ `let qres = format!`) and
+/// recovers the record
 /// from the member's own queryable. So with a short lease, damaging `Join` proves
 /// nothing — the KeepAlive path silently repairs it, which is exactly what the
 /// first version of the broadcast leg measured (all three legs stayed green under
@@ -230,7 +233,8 @@ fn spawn_zenoh_ext_view_size(port: u16, group: &str, size: usize) -> (ChildGuard
     );
     // BARRIER, not decoration — but a WEAKER one than the first version claimed.
     // The example prints this line after `Group::join` returns, and that
-    // guarantees its own Join has gone out (`zenoh-ext/src/group.rs:393` awaits
+    // guarantees its own Join has gone out (`zenoh-ext/src/group.rs`
+    // @ `let is_auto_liveliness` awaits
     // the put) but NOT that its event subscriber exists: `join` only
     // `spawn_abortable`s `net_event_handler` (`:400`), and the
     // `declare_subscriber` runs inside that task (`:248-251`). The residual race
@@ -276,7 +280,8 @@ fn wait_view_verdict(reader: &mut std::fs::File) -> String {
 /// variant 0 -> 7 leaves this leg green; `Join` is not on its path once wz is
 /// already in the group). R311y445 then replaced that with "the oracle's own view
 /// query", which does not exist: `Group::join` issues NO query
-/// (`zenoh-ext/src/group.rs:363-407` declares a publisher, puts its Join and
+/// (`zenoh-ext/src/group.rs` @ `// announce the member:` declares a publisher,
+/// puts its Join and
 /// spawns four tasks), and the only client-side `z.get()` in the whole of
 /// upstream's group protocol is at `group.rs:307`, inside the KeepAlive handler's
 /// unknown-member arm (`group.rs:279-307`).

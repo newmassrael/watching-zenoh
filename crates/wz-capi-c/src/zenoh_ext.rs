@@ -32,7 +32,7 @@
 //!
 //! ## `PublicationCache` semantics, read off upstream rather than guessed
 //!
-//! `zenoh-ext/src/publication_cache.rs:186-320`:
+//! `zenoh-ext/src/publication_cache.rs` @ `PublicationCache`:
 //!
 //! - A subscriber on `key_expr` with `Locality::SessionLocal` — the cache stores
 //!   what THIS session publishes, not what the network carries. Getting this
@@ -58,7 +58,8 @@
 //! ## `QueryingSubscriber` semantics
 //!
 //! `zenoh-c/src/querying_subscriber.rs:74-113` for the option defaults and
-//! `zenoh-ext/src/querying_subscriber.rs` for the behaviour: a subscriber that
+//! `zenoh-ext/src/querying_subscriber.rs` @ `QueryingSubscriber` for the
+//! behaviour: a subscriber that
 //! additionally issues a `get` at declaration time and merges the replies into
 //! the same callback. `ze_querying_subscriber_get` issues another one later.
 //!

@@ -4030,8 +4030,9 @@ pub mod common {
     ///
     /// WHY A DECLARER'S OWN READY LINE IS NOT THAT PREDICATE. Both foreign
     /// families print their marker BEFORE the call that declares: upstream
-    /// `examples/examples/z_queryable.rs:28` prints `Declaring Queryable on`
-    /// and declares on line 30, and zenoh-pico's `z_queryable.c:107` /
+    /// `examples/examples/z_queryable.rs` @ `.declare_queryable(&key_expr)`
+    /// prints `Declaring Queryable on` and declares on the NEXT statement, and
+    /// zenoh-pico's `z_queryable.c:107` /
     /// `z_sub.c:71` / `z_querier.c:72` print theirs above the matching
     /// `z_declare_*`. So the marker proves the session is OPEN and nothing
     /// about the ROUTER having registered anything. A querier that dials the

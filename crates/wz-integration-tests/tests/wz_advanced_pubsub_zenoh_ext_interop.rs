@@ -36,7 +36,8 @@
 //!    keyexpr, which does not intersect the `@adv` KE the GET is addressed to.
 //!    zenoh's responder refuses such a reply unless the querier set `_anyke`
 //!    (`zenoh/src/api/queryable.rs:278-287`), which zenoh-ext's own subscriber
-//!    does on every GET (`zenoh-ext/src/advanced_subscriber.rs:807` and six
+//!    does on every GET (`zenoh-ext/src/advanced_subscriber.rs`
+//!    @ `states.peek_lru()` and six
 //!    siblings). wz's runtime path never set it — though wz's C-API path did
 //!    (`wz-capi-pico/src/get.rs:820-835`), so the rule was known here and lost.
 //!
@@ -657,7 +658,8 @@ fn assert_gap_fixture_held(
 ///   * the PERIODIC / HEARTBEAT triggers — not armed. `--advanced-recovery` is
 ///     sample-driven only, which matters here because upstream's oracle DOES
 ///     beacon (`MissDetectionConfig::default().heartbeat(500ms)`,
-///     `zenoh-ext/examples/examples/z_advanced_pub.rs:36`), so a subscriber with
+///     `zenoh-ext/examples/examples/z_advanced_pub.rs`
+///     @ `sample_miss_detection`), so a subscriber with
 ///     the heartbeat trigger armed would recover the gap without the gap ever
 ///     having been the reason.
 ///
@@ -1225,7 +1227,8 @@ const BEACON_BURST: usize = 20;
 
 /// The beacon period wz is armed with. Matches upstream's own default in
 /// `z_advanced_pub` (`MissDetectionConfig::default().heartbeat(500ms)`,
-/// `zenoh-ext/examples/examples/z_advanced_pub.rs:36`), so the leg witnesses the
+/// `zenoh-ext/examples/examples/z_advanced_pub.rs` @ `sample_miss_detection`),
+/// so the leg witnesses the
 /// cadence a real deployment would run rather than one tuned to pass.
 const BEACON_PERIOD_MS: u64 = 500;
 
@@ -1754,7 +1757,7 @@ fn zenoh_ext_wz_recovery_get_stays_unbounded_without_the_heartbeat_trigger() {
 //   - sample-driven needs a NON-EMPTY REORDER BUFFER: `handle_live` issues its
 //     request at `advanced_subscriber.rs:605`, after the match, gated on
 //     `!state.pending_samples.is_empty()`. Upstream is the same shape and the
-//     same gate (`zenoh-ext/src/advanced_subscriber.rs:704-709`).
+//     same gate (`zenoh-ext/src/advanced_subscriber.rs` @ `fn seq_num_range`).
 //   - periodic (`State::periodic_requests`, `advanced_subscriber.rs:685-702`)
 //     consults nothing at all — it asks on EVERY tick for every known source
 //     with no GET in flight. Upstream's `PeriodicQuery::run` looks the source up

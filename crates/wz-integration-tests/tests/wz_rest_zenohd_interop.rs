@@ -224,7 +224,8 @@ fn first_event_for(text: &str, key_needle: &str) -> Option<(String, JsonSample)>
 ///
 /// REST is enabled through the generic `--cfg` overrides rather than a new
 /// spawn helper: zenohd applies `--cfg KEY:VALUE` pairs LAST
-/// (`zenohd/src/main.rs:251-266`), after the `--rest-http-port` handling, and
+/// (`zenohd/src/main.rs` @ `for json in &args.cfg`), after the
+/// `--rest-http-port` handling, and
 /// the shared spawner's hard-coded `--rest-http-port none` is a documented
 /// no-op (`main.rs:126-136` skips the whole block for the literal `none`). So
 /// these two keys are what the flag itself would have set, applied later.

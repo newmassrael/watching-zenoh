@@ -14585,7 +14585,8 @@ layer_z_zenohd_interop() {
         # KEEP-ALIVE plus the per-member queryable that answers the unknown-member
         # GET it provokes (R311y445-review corrected this — upstream issues no
         # "view query" on join; its only client-side get is the one at
-        # zenoh-ext/src/group.rs:307), the Join BROADCAST a foreign peer decodes,
+        # `zenoh-ext/src/group.rs` @ `let qres = format!`), the Join BROADCAST a
+        # foreign peer decodes,
         # and a wrong-group control. Oracle = z_view_size, which prints its own
         # verdict, so the pass/fail judgement is the FOREIGN implementation's
         # rather than an inference from wz's logs.
