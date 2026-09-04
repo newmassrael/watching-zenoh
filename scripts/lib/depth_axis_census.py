@@ -222,10 +222,19 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # is worth saying explicitly, because "415 wz citation(s) resolve and none
 # points past its file's end" is a true sentence that sounds like more than it
 # is.
+# R2343 — 416 -> 418, two citations, from `router-multicast-faces`'s appended
+# CORRECTION, which WITHDRAWS its mis-scoped-gate residual. The withdrawal rests
+# on where the egress plane is exercised, so the correction names the forwarder
+# that carries the calls and the integration file that gates itself without the
+# atom. Both are wz files the sentence is about; nothing upstream moved.
+#
+# This is the first round in this run that withdraws a clause rather than
+# confirming one, and the first whose correction adds no upstream anchor --
+# the claim is about this tree alone, so `ANCHORED_FLOOR` does not move either.
 PIN_REACHED = 72
 PIN_UNREACHED = 2
 PIN_NO_SYMBOL = 10
-PIN_WZ_CITATIONS = 416
+PIN_WZ_CITATIONS = 418
 PIN_AMBIGUOUS = 85
 
 

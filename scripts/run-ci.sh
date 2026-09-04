@@ -2136,6 +2136,29 @@ PY
     # for a bare name) that the first draft of this lint got wrong.
     python3 scripts/lib/root_relative_exclusion_lint.py --selftest || return 1
     python3 scripts/lib/root_relative_exclusion_lint.py || return 1
+    # R2343 (no register item) — WHO CAN ATTACH A MULTICAST EGRESS GROUP. This
+    # holds a WITHDRAWAL, not a rule: `router-multicast-faces` carried a residual
+    # saying its egress core is gated on the broad `transport-multicast` feature
+    # "so turning the atom off does not remove the plane", filed as a mis-scoped
+    # gate. Measured at R2343: the observation is true and the prescription is
+    # false. Re-gating onto the atom's own feature deletes COVERAGE, not dead
+    # code — four unit tests attach a group with the atom off. So the residual
+    # was withdrawn, and this grades the fact it was withdrawn on: if that
+    # coverage goes, or if a production attach appears outside the atom, the
+    # partition changed and the residual is live again.
+    #
+    # It watches `attach_mcast_group` ALONE and not the whole plane, which the
+    # first draft got wrong: `broadcast_to_mcast_groups` IS called from
+    # production under the broad feature (the unconditional `route_push` tail)
+    # and fans out to an EMPTY collection until something attaches. Watching
+    # both made the check pass for the wrong member. Its cfg attribution walks
+    # the enclosing block chain by brace depth — an item-header rule missed the
+    # bare `#[cfg(..)] { .. }` the shipped attach sits in, and read it as ungated.
+    # MEASURED: 1 production attach (atom-gated), 4 test attaches under the broad
+    # feature alone, 4 under the atom; the selftest drives sibling isolation and
+    # statement-level cfg, both of which the drafts got wrong.
+    python3 scripts/lib/mcast_egress_callers_gate.py --selftest || return 1
+    python3 scripts/lib/mcast_egress_callers_gate.py || return 1
     # R311y704 (§1.1n) — the DATAGRAM-HALF gate. `Dissection::flows()` is the
     # TCP half and `datagram_flows()` is the other one; a reader that walks the
     # first and forgets the second produces an EMPTY result over a multicast or
