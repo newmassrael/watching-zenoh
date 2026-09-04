@@ -49,6 +49,13 @@
 //! 4. Otherwise (default `Deny`), an applicable ALLOW rule → `Allow`, else
 //!    `Deny`.
 //!
+//! The `subject` of step 2/4 is OPTIONAL: `None` is a face whose peer identity
+//! the enforcer could not resolve, and it takes the same four steps as any other
+//! request rather than a fifth of its own. Only [`SubjectSelector::Any`] matches
+//! it, which keeps a wildcard deny effective and a zid-targeted allow inert — see
+//! [`AclPolicy::decision`] for why that pair is the fail-closed one, and
+//! open-debt item 655 for the escape it repairs.
+//!
 //! # Container note (perf, not semantics)
 //!
 //! zenoh folds rule keyexprs into a `KeBoxTree` for sublinear `nodes_including`
@@ -187,12 +194,33 @@ pub enum SubjectSelector {
 }
 
 impl SubjectSelector {
-    /// Whether this selector matches the request's subject zid.
+    /// Whether this selector matches the request's subject zid, where `None` is
+    /// an UNATTRIBUTABLE face — one whose peer identity the enforcer could not
+    /// resolve (open-debt item 655, R2347).
+    ///
+    /// The two arms answer an absent subject differently, and that split is the
+    /// whole point:
+    ///
+    /// - [`Any`](SubjectSelector::Any) does not READ the subject, so nothing
+    ///   about an absent one stops it matching. A rule saying "every peer"
+    ///   governs a peer whose name is unknown exactly as it governs one whose
+    ///   name is known.
+    /// - [`Zid`](SubjectSelector::Zid) NAMES a peer, and an absent identity is
+    ///   not that peer. This is a definite negative, the posture
+    ///   [`matches_protocols`](wz_session_core::link::LinkSubject::matches_protocols)
+    ///   already takes for a resolved-but-empty set.
+    ///
+    /// Fed through [`AclPolicy::decision`]'s deny-first / default / allow-narrow
+    /// order, the pair is fail-CLOSED in both directions: a wildcard DENY still
+    /// reaches the unattributable face, and a zid-targeted ALLOW does not rescue
+    /// it from a default-deny policy. Answering `true` for both arms would leak
+    /// the second; answering `false` for both would lose the first, which is the
+    /// escape item 655 named.
     #[inline]
-    fn matches(&self, subject: &Zid) -> bool {
+    fn matches(&self, subject: Option<&Zid>) -> bool {
         match self {
             SubjectSelector::Any => true,
-            SubjectSelector::Zid(z) => z == subject,
+            SubjectSelector::Zid(z) => subject == Some(z),
         }
     }
 }
@@ -354,9 +382,34 @@ impl AclPolicy {
     /// allow). `keyexpr` is the message's key expression; it is split once here
     /// and each rule keyexpr is tested for INCLUSION of it via the
     /// [`keyexpr_includes_target`] SSOT.
+    ///
+    /// `subject` is OPTIONAL, and the `None` spelling is load-bearing rather
+    /// than a convenience (open-debt item 655, R2347). It means the enforcer
+    /// could not resolve the peer identity of the face — in wz, the peer's zid
+    /// arrived non-conformant and `peer_zid_routing` rejected it. Until R2347 the
+    /// enforcer answered that case ITSELF, by returning early and admitting, so a
+    /// peer that presented an all-zero zid was exempt from every rule including
+    /// the wildcard ones; taking the `Option` here moves the question to the one
+    /// place that owns policy, and makes it unskippable at a call site.
+    ///
+    /// Upstream has no such state to answer, and that is measured rather than
+    /// assumed. Its zid is validated at CODEC DECODE
+    /// (`commons/zenoh-codec/src/core/zenohid.rs`
+    /// @ `ZenohIdProto::try_from(&id[..size])`), which goes through
+    /// `uhlc::ID`'s `NonZeroU128` and so refuses the all-zero slice: a transport
+    /// that presents no valid identity never opens, and the branch this
+    /// function now answers is one upstream cannot reach at all. Where upstream
+    /// comes CLOSEST — an `authn_ids` matching no subject entry — it leaves the
+    /// verdict at the configured default rather than admitting
+    /// (`zenoh/src/net/routing/interceptor/access_control.rs`
+    /// @ `let mut decision = policy_enforcer.default_permission`). Routing an
+    /// absent subject through the rule set, where only [`SubjectSelector::Any`]
+    /// can match it, lands on that same default whenever no wildcard rule
+    /// applies. So this is not a divergence: it is what upstream would do if
+    /// upstream could reach the branch.
     pub fn decision(
         &self,
-        subject: &Zid,
+        subject: Option<&Zid>,
         flow: AclFlow,
         action: AclMessage,
         keyexpr: &str,
@@ -499,7 +552,7 @@ mod tests {
         let z = zid(&[1]);
         assert_eq!(
             AclPolicy::new(AclConfig::allow_all()).decision(
-                &z,
+                Some(&z),
                 AclFlow::Ingress,
                 AclMessage::Put,
                 "x/y",
@@ -509,13 +562,78 @@ mod tests {
         );
         assert_eq!(
             AclPolicy::new(AclConfig::deny_all()).decision(
-                &z,
+                Some(&z),
                 AclFlow::Ingress,
                 AclMessage::Put,
                 "x/y",
                 None
             ),
             Permission::Deny
+        );
+    }
+
+    /// OPEN-DEBT 655 (R2347) — an UNATTRIBUTABLE subject takes the rule set, not
+    /// an exemption.
+    ///
+    /// The three directions are asserted together because each one alone is
+    /// satisfiable by a wrong answer: "always deny" passes the first, "always
+    /// allow" passes the third, and either passes the second by accident. Only
+    /// all three at once pin `Any` matching while `Zid` does not.
+    #[test]
+    fn an_unattributable_subject_is_governed_by_the_rules_that_do_not_name_a_peer() {
+        // 1. A WILDCARD deny reaches it. This is the escape item 655 named: the
+        //    enforcer used to return early and admit before the rule was read.
+        let wildcard_deny = AclPolicy::new(AclConfig {
+            default_permission: Permission::Allow,
+            rules: vec![deny_rule(SubjectSelector::Any, "admin/**")],
+        });
+        assert_eq!(
+            wildcard_deny.decision(None, AclFlow::Ingress, AclMessage::Put, "admin/cfg", None),
+            Permission::Deny,
+            "a rule that does not name a peer governs a peer with no name"
+        );
+        // 2. A ZID-TARGETED allow does NOT rescue it from a default-deny policy —
+        //    the other direction of fail-closed, and the one a blanket "absent
+        //    matches everything" (the LINK axes' rule) would have leaked.
+        let named_allow = AclPolicy::new(AclConfig {
+            default_permission: Permission::Deny,
+            rules: vec![allow_rule(SubjectSelector::Zid(zid(&[7])), "admin/**")],
+        });
+        assert_eq!(
+            named_allow.decision(None, AclFlow::Ingress, AclMessage::Put, "admin/cfg", None),
+            Permission::Deny,
+            "a rule naming one peer does not reach a peer with no name"
+        );
+        assert_eq!(
+            named_allow.decision(
+                Some(&zid(&[7])),
+                AclFlow::Ingress,
+                AclMessage::Put,
+                "admin/cfg",
+                None
+            ),
+            Permission::Allow,
+            "control: the SAME rule still admits the peer it names, so the \
+             previous assertion is about the absent subject and not about the rule"
+        );
+        // 3. Not a blanket deny: with nothing applicable, an unattributable
+        //    request lands on the configured default, exactly where upstream's
+        //    no-matched-subject path lands.
+        assert_eq!(
+            wildcard_deny.decision(None, AclFlow::Ingress, AclMessage::Put, "demo/data", None),
+            Permission::Allow,
+            "outside every rule, the default permission carries it"
+        );
+        assert_eq!(
+            AclPolicy::new(AclConfig::deny_all()).decision(
+                None,
+                AclFlow::Ingress,
+                AclMessage::Put,
+                "demo/data",
+                None
+            ),
+            Permission::Deny,
+            "and a deny default denies it — the default is read, not overridden"
         );
     }
 
@@ -528,12 +646,24 @@ mod tests {
         });
         // Denied: the deny rule's `admin/**` includes `admin/cfg`.
         assert_eq!(
-            policy.decision(&z, AclFlow::Ingress, AclMessage::Put, "admin/cfg", None),
+            policy.decision(
+                Some(&z),
+                AclFlow::Ingress,
+                AclMessage::Put,
+                "admin/cfg",
+                None
+            ),
             Permission::Deny
         );
         // Allowed: outside the deny keyexpr, the allow default carries it.
         assert_eq!(
-            policy.decision(&z, AclFlow::Ingress, AclMessage::Put, "demo/data", None),
+            policy.decision(
+                Some(&z),
+                AclFlow::Ingress,
+                AclMessage::Put,
+                "demo/data",
+                None
+            ),
             Permission::Allow
         );
     }
@@ -546,12 +676,24 @@ mod tests {
             rules: vec![allow_rule(SubjectSelector::Any, "metrics/**")],
         });
         assert_eq!(
-            policy.decision(&z, AclFlow::Ingress, AclMessage::Put, "metrics/cpu", None),
+            policy.decision(
+                Some(&z),
+                AclFlow::Ingress,
+                AclMessage::Put,
+                "metrics/cpu",
+                None
+            ),
             Permission::Allow
         );
         // Default-deny carries everything the allow rule does not cover.
         assert_eq!(
-            policy.decision(&z, AclFlow::Ingress, AclMessage::Put, "admin/cfg", None),
+            policy.decision(
+                Some(&z),
+                AclFlow::Ingress,
+                AclMessage::Put,
+                "admin/cfg",
+                None
+            ),
             Permission::Deny
         );
     }
@@ -568,12 +710,24 @@ mod tests {
         });
         // Both rules apply to `secret/key`; deny wins.
         assert_eq!(
-            policy.decision(&z, AclFlow::Ingress, AclMessage::Put, "secret/key", None),
+            policy.decision(
+                Some(&z),
+                AclFlow::Ingress,
+                AclMessage::Put,
+                "secret/key",
+                None
+            ),
             Permission::Deny
         );
         // Only the allow applies here.
         assert_eq!(
-            policy.decision(&z, AclFlow::Ingress, AclMessage::Put, "secret/pub", None),
+            policy.decision(
+                Some(&z),
+                AclFlow::Ingress,
+                AclMessage::Put,
+                "secret/pub",
+                None
+            ),
             Permission::Allow
         );
     }
@@ -589,7 +743,7 @@ mod tests {
         // The named peer is denied admin/**.
         assert_eq!(
             policy.decision(
-                &denied,
+                Some(&denied),
                 AclFlow::Ingress,
                 AclMessage::Put,
                 "admin/cfg",
@@ -599,7 +753,13 @@ mod tests {
         );
         // Another peer is not governed by that rule -> allow default.
         assert_eq!(
-            policy.decision(&other, AclFlow::Ingress, AclMessage::Put, "admin/cfg", None),
+            policy.decision(
+                Some(&other),
+                AclFlow::Ingress,
+                AclMessage::Put,
+                "admin/cfg",
+                None
+            ),
             Permission::Allow
         );
     }
@@ -613,7 +773,13 @@ mod tests {
         });
         // The deny rule is Ingress-flow; an Egress request is not governed by it.
         assert_eq!(
-            policy.decision(&z, AclFlow::Egress, AclMessage::Put, "admin/cfg", None),
+            policy.decision(
+                Some(&z),
+                AclFlow::Egress,
+                AclMessage::Put,
+                "admin/cfg",
+                None
+            ),
             Permission::Allow
         );
     }
@@ -637,12 +803,18 @@ mod tests {
             }],
         });
         assert_eq!(
-            policy.decision(&z, AclFlow::Ingress, AclMessage::Delete, "admin/cfg", None),
+            policy.decision(
+                Some(&z),
+                AclFlow::Ingress,
+                AclMessage::Delete,
+                "admin/cfg",
+                None
+            ),
             Permission::Deny
         );
         assert_eq!(
             policy.decision(
-                &z,
+                Some(&z),
                 AclFlow::Ingress,
                 AclMessage::DeclareSubscriber,
                 "admin/cfg",
@@ -652,7 +824,13 @@ mod tests {
         );
         // Put is not in the rule's action set -> allow default carries it.
         assert_eq!(
-            policy.decision(&z, AclFlow::Ingress, AclMessage::Put, "admin/cfg", None),
+            policy.decision(
+                Some(&z),
+                AclFlow::Ingress,
+                AclMessage::Put,
+                "admin/cfg",
+                None
+            ),
             Permission::Allow
         );
     }

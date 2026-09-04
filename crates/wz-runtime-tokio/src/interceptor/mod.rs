@@ -75,8 +75,19 @@ use self::low_pass::{LowPassInterceptor, LowPassRule};
 pub trait InterceptorContext {
     /// The request's subject — the routing identity of the peer on the other
     /// end of the face (the auth-free ACL subject). `None` when the face has no
-    /// resolved identity yet, in which case an enforcer admits (it cannot
-    /// attribute the message to a subject).
+    /// resolved identity: either it has not completed its handshake yet, or the
+    /// zid the peer presented was non-conformant and `peer_zid_routing` rejected
+    /// it.
+    ///
+    /// `None` is NOT an exemption. An enforcer passes it to its policy and the
+    /// policy answers, so a rule that does not name a peer still governs the
+    /// face and one that names a peer does not. Open-debt item 655 (R2347) is
+    /// why that is spelled out on the SEAM and not only at the one enforcer that
+    /// reads it: a peer chooses its own zid bytes, so an interceptor that
+    /// skipped an unattributable face would let the peer choose to be
+    /// unfiltered. `wz_access_control::AclPolicy::decision` takes the `Option`
+    /// for the same reason — no link here, because that crate is optional
+    /// (`access-acl`) and this trait is not.
     fn subject(&self) -> Option<Zid>;
 
     /// Resolve a message's key expression against THIS face's alias table to

@@ -5544,7 +5544,20 @@ layer_c1ay_cargo_test_router_hat() {
     # peer sent an all-zero zid is delivered to under an egress deny rule that
     # stops its conformant neighbour), and it asserts the CURRENT behaviour on
     # purpose — the round that fixes 655 flips it, and this count moves with it.
-    _runci_guarded_test "C1AY router_forward 141" 141 \
+    #
+    # R2347 — 141 -> 142, and the count is the smaller half of the news. The
+    # witness above FLIPPED (it is now
+    # `a_malformed_zid_no_longer_escapes_the_egress_acl`, asserting 0 frames
+    # where it asserted 1), and an assertion flip moves no count at all; what
+    # moves this one is its CONTROL,
+    # `a_zid_targeted_egress_rule_does_not_reach_an_unattributable_client` --
+    # same topology, same unattributable client, a deny that NAMES a peer
+    # instead of `Any`, and both frames delivered. Without it "both clients
+    # denied" is equally explained by a repair that blanket-denies every
+    # unattributable message, which would strand a face that has merely not
+    # finished its handshake. Still `#[cfg(feature = "access-acl")]`, so the
+    # five sibling resolutions are unchanged for R2346's reason.
+    _runci_guarded_test "C1AY router_forward 142" 142 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,access-acl --lib router_forward --quiet || return 1
     # R311y464 — 171 -> 173: y463 added token_current_future_interest_replies_with_a
     # _client_token and token_current_future_interest_matches_a_wildcard_target, both
@@ -7374,7 +7387,14 @@ layer_c1y_cargo_test_routing_peer() {
     # get wrong; the other pins that a subject-less face caches nothing. Neither
     # needs the hotreload feature: they exercise the trait pair directly, so this
     # lane's feature set is unchanged.
-    _runci_guarded_test "C1y interceptor" 36 \
+    # R2347 (open-debt 655) — 36 -> 37:
+    # `an_unattributable_face_is_still_narrowed_by_the_link_axis`. Item 655's
+    # fifth clause named `link_protocols` / `interfaces` as COLLATERAL of the
+    # early exit this round removed -- they are read inside
+    # `AclPolicy::decision`, so an enforcer returning before the call skipped
+    # them for every unattributable face too. Unlike the round's other new test
+    # this one is NOT in `router_forward`, so it moves this guard and not C1AY's.
+    _runci_guarded_test "C1y interceptor" 37 \
         cargo test -p wz-runtime-tokio --features "$access" --lib interceptor --quiet || return 1
     # R311y509 — 211 -> 213: the peer's CURRENT liveliness-TOKEN dump, in its two
     # tiers. Each test is bound by a damage that reds it ALONE: disabling the client

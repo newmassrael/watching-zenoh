@@ -183,12 +183,21 @@ impl Interceptor for AclInterceptor {
         let Some(governed) = acl_action(msg) else {
             return true;
         };
-        // No resolved subject -> admit: the enforcer cannot attribute the
-        // message to a peer, so it does not block it (zenoh skips a transport
-        // with no matched subject).
-        let Some(subject) = ctx.subject() else {
-            return true;
-        };
+        // No resolved subject -> the POLICY decides, not this function
+        // (open-debt item 655, R2347). Until then the enforcer returned `true`
+        // here, and that early exit was reachable by a peer's own choice: the zid
+        // is captured verbatim from its INIT body
+        // (`wz-session-core` `session_actions.rs:3836`, `:3872`, `:3879`) and
+        // nothing on the way to the slot validates it, so a peer sending an
+        // all-zero zid made `peer_zid_routing` answer `None` and exempted itself
+        // from every rule -- a wildcard `SubjectSelector::Any` deny included.
+        // `AclPolicy::decision` now takes the `Option`, where `Any` still matches
+        // and a zid-targeted rule does not; a request matching no rule lands on
+        // the configured default, which is where upstream's own
+        // no-matched-subject path lands
+        // (`zenoh/src/net/routing/interceptor/access_control.rs`
+        // @ `let mut decision = policy_enforcer.default_permission`).
+        let subject = ctx.subject();
         // A GOVERNED kind whose keyexpr does not resolve -> DENY. The enforcer
         // cannot decide a rule it cannot name a keyexpr for, and fail-open is the
         // wrong default for the one place that says no: zenoh takes the same
@@ -218,7 +227,7 @@ impl Interceptor for AclInterceptor {
             return governed.undeclare && self.flow == AclFlow::Ingress;
         };
         self.policy.decision(
-            &subject,
+            subject.as_ref(),
             self.flow,
             governed.action,
             &keyexpr,
@@ -235,10 +244,16 @@ impl Interceptor for AclInterceptor {
     /// verdict table factors through (face, keyexpr) — which is what makes the
     /// ACL cacheable at all, and what a rate limiter is not.
     ///
-    /// A face with no resolved subject caches NOTHING rather than caching
-    /// "admit": the subject can be resolved later on the same face, and a cached
-    /// admit would then outlive the reason for it. That is the one case where a
-    /// cheap-looking cache would change a verdict instead of just saving work.
+    /// A face with no resolved subject caches NOTHING rather than caching its
+    /// verdict: the subject can be resolved later on the same face, and the
+    /// cached row would then outlive the reason for it. That is the one case
+    /// where a cheap-looking cache would change a verdict instead of just saving
+    /// work — and R2347 sharpened it rather than retiring it. Before item 655 the
+    /// uncached verdict for such a face was a constant admit, so the row skipped
+    /// here was only ever "true"; now [`AclPolicy::decision`] gives that face a
+    /// REAL verdict off the wildcard rules, so the row would be a real answer to
+    /// a question whose inputs are still in flux. Declining to cache is the same
+    /// decision for a stronger reason.
     fn compute_keyexpr_cache(
         &self,
         ctx: &dyn InterceptorContext,
@@ -248,7 +263,7 @@ impl Interceptor for AclInterceptor {
         let link = ctx.link_subject();
         let allow = |action: AclMessage| {
             self.policy
-                .decision(&subject, self.flow, action, keyexpr, link)
+                .decision(Some(&subject), self.flow, action, keyexpr, link)
                 == Permission::Allow
         };
         Some(Box::new(AclKeyexprCache {
@@ -342,6 +357,7 @@ mod tests {
     use wz_session_core::interest_build::{
         build_interest_final, build_interest_liveliness_get, build_interest_liveliness_subscriber,
     };
+    use wz_session_core::link::{InterceptorLink, LinkSubject};
     use wz_session_core::push_build::{
         build_push_aliased, build_push_del_literal, build_push_literal,
     };
@@ -357,6 +373,14 @@ mod tests {
     struct MockCtx {
         subject: Option<Zid>,
         aliases: HashMap<u64, String>,
+        /// R2347 (open-debt 655) — the LINK subject this face reports. It exists
+        /// because item 655's fifth clause names the link axes as collateral of
+        /// the same early exit: `link_protocols` / `interfaces` are read INSIDE
+        /// `AclPolicy::decision`, so an enforcer that returned before calling it
+        /// left them as unreachable as the zid axis. Leaving this at `None` (the
+        /// trait default) cannot show that, because `None` matches every
+        /// narrowed rule — the axis would look reached whether or not it was.
+        link: Option<LinkSubject>,
     }
 
     impl MockCtx {
@@ -367,6 +391,21 @@ mod tests {
             Self {
                 subject,
                 aliases: HashMap::new(),
+                link: None,
+            }
+        }
+
+        /// The same context, reporting a RESOLVED link protocol — the one input
+        /// shape that can tell "the link axis was evaluated" from "the link axis
+        /// was skipped".
+        fn with_link_protocol(subject: Option<Zid>, protocol: InterceptorLink) -> Self {
+            Self {
+                subject,
+                aliases: HashMap::new(),
+                link: Some(LinkSubject {
+                    protocol: Some(protocol),
+                    interfaces: None,
+                }),
             }
         }
     }
@@ -377,6 +416,9 @@ mod tests {
         }
         fn full_keyexpr(&self, msg: &NetworkMessage) -> Option<String> {
             crate::linkstate_forward::resolve_governed_keyexpr(msg, &self.aliases)
+        }
+        fn link_subject(&self) -> Option<&LinkSubject> {
+            self.link.as_ref()
         }
     }
 
@@ -469,16 +511,86 @@ mod tests {
         assert!(!acl.intercept(&ctx, &del), "admin/secret Del is denied");
     }
 
+    /// OPEN-DEBT 655 (R2347) — the enforcer-level twin of the router-level
+    /// `a_malformed_zid_no_longer_escapes_the_egress_acl`. Until R2347 this
+    /// asserted the opposite ("an unattributable message is admitted, not
+    /// blocked"), and that sentence was the defect: `deny_admin_policy`'s rule is
+    /// `SubjectSelector::Any`, so it never needed a subject to decide, yet the
+    /// enforcer returned before reading it.
     #[test]
-    fn a_message_with_no_subject_is_admitted() {
+    fn a_message_with_no_subject_is_governed_by_a_wildcard_rule() {
         let acl = AclInterceptor::new(deny_admin_policy(), AclFlow::Ingress);
         let ctx = MockCtx::with_subject(None);
         let put = NetworkMessage::Push(Box::new(
             build_push_literal("admin/secret", b"x").expect("build"),
         ));
         assert!(
-            acl.intercept(&ctx, &put),
-            "an unattributable message is admitted, not blocked"
+            !acl.intercept(&ctx, &put),
+            "a rule that does not name a peer denies a message it cannot attribute"
+        );
+        // The control: the same unattributable face on a keyexpr the rule does
+        // NOT cover is still admitted by the allow default. Without this, the
+        // assertion above is equally explained by denying everything subjectless.
+        let benign = NetworkMessage::Push(Box::new(
+            build_push_literal("demo/data", b"x").expect("build"),
+        ));
+        assert!(
+            acl.intercept(&ctx, &benign),
+            "outside the rule, the allow default still carries an unattributable message"
+        );
+    }
+
+    /// OPEN-DEBT 655 clause 5, the OTHER half (R2347) — the LINK axes were
+    /// collateral of the same early exit, and closing the item means showing
+    /// they are reached now, not only the zid axis.
+    ///
+    /// `link_protocols` / `interfaces` are read inside `AclPolicy::decision`, so
+    /// an enforcer that returned `true` before calling it skipped them for every
+    /// unattributable face — a rule narrowed to TCP could not stop a peer that
+    /// had made itself unattributable, whatever it was speaking. The item said
+    /// so and nothing measured it.
+    ///
+    /// Both directions are asserted, because one alone proves nothing: a rule
+    /// narrowed to the protocol the face SPEAKS must deny it, and the same rule
+    /// narrowed to a protocol it does not speak must NOT apply — which is what
+    /// separates "the axis was evaluated" from "the axis was ignored and the
+    /// rule matched on its other fields".
+    #[test]
+    fn an_unattributable_face_is_still_narrowed_by_the_link_axis() {
+        let admin_deny_over = |protocol: InterceptorLink| {
+            AclInterceptor::new(
+                AclPolicy::new(AclConfig {
+                    default_permission: Permission::Allow,
+                    rules: vec![AclRule {
+                        subject: SubjectSelector::Any,
+                        key_exprs: vec!["admin/**".to_owned()],
+                        messages: vec![AclMessage::Put],
+                        flow: AclFlow::Ingress,
+                        permission: Permission::Deny,
+                        link_protocols: vec![protocol],
+                        interfaces: Vec::new(),
+                    }],
+                }),
+                AclFlow::Ingress,
+            )
+        };
+        // The face speaks TCP and has NO resolved subject.
+        let ctx = MockCtx::with_link_protocol(None, InterceptorLink::Tcp);
+        let put = || {
+            NetworkMessage::Push(Box::new(
+                build_push_literal("admin/secret", b"x").expect("build"),
+            ))
+        };
+        assert!(
+            !admin_deny_over(InterceptorLink::Tcp).intercept(&ctx, &put()),
+            "a rule narrowed to the protocol this face speaks reaches it, even \
+             though the face has no attributable zid"
+        );
+        assert!(
+            admin_deny_over(InterceptorLink::Udp).intercept(&ctx, &put()),
+            "and a rule narrowed to a protocol it does NOT speak leaves it to \
+             the allow default -- so the deny above is the link axis deciding, \
+             not the keyexpr and action matching on their own"
         );
     }
 
@@ -530,6 +642,7 @@ mod tests {
         let ctx = MockCtx {
             subject: Some(Zid::from_slice(&[0x0A])),
             aliases,
+            link: None,
         };
         let put = aliased_put(7);
         assert_eq!(
@@ -555,6 +668,7 @@ mod tests {
         let ctx = MockCtx {
             subject: Some(Zid::from_slice(&[0x0A])),
             aliases,
+            link: None,
         };
         let put = aliased_put(7);
         assert_eq!(ctx.full_keyexpr(&put).as_deref(), Some("admin/data"));
@@ -934,8 +1048,15 @@ mod tests {
 
     /// R311y508 — a face with NO resolved subject must cache nothing. The subject
     /// can resolve later on the same face, and a table computed while it was
-    /// unknown would then outlive the reason it was admitted under. This is the
+    /// unknown would then outlive the verdict it was built under. This is the
     /// one input that is face-derived but NOT stable for the life of the face.
+    ///
+    /// R2347 (open-debt 655) kept the rule and rewrote its second half. The
+    /// uncached verdict for such a face used to be a constant admit, so "no
+    /// cache" and "admitted anyway" were the same observation; now the fallback
+    /// runs the real policy, and what this pins is that the two paths AGREE —
+    /// which is the actual cache contract, and is what the old wording could not
+    /// distinguish from the enforcer simply not looking.
     #[test]
     fn a_subjectless_face_computes_no_cache() {
         let acl = AclInterceptor::new(deny_admin_policy(), AclFlow::Ingress);
@@ -944,13 +1065,17 @@ mod tests {
             acl.compute_keyexpr_cache(&ctx, "admin/secret").is_none(),
             "no subject -> no cached verdict table"
         );
-        // And the fallback is the direct path, which admits for want of a subject.
         let msg = NetworkMessage::Push(Box::new(
             build_push_literal("admin/secret", b"x").expect("build push"),
         ));
         assert!(
+            !acl.intercept_cached(&ctx, &msg, None),
+            "the cache-miss fallback is the direct path, which now denies this"
+        );
+        assert_eq!(
             acl.intercept_cached(&ctx, &msg, None),
-            "a subject-less face is admitted, cached or not"
+            acl.intercept(&ctx, &msg),
+            "cached and direct verdicts agree for a face that caches nothing"
         );
     }
 }

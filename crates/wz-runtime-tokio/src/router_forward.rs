@@ -6451,29 +6451,36 @@ mod tests {
         );
     }
 
-    /// OPEN-DEBT 655 — a WITNESS of a defect, not a specification of intent.
+    /// OPEN-DEBT 655, CLOSED by R2347 — a peer cannot buy its way out of the
+    /// egress ACL by choosing its own identity bytes.
     ///
     /// Two client subscribers to the same keyexpr, under ONE egress deny rule
     /// with `SubjectSelector::Any`, differing in exactly one thing: the zid the
-    /// peer presented at INIT. The conformant client is denied. The one that
-    /// sent an ALL-ZERO zid is delivered to, because the enforcer admits any
-    /// message it cannot attribute -- `let Some(subject) = ctx.subject() else {
-    /// return true; }` -- and `Zid::try_from` rejects an all-zero slice, so
-    /// `peer_zid_routing` answers `None` for it. The zid is peer-supplied and
-    /// nothing between the wire and that slot validates it, so a peer opts into
-    /// this by choosing its own identity bytes.
+    /// peer presented at INIT. R2346 wrote this as a WITNESS -- the all-zero-zid
+    /// client received the frame the conformant one was denied, because the
+    /// enforcer returned early on `ctx.subject() == None` and admitted before
+    /// reading the rule. `Zid::try_from` rejects an all-zero slice, so
+    /// `peer_zid_routing` answers `None` for that face, and nothing between the
+    /// wire and the zid slot validates what the peer sent
+    /// (`wz-session-core` `session_actions.rs:3836`); the peer therefore CHOSE
+    /// to be unattributable, which is what made the escape a security defect
+    /// rather than a corner case.
     ///
-    /// R2345 measured each link of that chain separately; this composes them,
-    /// which is what the register entry asks the fix round to open with. It
-    /// asserts the CURRENT behaviour on purpose: fixing 655 must flip the two
-    /// assertions below, and a fix that leaves them standing did not reach this
-    /// path. Whichever of the three repairs is chosen -- reject the malformed
-    /// zid at the session layer, deny rather than admit on an unattributable
-    /// message, or stop a zid-less face receiving anything -- this test is where
-    /// it becomes visible.
+    /// R2347 removed that early exit: `AclPolicy::decision` now takes
+    /// `Option<&Zid>` and answers the absent subject off the rules, where
+    /// `SubjectSelector::Any` matches and a zid-targeted selector does not. Both
+    /// clients are now denied, which is the ASSERTION FLIP the register entry
+    /// demanded as the proof that a repair reached this path.
+    ///
+    /// The rule is deliberately still `Any`: what changed is that an
+    /// unattributable face is now inside the rule's reach, not that everything
+    /// is denied. `a_zid_targeted_egress_rule_does_not_reach_an_unattributable_client`
+    /// is the control for that, and the policy-level triple lives in
+    /// `wz-access-control`
+    /// (`an_unattributable_subject_is_governed_by_the_rules_that_do_not_name_a_peer`).
     #[cfg(feature = "access-acl")]
     #[test]
-    fn a_client_with_a_malformed_zid_escapes_the_egress_acl() {
+    fn a_malformed_zid_no_longer_escapes_the_egress_acl() {
         let fwd = RouterForwarder::new(zid(0x01));
         // A peer publisher, a conformant client, and a client whose peer sent an
         // ALL-ZERO zid — accepted by the session (stored verbatim from INIT) and
@@ -6506,11 +6513,82 @@ mod tests {
         );
         assert_eq!(
             sink_bad.frame_count(),
-            1,
-            "open-debt 655: the same rule does NOT reach a client whose zid the \
+            0,
+            "open-debt 655 (R2347): the SAME rule reaches a client whose zid the \
              peer made unattributable — one deny rule, two clients, and the \
-             difference is bytes the peer chose"
+             bytes the peer chose no longer decide which of them it governs"
         );
+        assert_eq!(
+            fwd.interceptor_dropped(),
+            2,
+            "both relays are witnessed as dropped, so the second client was \
+             DENIED at the gate rather than never routed to at all — the \
+             distinction the frame count alone cannot make"
+        );
+    }
+
+    /// The control for [`a_malformed_zid_no_longer_escapes_the_egress_acl`]: the
+    /// SAME topology and the same unattributable client, under a rule that NAMES
+    /// a peer instead of saying `Any`.
+    ///
+    /// Without this, "both clients are denied" is equally explained by a repair
+    /// that denies every unattributable message outright, which is a different
+    /// (and worse) fix -- it would make a face that has merely not finished its
+    /// handshake undeliverable under any policy. Here the deny names the
+    /// publisher's zid, matches neither subscriber, and the allow default
+    /// carries both frames. So the previous test's zeros are attributable to the
+    /// rule applying, not to the subject being absent.
+    #[cfg(feature = "access-acl")]
+    #[test]
+    fn a_zid_targeted_egress_rule_does_not_reach_an_unattributable_client() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, _sink_a) = face(zid(0xAA), WIRE_PEER);
+        let (good, sink_good) = face(zid(0xCC), WIRE_CLIENT);
+        let (bad, sink_bad) = face(zid(0x00), WIRE_CLIENT);
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &good);
+        fwd.register(FaceId(2), &bad);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(1), declare_sub("demo/data"));
+        forward_one(&fwd, FaceId(2), declare_sub("demo/data"));
+        // Same keyexpr, same flow, same action as the deny that stopped both
+        // clients above — only the SUBJECT differs, and it names a peer that is
+        // neither of them.
+        fwd.set_interceptors(InterceptorConfig {
+            acl: Some(AclPolicy::new(AclConfig {
+                default_permission: Permission::Allow,
+                rules: vec![AclRule {
+                    subject: SubjectSelector::Zid(zid(0xAA)),
+                    key_exprs: vec!["demo/**".to_owned()],
+                    messages: vec![AclMessage::Put],
+                    flow: AclFlow::Egress,
+                    permission: Permission::Deny,
+                    link_protocols: Vec::new(),
+                    interfaces: Vec::new(),
+                }],
+            })),
+            ..Default::default()
+        });
+        sink_good.reset();
+        sink_bad.reset();
+
+        let push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
+            .expect("build push");
+        forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push)));
+
+        assert_eq!(
+            sink_good.frame_count(),
+            1,
+            "the rule names neither subscriber, so the conformant client is served"
+        );
+        assert_eq!(
+            sink_bad.frame_count(),
+            1,
+            "and the unattributable client is served too: R2347 subjected it to \
+             the rule set, it did not blanket-deny it"
+        );
+        assert_eq!(fwd.interceptor_dropped(), 0, "nothing dropped");
     }
 
     #[cfg(feature = "access-acl")]
