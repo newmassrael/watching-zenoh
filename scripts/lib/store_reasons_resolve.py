@@ -135,6 +135,27 @@ REASON_KEY = "reason"
 #: every claim resolved by never reading one.
 REASON_FLOOR = 100
 
+#: A MINIMUM on the live anchored population, and the one number here that is a
+#: ratchet rather than a shape check. R2339 raised it from 1 to 6 by anchoring
+#: `access-extauth-usrpwd`'s three residual clauses.
+#:
+#: Why a minimum can never produce a legitimate red, which is what makes this
+#: safe where a shrinking budget would not be: corrections to an inventory
+#: reason are APPENDED, never rewritten (the store's convention, and the reason
+#: R2337 withdrew a clause by adding a sentence rather than deleting one). An
+#: anchor once written therefore stays, so the count only ever grows. The only
+#: way under this floor is a rewrite that DELETES anchors -- which is the thing
+#: worth catching, because it is silent otherwise: without this, removing every
+#: anchor R2339 added would take the total from 9 back to 4 with both existing
+#: floors still satisfied and the gate still printing OK.
+#:
+#: It lives beside the live adjudication rather than in `check_floors` on
+#: purpose. Those floors ask whether a FORM is used at all and are unit-tested
+#: with synthetic counts; this asks a question about the real store, and mixing
+#: the two would make the classifier's own tests depend on how much of the
+#: track has been anchored so far.
+ANCHORED_FLOOR = 6
+
 
 class InputError(Exception):
     """The gate could not READ its input. rc 2 -- not a verdict about claims."""
@@ -294,6 +315,19 @@ def check_floors(counts: dict[str, int]) -> list[str]:
     return out
 
 
+def check_ratchet(counts: dict[str, int]) -> list[str]:
+    """The live-store ratchet. See `ANCHORED_FLOOR` for why a minimum is safe."""
+    if counts["anchored"] < ANCHORED_FLOOR:
+        return [
+            f"{counts['anchored']} anchored claim(s), under the floor of "
+            f"{ANCHORED_FLOOR}. Corrections to a reason are APPENDED, so this "
+            f"count only grows on its own -- a drop means a rewrite deleted "
+            f"anchors, and the residuals they pinned are ungraded again. "
+            f"Restore them; do not lower this number to match"
+        ]
+    return []
+
+
 def selftest() -> int:
     """Drive all three forms in BOTH directions over a synthetic upstream.
 
@@ -353,6 +387,27 @@ def selftest() -> int:
                 f"complaint(s), expected {want}"
             )
 
+    # The ratchet, driven on its own and in both directions. Expressed against
+    # the constant rather than a literal, so it keeps testing the boundary when
+    # a later round raises the floor.
+    for label, anchored, want in (
+        ("exactly on the floor", ANCHORED_FLOOR, 0),
+        ("one above the floor", ANCHORED_FLOOR + 1, 0),
+        ("one below the floor", ANCHORED_FLOOR - 1, 1),
+        ("anchors all deleted", 0, 1),
+    ):
+        got = len(check_ratchet({"anchored": anchored, "removed": 9, "absent": 9}))
+        if got != want:
+            failed += 1
+            print(
+                f"  store-reasons selftest FAIL: ratchet '{label}' raised {got} "
+                f"complaint(s), expected {want}"
+            )
+    # The ratchet must be able to fail at all -- a floor of zero never fires.
+    if ANCHORED_FLOOR <= 0:
+        failed += 1
+        print("  store-reasons selftest FAIL: ANCHORED_FLOOR cannot fire")
+
     # The store floor is an InputError, not a verdict.
     try:
         store_reasons(pathlib.Path("/nonexistent/store.json"))
@@ -367,7 +422,8 @@ def selftest() -> int:
         return 1
     print(
         "  store-reasons selftest OK -- three forms driven in both directions "
-        "over a synthetic upstream, and each floor emptied on its own"
+        "over a synthetic upstream, each floor emptied on its own, and the "
+        "anchored ratchet driven either side of its boundary"
     )
     return 0
 
@@ -395,7 +451,7 @@ def main(argv: list[str]) -> int:
         return 2
 
     failures, counts = adjudicate(reasons, texts, anchor.UPSTREAM_ROOTS)
-    floors = check_floors(counts)
+    floors = check_floors(counts) + check_ratchet(counts)
     total = sum(counts.values())
     print(
         f"  store-reasons: {total} anchored upstream claim(s) across "
