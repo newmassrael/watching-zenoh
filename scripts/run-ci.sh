@@ -2970,6 +2970,26 @@ PY
     # never execute.
     python3 scripts/lib/reason_citation_gate.py --selftest || return 1
     python3 scripts/lib/reason_citation_gate.py || return 1
+    # R2335 (unregistered open-debt item 15) — a lane may not claim of itself a
+    # term the test it runs has DENIED of itself. Layer C1aq's comment and the
+    # `ext-pubsub-advanced-publisher` atom's reason both described that lane's
+    # e2e as reaching further than it does, while the test's own doc said in as
+    # many words that it does not. R311y441 FOUND that, wrote it into the reason
+    # and fixed neither copy, so the claim outlived its own correction in two
+    # files. A correction that only describes an overstatement leaves the reader
+    # who greps for the claim finding the claim.
+    #
+    # The population is DERIVED on both sides and neither side is a word list:
+    # the terms come from the `not "<term>"` idiom this tree already writes in
+    # test docs (24 such denials on test fns), and the lanes from the `cargo
+    # test` invocations parsed out of every `layer_*()` body. Four counts FAIL
+    # at zero, because a scanner that quietly found nothing would exit 0 forever.
+    #
+    # BOTH SIDES ARE ON DISK, so it belongs here with its neighbours.
+    # `--selftest` first: the honest and the overstating lane are both fixtures,
+    # and a gate that cannot go red is worth nothing.
+    python3 scripts/lib/denied_term_lane_gate.py --selftest || return 1
+    python3 scripts/lib/denied_term_lane_gate.py || return 1
     # R2293 (unregistered open-debt item 625) — the TEST-DOUBLE WITNESS gate.
     # A test whose fixture cannot construct the input its branch needs measures
     # nothing, and R2289 walked into exactly that: nine mutations of the SHM
@@ -6566,12 +6586,29 @@ layer_c1ap_cargo_test_ext_pubsub_serde() {
 # R311y69: ext-pubsub-advanced-publisher (which pulls ext-pubsub-advanced-cache)
 # is off-default, so the default Layer C1 never compiles the advanced_publisher /
 # advanced_cache modules — this lane is their only run-site. It runs the
-# selector-filter + answer_from_ring unit tests AND the WIRE-LEVEL composed e2e
-# (a real loopback session.query through the declared cache queryable recovers
-# the three published sequenced samples — the R311y66 composition standard, not
-# a kernel-proxy), then clippy-gates the feature (incl the wz facade forward via
-# wz-runtime-tokio). query-get supplies the loopback get; pubsub-allow-loop the
-# loopback dispatch.
+# selector-filter + answer_from_ring unit tests AND the composed SESSION-API
+# LOOPBACK e2e (a real loopback session.query through the declared cache
+# queryable recovers the three published sequenced samples — the R311y66
+# composition standard, not a kernel-proxy), then clippy-gates the feature (incl
+# the wz facade forward via wz-runtime-tokio). query-get supplies the loopback
+# get; pubsub-allow-loop the loopback dispatch.
+#
+# R2335 — this comment used to claim a stronger reach for that e2e than the
+# test has, and the test's own doc had denied that term of itself all along:
+# SessionLocal dispatch stays in-process and does not traverse the
+# Push/Response codec. The doc on
+# `published_samples_recover_via_loopback_cache_query` is the oracle, and it
+# contradicted the lane that runs it. R311y441 found this and wrote it into the
+# atom's reason without fixing either copy, so the overstatement outlived its
+# own correction by many rounds — which is why the answer is a gate and not a
+# second note.
+#
+# A lane that OVERSTATES what it proves is worse than one that proves less,
+# because the overstatement is what stops anyone re-checking.
+# `scripts/lib/denied_term_lane_gate.py` (Layer C0) now derives that class: a
+# term a test denies of itself may not appear in the comment of a lane that
+# runs it. The denied phrase is deliberately NOT quoted above — a quotation of
+# it is still an occurrence of it, and the gate is right to say so.
 layer_c1aq_cargo_test_ext_pubsub_advanced() {
     _runci_guarded_test "C1aq advanced_" 16 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-publisher,query-get,pubsub-allow-loop \

@@ -717,6 +717,44 @@ if ! python3 scripts/lib/multicast_stop_wiring_gate.py; then
     exit 1
 fi
 
+# ─── gate 2s — a lane may not claim a term its test denies (R2335, item 15) ──
+# grades: worktree
+#
+# The `ext-pubsub-advanced-publisher` atom's residual list said Layer C1aq
+# proved a composed end-to-end reaching further than it does, and the lane's own
+# comment said the same, while the test both sentences describe denies that term
+# of itself in its doc. R311y441 FOUND that, wrote it into the atom's reason and
+# fixed neither copy, so the claim outlived its own correction by many rounds.
+#
+# Here for gate 2d's reasons, and the middle one again decides it: an
+# overstating COMMENT is not a failing test. Nothing compiles a comment, gate 3
+# runs the test happily either way, and the overstatement is precisely what
+# stops the next reader re-checking.
+#
+# UNCONDITIONAL, ~0.25s. Both populations are DERIVED and neither is a word
+# list: the terms come from the `not "<term>"` idiom already written in test
+# docs, the lanes from the `cargo test` invocations parsed out of every
+# `layer_*()` body. FOUR counts FAIL at zero, so no refactor can make this read
+# green by emptying it. Layer C0 runs the same script hosted.
+if ! python3 scripts/lib/denied_term_lane_gate.py --selftest >/dev/null; then
+    echo "" >&2
+    echo "pre-push: [gate 2s] denied-term-lane SELFTEST FAILED — the gate below" >&2
+    echo "          cannot be trusted to fail, so its silence means nothing." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+if ! python3 scripts/lib/denied_term_lane_gate.py; then
+    echo "" >&2
+    echo "pre-push: [gate 2s] denied-term-lane FAILED — a run-ci lane comment" >&2
+    echo "          claims of itself a term that a test the lane RUNS has" >&2
+    echo "          denied of itself, so the lane overstates what it proves." >&2
+    echo "          The line above names the lane and the denial's file:line." >&2
+    echo "          Reword the lane comment. Do not quote the denied phrase in" >&2
+    echo "          the repair — a quotation of it is still an occurrence." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+
 # ─── gate 2e — the scouting socket's movable axes (R2142, item 225) ──
 # grades: worktree
 #
