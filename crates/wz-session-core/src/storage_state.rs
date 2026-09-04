@@ -2595,6 +2595,57 @@ mod tests {
         }
 
         #[test]
+        fn all_mode_delete_hides_every_version_and_blocks_a_post_delete_older_put() {
+            // R2350 at the SEAM, not just inside the backend: the gate above
+            // an `All` storage is skipped (`latest_mode` false), so the
+            // ordering guarantee is the backend tombstone's alone. This is
+            // the sequence the foreign witness runs — put t=30, delete t=40,
+            // replay an older put t=20 — asserted here in process terms.
+            let mut s = all_state();
+            s.process_put(Some("demo/a"), vec![3], None, ts(30, 1))
+                .unwrap();
+            assert_eq!(
+                s.process_delete(Some("demo/a"), ts(40, 1)).unwrap(),
+                StorageInsertionResult::Deleted
+            );
+            // Every version is hidden from the query surfaces.
+            assert!(
+                s.matching_versions("demo/a").is_empty(),
+                "a deleted key is replied by no version"
+            );
+            assert!(s.matching_entries("demo/a").is_empty());
+            assert!(s.get(Some("demo/a")).is_none());
+
+            // The gate is still skipped — the replay is ACCEPTED, exactly as
+            // `all_mode_skips_the_newer_wins_gate_and_retains_every_version`
+            // asserts for the no-delete case. If this came back `Outdated`
+            // the tombstone would be acting as a gate, which is a different
+            // (and wrong) mechanism.
+            let replayed = s
+                .process_put(Some("demo/a"), vec![2], None, ts(20, 1))
+                .unwrap();
+            assert_ne!(
+                replayed,
+                StorageInsertionResult::Outdated,
+                "History::All has no newer-wins gate; the older put is stored"
+            );
+            // ...and yet it does NOT come back on a query, because it is
+            // stamped below the t=40 tombstone. Pre-R2350 the delete had
+            // dropped the timeline, so this put was the key's live value and
+            // a querier was served a value that had been deleted.
+            assert!(
+                s.matching_versions("demo/a").is_empty(),
+                "the post-delete older put is stored as history, not served"
+            );
+            assert!(s.get(Some("demo/a")).is_none());
+            assert_eq!(
+                s.backend().history_len(Some("demo/a")),
+                3,
+                "put t=30, tomb t=40 and the replayed put t=20 are all retained"
+            );
+        }
+
+        #[test]
         fn matching_versions_wildcard_returns_all_versions_per_matching_key() {
             let mut s = all_state();
             s.process_put(Some("demo/a"), vec![1], None, ts(10, 1))

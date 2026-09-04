@@ -29,18 +29,70 @@
 //! [`MemoryStorage`](crate::storage_backend::MemoryStorage)): `None` is the
 //! exact-prefix-match (mount-root) slot.
 //!
+//! ## Delete is a VERSIONED TOMBSTONE (R2350)
+//!
+//! A delete does NOT clear the key's versions. It appends a
+//! `Version::Tombstone` at its own timestamp, and the *live* view of a
+//! key is the suffix of its timeline after the newest tombstone. Two
+//! properties follow, and both are the point:
+//!
+//! - **History survives a delete.** `History::All` is defined as "saves
+//!   all the values including historical values"
+//!   (`zenoh-backend-traits/src/lib.rs:176-177`). A delete that dropped
+//!   the version list would keep the *latest* value semantics under an
+//!   `All` capability — the one thing the capability exists not to do.
+//! - **An out-of-order older Put cannot resurrect a deleted key.** With
+//!   no newer-wins gate above an `All` backend
+//!   (`storages_mgt/service.rs:318`, mirrored by
+//!   `crate::storage_state::StorageState::latest_mode`), the ordering
+//!   guarantee has to live *here*: a Put that lands at a timestamp at or
+//!   below the newest tombstone is stored as history but is not live, so
+//!   [`get`](crate::storage_backend::StorageBackend::get) and
+//!   [`get_versions`](crate::storage_backend::StorageBackend::get_versions)
+//!   do not serve it. A Put ABOVE the tombstone is live, which is how a
+//!   key comes back.
+//!
+//! Because the timeline is kept sorted by timestamp, "after the newest
+//! tombstone" is a SUFFIX, not a filter — see `HistoryStorage::live`.
+//!
+//! ### No upstream shape to copy — and why this is not a parity claim
+//!
+//! Measured against the pin (`zenoh` c479f0c, `plugins/`): `History::All`
+//! occurs in the whole upstream tree exactly once, in the doc comment that
+//! defines the enum (`zenoh-backend-traits/src/lib.rs:177`). EVERY
+//! `get_capability` upstream returns `History::Latest`
+//! (`memory_backend/mod.rs:61`, `zenoh-backend-example/src/lib.rs:72`,
+//! `zenoh-backend-traits/src/lib.rs:75`), and the storage manager REFUSES
+//! to replicate a non-`Latest` storage at all
+//! (`storages_mgt/mod.rs:86-93`). Upstream's own `StoredData`
+//! (`zenoh-backend-traits/src/lib.rs:192-197`) carries payload / encoding /
+//! timestamp and no kind, so an upstream `All` backend could not return a
+//! tombstone through `get` even if one existed. There is therefore no
+//! upstream `All`-delete behaviour to be faithful TO; this shape is
+//! answerable to wz's own
+//! [`History::All`](crate::storage_backend::History::All) declaration, and
+//! that is the ground it is justified on.
+//!
 //! ## Deliberate divergences (each layer/profile-driven)
 //!
-//! - **Delete clears the key's versions.** zenoh's `All`-capable backends
-//!   may keep a delete as a tombstone version; the minimal in-memory
-//!   backend removes the whole version list (the `History::Latest`
-//!   `delete` shape, lifted to the version list). Versioned tombstones
-//!   (a delete that survives in the history) are a refinement, alongside
-//!   the kernel GC / wildcard-override follow-ups.
 //! - **Exact-timestamp duplicate replaces.** Two versions with an
 //!   identical `(time, zid)` are the same logical event (uhlc timestamps
 //!   are unique per source-tick), so the later one replaces rather than
 //!   appends — the version list never holds two entries at one timestamp.
+//!   A delete and a put at one timestamp are likewise one event: the later
+//!   arrival wins the slot.
+//!
+//! ## Retention is the capability, not a leak
+//!
+//! A tombstone is kept for the life of the store, and so is every version
+//! it shadows. That is not a divergence from anything — it is what
+//! `History::All` says. Note it is also not NEW as of R2350: this backend
+//! already grew without bound on puts, since retaining every version is
+//! the whole capability. What R2350 changed is that a delete no longer
+//! frees the key. Bounding any of it (a retention window, a kernel GC) is
+//! a policy this backend deliberately does not invent — a `History::All`
+//! store that silently discarded history would be a `Latest` store with
+//! extra steps.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -53,14 +105,44 @@ use crate::storage_backend::{
 
 use crate::sample::timestamp_order_key;
 
-/// In-memory [`History::All`] [`StorageBackend`]: a
-/// `key -> Vec<StoredData>` map, each key's versions kept sorted by
-/// timestamp (newest last). The multi-version counterpart of
+/// One entry in a key's timeline: a stored value, or the tombstone a
+/// Delete leaves behind. Both carry the timestamp that orders them, and
+/// the timeline is kept sorted on it.
+///
+/// A tombstone is NOT a `StoredData` with an empty payload: an empty
+/// payload is a legitimate value, and the two must stay distinguishable —
+/// a querier that receives an empty Put has been told the key holds
+/// nothing, not that it was deleted.
+#[derive(Debug)]
+enum Version {
+    /// A value stored at this version's timestamp.
+    Put(StoredData),
+    /// A Delete at this timestamp; shadows every version at or below it.
+    Tombstone(TimestampHint),
+}
+
+impl Version {
+    /// The timestamp that orders this entry in its key's timeline.
+    fn timestamp(&self) -> &TimestampHint {
+        match self {
+            Version::Put(data) => &data.timestamp,
+            Version::Tombstone(ts) => ts,
+        }
+    }
+}
+
+/// In-memory [`History::All`] [`StorageBackend`]: a `key -> timeline` map,
+/// each key's `Version`s kept sorted by timestamp (newest last). The
+/// multi-version counterpart of
 /// [`MemoryStorage`](crate::storage_backend::MemoryStorage). Keyed on
 /// `Option<String>` (`None` = the exact-prefix-match slot).
+///
+/// A Delete appends a tombstone rather than clearing the timeline; see the
+/// module doc for why, and `Self::live` for the live/stored split that
+/// follows from it.
 #[derive(Debug, Default)]
 pub struct HistoryStorage {
-    map: BTreeMap<Option<String>, Vec<StoredData>>,
+    map: BTreeMap<Option<String>, Vec<Version>>,
 }
 
 impl HistoryStorage {
@@ -71,21 +153,75 @@ impl HistoryStorage {
         }
     }
 
-    /// The number of distinct keys currently stored (NOT the total version
-    /// count).
+    /// The LIVE suffix of one key's timeline: every version after the
+    /// NEWEST tombstone, or the whole timeline when the key was never
+    /// deleted. Contains only [`Version::Put`] by construction.
+    ///
+    /// A suffix rather than a filter because the timeline is sorted by
+    /// timestamp: everything a tombstone shadows is, by definition,
+    /// everything before it.
+    fn live(versions: &[Version]) -> &[Version] {
+        match versions
+            .iter()
+            .rposition(|v| matches!(v, Version::Tombstone(_)))
+        {
+            Some(newest_tombstone) => &versions[newest_tombstone + 1..],
+            None => versions,
+        }
+    }
+
+    /// Place `version` in `timeline`, keeping it sorted by `(time, zid)`.
+    /// An entry already at that exact timestamp is the same logical event,
+    /// so it is REPLACED (see the module doc's duplicate rule).
+    fn insert_version(timeline: &mut Vec<Version>, version: Version) {
+        match timeline.binary_search_by(|v| {
+            // The uhlc-faithful (time, 16-byte LE zid) key — the SSOT
+            // comparator the newer-wins gate also uses, so version ordering
+            // and the gate agree on what "newer" means.
+            timestamp_order_key(v.timestamp()).cmp(&timestamp_order_key(version.timestamp()))
+        }) {
+            Ok(pos) => timeline[pos] = version,
+            Err(pos) => timeline.insert(pos, version),
+        }
+    }
+
+    /// The number of distinct keys with a timeline (NOT the total version
+    /// count, and NOT the live-key count — a key whose newest version is a
+    /// tombstone still has a timeline and is still counted here).
     pub fn len(&self) -> usize {
         self.map.len()
     }
 
-    /// Whether the storage holds no keys.
+    /// Whether the storage holds no timeline at all. A deleted key still
+    /// has one, so this stays `false` after a delete — the history is the
+    /// point of an [`History::All`] backend.
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
     }
 
-    /// Total number of versions stored under `key` (0 if absent). `key` is
-    /// `None` for the exact-prefix-match slot.
+    /// Number of LIVE versions under `key` (0 if absent or deleted) — the
+    /// set a query replies. `key` is `None` for the exact-prefix-match
+    /// slot. For the retained history behind a tombstone see
+    /// [`Self::history_len`].
     pub fn version_count(&self, key: Option<&str>) -> usize {
+        self.map
+            .get(&key.map(String::from))
+            .map_or(0, |t| Self::live(t).len())
+    }
+
+    /// Total number of entries in `key`'s timeline, tombstones and
+    /// shadowed versions INCLUDED — the "all the values including
+    /// historical values" count. Always `>= version_count`.
+    pub fn history_len(&self, key: Option<&str>) -> usize {
         self.map.get(&key.map(String::from)).map_or(0, Vec::len)
+    }
+
+    /// Whether `key`'s newest timeline entry is a tombstone, i.e. the key
+    /// is deleted even though its history is retained.
+    pub fn is_deleted(&self, key: Option<&str>) -> bool {
+        self.map
+            .get(&key.map(String::from))
+            .is_some_and(|t| matches!(t.last(), Some(Version::Tombstone(_))))
     }
 }
 
@@ -102,22 +238,13 @@ impl StorageBackend for HistoryStorage {
             encoding,
             timestamp,
         };
-        let versions = self.map.entry(key.map(String::from)).or_default();
-        let existed = !versions.is_empty();
-        // The version list is maintained sorted by `(time, zid)`, so a
-        // binary search both locates an exact-timestamp duplicate (replace)
-        // and yields the insertion point that keeps the list ordered.
-        match versions
-            // Sorted by the uhlc-faithful (time, 16-byte LE zid) key — the
-            // SSOT comparator the newer-wins gate also uses, so version
-            // ordering and the gate agree on what "newer" means.
-            .binary_search_by(|v| {
-                timestamp_order_key(&v.timestamp).cmp(&timestamp_order_key(&data.timestamp))
-            }) {
-            Ok(pos) => versions[pos] = data,
-            Err(pos) => versions.insert(pos, data),
-        }
-        // Always `Ok`: an in-memory version list has no medium that can
+        let timeline = self.map.entry(key.map(String::from)).or_default();
+        // "Replaced" is about the LIVE value the caller would have read
+        // back, so a Put onto a deleted key reports `Inserted` — the key
+        // was absent, whatever its history holds.
+        let existed = !Self::live(timeline).is_empty();
+        Self::insert_version(timeline, Version::Put(data));
+        // Always `Ok`: an in-memory timeline has no medium that can
         // refuse the write (the `StorageWriteError` channel exists for the
         // backends that do).
         Ok(if existed {
@@ -127,29 +254,43 @@ impl StorageBackend for HistoryStorage {
         })
     }
 
-    fn delete(&mut self, key: Option<&str>, _timestamp: TimestampHint) -> StorageWriteResult {
-        // Minimal in-memory shape: a delete clears the whole version list
-        // (see the module-level divergence note on versioned tombstones).
-        self.map.remove(&key.map(String::from));
+    fn delete(&mut self, key: Option<&str>, timestamp: TimestampHint) -> StorageWriteResult {
+        // Append the tombstone instead of clearing the timeline (module
+        // doc). The entry is created even for a key never seen before: with
+        // no newer-wins gate above an `All` backend, this tombstone is the
+        // ONLY thing that can reject a Put that arrives later but is
+        // stamped earlier, so it has to be recorded whether or not the
+        // delete found a value.
+        let timeline = self.map.entry(key.map(String::from)).or_default();
+        Self::insert_version(timeline, Version::Tombstone(timestamp));
         Ok(StorageInsertionResult::Deleted)
     }
 
     fn get(&self, key: Option<&str>) -> Option<&StoredData> {
-        // The newest version (the list is sorted newest-last).
-        self.map
-            .get(&key.map(String::from))
-            .and_then(|versions| versions.last())
+        // The newest LIVE version (the timeline is sorted newest-last, and
+        // `live` drops everything the newest tombstone shadows).
+        self.map.get(&key.map(String::from)).and_then(|timeline| {
+            match Self::live(timeline).last() {
+                Some(Version::Put(data)) => Some(data),
+                // Unreachable by construction (`live` yields only Puts);
+                // written as a match rather than an unwrap so a future
+                // Version variant is a compile error, not a panic.
+                Some(Version::Tombstone(_)) | None => None,
+            }
+        })
     }
 
     fn get_all_entries(&self) -> Vec<(Option<String>, TimestampHint)> {
-        // One row per key, carrying its NEWEST timestamp (the wildcard scan
-        // only needs the key set; see the `get_all_entries` trait doc).
+        // One row per LIVE key, carrying its newest live timestamp. A
+        // deleted key is omitted, which is the contract every caller of
+        // this seam already relies on ("get_all_entries drops deleted
+        // keys", `crate::storage_state`): the wildcard-override scan and
+        // `matching_entries` both treat a returned key as present.
         self.map
             .iter()
-            .filter_map(|(k, versions)| {
-                versions
-                    .last()
-                    .map(|newest| (k.clone(), newest.timestamp.clone()))
+            .filter_map(|(k, timeline)| match Self::live(timeline).last() {
+                Some(Version::Put(newest)) => Some((k.clone(), newest.timestamp.clone())),
+                Some(Version::Tombstone(_)) | None => None,
             })
             .collect()
     }
@@ -159,9 +300,20 @@ impl StorageBackend for HistoryStorage {
     }
 
     fn get_versions(&self, key: Option<&str>) -> Vec<&StoredData> {
+        // The LIVE versions — the query reply set. Shadowed history is
+        // retained in the timeline but is not served: replying a version a
+        // newer tombstone deleted would tell a querier the key is alive.
         self.map
             .get(&key.map(String::from))
-            .map(|versions| versions.iter().collect())
+            .map(|timeline| {
+                Self::live(timeline)
+                    .iter()
+                    .filter_map(|v| match v {
+                        Version::Put(data) => Some(data),
+                        Version::Tombstone(_) => None,
+                    })
+                    .collect()
+            })
             .unwrap_or_default()
     }
 }
@@ -237,7 +389,9 @@ mod tests {
     }
 
     #[test]
-    fn delete_clears_the_version_list() {
+    fn delete_hides_the_versions_but_keeps_them_as_history() {
+        // R2350 — the tombstone replaces the old "delete clears the version
+        // list" shape. The key reads as absent; its history survives.
         let mut s = HistoryStorage::new();
         s.put(Some("demo/a"), vec![1], None, ts(10, 1)).unwrap();
         s.put(Some("demo/a"), vec![2], None, ts(20, 1)).unwrap();
@@ -245,9 +399,138 @@ mod tests {
             s.delete(Some("demo/a"), ts(30, 1)).unwrap(),
             StorageInsertionResult::Deleted
         );
-        assert_eq!(s.version_count(Some("demo/a")), 0);
-        assert!(s.get(Some("demo/a")).is_none());
-        assert!(s.is_empty());
+        // The LIVE view: gone.
+        assert_eq!(s.version_count(Some("demo/a")), 0, "no live version");
+        assert!(s.get(Some("demo/a")).is_none(), "reads as deleted");
+        assert!(
+            s.get_versions(Some("demo/a")).is_empty(),
+            "a query replies nothing for a deleted key"
+        );
+        assert!(
+            s.get_all_entries().is_empty(),
+            "the deleted key is dropped from the entry scan, the contract \
+             `matching_entries` / the wildcard-override scan rely on"
+        );
+        // The HISTORY view: retained. This is the whole difference from the
+        // pre-R2350 shape, where the version list was dropped outright.
+        assert!(s.is_deleted(Some("demo/a")));
+        assert_eq!(
+            s.history_len(Some("demo/a")),
+            3,
+            "two puts and the tombstone survive as history"
+        );
+        assert!(!s.is_empty(), "the key still has a timeline");
+    }
+
+    #[test]
+    fn a_post_delete_older_put_is_stored_but_does_not_resurrect_the_key() {
+        // The ordering guarantee an `All` backend has to carry ITSELF: with
+        // no newer-wins gate above it (`storage_state::latest_mode`), only
+        // the tombstone can reject a Put that arrives later but is stamped
+        // earlier. Pre-R2350 the delete had dropped the timeline, so this
+        // put became the key's live value.
+        let mut s = HistoryStorage::new();
+        s.put(Some("demo/a"), vec![3], None, ts(30, 1)).unwrap();
+        s.delete(Some("demo/a"), ts(40, 1)).unwrap();
+        assert_eq!(
+            s.put(Some("demo/a"), vec![2], None, ts(20, 1)).unwrap(),
+            StorageInsertionResult::Inserted,
+            "the key was absent, so the write is an insert, not a replace"
+        );
+        assert!(
+            s.get(Some("demo/a")).is_none(),
+            "a put stamped BELOW the tombstone must not resurrect the key"
+        );
+        assert!(s.get_versions(Some("demo/a")).is_empty());
+        assert_eq!(
+            s.history_len(Some("demo/a")),
+            3,
+            "it is still stored as history: put t=20, put t=30, tomb t=40"
+        );
+    }
+
+    #[test]
+    fn a_put_above_the_tombstone_is_live_again() {
+        // The other half of the ordering rule: the tombstone shadows what is
+        // at or BELOW it and nothing above, so a genuinely newer put brings
+        // the key back. Without this the tombstone would be a permanent
+        // grave rather than a version.
+        let mut s = HistoryStorage::new();
+        s.put(Some("demo/a"), vec![3], None, ts(30, 1)).unwrap();
+        s.delete(Some("demo/a"), ts(40, 1)).unwrap();
+        s.put(Some("demo/a"), vec![5], None, ts(50, 1)).unwrap();
+        assert_eq!(s.get(Some("demo/a")).unwrap().payload, vec![5]);
+        assert_eq!(
+            s.version_count(Some("demo/a")),
+            1,
+            "only the post-tombstone version is live"
+        );
+        assert!(!s.is_deleted(Some("demo/a")));
+        assert_eq!(
+            s.get_all_entries(),
+            vec![(Some(String::from("demo/a")), ts(50, 1))],
+            "the revived key is back in the entry scan at its live timestamp"
+        );
+        assert_eq!(s.history_len(Some("demo/a")), 3);
+    }
+
+    #[test]
+    fn an_older_delete_does_not_shadow_a_newer_put() {
+        // A delete is ordered like any other version, so one that arrives
+        // out of order lands BELOW the value it never applied to. Shadowing
+        // by arrival order rather than by timestamp would lose the value.
+        let mut s = HistoryStorage::new();
+        s.put(Some("demo/a"), vec![5], None, ts(50, 1)).unwrap();
+        s.delete(Some("demo/a"), ts(30, 1)).unwrap();
+        assert_eq!(
+            s.get(Some("demo/a")).unwrap().payload,
+            vec![5],
+            "the t=30 delete is older than the t=50 value it cannot delete"
+        );
+        assert!(!s.is_deleted(Some("demo/a")));
+    }
+
+    #[test]
+    fn delete_of_a_never_seen_key_records_the_tombstone() {
+        // The delete-before-put ordering case. `MemoryStorage` can no-op
+        // here because its gate keeps the tombstone (`StorageState::latest`);
+        // an `All` backend has no gate, so if the tombstone were not
+        // recorded a later, older put would be served.
+        let mut s = HistoryStorage::new();
+        assert_eq!(
+            s.delete(Some("demo/a"), ts(40, 1)).unwrap(),
+            StorageInsertionResult::Deleted
+        );
+        s.put(Some("demo/a"), vec![2], None, ts(20, 1)).unwrap();
+        assert!(
+            s.get(Some("demo/a")).is_none(),
+            "the recorded tombstone still shadows the older put"
+        );
+        assert_eq!(s.history_len(Some("demo/a")), 2);
+    }
+
+    #[test]
+    fn a_delete_and_a_put_at_one_timestamp_are_one_event() {
+        // The duplicate rule (module doc) covers tombstones too: the
+        // timeline never holds two entries at one timestamp, so the later
+        // arrival takes the slot. Left unhandled, a put and a delete at the
+        // same uhlc stamp would both sit in the timeline and `live` would
+        // depend on their insertion order.
+        let mut s = HistoryStorage::new();
+        s.put(Some("demo/a"), vec![1], None, ts(10, 1)).unwrap();
+        s.delete(Some("demo/a"), ts(10, 1)).unwrap();
+        assert_eq!(s.history_len(Some("demo/a")), 1, "one slot at t=10");
+        assert!(s.is_deleted(Some("demo/a")), "the delete arrived later");
+
+        let mut s = HistoryStorage::new();
+        s.delete(Some("demo/a"), ts(10, 1)).unwrap();
+        s.put(Some("demo/a"), vec![1], None, ts(10, 1)).unwrap();
+        assert_eq!(s.history_len(Some("demo/a")), 1);
+        assert_eq!(
+            s.get(Some("demo/a")).unwrap().payload,
+            vec![1],
+            "the put arrived later"
+        );
     }
 
     #[test]

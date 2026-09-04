@@ -568,7 +568,7 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # `--config their.json5`, and item 515 is the record that nothing foreign had
 # read the role it selects. Measured, not guessed: the audit read
 # `885, declared 882` with the file staged, which is exactly its three lines.
-FOREIGN_ADJUDICATOR_LINKS = 885
+FOREIGN_ADJUDICATOR_LINKS = 888
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

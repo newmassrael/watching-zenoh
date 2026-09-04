@@ -769,6 +769,68 @@ mod tests {
         }
 
         #[test]
+        fn answer_query_replies_nothing_after_a_delete_even_for_an_older_replay() {
+            // R2350 through the DRIVER's own reply path (`answer_into` ->
+            // `reply_keyed_stamped`), which is what a foreign querier
+            // actually receives. The three sibling tests here assert the
+            // versions that ARE replied; this one pins the set that is not.
+            let mut state = StorageState::new(HistoryStorage::new());
+            state.apply_sample(
+                &Sample::new_put("demo/a", vec![3]).with_timestamp(ts(30, 1)),
+                || unreachable!(),
+            );
+            state.apply_sample(
+                &Sample::new_del("demo/a").with_timestamp(ts(40, 1)),
+                || unreachable!(),
+            );
+            // The replay: strictly older than the delete, and accepted by the
+            // gate-free `All` path — but shadowed by the tombstone.
+            state.apply_sample(
+                &Sample::new_put("demo/a", vec![2]).with_timestamp(ts(20, 1)),
+                || unreachable!(),
+            );
+
+            let mut out = RecordingReplyOut::default();
+            state.answer_into(&query("demo/a"), &mut out);
+            assert!(
+                out.keyed.is_empty(),
+                "a deleted key must produce NO reply — neither the deleted \
+                 value nor the older replay. Got {:?}",
+                out.keyed
+            );
+            assert!(out.stamped.is_empty());
+        }
+
+        #[test]
+        fn answer_query_replies_versions_above_a_tombstone_only() {
+            // The complement: a delete does not silence the key forever, it
+            // shadows what it deleted. Without this the previous test would
+            // also pass on a backend that simply dropped every key it ever
+            // saw a delete for.
+            let mut state = StorageState::new(HistoryStorage::new());
+            state.apply_sample(
+                &Sample::new_put("demo/a", vec![3]).with_timestamp(ts(30, 1)),
+                || unreachable!(),
+            );
+            state.apply_sample(
+                &Sample::new_del("demo/a").with_timestamp(ts(40, 1)),
+                || unreachable!(),
+            );
+            state.apply_sample(
+                &Sample::new_put("demo/a", vec![5]).with_timestamp(ts(50, 1)),
+                || unreachable!(),
+            );
+
+            let mut out = RecordingReplyOut::default();
+            state.answer_into(&query("demo/a"), &mut out);
+            assert_eq!(
+                out.keyed,
+                vec![(String::from("demo/a"), vec![5])],
+                "only the post-tombstone version is replied"
+            );
+        }
+
+        #[test]
         fn answer_query_stamps_each_version_with_its_value_encoding_and_timestamp() {
             use wz_session_core::sample::EncodingHint;
             // Each version reply carries the timestamp that orders it AND the

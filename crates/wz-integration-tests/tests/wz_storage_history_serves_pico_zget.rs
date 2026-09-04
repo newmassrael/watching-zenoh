@@ -27,28 +27,47 @@
 //! does take a `?params` selector, but in this harness it received no replies at all
 //! — a separate question, not pursued here.)
 //!
-//! So this witnesses the GATE SKIP instead, which is the same capability seen through
-//! a single reply. Both legs run the IDENTICAL mutation sequence:
+//! Both legs run the IDENTICAL mutation sequence:
 //!
 //!   1. put `charlie` at t=3
 //!   2. DELETE at t=4
 //!   3. replay a STRICTLY OLDER put, `bravo` at t=2
 //!
-//! Under `History::Latest` the delete leaves a tombstone at t=4, so step 3 is
-//! rejected `Outdated` and the key stays gone: the foreign querier gets NO value.
-//! Under `History::All` there is no gate at all, so step 3 is accepted and becomes
-//! the key's live value: the foreign querier gets `bravo`. One reply either way, so
-//! the difference survives pico's consolidation — and `bravo` is a value that exists
-//! on the wire only because the gate was skipped.
+//! ## R2350 CHANGED WHAT THIS FILE WITNESSES, and the change is the point
 //!
-//! ## What makes it a cross-impl claim rather than wz agreeing with itself
+//! Until R2350 this file asserted that leg 1 (`History::All`) served `bravo` to
+//! pico. That was true, and it was the BUG the `storage-history` atom carried as
+//! its named residual: an `All` delete cleared the key's whole version list, so a
+//! put replayed underneath it became the key's live value and a real foreign
+//! querier was served a value that had been deleted. R2350 made a delete a
+//! VERSIONED TOMBSTONE (`wz_session_core::storage_history`), so `bravo` is stored
+//! as history and is NOT served. The assertion inverted because the behaviour it
+//! described was wrong — the witness had encoded the defect as the capability.
 //!
-//! The verdict wz computes in-process (`Outdated` vs accepted) is asserted too, but
-//! it is not the proof: the proof is that a real zenoh-pico client, over a real
-//! session, retrieves the value that verdict implies — the reply is built, encoded
-//! and accepted by a foreign decoder. The two legs differ ONLY in the backend passed
-//! to `declare_with_backend`, so the foreign-visible outcome tracks `history()` and
-//! nothing else.
+//! What the two legs still prove, foreign-side, is the TOMBSTONE: on either
+//! capability a real zenoh-pico client, over a real session, is served NO value
+//! for a key a delete removed — including the older replay that the gate-free
+//! `All` path accepts into storage. That is the residual's own correctness
+//! property, witnessed across an implementation boundary.
+//!
+//! ## `history()` is no longer observable HERE, and that is a measured claim
+//!
+//! The two legs' in-process verdicts still differ (`Outdated` under `Latest`,
+//! accepted under `All`) and are asserted, so the legs are not one test. Their
+//! FOREIGN observation, though, is now identical — and not because this sequence
+//! was chosen badly. At a LATEST-consolidating querier only the newest reply
+//! survives, and the newer-wins gate rejects only writes OLDER than the latest
+//! accepted one, which are by definition never the newest. So once deletes
+//! tombstone correctly, no single-key sequence can make the gate skip visible to
+//! such a querier: it was visible before R2350 only because the delete had erased
+//! everything above the replay.
+//!
+//! Reaching it needs a querier that asks for NONE consolidation, which pico's
+//! `z_get` cannot: it hardcodes empty selector parameters
+//! (`examples/unix/c11/z_get.c:98`, `z_get(..., "", ...)`) and its getopt string
+//! `"k:v:e:m:l:"` (:124) has no consolidation flag. `wz_storage_history_versions_
+//! to_a_zenoh_zget.rs` is the leg that does reach it, through zenoh's own `z_get`
+//! and a `_time` selector parameter.
 //!
 //! ## Non-flaky by construction ([[feedback-no-flaky-ever]])
 //!
@@ -96,9 +115,10 @@ const QUERY_KEY: &str = "demo/hist";
 /// The value stored at t=3 and then deleted at t=4. Must be ABSENT from both legs'
 /// replies — the delete removed it on either capability.
 const V_DELETED: &str = "history-version-charlie";
-/// The STRICTLY OLDER value replayed at t=2 after the delete. Its fate IS the
-/// capability: accepted under `History::All`, rejected `Outdated` under
-/// `History::Latest`.
+/// The STRICTLY OLDER value replayed at t=2 after the delete. Its IN-PROCESS fate
+/// is the capability — accepted under `History::All`, rejected `Outdated` under
+/// `History::Latest` — but on NEITHER capability may it reach the querier: under
+/// `All` the t=4 tombstone shadows it (R2350), under `Latest` the gate refused it.
 const V_OLDER: &str = "history-version-bravo";
 /// pico `z_get`'s terminator, printed whether or not any reply arrived
 /// (`examples/unix/c11/z_get.c`). The readiness edge for both legs.
@@ -249,9 +269,11 @@ where
     assert!(
         matches!(deleted, StorageInsertionResult::Deleted),
         "the t=4 delete did not land ({deleted:?}); without it there is no tombstone \
-         (Latest) and no cleared version list (All) for the replay to run against"
+         for the replay to run against — in the gate record under Latest, in the \
+         version timeline under All (R2350)"
     );
-    // The discriminating mutation. Its verdict IS the capability.
+    // The discriminating mutation. Its IN-PROCESS verdict is the capability; both
+    // legs must keep it away from the querier.
     let replayed_older = seed_put(2, V_OLDER);
 
     let timeouts = SessionTimeouts::spec_defaults();
@@ -332,50 +354,64 @@ where
     }
 }
 
-/// Leg 1 — the PROOF: on a `History::All` storage the newer-wins gate is SKIPPED, so
-/// a put replayed AFTER a newer delete is accepted, and a real pico `z_get` retrieves
-/// that older value over the wire.
+/// Leg 1 — the PROOF (R2350): on a `History::All` storage the newer-wins gate is
+/// SKIPPED, so a put replayed AFTER a newer delete is ACCEPTED INTO STORAGE — and
+/// a real pico `z_get` is still served nothing, because the t=4 tombstone shadows
+/// it.
 ///
-/// `bravo` can only reach a foreign querier if the gate was skipped: it is strictly
-/// older than the t=4 delete that preceded it.
+/// Both halves are needed. The acceptance is what makes this an `All` storage at
+/// all; the absence is what makes the acceptance safe. Before R2350 the second
+/// half was false: the delete had cleared the version list, so the replay was the
+/// key's only version and pico was served a deleted value.
 // wz-proves: storage-history wz->pico
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "binary-dep e2e (zenoh-pico CLI z_get); Layer E runs via --ignored"]
-async fn wz_history_storage_serves_a_post_delete_older_put_to_a_pico_zget() {
+async fn wz_history_storage_accepts_a_post_delete_older_put_but_serves_pico_nothing() {
     let leg = pico_zget_after_delete_then_older_put(HistoryStorage::new()).await;
 
     assert!(
         !matches!(leg.replayed_older, StorageInsertionResult::Outdated),
         "a History::All storage has NO newer-wins gate (zenoh gates it on \
-         `history == History::Latest`, storages_mgt/service.rs:319), so the t=2 put \
-         after the t=4 delete must be accepted; got {:?}",
+         `history == History::Latest`, storages_mgt/service.rs:318), so the t=2 put \
+         after the t=4 delete must be accepted into storage; got {:?}",
         leg.replayed_older
     );
+    // The terminator first, so both absences below are completed observations
+    // rather than "nothing yet".
     assert!(
-        leg.pico_stdout.contains(V_OLDER),
-        "pico z_get did not receive the post-delete older value {V_OLDER:?}. Only a \
-         gate-skipping History::All storage can serve it — under Latest the t=4 \
-         tombstone would have rejected it — so its absence means the gate ran.\n\
-         --- captured stdout ---\n{}",
+        leg.pico_stdout.contains(PICO_QUERY_FINAL),
+        "the terminator must be present for the absences below to be a completed \
+         observation.\n--- captured stdout ---\n{}",
+        leg.pico_stdout
+    );
+    assert!(
+        !leg.pico_stdout.contains(V_OLDER),
+        "pico z_get received the post-delete older value {V_OLDER:?}. It is stamped \
+         BELOW the t=4 delete, so the R2350 tombstone must shadow it: storing it as \
+         history is right, serving it is not. Its presence means the delete dropped \
+         the timeline instead of tombstoning it \
+         (wz_session_core::storage_history).\n--- captured stdout ---\n{}",
         leg.pico_stdout
     );
     assert!(
         !leg.pico_stdout.contains(V_DELETED),
-        "pico z_get received the DELETED value {V_DELETED:?}. wz's HistoryStorage \
-         delete clears the whole version list (a self-documented divergence from a \
-         versioned tombstone, storage_history.rs:34-39), so nothing from before the \
-         t=4 delete may come back.\n--- captured stdout ---\n{}",
+        "pico z_get received the DELETED value {V_DELETED:?}. It sits below the same \
+         t=4 tombstone, so nothing from before the delete may come back.\n\
+         --- captured stdout ---\n{}",
         leg.pico_stdout
     );
 }
 
 /// Leg 2 — the TWIN: the IDENTICAL sequence on the `History::Latest` `MemoryStorage`
-/// leaves the key GONE, and the same pico binary retrieves no value at all.
+/// leaves the key GONE by the OTHER mechanism — the newer-wins gate — and the same
+/// pico binary retrieves no value at all.
 ///
-/// This is what makes leg 1 a statement about the capability rather than about the
-/// harness: same key, same three mutations, same querier — only `history()` differs.
-/// It is also the direction that would silently pass if the gate were skipped
-/// unconditionally, i.e. if `latest_mode` were ignored.
+/// Since R2350 the two legs' FOREIGN observation agrees (see the module doc: at a
+/// LATEST-consolidating querier it must). What this leg still separates is the
+/// mechanism: it asserts the `Outdated` verdict leg 1 asserts the absence of, so a
+/// build that skipped the gate unconditionally — `latest_mode` ignored — reds here
+/// while leg 1 stays green. Without it, leg 1 alone would pass on a storage that
+/// had no gate at all.
 // wz-proves: storage-history wz->pico
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "binary-dep e2e (zenoh-pico CLI z_get); Layer E runs via --ignored"]
