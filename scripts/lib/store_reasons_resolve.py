@@ -141,7 +141,15 @@ REASON_FLOOR = 100
 #: `access-acl`'s two, which sit on the same seam -- one of them is the ACL
 #: subject axis that the usrpwd atom's discarded username feeds; R2341 to 15 by
 #: anchoring `session-extauth`'s three, the layer under both, where the pubkey
-#: method's config and runtime surfaces had never been anchored at all.
+#: method's config and runtime surfaces had never been anchored at all; R2342
+#: to 19 on `router-multicast-faces`, which also gave `@ REMOVED` its FIRST live
+#: subject -- the file that atom cited for its whole first clause is gone from
+#: the pinned tree while the capability it named simply moved.
+#:
+#: The floor counts `anchored` only, deliberately. `removed` and `absent` have
+#: their own floors, and those ask whether the FORM has a subject at all; a
+#: minimum on them would have been a number nobody could satisfy for the twelve
+#: rounds `removed` sat at zero.
 #:
 #: Why a minimum can never produce a legitimate red, which is what makes this
 #: safe where a shrinking budget would not be: corrections to an inventory
@@ -158,7 +166,7 @@ REASON_FLOOR = 100
 #: with synthetic counts; this asks a question about the real store, and mixing
 #: the two would make the classifier's own tests depend on how much of the
 #: track has been anchored so far.
-ANCHORED_FLOOR = 15
+ANCHORED_FLOOR = 19
 
 
 class InputError(Exception):

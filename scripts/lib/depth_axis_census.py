@@ -207,10 +207,25 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # touched, by running this file's own classifier over the draft, which is the
 # step R2340's carry added to the procedure. That step has now paid for itself
 # on its first use; the repair was again in the sentence, not in a pin.
+# R2342 — 415 -> 416, ONE citation, from `router-multicast-faces`'s appended
+# CORRECTION. Its third clause is a claim about this tree alone (the multicast
+# egress core is gated on the transport feature rather than on the atom's own,
+# so turning the atom off leaves the plane in place), and the correction names
+# the file that carries it. Everything else that correction adds is upstream.
+#
+# Worth recording for whoever reads that atom next: the four line numbers the
+# clause cites have ALL drifted, and this file's own wz-citation check cannot
+# see it. The check asks whether a cited line is past the end of its file; the
+# file is 13060 lines and the four are at :527, :542, :2736 and :2757, so every
+# one of them resolves, is in range, and points at something else. That is the
+# same rot R2339-R2341 measured in UPSTREAM citations, here in wz ones -- which
+# is worth saying explicitly, because "415 wz citation(s) resolve and none
+# points past its file's end" is a true sentence that sounds like more than it
+# is.
 PIN_REACHED = 72
 PIN_UNREACHED = 2
 PIN_NO_SYMBOL = 10
-PIN_WZ_CITATIONS = 415
+PIN_WZ_CITATIONS = 416
 PIN_AMBIGUOUS = 85
 
 
