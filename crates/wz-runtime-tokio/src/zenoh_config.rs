@@ -1691,6 +1691,54 @@ pub const WZ_EXTENSION_CONFIG_KEYS: &[&str] = &[
 /// it would report itself ignored while acting on it.
 pub const WZ_EXTENSION_HONOURED_KEYS: &[&str] = &["routing/peer/mode"];
 
+/// R2336 (open-debt item 15, atom `access-extauth-pubkey`) — keys the pinned
+/// upstream DECLARES and SERIALISES and whose value no upstream code ever
+/// reads.
+///
+/// # The fourth state, and why the third list could not hold it
+///
+/// [`WZ_EXTENSION_CONFIG_KEYS`] exists because a key upstream parses and
+/// DISCARDS is not a capability wz is failing to reach, and counting it as
+/// surface makes the fraction that surface yields unreadable. That argument is
+/// about CONSUMPTION. The instrument R2230 built to enforce it is about
+/// SERIALIZATION: `upstream_carries_the_surface.py` asks the daemon for its own
+/// resolved config, and a retired key is `#[serde(skip_serializing)]` so it does
+/// not appear. The two coincide for a `#[deprecated]` shim and come apart here.
+///
+/// `transport/auth/pubkey/key_size` and `known_keys_file` are ordinary
+/// `Option<usize>` / `Option<String>` fields of `PubKeyConf`. A real zenohd
+/// resolves them, prints them, and accepts a file that sets them — so the
+/// serializer says CARRIED — and then no line of upstream ever looks at either.
+/// `AuthPubKey::from_config` reads the four PEM fields beside them and ends at
+/// `// @TODO: populate lookup file`; nothing constructs a key of `key_size`
+/// bits, because nothing upstream generates a pubkey-auth keypair at all.
+/// MEASURED over the pinned checkout: each leaf identifier occurs exactly ONCE
+/// in 647 `.rs` files, on its own declaration line.
+///
+/// # Why this is not an escape hatch
+///
+/// This is the list shape that lets a later round shrink a denominator to make
+/// a check green, so membership is ADJUDICATED in both directions and by two
+/// independent things, neither of them prose:
+///
+/// * `scripts/lib/upstream_reads_the_surface.py` derives the population from
+///   these constants and greps the pinned upstream SOURCE. A surface key with
+///   no read reds (it belongs here); a key here WITH a read reds (it belongs on
+///   the surface); a key here whose leaf upstream does not declare at all reds
+///   as undecidable rather than being tolerated.
+/// * `the_upstream_config_surface_zenohd_resolves_is_enumerated_and_accounted_for`
+///   requires every member to appear in a running zenohd's own resolved config.
+///   A name upstream does not resolve cannot be parked here.
+///
+/// The wz-side half — that an operator's file naming these still STARTS a wz
+/// node and is told the keys did nothing — is
+/// `an_inert_key_is_accepted_and_reported_ignored`, which needs no zenohd and
+/// runs in every lane that compiles this crate.
+pub const UPSTREAM_INERT_CONFIG_KEYS: &[&str] = &[
+    "transport/auth/pubkey/key_size",
+    "transport/auth/pubkey/known_keys_file",
+];
+
 /// Every leaf key the pinned real zenoh resolves that wz does NOT honour.
 ///
 /// Together with [`HONOURED_CONFIG_KEYS`] this is the UPSTREAM CONFIG SURFACE
@@ -1782,8 +1830,12 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     // filter on.
     "stats/filters",
     "timestamping/drop_future_timestamp",
-    "transport/auth/pubkey/key_size",
-    "transport/auth/pubkey/known_keys_file",
+    // R2336 (open-debt item 15, `access-extauth-pubkey`) —
+    // `transport/auth/pubkey/key_size` and `known_keys_file` LEFT this list,
+    // for [`UPSTREAM_INERT_CONFIG_KEYS`]. The pinned upstream declares and
+    // SERIALISES both and READS neither: each leaf identifier occurs exactly
+    // once in the whole checkout, on its own declaration line. Their four PEM
+    // siblings below stay, because `AuthPubKey::from_config` reads all four.
     "transport/auth/pubkey/private_key_file",
     "transport/auth/pubkey/private_key_pem",
     "transport/auth/pubkey/public_key_file",
@@ -1978,8 +2030,10 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     // doc already records that even a per-priority split is a later extension.
     "stats/filters",
     "timestamping/drop_future_timestamp",
-    "transport/auth/pubkey/key_size",
-    "transport/auth/pubkey/known_keys_file",
+    // R2336 (open-debt item 15) — `key_size` / `known_keys_file` left the
+    // SURFACE, so they left this half of its partition with it. They are
+    // [`UPSTREAM_INERT_CONFIG_KEYS`]: still accepted, still reported ignored,
+    // no longer counted as something upstream does.
     "transport/auth/pubkey/private_key_file",
     "transport/auth/pubkey/private_key_pem",
     "transport/auth/pubkey/public_key_file",
@@ -2180,8 +2234,10 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
         "a credential store",
         "CredentialStore",
         &[
-            "transport/auth/pubkey/key_size",
-            "transport/auth/pubkey/known_keys_file",
+            // R2336 (open-debt item 15) — `key_size` / `known_keys_file` are
+            // [`UPSTREAM_INERT_CONFIG_KEYS`] now, so they are no longer part of
+            // the population this grouping has to cover. Upstream has no
+            // credential store behind either: nothing reads them.
             "transport/auth/pubkey/private_key_file",
             "transport/auth/pubkey/private_key_pem",
             "transport/auth/pubkey/public_key_file",
@@ -2468,11 +2524,12 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
         "set_gossip_multihop",
     ),
     ("scouting/gossip/target", "wz-has-it", "set_gossip_target"),
-    (
-        "transport/auth/pubkey/known_keys_file",
-        "foreign-node-config",
-        "zenohd",
-    ),
+    // R2336 (open-debt item 15) — the `transport/auth/pubkey/known_keys_file`
+    // row left with the key. This ledger's population is the UNHONOURED
+    // SURFACE, and the key is [`UPSTREAM_INERT_CONFIG_KEYS`] now; wz's source
+    // still spells it, and what those citations say is precisely that upstream
+    // never implemented it (`// @TODO: populate lookup file`), which is the
+    // classification rather than a gap in it.
     (
         "transport/auth/pubkey/private_key_file",
         "foreign-node-config",
@@ -2822,6 +2879,11 @@ fn wz_accepts(path: &str) -> bool {
         .iter()
         .chain(UNHONOURED_UPSTREAM_CONFIG_KEYS)
         .chain(WZ_EXTENSION_CONFIG_KEYS)
+        // R2336 (open-debt item 15) — an INERT key left the surface because
+        // upstream reads it nowhere, NOT because wz stopped taking it. Dropping
+        // it from this chain would make wz refuse a file a real zenohd starts
+        // on, which is the same trade R2230 refused for the extension list.
+        .chain(UPSTREAM_INERT_CONFIG_KEYS)
         .any(|known| path == *known)
         || HONOURED_SUBTREE_LEAVES.contains(&path)
         || DEEPENABLE_UPSTREAM_KEYS.iter().any(under)
@@ -5218,7 +5280,18 @@ mod tests {
         // leg against a running zenohd is what found them. Netting them against
         // the three that left would have reported "the surface moved by 4" and
         // hidden both events; they are recorded as what they are.
-        assert_eq!(total, 115);
+        //
+        // R2336 (open-debt item 15, atom `access-extauth-pubkey`) — 115 -> 113.
+        // `transport/auth/pubkey/key_size` and `known_keys_file` are
+        // `UPSTREAM_INERT_CONFIG_KEYS`: the pinned upstream declares and
+        // SERIALISES both — so `upstream_carries_the_surface.py` calls them
+        // carried, correctly — and READS neither, each leaf occurring exactly
+        // once in 647 upstream `.rs` files, on its own declaration line.
+        // Lowering this pin is legitimate here for the reason the paragraph
+        // above demands: beside a measurement, and the measurement is
+        // `scripts/lib/upstream_reads_the_surface.py`, which reds if a surface
+        // key has no upstream reader OR an inert key has one.
+        assert_eq!(total, 113);
         let mut unhonoured = UNHONOURED_UPSTREAM_CONFIG_KEYS.to_vec();
         unhonoured.sort_unstable();
         assert_eq!(
@@ -5339,6 +5412,93 @@ mod tests {
                     "{key} is reported both applied and ignored"
                 );
             }
+        }
+    }
+
+    /// R2336 (open-debt item 15) — the wz-side half of
+    /// [`UPSTREAM_INERT_CONFIG_KEYS`], written to the shape of the extension
+    /// test above because it guards the same failure: a list that exempts keys
+    /// from a denominator is the cheapest way to make a surface check green.
+    ///
+    /// What this can assert is what wz does — the list is non-empty, sorted,
+    /// disjoint from every other bucket, and each member still LOADS and is
+    /// REPORTED. What it cannot assert is the claim the keys were moved on,
+    /// because nothing in this crate knows whether upstream reads a key;
+    /// `scripts/lib/upstream_reads_the_surface.py` greps the pinned checkout
+    /// for that, in both directions. A claim about zenoh is adjudicated by
+    /// zenoh's source, a claim about wz by wz.
+    ///
+    /// The DROP-IN half is the load, not the list. These two keys left the
+    /// surface for a reason that is entirely about upstream, so an operator's
+    /// file that names them must go on starting a wz node exactly as before —
+    /// if the move had cost that, it would have bought a denominator with the
+    /// project's actual goal.
+    #[test]
+    fn an_inert_key_is_accepted_and_reported_ignored() {
+        assert!(
+            !UPSTREAM_INERT_CONFIG_KEYS.is_empty(),
+            "an empty inert list would make every check below vacuous"
+        );
+        let mut sorted = UPSTREAM_INERT_CONFIG_KEYS.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            sorted,
+            UPSTREAM_INERT_CONFIG_KEYS.to_vec(),
+            "the inert list is sorted and unique, like every list beside it"
+        );
+        for key in UPSTREAM_INERT_CONFIG_KEYS {
+            assert!(
+                !HONOURED_CONFIG_KEYS.contains(key)
+                    && !UNHONOURED_UPSTREAM_CONFIG_KEYS.contains(key)
+                    && !WZ_EXTENSION_CONFIG_KEYS.contains(key),
+                "{key} is inert AND in another bucket — it would be counted in \
+                 the denominator it was moved out of"
+            );
+        }
+
+        // Driven with the value shape upstream's own `PubKeyConf` declares, so
+        // a pass means wz took the document an operator actually writes. A
+        // nonsense shape would prove only that wz did not crash.
+        const DOCS: &[(&str, &str)] = &[
+            (
+                "transport/auth/pubkey/key_size",
+                r#"{ "transport": { "auth": { "pubkey": { "key_size": 2048 } } } }"#,
+            ),
+            (
+                "transport/auth/pubkey/known_keys_file",
+                r#"{ "transport": { "auth": { "pubkey": {
+                     "known_keys_file": "/etc/zenoh/known_keys" } } } }"#,
+            ),
+        ];
+        let covered: Vec<&str> = DOCS.iter().map(|(k, _)| *k).collect();
+        assert_eq!(
+            covered,
+            UPSTREAM_INERT_CONFIG_KEYS.to_vec(),
+            "a key added to the inert list without a loading fixture would be \
+             exempted from the surface AND unproven as accepted"
+        );
+
+        for (key, doc) in DOCS {
+            let ingest = ZenohNodeConfig::from_json5(doc).unwrap_or_else(|e| {
+                panic!("{key}: wz refused a file a real zenohd starts on: {e}")
+            });
+            assert!(
+                ingest.ignored.iter().any(|p| p == key),
+                "{key} is inert, so the operator has to be told it did \
+                 nothing; ignored was {:?}",
+                ingest.ignored
+            );
+            assert!(
+                !ingest.named.contains(key),
+                "{key} is reported both applied and ignored"
+            );
+            assert_eq!(
+                ingest.config,
+                ZenohNodeConfig::default(),
+                "{key} is inert upstream; wz must not grow a behaviour behind \
+                 a key that means nothing to the node it is replacing"
+            );
         }
     }
 

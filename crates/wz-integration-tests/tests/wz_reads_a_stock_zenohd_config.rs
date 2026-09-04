@@ -80,7 +80,8 @@ use wz_integration_tests::wire_tap::{synthesise_pcap, tap_proxy, Recording};
 use wz_runtime_tokio::zenoh_config::{
     default_listen_endpoint, ZenohNodeConfig, CONFIG_KEYS_PROVEN_ON_THE_WIRE, DAEMON_DEFAULT_MODE,
     DEEPENABLE_UPSTREAM_KEYS, HONOURED_CONFIG_KEYS, LIBRARY_DEFAULT_MODE,
-    UNHONOURED_UPSTREAM_CONFIG_KEYS, WZ_EXTENSION_CONFIG_KEYS, WZ_EXTENSION_HONOURED_KEYS,
+    UNHONOURED_UPSTREAM_CONFIG_KEYS, UPSTREAM_INERT_CONFIG_KEYS, WZ_EXTENSION_CONFIG_KEYS,
+    WZ_EXTENSION_HONOURED_KEYS,
 };
 use wz_runtime_tokio_test_support::zenoh_interop_session_init_params;
 use wz_session_core::dissect::{dissect_transport_message, FieldValue};
@@ -3017,11 +3018,33 @@ fn the_upstream_config_surface_zenohd_resolves_is_enumerated_and_accounted_for()
         .iter()
         .filter(|p| HONOURED_CONFIG_KEYS.contains(&p.as_str()))
         .collect();
+    // R2336 (open-debt item 15) — the INERT keys are subtracted here and
+    // adjudicated below, not silently skipped. They ARE in this dump; the whole
+    // reason they needed a fourth list is that upstream's serializer carries
+    // them while upstream's code never reads them, so the daemon can prove they
+    // exist and cannot prove they do anything.
     let unhonoured: Vec<&str> = upstream
         .iter()
-        .filter(|p| !HONOURED_CONFIG_KEYS.contains(&p.as_str()))
+        .filter(|p| {
+            !HONOURED_CONFIG_KEYS.contains(&p.as_str())
+                && !UPSTREAM_INERT_CONFIG_KEYS.contains(&p.as_str())
+        })
         .map(String::as_str)
         .collect();
+    // A name upstream does not resolve cannot be parked in the inert list. This
+    // is the direction that makes the list an exemption: without it, a later
+    // round could quiet any surface check by writing a key here that upstream
+    // has never heard of.
+    let unresolved: Vec<&&str> = UPSTREAM_INERT_CONFIG_KEYS
+        .iter()
+        .filter(|k| !upstream.iter().any(|p| p == *k))
+        .collect();
+    assert!(
+        unresolved.is_empty(),
+        "an inert key a real zenohd does not resolve at all: {unresolved:?} — \
+         it is not upstream surface being exempted, it is a name upstream does \
+         not have, and that needs a decision rather than a list entry"
+    );
 
     // Every key wz claims to honour must actually be IN the upstream surface —
     // a honoured key upstream does not have is wz reading a path that no zenoh
@@ -3044,7 +3067,7 @@ fn the_upstream_config_surface_zenohd_resolves_is_enumerated_and_accounted_for()
         "the upstream config surface moved"
     );
     assert_eq!(
-        honoured.len() + unhonoured.len(),
+        honoured.len() + unhonoured.len() + UPSTREAM_INERT_CONFIG_KEYS.len(),
         upstream.len(),
         "the partition lost a key"
     );

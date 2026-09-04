@@ -2637,6 +2637,18 @@ PY
     #
     # Milliseconds, no binary, no source tree. Layer Z runs the adjudication.
     python3 scripts/lib/upstream_carries_the_surface.py --selftest || return 1
+    # R2336 (open-debt item 15, atom `access-extauth-pubkey`) — the same split
+    # for the gate BESIDE that one. `upstream_carries_the_surface.py` asks
+    # upstream's SERIALIZER whether a key exists; this asks upstream's SOURCE
+    # whether anything READS it, and the two come apart on an ordinary field
+    # nobody consumes (`transport/auth/pubkey/key_size`, measured: one mention
+    # in 647 upstream files, its own declaration). A denominator that counts
+    # such a key debits wz for a capability upstream does not have either.
+    #
+    # This arm is the classifier, driven in BOTH directions plus the two
+    # population floors, over a synthetic upstream with no checkout at all.
+    # Layer Z runs the adjudication against the pinned source.
+    python3 scripts/lib/upstream_reads_the_surface.py --selftest || return 1
     # R311y605 — the DISSECT FEATURE CENSUS, the name census's sibling one level
     # up. `dissect`'s doc says it selects the whole codec-* MID space so "an
     # observer reads every message it sees", and the claim had been wrong THREE
@@ -13921,6 +13933,41 @@ layer_z_zenohd_interop() {
              "above for which key and which direction. ⛔ The fix is NEVER to" \
              "widen WZ_EXTENSION_CONFIG_KEYS to quiet it: that list is judged by" \
              "this same check."
+        return 1
+    fi
+    # R2336 (open-debt item 15, atom `access-extauth-pubkey`) — the ADJUDICATION
+    # arm of the gate beside the one above, here rather than in C0 for the same
+    # reason the citation gate's resolution arm is: it needs a zenoh SOURCE
+    # tree, and this is the lane that provisions one.
+    #
+    # It asks the question the check above structurally cannot. That one reads
+    # upstream's own serializer, which is exactly right for a `#[deprecated]`
+    # shim marked `skip_serializing` — and blind to an ORDINARY field that
+    # serialises like every other and whose value nothing upstream ever reads.
+    # `transport/auth/pubkey/key_size` and `known_keys_file` are that: resolved,
+    # printed, accepted, and consumed by no line of zenoh. Counting them as
+    # surface debits wz for capabilities upstream does not have either, which is
+    # the exact harm R2230 built the extension list to prevent.
+    #
+    # It also adjudicates `UPSTREAM_INERT_CONFIG_KEYS` in both directions, so
+    # the cheapest way to green this — move the offending key into the exempt
+    # list — reds instead: a key there that upstream DOES read is a FAIL, and so
+    # is one whose leaf upstream does not declare at all.
+    python3 scripts/lib/upstream_reads_the_surface.py
+    local reads_rc=$?
+    if [[ $reads_rc -eq 2 ]]; then
+        echo "  Z FAIL: the surface/upstream-source comparison could not READ" \
+             "its input, so NOTHING was graded — this is not a claim about the" \
+             "lists. The lines above name what was missing (the constants or a" \
+             "zenoh source checkout at the pin). A gate that cannot read its" \
+             "input must not report green."
+        return 1
+    elif [[ $reads_rc -ne 0 ]]; then
+        echo "  Z FAIL: a key wz counts as upstream config surface is one the" \
+             "pinned upstream never reads, or a key declared inert is one it" \
+             "does — see the lines above for which and which direction." \
+             "⛔ The fix is NEVER to widen UPSTREAM_INERT_CONFIG_KEYS to quiet" \
+             "it: that list is judged by this same check."
         return 1
     fi
     # R2162 (unregistered open-debt item 199) — the UPSTREAM arm of the
