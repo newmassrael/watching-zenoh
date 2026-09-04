@@ -5559,6 +5559,24 @@ layer_c1ay_cargo_test_router_hat() {
     # five sibling resolutions are unchanged for R2346's reason.
     _runci_guarded_test "C1AY router_forward 142" 142 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,access-acl --lib router_forward --quiet || return 1
+    # R2348 — a NEW arm, and it exists because without it this round's central
+    # tests would have been compiled out while the lane stayed green. The router
+    # interceptor CACHE is `#[cfg(feature = "routing-interceptor-hotreload")]`
+    # and `router_forward` is itself `#[cfg(feature = "routing-router-hat")]`, so
+    # the tests need BOTH; the six arms above name the hat and none of them name
+    # hotreload. Measured before this arm was added: `routing-interceptor-hotreload`
+    # appeared nowhere in C1ay, and the only runner that had both features was
+    # gate 2h's `wz-runtime-tokio` leg -- which is `lane`-scoped, so the pre-push
+    # hook never runs it. That is the R2346 shape exactly: give one feature when
+    # the module is gated on another and you get `running 0 tests`, `ok`, exit 0,
+    # with the count as the only signal.
+    #
+    # `access-acl` is not optional here either: an EMPTY chain short-circuits
+    # before the cache is consulted (the same vacuity that made R311y508's first
+    # cross-impl leg prove nothing), so a cache test with no policy installed
+    # tests nothing.
+    _runci_guarded_test "C1AY router_forward hotreload 145" 145 \
+        cargo test -p wz-runtime-tokio --features routing-router-hat,routing-interceptor-hotreload,access-acl --lib router_forward --quiet || return 1
     # R311y464 — 171 -> 173: y463 added token_current_future_interest_replies_with_a
     # _client_token and token_current_future_interest_matches_a_wildcard_target, both
     # cfg(routing-token-tables), so ONLY this arm of the six moves. The other five

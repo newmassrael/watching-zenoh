@@ -614,6 +614,25 @@ pub struct LinkstateForwarder {
     /// peer a verdict computed for the subject of the old one.
     #[cfg(feature = "routing-interceptor-hotreload")]
     ingress_keyexpr_cache: RefCell<hashbrown::HashMap<(FaceId, String), InterceptorKeyexprCache>>,
+    /// R2348 — the EGRESS twin of
+    /// [`ingress_keyexpr_cache`](Self#structfield.ingress_keyexpr_cache), and the
+    /// half zenoh has always had that wz did not: upstream carries
+    /// `e_interceptor_cache` beside `in_interceptor_cache` on the same
+    /// `SessionContext` (`zenoh/src/net/routing/dispatcher/resource.rs`
+    /// @ `pub(crate) e_interceptor_cache: InterceptorCache`, read through
+    /// @ `.and_then(|ctx| ctx.e_interceptor_cache.value(interceptor, self))`).
+    ///
+    /// It is a SEPARATE map rather than a flow field on one map because the two
+    /// flows carry different chains: the same (face, keyexpr) has an ingress
+    /// verdict and an egress verdict that are independent, and folding them into
+    /// one key space would make an egress entry evict an ingress one at random.
+    ///
+    /// Version-tagged and face-scoped on exactly the same terms — dropped with
+    /// its face in [`unregister`](Self::unregister), because a face id is
+    /// reusable and an entry outliving its face would serve a NEW peer a verdict
+    /// computed for the subject of the old one.
+    #[cfg(feature = "routing-interceptor-hotreload")]
+    egress_keyexpr_cache: RefCell<hashbrown::HashMap<(FaceId, String), InterceptorKeyexprCache>>,
     /// R311y508 — how many times a (face, keyexpr) verdict table has been
     /// COMPUTED: once when the pair is first seen, and once more each time a
     /// chain swap makes its entry stale. The witness that separates "the cache
@@ -622,6 +641,21 @@ pub struct LinkstateForwarder {
     /// entirely also produces the right verdict.
     #[cfg(feature = "routing-interceptor-hotreload")]
     interceptor_cache_recomputes: Cell<usize>,
+    /// R2348 — the EGRESS recompute witness, deliberately a SEPARATE counter
+    /// rather than a second contributor to
+    /// [`interceptor_cache_recomputes`](Self#structfield.interceptor_cache_recomputes).
+    ///
+    /// Sharing one counter was tried first and the ingress test refused it: a
+    /// single relayed Put computes an ingress table for the arriving face AND an
+    /// egress table for each destination, so the shared count read 2 where
+    /// `interceptor_cache_is_invalidated_by_a_live_reconfigure` asserts 1. That
+    /// failure is the argument — a summed counter cannot distinguish "the egress
+    /// table was built" from "the ingress table was built twice", which is the
+    /// exact discrimination the ingress witness exists to make. Keeping them
+    /// apart leaves that test measuring what it always measured, and gives the
+    /// egress witness a number of its own.
+    #[cfg(feature = "routing-interceptor-hotreload")]
+    egress_interceptor_cache_recomputes: Cell<usize>,
     /// R311tt — count of messages ANY interceptor dropped, on either flow: an ACL
     /// denial, a downsampling rate-limit, or a low-pass size-cap — the shared
     /// interceptor-drop witness, the drop twin of
@@ -920,7 +954,11 @@ impl LinkstateForwarder {
             #[cfg(feature = "routing-interceptor-hotreload")]
             ingress_keyexpr_cache: RefCell::new(hashbrown::HashMap::new()),
             #[cfg(feature = "routing-interceptor-hotreload")]
+            egress_keyexpr_cache: RefCell::new(hashbrown::HashMap::new()),
+            #[cfg(feature = "routing-interceptor-hotreload")]
             interceptor_cache_recomputes: Cell::new(0),
+            #[cfg(feature = "routing-interceptor-hotreload")]
+            egress_interceptor_cache_recomputes: Cell::new(0),
             interceptor_dropped: Cell::new(0),
             query_timeout: Cell::new(Self::DEFAULT_QUERY_TIMEOUT),
             timed_out: Cell::new(0),
@@ -1106,6 +1144,28 @@ impl LinkstateForwarder {
         self.ingress_keyexpr_cache.borrow().len()
     }
 
+    /// R2348 — how many (face, keyexpr) entries the EGRESS cache holds. Reported
+    /// separately from
+    /// [`interceptor_cache_len`](Self::interceptor_cache_len) rather than summed,
+    /// because a witness that added the two could not tell an egress table being
+    /// built from an ingress one being built twice.
+    #[cfg(feature = "routing-interceptor-hotreload")]
+    pub fn egress_interceptor_cache_len(&self) -> usize {
+        self.egress_keyexpr_cache.borrow().len()
+    }
+
+    /// R2348 — how many EGRESS verdict tables have been computed: one per
+    /// (destination face, keyexpr) first seen, plus one per pair re-seen after a
+    /// chain swap. The egress twin of
+    /// [`interceptor_cache_recomputes`](Self::interceptor_cache_recomputes), and
+    /// the number that separates "the egress cache is consulted and invalidated"
+    /// from "egress recomputes every message anyway" — a verdict assertion
+    /// cannot, because an uncached chain yields the same verdict.
+    #[cfg(feature = "routing-interceptor-hotreload")]
+    pub fn egress_interceptor_cache_recomputes(&self) -> usize {
+        self.egress_interceptor_cache_recomputes.get()
+    }
+
     /// Whether the INGRESS chain admits this inbound `msg` arriving on face `id`.
     /// The fast path: an empty chain (no ACL configured) admits without touching
     /// the face table. Otherwise it builds the per-message [`FaceContext`] off
@@ -1152,14 +1212,54 @@ impl LinkstateForwarder {
     /// The fast path: an empty chain admits without building a context.
     /// Consulted per outbound message in [`fan_out`](Self::fan_out) — the wz
     /// `Mux`-side twin of [`admit_inbound`](Self::admit_inbound). Takes the
-    /// already-borrowed `state` (not a `FaceId`) because `fan_out` holds the
-    /// `faces` borrow across the per-face loop.
-    fn admit_outbound(&self, state: &FaceState, msg: &NetworkMessage) -> bool {
+    /// already-borrowed `state` AND its `id`: the state because `fan_out` holds
+    /// the `faces` borrow across the per-face loop, the id because R2348's
+    /// egress cache keys on it. The id is not re-derived here — every call site
+    /// already had it in hand (it is the same `*id` the fan-out builder is
+    /// called with), so this is a parameter, not a lookup.
+    fn admit_outbound(&self, id: FaceId, state: &FaceState, msg: &NetworkMessage) -> bool {
+        // `id` is the EGRESS cache key and has no other use, so with the cache
+        // feature off it is genuinely unused. See the router twin for why it is
+        // discarded here rather than renamed `_id`.
+        #[cfg(not(feature = "routing-interceptor-hotreload"))]
+        let _ = id;
         let chain = self.egress_interceptors.borrow();
         if chain.is_empty() {
             return true;
         }
-        chain.admit(&FaceContext { face: state }, msg)
+        let ctx = FaceContext { face: state };
+        // R2348 (`routing-interceptor-hotreload`) — the EGRESS half of the
+        // per-(face, keyexpr) verdict cache, byte-for-byte the rule
+        // `admit_inbound` applies on the other flow: serve the precomputed table
+        // when the chain that produced it is still installed, recompute when the
+        // version says otherwise, and take the direct path for a message with no
+        // governed keyexpr to key on. Until R2348 this flow recomputed the whole
+        // chain per message per destination face, which is the residual the
+        // `routing-interceptor-hotreload` atom named — upstream has cached both
+        // flows all along (`zenoh/src/net/routing/dispatcher/resource.rs`
+        // @ `pub(crate) e_interceptor_cache: InterceptorCache`).
+        //
+        // Egress is the flow where this costs the most: `admit_inbound` runs
+        // ONCE per message, while this runs once per message PER DESTINATION
+        // FACE, so an uncached chain here is re-evaluated fan-out-width times
+        // for a single publish.
+        #[cfg(feature = "routing-interceptor-hotreload")]
+        if let Some(keyexpr) = resolve_governed_keyexpr(msg, &state.keyexpr_table) {
+            let mut cache = self.egress_keyexpr_cache.borrow_mut();
+            let recomputes = &self.egress_interceptor_cache_recomputes;
+            let mut compute = || {
+                recomputes.set(recomputes.get() + 1);
+                chain.compute_keyexpr_cache(&ctx, &keyexpr)
+            };
+            let slot = cache
+                .entry((id, keyexpr.clone()))
+                .or_insert_with(&mut compute);
+            if slot.version() != chain.version() {
+                *slot = compute();
+            }
+            return chain.admit_cached(&ctx, msg, Some(slot));
+        }
+        chain.admit(&ctx, msg)
     }
 }
 
@@ -1631,7 +1731,7 @@ impl LinkstateForwarder {
                 // outbound is dropped for THIS face (not sent, not counted) and
                 // witnessed — the wz `Mux`-side enforcement that also covers this
                 // node's own originations (a `publish` reaches only `fan_out`).
-                if !self.admit_outbound(state, &msg) {
+                if !self.admit_outbound(*id, state, &msg) {
                     self.interceptor_dropped
                         .set(self.interceptor_dropped.get() + 1);
                     continue;
@@ -5956,6 +6056,14 @@ impl FaceForwarder for LinkstateForwarder {
         self.ingress_keyexpr_cache
             .borrow_mut()
             .retain(|(face_id, _), _| *face_id != id);
+        // R2348 — and the egress table with it, for the identical reason. Two
+        // maps, so a sweep of one is not a sweep of the other; the test
+        // `a_departed_face_leaves_no_egress_verdict_behind` is what stops this
+        // pair drifting apart.
+        #[cfg(feature = "routing-interceptor-hotreload")]
+        self.egress_keyexpr_cache
+            .borrow_mut()
+            .retain(|(face_id, _), _| *face_id != id);
         // R311y509 — a departed client's tokens leave with it, or a later interest
         // would replay liveliness for a peer that is gone.
         self.client_tokens.borrow_mut().remove(&id);
@@ -9884,6 +9992,34 @@ mod tests {
         })
     }
 
+    /// R2348 — the EGRESS-flow twin of [`deny_put_policy`]. The only field that
+    /// differs is `flow`, and that is the point: a rule's flow is what decides
+    /// WHICH chain it governs, so an ingress-flow rule installed on both chains
+    /// leaves egress admitting everything while still being non-empty.
+    /// ⚠ The cfg here must match its USERS exactly, not merely `access-acl`:
+    /// both callers are `all(routing-interceptor-hotreload, config-mutate-runtime,
+    /// access-acl)`, and a broader gate makes this dead code in any combination
+    /// that has the ACL but not the other two — which `-D dead-code` rejects.
+    #[cfg(all(
+        feature = "routing-interceptor-hotreload",
+        feature = "config-mutate-runtime",
+        feature = "access-acl"
+    ))]
+    fn deny_put_policy_egress(deny_keyexpr: &str) -> AclPolicy {
+        AclPolicy::new(AclConfig {
+            default_permission: Permission::Allow,
+            rules: vec![AclRule {
+                subject: SubjectSelector::Any,
+                key_exprs: vec![deny_keyexpr.to_owned()],
+                messages: vec![AclMessage::Put],
+                flow: AclFlow::Egress,
+                permission: Permission::Deny,
+                link_protocols: Vec::new(),
+                interfaces: Vec::new(),
+            }],
+        })
+    }
+
     #[cfg(feature = "access-acl")]
     #[test]
     fn an_acl_deny_drops_an_inbound_put_before_relay() {
@@ -10409,6 +10545,177 @@ mod tests {
             sink_b.frame_count(),
             0,
             "phase 3: not relayed after the LIVE reconfigure"
+        );
+    }
+
+    /// R2348 (`routing-interceptor-hotreload`) — the EGRESS twin of
+    /// [`interceptor_cache_is_invalidated_by_a_live_reconfigure`], and the atom's
+    /// last residual: until this round the egress chain was re-evaluated for
+    /// EVERY message on EVERY destination face, where upstream has cached both
+    /// flows all along.
+    ///
+    /// The policy is EGRESS-flow throughout, which is what makes this test about
+    /// the other chain. An ingress-flow deny would drop the Put before `fan_out`
+    /// is reached, so phase 3 would prove nothing about the egress cache — the
+    /// message would never arrive at the seam under test.
+    ///
+    /// Phase 2 is the load-bearing one. Egress runs once per message PER
+    /// DESTINATION FACE, so "recomputes stayed at 1 across two Puts" is the only
+    /// assertion that distinguishes a served cache from a chain that re-evaluates
+    /// every time — both produce the same verdict and the same frame count.
+    #[cfg(all(
+        feature = "routing-interceptor-hotreload",
+        feature = "config-mutate-runtime",
+        feature = "access-acl"
+    ))]
+    #[test]
+    fn the_egress_interceptor_cache_is_invalidated_by_a_live_reconfigure() {
+        use crate::config::WzConfig;
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, _sink_a) = peer_face(zid(0x0A));
+        let (face_b, sink_b) = peer_face(zid(0x0B));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05);
+        declare_interest(&fwd, FaceId(1), "demo/data");
+
+        // A non-empty EGRESS chain that admits demo/data: it denies an unrelated
+        // keyexpr. An empty chain returns before the cache is consulted.
+        let mut config = WzConfig::new().with_interceptors(
+            InterceptorConfig::default().with_acl(deny_put_policy_egress("other/**")),
+        );
+        config.install_interceptors(&fwd);
+        sink_b.reset();
+
+        let put = || DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Push(Box::new(data_push()))], // demo/data
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+
+        // Phase 1 — relayed to B, and the EGRESS table for (face 1, demo/data) is
+        // computed once and stored.
+        fwd.forward(FaceId(0), IterationEvent::Poll(&put()));
+        assert_eq!(
+            sink_b.frame_count(),
+            1,
+            "phase 1: relayed to the subscriber"
+        );
+        assert_eq!(
+            fwd.egress_interceptor_cache_len(),
+            1,
+            "phase 1: one (destination face, keyexpr) egress table stored"
+        );
+        assert_eq!(
+            fwd.egress_interceptor_cache_recomputes(),
+            1,
+            "phase 1: computed exactly once"
+        );
+
+        // Phase 2 — a second identical Put is served from the egress cache.
+        fwd.forward(FaceId(0), IterationEvent::Poll(&put()));
+        assert_eq!(
+            fwd.egress_interceptor_cache_recomputes(),
+            1,
+            "phase 2: a cache HIT does not recompute the egress chain"
+        );
+        assert_eq!(sink_b.frame_count(), 2, "phase 2: still relayed");
+        assert_eq!(fwd.interceptor_dropped(), 0, "phase 2: nothing dropped");
+
+        // The LIVE swap: deny demo/** on EGRESS, on the running forwarder.
+        config.reconfigure_interceptors(
+            InterceptorConfig::default().with_acl(deny_put_policy_egress("demo/**")),
+            &fwd,
+        );
+
+        // Phase 3 — the stored egress table is stale, is recomputed against the
+        // chain just installed, and the SAME Put no longer reaches B.
+        sink_b.reset();
+        fwd.forward(FaceId(0), IterationEvent::Poll(&put()));
+        assert_eq!(
+            fwd.egress_interceptor_cache_recomputes(),
+            2,
+            "phase 3: the swap invalidated the stored egress table"
+        );
+        assert_eq!(
+            fwd.interceptor_dropped(),
+            1,
+            "phase 3: dropped at the EGRESS gate after the LIVE reconfigure"
+        );
+        assert_eq!(
+            sink_b.frame_count(),
+            0,
+            "phase 3: not relayed after the LIVE reconfigure"
+        );
+        // The INGRESS counters are untouched throughout: this message was never
+        // denied on the way in, and the two caches are separate maps. Without
+        // this, "the egress cache works" is equally explained by the ingress
+        // cache having been the thing under test all along.
+        assert_eq!(
+            fwd.data_seen(),
+            3,
+            "control: every Put was admitted on INGRESS -- the drop above is the
+             egress gate, not the ingress one"
+        );
+    }
+
+    /// R2348 — a departed face leaves no EGRESS verdict behind, the twin of the
+    /// eviction the ingress cache has had since R311y508. A `FaceId` is reusable,
+    /// so an entry outliving its face would serve a NEW peer a verdict computed
+    /// for the OLD peer's subject.
+    ///
+    /// Two maps means two sweeps, and nothing but a test makes the pair stay in
+    /// step: deleting the egress `retain` in `unregister` leaves the ingress one
+    /// passing and only this red.
+    #[cfg(all(
+        feature = "routing-interceptor-hotreload",
+        feature = "config-mutate-runtime",
+        feature = "access-acl"
+    ))]
+    #[test]
+    fn a_departed_face_leaves_no_egress_verdict_behind() {
+        use crate::config::WzConfig;
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, _sink_a) = peer_face(zid(0x0A));
+        let (face_b, sink_b) = peer_face(zid(0x0B));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05);
+        declare_interest(&fwd, FaceId(1), "demo/data");
+
+        let config = WzConfig::new().with_interceptors(
+            InterceptorConfig::default().with_acl(deny_put_policy_egress("other/**")),
+        );
+        config.install_interceptors(&fwd);
+        sink_b.reset();
+
+        fwd.forward(
+            FaceId(0),
+            IterationEvent::Poll(&DriverLoopOutcome::FramePayload {
+                priority: wz_session_core::qos::Priority::DEFAULT,
+                reliable: true,
+                sn: 0,
+                messages: vec![NetworkMessage::Push(Box::new(data_push()))],
+                has_ext: false,
+                extensions: Vec::new(),
+            }),
+        );
+        assert_eq!(
+            fwd.egress_interceptor_cache_len(),
+            1,
+            "the destination face has a stored egress verdict"
+        );
+
+        fwd.deregister(FaceId(1));
+        assert_eq!(
+            fwd.egress_interceptor_cache_len(),
+            0,
+            "the entry left with its face"
         );
     }
 
