@@ -255,8 +255,8 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
         // (zenoh-pico `_z_register_liveliness_subscriber` calls
         // `_z_liveliness_subscription_trigger_history` between the register
         // and the Interest emit, `src/net/liveliness.c:196-209`; zenoh runs
-        // it in `declare_liveliness_subscriber_inner` before
-        // `send_interest`, `zenoh/src/api/session.rs:1768-1815`), and so
+        // it before `send_interest`, `zenoh/src/api/session.rs`
+        // @ `let known_tokens = if history {`), and so
         // does this — folding it in is what makes both wz declare paths
         // (literal and aliased) correct with one rule instead of two
         // call-site copies that can drift.
@@ -393,7 +393,9 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
                 // R311y769 — the FIRST declaration of an id wins, and a repeat
                 // is silent. zenoh wraps this whole arm in
                 // `if let Entry::Vacant(e) = state.remote_tokens.entry(m.id)`
-                // (`zenoh/src/api/session.rs:2633`), so an OCCUPIED id neither
+                // (`zenoh/src/api/session.rs`
+                // @ `if let Entry::Vacant(e) = state.remote_tokens.entry(m.id)`),
+                // so an OCCUPIED id neither
                 // re-inserts nor calls the subscriber back.
                 //
                 // Both halves matter and they are one decision, not two. Firing
@@ -519,7 +521,8 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
     /// slot; both upstreams do exactly this at declare time — zenoh collects
     /// `state.remote_tokens` intersecting the new subscriber's keyexpr and
     /// calls its callback with an empty-payload `Put`
-    /// (`zenoh/src/api/session.rs:1768-1801`), and zenoh-pico's
+    /// (`zenoh/src/api/session.rs`
+    /// @ `let known_tokens = if history {`), and zenoh-pico's
     /// `_z_liveliness_subscription_trigger_history` walks `zn->_remote_tokens`
     /// and does the same (`vendor/zenoh-pico/src/net/liveliness.c:133-166`).
     ///
@@ -676,7 +679,8 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
     /// application is told a token "came alive" at the instant of its own
     /// unrelated query, and the token enters the peer table as if it had been
     /// announced. zenoh routes such a declare to the query and `return`s
-    /// before both (`zenoh/src/api/session.rs:2609-2632`).
+    /// before both (`zenoh/src/api/session.rs`
+    /// @ `query.callback.call(reply);`).
     ///
     /// THE CLAIM IS PER-ID, NOT PER-SOLICITATION, and that distinction is the
     /// whole of the rule: a HISTORY subscriber's own CURRENT replay is
@@ -1233,7 +1237,9 @@ mod tests {
     /// R311y769 (`liveliness-subscriber`) — a REPEATED `DeclToken` naming an id
     /// the peer already declared fires NOTHING. zenoh wraps the entire arm in
     /// `if let Entry::Vacant(e) = state.remote_tokens.entry(m.id)`
-    /// (`zenoh/src/api/session.rs:2633`), so an OCCUPIED id neither re-inserts
+    /// (`zenoh/src/api/session.rs`
+    /// @ `if let Entry::Vacant(e) = state.remote_tokens.entry(m.id)`), so an
+    /// OCCUPIED id neither re-inserts
     /// nor calls the subscriber back: an application counting presence is never
     /// told the same token appeared twice.
     ///
@@ -1314,7 +1320,9 @@ mod tests {
     /// registry never saw falls back to the keyexpr its OWN `ext_wire_expr`
     /// carries and still delivers the Delete. zenoh's `else if
     /// m.ext_wire_expr.wire_expr != WireExpr::empty()` branch
-    /// (`zenoh/src/api/session.rs:2679-2708`) is the whole of this: a retraction
+    /// (`zenoh/src/api/session.rs`
+    /// @ `} else if m.ext_wire_expr.wire_expr != WireExpr::empty() {`)
+    /// is the whole of this: a retraction
     /// that names its keyexpr does not need the declaration to have been
     /// observed, which is what a SOURCED token (`id == 0`, keyexpr IS the
     /// identity) always looks like.

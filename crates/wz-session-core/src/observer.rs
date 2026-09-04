@@ -2200,3 +2200,125 @@ mod sub_interest_reply_tests {
         );
     }
 }
+
+/// R2349 (`liveliness-history`) — the HISTORY replay covers the peer's
+/// tokens and NOT this session's own, and that exclusion is a PARITY
+/// DECISION rather than a gap.
+///
+/// Measured against the pinned upstreams rather than inherited, because the
+/// atom's own prose has asserted it for two rounds without anything
+/// enforcing it:
+///
+/// - zenoh replays `state.remote_tokens` only
+///   (`zenoh/src/api/session.rs` @ `let known_tokens = if history {`).
+/// - zenoh-pico iterates `zn->_remote_tokens` only, and records the gap as
+///   its OWN todo (`vendor/zenoh-pico/src/net/liveliness.c`, the
+///   `add support for local tokens` comment above the iterator).
+///
+/// So replaying local tokens here would be DIVERGENCE, not a fix.
+///
+/// ⚠ WHAT THIS PAIR IS, STATED EXACTLY, because R2349 probed it and the
+/// probe came back WEAKER than hoped. A mutation that makes the replay emit
+/// an extra local-looking token reds the CONTROL below and NOT the first
+/// test — because `replay_known_tokens` returns early on an empty
+/// `peer_token_table`, which is exactly the state the first test sets up.
+/// The first test therefore cannot be broken from inside the replay at all:
+/// the registry holds no local tokens and structurally cannot reach them.
+///
+/// So this is a REGRESSION FENCE, not a mutation-provable guard. It pins
+/// the observable fact against a FUTURE wiring — the two registries sit
+/// side by side on this struct, and connecting them is the change that
+/// would make it red. It is NOT evidence that the exclusion is defended
+/// today by anything but the type system, and must not be cited as such.
+///
+/// THE CONTROL IS THE HALF THAT CARRIES WEIGHT: a replay that is simply
+/// broken also delivers zero samples, so without a peer token actually
+/// arriving the first assertion is satisfiable by an inert registry.
+#[cfg(all(
+    test,
+    feature = "liveliness-token",
+    feature = "liveliness-subscriber",
+    feature = "alloc"
+))]
+mod history_replay_is_peer_scoped {
+    use super::*;
+    use crate::declare::liveliness_sample::BoxedLivelinessSampleSink;
+    use alloc::string::{String, ToString};
+    use alloc::vec::Vec;
+    use std::sync::{Arc, Mutex};
+    use wz_session_core_test_support::decl_token_nonlocal;
+
+    #[test]
+    fn a_locally_held_token_is_not_replayed_to_a_history_subscriber() {
+        let mut observer = ApplicationLayerObserver::new();
+        // A token THIS session holds, matching the pattern the subscriber
+        // will declare. Upstream would not replay it; neither may wz.
+        observer
+            .local_tokens
+            .register(41, "live/mine")
+            .expect("register a locally held token");
+
+        let fired: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let f = fired.clone();
+        observer
+            .liveliness_subscribers
+            .register(
+                9,
+                "live/**",
+                true, // history: the replay fires inside `register`
+                BoxedLivelinessSampleSink::new(move |sample| {
+                    f.lock().unwrap().push(sample.keyexpr.to_string());
+                }),
+            )
+            .expect("register the history subscriber");
+
+        assert!(
+            fired.lock().unwrap().is_empty(),
+            "a history subscriber is owed the PEER's tokens, not this \
+                 session's own — replaying a local token would diverge from \
+                 both upstreams, neither of which does it"
+        );
+    }
+
+    /// The control for the above: the SAME pattern and the same `history`
+    /// flag, with a token that arrived from the PEER. It must be replayed.
+    ///
+    /// Without this, "zero samples" is equally explained by the replay
+    /// being broken, by the pattern not matching, or by `history` not being
+    /// honoured — none of which is the claim.
+    #[test]
+    fn a_peer_token_is_replayed_to_the_same_history_subscriber() {
+        let mut observer = ApplicationLayerObserver::new();
+        // Same shape as the local token above, but arriving over the wire.
+        observer.liveliness_subscribers.dispatch_declare(
+            &wz_codecs::declare::DeclareOwnedVariant::CodecZenohDeclToken(decl_token_nonlocal(
+                41,
+                0,
+                Some("live/theirs"),
+            )),
+            &Default::default(),
+        );
+
+        let fired: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let f = fired.clone();
+        observer
+            .liveliness_subscribers
+            .register(
+                9,
+                "live/**",
+                true,
+                BoxedLivelinessSampleSink::new(move |sample| {
+                    f.lock().unwrap().push(sample.keyexpr.to_string());
+                }),
+            )
+            .expect("register the history subscriber");
+
+        assert_eq!(
+            fired.lock().unwrap().as_slice(),
+            ["live/theirs".to_string()],
+            "control: the replay itself works, the pattern matches, and \
+                 `history` is honoured — so the empty result above is about \
+                 the token being LOCAL and nothing else"
+        );
+    }
+}

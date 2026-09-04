@@ -314,7 +314,24 @@ _ANY_TOKEN = re.compile(r"(?<![\w/.-])(\w[\w-]*)/[\w/.-]+\.rs")
 
 #: BUDGETS. Measured, frozen, and checked in BOTH directions -- see the module
 #: doc. Not a threshold anyone chose.
-LINE_BUDGET = 300
+#: R2349 — 300 -> 294. Six line citations into upstream's session API module
+#: (the file this gate's own scan counts most often) became anchors, and every
+#: one was WRONG at the pin: three named the ordinary pub/sub subscriber-declare
+#: function where the liveliness history replay actually lives; two named an
+#: unknown-extension match arm where the first-declaration-wins guard actually
+#: lives; one named a timestamp-interception call where the query-return path
+#: actually lives. Each real referent is now quoted as the anchor's needle at
+#: the citation site, so this comment does not need to name a path — and MUST
+#: NOT, since this file is tracked and its own literals land in the population
+#: it grades (the residue rose by exactly two the last time that was forgotten).
+#:
+#: ⚠ THE CLAIMS WERE ALL TRUE — only the lines had moved, by hundreds. That is
+#: why the repair converts the citation and never retracts the observation.
+#: It is also why this budget can only shrink: the LINE bucket's resolution arm
+#: asks ONLY "is this line past the end of the file", so an in-file drift like
+#: these six resolves green while naming unrelated code. A line citation that
+#: survives here is unverified, not verified.
+LINE_BUDGET = 294
 BARE_BUDGET = 60
 #: The root-less axis, after R2317 repaired the 49 citations that named a file
 #: gone at the pin. Same two-directional ratchet as LINE and BARE.
