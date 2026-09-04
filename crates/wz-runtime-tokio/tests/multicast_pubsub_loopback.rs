@@ -38,7 +38,8 @@ use std::time::Duration;
 
 use tokio::net::UdpSocket;
 use wz_runtime_tokio::multicast_glue::{
-    drive_multicast_session, multicast_put_literal, spawn_router_mcast_egress, MulticastDriveConfig,
+    drive_multicast_session, multicast_put_literal, spawn_router_mcast_egress,
+    MulticastDriveConfig, MulticastOutcome,
 };
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::{McastGroupOptions, McastSocketConfig, UdpDriver};
@@ -753,7 +754,11 @@ async fn router_egress_helper_reaches_group_subscriber() {
     // own task and returns the sender `RouterForwarder::attach_mcast_group` holds.
     // `qos = false`: this loopback witness pins the pico-faithful 2-channel group
     // (the per-priority conduit is exercised by the dedicated qos witness, R311y232).
-    let tx = spawn_router_mcast_egress(
+    // R2333 (open-debt item 15) — the helper now returns its stop handle beside
+    // the sender. This test keeps it alive for the run and stops it at the end,
+    // which is also the socket-level witness that the production helper's group
+    // face CAN be stopped: `Stopped` is only reachable through the signal.
+    let (tx, mcast_stop) = spawn_router_mcast_egress(
         GROUP,
         HELPER_PORT,
         vec![0xAA; 4],
@@ -790,6 +795,16 @@ async fn router_egress_helper_reaches_group_subscriber() {
         dispatcher_b.active_peers(),
         1,
         "B admitted the egress helper from its JOIN beacon"
+    );
+
+    // R2333 — the production helper's face stops on ASK, on a real socket. The
+    // only door to `Stopped` is the signal (link loss yields `LinkLost`, and this
+    // helper runs with no iteration budget so `IterationLimit` is unreachable),
+    // so this outcome IS the proof that a shipped router can leave its group.
+    assert_eq!(
+        mcast_stop.stop().await,
+        Some(MulticastOutcome::Stopped),
+        "the egress helper's stop handle must end its group face gracefully"
     );
 }
 

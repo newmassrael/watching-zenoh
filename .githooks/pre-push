@@ -686,6 +686,37 @@ if ! python3 scripts/lib/deny_diagnostic_gate.py; then
     exit 1
 fi
 
+# ─── gate 2r — a shipped multicast loop must be stoppable (R2333, item 15) ──
+# grades: worktree
+#
+# The `transport-multicast` atom's residual: the library grew a graceful
+# multicast stop (R311y772) and its wire half, the departing group Close
+# (R311y782), and NOTHING SHIPPED EVER ASKED. A wz router left its group
+# silently and every member held a stale peer entry for it until the lease
+# expired.
+#
+# Here for gate 2d's reasons exactly, and the middle one is the whole argument:
+# a drive loop with no stop is not a failing test, it is a MISSING CALLER, and
+# `cargo test` cannot fail on an absence. Gate 3 compiles both hosts happily
+# either way.
+#
+# UNCONDITIONAL, and it costs milliseconds. The population is derived — every
+# `pub fn drive_multicast_session*` / `run_multicast_session` call in shipped
+# source whose config says `max_iters: None` — and an EMPTY population FAILS,
+# so a refactor that moves the hosts cannot make this read green by emptying it.
+if ! python3 scripts/lib/multicast_stop_wiring_gate.py; then
+    echo "" >&2
+    echo "pre-push: [gate 2r] multicast-stop-wiring FAILED — a shipped host" >&2
+    echo "          drives a multicast group loop that runs for the node's" >&2
+    echo "          life and cannot be asked to stop, so it can only leave" >&2
+    echo "          its group by dying: no departure Close, and every member" >&2
+    echo "          holds a stale peer entry until the lease expires." >&2
+    echo "          Drive it through a shutdown-capable entry point and hand" >&2
+    echo "          the host the stop handle." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+
 # ─── gate 2e — the scouting socket's movable axes (R2142, item 225) ──
 # grades: worktree
 #

@@ -3345,6 +3345,38 @@ PY
     # restoring it returns rc=0.
     python3 scripts/lib/deny_diagnostic_gate.py --selftest || return 1
     python3 scripts/lib/deny_diagnostic_gate.py --check || return 1
+    # R2333 (unregistered open-debt item 15, the `transport-multicast` atom) —
+    # a SHIPPED multicast drive loop that runs for the node's life must be one
+    # its host can ask to stop. The library has had the graceful stop since
+    # R311y772 and its wire half (the departing group Close) since R311y782,
+    # both tested; what no test could see is that NOTHING SHIPPED EVER ASKED.
+    # A wz router left its group silently, and every member held a stale peer
+    # entry for it until the lease expired.
+    #
+    # The class is invisible to `cargo test` by construction: a loop with no
+    # stop is a missing CALLER, not a failing assertion, and both hosts compile
+    # identically either way. That is what earns it a gate rather than a test.
+    #
+    # The population is DERIVED, because the residual named one function and
+    # that is who noticed, not the population: entry points are read out of the
+    # tree by name prefix, their stoppability out of their OWN SIGNATURES (does
+    # the parameter list carry a `watch::Receiver<bool>`), and the call sites
+    # out of shipped source with each file's `#[cfg(test)] mod tests` cut away.
+    # The subset that must be stoppable is the one whose config says
+    # `max_iters: None` — "the loop runs for the node's life" — which is
+    # exactly the property that makes an un-stoppable loop a defect, and is why
+    # the bounded MCU e2e host is correctly out of scope.
+    #
+    # An EMPTY population FAILS. A gate whose subject moved would otherwise
+    # report green forever.
+    #
+    # Enforcement MEASURED on the LIVE tree, three probes: reverting the egress
+    # face to `drive_multicast_session` (the pre-round shape) reds it naming
+    # that site; handing the ingress face `None` instead of its signal reds the
+    # OTHER arm at the other site; and narrowing the derivation's discriminator
+    # so nothing matches reds the empty-population guard. Restoring each
+    # returns rc=0.
+    python3 scripts/lib/multicast_stop_wiring_gate.py || return 1
     # R2241 (unregistered open-debt item 581) — an upstream claim must still
     # MEAN something after upstream moves. `CLAUDE.md` asks for `file:line` on
     # every source claim, which is right for OUR sources (we move those lines
@@ -5306,7 +5338,10 @@ layer_c1ax_cargo_test_routing_namespace() {
     # R311y784: 22 -> 26. Four `emit_peer_lost` observer cases. This time the
     # grep above was run BEFORE the edit and all four sites moved together, so
     # the prescription's first outing worked.
-    _runci_guarded_test "C1AX multicast_glue 26" 26 \
+    #
+    # R2333: 26 -> 27. One case, `the_membership_entry_point_also_stops_on_a_signal`.
+    # The grep was run before the edit again, and all four sites moved by +1.
+    _runci_guarded_test "C1AX multicast_glue 27" 27 \
         cargo test -p wz-runtime-tokio --features transport-multicast,routing-namespace --lib multicast_glue --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-session-core --features routing-namespace,session-unicast,codec-push,codec-request,codec-response,codec-response-final,codec-declare,reassembly --all-targets --quiet -- -D warnings \
@@ -8630,12 +8665,19 @@ layer_c1p_multicast() {
 # FOUR guards reading this filter move by the same +4 -- which is both the
 # not-accidentally-gated check and, this round, the check that the same-filter
 # miss of R311y782 was not repeated a third time.
+#
+# R2333: 23/27/29 -> 24/28/30, and the C1AX sibling 26 -> 27. ONE ungated case,
+# `the_membership_entry_point_also_stops_on_a_signal` — the membership entry
+# point took no shutdown signal at all until this round, which is why the router
+# INGRESS face could not be stopped even though the door had existed since
+# R311y772. All FOUR guards move by the same +1, the same not-accidentally-gated
+# check the three rounds above ran.
 layer_c1q_multicast_glue() {
-    _runci_guarded_test C1q 23 cargo test -p wz-runtime-tokio --features transport-multicast --lib multicast_glue --quiet \
+    _runci_guarded_test C1q 24 cargo test -p wz-runtime-tokio --features transport-multicast --lib multicast_glue --quiet \
         || return 1
-    _runci_guarded_test C1q 27 cargo test -p wz-runtime-tokio --features transport-multicast,reassembly --lib multicast_glue --quiet \
+    _runci_guarded_test C1q 28 cargo test -p wz-runtime-tokio --features transport-multicast,reassembly --lib multicast_glue --quiet \
         || return 1
-    _runci_guarded_test C1q 29 cargo test -p wz-runtime-tokio --features transport-multicast,transport-fragmentation --lib multicast_glue --quiet \
+    _runci_guarded_test C1q 30 cargo test -p wz-runtime-tokio --features transport-multicast,transport-fragmentation --lib multicast_glue --quiet \
         || return 1
     # R311y832 — the UDP multicast locator config surface (`ttl` / `join`, the
     # two keys of zenoh's `zenoh-link-udp` config module wz lacked). A NEW leg

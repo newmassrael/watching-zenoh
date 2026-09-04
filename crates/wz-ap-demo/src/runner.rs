@@ -5813,16 +5813,31 @@ async fn run_router_hat_until(
             },
         }
     };
+    // R2333 (open-debt item 15, `transport-multicast`) — the group faces' stop
+    // handles, held here for the whole run and driven at teardown. The library
+    // has had a graceful multicast stop since R311y772 and its wire half (the
+    // departing Close) since R311y782, but NO shipped host drove either: this
+    // router could not stop its group faces short of link loss or process exit,
+    // so it left the group silently and every member held a stale peer entry
+    // until the lease expired. Declared before the two spawn blocks so ONE
+    // teardown reaches both faces.
+    #[cfg(feature = "router-multicast-faces")]
+    let mut mcast_stops: Vec<(
+        &'static str,
+        wz::runtime_tokio::multicast_glue::McastFaceStop,
+    )> = Vec::new();
     #[cfg(feature = "router-multicast-faces")]
     {
-        let mcast_tx = wz::runtime_tokio::multicast_glue::spawn_router_mcast_egress(
-            mcast_group,
-            mcast_port,
-            params.zid.clone(),
-            multicast_qos,
-            mcast_opts.clone(),
-        );
+        let (mcast_tx, mcast_egress_stop) =
+            wz::runtime_tokio::multicast_glue::spawn_router_mcast_egress(
+                mcast_group,
+                mcast_port,
+                params.zid.clone(),
+                multicast_qos,
+                mcast_opts.clone(),
+            );
         forwarder.attach_mcast_group(mcast_tx);
+        mcast_stops.push(("egress", mcast_egress_stop));
         log::info!(
             "wz-ap-demo router-hat: multicast egress group {mcast_group}:{mcast_port} \
              attached (router-multicast-faces, {mcast_opts:?}); routed Push \
@@ -5851,7 +5866,7 @@ async fn run_router_hat_until(
         // the group egress + mcast-ingress federation loop-safe). S2 adds the third
         // channel: the group-SUBSCRIBER keyexpr aggregate, advertised into the mesh
         // so a mesh-side publisher reaches an on-group subscriber (reachability).
-        let (rx, members_rx, group_subs_rx) =
+        let (rx, members_rx, group_subs_rx, mcast_ingress_stop) =
             wz::runtime_tokio::multicast_glue::spawn_router_mcast_ingress(
                 mcast_group,
                 mcast_port,
@@ -5859,6 +5874,11 @@ async fn run_router_hat_until(
                 multicast_qos,
                 mcast_opts.clone(),
             );
+        // R2333 — the ingress face's stop, beside the egress one. A router is ONE
+        // bidirectional group member, so both faces must announce their departure;
+        // stopping only the egress would leave the JOIN beacon of the RX face
+        // running until the process died.
+        mcast_stops.push(("ingress", mcast_ingress_stop));
         log::info!(
             "wz-ap-demo router-hat: multicast ingress group {mcast_group}:{mcast_port} \
              joined (router-multicast-faces, {mcast_opts:?}); received Push routes \
@@ -6459,6 +6479,26 @@ async fn run_router_hat_until(
     // on a non-zero peak / count so a test never races the 250 ms app tick). The
     // peak member count proves the JOIN->relay->set chain ran; the federated /
     // suppressed pair is the deterministic single-bridge loop-safety proof.
+    // R2333 (open-debt item 15) — the graceful multicast departure, driven HERE
+    // because this is after the accept loop returned, i.e. after the shutdown
+    // signal that ended it. Each face signals its drive loop and is AWAITED, so
+    // the group `Close` (R311y782) is provably on the wire before this process
+    // exits; dropping the handles instead would stop the loops but race the exit.
+    // The outcome is logged per face because "the face stopped" and "the face
+    // announced that it stopped" are different claims, and a face whose bind had
+    // failed reports `None` — never a graceful departure it did not make.
+    #[cfg(feature = "router-multicast-faces")]
+    for (which, stop) in mcast_stops {
+        match stop.stop().await {
+            Some(outcome) => log::info!(
+                "wz-ap-demo router-hat: multicast {which} face stopped gracefully ({outcome:?})"
+            ),
+            None => log::warn!(
+                "wz-ap-demo router-hat: multicast {which} face announced no departure \
+                 (it never bound, or its task did not join)"
+            ),
+        }
+    }
     #[cfg(feature = "router-multicast-faces")]
     {
         if forwarder.mcast_member_peak() > 0 {

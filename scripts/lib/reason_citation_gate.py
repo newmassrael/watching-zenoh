@@ -67,7 +67,13 @@ import sys
 # selftest's one-row fixtures can drive the other three rules without the
 # ratchet firing on a population of one. It cannot loosen a real run: the count
 # it is compared against is still derived from the inventory.
-AMBIGUOUS_BASELINE = 104
+#
+# R2333 — 104 -> 103, the same pre-existing move `depth_axis_census.py`'s
+# citation pins record and for the same cause: R2332 re-cited the
+# `transport-stats` atom's reason and moved neither ratchet. Both caught it on
+# the next run, which is the mechanism working; the baselines move here because
+# this is the commit that publishes that one.
+AMBIGUOUS_BASELINE = 103
 
 
 def ambiguous_baseline() -> int:

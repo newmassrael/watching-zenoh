@@ -279,6 +279,7 @@ where
         outbound,
         |_members: &[Vec<u8>]| {},
         |_subs: &[String]| {},
+        None,
     )
     .await
 }
@@ -331,6 +332,68 @@ where
     .await
 }
 
+/// R2333 (open-debt item 15, `transport-multicast`) — the RAII stop handle a
+/// long-lived host holds for ONE multicast group face.
+///
+/// The library grew its graceful stop at R311y772 and its WIRE half (the
+/// departing `Close` multicast to the group) at R311y782, but every shipped
+/// host still drove the no-signal entry point, so an in-tree router could not
+/// stop its group face short of link loss or process exit — the residual this
+/// type closes. A router that exits without announcing leaves a stale entry in
+/// every group member's peer table until the lease expires.
+///
+/// Two ways to use it, and the difference is whether the departure is
+/// OBSERVABLE:
+///
+/// * [`stop`](Self::stop) signals and AWAITS the loop, so the group `Close` is
+///   provably on the wire before the caller proceeds. This is what a graceful
+///   host teardown wants.
+/// * Dropping the handle signals and does NOT wait. That is the documented
+///   `watch`-sender RAII contract of
+///   [`drive_multicast_session_with_shutdown`] — the loop still stops, but a
+///   process exiting immediately afterwards may outrun the announcement.
+///
+/// The `JoinHandle` rides along rather than being detached because "the face
+/// stopped" and "the face announced that it stopped" are different claims, and
+/// only awaiting the task can witness the second.
+#[cfg(all(feature = "transport-multicast", feature = "transport-link-udp"))]
+pub struct McastFaceStop {
+    /// Held, never read: dropping it closes the channel, which the drive loop
+    /// reads as a stop (see [`drive_multicast_session_with_shutdown`] for why a
+    /// closed channel cannot be ignored without busy-waiting).
+    signal: tokio::sync::watch::Sender<bool>,
+    /// `None` once [`stop`](Self::stop) has taken it.
+    task: tokio::task::JoinHandle<Option<MulticastOutcome>>,
+}
+
+#[cfg(all(feature = "transport-multicast", feature = "transport-link-udp"))]
+impl McastFaceStop {
+    /// Ask the group face to stop, and wait for it to finish announcing.
+    ///
+    /// Returns what the drive loop returned: `Some(`[`MulticastOutcome::Stopped`]`)`
+    /// on the graceful path, `Some(`[`MulticastOutcome::LinkLost`]`)` if the link
+    /// had already gone, and `None` when the face never ran at all because its
+    /// bind failed (the helpers log that and exit the task; a host must not
+    /// mistake it for a graceful departure).
+    ///
+    /// A task that panicked reports `None` too — the join error is logged here
+    /// rather than propagated, because a teardown path that returned `Err` for a
+    /// face it was already abandoning would give the host nothing to do with it.
+    pub async fn stop(self) -> Option<MulticastOutcome> {
+        // Ignoring the send error is deliberate: it means the loop is already
+        // gone (link loss, or a bind that failed), and the await below is what
+        // establishes that rather than this line.
+        let _ = self.signal.send(true);
+        match self.task.await {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                log::error!("multicast group face task did not join cleanly: {e}");
+                None
+            }
+        }
+    }
+}
+
 /// The membership-aware variant of [`drive_multicast_session`]: the identical
 /// drive loop, plus — after each iteration — a snapshot-diff of the dispatcher's
 /// on-group ROUTER member set. On a real change it calls `on_members`; the router
@@ -357,6 +420,7 @@ pub async fn drive_multicast_session_with_membership<D, T, F, G, H, const MAX_PE
     outbound: &mut UnboundedReceiver<MulticastTxItem>,
     on_members: G,
     on_group_subs: H,
+    shutdown: Option<&mut tokio::sync::watch::Receiver<bool>>,
 ) -> MulticastOutcome
 where
     D: LinkDriver,
@@ -365,9 +429,15 @@ where
     G: FnMut(&[Vec<u8>]),
     H: FnMut(&[String]),
 {
-    // R311y772 — no shutdown signal: this entry point keeps its pre-round
-    // behaviour exactly (link loss or the iteration budget are the only exits).
-    // The graceful stop lives on `drive_multicast_session_with_shutdown`.
+    // R2333 — this is the GENERAL entry point: membership relay AND the optional
+    // graceful stop. It took no signal until this round, which is why the router
+    // INGRESS face — the one host that needs membership — was structurally
+    // unable to stop even after R311y772 built the door.
+    //
+    // The alternative was a fourth name for the fourth corner of a 2x2 (membership
+    // x shutdown); the shapes that combine are a parameter, not a name. So the
+    // surface stays three: this general one, plus `drive_multicast_session` and
+    // `drive_multicast_session_with_shutdown` as the no-membership conveniences.
     drive_multicast_session_inner(
         dispatcher,
         cfg,
@@ -377,7 +447,7 @@ where
         outbound,
         on_members,
         on_group_subs,
-        None,
+        shutdown,
     )
     .await
 }
@@ -771,13 +841,20 @@ where
 /// which carries the other two keys of the same zenoh config module (`ttl`,
 /// `join`). Only `ttl` reaches this SEND-only half; a sender installs no
 /// membership, so `joins` is inert here by construction rather than by omission.
+///
+/// R2333 (open-debt item 15) — returns a [`McastFaceStop`] beside the sender.
+/// The loop this helper spawns runs with `max_iters: None`, i.e. for the node's
+/// life, and until this round nothing could ask it to stop: the graceful-stop
+/// door built at R311y772 had no production caller, so a router leaving the
+/// group never announced its departure and every member held a stale peer entry
+/// until the lease expired. The handle is what a host teardown drives.
 pub fn spawn_router_mcast_egress(
     group: core::net::Ipv4Addr,
     port: u16,
     zid: Vec<u8>,
     qos: bool,
     opts: crate::McastGroupOptions,
-) -> UnboundedSender<MulticastTxItem> {
+) -> (UnboundedSender<MulticastTxItem>, McastFaceStop) {
     // R311y454 — `Ipv4Addr` / `SocketAddr` were needed only for the bare
     // `UdpSocket::bind((UNSPECIFIED, 0))` + `from_socket(.., group:port)` this
     // function used to spell out inline; `UdpDriver::bind_multicast_tx_v4` now owns
@@ -816,7 +893,10 @@ pub fn spawn_router_mcast_egress(
     };
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    tokio::spawn(async move {
+    // R2333 — the stop channel. `false` is the resting value; the loop watches for
+    // a CHANGE, so the initial value is never mistaken for a stop.
+    let (signal, mut shutdown) = tokio::sync::watch::channel(false);
+    let task = tokio::spawn(async move {
         // R311y454 — was a bare `UdpSocket::bind((UNSPECIFIED, 0))` +
         // `from_socket`. `bind_multicast_tx_v4` is that same ephemeral bind plus
         // the `IP_MULTICAST_IF` pin when `#iface=` names one, so an unnarrowed
@@ -829,30 +909,37 @@ pub fn spawn_router_mcast_egress(
                     log::error!(
                         "router multicast egress: ephemeral bind failed ({e}); egress group absent"
                     );
-                    return;
+                    // R2333 — `None` is the bind-failure verdict, distinct from
+                    // every `MulticastOutcome`: no loop ran, so no departure was
+                    // announced and a host must not report one.
+                    return None;
                 }
             };
         let mut dispatcher =
             MulticastDispatcher::<MCAST_MAX_PEERS>::new(MulticastConfig::new(params.lease_ms));
         let clock = TokioTime::new();
-        drive_multicast_session(
-            &mut dispatcher,
-            MulticastDriveConfig {
-                params: &params,
-                tick_ms: 50,
-                // production: no iteration budget — the loop runs for the node's life.
-                max_iters: None,
-            },
-            &mut driver,
-            &clock,
-            // Egress-only: a router group face consumes no group ingress (the
-            // `mcast_faces` ingress plane is the deferred milestone).
-            |_| {},
-            &mut rx,
+        Some(
+            drive_multicast_session_with_shutdown(
+                &mut dispatcher,
+                MulticastDriveConfig {
+                    params: &params,
+                    tick_ms: 50,
+                    // production: no iteration budget — the loop runs until the host
+                    // stops it (R2333) or the link is lost.
+                    max_iters: None,
+                },
+                &mut driver,
+                &clock,
+                // Egress-only: a router group face consumes no group ingress (the
+                // `mcast_faces` ingress plane is the deferred milestone).
+                |_| {},
+                &mut rx,
+                &mut shutdown,
+            )
+            .await,
         )
-        .await;
     });
-    tx
+    (tx, McastFaceStop { signal, task })
 }
 
 /// R311y194 — router-multicast-faces INGRESS slice (I1): spawn the multicast group
@@ -903,10 +990,15 @@ pub fn spawn_router_mcast_egress(
     feature = "routing-accept",
     feature = "codec-push"
 ))]
+/// R2333 (open-debt item 15) — the fourth slot is the group face's stop handle,
+/// the ingress twin of the one [`spawn_router_mcast_egress`] returns. It rides
+/// the alias rather than a separate return because the three channels and the
+/// handle share one lifetime: they are all this ONE face.
 type RouterMcastIngressChannels = (
     UnboundedReceiver<crate::accept_loop::McastIngressItem>,
     UnboundedReceiver<Vec<Vec<u8>>>,
     UnboundedReceiver<Vec<String>>,
+    McastFaceStop,
 );
 
 #[cfg(all(
@@ -972,7 +1064,10 @@ pub fn spawn_router_mcast_ingress(
     // subscriber keyexpr aggregate to the accept loop / forwarder, so it advertises
     // the group's interest into the unicast mesh (cross-router reachability).
     let (group_subs_tx, group_subs_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<String>>();
-    tokio::spawn(async move {
+    // R2333 — the stop channel; see the egress twin for why the resting value is
+    // `false` and only a CHANGE stops the loop.
+    let (signal, mut shutdown) = tokio::sync::watch::channel(false);
+    let task = tokio::spawn(async move {
         let mut driver =
             match UdpDriver::bind_multicast_v4(group, port, opts.as_socket_config()).await {
                 Ok(driver) => driver,
@@ -980,7 +1075,8 @@ pub fn spawn_router_mcast_ingress(
                     log::error!(
                         "router multicast ingress: group bind/join failed ({e}); ingress absent"
                     );
-                    return;
+                    // R2333 — the bind-failure verdict; see the egress twin.
+                    return None;
                 }
             };
         let mut dispatcher =
@@ -991,64 +1087,73 @@ pub fn spawn_router_mcast_ingress(
         // outbound sender alive to keep its egress arm parked (a dropped receiver
         // would end the loop).
         let (_dummy_tx, mut dummy_rx) = tokio::sync::mpsc::unbounded_channel();
-        drive_multicast_session_with_membership(
-            &mut dispatcher,
-            MulticastDriveConfig {
-                params: &params,
-                tick_ms: 50,
-                // production: no iteration budget — the loop runs for the node's life.
-                max_iters: None,
-            },
-            &mut driver,
-            &clock,
-            // Fold each admitted Push to the peer-loop task. A closed receiver (peer
-            // loop gone) drops the item — fire-and-forget, matching the egress
-            // helper's group-sink contract. Declarations + non-Push messages are
-            // ignored (the deferred I3 declaration plane).
-            |event: IterationEvent<'_>| {
-                if let IterationEvent::Poll(DriverLoopOutcome::FramePayload {
-                    messages,
-                    reliable,
-                    priority,
-                    ..
-                }) = event
-                {
-                    for msg in messages {
-                        if let NetworkMessage::Push(push) = msg {
-                            // R311y227 — carry the frame's decoded QoS band across
-                            // the fold so the forwarder re-injects at that priority
-                            // (DEFAULT on a non-qos group).
-                            let _ = ingress_tx.send(McastIngressItem {
-                                push: (**push).clone(),
-                                reliable: *reliable,
-                                priority: *priority,
-                            });
+        Some(
+            drive_multicast_session_with_membership(
+                &mut dispatcher,
+                MulticastDriveConfig {
+                    params: &params,
+                    tick_ms: 50,
+                    // production: no iteration budget — the loop runs until the host
+                    // stops it (R2333) or the link is lost.
+                    max_iters: None,
+                },
+                &mut driver,
+                &clock,
+                // Fold each admitted Push to the peer-loop task. A closed receiver (peer
+                // loop gone) drops the item — fire-and-forget, matching the egress
+                // helper's group-sink contract. Declarations + non-Push messages are
+                // ignored (the deferred I3 declaration plane).
+                |event: IterationEvent<'_>| {
+                    if let IterationEvent::Poll(DriverLoopOutcome::FramePayload {
+                        messages,
+                        reliable,
+                        priority,
+                        ..
+                    }) = event
+                    {
+                        for msg in messages {
+                            if let NetworkMessage::Push(push) = msg {
+                                // R311y227 — carry the frame's decoded QoS band across
+                                // the fold so the forwarder re-injects at that priority
+                                // (DEFAULT on a non-qos group).
+                                let _ = ingress_tx.send(McastIngressItem {
+                                    push: (**push).clone(),
+                                    reliable: *reliable,
+                                    priority: *priority,
+                                });
+                            }
                         }
                     }
-                }
-            },
-            &mut dummy_rx,
-            // §5.21 router-multicast-faces (I3b) — on a membership change, relay
-            // the raw on-group ROUTER zid bytes to the forwarder (via the accept
-            // loop). The forwarder's `set_mcast_group_members` converts to `Zid`,
-            // keeping the routing-graph type off the accept-loop channel so a
-            // `routing-accept` build (which does not link `wz-routing-graph`) still
-            // compiles. A closed receiver (accept loop gone) is fire-and-forget.
-            |members: &[Vec<u8>]| {
-                let _ = members_tx.send(members.to_vec());
-            },
-            // §5.21 router-multicast-faces (sub plane, S2) — on a group-subscriber
-            // change, relay the deduped keyexpr aggregate to the forwarder (via the
-            // accept loop). `set_mcast_group_subs` diffs it and advertises/withdraws
-            // the group's interest into the unicast mesh. Fire-and-forget on a closed
-            // receiver (accept loop gone), matching the member relay.
-            |subs: &[String]| {
-                let _ = group_subs_tx.send(subs.to_vec());
-            },
+                },
+                &mut dummy_rx,
+                // §5.21 router-multicast-faces (I3b) — on a membership change, relay
+                // the raw on-group ROUTER zid bytes to the forwarder (via the accept
+                // loop). The forwarder's `set_mcast_group_members` converts to `Zid`,
+                // keeping the routing-graph type off the accept-loop channel so a
+                // `routing-accept` build (which does not link `wz-routing-graph`) still
+                // compiles. A closed receiver (accept loop gone) is fire-and-forget.
+                |members: &[Vec<u8>]| {
+                    let _ = members_tx.send(members.to_vec());
+                },
+                // §5.21 router-multicast-faces (sub plane, S2) — on a group-subscriber
+                // change, relay the deduped keyexpr aggregate to the forwarder (via the
+                // accept loop). `set_mcast_group_subs` diffs it and advertises/withdraws
+                // the group's interest into the unicast mesh. Fire-and-forget on a closed
+                // receiver (accept loop gone), matching the member relay.
+                |subs: &[String]| {
+                    let _ = group_subs_tx.send(subs.to_vec());
+                },
+                Some(&mut shutdown),
+            )
+            .await,
         )
-        .await;
     });
-    (ingress_rx, members_rx, group_subs_rx)
+    (
+        ingress_rx,
+        members_rx,
+        group_subs_rx,
+        McastFaceStop { signal, task },
+    )
 }
 
 #[cfg(test)]
@@ -1391,6 +1496,79 @@ mod tests {
             dispatcher.active_peers(),
             1,
             "and must not clear the peer table",
+        );
+    }
+
+    /// R2333 (open-debt item 15) — the MEMBERSHIP entry point honours the signal
+    /// too. This is not a duplicate of the two tests above: until this round
+    /// `drive_multicast_session_with_membership` took no signal at all, which is
+    /// precisely why the router INGRESS face — the one shipped host that needs
+    /// the membership relay — could not be stopped even though the door had
+    /// existed since R311y772. A shutdown that reaches only the no-membership
+    /// entry point leaves half the production population unstoppable.
+    ///
+    /// Same two-phase shape as the base test, and for the same reason: the peer
+    /// the stop must clear has to be provably present before the signal fires.
+    #[tokio::test]
+    async fn the_membership_entry_point_also_stops_on_a_signal() {
+        let peer_b = [0x01, 0x02, 0x03, 0x04];
+        let mut driver = FakeDriver::with([(join0(&params(&peer_b)), src(2))]);
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let clock = TokioTime::new();
+        let self_params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
+        let cfg = || MulticastDriveConfig {
+            params: &self_params,
+            tick_ms: 5,
+            max_iters: Some(5),
+        };
+
+        // Phase 1 — the membership entry point with NO signal: unchanged
+        // behaviour, and it admits the peer the stop must later clear.
+        let admitted = drive_multicast_session_with_membership(
+            &mut dispatcher,
+            cfg(),
+            &mut driver,
+            &clock,
+            |_| {},
+            &mut idle_outbound(),
+            |_members: &[Vec<u8>]| {},
+            |_subs: &[String]| {},
+            None,
+        )
+        .await;
+        assert_eq!(admitted, MulticastOutcome::IterationLimit);
+        assert_eq!(
+            dispatcher.active_peers(),
+            1,
+            "the peer the stop must clear has to be there first",
+        );
+
+        // Phase 2 — the SAME entry point with the signal already fired.
+        let (tx, mut rx) = tokio::sync::watch::channel(false);
+        tx.send(true).expect("receiver alive");
+        let stopped = drive_multicast_session_with_membership(
+            &mut dispatcher,
+            cfg(),
+            &mut driver,
+            &clock,
+            |_| {},
+            &mut idle_outbound(),
+            |_members: &[Vec<u8>]| {},
+            |_subs: &[String]| {},
+            Some(&mut rx),
+        )
+        .await;
+
+        assert_eq!(
+            stopped,
+            MulticastOutcome::Stopped,
+            "the membership entry point must honour the signal, not only the \
+             no-membership one",
+        );
+        assert_eq!(
+            dispatcher.active_peers(),
+            0,
+            "and must clear the peer table on the way out, like its twin",
         );
     }
 

@@ -138,11 +138,31 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # gaps it found were CLOSED rather than re-described. The total falls with it,
 # 85 -> 84, and the citation pin below falls because that reason's two wz
 # citations left the PARTIAL corpus with it.
+# R2333 — 407 -> 405 and 86 -> 85, and NEITHER move is this round's own work.
+# The measurement moved in R2332 (`transport-stats cited a zenoh file gone at
+# the pin`), which re-cited that atom's reason and did not move the pins with
+# it; the ratchet caught it exactly as designed, on the next run. The pins move
+# here because this is the commit that publishes that one.
+#
+# What left, read out of the two revisions rather than inferred: the reason
+# dropped `wz-session-core/src/stats.rs` for the repo-rooted
+# `crates/wz-session-core/src/stats.rs` (still one wz citation, so no move from
+# that pair), dropped the four line-form citations `drive.rs:76`,
+# `session_actions.rs:1426`, `stats.rs:34` and `stats.rs:50`, and gained two
+# rooted UPSTREAM paths (read as upstream, not judged) plus a bare `stats.rs`.
+# Two wz citations and one ambiguous one net out of the corpus.
+#
+# Those two upstream paths are deliberately NOT spelled here. Writing them would
+# make this comment itself an upstream citation in bare form, which is the
+# R2241 class -- `upstream_citation_anchor_gate.py` counted exactly that and
+# redded on 60 -> 62 while this note was being written. A gate's own prose is
+# tracked text like any other; the repair is to stop making the claim, not to
+# re-anchor a claim this file has no reason to make.
 PIN_REACHED = 72
 PIN_UNREACHED = 2
 PIN_NO_SYMBOL = 10
-PIN_WZ_CITATIONS = 407
-PIN_AMBIGUOUS = 86
+PIN_WZ_CITATIONS = 405
+PIN_AMBIGUOUS = 85
 
 
 class Fatal(Exception):
