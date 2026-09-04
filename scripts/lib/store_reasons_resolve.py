@@ -150,7 +150,10 @@ REASON_FLOOR = 100
 #: transport) and one RESTATES an anchor already in that reason, because the
 #: ordering argument needs both halves in one sentence. A restatement still
 #: counts here, and that is correct: the count is of graded CLAIMS, and a claim
-#: quoted a second time is adjudicated a second time.
+#: quoted a second time is adjudicated a second time. R2345 to 23, on `access-acl`,
+#: for the same pair -- the round filed open-debt 655 (a peer that sends a
+#: malformed zid is exempt from egress ACL) and the two anchors are what make
+#: "upstream cannot reach this branch" a graded claim rather than an assertion.
 #:
 #: The floor counts `anchored` only, deliberately. `removed` and `absent` have
 #: their own floors, and those ask whether the FORM has a subject at all; a
@@ -172,7 +175,7 @@ REASON_FLOOR = 100
 #: with synthetic counts; this asks a question about the real store, and mixing
 #: the two would make the classifier's own tests depend on how much of the
 #: track has been anchored so far.
-ANCHORED_FLOOR = 21
+ANCHORED_FLOOR = 23
 
 
 class InputError(Exception):
