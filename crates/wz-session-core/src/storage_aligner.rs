@@ -43,13 +43,15 @@
 //!   received `WildcardDelete`/`WildcardPut` materializes via
 //!   `storage_state.rs` (`materialize_wildcard`, behind
 //!   `storage-mgr-wildcard-updates`); with that feature OFF a received wildcard
-//!   event is skipped, as slice 1 did. The remaining, PERMANENT divergence is
-//!   PRODUCTION: wz keeps no replication log of wildcard events (it recomputes
-//!   buckets from the `latest` snapshot), so its aligner re-advertises only the
-//!   concrete keys a wildcard materialized onto, never the wildcard log-entry
-//!   itself — a wildcard log-key fingerprint stays divergent from a real zenohd
-//!   peer (the AV5 residual on the `storage-aligner` inventory atom). Concrete
-//!   `Put`/`Delete` converge fully in both directions.
+//!   event is skipped, as slice 1 did. R2351 correction (this doc had gone
+//!   stale a SECOND time, in the opposite direction — it called the remaining
+//!   divergence PERMANENT): PRODUCTION is implemented. wz still keeps no
+//!   incremental log — it recomputes buckets from the `latest` snapshot — but
+//!   the recompute now includes the registered wildcard updates
+//!   (`StorageState::wildcard_replication_entries`), so this replica advertises
+//!   the wildcard log entry itself and can answer a retrieval for it, and the
+//!   wildcard's own log-key fingerprint converges with a real zenohd peer.
+//!   Concrete `Put`/`Delete` converge fully in both directions, as before.
 //! - **`timestamp_last_non_wildcard_update` — now a real field (slice-1).** zenoh's
 //!   `EventMetadata` carries this extra timestamp (log.rs:104) to order wildcard
 //!   updates against the non-wildcard events they override. R311wt slice-1

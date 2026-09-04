@@ -118,9 +118,14 @@
 //!        so the out-of-order delete is ts-skipped), so no single faithful target
 //!        exists; wz matches zenoh's live-materialize behavior and stays
 //!        internally consistent (one gate, live + align). Every CONCRETE key
-//!        still converges at the (key, ts) fingerprint layer; only the wildcard's
-//!        own log-key fingerprint diverges from a zenohd peer (wz keeps no
-//!        wildcard-event log — AV5). wz DECODES the incoming event's tlnwu
+//!        still converges at the (key, ts) fingerprint layer. R2351 closed the
+//!        wildcard's OWN log-key fingerprint too (the former AV5 residual): a
+//!        registered wildcard is now derived as an event by
+//!        `StorageState::wildcard_replication_entries`, so both the digest and
+//!        the aligner advertise it and a retrieval for it is answerable. wz
+//!        still keeps no incremental log — it recomputes — but it no longer
+//!        recomputes a SMALLER population than upstream logs. wz DECODES the
+//!        incoming event's tlnwu
 //!        (slice 1) but does not consume it on receive (the sweep would need the
 //!        STORED key's tlnwu) — it is carried for wire-fidelity, not load-bearing.
 //!        Registry pruning (dropping a wildcard-put superseded by a covering
@@ -129,10 +134,10 @@
 //!        WildcardPut whose payload the peer SKIPPED (value `None`) is a no-op
 //!        (it registers nothing) — matching the plain-Put skip; a wz<->zenohd
 //!        cross-impl e2e (a peer's wildcard propagating over the wire end to end)
-//!        is a cross-impl-leg follow-up, not a unit-testable path here (a wz peer
-//!        serves no wildcard event — retrieval_response returns `None` — so a
-//!        two-wz `drive_alignment` cannot exercise wildcard reception; the
-//!        receive half is covered by direct-reply unit tests). The LIVE capture
+//!        is a cross-impl-leg follow-up. R2351 removed the reason it was not
+//!        unit-testable between two wz replicas: a wz peer now SERVES its
+//!        wildcard events, so a two-wz `drive_alignment` can exercise wildcard
+//!        reception rather than only the direct-reply unit tests. The LIVE capture
 //!        path — this same wildcard reception on `apply_sample`, NOT the align
 //!        path — IS now cross-impl-proven end to end by a foreign zenoh-pico
 //!        `z_put -k demo/**` in the wz-integration-tests e2e
@@ -951,6 +956,38 @@ impl<B: StorageBackend> StorageState<B> {
         (self.wildcard_puts.len(), self.wildcard_deletes.len())
     }
 
+    /// Every registered wildcard update, as `(full un-stripped keyexpr, entry)`
+    /// — the ONE derivation the replication digest and the aligner's event
+    /// snapshot both read their wildcard events off (R2351, the AV5 residual).
+    ///
+    /// zenoh keeps a single incremental log and both its digest and its aligner
+    /// read wildcard events out of it — the insert sits next to the wildcard
+    /// registration
+    /// (`plugins/zenoh-plugin-storage-manager/src/storages_mgt/service.rs` @ `if key_expr.is_wild()`).
+    /// wz recomputes instead of logging, which is the
+    /// declared divergence — but "recompute" must still mean ONE derivation, or
+    /// the two recomputes disagree with each other. Hence this helper rather
+    /// than two iterators: see
+    /// [`replication_digest`](Self::replication_digest) for why a split is
+    /// worse than the absence it replaces.
+    ///
+    /// A `WildcardPut` and a `WildcardDelete` over the same keyexpr are two
+    /// distinct entries here, as they are two distinct log entries upstream —
+    /// its log key is `(key, SampleKind)`
+    /// (`plugins/zenoh-plugin-storage-manager/src/replication/log.rs` @ `pub fn log_key`)
+    /// — which is why the registries are two maps and this chains them rather
+    /// than merging.
+    #[cfg(all(
+        feature = "storage-mgr-wildcard-updates",
+        any(feature = "storage-replication", feature = "storage-aligner")
+    ))]
+    fn wildcard_replication_entries(&self) -> impl Iterator<Item = (&str, &WildcardUpdate)> + '_ {
+        self.wildcard_puts
+            .iter()
+            .chain(self.wildcard_deletes.iter())
+            .map(|(wildcard_ke, wu)| (wildcard_ke.as_str(), wu))
+    }
+
     /// Answer one inbound query from the stored set (the serve side of a
     /// storage): reply every matching key — under `History::All` every
     /// version of it — each stamped with its OWN concrete keyexpr + value
@@ -1018,6 +1055,24 @@ impl<B: StorageBackend> StorageState<B> {
              History::All backend leaves `latest` empty and yields an empty \
              digest (zenoh's digest likewise assumes Latest)"
         );
+        // R2351 (AV5) — the registered wildcard updates are replication events
+        // too, and they belong in the DIGEST as well as in
+        // [`replication_events`](Self::replication_events). Both are the XOR of
+        // the SAME per-event `event_fingerprint(key, timestamp)`
+        // (`storage_replication.rs` `build_digest`, and
+        // `storage_aligner.rs` `EventBuckets::sub_fingerprint`), so a wildcard
+        // event carried by one and not the other would make this replica
+        // advertise a sub-interval fingerprint its own digest never announced —
+        // a disagreement with ITSELF, which is worse than the uniform absence
+        // it replaces. zenoh cannot have that split: one log carries the
+        // wildcard variants and feeds both
+        // (`plugins/zenoh-plugin-storage-manager/src/replication/log.rs` @ `WildcardPut(OwnedKeyExpr)`).
+        #[cfg(feature = "storage-mgr-wildcard-updates")]
+        let wildcard_events = self
+            .wildcard_replication_entries()
+            .map(|(wildcard_ke, wu)| (Some(wildcard_ke), &wu.data.timestamp));
+        #[cfg(not(feature = "storage-mgr-wildcard-updates"))]
+        let wildcard_events = core::iter::empty();
         build_digest(
             config,
             // Every key in `latest`, INCLUDING the mount-root (`None`) key: the
@@ -1025,7 +1080,10 @@ impl<B: StorageBackend> StorageState<B> {
             // (no key bytes when `None`), so a strip-configured storage's
             // mount-root value replicates faithfully (R311y64). zenoh hashes the
             // `Option` stripped key likewise (log.rs:237).
-            self.latest.iter().map(|(key, ts)| (key.as_deref(), ts)),
+            self.latest
+                .iter()
+                .map(|(key, ts)| (key.as_deref(), ts))
+                .chain(wildcard_events),
             hot_era_upper_bound,
         )
     }
@@ -1059,6 +1117,48 @@ impl<B: StorageBackend> StorageState<B> {
              History::All backend leaves `latest` empty (the aligner, like the \
              digest, assumes Latest)"
         );
+        // R2351 (AV5) — a registered wildcard update is an event in its own
+        // right, keyed on the FULL, un-stripped wildcard keyexpr. zenoh keys it
+        // the same way and for the same reason: a wildcard cannot be stripped
+        // (`put test/**` need not start with the storage's `strip_prefix`), so
+        // the event carries the whole keyexpr
+        // (`plugins/zenoh-plugin-storage-manager/src/replication/log.rs` @ `cannot be stripped`),
+        // and the insert sits at
+        // (`plugins/zenoh-plugin-storage-manager/src/storages_mgt/service.rs` @ `if key_expr.is_wild()`).
+        //
+        // `EventMetadata::wildcard` sets `timestamp_last_non_wildcard_update`
+        // to `None`, which is what upstream's `Event::new` does for exactly
+        // these two variants
+        // (`plugins/zenoh-plugin-storage-manager/src/replication/log.rs` @ `Action::WildcardPut(_) | Action::WildcardDelete(_) => None`)
+        // — a wildcard is not a concrete write, so it cannot be its own last
+        // non-wildcard one.
+        //
+        // Nothing else is needed for these to reach the ANSWERS: `EventBuckets`
+        // classifies on the timestamp and XORs `fingerprint()`, never looking
+        // at the action, so a wildcard event flows into the Diff / Intervals /
+        // SubIntervals / Events drill-down like any other.
+        //
+        // Built as a chained iterator rather than a `push` loop so this reads
+        // the same way [`replication_digest`](Self::replication_digest) does —
+        // the two derivations of one population are meant to be legible as a
+        // pair, and a `mut` here would exist only in one of the two feature
+        // configurations anyway.
+        #[cfg(feature = "storage-mgr-wildcard-updates")]
+        let wildcard_events = self
+            .wildcard_replication_entries()
+            .map(|(wildcard_ke, wu)| {
+                let action = match wu.kind {
+                    SampleKind::Put => Action::WildcardPut(String::from(wildcard_ke)),
+                    SampleKind::Del => Action::WildcardDelete(String::from(wildcard_ke)),
+                };
+                EventMetadata::wildcard(
+                    Some(String::from(wildcard_ke)),
+                    wu.data.timestamp.clone(),
+                    action,
+                )
+            });
+        #[cfg(not(feature = "storage-mgr-wildcard-updates"))]
+        let wildcard_events = core::iter::empty();
         self.latest
             .iter()
             // Every key in `latest`, INCLUDING the mount-root (`None`) key: an
@@ -1072,6 +1172,7 @@ impl<B: StorageBackend> StorageState<B> {
                     EventMetadata::delete(key.clone(), ts.clone())
                 }
             })
+            .chain(wildcard_events)
             .collect()
     }
 
@@ -1201,13 +1302,50 @@ impl<B: StorageBackend> StorageState<B> {
                 // metadata was sent: skip, as zenoh does.
                 _ => None,
             },
-            // wz does not HOST a wildcard event to answer a retrieval for: it
-            // never PRODUCES a wildcard event (it has no wildcard-event log —
-            // AV5), only RECEIVES + applies one (slice 3). This is a permanent
-            // non-goal, not a pending slice — a wz replica re-advertises only the
-            // concrete keys a wildcard materialized onto, never the wildcard
-            // itself, so the wildcard's own log-key fingerprint stays divergent
-            // from a zenohd peer (the named AV5 residual). Skip.
+            // R2351 — wz now HOSTS its wildcard events (they are derived from
+            // the registry by
+            // [`wildcard_replication_entries`](Self::wildcard_replication_entries)),
+            // so a retrieval for one is answerable and the AV5 residual is
+            // closed: a wz replica re-advertises the wildcard log entry itself,
+            // not only the concrete keys it materialized onto.
+            //
+            // The value comes out of the REGISTRY, not the backend, and — unlike
+            // the concrete `Put` arm above — there is NO timestamp comparison:
+            // presence in the registry is the whole test. That asymmetry is
+            // upstream's — it replies with whatever it finds
+            // (`plugins/zenoh-plugin-storage-manager/src/replication/core/aligner_query.rs` @ `wildcard_puts_guard.weight_at(wildcard_ke)`)
+            // — and it is not an oversight: the registry is
+            // keyed on the wildcard
+            // keyexpr and holds exactly one entry per key, so a re-issued
+            // wildcard REPLACES rather than shadows, leaving nothing staler to
+            // guard against. An absent entry is a skip — upstream logs and
+            // returns without replying, which is this function's `None`.
+            #[cfg(feature = "storage-mgr-wildcard-updates")]
+            Action::WildcardPut(wildcard_ke) => {
+                self.wildcard_puts
+                    .get(&wildcard_ke)
+                    .map(|wu| AlignmentResponse {
+                        value: Some(RetrievedValue {
+                            payload: wu.data.payload.clone(),
+                            encoding: wu.data.encoding.clone(),
+                        }),
+                        reply: AlignmentReply::Retrieval(meta),
+                    })
+            }
+            // A WildcardDelete carries no value, for the same reason a concrete
+            // Delete does not: the peer applies it from the metadata alone
+            // (`plugins/zenoh-plugin-storage-manager/src/replication/core/aligner_query.rs` @ `Action::Delete | Action::WildcardDelete(_) => None`
+            // pairs the two in one arm).
+            #[cfg(feature = "storage-mgr-wildcard-updates")]
+            Action::WildcardDelete(_) => Some(AlignmentResponse {
+                reply: AlignmentReply::Retrieval(meta),
+                value: None,
+            }),
+            // Without the wildcard-update engine there is no registry, so no
+            // wildcard event is produced and none can be retrieved. This is the
+            // slice-1 behaviour (decode-only), kept exactly where it still
+            // applies rather than described as a permanent non-goal.
+            #[cfg(not(feature = "storage-mgr-wildcard-updates"))]
             Action::WildcardPut(_) | Action::WildcardDelete(_) => None,
         }
     }
@@ -3642,6 +3780,220 @@ mod tests {
                     s.get(Some("temp")).is_none(),
                     "the full-keyexpr Action ke (not meta.key()) drove the match + delete"
                 );
+            }
+
+            // R2351 — the PRODUCE half, the AV5 residual of the
+            // `storage-aligner` atom. Everything above is RECEIVE: a wildcard
+            // event decoded off a peer and applied here. These are the mirror:
+            // a wildcard registered on THIS replica becomes an event this
+            // replica advertises and can answer a retrieval for, which is what
+            // upstream's log does
+            // (`plugins/zenoh-plugin-storage-manager/src/storages_mgt/service.rs` @ `if key_expr.is_wild()`).
+            mod wildcard_production {
+                use super::*;
+                use crate::sample::Sample;
+
+                fn wput(s: &mut StorageState<MemoryStorage>, ke: &str, payload: Vec<u8>, t: u64) {
+                    s.apply_sample(
+                        &Sample::new_put(ke, payload).with_timestamp(at(t, 0)),
+                        || unreachable!(),
+                    );
+                }
+                fn wdel(s: &mut StorageState<MemoryStorage>, ke: &str, t: u64) {
+                    s.apply_sample(
+                        &Sample::new_del(ke).with_timestamp(at(t, 0)),
+                        || unreachable!(),
+                    );
+                }
+                /// The single event whose action is a wildcard, or a panic. The
+                /// tests below each assert about ONE wildcard, so anything else
+                /// is a defect in the derivation rather than a case to skip.
+                fn the_wildcard_event(s: &StorageState<MemoryStorage>) -> EventMetadata {
+                    let mut wild: Vec<EventMetadata> = s
+                        .replication_events()
+                        .into_iter()
+                        .filter(|e| {
+                            matches!(
+                                e.action(),
+                                Action::WildcardPut(_) | Action::WildcardDelete(_)
+                            )
+                        })
+                        .collect();
+                    assert_eq!(wild.len(), 1, "expected exactly one wildcard event");
+                    wild.remove(0)
+                }
+
+                #[test]
+                fn a_registered_wildcard_put_is_advertised_as_an_event() {
+                    let mut s = state();
+                    s.process_put(Some("demo/a"), vec![1], None, at(1, 0))
+                        .unwrap();
+                    wput(&mut s, "demo/**", vec![9], 5);
+
+                    let event = the_wildcard_event(&s);
+                    assert_eq!(
+                        *event.action(),
+                        Action::WildcardPut("demo/**".into()),
+                        "the action carries the FULL wildcard keyexpr"
+                    );
+                    assert_eq!(
+                        event.key(),
+                        Some("demo/**"),
+                        "the event is keyed on the wildcard itself, not on a key it \
+                         materialized onto (zenoh `Event::new(Some(key_expr), ..)`)"
+                    );
+                    assert_eq!(event.timestamp(), &at(5, 0));
+                    assert!(
+                        event.timestamp_last_non_wildcard_update().is_none(),
+                        "a wildcard is not a concrete write, so it is not its own \
+                         last non-wildcard update, which is what upstream's \
+                         `Event::new` sets for exactly these two variants"
+                    );
+                }
+
+                #[test]
+                fn a_registered_wildcard_delete_is_advertised_as_an_event() {
+                    let mut s = state();
+                    s.process_put(Some("demo/a"), vec![1], None, at(1, 0))
+                        .unwrap();
+                    wdel(&mut s, "demo/**", 5);
+
+                    let event = the_wildcard_event(&s);
+                    assert_eq!(*event.action(), Action::WildcardDelete("demo/**".into()));
+                    assert_eq!(event.key(), Some("demo/**"));
+                }
+
+                #[test]
+                fn a_wildcard_put_and_delete_on_one_keyexpr_are_two_events() {
+                    let mut s = state();
+                    wput(&mut s, "demo/**", vec![9], 5);
+                    wdel(&mut s, "demo/**", 7);
+                    let wild = s
+                        .replication_events()
+                        .into_iter()
+                        .filter(|e| {
+                            matches!(
+                                e.action(),
+                                Action::WildcardPut(_) | Action::WildcardDelete(_)
+                            )
+                        })
+                        .count();
+                    assert_eq!(
+                        wild, 2,
+                        "upstream's log key is (key, SampleKind), so a Put and a \
+                         Delete over the same keyexpr are two entries, not one \
+                         replacing the other"
+                    );
+                }
+
+                #[test]
+                fn a_wildcard_put_event_retrieves_its_registered_value() {
+                    let mut s = state();
+                    s.process_put(Some("demo/a"), vec![1], None, at(1, 0))
+                        .unwrap();
+                    wput(&mut s, "demo/**", vec![9, 9, 9], 5);
+
+                    let event = the_wildcard_event(&s);
+                    let responses = s.answer_alignment_query(
+                        &cfg(),
+                        &AlignmentQuery::Events(vec![event]),
+                        &[0x01],
+                        at(9, 0).time,
+                    );
+                    assert_eq!(responses.len(), 1, "the wildcard event is answerable");
+                    assert_eq!(
+                        responses[0].value,
+                        Some(RetrievedValue {
+                            payload: vec![9, 9, 9],
+                            encoding: None,
+                        }),
+                        "the value comes out of the wildcard registry, not the backend \
+                         (the wildcard is not a stored key)"
+                    );
+                }
+
+                #[test]
+                fn a_wildcard_delete_event_retrieves_with_no_value() {
+                    let mut s = state();
+                    s.process_put(Some("demo/a"), vec![1], None, at(1, 0))
+                        .unwrap();
+                    wdel(&mut s, "demo/**", 5);
+
+                    let event = the_wildcard_event(&s);
+                    let responses = s.answer_alignment_query(
+                        &cfg(),
+                        &AlignmentQuery::Events(vec![event]),
+                        &[0x01],
+                        at(9, 0).time,
+                    );
+                    assert_eq!(responses.len(), 1);
+                    assert!(
+                        responses[0].value.is_none(),
+                        "a WildcardDelete carries no value, as a concrete Delete does not"
+                    );
+                }
+
+                #[test]
+                fn a_retrieval_for_an_unregistered_wildcard_is_skipped() {
+                    let s = state();
+                    let stranger = EventMetadata::wildcard(
+                        Some("never/registered/**".into()),
+                        at(5, 0),
+                        Action::WildcardPut("never/registered/**".into()),
+                    );
+                    let responses = s.answer_alignment_query(
+                        &cfg(),
+                        &AlignmentQuery::Events(vec![stranger]),
+                        &[0x01],
+                        at(9, 0).time,
+                    );
+                    assert!(
+                        responses.is_empty(),
+                        "no registry entry means no value to serve: upstream logs and \
+                         returns without replying"
+                    );
+                }
+
+                // The consistency claim the digest half exists for. Both
+                // derivations are the XOR of the same per-event
+                // `event_fingerprint(key, timestamp)`, so re-deriving the digest
+                // FROM the aligner's advertised events must reproduce the digest
+                // this replica publishes. If either derivation carried the
+                // wildcard and the other did not, this replica would advertise a
+                // sub-interval its own digest never announced — and these two
+                // values would differ.
+                #[cfg(feature = "storage-replication")]
+                #[test]
+                fn the_published_digest_is_the_digest_of_the_advertised_events() {
+                    use crate::storage_replication::build_digest;
+                    let mut s = state();
+                    s.process_put(Some("demo/a"), vec![1], None, at(1, 0))
+                        .unwrap();
+                    s.process_put(Some("demo/b"), vec![2], None, at(2, 0))
+                        .unwrap();
+                    wput(&mut s, "demo/**", vec![9], 5);
+                    wdel(&mut s, "demo/other/**", 6);
+                    let hot_upper = IntervalIdx::from(9);
+
+                    let advertised = s.replication_events();
+                    assert!(
+                        advertised
+                            .iter()
+                            .any(|e| matches!(e.action(), Action::WildcardPut(_))),
+                        "precondition: the aligner really is advertising a wildcard"
+                    );
+                    assert_eq!(
+                        s.replication_digest(&cfg(), hot_upper),
+                        build_digest(
+                            &cfg(),
+                            advertised.iter().map(|e| (e.key(), e.timestamp())),
+                            hot_upper,
+                        ),
+                        "the digest and the aligner must be two derivations of ONE \
+                         population; zenoh cannot disagree here because one log \
+                         feeds both"
+                    );
+                }
             }
         }
     }

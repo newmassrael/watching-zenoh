@@ -257,10 +257,27 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 #   tests/wz_storage_history_serves_pico_zget.rs — and all eight left the
 #   PARTIAL corpus with the atom, the same way R2220's two did. The total falls
 #   with it, 83 -> 82.
-PIN_REACHED = 70
+# R2351 — 70 -> 69 and 408 -> 403, ONE atom leaving the corpus and nothing else.
+# `storage-aligner` went PARTIAL -> COMPLETE because all three of its residual
+# clauses resolved: the named AV5 residual was IMPLEMENTED (a registered
+# wildcard update is now derived as a replication event, fed to BOTH the digest
+# and the aligner, and answerable on retrieval), and the other two were REFUTED
+# by measurement (the "stale" kernel doc had already been corrected; Layer C1z
+# is hosted, ci.yml runs it).
+#
+# The delta was PRE-COMPUTED with this file's own classifier before the store
+# was touched — `citation_audit` over the single atom returned (wz 5,
+# ambiguous 0, upstream 1) and `reach_partition` placed it in `reached` — and
+# then re-measured after, which is what the two numbers below record. Doing it
+# in that order is the R2340 step: the same run that grades the corpus can
+# grade a draft, so a pin move stops being a guess about a delta. It also
+# separates the components the R2350 way: this round edited no other atom's
+# reason, so the whole of both moves is this one atom, and PARTIAL falls 82 ->
+# 81 with it.
+PIN_REACHED = 69
 PIN_UNREACHED = 2
 PIN_NO_SYMBOL = 10
-PIN_WZ_CITATIONS = 408
+PIN_WZ_CITATIONS = 403
 PIN_AMBIGUOUS = 85
 
 

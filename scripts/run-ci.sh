@@ -7593,7 +7593,23 @@ layer_c1z_cargo_test_storage_driver() {
     # lives behind `storage-replication`, which only `storage-aligner` pulls in
     # here, and the other seven subsets were re-measured at their old counts
     # rather than assumed unaffected.
-    _runci_guarded_test "C1z storage" 138 \
+    # R2351 138 -> 145: the `storage-aligner` atom closed its AV5 residual, so
+    # `wildcard_production` adds seven cases (a wildcard put / delete is
+    # advertised as an event, the two are two events, each retrieves — with and
+    # without a value, an unregistered one is skipped, and the published digest
+    # equals the digest of the advertised events).
+    #
+    # DERIVED, not assumed: these live under `mod aligner` (cfg
+    # `storage-aligner`) inside a `storage-mgr-wildcard-updates` gate, and this
+    # is the ONLY guard here whose features enable both — the two bare
+    # `storage-mgr-wildcard-updates` subsets above carry no aligner, so their
+    # 45 / 59 do not move, and the lane re-measured them at those values in the
+    # same run rather than taking it on trust. The digest case additionally
+    # needs `storage-replication`, which it gets because
+    # `storage-aligner = ["storage-replication"]`
+    # (wz-session-core/Cargo.toml:907) — without that implication this would be
+    # 144, so the number is the command's, not the diff's.
+    _runci_guarded_test "C1z storage" 145 \
         cargo test -p wz-session-core --features storage-aligner,storage-mgr-wildcard-updates --lib storage --quiet || return 1
     _runci_guarded_test "C1z storage_service" 9 \
         cargo test -p wz-runtime-tokio --features storage-mgr-complete-flag --lib storage_service --quiet || return 1
