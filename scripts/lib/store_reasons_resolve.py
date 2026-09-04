@@ -144,7 +144,13 @@ REASON_FLOOR = 100
 #: method's config and runtime surfaces had never been anchored at all; R2342
 #: to 19 on `router-multicast-faces`, which also gave `@ REMOVED` its FIRST live
 #: subject -- the file that atom cited for its whole first clause is gone from
-#: the pinned tree while the capability it named simply moved.
+#: the pinned tree while the capability it named simply moved; R2344 to 21 on
+#: the same atom, for the ORDERING between its last two residuals. One of that
+#: round's two anchors is new (upstream derives the ACL subject from the
+#: transport) and one RESTATES an anchor already in that reason, because the
+#: ordering argument needs both halves in one sentence. A restatement still
+#: counts here, and that is correct: the count is of graded CLAIMS, and a claim
+#: quoted a second time is adjudicated a second time.
 #:
 #: The floor counts `anchored` only, deliberately. `removed` and `absent` have
 #: their own floors, and those ask whether the FORM has a subject at all; a
@@ -166,7 +172,7 @@ REASON_FLOOR = 100
 #: with synthetic counts; this asks a question about the real store, and mixing
 #: the two would make the classifier's own tests depend on how much of the
 #: track has been anchored so far.
-ANCHORED_FLOOR = 19
+ANCHORED_FLOOR = 21
 
 
 class InputError(Exception):

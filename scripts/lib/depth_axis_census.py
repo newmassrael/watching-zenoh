@@ -231,10 +231,15 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # This is the first round in this run that withdraws a clause rather than
 # confirming one, and the first whose correction adds no upstream anchor --
 # the claim is about this tree alone, so `ANCHORED_FLOOR` does not move either.
+# R2344 — 418 -> 419, ONE citation, from `router-multicast-faces`'s appended
+# CORRECTION recording that its last two residuals are ORDERED rather than
+# siblings. The wz half of that argument is the ACL enforcer's subject
+# early-return, so the correction names the file that carries it; the two
+# upstream halves are anchored and read as upstream.
 PIN_REACHED = 72
 PIN_UNREACHED = 2
 PIN_NO_SYMBOL = 10
-PIN_WZ_CITATIONS = 418
+PIN_WZ_CITATIONS = 419
 PIN_AMBIGUOUS = 85
 
 
