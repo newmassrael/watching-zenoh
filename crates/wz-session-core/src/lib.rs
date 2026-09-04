@@ -510,6 +510,16 @@ pub mod scouting_message;
 #[cfg(all(feature = "alloc", feature = "codec-scout", feature = "codec-hello"))]
 pub mod scout_responder;
 
+/// R2334 — the INITIATOR's counterpart to [`scout_responder`]: why a datagram
+/// that reached a scouting window advanced nothing.
+///
+/// Gated identically, and for the identical reason — it reads a Scout (to tell
+/// our own looped-back question from a stranger's) and is consulted by the loop
+/// that is waiting for a Hello, so a build with one codec has no verdict to
+/// give rather than half of one.
+#[cfg(all(feature = "alloc", feature = "codec-scout", feature = "codec-hello"))]
+pub mod scout_initiator;
+
 /// R311ky — deferred callback firing (the F-6 structural fix): the
 /// staging queue + per-listener take-call-restore cell that let
 /// decl/matching/data callbacks run OUTSIDE the session observer mutex.

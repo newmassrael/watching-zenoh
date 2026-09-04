@@ -80,6 +80,10 @@ use wz_session_core::reliability::Reliability;
 // own, so without this the module's own public constructor cannot be CALLED
 // from there — its parameter type is unnameable. The in-tree tests never hit
 // it: they carry a direct wz-session-core dev-dep the facade's consumers lack.
+// R2334 — the initiator's ignore verdict. Re-exported because it is part of
+// this module's READ surface: `ScoutingActions::ignored_datagrams` returns it,
+// so a caller must be able to name it without depending on the core crate.
+pub use wz_session_core::scout_initiator::{classify_ignored_scout_rx, ScoutRxIgnored};
 pub use wz_session_core::scout_params::ScoutParams;
 use wz_session_core::scout_trace::ScoutTrace;
 // The generated engine-free action trait. Aliased so the trait name does
@@ -182,6 +186,24 @@ pub struct ScoutingActions<R: Runtime = TokioRuntime> {
     /// self-transition carries since the round that split those two
     /// `hello.received` transitions.
     pub hellos: R::Mutex<Vec<ScoutedHello>>,
+    /// R2334 — every datagram the window OBSERVED and did not take as a Hello,
+    /// with the reason, in arrival order.
+    ///
+    /// This is the accumulator half of the `scouting-active` residual "wz drops
+    /// a non-Hello scouting datagram silently at the MID filter where pico logs
+    /// `_Z_ERR_MESSAGE_UNEXPECTED`". The residual asked for OBSERVABILITY, and
+    /// a log line alone is the wrong instrument for it: a log needle dies two
+    /// ways (the level is filtered, or the wording drifts) and a test that
+    /// greps for one is asserting on prose. So the verdict is recorded here,
+    /// where it is a value, and logged BESIDE this rather than instead of it.
+    ///
+    /// Together with [`Self::hellos`] this makes the loop's handling of inbound
+    /// datagrams CONSERVATIVE: every datagram the window receives lands in
+    /// exactly one of the two, so a future silent drop is not a missing log
+    /// line but a broken count. That conservation is what
+    /// `every_observed_datagram_lands_in_exactly_one_accumulator` asserts, and
+    /// it is the check that generalises past the two drops this round found.
+    pub ignored: R::Mutex<Vec<ScoutRxIgnored>>,
 }
 
 /// One decoded Hello, carrying what zenoh-pico's `_z_hello_t` carries:
@@ -262,6 +284,7 @@ impl ScoutingActions<TokioRuntime> {
             pending_hello: Mutex::new(None),
             discovered: Mutex::new(None),
             hellos: Mutex::new(Vec::new()),
+            ignored: Mutex::new(Vec::new()),
         })
     }
 
@@ -285,6 +308,42 @@ impl ScoutingActions<TokioRuntime> {
     /// indistinguishable from silence.
     pub fn scouted_hellos(&self) -> Vec<ScoutedHello> {
         self.hellos.lock().unwrap().clone()
+    }
+
+    /// R2334 — every datagram this window observed and did not take as a
+    /// Hello, with the reason, in arrival order. The companion read to
+    /// [`Self::scouted_hellos`]; see [`Self::ignored`] for why the record is a
+    /// value rather than only a log line.
+    pub fn ignored_datagrams(&self) -> Vec<ScoutRxIgnored> {
+        self.ignored.lock().unwrap().clone()
+    }
+
+    /// Record one non-Hello observation and say so at a severity that matches
+    /// what the verdict MEANS here, which is not always what it means upstream.
+    ///
+    /// `Undecodable` and `UnknownMid` are upstream's two `_Z_ERROR` arms and
+    /// are anomalous here too. The other two are not: wz's scouting socket asks
+    /// for `IP_MULTICAST_LOOP` so its own Scout always comes back, and a second
+    /// node scouting the same group is ordinary. Logging either at pico's
+    /// severity would put a warning on wz's own traffic once per cycle — see
+    /// [`wz_session_core::scout_initiator`] for why wz can tell those two apart
+    /// at all when pico's `default:` arm cannot.
+    fn record_ignored(&self, why: ScoutRxIgnored) {
+        match &why {
+            ScoutRxIgnored::Undecodable => {
+                log::warn!("scouting window: received malformed message; ignored")
+            }
+            ScoutRxIgnored::UnknownMid { mid } => {
+                log::warn!("scouting window: received unexpected message (mid {mid:#04x}); ignored")
+            }
+            ScoutRxIgnored::SelfEcho => {
+                log::debug!("scouting window: our own Scout, looped back; ignored")
+            }
+            ScoutRxIgnored::ForeignScout => {
+                log::debug!("scouting window: another node's Scout; ignored")
+            }
+        }
+        self.ignored.lock().unwrap().push(why);
     }
 }
 
@@ -498,19 +557,41 @@ where
                     // `_z_scouting_message_decode` (scout.c:71-76), so it
                     // never reaches the FSM and cannot end an
                     // exit-on-first window with nothing discovered.
-                    if rx.bytes.first().map(|h| h & 0x1f) == Some(wire_const::S_MID_HELLO) {
-                        if let Some(hello) = decode_scouted_hello(&rx.bytes) {
-                            *actions.pending_hello.lock().unwrap() = Some(hello);
-                            // The cycle's mode rides the event: the
-                            // engine-free statechart has no datamodel, so
-                            // its two `hello.received` arms guard on this
-                            // typed field (scouting.scxml + the
-                            // hello_received_schema EventSchema).
-                            engine.raise_hello_received(ScoutingHelloReceivedPayload {
-                                exit_on_first: u8::from(actions.params.exit_on_first),
-                            });
-                            engine.step();
+                    //
+                    // R2334 — both of those drops used to be SILENT, which is
+                    // the residual this closes. The verdict is computed at ONE
+                    // place on purpose: an `advanced` flag rather than a
+                    // record call per drop site, so a future arm added to this
+                    // match cannot forget to account for its datagram. Every
+                    // datagram the window observes now lands in exactly one of
+                    // `hellos` / `ignored`.
+                    let advanced = if rx.bytes.first().map(|h| h & 0x1f)
+                        == Some(wire_const::S_MID_HELLO)
+                    {
+                        match decode_scouted_hello(&rx.bytes) {
+                            Some(hello) => {
+                                *actions.pending_hello.lock().unwrap() = Some(hello);
+                                // The cycle's mode rides the event: the
+                                // engine-free statechart has no datamodel, so
+                                // its two `hello.received` arms guard on this
+                                // typed field (scouting.scxml + the
+                                // hello_received_schema EventSchema).
+                                engine.raise_hello_received(ScoutingHelloReceivedPayload {
+                                    exit_on_first: u8::from(actions.params.exit_on_first),
+                                });
+                                engine.step();
+                                true
+                            }
+                            None => false,
                         }
+                    } else {
+                        false
+                    };
+                    if !advanced {
+                        actions.record_ignored(classify_ignored_scout_rx(
+                            &actions.params.zid,
+                            &rx.bytes,
+                        ));
                     }
                 }
                 LinkEvent::Lost { cause } => return ScoutOutcome::LinkLost(cause),
@@ -1039,6 +1120,119 @@ mod tests {
             "the action never ran for the malformed datagram"
         );
         assert_eq!(actions.trace_snapshot().scout_timeout, 0);
+    }
+
+    /// A Scout datagram carrying `zid`, built through the CODEC.
+    ///
+    /// Not by hand: the id rides an `I` flag as well as the `zid_len_m1`
+    /// nibble, so hand-assembled bytes decode to `zid: None` and every
+    /// self-echo silently reads as a stranger. Measured — that is exactly how
+    /// the first draft of the conservation test below failed.
+    fn craft_scout_with(zid: &[u8]) -> Vec<u8> {
+        let mut scout = Scout::new();
+        scout.version = 0x09;
+        scout.set_what(0x03);
+        scout.set_i(true);
+        scout.set_zid_len_m1((zid.len() - 1) as u8);
+        scout.zid = Some(zid);
+        let mut wire = vec![wire_const::S_MID_SCOUT];
+        wire.extend_from_slice(&scout.encode_to_vec());
+        wire
+    }
+
+    /// R2334 — CONSERVATION. Every datagram the window observes lands in
+    /// EXACTLY ONE of the two accumulators, and none is dropped silently.
+    ///
+    /// This is the check the `scouting-active` residual actually wanted. That
+    /// residual named one drop site (the MID filter); there were two, and the
+    /// thing that makes a THIRD impossible is not another named site but this
+    /// arithmetic — `hellos + ignored == observed`. A future arm added to the
+    /// `Rx` match that forgets to account for its datagram fails here, whatever
+    /// shape it takes and whatever it logs.
+    ///
+    /// The window runs the SURVEY arm so it does not exit on the first Hello,
+    /// which is what lets one window observe all five shapes.
+    #[tokio::test]
+    async fn every_observed_datagram_lands_in_exactly_one_accumulator() {
+        const OUR_ZID: &[u8] = &[0xAA];
+        let observed: Vec<Vec<u8>> = vec![
+            // 1. a usable Hello -> `hellos`
+            craft_hello_with(0x01, &[0xA1], &["udp/127.0.0.1:7447"]),
+            // 2. Hello MID, undecodable body -> pico's "malformed message"
+            vec![wire_const::S_MID_HELLO | wire_const::FLAG_S_HELLO_L, 0x09],
+            // 3. our own Scout, back from IP_MULTICAST_LOOP
+            craft_scout_with(OUR_ZID),
+            // 4. another node's Scout: a question, not our answer
+            craft_scout_with(&[0x77]),
+            // 5. a MID in neither arm -> pico's `default:`
+            vec![0x1E, 0x00, 0x00],
+        ];
+        let count = observed.len();
+        let mut driver = ScriptedScoutLink::with(observed);
+        let actions = ScoutingActions::new(ScoutParams {
+            version: 0x09,
+            what: 0x03,
+            zid: OUR_ZID.to_vec(),
+            timeout_ms: 400,
+            exit_on_first: false,
+        });
+        let mut engine = new_scouting_engine(&actions);
+        let clock = TokioTime::new();
+
+        drive_scouting_until_resolved(&mut driver, &actions, &mut engine, &clock, None, 5).await;
+
+        let hellos = actions.scouted_hellos();
+        let ignored = actions.ignored_datagrams();
+        assert_eq!(
+            hellos.len() + ignored.len(),
+            count,
+            "every observed datagram must be accounted for exactly once; \
+             hellos={hellos:?} ignored={ignored:?}",
+        );
+        assert_eq!(hellos.len(), 1, "only the well-formed Hello is a peer");
+        // In arrival order, and each naming what it was — the residual asked
+        // for observability, so the RECORD has to be specific, not a count.
+        assert_eq!(
+            ignored,
+            vec![
+                ScoutRxIgnored::Undecodable,
+                ScoutRxIgnored::SelfEcho,
+                ScoutRxIgnored::ForeignScout,
+                ScoutRxIgnored::UnknownMid { mid: 0x1E },
+            ],
+        );
+    }
+
+    /// DISCRIMINATOR for the arm above: the self-echo verdict must depend on
+    /// OUR zid, not on "it was a Scout".
+    ///
+    /// Same window, same datagram, different `ScoutParams::zid` — the verdict
+    /// must move from `SelfEcho` to `ForeignScout`. Without this the
+    /// conservation test would pass on a loop that called every Scout its own
+    /// echo, which is the classification a reader would most likely write by
+    /// accident and which would hide a real peer's question.
+    #[tokio::test]
+    async fn the_self_echo_verdict_follows_our_own_zid() {
+        let echoed = craft_scout_with(&[0xAA]);
+        let mut driver = ScriptedScoutLink::with([echoed]);
+        let actions = ScoutingActions::new(ScoutParams {
+            version: 0x09,
+            what: 0x03,
+            // NOT the zid in the datagram above.
+            zid: vec![0xBB],
+            timeout_ms: 200,
+            exit_on_first: false,
+        });
+        let mut engine = new_scouting_engine(&actions);
+        let clock = TokioTime::new();
+
+        drive_scouting_until_resolved(&mut driver, &actions, &mut engine, &clock, None, 5).await;
+
+        assert_eq!(
+            actions.ignored_datagrams(),
+            vec![ScoutRxIgnored::ForeignScout],
+            "a Scout carrying somebody else's zid is not our loopback",
+        );
     }
 
     /// ONE Scout carries a whole survey window, and every responder in it is

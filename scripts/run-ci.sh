@@ -8363,7 +8363,19 @@ layer_c1cn_nondefault_features() {
 }
 
 layer_c1i_cargo_test_scouting() {
-    _runci_guarded_test C1i 12 \
+    # R2334: 12 -> 14. The initiator's ignore verdict — the two datagram drops
+    # the drive loop used to make SILENTLY — plus the discriminator that ties
+    # the self-echo arm to our own zid. `grep -n 'lib scouting_glue'
+    # scripts/run-ci.sh` (R311y784's mechanical prescription) returns this one
+    # line, so this is the whole population for that filter.
+    #
+    # The classifier's own six unit tests are NOT here: they live in
+    # `wz-session-core` behind `codec-scout` / `codec-hello`, and
+    # `nondefault-tests-gate.sh --census` reports that crate 1333/1333 run by a
+    # leg — its `wz-session-core` row is `hook`-scoped and already carries both
+    # codecs, so pre-push runs them. That was ASKED of the census rather than
+    # worked out by hand, which is the point of having it.
+    _runci_guarded_test C1i 14 \
         cargo test -p wz-runtime-tokio --features scouting-active --lib scouting_glue --quiet
 }
 

@@ -1566,6 +1566,16 @@ scouting-active = [
     "transport-link-udp",
     "codec-scout",
     "codec-hello",
+    # R2334 — the two core-crate forwards, which this key lacked while its
+    # `scouting-responder` sibling (below) has always carried them. Without them
+    # `codec-scout` / `codec-hello` reach `wz-codecs` only, so
+    # `wz_session_core::scout_initiator` — the initiator's ignore verdict, the
+    # twin of the responder's — is configured out of the very build that drives
+    # a scouting window. The asymmetry was invisible until something in the core
+    # crate was needed by the ACTIVE half; the responder half needed one from
+    # the day it was written.
+    "wz-session-core/codec-scout",
+    "wz-session-core/codec-hello",
     "dep:socket2",
 ]
 
