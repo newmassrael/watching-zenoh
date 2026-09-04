@@ -76,21 +76,8 @@
 //!   onto every already-stored matching key, and shadow-checks every concrete
 //!   sample against the registries (the resurrection guard). With the feature
 //!   OFF the minimal state treats a wildcard key as an ordinary stored key
-//!   (verbatim prior behavior). Two named divergences from zenoh:
-//!     1. **Dispatch on the effective (override) kind, not the incoming kind.**
-//!        zenoh dispatches the backend op on `sample.kind()` (service.rs:332)
-//!        while pulling the value from `sample_to_store`, so an incoming Put
-//!        overridden by a newer Wildcard-Delete becomes an empty-payload PUT at
-//!        the wildcard-delete ts — even though zenoh's own replication log
-//!        records that event as a `Delete` (`determine_action`, log.rs:181-202).
-//!        wz dispatches on the override kind, so that case becomes a
-//!        [`process_delete`](StorageState::process_delete) (tombstone), which
-//!        AGREES with the log action and converges at the fingerprint layer
-//!        (the fingerprint hashes key+timestamp only, storage_aligner.rs:206);
-//!        the only observable difference is a query returns "absent" (wz,
-//!        correct for a deleted key) vs an empty value (zenoh's backend/log
-//!        inconsistency we deliberately do not reproduce).
-//!     2. **Resurrection-ordering on the ALIGN-receive path (R311wt slice 3,
+//!   (verbatim prior behavior). One named divergence from zenoh:
+//!     1. **Resurrection-ordering on the ALIGN-receive path (R311wt slice 3,
 //!        divergence D-slice3-1).**
 //!        [`process_alignment_reply`](StorageState::process_alignment_reply) now
 //!        APPLIES a wildcard received from a peer — register + materialize via the
@@ -688,12 +675,34 @@ impl<B: StorageBackend> StorageState<B> {
     /// is the FULL keyexpr the override lookup keys on (they differ only under a
     /// `strip_prefix`).
     ///
-    /// Divergence from zenoh (named, module doc #1): the backend op is dispatched
-    /// on the EFFECTIVE (override) kind, so an incoming Put overridden by a newer
-    /// Wildcard-Delete becomes a [`process_delete`](Self::process_delete)
-    /// (tombstone) rather than zenoh's empty-payload put — the tombstone agrees
-    /// with the log action zenoh's own `determine_action` records and converges
-    /// at the fingerprint layer.
+    /// R2352 — the backend op is dispatched on the INCOMING kind while the
+    /// VALUE and TIMESTAMP come from the override, which is exactly upstream's
+    /// split: it builds `sample_to_store` from `update.kind`
+    /// (`plugins/zenoh-plugin-storage-manager/src/storages_mgt/service.rs` @ `SampleKind::Delete => SampleBuilder::delete(k.clone())`)
+    /// and then dispatches on the received sample
+    /// (`plugins/zenoh-plugin-storage-manager/src/storages_mgt/service.rs` @ `let storage_result = match sample.kind()`).
+    /// The only pair the two dispatches disagree on is (incoming Put, override
+    /// Delete) — a Delete cannot be overridden by a Wildcard Put, because the
+    /// put phase is not even entered for it — and there the shared answer is an
+    /// EMPTY-PAYLOAD PUT at the wildcard-delete ts, not a tombstone. The
+    /// wildcard-delete still wins; only its materialized representation is a
+    /// present-but-empty value, which is what a query on a real zenohd returns.
+    ///
+    /// This REPLACES a divergence wz had named and justified. The justification
+    /// was that a tombstone "agrees with the log action zenoh's own
+    /// `determine_action` records"; measured against the pin, that is false.
+    /// The overridden concrete write keeps the PLAIN action it was born with
+    /// (`plugins/zenoh-plugin-storage-manager/src/storages_mgt/service.rs` @ `let mut action: Action = kind.into()`
+    /// — reassigned only inside the `is_wild` arm), the log event is built from
+    /// that same `action`
+    /// (`plugins/zenoh-plugin-storage-manager/src/storages_mgt/service.rs` @ `let new_event = Event::new(stripped_key.clone()`),
+    /// and `determine_action` returns a plain `Put` unchanged
+    /// (`plugins/zenoh-plugin-storage-manager/src/replication/log.rs` @ `Action::Put => return Action::Put`).
+    /// So upstream logs a Put AND stores a put: it is internally consistent in
+    /// the very case wz cited as its inconsistency, and it was wz that logged a
+    /// Delete for a key upstream logs as a Put
+    /// ([`replication_events`](Self::replication_events) derives the action from
+    /// backend presence).
     #[cfg(feature = "storage-mgr-wildcard-updates")]
     fn apply_one_with_override(
         &mut self,
@@ -716,17 +725,26 @@ impl<B: StorageBackend> StorageState<B> {
         // tlnwu = None on the live write path (zenoh service.rs:275), so the
         // resurrection guard's `lowest_event_ts` collapses to the incoming ts.
         match self.overriding_wild_update(full_key, &timestamp, run_delete_phase, run_put_phase) {
-            Some(update) => match update.kind {
-                SampleKind::Put => self.process_put(
-                    stored_key,
-                    update.data.payload,
-                    update.data.encoding,
-                    update.data.timestamp,
-                ),
-                // Override ts, NOT the incoming ts (AV3): tombstoning at the
-                // older incoming ts would open a resurrection window.
-                SampleKind::Del => self.process_delete(stored_key, update.data.timestamp),
-            },
+            Some(update) => {
+                // The override supplies the VALUE and the TIMESTAMP. A
+                // wildcard-DELETE override supplies an empty value under the
+                // default encoding, because that is what the sample upstream
+                // builds with `SampleBuilder::delete` carries into the put.
+                let (payload, encoding) = match update.kind {
+                    SampleKind::Put => (update.data.payload, update.data.encoding),
+                    SampleKind::Del => (Vec::new(), None),
+                };
+                // Override ts, NOT the incoming ts (AV3): writing at the older
+                // incoming ts would open a resurrection window. Either arm
+                // records `latest` = the override ts, so the newer-wins gate is
+                // unchanged by which arm ran.
+                match kind {
+                    SampleKind::Put => {
+                        self.process_put(stored_key, payload, encoding, update.data.timestamp)
+                    }
+                    SampleKind::Del => self.process_delete(stored_key, update.data.timestamp),
+                }
+            }
             None => match kind {
                 SampleKind::Put => self.process_put(stored_key, payload, encoding, timestamp),
                 SampleKind::Del => self.process_delete(stored_key, timestamp),
@@ -2279,23 +2297,31 @@ mod tests {
         }
 
         #[test]
-        fn out_of_order_concrete_put_under_a_registered_wildcard_delete_is_tombstoned() {
-            // Timeline (e)+(g), THE subtle core slice 2 finishes + the AV2
-            // divergence: wildcard-delete demo/**@t5 arrives while demo/a is
-            // ABSENT (registers wd@t5, materializes onto nothing), then a LATE
-            // concrete Put demo/a=Y@t3 (t3 < t5) arrives. The shadow-check
-            // overrides the put with the wildcard-delete: demo/a is TOMBSTONED
-            // (absent), NOT stored with an empty value (the named divergence
-            // from zenoh's empty-put; wz's tombstone agrees with the log action).
+        fn out_of_order_concrete_put_under_a_registered_wildcard_delete_is_emptied() {
+            // Timeline (e)+(g), THE subtle core slice 2 finishes: wildcard-delete
+            // demo/**@t5 arrives while demo/a is ABSENT (registers wd@t5,
+            // materializes onto nothing), then a LATE concrete Put demo/a=Y@t3
+            // (t3 < t5) arrives. The shadow-check overrides the put's VALUE with
+            // the wildcard-delete's — an EMPTY value at t5 — while the backend
+            // op stays the incoming put. R2352: the key is therefore PRESENT and
+            // empty, which is what upstream stores and what a query on a real
+            // zenohd returns.
             let mut s = state();
             wdel(&mut s, "demo/**", 50, 1);
             wput(&mut s, "demo/a", vec![9], 30, 1);
+            let stored = s
+                .get(Some("demo/a"))
+                .expect("the overridden put is stored, not tombstoned");
             assert!(
-                s.get(Some("demo/a")).is_none(),
-                "the late older put is suppressed by the registered wildcard-delete \
-                 (absent, not an empty value)"
+                stored.payload.is_empty(),
+                "the wildcard-delete still wins: it empties the value it overrode"
             );
-            // AV3: the tombstone sits at the wildcard-delete ts (t5=50), NOT the
+            assert_eq!(
+                stored.timestamp,
+                ts(50, 1),
+                "the stored value carries the OVERRIDE ts, not the incoming put's"
+            );
+            // AV3: the write sits at the wildcard-delete ts (t5=50), NOT the
             // incoming put ts (t3=30). An intermediate put@t40 is still rejected;
             // only a put NEWER than t50 resurrects.
             let r_mid = s
@@ -2309,7 +2335,12 @@ mod tests {
             let r_new = s
                 .process_put(Some("demo/a"), vec![2], None, ts(60, 1))
                 .unwrap();
-            assert_eq!(r_new, StorageInsertionResult::Inserted);
+            assert_eq!(
+                r_new,
+                StorageInsertionResult::Replaced,
+                "R2352 — the newer put REPLACES the empty value the override left \
+                 behind; it was an Insert while the override tombstoned the key"
+            );
             assert_eq!(s.get(Some("demo/a")).unwrap().payload, vec![2]);
         }
 
@@ -2360,10 +2391,15 @@ mod tests {
             wput(&mut s, "demo/**", vec![0xAA], 10, 1);
             wdel(&mut s, "demo/**", 20, 1);
             wput(&mut s, "demo/a", vec![0xBB], 5, 1);
+            let stored = s
+                .get(Some("demo/a"))
+                .expect("R2352: an overridden put is stored empty, not tombstoned");
             assert!(
-                s.get(Some("demo/a")).is_none(),
-                "the newer wildcard-delete wins over the wildcard-put"
+                stored.payload.is_empty(),
+                "the newer wildcard-delete wins over the wildcard-put: the \
+                 wildcard-put's 0xAA must NOT be the stored value"
             );
+            assert_eq!(stored.timestamp, ts(20, 1), "at the wildcard-delete ts");
         }
 
         #[test]
@@ -2378,10 +2414,15 @@ mod tests {
             wdel(&mut s, "demo/**", 10, 1);
             wput(&mut s, "demo/**", vec![0xAA], 20, 1);
             wput(&mut s, "demo/a", vec![0xBB], 5, 1);
+            let stored = s
+                .get(Some("demo/a"))
+                .expect("R2352: an overridden put is stored empty, not tombstoned");
             assert!(
-                s.get(Some("demo/a")).is_none(),
-                "the delete phase short-circuits before the newer put (zenoh live parity)"
+                stored.payload.is_empty(),
+                "the delete phase short-circuits before the newer put (zenoh live \
+                 parity): neither 0xAA nor 0xBB is stored"
             );
+            assert_eq!(stored.timestamp, ts(10, 1), "at the wildcard-delete ts");
         }
 
         #[test]
@@ -2410,9 +2451,13 @@ mod tests {
             let mut s = state();
             wdel(&mut s, "demo/**", 10, 1);
             wput(&mut s, "demo/a", vec![7], 10, 1);
+            let stored = s
+                .get(Some("demo/a"))
+                .expect("R2352: an overridden put is stored empty, not tombstoned");
             assert!(
-                s.get(Some("demo/a")).is_none(),
-                "an equal-ts wildcard-delete overrides the concrete put (>= tie)"
+                stored.payload.is_empty(),
+                "an equal-ts wildcard-delete overrides the concrete put (>= tie), \
+                 so the put's own value must not survive"
             );
         }
 
@@ -2470,6 +2515,209 @@ mod tests {
                 vec![0x20],
                 "the re-issued wildcard-put replaced the older registry entry"
             );
+        }
+
+        // R2352 — which KIND the backend op is dispatched on when a wildcard
+        // override applies. The population is DERIVED twice over, because the
+        // residual that opened this named one function and that is who noticed,
+        // not what the class is:
+        //
+        //   * over the TYPE — every (incoming kind, override kind) pair the
+        //     phase selection can reach, so the pair the two dispatches disagree
+        //     on is counted rather than asserted; and
+        //   * over the SOURCE — every call site of `apply_one_with_override`, so
+        //     a fourth door added later fails here instead of quietly inheriting
+        //     whichever answer this module happened to pin.
+        //
+        // Both derivations fail on an empty population.
+        mod override_dispatch {
+            use super::*;
+
+            /// Every kind, from the type rather than a hand list: a new
+            /// `SampleKind` variant makes this array stop compiling, which is
+            /// the only way a matrix over it can stay honest.
+            const KINDS: [SampleKind; 2] = [SampleKind::Put, SampleKind::Del];
+
+            /// The phase selection in
+            /// [`apply_one_with_override`](StorageState::apply_one_with_override),
+            /// restated so the matrix below can ask which overrides each
+            /// incoming kind can actually meet. A Delete never enters the put
+            /// phase, so it can never be overridden by a Wildcard Put.
+            fn reachable_overrides(incoming: SampleKind) -> Vec<SampleKind> {
+                match incoming {
+                    SampleKind::Put => vec![SampleKind::Del, SampleKind::Put],
+                    SampleKind::Del => vec![SampleKind::Del],
+                }
+            }
+
+            /// Drive one (incoming, override) pair through the LIVE concrete
+            /// door and report whether the key is present afterwards. The
+            /// override is registered first so the concrete sample at the older
+            /// ts is the one that gets shadowed.
+            fn drive(incoming: SampleKind, override_kind: SampleKind) -> Option<Vec<u8>> {
+                let mut s = state();
+                match override_kind {
+                    SampleKind::Put => wput(&mut s, "demo/**", vec![0xAA], 20, 1),
+                    SampleKind::Del => wdel(&mut s, "demo/**", 20, 1),
+                }
+                match incoming {
+                    SampleKind::Put => wput(&mut s, "demo/a", vec![0xBB], 10, 1),
+                    SampleKind::Del => {
+                        s.apply_sample(
+                            &Sample::new_del("demo/a").with_timestamp(ts(10, 1)),
+                            || unreachable!(),
+                        );
+                    }
+                }
+                s.get(Some("demo/a")).map(|d| d.payload.clone())
+            }
+
+            #[test]
+            fn exactly_one_reachable_pair_makes_the_two_dispatches_disagree() {
+                // The pairs are enumerated, not listed: dispatching on the
+                // incoming kind and dispatching on the override kind differ
+                // exactly where the two kinds differ, so the divergent set is
+                // `{(i, o) | i != o}` intersected with what is reachable.
+                let pairs: Vec<(SampleKind, SampleKind)> = KINDS
+                    .into_iter()
+                    .flat_map(|i| reachable_overrides(i).into_iter().map(move |o| (i, o)))
+                    .collect();
+                assert!(
+                    !pairs.is_empty(),
+                    "the phase selection reaches no (incoming, override) pair at \
+                     all — this matrix would then be measuring nothing"
+                );
+                let divergent: Vec<(SampleKind, SampleKind)> =
+                    pairs.iter().copied().filter(|(i, o)| i != o).collect();
+                assert_eq!(
+                    divergent,
+                    vec![(SampleKind::Put, SampleKind::Del)],
+                    "an incoming Put under a Wildcard-Delete override is the ONLY \
+                     place the choice of dispatch kind is observable; if this set \
+                     grew, the parity argument below covers only part of it"
+                );
+                // ...and the whole matrix agrees with upstream: the write happens
+                // (the incoming kind decides the op) and the value is the
+                // override's (empty for a Delete override).
+                for (i, o) in pairs {
+                    match (i, o) {
+                        (SampleKind::Put, SampleKind::Del) => assert_eq!(
+                            drive(i, o),
+                            Some(Vec::new()),
+                            "present and empty: the divergent pair"
+                        ),
+                        (SampleKind::Put, SampleKind::Put) => assert_eq!(
+                            drive(i, o),
+                            Some(vec![0xAA]),
+                            "the wildcard-put's value is stored"
+                        ),
+                        (SampleKind::Del, _) => assert_eq!(
+                            drive(i, o),
+                            None,
+                            "an incoming Delete is a delete under either dispatch"
+                        ),
+                    }
+                }
+            }
+
+            #[test]
+            fn every_call_site_of_the_override_seam_is_driven_by_this_module() {
+                // The needle is ASSEMBLED at compile time so this file's own
+                // source does not contain the joined form and cannot self-match
+                // (the same construction `reassembly_dispatch.rs` uses).
+                let needle = concat!("self.apply_one_with", "_override(");
+                let src = include_str!("storage_state.rs");
+                let call_sites = src.matches(needle).count();
+                assert!(
+                    call_sites > 0,
+                    "found no call site of the override seam; the derivation is \
+                     broken, so nothing below is evidence"
+                );
+                assert_eq!(
+                    call_sites, 3,
+                    "the override seam has {call_sites} doors, and this module \
+                     drives three of them: the live concrete write, the wildcard \
+                     materialize loop and the align-receive concrete write. A new \
+                     door needs its own divergent-pair test, because the three \
+                     reach the seam with DIFFERENT incoming kinds."
+                );
+            }
+
+            #[test]
+            fn the_materialize_door_stores_an_empty_value_over_a_live_key() {
+                // The door the residual did NOT name and no test reached with the
+                // divergent pair: a Wildcard PUT materializing onto an ALREADY
+                // STORED key, over which a Wildcard DELETE is registered. The
+                // incoming kind is the wildcard-put's, so the delete phase runs
+                // first and returns the wildcard-delete; upstream still dispatches
+                // the received sample's Put. Distinct from the live-concrete tests
+                // above, where the incoming sample is the concrete one.
+                // The delete phase keeps a wildcard-delete whose ts is >= the
+                // INCOMING ts, so the wildcard-put has to sit at or below the
+                // registered delete. The live key is planted with the RAW gated
+                // write, which bypasses the registries by design, because a
+                // wildcard-delete's own materialize would otherwise have removed
+                // it and the materialize loop only visits keys the backend holds.
+                let mut s = state();
+                wdel(&mut s, "demo/**", 50, 1);
+                s.process_put(Some("demo/a"), vec![7], None, ts(30, 1))
+                    .unwrap();
+                wput(&mut s, "demo/**", vec![0xAA], 20, 1);
+                let stored = s
+                    .get(Some("demo/a"))
+                    .expect("R2352: the materialize door stores, it does not tombstone");
+                assert!(
+                    stored.payload.is_empty(),
+                    "the registered wildcard-delete empties the value the \
+                     wildcard-put tried to materialize onto this key"
+                );
+                assert_eq!(
+                    stored.timestamp,
+                    ts(50, 1),
+                    "at the wildcard-delete ts, not the wildcard-put's"
+                );
+                // The control direction, same door: a wildcard-put NEWER than
+                // every registered wildcard-delete is not overridden at all, so
+                // its own value materializes. Without this the assertion above
+                // would also pass on a materialize loop that always emptied.
+                let mut s2 = state();
+                wdel(&mut s2, "demo/**", 20, 1);
+                s2.process_put(Some("demo/b"), vec![7], None, ts(30, 1))
+                    .unwrap();
+                wput(&mut s2, "demo/**", vec![0xAA], 40, 1);
+                assert_eq!(
+                    s2.get(Some("demo/b")).map(|d| d.payload.clone()),
+                    Some(vec![0xAA]),
+                    "an unshadowed wildcard-put materializes its own value"
+                );
+            }
+
+            #[test]
+            fn the_query_surface_answers_an_empty_value_not_an_absent_key() {
+                // The residual's own observable: "query = absent" (wz, before)
+                // vs "query = empty value" (a real zenohd). The queryable reply
+                // set is `matching_entries`, so that is where it is asserted —
+                // `get` alone would pin the backend without pinning the reply.
+                let mut s = state();
+                wdel(&mut s, "demo/**", 50, 1);
+                wput(&mut s, "demo/a", vec![9], 30, 1);
+                let replies = s.matching_entries("demo/**");
+                assert_eq!(
+                    replies.len(),
+                    1,
+                    "a query over the overridden key replies once, not zero times"
+                );
+                assert_eq!(replies[0].0, "demo/a");
+                assert!(
+                    replies[0].1.payload.is_empty(),
+                    "the reply carries an empty value"
+                );
+                assert!(
+                    replies[0].1.encoding.is_none(),
+                    "under the default encoding, which is what the sample upstream \
+                     builds with `SampleBuilder::delete` carries"
+                );
+            }
         }
 
         // R311wt slice 4 — the garbage-collection sweep over the wildcard
@@ -3661,9 +3909,18 @@ mod tests {
                         encoding: None,
                     }),
                 );
+                let stored = s
+                    .get(Some("demo/a"))
+                    .expect("R2352: the shadowed aligned put is stored empty");
                 assert!(
-                    s.get(Some("demo/a")).is_none(),
-                    "the registered wildcard-delete shadows the older aligned concrete put"
+                    stored.payload.is_empty(),
+                    "the registered wildcard-delete shadows the older aligned concrete \
+                     put: the retrieved 0xAA must NOT reach the backend"
+                );
+                assert_eq!(
+                    stored.timestamp,
+                    at(10, 0),
+                    "at the wildcard-delete ts, so an older event still cannot resurrect"
                 );
             }
 
@@ -3861,6 +4118,48 @@ mod tests {
                     let event = the_wildcard_event(&s);
                     assert_eq!(*event.action(), Action::WildcardDelete("demo/**".into()));
                     assert_eq!(event.key(), Some("demo/**"));
+                }
+
+                #[test]
+                fn an_overridden_concrete_put_is_advertised_as_a_put() {
+                    // R2352 — the layer wz's retired divergence appealed to. It
+                    // claimed a tombstone "agrees with the log action zenoh's own
+                    // `determine_action` records"; measured, upstream records a
+                    // plain Put there, because the overridden concrete write keeps
+                    // the action it was born with
+                    // (`plugins/zenoh-plugin-storage-manager/src/storages_mgt/service.rs` @ `let mut action: Action = kind.into()`)
+                    // and `determine_action` returns that unchanged
+                    // (`plugins/zenoh-plugin-storage-manager/src/replication/log.rs` @ `Action::Put => return Action::Put`).
+                    // wz derives the action from backend presence, so the fix moves
+                    // this event from Delete to Put and the two logs now agree.
+                    let mut s = state();
+                    wdel(&mut s, "demo/**", 50);
+                    s.apply_sample(
+                        &Sample::new_put("demo/a", vec![9]).with_timestamp(at(30, 0)),
+                        || unreachable!(),
+                    );
+                    let concrete: Vec<EventMetadata> = s
+                        .replication_events()
+                        .into_iter()
+                        .filter(|e| e.key() == Some("demo/a"))
+                        .collect();
+                    assert_eq!(
+                        concrete.len(),
+                        1,
+                        "the overridden key is one replication event"
+                    );
+                    assert_eq!(
+                        *concrete[0].action(),
+                        Action::Put,
+                        "the overridden concrete put is logged as a Put, matching \
+                         upstream's `determine_action`"
+                    );
+                    assert_eq!(
+                        concrete[0].timestamp(),
+                        &at(50, 0),
+                        "at the wildcard-delete ts, so the fingerprint is unchanged \
+                         by this fix (it hashes key + timestamp only)"
+                    );
                 }
 
                 #[test]

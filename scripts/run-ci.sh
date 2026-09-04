@@ -7584,9 +7584,24 @@ layer_c1z_cargo_test_storage_driver() {
     # CONTROL: put 56 back and this leg alone reds — measured, not claimed.
     _runci_guarded_test "C1z storage" 62 \
         cargo test -p wz-session-core --features storage-history,storage-mgr-strip-prefix --lib storage --quiet || return 1
-    _runci_guarded_test "C1z storage" 45 \
+    # R2352 45 -> 49 / 59 -> 63: the `storage-mgr-wildcard-updates` atom closed
+    # its named residual (dispatch-on-override-kind), and the new
+    # `storage_state::tests::wildcard::override_dispatch` mod adds four cases —
+    # the (incoming, override) matrix, the source-derived call-site floor, the
+    # materialize door with the divergent pair, and the query surface.
+    #
+    # WHICH GUARDS MOVE IS DERIVED from the manifest, not assumed: the only
+    # feature in wz-session-core/Cargo.toml that lists
+    # `storage-mgr-wildcard-updates` is `storage-mgr-garbage-collection`
+    # (Cargo.toml:955), so exactly these two plus the gc subset (52 -> 56) and
+    # the aligner subset (145 -> 150, which additionally gains the one
+    # `wildcard_production` case) can move. The remaining subsets here were
+    # re-measured at their old counts in the same run rather than assumed
+    # unaffected, and the two `-p wz-runtime-tokio` gc/aligner guards do not
+    # move because every new case lives in wz-session-core's storage_state.rs.
+    _runci_guarded_test "C1z storage" 49 \
         cargo test -p wz-session-core --features storage-mgr-wildcard-updates --lib storage --quiet || return 1
-    _runci_guarded_test "C1z storage" 59 \
+    _runci_guarded_test "C1z storage" 63 \
         cargo test -p wz-session-core --features storage-mgr-wildcard-updates,storage-mgr-strip-prefix --lib storage --quiet || return 1
     # R311y829 128 -> 132: the four publication-schedule tests. This is the
     # ONLY `-p wz-session-core --lib storage` subset that moved — the schedule
@@ -7609,13 +7624,23 @@ layer_c1z_cargo_test_storage_driver() {
     # `storage-aligner = ["storage-replication"]`
     # (wz-session-core/Cargo.toml:907) — without that implication this would be
     # 144, so the number is the command's, not the diff's.
-    _runci_guarded_test "C1z storage" 145 \
+    # R2352 145 -> 150: the four `override_dispatch` cases above plus ONE more
+    # that only this subset can see — `wildcard_production`'s
+    # `an_overridden_concrete_put_is_advertised_as_a_put`, which needs the
+    # replication events `storage-aligner` pulls in. So the delta here is 5 and
+    # the two bare wildcard subsets' is 4; the difference is the number, not a
+    # rounding of it.
+    _runci_guarded_test "C1z storage" 150 \
         cargo test -p wz-session-core --features storage-aligner,storage-mgr-wildcard-updates --lib storage --quiet || return 1
     _runci_guarded_test "C1z storage_service" 9 \
         cargo test -p wz-runtime-tokio --features storage-mgr-complete-flag --lib storage_service --quiet || return 1
     _runci_guarded_test "C1z storage_service" 10 \
         cargo test -p wz-runtime-tokio --features storage-backend,storage-mgr-strip-prefix,declare-subscriber,pubsub-allow-loop --lib storage_service --quiet || return 1
-    _runci_guarded_test "C1z storage" 52 \
+    # R2352 52 -> 56: the transitive enabler. `storage-mgr-garbage-collection`
+    # requires the wildcard registries it sweeps, so this subset compiles the
+    # four `override_dispatch` cases too. It carries no aligner, so it does NOT
+    # gain the fifth.
+    _runci_guarded_test "C1z storage" 56 \
         cargo test -p wz-session-core --features storage-mgr-garbage-collection --lib storage --quiet || return 1
     _runci_guarded_test "C1z storage_gc_service" 3 \
         cargo test -p wz-runtime-tokio --features storage-mgr-garbage-collection --lib storage_gc_service --quiet || return 1
@@ -9918,6 +9943,19 @@ layer_c1bz_docs_resolve() {
     # import at module scope. A `use` added for the compiler's benefit is
     # therefore a doc-link edit too, which is the shape this arm exists to catch:
     # nothing in R2159's diff LOOKS like a doc change, and the count still moved.
+    #
+    # R2352: wz-session-core 538 -> 537. The link MULTISET did not move (two
+    # removed, two added), so the count could not be read off the diff and the
+    # finding was NAMED by measurement instead -- `cargo doc` run on the stashed
+    # tree and on this one, error sets sorted and diffed: exactly one line is
+    # only at HEAD, `unresolved link to StorageState::process_delete`. It sat in
+    # the storage_state MODULE doc, and a module-level `//!` cannot reach an
+    # inherent method through the type name (the surviving
+    # `StorageState::replication_events` line in the same file is the same
+    # class), so the paragraph R2352 retired -- the dispatch-on-override-kind
+    # divergence -- had been carrying a broken link the whole time. The two
+    # links R2352 ADDED both sit in a PRIVATE method's doc, which rustdoc does
+    # not resolve without --document-private-items, so they are worth 0 here.
     budget="
         wz:2
         wz-ap-demo:26
@@ -9929,7 +9967,7 @@ layer_c1bz_docs_resolve() {
         wz-routing-graph:6
         wz-runtime-coop:12
         wz-runtime-tokio:522
-        wz-session-core:538
+        wz-session-core:537
         wz-session-lwip:4
         wz-switchboard-codegen:8
         zenoh-pico-sys:3

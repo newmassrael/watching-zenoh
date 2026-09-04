@@ -274,10 +274,26 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # separates the components the R2350 way: this round edited no other atom's
 # reason, so the whole of both moves is this one atom, and PARTIAL falls 82 ->
 # 81 with it.
-PIN_REACHED = 69
+# R2352 — 69 -> 68 and 403 -> 402, again ONE atom leaving the corpus and
+# nothing else. `storage-mgr-wildcard-updates` went PARTIAL -> COMPLETE: its one
+# named residual (dispatch-on-override-kind) was IMPLEMENTED — the backend op
+# now dispatches on the INCOMING kind while the value and timestamp come from
+# the override, so a concrete Put shadowed by a wildcard-delete materializes as
+# upstream's empty-payload put rather than as a tombstone — and the
+# JUSTIFICATION that clause carried was REFUTED at the pin: upstream logs that
+# event as a plain Put and stores a put, so it is consistent in the very place
+# the clause called it inconsistent.
+#
+# The two components are SEPARATED, not inferred from the total. The reason's
+# citation TOKENS are byte-identical before and after (measured: the same four
+# `path:line` tokens in both), so neither move comes from editing prose — the
+# whole of both is the atom leaving the population, carrying its single wz
+# citation (`storage_state.rs:515-551`; its other three tokens are upstream or
+# root-less and were never in this count). PARTIAL falls 81 -> 80 with it.
+PIN_REACHED = 68
 PIN_UNREACHED = 2
 PIN_NO_SYMBOL = 10
-PIN_WZ_CITATIONS = 403
+PIN_WZ_CITATIONS = 402
 PIN_AMBIGUOUS = 85
 
 
