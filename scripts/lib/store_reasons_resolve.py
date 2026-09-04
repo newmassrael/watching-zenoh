@@ -137,7 +137,9 @@ REASON_FLOOR = 100
 
 #: A MINIMUM on the live anchored population, and the one number here that is a
 #: ratchet rather than a shape check. R2339 raised it from 1 to 6 by anchoring
-#: `access-extauth-usrpwd`'s three residual clauses.
+#: `access-extauth-usrpwd`'s three residual clauses; R2340 to 9 by anchoring
+#: `access-acl`'s two, which sit on the same seam -- one of them is the ACL
+#: subject axis that the usrpwd atom's discarded username feeds.
 #:
 #: Why a minimum can never produce a legitimate red, which is what makes this
 #: safe where a shrinking budget would not be: corrections to an inventory
@@ -154,7 +156,7 @@ REASON_FLOOR = 100
 #: with synthetic counts; this asks a question about the real store, and mixing
 #: the two would make the classifier's own tests depend on how much of the
 #: track has been anchored so far.
-ANCHORED_FLOOR = 6
+ANCHORED_FLOOR = 9
 
 
 class InputError(Exception):

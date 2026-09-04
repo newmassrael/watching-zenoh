@@ -173,10 +173,28 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # R2241 class, and it has now recurred five times; the repair is to not make the
 # claim. PIN_AMBIGUOUS does not move -- the three additions are all rooted at
 # `crates/`, so none of them is ambiguous.
+# R2340 — 408 -> 409, one citation, from `access-acl`'s appended CORRECTION.
+# Its two `WHAT REMAINS` clauses were re-measured against the pin and both hold;
+# the wz half of the subject-axis clause is the access-control crate's own
+# module doc, which states the missing axes about itself in three places, so the
+# correction cites that file to show the claim rather than assert it. The other
+# clause's wz half is a Cargo feature list, which is not a citation, and every
+# upstream half is anchored and reads as upstream -- so one citation, not five.
+#
+# PIN_AMBIGUOUS does not move, and that is worth a sentence because the first
+# draft of this correction moved it. That draft wrote the crate's file as a bare
+# `lib.rs`, which matches many tracked files and is counted as ambiguous rather
+# than guessed at, and it shortened an upstream path to `interceptor/mod.rs:133`
+# -- which resolves to a WZ file, so the atom would have been recorded citing wz
+# code for a claim about zenoh. Both were repaired in the prose (full paths, one
+# each way) rather than absorbed by moving the pins to match, which is the same
+# repair the R2333 and R2337 notes above chose for the R2241 class: when a
+# sentence makes a claim the gate reads differently than the author meant, fix
+# the sentence.
 PIN_REACHED = 72
 PIN_UNREACHED = 2
 PIN_NO_SYMBOL = 10
-PIN_WZ_CITATIONS = 408
+PIN_WZ_CITATIONS = 409
 PIN_AMBIGUOUS = 85
 
 
