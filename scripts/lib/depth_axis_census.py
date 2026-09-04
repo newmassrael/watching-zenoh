@@ -191,10 +191,26 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # repair the R2333 and R2337 notes above chose for the R2241 class: when a
 # sentence makes a claim the gate reads differently than the author meant, fix
 # the sentence.
+# R2341 — 409 -> 415, six citations, from `session-extauth`'s appended
+# CORRECTION. Its three residual clauses were re-measured against the pin and
+# all three hold; the wz half of each is a claim about THIS tree, so the
+# correction names the files that carry it -- the dispatch module and the two
+# method modules for "no runtime credential mutation" and "no identity slot",
+# and the session actions for the second. Six occurrences across five files,
+# every one a file the sentence is actually about.
+#
+# PIN_AMBIGUOUS does not move, and once again the first draft would have moved
+# something it should not: it wrote zenoh's interceptor path shortened to
+# `interceptor/access_control.rs:210`, which resolves to the WZ file of that
+# name -- the identical mistake R2340's note above records, made again one round
+# later while writing about citation rot. It was caught BEFORE the store was
+# touched, by running this file's own classifier over the draft, which is the
+# step R2340's carry added to the procedure. That step has now paid for itself
+# on its first use; the repair was again in the sentence, not in a pin.
 PIN_REACHED = 72
 PIN_UNREACHED = 2
 PIN_NO_SYMBOL = 10
-PIN_WZ_CITATIONS = 409
+PIN_WZ_CITATIONS = 415
 PIN_AMBIGUOUS = 85
 
 
