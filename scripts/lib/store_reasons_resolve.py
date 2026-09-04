@@ -196,10 +196,17 @@ def upstream_texts(root: pathlib.Path) -> dict[str, str]:
     """Every `.rs` file of the pinned checkout, keyed by relative path."""
     texts: dict[str, str] = {}
     for path in root.rglob("*.rs"):
-        if "target" in path.parts:
+        rel = path.relative_to(root)
+        # R2338 — RELATIVE, for the reason the sibling gate records at the same
+        # line: hosted CI puts the pinned checkout under a directory named
+        # `target`, so testing the absolute path skips every file and the floor
+        # below reports "this tree is empty" about a tree that is complete. This
+        # gate inherited the shape from that one and would have been red hosted
+        # the moment the layer reached it.
+        if "target" in rel.parts:
             continue
         try:
-            texts[path.relative_to(root).as_posix()] = path.read_text(errors="replace")
+            texts[rel.as_posix()] = path.read_text(errors="replace")
         except OSError as exc:
             raise InputError(f"{path} is not readable ({exc})") from exc
     if len(texts) < anchor.__dict__.get("UPSTREAM_FILE_FLOOR", 200):

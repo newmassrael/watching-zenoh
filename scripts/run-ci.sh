@@ -2113,6 +2113,29 @@ PY
     # baselined gate that gains its citation reds asking for the baseline to
     # shrink, and a stale baseline entry reds — each revert returns OK.
     python3 scripts/lib/gate_provenance_lint.py >/dev/null || return 1
+    # R2338 (no register item) — the ROOT-RELATIVE EXCLUSION lint. Hosted run
+    # 33839814655 failed with `upstream-reads: FAIL -- ... yielded 0 Rust
+    # file(s), under the floor of 200` about a checkout that was COMPLETE:
+    # the walk skipped an inner build directory with `"target" in path.parts`
+    # on the ABSOLUTE path, and hosted CI puts the pinned zenoh under
+    # `target/zenohd-build/zenoh-src`, so the ancestor matched every file.
+    # Three sibling gates read that same root in the same job and passed —
+    # they walk narrower subtrees and carry no such filter — which is why the
+    # tree looked fine either side of it.
+    #
+    # The gate is the CLASS, not the two files: 18 component tests across 13
+    # scripts spell the same thing, and what separated the two that bit from
+    # the rest is only whether the walked root comes from outside the repo.
+    # There is no exemption table because relative is correct at all 18 and
+    # weaker at none. The floor is a MINIMUM — a lint whose population went to
+    # zero would report green while grading nothing — and deliberately not a
+    # ceiling, so a correct new walk never has to argue with a budget.
+    # MEASURED both ways: reverting any one site reds by name, and the
+    # selftest drives the classifier over synthetic sources including the
+    # laundering case (a sibling function's relative binding must not vouch
+    # for a bare name) that the first draft of this lint got wrong.
+    python3 scripts/lib/root_relative_exclusion_lint.py --selftest || return 1
+    python3 scripts/lib/root_relative_exclusion_lint.py || return 1
     # R311y704 (§1.1n) — the DATAGRAM-HALF gate. `Dissection::flows()` is the
     # TCP half and `datagram_flows()` is the other one; a reader that walks the
     # first and forgets the second produces an EMPTY result over a multicast or

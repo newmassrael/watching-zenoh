@@ -80,7 +80,9 @@ def findings_in(path: Path) -> list[tuple[int, str]]:
 
 def main() -> int:
     sources = sorted(CRATES.rglob("*.rs"))
-    sources = [p for p in sources if "target" not in p.parts]
+    # RELATIVE (R2338): whether an ABSOLUTE test means the same thing is a fact
+    # about where the tree happens to sit, not about this walk.
+    sources = [p for p in sources if "target" not in p.relative_to(CRATES).parts]
     if not sources:
         # A version that scanned nothing would exit 0 forever and read as
         # coverage. Same rule as count_guard_lint.py's empty-scope failure.

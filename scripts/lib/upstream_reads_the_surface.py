@@ -274,10 +274,31 @@ def upstream_texts() -> tuple[pathlib.Path, dict[str, str]]:
         )
     texts: dict[str, str] = {}
     for path in root.rglob("*.rs"):
-        if "target" in path.parts:
+        rel = path.relative_to(root)
+        # R2338 — RELATIVE to the checkout, and that is the whole fix. This
+        # skips a build directory INSIDE the upstream tree; testing the ABSOLUTE
+        # path instead asks whether any ancestor is named `target`, and hosted CI
+        # puts the checkout at <repo>/target/zenohd-build/zenoh-src -- so every
+        # file matched, the walk yielded nothing, and the floor below turned that
+        # into rc 2. Layer Z had been red on it, correctly refusing to grade,
+        # while the tree it was pointed at was complete: the ci.yml guard that
+        # asserts this very checkout's protocol lib root passed in the same job.
+        # Reproduced by pointing ZENOHD_SRC at the SAME tree through a path with
+        # a `target` component -- same content, 647 files or 0 depending only on
+        # where it sits.
+        #
+        # The exclusion STAYS rather than being deleted, and the reason is the
+        # same environment: a developer's cargo-git checkout has no build tree
+        # inside it (measured at the pin: zero directories named `target`, zero
+        # `.rs` under one, of 647 in all), so locally this line never skips
+        # anything. Hosted CI BUILDS zenoh in the tree it cloned, so the inner
+        # build directory exists precisely there. The filter has no subject on
+        # the machine where it looks harmless and a real one on the machine where
+        # it bit.
+        if "target" in rel.parts:
             continue
         try:
-            texts[path.relative_to(root).as_posix()] = path.read_text(errors="replace")
+            texts[rel.as_posix()] = path.read_text(errors="replace")
         except OSError as exc:
             raise InputError(f"{path} is not readable ({exc})") from exc
     if len(texts) < UPSTREAM_FILE_FLOOR:

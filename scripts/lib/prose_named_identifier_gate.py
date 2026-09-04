@@ -325,7 +325,10 @@ def tracked(root: pathlib.Path | None) -> list[str]:
     return sorted(
         str(p.relative_to(base))
         for p in base.rglob("*")
-        if p.is_file() and ".git" not in p.parts
+        # RELATIVE (R2338), and the walk already had the relative path in hand
+        # one line up: whether an ABSOLUTE test means the same thing is a fact
+        # about where the tree happens to sit, not about this walk.
+        if p.is_file() and ".git" not in p.relative_to(base).parts
     )
 
 

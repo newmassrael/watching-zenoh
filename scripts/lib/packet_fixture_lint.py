@@ -155,10 +155,13 @@ REFILL_WINDOW = 15
 
 
 def rust_files() -> list[pathlib.Path]:
+    # RELATIVE (R2338): whether an ABSOLUTE test means the same thing is a fact
+    # about where the tree happens to sit, not about this walk.
     return sorted(
         p
         for p in CRATES.rglob("*.rs")
-        if "target" not in p.parts and "vendor" not in p.parts
+        if "target" not in p.relative_to(CRATES).parts
+        and "vendor" not in p.relative_to(CRATES).parts
     )
 
 

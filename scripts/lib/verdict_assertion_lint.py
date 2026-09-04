@@ -286,10 +286,13 @@ def pins_the_list(body: str) -> bool:
 
 
 def main() -> int:
+    # RELATIVE (R2338): whether an ABSOLUTE test means the same thing is a fact
+    # about where the tree happens to sit, not about this walk.
     files = sorted(
         p
         for p in CRATES.rglob("*.rs")
-        if "target" not in p.parts and "vendor" not in p.parts
+        if "target" not in p.relative_to(CRATES).parts
+        and "vendor" not in p.relative_to(CRATES).parts
     )
     if not files:
         print(
@@ -314,7 +317,15 @@ def main() -> int:
         # a file under `tests/` needs no such module. The population narrowed
         # silently and the count went 20 to 19, which is the only reason it was
         # noticed.
-        whole_file = "tests" in path.parts or "benches" in path.parts
+        # RELATIVE (R2338), and this one is the sharpest of the family: the
+        # tokens are `tests` and `benches`, so an ABSOLUTE test asks whether
+        # anybody ever cloned this tree under a directory by either name -- and
+        # if they did, EVERY file would read as test scope and the gate would
+        # ask nothing of any of them.
+        # A separate name because `rel` above is already a `str` for
+        # reporting, and `.parts` on that would be a different question.
+        within = path.relative_to(CRATES)
+        whole_file = "tests" in within.parts or "benches" in within.parts
         scopes = test_scopes(masked)
         in_tests = (lambda _at: True) if whole_file else (
             lambda at: any(a <= at < b for a, b in scopes)

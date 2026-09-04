@@ -158,7 +158,9 @@ def main() -> int:
     root = REPO_ROOT / CRATE
     files: dict[Path, list[str]] = {}
     for path in sorted(root.rglob("*.rs")):
-        if "target" in path.parts:
+        # RELATIVE (R2338): whether an ABSOLUTE test means the same thing is a
+        # fact about where the tree happens to sit, not about this walk.
+        if "target" in path.relative_to(root).parts:
             continue
         files[path] = blank_noncode(
             path.read_text(encoding="utf-8", errors="replace")

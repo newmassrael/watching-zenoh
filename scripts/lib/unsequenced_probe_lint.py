@@ -80,7 +80,9 @@ def c_probe_sources() -> list[tuple[Path, int, str]]:
     """Every C probe source in the tree, as (file, line offset, text)."""
     found: list[tuple[Path, int, str]] = []
     for path in sorted(CRATES.rglob("*.rs")):
-        if "target" in path.parts:
+        # RELATIVE (R2338): whether an ABSOLUTE test means the same thing is a
+        # fact about where the tree happens to sit, not about this walk.
+        if "target" in path.relative_to(CRATES).parts:
             continue
         text = path.read_text(errors="ignore")
         if "#include" not in text:
@@ -92,7 +94,7 @@ def c_probe_sources() -> list[tuple[Path, int, str]]:
             line = text[: match.start()].count("\n") + 1
             found.append((path, line, body))
     for path in sorted(CRATES.rglob("*.c")):
-        if "target" in path.parts:
+        if "target" in path.relative_to(CRATES).parts:
             continue
         found.append((path, 1, path.read_text(errors="ignore")))
     return found

@@ -193,7 +193,9 @@ def test_bindings(root: Path) -> tuple[dict[str, list[str]], int, int]:
     tests_seen = 0
     scanned = 0
     for path in sorted((root / "crates").rglob("*.rs")):
-        if "target" in path.parts:
+        # RELATIVE (R2338): whether an ABSOLUTE test means the same thing is a
+        # fact about where the tree happens to sit, not about this walk.
+        if "target" in path.relative_to(root).parts:
             continue
         scanned += 1
         raw = path.read_text(encoding="utf-8", errors="replace")

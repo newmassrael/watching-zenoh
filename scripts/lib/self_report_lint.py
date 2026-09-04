@@ -146,7 +146,10 @@ def sources(root: pathlib.Path) -> list[pathlib.Path]:
     out: list[pathlib.Path] = []
     for pattern in ("crates/*/src/**/*.rs", "crates/*/tests/**/*.rs"):
         for p in sorted(root.glob(pattern)):
-            if "target" in p.parts:
+            # RELATIVE (R2338): whether an ABSOLUTE test means the same thing
+            # is a fact about where the tree happens to sit, not about this
+            # walk.
+            if "target" in p.relative_to(root).parts:
                 continue
             out.append(p)
     return out

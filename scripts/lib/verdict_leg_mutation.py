@@ -718,8 +718,11 @@ def _crate_sources() -> list[str]:
     if _SOURCES is None:
         _SOURCES = [
             p.read_text(encoding="utf-8", errors="replace")
+            # RELATIVE (R2338): whether an ABSOLUTE test means the same thing
+            # is a fact about where the tree happens to sit, not about this
+            # walk.
             for p in sorted((REPO_ROOT / "crates").rglob("*.rs"))
-            if "target" not in p.parts
+            if "target" not in p.relative_to(REPO_ROOT).parts
         ]
     return _SOURCES
 
