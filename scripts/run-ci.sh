@@ -7569,7 +7569,20 @@ layer_c1z_cargo_test_storage_driver() {
         cargo test -p wz-session-core --features storage-mgr-strip-prefix --lib storage_strip_prefix --quiet || return 1
     _runci_guarded_test "C1z storage" 46 \
         cargo test -p wz-session-core --features storage-backend,storage-mgr-strip-prefix --lib storage --quiet || return 1
-    _runci_guarded_test "C1z storage" 56 \
+    # R2350 56 -> 62: the `storage-history` atom closed its named residual, so
+    # its module gained five cases (a delete is now a versioned tombstone: the
+    # hide/retain split, the post-delete older put, the put above the tombstone,
+    # the older delete, and the one-timestamp duplicate) plus one in
+    # `storage_state::tests::history`. Taken from what the command PRINTED under
+    # gate 4b, not from counting the diff.
+    #
+    # "The ONLY `-p wz-session-core --lib storage` subset that moved" is DERIVED,
+    # not asserted: `storage-history` is defined at wz-session-core/Cargo.toml:882
+    # and no other feature in that manifest lists it, so no other subset here can
+    # unify it in. The lane then re-measured the other seven at their old counts
+    # (16 of 16 legs reached, all green) rather than assume them unaffected.
+    # CONTROL: put 56 back and this leg alone reds — measured, not claimed.
+    _runci_guarded_test "C1z storage" 62 \
         cargo test -p wz-session-core --features storage-history,storage-mgr-strip-prefix --lib storage --quiet || return 1
     _runci_guarded_test "C1z storage" 45 \
         cargo test -p wz-session-core --features storage-mgr-wildcard-updates --lib storage --quiet || return 1
@@ -7598,7 +7611,16 @@ layer_c1z_cargo_test_storage_driver() {
         cargo test -p wz-runtime-tokio --features storage-aligner --lib storage --quiet || return 1
     _runci_guarded_test "C1z storage_aligner_convergence_e2e" 1 \
         cargo test -p wz-runtime-tokio --features storage-aligner --test storage_aligner_convergence_e2e --quiet || return 1
-    _runci_guarded_test "C1z storage" 11 \
+    # R2350 11 -> 13: the driver half of the same close — two reply-path cases
+    # in `storage_service::tests::history` (a deleted key replies nothing at
+    # all; a version above the tombstone still replies). The wz-session-core
+    # twin is the 62 above; these are the only two guards in this file whose
+    # invocation enables `storage-history` (wz-runtime-tokio/Cargo.toml:486
+    # defines it and nothing else in that manifest lists it).
+    # CONTROL: put 11 back with the 62 left in place and the lane reaches all
+    # 16 legs and reds on THIS one — the two pins were reverted separately, so
+    # neither is riding on the other's short-circuit.
+    _runci_guarded_test "C1z storage" 13 \
         cargo test -p wz-runtime-tokio --features storage-history --lib storage --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-session-core --features storage-mgr-multi-storage-host --all-targets --quiet -- -D warnings \
