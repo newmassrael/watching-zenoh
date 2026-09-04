@@ -158,10 +158,25 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # redded on 60 -> 62 while this note was being written. A gate's own prose is
 # tracked text like any other; the repair is to stop making the claim, not to
 # re-anchor a claim this file has no reason to make.
+# R2337 — 405 -> 408, and unlike R2333 this move IS the round's own work.
+# `routing-router`'s reason gained an appended CORRECTION that re-measures its
+# four residual clauses against the pin, and three of them cite a wz file to say
+# so: the run-mode table that maps the star router to the Peer wire value, the
+# module declaration that puts the dual-mesh forwarder behind its sibling
+# feature, and the arm that selects the no-op forwarder without `routing-routes`.
+# Three clauses that HOLD, each now naming the line that shows it. The fourth
+# clause was withdrawn and cites upstream only, so it moves nothing here.
+#
+# The withdrawn clause's upstream paths are deliberately NOT spelled here, for
+# the reason the R2333 note above gives: a gate's own prose is tracked text, and
+# writing them would make this comment a bare upstream citation. That is the
+# R2241 class, and it has now recurred five times; the repair is to not make the
+# claim. PIN_AMBIGUOUS does not move -- the three additions are all rooted at
+# `crates/`, so none of them is ambiguous.
 PIN_REACHED = 72
 PIN_UNREACHED = 2
 PIN_NO_SYMBOL = 10
-PIN_WZ_CITATIONS = 405
+PIN_WZ_CITATIONS = 408
 PIN_AMBIGUOUS = 85
 
 

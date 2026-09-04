@@ -2649,6 +2649,23 @@ PY
     # population floors, over a synthetic upstream with no checkout at all.
     # Layer Z runs the adjudication against the pinned source.
     python3 scripts/lib/upstream_reads_the_surface.py --selftest || return 1
+    # R2337 (open-debt item 15, atom `routing-router`) — the same split again,
+    # one layer up: not "does upstream read this config key" but "is this atom's
+    # claim about upstream still TRUE at the pin".
+    #
+    # `upstream_citation_anchor_gate.py` already grades that for 1175 tracked
+    # files and SKIPS the atomic store, on a reason that is right about the
+    # ledger (frozen; grading it would grade history) and wrong about the
+    # inventory reasons under the same prefix — those are LIVE, they state what
+    # each atom still owes for parity, and they were graded by nothing. Measured
+    # on `routing-router`: it debited wz for having no peers-failover brokering,
+    # a capability the pinned upstream deleted, citing files that still exist so
+    # no path check could notice.
+    #
+    # This arm drives all three citation forms in BOTH directions plus each
+    # floor emptied on its own, over a synthetic upstream with no checkout and
+    # no store. Layer Z runs the adjudication against the pinned source.
+    python3 scripts/lib/store_reasons_resolve.py --selftest || return 1
     # R311y605 — the DISSECT FEATURE CENSUS, the name census's sibling one level
     # up. `dissect`'s doc says it selects the whole codec-* MID space so "an
     # observer reads every message it sees", and the claim had been wrong THREE
@@ -13968,6 +13985,36 @@ layer_z_zenohd_interop() {
              "does — see the lines above for which and which direction." \
              "⛔ The fix is NEVER to widen UPSTREAM_INERT_CONFIG_KEYS to quiet" \
              "it: that list is judged by this same check."
+        return 1
+    fi
+    # R2337 (open-debt item 15) — the adjudication arm of the check above's
+    # sibling, here for the same reason: it needs a pinned zenoh SOURCE tree and
+    # this is the lane that provisions one.
+    #
+    # It asks whether each ANCHORED upstream claim in an inventory reason still
+    # holds, in the direction that can falsify it. The `@ ABSENT` form is the one
+    # the tree did not have: between "the file has it" and "the file is gone"
+    # sits the case an ordinary upstream refactor produces — the module survives
+    # and the capability in it does not — and a claim in that state resolves as a
+    # path while being false as a claim. It reds when the needle COMES BACK, so a
+    # residual withdrawn because upstream dropped something becomes live again on
+    # its own.
+    python3 scripts/lib/store_reasons_resolve.py
+    local store_reasons_rc=$?
+    if [[ $store_reasons_rc -eq 2 ]]; then
+        echo "  Z FAIL: the store's upstream claims could not be READ, so" \
+             "NOTHING was graded — this is not a claim about the atoms. The" \
+             "lines above name what was missing (the store's inventory" \
+             "collection, or a zenoh source checkout at the pin). A gate that" \
+             "cannot read its input must not report green."
+        return 1
+    elif [[ $store_reasons_rc -ne 0 ]]; then
+        echo "  Z FAIL: an atom's inventory reason makes a claim about the" \
+             "pinned upstream that is no longer true, or the anchored" \
+             "population is empty — see the lines above for which and which" \
+             "direction. ⛔ The fix is NEVER to delete the anchor to quiet it:" \
+             "an unanchored claim is exactly the state this gate exists to end." \
+             "Correct the reason by APPENDING, which is the store's convention."
         return 1
     fi
     # R2162 (unregistered open-debt item 199) — the UPSTREAM arm of the

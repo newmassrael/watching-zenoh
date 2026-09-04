@@ -178,12 +178,37 @@ def reads_the_store(text: str) -> bool:
             if marker in body:
                 return True
             continue
-        for line in body.splitlines():
-            if marker not in line:
-                continue
-            if any(compound in line for compound in NOT_A_READ):
-                continue
+        if needs_the_reader(text):
             return True
+    return False
+
+
+def needs_the_reader(text: str) -> bool:
+    """Does this script read the store THROUGH `mnemosyne-cli`?
+
+    R2337 — the provisioning half of this gate rests on a dependency, and it is
+    the TOOL, not the store: the docstring's own account of the class is "four
+    gates read the atomic store through `mnemosyne-cli`", and what R311y743 broke
+    was a job that could not satisfy that install. A script that parses the
+    tracked sidecar with `json.loads` acquires no such dependency -- the file
+    arrives with the checkout, so any job that has the repo has the input. This
+    tree already relies on that: `schema-pin-gate.sh` reads the store's
+    `schema_version` with a real JSON parse precisely BECAUSE a git hook cannot
+    assume the tool.
+
+    So this is a third mechanical case beside the module and the git hook, and
+    like those it is derived rather than listed: it is decided by what the
+    script INVOKES. Being a store reader still requires a lane -- a gate nothing
+    runs cannot fail, and that half is unchanged for every reader. Only the
+    "the job must install mnemosyne-cli" half is scoped to the readers that use
+    it, which leaves all four original subjects exactly where they were.
+    """
+    for line in code_only(text).splitlines():
+        if "mnemosyne-cli" not in line:
+            continue
+        if any(compound in line for compound in NOT_A_READ):
+            continue
+        return True
     return False
 
 
@@ -315,6 +340,10 @@ def main() -> int:
                 for name, block in provisioning.items()
                 if re.search(rf"--layer {re.escape(lane)}\b", block)
             ]
+            if not needs_the_reader(known[reader].read_text()):
+                # Reads the tracked sidecar directly, so the checkout IS the
+                # provisioning. The lane requirement above still applied.
+                continue
             if not hosted:
                 findings.append(
                     f"{reader}: runs in lane {lane}, which no ci.yml job that "
