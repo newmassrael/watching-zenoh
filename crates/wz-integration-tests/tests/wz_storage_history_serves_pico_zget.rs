@@ -64,8 +64,10 @@
 //!
 //! Reaching it needs a querier that asks for NONE consolidation, which pico's
 //! `z_get` cannot: it hardcodes empty selector parameters
-//! (`examples/unix/c11/z_get.c:98`, `z_get(..., "", ...)`) and its getopt string
-//! `"k:v:e:m:l:"` (:124) has no consolidation flag. `wz_storage_history_versions_
+//! (`vendor/zenoh-pico/examples/unix/c11/z_get.c` @ `z_get(z_loan(s), z_loan(ke), ""`)
+//! and its getopt string
+//! (`vendor/zenoh-pico/examples/unix/c11/z_get.c` @ `getopt(argc, argv, "k:v:e:m:l:")`)
+//! has no consolidation flag. `wz_storage_history_versions_
 //! to_a_zenoh_zget.rs` is the leg that does reach it, through zenoh's own `z_get`
 //! and a `_time` selector parameter.
 //!
@@ -372,7 +374,7 @@ async fn wz_history_storage_accepts_a_post_delete_older_put_but_serves_pico_noth
     assert!(
         !matches!(leg.replayed_older, StorageInsertionResult::Outdated),
         "a History::All storage has NO newer-wins gate (zenoh gates it on \
-         `history == History::Latest`, storages_mgt/service.rs:318), so the t=2 put \
+         `history == History::Latest`), so the t=2 put \
          after the t=4 delete must be accepted into storage; got {:?}",
         leg.replayed_older
     );

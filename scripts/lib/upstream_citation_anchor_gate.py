@@ -358,7 +358,12 @@ ROOTLESS_STALE_LINE_BUDGET = 1
 #: This is the residue of open debt 647 made monotone rather than argued: it
 #: can only shrink, so declaring a segment forces it down in the same commit,
 #: and writing a NEW root-less citation of an undeclared segment reds.
-ROOTLESS_UNDECLARED_BUDGET = 672
+#: R2350 — 672 -> 671. The `storage-history` round rewrote its own upstream
+#: citations into the anchor form, and one of them was pico's `z_get` example
+#: cited as a root-less fragment. It is now written with its IN-TREE root
+#: (`vendor/zenoh-pico/...`), which is where that file actually lives here, so
+#: the occurrence left this residue rather than moving between buckets.
+ROOTLESS_UNDECLARED_BUDGET = 671
 #: EVERY root-less occurrence, graded or not: `rootless_line + rootless_bare +
 #: residue`. One ratchet over the union of the three above, and it exists
 #: because those three CANNOT express the invariant that matters.
@@ -388,7 +393,11 @@ ROOTLESS_UNDECLARED_BUDGET = 672
 #: promotes that segment to a candidate and its root-less tokens become
 #: visible. That is a real event and reds correctly -- it is R2317's finding
 #: happening again, one segment at a time.
-ROOTLESS_TOTAL_BUDGET = 806
+#: R2350 — 806 -> 805, the same single occurrence as the budget above: pico's
+#: `z_get` example given its in-tree root. The total falls because the citation
+#: left the root-less population entirely, which is the one direction this
+#: number is allowed to move.
+ROOTLESS_TOTAL_BUDGET = 805
 
 #: A LIVE invocation of the RESOLUTION arm. R2242 split this gate in two and,
 #: in doing so, made `--resolve` a flag someone can simply stop passing: delete

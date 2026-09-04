@@ -21,22 +21,25 @@
 //!   sequence, and only the reply COUNT differs.
 //!
 //! pico's `z_get` cannot see a count: it hardcodes empty selector parameters
-//! (`examples/unix/c11/z_get.c:98`) so its `AUTO` consolidation resolves to
-//! `LATEST` (`src/net/primitives.c:567-571`), and it drops every non-newest
-//! same-key reply inside the querier before the callback (`src/session/query.c:133-150`).
-//! Its getopt string `"k:v:e:m:l:"` (:124) has no consolidation flag, so there is
-//! no way to ask it for anything else.
+//! (`vendor/zenoh-pico/examples/unix/c11/z_get.c` @ `z_get(z_loan(s), z_loan(ke), ""`)
+//! so its `AUTO` consolidation resolves to `LATEST`, and it drops every
+//! non-newest same-key reply inside the querier before the callback. Its
+//! getopt string
+//! (`vendor/zenoh-pico/examples/unix/c11/z_get.c` @ `getopt(argc, argv, "k:v:e:m:l:")`)
+//! has no consolidation flag, so there is no way to ask it for anything else.
 //!
 //! ## The observable this file uses instead
 //!
 //! zenoh's own `z_get` takes a full `Selector` on `-s`, and zenoh resolves `AUTO`
 //! to `ConsolidationMode::None` when the selector carries a `_time` parameter
-//! (`zenoh/src/api/session.rs:2717`, `TIME_RANGE_KEY = "_time"` at
-//! `zenoh/src/api/selector.rs:141`). Under `None` every reply reaches the
+//! (`zenoh/src/api/session.rs` @ `ConsolidationMode::Auto if parameters.time_range().is_some()`,
+//! with the key at `zenoh/src/api/selector.rs` @ `const TIME_RANGE_KEY`).
+//! Under `None` every reply reaches the
 //! application callback, which prints one [`GET_RECEIVED`] line each — so the
 //! version count becomes foreign-observable, and it is the capability's own
 //! definition ("History::All saves all the values including historical values",
-//! `zenoh-backend-traits/src/lib.rs:176-177`) rather than a proxy for it.
+//! `plugins/zenoh-backend-traits/src/lib.rs` @ `History::All saves all the values`)
+//! rather than a proxy for it.
 //!
 //! ## Three legs, and why the third is not optional
 //!
@@ -97,11 +100,13 @@ const STORAGE_KEYEXPR: &str = "demo/**";
 /// The ONE key every version is stored under, and the key `z_get` queries.
 const QUERY_KEY: &str = "demo/hist";
 /// The `_time` selector parameter that flips zenoh's `AUTO` consolidation to
-/// `None` (`zenoh/src/api/session.rs:2717`). The RANGE is deliberately wide: the
+/// `None` (`zenoh/src/api/session.rs` @ `ConsolidationMode::Auto if parameters.time_range().is_some()`).
+/// The RANGE is deliberately wide: the
 /// branch turns on the parameter being PRESENT, not on what it selects, and wz
 /// does not filter replies by it — narrowing it would add a second variable.
 const TIME_PARAM: &str = "?_time=[now(-1h)..]";
-/// `z_get`'s per-reply print (`examples/examples/z_get.rs`). Counting these lines
+/// `z_get`'s per-reply print
+/// (`examples/examples/z_get.rs` @ `">> Received ('{}': '{}')"`). Counting these lines
 /// IS the measurement.
 const GET_RECEIVED: &str = ">> Received (";
 /// The three versions, seeded in ascending timestamp order so that the `Latest`
@@ -349,7 +354,7 @@ async fn wz_history_storage_replies_every_version_to_a_none_consolidating_zenoh_
         leg.replies(),
         3,
         "a History::All storage must reply every version, and a `_time` selector \
-         resolves zenoh's AUTO consolidation to None (session.rs:2717) so all three \
+         resolves zenoh's AUTO consolidation to None, so all three \
          reach the callback. Got {} — if it is 1, either the consolidation did not \
          flip (leg 3 is the control for that) or wz replied only the newest.\n\
          --- captured stdout ---\n{}",
@@ -403,7 +408,8 @@ async fn wz_latest_storage_replies_one_version_to_the_same_zenoh_zget() {
 ///
 /// This is the leg that stops leg 1 from being read as "wz sends three replies to
 /// every querier". wz sends three either way; here zenoh's `AUTO` stays `LATEST`
-/// (`session.rs:2718`) and the querier collapses them before the callback — the
+/// (the `ConsolidationMode::Auto => ConsolidationMode::Latest` arm of the same
+/// match) and the querier collapses them before the callback — the
 /// same thing pico's `z_get` does unconditionally, which is precisely why the pico
 /// sibling can no longer see this capability.
 // wz-proves: storage-history wz->zenoh

@@ -236,10 +236,31 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # siblings. The wz half of that argument is the ACL enforcer's subject
 # early-return, so the correction names the file that carries it; the two
 # upstream halves are anchored and read as upstream.
-PIN_REACHED = 72
+# R2350 — 72 -> 70 and 419 -> 408, and only HALF of that is this round's work.
+# The two components were measured separately, at e697fab0 and here, rather
+# than inferred from one delta:
+#
+#   R2349 moved reached 72 -> 71 and citations 419 -> 416 by anchoring six
+#   rotted zenoh citations and fencing a scope, and did not move the pins with
+#   it. The ratchet caught it exactly as designed, on the next push. The pins
+#   move here because this is the commit that publishes that one — the R2333
+#   shape.
+#
+#   R2350 moves reached 71 -> 70 and citations 416 -> 408. Both are ONE atom
+#   leaving the corpus: `storage-history` went PARTIAL -> COMPLETE because its
+#   single named residual was CLOSED, not relabelled (a History::All delete is
+#   now a versioned tombstone, so history survives it and an out-of-order older
+#   put is stored without resurrecting the key). Its reason carried EIGHT
+#   citations that resolve to a tracked wz file — storage_backend.rs:120,
+#   storage_state.rs:310, storage_history.rs:91, storage_state.rs:436,
+#   storage_service.rs:657, storage_history.rs:125, storage_history.rs:34 and
+#   tests/wz_storage_history_serves_pico_zget.rs — and all eight left the
+#   PARTIAL corpus with the atom, the same way R2220's two did. The total falls
+#   with it, 83 -> 82.
+PIN_REACHED = 70
 PIN_UNREACHED = 2
 PIN_NO_SYMBOL = 10
-PIN_WZ_CITATIONS = 419
+PIN_WZ_CITATIONS = 408
 PIN_AMBIGUOUS = 85
 
 

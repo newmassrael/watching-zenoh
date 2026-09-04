@@ -38,13 +38,14 @@
 //!
 //! - **History survives a delete.** `History::All` is defined as "saves
 //!   all the values including historical values"
-//!   (`zenoh-backend-traits/src/lib.rs:176-177`). A delete that dropped
-//!   the version list would keep the *latest* value semantics under an
-//!   `All` capability — the one thing the capability exists not to do.
+//!   (`plugins/zenoh-backend-traits/src/lib.rs` @ `History::All saves all the values`).
+//!   A delete that dropped the version list would keep the *latest* value
+//!   semantics under an `All` capability — the one thing the capability
+//!   exists not to do.
 //! - **An out-of-order older Put cannot resurrect a deleted key.** With
 //!   no newer-wins gate above an `All` backend
-//!   (`storages_mgt/service.rs:318`, mirrored by
-//!   `crate::storage_state::StorageState::latest_mode`), the ordering
+//!   (`plugins/zenoh-plugin-storage-manager/src/storages_mgt/service.rs` @ `self.capability.history == History::Latest`,
+//!   mirrored by `crate::storage_state::StorageState::latest_mode`), the ordering
 //!   guarantee has to live *here*: a Put that lands at a timestamp at or
 //!   below the newest tombstone is stored as history but is not live, so
 //!   [`get`](crate::storage_backend::StorageBackend::get) and
@@ -59,13 +60,16 @@
 //!
 //! Measured against the pin (`zenoh` c479f0c, `plugins/`): `History::All`
 //! occurs in the whole upstream tree exactly once, in the doc comment that
-//! defines the enum (`zenoh-backend-traits/src/lib.rs:177`). EVERY
-//! `get_capability` upstream returns `History::Latest`
-//! (`memory_backend/mod.rs:61`, `zenoh-backend-example/src/lib.rs:72`,
-//! `zenoh-backend-traits/src/lib.rs:75`), and the storage manager REFUSES
-//! to replicate a non-`Latest` storage at all
-//! (`storages_mgt/mod.rs:86-93`). Upstream's own `StoredData`
-//! (`zenoh-backend-traits/src/lib.rs:192-197`) carries payload / encoding /
+//! defines the enum. EVERY `get_capability` upstream returns
+//! `History::Latest`
+//! (`plugins/zenoh-plugin-storage-manager/src/memory_backend/mod.rs` @ `history: History::Latest`;
+//! `plugins/zenoh-backend-example/src/lib.rs` @ `history: History::Latest`),
+//! and the storage manager REFUSES to replicate a non-`Latest` storage at
+//! all
+//! (`plugins/zenoh-plugin-storage-manager/src/storages_mgt/mod.rs` @ `Replication was enabled for storage`).
+//! Upstream's own
+//! `plugins/zenoh-backend-traits/src/lib.rs` @ `pub struct StoredData`
+//! carries payload / encoding /
 //! timestamp and no kind, so an upstream `All` backend could not return a
 //! tombstone through `get` even if one existed. There is therefore no
 //! upstream `All`-delete behaviour to be faithful TO; this shape is
