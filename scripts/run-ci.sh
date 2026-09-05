@@ -14117,6 +14117,29 @@ layer_z_zenohd_interop() {
         echo "  Layer Z FAIL: an upstream citation no longer resolves at the pin" >&2
         return 1
     fi
+    # R2356 — the SAME question asked of the STORE's live atom reasons, which
+    # the gate above cannot see: its `SKIP_PREFIXES` excludes `docs/.atomic/`
+    # because the LEDGER quotes citations verbatim and grading that would grade
+    # frozen history. That reason does not reach `inventory_entries[*].reason`,
+    # the live impl-axis verdicts, which are rewritten on every re-grade -- so
+    # they were the one population with upstream claims and no oracle, exactly
+    # what `depth_axis_census` reports as "read as upstream and NOT judged".
+    #
+    # HERE and not in C0, for the reason the arm above is here: this one
+    # RESOLVES, so it needs the source tree this lane provisions. It has no
+    # form-only mode on purpose -- a store citation that merely parses tells you
+    # nothing the census did not already say.
+    #
+    # The budgets it carries are INHERITED debt seeded at what the command
+    # printed, the shape LINE_BUDGET was seeded in above. Seven of the ten
+    # unresolved claims are STALE GRADINGS rather than citation defects: five
+    # atoms graded against 1.5.0 while the tree pins 1.10.0, whose subjects
+    # upstream has since restructured away. Those are re-graded a round each.
+    python3 scripts/lib/store_reason_citation_gate.py --selftest || return 1
+    if ! python3 scripts/lib/store_reason_citation_gate.py --check; then
+        echo "  Layer Z FAIL: a store atom reason's upstream claim does not resolve" >&2
+        return 1
+    fi
     # R2260 (open-debt item 593's residue) — the ORACLE arm of the link-axis
     # gate, here for the reason the resolution arm above is: it needs a zenoh
     # SOURCE tree. `--require` is what makes a missing checkout a FAIL instead of
