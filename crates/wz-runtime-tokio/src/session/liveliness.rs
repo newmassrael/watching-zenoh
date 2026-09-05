@@ -752,8 +752,8 @@ impl<R: SessionRuntime, T: TimeSource> LivelinessSubscriber<R, T> {
     /// spells it `z_liveliness_declare_background_subscriber`.
     ///
     /// It is the RAII disarm and nothing else, which is why it can be one
-    /// line: clearing `armed` is exactly "do not run
-    /// [`teardown`](Self::teardown)", and teardown is the whole of what a
+    /// line: clearing `armed` is exactly "do not run `teardown`", and teardown
+    /// is the whole of what a
     /// retraction means here — kill the deferred cell, unregister the local
     /// slot, emit `Interest(Final)`, prune the replay cache. Suppress all four
     /// and the subscriber is simply still declared, on both sides of the wire.

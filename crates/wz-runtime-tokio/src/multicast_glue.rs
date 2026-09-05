@@ -151,6 +151,16 @@ use wz_session_core::sn::{self, MulticastTxConduits};
 
 use wz_runtime_core::TimeSource;
 
+// R2370 — gated to match its two uses. Both the egress and ingress pumps sit
+// behind `all(transport-multicast, transport-link-udp)`, and this import did
+// not, so a feature set that keeps the module but drops those pumps left it
+// unused and `-D warnings` made that an error. Pre-push gate 6 could not see
+// it: it checks the CHANGED crates, and `wz-runtime-tokio` passes when built
+// directly -- the combination only arises when `wz-runtime-tokio-multicast-
+// tests` pulls this crate with its own reduced feature set, which is a crate
+// R2366's push never changed. Hosted C1cf (the whole-workspace sweep) and C1s
+// found it, as one defect reported by two lanes.
+#[cfg(all(feature = "transport-multicast", feature = "transport-link-udp"))]
 use crate::runtime_pool::WzRuntime;
 use crate::LinkDriver;
 
