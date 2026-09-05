@@ -378,6 +378,36 @@ if ! python3 scripts/lib/config_key_fixture_gate.py; then
     exit 1
 fi
 
+# ─── gate 2k — the replication-log funnel (R2354) ───────────────────
+# grades: worktree
+#
+# The storage replication digest is read off a MAINTAINED log since R2354, not
+# recomputed from the stored set each cycle. A maintained structure goes stale
+# when a write path is added and does not tell it, and the compiler cannot say
+# so: touching `latest` and touching the log are unrelated statements.
+#
+# `replication_digest` debug-asserts maintained == recomputed on every call, so
+# a test that writes and then takes a digest catches it. That covers only paths
+# a test drives that way — the garbage collector was one nothing did until
+# R2354 wrote the case, and it is the one path in this storage that REMOVES an
+# event outright.
+#
+# UNCONDITIONAL, like gate 2d and for the same reason: it reads one file and
+# costs milliseconds, and a scope predicate that is wrong reads exactly like a
+# pass.
+if ! python3 scripts/lib/replication_log_funnel_gate.py; then
+    echo "" >&2
+    echo "pre-push: [gate 2k] replication-log funnel gate FAILED — a \`&mut self\`" >&2
+    echo "          write path changes a digest source without naming the" >&2
+    echo "          replication log. The line above names it. Route the change" >&2
+    echo "          through the log (\`ReplicationLog::apply\`, previous ->" >&2
+    echo "          current) rather than silencing this: a digest that does not" >&2
+    echo "          hear about a write advertises state this replica does not" >&2
+    echo "          hold, to every peer, until it restarts." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+
 # ─── gate 2j — the test-double witness (R2293, item 625) ────────────
 # grades: worktree
 #

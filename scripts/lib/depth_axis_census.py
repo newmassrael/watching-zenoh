@@ -307,10 +307,27 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # tracked file — exactly the 3 this move drops. The reason's own tokens are
 # UNCHANGED by the rewrite (the historical prose is preserved verbatim), so
 # neither move comes from editing prose. PARTIAL falls 80 -> 79 with it.
-PIN_REACHED = 67
+# R2354 — 67 -> 66 and 399 -> 393, ONE atom leaving the corpus.
+# `storage-replication` went PARTIAL -> COMPLETE: its one REMAINING clause (the
+# recompute-not-incremental-log divergence) was IMPLEMENTED — the digest is now
+# read off a `ReplicationLog` whose `(interval, sub-interval)` buckets the write
+# paths keep XOR-maintained, instead of being rebuilt from the stored set every
+# publication cycle.
+#
+# The components are SEPARATED and were measured BEFORE the reason was
+# rewritten, with this module's own `reach_partition` and `citation_audit` run
+# against the pre-change entry rather than inferred from the total: the atom sat
+# in `reached` (so that count loses exactly 1) and its reason held ELEVEN
+# citation tokens, of which 6 resolve to one tracked wz file and 5 read as
+# upstream — exactly the 399 -> 393 and the unpinned 533 -> 528 this move makes,
+# with no token left unaccounted for. The round's appended prose adds no
+# `path:line` token at all (upstream claims are written in the anchored ``path`
+# @ `needle`` form), so neither move comes from editing prose. PARTIAL falls
+# 79 -> 78 with it.
+PIN_REACHED = 66
 PIN_UNREACHED = 2
 PIN_NO_SYMBOL = 10
-PIN_WZ_CITATIONS = 399
+PIN_WZ_CITATIONS = 393
 PIN_AMBIGUOUS = 85
 
 

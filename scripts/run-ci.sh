@@ -3014,6 +3014,26 @@ PY
     # `.githooks/pre-push`, which is what makes it the LOCAL gate item 224 asks
     # for -- this lane is the hosted half.
     python3 scripts/lib/config_key_fixture_gate.py || return 1
+    # R2354 (the `storage-replication` atom's last residual) — the
+    # REPLICATION-LOG FUNNEL gate. The digest stopped being recomputed from the
+    # stored set every publication cycle and is now read off a maintained log,
+    # which trades "cannot be stale" for "can be, if a write path forgets it".
+    # `replication_digest` debug-asserts maintained == recomputed on every
+    # call, so any test that writes and then takes a digest catches it — but
+    # only for paths a test drives that way, and the garbage collector was
+    # exactly one that nothing did until R2354 wrote the case. This needs no
+    # test to exist: it derives the digest's source fields from
+    # `replication_event_stream` (the storage's own definition of what the
+    # digest is a function of), takes the population to be every `&mut self`
+    # method naming one, and requires each to name the log.
+    #
+    # `--selftest` first, and its fixture carries the two shapes that defeated
+    # this gate's own first draft: a rustfmt-broken `self\n  .method()`
+    # receiver, and a member whose name has a digest source as a prefix
+    # (`latest_mode` vs `latest`). Both made it report a clean tree it had
+    # misread.
+    python3 scripts/lib/replication_log_funnel_gate.py --selftest >/dev/null || return 1
+    python3 scripts/lib/replication_log_funnel_gate.py || return 1
     # R2311 (open-debt item 645) — the FOREIGN-QUERY READINESS gate. Both
     # foreign example families print their readiness line BEFORE the call that
     # declares, so a querier that dials the router separately can arrive first
@@ -7634,7 +7654,32 @@ layer_c1z_cargo_test_storage_driver() {
     # replication events `storage-aligner` pulls in. So the delta here is 5 and
     # the two bare wildcard subsets' is 4; the difference is the number, not a
     # rounding of it.
-    _runci_guarded_test "C1z storage" 150 \
+    # R2354 150 -> 162: the `storage-replication` atom closed its last
+    # residual — the digest is read off a maintained `ReplicationLog` instead
+    # of recomputed from the stored set each cycle — and the twelve cases are
+    # eight `storage_replication::tests::incremental_log` differentials
+    # against `build_digest` (overwrite, emptied interval, the cancelled-bucket
+    # case that makes the event count load-bearing, the zero-XOR shape,
+    # removal, inert-until-seeded, rebinding, every-hot-bound) plus four at the
+    # storage seam (seeds-once, tombstone move, peer-config rebind, wildcard
+    # re-registration).
+    #
+    # The number is what THIS LANE PRINTED, not what the diff was counted to
+    # be: the first attempt pinned 161, an earlier direct measurement taken
+    # before the last case existed, and the lane's own 162 corrected it.
+    #
+    # WHICH GUARD MOVES IS DERIVED from the manifest: the new cases are all
+    # `cfg(storage-replication)`, `wz-session-core/Cargo.toml:895` defines it
+    # and the ONLY feature there that lists it is `storage-aligner`
+    # (Cargo.toml:907), so this is the only `-p wz-session-core --lib storage`
+    # subset that can see them. The twelfth case
+    # (`a_collected_wildcard_update_leaves_the_digest`) additionally needs
+    # `storage-mgr-garbage-collection`, which no guarded leg pairs with
+    # `storage-aligner` — measured at 170 under
+    # `storage-aligner,storage-mgr-garbage-collection`, which is not a guard
+    # here. The two `-p wz-runtime-tokio` aligner guards do NOT move (40 and 1,
+    # re-measured, not assumed): every new case lives in wz-session-core.
+    _runci_guarded_test "C1z storage" 162 \
         cargo test -p wz-session-core --features storage-aligner,storage-mgr-wildcard-updates --lib storage --quiet || return 1
     _runci_guarded_test "C1z storage_service" 9 \
         cargo test -p wz-runtime-tokio --features storage-mgr-complete-flag --lib storage_service --quiet || return 1

@@ -166,7 +166,9 @@ use crate::storage_backend::{
     StoredData,
 };
 #[cfg(feature = "storage-replication")]
-use crate::storage_replication::{build_digest, Digest, IntervalIdx, ReplicationConfig};
+use crate::storage_replication::{
+    build_digest, Digest, IntervalIdx, ReplicationConfig, ReplicationLog,
+};
 
 // R311y73 — the uhlc timestamp-order SSOT (`timestamp_order_key` /
 // `timestamp_strictly_newer`) moved to its natural home
@@ -217,6 +219,18 @@ pub struct StorageState<B: StorageBackend> {
     /// See [`wildcard_puts`](StorageState).
     #[cfg(feature = "storage-mgr-wildcard-updates")]
     wildcard_deletes: BTreeMap<String, WildcardUpdate>,
+    /// The incrementally-maintained replication buckets this storage's
+    /// [`Digest`] is read off (R2354). Every field above that a digest is a
+    /// function of — [`latest`](StorageState) and the two wildcard registries
+    /// — feeds it through the funnels
+    /// [`record_latest`](StorageState::record_latest) /
+    /// [`register_wildcard_update`](StorageState::register_wildcard_update) /
+    /// [`collect_garbage`](StorageState::collect_garbage), which is the
+    /// invariant `scripts/lib/replication_log_funnel_gate.py` derives and
+    /// checks: a `&mut self` method that names a digest source must also name
+    /// this log.
+    #[cfg(feature = "storage-replication")]
+    replication_log: ReplicationLog,
 }
 
 /// A registered wildcard update: the value + kind a wildcard Put/Delete carries,
@@ -242,6 +256,8 @@ impl<B: StorageBackend> StorageState<B> {
             wildcard_puts: BTreeMap::new(),
             #[cfg(feature = "storage-mgr-wildcard-updates")]
             wildcard_deletes: BTreeMap::new(),
+            #[cfg(feature = "storage-replication")]
+            replication_log: ReplicationLog::default(),
         }
     }
 
@@ -262,6 +278,8 @@ impl<B: StorageBackend> StorageState<B> {
             wildcard_puts: BTreeMap::new(),
             #[cfg(feature = "storage-mgr-wildcard-updates")]
             wildcard_deletes: BTreeMap::new(),
+            #[cfg(feature = "storage-replication")]
+            replication_log: ReplicationLog::default(),
         }
     }
 
@@ -319,6 +337,29 @@ impl<B: StorageBackend> StorageState<B> {
         }
     }
 
+    /// The SINGLE writer of [`latest`](StorageState) — the newer-wins record
+    /// AND the digest's primary event source, which is why it is one method
+    /// and not two `insert` call sites.
+    ///
+    /// R2354: the replication buckets are maintained here, at the moment the
+    /// event set changes, because that is what makes them buckets rather than
+    /// a cache. The previous timestamp for this key is read BEFORE the insert
+    /// and handed to [`ReplicationLog::apply`] so the outgoing event leaves
+    /// the bucket it was hashed into — a fingerprint is an XOR accumulator, so
+    /// an overwrite that only adds is not "slightly stale", it is a
+    /// permanently wrong digest for the key's OLD sub-interval as well as its
+    /// new one.
+    fn record_latest(&mut self, key: Option<&str>, timestamp: TimestampHint) {
+        let stored_key = key.map(String::from);
+        #[cfg(feature = "storage-replication")]
+        {
+            let previous = self.latest.get(&stored_key).cloned();
+            self.replication_log
+                .apply(key, previous.as_ref(), Some(&timestamp));
+        }
+        self.latest.insert(stored_key, timestamp);
+    }
+
     /// Process an inbound Put over the backend's `Option<&str>` key space:
     /// `None` is the exact-prefix-match mount-root slot a strip-configured
     /// [`apply_sample`](Self::apply_sample) produces. In [`History::Latest`]
@@ -359,7 +400,7 @@ impl<B: StorageBackend> StorageState<B> {
             .backend
             .put(key, payload, encoding, timestamp.clone())?;
         if latest_mode {
-            self.latest.insert(key.map(String::from), timestamp);
+            self.record_latest(key, timestamp);
         }
         Ok(result)
     }
@@ -392,7 +433,7 @@ impl<B: StorageBackend> StorageState<B> {
             // from the backend but the latest-accepted record survives, so
             // the newer-wins gate still rejects an older Put. zenoh keeps the
             // Delete event in `cache_latest.latest_updates` for this reason.
-            self.latest.insert(key.map(String::from), timestamp);
+            self.record_latest(key, timestamp);
         }
         Ok(result)
     }
@@ -773,6 +814,24 @@ impl<B: StorageBackend> StorageState<B> {
                 timestamp,
             },
         };
+        // R2354 — a registered wildcard update is a replication event (R2351,
+        // AV5), so an upsert here is an event transition the digest buckets
+        // have to hear about. The displaced registration is read out FIRST:
+        // re-issuing `demo/**` at a newer timestamp moves the event to another
+        // sub-interval, and only the old timestamp can XOR it out of the one
+        // it was hashed into.
+        #[cfg(feature = "storage-replication")]
+        let displaced = match kind {
+            SampleKind::Put => self.wildcard_puts.get(wildcard_key),
+            SampleKind::Del => self.wildcard_deletes.get(wildcard_key),
+        }
+        .map(|wu| wu.data.timestamp.clone());
+        #[cfg(feature = "storage-replication")]
+        self.replication_log.apply(
+            Some(wildcard_key),
+            displaced.as_ref(),
+            Some(&update.data.timestamp),
+        );
         match kind {
             SampleKind::Put => {
                 self.wildcard_puts
@@ -957,10 +1016,29 @@ impl<B: StorageBackend> StorageState<B> {
     pub fn collect_garbage(&mut self, now_ntp64: u64, lifespan: core::time::Duration) {
         let time_limit =
             now_ntp64.saturating_sub(crate::ntp64::Ntp64::from_duration(lifespan).as_word());
+        // R2354 — the sweep REMOVES replication events, so each collected
+        // registration must leave the digest buckets it was hashed into. The
+        // doomed set is read out before the retain: after it, the timestamps
+        // that identify the buckets are gone. A sweep that dropped events
+        // without telling the log would leave this replica advertising a
+        // fingerprint for wildcard updates it no longer holds — the exact
+        // shape of divergence replication exists to detect, manufactured by
+        // the garbage collector.
+        #[cfg(feature = "storage-replication")]
+        let collected: Vec<(String, TimestampHint)> = self
+            .wildcard_replication_entries()
+            .filter(|(_, wu)| wu.data.timestamp.time < time_limit)
+            .map(|(wildcard_ke, wu)| (String::from(wildcard_ke), wu.data.timestamp.clone()))
+            .collect();
         self.wildcard_puts
             .retain(|_, wu| wu.data.timestamp.time >= time_limit);
         self.wildcard_deletes
             .retain(|_, wu| wu.data.timestamp.time >= time_limit);
+        #[cfg(feature = "storage-replication")]
+        for (wildcard_ke, timestamp) in &collected {
+            self.replication_log
+                .apply(Some(wildcard_ke.as_str()), Some(timestamp), None);
+        }
     }
 
     /// The `(wildcard_puts, wildcard_deletes)` registry sizes — the inspection
@@ -1061,9 +1139,23 @@ impl<B: StorageBackend> StorageState<B> {
     /// `storage-replication` feature deliberately does not imply
     /// `storage-history`); the `debug_assert` below catches it loudly in
     /// debug builds instead of letting it fail silently.
+    ///
+    /// # Maintained, not recomputed (R2354)
+    ///
+    /// The digest is read off [`ReplicationLog`], which the write paths keep
+    /// in step, so a publication cycle costs the era rollup and not a walk of
+    /// the stored set. The `O(n)` derivation survives as
+    /// [`recomputed_replication_digest`](Self::recomputed_replication_digest),
+    /// and every debug build asserts the two agree on every call — the
+    /// invariant is cheap to state, expensive to lose, and a write path that
+    /// forgets the log has no other way of announcing itself. It is `&mut
+    /// self` because the FIRST call under a configuration seeds the buckets:
+    /// a storage takes writes long before anything asks it for a digest, and
+    /// this tree also asks for digests under a PEER's configuration, which
+    /// re-cuts the buckets.
     #[cfg(feature = "storage-replication")]
     pub fn replication_digest(
-        &self,
+        &mut self,
         config: &ReplicationConfig,
         hot_era_upper_bound: IntervalIdx,
     ) -> Digest {
@@ -1073,6 +1165,62 @@ impl<B: StorageBackend> StorageState<B> {
              History::All backend leaves `latest` empty and yields an empty \
              digest (zenoh's digest likewise assumes Latest)"
         );
+        if !self.replication_log.is_bound_to(config) {
+            // `mem::take` so the event stream (an immutable borrow of the
+            // registries) and the log (a mutable one) are not borrowed from
+            // `self` at the same time. The log is put back below; taking it is
+            // sound precisely because seeding discards whatever was there.
+            let mut log = core::mem::take(&mut self.replication_log);
+            log.seed(config, self.replication_event_stream());
+            self.replication_log = log;
+        }
+        let digest = self
+            .replication_log
+            .digest_from(config, hot_era_upper_bound);
+        debug_assert_eq!(
+            digest,
+            self.recomputed_replication_digest(config, hot_era_upper_bound),
+            "the maintained replication log disagrees with the recompute — a \
+             write path changed a digest source without telling the log"
+        );
+        digest
+    }
+
+    /// The `O(n)` recompute of this storage's [`Digest`] straight from the
+    /// event set: the SECOND derivation
+    /// [`replication_digest`](Self::replication_digest) is checked against,
+    /// and the one this atom published until R2354.
+    ///
+    /// It is public because it is an oracle, and an oracle nobody can call is
+    /// not one: the differential lives in this crate's unit tests AND in the
+    /// driver's, on the other side of the crate boundary. Production reads the
+    /// maintained digest; this is what says the maintained digest is right.
+    #[cfg(feature = "storage-replication")]
+    pub fn recomputed_replication_digest(
+        &self,
+        config: &ReplicationConfig,
+        hot_era_upper_bound: IntervalIdx,
+    ) -> Digest {
+        build_digest(config, self.replication_event_stream(), hot_era_upper_bound)
+    }
+
+    /// How many times this storage's replication buckets have been seeded from
+    /// the full event set (R2354). A replica publishing under one
+    /// configuration seeds ONCE, however many cycles it runs; the counter is
+    /// the seam a test uses to say "maintained" rather than take it on trust,
+    /// because a digest that silently recomputed would still be CORRECT and so
+    /// could not be caught by comparing digests.
+    #[cfg(feature = "storage-replication")]
+    pub fn replication_log_seeds(&self) -> u64 {
+        self.replication_log.seeds()
+    }
+
+    /// Every replication event of this storage as `(key, timestamp)` — the ONE
+    /// derivation both the maintained log and the recompute read, so the two
+    /// cannot disagree about what the population IS while disagreeing about
+    /// the digest of it.
+    #[cfg(feature = "storage-replication")]
+    fn replication_event_stream(&self) -> impl Iterator<Item = (Option<&str>, &TimestampHint)> {
         // R2351 (AV5) — the registered wildcard updates are replication events
         // too, and they belong in the DIGEST as well as in
         // [`replication_events`](Self::replication_events). Both are the XOR of
@@ -1091,19 +1239,15 @@ impl<B: StorageBackend> StorageState<B> {
             .map(|(wildcard_ke, wu)| (Some(wildcard_ke), &wu.data.timestamp));
         #[cfg(not(feature = "storage-mgr-wildcard-updates"))]
         let wildcard_events = core::iter::empty();
-        build_digest(
-            config,
-            // Every key in `latest`, INCLUDING the mount-root (`None`) key: the
-            // digest's per-event fingerprint hashes an `Option<&str>` key
-            // (no key bytes when `None`), so a strip-configured storage's
-            // mount-root value replicates faithfully (R311y64). zenoh hashes the
-            // `Option` stripped key likewise (log.rs:237).
-            self.latest
-                .iter()
-                .map(|(key, ts)| (key.as_deref(), ts))
-                .chain(wildcard_events),
-            hot_era_upper_bound,
-        )
+        // Every key in `latest`, INCLUDING the mount-root (`None`) key: the
+        // digest's per-event fingerprint hashes an `Option<&str>` key
+        // (no key bytes when `None`), so a strip-configured storage's
+        // mount-root value replicates faithfully (R311y64). zenoh hashes the
+        // `Option` stripped key likewise (log.rs:237).
+        self.latest
+            .iter()
+            .map(|(key, ts)| (key.as_deref(), ts))
+            .chain(wildcard_events)
     }
 
     /// This storage's events as [`EventMetadata`], the snapshot the aligner
@@ -3170,6 +3314,189 @@ mod tests {
                 build_digest(&cfg, [(Some("demo/a"), &newer)], hot_upper)
             );
         }
+
+        // -- The maintained log, at the storage seam (R2354) -------------
+        //
+        // The unit differentials for the log itself live beside it in
+        // `storage_replication`. What is checked HERE is the wiring: that
+        // every path which changes a digest source tells the log, and that
+        // the published digest is read off it rather than rebuilt.
+        //
+        // The population is not a list written here. `replication_digest`
+        // debug-asserts maintained == recomputed on EVERY call, so every test
+        // in this tree that takes a digest is a witness for the wiring; these
+        // cases add the transitions no other test drives.
+
+        /// An NTP64 `time` at `secs` seconds, so events can be placed in
+        /// distinct buckets (the `ts` helper above uses raw sub-millisecond
+        /// words, which all classify into interval 0).
+        fn at_secs(secs: u64, zid: u8) -> TimestampHint {
+            ts(secs << 32, zid)
+        }
+
+        /// A configuration whose buckets are 10s intervals of 2s
+        /// sub-intervals — coarse enough to name, fine enough that the
+        /// timestamps below fall in different ones.
+        fn era_cfg() -> ReplicationConfig {
+            ReplicationConfig::new("demo/**", None, 10_000, 5, 2, 3, 250)
+        }
+
+        /// THE claim this atom closes: a replica that publishes N digests
+        /// walks its stored set ONCE, not N times. The digests are still
+        /// checked against the recompute — being cheap is worthless if it is
+        /// also wrong — but the load-bearing assertion is the seed count,
+        /// because a digest that silently fell back to recomputing would be
+        /// correct and therefore invisible to any comparison of digests.
+        #[test]
+        fn a_publishing_replica_seeds_once_and_maintains_thereafter() {
+            let cfg = era_cfg();
+            let hot_upper = IntervalIdx::from(10);
+            let mut s = state();
+            s.process_put(Some("demo/a"), vec![1], None, at_secs(92, 1))
+                .unwrap();
+
+            assert_eq!(s.replication_log_seeds(), 0, "inert until first asked");
+            for (n, secs) in [93u64, 95, 97, 99].into_iter().enumerate() {
+                let digest = s.replication_digest(&cfg, hot_upper);
+                assert_eq!(
+                    digest,
+                    s.recomputed_replication_digest(&cfg, hot_upper),
+                    "cycle {n}"
+                );
+                assert_eq!(s.replication_log_seeds(), 1, "cycle {n} re-seeded");
+                s.process_put(Some("demo/a"), vec![2], None, at_secs(secs, 1))
+                    .unwrap();
+            }
+            assert_eq!(
+                s.replication_digest(&cfg, hot_upper),
+                s.recomputed_replication_digest(&cfg, hot_upper)
+            );
+            assert_eq!(s.replication_log_seeds(), 1);
+        }
+
+        /// A delete is an event MOVE, not an addition: the tombstone replaces
+        /// the put in the event set, and it lands in whatever bucket its own
+        /// timestamp names. The two timestamps here are in different
+        /// intervals, so a log that only added would carry both.
+        #[test]
+        fn a_tombstone_moves_the_key_out_of_its_put_bucket() {
+            let cfg = era_cfg();
+            let hot_upper = IntervalIdx::from(10);
+            let mut s = state();
+            s.process_put(Some("demo/a"), vec![1], None, at_secs(92, 1))
+                .unwrap();
+            let _ = s.replication_digest(&cfg, hot_upper); // seed
+            s.process_delete(Some("demo/a"), at_secs(101, 1)).unwrap();
+
+            let tombstone = at_secs(101, 1);
+            assert_eq!(
+                s.replication_digest(&cfg, hot_upper),
+                build_digest(&cfg, [(Some("demo/a"), &tombstone)], hot_upper),
+                "the put's bucket must be empty and the tombstone's occupied"
+            );
+            assert_eq!(s.replication_log_seeds(), 1);
+        }
+
+        /// A digest asked for under a PEER's configuration re-cuts the
+        /// buckets, and asking again under the local one re-cuts them back.
+        /// Both answers are right; what must not happen is one configuration's
+        /// buckets answering under the other's fingerprint.
+        #[test]
+        fn a_peer_configuration_rebinds_and_the_local_one_rebinds_back() {
+            let local = era_cfg();
+            let peer = ReplicationConfig::new("demo/**", None, 1_000, 5, 2, 3, 250);
+            let hot_upper = IntervalIdx::from(10);
+            let mut s = state();
+            s.process_put(Some("demo/a"), vec![1], None, at_secs(92, 1))
+                .unwrap();
+
+            let under_local = s.replication_digest(&local, hot_upper);
+            let under_peer = s.replication_digest(&peer, IntervalIdx::from(100));
+            assert_eq!(s.replication_log_seeds(), 2, "the peer config re-seeds");
+            assert_eq!(
+                under_peer,
+                s.recomputed_replication_digest(&peer, IntervalIdx::from(100))
+            );
+            assert_eq!(
+                s.replication_digest(&local, hot_upper),
+                under_local,
+                "the local configuration's digest is unchanged by the detour"
+            );
+            assert_eq!(s.replication_log_seeds(), 3);
+        }
+
+        // The wildcard registries are the digest's SECOND event source
+        // (R2351, AV5), so they are the second thing the maintained log has
+        // to hear from — and the garbage collector is the only path in this
+        // storage that REMOVES an event outright.
+        #[cfg(feature = "storage-mgr-wildcard-updates")]
+        mod wildcard_events {
+            use super::*;
+            use crate::sample::Sample;
+
+            fn wput(s: &mut StorageState<MemoryStorage>, ke: &str, t: TimestampHint) {
+                s.apply_sample(
+                    &Sample::new_put(ke, vec![9]).with_timestamp(t),
+                    || unreachable!(),
+                );
+            }
+
+            /// Re-issuing a wildcard update at a newer timestamp moves its
+            /// event to another bucket, exactly as an overwritten key does.
+            /// The registry is an upsert, so nothing else signals that the
+            /// old registration left.
+            #[test]
+            fn a_re_registered_wildcard_update_leaves_its_old_bucket() {
+                let cfg = era_cfg();
+                let hot_upper = IntervalIdx::from(10);
+                let mut s = state();
+                wput(&mut s, "demo/**", at_secs(92, 1));
+                let _ = s.replication_digest(&cfg, hot_upper); // seed
+                wput(&mut s, "demo/**", at_secs(98, 1));
+
+                let newer = at_secs(98, 1);
+                assert_eq!(
+                    s.replication_digest(&cfg, hot_upper),
+                    build_digest(&cfg, [(Some("demo/**"), &newer)], hot_upper),
+                    "only the current registration is a replication event"
+                );
+                assert_eq!(s.replication_log_seeds(), 1);
+            }
+
+            /// The garbage collector drops registrations, and a dropped
+            /// registration is a dropped replication event. This is the one
+            /// path that removes rather than replaces, and nothing else in
+            /// the tree drives it with a digest in play: a sweep that did not
+            /// tell the log would leave this replica advertising a
+            /// fingerprint for wildcard updates it no longer holds — a
+            /// divergence manufactured by the collector, which no peer could
+            /// ever resolve.
+            #[cfg(feature = "storage-mgr-garbage-collection")]
+            #[test]
+            fn a_collected_wildcard_update_leaves_the_digest() {
+                let cfg = era_cfg();
+                let hot_upper = IntervalIdx::from(10);
+                let mut s = state();
+                wput(&mut s, "old/**", at_secs(35, 1));
+                wput(&mut s, "new/**", at_secs(92, 1));
+                let before = s.replication_digest(&cfg, hot_upper); // seed
+                assert_eq!(s.wildcard_registry_lens(), (2, 0));
+
+                // Collect everything older than 30s at "now" = 95s: the old
+                // registration goes, the new one stays.
+                s.collect_garbage(at_secs(95, 1).time, core::time::Duration::from_secs(30));
+                assert_eq!(s.wildcard_registry_lens(), (1, 0), "one was collected");
+
+                let kept = at_secs(92, 1);
+                let after = s.replication_digest(&cfg, hot_upper);
+                assert_ne!(before, after, "the collected event left the digest");
+                assert_eq!(
+                    after,
+                    build_digest(&cfg, [(Some("new/**"), &kept)], hot_upper)
+                );
+                assert_eq!(s.replication_log_seeds(), 1);
+            }
+        }
     }
 
     // The aligner event snapshot needs the storage-aligner kernel.
@@ -3576,7 +3903,10 @@ mod tests {
         // query -> peer.answer -> local.process until every branch is Done.
         fn drive_alignment(
             local: &mut StorageState<MemoryStorage>,
-            peer: &StorageState<MemoryStorage>,
+            // `&mut` since R2354: a digest SEEDS the replication log on its
+            // first call under a configuration, so even the peer's read-only
+            // role in this exchange needs the mutable handle.
+            peer: &mut StorageState<MemoryStorage>,
             config: &ReplicationConfig,
             now: u64,
         ) {
@@ -3620,7 +3950,7 @@ mod tests {
                 .process_put(Some("demo/cold"), vec![1], None, at(2, 0))
                 .unwrap(); // shared cold
 
-            drive_alignment(&mut local, &peer, &config, now);
+            drive_alignment(&mut local, &mut peer, &config, now);
 
             // Local pulled every entry it was missing, across all three eras.
             assert_eq!(
@@ -3667,8 +3997,8 @@ mod tests {
                 .unwrap();
 
             // a pulls from b, then b pulls from a (now the union).
-            drive_alignment(&mut a, &b, &config, now);
-            drive_alignment(&mut b, &a, &config, now);
+            drive_alignment(&mut a, &mut b, &config, now);
+            drive_alignment(&mut b, &mut a, &config, now);
 
             for (key, val) in [
                 ("k/only_a_warm", vec![0xA1]),
@@ -3715,7 +4045,7 @@ mod tests {
                 .unwrap();
 
             // The peer holds the higher-zid version -> local must adopt it.
-            drive_alignment(&mut local, &peer, &config, now);
+            drive_alignment(&mut local, &mut peer, &config, now);
             assert_eq!(
                 local.get(Some("k/x")).map(|d| d.payload.clone()),
                 Some(vec![0xBB]),

@@ -137,7 +137,9 @@ fn digest_frame<B: StorageBackend>(
 ) -> (String, Vec<u8>) {
     let hot_upper = config.classify(now).0;
     let digest = {
-        let guard = state.lock().expect("storage state mutex poisoned");
+        // `mut` since R2354: the digest is read off the storage's maintained
+        // replication log, and the first call under a configuration seeds it.
+        let mut guard = state.lock().expect("storage state mutex poisoned");
         guard.replication_digest(config, hot_upper)
     };
     (digest_keyexpr(config, local_zid), wire::encode(&digest))
@@ -271,7 +273,8 @@ fn handle_peer_digest<B: StorageBackend>(
     };
     let hot_upper = config.classify(now).0;
     let local = {
-        let guard = state.lock().expect("storage state mutex poisoned");
+        // `mut` since R2354 — see [`digest_frame`].
+        let mut guard = state.lock().expect("storage state mutex poisoned");
         guard.replication_digest(config, hot_upper)
     };
     if let Some(diff) = local.diff(peer) {
@@ -399,9 +402,9 @@ mod tests {
         let now = wall_clock_ntp64();
         let config = cfg();
         let hot_upper = config.classify(now).0;
-        let local = state_with(&["demo/a"], now);
+        let mut local = state_with(&["demo/a"], now);
         // The peer holds an extra key -> the local replica diverges from it.
-        let peer = state_with(&["demo/a", "demo/b"], now);
+        let mut peer = state_with(&["demo/a", "demo/b"], now);
         let peer_bytes = wire::encode(&peer.replication_digest(&config, hot_upper));
 
         let expected = local
@@ -428,7 +431,7 @@ mod tests {
         let now = wall_clock_ntp64();
         let config = cfg();
         let hot_upper = config.classify(now).0;
-        let local = state_with(&["demo/a"], now);
+        let mut local = state_with(&["demo/a"], now);
         let peer_bytes = wire::encode(&local.replication_digest(&config, hot_upper));
 
         let arc = Arc::new(Mutex::new(local));

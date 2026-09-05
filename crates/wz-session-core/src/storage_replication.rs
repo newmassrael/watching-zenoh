@@ -722,15 +722,22 @@ impl DigestDiff {
 /// the same era partition. The non-zero filters are required for digest
 /// equality: an absent entry and a zero entry diff differently.
 ///
-/// # Design divergence
+/// # Role: the recompute ORACLE, not the publication path
 ///
-/// zenoh maintains an incremental `LogLatest` (XOR-updated on every event)
-/// and reads the digest off it. wz recomputes the digest from the storage
-/// snapshot each publish cycle, so the buckets here are transient and no
-/// parallel log is kept. The resulting [`Digest`] is identical — only the
-/// computation strategy differs (recompute vs incremental). An incremental
-/// log is a throughput optimisation for very large stores, a documented
-/// future atom if profiling demands it.
+/// This is the `O(n)` derivation of a [`Digest`] from a complete event set.
+/// It is no longer what a publication cycle runs: [`ReplicationLog`] keeps
+/// the same buckets incrementally and the cycle reads the digest off them
+/// (R2354, the last `storage-replication` residual — zenoh has kept an
+/// incremental log since it had a digest at all). What this function is now
+/// is the INDEPENDENT second derivation the maintained one is checked
+/// against, in
+/// [`StorageState::recomputed_replication_digest`](crate::storage_state::StorageState::recomputed_replication_digest)
+/// and, on every debug build, inside
+/// [`StorageState::replication_digest`](crate::storage_state::StorageState::replication_digest)
+/// itself. Two derivations that must agree are worth more than one that
+/// cannot be wrong, which is why this stays rather than being deleted —
+/// upstream keeps the same shape of self-check
+/// (`plugins/zenoh-plugin-storage-manager/src/replication/log.rs` @ `assert_only_one_event_per_key_expr`).
 pub fn build_digest<'a>(
     config: &ReplicationConfig,
     events: impl IntoIterator<Item = (Option<&'a str>, &'a TimestampHint)>,
@@ -788,6 +795,258 @@ pub fn build_digest<'a>(
         cold_era_fingerprint,
         warm_era_fingerprints,
         hot_era_fingerprints,
+    }
+}
+
+/// The **incremental replication log**: the bucketed, XOR-maintained
+/// counterpart of [`build_digest`], and the structure a [`Digest`] is read
+/// OFF rather than recomputed from.
+///
+/// zenoh keeps one
+/// (`plugins/zenoh-plugin-storage-manager/src/replication/log.rs` @ `pub struct LogLatest`),
+/// groups every event into an `(interval, sub-interval)` bucket as it
+/// arrives, and reads the digest off the maintained fingerprints
+/// (`plugins/zenoh-plugin-storage-manager/src/replication/log.rs` @ `fn digest_from`).
+/// wz recomputed instead — every publication cycle walked the whole stored
+/// set through [`build_digest`], so a replica's digest cost grew with the
+/// store on a fixed `interval_ms` timer. This is that residual paid: the
+/// buckets are updated by the write that causes them to change, and the
+/// publication cycle only rolls the eras up.
+///
+/// # What is maintained, and why an event COUNT is part of it
+///
+/// A [`Fingerprint`] is an XOR accumulator, so removing an event is the same
+/// operation as adding it — that half is self-inverse and needs no
+/// bookkeeping. Emptiness is NOT, and so each bucket carries the number of
+/// events XOR-ed into it and is dropped when that reaches zero — which is
+/// what upstream does when a sub-interval's event set empties
+/// (`plugins/zenoh-plugin-storage-manager/src/replication/classification.rs` @ `if sub_interval.events.is_empty()`).
+///
+/// The reason it cannot be "drop when the fingerprint reaches zero" was
+/// MEASURED rather than argued, and the first argument written here was
+/// wrong. Pruning on a zero fingerprint gives the same digest for a
+/// sub-interval whose events cancel — [`build_digest`] filters a zero
+/// fingerprint out of the hot / warm maps anyway, so nothing observable
+/// changes at that moment. What it destroys is the bucket's ability to give
+/// an event back LATER: two events with the SAME fingerprint (a wildcard put
+/// and a wildcard delete registered on one keyexpr at one timestamp are
+/// exactly that) cancel to zero while both are present, and if the bucket is
+/// dropped there, the removal that follows when one of them is re-issued
+/// finds nothing to XOR out and the survivor's fingerprint is lost from the
+/// digest for good. The count is what keeps a cancelled bucket alive until
+/// its events actually leave.
+///
+/// # Binding
+///
+/// The bucket boundaries are a function of the [`ReplicationConfig`], and a
+/// storage accepts writes before any replication configuration reaches it
+/// (and, in this tree's tests, is asked for digests under a PEER's config).
+/// The log therefore binds LAZILY: it is inert until a digest names a
+/// configuration, seeds itself from the event set once
+/// ([`seed`](ReplicationLog::seed)), and is incremental from then on. A digest
+/// asked for under a different configuration re-seeds — correct, and the only
+/// honest answer, since buckets cut at one interval width cannot be re-cut at
+/// another. [`seeds`](ReplicationLog::seeds) counts those seeds, so a test can
+/// assert that a steady-state publisher recomputes exactly once.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReplicationLog {
+    /// The configuration the buckets below are cut by; `None` while inert.
+    /// Compared by VALUE rather than by [`ReplicationConfig::fingerprint`]:
+    /// the fingerprint is a hash, and a re-seed decision must not rest on the
+    /// absence of a collision.
+    binding: Option<ReplicationConfig>,
+    /// The maintained buckets, pruned to exactly the intervals that hold at
+    /// least one event (see the emptiness note above).
+    intervals: BTreeMap<IntervalIdx, IntervalBucket>,
+    /// How many times the log has been seeded from a full event set — the
+    /// observability seam that distinguishes "maintained" from "recomputed".
+    seeds: u64,
+}
+
+/// One interval's sub-interval buckets. The interval fingerprint is NOT
+/// cached: it is the XOR of the sub-interval fingerprints, and a cached copy
+/// would be a second thing to keep in step for no gain at digest time (the
+/// rollup already visits every sub-interval of the interval).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct IntervalBucket {
+    subs: BTreeMap<SubIntervalIdx, SubIntervalBucket>,
+}
+
+/// One sub-interval's maintained state: the XOR of its events' fingerprints,
+/// and how many events are in it (the emptiness discriminator).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct SubIntervalBucket {
+    fingerprint: Fingerprint,
+    events: usize,
+}
+
+impl ReplicationLog {
+    /// How many times this log has been seeded from a full event set. A
+    /// steady-state replica seeds ONCE — every later digest is read off the
+    /// maintained buckets. This is the observable that separates the
+    /// incremental log from the recompute it replaces: an implementation that
+    /// silently fell back to walking the store would show a seed per cycle.
+    pub fn seeds(&self) -> u64 {
+        self.seeds
+    }
+
+    /// Whether the buckets are already cut by `config`, i.e. a digest under
+    /// it can be read off without re-seeding.
+    pub fn is_bound_to(&self, config: &ReplicationConfig) -> bool {
+        self.binding.as_ref() == Some(config)
+    }
+
+    /// (Re)binds the log to `config` and fills it from the complete event set.
+    /// The `O(n)` path — taken once per configuration, not once per cycle.
+    pub fn seed<'a>(
+        &mut self,
+        config: &ReplicationConfig,
+        events: impl IntoIterator<Item = (Option<&'a str>, &'a TimestampHint)>,
+    ) {
+        self.binding = Some(config.clone());
+        self.intervals = BTreeMap::new();
+        self.seeds += 1;
+        for (key, timestamp) in events {
+            self.insert_event(key, timestamp);
+        }
+    }
+
+    /// Applies one event transition: `previous` (if any) leaves the buckets
+    /// and `current` (if any) enters them. This is the whole maintenance
+    /// surface —
+    /// - a first write is `(None, Some(new))`,
+    /// - an accepted overwrite or a tombstone is `(Some(old), Some(new))`,
+    /// - a garbage-collected wildcard registration is `(Some(old), None)`.
+    ///
+    /// Inert (and free) while the log is unbound: the next digest seeds from
+    /// the authoritative event set, so nothing is lost by not tracking a
+    /// storage nobody has asked a digest of yet.
+    pub fn apply(
+        &mut self,
+        key: Option<&str>,
+        previous: Option<&TimestampHint>,
+        current: Option<&TimestampHint>,
+    ) {
+        if self.binding.is_none() {
+            return;
+        }
+        if let Some(previous) = previous {
+            self.remove_event(key, previous);
+        }
+        if let Some(current) = current {
+            self.insert_event(key, current);
+        }
+    }
+
+    /// The `(interval, sub-interval, fingerprint)` of one event under the
+    /// bound configuration, or `None` while inert. Computed before any bucket
+    /// is touched so the classification borrow does not overlap the mutation.
+    fn locate(
+        &self,
+        key: Option<&str>,
+        timestamp: &TimestampHint,
+    ) -> Option<(IntervalIdx, SubIntervalIdx, Fingerprint)> {
+        let config = self.binding.as_ref()?;
+        let (interval_idx, sub_interval_idx) = config.classify(timestamp.time);
+        Some((
+            interval_idx,
+            sub_interval_idx,
+            event_fingerprint(key, timestamp),
+        ))
+    }
+
+    fn insert_event(&mut self, key: Option<&str>, timestamp: &TimestampHint) {
+        let Some((interval_idx, sub_interval_idx, fp)) = self.locate(key, timestamp) else {
+            return;
+        };
+        let sub = self
+            .intervals
+            .entry(interval_idx)
+            .or_default()
+            .subs
+            .entry(sub_interval_idx)
+            .or_default();
+        sub.fingerprint ^= fp;
+        sub.events += 1;
+    }
+
+    fn remove_event(&mut self, key: Option<&str>, timestamp: &TimestampHint) {
+        let Some((interval_idx, sub_interval_idx, fp)) = self.locate(key, timestamp) else {
+            return;
+        };
+        let Some(interval) = self.intervals.get_mut(&interval_idx) else {
+            return;
+        };
+        if let Some(sub) = interval.subs.get_mut(&sub_interval_idx) {
+            sub.fingerprint ^= fp;
+            sub.events -= 1;
+            if sub.events == 0 {
+                interval.subs.remove(&sub_interval_idx);
+            }
+        }
+        if interval.subs.is_empty() {
+            self.intervals.remove(&interval_idx);
+        }
+    }
+
+    /// Rolls the maintained buckets up into a [`Digest`] for
+    /// `hot_era_upper_bound`.
+    ///
+    /// The era partition is re-derived on every call (it moves with the
+    /// bound, not with the data), so this is the same rollup [`build_digest`]
+    /// performs in its second pass — minus the first pass, which the
+    /// maintenance above has already done. Every filter [`build_digest`]
+    /// applies is applied here for the same reason: the two digests must be
+    /// EQUAL, not merely similar, because one of them goes on the wire.
+    pub fn digest_from(
+        &self,
+        config: &ReplicationConfig,
+        hot_era_upper_bound: IntervalIdx,
+    ) -> Digest {
+        debug_assert!(
+            self.is_bound_to(config),
+            "digest_from must be called under the configuration the log is \
+             bound to; seed it first"
+        );
+        let hot_lower = config.hot_era_lower_bound(hot_era_upper_bound);
+        let warm_lower = config.warm_era_lower_bound(hot_era_upper_bound);
+
+        let mut cold_era_fingerprint = Fingerprint::default();
+        let mut warm_era_fingerprints = BTreeMap::new();
+        let mut hot_era_fingerprints = BTreeMap::new();
+
+        for (interval_idx, interval) in &self.intervals {
+            if *interval_idx > hot_era_upper_bound {
+                continue;
+            }
+            let interval_fp = interval
+                .subs
+                .values()
+                .fold(Fingerprint::default(), |acc, sub| acc ^ sub.fingerprint);
+
+            if *interval_idx < warm_lower {
+                cold_era_fingerprint ^= interval_fp;
+            } else if *interval_idx < hot_lower {
+                if interval_fp != Fingerprint::default() {
+                    warm_era_fingerprints.insert(*interval_idx, interval_fp);
+                }
+            } else {
+                let subs: BTreeMap<SubIntervalIdx, Fingerprint> = interval
+                    .subs
+                    .iter()
+                    .filter(|(_, sub)| sub.fingerprint != Fingerprint::default())
+                    .map(|(sub_idx, sub)| (*sub_idx, sub.fingerprint))
+                    .collect();
+                hot_era_fingerprints.insert(*interval_idx, subs);
+            }
+        }
+
+        Digest {
+            configuration_fingerprint: config.fingerprint(),
+            cold_era_fingerprint,
+            warm_era_fingerprints,
+            hot_era_fingerprints,
+        }
     }
 }
 
@@ -1798,5 +2057,271 @@ mod tests {
             .get(&IntervalIdx::from(9))
             .unwrap()
             .contains(&SubIntervalIdx::from(4)));
+    }
+
+    // -- Incremental log (R2354) ----------------------------------------
+    //
+    // Every case here is a DIFFERENTIAL against [`build_digest`], never
+    // against a hand-written expected digest. The two derivations are
+    // independent — one walks the event set, the other is maintained by the
+    // transitions — and the claim this atom closes is precisely that they
+    // agree. A hand-written expectation would let both drift together.
+    mod incremental_log {
+        use super::*;
+
+        /// Drives a log through `transitions` and asserts its digest equals
+        /// the recompute over `population`, the event set the transitions add
+        /// up to. Returns the log so a caller can go on asserting about it.
+        ///
+        /// The oracle's population is passed in rather than read back out of
+        /// the log: a log that agrees with a population IT supplied would
+        /// agree with anything.
+        fn differential<'a>(
+            config: &ReplicationConfig,
+            hot_upper: IntervalIdx,
+            transitions: &[(
+                Option<&'a str>,
+                Option<&'a TimestampHint>,
+                Option<&'a TimestampHint>,
+            )],
+            population: &[(Option<&'a str>, &'a TimestampHint)],
+        ) -> ReplicationLog {
+            let mut log = ReplicationLog::default();
+            log.seed(config, []);
+            for (key, previous, current) in transitions {
+                log.apply(*key, *previous, *current);
+            }
+            assert_eq!(
+                log.digest_from(config, hot_upper),
+                build_digest(config, population.iter().copied(), hot_upper),
+                "the maintained digest must EQUAL the recompute, not resemble it"
+            );
+            log
+        }
+
+        /// The transition an accepted overwrite makes: the key leaves the
+        /// sub-interval its old timestamp hashed into and enters a new one.
+        /// This is the case a log that only ever adds gets wrong in BOTH
+        /// buckets at once, and it is the whole reason `apply` takes the
+        /// previous timestamp.
+        #[test]
+        fn an_overwrite_leaves_the_bucket_it_was_hashed_into() {
+            let cfg = era_cfg();
+            let old = ts(at_secs(92), vec![0x01]); // interval 9, sub 1
+            let new = ts(at_secs(98), vec![0x01]); // interval 9, sub 4
+            assert_ne!(
+                cfg.classify(old.time),
+                cfg.classify(new.time),
+                "the two timestamps must fall in different buckets or this \
+                 test cannot distinguish anything"
+            );
+
+            differential(
+                &cfg,
+                IntervalIdx::from(10),
+                &[
+                    (Some("demo/a"), None, Some(&old)),
+                    (Some("demo/a"), Some(&old), Some(&new)),
+                ],
+                &[(Some("demo/a"), &new)],
+            );
+        }
+
+        /// A key whose only event moves to another INTERVAL empties the one it
+        /// left, and an emptied interval must vanish rather than linger as a
+        /// zero-fingerprinted hot entry — `build_digest` never emits a bucket
+        /// for an interval that holds no event, so a lingering one is a digest
+        /// two replicas cannot agree on.
+        #[test]
+        fn an_emptied_interval_is_pruned_from_the_hot_map() {
+            let cfg = era_cfg();
+            let old = ts(at_secs(92), vec![0x01]); // interval 9
+            let new = ts(at_secs(101), vec![0x01]); // interval 10
+            let log = differential(
+                &cfg,
+                IntervalIdx::from(10),
+                &[
+                    (Some("demo/a"), None, Some(&old)),
+                    (Some("demo/a"), Some(&old), Some(&new)),
+                ],
+                &[(Some("demo/a"), &new)],
+            );
+            assert!(
+                !log.digest_from(&cfg, IntervalIdx::from(10))
+                    .hot_era_fingerprints()
+                    .contains_key(&IntervalIdx::from(9)),
+                "interval 9 held one event and it moved away"
+            );
+        }
+
+        /// The SHAPE `build_digest` emits for a sub-interval whose events
+        /// cancel: the sub-interval is filtered out (zero fingerprint) but its
+        /// INTERVAL is still there, carrying an empty map. The log must emit
+        /// the same shape, which is why it prunes an interval only when the
+        /// last of its sub-intervals goes.
+        ///
+        /// This case does NOT discriminate the event count — measured, and
+        /// the first draft of this module claimed it did. Pruning on a zero
+        /// fingerprint produces the identical digest here;
+        /// [`a_cancelled_bucket_must_still_give_its_events_back`] is the case
+        /// that separates them.
+        ///
+        /// The population is reachable, not contrived: a wildcard put and a
+        /// wildcard delete registered on one keyexpr at one timestamp are two
+        /// distinct replication events with identical `(key, timestamp)`.
+        #[test]
+        fn two_events_that_xor_to_zero_keep_their_interval() {
+            let cfg = era_cfg();
+            let t = ts(at_secs(92), vec![0x01]); // interval 9, sub 1
+            let log = differential(
+                &cfg,
+                IntervalIdx::from(10),
+                &[
+                    (Some("demo/**"), None, Some(&t)),
+                    (Some("demo/**"), None, Some(&t)),
+                ],
+                &[(Some("demo/**"), &t), (Some("demo/**"), &t)],
+            );
+            let digest = log.digest_from(&cfg, IntervalIdx::from(10));
+            let interval = digest
+                .hot_era_fingerprints()
+                .get(&IntervalIdx::from(9))
+                .expect("the interval still holds two events");
+            assert!(
+                interval.is_empty(),
+                "their sub-interval fingerprint is zero, so it is filtered out \
+                 — but the interval itself is not"
+            );
+        }
+
+        /// THE case that makes the event count load-bearing, and the one the
+        /// module's first justification for the count did not cover.
+        ///
+        /// Two events with the same fingerprint cancel their sub-interval to
+        /// zero while both are present. A log that pruned the bucket there
+        /// would produce the SAME digest at that instant — nothing is
+        /// observable yet, which is what makes it a plausible simplification.
+        /// The damage lands one transition later: when one of the two is
+        /// re-issued at a newer timestamp, its removal has no bucket to XOR
+        /// out of, and the surviving twin's fingerprint disappears from the
+        /// digest permanently. That is a replica advertising a sub-interval it
+        /// does not hold, to every peer, until it restarts.
+        ///
+        /// The pair is exactly what a wildcard put and a wildcard delete on
+        /// one keyexpr at one timestamp are.
+        #[test]
+        fn a_cancelled_bucket_must_still_give_its_events_back() {
+            let cfg = era_cfg();
+            let t = ts(at_secs(92), vec![0x01]); // interval 9, sub 1
+            let moved = ts(at_secs(98), vec![0x01]); // interval 9, sub 4
+            differential(
+                &cfg,
+                IntervalIdx::from(10),
+                &[
+                    // The wildcard put and the wildcard delete: same key, same
+                    // timestamp, so the sub-interval fingerprint is zero.
+                    (Some("demo/**"), None, Some(&t)),
+                    (Some("demo/**"), None, Some(&t)),
+                    // The put is re-issued; one of the twins leaves.
+                    (Some("demo/**"), Some(&t), Some(&moved)),
+                ],
+                &[(Some("demo/**"), &t), (Some("demo/**"), &moved)],
+            );
+        }
+
+        /// A removal — the shape a garbage-collected wildcard registration
+        /// takes — returns the log to the digest of the smaller event set.
+        #[test]
+        fn a_removal_returns_the_digest_to_the_remaining_set() {
+            let cfg = era_cfg();
+            let kept = ts(at_secs(92), vec![0x01]);
+            let dropped = ts(at_secs(35), vec![0x02]);
+            differential(
+                &cfg,
+                IntervalIdx::from(10),
+                &[
+                    (Some("demo/a"), None, Some(&kept)),
+                    (Some("demo/**"), None, Some(&dropped)),
+                    (Some("demo/**"), Some(&dropped), None),
+                ],
+                &[(Some("demo/a"), &kept)],
+            );
+        }
+
+        /// An unbound log tracks nothing — and must not, since it does not
+        /// know where the bucket boundaries are. `apply` is inert, and the
+        /// seed that binds it is what fills it.
+        #[test]
+        fn an_unbound_log_is_inert_until_it_is_seeded() {
+            let cfg = era_cfg();
+            let t = ts(at_secs(92), vec![0x01]);
+            let mut log = ReplicationLog::default();
+            assert_eq!(log.seeds(), 0);
+            assert!(!log.is_bound_to(&cfg));
+            log.apply(Some("demo/a"), None, Some(&t));
+
+            log.seed(&cfg, [(Some("demo/a"), &t)]);
+            assert_eq!(log.seeds(), 1);
+            assert!(log.is_bound_to(&cfg));
+            assert_eq!(
+                log.digest_from(&cfg, IntervalIdx::from(10)),
+                build_digest(&cfg, [(Some("demo/a"), &t)], IntervalIdx::from(10)),
+                "the pre-seed apply must not have double-counted the event"
+            );
+        }
+
+        /// Buckets cut at one interval width cannot be re-cut at another, so a
+        /// digest asked for under a different configuration re-seeds. The
+        /// binding is compared by VALUE: two configurations that differ only
+        /// in a field outside the classification are still different
+        /// configurations, and the digest carries their fingerprint.
+        #[test]
+        fn a_different_configuration_rebinds_the_buckets() {
+            let coarse = era_cfg();
+            let fine = ReplicationConfig::new("demo/**", None, 1_000, 5, 2, 3, 250);
+            let t = ts(at_secs(92), vec![0x01]);
+
+            let mut log = ReplicationLog::default();
+            log.seed(&coarse, [(Some("demo/a"), &t)]);
+            assert_eq!(log.seeds(), 1);
+            assert!(!log.is_bound_to(&fine));
+
+            log.seed(&fine, [(Some("demo/a"), &t)]);
+            assert_eq!(log.seeds(), 2);
+            assert_eq!(
+                log.digest_from(&fine, IntervalIdx::from(100)),
+                build_digest(&fine, [(Some("demo/a"), &t)], IntervalIdx::from(100)),
+                "the re-cut buckets answer under the new configuration"
+            );
+        }
+
+        /// The era rollup is a function of the BOUND, not of the data, so one
+        /// maintained log answers for every hot-era upper bound a peer might
+        /// have published under — which is what makes a digest comparable
+        /// across replicas whose cycles are not in lockstep.
+        #[test]
+        fn one_maintained_log_answers_every_hot_era_upper_bound() {
+            let cfg = era_cfg();
+            let cold = ts(at_secs(35), vec![0x01]);
+            let warm = ts(at_secs(75), vec![0x01]);
+            let hot = ts(at_secs(95), vec![0x01]);
+            let population = [
+                (Some("demo/a"), &cold),
+                (Some("demo/b"), &warm),
+                (Some("demo/c"), &hot),
+            ];
+            let mut log = ReplicationLog::default();
+            log.seed(&cfg, population);
+
+            for bound in [8u64, 9, 10, 11, 20] {
+                let hot_upper = IntervalIdx::from(bound);
+                assert_eq!(
+                    log.digest_from(&cfg, hot_upper),
+                    build_digest(&cfg, population, hot_upper),
+                    "hot_era_upper_bound {bound}"
+                );
+            }
+            assert_eq!(log.seeds(), 1, "no bound re-seeds the log");
+        }
     }
 }
