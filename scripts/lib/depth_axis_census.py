@@ -290,10 +290,27 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # whole of both is the atom leaving the population, carrying its single wz
 # citation (`storage_state.rs:515-551`; its other three tokens are upstream or
 # root-less and were never in this count). PARTIAL falls 81 -> 80 with it.
-PIN_REACHED = 68
+# R2353 — 68 -> 67 and 402 -> 399, ONE atom leaving the corpus.
+# `transport-link-unixsock` went PARTIAL -> COMPLETE: its last residual (no
+# cross-process flock lock-file lifecycle, and no `del_listener`) was
+# IMPLEMENTED — `bind_unixsock` now takes an exclusive non-blocking `flock` on
+# `{path}.lock` BEFORE it unlinks a stale socket, and the new owning
+# `UnixsockListener` unlinks the socket on close/drop — while the entry's
+# "LOCAL-ONLY: lane C1aa absent from ci.yml" clause was REFUTED by measurement
+# (ci.yml has carried that lane since R311y413).
+#
+# The components are SEPARATED, not inferred from the total, and the citation
+# half was measured with THIS module's own regex against the pre-change reason
+# rather than eyeballed: that reason held four citation tokens, of which
+# `unicast.rs` is upstream (0 candidates) and `unixsock_pipeline.rs:94`,
+# `session_open.rs:816-819` and a bare `session_open.rs` each resolve to one
+# tracked file — exactly the 3 this move drops. The reason's own tokens are
+# UNCHANGED by the rewrite (the historical prose is preserved verbatim), so
+# neither move comes from editing prose. PARTIAL falls 80 -> 79 with it.
+PIN_REACHED = 67
 PIN_UNREACHED = 2
 PIN_NO_SYMBOL = 10
-PIN_WZ_CITATIONS = 402
+PIN_WZ_CITATIONS = 399
 PIN_AMBIGUOUS = 85
 
 

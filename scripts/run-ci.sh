@@ -4918,7 +4918,11 @@ layer_c1v_cargo_test_ws() {
 #   1. runs the locator tests (the `unixsock-stream` parse is ungated
 #      parse-always, like serial — the `AnyLocator::Unixsock` leaf);
 #   2. runs the `unixsock_pipeline` unit tests (dial-error, bind/accept
-#      round-trip, stale-socket-file replace);
+#      round-trip, stale-socket-file replace, and — R2353 — the `{path}.lock`
+#      arbitration: a live listener keeps its socket against a second bind,
+#      close/drop both release the path, the measured reason wz retains the
+#      lock file where upstream's `del_listener` unlinks it, and the derived
+#      population guard over every path-addressed `bind_*` seam);
 #   3. runs the `unixsock_e2e` integration test (gated
 #      `all(transport-link-unixsock, transport-unicast)`: two nodes bring a
 #      session up over a loopback unix socket — the initiator via a
@@ -4940,7 +4944,7 @@ layer_c1v_cargo_test_ws() {
 layer_c1aa_cargo_test_unixsock() {
     (cd crates \
         && cargo test -p wz-session-core --features alloc --lib locator --quiet \
-        && cargo test -p wz-runtime-tokio --features transport-link-unixsock --lib unixsock_pipeline --quiet 2>&1 | grep -qE '^test result: ok\. 3 passed' \
+        && cargo test -p wz-runtime-tokio --features transport-link-unixsock --lib unixsock_pipeline --quiet 2>&1 | grep -qE '^test result: ok\. 7 passed' \
         && cargo test -p wz-runtime-tokio --features transport-link-unixsock --test unixsock_e2e --quiet 2>&1 | grep -qE '^test result: ok\. 2 passed' \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-unixsock --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-link-unixsock --quiet -- -D warnings)
@@ -9966,7 +9970,7 @@ layer_c1bz_docs_resolve() {
         wz-mcu-session-acceptor:4
         wz-routing-graph:6
         wz-runtime-coop:12
-        wz-runtime-tokio:522
+        wz-runtime-tokio:521
         wz-session-core:537
         wz-session-lwip:4
         wz-switchboard-codegen:8

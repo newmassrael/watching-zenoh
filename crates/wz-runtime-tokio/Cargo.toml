@@ -874,14 +874,18 @@ transport-link-ws = ["link-interfaces", "dep:tokio-tungstenite", "dep:futures-ut
 # reuses the ENTIRE TCP `stream_link` pipeline — the StreamEnvelope
 # length-prefix framing, the shared `poll_framed` reader, the writer task —
 # over a `tokio::net::UnixStream` instead of a `TcpStream`, so no new codec.
-# Pulls NO new dep: tokio's `net` feature already carries `UnixStream` /
+# Pulls no TRANSPORT dep: tokio's `net` feature already carries `UnixStream` /
 # `UnixListener` on Unix (vs TLS's `tokio-rustls` / WS's `tokio-tungstenite`).
+# It does pull `dep:libc`, for the one `flock` FFI call the listener's
+# `{path}.lock` arbitration makes — zenoh reaches for `nix::fcntl::flock` at the
+# same seam, and `libc` is already in this crate for the unixpipe rendezvous and
+# the SHM auth segment, which take the SAME lock through the same raw call.
 # The locator PARSE (`AnyLocator::Unixsock`) is unconditional in
 # wz-session-core (no feature forward, like serial); only the dial/accept
 # BACKEND is gated here, and the `session_open` DialedLink::Unixsock arm rides
 # the `transport-link-tcp`-gated session-open module additively, like the tls
 # arm. NOT default — pico has no unixsock transport at all (host-only link).
-transport-link-unixsock = ["transport-link-tcp"]
+transport-link-unixsock = ["transport-link-tcp", "dep:libc"]
 # R311xj — host AF_VSOCK link backend (VM<->host / VM<->VM). Like tls/unixsock
 # (and UNLIKE ws), forwards `transport-link-tcp`: vsock is a reliable byte
 # STREAM (zenoh's vsock link: is_streamed/is_reliable=true, MTU=BatchSize::MAX)

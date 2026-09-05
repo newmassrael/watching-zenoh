@@ -194,10 +194,11 @@ async fn wz_to_wz_over_unixsock_reaches_established_and_delivers_put() {
         "exactly one delivery from the Put over the unixsock link"
     );
 
-    // Hygiene: unlink the socket file (a unix listener does not auto-unlink on
-    // drop). `listener` is still owned here; it drops at function end.
+    // Hygiene: dropping a `UnixsockListener` unlinks the socket file itself
+    // (the `del_listener` teardown), so only the retained `{path}.lock` is left
+    // for this test to clear.
     drop(listener);
-    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(format!("{path}.lock"));
 }
 
 /// A unique unix-socket path for the accept-seam test (a distinct suffix from
@@ -367,5 +368,7 @@ async fn wz_accepts_a_session_over_unixsock_via_the_bind_endpoint_seam() {
         "exactly one delivery from the Put over the unixsock seam"
     );
 
-    let _ = std::fs::remove_file(&path);
+    // The `BoundListener::Unixsock` teardown unlinks the socket file; clear the
+    // retained lock file so a temp dir does not collect one per run.
+    let _ = std::fs::remove_file(format!("{path}.lock"));
 }

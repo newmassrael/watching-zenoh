@@ -182,10 +182,11 @@ use tokio_tungstenite::WebSocketStream;
 // locator dials directly through `dial_locator`, like `ws`/`udp`.
 #[cfg(feature = "transport-link-unixsock")]
 use crate::unixsock_pipeline::{
-    accept_unixsock_on, bind_unixsock, dial_unixsock, wire_unixsock_stream, UnixsockReadDriver,
+    accept_unixsock_on, bind_unixsock, dial_unixsock, wire_unixsock_stream, UnixsockListener,
+    UnixsockReadDriver,
 };
 #[cfg(feature = "transport-link-unixsock")]
-use tokio::net::{UnixListener, UnixStream};
+use tokio::net::UnixStream;
 
 // R311xj — the vsock arm, like tls/unixsock, rides this tcp+unicast-gated
 // module as an additive STREAM transport, but Linux-only (AF_VSOCK), so gated
@@ -721,15 +722,21 @@ pub enum BoundListener {
     /// [`AcceptConfig::tls`] at bind time and carried until the accept runs it.
     #[cfg(feature = "transport-link-tls")]
     Tls(TcpListener, Arc<ServerConfig>),
-    /// A bound unix-domain [`UnixListener`]; [`accept_bound`] accepts a raw
+    /// A bound unix-domain [`UnixsockListener`]; [`accept_bound`] accepts a raw
     /// [`DialedLink::Unixsock`] with NO post-accept handshake (a `UnixStream` is
     /// wrapped directly, like `tcp`). The FIRST non-`TcpListener` variant
     /// (R311y378, accept-symmetry Stage 4) — the accept-side mirror of
     /// `dial_locator`'s `AnyLocator::Unixsock => DialedLink::Unixsock`, and the
     /// reason [`Self::accept_raw`] yields an [`AcceptedPeer`] (a unix accept has
     /// no IP peer) and [`Self::local_addr`] returns a typed error for it.
+    ///
+    /// Not a bare `UnixListener`: a unix listener also owns a FILESYSTEM
+    /// artifact, so the variant carries the `{path}.lock` arbitration and the
+    /// unlink-on-teardown that zenoh's `ListenerUnixSocketStream` carries
+    /// (`unicast.rs`). Dropping this `BoundListener` therefore removes the
+    /// socket file, which is why no caller has to.
     #[cfg(feature = "transport-link-unixsock")]
-    Unixsock(UnixListener),
+    Unixsock(UnixsockListener),
     /// A bound AF_VSOCK [`VsockListener`]; [`accept_bound`] accepts a raw
     /// [`DialedLink::Vsock`] with NO post-accept handshake (direct wrap, like
     /// `tcp` / `unixsock`). Non-IP like `unixsock` (the accepted peer is
