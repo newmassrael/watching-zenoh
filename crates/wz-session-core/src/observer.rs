@@ -1574,7 +1574,22 @@ mod tests {
         /// One liveliness subscriber on `k/**` and one pending GET, so every
         /// token below matches BOTH planes by keyexpr. The routing rule is the
         /// only thing that can tell them apart.
+        ///
+        /// The subscriber asks for HISTORY, and R2359 made that load-bearing
+        /// rather than incidental. A declare tagged with the SUBSCRIBER's own
+        /// interest id can only exist because that subscriber sent a CURRENT
+        /// interest, and only a `history = true` declare sends one — so a
+        /// future-only subscriber in this fixture would be a state the wire
+        /// cannot produce, and the module's whole subject is declares carrying
+        /// exactly that id. It read `false` until R2359 and nothing noticed,
+        /// because until then the history flag changed no delivery.
         fn fixture() -> Fixture {
+            fixture_with_history(true)
+        }
+
+        /// [`fixture`] with the subscriber's `history` flag under the test's
+        /// control, for the one case that needs the other value.
+        fn fixture_with_history(history: bool) -> Fixture {
             let mut observer = ApplicationLayerObserver::new();
             let sub_fired = Arc::new(AtomicUsize::new(0));
             let s = sub_fired.clone();
@@ -1583,7 +1598,7 @@ mod tests {
                 .register(
                     SUB_INTEREST,
                     "k/**",
-                    false,
+                    history,
                     BoxedLivelinessSampleSink::new(move |_sample| {
                         s.fetch_add(1, Ordering::SeqCst);
                     }),
@@ -1709,6 +1724,36 @@ mod tests {
                  unsolicited one beside it still is"
             );
             assert_eq!(f.get_fired.load(Ordering::SeqCst), 1);
+        }
+
+        /// R2359 — the same routing question asked of a FUTURE-ONLY
+        /// subscriber, at the observer plane rather than the registry's.
+        /// It gets its own witness for the reason this module already records
+        /// one line up: the planes are separate registries reached by separate
+        /// calls, so the registry-level tests cannot speak for this one.
+        ///
+        /// The declare is tagged with an interest id that is NOT the pending
+        /// GET's, so the claim filter lets it through — and it is still a
+        /// CURRENT answer, which a `history = false` subscriber declined.
+        /// Upstream: `zenoh/src/api/session.rs` @ `&& (!historical || sub.history)`.
+        #[test]
+        fn a_solicited_replay_does_not_reach_a_future_only_subscriber() {
+            let mut f = fixture_with_history(false);
+            f.observer
+                .dispatch_event(IterationEvent::Poll(&make_outcome(vec![
+                    NetworkMessage::Declare(Box::new(declare_envelope_decl_token_with_interest(
+                        token(6, "k/b"),
+                        SUB_INTEREST,
+                    ))),
+                ])));
+
+            assert_eq!(
+                f.sub_fired.load(Ordering::SeqCst),
+                0,
+                "a future-only subscriber is not told about a token that \
+                 existed before it declared, whoever solicited it"
+            );
+            assert_eq!(f.get_fired.load(Ordering::SeqCst), 0);
         }
 
         /// The unsolicited arm, unchanged: a peer declaring a token live with
