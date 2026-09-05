@@ -40,32 +40,84 @@
 //!   serializes into a `Vec<u8>` and reads from a `&[u8]` cursor. The
 //!   emitted bytes are identical to `ZBytes::to_bytes()` — the golden
 //!   vectors below lock that.
-//! - **The `VarInt` length prefix reuses the [`crate::vle`] SSOT**
-//!   (`sce_forge_runtime` base-128 VLE), NOT a second `leb128`
-//!   dependency. zenoh-ext's `VarInt` uses the `leb128` crate
-//!   (serialization.rs:551-561, standard LEB128, up to 10 bytes for a
-//!   `u64`); wz's VLE caps a `u64` at 9 bytes. The two encodings are
-//!   byte-identical for every value `< 2^63`, and a Rust collection
-//!   length is bounded by `isize::MAX = 2^63 - 1`, so EVERY reachable
-//!   length prefix encodes identically — the divergence point is
-//!   physically unreachable. One varint SSOT, zero drift.
-//! - **`HashMap` / `HashSet` are NOT supported.** They are std-only
-//!   (no_std has no `std::collections::Hash*`) and their iteration
-//!   order is non-deterministic, so their serialization is not
-//!   byte-stable. `BTreeMap` / `BTreeSet` are the deterministic
-//!   superset wz offers instead.
-//! - The `Cow`, `Box<[T]>`, `[T; N]`, and streaming-iterator
-//!   (`ZReadIter` / `deserialize_iter`) conveniences are omitted; the
-//!   scalar / `Vec` / `String` / tuple / `BTree*` surface above covers
-//!   the codec's consumers. They are re-addable without a wire change.
+//!   Upstream's `impl Serialize for ZBytes`
+//!   (`zenoh-ext/src/serialization.rs` @ `impl Serialize for ZBytes`)
+//!   writes a `VarInt` length then the raw bytes, which is exactly what
+//!   wz's `impl Serialize for Vec<u8>` writes — the type is renamed, the
+//!   format is not, and `zbytes_container_shape_is_the_vec_u8_impl`
+//!   pins the equality.
+//! - **`HashMap` / `HashSet` are the `hashbrown` ones**, not
+//!   `std::collections`'. This crate is `#![no_std]`, and it already
+//!   carries `hashbrown` for the peer-keyexpr table, so the hash
+//!   containers cost no new dependency. They are generic over the hasher
+//!   `S` where upstream fixes `RandomState`; the serialized form is a
+//!   `VarInt` count then the entries in iteration order, which is what
+//!   upstream emits and what upstream's own hash containers cannot make
+//!   deterministic either.
+//! - **The `serialize_n` / `deserialize_n` bulk hooks keep upstream's
+//!   ROLE, not upstream's signature.** Upstream reads through
+//!   `std::io::Read`, which can only fill ALREADY-INITIALIZED memory, so
+//!   its bulk read takes `&mut [Self]` and carries a second
+//!   `deserialize_n_uninit` over `MaybeUninit` to dodge the double
+//!   initialization — its own comment at `default_deserialize_n_uninit`
+//!   says exactly that. wz's deserializer reads from a BORROWED SLICE,
+//!   so the bulk path constructs the `Vec` directly and needs neither
+//!   the out-parameter nor the `MaybeUninit` twin:
+//!   `Deserialize::deserialize_n` subsumes both upstream methods. (Plain
+//!   code, not an intra-doc link: both hooks are `#[doc(hidden)]`, so a link
+//!   to one is unresolvable and would spend a Layer C1bz doc-link budget.)
+//!
+//! ## The two varints, and why this module carries its own
+//!
+//! zenoh has TWO variable-length integer encodings and they are not the
+//! same encoding:
+//!
+//! - The PROTOCOL `ZInt` (base-128 VLE) every wire field uses. Its 9th
+//!   byte carries a full 8 data bits, the continuation bit reused as
+//!   data, so a `u64` caps at 9 bytes. That is [`crate::vle`], the SSOT
+//!   shared with every SCE-generated codec.
+//! - The SERIALIZATION-FORMAT `VarInt`, which zenoh-ext encodes with the
+//!   `leb128` crate (`zenoh-ext/Cargo.toml` @ `leb128`) — canonical
+//!   LEB128, seven data bits per byte, so a `u64` takes up to ten.
+//!
+//! They agree for every value `< 2^63` and diverge above it, and
+//! `VarInt` is a PUBLIC `Serialize` type, so the divergence is reachable
+//! through the API and not only through length prefixes. Until R2362 this
+//! module routed `VarInt` through the protocol VLE and called the
+//! difference unreachable; it now carries the LEB128 the format actually
+//! specifies, module-private, so the protocol SSOT keeps its own subject.
 
 use alloc::{
+    borrow::Cow,
+    boxed::Box,
     collections::{BTreeMap, BTreeSet},
     string::String,
     vec::Vec,
 };
+use core::{
+    hash::{BuildHasher, Hash},
+    marker::PhantomData,
+};
 
-use crate::vle::{encode_vle_u64_into, read_vle_u64};
+use hashbrown::{HashMap, HashSet};
+
+/// Append `v` to `out` as canonical LEB128 — the encoding zenoh-ext's
+/// `VarInt<usize>` uses (`leb128::write::unsigned`). Seven data bits per
+/// byte, the high bit marking continuation, so `u64::MAX` takes ten
+/// bytes where the protocol VLE ([`crate::vle`]) would take nine.
+fn write_leb128(out: &mut Vec<u8>, mut v: u64) {
+    loop {
+        let mut byte = (v as u8) & 0x7f;
+        v >>= 7;
+        if v != 0 {
+            byte |= 0x80;
+        }
+        out.push(byte);
+        if v == 0 {
+            return;
+        }
+    }
+}
 
 /// Error returned when deserialization fails (truncated input, an
 /// invalid `bool` byte, a non-UTF-8 `String`, or trailing bytes after a
@@ -79,10 +131,47 @@ impl core::fmt::Display for ZDeserializeError {
     }
 }
 
+/// The element-at-a-time fallback behind [`Serialize::serialize_n`] —
+/// the twin of zenoh-ext's `default_serialize_n`.
+fn default_serialize_n<T: Serialize>(slice: &[T], serializer: &mut ZSerializer) {
+    for t in slice {
+        t.serialize(serializer);
+    }
+}
+
+/// The element-at-a-time fallback behind [`Deserialize::deserialize_n`] —
+/// the twin of zenoh-ext's `default_deserialize_n`. Pushes in a loop with
+/// no `with_capacity(len)`, so a malformed length cannot drive an
+/// unbounded allocation before the truncation check fails.
+fn default_deserialize_n<T: Deserialize>(
+    len: usize,
+    deserializer: &mut ZDeserializer<'_>,
+) -> Result<Vec<T>, ZDeserializeError> {
+    let mut out = Vec::new();
+    for _ in 0..len {
+        out.push(T::deserialize(deserializer)?);
+    }
+    Ok(out)
+}
+
 /// A type that can be serialized into the Zenoh Serialization Format.
 pub trait Serialize {
     /// Append the serialized form of `self` to `serializer`.
     fn serialize(&self, serializer: &mut ZSerializer);
+
+    /// Bulk-serialize a run of `Self` — the hook every sequence body goes
+    /// through, so an implementor can replace `len` calls to
+    /// [`Serialize::serialize`] with one pass. The default is exactly
+    /// that loop, and an override MUST emit the same bytes it would.
+    ///
+    /// The wz twin of zenoh-ext's `Serialize::serialize_n`.
+    #[doc(hidden)]
+    fn serialize_n(slice: &[Self], serializer: &mut ZSerializer)
+    where
+        Self: Sized,
+    {
+        default_serialize_n(slice, serializer);
+    }
 }
 
 impl<T: Serialize + ?Sized> Serialize for &T {
@@ -95,6 +184,23 @@ impl<T: Serialize + ?Sized> Serialize for &T {
 pub trait Deserialize: Sized {
     /// Read one value of `Self` from `deserializer`, advancing its cursor.
     fn deserialize(deserializer: &mut ZDeserializer<'_>) -> Result<Self, ZDeserializeError>;
+
+    /// Bulk-deserialize a run of `len` values — the read twin of
+    /// [`Serialize::serialize_n`], and the hook every sequence body goes
+    /// through once the `VarInt` count has been read.
+    ///
+    /// This subsumes BOTH of upstream's read hooks. `deserialize_n` and
+    /// `deserialize_n_uninit` are two methods there only because a
+    /// `std::io::Read` can fill nothing but initialized memory; wz reads
+    /// from a borrowed slice, so the run is built straight into a `Vec`
+    /// and there is no uninitialized half to dodge.
+    #[doc(hidden)]
+    fn deserialize_n(
+        len: usize,
+        deserializer: &mut ZDeserializer<'_>,
+    ) -> Result<Vec<Self>, ZDeserializeError> {
+        default_deserialize_n(len, deserializer)
+    }
 }
 
 /// Serializer accumulating bytes into a `Vec<u8>` (the wz analogue of
@@ -157,6 +263,26 @@ impl<'a> ZDeserializer<'a> {
         T::deserialize(self)
     }
 
+    /// Read a `VarInt` count and return an iterator over that many `T` —
+    /// the streaming read half, and the twin of zenoh-ext's
+    /// `ZDeserializer::deserialize_iter`. It reads what
+    /// [`ZSerializer::serialize_iter`] wrote, which is the same framing
+    /// every sequence body uses.
+    ///
+    /// Dropping the iterator early drains the rest of the run, so the
+    /// cursor is left where a full read would have left it and the value
+    /// after the sequence still parses.
+    pub fn deserialize_iter<'b, T: Deserialize>(
+        &'b mut self,
+    ) -> Result<ZReadIter<'a, 'b, T>, ZDeserializeError> {
+        let len = VarInt::<usize>::deserialize(self)?.0;
+        Ok(ZReadIter {
+            deserializer: self,
+            len,
+            _phantom: PhantomData,
+        })
+    }
+
     /// `read_exact` over the borrowed slice: take `n` bytes or fail.
     fn read_bytes(&mut self, n: usize) -> Result<&'a [u8], ZDeserializeError> {
         let end = self.pos.checked_add(n).ok_or(ZDeserializeError)?;
@@ -168,12 +294,60 @@ impl<'a> ZDeserializer<'a> {
         Ok(slice)
     }
 
-    /// Read one base-128 VLE `u64` (the `VarInt` length-prefix reader),
-    /// advancing the cursor by the consumed byte count.
-    fn read_vle(&mut self) -> Result<u64, ZDeserializeError> {
-        let (value, consumed) = read_vle_u64(&self.bytes[self.pos..]).ok_or(ZDeserializeError)?;
-        self.pos += consumed;
-        Ok(value)
+    /// Read one canonical-LEB128 `u64` (the `VarInt` reader), advancing
+    /// the cursor by the consumed byte count. Rejects an encoding whose
+    /// value does not fit a `u64`, the same overflow rule
+    /// `leb128::read::unsigned` applies at `shift == 63`.
+    fn read_leb128(&mut self) -> Result<u64, ZDeserializeError> {
+        let mut result: u64 = 0;
+        let mut shift: u32 = 0;
+        loop {
+            let byte = self.read_bytes(1)?[0];
+            if shift == 63 && byte != 0x00 && byte != 0x01 {
+                return Err(ZDeserializeError);
+            }
+            if shift > 63 {
+                return Err(ZDeserializeError);
+            }
+            result |= u64::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                return Ok(result);
+            }
+            shift += 7;
+        }
+    }
+}
+
+/// Iterator returned by [`ZDeserializer::deserialize_iter`] — the wz twin
+/// of zenoh-ext's `ZReadIter`.
+#[derive(Debug)]
+pub struct ZReadIter<'a, 'b, T: Deserialize> {
+    deserializer: &'b mut ZDeserializer<'a>,
+    len: usize,
+    _phantom: PhantomData<T>,
+}
+
+impl<T: Deserialize> Iterator for ZReadIter<'_, '_, T> {
+    type Item = Result<T, ZDeserializeError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.len == 0 {
+            return None;
+        }
+        self.len -= 1;
+        Some(T::deserialize(self.deserializer))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.len, Some(self.len))
+    }
+}
+
+impl<T: Deserialize> ExactSizeIterator for ZReadIter<'_, '_, T> {}
+
+impl<T: Deserialize> Drop for ZReadIter<'_, '_, T> {
+    fn drop(&mut self) {
+        self.by_ref().for_each(drop);
     }
 }
 
@@ -205,13 +379,13 @@ pub struct VarInt<T>(pub T);
 
 impl Serialize for VarInt<usize> {
     fn serialize(&self, serializer: &mut ZSerializer) {
-        encode_vle_u64_into(&mut serializer.0, self.0 as u64);
+        write_leb128(&mut serializer.0, self.0 as u64);
     }
 }
 
 impl Deserialize for VarInt<usize> {
     fn deserialize(deserializer: &mut ZDeserializer<'_>) -> Result<Self, ZDeserializeError> {
-        let n = deserializer.read_vle()?;
+        let n = deserializer.read_leb128()?;
         Ok(VarInt(usize::try_from(n).map_err(|_| ZDeserializeError)?))
     }
 }
@@ -223,6 +397,21 @@ macro_rules! impl_num {
             fn serialize(&self, serializer: &mut ZSerializer) {
                 serializer.0.extend_from_slice(&self.to_le_bytes());
             }
+
+            /// The bulk write: one `reserve` for the whole run instead of
+            /// `len` growth checks. Upstream reaches the same place by
+            /// transmuting the slice to its little-endian bytes
+            /// (`unsafe { slice.align_to().1 }`); wz declines the
+            /// transmute and keeps the loop, because the hook's contract
+            /// is the BYTES and those are identical either way.
+            #[inline]
+            fn serialize_n(slice: &[Self], serializer: &mut ZSerializer) {
+                const N: usize = core::mem::size_of::<$ty>();
+                serializer.0.reserve(slice.len().saturating_mul(N));
+                for t in slice {
+                    serializer.0.extend_from_slice(&t.to_le_bytes());
+                }
+            }
         }
         impl Deserialize for $ty {
             #[inline]
@@ -233,6 +422,28 @@ macro_rules! impl_num {
                 let mut buf = [0u8; N];
                 buf.copy_from_slice(deserializer.read_bytes(N)?);
                 Ok(<$ty>::from_le_bytes(buf))
+            }
+
+            /// The bulk read: the run's whole byte span is bounds-checked
+            /// ONCE, which is also what makes `with_capacity(len)` safe
+            /// here — a malformed length fails `read_bytes` before a
+            /// single element is allocated, so the reservation can never
+            /// outrun the input the way it could in the generic path.
+            #[inline]
+            fn deserialize_n(
+                len: usize,
+                deserializer: &mut ZDeserializer<'_>,
+            ) -> Result<Vec<Self>, ZDeserializeError> {
+                const N: usize = core::mem::size_of::<$ty>();
+                let span = len.checked_mul(N).ok_or(ZDeserializeError)?;
+                let bytes = deserializer.read_bytes(span)?;
+                let mut out = Vec::with_capacity(len);
+                for chunk in bytes.chunks_exact(N) {
+                    let mut buf = [0u8; N];
+                    buf.copy_from_slice(chunk);
+                    out.push(<$ty>::from_le_bytes(buf));
+                }
+                Ok(out)
             }
         }
     )*};
@@ -256,14 +467,56 @@ impl Deserialize for bool {
 
 fn serialize_slice<T: Serialize>(slice: &[T], serializer: &mut ZSerializer) {
     VarInt(slice.len()).serialize(serializer);
-    for t in slice {
-        t.serialize(serializer);
-    }
+    T::serialize_n(slice, serializer);
+}
+
+fn deserialize_slice<T: Deserialize>(
+    deserializer: &mut ZDeserializer<'_>,
+) -> Result<Vec<T>, ZDeserializeError> {
+    let len = VarInt::<usize>::deserialize(deserializer)?.0;
+    T::deserialize_n(len, deserializer)
 }
 
 impl<T: Serialize> Serialize for [T] {
     fn serialize(&self, serializer: &mut ZSerializer) {
         serialize_slice(self, serializer);
+    }
+}
+impl<T: Serialize, const N: usize> Serialize for [T; N] {
+    fn serialize(&self, serializer: &mut ZSerializer) {
+        serialize_slice(self.as_slice(), serializer);
+    }
+}
+impl<T: Deserialize, const N: usize> Deserialize for [T; N] {
+    fn deserialize(deserializer: &mut ZDeserializer<'_>) -> Result<Self, ZDeserializeError> {
+        // The length prefix must name EXACTLY N, the same reject upstream
+        // makes before it reads a single element.
+        if VarInt::<usize>::deserialize(deserializer)?.0 != N {
+            return Err(ZDeserializeError);
+        }
+        let elems = T::deserialize_n(N, deserializer)?;
+        // `deserialize_n` returned N elements or errored, so the convert
+        // cannot fail; `map_err` rather than `unwrap` keeps the `T: Debug`
+        // bound upstream's `MaybeUninit` route also avoids.
+        <[T; N]>::try_from(elems).map_err(|_| ZDeserializeError)
+    }
+}
+impl<'a, T: Serialize + 'a> Serialize for Cow<'a, [T]>
+where
+    [T]: alloc::borrow::ToOwned,
+{
+    fn serialize(&self, serializer: &mut ZSerializer) {
+        serialize_slice(self, serializer);
+    }
+}
+impl<T: Serialize> Serialize for Box<[T]> {
+    fn serialize(&self, serializer: &mut ZSerializer) {
+        serialize_slice(self, serializer);
+    }
+}
+impl<T: Deserialize> Deserialize for Box<[T]> {
+    fn deserialize(deserializer: &mut ZDeserializer<'_>) -> Result<Self, ZDeserializeError> {
+        Ok(deserialize_slice(deserializer)?.into_boxed_slice())
     }
 }
 impl<T: Serialize> Serialize for Vec<T> {
@@ -273,19 +526,16 @@ impl<T: Serialize> Serialize for Vec<T> {
 }
 impl<T: Deserialize> Deserialize for Vec<T> {
     fn deserialize(deserializer: &mut ZDeserializer<'_>) -> Result<Self, ZDeserializeError> {
-        let len = VarInt::<usize>::deserialize(deserializer)?.0;
-        // Push in a loop (no pre-`with_capacity(len)`) so a malformed
-        // length cannot drive an unbounded allocation before the
-        // truncation check fails; the emitted bytes are unaffected.
-        let mut out = Vec::new();
-        for _ in 0..len {
-            out.push(T::deserialize(deserializer)?);
-        }
-        Ok(out)
+        deserialize_slice(deserializer)
     }
 }
 
 impl Serialize for str {
+    fn serialize(&self, serializer: &mut ZSerializer) {
+        self.as_bytes().serialize(serializer);
+    }
+}
+impl Serialize for Cow<'_, str> {
     fn serialize(&self, serializer: &mut ZSerializer) {
         self.as_bytes().serialize(serializer);
     }
@@ -301,6 +551,16 @@ impl Deserialize for String {
     }
 }
 
+impl<T: Serialize + Eq + Hash, S> Serialize for HashSet<T, S> {
+    fn serialize(&self, serializer: &mut ZSerializer) {
+        serializer.serialize_iter(self);
+    }
+}
+impl<T: Deserialize + Eq + Hash, S: BuildHasher + Default> Deserialize for HashSet<T, S> {
+    fn deserialize(deserializer: &mut ZDeserializer<'_>) -> Result<Self, ZDeserializeError> {
+        deserializer.deserialize_iter()?.collect()
+    }
+}
 impl<T: Serialize + Ord> Serialize for BTreeSet<T> {
     fn serialize(&self, serializer: &mut ZSerializer) {
         serializer.serialize_iter(self);
@@ -308,12 +568,19 @@ impl<T: Serialize + Ord> Serialize for BTreeSet<T> {
 }
 impl<T: Deserialize + Ord> Deserialize for BTreeSet<T> {
     fn deserialize(deserializer: &mut ZDeserializer<'_>) -> Result<Self, ZDeserializeError> {
-        let len = VarInt::<usize>::deserialize(deserializer)?.0;
-        let mut set = BTreeSet::new();
-        for _ in 0..len {
-            set.insert(T::deserialize(deserializer)?);
-        }
-        Ok(set)
+        deserializer.deserialize_iter()?.collect()
+    }
+}
+impl<K: Serialize + Eq + Hash, V: Serialize, S> Serialize for HashMap<K, V, S> {
+    fn serialize(&self, serializer: &mut ZSerializer) {
+        serializer.serialize_iter(self);
+    }
+}
+impl<K: Deserialize + Eq + Hash, V: Deserialize, S: BuildHasher + Default> Deserialize
+    for HashMap<K, V, S>
+{
+    fn deserialize(deserializer: &mut ZDeserializer<'_>) -> Result<Self, ZDeserializeError> {
+        deserializer.deserialize_iter()?.collect()
     }
 }
 impl<K: Serialize + Ord, V: Serialize> Serialize for BTreeMap<K, V> {
@@ -323,14 +590,7 @@ impl<K: Serialize + Ord, V: Serialize> Serialize for BTreeMap<K, V> {
 }
 impl<K: Deserialize + Ord, V: Deserialize> Deserialize for BTreeMap<K, V> {
     fn deserialize(deserializer: &mut ZDeserializer<'_>) -> Result<Self, ZDeserializeError> {
-        let len = VarInt::<usize>::deserialize(deserializer)?.0;
-        let mut map = BTreeMap::new();
-        for _ in 0..len {
-            let k = K::deserialize(deserializer)?;
-            let v = V::deserialize(deserializer)?;
-            map.insert(k, v);
-        }
-        Ok(map)
+        deserializer.deserialize_iter()?.collect()
     }
 }
 
@@ -350,6 +610,18 @@ macro_rules! impl_tuple {
         }
     };
 }
+/// The empty tuple: zero fields concatenated is zero bytes. Upstream's
+/// `impl_tuple!` recursion emits this arity first (its `@@` arm with an
+/// empty type list), so `z_serialize(&())` is an empty payload there too.
+impl Serialize for () {
+    fn serialize(&self, _serializer: &mut ZSerializer) {}
+}
+impl Deserialize for () {
+    fn deserialize(_deserializer: &mut ZDeserializer<'_>) -> Result<Self, ZDeserializeError> {
+        Ok(())
+    }
+}
+
 impl_tuple!(T0 0);
 impl_tuple!(T0 0, T1 1);
 impl_tuple!(T0 0, T1 1, T2 2);
@@ -358,6 +630,25 @@ impl_tuple!(T0 0, T1 1, T2 2, T3 3, T4 4);
 impl_tuple!(T0 0, T1 1, T2 2, T3 3, T4 4, T5 5);
 impl_tuple!(T0 0, T1 1, T2 2, T3 3, T4 4, T5 5, T6 6);
 impl_tuple!(T0 0, T1 1, T2 2, T3 3, T4 4, T5 5, T6 6, T7 7);
+impl_tuple!(T0 0, T1 1, T2 2, T3 3, T4 4, T5 5, T6 6, T7 7, T8 8);
+impl_tuple!(T0 0, T1 1, T2 2, T3 3, T4 4, T5 5, T6 6, T7 7, T8 8, T9 9);
+impl_tuple!(T0 0, T1 1, T2 2, T3 3, T4 4, T5 5, T6 6, T7 7, T8 8, T9 9, T10 10);
+impl_tuple!(T0 0, T1 1, T2 2, T3 3, T4 4, T5 5, T6 6, T7 7, T8 8, T9 9, T10 10, T11 11);
+impl_tuple!(
+    T0 0, T1 1, T2 2, T3 3, T4 4, T5 5, T6 6, T7 7, T8 8, T9 9, T10 10, T11 11, T12 12
+);
+impl_tuple!(
+    T0 0, T1 1, T2 2, T3 3, T4 4, T5 5, T6 6, T7 7, T8 8, T9 9, T10 10, T11 11, T12 12,
+    T13 13
+);
+impl_tuple!(
+    T0 0, T1 1, T2 2, T3 3, T4 4, T5 5, T6 6, T7 7, T8 8, T9 9, T10 10, T11 11, T12 12,
+    T13 13, T14 14
+);
+impl_tuple!(
+    T0 0, T1 1, T2 2, T3 3, T4 4, T5 5, T6 6, T7 7, T8 8, T9 9, T10 10, T11 11, T12 12,
+    T13 13, T14 14, T15 15
+);
 
 #[cfg(test)]
 mod tests {
@@ -457,6 +748,275 @@ mod tests {
             let bytes = z_serialize(&VarInt(v));
             assert_eq!(z_deserialize::<VarInt<usize>>(&bytes).unwrap(), VarInt(v));
         }
+    }
+
+    /// R2362 — `VarInt` is CANONICAL LEB128, not the protocol `ZInt` VLE.
+    ///
+    /// The two agree below `2^63` and part above it: LEB128 spends seven
+    /// data bits per byte, so `u64::MAX` is TEN bytes of `0xff` capped by
+    /// a `0x01`, where [`crate::vle`] packs the ninth byte with eight data
+    /// bits and stops at NINE. `VarInt` is public `Serialize` surface, so
+    /// that difference is reachable through the API and not only through
+    /// length prefixes. Routing this back through `crate::vle` reds here.
+    #[test]
+    fn varint_is_leb128_not_the_protocol_vle() {
+        // usize::MAX == u64::MAX on this target, the value that separates
+        // the two encodings.
+        let bytes = z_serialize(&VarInt(usize::MAX));
+        assert_eq!(
+            bytes,
+            vec![0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01],
+            "VarInt(u64::MAX) is ten LEB128 bytes; the protocol VLE would emit nine",
+        );
+        // The protocol VLE's nine-byte form must NOT decode as this value:
+        // it is a different encoding, and reading it as LEB128 is a short,
+        // wrong number followed by trailing bytes.
+        let mut vle_form = alloc::vec::Vec::new();
+        crate::vle::encode_vle_u64_into(&mut vle_form, u64::MAX);
+        assert_eq!(
+            vle_form.len(),
+            9,
+            "the protocol VLE caps a u64 at nine bytes"
+        );
+        assert_ne!(vle_form, bytes);
+        assert!(z_deserialize::<VarInt<usize>>(&vle_form).is_err());
+
+        // Below the split the two agree, which is why every length prefix
+        // in the golden vectors is unchanged.
+        for v in [0u64, 1, 127, 128, 300, 16384, (1u64 << 63) - 1] {
+            let mut vle = alloc::vec::Vec::new();
+            crate::vle::encode_vle_u64_into(&mut vle, v);
+            assert_eq!(z_serialize(&VarInt(v as usize)), vle, "value {v}");
+        }
+
+        // The overflow reject `leb128::read::unsigned` makes at shift 63.
+        assert!(z_deserialize::<VarInt<usize>>(&[
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x02
+        ])
+        .is_err());
+    }
+
+    /// R2362 — the arities upstream's `impl_tuple!` recursion covers:
+    /// zero through sixteen. wz stopped at eight, so a nine-field tuple
+    /// was not serializable at all.
+    #[test]
+    fn tuple_arities_zero_and_nine_through_sixteen() {
+        // The element type is spelled out: an empty `vec![]` is ambiguous once
+        // the crate's feature union pulls a second `PartialEq<_>` for `u8`
+        // into scope (`serde_json::Value`), and the narrower single-feature
+        // build this test was first run under could not see that.
+        let empty: Vec<u8> = Vec::new();
+        assert_eq!(z_serialize(&()), empty);
+        assert_eq!(z_deserialize::<()>(&[]).unwrap(), ());
+
+        type Nine = (u8, u8, u8, u8, u8, u8, u8, u8, u8);
+        let nine: Nine = (1, 2, 3, 4, 5, 6, 7, 8, 9);
+        assert_eq!(z_serialize(&nine), vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(z_deserialize::<Nine>(&z_serialize(&nine)).unwrap(), nine);
+
+        #[rustfmt::skip]
+        type Sixteen = (
+            u8, u8, u8, u8, u8, u8, u8, u8,
+            u8, u8, u8, u8, u8, u8, u8, u16,
+        );
+        let sixteen: Sixteen = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0x0102);
+        assert_eq!(
+            z_serialize(&sixteen),
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0x02, 0x01],
+            "tuple fields concatenate with no framing, the last one little-endian",
+        );
+        // `core` stops implementing `Debug` / `PartialEq` for tuples at
+        // arity twelve, so the read back is compared by re-serializing it
+        // rather than by `assert_eq!` on the tuple itself.
+        let Ok(back) = z_deserialize::<Sixteen>(&z_serialize(&sixteen)) else {
+            panic!("a sixteen-field tuple must deserialize");
+        };
+        assert_eq!(z_serialize(&back), z_serialize(&sixteen));
+    }
+
+    /// R2362 — the four sequence carriers upstream serializes and wz did
+    /// not: `[T; N]`, `Box<[T]>`, `Cow<[T]>` and `Cow<str>`. All four
+    /// share `Vec`'s framing, so the assertion is byte equality with the
+    /// `Vec` form plus the round trip for the two readable ones.
+    #[test]
+    fn array_box_and_cow_carriers_share_the_vec_framing() {
+        let arr: [u16; 3] = [1, 2, 3];
+        let as_vec: Vec<u16> = vec![1, 2, 3];
+        assert_eq!(z_serialize(&arr), z_serialize(&as_vec));
+        assert_eq!(z_deserialize::<[u16; 3]>(&z_serialize(&arr)).unwrap(), arr);
+        // A length prefix that does not name N is refused before any
+        // element is read (upstream's own N-mismatch reject).
+        assert!(z_deserialize::<[u16; 4]>(&z_serialize(&arr)).is_err());
+        assert!(z_deserialize::<[u16; 2]>(&z_serialize(&arr)).is_err());
+
+        let boxed: Box<[u16]> = as_vec.clone().into_boxed_slice();
+        assert_eq!(z_serialize(&boxed), z_serialize(&as_vec));
+        assert_eq!(
+            z_deserialize::<Box<[u16]>>(&z_serialize(&boxed)).unwrap(),
+            boxed
+        );
+
+        let borrowed: Cow<'_, [u16]> = Cow::Borrowed(&as_vec);
+        let owned: Cow<'_, [u16]> = Cow::Owned(as_vec.clone());
+        assert_eq!(z_serialize(&borrowed), z_serialize(&as_vec));
+        assert_eq!(z_serialize(&owned), z_serialize(&as_vec));
+
+        let cow_str: Cow<'_, str> = Cow::Borrowed("test");
+        assert_eq!(z_serialize(&cow_str), vec![4, 116, 101, 115, 116]);
+        assert_eq!(z_serialize(&cow_str), z_serialize(&"test".to_string()));
+    }
+
+    /// R2362 — the hash containers. wz's are `hashbrown`'s (this crate is
+    /// `no_std` and already carries the dependency), and their wire form
+    /// is the same `VarInt` count plus entries every collection uses, so a
+    /// `HashMap` and the `BTreeMap` holding the same single entry emit the
+    /// same bytes.
+    #[test]
+    fn hash_containers_share_the_collection_framing() {
+        let mut hset: HashSet<u16> = HashSet::new();
+        hset.insert(7);
+        let bset: BTreeSet<u16> = [7u16].into_iter().collect();
+        assert_eq!(z_serialize(&hset), z_serialize(&bset));
+        assert_eq!(
+            z_deserialize::<HashSet<u16>>(&z_serialize(&hset)).unwrap(),
+            hset
+        );
+
+        let mut hmap: HashMap<u16, String> = HashMap::new();
+        hmap.insert(1, "one".to_string());
+        let mut bmap: BTreeMap<u16, String> = BTreeMap::new();
+        bmap.insert(1, "one".to_string());
+        assert_eq!(z_serialize(&hmap), z_serialize(&bmap));
+        assert_eq!(
+            z_deserialize::<HashMap<u16, String>>(&z_serialize(&hmap)).unwrap(),
+            hmap
+        );
+
+        // Multi-entry: iteration order is the hasher's, so the assertion
+        // is the round trip rather than the bytes.
+        let many: HashMap<u32, u32> = (0u32..8).map(|k| (k, k * 3)).collect();
+        assert_eq!(
+            z_deserialize::<HashMap<u32, u32>>(&z_serialize(&many)).unwrap(),
+            many
+        );
+    }
+
+    /// R2362 — the streaming read half. `deserialize_iter` reads what
+    /// `serialize_iter` wrote, and dropping it early DRAINS the rest of
+    /// the run so the value after the sequence still parses.
+    #[test]
+    fn deserialize_iter_streams_and_drains_on_drop() {
+        let mut s = ZSerializer::new();
+        s.serialize_iter([10u16, 20, 30]);
+        s.serialize(0xabcdu16);
+        let bytes = s.finish();
+
+        let mut d = ZDeserializer::new(&bytes);
+        let it = d.deserialize_iter::<u16>().unwrap();
+        assert_eq!(it.len(), 3);
+        let read: Result<Vec<u16>, _> = it.collect();
+        assert_eq!(read.unwrap(), vec![10, 20, 30]);
+        assert_eq!(d.deserialize::<u16>().unwrap(), 0xabcd);
+        assert!(d.done());
+
+        // Early drop: take one element, drop the iterator, and the tail
+        // value must still be where it was.
+        let mut d = ZDeserializer::new(&bytes);
+        {
+            let mut it = d.deserialize_iter::<u16>().unwrap();
+            assert_eq!(it.next().unwrap().unwrap(), 10);
+        }
+        assert_eq!(d.deserialize::<u16>().unwrap(), 0xabcd);
+        assert!(d.done());
+    }
+
+    /// R2362 — the bulk hooks are WIRED, not merely declared. The proof
+    /// is a type whose overrides emit and consume a different shape than
+    /// `len` calls to the single-value methods: if `serialize_slice` /
+    /// `deserialize_slice` went back to a plain loop, the run would carry
+    /// the single-value bytes and this reds.
+    #[test]
+    fn sequence_bodies_go_through_the_bulk_hooks() {
+        #[derive(Debug, PartialEq, Eq)]
+        struct Marked(u8);
+
+        impl Serialize for Marked {
+            fn serialize(&self, serializer: &mut ZSerializer) {
+                // Single-value form: the byte, tagged 0xA0.
+                0xa0u8.serialize(serializer);
+                self.0.serialize(serializer);
+            }
+            fn serialize_n(slice: &[Self], serializer: &mut ZSerializer) {
+                // Bulk form: one 0xB0 marker, then the bare bytes.
+                0xb0u8.serialize(serializer);
+                for m in slice {
+                    m.0.serialize(serializer);
+                }
+            }
+        }
+        impl Deserialize for Marked {
+            fn deserialize(
+                deserializer: &mut ZDeserializer<'_>,
+            ) -> Result<Self, ZDeserializeError> {
+                if u8::deserialize(deserializer)? != 0xa0 {
+                    return Err(ZDeserializeError);
+                }
+                Ok(Marked(u8::deserialize(deserializer)?))
+            }
+            fn deserialize_n(
+                len: usize,
+                deserializer: &mut ZDeserializer<'_>,
+            ) -> Result<Vec<Self>, ZDeserializeError> {
+                if u8::deserialize(deserializer)? != 0xb0 {
+                    return Err(ZDeserializeError);
+                }
+                let mut out = Vec::new();
+                for _ in 0..len {
+                    out.push(Marked(u8::deserialize(deserializer)?));
+                }
+                Ok(out)
+            }
+        }
+
+        let v = vec![Marked(1), Marked(2)];
+        // VarInt(2), the BULK marker, then the two bare bytes. A plain
+        // per-element loop would have written 0xa0 twice instead.
+        assert_eq!(z_serialize(&v), vec![2, 0xb0, 1, 2]);
+        assert_eq!(z_deserialize::<Vec<Marked>>(&z_serialize(&v)).unwrap(), v);
+        // The single-value path is still reachable and still tagged 0xA0.
+        assert_eq!(z_serialize(&Marked(9)), vec![0xa0, 9]);
+    }
+
+    /// R2362 — the numeric bulk read is bounds-checked over the WHOLE run
+    /// before it allocates, so a length prefix that overruns the buffer
+    /// fails without a large reservation.
+    #[test]
+    fn numeric_bulk_read_rejects_an_overrunning_length() {
+        // VarInt(0xffff_ffff) then two bytes: the span check fails first.
+        let mut bytes = alloc::vec::Vec::new();
+        write_leb128(&mut bytes, 0xffff_ffff);
+        bytes.extend_from_slice(&[1, 2]);
+        assert!(z_deserialize::<Vec<u64>>(&bytes).is_err());
+        // The honest form still round-trips through the same path.
+        let v: Vec<u64> = vec![1, 2, u64::MAX];
+        assert_eq!(z_deserialize::<Vec<u64>>(&z_serialize(&v)).unwrap(), v);
+    }
+
+    /// R2362 — wz has no `ZBytes`, and that is a CONTAINER rename rather
+    /// than a missing format. Upstream's `impl Serialize for ZBytes`
+    /// writes `VarInt(len)` then the raw bytes; wz's payload container is
+    /// `Vec<u8>` and its impl writes exactly that.
+    #[test]
+    fn zbytes_container_shape_is_the_vec_u8_impl() {
+        let payload: Vec<u8> = vec![0xde, 0xad, 0xbe, 0xef];
+        let mut expected = alloc::vec::Vec::new();
+        write_leb128(&mut expected, payload.len() as u64);
+        expected.extend_from_slice(&payload);
+        assert_eq!(z_serialize(&payload), expected);
+        assert_eq!(
+            z_deserialize::<Vec<u8>>(&z_serialize(&payload)).unwrap(),
+            payload
+        );
     }
 
     #[test]

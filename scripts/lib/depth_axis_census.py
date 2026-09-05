@@ -371,10 +371,25 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # landed in the ambiguous bucket (81 -> 82). The requote is gone and the count is
 # 81 again. The lesson is the standing one: to correct a citation, describe it;
 # do not reproduce it in citable form.
-PIN_REACHED = 64
+# R2362 — `ext-pubsub-serde-codec` goes PARTIAL -> COMPLETE, so its reason
+# leaves this population entirely and takes its citations with it. PARTIAL
+# falls 76 -> 75; REACHED falls 64 -> 63, because that is the bucket the atom
+# sat in. Its citation contribution was measured with THIS module's own
+# `citation_audit` over that atom alone, BEFORE the reason was rewritten: wz 3,
+# ambiguous 0, upstream 9 — so wz citations fall 380 -> 377 and the ambiguous
+# pin does not move, which is exactly what the run then printed. UNREACHED and
+# NO_SYMBOL are untouched.
+#
+# The round closed the atom's LAST residual clauses: the format's `VarInt` was
+# routed through the PROTOCOL varint SSOT and diverged from upstream's LEB128
+# above 2^63 (reachable, because `VarInt` is public `Serialize` surface), and
+# six type/hook families upstream carries had no wz counterpart. The instrument
+# is a derived-population gate over both serialization modules rather than a
+# reading of the residual prose, for the reason this file exists at all.
+PIN_REACHED = 63
 PIN_UNREACHED = 2
 PIN_NO_SYMBOL = 10
-PIN_WZ_CITATIONS = 380
+PIN_WZ_CITATIONS = 377
 PIN_AMBIGUOUS = 81
 
 

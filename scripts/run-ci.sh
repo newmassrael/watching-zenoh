@@ -2732,6 +2732,13 @@ PY
     # floor emptied on its own, over a synthetic upstream with no checkout and
     # no store. Layer Z runs the adjudication against the pinned source.
     python3 scripts/lib/store_reasons_resolve.py --selftest || return 1
+    # R2362 — the SHAPE arm of the serde format-surface gate. It drives the
+    # full fixture, every floor emptied on its own (an empty upstream
+    # population must FAIL, never report green), the reverse direction (an
+    # upstream ADDITION must fail), and the alias direction — an alias is not a
+    # skip, so removing the wz type an alias points at must fail too. Layer Z
+    # runs the same script against the pinned checkout.
+    python3 scripts/lib/serde_format_surface_gate.py --selftest || return 1
     # R311y605 — the DISSECT FEATURE CENSUS, the name census's sibling one level
     # up. `dissect`'s doc says it selects the whole codec-* MID space so "an
     # observer reads every message it sees", and the claim had been wrong THREE
@@ -6759,7 +6766,15 @@ layer_c1ao_cargo_test_config_mutate_runtime() {
 # (wz-session-core::serde_codec) AND the facade forward (wz-runtime-tokio's
 # re-export at crate::serde_codec), proving the 3-stage feature chain composes.
 layer_c1ap_cargo_test_ext_pubsub_serde() {
-    _runci_guarded_test "C1ap serde_codec" 6 \
+    # R2362 — 6 -> 14. The atom went PARTIAL -> COMPLETE and the eight new
+    # tests are what closed its residual clauses: the LEB128 `VarInt` (the one
+    # clause the format-surface gate is blind to, because it grades types and
+    # not encodings), the tuple arities upstream covers and wz did not, the
+    # array / boxed-slice / Cow carriers, the hash containers, the streaming
+    # read half, the bulk hooks being REACHED rather than merely declared, the
+    # numeric bulk read's whole-span bounds check, and the `ZBytes` container
+    # equivalence.
+    _runci_guarded_test "C1ap serde_codec" 14 \
         cargo test -p wz-session-core --features ext-pubsub-serde-codec --lib serde_codec --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-session-core --all-targets --features ext-pubsub-serde-codec --quiet -- -D warnings \
@@ -14316,6 +14331,34 @@ layer_z_zenohd_interop() {
              "direction. ⛔ The fix is NEVER to delete the anchor to quiet it:" \
              "an unanchored claim is exactly the state this gate exists to end." \
              "Correct the reason by APPENDING, which is the store's convention."
+        return 1
+    fi
+    # R2362 — the serde FORMAT SURFACE, on this layer for the same reason as
+    # the two checks above: it needs a pinned zenoh SOURCE tree and this is the
+    # lane that provisions one.
+    #
+    # `ext-pubsub-serde-codec` re-implements zenoh-ext's `serialization.rs`
+    # type for type, so what it owes is a POPULATION — and a population is the
+    # one thing `cargo test` structurally cannot fail on, because an absent
+    # `impl Serialize for X` is a compile error only at a call site nobody
+    # wrote. The gate DERIVES both sides by parsing, with one parser, and
+    # compares eight axes. Layer C0 runs its `--selftest` with no checkout.
+    python3 scripts/lib/serde_format_surface_gate.py
+    local serde_surface_rc=$?
+    if [[ $serde_surface_rc -eq 2 ]]; then
+        echo "  Z FAIL: the serde format surface could not be READ, so NOTHING" \
+             "was graded — this is not a claim about wz's codec. The lines" \
+             "above name what was missing (the wz module, or a zenoh source" \
+             "checkout at the pin). A gate that cannot read its input must not" \
+             "report green."
+        return 1
+    elif [[ $serde_surface_rc -ne 0 ]]; then
+        echo "  Z FAIL: the pinned zenoh-ext serialization format carries a" \
+             "type, arity, hook or method wz's serde_codec does not — see the" \
+             "lines above for which axis and which element. ⛔ The fix is to" \
+             "IMPLEMENT it, or to declare an ALIAS naming the wz counterpart" \
+             "(which the gate then requires to exist); never to widen the" \
+             "parser until the element stops being read."
         return 1
     fi
     # R2162 (unregistered open-debt item 199) — the UPSTREAM arm of the
