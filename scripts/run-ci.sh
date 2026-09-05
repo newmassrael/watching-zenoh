@@ -9086,32 +9086,37 @@ layer_c1q_multicast_glue() {
 # tests, so a cfg-gate change that silently stops compiling the arms these
 # combos exist to reach would have kept every one of them green. The counts are
 # a real discriminator here rather than a formality: they DIFFER per combo
-# (1/1/3/4/5/4/7/3/5), so each guard pins the arms its own features add. The
+# (2/2/4/5/6/5/8/4/6), so each guard pins the arms its own features add. The
+# R2364 moved every one of the nine by +1: the round's new test
+# (`mcu_session_runs_as_a_task_on_the_cooperative_executor`) is unconditional,
+# so it lands in EVERY combo rather than in the one whose feature it exercises.
+# The numbers are the ones gate 4b PRINTED, not ones counted off the diff --
+# which is the distinction the paragraph below exists to make. The
 # crate has no tests/ dir — all nine runs emit exactly two summaries, the lib
 # one and a 0-count doc-test — which is what makes an exact count meaningful
 # (contrast C1n below, where six summaries make it ambiguous).
 layer_c1m_session_lwip() {
-    _runci_guarded_test "C1m default" 1 \
+    _runci_guarded_test "C1m default" 2 \
         cargo test -p wz-session-lwip --quiet || return 1
-    _runci_guarded_test "C1m reassembly" 1 \
+    _runci_guarded_test "C1m reassembly" 2 \
         cargo test -p wz-session-lwip --features reassembly --quiet || return 1
-    _runci_guarded_test "C1m multicast" 3 \
+    _runci_guarded_test "C1m multicast" 4 \
         cargo test -p wz-session-lwip --features transport-multicast --quiet || return 1
-    _runci_guarded_test "C1m multicast+push" 4 \
+    _runci_guarded_test "C1m multicast+push" 5 \
         cargo test -p wz-session-lwip --features transport-multicast,codec-push --quiet || return 1
-    _runci_guarded_test "C1m multicast+liveliness" 5 \
+    _runci_guarded_test "C1m multicast+liveliness" 6 \
         cargo test -p wz-session-lwip --features transport-multicast,liveliness-token --quiet || return 1
-    _runci_guarded_test "C1m multicast+queryable" 4 \
+    _runci_guarded_test "C1m multicast+queryable" 5 \
         cargo test -p wz-session-lwip \
         --features transport-multicast,query-queryable,codec-response,codec-response-final \
         --quiet || return 1
-    _runci_guarded_test "C1m multicast maximal" 7 \
+    _runci_guarded_test "C1m multicast maximal" 8 \
         cargo test -p wz-session-lwip \
         --features transport-multicast,codec-push,codec-response,codec-response-final,liveliness-token,query-queryable \
         --quiet || return 1
-    _runci_guarded_test "C1m multicast+reassembly" 3 \
+    _runci_guarded_test "C1m multicast+reassembly" 4 \
         cargo test -p wz-session-lwip --features transport-multicast,reassembly --quiet || return 1
-    _runci_guarded_test "C1m multicast+fragmentation" 5 \
+    _runci_guarded_test "C1m multicast+fragmentation" 6 \
         cargo test -p wz-session-lwip \
         --features transport-multicast,transport-fragmentation,codec-push --quiet || return 1
     (cd crates \
