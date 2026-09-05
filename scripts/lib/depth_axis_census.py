@@ -404,10 +404,31 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # residual belonged to (every key an upstream link crate declares in its own
 # `pub mod config`) rather than grading the one key that was noticed; that
 # derivation is what found the serial residual this round had to add.
+# R2364 — `runtime-coop` goes PARTIAL -> COMPLETE, so its reason leaves this
+# population and takes its citations with it. Only ONE atom moves this round
+# (none gained a residual), so the net IS the single half; it was still
+# measured with this module's own `citation_audit` over that atom alone,
+# against the PRE-rewrite reason read out of `HEAD`, rather than subtracted
+# off the totals: wz 3, ambiguous 0, upstream 0. 376 - 3 = 373, which is what
+# the run then printed. PARTIAL falls 74 -> 73. The bucket that empties is
+# NO_SYMBOL, 10 -> 9 -- `runtime-coop` had no symbol this derivation could
+# own, which is itself the honest record of what the atom was: an executor
+# whose residual was a MISSING call site, and a call site that does not exist
+# has nothing for a symbol derivation to name. REACHED, UNREACHED and the
+# ambiguous pin are untouched.
+#
+# The round closed the atom's sole residual -- "the zenoh session can never
+# ride this executor" -- by adding a !Send task pool (`CoopLocalSet`) beside
+# the `Runtime` contract rather than by weakening it, and the spawn call site
+# the residual counted as zero now exists. The instrument is a test that
+# witnesses the session holding a live slot in the pool and advancing one
+# iteration per executor pass, with three compiled control probes, because
+# "it is spawned" is a claim about SCHEDULING that a passing smoke over the
+# old synchronous driver would have reported green either way.
 PIN_REACHED = 62
 PIN_UNREACHED = 2
-PIN_NO_SYMBOL = 10
-PIN_WZ_CITATIONS = 376
+PIN_NO_SYMBOL = 9
+PIN_WZ_CITATIONS = 373
 PIN_AMBIGUOUS = 81
 
 
