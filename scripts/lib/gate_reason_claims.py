@@ -487,6 +487,25 @@ class Corpus:
             if any(fnmatch.fnmatch(i, token) for i in self.inventory):
                 return "inventory ids"
             return None
+        # R2365 — the SINGULAR of the arm above, which was missing. A citation
+        # of ONE atom is the tighter claim (a glob answers for a family; this
+        # answers for exactly one id the store declares), and its absence sent
+        # `routing-client` to the substring arm, where it died: the atom is
+        # declared in a `Cargo.toml` and every `.rs` mention of it sits in a
+        # comment, so the comment-stripped corpus holds the name nowhere.
+        #
+        # ⛔ POSITIVE-ONLY -- a miss falls THROUGH and does not refuse. That is
+        # the whole of the arm's precision, and it is measured rather than
+        # assumed: of the seven bare-id-shaped REASON tokens this tree carries,
+        # `quic-datagram` and `not-a-file` are NOT inventory ids and resolve
+        # elsewhere (crates source / sibling row). A terminal arm would swallow
+        # both and turn two live resolutions into two budget lines.
+        #
+        # Not an escape hatch, for the same reason the glob arm is not: the
+        # oracle is the store's own `inventory_entries` KEYS, a derived set no
+        # author can widen from here. A mistyped atom name resolves nowhere.
+        if token in self.inventory:
+            return "inventory ids"
         # An expression may contain SPACES (`#[must_use] Discarded` does), so a
         # space is tolerated -- but it cannot be the only punctuation, or
         # `west build`, two bare words of a shell command, would be read as an
@@ -948,6 +967,21 @@ def selftest() -> int:
     for other in ("#[must_use] Discarded", "*lost +=", r"((?:z|ze|zc|zp)_[A-Za-z0-9_]*\*?)"):
         if INVENTORY_GLOB.match(other):
             return fail(f"{other!r} was claimed by the inventory-glob shape")
+
+    # R2365 — the SINGULAR inventory arm. Its hits matter less than the two
+    # things it must not do, so both directions are driven here.
+    if corpus.resolve("routing-client", frozenset()) != "inventory ids":
+        return fail("a bare id the store declares did not resolve as one")
+    if corpus.resolve("zzqq-nosuch-atom", frozenset()) is not None:
+        return fail("a bare id the store does NOT declare resolved; the arm passes anything")
+    # ⛔ THE FALL-THROUGH CONTROL, and it is the one that makes the arm safe to
+    # add. A bare-id SHAPE the inventory does not hold must keep reaching the
+    # arm that owns it -- `quic-datagram` is a fragment of a feature name and
+    # lives in crates source. An arm that refused on a miss would convert it
+    # from a resolution into a budget line, which is the failure direction this
+    # gate's header says must never look like progress.
+    if corpus.resolve("quic-datagram", frozenset()) != "crates source":
+        return fail("a bare-id-SHAPED non-atom stopped reaching the crates-source arm")
 
     # R2216 — the EXPRESSION arm, and its shape controls matter more than its
     # hits. It must resolve a real expression, refuse an invented one, and

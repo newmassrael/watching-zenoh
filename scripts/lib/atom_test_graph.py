@@ -88,8 +88,10 @@
 #   defect with the twin arm that must survive its fix, and Layer A3 runs it
 #   before it trusts a single answer.
 
+import json
 import os
 import re
+import subprocess
 
 _CFG_START = re.compile(r"#\[cfg(?:_attr)?\(")
 _FEAT = re.compile(r'feature\s*=\s*"([A-Za-z0-9_-]+)"')
@@ -348,6 +350,124 @@ def _scan_lines(lines):
     return owned
 
 
+def _dep_forwards(manifest_dir="crates"):
+    """(feature -> {dep name}, dep name -> crate dir). Cargo's OWN parse.
+
+    ⛔ NOT `tomllib`, and the reason is measured rather than stylistic: it is
+    stdlib only from python 3.11 and the hosted floor is 3.10, so the import
+    dies on the runner while staying green on a 3.12 workstation. This module's
+    first draft did exactly that and Layer C0's python-floor lint caught it
+    before the push -- the same trap `dissect_feature_census.py` documents
+    paying for at R311y606, where the death took 29 steps with it.
+
+    `cargo metadata --no-deps` costs ~50ms, needs no network, and answers both
+    halves at once: `packages[].features` is the feature table verbatim, and
+    `packages[].dependencies[].path` is cargo's own resolution of a path
+    dependency -- which also settles `[target.'cfg(..)'.dependencies]`, where
+    the MCU crates live, without this module knowing that table exists.
+    """
+    out = subprocess.run(
+        ["cargo", "metadata", "--no-deps", "--format-version", "1"],
+        cwd=manifest_dir,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    root = os.path.abspath(os.path.join(manifest_dir, os.pardir))
+    pulls = {}
+    paths = {}
+    for pkg in json.loads(out)["packages"]:
+        for dep in pkg.get("dependencies") or []:
+            if not dep.get("path"):
+                continue
+            rel = os.path.relpath(dep["path"], root)
+            if rel.startswith("crates" + os.sep) and os.path.isdir(rel):
+                paths[dep["name"]] = rel
+        for feat, vals in (pkg.get("features") or {}).items():
+            for val in vals:
+                if isinstance(val, str) and val.startswith("dep:"):
+                    pulls.setdefault(feat, set()).add(val[4:])
+    return pulls, paths
+
+
+def _crate_public_symbols(crate_dir):
+    """The names a crate's own source declares `pub`. Its API surface, derived."""
+    syms = set()
+    for path in _rs_files(crate_dir):
+        try:
+            lines = open(path, encoding="utf-8").read().splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            if not line.lstrip().startswith("pub"):
+                continue
+            m = _ITEM.match(line)
+            if m and m.group(2) not in _NOISE:
+                syms.add(m.group(2))
+    return syms
+
+
+def _exclusive_crates(pulls, paths):
+    """feature -> {crate dir}: the in-tree crates NO other feature also pulls.
+
+    The seam `dep_ownership()` and the self-check share, so the guard drives the
+    same selection the tree walk does. Pure: both inputs are handed in.
+    """
+    pullers = {}
+    for feat, deps in pulls.items():
+        for dep in deps:
+            pullers.setdefault(dep, set()).add(feat)
+    out = {}
+    for feat, deps in pulls.items():
+        for dep in deps:
+            if len(pullers[dep]) == 1 and dep in paths:
+                out.setdefault(feat, set()).add(paths[dep])
+    return out
+
+
+def dep_ownership():
+    """atom -> {symbol}: the API of the in-tree crates ONLY this feature pulls in.
+
+    ARM 3 (R2365) — the blind spot ARM 1 was built with. ARM 1 asks which
+    symbols a `#[cfg(feature = X)]` elides, which answers nothing for a feature
+    whose entire implementation is an optional DEPENDENCY: `runtime-coop =
+    ["dep:wz-runtime-coop", ..]` gates a whole crate and writes no cfg at all,
+    so the feature owned ZERO symbols and A3 could never admit a COMPLETE tag on
+    it. MEASURED before building: 63 features forward to a `dep:`, and NINE of
+    them own nothing under ARM 1 -- `runtime-coop` is merely the first one a
+    round tagged COMPLETE, so it is the first to trip the invariant and not the
+    extent of the class. The other eight (`api-compat-c`, `api-compat-pico`,
+    `no_std`, `platform-freertos`, `platform-zephyr`, `rest-http-bridge`,
+    `runtime-tokio`, `session-lwip`) are latent behind the same defect.
+
+    ⛔ EXCLUSIVE, and that is the arm's whole precision. A crate two features
+    both pull is nobody's own code: `wz-runtime-core` is pulled by BOTH
+    `runtime-coop` and `runtime-tokio`, so crediting it would let one test of
+    the shared core prove two different atoms COMPLETE -- exactly the phantom
+    symbol this module's header says can only ever make the gate PASS an atom it
+    should have failed. `sce-rust-runtime` (shared) and `portable-atomic`
+    (shared AND not this tree's code) fall out the same way, which leaves
+    `no_std` owning nothing -- the honest answer, not a gap.
+
+    IN-TREE, for the second half of the same reason: an external crate is not
+    this atom's implementation however exclusively the feature pulls it.
+
+    The residue, stated rather than hidden: exclusivity is a property of the
+    manifests TODAY. A crate that gains a second puller stops being owned, and
+    the atom's COMPLETE tag goes red until a test names something it still owns.
+    That is the derivation working -- it is what "derived, nothing authored"
+    costs, and the alternative is a pinned list that rots silently.
+    """
+    pulls, paths = _dep_forwards()
+    owned = {}
+    for feat, dirs in _exclusive_crates(pulls, paths).items():
+        for crate_dir in dirs:
+            syms = _crate_public_symbols(crate_dir)
+            if syms:
+                owned.setdefault(feat, set()).update(syms)
+    return owned
+
+
 def ownership():
     """atom -> {symbol}: the symbols each feature's cfg sites gate. Derived."""
     owned = {}
@@ -358,6 +478,8 @@ def ownership():
             continue
         for f, syms in _scan_lines(lines).items():
             owned.setdefault(f, set()).update(syms)
+    for f, syms in dep_ownership().items():
+        owned.setdefault(f, set()).update(syms)
     return owned
 
 
@@ -675,6 +797,44 @@ def _selftest():
     # back to that fn. This is the arm that catches dead gated code.
     eq("ARM1 twin: a cfg inside a body still resolves to the enclosing fn",
        own.get("feat-final"), {"send_declare_final"})
+
+    # ARM 3, the DEFECT (R2365): a feature whose implementation is an optional
+    # DEPENDENCY writes no cfg, so ARM 1 credits it with nothing and A3 can
+    # never admit a COMPLETE tag on it. `runtime-coop` is the measured case.
+    _pulls = {
+        "feat-coop": {"wz-runtime-coop", "wz-runtime-core", "ext-crate"},
+        "feat-tokio": {"wz-runtime-tokio", "wz-runtime-core"},
+    }
+    _paths = {
+        "wz-runtime-coop": "crates/wz-runtime-coop",
+        "wz-runtime-tokio": "crates/wz-runtime-tokio",
+        "wz-runtime-core": "crates/wz-runtime-core",
+    }
+    _excl = _exclusive_crates(_pulls, _paths)
+    eq("ARM3: a feature owns the in-tree crate only IT pulls",
+       _excl.get("feat-coop"), {"crates/wz-runtime-coop"})
+    # ⛔ THE CONTROL THAT MAKES THE ARM SAFE. A crate two features both pull is
+    # nobody's own code -- crediting `wz-runtime-core` would let one test of the
+    # shared core prove BOTH runtime atoms, which is the phantom symbol this
+    # module's header says can only ever make the gate pass an atom it should
+    # have failed.
+    #
+    # ⚠ The first draft of this line read `any("wz-runtime-core" in d for d in
+    # _excl.values())`, and `d` is a SET of paths -- so it asked whether the bare
+    # name was a member, which no element ever equals, and the assertion could
+    # not fail in either direction. Its own control probe is what found that:
+    # disabling exclusivity fired the two neighbours and left this one green.
+    eq("ARM3 shared: a crate two features pull is credited to neither",
+       sorted(c for dirs in _excl.values() for c in dirs if c.endswith("wz-runtime-core")), [])
+    # An external crate is not this atom's implementation however exclusively
+    # the feature pulls it: `ext-crate` has no in-tree path and must drop out.
+    eq("ARM3 external: a dep with no in-tree path is not owned",
+       _excl.get("feat-coop") == {"crates/wz-runtime-coop"}, True)
+    # ARM 3, the TWIN that must not regress: the live tree really does credit
+    # the atom this arm was built for, and by a symbol its own lane names.
+    if "CoopLocalSet" not in dep_ownership().get("runtime-coop", set()):
+        bad.append("ARM3 twin: the live tree stopped crediting runtime-coop with "
+                   "its own crate's API")
 
     # ARM 2, the DEFECT (R311y344): a test that never runs is not a test. This
     # module harvested every identifier in a test file without ever looking at

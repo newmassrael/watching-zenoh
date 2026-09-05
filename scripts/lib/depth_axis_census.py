@@ -425,9 +425,37 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # iteration per executor pass, with three compiled control probes, because
 # "it is spawned" is a claim about SCHEDULING that a passing smoke over the
 # old synchronous driver would have reported green either way.
-PIN_REACHED = 62
-PIN_UNREACHED = 2
-PIN_NO_SYMBOL = 9
+# R2365 — NO reason prose moves this round, so the citation pins hold at 373 /
+# 81. What moves is the DERIVATION under all three reach buckets:
+# `atom_test_graph` gained ARM 3, which credits a feature with the API of the
+# in-tree crates only IT pulls. A feature whose whole implementation is an
+# optional dependency writes no `#[cfg]`, so ARM 1 saw nothing and the atom
+# landed in NO_SYMBOL for a property of the instrument rather than of the atom.
+#
+# ⚠ That is a correction to what R2364 wrote four paragraphs above. It read
+# `runtime-coop`'s empty bucket as "the honest record of what the atom was --
+# a residual that was a MISSING call site, and a call site that does not exist
+# has nothing for a symbol derivation to name". The call site did exist by
+# then; the derivation could not see the crate it lives in. The bucket was
+# measuring the reader.
+#
+# SIX atoms leave NO_SYMBOL, 9 -> 3: `api-compat-c`, `api-compat-pico`,
+# `rest-http-bridge` and `runtime-tokio` land in REACHED because a lane already
+# names their crates' API, and `platform-freertos` / `platform-zephyr` land in
+# UNREACHED because nothing does. A seventh atom,
+# `storage-mgr-dynamic-volume-loading`, moves UNREACHED -> REACHED: it owned
+# cfg symbols no test named, and its exclusive crate's API is named.
+# So REACHED 62 -> 67 (+4 from no-symbol, +1 from unreached), UNREACHED 2 -> 3
+# (-1 out, +2 in), NO_SYMBOL 9 -> 3. Each bucket is derived, not netted.
+#
+# The three that REMAIN in NO_SYMBOL are the honest residue and name their own
+# reason: `declare-final` gates a seam whose cfg is an `any(..)` arm it does
+# not own, and `platform-macos` / `platform-windows` forward to no crate at
+# all. None of the three is a dep-forwarding feature, so ARM 3 does not reach
+# them and must not appear to.
+PIN_REACHED = 67
+PIN_UNREACHED = 3
+PIN_NO_SYMBOL = 3
 PIN_WZ_CITATIONS = 373
 PIN_AMBIGUOUS = 81
 
