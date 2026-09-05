@@ -348,10 +348,33 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # at the pin (zenoh and pico each replay REMOTE tokens only), and the round
 # closed a gap no clause had named — a historical delivery reaching a
 # future-only subscriber — damage-bound by two separable probes.
+# R2361 — 377 -> 380, and NOTHING ELSE MOVES. `transport-link-serial` stays
+# PARTIAL, so its reason stays in this population; the round re-measured its
+# three "STILL PARTIAL" clauses and the correction it appended cites three
+# TRACKED wz files it had not cited before (`serial_pipeline.rs`,
+# `session_open.rs`, and the pico-serial interop test). Derived with this
+# module's OWN `citation_audit` over that atom alone, before and after: wz
+# 2 -> 5, ambiguous 0 -> 0, upstream 3 -> 6 -- so the +3 here is exactly this
+# atom's and the ambiguous pin is untouched.
+#
+# The correction also names three files that are NOT tracked and so land in the
+# unpinned upstream bucket rather than here: the zenoh serial link, and two
+# zenoh-pico paths. The pico ones look tracked and are not -- `vendor/zenoh-pico`
+# is a SUBMODULE, so `git ls-files` yields the gitlink and never the files under
+# it. Worth writing down, because a pico citation reads as upstream to this gate
+# while reading as in-tree to a person.
+#
+# ⚠ R2360 pushed this gate RED and this round paid it, by DELETION rather than by
+# moving the ambiguous pin: that round's correction requoted the stale citation
+# `<lib file>:400-414` in order to say it was stale, and a requote is another
+# OCCURRENCE -- one whose bare filename end-matches many tracked crates, so it
+# landed in the ambiguous bucket (81 -> 82). The requote is gone and the count is
+# 81 again. The lesson is the standing one: to correct a citation, describe it;
+# do not reproduce it in citable form.
 PIN_REACHED = 64
 PIN_UNREACHED = 2
 PIN_NO_SYMBOL = 10
-PIN_WZ_CITATIONS = 377
+PIN_WZ_CITATIONS = 380
 PIN_AMBIGUOUS = 81
 
 
