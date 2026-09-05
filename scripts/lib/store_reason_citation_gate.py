@@ -82,7 +82,15 @@ MIN_REASONS = 40
 #: The owner's decision of 2026-09-01 is that upstream claims carry no line
 #: numbers. These are the debt that decision inherited in the store, seeded at
 #: what the command PRINTED on the landing commit; they may only shrink.
-LINE_BUDGET = 29
+#:
+#: 29 -> 28 (R2368). R2366 re-tagged the `runtime-tokio` atom, and
+#: `set-inventory-status --reason` replaces a whole reason blob, so the rewrite
+#: took one line-form citation out of the store with it. The count therefore sat
+#: exactly ON 29 at that commit's parent and BELOW it after, which is this
+#: ratchet's "removed one" direction. R2366 did not follow it down, and nothing
+#: local could say so: this gate runs in Layer Z, not in pre-push, so the push
+#: published green and the red waited on the hosted run.
+LINE_BUDGET = 28
 BARE_BUDGET = 9
 
 #: FINDINGS -- claims that do not resolve at the pin. Seeded at the inherited
