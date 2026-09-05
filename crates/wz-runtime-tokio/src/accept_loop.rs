@@ -3328,6 +3328,42 @@ mod tests {
         opened.drain_to_close().await;
     }
 
+    /// R2355 — the ws twin of [`unixsock_idle_initiator`]: dials a
+    /// `ws/127.0.0.1:<port>` listener through the same
+    /// [`connect_and_open_session`] SSOT, reaches Established over the RFC6455
+    /// link, and idles until `go`. ws LISTENS on tcp but is a distinct scheme
+    /// through the whole accept path (the server upgrade runs per accepted
+    /// connection), which is what makes N of these a real test of the loop's
+    /// scheme-keyed listener rather than of tcp wearing a different locator.
+    #[cfg(feature = "transport-link-ws")]
+    async fn ws_idle_initiator(addr: SocketAddr, zid: u8, mut go: watch::Receiver<bool>) {
+        use crate::session_open::{connect_and_open_session, DialConfig};
+        use wz_session_core::locator::parse_any_locator;
+        let locator = parse_any_locator(&format!("ws/{addr}")).expect("parse ws locator");
+        let mut params = fixture_session_init_params();
+        params.zid = vec![zid; 4];
+        let mut opened = connect_and_open_session(
+            locator,
+            params,
+            &DialConfig::default(),
+            TokioTime::new(),
+            Some(10_000),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+        .expect("ws initiator reaches Established");
+
+        let timeouts = SessionTimeouts::spec_defaults();
+        tokio::select! {
+            _ = go.wait_for(|&v| v) => {}
+            _ = drive_session_until_terminal(
+                &mut opened.inbound, &opened.actions, &mut opened.engine,
+                None, &opened.clock, &timeouts, |_e| {},
+            ) => {}
+        }
+        opened.drain_to_close().await;
+    }
+
     /// The unixpipe twin of [`unixsock_idle_initiator`] (R311y392): dials a
     /// `unixpipe/<base>` listener through the multi-client invitation handshake,
     /// reaches Established, and idles until `go`. The multi-client acceptor gives
@@ -3720,6 +3756,100 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// R2355 — the MULTI-PEER ws discriminator, in the tree rather than behind a
+    /// binary. Two ws clients dial ONE `ws/127.0.0.1:0` listener through the
+    /// mesh accept loop and BOTH are held at once (`peak_concurrent == 2`), with
+    /// zero `AcceptError`.
+    ///
+    /// WHY IT IS HERE. The `transport-link-ws` registry entry carried "the
+    /// multi-peer `--router ws/` path stays tcp-only (`bind_endpoint` via
+    /// `BoundListener::into_tcp`, a clean typed `Unsupported`) pending the
+    /// accept_loop generalization" as an open residual. R311y376 did the
+    /// generalization -- `FaceSources.listener` became a scheme-keyed
+    /// `BoundListener` -- but its only proof was
+    /// `wz_router_ws_acceptor_zenohd_interop`, which needs a real `zenohd` and
+    /// so runs on the `--ignored` Layer Z lane. A clause whose evidence only
+    /// exists when a foreign binary is installed is a clause most runs cannot
+    /// see, so this is the wz<->wz twin that runs on C1v every time.
+    ///
+    /// RED on the pre-y376 loop: `bind_endpoint` projected to a raw
+    /// `TcpListener`, so a `ws/` listen surfaced `Unsupported` at BIND and the
+    /// loop never started -- the failure lands on the `expect` below, before any
+    /// initiator dials. On a loop generalized but NOT running the per-accept
+    /// server upgrade, the initiators' RFC6455 client handshake never completes
+    /// and `established` stays 0.
+    ///
+    /// TWO peers, not one: the point of the clause is the MULTI-peer path, and a
+    /// single-accept assertion is satisfied by the one-shot `accept_bound` seam
+    /// that was never tcp-only in the first place. NON-FLAKY: loopback TCP under
+    /// ws is lossless + in-order, so two clean handshakes are deterministic --
+    /// the assumption the unixsock/udp/tcp N-peer siblings above share.
+    #[cfg(feature = "transport-link-ws")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn mesh_accept_loop_holds_two_ws_peers() {
+        use crate::session_open::bind_endpoint;
+        const N: usize = 2;
+        let listener = bind_endpoint("ws/127.0.0.1:0")
+            .await
+            .expect("bind a ws listener through the shipped multi-peer seam");
+        let addr = listener.local_addr().expect("ws listener local_addr");
+
+        // `go` flips when the Nth face is up: it ends the acceptor AND releases
+        // both initiators, so both are held simultaneously first.
+        let (go_tx, go_rx) = watch::channel(false);
+        let up = Arc::new(AtomicUsize::new(0));
+        let rejects = Arc::new(AtomicUsize::new(0));
+        let on_event = {
+            let up = up.clone();
+            let go_tx = go_tx.clone();
+            let rejects = rejects.clone();
+            move |event: &AcceptEvent| match event {
+                AcceptEvent::FaceUp(_) => {
+                    if up.fetch_add(1, SeqCst) + 1 == N {
+                        let _ = go_tx.send(true);
+                    }
+                }
+                AcceptEvent::AcceptError(_) => {
+                    rejects.fetch_add(1, SeqCst);
+                }
+                _ => {}
+            }
+        };
+        let acceptor = accept_loop(
+            listener,
+            acceptor_params(),
+            TokioTime::new(),
+            DEFAULT_OPEN_TICK_MS,
+            shutdown_on(go_rx.clone()),
+            on_event,
+            &NoOpForwarder,
+        );
+        let initiators = (0..N).map(|i| ws_idle_initiator(addr, (i as u8) + 1, go_rx.clone()));
+
+        let summary = tokio::time::timeout(Duration::from_secs(20), async {
+            let (summary, _) = tokio::join!(acceptor, join_all(initiators));
+            summary
+        })
+        .await
+        .expect("multi-peer ws accept completes within 20s");
+
+        assert_eq!(
+            summary.accepted, N,
+            "accepted both ws peers through the scheme-keyed BoundListener"
+        );
+        assert_eq!(
+            summary.established, N,
+            "both ws peers reached Established, so the per-accept RFC6455 server \
+             upgrade ran inside the loop"
+        );
+        assert_eq!(
+            summary.peak_concurrent, N,
+            "held both ws faces simultaneously — the MULTI-peer property, not the \
+             one-shot accept seam"
+        );
+        assert_eq!(rejects.load(SeqCst), 0, "no AcceptError over a ws listener");
     }
 
     /// R311y392 — the MESH-JOIN discriminator (replaces the retired R311y380

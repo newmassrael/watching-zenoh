@@ -1449,35 +1449,15 @@ impl BoundListener {
         })
     }
 
-    /// Extract the raw [`TcpListener`] for the TCP-only multi-peer paths — the
-    /// concurrent [`accept_loop`](crate::accept_loop) and its [`bind_endpoint`]
-    /// callers, which do not yet hold non-tcp faces. A non-tcp variant returns a
-    /// typed `Unsupported`, the same shape a router/peer `--listen` surfaced
-    /// before (their accept side was always tcp-only). Generalizing `accept_loop`
-    /// to accept every [`BoundListener`] variant retires this accessor.
-    pub fn into_tcp(self) -> io::Result<TcpListener> {
-        match self {
-            BoundListener::Tcp(l) => Ok(l),
-            #[cfg(any(
-                feature = "transport-link-ws",
-                feature = "transport-link-tls",
-                feature = "transport-link-unixsock",
-                feature = "transport-link-udp",
-                feature = "transport-link-quic",
-                feature = "transport-link-serial",
-                all(feature = "transport-link-vsock", target_os = "linux"),
-                all(feature = "transport-link-unixpipe", target_os = "linux")
-            ))]
-            other => Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                format!(
-                    "the multi-peer accept loop is wired only for tcp; a {} listener needs \
-                     the generalized accept_loop",
-                    other.transport_name()
-                ),
-            )),
-        }
-    }
+    // R2355 — `into_tcp` is GONE, and its own doc had asked for that: "Generalizing
+    // `accept_loop` to accept every `BoundListener` variant retires this accessor."
+    // R311y376 did the generalizing; the accessor outlived it by pointing at a
+    // caller that was never the multi-peer loop at all. Its last user was the
+    // demo's SEQUENTIAL storage-host seam, which now borrows the `BoundListener`
+    // through `accept_bound_on` like its two siblings, so nothing in the tree
+    // projects a listen endpoint down to tcp any more. Deleting it rather than
+    // leaving it unused is the point: an accessor whose whole body is a typed
+    // `Unsupported` for seven schemes is a gap that reads as a feature.
 }
 
 /// A raw transport connection accepted from a [`BoundListener`], carrying the
@@ -2900,24 +2880,45 @@ async fn accept_bound(mut listener: BoundListener) -> io::Result<DialedLink> {
     Ok(link)
 }
 
-/// Accept ONE peer from a *borrowed* [`TcpListener`], wrapping it as a
-/// [`DialedLink::Tcp`] — the multi-accept counterpart of [`accept_bound`] (which
-/// CONSUMES the listener for the one-shot session-open contract). Borrowing keeps
-/// the listener bound across accepts, so a host that serves N SEQUENTIAL clients
-/// binds once via [`bind_endpoint`] then loops this + [`accept_and_open_session`],
-/// opening and driving ONE session at a time (the caller's loop owns the
-/// re-accept). This is the bind-once/accept-many seam at the session-open layer
-/// that the [`crate::accept_loop`] docstring references — distinct from the full
-/// [`accept_loop`](crate::accept_loop), which holds N CONCURRENT faces: this seam
-/// suits a per-client-Session host (e.g. the demo's `--storage-host` admin mode,
-/// where a pico `z_put` then a pico `z_get` are separate one-shot connections a
-/// single 1:1 unicast Session cannot both serve). Reuses the [`accept_tcp_on`]
-/// SSOT (accept + per-link TCP tuning); logs the "accepted peer" line here, quiet
-/// like [`accept_bound`]'s primitive siblings.
-pub async fn accept_bound_on(listener: &TcpListener) -> io::Result<DialedLink> {
-    let (stream, peer) = accept_tcp_on(listener).await?;
-    log::info!("wz accept: accepted peer {peer}");
-    Ok(DialedLink::Tcp(stream))
+/// Accept ONE peer from a *borrowed* [`BoundListener`] — the multi-accept
+/// counterpart of `accept_bound` (which CONSUMES the listener for the one-shot
+/// session-open contract). Borrowing keeps the listener bound across accepts, so
+/// a host that serves N SEQUENTIAL clients binds once via [`bind_endpoint`] then
+/// loops this + [`accept_and_open_session`], opening and driving ONE session at a
+/// time (the caller's loop owns the re-accept). This is the bind-once/accept-many
+/// seam at the session-open layer that the [`crate::accept_loop`] docstring
+/// references — distinct from the full [`accept_loop`](crate::accept_loop), which
+/// holds N CONCURRENT faces: this seam suits a per-client-Session host (e.g. the
+/// demo's `--storage-host` admin mode, where a pico `z_put` then a pico `z_get`
+/// are separate one-shot connections a single 1:1 unicast Session cannot both
+/// serve).
+///
+/// R2355 — this took a `&TcpListener` and was the LAST seam in the tree that
+/// forced a listen endpoint down to tcp. R311y376 generalized the concurrent
+/// [`accept_loop`](crate::accept_loop) to hold any [`BoundListener`], and the
+/// one-shot `accept_bound` was never tcp-only; this sequential seam was left
+/// behind, so a `--storage-host --listen ws/...` failed at bind with a typed
+/// `Unsupported` while the same string on `--router` or `--listen` worked. It now
+/// runs the same two steps its two siblings do — [`BoundListener::accept_raw`]
+/// then [`AcceptedLink::handshake`] — so the per-scheme SERVER upgrade (ws
+/// RFC6455, tls rustls) happens here rather than being unreachable, and the
+/// mechanism stays in [`AcceptedLink`] rather than being spelled a third time.
+/// The "; ws server upgrade" / "; tls server handshake" note is read BEFORE the
+/// handshake consumes `accepted` and logged only AFTER it succeeds, exactly as in
+/// `accept_bound`, so a failed upgrade never logs a spurious "accepted peer".
+///
+/// R2355 — `accept_bound` is a CODE SPAN throughout this doc, not an intra-doc
+/// link. It is a private fn and this one is `pub`, so each `[`..`]` form is a
+/// broken public-doc link that Layer C1bz counts; rewriting this doc took that
+/// from two to three and pushed the crate one over budget. A span says the same
+/// thing and resolves, which is the repair the budget asks for — the budget
+/// follows the links, never the other way round.
+pub async fn accept_bound_on(listener: &mut BoundListener) -> io::Result<DialedLink> {
+    let (accepted, peer) = listener.accept_raw().await?;
+    let note = accepted.server_handshake_note();
+    let link = accepted.handshake().await?;
+    log::info!("wz accept: accepted peer {peer}{note}");
+    Ok(link)
 }
 
 /// Accept a `--listen`-style endpoint string to a raw [`DialedLink`] — the
@@ -2965,14 +2966,18 @@ pub async fn accept_endpoint(listen: &str, cfg: &AcceptConfig) -> io::Result<Dia
 ///
 /// R311y376 (Stage 3) — the multi-peer accept loop now accepts every
 /// [`BoundListener`] variant, so this seam yields the [`BoundListener`] directly
-/// (was: projected to a raw [`TcpListener`] via [`BoundListener::into_tcp`], the
-/// tcp-only-loop restriction). The cert-free shorthand for
-/// [`bind_endpoint_with_config`]: a `tcp` / `ws` / `udp` listen binds; a `tls` /
-/// `quic` listen surfaces `Unsupported` because the default [`AcceptConfig`]
-/// carries no server cert. A mesh `--router`/`--peer` that threads its
-/// `--<scheme>-cert` uses [`bind_endpoint_with_config`] (R311y405). The one-shot
-/// tcp-only sequential seam (the storage-host `accept_bound_on(&TcpListener)`
-/// caller) projects via [`BoundListener::into_tcp`] at its own call site.
+/// (was: projected to a raw [`tokio::net::TcpListener`] via a
+/// `BoundListener::into_tcp` accessor, the tcp-only-loop restriction). The
+/// cert-free shorthand for [`bind_endpoint_with_config`]: a `tcp` / `ws` / `udp`
+/// listen binds; a `tls` / `quic` listen surfaces `Unsupported` because the
+/// default [`AcceptConfig`] carries no server cert. A mesh `--router`/`--peer`
+/// that threads its `--<scheme>-cert` uses [`bind_endpoint_with_config`]
+/// (R311y405).
+///
+/// R2355 — EVERY caller of this seam now holds the [`BoundListener`]. The
+/// sequential storage-host seam was the last one projecting to tcp, and
+/// [`accept_bound_on`] borrows the listener instead, so `into_tcp` is deleted
+/// rather than merely unused.
 pub async fn bind_endpoint(listen: &str) -> io::Result<BoundListener> {
     bind_endpoint_with_config(listen, &AcceptConfig::default()).await
 }

@@ -6755,13 +6755,15 @@ pub(crate) async fn run_storage_host(
     let zid_hex = zid_to_zenoh_hex(&node_zid);
     let whatami_str = params.whatami.to_str();
 
-    // R311y376 — bind_endpoint now yields a scheme-keyed BoundListener; the
-    // storage-host sequential seam (accept_bound_on) is tcp-only, so project to a
-    // TcpListener via into_tcp (a non-tcp storage-host --listen surfaces the same
-    // Unsupported it did before). The display string is read before the projection.
-    let bound = bind_endpoint(listen).await?;
-    let local = bound.local_addr_display()?;
-    let listener = bound.into_tcp()?;
+    // R2355 — the storage host HOLDS its scheme-keyed BoundListener. It used to
+    // project to a raw TcpListener here (`into_tcp`), which made this the last
+    // seam in the tree that forced a listen endpoint down to tcp: the same
+    // `ws/...` string worked on `--router` and on the one-shot `--listen` and
+    // failed here at bind. `accept_bound_on` borrows the listener across accepts
+    // and runs the per-scheme SERVER upgrade, so bind-once/accept-many now works
+    // for every scheme this build carries.
+    let mut listener = bind_endpoint(listen).await?;
+    let local = listener.local_addr_display()?;
 
     // The admin keys this host serves (SSOT-derived from the same zid/whatami).
     let queryable_key = admin_queryable_key(&zid_hex, whatami_str); // @/<zid>/peer/**
@@ -6926,15 +6928,19 @@ pub(crate) async fn run_storage_host(
     // host via ChildGuard) or a graceful-shutdown signal arrives (Ctrl-C / SIGTERM),
     // handled via the same `race_against_shutdown` SSOT the one-shot demo uses.
     loop {
-        let dialed =
-            match race_against_shutdown(accept_bound_on(&listener), "storage-host accept").await {
-                Some(Ok(d)) => d,
-                Some(Err(e)) => {
-                    log::warn!("wz-ap-demo storage-host: accept failed: {e}; re-accepting");
-                    continue;
-                }
-                None => break, // graceful shutdown while idle
-            };
+        let dialed = match race_against_shutdown(
+            accept_bound_on(&mut listener),
+            "storage-host accept",
+        )
+        .await
+        {
+            Some(Ok(d)) => d,
+            Some(Err(e)) => {
+                log::warn!("wz-ap-demo storage-host: accept failed: {e}; re-accepting");
+                continue;
+            }
+            None => break, // graceful shutdown while idle
+        };
         // R311y506 — FULLY QUALIFIED, not imported. This run mode is the only
         // caller of the bare accept helper and it compiles only under
         // `adminspace-config-hotreload`, so an unconditional `use` would be an

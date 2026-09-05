@@ -284,3 +284,63 @@ async fn a_named_tls_locator_verifies_against_the_locator_name_not_the_configure
         "the numeric arm is wired; its failure must be the certificate check (got {err:?})"
     );
 }
+
+/// R2355 — a tls link is TCP_NODELAY on BOTH halves, matching zenoh.
+///
+/// The SIBLING of `ws_e2e.rs`'s `a_ws_link_disables_nagle_on_both_the_dial_and_the_accept_half`,
+/// and it is here because the defect was never ws-only. wz applied the TCP
+/// tuning at each CALLER of the shared connect primitive; `dial_tcp` /
+/// `dial_tcp_host` took that step and `dial_ws` / `dial_tls` did not, so the
+/// population of broken dials was TWO and the atom that noticed was one. Upstream
+/// has the line in all three families' shared dial+accept constructor
+/// (`io/zenoh-links/zenoh-link-tls/src/unicast.rs`
+/// @ `tcp_stream.set_nodelay(true)`).
+///
+/// Reading it back off a TLS link means reaching the TCP socket UNDER rustls:
+/// `tokio_rustls::TlsStream::get_ref()` yields `(&IO, &CommonState)` and the
+/// `IO` here is the `TcpStream` `connect_tcp_bound` returned — the same socket
+/// whose tuning is under test, not a re-connected one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tls_link_disables_nagle_on_both_the_dial_and_the_accept_half() {
+    use wz_runtime_tokio::session_open::{
+        bind_locator, dial_locator, AcceptConfig, DialedLink, TlsAcceptConfig, TlsDialConfig,
+    };
+
+    let (server_config, client_config) = loopback_tls_configs();
+    let accept_cfg = AcceptConfig::default().with_tls(TlsAcceptConfig { server_config });
+    let dial_cfg = DialConfig::default().with_tls(TlsDialConfig {
+        client_config,
+        server_name: tokio_rustls::rustls::pki_types::ServerName::try_from("localhost".to_string())
+            .expect("localhost is a valid server name"),
+    });
+
+    let mut listener = bind_locator(
+        parse_any_locator("tls/127.0.0.1:0").expect("parse tls listen locator"),
+        &accept_cfg,
+    )
+    .await
+    .expect("bind tls/127.0.0.1:0");
+    let port = listener.local_addr().expect("local_addr").port();
+
+    let acc = async move {
+        let (accepted, _peer) = listener.accept_raw().await.expect("accept a tls peer");
+        accepted.handshake().await.expect("rustls server handshake")
+    };
+    let dial = async {
+        let locator =
+            parse_any_locator(&format!("tls/localhost:{port}")).expect("parse tls name locator");
+        dial_locator(locator, &dial_cfg).await.expect("tls dial")
+    };
+    let (accepted, dialed) = tokio::join!(acc, dial);
+
+    for (half, link) in [("dial", &dialed), ("accept", &accepted)] {
+        let DialedLink::Tls(tls) = link else {
+            panic!("{half}: expected a TLS link");
+        };
+        assert!(
+            tls.get_ref().0.nodelay().expect("read TCP_NODELAY back"),
+            "{half} half of a tls link left Nagle ON; zenoh sets TCP_NODELAY on \
+             every TCP-backed link in its shared dial+accept constructor"
+        );
+    }
+}

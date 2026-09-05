@@ -331,7 +331,13 @@ _ANY_TOKEN = re.compile(r"(?<![\w/.-])(\w[\w-]*)/[\w/.-]+\.rs")
 #: asks ONLY "is this line past the end of the file", so an in-file drift like
 #: these six resolves green while naming unrelated code. A line citation that
 #: survives here is unverified, not verified.
-LINE_BUDGET = 294
+#: 294 -> 293 (R2355). The retired `link_pipeline::configure_tcp_stream` doc
+#: cited the tcp link family in the LINE form; the tuning moved to
+#: `iface_bind::configure_tcp_stream` and its replacement doc cites all three
+#: families in the anchored `path` @ `needle` form instead. One line-form
+#: citation left the tree, so the ratchet follows it down in the same commit --
+#: the only direction this number is allowed to move.
+LINE_BUDGET = 293
 BARE_BUDGET = 60
 #: The root-less axis, after R2317 repaired the 49 citations that named a file
 #: gone at the pin. Same two-directional ratchet as LINE and BARE.

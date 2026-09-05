@@ -67,9 +67,10 @@ pub async fn dial_tcp(addr: SocketAddr, iface: Option<&str>) -> io::Result<TcpSt
     // [`crate::iface_bind`] module (NOT here) so `ws_pipeline` (which does NOT
     // pull `transport-link-tcp`) can also reach it without dragging in the whole
     // TCP stream pipeline.
-    let stream = crate::iface_bind::connect_tcp_bound(addr, iface).await?;
-    configure_tcp_stream(&stream);
-    Ok(stream)
+    // R2355 — no `configure_tcp_stream` call here any more: the primitive tunes
+    // the stream it returns, so tcp/ws/tls are tuned by the SAME step instead of
+    // by three remembered ones (two of which were not taken).
+    crate::iface_bind::connect_tcp_bound(addr, iface).await
 }
 
 /// Dial an outbound TCP connection to a `host:port` STRING — the DNS-capable
@@ -85,36 +86,34 @@ pub async fn dial_tcp(addr: SocketAddr, iface: Option<&str>) -> io::Result<TcpSt
 /// for a scheme-less `--connect HOST:PORT` and a `tcp/HOST` with a DNS
 /// hostname; the numeric [`dial_tcp`] handles a parsed `tcp/` locator.
 pub async fn dial_tcp_host(host: &str, iface: Option<&str>) -> io::Result<TcpStream> {
-    let stream = match iface {
-        // No bind: the single `ToSocketAddrs` connect walks every resolved
-        // address until one connects (the original path).
-        None => TcpStream::connect(host).await?,
-        // R311y236 — a device-bound named dial must resolve first, then connect
-        // each candidate through a device-bound `TcpSocket` (the bind precedes
-        // connect); `lookup_host` is the std resolver `TcpStream::connect`
-        // otherwise uses internally, made explicit so each attempt can carry the
-        // bind. Tries in resolved order until one connects (the same walk).
-        Some(iface) => {
-            let mut last_err: Option<io::Error> = None;
-            for addr in tokio::net::lookup_host(host).await? {
-                match crate::iface_bind::connect_tcp_bound(addr, Some(iface)).await {
-                    Ok(stream) => {
-                        configure_tcp_stream(&stream);
-                        return Ok(stream);
-                    }
-                    Err(e) => last_err = Some(e),
-                }
-            }
-            return Err(last_err.unwrap_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::AddrNotAvailable,
-                    format!("no addresses resolved for {host}"),
-                )
-            }));
+    // R311y236 — a device-bound named dial must resolve first, then connect each
+    // candidate through a device-bound `TcpSocket` (the bind precedes connect);
+    // `lookup_host` is the std resolver `TcpStream::connect` otherwise uses
+    // internally, made explicit so each attempt can carry the bind. Tries in
+    // resolved order until one connects.
+    //
+    // R2355 — the unbound arm walks the SAME resolved list through the SAME
+    // primitive instead of handing the string to `TcpStream::connect`. That call
+    // was the one remaining dial-side `TcpStream` producer outside
+    // [`crate::iface_bind::connect_tcp_bound`], and it was reachable on the
+    // DEFAULT path (`--connect HOST:PORT` with no `#iface=`) — so the tuning the
+    // primitive now applies would have had a hole precisely where most dials go.
+    // Behaviour is preserved: this is the resolver `TcpStream::connect` calls
+    // internally, walked in the same order, which is the equivalence the
+    // `Some(iface)` arm has relied on since R311y236.
+    let mut last_err: Option<io::Error> = None;
+    for addr in tokio::net::lookup_host(host).await? {
+        match crate::iface_bind::connect_tcp_bound(addr, iface).await {
+            Ok(stream) => return Ok(stream),
+            Err(e) => last_err = Some(e),
         }
-    };
-    configure_tcp_stream(&stream);
-    Ok(stream)
+    }
+    Err(last_err.unwrap_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::AddrNotAvailable,
+            format!("no addresses resolved for {host}"),
+        )
+    }))
 }
 
 /// Bind a TCP listener on a NUMERIC endpoint — the accept-side "listen half"
@@ -305,38 +304,19 @@ pub async fn accept_tcp(listener: TcpListener) -> io::Result<(TcpStream, SocketA
     accept_tcp_on(&listener).await
 }
 
-/// Apply zenoh's per-link TCP socket tuning to a freshly connected / accepted
-/// stream: `TCP_NODELAY` on — disable Nagle so every wz frame ships at once,
-/// the low-latency posture zenoh sets on every link (upstream
-/// `LinkUnicastTcp::new`, `io/zenoh-links/zenoh-link-tcp/src/unicast.rs:55`).
-/// `new` is zenoh's SHARED dial + accept link constructor, so both `dial_tcp` /
-/// `dial_tcp_host` and `accept_tcp` route their stream through here — the SSOT
-/// for wz's per-link TCP tuning.
-///
-/// Best-effort, matching zenoh (which `tracing::warn!`s and continues): a
-/// nodelay-set failure is logged and the link proceeds (Nagle-on is a latency
-/// degradation, not a correctness failure). The warning is the one log this
-/// otherwise-quiet primitive emits, and only on the abnormal path.
-///
-/// `SO_LINGER` is DELIBERATELY NOT set, diverging from zenoh's `set_linger(10s)`
-/// (unicast.rs:65): `tokio::net::TcpStream::set_linger` is deprecated because
-/// SO_LINGER makes `close()` BLOCK the worker thread on drop — a footgun in an
-/// async runtime. zenoh's synchronous socket layer can afford it; wz on tokio
-/// must not blindly mirror it. The graceful-close intent (drain tail bytes
-/// before teardown) is already served at the application layer by wz-ap-demo's
-/// R292 teardown chain (writer drain + Close frame), and a normal non-linger
-/// close still lets the kernel background-deliver queued bytes, so nothing is
-/// lost — only the thread-blocking drop is avoided.
-///
-/// Distinct from R311pz's reverted `SO_REUSEADDR`: tokio's `TcpStream` does NOT
-/// set nodelay by default, so this closes a REAL behavioral parity gap — and a
-/// non-vacuous one (a unit reads `nodelay()` back and distinguishes
-/// set-from-unset precisely because tokio's default is off).
-fn configure_tcp_stream(stream: &TcpStream) {
-    if let Err(e) = stream.set_nodelay(true) {
-        log::warn!("wz tcp: set_nodelay(true) failed (Nagle stays on): {e}");
-    }
-}
+// R2355 — the per-link TCP tuning MOVED to `iface_bind::configure_tcp_stream`,
+// next to the `connect_tcp_bound` primitive it now runs inside. This module is
+// gated on `transport-link-tcp` and `transport-link-ws` does NOT pull tcp, so a
+// tuning function that lived HERE was one the ws dial (and, through the same
+// primitive, the tls dial) could not take — which is exactly what had happened.
+// The accept half still applies it explicitly, because an accepted stream comes
+// from a listener rather than from the dial primitive; the name is imported into
+// this module's scope so `accept_tcp_on` reads unchanged.
+//
+// A `//` comment and not a `///` one: a doc comment on a `use` of a `pub(crate)`
+// item spends Layer C1bz doc-link budget on links rustdoc cannot resolve, and
+// this is a note about a move rather than API documentation.
+use crate::iface_bind::configure_tcp_stream;
 
 /// Split a connected [`TcpStream`] into the cooperating drivers the session
 /// FSM consumes: an inbound [`TcpReadDriver`] (`&mut LinkDriver` for the poll

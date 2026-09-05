@@ -38,8 +38,8 @@ use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session::{PublishOptions, TokioSession};
 use wz_runtime_tokio::session_glue::drive_session_until_terminal;
 use wz_runtime_tokio::session_open::{
-    accept_and_open_session, bind_locator, connect_and_open_session, dial_locator, AcceptConfig,
-    DialConfig, DialedLink, DEFAULT_OPEN_TICK_MS,
+    accept_and_open_session, accept_bound_on, bind_locator, connect_and_open_session, dial_locator,
+    AcceptConfig, DialConfig, DialedLink, DEFAULT_OPEN_TICK_MS,
 };
 use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio::ws_pipeline::accept_ws;
@@ -257,4 +257,102 @@ async fn an_unreachable_ws_name_fails_as_a_dial_not_as_an_unsupported_scheme() {
         "a `ws/NAME` dial is WIRED: the failure must come from the resolver or the \
          network, not from the seam refusing the scheme (got {err:?})"
     );
+}
+
+/// R2355 — the SEQUENTIAL bind-once/accept-many seam (`accept_bound_on`) holds a
+/// non-tcp listener, so a `--storage-host --listen ws/...` serves N one-shot
+/// clients in turn.
+///
+/// This is the last seam in the tree that forced a listen endpoint down to tcp.
+/// The tree had three accept shapes and only two of them carried the scheme: the
+/// one-shot `accept_bound` CONSUMES a `BoundListener`, R311y376 generalized the
+/// concurrent `accept_loop` to hold one, and this sequential one still projected
+/// to a raw `TcpListener` (`BoundListener::into_tcp`, now deleted). So the same
+/// `ws/...` string worked on `--router` and on `--listen` and failed at BIND on
+/// `--storage-host` — a hole shaped like a scheme gap but actually a seam gap.
+///
+/// TWO accepts, not one, and that is the load-bearing half: `accept_bound_on`
+/// BORROWS its listener precisely so the bind survives, and a body that consumed
+/// or re-bound would pass a single-accept test. The second dial is what says the
+/// ws listener is still bound after the first client is done with it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_sequential_accept_seam_serves_two_ws_clients_from_one_bind() {
+    let mut listener = bind_locator(
+        parse_any_locator("ws/127.0.0.1:0").expect("parse ws listen locator"),
+        &AcceptConfig::default(),
+    )
+    .await
+    .expect("bind ws/127.0.0.1:0");
+    let port = listener.local_addr().expect("local_addr").port();
+
+    for round in 0..2u8 {
+        let dial = tokio::spawn(async move {
+            let locator =
+                parse_any_locator(&format!("ws/127.0.0.1:{port}")).expect("parse ws locator");
+            dial_locator(locator, &DialConfig::default())
+                .await
+                .expect("ws dial")
+        });
+        let accepted = accept_bound_on(&mut listener)
+            .await
+            .unwrap_or_else(|e| panic!("sequential accept {round} over a ws listener: {e:?}"));
+        assert!(
+            matches!(accepted, DialedLink::Ws(_)),
+            "round {round}: the sequential seam ran the RFC6455 SERVER upgrade and \
+             produced a WebSocket link, not a bare TCP one"
+        );
+        let dialed = dial.await.expect("dial task");
+        assert!(matches!(dialed, DialedLink::Ws(_)), "round {round}: dial");
+        // Both ends drop here; the listener must survive into the next round.
+    }
+}
+
+/// R2355 — a ws link is TCP_NODELAY on BOTH halves, matching zenoh.
+///
+/// Upstream sets it inside each link family's SHARED dial+accept constructor
+/// (`io/zenoh-links/zenoh-link-ws/src/unicast.rs`
+/// @ `get_stream(&socket).set_nodelay(true)`, and the same line exists in the
+/// tcp and tls families beside it), so every
+/// zenoh TCP-backed link runs with Nagle off in both directions. wz applied the
+/// tuning at each CALLER instead, and the ws dial was not one of the callers:
+/// `dial_ws` reaches TCP through `iface_bind::connect_tcp_bound`, which did not
+/// tune, while the ws ACCEPT went through `accept_tcp_on`, which did. So a wz ws
+/// dialer ran with Nagle ON — every small frame paying an ack round-trip that
+/// zenoh does not pay.
+///
+/// BOTH halves are asserted because only one of them was broken; an accept-only
+/// or dial-only assertion would have been green on the defect. The check reads
+/// `nodelay()` back off the wire socket rather than trusting the call, and it is
+/// NON-VACUOUS precisely because tokio's default is off: a `TcpStream` nobody
+/// tuned answers `false` here (which is what this test reported before the fix).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_ws_link_disables_nagle_on_both_the_dial_and_the_accept_half() {
+    let mut listener = bind_locator(
+        parse_any_locator("ws/127.0.0.1:0").expect("parse ws listen locator"),
+        &AcceptConfig::default(),
+    )
+    .await
+    .expect("bind ws/127.0.0.1:0");
+    let port = listener.local_addr().expect("local_addr").port();
+
+    let dial = tokio::spawn(async move {
+        let locator = parse_any_locator(&format!("ws/127.0.0.1:{port}")).expect("parse ws locator");
+        dial_locator(locator, &DialConfig::default())
+            .await
+            .expect("ws dial")
+    });
+    let accepted = accept_bound_on(&mut listener).await.expect("ws accept");
+    let dialed = dial.await.expect("dial task");
+
+    for (half, link) in [("dial", &dialed), ("accept", &accepted)] {
+        let DialedLink::Ws(ws) = link else {
+            panic!("{half}: expected a WebSocket link");
+        };
+        // `WebSocketStream::get_ref` is the TCP socket the RFC6455 framing rides.
+        assert!(
+            ws.get_ref().nodelay().expect("read TCP_NODELAY back"),
+            "{half} half of a ws link left Nagle ON; zenoh sets TCP_NODELAY on \
+             every TCP-backed link in its shared dial+accept constructor"
+        );
+    }
 }

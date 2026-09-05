@@ -2170,6 +2170,26 @@ PY
     # MEASURED: reverting `samples` to its R311y700 shape reds and names the
     # function; the restore returns OK.
     python3 scripts/lib/datagram_half_lint.py || return 1
+    # R2355 (no register item) — the TCP-TUNING-SEAM gate. zenoh sets
+    # TCP_NODELAY inside every link family's SHARED dial+accept constructor
+    # (zenoh-link-tcp / -tls / -ws each carry the line); wz applied it at each
+    # CALLER of its shared connect primitive instead, and two of the four
+    # callers never took the step -- `dial_ws` and `dial_tls` both dialled with
+    # Nagle ON. Nothing failed, and nothing could: a link with Nagle on carries
+    # every byte, so `cargo test` cannot observe the difference, which is this
+    # tree's standing reason that a missing step needs a gate rather than a
+    # test. The scan derives its population from the SIGNATURES (a fn whose
+    # return mentions `TcpStream` and whose args do not is a socket PRODUCER)
+    # and resolves reachability to the `set_nodelay` call, so it sees the shape
+    # the defect actually had -- every leaf named the right primitive and the
+    # PRIMITIVE was what did not tune. Enforcement MEASURED against the pre-fix
+    # tree (`git archive HEAD` into a temp dir, run with `--root`): it reds and
+    # names `dial_ws`, `dial_tls` and `connect_tcp_bound`, which is the
+    # defect's measured population; the fixed tree returns OK. A first draft
+    # that accepted the primitive's NAME in a caller's body passed that same
+    # tree, which is why the walk resolves the chain instead of the leaf.
+    python3 scripts/lib/tcp_tuning_seam_gate.py --selftest || return 1
+    python3 scripts/lib/tcp_tuning_seam_gate.py || return 1
     # R311y717 (§C G5) — the DISCARD-SITE gate. R311y713 made the flow table's
     # exit an obligation a TYPE enforces and closed that one invariant; the
     # register carried "the other multi-exit sites have not been looked at" as
@@ -4853,7 +4873,7 @@ layer_c1u_cargo_test_tls() {
     # all — it is a citation, and a citation has to say when it is wrong.
     _runci_guarded_test C1u + cargo test -p wz-session-core --features alloc --lib locator --quiet \
         || return 1
-    _runci_guarded_test C1u 3 cargo test -p wz-runtime-tokio --features transport-link-tls --test tls_e2e --quiet \
+    _runci_guarded_test C1u 4 cargo test -p wz-runtime-tokio --features transport-link-tls --test tls_e2e --quiet \
         || return 1
     #
     # R311y801 — 6 -> 7, the THIRD instance of the same missed update, and this
@@ -4916,10 +4936,25 @@ layer_c1v_cargo_test_ws() {
     # its own message.
     _runci_guarded_test C1v + cargo test -p wz-session-core --features alloc --lib locator --quiet \
         || return 1
-    _runci_guarded_test C1v 3 cargo test -p wz-runtime-tokio --features transport-link-ws --test ws_e2e --quiet \
+    _runci_guarded_test C1v 5 cargo test -p wz-runtime-tokio --features transport-link-ws --test ws_e2e --quiet \
         || return 1
     # R311y801 — 6 -> 7 with C1u, same commit, same reason (see C1u's note).
     _runci_guarded_test C1v 7 cargo test -p wz-runtime-tokio --features transport-link-ws --test session_reconnect_e2e --quiet \
+        || return 1
+    # R2355 — the MULTI-PEER ws accept, which no lane ran until now. The
+    # `transport-link-ws` registry entry carried "the multi-peer `--router ws/`
+    # path stays tcp-only" as an open residual; R311y376 generalized
+    # `accept_loop` to a scheme-keyed `BoundListener` and proved it ONLY with
+    # `wz_router_ws_acceptor_zenohd_interop`, which needs a real `zenohd` and so
+    # runs on the `--ignored` Layer Z lane. `mesh_accept_loop_holds_two_ws_peers`
+    # is the wz<->wz twin.
+    #
+    # The FEATURE PAIR is the point and was measured the hard way: `accept_loop`
+    # is gated on `routing-accept`, which `transport-link-ws` does not pull, so
+    # this same filter under the lane's own feature set reported `running 0
+    # tests ... ok` — 408 filtered out and a green lane that had run nothing.
+    # That is why the count is pinned rather than the exit status trusted.
+    _runci_guarded_test C1v 9 cargo test -p wz-runtime-tokio --features routing-accept,transport-link-ws --lib accept_loop --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-ws --quiet -- -D warnings \
@@ -10015,7 +10050,7 @@ layer_c1bz_docs_resolve() {
         wz-mcu-session-acceptor:4
         wz-routing-graph:6
         wz-runtime-coop:12
-        wz-runtime-tokio:521
+        wz-runtime-tokio:519
         wz-session-core:537
         wz-session-lwip:4
         wz-switchboard-codegen:8

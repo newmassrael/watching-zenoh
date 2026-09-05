@@ -994,6 +994,13 @@ pub(crate) mod iface_bind {
     /// gated on its callers (tcp / tls->tcp / ws) so it is not dead in a
     /// udp/quic-only build. Uses tokio's `TcpStream`/`TcpSocket` (never
     /// feature-gated — only the `link_pipeline` MODULE is).
+    /// R2355 — the tuning is applied INSIDE this primitive rather than by each
+    /// caller. It used to be the caller's own step, and two of the four callers
+    /// never took it ([`crate::ws_pipeline::dial_ws`],
+    /// [`crate::tls_pipeline::dial_tls`]); an SSOT a caller has to remember is
+    /// not one. Every TCP-backed wz dial now leaves this function tuned by
+    /// construction, so a fifth link family over TCP cannot reintroduce the gap
+    /// by omission.
     #[cfg(any(feature = "transport-link-tcp", feature = "transport-link-ws"))]
     pub(crate) async fn connect_tcp_bound(
         addr: std::net::SocketAddr,
@@ -1001,16 +1008,78 @@ pub(crate) mod iface_bind {
     ) -> io::Result<tokio::net::TcpStream> {
         use std::net::SocketAddr;
         use tokio::net::{TcpSocket, TcpStream};
-        match iface {
-            None => TcpStream::connect(addr).await,
+        let stream = match iface {
+            None => TcpStream::connect(addr).await?,
             Some(iface) => {
                 let socket = match addr {
                     SocketAddr::V4(_) => TcpSocket::new_v4()?,
                     SocketAddr::V6(_) => TcpSocket::new_v6()?,
                 };
                 bind_socket_to_device(&socket, iface)?;
-                socket.connect(addr).await
+                socket.connect(addr).await?
             }
+        };
+        configure_tcp_stream(&stream);
+        Ok(stream)
+    }
+
+    /// Apply zenoh's per-link TCP socket tuning to a freshly connected /
+    /// accepted stream: `TCP_NODELAY` on — disable Nagle so every wz frame
+    /// ships at once, the low-latency posture zenoh sets on every TCP-backed
+    /// link. Upstream applies it inside each link family's SHARED dial+accept
+    /// constructor, which is why all three families have it:
+    /// `io/zenoh-links/zenoh-link-tcp/src/unicast.rs`
+    /// @ `socket.set_nodelay(true)`,
+    /// `io/zenoh-links/zenoh-link-tls/src/unicast.rs`
+    /// @ `tcp_stream.set_nodelay(true)`,
+    /// `io/zenoh-links/zenoh-link-ws/src/unicast.rs`
+    /// @ `get_stream(&socket).set_nodelay(true)`.
+    ///
+    /// R2355 — these are the REPO paths, not the `zenoh-link-*-<version>/src/..`
+    /// registry ones this round first wrote. The citation gate's population is
+    /// rooted at the pin's top-level directories, so a registry-layout path
+    /// matches no root and lands in NO bucket: not anchored, not line, not bare,
+    /// not even a root-less candidate. The claims were true either way; they
+    /// were graded by nothing, which is the same shape that once hid
+    /// twenty-four `zenoh-ext/..` citations.
+    ///
+    /// R2355 — this MOVED here from the `transport-link-tcp`-gated
+    /// `link_pipeline`, for exactly the reason [`connect_tcp_bound`] already
+    /// lived here: `transport-link-ws` does NOT pull tcp, so a tuning function
+    /// only the tcp module could name is a tuning function ws could not take.
+    /// Its callers were `dial_tcp` / `dial_tcp_host` and
+    /// [`crate::link_pipeline::accept_tcp_on`], which made the ACCEPT side
+    /// uniform across tcp/ws/tls (all three accept through `accept_tcp_on`)
+    /// while the DIAL side was not: `dial_ws` and `dial_tls` reach TCP through
+    /// [`connect_tcp_bound`] and neither applied it, so a wz ws or tls DIALER
+    /// ran with Nagle ON where zenoh runs with it off — visible as added
+    /// latency on small frames, and invisible to every test, since a link with
+    /// Nagle on still carries every byte.
+    ///
+    /// Best-effort, matching zenoh (which `tracing::warn!`s and continues): a
+    /// nodelay-set failure is logged and the link proceeds — Nagle-on is a
+    /// latency degradation, not a correctness failure. The warning is the one
+    /// log this otherwise-quiet primitive emits, and only on the abnormal path.
+    ///
+    /// `SO_LINGER` is DELIBERATELY NOT set, diverging from zenoh's
+    /// `set_linger(10s)`: `tokio::net::TcpStream::set_linger` is deprecated
+    /// because SO_LINGER makes `close()` BLOCK the worker thread on drop — a
+    /// footgun in an async runtime. zenoh's synchronous socket layer can afford
+    /// it; wz on tokio must not blindly mirror it. The graceful-close intent
+    /// (drain tail bytes before teardown) is already served at the application
+    /// layer by wz-ap-demo's R292 teardown chain (writer drain + Close frame),
+    /// and a normal non-linger close still lets the kernel background-deliver
+    /// queued bytes, so nothing is lost — only the thread-blocking drop is
+    /// avoided.
+    ///
+    /// Distinct from R311pz's reverted `SO_REUSEADDR`: tokio's `TcpStream` does
+    /// NOT set nodelay by default, so this closes a REAL behavioral parity gap
+    /// — and a non-vacuous one (a unit reads `nodelay()` back and distinguishes
+    /// set-from-unset precisely because tokio's default is off).
+    #[cfg(any(feature = "transport-link-tcp", feature = "transport-link-ws"))]
+    pub(crate) fn configure_tcp_stream(stream: &tokio::net::TcpStream) {
+        if let Err(e) = stream.set_nodelay(true) {
+            log::warn!("wz tcp: set_nodelay(true) failed (Nagle stays on): {e}");
         }
     }
 }
