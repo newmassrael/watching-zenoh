@@ -71,7 +71,12 @@ CARRY = {
             "routing-route-cache",
             "routing-token-tables",
         },
-        "not yet established whether these omissions are intentional",
+        "AUDITED R2363, no policy explains the split: all 9 have a facade "
+        "feature (so none is the `query-value` cause), and the only candidate "
+        "rule -- exclude empty-forward markers -- is refuted by `routing-client`, "
+        "which IS listed and forwards to nothing. 4 of the 9 forward to real "
+        "crate features, so the bundle under-delivers its domain. Repair is a "
+        "product change; the row stays until the bundle does",
     ),
     "domain-storage": (
         {
@@ -89,7 +94,15 @@ CARRY = {
             "storage-mgr-strip-prefix",
             "storage-mgr-wildcard-updates",
         },
-        "storage-backend-* / storage-mgr-* sub-namespaces; unaudited",
+        "AUDITED R2363: the sub-namespace DESCRIPTION is exact in both "
+        "directions (13/13 omitted are in those prefixes, no listed member is, "
+        "no non-sub-namespaced storage atom is omitted) but it does NOT justify "
+        "-- `storage-backend` forwards only to the runtime crate, so the "
+        "bundle's closure reaches 0 of the 13. The pick-one defence is refuted "
+        "too: only 7 of the 13 have an implementation behind them (filesystem + "
+        "6 manager atoms), the other 6 forward to nothing, and no mutual-"
+        "exclusion guard exists. Repair must add the implemented 7 and decide "
+        "the 6 markers separately",
     ),
     "domain-transport": (
         {
@@ -99,7 +112,14 @@ CARRY = {
             "transport-qos",
             "transport-stats",
         },
-        "not yet established whether these omissions are intentional",
+        "AUDITED R2363, the clearest of the three: the bundle lists EIGHT "
+        "`transport-link-*` schemes and omits two of the same shape, so no "
+        "naming rule applies, and its closure reaches 0 of the 5. Only "
+        "`quic-datagram` has a defence (it forwards to `transport-link-quic` "
+        "and upstream gives both links one locator scheme); `unixpipe`, "
+        "`multilink`, `qos` and `stats` have none -- and R2363 closed the "
+        "`transport-link-unixpipe` ATOM while this bundle still does not turn "
+        "it on, which is this gate's own subject landing on its own tree",
     ),
 }
 
