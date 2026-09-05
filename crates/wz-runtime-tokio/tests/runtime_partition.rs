@@ -26,6 +26,13 @@ use wz_runtime_tokio::runtime_impl::TokioRuntime;
 use wz_runtime_tokio::runtime_pool::{
     PartitionedRuntime, RuntimeConfigError, RuntimeParam, RuntimeParams, RuntimePool, WzRuntime,
 };
+// R2367 — gated to match the module it names. `udp_pipeline` sits behind
+// `transport-link-udp` (`lib.rs` @ `pub mod udp_pipeline;`), and this import did
+// not, so the whole test binary failed to compile under
+// `--no-default-features`: pre-push gate 6, which R2366 never reached because
+// its push stopped at an earlier gate. The one test below is gated with it —
+// gating the import alone would leave that test naming a symbol it cannot see.
+#[cfg(feature = "transport-link-udp")]
 use wz_runtime_tokio::udp_pipeline::bind_udp_demux;
 use wz_runtime_tokio::writer_queue::WriterHandle;
 
@@ -714,6 +721,7 @@ async fn writer_spawn_on_stays_on_the_callers_runtime() {
 ///
 /// The datagram is sent from a plain `std` socket, so the poke itself owes
 /// nothing to any runtime.
+#[cfg(feature = "transport-link-udp")]
 #[test]
 fn a_listener_pump_is_paced_by_the_acceptor_subsystem() {
     let binder = tokio::runtime::Builder::new_multi_thread()
