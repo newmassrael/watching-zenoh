@@ -170,7 +170,48 @@ impl DigestPublisher {
     /// "publication schedule" note for the four sleeps it is built from. The
     /// frame body is the deterministically tested [`digest_frame`]; this is
     /// the timer glue over it.
+    /// The publisher runs on the APPLICATION subsystem
+    /// ([`WzRuntime::Application`](crate::runtime_pool::WzRuntime)). Upstream's
+    /// storage plugin names no subsystem at all — `tokio::task::spawn`
+    /// (`plugins/zenoh-plugin-storage-manager/src/replication/service.rs`
+    /// @ `tokio::task::spawn(async move {`) —
+    /// so its four replication tasks inherit whichever runtime loaded the
+    /// plugin. wz makes that inheritance explicit instead, which is a superset:
+    /// the loop still runs beside application work, and an operator now has a
+    /// dial that separates it from the link paths it must not stall.
     pub fn spawn<R, T, B>(
+        session: &Session<R, T, Unicast>,
+        state: Arc<Mutex<StorageState<B>>>,
+        config: ReplicationConfig,
+        local_zid: Vec<u8>,
+    ) -> Self
+    where
+        R: SessionRuntime + 'static,
+        T: TimeSource + Send + Sync + 'static,
+        B: StorageBackend + Send + 'static,
+        <R as SessionRuntime>::LinkSink: Send + Sync,
+        SessionLinkActions<R, T>: Send + Sync + 'static,
+        Session<R, T, Unicast>: Clone + Send + 'static,
+    {
+        Self::spawn_on(
+            crate::runtime_pool::WzRuntime::Application.handle().clone(),
+            session,
+            state,
+            config,
+            local_zid,
+        )
+    }
+
+    /// [`Self::spawn`] onto a NAMED tokio runtime rather than the application
+    /// subsystem.
+    ///
+    /// The publication schedule IS this type's subject, and tokio's paused
+    /// clock is per-runtime: an observer that advances time can only observe a
+    /// publisher sharing its runtime. That is why the general form is public
+    /// rather than a test hook — a host driving wz from its own reactor has the
+    /// same requirement for the same reason.
+    pub fn spawn_on<R, T, B>(
+        handle: tokio::runtime::Handle,
         session: &Session<R, T, Unicast>,
         state: Arc<Mutex<StorageState<B>>>,
         config: ReplicationConfig,
@@ -186,7 +227,7 @@ impl DigestPublisher {
     {
         let session = session.clone();
         let clock = Arc::clone(session.clock());
-        let task = tokio::spawn(async move {
+        let task = handle.spawn(async move {
             // Align to the interval boundaries the whole fleet shares, rather
             // than to whenever this process happened to start (zenoh
             // core.rs:161-191). Read once, before the loop: from here on the
@@ -701,7 +742,17 @@ mod tests {
             )
             .expect("digest keyexpr subscriber declares");
 
-        let publisher = DigestPublisher::spawn(&session, state, config.clone(), zid);
+        // `spawn_on` with THIS runtime's handle: the offsets below are read off
+        // the paused clock, which is per-runtime, so a publisher on the
+        // application subsystem would be pacing itself by real wall-clock while
+        // the reader believes it advanced 600 virtual seconds.
+        let publisher = DigestPublisher::spawn_on(
+            tokio::runtime::Handle::current(),
+            &session,
+            state,
+            config.clone(),
+            zid,
+        );
 
         // Virtual time, so this budget costs no wall-clock; it is the
         // fail-loud bound for a publisher that stopped emitting, not a race.

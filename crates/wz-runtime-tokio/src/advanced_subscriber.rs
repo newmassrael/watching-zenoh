@@ -1954,7 +1954,14 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
             // to 0, turning the loop into a zero-delay GET storm / busy spin.
             let period_ms = (period.as_millis() as u64).max(1);
             PeriodicTask {
-                handle: tokio::spawn(async move {
+                // The APPLICATION subsystem — upstream's own choice for the
+                // same task: `ZRuntime::Application.spawn` wraps
+                // `spawn_periodic_queries`
+                // (`zenoh-ext/src/advanced_subscriber.rs`
+                // @ `AbortOnDropHandle::new(ZRuntime::Application.spawn(`). It issues GETs
+                // on the consumer's behalf, so it is application work even
+                // though nothing awaits it.
+                handle: crate::runtime_pool::WzRuntime::Application.spawn(async move {
                     loop {
                         clock.sleep(period_ms).await;
                         run_periodic_tick(

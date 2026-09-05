@@ -311,7 +311,15 @@ where
                 // truncates to 0, turning the beacon loop into a busy spin.
                 let period_ms = (period.as_millis() as u64).max(1);
                 HeartbeatTask {
-                    handle: tokio::spawn(async move {
+                    // The NET subsystem, which is where upstream puts this exact
+                    // beacon: both arms of zenoh's advanced-publisher heartbeat
+                    // are `TerminatableTask::spawn_abortable(ZRuntime::Net, ..)`
+                    // (`zenoh-ext/src/advanced_publisher.rs`
+                    // @ `TerminatableTask::spawn_abortable(`, both the
+                    // sporadic-off and sporadic-on arm). A beacon is upkeep the application
+                    // never waits on, so it belongs beside gossip rather than
+                    // beside the API surface.
+                    handle: crate::runtime_pool::WzRuntime::Net.spawn(async move {
                         let mut last_emitted = 0u32;
                         loop {
                             clock.sleep(period_ms).await;

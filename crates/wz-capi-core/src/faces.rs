@@ -237,14 +237,23 @@ struct FaceEntry {
     /// R311y532 — the tokio runtime this face is DRIVEN by.
     ///
     /// Captured at `face_up`, which runs inside that runtime, and entered
-    /// again by any declaration that spawns. Only the advanced publisher needs
-    /// it today: its heartbeat beacon is a `tokio::spawn`, so
-    /// `AdvancedPublisher::declare` fails `NoRuntime` when called from the C
+    /// again by any declaration that spawns. R311y532 added it because the
+    /// advanced publisher's heartbeat beacon was a bare `tokio::spawn`, so
+    /// `AdvancedPublisher::declare` failed `NoRuntime` when called from the C
     /// APPLICATION thread — which is exactly where a C program declares. A
-    /// dialed session brings its face up BEFORE `z_open` returns, so that is
+    /// dialed session brings its face up BEFORE `z_open` returns, so that was
     /// the ordinary path, not a corner: measured, the declare failed and was
     /// swallowed by the best-effort loop, and the publisher then put to nobody
     /// while still reporting `Z_OK`.
+    ///
+    /// R2366 — THAT PARTICULAR CAUSE IS GONE. The beacon names its subsystem
+    /// now (`WzRuntime::Net`, `advanced_publisher.rs`) and resolves its runtime
+    /// through the process partition, so it no longer asks the caller's thread
+    /// for one. The guard STAYS, and deliberately: this field's contract is
+    /// "any declaration that spawns", not "the beacon", and nothing has
+    /// measured the rest of a declare's body to be runtime-free. What changed
+    /// is that the guard is now a defence rather than the only thing holding
+    /// the C entry point up.
     runtime: tokio::runtime::Handle,
     /// R311y296 — the signal that this face's drive loop should re-arm its wake
     /// because a `z_get` just registered a pending query with a nearer deadline
@@ -2227,8 +2236,10 @@ impl SharedSession {
         for face in guard.faces.values_mut() {
             let zid = face.session.actions().params.zid.clone();
             // Enter the face's own runtime: this call site is the C application
-            // thread, and the heartbeat beacon is a `tokio::spawn`. See
-            // `FaceEntry::runtime`.
+            // thread, and a declaration may spawn. R2366 moved the beacon onto
+            // the `net` subsystem, which needs no ambient runtime, so this is
+            // now a defence for the rest of the declare rather than the single
+            // thing the beacon depended on. See `FaceEntry::runtime`.
             let _guard = face.runtime.enter();
             if let Ok(pub_) =
                 AdvancedPublisher::declare(&face.session, keyexpr.clone(), options, zid)
@@ -2313,7 +2324,9 @@ impl SharedSession {
         for face in guard.faces.values_mut() {
             let (on_sample, on_miss) = (sink)();
             // Same reason as the publisher's: a `recovery.periodic_queries`
-            // subscriber spawns a background task at declare time.
+            // subscriber spawns a background task at declare time — and, since
+            // R2366, that task names the `app` subsystem, so this guard is the
+            // same defence-in-depth the publisher's now is.
             let _guard = face.runtime.enter();
             if let Ok(sub) = AdvancedSubscriber::declare_with_options(
                 &face.session,

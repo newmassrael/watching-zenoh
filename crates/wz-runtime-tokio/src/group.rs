@@ -360,27 +360,45 @@ where
             let ka_keyexpr = event_keyexpr.clone();
             let ka_buf = encode_net_event(&GroupNetEvent::KeepAlive(member.mid.clone()));
             let period_ms = keepalive_period_ms(member.lease, member.refresh_ratio);
-            AbortOnDrop(tokio::spawn(async move {
-                loop {
-                    ka_clock.sleep(period_ms).await;
-                    // Fire-and-forget: a beacon publish error (e.g. a torn-down
-                    // link) is transient — the next tick re-beacons, and the
-                    // peer's lease has not yet elapsed. Dropping it is the
-                    // zenoh-ext behavior (group.rs:197 `let _ = ...put()`).
-                    let _ = ka_session.publish(&ka_keyexpr, &ka_buf, PublishOptions::put());
-                }
-            }))
+            // The APPLICATION subsystem. zenoh-ext's group runs its four tasks
+            // through `TaskController::spawn_abortable`
+            // (`zenoh-ext/src/group.rs`
+            // @ `task_controller.spawn_abortable(keep_alive_task(`), the arm
+            // WITHOUT a `ZRuntime` argument
+            // (`commons/zenoh-task/src/lib.rs`
+            // @ `pub fn spawn_abortable<F, T>(&self, future: F)`, versus
+            // `spawn_abortable_with_rt`), so they inherit the caller's
+            // runtime — and a group is joined from application code. Naming the
+            // subsystem it already lands on is what makes it schedulable.
+            AbortOnDrop(
+                crate::runtime_pool::WzRuntime::Application.spawn(async move {
+                    loop {
+                        ka_clock.sleep(period_ms).await;
+                        // Fire-and-forget: a beacon publish error (e.g. a torn-down
+                        // link) is transient — the next tick re-beacons, and the
+                        // peer's lease has not yet elapsed. Dropping it is the
+                        // zenoh-ext behavior (group.rs:197 `let _ = ...put()`).
+                        let _ = ka_session.publish(&ka_keyexpr, &ka_buf, PublishOptions::put());
+                    }
+                }),
+            )
         });
 
         // 5) The watchdog: evict expired members once per second.
         let wd_state = Arc::clone(&state);
         let wd_clock = Arc::clone(session.clock());
-        let watchdog = AbortOnDrop(tokio::spawn(async move {
-            loop {
-                wd_clock.sleep(WATCHDOG_PERIOD_MS).await;
-                sweep_expired(&wd_state, wd_clock.now_monotonic_ms());
-            }
-        }));
+        // APPLICATION for the same reason as the keep-alive beacon above —
+        // upstream's watchdog is the fourth of those inheriting tasks
+        // (`zenoh-ext/src/group.rs`
+        // @ `task_controller.spawn_abortable(watchdog_task(`).
+        let watchdog = AbortOnDrop(
+            crate::runtime_pool::WzRuntime::Application.spawn(async move {
+                loop {
+                    wd_clock.sleep(WATCHDOG_PERIOD_MS).await;
+                    sweep_expired(&wd_state, wd_clock.now_monotonic_ms());
+                }
+            }),
+        );
 
         Ok(Self {
             state,

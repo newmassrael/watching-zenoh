@@ -64,9 +64,9 @@ use std::time::Duration;
 
 use tokio::sync::{mpsc, watch};
 use tokio::time::timeout;
-use wz_runtime_core::Runtime;
 
-use crate::runtime_impl::{TokioJoinHandle, TokioRuntime};
+use crate::runtime_impl::TokioJoinHandle;
+use crate::runtime_pool::WzRuntime;
 
 /// Bound on a SINGLE outbound write once the queue is sealed — the wedged-peer
 /// defence that the wall-clock drain budget used to provide, at the one place
@@ -221,7 +221,39 @@ impl WriterHandle {
     /// Taking the receiver rather than a ready-made queue is deliberate: it
     /// makes this the only route from a channel to a running writer, so a
     /// pipeline cannot end up with a task no one can seal.
+    ///
+    /// The writer lands on the TRANSMIT subsystem
+    /// ([`WzRuntime::Tx`](crate::runtime_pool::WzRuntime)), which is what makes
+    /// this one call the whole of wz's TX partition: every stream and datagram
+    /// pipeline reaches its writer through here, so an operator lowering
+    /// `tx:worker_threads` narrows all ten of them at once. zenoh names the same
+    /// subsystem at the same seam — `ZRuntime::TX.spawn` around the unicast
+    /// `tx_task` (`io/zenoh-transport/src/unicast/universal/link.rs`
+    /// @ `ZRuntime::TX.spawn(async move {`) and around the multicast one
+    /// (`io/zenoh-transport/src/multicast/link.rs`
+    /// @ `ZRuntime::TX.spawn(async move {`).
     pub fn spawn<F, Fut>(rx: mpsc::UnboundedReceiver<Vec<u8>>, task: F) -> Self
+    where
+        F: FnOnce(OutboundQueue) -> Fut,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        Self::spawn_on(WzRuntime::Tx.handle().clone(), rx, task)
+    }
+
+    /// [`Self::spawn`] onto a NAMED tokio runtime rather than the TX subsystem.
+    ///
+    /// The general form, and the escape a caller needs when the writer must
+    /// share a runtime with whoever is observing it. That is not a niche:
+    /// tokio's paused clock is per-runtime, so a test that advances time and a
+    /// writer on another runtime are measuring two different clocks — the
+    /// [`WRITER_STALL_MS`] bound would then be spent in real seconds while the
+    /// test believes it moved instantly. A host embedding wz inside its own
+    /// reactor has the same need for the same reason.
+    pub fn spawn_on<F, Fut>(
+        handle: tokio::runtime::Handle,
+        rx: mpsc::UnboundedReceiver<Vec<u8>>,
+        task: F,
+    ) -> Self
     where
         F: FnOnce(OutboundQueue) -> Fut,
         Fut: Future<Output = ()> + Send + 'static,
@@ -233,7 +265,7 @@ impl WriterHandle {
             sealed: false,
         };
         WriterHandle {
-            join: TokioRuntime.spawn(task(queue)),
+            join: TokioJoinHandle::from_tokio(handle.spawn(task(queue))),
             seal,
         }
     }
@@ -313,19 +345,28 @@ mod tests {
     ///
     /// The bound is exercised through a pending-forever future, so the test
     /// measures the arming of the bound rather than a real socket.
+    ///
+    /// [`WriterHandle::spawn_on`] with THIS runtime's handle, not
+    /// [`WriterHandle::spawn`]: the paused clock belongs to the test's runtime,
+    /// and a writer on the TX subsystem would spend the bound in two real
+    /// seconds of wall clock while `start_paused` reported instants.
     #[tokio::test(start_paused = true)]
     async fn a_write_in_flight_when_the_seal_lands_is_bounded() {
         let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
         let bailed = Arc::new(AtomicUsize::new(0));
         let bailed_task = bailed.clone();
-        let handle = WriterHandle::spawn(rx, move |mut queue| async move {
-            while let Some(_frame) = queue.next().await {
-                if queue.guarded(std::future::pending::<()>()).await.is_none() {
-                    bailed_task.fetch_add(1, Ordering::SeqCst);
-                    return;
+        let handle = WriterHandle::spawn_on(
+            tokio::runtime::Handle::current(),
+            rx,
+            move |mut queue| async move {
+                while let Some(_frame) = queue.next().await {
+                    if queue.guarded(std::future::pending::<()>()).await.is_none() {
+                        bailed_task.fetch_add(1, Ordering::SeqCst);
+                        return;
+                    }
                 }
-            }
-        });
+            },
+        );
 
         tx.send(vec![0u8; 1]).expect("enqueue");
         // Let the writer reach the wedged write before teardown lands.

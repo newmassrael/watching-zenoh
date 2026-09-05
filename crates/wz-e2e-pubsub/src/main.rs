@@ -57,23 +57,25 @@ fn main() -> ExitCode {
             // loop).
             let session = opened.session.clone();
             let clock = opened.clock;
-            let publisher = tokio::spawn(async move {
-                for idx in 0..PUBLISH_BURST {
-                    let mut opts =
-                        PublishOptions::default().with_reliability(Reliability::Reliable);
-                    opts.kind = SampleKind::Put;
-                    let fired = session
-                        .publish(&publish_key, value.as_bytes(), opts)
-                        .unwrap();
-                    log::info!(
-                        "{BINARY}: PUBLISHER EMITTED idx={idx} keyexpr='{publish_key}' \
+            // APPLICATION — the burst is this binary's own workload.
+            let publisher =
+                wz::runtime_tokio::runtime_pool::WzRuntime::Application.spawn(async move {
+                    for idx in 0..PUBLISH_BURST {
+                        let mut opts =
+                            PublishOptions::default().with_reliability(Reliability::Reliable);
+                        opts.kind = SampleKind::Put;
+                        let fired = session
+                            .publish(&publish_key, value.as_bytes(), opts)
+                            .unwrap();
+                        log::info!(
+                            "{BINARY}: PUBLISHER EMITTED idx={idx} keyexpr='{publish_key}' \
                          payload_len={} loopback_fired={fired}",
-                        value.len()
-                    );
-                    clock.sleep(BURST_INTERVAL_MS).await;
-                }
-                log::info!("{BINARY}: publisher burst complete");
-            });
+                            value.len()
+                        );
+                        clock.sleep(BURST_INTERVAL_MS).await;
+                    }
+                    log::info!("{BINARY}: publisher burst complete");
+                });
             Ok::<_, std::io::Error>(AbortOnDrop(publisher))
         }),
     )

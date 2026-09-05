@@ -175,13 +175,22 @@ async fn play_into_session(
 
     // The emission runs OFF the runtime's workers; see this module's header.
     let sink_session = session.clone();
-    let emitting = tokio::task::spawn_blocking(move || {
-        let mut sink = LiveSink {
-            session: sink_session,
-            emitted: 0,
-        };
-        play(&plan, &mut sink)
-    });
+    // APPLICATION, and `spawn_blocking` rather than `spawn`: the emission is a
+    // synchronous `play` over the plan, so it must not occupy a worker at all.
+    // This is the one caller that spends a subsystem's `max_blocking_threads` —
+    // that ceiling is per runtime, so naming the subsystem is what turns the
+    // configured number into a dial. zenoh spends its own the same way
+    // (`ZRuntime::Application.spawn_blocking`,
+    // `io/zenoh-transport/src/common/shm/interop.rs`
+    // @ `ZRuntime::Application.spawn_blocking(`).
+    let emitting =
+        wz::runtime_tokio::runtime_pool::WzRuntime::Application.spawn_blocking(move || {
+            let mut sink = LiveSink {
+                session: sink_session,
+                emitted: 0,
+            };
+            play(&plan, &mut sink)
+        });
 
     let mut driver = inbound;
     let actions_for_loop = actions.clone();

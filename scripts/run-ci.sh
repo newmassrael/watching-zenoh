@@ -3041,6 +3041,22 @@ PY
     # `.githooks/pre-push`, which is what makes it the LOCAL gate item 224 asks
     # for -- this lane is the hosted half.
     python3 scripts/lib/config_key_fixture_gate.py || return 1
+    # R2366 (the `runtime-tokio` atom's last residual) — the SUBSYSTEM-SPAWN
+    # gate. R311y825 built the five-runtime partition and nothing production
+    # ever named a subsystem, so `WZ_RUNTIME` tuned runtimes no task ran on and
+    # `max_blocking_threads` was reachable by no caller. `cargo test` is
+    # structurally unable to fail on that: every partition test builds its own
+    # pool or names a subsystem itself, so `--test runtime_partition` was green
+    # for the whole period the partition had no caller at all.
+    #
+    # Two derivations, because one is the "a population of zero reports green"
+    # trap: the AMBIENT spellings must be absent from production, AND the NAMED
+    # sites must be non-empty and reach every subsystem `WzRuntime` declares.
+    # `--selftest` first — its fixtures carry the two shapes that defeated this
+    # gate's own first draft, a path-qualified `crate::runtime_pool::WzRuntime`
+    # reach and a subsystem named through `.handle()` rather than `.spawn()`.
+    python3 scripts/lib/subsystem_spawn_gate.py --selftest >/dev/null || return 1
+    python3 scripts/lib/subsystem_spawn_gate.py || return 1
     # R2354 (the `storage-replication` atom's last residual) — the
     # REPLICATION-LOG FUNNEL gate. The digest stopped being recomputed from the
     # stored set every publication cycle and is now read off a maintained log,
@@ -8551,8 +8567,15 @@ layer_c1cb_cargo_test_init_ack_admission() {
 # because a crate suite counts nothing. This lane caught it on the next hosted
 # run with "expected exactly 14 passed ... no libtest summary matched", which is
 # exactly the sentence it exists to print.
+#
+# R2366 -- 16 -> 20, the atom's SECOND residual. The four added tests enter
+# through PRODUCTION seams and ask which subsystem the task landed on, which is
+# the one thing the sixteen above cannot: each of them builds its own pool or
+# names a subsystem itself, so all sixteen passed unchanged during the whole
+# period no production code named one. `subsystem_spawn_gate.py` (Layer C0,
+# pre-push gate 2t) is the static half; these are the executable half.
 layer_c1cg_cargo_test_runtime_partition() {
-    _runci_guarded_test C1cg 16 \
+    _runci_guarded_test C1cg 20 \
         cargo test -p wz-runtime-tokio --test runtime_partition --quiet || return 1
 }
 

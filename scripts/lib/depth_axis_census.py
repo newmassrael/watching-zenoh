@@ -453,11 +453,17 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # not own, and `platform-macos` / `platform-windows` forward to no crate at
 # all. None of the three is a dep-forwarding feature, so ARM 3 does not reach
 # them and must not appear to.
-PIN_REACHED = 67
+# R2366 -- `runtime-tokio` CLOSED, so it leaves the PARTIAL population entirely
+# and takes its own row with it. It sat in REACHED (67 -> 66) and its reason
+# carried exactly one AMBIGUOUS citation and one upstream one (81 -> 80), which
+# was ATTRIBUTED rather than netted: running `citation_audit` over that atom's
+# OLD reason alone answers (0 wz, 1 ambiguous, 1 upstream), so the wz-citation
+# pin correctly does not move and the other two move by exactly that row.
+PIN_REACHED = 66
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 3
 PIN_WZ_CITATIONS = 373
-PIN_AMBIGUOUS = 81
+PIN_AMBIGUOUS = 80
 
 
 class Fatal(Exception):

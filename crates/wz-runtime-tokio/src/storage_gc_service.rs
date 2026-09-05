@@ -114,7 +114,15 @@ impl GarbageCollector {
             .max(1);
         let lifespan = gc.lifespan;
         let label = storage_name.to_string();
-        let task = tokio::spawn(async move {
+        // The APPLICATION subsystem, as for the replication publisher and for
+        // the same reason: upstream's storage plugin names none
+        // (`plugins/zenoh-plugin-storage-manager`), so wz makes the inherited
+        // tier explicit. zenoh's nearest named analogue is the ext GC loop,
+        // `ZRuntime::Application.spawn(gc_task(..))`
+        // (`zenoh-ext/src/advanced_subscriber.rs`
+        // @ `ZRuntime::Application.spawn(gc_task(`), which is this same
+        // shape — a periodic sweep over retained state.
+        let task = crate::runtime_pool::WzRuntime::Application.spawn(async move {
             loop {
                 // PERIOD: monotonic ms sleep (interval, held OUTSIDE the lock).
                 clock.sleep(period_ms).await;

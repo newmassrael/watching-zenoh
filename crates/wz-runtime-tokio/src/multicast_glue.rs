@@ -151,6 +151,7 @@ use wz_session_core::sn::{self, MulticastTxConduits};
 
 use wz_runtime_core::TimeSource;
 
+use crate::runtime_pool::WzRuntime;
 use crate::LinkDriver;
 
 // R311lx — `MulticastTxItem` moved to the shared `wz_session_core::multicast_tx`
@@ -896,7 +897,13 @@ pub fn spawn_router_mcast_egress(
     // R2333 — the stop channel. `false` is the resting value; the loop watches for
     // a CHANGE, so the initial value is never mistaken for a stop.
     let (signal, mut shutdown) = tokio::sync::watch::channel(false);
-    let task = tokio::spawn(async move {
+    // The TRANSMIT subsystem: this is the group's EGRESS pump, and upstream puts
+    // the multicast transmit task on `ZRuntime::TX`
+    // (`io/zenoh-transport/src/multicast/link.rs`
+    // @ `ZRuntime::TX.spawn(async move {`). Its ingress twin below
+    // takes `RX` from the same seam, so the two directions of one group
+    // are schedulable against each other rather than sharing a pool.
+    let task = WzRuntime::Tx.spawn(async move {
         // R311y454 — was a bare `UdpSocket::bind((UNSPECIFIED, 0))` +
         // `from_socket`. `bind_multicast_tx_v4` is that same ephemeral bind plus
         // the `IP_MULTICAST_IF` pin when `#iface=` names one, so an unnarrowed
@@ -1067,7 +1074,10 @@ pub fn spawn_router_mcast_ingress(
     // R2333 — the stop channel; see the egress twin for why the resting value is
     // `false` and only a CHANGE stops the loop.
     let (signal, mut shutdown) = tokio::sync::watch::channel(false);
-    let task = tokio::spawn(async move {
+    // The RECEIVE subsystem — the egress twin's counterpart, and upstream's own
+    // split at the same seam (`io/zenoh-transport/src/multicast/link.rs`
+    // @ `ZRuntime::RX.spawn(async move {`).
+    let task = WzRuntime::Rx.spawn(async move {
         let mut driver =
             match UdpDriver::bind_multicast_v4(group, port, opts.as_socket_config()).await {
                 Ok(driver) => driver,

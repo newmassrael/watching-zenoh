@@ -59,6 +59,15 @@ use std::sync::Arc;
 // concrete TokioRuntime instance is a unit struct so each call site
 // pays zero runtime cost. teardown.rs migrates the same field types
 // in lockstep so the typestate handoff stays type-uniform.
+//
+// R2366 carries that one step further: a call site no longer names
+// "the wz runtime", it names WHICH ONE — `PartitionedRuntime::NET`,
+// `::APPLICATION` and so on, the drop-in with the same `Runtime`
+// impl and the same `TokioJoinHandle` return. `TokioRuntime` is the
+// AMBIENT binding, so a node built on it hands every subsystem the
+// one worker pool and `WZ_RUNTIME` tunes runtimes nothing runs on.
+// This binary is where wz's own node is assembled, so it is where
+// the partition either reaches production or does not.
 use wz::runtime_core::Runtime;
 use wz::runtime_core::TimeSource;
 #[cfg(feature = "advanced")]
@@ -73,8 +82,9 @@ use wz::runtime_tokio::reconnect::{
 };
 use wz::runtime_tokio::reply_acceptance::{ReplyAcceptance, ReplyKeyExpr};
 use wz::runtime_tokio::reply_sink::ReplyKind;
+use wz::runtime_tokio::runtime_impl::TokioJoinHandle;
 use wz::runtime_tokio::runtime_impl::TokioTime;
-use wz::runtime_tokio::runtime_impl::{TokioJoinHandle, TokioRuntime};
+use wz::runtime_tokio::runtime_pool::PartitionedRuntime;
 use wz::runtime_tokio::session::{
     LivelinessOptions, LivelinessSubscriber, LivelinessSubscriberOptions, LivelinessToken,
     MatchingListener, PublishOptions, Publisher, Querier, QueryOptions, Queryable,
@@ -1180,7 +1190,9 @@ pub(crate) async fn spawn_scouting_responder(
     } else {
         log::info!("wz-ap-demo: SCOUT REPLY SOCKETS {elected_from:?}");
     }
-    tokio::spawn(serve(responder, |step| {
+    // NET — scouting is network-tier upkeep, the subsystem zenoh puts its own
+    // gossip on (`zenoh/src/net/protocol/gossip.rs` @ `ZRuntime::Net.block_in_place(`).
+    PartitionedRuntime::NET.spawn(serve(responder, |step| {
         match step {
             ResponderStep::Answered { to, from, bytes } => {
                 log::info!("wz-ap-demo: SCOUT ANSWERED {to} from {from:?} ({bytes} byte Hello)");
@@ -1299,7 +1311,9 @@ async fn spawn_scouting_autoconnect(
         }
     );
 
-    tokio::spawn(async move {
+    // NET — the autoconnect driver is the gossip/scouting plane's dialer, the
+    // same tier as the responder above.
+    PartitionedRuntime::NET.spawn(async move {
         serve_autoconnect(
             &mut driver,
             &actions,
@@ -2244,7 +2258,9 @@ fn spawn_background_tasks(
     } = specs;
     let publisher_handle = publisher_spec.map(|spec| {
         let session_for_publisher = session.clone();
-        TokioRuntime.spawn(publisher_task(
+        // APPLICATION — the demo's own workload, which is exactly what that
+        // subsystem names. The four handles below share the classification.
+        PartitionedRuntime::APPLICATION.spawn(publisher_task(
             session_for_publisher,
             spec,
             session_clock,
@@ -2254,12 +2270,16 @@ fn spawn_background_tasks(
 
     let query_handle = query_spec.map(|spec| {
         let actions_for_query = actions.clone();
-        TokioRuntime.spawn(query_task(actions_for_query, spec, session_clock))
+        PartitionedRuntime::APPLICATION.spawn(query_task(actions_for_query, spec, session_clock))
     });
 
     let liveliness_get_handle = liveliness_get_spec.map(|spec| {
         let session_for_get = session.clone();
-        TokioRuntime.spawn(liveliness_get_task(session_for_get, spec, session_clock))
+        PartitionedRuntime::APPLICATION.spawn(liveliness_get_task(
+            session_for_get,
+            spec,
+            session_clock,
+        ))
     });
 
     // R311y442 — the advanced publisher declares INSIDE its task (the heartbeat
@@ -2268,7 +2288,7 @@ fn spawn_background_tasks(
     #[cfg(feature = "advanced")]
     let advanced_publisher_handle = advanced_publish_spec.map(|spec| {
         let session_for_advanced = session.clone();
-        TokioRuntime.spawn(crate::tasks::advanced_publisher_task(
+        PartitionedRuntime::APPLICATION.spawn(crate::tasks::advanced_publisher_task(
             session_for_advanced,
             spec,
             session_clock,
@@ -2279,7 +2299,7 @@ fn spawn_background_tasks(
     #[cfg(feature = "group")]
     let group_join_handle = group_join_spec.map(|spec| {
         let session_for_group = session.clone();
-        TokioRuntime.spawn(crate::tasks::group_join_task(
+        PartitionedRuntime::APPLICATION.spawn(crate::tasks::group_join_task(
             session_for_group,
             spec,
             session_clock,
@@ -3155,7 +3175,11 @@ pub(crate) async fn run_demo(
     let actions_for_sweep = actions.clone();
     let session_for_sweep = session.clone();
     let sweep_cadence_ms = u64::from(reply_log_spec.sweep_cadence_ms);
-    let sweep_task = TokioRuntime.spawn(async move {
+    // APPLICATION — a periodic sweep over retained reply state, which is the
+    // shape zenoh gives `ZRuntime::Application.spawn(gc_task(..))`
+    // (`zenoh-ext/src/advanced_subscriber.rs`
+    // @ `ZRuntime::Application.spawn(gc_task(`).
+    let sweep_task = PartitionedRuntime::APPLICATION.spawn(async move {
         loop {
             sweep_clock.sleep(sweep_cadence_ms).await;
             // Lock the observer for the minimum window: a single

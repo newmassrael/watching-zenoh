@@ -785,6 +785,41 @@ if ! python3 scripts/lib/denied_term_lane_gate.py; then
     exit 1
 fi
 
+# ─── gate 2t — a production task names its subsystem (R2366, item 15) ──
+# grades: worktree
+#
+# R311y825 built the five-runtime partition; nothing production ever named a
+# subsystem, so `WZ_RUNTIME` tuned runtimes no task ran on. That is the shape
+# gate 2s is about, one level down: not an overstating comment but an
+# unreachable dial, and `cargo test` cannot fail on it — every test in
+# `--test runtime_partition` builds its own pool or names a subsystem itself, so
+# the target stayed green for the whole period the partition had no caller.
+#
+# UNCONDITIONAL, ~0.3s, and here rather than only hosted because the class is
+# invisible to gate 3: a seam reverted to `TokioRuntime.spawn` still compiles,
+# still passes its crate's tests, and only this reads the source for it. Two
+# derivations, so an empty tree cannot report green — the AMBIENT spellings must
+# be absent AND the NAMED sites must reach every declared subsystem. Layer C0
+# runs the same script hosted.
+if ! python3 scripts/lib/subsystem_spawn_gate.py --selftest >/dev/null; then
+    echo "" >&2
+    echo "pre-push: [gate 2t] subsystem-spawn SELFTEST FAILED — the gate below" >&2
+    echo "          cannot be trusted to fail, so its silence means nothing." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+if ! python3 scripts/lib/subsystem_spawn_gate.py; then
+    echo "" >&2
+    echo "pre-push: [gate 2t] subsystem-spawn FAILED — a production task lands" >&2
+    echo "          on whichever runtime is ambient, or a declared subsystem is" >&2
+    echo "          reached by nothing. Either way \`WZ_RUNTIME\` no longer paces" >&2
+    echo "          a running node. The line above names the file:line." >&2
+    echo "          Name the subsystem at the call site (\`WzRuntime::Rx\`," >&2
+    echo "          \`PartitionedRuntime::TX\`, ..) rather than widening this gate." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+
 # ─── gate 2e — the scouting socket's movable axes (R2142, item 225) ──
 # grades: worktree
 #

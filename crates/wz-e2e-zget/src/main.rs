@@ -89,57 +89,59 @@ fn main() -> ExitCode {
             let clock = opened.clock;
             let got_reply = Arc::new(AtomicBool::new(false));
             let got_reply_task = got_reply.clone();
-            let getter = tokio::spawn(async move {
-                for idx in 0..QUERY_BURST {
-                    if got_reply_task.load(Ordering::SeqCst) {
-                        break;
-                    }
-                    let got_reply_cb = got_reply_task.clone();
-                    let query_result = session.query(
-                        &query_key,
-                        QueryOptions::get(),
-                        move |reply| {
-                            got_reply_cb.store(true, Ordering::SeqCst);
-                            // Mirror wz-ap-demo's REPLY RECEIVED line so the
-                            // e2e test can assert the resolved keyexpr literal
-                            // + the responder's payload both surfaced through
-                            // the wire dispatch (Response -> ReplyRegistry ->
-                            // on_reply) under the zget-reply-only subset.
-                            let body_text = match reply.kind() {
-                                ReplyKind::Put => format!(
-                                    "Put payload={:?}",
-                                    String::from_utf8_lossy(reply.payload())
-                                ),
-                                ReplyKind::Del => "Del".to_string(),
-                                ReplyKind::Err => format!(
-                                    "Err encoding={:?} payload={:?}",
-                                    reply.err_encoding(),
-                                    String::from_utf8_lossy(reply.payload())
-                                ),
-                            };
-                            log::info!(
-                                "{BINARY}: ZGET REPLY RECEIVED rid={} keyexpr='{}' body={}",
-                                reply.rid(),
-                                reply.keyexpr(),
-                                body_text
-                            );
-                        },
-                        move |rid| {
-                            log::info!("{BINARY}: ZGET FINAL RECEIVED rid={rid}");
-                        },
-                    );
-                    match query_result {
-                        Ok(_handle) => {
-                            log::info!("{BINARY}: GET ISSUED idx={idx} keyexpr='{query_key}'")
-                        }
-                        Err(e) => {
-                            log::error!("{BINARY}: query failed: {e:?}");
+            // APPLICATION — the burst is this binary's own workload.
+            let getter =
+                wz::runtime_tokio::runtime_pool::WzRuntime::Application.spawn(async move {
+                    for idx in 0..QUERY_BURST {
+                        if got_reply_task.load(Ordering::SeqCst) {
                             break;
                         }
+                        let got_reply_cb = got_reply_task.clone();
+                        let query_result = session.query(
+                            &query_key,
+                            QueryOptions::get(),
+                            move |reply| {
+                                got_reply_cb.store(true, Ordering::SeqCst);
+                                // Mirror wz-ap-demo's REPLY RECEIVED line so the
+                                // e2e test can assert the resolved keyexpr literal
+                                // + the responder's payload both surfaced through
+                                // the wire dispatch (Response -> ReplyRegistry ->
+                                // on_reply) under the zget-reply-only subset.
+                                let body_text = match reply.kind() {
+                                    ReplyKind::Put => format!(
+                                        "Put payload={:?}",
+                                        String::from_utf8_lossy(reply.payload())
+                                    ),
+                                    ReplyKind::Del => "Del".to_string(),
+                                    ReplyKind::Err => format!(
+                                        "Err encoding={:?} payload={:?}",
+                                        reply.err_encoding(),
+                                        String::from_utf8_lossy(reply.payload())
+                                    ),
+                                };
+                                log::info!(
+                                    "{BINARY}: ZGET REPLY RECEIVED rid={} keyexpr='{}' body={}",
+                                    reply.rid(),
+                                    reply.keyexpr(),
+                                    body_text
+                                );
+                            },
+                            move |rid| {
+                                log::info!("{BINARY}: ZGET FINAL RECEIVED rid={rid}");
+                            },
+                        );
+                        match query_result {
+                            Ok(_handle) => {
+                                log::info!("{BINARY}: GET ISSUED idx={idx} keyexpr='{query_key}'")
+                            }
+                            Err(e) => {
+                                log::error!("{BINARY}: query failed: {e:?}");
+                                break;
+                            }
+                        }
+                        clock.sleep(BURST_INTERVAL_MS).await;
                     }
-                    clock.sleep(BURST_INTERVAL_MS).await;
-                }
-            });
+                });
             Ok::<_, std::io::Error>(AbortOnDrop(getter))
         }),
     )

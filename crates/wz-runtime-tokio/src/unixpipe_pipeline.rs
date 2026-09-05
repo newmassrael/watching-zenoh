@@ -81,7 +81,8 @@ use tokio::sync::mpsc;
 use wz_runtime_core::Runtime;
 
 use crate::link_interfaces::{addressless_link_endpoints, addressless_link_subject};
-use crate::runtime_impl::{TokioJoinHandle, TokioRuntime};
+use crate::runtime_impl::TokioJoinHandle;
+use crate::runtime_pool::PartitionedRuntime;
 use crate::stream_link::{writer_task, StreamReadDriver, StreamWriteDriver};
 use crate::writer_queue::WriterHandle;
 use wz_session_core::link::InterceptorLink;
@@ -698,7 +699,13 @@ pub async fn bind_unixpipe(path: &str, file_mask: Option<u32>) -> io::Result<Uni
     })?;
 
     let (tx, rx) = mpsc::unbounded_channel::<UnixpipeLink>();
-    let handle = TokioRuntime.spawn(unixpipe_acceptor_task(
+    // The ACCEPTOR subsystem — zenoh spawns every listener's accept task there
+    // (`io/zenoh-link-commons/src/listener.rs`
+    // @ `ZRuntime::Acceptor.spawn(task)`), and unixpipe in particular
+    // enters that runtime by name upstream
+    // (`io/zenoh-links/zenoh-link-unixpipe/src/unix/unicast.rs`
+    // @ `ZRuntime::Acceptor.block_on(`).
+    let handle = PartitionedRuntime::ACCEPTOR.spawn(unixpipe_acceptor_task(
         base_reader,
         path.to_string(),
         mode,

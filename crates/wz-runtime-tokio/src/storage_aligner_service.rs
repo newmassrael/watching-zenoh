@@ -578,7 +578,11 @@ where
     Session<R, T, Unicast>: Clone + Send + 'static,
 {
     let session = session.clone();
-    tokio::spawn(async move {
+    // The APPLICATION subsystem — the third of this crate's storage services,
+    // classified with its two siblings (see
+    // [`DigestPublisher::spawn`](crate::storage_replication_service::DigestPublisher::spawn)
+    // for why upstream naming none is not a reason for wz to name none).
+    crate::runtime_pool::WzRuntime::Application.spawn(async move {
         run_alignment(&session, &state, &config, peer_aligner_ke, initial_query).await;
     })
 }

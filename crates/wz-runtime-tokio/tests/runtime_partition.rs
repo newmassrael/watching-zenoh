@@ -26,6 +26,8 @@ use wz_runtime_tokio::runtime_impl::TokioRuntime;
 use wz_runtime_tokio::runtime_pool::{
     PartitionedRuntime, RuntimeConfigError, RuntimeParam, RuntimeParams, RuntimePool, WzRuntime,
 };
+use wz_runtime_tokio::udp_pipeline::bind_udp_demux;
+use wz_runtime_tokio::writer_queue::WriterHandle;
 
 /// BACKSTOP on how long a saturating task may hold its worker. It is not the
 /// hold — the test RELEASES its holders (see [`Holders`]) — it is what stops a
@@ -600,5 +602,199 @@ async fn block_in_place_drives_the_future_in_its_subsystem_context() {
         name.starts_with("wz-net-"),
         "work spawned from the bridged future belongs to the subsystem it was \
          bridged onto, not to the ambient runtime; got `{name}`"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// R2366 — what the partition PACES
+// ---------------------------------------------------------------------------
+//
+// The clause at the top of this file was answered by the SUBSTRATE, and left a
+// second one behind it, verbatim from the registry: "nothing in wz SELECTS a
+// subsystem. Every wz spawn still goes through TokioRuntime onto the ambient
+// runtime, so WZ_RUNTIME is inert in a real node and the max_blocking_threads
+// dial is reachable by no caller."
+//
+// No test above can tell that apart. Each of them builds its own pool or names
+// a subsystem itself, so every one would pass unchanged against a tree where no
+// production code ever named one. These four enter through PRODUCTION seams and
+// ask where the task landed; reverting a seam to `TokioRuntime.spawn` reds
+// them, and nothing else in this file moves.
+
+/// The link writer task runs on the TX subsystem.
+///
+/// `WriterHandle::spawn` is the ONE constructor every stream and datagram
+/// pipeline reaches its writer through (ten of them at the time of writing), so
+/// this is not one seam out of ten — it is the whole of wz's transmit
+/// partition, entered the way production enters it. The task body is
+/// caller-supplied, which is what makes the landing observable from outside the
+/// crate at all.
+#[tokio::test]
+async fn the_link_writer_task_runs_on_the_tx_subsystem() {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    let slot = Arc::new(std::sync::Mutex::new(None));
+    let task_slot = Arc::clone(&slot);
+
+    let handle = WriterHandle::spawn(rx, move |mut queue| async move {
+        record_thread_name(task_slot).await;
+        while queue.next().await.is_some() {}
+    });
+
+    tx.send(vec![0u8; 1]).expect("enqueue");
+    drop(tx);
+    handle.drain().await;
+
+    let name = slot.lock().expect("slot").clone().expect("the writer ran");
+    assert!(
+        name.starts_with("wz-tx-"),
+        "every pipeline reaches its writer through `WriterHandle::spawn`, so the \
+         writer must land on the tx subsystem rather than on whichever runtime \
+         happened to build the link; got `{name}`"
+    );
+}
+
+/// The ambient escape still escapes.
+///
+/// `WriterHandle::spawn_on` is what a caller uses when the writer has to share
+/// a runtime with whoever observes it — the paused-clock case
+/// `crate::runtime_pool` documents. It is also the control for the test above:
+/// same seam, same task, one argument different, and the landing moves.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn writer_spawn_on_stays_on_the_callers_runtime() {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    let slot = Arc::new(std::sync::Mutex::new(None));
+    let task_slot = Arc::clone(&slot);
+
+    let handle = WriterHandle::spawn_on(
+        tokio::runtime::Handle::current(),
+        rx,
+        move |mut queue| async move {
+            record_thread_name(task_slot).await;
+            while queue.next().await.is_some() {}
+        },
+    );
+
+    tx.send(vec![0u8; 1]).expect("enqueue");
+    drop(tx);
+    handle.drain().await;
+
+    let name = slot.lock().expect("slot").clone().expect("the writer ran");
+    assert!(
+        !name.starts_with("wz-"),
+        "a named handle must be honoured rather than overridden by the subsystem \
+         the convenience form picks; got `{name}`"
+    );
+}
+
+/// A listener's accept pump is PACED BY the acceptor subsystem.
+///
+/// The strongest shape available for a seam whose task is internal: rather than
+/// read a thread name the pump never exposes, hold every worker of `acc` and
+/// show the pump stops delivering — then release them and show the very same
+/// datagram arrives. Progress gated on `acc` is what "the pump runs on acc"
+/// means from outside. The bind runs on a runtime of the test's own, so a pump
+/// that had inherited the binder (the shape before this round) would be
+/// unaffected by holding `acc` and would deliver in the first phase, which is
+/// the assertion that then reds.
+///
+/// # What this measured that the first draft assumed
+///
+/// That draft held the BINDER's workers and expected the pump to keep going.
+/// It timed out, and the reason is a fact about tokio worth recording: an I/O
+/// resource stays registered with the runtime that CREATED it, so the socket's
+/// readiness still comes from the binder's reactor however the pump is spawned.
+/// Naming a subsystem moves the TASK, not the reactor that wakes it. That is
+/// upstream's shape too — zenoh builds its listener socket in the caller's
+/// runtime (`tokio::net::TcpSocket` in
+/// `io/zenoh-link-commons/src/tcp.rs`
+/// @ `pub fn new_listener(&self, addr: &SocketAddr)`) and only then spawns the
+/// accept task on `ZRuntime::Acceptor` (`io/zenoh-link-commons/src/listener.rs`
+/// @ `ZRuntime::Acceptor.spawn(task)`) —
+/// so it is a property of the partition, not a defect wz introduced.
+///
+/// The datagram is sent from a plain `std` socket, so the poke itself owes
+/// nothing to any runtime.
+#[test]
+fn a_listener_pump_is_paced_by_the_acceptor_subsystem() {
+    let binder = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("a runtime of the test's own to bind the listener on");
+
+    let mut demux = binder
+        .block_on(bind_udp_demux(
+            "127.0.0.1:0".parse().expect("loopback"),
+            None,
+        ))
+        .expect("udp demux binds on an ephemeral loopback port");
+    let listen_addr = demux.local_addr();
+
+    let holders = Holders::new();
+    saturate(
+        |started| {
+            WzRuntime::Acceptor.spawn(hold_a_worker(started, holders.clone()));
+        },
+        RuntimeParam::defaults_for(WzRuntime::Acceptor).worker_threads,
+    );
+
+    let peer = std::net::UdpSocket::bind("127.0.0.1:0").expect("peer socket");
+    peer.send_to(b"wz-partition-probe", listen_addr)
+        .expect("datagram reaches the listener");
+
+    let while_held = binder.block_on(async {
+        tokio::time::timeout(Duration::from_millis(OBSERVE_MS), demux.recv_new_face())
+            .await
+            .map(|face| face.is_some())
+    });
+    holders.release();
+    let after_release = binder.block_on(async {
+        tokio::time::timeout(
+            Duration::from_millis(REACH_WORKER_MS),
+            demux.recv_new_face(),
+        )
+        .await
+        .map(|face| face.is_some())
+    });
+
+    assert!(
+        while_held.is_err(),
+        "with every acc worker held the demux pump cannot be polled, so no face \
+         may be delivered inside {OBSERVE_MS}ms — a pump that had inherited the \
+         binding runtime would be untouched by this and deliver; got \
+         {while_held:?}"
+    );
+    assert!(
+        matches!(after_release, Ok(true)),
+        "the datagram is still in the socket, so releasing acc must let the very \
+         same face through — otherwise the first phase proved nothing but a lost \
+         packet; got {after_release:?}"
+    );
+}
+
+/// A blocking caller reaches its subsystem's BLOCKING pool.
+///
+/// `max_blocking_threads` is configured on all five runtimes and, until a
+/// caller spends it, is a number with no behaviour: an operator could lower it
+/// to one and nothing would change, because nothing ever asked those pools for
+/// a thread. This is the seam that makes it a dial, entered as `wz-replay`'s
+/// live emission enters it.
+#[test]
+fn a_blocking_caller_reaches_its_subsystems_blocking_pool() {
+    let handle = WzRuntime::Application.spawn_blocking(|| {
+        std::thread::current()
+            .name()
+            .unwrap_or("<unnamed>")
+            .to_string()
+    });
+    let name = WzRuntime::Application
+        .handle()
+        .block_on(handle)
+        .expect("the blocking task joins");
+
+    assert!(
+        name.starts_with("wz-app-"),
+        "a blocking task must draw from the named subsystem's blocking pool — \
+         that pool is where `max_blocking_threads` is spent; got `{name}`"
     );
 }

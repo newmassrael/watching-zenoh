@@ -84,7 +84,8 @@ use tokio::sync::mpsc;
 
 use wz_runtime_core::Runtime;
 
-use crate::runtime_impl::{TokioJoinHandle, TokioRuntime};
+use crate::runtime_impl::TokioJoinHandle;
+use crate::runtime_pool::PartitionedRuntime;
 use crate::writer_queue::{OutboundQueue, WriterHandle};
 // R311mk — import `BoxedLinkDriver` from its SSOT home (the shared
 // `wz_session_core::link` tier) rather than via the `crate::session_glue`
@@ -343,7 +344,14 @@ pub async fn bind_udp_demux(listen: SocketAddr, iface: Option<&str>) -> io::Resu
     let local_addr = socket.local_addr()?;
     let socket = Arc::new(socket);
     let (new_face_tx, new_face_rx) = mpsc::unbounded_channel::<NewUdpFace>();
-    let handle = TokioRuntime.spawn(udp_demux_task(socket.clone(), new_face_tx));
+    // The ACCEPTOR subsystem, which this function's own doc already named the
+    // reason for: the pump is this listener's accept task, and zenoh spawns
+    // every listener's accept task on `ZRuntime::Acceptor`
+    // (`io/zenoh-link-commons/src/listener.rs`
+    // @ `ZRuntime::Acceptor.spawn(task)`). It demuxes datagrams as
+    // well as producing faces, but the face production is what its lifetime is
+    // bound to — it starts at bind and ends when the listener does.
+    let handle = PartitionedRuntime::ACCEPTOR.spawn(udp_demux_task(socket.clone(), new_face_tx));
     Ok(UdpDemux {
         new_face_rx,
         send_socket: socket,

@@ -22,16 +22,32 @@
 //!
 //! ## Choosing a runtime
 //!
-//! Nothing is rewired implicitly. `TokioRuntime` keeps spawning onto the
-//! ambient runtime, which is what every existing consumer and every
-//! `#[tokio::test]` expects. A caller that wants isolation names it:
+//! Every PRODUCTION task in wz names its subsystem (R2366). That is what makes
+//! [`RUNTIME_ENV`](crate::runtime_pool::RUNTIME_ENV) reach a running node:
+//! until it did, the partition was a substrate with no caller, so an operator
+//! could tune five runtimes and pace nothing. The classification is derived
+//! from zenoh's own — upstream names a subsystem at 48 sites, and each wz seam
+//! carries the upstream line it was classified against.
+//!
+//! | wz seam | subsystem |
+//! |---|---|
+//! | link writer task (all ten pipelines, via `WriterHandle::spawn`) | `tx` |
+//! | multicast egress pump | `tx` |
+//! | link read / demux, multicast ingress pump | `rx` |
+//! | listener accept task (udp demux, unixpipe, REST connection) | `acc` |
+//! | scouting responder, autoconnect dialer, advanced-publisher beacon | `net` |
+//! | session workload, storage services, retained-state sweeps | `app` |
+//!
+//! [`TokioRuntime`](crate::runtime_impl::TokioRuntime) remains the AMBIENT
+//! binding, and it is still the right one for a consumer embedding wz inside
+//! their own reactor, for a `#[tokio::test]`, and at the `spawn_on` escapes
+//! (see below). A caller names a subsystem like this:
 //!
 //! ```no_run
-//! use wz_runtime_tokio::runtime_pool::{PartitionedRuntime, WzRuntime};
+//! use wz_runtime_tokio::runtime_pool::PartitionedRuntime;
 //! use wz_runtime_core::Runtime;
 //!
-//! let rx = PartitionedRuntime::new(WzRuntime::Rx);
-//! rx.spawn(async { /* decode loop, isolated from TX */ });
+//! PartitionedRuntime::RX.spawn(async { /* decode loop, isolated from TX */ });
 //! ```
 //!
 //! [`PartitionedRuntime`](crate::runtime_pool::PartitionedRuntime) implements
@@ -39,6 +55,17 @@
 //! wherever a generic `R: Runtime` is threaded — the MCU profile's
 //! single-executor binding is unaffected, since the partition is an AP-profile
 //! concern and lives entirely in this crate.
+//!
+//! ## Why two seams keep an ambient escape
+//!
+//! Tokio's paused clock is per-runtime. A task whose SCHEDULE is the thing
+//! under observation therefore has to share a runtime with whoever advances
+//! that clock, or the two are reading different clocks and the observer sees
+//! real seconds where it expected virtual instants. Those two seams —
+//! `WriterHandle::spawn_on` and `DigestPublisher::spawn_on` — take a
+//! `tokio::runtime::Handle` for that reason, with the subsystem-naming `spawn`
+//! delegating to them. It is a public general form rather than a test hook: a
+//! host driving wz from its own reactor needs it for the same reason.
 //!
 //! ## Tuning
 //!
@@ -185,6 +212,34 @@ impl WzRuntime {
         F::Output: Send + 'static,
     {
         self.handle().spawn(fut)
+    }
+
+    /// Run a BLOCKING closure on this subsystem's blocking-thread pool.
+    ///
+    /// The counterpart of [`Self::spawn`] for work that must not be polled on a
+    /// worker at all — a synchronous emit loop, a `read(2)` that cannot be made
+    /// async. It is what makes
+    /// [`RuntimeParam::max_blocking_threads`](crate::runtime_pool::RuntimeParam)
+    /// a dial rather than a recorded number: until a caller reaches this, the
+    /// ceiling is configured on runtimes whose blocking pool nothing ever asks
+    /// for, and an operator lowering it changes nothing.
+    ///
+    /// zenoh spends its own `spawn_blocking` on exactly this shape — the uring
+    /// reader's submit loop on `RX`
+    /// (`commons/zenoh-uring/src/linux/api/reader/mod.rs`
+    /// @ `ZRuntime::RX.spawn_blocking(`), the SHM
+    /// segment handshake on `Application`
+    /// (`io/zenoh-transport/src/common/shm/interop.rs`
+    /// @ `ZRuntime::Application.spawn_blocking(`) and the batch
+    /// serializer on `Net` (`io/zenoh-transport/src/unicast/universal/tx.rs`
+    /// @ `ZRuntime::Net.spawn_blocking(`),
+    /// each naming the subsystem whose ceiling it should draw against.
+    pub fn spawn_blocking<F, R>(self, f: F) -> tokio::task::JoinHandle<R>
+    where
+        F: FnOnce() -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        self.handle().spawn_blocking(f)
     }
 
     /// Drive `fut` to completion in this subsystem's runtime context from a
@@ -540,6 +595,19 @@ impl RuntimePool {
         self.handle(rt).spawn(fut)
     }
 
+    /// Run a blocking closure on the blocking pool of the runtime serving `rt` —
+    /// the caller-owned twin of
+    /// [`WzRuntime::spawn_blocking`](crate::runtime_pool::WzRuntime::spawn_blocking),
+    /// and the only route by which a pool built here spends its
+    /// `max_blocking_threads`.
+    pub fn spawn_blocking<F, R>(&self, rt: WzRuntime, f: F) -> tokio::task::JoinHandle<R>
+    where
+        F: FnOnce() -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        self.handle(rt).spawn_blocking(f)
+    }
+
     fn build(&self, rt: WzRuntime) -> Result<TokioRt, RuntimeConfigError> {
         let param = self.params.get(rt);
         let counter = Arc::clone(&self.thread_index[rt.index()]);
@@ -606,6 +674,17 @@ impl PartitionedRuntime {
     pub const fn new(subsystem: WzRuntime) -> Self {
         Self { subsystem }
     }
+
+    /// The application tier — the session API surface a consumer calls into.
+    pub const APPLICATION: Self = Self::new(WzRuntime::Application);
+    /// Inbound connection acceptance — a listener's accept task.
+    pub const ACCEPTOR: Self = Self::new(WzRuntime::Acceptor);
+    /// The transmit path — a link's writer task.
+    pub const TX: Self = Self::new(WzRuntime::Tx);
+    /// The receive path — a link's read and demux task.
+    pub const RX: Self = Self::new(WzRuntime::Rx);
+    /// Network-tier background work — scouting, gossip, beacons, upkeep.
+    pub const NET: Self = Self::new(WzRuntime::Net);
 
     /// Which subsystem this spawns onto.
     pub const fn subsystem(self) -> WzRuntime {

@@ -65,6 +65,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{sleep, timeout, Duration};
 
+use wz_runtime_tokio::runtime_pool::WzRuntime;
 use wz_runtime_tokio::session::TokioSession;
 
 mod bridge;
@@ -128,7 +129,15 @@ pub async fn serve_on(
     // ticks the reply sweep). Safe alongside any caller-side sweep (idempotent).
     // Aborted when this accept loop returns.
     let sweep_session = session.clone();
-    let _sweep = AbortOnDrop(tokio::spawn(async move {
+    // APPLICATION — a periodic sweep over retained query state, zenoh's own
+    // classification for that shape (`ZRuntime::Application.spawn(gc_task(..))`,
+    // `zenoh-ext/src/advanced_subscriber.rs`
+    // @ `ZRuntime::Application.spawn(gc_task(`). Upstream's REST plugin names
+    // no subsystem at all — it reaches for a plugin-local runtime instead
+    // (`plugins/zenoh-plugin-rest/src/lib.rs`
+    // @ `fn spawn_runtime<F>(task: F)`) — so there is no upstream
+    // choice here to be faithful to, only wz's own tiers to place it in.
+    let _sweep = AbortOnDrop(WzRuntime::Application.spawn(async move {
         loop {
             sleep(SWEEP_CADENCE).await;
             sweep_session.sweep_expired_queries();
@@ -139,7 +148,11 @@ pub async fn serve_on(
         let (stream, _peer) = listener.accept().await?;
         let session = session.clone();
         let zid = zid.clone();
-        tokio::spawn(async move {
+        // ACCEPTOR — this is the per-connection child of an accept loop, and an
+        // accept loop is what zenoh puts on that subsystem
+        // (`io/zenoh-link-commons/src/listener.rs`
+        // @ `ZRuntime::Acceptor.spawn(task)`).
+        WzRuntime::Acceptor.spawn(async move {
             handle_connection(session, zid, stream).await;
         });
     }
