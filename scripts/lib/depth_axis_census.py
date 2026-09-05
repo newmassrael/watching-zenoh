@@ -324,11 +324,20 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # `path:line` token at all (upstream claims are written in the anchored ``path`
 # @ `needle`` form), so neither move comes from editing prose. PARTIAL falls
 # 79 -> 78 with it.
-PIN_REACHED = 66
+# R2357 — `declare-queryable` left the PARTIAL population (COMPLETE), so these
+# three fall with it and NOT because any prose was edited: reached 66 -> 65 (it
+# was one of the atoms an executing test reached), wz citations 393 -> 384 and
+# ambiguous 83 -> 85 -> 83, all of them citations that entry carried. PARTIAL
+# falls 78 -> 77 with it. Its residuals were each discharged and re-checked by
+# command -- the Mapping-bit witness passes with its negative control, the
+# ext_qos tests red under a mutation of the extension id, the distance clause
+# was already rejected by measurement, and the QUERYABLES-interest consequence
+# is owned by `declare-interest` and stays open there.
+PIN_REACHED = 65
 PIN_UNREACHED = 2
 PIN_NO_SYMBOL = 10
-PIN_WZ_CITATIONS = 393
-PIN_AMBIGUOUS = 85
+PIN_WZ_CITATIONS = 384
+PIN_AMBIGUOUS = 83
 
 
 class Fatal(Exception):
