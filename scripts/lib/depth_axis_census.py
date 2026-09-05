@@ -333,11 +333,26 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # ext_qos tests red under a mutation of the extension id, the distance clause
 # was already rejected by measurement, and the QUERYABLES-interest consequence
 # is owned by `declare-interest` and stays open there.
-PIN_REACHED = 65
+# R2359 — `liveliness-history` left the PARTIAL population (COMPLETE), so these
+# three fall WITH the atom and not because any prose was edited. Measured with
+# this module's OWN `reach_partition` and `citation_audit` against the entry as
+# it stood BEFORE the reason was rewritten, the discipline R2354 records above:
+# the atom sat in `reached` (so that count loses exactly 1) and its reason
+# carried 7 citations resolving to one tracked wz file plus 2 ambiguous ones —
+# exactly the 384 -> 377 and 83 -> 81 this move makes. The 11 upstream-read
+# tokens it also carried leave the unpinned total (522 -> 511). Nothing the
+# round APPENDED can move these: the census reads PARTIAL entries only, so a
+# COMPLETE atom's reason is outside the population by construction. PARTIAL
+# falls 77 -> 76 with it.
+# Its last standing clause was closed as PARITY by re-measuring both references
+# at the pin (zenoh and pico each replay REMOTE tokens only), and the round
+# closed a gap no clause had named — a historical delivery reaching a
+# future-only subscriber — damage-bound by two separable probes.
+PIN_REACHED = 64
 PIN_UNREACHED = 2
 PIN_NO_SYMBOL = 10
-PIN_WZ_CITATIONS = 384
-PIN_AMBIGUOUS = 83
+PIN_WZ_CITATIONS = 377
+PIN_AMBIGUOUS = 81
 
 
 class Fatal(Exception):

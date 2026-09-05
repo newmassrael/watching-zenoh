@@ -355,7 +355,10 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
         keyexpr: &str,
         token_id: u64,
     ) -> usize {
-        self.fan_to_matching_slots(kind, keyexpr, token_id)
+        // The BORROWED fan is the live plane by construction: it carries no
+        // envelope, so there is no `interest_id` that could make it a CURRENT
+        // answer. `false` is the derived value here, not a default.
+        self.fan_to_matching_slots(kind, keyexpr, token_id, false)
     }
 
     /// Route an inbound `Declare` envelope's inner body through the
@@ -377,11 +380,54 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
     /// owned `DeclareOwnedVariant` (codec) + the `alloc` `peer_token_table`
     /// resolution, then funnels through the no-heap
     /// [`dispatch_sample_borrowed`](Self::dispatch_sample_borrowed) SSOT.
+    ///
+    /// An UNSOLICITED declaration — the live plane. A declaration that
+    /// ANSWERS a CURRENT interest is historical and belongs to
+    /// [`dispatch_declare_historical`](Self::dispatch_declare_historical);
+    /// the two share one body, the way `dispatch_messages` shares
+    /// [`dispatch_messages_unclaimed`](Self::dispatch_messages_unclaimed)'s.
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
     pub fn dispatch_declare<'a>(
         &mut self,
         body: &DeclareOwnedVariant,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+    ) {
+        self.dispatch_declare_historical(body, peer_keyexpr_table, false);
+    }
+
+    /// [`Self::dispatch_declare`], told whether the declaration is a
+    /// HISTORICAL one — i.e. an answer to a CURRENT interest, which on the
+    /// wire is a `Declare` carrying an outer `interest_id`.
+    ///
+    /// A historical token is delivered ONLY to slots that asked for history.
+    /// zenoh spells the rule `(!historical || sub.history)` at
+    /// `zenoh/src/api/session.rs` @ `&& (!historical || sub.history)`, and
+    /// derives the flag at its `DeclareToken` arm from the envelope, with the
+    /// reason in its own comment: `zenoh/src/api/session.rs` @ `// interest_id is set if the Token is an Interest::Current.`
+    ///
+    /// WHY IT MATTERS, and why the flag cannot be dropped: `history = false`
+    /// means "tell me about tokens that come alive FROM NOW ON". A second
+    /// subscriber declaring with `history = true` pulls the peer's whole
+    /// CURRENT set onto the same session, and without this gate every one of
+    /// those pre-existing tokens is announced to the `history = false`
+    /// subscriber as if it had just appeared — the exact event that subscriber
+    /// declined. The tokens still enter `peer_token_table` either way (the gate
+    /// is on DELIVERY, not on the table), which is upstream's split too: its
+    /// `Entry::Vacant` insert runs before the callback fan.
+    ///
+    /// zenoh-pico has NO counterpart and cannot have one: its subscription
+    /// record stores no `history` bit at all —
+    /// `vendor/zenoh-pico/include/zenoh-pico/net/subscribe.h` @ `_z_subscriber_t`
+    /// — the flag being consumed at register time and discarded, so pico fans a
+    /// historical token to every matching subscription. wz follows zenoh here
+    /// rather than pico: the two disagree, and this gate is the side that keeps
+    /// `history = false` truthful.
+    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    pub fn dispatch_declare_historical<'a>(
+        &mut self,
+        body: &DeclareOwnedVariant,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        historical: bool,
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         match body {
@@ -409,7 +455,12 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
                     return;
                 }
                 self.peer_token_table.insert(decl.id, resolved.clone());
-                self.fan_to_matching_slots(LivelinessSampleKind::Put, &resolved, decl.id);
+                self.fan_to_matching_slots(
+                    LivelinessSampleKind::Put,
+                    &resolved,
+                    decl.id,
+                    historical,
+                );
             }
             DeclareOwnedVariant::CodecZenohUndeclToken(undecl) => {
                 let resolved = match self.peer_token_table.remove(&undecl.id) {
@@ -444,7 +495,12 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
                         None => return,
                     },
                 };
-                self.fan_to_matching_slots(LivelinessSampleKind::Delete, &resolved, undecl.id);
+                self.fan_to_matching_slots(
+                    LivelinessSampleKind::Delete,
+                    &resolved,
+                    undecl.id,
+                    historical,
+                );
             }
             // Other DeclareOwnedVariant arms are not the liveliness layer's
             // concern.
@@ -505,7 +561,10 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
                 self.peer_token_table.drain().collect();
             drained.sort_by_key(|(id, _)| *id);
             for (id, keyexpr) in &drained {
-                self.fan_to_matching_slots(LivelinessSampleKind::Delete, keyexpr, *id);
+                // A link loss is a LIVE event — the peer's tokens are going
+                // away NOW — so it reaches every matching slot regardless of
+                // its history flag, exactly as the live `UndeclToken` fan does.
+                self.fan_to_matching_slots(LivelinessSampleKind::Delete, keyexpr, *id, false);
             }
             drained.len()
         }
@@ -619,9 +678,19 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
         kind: LivelinessSampleKind,
         resolved: &str,
         token_id: u64,
+        historical: bool,
     ) -> usize {
         let mut fired: usize = 0;
         for slot in self.slots.iter_mut() {
+            // R2359 — a HISTORICAL delivery (an answer to a CURRENT interest)
+            // reaches only the slots that asked for history. zenoh's own
+            // predicate is `zenoh/src/api/session.rs` @ `&& (!historical || sub.history)`,
+            // evaluated per subscriber in exactly this position: after the
+            // origin test and before the keyexpr match, on the SAME slot list
+            // the live fan walks.
+            if historical && !slot.history {
+                continue;
+            }
             let mut chunks: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
             let mut overflow = false;
             for c in slot.pattern.split('/') {
@@ -743,7 +812,20 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
                     // dispatch (get is interest_id-only); conflating the two
                     // correlation models here would lose separation, not gain
                     // symmetry.
-                    self.dispatch_declare(&decl.body, peer_keyexpr_table);
+                    // R2359 — the outer `interest_id` is what makes a
+                    // declaration HISTORICAL: it is set only when the token
+                    // answers a CURRENT interest. Derived from the envelope
+                    // here (the one place that holds it) rather than passed as
+                    // a literal, which is upstream's own derivation —
+                    // `zenoh/src/api/session.rs` @ `msg.interest_id.is_some(),`.
+                    // The claimed-id filter above has already removed the ids a
+                    // pending GET owns, so what survives to here and carries an
+                    // id is a SUBSCRIBER's own CURRENT replay.
+                    self.dispatch_declare_historical(
+                        &decl.body,
+                        peer_keyexpr_table,
+                        decl.interest_id.is_some(),
+                    );
                     // R311xx — the responder terminates a CURRENT replay
                     // with `Declare(DeclFinal)` carrying our `interest_id`
                     // (the declarer-side `LocalTokenRegistry` stages it via
@@ -845,6 +927,23 @@ mod tests {
     use wz_session_core_test_support::*;
 
     use crate::network_message::NetworkMessage;
+
+    /// R2359 — a `Declare` envelope with the outer `interest_id` under the
+    /// test's control. That field is the ONLY thing separating a historical
+    /// declaration from a live one, and none of the `declare_envelope_*`
+    /// helpers in the shared support crate can set it (they all hardcode
+    /// `None`), so the wire-side history gate cannot be driven without it.
+    fn declare_envelope_with_interest(
+        body: DeclareOwnedVariant,
+        interest_id: Option<u64>,
+    ) -> wz_codecs::declare::DeclareOwned {
+        wz_codecs::declare::DeclareOwned {
+            header: 0,
+            interest_id,
+            extensions: None,
+            body,
+        }
+    }
 
     fn make_subscriber(
         capture: Arc<Mutex<Vec<(LivelinessSampleKind, String, u64)>>>,
@@ -1037,6 +1136,181 @@ mod tests {
             3,
             "the replay is owed to the DECLARING slot only -- subscriber A was \
              already told about these tokens when they arrived live",
+        );
+    }
+
+    /// R2359 — the wire-side twin of the replay gate below, and the half wz
+    /// did not have. A token that ANSWERS a CURRENT interest is HISTORICAL,
+    /// and upstream withholds it from every subscriber that did not ask for
+    /// history: `zenoh/src/api/session.rs` @ `&& (!historical || sub.history)`.
+    ///
+    /// The scenario is the only one in which the two can be told apart on a
+    /// single session: B declares future-only, then A declares with history,
+    /// and A's CURRENT replay drags the peer's PRE-EXISTING tokens in. Without
+    /// the gate B is told those tokens came alive now — the one event B
+    /// declined by passing `history = false`.
+    ///
+    /// Driven through [`dispatch_messages`](LivelinessSubscriberRegistry::dispatch_messages)
+    /// rather than the fan, because the claim is about a value DERIVED from the
+    /// envelope: a test that passed `historical` by hand would pass with the
+    /// derivation deleted.
+    #[test]
+    fn a_historical_token_is_withheld_from_a_future_only_subscriber() {
+        let mut reg = LivelinessSubscriberRegistry::new();
+        let future_only: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
+        let with_history: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
+        reg.register(
+            1,
+            "liveliness/**",
+            false,
+            make_subscriber(future_only.clone()),
+        )
+        .unwrap();
+        reg.register(
+            2,
+            "liveliness/**",
+            true,
+            make_subscriber(with_history.clone()),
+        )
+        .unwrap();
+
+        // interest_id = Some -> this Declare answers subscriber 2's CURRENT
+        // interest. Both slots MATCH the keyexpr; only the history flag differs.
+        reg.dispatch_messages(
+            &[NetworkMessage::Declare(Box::new(
+                declare_envelope_with_interest(
+                    DeclareOwnedVariant::CodecZenohDeclToken(decl_token(
+                        7,
+                        0,
+                        Some("liveliness/a"),
+                    )),
+                    Some(11),
+                ),
+            ))],
+            &HashMap::new(),
+        );
+
+        assert_eq!(
+            with_history.lock().unwrap().len(),
+            1,
+            "the subscriber that ASKED for history is owed the historical token",
+        );
+        assert!(
+            future_only.lock().unwrap().is_empty(),
+            "a future-only subscriber must not be told a pre-existing token \
+             came alive just because a SIBLING subscriber asked for history",
+        );
+        assert_eq!(
+            reg.peer_token_count(),
+            1,
+            "the gate is on DELIVERY, not on the table -- upstream inserts into \
+             `remote_tokens` before the callback fan and so does this",
+        );
+    }
+
+    /// THE CONTROL for the test above, and the reason its emptiness is a
+    /// reading rather than an accident. The SAME two slots and the SAME token,
+    /// differing only in the envelope's `interest_id`: unsolicited, so both
+    /// subscribers are owed it. Without this, "B saw nothing" is equally
+    /// explained by the pattern not matching or by B's sink being broken.
+    #[test]
+    fn an_unsolicited_token_reaches_a_future_only_subscriber_too() {
+        let mut reg = LivelinessSubscriberRegistry::new();
+        let future_only: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
+        let with_history: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
+        reg.register(
+            1,
+            "liveliness/**",
+            false,
+            make_subscriber(future_only.clone()),
+        )
+        .unwrap();
+        reg.register(
+            2,
+            "liveliness/**",
+            true,
+            make_subscriber(with_history.clone()),
+        )
+        .unwrap();
+
+        reg.dispatch_messages(
+            &[NetworkMessage::Declare(Box::new(
+                declare_envelope_with_interest(
+                    DeclareOwnedVariant::CodecZenohDeclToken(decl_token(
+                        7,
+                        0,
+                        Some("liveliness/a"),
+                    )),
+                    None,
+                ),
+            ))],
+            &HashMap::new(),
+        );
+
+        assert_eq!(
+            future_only.lock().unwrap().len(),
+            1,
+            "a LIVE arrival is exactly what `history = false` subscribes to",
+        );
+        assert_eq!(
+            with_history.lock().unwrap().len(),
+            1,
+            "and the other slot too"
+        );
+    }
+
+    /// The retraction half. zenoh passes the same derived flag to its
+    /// `UndeclareToken` arm — `zenoh/src/api/session.rs` @ `let interest_current = msg.interest_id.is_some();`
+    /// — so a historical Delete is withheld from a future-only subscriber for
+    /// the same reason its Put was: that subscriber was never told the token
+    /// existed, and a Delete for a token it never saw is a phantom retraction.
+    #[test]
+    fn a_historical_undeclaration_is_withheld_from_a_future_only_subscriber() {
+        let mut reg = LivelinessSubscriberRegistry::new();
+        let future_only: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
+        let with_history: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
+        reg.register(
+            1,
+            "liveliness/**",
+            false,
+            make_subscriber(future_only.clone()),
+        )
+        .unwrap();
+        reg.register(
+            2,
+            "liveliness/**",
+            true,
+            make_subscriber(with_history.clone()),
+        )
+        .unwrap();
+
+        // Establish the token historically, then retract it historically.
+        for body in [
+            DeclareOwnedVariant::CodecZenohDeclToken(decl_token(7, 0, Some("liveliness/a"))),
+            DeclareOwnedVariant::CodecZenohUndeclToken(undecl_token(7)),
+        ] {
+            reg.dispatch_messages(
+                &[NetworkMessage::Declare(Box::new(
+                    declare_envelope_with_interest(body, Some(11)),
+                ))],
+                &HashMap::new(),
+            );
+        }
+
+        assert_eq!(
+            with_history
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(k, ..)| *k == LivelinessSampleKind::Delete)
+                .count(),
+            1,
+            "the history subscriber saw the token, so it is owed the retraction",
+        );
+        assert!(
+            future_only.lock().unwrap().is_empty(),
+            "neither half of a historical token's life reaches a future-only \
+             subscriber -- no Put, and therefore no Delete either",
         );
     }
 
