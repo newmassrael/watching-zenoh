@@ -1800,7 +1800,7 @@ import pathlib, re, sys
 # self-check below, which requires every token to appear in that skip block.
 TOKENS = ["wz_e2e_", "multicast", "zenohd", "wz_router", "wz_peer",
           "wz_storage_host", "zenoh_ext", "inert", "apfull", "wz_plugin",
-          "capi_c", "analyzer"]
+          "capi_c", "analyzer", "zenoh_zget"]
 
 # R311y838 — the selfcheck is BIDIRECTIONAL now, and scoped to Layer E's own
 # invocation instead of the whole file.
@@ -3555,6 +3555,21 @@ PY
     # citation resolves".
     python3 scripts/lib/upstream_citation_anchor_gate.py --selftest || return 1
     python3 scripts/lib/upstream_citation_anchor_gate.py --check || return 1
+    # R2358 — Layer E must not SELECT a test whose oracle it does not PROVISION.
+    # That lane sweeps `-- --ignored` minus a hand-written token list, so it
+    # ADOPTS every ignored test added to wz-integration-tests, and it builds only
+    # the zenoh-pico CLI and wz-ap-demo. R2350 added three tests driving the
+    # zenoh CORE EXAMPLE z_get; they matched no token, so the lane took them and
+    # PANICKED on the missing binary -- six hosted runs in a row, and the lane's
+    # own comment had already said the sweep "is not count-guarded, so there is
+    # no number to follow it". Three prior extensions of that list are recorded
+    # beside it; this is the fourth, and the first with a mechanism.
+    # HERE and not in a lane that runs the tests: the question is which tests the
+    # sweep SELECTS, which is answerable by reading run-ci.sh and the test crate,
+    # with no binary of any kind. MEASURED both ways -- removing the token reds it
+    # naming exactly the three that failed hosted, and nothing else.
+    python3 scripts/lib/layer_e_oracle_scope_gate.py --selftest || return 1
+    python3 scripts/lib/layer_e_oracle_scope_gate.py || return 1
     # R2260 (open-debt item 593's residue) — wz's per-protocol `is_streamed` /
     # `is_reliable`, which answer zenoh-c's `z_link_is_streamed` /
     # `z_link_reliability` and are therefore UPSTREAM'S values rather than wz's
@@ -12482,10 +12497,23 @@ layer_e_ap_demo_round_trip() {
     # only Z builds. MEASURED before adding: of the 76 tests this sweep selects,
     # exactly one fn contains `analyzer`, so the token moves that leg and nothing
     # else. The sweep is not count-guarded, so there is no number to follow it.
+    # R2358 — `zenoh_zget` joins the list, and this time with a GATE behind it
+    # (`scripts/lib/layer_e_oracle_scope_gate.py`) rather than a fourth promise.
+    # R2350 added three tests that drive the zenoh CORE EXAMPLE `z_get`, a binary
+    # family this job never builds: it provisions the zenoh-pico CLI and
+    # wz-ap-demo and nothing else. Their `#[ignore]` reason says "Layer E runs
+    # via --ignored", which is what the sweep did -- so they were adopted by a
+    # lane that cannot supply their oracle and PANICKED on the missing binary
+    # instead of taking the honest skip path, six hosted runs in a row.
+    # DERIVED, not guessed: of the 123 ignored tests this sweep selects, exactly
+    # three live in a file that calls `zenoh_core_example_binary`, and this token
+    # removes exactly those three -- zero over-reach (no other selected test
+    # matches it, including the pico `..._serves_pico_zget` sibling this lane
+    # SHOULD run) and zero under-reach.
     (cd crates && cargo test -p wz-integration-tests --quiet -- --ignored \
         --skip wz_e2e_ --skip multicast --skip zenohd --skip wz_router --skip wz_peer \
         --skip wz_storage_host --skip zenoh_ext --skip inert --skip apfull \
-        --skip wz_plugin --skip capi_c --skip analyzer)
+        --skip wz_plugin --skip capi_c --skip analyzer --skip zenoh_zget)
 }
 
 # ─── Layer E2 — facade-subset behavioural e2e vs zenoh-pico ──────────
@@ -14725,6 +14753,20 @@ layer_z_zenohd_interop() {
     # calibration twin's zero on the same walk is what makes that a reading).
     _runci_guarded_test Z 3 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_fragment_tx_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
+    # R2358 — the storage-history version legs, registered in the lane that
+    # PROVISIONS their oracle. They drive the zenoh CORE EXAMPLE `z_get`, which
+    # only this lane builds (`build-zenohd.sh` emits the core examples beside
+    # zenohd from the same pinned checkout). Layer E's `-- --ignored` sweep had
+    # adopted them automatically, and that lane builds the pico CLI and
+    # wz-ap-demo only, so the helper's deliberate "a missing oracle must not
+    # degrade into a green run" assert fired there instead -- six hosted runs
+    # red. R2358 skips them out of E with `zenoh_zget` and lands them here.
+    # COUNT-GUARDED at 3, which is the half that matters: the fixture is now
+    # reachable from exactly one lane, so a dropped `#[ignore]` that selected
+    # ZERO tests would otherwise pass green in both.
+    _runci_guarded_test Z 3 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_storage_history_versions_to_a_zenoh_zget -- --ignored --quiet --test-threads=1 \
+        || return 1
     # R311y439 — wz RX FRAGMENTATION cross-impl (transport-fragmentation
     # zenohd->wz), the direction R311y438 explicitly left open ("the tiny MTU
     # binds BOTH ways ... but nothing asserts it, so no claim is made"). wz
