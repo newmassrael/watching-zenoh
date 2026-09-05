@@ -404,8 +404,17 @@ untracked note.
   state, not a gap to paper over — but "absent" is a fact to establish, not to
   inherit. The read-directly rule is NOT waived by the reference being
   inconvenient.
-- **zenoh-pico** — vendored in-repo at `vendor/zenoh-pico/`, so unlike the
-  others this one is always available to every clone.
+- **zenoh-pico** — vendored as a SUBMODULE at `vendor/zenoh-pico/`, so it is
+  present in a clone that initialises submodules (`--recurse-submodules`, or a
+  later `git submodule update --init`) and ABSENT from one that does not: a
+  bare clone leaves the directory empty, and `git ls-files vendor/zenoh-pico/`
+  yields the gitlink rather than the tree. `vendor/sce` is the same shape, so
+  the contrast is not pico-versus-the-rest — it is the two SUBMODULES against
+  the zenoh references above, which no submodule carries and which each need
+  provisioning of their own. (R2363: this bullet used to say "always available
+  to every clone", which was false on both halves — the availability and the
+  "unlike the others" — three lines under the paragraph that says an absence is
+  a fact to establish rather than inherit.)
 
 ## Response style
 
