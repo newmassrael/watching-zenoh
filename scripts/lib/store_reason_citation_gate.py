@@ -98,7 +98,16 @@ MIN_REASONS = 40
 #: substituted -- which is why this number is exact rather than discovered by a
 #: red. Only ONE of that reason's many line references was ever in this bucket;
 #: the rest name wz's OWN files, which are not upstream claims.
-LINE_BUDGET = 27
+#:
+#: 27 -> 26 (R2369). The `liveliness-subscriber` re-tag replaced that reason
+#: blob, and the one line-form citation it carried was the DEFECT the round
+#: repaired: `api/liveliness.rs:483-532` names a range past the end of a
+#: 331-line file at the pin, because the builder had moved. So this decrement
+#: retires a citation that was not merely mis-formatted but NOT RESOLVING AT
+#: ALL. ⚠ That same re-tag then tried to ADD a bare citation and this gate
+#: refused it, which is the ratchet working in its other direction: the first
+#: mention of the builder's new path carried no needle. Anchored, not budgeted.
+LINE_BUDGET = 26
 BARE_BUDGET = 9
 
 #: FINDINGS -- claims that do not resolve at the pin. Seeded at the inherited

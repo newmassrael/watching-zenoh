@@ -467,10 +467,16 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # 13 upstream): the wz pin therefore falls by exactly 9 (373 -> 364) and the
 # AMBIGUOUS pin correctly does not move at all. Its NEW reason's own 3 wz
 # citations are not counted here because this census reads PARTIAL reasons only.
-PIN_REACHED = 66
+# R2369 -- `liveliness-subscriber` CLOSED, same shape again and ATTRIBUTED the
+# same way. `atom_test_graph.graph()` gives it 29 owned symbols with 24
+# referenced, so it sat in REACHED (66 -> 65) and neither NO-SYMBOL nor
+# UNREACHED moves. `citation_audit` over its OLD reason ALONE answers (9 wz, 0
+# ambiguous, 15 upstream), so the wz pin falls by exactly 9 (364 -> 355) and the
+# AMBIGUOUS pin again does not move at all.
+PIN_REACHED = 65
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
-PIN_WZ_CITATIONS = 364
+PIN_WZ_CITATIONS = 355
 PIN_AMBIGUOUS = 80
 
 

@@ -554,6 +554,42 @@ impl LivelinessSubscriberOptions {
 // into_inner on AP; no poison concept on MCU). The peer-side
 // Interest(Final) emit was already unconditional.
 #[non_exhaustive]
+/// R2369 — an OWNED liveliness sample, the form a sample takes once it has to
+/// outlive the callback that received it.
+///
+/// [`LivelinessSample`](crate::declare::LivelinessSample) borrows its keyexpr
+/// from the drive loop's staging buffer, which is what makes the callback form
+/// allocation-free and is exactly what stops a sample being handed to anyone
+/// else. A channel is the case where it must be: the receiver runs on another
+/// task, after the buffer is gone. So this owns the one borrowed field and
+/// copies the two that already were.
+///
+/// Deliberately in this crate rather than beside `LivelinessSample` in
+/// `wz-session-core`: the borrowed type is the no_std core's, and an owned
+/// keyexpr is an `alloc` obligation that only the AP-profile channel form
+/// incurs. Putting it here keeps the core's shape unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedLivelinessSample {
+    /// `Put` for a `DeclToken`, `Delete` for an `UndeclToken`.
+    pub kind: crate::declare::LivelinessSampleKind,
+    /// The resolved keyexpr, owned.
+    pub keyexpr: String,
+    /// The peer-side token id, stable across the `Put` / `Delete` pair so a
+    /// receiver can correlate them without comparing keyexprs.
+    pub token_id: u64,
+}
+
+impl OwnedLivelinessSample {
+    /// Take ownership of a borrowed sample. The only allocation is the keyexpr.
+    pub fn from_borrowed(sample: &crate::declare::LivelinessSample<'_>) -> Self {
+        Self {
+            kind: sample.kind,
+            keyexpr: sample.keyexpr.to_owned(),
+            token_id: sample.token_id,
+        }
+    }
+}
+
 pub struct LivelinessSubscriber<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> {
     pub(super) session: Session<R, T, Unicast>,
     pub(super) interest_id: u64,
@@ -704,6 +740,33 @@ impl<R: SessionRuntime, T: TimeSource> LivelinessSubscriber<R, T> {
     /// [`LivelinessToken::undeclare`].
     pub fn undeclare(mut self) {
         self.teardown();
+    }
+
+    /// R2369 — run this subscriber in the BACKGROUND: it keeps delivering
+    /// until the session is dropped, and no handle is returned to retract it.
+    ///
+    /// zenoh's own form and its own words — "Make subscriber run in background
+    /// until the session is closed. The background builder doesn't return a
+    /// `Subscriber` object anymore"
+    /// (`zenoh/src/api/builders/liveliness.rs` @ `pub fn background`); pico
+    /// spells it `z_liveliness_declare_background_subscriber`.
+    ///
+    /// It is the RAII disarm and nothing else, which is why it can be one
+    /// line: clearing `armed` is exactly "do not run
+    /// [`teardown`](Self::teardown)", and teardown is the whole of what a
+    /// retraction means here — kill the deferred cell, unregister the local
+    /// slot, emit `Interest(Final)`, prune the replay cache. Suppress all four
+    /// and the subscriber is simply still declared, on both sides of the wire.
+    ///
+    /// Dropping the handle afterwards is not a leak, and that is a property of
+    /// R311lo rather than a claim made here: the disarmed `Drop` frees the
+    /// handle's owned fields (the keyexpr `String`, the `Session` clone, the
+    /// cell `Arc`) instead of the `mem::forget(self)` this type used before.
+    /// The registry holds its own clone of the cell, so delivery is unaffected
+    /// by the handle going away — which is the same reason `teardown` has to
+    /// call `cell.kill()` explicitly rather than relying on the drop.
+    pub fn background(mut self) {
+        self.armed = false;
     }
 
     /// R311lo — shared teardown for [`Self::undeclare`] + [`Drop`], the

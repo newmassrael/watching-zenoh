@@ -9579,6 +9579,130 @@ fn liveliness_sample_callback_runs_deferred_and_may_reenter_session() {
     );
 }
 
+/// R2369 — `background()` keeps the subscriber DELIVERING after its handle is
+/// gone, which is the whole of what zenoh's `background` promises.
+///
+/// The discriminator is delivery, not slot bookkeeping. A test that only
+/// checked `slot_count() == 1` would pass against a `background` that forgot
+/// the handle without disarming it, because the slot outlives the forget
+/// either way; it is the SAMPLE arriving after the handle has dropped that
+/// separates "still declared" from "leaked".
+#[cfg(all(feature = "liveliness-subscriber", feature = "liveliness-token"))]
+#[test]
+fn a_background_liveliness_subscriber_keeps_delivering_after_its_handle_is_gone() {
+    use crate::declare::LivelinessSampleKind;
+    use hashbrown::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    let (session, driver) = build_session();
+    let log: Arc<Mutex<Vec<(LivelinessSampleKind, String, u64)>>> =
+        Arc::new(Mutex::new(Vec::new()));
+    let log_cb = log.clone();
+
+    let sub = session
+        .declare_liveliness_subscriber(
+            "liveliness/**",
+            LivelinessSubscriberOptions::default(),
+            move |sample| {
+                log_cb.lock().unwrap().push((
+                    sample.kind,
+                    sample.keyexpr.to_string(),
+                    sample.token_id,
+                ));
+            },
+        )
+        .expect("liveliness-subscriber is on in this lane");
+    let frames_at_declare = driver.frame_count();
+
+    // The handle goes away HERE, and takes no retraction with it.
+    sub.background();
+
+    assert_eq!(
+        driver.frame_count(),
+        frames_at_declare,
+        "background() must emit NO Interest(Final) -- a retracted subscriber \
+         is exactly what it is not",
+    );
+    assert_eq!(
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .liveliness_subscribers
+            .slot_count(),
+        1,
+        "the local slot must survive the handle",
+    );
+
+    session
+        .observer()
+        .lock()
+        .unwrap()
+        .liveliness_subscribers
+        .dispatch_declare(&make_decl_token(11, "liveliness/bg"), &HashMap::new());
+    session.drain_deferred_fires();
+    assert_eq!(
+        *log.lock().unwrap(),
+        vec![(LivelinessSampleKind::Put, "liveliness/bg".to_string(), 11)],
+        "a backgrounded subscriber still delivers; without the disarm the cell \
+         is killed and this log stays empty",
+    );
+}
+
+/// R2369 — the CHANNEL form delivers an OWNED sample to a receiver.
+///
+/// Driven through the same registry dispatch + deferred drain the callback
+/// sibling above uses, so this asserts real delivery rather than that a
+/// channel was constructed. The owned keyexpr is the point: the borrowed
+/// sample's `&str` is gone by the time a receiver reads it.
+#[cfg(all(feature = "liveliness-subscriber", feature = "liveliness-token"))]
+#[test]
+fn a_channel_liveliness_subscriber_delivers_an_owned_sample_to_its_receiver() {
+    use crate::declare::LivelinessSampleKind;
+    use hashbrown::HashMap;
+
+    let (session, _driver) = build_session();
+    let (sub, mut rx) = session
+        .declare_liveliness_subscriber_with_channel(
+            "liveliness/**",
+            LivelinessSubscriberOptions::default(),
+        )
+        .expect("liveliness-subscriber is on in this lane");
+
+    assert!(
+        rx.try_recv().is_err(),
+        "nothing has been declared by a peer yet, so the channel is empty",
+    );
+
+    session
+        .observer()
+        .lock()
+        .unwrap()
+        .liveliness_subscribers
+        .dispatch_declare(&make_decl_token(21, "liveliness/chan"), &HashMap::new());
+    session.drain_deferred_fires();
+
+    let got = rx
+        .try_recv()
+        .expect("the staged sample reaches the receiver");
+    assert_eq!(got.kind, LivelinessSampleKind::Put);
+    assert_eq!(got.keyexpr, "liveliness/chan");
+    assert_eq!(got.token_id, 21);
+
+    // The HANDLE owns the retraction, not the receiver.
+    sub.undeclare();
+    assert_eq!(
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .liveliness_subscribers
+            .slot_count(),
+        0,
+        "undeclaring the handle retracts the channel-form subscriber too",
+    );
+}
+
 /// R311y790 — the SESSION-level witness for the declare-time history replay.
 /// The registry-level tests pin that `register` fires the known tokens into
 /// the slot's sink; this pins that the samples reach the APPLICATION

@@ -4375,6 +4375,52 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// and only the aliased surface returns `NotEstablished` — so the
     /// only NEW Result variant a caller hits on this method is
     /// `FeatureDisabled` (default-build paths still observe `Ok(...)`).
+    /// R2369 — the CHANNEL form: deliver samples to a receiver instead of to a
+    /// callback. zenoh's `with(handler)`
+    /// (`zenoh/src/api/builders/liveliness.rs` @ `pub fn with<Handler>`) beside
+    /// its `callback` / `callback_mut`; this crate's callback declare above is
+    /// the `callback_mut` of that pair, and this is the other one.
+    ///
+    /// A THIN ADAPTER over that declare, not a second declare. Everything the
+    /// callback form does — the interest-id alloc, the register-before-emit
+    /// order, the R311ll rollback, the deferred-fire cell — is behaviour a
+    /// second body would have to keep in lock-step by hand, which is what
+    /// R311lo's shared `teardown` exists to avoid on the retract side. So the
+    /// channel is built from a callback and the real work stays in one place.
+    ///
+    /// The channel is UNBOUNDED, and that is the deliberate half. A bounded one
+    /// would have to decide what happens when it fills, and every answer is
+    /// wrong here: blocking would stall the drive loop that fires the deferred
+    /// cell (the R311lf lock-free invariant), and dropping would lose a
+    /// `Delete` whose `Put` the receiver has already seen, leaving it believing
+    /// a withdrawn token is alive — the same stale-liveliness defect R311y521
+    /// paid off on the reconnect path. A receiver that cannot keep up grows
+    /// memory instead, which is at least visible.
+    ///
+    /// Dropping the receiver does NOT retract the subscriber: the returned
+    /// handle owns that, exactly as in the callback form. The send failure a
+    /// dropped receiver produces is discarded for the same reason the callback
+    /// form has no error channel.
+    pub fn declare_liveliness_subscriber_with_channel(
+        &self,
+        keyexpr: impl Into<String>,
+        options: LivelinessSubscriberOptions,
+    ) -> Result<
+        (
+            LivelinessSubscriber<R, T>,
+            tokio::sync::mpsc::UnboundedReceiver<crate::session::liveliness::OwnedLivelinessSample>,
+        ),
+        LivelinessSubscriberAliasError,
+    > {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let subscriber = self.declare_liveliness_subscriber(keyexpr, options, move |sample| {
+            // A closed receiver is not an error here; see the doc above.
+            let _ =
+                tx.send(crate::session::liveliness::OwnedLivelinessSample::from_borrowed(&sample));
+        })?;
+        Ok((subscriber, rx))
+    }
+
     pub fn declare_liveliness_subscriber(
         &self,
         keyexpr: impl Into<String>,
