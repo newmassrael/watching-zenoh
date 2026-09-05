@@ -90,7 +90,15 @@ MIN_REASONS = 40
 #: ratchet's "removed one" direction. R2366 did not follow it down, and nothing
 #: local could say so: this gate runs in Layer Z, not in pre-push, so the push
 #: published green and the red waited on the hosted run.
-LINE_BUDGET = 28
+#:
+#: 28 -> 27 (R2368). The `declare-final` re-tag replaced that reason blob too,
+#: and its rewrite trades line numbers for `path` @ `needle` anchors: 64 -> 66
+#: anchored, 28 -> 27 line-form. MEASURED BEFORE IT WAS WRITTEN, by grading the
+#: draft through this gate's own `grade()` against a reasons dict with the draft
+#: substituted -- which is why this number is exact rather than discovered by a
+#: red. Only ONE of that reason's many line references was ever in this bucket;
+#: the rest name wz's OWN files, which are not upstream claims.
+LINE_BUDGET = 27
 BARE_BUDGET = 9
 
 #: FINDINGS -- claims that do not resolve at the pin. Seeded at the inherited

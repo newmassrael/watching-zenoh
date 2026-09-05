@@ -459,10 +459,18 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # was ATTRIBUTED rather than netted: running `citation_audit` over that atom's
 # OLD reason alone answers (0 wz, 1 ambiguous, 1 upstream), so the wz-citation
 # pin correctly does not move and the other two move by exactly that row.
+# R2368 -- `declare-final` CLOSED, so it leaves the PARTIAL population and takes
+# its row with it, exactly as `runtime-tokio` did above. ATTRIBUTED, not netted:
+# `atom_test_graph.graph()` gives it 0 owned symbols, so it sat in NO-SYMBOL
+# (3 -> 2) and never in REACHED or UNREACHED, which is why those two do not move.
+# Running `citation_audit` over its OLD reason ALONE answers (9 wz, 0 ambiguous,
+# 13 upstream): the wz pin therefore falls by exactly 9 (373 -> 364) and the
+# AMBIGUOUS pin correctly does not move at all. Its NEW reason's own 3 wz
+# citations are not counted here because this census reads PARTIAL reasons only.
 PIN_REACHED = 66
 PIN_UNREACHED = 3
-PIN_NO_SYMBOL = 3
-PIN_WZ_CITATIONS = 373
+PIN_NO_SYMBOL = 2
+PIN_WZ_CITATIONS = 364
 PIN_AMBIGUOUS = 80
 
 
