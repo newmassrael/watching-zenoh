@@ -689,6 +689,27 @@ pub fn parse_unixsock_locator(locator: &str) -> Result<UnixsockEndpoint, Unixsoc
 pub struct UnixpipeEndpoint {
     /// The FIFO-pair base path, taken verbatim from the locator address.
     pub path: String,
+    /// R2363 — the `#file_mask=<n>` FIFO creation mode from the CONFIG span
+    /// (zenoh `FILE_ACCESS_MASK`,
+    /// `io/zenoh-links/zenoh-link-unixpipe/src/unix/mod.rs`
+    /// @ `pub const FILE_ACCESS_MASK: &str = "file_mask";`, read at
+    /// `io/zenoh-links/zenoh-link-unixpipe/src/unix/unicast.rs`
+    /// @ `fn endpoint_to_pipe_path` and handed to `mkfifo`). `None` = the
+    /// backend keeps its own default.
+    ///
+    /// DECIMAL, like upstream: the value is `parse`d as a plain `u32` there
+    /// too, so `file_mask=511` is `0o777` and `file_mask=777` is `0o1411`. The
+    /// spelling is upstream's and copying it is the point — a locator written
+    /// for a zenohd must mean the same thing here.
+    ///
+    /// NAMED DIVERGENCE: a value that is not a `u32` is REFUSED here
+    /// ([`UnixpipeLocatorError::BadConfigValue`]) where upstream's
+    /// `val.parse().unwrap_or(*FILE_ACCESS_MASK)` silently falls back to the
+    /// default. That refusal is the judgement [`ParsedLocator::mcast_ttl`]
+    /// already makes, for the same reason: a typo in the one field deciding who
+    /// else on this host may open the link must not look like a working
+    /// configuration. The ACCEPTED set is identical.
+    pub file_mask: Option<u32>,
 }
 
 /// Why a `unixpipe/...` locator string did not parse.
@@ -698,9 +719,21 @@ pub enum UnixpipeLocatorError {
     NotUnixpipeScheme,
     /// The path (after the scheme) is empty (`unixpipe/`).
     EmptyPath,
+    /// R2363 — a config key whose value this leaf understands the SHAPE of and
+    /// this value does not fit: today only `#file_mask=<n>` (not a `u32`).
+    /// Carries the key so a message can name it; an unknown key is still
+    /// ignored rather than rejected, which is the forward-compat rule the
+    /// shared `lookup_param` states (a private helper, so named in a code span
+    /// rather than linked).
+    BadConfigValue { key: &'static str, value: String },
 }
 
 const UNIXPIPE_SCHEME: &str = "unixpipe";
+
+/// zenoh `FILE_ACCESS_MASK` config key
+/// (`io/zenoh-links/zenoh-link-unixpipe/src/unix/mod.rs`
+/// @ `pub const FILE_ACCESS_MASK: &str = "file_mask";`).
+const LOCATOR_FILE_MASK_KEY: &str = "file_mask";
 
 /// Parse a `unixpipe/...` locator into a [`UnixpipeEndpoint`] — the FIFO-pair
 /// sibling of [`parse_unixsock_locator`]. The scheme is the substring before
@@ -716,13 +749,40 @@ pub fn parse_unixpipe_locator(locator: &str) -> Result<UnixpipeEndpoint, Unixpip
     }
     // R311y469 — the FIFO-pair base path is the ADDRESS span, exactly as for
     // the unixsock sibling above.
-    let path = split_locator_parts(body).address;
+    let parts = split_locator_parts(body);
+    let path = parts.address;
     if path.is_empty() {
         return Err(UnixpipeLocatorError::EmptyPath);
     }
     Ok(UnixpipeEndpoint {
         path: path.to_string(),
+        file_mask: parse_file_mask(parts.config)?,
     })
+}
+
+/// R2363 — the `#file_mask=<n>` FIFO creation mode from the CONFIG span.
+///
+/// Absent or empty yields `Ok(None)`, leaving the backend's own default; a
+/// value that is not a `u32` is REFUSED. See [`UnixpipeEndpoint::file_mask`]
+/// for why this leaf refuses where upstream falls back, and why the value is
+/// decimal.
+///
+/// The CONFIG span specifically, never the metadata one — the same namespace
+/// rule `iface` / `ttl` / `join` follow, and upstream reads this key off
+/// `endpoint.config()`.
+fn parse_file_mask(config: &str) -> Result<Option<u32>, UnixpipeLocatorError> {
+    match lookup_param(config, LOCATOR_FILE_MASK_KEY).filter(|v| !v.is_empty()) {
+        None => Ok(None),
+        Some(value) => {
+            value
+                .parse::<u32>()
+                .map(Some)
+                .map_err(|_| UnixpipeLocatorError::BadConfigValue {
+                    key: LOCATOR_FILE_MASK_KEY,
+                    value: value.to_string(),
+                })
+        }
+    }
 }
 
 // ─── vsock locator leaf ───
@@ -1821,7 +1881,83 @@ mod tests {
             parse_unixpipe_locator("unixpipe//tmp/wz.pipe?meta=x#iface=eth0"),
             Ok(UnixpipeEndpoint {
                 path: "/tmp/wz.pipe".to_string(),
+                file_mask: None,
             })
+        );
+    }
+
+    // ─── R2363: `file_mask`, zenoh's ONE unixpipe link config key ───
+
+    /// The key is read from the CONFIG span and carried DECIMAL, upstream's own
+    /// spelling (`val.parse::<u32>()`), so 511 is 0o777 rather than 0o777 being
+    /// written literally.
+    #[test]
+    fn unixpipe_leaf_reads_file_mask_from_the_config_span() {
+        assert_eq!(
+            parse_unixpipe_locator("unixpipe//tmp/wz.pipe#file_mask=511"),
+            Ok(UnixpipeEndpoint {
+                path: "/tmp/wz.pipe".to_string(),
+                file_mask: Some(511),
+            })
+        );
+        // Alongside another config key, in either order — the shared `;` list
+        // grammar, not a prefix match.
+        assert_eq!(
+            parse_unixpipe_locator("unixpipe//tmp/wz.pipe#iface=eth0;file_mask=416"),
+            Ok(UnixpipeEndpoint {
+                path: "/tmp/wz.pipe".to_string(),
+                file_mask: Some(416),
+            })
+        );
+    }
+
+    /// The METADATA span is a different namespace: `?file_mask=` is NOT a FIFO
+    /// mode, exactly as `?iface=` is not a NIC bind (R311y469). A parser that
+    /// read the whole tail would pass the case above and fail this one.
+    #[test]
+    fn unixpipe_leaf_ignores_file_mask_in_the_metadata_span() {
+        assert_eq!(
+            parse_unixpipe_locator("unixpipe//tmp/wz.pipe?file_mask=511"),
+            Ok(UnixpipeEndpoint {
+                path: "/tmp/wz.pipe".to_string(),
+                file_mask: None,
+            })
+        );
+    }
+
+    /// A malformed value is REFUSED, the declared divergence from upstream's
+    /// `unwrap_or(default)`. An empty value is "said nothing", not a typo — the
+    /// same shape `iface` and `ttl` take.
+    #[test]
+    fn unixpipe_leaf_refuses_a_malformed_file_mask() {
+        assert_eq!(
+            parse_unixpipe_locator("unixpipe//tmp/wz.pipe#file_mask=0o600"),
+            Err(UnixpipeLocatorError::BadConfigValue {
+                key: "file_mask",
+                value: "0o600".to_string(),
+            })
+        );
+        assert_eq!(
+            parse_unixpipe_locator("unixpipe//tmp/wz.pipe#file_mask="),
+            Ok(UnixpipeEndpoint {
+                path: "/tmp/wz.pipe".to_string(),
+                file_mask: None,
+            })
+        );
+    }
+
+    /// The refusal survives the `AnyLocator` dispatch rather than being
+    /// flattened into "not a unixpipe locator" — the seam every caller uses.
+    #[test]
+    fn any_locator_surfaces_a_malformed_file_mask() {
+        assert_eq!(
+            parse_any_locator("unixpipe//tmp/wz.pipe#file_mask=nope"),
+            Err(AnyLocatorError::Unixpipe(
+                UnixpipeLocatorError::BadConfigValue {
+                    key: "file_mask",
+                    value: "nope".to_string(),
+                }
+            ))
         );
     }
 

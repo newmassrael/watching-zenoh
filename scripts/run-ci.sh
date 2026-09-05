@@ -3590,6 +3590,13 @@ PY
     # reporting a green that would read as "wz agrees with upstream".
     python3 scripts/lib/upstream_link_axis_gate.py --selftest || return 1
     python3 scripts/lib/upstream_link_axis_gate.py --check || return 1
+    # R2363 (open-debt item 15) — every locator config key an upstream link
+    # crate declares is either read by wz or named as that atom's residual.
+    # The SELFTEST runs here because it needs nothing; the CHECK's whole
+    # population is derived from an upstream checkout, so without one it SKIPS
+    # here and is REQUIRED in Layer Z, exactly like the two gates above.
+    python3 scripts/lib/upstream_link_config_keys_gate.py --selftest || return 1
+    python3 scripts/lib/upstream_link_config_keys_gate.py --check || return 1
     return 0
 }
 
@@ -14190,6 +14197,14 @@ layer_z_zenohd_interop() {
     # open-debt 581 condition 3 names, and this is the lane that has no excuse.
     if ! python3 scripts/lib/upstream_link_axis_gate.py --check --require; then
         echo "  Layer Z FAIL: wz's link streamed/reliable axes disagree with upstream" >&2
+        return 1
+    fi
+    # R2363 (open-debt item 15) — the same shape one gate down: the population
+    # is upstream's own `pub mod config` blocks, so this is the lane that can
+    # demand it. A key that is neither read by wz nor named as its atom's
+    # residual is an ungraded gap, and an atom tagged COMPLETE may have none.
+    if ! python3 scripts/lib/upstream_link_config_keys_gate.py --check --require; then
+        echo "  Layer Z FAIL: an upstream link config key is graded by nobody" >&2
         return 1
     fi
     # R2080 (open-debt item 503) — the COMPLETENESS audit of the acceptance

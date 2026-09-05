@@ -4203,14 +4203,14 @@ mod tests {
             .join(format!("wz-unixpipe-cap-{}", std::process::id()))
             .to_string_lossy()
             .into_owned();
-        let mut acc = bind_unixpipe(&base)
+        let mut acc = bind_unixpipe(&base, None)
             .await
             .expect("bind the unixpipe acceptor");
         // Drive one client through the invitation handshake; the acceptor task
         // yields the accepted listener-side link.
         let dialer = tokio::spawn({
             let base = base.clone();
-            async move { dial_unixpipe(&base).await }
+            async move { dial_unixpipe(&base, None).await }
         });
         let link = acc.recv_new_link().await.expect("accept one client");
         let _client = dialer.await.unwrap().expect("dial completes");

@@ -2066,7 +2066,16 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     "transport/link/tx/queue/size/real_time",
     "transport/link/tx/sequence_number_resolution",
     "transport/link/tx/threads",
-    "transport/link/unixpipe/file_access_mask",
+    // R2363 — `transport/link/unixpipe/file_access_mask` LEFT here for
+    // [`UNHONOURED_READER_GAP`]. Its `LinkTxConf` group sentence said wz had no
+    // "configurable link-TX surface"; that was true of a `mkfifo` mode written
+    // as a literal and stopped being true when the unixpipe link learned to
+    // read `#file_mask=<n>` off the locator's config span. The row is recorded
+    // in the past tense rather than deleted because a beyond-wz row that
+    // becomes a reader gap — wz grew the capability and nothing red — is the
+    // exact failure mode [`UNHONOURED_CITATION_LEDGER`]'s own doc names, and
+    // this is the first time it has been caught by an instrument rather than
+    // by re-reading a group sentence.
     "transport/multicast/compression/enabled",
     "transport/multicast/join_interval",
     "transport/multicast/max_sessions",
@@ -2144,6 +2153,16 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
 ///   `ServerNameVerification` is the `verify_name_on_connect` axis, named after
 ///   `Z_CONFIG_TLS_VERIFY_NAME_ON_CONNECT` in its own doc. The C ABI already
 ///   exposes both.
+/// * `transport/link/unixpipe/file_access_mask` — the unixpipe link's FIFO
+///   creation mode, which R2363 made configurable:
+///   `crate::unixpipe_pipeline::DEFAULT_FILE_MASK` and the
+///   `wz_session_core::locator::UnixpipeEndpoint::file_mask` the locator's
+///   `#file_mask=<n>` fills, threaded into every `mkfifo` the bind and the dial
+///   perform. Upstream's own path from the CONFIG KEY to the link is the same
+///   shape: `UnixPipeConfigurator::inspect_config` renders it into the
+///   endpoint's config span as a per-link DEFAULT, which the endpoint's own
+///   parameters then overwrite. So the reader change is "render the key onto
+///   the unixpipe endpoints", not "build a mode".
 ///
 /// ⚠ Being here is NOT a claim that the move is mechanical. R311y844's ten were
 /// moved one at a time, and `scouting/multicast/autoconnect` needed R2141 to
@@ -2173,6 +2192,18 @@ pub const UNHONOURED_READER_GAP: &[&str] = &[
     "transport/link/tls/connect_private_key",
     "transport/link/tls/enable_mtls",
     "transport/link/tls/verify_name_on_connect",
+    // R2363 — MOVED here from `UNHONOURED_BEYOND_WZ`, and the move is the
+    // finding rather than the bookkeeping: that list's `LinkTxConf` group said
+    // wz lacked "a configurable link-TX surface" for this key, which was true
+    // while wz's `mkfifo` mode was a literal. It is not true any more — the
+    // unixpipe link now reads `#file_mask=<n>` off the locator's config span
+    // and hands it to every FIFO it creates. What is left is the READER: the
+    // zenoh key is upstream's per-link DEFAULT, merged into each endpoint's
+    // config span by `UnixPipeConfigurator::inspect_config`, and wz's
+    // JSON5 reader has no field for it. This is the exact class the ledger's
+    // own doc warns about — a beyond-wz row that becomes a reader gap because
+    // wz grew the capability, and reds nothing on its own.
+    "transport/link/unixpipe/file_access_mask",
 ];
 
 /// WHICH subsystem each [`UNHONOURED_BEYOND_WZ`] key would need, as data —
@@ -2276,7 +2307,10 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
             "transport/link/tx/queue/size/real_time",
             "transport/link/tx/sequence_number_resolution",
             "transport/link/tx/threads",
-            "transport/link/unixpipe/file_access_mask",
+            // R2363 removed `transport/link/unixpipe/file_access_mask` from
+            // this group: wz now HAS the surface for it (a per-locator FIFO
+            // mode), so the group's own sentence stopped describing it and it
+            // moved to `UNHONOURED_READER_GAP`.
         ],
     ),
     (
@@ -2574,6 +2608,18 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
         "transport/link/tls/verify_name_on_connect",
         "wz-has-it",
         "ServerNameVerification",
+    ),
+    // R2363 — the unixpipe FIFO mode. The anchor is the DEFAULT rather than the
+    // parse, because the default is the whole of wz's declared divergence
+    // (0o600 where upstream defaults to 0o777) and it is what a reader
+    // rendering the key would have to override. `UnixpipeEndpoint::file_mask`
+    // is the other half and lives in `wz-session-core`; the anchor has to be a
+    // symbol in THIS crate's own sweep, so the one that is here is the one
+    // named.
+    (
+        "transport/link/unixpipe/file_access_mask",
+        "wz-has-it",
+        "DEFAULT_FILE_MASK",
     ),
     // R2226 (open-debt item 575) — TWO capacity knobs wz spells at a GENUINE
     // zenohd and never at itself, on the same footing as

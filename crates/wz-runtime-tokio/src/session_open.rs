@@ -2200,7 +2200,9 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
         // within the tokio runtime this async dial seam provides. No cert config
         // (like unixsock/udp).
         #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
-        AnyLocator::Unixpipe(ep) => Ok(DialedLink::Unixpipe(dial_unixpipe(&ep.path).await?)),
+        AnyLocator::Unixpipe(ep) => Ok(DialedLink::Unixpipe(
+            dial_unixpipe(&ep.path, ep.file_mask).await?,
+        )),
         // R311y10 — `AnyLocator::Unixpipe` is an ALWAYS-present, PLATFORM-
         // INDEPENDENT variant (the unixpipe locator leaf is ungated in
         // wz-session-core), so this arm must exist on every target / feature
@@ -2850,7 +2852,9 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
         // wz-session-core) stays exhaustive on every target. `udp` is the remaining
         // acceptor extension point.
         #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
-        AnyLocator::Unixpipe(ep) => Ok(BoundListener::Unixpipe(bind_unixpipe(&ep.path).await?)),
+        AnyLocator::Unixpipe(ep) => Ok(BoundListener::Unixpipe(
+            bind_unixpipe(&ep.path, ep.file_mask).await?,
+        )),
         #[cfg(not(all(feature = "transport-link-unixpipe", target_os = "linux")))]
         AnyLocator::Unixpipe(_ep) => Err(unsupported(
             "unixpipe accept requires the transport-link-unixpipe feature on Linux",
@@ -5489,7 +5493,7 @@ mod tests {
             .join(format!("wz-boundlistener-cap-{}", std::process::id()))
             .to_string_lossy()
             .into_owned();
-        let acc = bind_unixpipe(&base)
+        let acc = bind_unixpipe(&base, None)
             .await
             .expect("bind the unixpipe acceptor");
         let listener = BoundListener::Unixpipe(acc);

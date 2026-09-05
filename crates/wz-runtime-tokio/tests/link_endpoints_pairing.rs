@@ -375,8 +375,15 @@ fn client_port_of(locator: &str) -> u16 {
 /// note said the pair could not be named because the rendezvous BASE path belongs
 /// to the acceptor rather than the link. Upstream does not use the base either: it
 /// renders the dedicated pair, `src` = the FIFO this end reads and `dst` = the one
-/// it writes, on both sides (`zenoh-link-unixpipe/src/unix/unicast.rs:264-274`
-/// client, `:417-427` listener). Both nodes are known to both ends.
+/// it writes, on both sides — the listener at
+/// `io/zenoh-links/zenoh-link-unixpipe/src/unix/unicast.rs`
+/// @ `let mut dedicated_downlink = PipeW::new(&dedicated_downlink_path).await?;`
+/// and the client at
+/// `io/zenoh-links/zenoh-link-unixpipe/src/unix/unicast.rs`
+/// @ `dedicated_donlink_path`. Both nodes are known to both ends.
+/// (R2363 re-anchored this: it was root-less with line numbers, which the
+/// citation gate could not see until this round's own citations made that
+/// segment derivable.)
 ///
 /// The filesystem check is the point: a path that parses but does not exist is a
 /// string an admin client cannot act on, and no wz code is consulted to decide it.
@@ -396,7 +403,7 @@ async fn unixpipe_link_ends_report_mirrored_dedicated_fifo_endpoints() {
         .to_string_lossy()
         .into_owned();
 
-    let mut acceptor = bind_unixpipe(&base)
+    let mut acceptor = bind_unixpipe(&base, None)
         .await
         .expect("bind the unixpipe rendezvous channel");
 
@@ -408,7 +415,7 @@ async fn unixpipe_link_ends_report_mirrored_dedicated_fifo_endpoints() {
                 .expect("the acceptor yields a connected link")
         },
         async {
-            dial_unixpipe(&base)
+            dial_unixpipe(&base, None)
                 .await
                 .expect("dial the unixpipe rendezvous channel")
         }

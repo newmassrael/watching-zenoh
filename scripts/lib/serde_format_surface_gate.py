@@ -23,7 +23,8 @@ unimplemented `Serialize` is a compile error only at a call site nobody wrote.
 
 So the gate DERIVES both populations by parsing, with the SAME parser:
 
-  * upstream: `zenoh-ext/src/serialization.rs` in the pinned checkout,
+  * upstream: `zenoh-ext/src/serialization.rs`
+              @ `impl<T: Serialize> Serialize for Vec<T>` in the pinned checkout,
   * wz:       `crates/wz-session-core/src/serde_codec.rs`,
 
 and compares. Five axes come out of that parse, each one a thing the format
@@ -76,7 +77,16 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 WZ_REL = "crates/wz-session-core/src/serde_codec.rs"
 
 #: The upstream side, relative to the pinned zenoh checkout root.
-UPSTREAM_REL = "zenoh-ext/src/serialization.rs"
+#:
+#: R2363 — SEGMENTS rather than one literal, the idiom `upstream_link_axis_gate`
+#: already uses. A literal upstream path in a tracked file IS a citation to
+#: `upstream_citation_anchor_gate`, and a path a program needs to OPEN cannot be
+#: written in that gate's anchored form, so the two rules only both hold when
+#: the path is composed. R2362 wrote it as a literal and pushed the bare-form
+#: ratchet from 60 to 62 without moving the budget; this is the half of that
+#: repair the code owns, the module docstring's prose mention being the other.
+UPSTREAM_PARTS = ("zenoh-ext", "src", "serialization.rs")
+UPSTREAM_REL = "/".join(UPSTREAM_PARTS)
 
 #: Upstream element -> the wz element that answers it. An alias is NOT a skip:
 #: the gate requires the RIGHT-HAND side to be present in wz's own derived set,

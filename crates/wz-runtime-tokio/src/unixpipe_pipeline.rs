@@ -146,24 +146,60 @@ fn dedicated_channels(base: &str, suffix: u32) -> (String, String) {
 // FIFO node create (NO-UNLINK, EEXIST-tolerant) + unlink.
 // ---------------------------------------------------------------------------
 
-/// `mkfifo` a FIFO at `path` with mode 0o600, TOLERATING a pre-existing node
+/// The FIFO creation mode used when a locator carries no `#file_mask=<n>`.
+///
+/// R311y13 / R2363 NAMED DIVERGENCE, and the one place it lives: 0o600
+/// (owner-only) where upstream's own default is 0o777
+/// (`io/zenoh-links/zenoh-link-unixpipe/src/unix/mod.rs`
+/// @ `pub const FILE_ACCESS_MASK_DEFAULT: u32 = 0o777;`). A FIFO pair in a
+/// world-writable directory IS the link, so upstream's default lets any local
+/// account write frames into someone else's session; wz declines that by
+/// default and makes the permissive mode REACHABLE instead of unreachable —
+/// which is what R2363 changed. Cross-impl interop with a zenohd running as a
+/// DIFFERENT uid therefore needs the mask written on the locator
+/// (`unixpipe//tmp/p#file_mask=438` = 0o666); as the same uid, the default
+/// suffices and is what run-ci's Layer Z unixpipe leg uses.
+///
+/// This constant is also wz's answer for the zenoh CONFIG key
+/// `transport/link/unixpipe/file_access_mask`, which upstream renders into
+/// every unixpipe endpoint's config span as a per-link DEFAULT that the
+/// endpoint's own parameters then overwrite. wz has the endpoint half and not
+/// the rendering, so the key sits in `zenoh_config::UNHONOURED_READER_GAP` with
+/// this symbol as its anchor: the capability exists, the JSON5 reader was never
+/// told. (A code span, not an intra-doc link — that module is behind the
+/// `zenoh-config` feature and the link would not resolve in a default build.)
+pub const DEFAULT_FILE_MASK: u32 = 0o600;
+
+/// Resolve a locator's optional `#file_mask=<n>` against [`DEFAULT_FILE_MASK`].
+///
+/// `None` is "the locator said nothing", not "0" — the distinction the
+/// `wz_session_core::locator::UnixpipeEndpoint::file_mask` field carries all the
+/// way from the parse, so the default lives HERE and not in every call site.
+fn resolve_file_mask(file_mask: Option<u32>) -> libc::mode_t {
+    file_mask.unwrap_or(DEFAULT_FILE_MASK) as libc::mode_t
+}
+
+/// `mkfifo` a FIFO at `path` with `mode`, TOLERATING a pre-existing node
 /// (`EEXIST` => `Ok`). Unlike the old `make_fifo`, this does NOT unlink first —
 /// unlink-then-create would clobber a concurrent dialer's flock-reserved node
 /// (flock is invisible to `unlink`), defeating the suffix-collision detector. The
 /// real reservation is the exclusive flock the caller then acquires on the
 /// opened reader; `EEXIST` here is a harmless reuse.
 ///
-/// R311y13 disclosure: mode 0o600 (owner-only) is a deliberate hardening over
-/// zenoh's default 0o777 for this same-host IPC node; wz does NOT model zenoh's
-/// configurable `file_mask` locator parameter. Cross-impl interop therefore needs
-/// zenohd and wz to run as the SAME uid (a different uid + 0o600 would `EACCES`).
-fn create_fifo_tolerant(path: &str) -> io::Result<()> {
+/// `mode` is the raw `mkfifo` argument, exactly as upstream passes its own: its
+/// `unix_named_pipe` 0.2.0 dependency is a thin wrapper whose `create` calls
+/// `mkfifo(path, mode)` and nothing else, so the process umask applies
+/// identically on both sides. An `EEXIST` reuse keeps the
+/// EXISTING node's mode, which is also upstream's behaviour — `mkfifo` does not
+/// chmod an existing node — and matters here because a re-bind on the same base
+/// path does not silently re-permission a node a peer already holds open.
+fn create_fifo_tolerant(path: &str, mode: libc::mode_t) -> io::Result<()> {
     let c_path = CString::new(path).map_err(|_| {
         io::Error::new(io::ErrorKind::InvalidInput, "fifo path has an interior NUL")
     })?;
     // SAFETY: `c_path` is a valid NUL-terminated C string live for the call;
-    // `mkfifo` only reads through the pointer. 0o600 = owner read+write.
-    let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600 as libc::mode_t) };
+    // `mkfifo` only reads through the pointer.
+    let rc = unsafe { libc::mkfifo(c_path.as_ptr(), mode) };
     if rc != 0 {
         let err = io::Error::last_os_error();
         if err.raw_os_error() == Some(libc::EEXIST) {
@@ -345,14 +381,19 @@ pub struct UnixpipeLink {
 /// unlinked — the listener re-creates + opens it, zenoh's `create_pipe` parity).
 /// A flock failure on either reader means another dialer holds that suffix ->
 /// retry a new one (up to [`DEDICATE_TRIES`]). Returns `(suffix, downlink reader)`.
-fn dedicate(base: &str) -> io::Result<(u32, FifoReadEnd)> {
+///
+/// `mode` is the resolved FIFO creation mode ([`resolve_file_mask`]) — the
+/// DEDICATED nodes carry it too, not only the base one, because upstream's
+/// `dedicate_pipe` threads the same `access_mode` into every `PipeR::new`
+/// (`io/zenoh-links/zenoh-link-unixpipe/src/unix/unicast.rs` @ `fn dedicate_pipe`).
+fn dedicate(base: &str, mode: libc::mode_t) -> io::Result<(u32, FifoReadEnd)> {
     for _ in 0..DEDICATE_TRIES {
         let suffix: u32 = rand::random();
         let (uplink, downlink) = dedicated_channels(base, suffix);
 
         // Reserve the downlink (the client's read end): create no-unlink, open,
         // and try to flock. A held lock means a concurrent dialer has this suffix.
-        if create_fifo_tolerant(&downlink).is_err() {
+        if create_fifo_tolerant(&downlink, mode).is_err() {
             continue;
         }
         let dl = match OpenOptions::new().open_receiver(&downlink) {
@@ -371,7 +412,7 @@ fn dedicate(base: &str) -> io::Result<(u32, FifoReadEnd)> {
         // Reserve the uplink transiently (zenoh creates it then drops+unlinks it,
         // so the listener re-creates + opens it): confirm the suffix's uplink name
         // is also free, then release + unlink it.
-        if create_fifo_tolerant(&uplink).is_err() {
+        if create_fifo_tolerant(&uplink, mode).is_err() {
             drop(dl);
             unlink_node(&downlink);
             continue;
@@ -410,7 +451,17 @@ fn dedicate(base: &str) -> io::Result<(u32, FifoReadEnd)> {
 /// via `ENXIO` / a free base flock), reserves a dedicated pair, and completes the
 /// 3-way handshake, returning the connected [`UnixpipeLink`]. Must run within a
 /// tokio runtime.
-pub async fn dial_unixpipe(path: &str) -> io::Result<UnixpipeLink> {
+///
+/// `file_mask` is the locator's `#file_mask=<n>`
+/// (`wz_session_core::locator::UnixpipeEndpoint::file_mask`); `None` takes
+/// [`DEFAULT_FILE_MASK`]. A DIALER needs it because the client creates the
+/// dedicated pair's nodes during `dedicate` (private, so a code span rather
+/// than a link — a link to it reds Layer C1bz), exactly as upstream's
+/// `UnicastPipeClient::connect_to` threads its own `access_mode` down
+/// (`io/zenoh-links/zenoh-link-unixpipe/src/unix/unicast.rs`
+/// @ `let (path, access_mode) = endpoint_to_pipe_path(&endpoint);`).
+pub async fn dial_unixpipe(path: &str, file_mask: Option<u32>) -> io::Result<UnixpipeLink> {
+    let mode = resolve_file_mask(file_mask);
     let (base_uplink, _base_downlink) = base_channels(path);
 
     // 1. Open the base request channel for write. Two "no listener" shapes both map
@@ -438,7 +489,7 @@ pub async fn dial_unixpipe(path: &str) -> io::Result<UnixpipeLink> {
     }
 
     // 2. Reserve a dedicated pair (client's downlink reader kept + flock'd).
-    let (suffix, mut read) = dedicate(path)?;
+    let (suffix, mut read) = dedicate(path, mode)?;
     let (uplink, _downlink) = dedicated_channels(path, suffix);
 
     // 3. Invite the listener over the request channel.
@@ -475,13 +526,13 @@ pub async fn dial_unixpipe(path: &str) -> io::Result<UnixpipeLink> {
 /// [`HANDSHAKE_TIMEOUT`] wrapper (NOT in `accept_raw`'s cancel-prone `select!`), so
 /// a peer that stalls mid-handshake is bounded to the timeout rather than wedging
 /// the acceptor forever.
-async fn finish_handshake(base: &str, suffix: u32) -> io::Result<UnixpipeLink> {
+async fn finish_handshake(base: &str, suffix: u32, mode: libc::mode_t) -> io::Result<UnixpipeLink> {
     let (uplink, downlink) = dedicated_channels(base, suffix);
 
     // The client unlinked its transient `P_uplink{suffix}` reservation; re-create
     // it (EEXIST-tolerant) and open + flock it as our read end. The flock is what
     // a zenoh CLIENT's `PipeW::new(uplink)` probes.
-    create_fifo_tolerant(&uplink)?;
+    create_fifo_tolerant(&uplink, mode)?;
     let ul_reader = OpenOptions::new().open_receiver(&uplink)?;
     try_flock_ex(ul_reader.as_raw_fd()).map_err(|e| {
         io::Error::new(
@@ -586,6 +637,7 @@ impl Drop for UnixpipeAcceptor {
 async fn unixpipe_acceptor_task(
     mut base_reader: Receiver,
     base: String,
+    mode: libc::mode_t,
     tx: mpsc::UnboundedSender<UnixpipeLink>,
 ) {
     loop {
@@ -596,7 +648,7 @@ async fn unixpipe_acceptor_task(
                 continue;
             }
         };
-        match tokio::time::timeout(HANDSHAKE_TIMEOUT, finish_handshake(&base, suffix)).await {
+        match tokio::time::timeout(HANDSHAKE_TIMEOUT, finish_handshake(&base, suffix, mode)).await {
             Ok(Ok(link)) => {
                 if tx.send(link).is_err() {
                     // The `UnixpipeAcceptor` (BoundListener) was dropped — stop.
@@ -621,10 +673,18 @@ async fn unixpipe_acceptor_task(
 /// The listener creates ONLY `P_uplink` (the request channel); the per-connection
 /// `P_uplink{suffix}` / `P_downlink{suffix}` nodes are created during each
 /// handshake. `P_downlink` (base) is never created (zenoh parity).
-pub async fn bind_unixpipe(path: &str) -> io::Result<UnixpipeAcceptor> {
+///
+/// `file_mask` is the locator's `#file_mask=<n>`
+/// (`wz_session_core::locator::UnixpipeEndpoint::file_mask`); `None` takes
+/// [`DEFAULT_FILE_MASK`]. The listener keeps it for the whole listener's life
+/// because EVERY later handshake creates its dedicated `P_uplink{suffix}` with
+/// it — upstream keeps it the same way, in the `UnicastPipeListener`'s own
+/// state rather than re-reading the endpoint per client.
+pub async fn bind_unixpipe(path: &str, file_mask: Option<u32>) -> io::Result<UnixpipeAcceptor> {
+    let mode = resolve_file_mask(file_mask);
     let (base_uplink, _base_downlink) = base_channels(path);
 
-    create_fifo_tolerant(&base_uplink)?;
+    create_fifo_tolerant(&base_uplink, mode)?;
     // O_RDWR so the base reader is its own writer -> never EOFs across client churn.
     let base_reader = OpenOptions::new()
         .read_write(true)
@@ -638,7 +698,12 @@ pub async fn bind_unixpipe(path: &str) -> io::Result<UnixpipeAcceptor> {
     })?;
 
     let (tx, rx) = mpsc::unbounded_channel::<UnixpipeLink>();
-    let handle = TokioRuntime.spawn(unixpipe_acceptor_task(base_reader, path.to_string(), tx));
+    let handle = TokioRuntime.spawn(unixpipe_acceptor_task(
+        base_reader,
+        path.to_string(),
+        mode,
+        tx,
+    ));
 
     Ok(UnixpipeAcceptor {
         new_link_rx: rx,
@@ -667,10 +732,21 @@ pub fn wire_unixpipe_stream(
     // the pair could not be named because the rendezvous BASE path belongs to the
     // acceptor rather than the link — but upstream does not use the base either. It
     // renders the DEDICATED per-link pair, `src` = the FIFO this end READS and
-    // `dst` = the FIFO it WRITES, on both sides
-    // (`zenoh-link-unixpipe/src/unix/unicast.rs:264-274` client,
-    // `:417-427` listener). Both nodes are known to both ends, so no type had to be
+    // `dst` = the FIFO it WRITES, on both sides — the listener at
+    // `io/zenoh-links/zenoh-link-unixpipe/src/unix/unicast.rs`
+    // @ `let mut dedicated_downlink = PipeW::new(&dedicated_downlink_path).await?;`
+    // and the client at
+    // `io/zenoh-links/zenoh-link-unixpipe/src/unix/unicast.rs`
+    // @ `dedicated_donlink_path` (upstream's own spelling). Both nodes are known
+    // to both ends, so no type had to be
     // widened beyond carrying the write node the `Sender` does not track.
+    //
+    // R2363 re-anchored this citation. It was written root-less with line
+    // numbers, which made it INVISIBLE to `upstream_citation_anchor_gate` —
+    // that axis grades a segment only once some rooted citation in the tree
+    // names it, and nothing did until this round cited this very crate with
+    // its root. An unanchored claim about upstream is not a weaker claim; it
+    // is one nothing can ever red.
     //
     // `None` survives only for a read end with no node at all, which today cannot
     // arise (`FifoReadEnd::new` always sets one) — but the field is an `Option`, so
@@ -717,7 +793,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn bind_creates_only_the_request_channel() {
         let base = unique_pipe_base();
-        let acc = bind_unixpipe(&base)
+        let acc = bind_unixpipe(&base, None)
             .await
             .expect("bind the request channel");
         let (uplink, downlink) = base_channels(&base);
@@ -737,9 +813,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn second_listener_on_the_same_path_is_rejected() {
         let base = unique_pipe_base();
-        let acc = bind_unixpipe(&base).await.expect("first listener binds");
+        let acc = bind_unixpipe(&base, None)
+            .await
+            .expect("first listener binds");
         // `UnixpipeAcceptor` is not `Debug`, so match rather than `expect_err`.
-        match bind_unixpipe(&base).await {
+        match bind_unixpipe(&base, None).await {
             Ok(_) => panic!("second listener on the same path must fail"),
             Err(e) => assert_eq!(e.kind(), io::ErrorKind::AddrInUse),
         }
@@ -751,7 +829,7 @@ mod tests {
     async fn dial_with_no_listener_is_refused() {
         let base = unique_pipe_base();
         // `UnixpipeLink` is not `Debug`, so match rather than `expect_err`.
-        match dial_unixpipe(&base).await {
+        match dial_unixpipe(&base, None).await {
             Ok(_) => panic!("dial with no listener must be refused"),
             Err(e) => assert_eq!(e.kind(), io::ErrorKind::ConnectionRefused),
         }
@@ -763,16 +841,16 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn two_dialers_get_distinct_dedicated_pairs() {
         let base = unique_pipe_base();
-        let mut acc = bind_unixpipe(&base).await.expect("bind");
+        let mut acc = bind_unixpipe(&base, None).await.expect("bind");
 
         // Dial twice concurrently; accept both from the one listener.
         let d1 = tokio::spawn({
             let base = base.clone();
-            async move { dial_unixpipe(&base).await }
+            async move { dial_unixpipe(&base, None).await }
         });
         let d2 = tokio::spawn({
             let base = base.clone();
-            async move { dial_unixpipe(&base).await }
+            async move { dial_unixpipe(&base, None).await }
         });
 
         let a1 = acc.recv_new_link().await.expect("accept client 1");

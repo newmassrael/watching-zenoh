@@ -386,10 +386,28 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # six type/hook families upstream carries had no wz counterpart. The instrument
 # is a derived-population gate over both serialization modules rather than a
 # reading of the residual prose, for the reason this file exists at all.
-PIN_REACHED = 63
+# R2363 — `transport-link-unixpipe` goes PARTIAL -> COMPLETE, so its reason
+# leaves this population and takes its citations with it, while the SAME round
+# ADDS a residual to `transport-link-serial`, which stays PARTIAL. The two move
+# in opposite directions and the net is what the pins record, so both halves are
+# measured separately with this module's own `citation_audit` rather than read
+# off the net: the retiring unixpipe reason carried wz 4 / ambiguous 0, and the
+# serial reason goes wz 5 -> 8 (ambiguous 0 both ways). 377 - 4 + 3 = 376, which
+# is what the run then printed. PARTIAL falls 75 -> 74 and REACHED 63 -> 62,
+# because REACHED is the bucket unixpipe sat in; UNREACHED, NO_SYMBOL and the
+# ambiguous pin are untouched.
+#
+# The round built the atom's one live residual -- zenoh's `file_mask` locator
+# config key, which wz wrote as a literal 0o600 and read nowhere -- and its
+# other two clauses were re-measured and found already dead. The instrument is
+# `upstream_link_config_keys_gate.py`, which derives the population this
+# residual belonged to (every key an upstream link crate declares in its own
+# `pub mod config`) rather than grading the one key that was noticed; that
+# derivation is what found the serial residual this round had to add.
+PIN_REACHED = 62
 PIN_UNREACHED = 2
 PIN_NO_SYMBOL = 10
-PIN_WZ_CITATIONS = 377
+PIN_WZ_CITATIONS = 376
 PIN_AMBIGUOUS = 81
 
 

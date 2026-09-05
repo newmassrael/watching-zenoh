@@ -65,7 +65,7 @@ async fn wz_to_wz_over_unixpipe_reaches_established_and_delivers_put() {
     // Bind the multi-client acceptor (creates the request channel + spawns the
     // acceptor task). The initiator's dial drives the invitation handshake; the
     // task yields the accepted listener-side link.
-    let mut acc = bind_unixpipe(&base)
+    let mut acc = bind_unixpipe(&base, None)
         .await
         .expect("bind the unixpipe acceptor");
 
