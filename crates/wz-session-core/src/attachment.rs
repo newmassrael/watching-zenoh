@@ -59,6 +59,16 @@ pub const ATTACHMENT_EXT_ID_PUSH: u8 = 0x03;
 /// instead would please pico and make zenoh read the ext as
 /// `ext_unknown`, which is the same loss pointed the other way, with the
 /// protocol SSOT on the losing side.
+///
+/// R2370 — the PUSH Del arm honours this only from that round. R311y769 fixed
+/// the REPLY arm and left `push_build::build_body_extensions` hardcoding the
+/// Put id, so the sentence above about landing on today's behaviour was true
+/// of a Del REPLY and false of a Del PUSH, which pico did decode at `0x03`.
+/// Both arms emit `0x02` now, so the wire changed for a pico subscriber of a
+/// wz `del()`: it saw the attachment before and does not now. That is the
+/// accepted side of the trade above rather than a regression to repair, and
+/// pico cannot send the reciprocal message either — `has_attachment` is
+/// `pshb->_is_put && ..` (`src/protocol/codec/message.c:263`).
 pub const ATTACHMENT_EXT_ID_DEL: u8 = 0x02;
 
 /// Attachment ext id inside a Query — zenoh-pico `_z_query_encode_ext`

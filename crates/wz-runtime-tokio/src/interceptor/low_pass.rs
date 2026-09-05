@@ -82,7 +82,7 @@ use wz_codecs::reply::ReplyOwnedVariant;
 use wz_codecs::request::RequestOwnedVariant;
 use wz_codecs::response::ResponseOwnedVariant;
 use wz_session_core::attachment::{
-    decode_attachment_ext, ATTACHMENT_EXT_ID_PUSH, ATTACHMENT_EXT_ID_QUERY,
+    decode_attachment_ext, ATTACHMENT_EXT_ID_DEL, ATTACHMENT_EXT_ID_PUSH, ATTACHMENT_EXT_ID_QUERY,
 };
 use wz_session_core::keyexpr_match::keyexpr_includes_target;
 use wz_session_core::network_message::NetworkMessage;
@@ -288,7 +288,7 @@ fn message_size(msg: &NetworkMessage) -> Option<(LowPassMessage, usize, usize)> 
             PushOwnedVariant::CodecZenohMsgDel(del) => Some((
                 LowPassMessage::Delete,
                 0,
-                attachment_len(del.extensions.as_ref(), ATTACHMENT_EXT_ID_PUSH),
+                attachment_len(del.extensions.as_ref(), ATTACHMENT_EXT_ID_DEL),
             )),
             _ => None,
         },
@@ -306,7 +306,7 @@ fn message_size(msg: &NetworkMessage) -> Option<(LowPassMessage, usize, usize)> 
             RequestOwnedVariant::CodecZenohMsgDel(del) => Some((
                 LowPassMessage::Delete,
                 0,
-                attachment_len(del.extensions.as_ref(), ATTACHMENT_EXT_ID_PUSH),
+                attachment_len(del.extensions.as_ref(), ATTACHMENT_EXT_ID_DEL),
             )),
             _ => None,
         },
@@ -320,7 +320,7 @@ fn message_size(msg: &NetworkMessage) -> Option<(LowPassMessage, usize, usize)> 
                 ReplyOwnedVariant::CodecZenohMsgDel(del) => Some((
                     LowPassMessage::Reply,
                     0,
-                    attachment_len(del.extensions.as_ref(), ATTACHMENT_EXT_ID_PUSH),
+                    attachment_len(del.extensions.as_ref(), ATTACHMENT_EXT_ID_DEL),
                 )),
                 _ => None,
             },
@@ -581,6 +581,50 @@ mod tests {
             measured,
             attachment.len(),
             "the attachment half comes from the 0x03 ext, not a named field"
+        );
+    }
+
+    /// R2370 — the DEL twin of the sibling above, and the witness this
+    /// measurement never had.
+    ///
+    /// A Del body's attachment is a DIFFERENT ext id from a Put's: upstream
+    /// declares 0x02 for Del (`commons/zenoh-protocol/src/zenoh/del.rs`
+    /// @ `pub type Attachment`) against 0x03 for Put
+    /// (`commons/zenoh-protocol/src/zenoh/put.rs` @ `pub type Attachment`).
+    /// This lane measured all three of its Del arms at the PUT id, so it sized
+    /// every Del attachment as ZERO — a Del carrying one could cross a
+    /// low-pass budget that was meant to stop it.
+    ///
+    /// It stayed invisible because nothing here exercised a Del WITH an
+    /// attachment: the sibling covers Put, and changing the three Del lines
+    /// left all nine tests green either way. So this test is the point, not
+    /// the fix.
+    #[test]
+    fn a_real_del_attachment_ext_is_measured_at_the_del_id_not_the_put_one() {
+        use wz_session_core::attachment::{encode_attachment_ext, ATTACHMENT_EXT_ID_DEL};
+        use wz_session_core::push_build::build_push_del_literal;
+
+        let attachment = b"0123456789";
+        let mut push = build_push_del_literal("demo/x").expect("build del");
+        let PushOwnedVariant::CodecZenohMsgDel(del) = &mut push.body else {
+            panic!("build_push_del_literal emits a Del body");
+        };
+        del.extensions = Some(vec![encode_attachment_ext(
+            ATTACHMENT_EXT_ID_DEL,
+            attachment,
+        )
+        .expect("encode attachment")]);
+        del.header |= 0x80; // the Z chain bit
+
+        let msg = NetworkMessage::Push(Box::new(push));
+        let (kind, payload, measured) = message_size(&msg).expect("a Del is sized");
+        assert_eq!(kind, LowPassMessage::Delete);
+        assert_eq!(payload, 0, "a Del carries no payload");
+        assert_eq!(
+            measured,
+            attachment.len(),
+            "the attachment half must come from the 0x02 ext; measuring at the \
+             Put's 0x03 reads it as ZERO and the budget stops nothing"
         );
     }
 }

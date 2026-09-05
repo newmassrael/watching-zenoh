@@ -32,11 +32,22 @@
 //!   Dispatcher walks `Push.extensions`; the ZInt value is the raw QoS
 //!   byte (priority / congestion / express packed; surfaced as
 //!   [`QosLevel::raw`]).
-//! * `attachment` — body-level extension `_Z_MSG_EXT_ENC_ZBUF | 0x03`
-//!   (zenoh-pico `src/protocol/codec/message.c` 314-322
-//!   `_z_push_body_decode_extensions`). Dispatcher walks the matching
-//!   body's extension chain (`MsgPut.extensions` for Put,
-//!   `MsgDel.extensions` for Del).
+//! * `attachment` — body-level extension, and the ext id depends on WHICH
+//!   body carries it: `_Z_MSG_EXT_ENC_ZBUF | 0x03` on a Put
+//!   (`commons/zenoh-protocol/src/zenoh/put.rs` @ `pub type Attachment`) but
+//!   `| 0x02` on a Del
+//!   (`commons/zenoh-protocol/src/zenoh/del.rs` @ `pub type Attachment`).
+//!   Dispatcher walks the matching body's extension
+//!   chain (`MsgPut.extensions` for Put, `MsgDel.extensions` for Del) at that
+//!   body's own id — R2370 repaired the Del arm, which read the Put's.
+//!   zenoh-pico DIVERGES here: one shared callback decodes both bodies and
+//!   matches attachment only at `| 0x03` (`src/protocol/codec/message.c`
+//!   @ `_z_push_body_decode_extensions`), its encoder emits 0x03 for a Del
+//!   too (`src/protocol/codec/message.c` @ `if (has_attachment) {`), and
+//!   `z_delete_options_t` (`include/zenoh-pico/api/types.h`
+//!   @ `} z_delete_options_t;`) has no attachment field at all — so pico
+//!   cannot PRODUCE a Del attachment, and a wz-emitted one is ignored by a
+//!   pico peer as a non-mandatory unknown ext.
 //! * `source_info` — body-level extension `_Z_MSG_EXT_ENC_ZBUF | 0x01`
 //!   (same callback; case 309-313). The ZBuf payload is the serialized
 //!   `_z_source_info_t`: a header byte whose high nibble is `(zidlen-1)`

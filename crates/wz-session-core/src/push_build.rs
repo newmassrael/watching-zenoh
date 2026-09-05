@@ -337,6 +337,18 @@ pub fn build_push_del_aliased(
     })
 }
 
+/// R2370 — which push body an extension chain is being built for.
+///
+/// The two bodies agree on the `source_info` ext id (0x01) and disagree on the
+/// attachment's, so a shared builder cannot infer it. The caller states the
+/// BODY — a fact it always knows — and the wire id stays a detail of the
+/// gated branch that emits it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PushBodyKind {
+    Put,
+    Del,
+}
+
 /// R233 — build the body-level extension chain (`source_info` +
 /// `attachment`) for a `MsgPut` or `MsgDel`. Returns `None` when
 /// both fields are absent so the caller can leave
@@ -346,9 +358,27 @@ pub fn build_push_del_aliased(
 /// `MsgPut::encode` / `MsgDel::encode` iterate the chain and the
 /// surrounding wire serializer applies the Z bit at the right
 /// position via the per-entry codec emit.
+/// R2370 — `body` is a PARAMETER because the two push bodies do not share one
+/// attachment ext id. Upstream declares the Put body's attachment at 0x03
+/// (`commons/zenoh-protocol/src/zenoh/put.rs` @ `pub type Attachment`) and the
+/// Del body's at 0x02
+/// (`commons/zenoh-protocol/src/zenoh/del.rs` @ `pub type Attachment`);
+/// this function is reached by both, and hardcoding the
+/// Put id here is what made wz emit a Del attachment zenoh reads as
+/// `ext_unknown`. The reply path already distinguished them
+/// (`response_build.rs`); the push path did not, and nothing pinned it because
+/// the two ids encode identically.
+///
+/// The caller names the BODY, not the id, so the `attachment` module — which
+/// is gated on `attachment-bytes` — is referenced only inside the
+/// `pubsub-attachment` branch below. Passing the id in from the call sites
+/// instead put `crate::attachment::…` in ungated position and broke every
+/// build without the feature (`wz-capture`, `wz-session-lwip`).
+#[cfg_attr(not(feature = "pubsub-attachment"), allow(unused_variables))]
 fn build_body_extensions(
     source_info: Option<&crate::sample::SourceInfo>,
     attachment: Option<&[u8]>,
+    body: PushBodyKind,
 ) -> Result<Option<Vec<ExtEntryOwned>>, CodecError> {
     let mut exts: Vec<ExtEntryOwned> = Vec::new();
     // Push source_info ext (id 0x01) — gated on `pubsub-source-info` so a
@@ -370,16 +400,21 @@ fn build_body_extensions(
     }
     #[cfg(not(feature = "pubsub-source-info"))]
     let _ = source_info;
-    // Push attachment ext (id 0x03) — gated on `pubsub-attachment` so a
-    // codec-push subset that does not compose attachments carries no
-    // attachment encode path. The ext wire shape lives in the
-    // wz-session-core `attachment` SSOT module (selected by
-    // pubsub-attachment). M flag stays clear (informational); Z chain bit
-    // applied below.
+    // Push attachment ext — gated on `pubsub-attachment` so a codec-push
+    // subset that does not compose attachments carries no attachment encode
+    // path. The ext wire shape lives in the wz-session-core `attachment` SSOT
+    // module (selected by pubsub-attachment). The ID is per-body (R2370): the
+    // SSOT constants are resolved HERE, inside the gate, because the module
+    // that owns them is itself gated. M flag stays clear (informational); Z
+    // chain bit applied below.
     #[cfg(feature = "pubsub-attachment")]
     if let Some(bytes) = attachment {
+        let attachment_ext_id = match body {
+            PushBodyKind::Put => crate::attachment::ATTACHMENT_EXT_ID_PUSH,
+            PushBodyKind::Del => crate::attachment::ATTACHMENT_EXT_ID_DEL,
+        };
         exts.push(crate::attachment::encode_attachment_ext(
-            crate::attachment::ATTACHMENT_EXT_ID_PUSH,
+            attachment_ext_id,
             bytes,
         )?);
     }
@@ -571,7 +606,7 @@ fn build_msg_put_with_meta(
     attachment: Option<&[u8]>,
 ) -> Result<MsgPutOwned, CodecError> {
     let payload_len = payload.len() as u64;
-    let extensions = build_body_extensions(source_info, attachment)?;
+    let extensions = build_body_extensions(source_info, attachment, PushBodyKind::Put)?;
     let mut put = MsgPutOwned {
         header: 0x01,
         timestamp: gated_timestamp_field(timestamp)?,
@@ -609,7 +644,11 @@ fn build_msg_del_with_meta(
     source_info: Option<&crate::sample::SourceInfo>,
     attachment: Option<&[u8]>,
 ) -> Result<MsgDelOwned, CodecError> {
-    let extensions = build_body_extensions(source_info, attachment)?;
+    // R2370 — name the DEL body, which resolves to ext id 0x02 rather than the
+    // Put's 0x03. Upstream declares them separately per body and the reply path
+    // already honoured that; this arm did not, and the two ids encode
+    // identically so nothing caught it.
+    let extensions = build_body_extensions(source_info, attachment, PushBodyKind::Del)?;
     let mut del = MsgDelOwned {
         header: 0x02,
         timestamp: gated_timestamp_field(timestamp)?,
@@ -676,7 +715,8 @@ fn build_msg_put_shm(
     let payload_len = descriptor_bytes.len() as u64;
     // Reuse the source_info / attachment SSOT, then append the 0x2 marker and
     // re-normalise the chain-continuation Z bits over the full chain.
-    let mut exts = build_body_extensions(source_info, attachment)?.unwrap_or_default();
+    let mut exts =
+        build_body_extensions(source_info, attachment, PushBodyKind::Put)?.unwrap_or_default();
     exts.push(crate::extshm::encode_shm_marker_ext());
     crate::ext_nodeid::apply_chain_z_bits(&mut exts);
     let mut put = MsgPutOwned {
@@ -1012,6 +1052,44 @@ mod tests {
         assert!(del.timestamp.is_some());
         assert!(del.t(), "T flag set when Del carries timestamp");
         assert!(!del.z(), "Z flag clear with no extensions");
+    }
+
+    /// R2370 — the push-path Del attachment's EXT ID, which nothing pinned.
+    ///
+    /// Upstream declares the Del body's attachment at 0x02
+    /// (`commons/zenoh-protocol/src/zenoh/del.rs` @ `pub type Attachment`), NOT
+    /// the Put body's 0x03
+    /// (`commons/zenoh-protocol/src/zenoh/put.rs` @ `pub type Attachment`), and
+    /// this tree already knows it: `attachment::ATTACHMENT_EXT_ID_DEL` is 0x02
+    /// and the REPLY Del arm uses it. The push arm reaches the attachment
+    /// encode through the shared `build_body_extensions`, which hardcodes the
+    /// PUSH id, so wz's two Del arms disagree with each other.
+    ///
+    /// Found by RE-AUDITING the attachment surface, not by a red: the sibling
+    /// Put test pins 0x43 and the other Del test covers `encoding`, so no
+    /// witness ever named this id -- and the two ids encode identically, so no
+    /// length or round-trip check can catch the difference. That is the same
+    /// trap R311y769 documented when it fixed the REPLY Del arm; this is the
+    /// push arm, which that round did not reach.
+    #[cfg(all(
+        feature = "codec-push",
+        feature = "pubsub-attachment",
+        feature = "pubsub-source-info"
+    ))]
+    #[test]
+    fn build_msg_del_with_meta_attaches_at_the_del_ext_id_not_the_push_one() {
+        let si = SourceInfo::new(&[0xDE, 0xAD], 7, 0);
+        let del = build_msg_del_with_meta(None, Some(&si), Some(b"attach-payload")).unwrap();
+        let exts = del.extensions.as_deref().expect("body ext chain populated");
+        assert_eq!(exts.len(), 2, "source_info + attachment = 2 entries");
+        assert_eq!(exts[0].header & 0x4F, 0x41, "source_info first");
+        assert_eq!(
+            exts[1].header & 0x4F,
+            0x40 | crate::attachment::ATTACHMENT_EXT_ID_DEL,
+            "a Del body's attachment carries the DEL ext id (0x02), the one \
+             upstream declares for THIS body -- emitting the Put id puts a byte \
+             on the wire zenoh reads as ext_unknown",
+        );
     }
 
     #[cfg(all(feature = "codec-push", feature = "pubsub-qos"))]
@@ -1483,9 +1561,14 @@ mod tests {
             let si = crate::sample::extract_source_info(body_exts).unwrap();
             assert_eq!(si.eid, 1);
             assert_eq!(si.sn, 2);
+            // R2370 — decode at the DEL id. This test named
+            // ATTACHMENT_EXT_ID_PUSH and PASSED, because the emit used the same
+            // wrong id: a round trip is symmetric, so it cannot see an id that
+            // is wrong on BOTH sides. That is why the repair needed a witness
+            // naming the id against upstream rather than another round trip.
             let att = crate::attachment::decode_attachment_ext(
                 body_exts,
-                crate::attachment::ATTACHMENT_EXT_ID_PUSH,
+                crate::attachment::ATTACHMENT_EXT_ID_DEL,
             )
             .map(<[u8]>::to_vec)
             .unwrap();

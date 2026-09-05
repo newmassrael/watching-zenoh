@@ -127,8 +127,11 @@ pub struct PublishOptions {
     /// still pins the byte layout. Loopback honours it from R232.
     pub source_info: Option<SourceInfo>,
     /// R232 — body-level attachment blob propagated to
-    /// `Sample.attachment`. Wire-side propagation is built (R233, body
-    /// ext `0x03` via `build_body_extensions`, gated `pubsub-attachment`)
+    /// `Sample.attachment`. Wire-side propagation is built (R233, via
+    /// `build_body_extensions`, gated `pubsub-attachment`) at the ext id of
+    /// the body that carries it — `0x03` for the `put()` arm, `0x02` for the
+    /// `del()` one, which is R2370's repair; this field feeds BOTH, so the
+    /// single id this comment used to name was wrong for one of them
     /// and foreign-proven — R311y209 (`wz_attachment_to_pico_zsub`,
     /// ze_serializer kv-pairs decoded by pico); loopback honours it
     /// from R232.

@@ -1471,9 +1471,15 @@ impl<C: SampleSink> SubscriberRegistry<C> {
                     let body_timestamp = del.timestamp.as_ref().map(TimestampHint::from_codec);
                     #[cfg(not(feature = "pubsub-timestamp"))]
                     let body_timestamp: Option<TimestampHint> = None;
+                    // R2370 — the DEL id (0x02) on a Del body, not the Put's
+                    // 0x03. Emit and decode were BOTH the Put id, which is
+                    // exactly why the round-trip test passed over a wrong wire
+                    // byte: the two ids encode identically, so only a test that
+                    // NAMES the id can tell them apart, and none did.
                     #[cfg(feature = "pubsub-attachment")]
-                    let body_attachment = decode_attachment_ext(body_exts, ATTACHMENT_EXT_ID_PUSH)
-                        .map(<[u8]>::to_vec);
+                    let body_attachment =
+                        decode_attachment_ext(body_exts, crate::attachment::ATTACHMENT_EXT_ID_DEL)
+                            .map(<[u8]>::to_vec);
                     #[cfg(not(feature = "pubsub-attachment"))]
                     let body_attachment: Option<alloc::vec::Vec<u8>> = {
                         let _ = body_exts;
