@@ -337,7 +337,15 @@ _ANY_TOKEN = re.compile(r"(?<![\w/.-])(\w[\w-]*)/[\w/.-]+\.rs")
 #: families in the anchored `path` @ `needle` form instead. One line-form
 #: citation left the tree, so the ratchet follows it down in the same commit --
 #: the only direction this number is allowed to move.
-LINE_BUDGET = 293
+#: 293 -> 292 (R2367). `runtime_pool`'s module doc cited zenoh's `zenoh-runtime`
+#: by line range at 49c8a53 -- a claim about zenoh 1.5.0, which is not the
+#: upstream this tree pins. Re-measured at the pin the borrowed facts all still
+#: held (five subsystems, the `app`/`acc`/`tx`/`rx`/`net` spellings, `rx` at two
+#: workers, 50 blocking threads) while both line ranges had MOVED, which is
+#: precisely the drift a line number reports as silence. The replacement names
+#: `pub enum ZRuntime` and `pub struct RuntimeParam` in the anchored form, so one
+#: line-form citation left the tree and the ratchet follows it down.
+LINE_BUDGET = 292
 BARE_BUDGET = 60
 #: The root-less axis, after R2317 repaired the 49 citations that named a file
 #: gone at the pin. Same two-directional ratchet as LINE and BARE.

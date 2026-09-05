@@ -90,10 +90,10 @@ pub const WRITER_STALL_MS: u64 = 2_000;
 /// it. Constructed by [`WriterHandle::spawn`] and consumed by a writer task.
 pub struct OutboundQueue {
     rx: mpsc::UnboundedReceiver<Vec<u8>>,
-    /// `None` once the seal has been observed, or once the [`WriterHandle`] has
-    /// been dropped without sealing — in the latter case the task is detached
-    /// and sender liveness is the only close signal left, which is the
-    /// pre-R311y519 behaviour and the right one for a detached writer.
+    /// `None` once the queue has been sealed — by an explicit
+    /// [`WriterHandle::drain`], or by the handle being DROPPED, which R2367
+    /// made the same signal. See [`WriterHandle`] for why the two had to
+    /// converge once the writer stopped living on its owner's runtime.
     seal: Option<watch::Receiver<bool>>,
     sealed: bool,
 }
@@ -112,23 +112,21 @@ impl OutboundQueue {
             }
             let seal = self.seal.as_mut().expect("checked directly above");
             let mut sealed_now = false;
-            let mut detached = false;
             let frame = tokio::select! {
                 biased;
                 frame = self.rx.recv() => Some(frame),
                 changed = seal.changed() => {
-                    match changed {
-                        Ok(()) => sealed_now = *seal.borrow_and_update(),
-                        Err(_) => detached = true,
-                    }
+                    sealed_now = match changed {
+                        Ok(()) => *seal.borrow_and_update(),
+                        // The handle is GONE, so no one can ever seal this
+                        // queue: its disappearance IS the seal (R2367).
+                        Err(_) => true,
+                    };
                     None
                 }
             };
             if let Some(frame) = frame {
                 return frame;
-            }
-            if detached {
-                self.seal = None;
             }
             if sealed_now {
                 self.apply_seal();
@@ -159,23 +157,21 @@ impl OutboundQueue {
                 return Some(write.await);
             };
             let mut sealed_now = false;
-            let mut detached = false;
             let out = tokio::select! {
                 biased;
                 out = &mut write => Some(out),
                 changed = seal.changed() => {
-                    match changed {
-                        Ok(()) => sealed_now = *seal.borrow_and_update(),
-                        Err(_) => detached = true,
-                    }
+                    sealed_now = match changed {
+                        Ok(()) => *seal.borrow_and_update(),
+                        // Same as `next`: a vanished handle seals (R2367), so
+                        // the wedged-peer bound arms here too.
+                        Err(_) => true,
+                    };
                     None
                 }
             };
             if let Some(out) = out {
                 return Some(out);
-            }
-            if detached {
-                self.seal = None;
             }
             if sealed_now {
                 self.apply_seal();
@@ -206,9 +202,30 @@ impl OutboundQueue {
 /// A spawned writer task's lifecycle handle: the join handle, plus the seal that
 /// lets teardown end the task without depending on sender liveness.
 ///
-/// Dropping it detaches the writer, exactly as dropping a bare
-/// [`TokioJoinHandle`] did — the queue then falls back to the sender-liveness
-/// close signal.
+/// Dropping it SEALS the queue (R2367): the writer finishes what is already
+/// buffered and exits. It is therefore the RAII form of [`Self::drain`] — the
+/// same terminal meaning, without the await.
+///
+/// It used to DETACH instead, falling back to sender liveness, and that was
+/// defensible only while [`Self::spawn`] used the ambient runtime: the writer
+/// then died with its owner's runtime whatever the senders did, so "detach" had
+/// a floor under it. R2366 moved every writer onto the process-wide
+/// [`WzRuntime::Tx`] subsystem and removed that floor without noticing —
+/// a detached writer now outlives its owner's runtime, and an outstanding sender
+/// clone pins it FOREVER, holding the link's write half open. The socket then
+/// never closes, so the peer never sees the FIN that tells it the session is
+/// gone: measured as `a_vanishing_peer_is_purged_from_the_matching_aggregate`
+/// going red, where a peer that had vanished was still credited with a matching
+/// subscriber on the far side.
+///
+/// zenoh reaches the same conclusion at the same seam and for the same reason.
+/// Its `tx_task` also runs on a process-wide transmit runtime
+/// (`io/zenoh-transport/src/unicast/universal/link.rs`
+/// @ `ZRuntime::TX.spawn(async move {`), and link close terminates it EXPLICITLY
+/// through a cancellation token rather than by letting a runtime fall
+/// (`io/zenoh-transport/src/unicast/universal/link.rs`
+/// @ `self.task_controller.terminate_all_async().await;`). A shared TX pool and
+/// an implicit close signal do not go together in either implementation.
 pub struct WriterHandle {
     join: TokioJoinHandle<()>,
     seal: watch::Sender<bool>,
@@ -288,9 +305,10 @@ impl WriterHandle {
         self.join.abort();
     }
 
-    /// Release the join handle alone, dropping the seal. The writer then closes
-    /// on sender liveness, so this is for callers that have already released
-    /// every sender and want the raw join.
+    /// Release the join handle alone, dropping the seal — which, since R2367,
+    /// seals the queue. For callers that have already released every sender and
+    /// want the raw join: there the queue is finite either way, so this stays
+    /// the await-the-tail form of [`Self::drain`] rather than a weaker one.
     pub fn into_join(self) -> TokioJoinHandle<()> {
         self.join
     }
@@ -340,6 +358,70 @@ mod tests {
         drop(tx);
     }
 
+    /// R2367 — DROPPING the handle ends the writer while a sender clone
+    /// survives, exactly as [`WriterHandle::drain`] does.
+    ///
+    /// The sibling above proves the EXPLICIT seal; this proves the implicit one,
+    /// and the surviving sender is what makes them the same claim. Without it
+    /// the writer would wait on sender liveness, and since R2366 put every
+    /// writer on the process-wide TX subsystem that wait no longer has a
+    /// runtime-shaped floor under it — the task would hold the link's write half
+    /// for the life of the PROCESS, so the socket never closes and the peer
+    /// never learns the session is gone.
+    ///
+    /// The assertion is the task's own exit, observed through the join handle:
+    /// `into_join` releases the seal (which is the drop under test) and hands
+    /// back the tail to await.
+    ///
+    /// That await is BOUNDED, and the bound is the reason this reads as a test
+    /// rather than as a hang. Measured with the pre-R2367 detach restored, the
+    /// unbounded form did not fail — it stopped, because "the writer never ends"
+    /// has no timeout of its own, and a control probe whose red is a job-level
+    /// timeout costs the run its budget instead of naming the defect. The bound
+    /// is orders of magnitude over a drain of two queued frames, so it can only
+    /// expire on the property this test is about.
+    #[tokio::test]
+    async fn dropping_the_handle_ends_the_writer_while_a_sender_clone_survives() {
+        let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let seen = Arc::new(AtomicUsize::new(0));
+        let seen_task = seen.clone();
+        let handle = WriterHandle::spawn(rx, move |mut queue| async move {
+            while let Some(frame) = queue.next().await {
+                seen_task.fetch_add(frame.len(), Ordering::SeqCst);
+            }
+        });
+
+        tx.send(vec![0u8; 3]).expect("enqueue");
+        tx.send(vec![0u8; 4]).expect("enqueue");
+
+        // Held to the END of the test: it is the whole point that the writer
+        // ends anyway. A `drop(tx)` before the await would prove nothing.
+        let survivor = tx.clone();
+
+        // The drop under test, and then the tail.
+        let join = handle.into_join();
+        timeout(Duration::from_millis(WRITER_STALL_MS), join)
+            .await
+            .expect(
+                "a dropped handle must END the writer; without the seal it waits on the \
+                 surviving sender forever, holding the link's write half open for the \
+                 life of the process",
+            )
+            .expect("the writer task itself must not panic");
+
+        assert_eq!(
+            seen.load(Ordering::SeqCst),
+            7,
+            "a dropped handle must SEAL — finish the queue — not discard it"
+        );
+        assert!(
+            survivor.send(vec![0u8; 5]).is_err(),
+            "the dropped handle must close the channel, so a surviving sender \
+             cannot enqueue behind a writer that has already exited"
+        );
+        drop(tx);
+    }
+
     /// A write that is already blocked when the seal lands is bounded, not left
     /// to hang — the wedged-peer case the wall-clock budget used to cover.
     ///
@@ -381,10 +463,24 @@ mod tests {
         );
     }
 
-    /// Dropping the handle without sealing leaves the pre-R311y519 behaviour
-    /// intact: the writer is detached and closes on sender liveness.
+    /// [`WriterHandle::into_join`] under its DOCUMENTED precondition — every
+    /// sender released — hands over what was already queued and joins.
+    ///
+    /// R2367 rewrote this test twice over. It used to assert that releasing the
+    /// handle "leaves sender liveness as the close signal", which is the
+    /// contract that same round removed; the outcome it checks is unchanged
+    /// because with no sender left the two signals agree, but the claim in the
+    /// name was no longer one this file makes.
+    ///
+    /// The enqueue also had to move ABOVE the release. It sat below, which was
+    /// safe only while `spawn` used the ambient current-thread test runtime and
+    /// the writer therefore could not run until the test awaited. R2366 put the
+    /// writer on the multi-threaded TX subsystem, so it can now reach the seal's
+    /// `rx.close()` before the test's next line — and the send would then fail
+    /// its `expect`. That race was latent from R2366 and armed by this round's
+    /// seal-on-drop; ordering the two removes it rather than widening a window.
     #[tokio::test]
-    async fn dropping_the_handle_leaves_sender_liveness_as_the_close_signal() {
+    async fn a_released_handle_hands_over_what_was_already_queued() {
         let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
         let seen = Arc::new(AtomicUsize::new(0));
         let seen_task = seen.clone();
@@ -393,12 +489,12 @@ mod tests {
                 seen_task.fetch_add(frame.len(), Ordering::SeqCst);
             }
         });
-        let join = handle.into_join();
 
         tx.send(vec![0u8; 2]).expect("enqueue");
         drop(tx);
+        let join = handle.into_join();
         join.await
-            .expect("the writer joins once every sender has dropped");
+            .expect("the writer joins once the handle is released");
 
         assert_eq!(seen.load(Ordering::SeqCst), 2);
     }

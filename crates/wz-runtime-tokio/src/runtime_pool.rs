@@ -8,9 +8,19 @@
 //! worker pool: a receive path that saturates its workers with decode work
 //! also starves the transmit path, and an operator has no dial to separate
 //! them. This module is the dial. It gives each subsystem its own runtime with
-//! independently tunable worker and blocking-thread counts, mirroring zenoh
-//! 1.5.0's `zenoh-runtime` (`commons/zenoh-runtime/src/lib.rs:48-72, 103-127`,
-//! read at 49c8a53).
+//! independently tunable worker and blocking-thread counts, mirroring zenoh's
+//! `zenoh-runtime` (`commons/zenoh-runtime/src/lib.rs` @ `pub enum ZRuntime`
+//! and `commons/zenoh-runtime/src/lib.rs` @ `pub struct RuntimeParam`).
+//!
+//! R2367 re-measured that mirror against the tree's PIN. It had declared
+//! zenoh 1.5.0 at 49c8a53 by line number, which is a claim about a different
+//! upstream than the one this workspace pins, and a line number cannot say so.
+//! Re-read at the pin, every borrowed fact still holds — the five subsystems,
+//! their `app`/`acc`/`tx`/`rx`/`net` spellings, `rx` at two workers and the
+//! rest at one, and 50 blocking threads everywhere — so the substance needed no
+//! change and only the anchors did. Named needles rather than line numbers
+//! because the lines DID move (48-72 -> 45-52, 103-127 -> 101-127) while the
+//! items did not, which is exactly the drift a line number reports as silence.
 //!
 //! ## The five subsystems
 //!
@@ -55,6 +65,28 @@
 //! wherever a generic `R: Runtime` is threaded — the MCU profile's
 //! single-executor binding is unaffected, since the partition is an AP-profile
 //! concern and lives entirely in this crate.
+//!
+//! ## Naming a subsystem takes a task's floor away
+//!
+//! R2367 — a subsystem runtime is process-wide and OUTLIVES whoever spawned
+//! onto it. An ambient spawn did not: it died with its owner's runtime whatever
+//! else was true, so every wz task had a floor under its lifetime that nobody
+//! had to think about. Moving a task here removes that floor, silently, and
+//! leaves it with only the close signal its own body implements. A task whose
+//! signal is the liveness of something its owner may still hold therefore stops
+//! terminating — and if it holds a link's write half, the socket never closes
+//! and the peer never learns the session is gone.
+//!
+//! That is not hypothetical; it is what R2366 did to
+//! [`WriterHandle`](crate::writer_queue::WriterHandle), whose drop detached and
+//! waited on sender liveness. So the obligation is explicit here: **a task named
+//! onto a subsystem must be ended by something its owner controls.** Derived
+//! over the 25 named spawns, all 25 now are — eight by an abort-on-drop owner
+//! (`AbortOnDrop` and the per-type `Drop`s modelled on it), two by treating a
+//! closed stop-channel as an RAII shutdown (the multicast pumps), one by the
+//! seal a dropped [`WriterHandle`](crate::writer_queue::WriterHandle) now
+//! raises, two self-terminating and bounded, and twelve in binaries the process
+//! exit ends.
 //!
 //! ## Why two seams keep an ambient escape
 //!
