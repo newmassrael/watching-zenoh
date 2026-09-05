@@ -154,6 +154,11 @@ pub(crate) mod atomic;
 pub mod executor;
 #[cfg(feature = "alloc")]
 pub mod join_handle;
+// The `!Send` task pool. Separate from `executor` (the `Send` pool) because
+// the two differ in exactly one bound and that bound is what makes the AP
+// contract and the MCU session bundle incompatible — see the module doc.
+#[cfg(feature = "alloc")]
+pub mod local;
 #[cfg(feature = "alloc")]
 pub mod runtime_impl;
 #[cfg(feature = "alloc")]
@@ -162,7 +167,11 @@ pub mod time;
 pub mod timer;
 
 #[cfg(feature = "alloc")]
+pub use executor::yield_now;
+#[cfg(feature = "alloc")]
 pub use join_handle::CoopJoinHandle;
+#[cfg(feature = "alloc")]
+pub use local::{CoopLocalJoinHandle, CoopLocalSet};
 #[cfg(feature = "alloc")]
 pub use runtime_impl::CoopRuntime;
 #[cfg(feature = "alloc")]

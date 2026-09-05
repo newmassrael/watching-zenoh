@@ -811,6 +811,20 @@ pub fn check_keepalive_deadline<R: SessionRuntime, T: TimeSource>(
     }
 }
 
+/// The FSM engine [`new_session_engine`] yields, named once here.
+///
+/// R2364 — the alias exists because a driver that wants to STORE the engine
+/// (rather than hold it in a local of an inference-typed `let`) has to write
+/// the type out, and writing it out names `sce_rust_runtime::Engine`. That is
+/// a dependency the AP profile happens to carry and the MCU session shell
+/// (`wz-session-lwip`) does not: it reaches the engine only through this
+/// crate's factory. Adding the sce dep to a crate that names no other sce
+/// item, purely to spell a return type, would be a dependency edge bought
+/// for a syntax problem. The alias lets any driver on any profile store the
+/// engine with the dep graph unchanged, which is what the MCU
+/// `SessionPump` does.
+pub type SessionEngine<R, T> = Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>;
+
 /// Build a session [`Engine`] over the generated engine-free
 /// [`SessionFsmUnicastPolicy`], parameterised over a [`SessionActionsBinding`]
 /// wrapping a clone of `actions`. Generic over `R: SessionRuntime` so the AP
@@ -820,7 +834,7 @@ pub fn check_keepalive_deadline<R: SessionRuntime, T: TimeSource>(
 /// the returned engine with `dispatch_link_event` / `check_lease_deadline`.
 pub fn new_session_engine<R: SessionRuntime, T: TimeSource>(
     actions: &R::ActionsHandle<T>,
-) -> Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>> {
+) -> SessionEngine<R, T> {
     // `SessionActionsBinding.inner` is private to this crate; construct through
     // the pub `::new` constructor (mirrors the AP `new_session_engine`).
     let binding = SessionActionsBinding::new(actions.clone());
