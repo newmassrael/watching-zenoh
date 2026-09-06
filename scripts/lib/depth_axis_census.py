@@ -481,10 +481,17 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # closes above -- the AMBIGUOUS pin DOES move, by exactly 1 (80 -> 79). Its NEW
 # reason's citations are not counted here: this census reads PARTIAL reasons
 # only, and that atom is no longer one.
+# R2374 -- 352 -> 354, and this one moves UP, which none of the four above did.
+# No atom left the corpus: `adminspace-read` and `adminspace-write` both stay
+# PARTIAL, so REACHED / UNREACHED / NO-SYMBOL are all untouched and the whole
+# delta is prose. Each of the two gained a CORRECTION naming one tracked wz file
+# the census resolves -- the round closed one atom's misattributed clause and
+# narrowed the other's, and a residual narrowed in writing is a citation added.
+# The AMBIGUOUS pin does not move: both new citations resolve to exactly one file.
 PIN_REACHED = 64
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
-PIN_WZ_CITATIONS = 352
+PIN_WZ_CITATIONS = 354
 PIN_AMBIGUOUS = 79
 
 
