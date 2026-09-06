@@ -766,19 +766,23 @@ struct DeferredQuery {
 /// MINUS `Send` — the forwarder is single-task, so a handler may capture an `Rc`
 /// (Phase 3b's shared `WzConfig`). Factored to a `type` per
 /// `clippy::type_complexity`, as `LocalQueryHandler` is.
-type LocalSubscriberHandler = Box<dyn FnMut(&dyn SampleView)>;
+pub(crate) type LocalSubscriberHandler = Box<dyn FnMut(&dyn SampleView)>;
 
 /// R311y46 (§5.23 Phase 3a) — a subscriber HOSTED BY THIS NODE: its declared
 /// keyexpr (a PATTERN) + the handler. A Put whose concrete key the pattern matches
 /// is delivered to the handler (the Push-plane twin of [`LocalQueryable`]).
-struct LocalSubscriber {
-    keyexpr: String,
+/// R2393 — `pub(crate)` for the reason [`LocalQueryable`] is: the ROUTER forwarder
+/// (`router_forward.rs`) reuses the SAME type for its own host-subscriber store
+/// rather than duplicating it, so the two planes cannot drift in what a local
+/// subscriber IS.
+pub(crate) struct LocalSubscriber {
+    pub(crate) keyexpr: String,
     /// `Rc<RefCell<…>>` — the Push-plane twin of [`LocalQueryable`]'s handler:
     /// [`dispatch_local_subscribers`](LinkstateForwarder::dispatch_local_subscribers)
     /// clones the handle out under a short borrow, drops the `local_subscribers`
     /// borrow, then invokes, so a handler may re-entrantly register / undeclare a
     /// local subscriber (incl. self-undeclare) without a `RefCell` panic.
-    handler: Rc<RefCell<LocalSubscriberHandler>>,
+    pub(crate) handler: Rc<RefCell<LocalSubscriberHandler>>,
 }
 
 /// A minimal [`QueryView`] over a routed Request's resolved fields, for

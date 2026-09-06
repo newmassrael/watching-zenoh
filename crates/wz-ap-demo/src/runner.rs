@@ -6171,6 +6171,15 @@ async fn run_router_hat_until(
             "wz-ap-demo router-hat: adminspace read permit = {}",
             wz::runtime_tokio::admin_read_permit(&admin_cfg.borrow().admin_permissions())
         );
+        // R2393 — taken BEFORE the GET handler moves them: the config-WRITE
+        // subscriber below needs the same zid and the same live config, and the
+        // `Rc` clone is what makes "the same" literal — both gates read one
+        // `RefCell`, so a permit change cannot leave the read and write halves
+        // disagreeing about what this node permits.
+        #[cfg(feature = "router-connect-reconcile")]
+        let write_zid_hex = zid_hex.clone();
+        #[cfg(feature = "router-connect-reconcile")]
+        let write_admin_cfg = std::rc::Rc::clone(&admin_cfg);
         let handler = move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
             // Resolved per GET off the shared config, exactly as the peer host does —
             // zenoh re-reads the live config inside its admin handler
@@ -6228,6 +6237,110 @@ async fn run_router_hat_until(
             "wz-ap-demo router-hat: adminspace router legs hosted at {queryable_key} \
              (linkstate/routers, linkstate/peers, route/successor)"
         );
+
+        // R2393 (router-connect-reconcile) — the config-WRITE subscriber that makes
+        // the runtime connect list reachable from the WIRE, closing this atom's last
+        // live residual: "the trigger is a one-shot --connect-after CLI argument
+        // rather than a live config-modification subscription, where upstream
+        // re-enters update_peers on config change".
+        //
+        // NOTHING about the dial changes. The reconcile channel, its add-dedup and
+        // the accept loop's ADD-ONLY apply have existed since R311y202; what the
+        // residual named was that the channel had exactly ONE producer, a timer that
+        // fires once. This is a second producer — the same shape R2333 closed on
+        // transport-multicast, where the residual had moved from "there is no way to
+        // stop" to "nothing asks to stop".
+        //
+        // On the FORWARDER (`register_local_subscriber`, R2393) rather than a Session
+        // declare: this host is forwarder-based with no single Session, which is why
+        // `run_storage_host` exists as a separate per-client-Session mode at all.
+        #[cfg(feature = "router-connect-reconcile")]
+        {
+            use wz::runtime_tokio::adminspace::{
+                admin_config_write_key, parse_admin_config_write, AdminConfigWrite,
+                AdminConfigWriteOutcome,
+            };
+            use wz::runtime_tokio::sink::SampleView;
+            let write_key = admin_config_write_key(&write_zid_hex, whatami_str);
+            let write_cfg = write_admin_cfg;
+            let write_tx = reconcile_tx.clone();
+            let write_prefix = format!("{write_key}/");
+            let write_handler = move |sample: &dyn SampleView| {
+                // Re-read per PUT off the SAME live config the GET gate reads —
+                // a permit captured at setup could not answer a permission changed
+                // since, which is the frozen-permit divergence this tree has already
+                // paid for twice.
+                let write_permitted =
+                    wz::runtime_tokio::admin_write_permit(&write_cfg.borrow().admin_permissions());
+                match parse_admin_config_write(
+                    &write_prefix,
+                    sample.keyexpr(),
+                    sample.payload(),
+                    write_permitted,
+                ) {
+                    AdminConfigWriteOutcome::Apply(AdminConfigWrite::ConnectAdd(eps)) => {
+                        // Parsed with the SAME locator parser the `--connect-after`
+                        // path uses, so a string that dials from the CLI dials from
+                        // here identically. ALL-OR-NOTHING at this layer too: the
+                        // decoder rejected empty elements, and an element that does
+                        // not PARSE stops the whole batch rather than dialling its
+                        // parsable half.
+                        let mut locs = Vec::with_capacity(eps.len());
+                        let mut bad: Option<String> = None;
+                        for ep in &eps {
+                            match wz::runtime_tokio::locator::parse_any_locator(ep) {
+                                Ok(l) => locs.push(l),
+                                Err(_) => {
+                                    bad = Some(ep.clone());
+                                    break;
+                                }
+                            }
+                        }
+                        match bad {
+                            Some(ep) => log::warn!(
+                                "wz-ap-demo router-hat: config-write connect-add ignored; \
+                                 {ep} is not a locator (the batch applies whole or not at all)"
+                            ),
+                            None => {
+                                let n = locs.len();
+                                // A closed channel means the face loop is gone — a
+                                // shutdown, not an error to shout about.
+                                if write_tx.send(locs).is_ok() {
+                                    log::info!(
+                                        "wz-ap-demo router-hat: config-write connect-add \
+                                         reconciled {n} endpoint(s) onto the connect list"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    // Every other intent decodes here (the decoder is one SSOT) but
+                    // this host applies none: the ACL slice and the storage manager
+                    // belong to the peer and storage hosts.
+                    AdminConfigWriteOutcome::Apply(other) => log::warn!(
+                        "wz-ap-demo router-hat: config-write intent {other:?} decoded but \
+                         this host applies only connect-add; ignored"
+                    ),
+                    // zenoh logs a denied write at error (`adminspace.rs:397`).
+                    AdminConfigWriteOutcome::Denied => log::error!(
+                        "wz-ap-demo router-hat: config-write on {} DENIED \
+                         (adminspace.permissions.write is false)",
+                        sample.keyexpr()
+                    ),
+                    AdminConfigWriteOutcome::Malformed => {
+                        log::warn!("wz-ap-demo router-hat: config-write malformed payload; ignored")
+                    }
+                    AdminConfigWriteOutcome::UnknownKey(k) => log::warn!(
+                        "wz-ap-demo router-hat: config-write unknown sub-key {k}; ignored"
+                    ),
+                    AdminConfigWriteOutcome::NotAWrite => {}
+                }
+            };
+            forwarder.register_local_subscriber(&write_key, Box::new(write_handler));
+            log::info!(
+                "wz-ap-demo router-hat: adminspace config WRITE at {write_key} (connect-add)"
+            );
+        }
     }
 
     let loop_fut = peer_loop(
@@ -7483,6 +7596,17 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
                             "wz-ap-demo storage-host: admin-read {read} reached the \
                          dispatch queue; it is applied in the subscriber and \
                          should never be stashed"
+                        ),
+                        // R2393 — the router-hat's connect-list intent. This host runs
+                        // no face loop and holds no reconcile sender, so there is
+                        // nothing here to apply it to. Reported rather than dropped,
+                        // for the reason the arm above gives: a `_` would have hidden
+                        // it, and the compiler forcing this decision when the variant
+                        // was added is what the exhaustive match is for.
+                        AdminConfigWrite::ConnectAdd(eps) => log::warn!(
+                            "wz-ap-demo storage-host: connect-add ({} endpoint(s)) \
+                         ignored; this mode hosts no face loop to reconcile",
+                            eps.len()
                         ),
                     }
                 }

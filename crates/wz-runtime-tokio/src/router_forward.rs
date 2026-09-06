@@ -314,7 +314,7 @@ use sce_forge_runtime::codec::CodecError;
 use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
 use wz_codecs::interest::InterestOwned;
 use wz_codecs::linkstate_list::LinkstateListOwned;
-use wz_codecs::push::PushOwned;
+use wz_codecs::push::{PushOwned, PushOwnedVariant};
 use wz_codecs::wireexpr::WireexprOwned;
 // R311wt-mc slice 1 — the EGRESS-only multicast group plane
 // (`router-multicast-faces`). Gated on `transport-multicast` (the existing §5.1
@@ -370,8 +370,13 @@ use crate::linkstate_forward::{
     is_tree_forward_target, peer_whatami_routing, peer_zid_routing, re_advertise_interest_into,
     resolve_governed_keyexpr, resolve_source_in, select_best_matching,
     synthesize_drained_fan_finals, synthesize_expired_query_returns, LocalQueryHandler,
-    LocalQueryView, LocalQueryable,
+    LocalQueryView, LocalQueryable, LocalSubscriber, LocalSubscriberHandler,
 };
+// R2393 — the host-subscriber dispatch's sample types, the same ones the peer
+// plane's `dispatch_local_subscribers` builds from.
+use wz_session_core::sample_kind::SampleKind;
+use wz_session_core::sink::BorrowedSample;
+
 use crate::linkstate_interest::LinkstatepeerInterest;
 use crate::linkstate_pending::{PendingQueries, QueryFan};
 use crate::session_glue::{IterationEvent, SessionLinkActions};
@@ -755,6 +760,23 @@ pub struct RouterForwarder {
     /// the `adminspace-router-linkstate` cfg gates only the demo registration + the
     /// session-core answerer, so an unused registry is a harmless empty no-op.
     local_queryables: RefCell<Vec<LocalQueryable>>,
+    /// R2393 (§5.21 `router-connect-reconcile`) — subscribers HOSTED BY THIS ROUTER,
+    /// the Push-plane twin of [`local_queryables`](Self#structfield.local_queryables).
+    ///
+    /// Until this round the router could be ASKED things (an admin GET reaches
+    /// [`register_local_queryable`](Self::register_local_queryable)) and could not be
+    /// TOLD anything: there was no way for a host to receive a Put, which is why the
+    /// runtime connect-list reconcile had exactly one producer, a one-shot CLI timer.
+    /// `LinkstateForwarder` has carried this since R311y146; the router had only half
+    /// the pair, and the asymmetry was invisible until something needed the other
+    /// half.
+    ///
+    /// A host subscriber is the FOURTH contributor to
+    /// [`self_advertises_sub_into`](Self::self_advertises_sub_into), beside client
+    /// subs, group subs and opposite-mesh natives — so it advertises by the SAME
+    /// derive every other contributor uses rather than through a parallel path, and
+    /// self is still never stored in either mesh's table.
+    local_subscribers: RefCell<Vec<LocalSubscriber>>,
     /// FUTURE-mode subscriber-interest store (R311y146) — which CLIENT faces
     /// declared a FUTURE (`f()`) subscriber `Interest`, and which
     /// `DeclareSubscriber`s wz has pushed back to them (zenoh's per-`FaceState`
@@ -1105,6 +1127,7 @@ impl RouterForwarder {
             client_subs: RefCell::new(HashMap::new()),
             client_qabls: RefCell::new(HashMap::new()),
             local_queryables: RefCell::new(Vec::new()),
+            local_subscribers: RefCell::new(Vec::new()),
             future_subs: RefCell::new(FutureSubStore::new()),
             future_qabls: RefCell::new(FutureQablStore::new()),
             #[cfg(feature = "routing-token-tables")]
@@ -2871,6 +2894,18 @@ impl RouterForwarder {
         self.deliver_to_client_subscribers(
             inbound, tier, reliable, priority, push, &keyexpr, master,
         );
+        // Block 3b (R2393) — local HOST delivery: a subscriber this router itself
+        // registered. Beside block 3 rather than inside it, because a client
+        // subscriber is a FACE to send to and a host subscriber is a CLOSURE to
+        // invoke; folding them would make one of the two lie about what it does.
+        //
+        // UNGATED by `master`, and that is the one decision here worth arguing.
+        // Blocks 1-3 gate on mastership because they RE-FORWARD onto a wire, and two
+        // routers both forwarding one Put is a duplicate a peer can observe. This
+        // block terminates the Put in-process: nothing leaves, so there is nothing to
+        // duplicate, and gating it would mean a router that is not master for a
+        // keyexpr silently ignores what it was told over its own admin space.
+        self.dispatch_local_subscribers(reliable, push, &keyexpr);
         // Client-sourced mesh re-injection (peer leg ungated, router leg master).
         // A multicast INGRESS Push (I3b) federates into the mesh ONLY when this
         // router is the Designated Router (DR) for its keyexpr: `is_group_dr`
@@ -3905,7 +3940,30 @@ impl RouterForwarder {
     fn self_advertises_sub_into(&self, target: FaceTier, keyexpr: &str) -> bool {
         self.any_client_subscribes(keyexpr)
             || self.group_subscribes(keyexpr)
+            || self.host_subscribes(keyexpr)
             || self.contributor_subs_source_count(target, keyexpr) > 0
+    }
+
+    /// R2393 — whether a subscriber HOSTED BY THIS ROUTER holds `keyexpr`: the
+    /// FOURTH self-advertise contributor, added beside client subs, group subs and
+    /// opposite-mesh natives.
+    ///
+    /// It belongs in the DERIVE rather than in a flood of its own for the reason
+    /// this predicate's own doc gives: self is never stored in either mesh's table,
+    /// so every question about "does this router want `keyexpr`" has to be answered
+    /// by asking its contributors. A host sub that advertised through a separate
+    /// path would be a second answer to that question, and the two could disagree —
+    /// which is exactly the drift `DERIVE-not-STORE` exists to make impossible.
+    ///
+    /// Matching is by the same intersection every other contributor uses, so a host
+    /// registering `@/<zid>/router/config/**` is advertised for, and reached by, a
+    /// concrete Put under it.
+    fn host_subscribes(&self, keyexpr: &str) -> bool {
+        let target_chunks: Vec<&str> = keyexpr.split('/').collect();
+        self.local_subscribers
+            .borrow()
+            .iter()
+            .any(|ls| keyexpr_intersects_target(&ls.keyexpr, &target_chunks))
     }
 
     /// Whether a multicast-group SUBSCRIBER holds `keyexpr` — the THIRD
@@ -4694,6 +4752,116 @@ impl RouterForwarder {
             handler: Rc::new(RefCell::new(handler)),
         });
         self.advertise_cross_tier_qabl_both_meshes(keyexpr);
+    }
+
+    /// R2393 (§5.21) — register a subscriber HOSTED BY THIS ROUTER: the Push-plane
+    /// twin of [`register_local_queryable`](Self::register_local_queryable) and the
+    /// router counterpart of
+    /// [`LinkstateForwarder::register_local_subscriber`](crate::linkstate_forward::LinkstateForwarder::register_local_subscriber).
+    ///
+    /// Stores the handler in
+    /// [`local_subscribers`](Self#structfield.local_subscribers) — so a routed Put
+    /// whose concrete key the pattern matches is delivered at the Push ingress, in
+    /// ADDITION to the remote fan-out — and advertises the interest into BOTH meshes
+    /// so a remote router or peer routes a matching Put toward this router at all.
+    ///
+    /// The advertisement is a FLOOD here and a DERIVE at
+    /// [`self_advertises_sub_into`](Self::self_advertises_sub_into), and both are
+    /// needed for the reason the queryable twin needs both: the flood tells the
+    /// members that are ALREADY in the mesh, and the derive answers for a member
+    /// that joins LATER, whose declare-fold asks this router what it wants. A flood
+    /// alone would be invisible to a late joiner; a derive alone would be invisible
+    /// to everyone already there.
+    ///
+    /// Unlike the peer twin this returns no reach count: the router floods into two
+    /// meshes rather than one tree, so a single number would have to fold two
+    /// answers into one and could not say which mesh a zero came from.
+    pub fn register_local_subscriber(&self, keyexpr: &str, handler: LocalSubscriberHandler) {
+        self.local_subscribers.borrow_mut().push(LocalSubscriber {
+            keyexpr: keyexpr.to_string(),
+            handler: Rc::new(RefCell::new(handler)),
+        });
+        self.advertise_cross_tier_sub_both_meshes(keyexpr);
+    }
+
+    /// R2393 — deliver a routed Put to any subscriber HOSTED BY THIS ROUTER whose
+    /// declared pattern matches the concrete key: the Push-plane twin of
+    /// [`dispatch_local_queryables`](Self::dispatch_local_queryables) and the router
+    /// counterpart of `LinkstateForwarder::dispatch_local_subscribers`.
+    ///
+    /// RE-ENTRANCY, the same collect-drop-invoke contract the peer plane documents:
+    /// matching handlers are cloned out (`Rc<RefCell<…>>`) under a SHORT borrow of
+    /// `local_subscribers`, the borrow is DROPPED before any handler runs, and each is
+    /// invoked through `try_borrow_mut`. So a handler may re-entrantly register or
+    /// remove a host subscriber — including itself — without panicking the outer
+    /// `RefCell`.
+    ///
+    /// ⚠ ONE DIVERGENCE FROM THE PEER TWIN, named rather than left to be discovered:
+    /// on a BUSY handler (`try_borrow_mut` fails — a handler that re-entered this
+    /// dispatch for its own pattern) the peer plane QUEUES the sample and redelivers
+    /// it off-stack, faithful to zenoh's FIFO requeue. This plane drops it and says
+    /// so. The requeue needs the outermost-`forward`-exit drain the peer plane owns,
+    /// and no router-hosted subscriber can currently reach the busy arm: the shipped
+    /// host is an admin config-write handler that sends on a channel and publishes
+    /// nothing, so it cannot echo to its own pattern. Building the queue now would be
+    /// a mechanism with no reachable caller; it becomes real the first time a
+    /// router-hosted subscriber publishes.
+    fn dispatch_local_subscribers(&self, reliable: bool, push: &PushOwned, keyexpr: &str) {
+        // Cheap exit before any payload work: the overwhelmingly common case is a
+        // router hosting no subscribers at all.
+        if self.local_subscribers.borrow().is_empty() {
+            return;
+        }
+        // The MsgPut payload, delivered raw. A non-Put body (MsgDel) is skipped, as
+        // the peer twin skips it — a host subscriber sees Puts.
+        let payload: &[u8] = match &push.body {
+            PushOwnedVariant::CodecZenohMsgPut(put) => put.payload.as_slice(),
+            _ => return,
+        };
+        let sample = BorrowedSample {
+            keyexpr,
+            payload,
+            kind: SampleKind::Put,
+            reliability: if reliable {
+                crate::Reliability::Reliable
+            } else {
+                crate::Reliability::BestEffort
+            },
+        };
+        let matched: Vec<Rc<RefCell<LocalSubscriberHandler>>> = {
+            let locals = self.local_subscribers.borrow();
+            let target_chunks: Vec<&str> = keyexpr.split('/').collect();
+            locals
+                .iter()
+                .filter(|sub| keyexpr_intersects_target(&sub.keyexpr, &target_chunks))
+                .map(|sub| Rc::clone(&sub.handler))
+                .collect()
+        };
+        for handler in &matched {
+            match handler.try_borrow_mut() {
+                Ok(mut h) => (**h)(&sample),
+                Err(_) => log::warn!(
+                    "router-forward: host subscriber for {keyexpr} is BUSY (self-echo); \
+                     the sample is dropped — this plane has no redelivery queue yet"
+                ),
+            }
+        }
+    }
+
+    /// R2393 — advertise a self-hosted SUBSCRIPTION into both meshes, the subscriber
+    /// twin of [`advertise_cross_tier_qabl_both_meshes`](Self::advertise_cross_tier_qabl_both_meshes).
+    ///
+    /// `build_declare_subscriber(0, 0, …)` is the same self-sourced literal form the
+    /// peer plane uses: node_id 0 means self-originated (no `ext_nodeid` is emitted)
+    /// and mapping id 0 with a suffix is the literal-keyexpr wire shape. There is no
+    /// per-tier info to derive as the queryable path has — a subscription carries no
+    /// `complete` / distance — so this floods unconditionally into each tier.
+    fn advertise_cross_tier_sub_both_meshes(&self, keyexpr: &str) {
+        for target in [FaceTier::Routers, FaceTier::LinkstatePeers] {
+            self.flood_self_sourced(target, keyexpr, |ke| {
+                build_declare_subscriber(0, 0, Some(ke))
+            });
+        }
     }
 
     /// A read-only [`LinkstateNetView`] over the ROUTER-tier graph (`routers_net`)
@@ -6615,6 +6783,93 @@ mod tests {
             sink_r.frame_count(),
             1,
             "bridged to the router-tier subscriber (self is master in single-router)"
+        );
+    }
+
+    /// R2393 — a Put routed to this router reaches a subscriber the ROUTER ITSELF
+    /// hosts, and the router advertises that interest into its meshes.
+    ///
+    /// The two halves are asserted together because either alone is a half-truth: a
+    /// handler that fires proves nothing if no peer would ever route a matching Put
+    /// here, and an advertisement proves nothing if the arriving Put is then dropped.
+    /// `self_advertises_sub_into` is the derive every mesh answer goes through, so
+    /// asserting it is asserting what a late-joining member's declare-fold will learn.
+    ///
+    /// The control is INSIDE the fixture rather than a second test: the same router,
+    /// the same face, the same drive — only the KEY differs, so a Put under a
+    /// non-matching key must leave the counter alone. A separate test would vary the
+    /// fixture too and could not make that claim.
+    /// Ungated: the host-subscriber plane needs no QoS, unlike the band test below
+    /// whose `#[cfg(feature = "transport-qos")]` this test must NOT inherit.
+    #[test]
+    fn a_router_hosted_subscriber_receives_a_routed_put_and_is_advertised() {
+        use std::cell::Cell;
+        // Scoped to the test: the lib's dispatch builds a `BorrowedSample` and never
+        // names the trait, so a module-level import would be dead in a non-test build
+        // and `-D warnings` rejects it.
+        use wz_session_core::sink::SampleView;
+
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, _sink_a) = face(zid(0xAA), WIRE_PEER); // peer source
+        fwd.register(FaceId(0), &a);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        fwd.tick();
+
+        // Before registering anything, the router advertises no interest in the
+        // pattern — so the assertion after registration is a CHANGE, not a constant.
+        assert!(
+            !fwd.self_advertises_sub_into(FaceTier::LinkstatePeers, "demo/host/k"),
+            "a router with no host subscriber must not advertise interest"
+        );
+
+        let hits = Rc::new(Cell::new(0usize));
+        let seen = Rc::new(RefCell::new(Vec::<u8>::new()));
+        {
+            let hits = Rc::clone(&hits);
+            let seen = Rc::clone(&seen);
+            fwd.register_local_subscriber(
+                "demo/host/**",
+                Box::new(move |s: &dyn SampleView| {
+                    hits.set(hits.get() + 1);
+                    *seen.borrow_mut() = s.payload().to_vec();
+                }),
+            );
+        }
+
+        // HALF ONE — the derive now says yes, in BOTH meshes. A host sub is the
+        // fourth contributor, so this is what a late joiner's fold reads.
+        assert!(
+            fwd.self_advertises_sub_into(FaceTier::LinkstatePeers, "demo/host/k"),
+            "a host subscriber must make the router advertise into the peer mesh"
+        );
+        assert!(
+            fwd.self_advertises_sub_into(FaceTier::Routers, "demo/host/k"),
+            "and into the router mesh — a host sub is not tier-scoped"
+        );
+
+        // HALF TWO — a routed Put under the pattern reaches the handler.
+        let push = wz_session_core::push_build::build_push_literal("demo/host/k", b"payload")
+            .expect("build push");
+        forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push)));
+        assert_eq!(
+            hits.get(),
+            1,
+            "the router-hosted subscriber must receive it"
+        );
+        assert_eq!(
+            seen.borrow().as_slice(),
+            b"payload",
+            "and receive the Put's payload, not an empty or stale body"
+        );
+
+        // CONTROL — same router, same face, same drive, only the KEY differs.
+        let other = wz_session_core::push_build::build_push_literal("demo/other/k", b"nope")
+            .expect("build push");
+        forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(other)));
+        assert_eq!(
+            hits.get(),
+            1,
+            "a Put outside the declared pattern must NOT reach the handler"
         );
     }
 

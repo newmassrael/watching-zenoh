@@ -1086,6 +1086,29 @@ pub enum AdminConfigWrite {
     /// a test that reached inside. See
     /// `wz_storage_host_adminspace_read_permit_flips_over_the_wire`.
     AdminReadPermit(bool),
+    /// R2393 (`router-connect-reconcile`) — `.../config/connect-add <endpoint>[,…]`
+    /// — dial these endpoints now, the wz analogue of upstream re-entering
+    /// `update_peers` when a live node's connect list changes.
+    ///
+    /// # Why this key is admissible, on the test [`AdminReadPermit`] used
+    ///
+    /// The atom's last live residual said wz's runtime connect ADD is reachable only
+    /// from a ONE-SHOT CLI argument (`--connect-after`), where upstream re-reads the
+    /// list on a config change (`net/runtime/orchestrator.rs` @ `update_peers`). That
+    /// is a DIVERGENCE on a capability upstream HAS, not a wz affordance nobody asked
+    /// for — the same test that admitted the read permit and would have refused a
+    /// bespoke fifth intent.
+    ///
+    /// Deliberately an ADD, mirroring the mechanism behind it: the reconcile seam is
+    /// add-only because a close-removed teardown is a Client-only mesh-blackhole
+    /// footgun the atom excludes on purpose, and an intent that could REMOVE would be
+    /// wider than what it drives.
+    ///
+    /// The payload is one or more endpoints separated by `,`. An empty payload, or
+    /// any empty element, is `Malformed` — never a partial dial, because a node told
+    /// to join two peers and silently joining one is the shape an operator cannot
+    /// see.
+    ConnectAdd(alloc::vec::Vec<alloc::string::String>),
 }
 
 #[cfg(feature = "adminspace-config-hotreload")]
@@ -1172,6 +1195,34 @@ pub fn parse_admin_config_write(
                 AdminConfigWriteOutcome::Malformed
             } else {
                 AdminConfigWriteOutcome::Apply(AdminConfigWrite::AclDeny(String::from(deny)))
+            }
+        }
+        // R2393 (router-connect-reconcile) — `connect-add <ep>[,<ep>…]`: the live
+        // config-change producer for the runtime connect list, beside the one-shot
+        // `--connect-after` timer that was until now its ONLY producer. The dial
+        // machinery is untouched; this decodes an intent and the host feeds the
+        // `ReconcileSender` the accept loop already drains.
+        //
+        // ALL-OR-NOTHING on the split: a trailing or doubled `,` makes the WHOLE
+        // payload Malformed rather than dialling the members that did parse. A
+        // partially-applied connect list is the one outcome an operator cannot
+        // observe from outside — the node comes up, joins some peers, reports
+        // nothing — and it is the same reasoning the `admin-read` arm gives for
+        // refusing anything but a strict `true`/`false`.
+        //
+        // Ungated for the reason the whole decoder is: the gate is the VALUE
+        // `permissions_write`, not a `#[cfg]`. A host holding no reconcile sender
+        // simply has nothing to apply it to, and says so.
+        "connect-add" => {
+            let raw = String::from_utf8_lossy(payload);
+            let eps: alloc::vec::Vec<alloc::string::String> = raw
+                .split(',')
+                .map(|e| alloc::string::String::from(e.trim()))
+                .collect();
+            if eps.iter().any(|e| e.is_empty()) {
+                AdminConfigWriteOutcome::Malformed
+            } else {
+                AdminConfigWriteOutcome::Apply(AdminConfigWrite::ConnectAdd(eps))
             }
         }
         // R311y239 (adminspace-config-hotreload) — the config-diff-driven storage
@@ -1529,6 +1580,68 @@ mod tests {
         // acl-deny is Denied when the permission is off — the deny does not depend
         // on the payload being valid.
         let out = parse_admin_config_write(WRITE_PREFIX, "@/a1b2/peer/config/acl-deny", b"", false);
+        assert_eq!(out, AdminConfigWriteOutcome::Denied);
+    }
+
+    // ── R2393 (router-connect-reconcile) — the live connect-list producer ──
+
+    #[test]
+    fn parse_config_write_connect_add_decodes_each_endpoint() {
+        // The intent upstream reaches by re-entering `update_peers` on a config
+        // change. Whitespace around each element is trimmed, as every other arm here
+        // trims, so an operator's spaced list dials what a tight one does.
+        let out = parse_admin_config_write(
+            WRITE_PREFIX,
+            "@/a1b2/peer/config/connect-add",
+            b" tcp/127.0.0.1:7447 , tcp/127.0.0.1:7448 ",
+            true,
+        );
+        assert_eq!(
+            out,
+            AdminConfigWriteOutcome::Apply(AdminConfigWrite::ConnectAdd(vec![
+                String::from("tcp/127.0.0.1:7447"),
+                String::from("tcp/127.0.0.1:7448"),
+            ]))
+        );
+    }
+
+    #[test]
+    fn parse_config_write_connect_add_is_all_or_nothing() {
+        // Four shapes, because they fail on DIFFERENT halves of the guard: a
+        // trailing comma yields a trailing EMPTY element, an empty payload yields a
+        // SINGLE empty one. A guard checking only `is_empty()` on the VECTOR would
+        // pass both, since `"".split(',')` yields one element rather than none —
+        // which is why the per-element check carries the weight.
+        for payload in [
+            &b"tcp/127.0.0.1:7447,"[..],
+            &b"tcp/127.0.0.1:7447,,tcp/127.0.0.1:7448"[..],
+            &b""[..],
+            &b"   "[..],
+        ] {
+            assert_eq!(
+                parse_admin_config_write(
+                    WRITE_PREFIX,
+                    "@/a1b2/peer/config/connect-add",
+                    payload,
+                    true,
+                ),
+                AdminConfigWriteOutcome::Malformed,
+                "a partially-parsable connect list must not dial its parsable half"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_config_write_connect_add_obeys_the_write_gate() {
+        // The gate precedes decode for this arm as for every other, so the new
+        // intent cannot become a way around `permissions.write` — it is the one arm
+        // that makes a node dial arbitrary endpoints from the wire.
+        let out = parse_admin_config_write(
+            WRITE_PREFIX,
+            "@/a1b2/peer/config/connect-add",
+            b"tcp/127.0.0.1:7447",
+            false,
+        );
         assert_eq!(out, AdminConfigWriteOutcome::Denied);
     }
 
