@@ -23,3 +23,10 @@
 #include "lwip/ip4.h"
 #include "lwip/igmp.h"
 #include "lwip/err.h"
+
+/* R2390 — the netif carrier seam, defined in `shim.c` beside the lwIP sources.
+ * Declared here so bindgen emits it; both halves are C macros in lwIP, so
+ * neither can be reached from Rust (see shim.c for what measured that).
+ */
+int wz_lwip_any_link_up(void);
+void wz_lwip_set_all_links(int up);

@@ -240,6 +240,32 @@ pub fn lwip_test_link() -> (std::sync::MutexGuard<'static, ()>, LwipLink) {
     )
 }
 
+/// R2390 (transport-multicast) — drive every interface's CARRIER, the injector
+/// [`LwipLink::any_link_is_up`] is read against.
+///
+/// Test-support and not product, on purpose, and the asymmetry is the point:
+/// the carrier bit is written by the PORT's MAC/PHY driver
+/// (`netif_set_link_up` / `netif_set_link_down`, `netif.h:488-489`) and read by
+/// wz. A loopback netif has no PHY, so nothing in a host or QEMU run ever drops
+/// its carrier — without an injector the link-loss arm of the multicast drive
+/// loop would have no witness at all, which is the shape a gate cannot tell
+/// from an unreachable arm.
+///
+/// A caller MUST restore the carrier before it can panic: lwIP's netif state is
+/// process-global, [`lwip_test_link`] hands out its lock with
+/// `PoisonError::into_inner`, and a test that dies with the link down leaves
+/// every later test in the binary running against a dead stack. Take the
+/// outcome, restore, THEN assert.
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_all_netif_links(up: bool) {
+    // SAFETY: single-threaded under the `lwip_test_link` lock. The shim walks
+    // lwIP's own interface list through `NETIF_FOREACH` and calls
+    // `netif_set_link_up` / `netif_set_link_down`, both unconditional lwIP
+    // entry points (not behind `LWIP_NETIF_LINK_CALLBACK`, which gates only
+    // callback registration).
+    unsafe { lwip_sys::wz_lwip_set_all_links(i32::from(up)) }
+}
+
 /// Maximum UDP datagram payload captured per receive (R311az-pre D4
 /// per-link bounded shape). Sized to the standard 1500-byte Ethernet
 /// MTU minus IP+UDP overhead, rounded up to a power of two for
@@ -371,6 +397,46 @@ impl LwipLink {
         {
             Err(LinkError::FeatureDisabled)
         }
+    }
+
+    /// R2390 (transport-multicast) — does this node still have a network
+    /// interface whose CARRIER is up?
+    ///
+    /// The MCU link-loss seam. lwIP's contract is that the port's MAC/PHY
+    /// driver reports a carrier change by calling `netif_set_link_up` /
+    /// `netif_set_link_down` (`netif.h:488-489`); the state it writes is the
+    /// `NETIF_FLAG_LINK_UP` bit of each interface's `flags`, and
+    /// `netif_is_link_up` is a MACRO over exactly that bit (`netif.h:491`), so
+    /// there is no function to call — the flag is read off the struct. wz only
+    /// READS it: writing it is the port's job, and a wz that wrote it would be
+    /// claiming a carrier it cannot observe.
+    ///
+    /// `false` means EVERY interface is down, which is the condition a
+    /// multicast group member experiences as link loss: no datagram can leave
+    /// and none can arrive. It is deliberately a disjunction over the whole
+    /// list rather than a check on one deploy-chosen netif — a node with a
+    /// second live interface has not lost its link, and this way the reader
+    /// needs no handle the deploy would have to thread down to it.
+    ///
+    /// An EMPTY interface list is `false` too, for the same reason: a node with
+    /// no netif at all has no carrier. That is not the shape a booted deploy is
+    /// in — `netif_init()` adds and link-ups the loop netif under
+    /// `LWIP_HAVE_LOOPIF` (`vendor/lwip/src/core/netif.c:188-215`), which every
+    /// port in this tree sets — so it is the vacuous arm, named rather than
+    /// left to be discovered.
+    /// R2390 — this walks the list in C (`lwip-sys/shim.c`) rather than in
+    /// Rust, and the reason is a MEASUREMENT rather than taste: the first
+    /// version read `netif.flags` and `netif.next` through the bindgen struct,
+    /// and in the port a non-default feature build selects, bindgen emits
+    /// `netif` as an OPAQUE type whose only field is `_address` — so those
+    /// reads did not compile there. `netif_is_link_up` and `NETIF_FOREACH` are
+    /// both C macros, so C is where the walk belongs, and lwIP's own macro is
+    /// then the SSOT for the carrier bit instead of a literal duplicated here.
+    pub fn any_link_is_up(&self) -> bool {
+        // SAFETY: single-threaded NO_SYS=1 contract. The shim only walks lwIP's
+        // own interface list through `NETIF_FOREACH` and reads each carrier
+        // through `netif_is_link_up`; it takes no argument and stores nothing.
+        unsafe { lwip_sys::wz_lwip_any_link_up() != 0 }
     }
 
     /// Pump expired lwIP timers (ARP retransmit, TCP slow timer, etc.).

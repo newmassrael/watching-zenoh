@@ -100,11 +100,28 @@
 //! countdown. [`run_multicast_session`] is that same body with a predicate that
 //! never fires.
 //!
-//! ## Not yet here (R311lt foundation; follow-on increments)
+//! ## Link loss (R2390)
 //!
-//! - **`MulticastOutcome::LinkLost`** — the MCU poll loop has no link-loss
-//!   event (a silent group is an empty `try_recv`), so it returns only
-//!   `Stopped` / `IterationLimit`.
+//! The third way out, and until R2390 this loop had no way to reach it: the
+//! header here said "the MCU poll loop has no link-loss event (a silent group
+//! is an empty `try_recv`), so it returns only `Stopped` / `IterationLimit`".
+//! The first half of that stays TRUE and is why the answer is not the RX path —
+//! `try_recv` returning `None` is what a quiet group looks like, so no amount
+//! of reading it separates a silent group from a dead interface.
+//!
+//! The CARRIER separates them. lwIP's port contract is that the MAC/PHY driver
+//! calls `netif_set_link_up` / `netif_set_link_down` on a carrier change, and
+//! [`LwipLink::any_link_is_up`] reads the `NETIF_FLAG_LINK_UP` bit that writes.
+//! Polled once per iteration beside the stop signal, it drives §3.1
+//! Running -> Stopped through `notify_link_lost` and returns
+//! [`MulticastOutcome::LinkLost`] — the same terminal the AP twin reaches from
+//! a socket recv error, off a real stack event rather than a signal the host
+//! supplies.
+//!
+//! It is a READ, not a predicate parameter: a `FnMut() -> bool` would have made
+//! the arm reachable only for a deploy that already knew its link state and
+//! bothered to say so, and every shipped MCU host in this tree would have
+//! passed `|| false` — an arm with a witness and no user.
 
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
@@ -114,6 +131,7 @@ use wz_runtime_coop::{ClockSource, CoopRuntime, CoopTime};
 use wz_runtime_core::TimeSource;
 use wz_session_core::driver_loop::IterationEvent;
 use wz_session_core::handshake_encode::encode_multicast_close;
+use wz_session_core::link::LostCause;
 use wz_session_core::multicast_dispatch::MulticastDispatcher;
 use wz_session_core::multicast_join::encode_join;
 use wz_session_core::multicast_params::{MulticastDriveConfig, MulticastOutcome};
@@ -534,6 +552,37 @@ where
             // without it would leave a Stopped session still holding peers.
             dispatcher.stop();
             return MulticastOutcome::Stopped;
+        }
+        // R2390 — LINK LOSS: the third way out, and the one this loop did not
+        // have. The AP twin gets `LinkEvent::Lost` from a socket recv error
+        // (`udp_pipeline.rs:595`); a busy-poll `try_recv` cannot carry it,
+        // because an empty queue is what a QUIET group looks like too. The
+        // carrier is where the two are distinguishable: lwIP's port driver
+        // reports it (`netif_set_link_up` / `_down`) and
+        // `LwipLink::any_link_is_up` reads it, so this is a real event off the
+        // stack rather than a signal the host has to supply.
+        //
+        // `notify_link_lost()` rather than `stop()`: they are different §3.1
+        // transitions with the same peer-table consequence, and the FSM half
+        // has carried the distinction since R311lt. NO departing Close is sent
+        // — the AP loop does not send one either, and it could not arrive: the
+        // interface that would carry it is the one that went away. A member's
+        // peers fall back to the lease sweep, which is what an unannounced
+        // departure has always meant.
+        //
+        // AFTER the stop poll and BEFORE the budget, for the same reason the
+        // stop poll sits where it does: a caller that asked to stop gets
+        // `Stopped` even on a dead link (its request is the older fact), while
+        // a link that dropped is a REAL terminal and must not be reported as
+        // the test guard `IterationLimit` because the budget happened to run
+        // out on the same iteration.
+        if !link.any_link_is_up() {
+            dispatcher.notify_link_lost();
+            // `OsError` is the AP's cause for a socket that stopped working
+            // (`udp_pipeline.rs:596`), which is what a dropped carrier is here:
+            // not a peer's announced departure (`PeerClosed`) and not a lease
+            // that ran out (`Timeout`).
+            return MulticastOutcome::LinkLost(LostCause::OsError);
         }
         if let Some(limit) = max_iters {
             if iter >= limit {
@@ -1531,6 +1580,185 @@ mod tests {
         std::assert!(
             drain_for_close(&link, &runtime, &mut driver).is_some(),
             "and the departure it took must still have been announced"
+        );
+
+        link.leave_multicast_group(group).expect("leave group");
+    }
+
+    // ── R2390 transport-multicast: LINK LOSS, this atom's last named clause ──
+
+    /// Admit a peer, THEN drop the CARRIER: the loop returns
+    /// [`MulticastOutcome::LinkLost`], the peer table is cleared, and NO
+    /// departing Close is put on the group.
+    ///
+    /// Two phases against ONE fixture, and phase 1 is the control rather than a
+    /// separate test: it drives the SAME entry point with the SAME dispatcher,
+    /// socket, params and budget, and the ONLY thing that differs in phase 2 is
+    /// the carrier bit. A separate anti-vacuity test could not make that claim
+    /// — it would vary the fixture too — and the module's own stop tests needed
+    /// a second test only because the signal there is a parameter, which this
+    /// one deliberately is not.
+    ///
+    /// The Close assertion is the half that distinguishes link loss from stop:
+    /// a departure the caller ASKED for is announced, a link that went away
+    /// cannot be, because the interface that would carry the datagram is the
+    /// one that dropped. Asserting only the outcome would let a copy of the
+    /// stop arm pass.
+    ///
+    /// The carrier is restored BEFORE any assertion, deliberately: lwIP's netif
+    /// state is process-global and `lwip_test_link` hands out its lock through
+    /// `PoisonError::into_inner`, so a panic with the link down would run every
+    /// later test in this binary against a dead stack. A distinct port (7460).
+    #[test]
+    fn run_multicast_session_reports_link_loss_when_the_carrier_drops() {
+        let (_serial, link) = lwip_test_link();
+        let group = SESSION_MULTICAST_GROUP_DEFAULT;
+        let port: u16 = 7460;
+        let mut socket = bind_session_multicast_rx(&link, group, port).expect("bind + join group");
+
+        let peer = params(&[0x01, 0x02, 0x03, 0x04]);
+        let peer_join = encode_join(
+            &peer,
+            &MulticastTxConduits::new(sn::mask_from_res(peer.seq_num_res)),
+        );
+        socket
+            .send_to(group, port, &peer_join)
+            .expect("inject peer JOIN");
+
+        let mut driver = LwipMulticastDriver::new(socket, group, port);
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let runtime = CoopRuntime::new(FrozenClock);
+        let self_params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
+        let cfg = || MulticastDriveConfig {
+            params: &self_params,
+            tick_ms: 5,
+            max_iters: Some(12),
+        };
+
+        // Phase 1 — CONTROL: carrier up, everything else identical.
+        let admitted = run_multicast_session(
+            &mut dispatcher,
+            cfg(),
+            &runtime,
+            &link,
+            &mut driver,
+            |_event| {},
+            || None,
+        );
+        std::assert_eq!(admitted, MulticastOutcome::IterationLimit);
+        std::assert_eq!(
+            dispatcher.active_peers(),
+            1,
+            "the peer the link-loss path must clear has to be there first"
+        );
+        std::assert!(
+            link.any_link_is_up(),
+            "the control phase must run with a live carrier, or it is not one"
+        );
+
+        // Phase 2 — the carrier is gone when the loop is entered.
+        wz_link_lwip::set_all_netif_links(false);
+        let lost = run_multicast_session(
+            &mut dispatcher,
+            cfg(),
+            &runtime,
+            &link,
+            &mut driver,
+            |_event| {},
+            || None,
+        );
+        let state = dispatcher.session_state();
+        let peers = dispatcher.active_peers();
+        wz_link_lwip::set_all_netif_links(true);
+
+        std::assert_eq!(
+            lost,
+            MulticastOutcome::LinkLost(LostCause::OsError),
+            "a dropped carrier must end the loop as LinkLost, not by budget"
+        );
+        std::assert_eq!(state, SessionFsmMulticastState::Stopped);
+        std::assert_eq!(
+            peers,
+            0,
+            "notify_link_lost() must run on the way out -- a Stopped session \
+             still holding peers is the defect the AP path already avoids"
+        );
+        std::assert!(
+            drain_for_close(&link, &runtime, &mut driver).is_none(),
+            "a link that went away cannot announce a departure; only a stop \
+             request the caller made is announced"
+        );
+
+        link.leave_multicast_group(group).expect("leave group");
+    }
+
+    /// The two ORDERING decisions the link-loss arm makes, asserted rather than
+    /// only commented: a lost link BEATS an exhausted iteration budget, and a
+    /// stop request BEATS a lost link.
+    ///
+    /// `max_iters: Some(0)` puts the budget's terminal on the same iteration as
+    /// the carrier read, which is the coincidence in its smallest form. Without
+    /// the first half, moving the carrier read below the budget check would
+    /// keep every other test in this module green — the loop would report the
+    /// TEST GUARD where a real link had died. Without the second, moving it
+    /// above the stop poll would keep them green too, and a caller that asked
+    /// to leave would be told the link failed instead.
+    ///
+    /// Fresh dispatchers per half: `notify_link_lost` leaves the first one
+    /// Stopped, so reusing it would exit at the loop's state check and prove
+    /// nothing about either ordering. A distinct port (7461).
+    #[test]
+    fn link_loss_beats_the_budget_and_a_stop_request_beats_link_loss() {
+        let (_serial, link) = lwip_test_link();
+        let group = SESSION_MULTICAST_GROUP_DEFAULT;
+        let port: u16 = 7461;
+        let socket = bind_session_multicast_rx(&link, group, port).expect("bind + join group");
+
+        let mut driver = LwipMulticastDriver::new(socket, group, port);
+        let runtime = CoopRuntime::new(FrozenClock);
+        let self_params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
+        let cfg = || MulticastDriveConfig {
+            params: &self_params,
+            tick_ms: 5,
+            max_iters: Some(0),
+        };
+
+        let mut spent_budget = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let mut also_asked_to_stop = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+
+        wz_link_lwip::set_all_netif_links(false);
+        let over_budget = run_multicast_session(
+            &mut spent_budget,
+            cfg(),
+            &runtime,
+            &link,
+            &mut driver,
+            |_event| {},
+            || None,
+        );
+        let over_stop = run_multicast_session_with_shutdown(
+            &mut also_asked_to_stop,
+            cfg(),
+            &runtime,
+            &link,
+            &mut driver,
+            |_event| {},
+            || None,
+            || true,
+        );
+        wz_link_lwip::set_all_netif_links(true);
+
+        std::assert_eq!(
+            over_budget,
+            MulticastOutcome::LinkLost(LostCause::OsError),
+            "the carrier is read before the budget, so a spent budget must not \
+             disguise a dead link as the test guard"
+        );
+        std::assert_eq!(
+            over_stop,
+            MulticastOutcome::Stopped,
+            "the stop poll is read before the carrier, so a caller that asked \
+             to leave is not told its link failed"
         );
 
         link.leave_multicast_group(group).expect("leave group");

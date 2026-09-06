@@ -189,6 +189,14 @@ fn main() {
         build.file(lwip_src.join(f));
     }
 
+    // R2390 — the netif carrier seam. Compiled HERE rather than bound, because
+    // both halves it needs are C macros: `netif_is_link_up` is a macro over
+    // `netif.flags` and `NETIF_FOREACH` expands differently per port. Building
+    // it beside lwIP is what makes it see the port's own `lwipopts.h`.
+    let shim = manifest_dir.join("shim.c");
+    println!("cargo:rerun-if-changed={}", shim.display());
+    build.file(&shim);
+
     build.compile("lwip");
 
     // Stage 2: bindgen → Rust FFI.
@@ -281,6 +289,20 @@ fn main() {
         .allowlist_function("netif_add_noaddr")
         .allowlist_function("netif_set_default")
         .allowlist_function("netif_set_up")
+        // R2390 (transport-multicast) — the netif CARRIER seam, bound as the
+        // two `shim.c` entry points rather than as lwIP symbols.
+        //
+        // The first attempt allowlisted `netif_set_link_up` / `_down` plus the
+        // `netif_list` var and walked the struct from Rust. Gate 2h caught it:
+        // in the port a non-default feature build selects, bindgen emits
+        // `netif` as an OPAQUE type whose only field is `_address`, so reading
+        // `.flags` / `.next` does not compile there. Both halves are C macros
+        // anyway (`netif_is_link_up` over `flags`; `NETIF_FOREACH`, whose
+        // expansion depends on `LWIP_SINGLE_NETIF`), so C is where they belong
+        // -- and the macro is then the SSOT for the flag bit instead of a
+        // literal spelled on the Rust side with nothing to catch its drift.
+        .allowlist_function("wz_lwip_any_link_up")
+        .allowlist_function("wz_lwip_set_all_links")
         // Loopback poll (NO_SYS + LWIP_NETIF_LOOPBACK_MULTITHREADING=0
         // requires explicit poll to drain the loop_netif output queue
         // into ip_input).

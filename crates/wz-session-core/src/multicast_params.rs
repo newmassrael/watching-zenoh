@@ -193,16 +193,31 @@ pub struct MulticastDriveConfig<'a> {
 
 /// R311lt — outcome of one multicast drive-loop run, shared by the AP
 /// (`drive_multicast_session`) and MCU (`run_multicast_session`) loops so the
-/// two profiles report the same terminal vocabulary. The MCU poll loop never
-/// produces [`Self::LinkLost`] (its `try_recv` has no link-loss event — a
-/// silent group is just an empty poll), so that variant is AP-only in
-/// practice; the enum stays shared for the common cases.
+/// two profiles report the same terminal vocabulary.
+///
+/// R2390 — and BOTH profiles now reach all three. This paragraph used to say
+/// "The MCU poll loop never produces [`Self::LinkLost`] (its `try_recv` has no
+/// link-loss event — a silent group is just an empty poll), so that variant is
+/// AP-only in practice". Its premise survives and its conclusion does not: a
+/// `try_recv` still cannot tell a quiet group from a dead interface, which is
+/// why the MCU answer is not the RX path but the CARRIER the lwIP port already
+/// maintains. The shared vocabulary is therefore no longer shared-in-name for
+/// one of its three words.
+///
+/// ⚠ Two docs carried that claim and only one of them is where a reader looks:
+/// this paragraph and the variant's own. R2390 struck both in the same edit,
+/// because a fossil quoted twice is the shape that outlives the round that
+/// thinks it removed it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MulticastOutcome {
     /// The session left Running (e.g. a pre-stopped dispatcher).
     Stopped,
-    /// The multicast link was lost (AP only — the `select!` `LinkEvent::Lost`
-    /// arm; the MCU poll loop has no equivalent event).
+    /// The multicast link was lost: the AP loop's `select!` `LinkEvent::Lost`
+    /// arm, and — since R2390 — the MCU loop's per-iteration carrier read
+    /// (`LwipLink::any_link_is_up`, the lwIP `NETIF_FLAG_LINK_UP` bit a port's
+    /// PHY driver writes). Both drive `notify_link_lost` before returning, so
+    /// the peer table is cleared on either. This doc said "AP only — the MCU
+    /// poll loop has no equivalent event" until that round.
     LinkLost(crate::link::LostCause),
     /// The bounded iteration budget was exhausted (test guard).
     IterationLimit,
