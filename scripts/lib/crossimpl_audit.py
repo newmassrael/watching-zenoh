@@ -568,7 +568,22 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # `--config their.json5`, and item 515 is the record that nothing foreign had
 # read the role it selects. Measured, not guessed: the audit read
 # `885, declared 882` with the file staged, which is exactly its three lines.
-FOREIGN_ADJUDICATOR_LINKS = 888
+# R2376 — 888 -> 890, and this is R2374's debt paid rather than new ground.
+# That round added two `wz-proves:` annotations to
+# `wz_storage_host_adminspace_read_deny_to_pico_zget.rs` (`adminspace-read
+# pico->wz` and `adminspace-write pico->wz`, one above each `#[test]`) without
+# moving this constant, so hosted A4 has been red since. Attribution MEASURED,
+# not inherited: `git log -S` names commit `5008b477` as the one that introduced
+# both lines, and the audit reads `890, declared 888` on the tree that carries
+# them. They are real links — a foreign pico CLI adjudicates each — so the pin
+# moves to meet them.
+#
+# ⚠ What this does NOT explain, and the next round should not assume it does:
+# pre-push gate 2b triggers on exactly this (`wz-proves:` moving in the pushed
+# range) and its logic reads correct, yet that push landed. Either the hook did
+# not run for it or it was bypassed; both are unverified here, so nothing is
+# claimed.
+FOREIGN_ADJUDICATOR_LINKS = 890
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
