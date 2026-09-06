@@ -60,7 +60,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use wz_capture::link::FlowKey;
-use wz_capture::{AnchorSpace, CaptureError, Dissection, DissectionLimits, MessageListOrigin};
+use wz_capture::{
+    AnchorSpace, CaptureCursor, CaptureError, Dissection, DissectionLimits, FollowError,
+    MessageListOrigin,
+};
 use wz_session_core::passive::{Direction, PassiveFrame};
 
 /// R2102 — a message this reader could not decode. Not a variant of
@@ -234,6 +237,18 @@ pub struct LiveDissection {
     /// the failure mode worth spending a few integers to remove.
     next_id: u64,
     lost: u64,
+    /// R2373 (open-debt item 661) — how far into a capture CONTAINER this
+    /// handle has read, for [`Self::follow`].
+    ///
+    /// On the handle rather than beside it because it is the only thing that
+    /// knows what it has already consumed, and it is the thing that must know:
+    /// a follower hands over the whole prefix every call, so a cursor the
+    /// CALLER held would be a second place the same fact lived, and the two
+    /// would part the first time a call returned an error.
+    ///
+    /// [`Self::from_capture`] leaves it at the end of the file it read, which
+    /// is what lets a replayed handle be followed as the writer appends more.
+    cursor: CaptureCursor,
 }
 
 impl LiveDissection {
@@ -262,8 +277,77 @@ impl LiveDissection {
     /// `Dissection::next_packet_index` is where a later [`Self::push`] resumes,
     /// so a live source continuing after the file cannot land on a coordinate
     /// the file already spent.
+    ///
+    /// R2373 (open-debt item 661) — it now reads the file through
+    /// [`Self::follow`], which is the same walk a GROWING container gets, and
+    /// then requires the container to have ENDED on a block boundary. Two
+    /// things come of that. The handle's cursor is left at the file's end, so a
+    /// replay may be followed as the writer appends — the two doors compose
+    /// rather than excluding each other. And "the frozen door and the growing
+    /// door read these bytes the same way" stops being a claim in a comment: it
+    /// is one function calling the other.
     pub fn from_capture(bytes: &[u8], limits: DissectionLimits) -> Result<Self, CaptureError> {
-        Ok(Self::over(Dissection::from_capture_bounded(bytes, limits)?))
+        let mut me = Self::over(Dissection::with_limits(limits));
+        me.follow(bytes).map_err(|e| match e {
+            FollowError::Capture(c) => c,
+            // Unreachable from a fresh cursor: nothing has been consumed, so
+            // no prefix can be shorter than it. Mapped rather than unwrapped
+            // because a panic here would be this door's answer to a caller's
+            // capture, and it has a better one.
+            FollowError::Shrank { .. } => {
+                CaptureError::Pcapng(wz_capture::pcapng::PcapngError::Truncated { offset: 0 })
+            }
+        })?;
+        if me.followed() != bytes.len() {
+            // A FILE does not grow, so the tail a follower would wait for is a
+            // truncation here. Reported through the format the container turned
+            // out to be, which is what the whole-file readers did.
+            return Err(if wz_capture::pcapng::looks_like_pcapng(bytes) {
+                CaptureError::Pcapng(wz_capture::pcapng::PcapngError::Truncated {
+                    offset: me.followed(),
+                })
+            } else {
+                CaptureError::Pcap(wz_capture::pcap::PcapError::TruncatedRecordHeader {
+                    index: me.dissection.next_packet_index(),
+                })
+            });
+        }
+        // R311y610 — a FILE has a last packet, so the patience an open gap is
+        // waiting on will never be spent. This is the caller that knows it, and
+        // it is the one thing `follow` deliberately does not do.
+        me.dissection.finish();
+        Ok(me)
+    }
+
+    /// R2373 (open-debt item 661) — FEED A GROWING CAPTURE CONTAINER into this
+    /// handle. Returns how many packets became readable.
+    ///
+    /// `bytes` is the whole container prefix the caller holds, from offset
+    /// zero, on every call. The handle remembers how far into it has been
+    /// parsed and consumes only the blocks that completed since the last call,
+    /// so a message whose bytes span two calls is decoded exactly ONCE and
+    /// every coordinate, count and budget continues.
+    ///
+    /// See [`wz_capture::Dissection::follow_container`] for why the whole
+    /// prefix rather than the new tail, and why re-reading the prefix each
+    /// window fails on correctness rather than on speed.
+    ///
+    /// A prefix that ends in the middle of a block is LEGAL and consumes
+    /// nothing extra; the next call with more bytes decodes that block. It does
+    /// not call `finish`, because a container still being written has no last
+    /// packet.
+    pub fn follow(&mut self, bytes: &[u8]) -> Result<usize, FollowError> {
+        self.dissection.follow_container(&mut self.cursor, bytes)
+    }
+
+    /// How many bytes of the container [`Self::follow`] has consumed.
+    ///
+    /// A consumer that already knows how far its writer's cursor reached does
+    /// not need this. It exists for the one thing the caller cannot otherwise
+    /// see: whether a prefix ended mid-block, which is the difference between
+    /// "nothing new was written" and "a block is half here".
+    pub fn followed(&self) -> usize {
+        self.cursor.consumed()
     }
 
     /// The one constructor both of the above go through.
@@ -274,6 +358,7 @@ impl LiveDissection {
             flow_ids: BTreeMap::new(),
             next_id: 0,
             lost: 0,
+            cursor: CaptureCursor::new(),
         }
     }
 

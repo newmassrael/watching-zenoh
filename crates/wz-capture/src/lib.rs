@@ -5806,6 +5806,246 @@ impl Dissection {
             Self::from_pcap_declaring_quic(bytes, quic_udp_ports).map_err(CaptureError::Pcap)
         }
     }
+
+    /// R2373 (open-debt item 661) — FEED A GROWING CAPTURE CONTAINER into a
+    /// dissection that already exists.
+    ///
+    /// `bytes` is the whole container prefix the caller holds, from offset
+    /// zero, on every call; `cursor` is what remembers how much of it has
+    /// already been read. Blocks that became complete since the last call are
+    /// pushed into this dissection and nothing else is. Returns how many
+    /// packets that was.
+    ///
+    /// # Why the whole prefix rather than the new tail
+    ///
+    /// A suffix of a pcapng is not a container: it carries no Section Header
+    /// and no Interface Description, so a caller handing over only new bytes
+    /// would have to splice a header onto them. A consumer that writes pcapng
+    /// headers is a second WRITER of the format, exactly as surely as one that
+    /// parses it is a second reader — and the growing mmap a capture helper
+    /// publishes already gives the whole prefix at no copy, so the shape that
+    /// avoids the splice is also the cheap one.
+    ///
+    /// # Why not simply re-read the prefix each time
+    ///
+    /// Because it fails on CORRECTNESS, not on speed. Every counter this
+    /// dissection hands out is cumulative over the container's life — the
+    /// packet coordinate a message anchors to, the decryption-secret budget,
+    /// the capture tool's own drop total, and the discard count a live handle
+    /// reports. A fresh read restarts all of them, so a consumer polling a
+    /// growing file would report each window's floor as the total and would
+    /// re-issue packet coordinates a previous window already spent. The
+    /// quadratic cost is real and it is the SECOND problem.
+    ///
+    /// # What it does NOT do
+    ///
+    /// It does not call [`Self::finish`]. That call spends the patience an open
+    /// gap is waiting on, and it is sound only because a FILE has a last
+    /// packet — which is exactly what a container still being written does not
+    /// have. A caller that learns the writer has stopped calls `finish` itself.
+    pub fn follow_container(
+        &mut self,
+        cursor: &mut CaptureCursor,
+        bytes: &[u8],
+    ) -> Result<usize, FollowError> {
+        if bytes.len() < cursor.consumed() {
+            return Err(FollowError::Shrank {
+                consumed: cursor.consumed(),
+                given: bytes.len(),
+            });
+        }
+        let before = cursor.packets_produced();
+        match cursor.decide(bytes) {
+            None => return Ok(0),
+            Some(Container::Pcapng) => {
+                let ng = cursor.pcapng_mut();
+                // R311y607 — a pcapng that reports no drops reports ZERO, not
+                // "unstated"; `from_pcapng_declaring_bounded` folds an empty
+                // list to `Some(0)` and this is the same claim, made as soon as
+                // the format is known rather than after the last block.
+                if self.capture_reported_drops.is_none() {
+                    self.capture_reported_drops = Some(0);
+                }
+                let dissection = &mut *self;
+                let halt = ng
+                    .advance(bytes, |y| match y {
+                        pcapng::PcapngYield::Packet(p) => {
+                            // R311y720 — the INTERFACE travels with the packet.
+                            dissection.push_packet_on(
+                                p.link_type,
+                                p.index,
+                                p.interface_id,
+                                p.ts_millis,
+                                &p.data,
+                            );
+                        }
+                        pcapng::PcapngYield::Secrets(s) => {
+                            dissection.decryption_secrets.push(s);
+                        }
+                        pcapng::PcapngYield::Stats(s) => {
+                            dissection.add_reported_drops(s.dropped);
+                        }
+                        pcapng::PcapngYield::PacketBlockDrops { dropped, .. } => {
+                            dissection.add_reported_drops(Some(dropped));
+                        }
+                    })
+                    .map_err(|e| FollowError::Capture(CaptureError::Pcapng(e)))?;
+                // A container that is still being written HAS a partial tail
+                // most of the time. That is the ordinary case here and not an
+                // error; the cursor kept its place and the next call reads it.
+                let _ = halt;
+            }
+            Some(Container::Pcap) => {
+                let classic = cursor.pcap_mut();
+                let dissection = &mut *self;
+                // A classic pcap declares ONE link type for the whole file and
+                // carries no interface, no statistics and no secrets, so this
+                // arm is the whole of what `from_pcap_declaring_bounded` does
+                // per packet. `capture_reported_drops` stays UNSTATED here,
+                // exactly as it does for a file read whole: the format has
+                // nowhere to state it.
+                let halt = classic
+                    .advance(bytes, |link_type, unit, p| {
+                        dissection.push_packet_at(
+                            link_type,
+                            p.index,
+                            Some(p.ts_millis(unit)),
+                            &p.data,
+                        );
+                    })
+                    .map_err(|e| FollowError::Capture(CaptureError::Pcap(e)))?;
+                let _ = halt;
+            }
+        }
+        Ok(cursor.packets_produced() - before)
+    }
+
+    /// Fold one more reported-drop figure into [`Self::capture_reported_drops`].
+    ///
+    /// `None` is UNSTATED and adds nothing — an ISB that omits `isb_ifdrop`
+    /// says nothing about drops, and reading it as zero would turn silence into
+    /// a measurement. An overflow poisons the total to `None` for the same
+    /// reason `from_pcapng_declaring_bounded`'s `checked_add` does: a wrapped
+    /// count is a smaller number than the truth, and this figure exists to stop
+    /// a floor being read as a total.
+    fn add_reported_drops(&mut self, dropped: Option<u64>) {
+        let Some(d) = dropped else { return };
+        self.capture_reported_drops = self
+            .capture_reported_drops
+            .and_then(|acc| acc.checked_add(d));
+    }
+}
+
+/// R2373 (open-debt item 661) — which container a [`CaptureCursor`] settled on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Container {
+    Pcapng,
+    Pcap,
+}
+
+/// R2373 (open-debt item 661) — a resumable walk over a capture container of
+/// EITHER format, for [`Dissection::follow_container`].
+///
+/// Dispatch on the magic happens ONCE, when the first four bytes exist, and is
+/// then remembered — the same dispatch [`Dissection::from_capture`] does, for
+/// the same reason it does it rather than trying one parser and then the other.
+/// Before those four bytes arrive the cursor is undecided and consumes nothing,
+/// which is the honest state for a file whose writer has not got that far.
+#[derive(Debug, Clone, Default)]
+pub struct CaptureCursor {
+    inner: CaptureCursorInner,
+}
+
+#[derive(Debug, Clone, Default)]
+enum CaptureCursorInner {
+    /// Fewer than four bytes have been seen, so the format is not yet known.
+    #[default]
+    Undecided,
+    Ng(pcapng::PcapngCursor),
+    Classic(pcap::PcapCursor),
+}
+
+impl CaptureCursor {
+    /// A walk positioned at the start of a container of unknown format.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// How many bytes of the container have been consumed.
+    pub fn consumed(&self) -> usize {
+        match &self.inner {
+            CaptureCursorInner::Undecided => 0,
+            CaptureCursorInner::Ng(c) => c.consumed(),
+            CaptureCursorInner::Classic(c) => c.consumed(),
+        }
+    }
+
+    /// How many packets the walk has produced, which is the index the next one
+    /// will carry.
+    pub fn packets_produced(&self) -> usize {
+        match &self.inner {
+            CaptureCursorInner::Undecided => 0,
+            CaptureCursorInner::Ng(c) => c.packets_produced(),
+            CaptureCursorInner::Classic(c) => c.packets_produced(),
+        }
+    }
+
+    /// Settle the format if `bytes` is long enough to say, and report which it
+    /// is. `None` means the container has not yet said.
+    fn decide(&mut self, bytes: &[u8]) -> Option<Container> {
+        if matches!(self.inner, CaptureCursorInner::Undecided) {
+            if bytes.len() < 4 {
+                return None;
+            }
+            self.inner = if pcapng::looks_like_pcapng(bytes) {
+                CaptureCursorInner::Ng(pcapng::PcapngCursor::new())
+            } else {
+                CaptureCursorInner::Classic(pcap::PcapCursor::new())
+            };
+        }
+        match &self.inner {
+            CaptureCursorInner::Undecided => None,
+            CaptureCursorInner::Ng(_) => Some(Container::Pcapng),
+            CaptureCursorInner::Classic(_) => Some(Container::Pcap),
+        }
+    }
+
+    /// The pcapng walk, once [`Self::decide`] has said that is what this is.
+    fn pcapng_mut(&mut self) -> &mut pcapng::PcapngCursor {
+        match &mut self.inner {
+            CaptureCursorInner::Ng(c) => c,
+            _ => unreachable!("decide() reported pcapng"),
+        }
+    }
+
+    /// The classic-pcap walk, once [`Self::decide`] has said so.
+    fn pcap_mut(&mut self) -> &mut pcap::PcapCursor {
+        match &mut self.inner {
+            CaptureCursorInner::Classic(c) => c,
+            _ => unreachable!("decide() reported classic pcap"),
+        }
+    }
+}
+
+/// R2373 (open-debt item 661) — why following a growing container failed.
+///
+/// Two members, and the second is the reason this is not simply
+/// [`CaptureError`]: a container that came back SHORTER than what has already
+/// been read is not a damaged capture, it is a caller that handed over a
+/// different buffer — a reopened file, a truncated one, a length taken from the
+/// wrong place. Reporting it as a parse failure would send the reader looking
+/// at the writer's bytes, which are fine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FollowError {
+    /// The container did not read, in whichever format it is.
+    Capture(CaptureError),
+    /// The prefix handed over was SHORTER than what has already been consumed.
+    Shrank {
+        /// How far the walk had already read.
+        consumed: usize,
+        /// How many bytes this call offered.
+        given: usize,
+    },
 }
 
 /// R311y605 — why a capture file could not be read, in either format.

@@ -120,6 +120,16 @@ pub const WZ_DISSECT_ERR_BYTES_RETIRED: c_int = -6;
 /// place inside it), and one was recovered from an encrypted transport, walked
 /// while the plaintext was alive and never retained.
 pub const WZ_DISSECT_ERR_NO_BYTE_SOURCE: c_int = -7;
+/// R2373 (open-debt item 661) — a followed container came back SHORTER than
+/// what this handle has already read from it.
+///
+/// Its own code and not [`WZ_DISSECT_ERR_BAD_CAPTURE`], because the bytes are
+/// not the problem: a container only a writer appends to cannot shrink, so this
+/// says the caller handed over a DIFFERENT buffer — a reopened file, a
+/// truncated one, a length read from the wrong place. Folded into the capture
+/// error it would send a consumer to inspect a capture that is fine, which is
+/// the longest kind of wrong turn this ABI can hand out.
+pub const WZ_DISSECT_ERR_CONTAINER_SHRANK: c_int = -8;
 
 /// R311y887 — read with no ceilings at all, which is what a FILE deserves: it
 /// ends, so keeping every byte of it is already bounded.
@@ -248,11 +258,27 @@ pub const WZ_DISSECT_NO_TIMESTAMP: u64 = live::NO_TIMESTAMP;
 /// [`WZ_DISSECT_ERR_NO_BYTE_SOURCE`] beside
 /// [`WZ_DISSECT_ERR_BYTES_RETIRED`].
 ///
+/// R2373 (open-debt item 661) — 14 → 15, ADDING [`wz_dissect_live_follow`]. A
+/// new symbol, so the revision moves under the rule this doc has stated since
+/// R311y748; the memory rule is untouched, since the handle it feeds is the one
+/// [`wz_dissect_live_open`] already made and [`wz_dissect_live_close`] already
+/// releases, and nothing new crosses the boundary allocated.
+///
+/// What the symbol answers is the half of the file question
+/// [`wz_dissect_pcap_replay`] left open. That door closes the case of a FROZEN
+/// container by handing back a NEW handle; a container still being WRITTEN has
+/// no such moment, and calling the frozen door once per window silently
+/// restarts the packet coordinate and the discard count that make a live
+/// reader's output mean anything. A consumer with a growing capture therefore
+/// had only the second reader of the pcap format that the same header forbids
+/// by name. [`WZ_DISSECT_ERR_CONTAINER_SHRANK`] arrived with it and moves
+/// nothing further: a constant is compiled in, not linked.
+///
 /// # Safety
 /// None; takes no arguments and touches no memory.
 #[no_mangle]
 pub extern "C" fn wz_dissect_abi_version() -> c_int {
-    14
+    15
 }
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
@@ -1472,6 +1498,88 @@ pub unsafe extern "C" fn wz_dissect_live_push(
     let packet = unsafe { core::slice::from_raw_parts(bytes, len) };
     handle.push(link_type, ts_ns, packet);
     WZ_DISSECT_OK
+}
+
+/// R2373 (open-debt item 661) — FEED A GROWING CAPTURE CONTAINER into an
+/// existing handle.
+///
+/// # The gap this closes
+///
+/// [`wz_dissect_pcap_replay`] takes a container and OPENS a handle; this one
+/// takes a container and CONTINUES one. Between them they had a hole exactly
+/// the shape of a capture backend that is still writing: a privileged helper
+/// appending to a pcapng and a reader mapping the same file up to a cursor the
+/// helper publishes. The reader has bytes, they are a container, and until this
+/// door existed nothing here would take them without also making a new handle.
+///
+/// Two workarounds were available to such a consumer and both are worse than
+/// they look. Opening the container itself puts a SECOND reader of the pcap
+/// format in the system, which the paragraph at [`wz_dissect_pcap_replay`]
+/// forbids by name and for a stated reason. Calling that door on the whole
+/// prefix each window fails on CORRECTNESS rather than on speed: every call
+/// builds a new handle, so [`wz_dissect_live_lost`] restarts at zero — and that
+/// counter is the one thing separating "the link went quiet" from "this reader
+/// could not keep up", so a consumer resetting it every window reports a floor
+/// as a total, permanently. Packet coordinates restart with it, which is the
+/// very thing this ABI's replay-to-push seam is documented to avoid.
+///
+/// # What the handle remembers
+///
+/// How far into the container it has parsed. Hand it the whole prefix you hold
+/// — a growing mmap gives you exactly that, at no copy — and it consumes only
+/// the blocks that became complete since the last call. Coordinates, session
+/// context, the decryption-secret budget and the lost count all CONTINUE.
+///
+/// # A prefix that ends mid-block is legal
+///
+/// It consumes nothing extra and the next call with more bytes decodes that
+/// block. A door that worked only on block-aligned prefixes would hand the
+/// alignment rule back to the consumer, which is format knowledge outside this
+/// library again — the thing the door exists to prevent.
+///
+/// # Why the WHOLE prefix rather than the new bytes
+///
+/// A suffix of a pcapng is not a container: no Section Header, no Interface
+/// Description. A consumer handing over `[known, cursor)` would have to splice
+/// a header onto it, and a consumer that writes pcapng headers is a second
+/// WRITER as surely as one that parses them is a second reader.
+///
+/// # It does not FINISH the dissection
+///
+/// A container still being written has no last packet, so the gap patience a
+/// file's end makes final is left unspent. That is the one behaviour that
+/// separates this door from [`wz_dissect_pcap_replay`] over the same bytes.
+///
+/// # Errors
+///
+/// [`WZ_DISSECT_ERR_BAD_CAPTURE`] for a container that does not read.
+/// [`WZ_DISSECT_ERR_CONTAINER_SHRANK`] when `len` is below what this handle has
+/// already consumed — its own code because that is not a damaged capture, it is
+/// a different buffer, and reporting it as a parse failure would send the
+/// caller to inspect bytes that are fine.
+///
+/// # Safety
+/// `handle` must be a handle from [`wz_dissect_live_open`] or
+/// [`wz_dissect_pcap_replay`] that has not been closed, and `bytes` must point
+/// to at least `len` readable bytes. Neither may be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_live_follow(
+    handle: *mut live::LiveDissection,
+    bytes: *const u8,
+    len: usize,
+) -> c_int {
+    if handle.is_null() || bytes.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let handle = unsafe { &mut *handle };
+    // SAFETY: caller contract above.
+    let container = unsafe { core::slice::from_raw_parts(bytes, len) };
+    match handle.follow(container) {
+        Ok(_) => WZ_DISSECT_OK,
+        Err(wz_capture::FollowError::Shrank { .. }) => WZ_DISSECT_ERR_CONTAINER_SHRANK,
+        Err(wz_capture::FollowError::Capture(_)) => WZ_DISSECT_ERR_BAD_CAPTURE,
+    }
 }
 
 /// R2102 — take the messages decoded since the last drain, into a buffer YOU
@@ -4168,7 +4276,15 @@ mod tests {
         // a `char*` nor a fixed-layout record, so it is the one that could have
         // moved the rule. Bytes into a buffer the CALLER sized keep both halves
         // intact -- nothing new crosses allocated, and no callback runs.
-        assert_eq!(wz_dissect_abi_version(), 14);
+        //
+        // R2373 (open-debt item 661) — 15, one new symbol
+        // (`wz_dissect_live_follow`) and neither the memory rule nor the record
+        // layout moved. It feeds a GROWING container into a handle that already
+        // exists, which is the half of the file question `wz_dissect_pcap_replay`
+        // left open: that door hands back a new handle, and a capture still
+        // being written has no moment at which a new handle is the right
+        // answer.
+        assert_eq!(wz_dissect_abi_version(), 15);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -6175,5 +6291,615 @@ mod tests {
             },
             WZ_DISSECT_ERR_INVALID_ARG
         );
+    }
+
+    // ── R2373 (open-debt item 661) — THE GROWING CONTAINER ────────────────
+
+    /// One `wz_dissect_live_follow` over `bytes`, through the ABI.
+    fn follow(handle: *mut live::LiveDissection, bytes: &[u8]) -> c_int {
+        unsafe { wz_dissect_live_follow(handle, bytes.as_ptr(), bytes.len()) }
+    }
+
+    /// Drain until the handle stops filling, so a count is never a buffer's
+    /// size in disguise.
+    fn drain_all(handle: *mut live::LiveDissection) -> Vec<WzDissectRecord> {
+        let mut out = Vec::new();
+        loop {
+            let batch = drain_live(handle, 8);
+            let short = batch.len() < 8;
+            out.extend(batch);
+            if short {
+                return out;
+            }
+        }
+    }
+
+    /// The same records with `flow_id` and `list_id` renumbered by FIRST
+    /// APPEARANCE, so two drain schedules over one container are comparable.
+    ///
+    /// # Why the raw numbers cannot be compared, and what survives
+    ///
+    /// MEASURED while writing the sweep below, and it is a property of `drain`
+    /// rather than of the door under test: the ids are handed out by a counter
+    /// that advances as lists are FIRST VISITED, and
+    /// `Dissection::message_lists_with_origin` always yields the serial line —
+    /// present or not, since a capture has at most one and it needs no flow to
+    /// stand under. So a consumer that drains an empty first window has already
+    /// spent two ids on it, and every later id is two higher than a consumer
+    /// who did not. Both are correct; the numbers are allocation order, which
+    /// is exactly what differs between "one call" and "many".
+    ///
+    /// What the comparison must NOT lose is what the ids MEAN: which records
+    /// share a list, and which share a flow. Renumbering by first appearance
+    /// keeps that whole — a record moved to another list, a list split in two
+    /// at the seam, or a list re-created mid-stream all still come out
+    /// different — while dropping only the arbitrary starting point.
+    fn canonical_ids(records: &[WzDissectRecord]) -> Vec<WzDissectRecord> {
+        fn seat(seen: &mut Vec<u64>, id: u64) -> u64 {
+            match seen.iter().position(|&s| s == id) {
+                Some(i) => i as u64,
+                None => {
+                    seen.push(id);
+                    (seen.len() - 1) as u64
+                }
+            }
+        }
+        let mut lists: Vec<u64> = Vec::new();
+        let mut flows: Vec<u64> = Vec::new();
+        records
+            .iter()
+            .map(|r| WzDissectRecord {
+                list_id: seat(&mut lists, r.list_id),
+                flow_id: seat(&mut flows, r.flow_id),
+                ..*r
+            })
+            .collect()
+    }
+
+    /// A pcapng carrying THREE framed KeepAlives over FOUR TCP segments, cut so
+    /// that two of the three messages span a packet boundary.
+    ///
+    /// The straddle is the fixture's whole job. A capture whose every message
+    /// sits inside one packet cannot tell a door that resumes where it left off
+    /// from one that simply re-reads whatever whole blocks it can see, because
+    /// on such a capture the two produce the same records. The messages that a
+    /// window-slicing reader LOSES are exactly the ones cut in half, so they
+    /// are the ones a test has to contain.
+    ///
+    /// `[1, 0, KIND_KEEPALIVE]` is one framed unit: a 16-bit little-endian
+    /// length and a one-byte body.
+    ///
+    /// # A DATAGRAM rides along, and it is not decoration
+    ///
+    /// MEASURED: with the TCP segments alone, the control probe for this whole
+    /// item — a follower that re-reads the prefix from zero on every call —
+    /// PASSED the sweep. The reason is that a re-read hands the reassembler the
+    /// same bytes at the same sequence numbers, and it recognises a
+    /// RETRANSMISSION and drops them. So a stream-only fixture cannot tell the
+    /// door from a re-reader; the duplicate is absorbed by a mechanism that has
+    /// nothing to do with what is under test.
+    ///
+    /// A datagram has no sequence space to be absorbed by, so a packet handed
+    /// over twice is a message twice. That is what makes the sweep able to
+    /// fail, and it was found by running the control rather than by reasoning
+    /// about it.
+    fn straddling_container() -> Vec<u8> {
+        let segments: [&[u8]; 4] = [
+            &[1, 0, KIND_KEEPALIVE], // message 1, whole
+            &[1, 0],                 // message 2, its length only
+            &[KIND_KEEPALIVE, 1, 0], // message 2's body, message 3's length
+            &[KIND_KEEPALIVE],       // message 3's body
+        ];
+        let datagram = udp_packet([10, 0, 0, 1], 7447, [10, 0, 0, 2], 7447, &KEEPALIVE);
+        let mut seq = 1000u32;
+        let mut packets: Vec<Vec<u8>> = segments
+            .iter()
+            .map(|seg| {
+                let p = tcp_packet(seq, seg);
+                seq += seg.len() as u32;
+                p
+            })
+            .collect();
+        packets.push(datagram);
+        let refs: Vec<(u32, u64, &[u8])> = packets
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (0u32, (i as u64 + 1) * 1_000, p.as_slice()))
+            .collect();
+        wz_capture::pcapng::write(&[(LINKTYPE_ETHERNET, 6)], &refs)
+    }
+
+    /// R2373 (open-debt item 661) — EVERY CUT of a growing container yields
+    /// exactly the records the whole of it does.
+    ///
+    /// # The population is the container's own length, not a list of interesting
+    /// offsets
+    ///
+    /// A hand-picked set of split points is the failure this sweep exists to
+    /// avoid: the author picks the offsets they were already thinking about, and
+    /// the door passes on exactly those. Here the population is every byte
+    /// boundary of the fixture — derived from the artifact rather than chosen —
+    /// so a block header cut between its length words, a packet cut inside its
+    /// Ethernet padding and a prefix ending one byte before a block's trailing
+    /// length are all in it because they exist, not because anyone remembered
+    /// them.
+    ///
+    /// # What each of the four acceptance clauses gets from this
+    ///
+    /// The clauses came from the consumer that asked for the door, and three of
+    /// the four are properties of ALL cuts rather than of one:
+    ///
+    /// 1. a message straddling a window is decoded EXACTLY ONCE — the record
+    ///    vector must equal the one-shot vector, so neither a loss nor a
+    ///    duplicate passes, at every cut that lands inside a straddled message;
+    /// 3. packet coordinates CONTINUE — the anchors are compared as part of the
+    ///    record, so a second call re-issuing a first call's index is a
+    ///    mismatch;
+    /// 4. a prefix ending mid-block is LEGAL and consumes nothing extra — every
+    ///    cut must return `WZ_DISSECT_OK`, and `followed()` may never exceed
+    ///    what the call was given.
+    ///
+    /// The witnesses below are what stop each of those passing vacuously: a
+    /// fixture with no mid-block cut, or no partially-decoded window, would
+    /// satisfy the equality above by having nothing to get wrong.
+    #[test]
+    fn every_cut_of_a_container_yields_exactly_the_records_the_whole_of_it_does() {
+        let file = straddling_container();
+        let cuts: Vec<usize> = (0..=file.len()).collect();
+        assert!(
+            cuts.len() > 1,
+            "the population is derived from the fixture's length and must not \
+             be empty: {} cut(s)",
+            cuts.len()
+        );
+
+        let whole = {
+            let h = open_live(WZ_DISSECT_LIMITS_NONE).expect("a handle opens");
+            assert_eq!(follow(h, &file), WZ_DISSECT_OK);
+            let records = drain_all(h);
+            unsafe { wz_dissect_live_close(h) };
+            records
+        };
+        assert_eq!(
+            whole.len(),
+            4,
+            "the fixture carries three framed KeepAlives over four segments and \
+             one datagram; a one-shot follow must find all four"
+        );
+
+        // The three witnesses this sweep would otherwise pass vacuously on.
+        let mut mid_block_cuts = 0usize;
+        let mut partial_windows = 0usize;
+        let mut aligned_partial_windows = 0usize;
+
+        for &cut in &cuts {
+            let h = open_live(WZ_DISSECT_LIMITS_NONE).expect("a handle opens");
+            assert_eq!(
+                follow(h, &file[..cut]),
+                WZ_DISSECT_OK,
+                "a prefix of {cut} byte(s) must be legal, whatever it ends in"
+            );
+            let followed = unsafe { &*h }.followed();
+            assert!(
+                followed <= cut,
+                "a follow consumed {followed} of the {cut} byte(s) it was given"
+            );
+            if followed < cut {
+                mid_block_cuts += 1;
+            }
+            let first = drain_all(h);
+            let partial = !first.is_empty() && first.len() < whole.len();
+            if partial {
+                partial_windows += 1;
+            }
+            // A prefix that ends exactly on a block boundary and STILL has
+            // messages to come. This is the case a door built out of "re-read
+            // whatever whole blocks are present" cannot tell from a finished
+            // container, because by its own measure nothing is outstanding.
+            if partial && followed == cut {
+                aligned_partial_windows += 1;
+            }
+
+            assert_eq!(
+                follow(h, &file),
+                WZ_DISSECT_OK,
+                "the whole container after a {cut}-byte prefix"
+            );
+            let mut all = first;
+            all.extend(drain_all(h));
+            assert_eq!(
+                canonical_ids(&all),
+                canonical_ids(&whole),
+                "a container split at byte {cut} and fed in two calls must \
+                 yield exactly what one call yields — no message lost at the \
+                 seam, none decoded twice, and no coordinate re-issued"
+            );
+            unsafe { wz_dissect_live_close(h) };
+        }
+
+        assert!(
+            mid_block_cuts > 0,
+            "no cut of this fixture landed inside a block, so clause 4 was \
+             never exercised"
+        );
+        assert!(
+            partial_windows > 0,
+            "every cut either decoded nothing or decoded everything, so the \
+             seam was never crossed by a message"
+        );
+        assert!(
+            aligned_partial_windows > 0,
+            "no block-aligned prefix of this fixture left messages outstanding, \
+             so a reader that mistakes 'all blocks read' for 'container \
+             finished' would pass this sweep"
+        );
+    }
+
+    /// R2373 (open-debt item 661) — clause 1, NAMED: one message's bytes split
+    /// across two calls, decoded exactly once.
+    ///
+    /// The sweep above covers this at every offset; this states it as a claim a
+    /// reader can find. The cut is BLOCK-ALIGNED on purpose — the end of the
+    /// packet carrying the message's length and nothing of its body — because
+    /// that is the case a door built out of "re-read whatever whole blocks are
+    /// there" gets wrong while looking right: both halves are complete blocks,
+    /// and the message between them belongs to neither.
+    #[test]
+    fn a_message_split_across_two_windows_is_decoded_exactly_once() {
+        let file = straddling_container();
+        // The offset after the second packet's block, found by asking the
+        // reader itself rather than by counting header bytes here — a length
+        // arithmetic of this test's own would be a second reader of the format
+        // inside the test for the door that exists to remove one.
+        let after_second_packet = {
+            let mut at = None;
+            for cut in 0..=file.len() {
+                // A FRESH handle per cut: one handle walked over every prefix
+                // would carry the previous cut's records into this one's
+                // answer, and the search would be reading its own history.
+                let h = open_live(WZ_DISSECT_LIMITS_NONE).expect("a handle opens");
+                assert_eq!(follow(h, &file[..cut]), WZ_DISSECT_OK);
+                let aligned = unsafe { &*h }.followed() == cut;
+                let decoded = drain_all(h).len();
+                unsafe { wz_dissect_live_close(h) };
+                if aligned && decoded == 1 {
+                    // The LARGEST such prefix: the block-aligned offsets that
+                    // hold one message run from the end of the first packet to
+                    // the end of the second, and it is the second that carries
+                    // the next message's length with no body.
+                    at = Some(cut);
+                }
+            }
+            at.expect("some block-aligned prefix holds exactly one message")
+        };
+
+        let h = open_live(WZ_DISSECT_LIMITS_NONE).expect("a handle opens");
+        assert_eq!(follow(h, &file[..after_second_packet]), WZ_DISSECT_OK);
+        let first = drain_all(h);
+        assert_eq!(
+            first.len(),
+            1,
+            "the prefix holds one whole message and the LENGTH of the next; the \
+             second message must not be decoded from a length alone"
+        );
+
+        assert_eq!(follow(h, &file), WZ_DISSECT_OK);
+        let rest = drain_all(h);
+        assert_eq!(
+            rest.len(),
+            3,
+            "the two stream messages completed by the second call and the \
+             datagram after them, each once"
+        );
+        let anchors: Vec<u64> = first.iter().chain(&rest).map(|r| r.anchor).collect();
+        let mut unique = anchors.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            anchors.len(),
+            "a message decoded twice would come out under an anchor already \
+             spent: {anchors:?}"
+        );
+        unsafe { wz_dissect_live_close(h) };
+    }
+
+    /// R2373 (open-debt item 661) — clause 2: `wz_dissect_live_lost` is
+    /// CUMULATIVE over the container's life, not per call.
+    ///
+    /// # Why the ceiling is named here rather than taken from a preset
+    ///
+    /// The same reason `the_byte_door_tells_retained_retired_and_no_source_apart`
+    /// gives: `WZ_DISSECT_LIMITS_LIVE_TAP` keeps ten thousand messages per flow,
+    /// so reaching a discard through the preset would mean writing ten thousand
+    /// packets into a fixture to prove one branch. The handle is built with a
+    /// ceiling of two and then driven entirely through the C door, so what is
+    /// under test is still the door.
+    ///
+    /// # The discriminator
+    ///
+    /// Discards happen in BOTH windows, and the second reading must be the SUM.
+    /// A door that reported only what the latest call discarded would answer 2,
+    /// and a door built on a fresh handle per window — the workaround this
+    /// symbol exists to replace — would answer whatever its last window saw and
+    /// call it a total.
+    #[test]
+    fn the_lost_count_is_cumulative_across_follow_calls() {
+        let limits = wz_capture::DissectionLimits {
+            frames_per_flow: Some(2),
+            ..wz_capture::DissectionLimits::default()
+        };
+        let handle = Box::into_raw(Box::new(live::LiveDissection::new(limits)));
+
+        let unit = [1u8, 0, KIND_KEEPALIVE];
+        let packets: Vec<Vec<u8>> = (0..5)
+            .map(|i| tcp_packet(1000 + i * unit.len() as u32, &unit))
+            .collect();
+        let refs: Vec<(u32, u64, &[u8])> = packets
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (0u32, (i as u64 + 1) * 1_000, p.as_slice()))
+            .collect();
+        let container = wz_capture::pcapng::write(&[(LINKTYPE_ETHERNET, 6)], &refs);
+        let three = wz_capture::pcapng::write(&[(LINKTYPE_ETHERNET, 6)], &refs[..3]);
+
+        // A drain of ZERO takes nothing and still brings the accounting up to
+        // date, which is what the header says it is for. Using it keeps every
+        // message a discard, so both windows have something to lose.
+        assert_eq!(follow(handle, &three), WZ_DISSECT_OK);
+        assert_eq!(drain_live(handle, 0).len(), 0);
+        let after_first = unsafe { wz_dissect_live_lost(handle) };
+        assert!(
+            after_first > 0,
+            "the first window must discard something, or this test asserts \
+             nothing about a total"
+        );
+
+        assert_eq!(follow(handle, &container), WZ_DISSECT_OK);
+        assert_eq!(drain_live(handle, 0).len(), 0);
+        let after_second = unsafe { wz_dissect_live_lost(handle) };
+        assert!(
+            after_second > after_first,
+            "the second window discarded nothing, so this fixture cannot tell a \
+             total from a latest reading"
+        );
+
+        // What the whole container discards when nothing is drained part way
+        // through: the figure a per-call reading would have to differ from.
+        let one_shot = {
+            let h = Box::into_raw(Box::new(live::LiveDissection::new(limits)));
+            assert_eq!(follow(h, &container), WZ_DISSECT_OK);
+            assert_eq!(drain_live(h, 0).len(), 0);
+            let lost = unsafe { wz_dissect_live_lost(h) };
+            unsafe { wz_dissect_live_close(h) };
+            lost
+        };
+        assert_eq!(
+            after_second, one_shot,
+            "windowing changed the total: {after_first} then {after_second}, \
+             against {one_shot} read in one go"
+        );
+        unsafe { wz_dissect_live_close(handle) };
+    }
+
+    /// R2373 (open-debt item 661) — clause 3, NAMED: a packet fed in the second
+    /// call does not carry an index the first call already used.
+    ///
+    /// Stated on a DATAGRAM fixture because a datagram message anchors to its
+    /// packet's index directly — `anchor_space` 0 — so the coordinate is
+    /// readable off the record rather than inferred. The equality the sweep
+    /// asserts covers this too; what this adds is the reason a reader can see.
+    #[test]
+    fn packet_coordinates_continue_across_follow_calls() {
+        let packet = udp_packet([10, 0, 0, 1], 7447, [10, 0, 0, 2], 7447, &KEEPALIVE);
+        let all: Vec<(u32, u64, &[u8])> = (0..3)
+            .map(|i| (0u32, (i as u64 + 1) * 1_000, packet.as_slice()))
+            .collect();
+        let first_two = wz_capture::pcapng::write(&[(LINKTYPE_ETHERNET, 6)], &all[..2]);
+        let container = wz_capture::pcapng::write(&[(LINKTYPE_ETHERNET, 6)], &all);
+
+        let h = open_live(WZ_DISSECT_LIMITS_NONE).expect("a handle opens");
+        assert_eq!(follow(h, &first_two), WZ_DISSECT_OK);
+        let early = drain_all(h);
+        assert_eq!(
+            early.iter().map(|r| r.anchor).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert_eq!(follow(h, &container), WZ_DISSECT_OK);
+        let late = drain_all(h);
+        assert_eq!(
+            late.iter().map(|r| r.anchor).collect::<Vec<_>>(),
+            vec![2],
+            "the third packet must anchor at 2; a coordinate that restarted \
+             would put it at 0 and a consumer would read two distinct messages \
+             as one"
+        );
+        unsafe { wz_dissect_live_close(h) };
+    }
+
+    /// R2373 (open-debt item 661) — clause 4, NAMED: a prefix ending mid-block
+    /// consumes nothing extra, and the next call decodes that block.
+    ///
+    /// The alternative a door could get away with is refusing such a prefix, or
+    /// consuming a block it has only part of. Both put the alignment rule back
+    /// on the consumer, which is format knowledge outside this library — the
+    /// thing the door exists to remove.
+    #[test]
+    fn a_prefix_ending_mid_block_is_legal_and_consumes_nothing_extra() {
+        let packet = udp_packet([10, 0, 0, 1], 7447, [10, 0, 0, 2], 7447, &KEEPALIVE);
+        let container = wz_capture::pcapng::write(
+            &[(LINKTYPE_ETHERNET, 6)],
+            &[(0, 1_000, &packet), (0, 2_000, &packet)],
+        );
+
+        // Every offset at which the container is NOT on a block boundary,
+        // derived by asking the reader where it stopped rather than by this
+        // test doing block arithmetic of its own.
+        let mut mid_block: Vec<(usize, usize)> = Vec::new();
+        for cut in 0..=container.len() {
+            let h = open_live(WZ_DISSECT_LIMITS_NONE).expect("a handle opens");
+            assert_eq!(follow(h, &container[..cut]), WZ_DISSECT_OK);
+            let followed = unsafe { &*h }.followed();
+            unsafe { wz_dissect_live_close(h) };
+            if followed < cut {
+                mid_block.push((cut, followed));
+            }
+        }
+        assert!(
+            !mid_block.is_empty(),
+            "the population is empty: this container has no offset that is not \
+             a block boundary, so the clause cannot be tested on it"
+        );
+
+        for (cut, followed) in mid_block {
+            let h = open_live(WZ_DISSECT_LIMITS_NONE).expect("a handle opens");
+            assert_eq!(follow(h, &container[..cut]), WZ_DISSECT_OK);
+            assert_eq!(
+                unsafe { &*h }.followed(),
+                followed,
+                "a mid-block prefix consumed a different amount the second time"
+            );
+            assert_eq!(follow(h, &container), WZ_DISSECT_OK);
+            assert_eq!(
+                unsafe { &*h }.followed(),
+                container.len(),
+                "the block half-present at byte {cut} was never picked up once \
+                 the rest of it arrived"
+            );
+            assert_eq!(
+                drain_all(h).len(),
+                2,
+                "both packets must be decoded across the two calls"
+            );
+            unsafe { wz_dissect_live_close(h) };
+        }
+    }
+
+    /// R2373 (open-debt item 661) — a container that came back SHORTER is its
+    /// own error, and the handle is left where it was.
+    ///
+    /// Not [`WZ_DISSECT_ERR_BAD_CAPTURE`], because the capture is fine. A
+    /// container only a writer appends to cannot shrink, so this says the
+    /// caller handed over a different buffer — and reporting it as a parse
+    /// failure would send a consumer to inspect bytes that are correct.
+    #[test]
+    fn a_container_that_shrank_is_its_own_error() {
+        let packet = udp_packet([10, 0, 0, 1], 7447, [10, 0, 0, 2], 7447, &KEEPALIVE);
+        let container = wz_capture::pcapng::write(
+            &[(LINKTYPE_ETHERNET, 6)],
+            &[(0, 1_000, &packet), (0, 2_000, &packet)],
+        );
+
+        let h = open_live(WZ_DISSECT_LIMITS_NONE).expect("a handle opens");
+        assert_eq!(follow(h, &container), WZ_DISSECT_OK);
+        let followed = unsafe { &*h }.followed();
+        assert_eq!(followed, container.len());
+
+        assert_eq!(
+            follow(h, &container[..followed - 1]),
+            WZ_DISSECT_ERR_CONTAINER_SHRANK
+        );
+        assert_eq!(
+            unsafe { &*h }.followed(),
+            followed,
+            "a refused call moved the handle's place in the container"
+        );
+        // And the handle still works: the refusal is about the argument, not
+        // about the handle's state.
+        assert_eq!(follow(h, &container), WZ_DISSECT_OK);
+        assert_eq!(drain_all(h).len(), 2);
+        unsafe { wz_dissect_live_close(h) };
+    }
+
+    /// R2373 (open-debt item 661) — a REPLAYED handle may be followed as the
+    /// writer appends, and does not re-read what the replay already read.
+    ///
+    /// The two doors compose because they are one walk: `from_capture` reads
+    /// the file THROUGH `follow` and leaves the cursor at its end. Had it kept
+    /// its own whole-file reader, this call would restart at offset zero and
+    /// hand every message out a second time — which is the shape the sweep
+    /// above would catch on a fresh handle and this one catches on a replayed
+    /// one.
+    #[test]
+    fn a_replay_may_be_followed_as_the_writer_appends() {
+        let packet = udp_packet([10, 0, 0, 1], 7447, [10, 0, 0, 2], 7447, &KEEPALIVE);
+        let all: Vec<(u32, u64, &[u8])> = (0..3)
+            .map(|i| (0u32, (i as u64 + 1) * 1_000, packet.as_slice()))
+            .collect();
+        let frozen = wz_capture::pcapng::write(&[(LINKTYPE_ETHERNET, 6)], &all[..1]);
+        let grown = wz_capture::pcapng::write(&[(LINKTYPE_ETHERNET, 6)], &all);
+
+        let h = replay(&frozen, WZ_DISSECT_LIMITS_NONE).expect("the capture reads");
+        assert_eq!(drain_all(h).len(), 1);
+        assert_eq!(follow(h, &grown), WZ_DISSECT_OK);
+        let more = drain_all(h);
+        assert_eq!(
+            more.iter().map(|r| r.anchor).collect::<Vec<_>>(),
+            vec![1, 2],
+            "the replay's own packet was handed out again"
+        );
+        unsafe { wz_dissect_live_close(h) };
+    }
+
+    /// R2373 (open-debt item 661) — the FROZEN door and the GROWING door read
+    /// one container the same way.
+    ///
+    /// This is the claim the whole item turns on. A consumer told to poll a
+    /// growing file through a door that reads it differently from the one every
+    /// document here uses would be running the second reader again, one seam
+    /// further in. The two are held together by construction —
+    /// `LiveDissection::from_capture` calls `follow` — and this is the
+    /// measurement that says the construction survived.
+    #[test]
+    fn the_follow_door_and_the_replay_door_read_one_container_the_same_way() {
+        let file = straddling_container();
+
+        let replayed = {
+            let h = replay(&file, WZ_DISSECT_LIMITS_NONE).expect("the capture reads");
+            let r = drain_all(h);
+            unsafe { wz_dissect_live_close(h) };
+            r
+        };
+        let followed = {
+            let h = open_live(WZ_DISSECT_LIMITS_NONE).expect("a handle opens");
+            assert_eq!(follow(h, &file), WZ_DISSECT_OK);
+            let r = drain_all(h);
+            unsafe { wz_dissect_live_close(h) };
+            r
+        };
+        assert_eq!(
+            followed, replayed,
+            "the two doors over one container must not disagree about a single \
+             record"
+        );
+        assert!(
+            !replayed.is_empty(),
+            "an empty agreement is not an agreement"
+        );
+    }
+
+    /// R2373 (open-debt item 661) — the door refuses what it cannot read, and
+    /// null arguments before anything else.
+    #[test]
+    fn the_follow_door_refuses_a_bad_container_and_null_arguments() {
+        let h = open_live(WZ_DISSECT_LIMITS_NONE).expect("a handle opens");
+        // The pcapng magic and a block whose length word is impossible.
+        let broken = [0x0Au8, 0x0D, 0x0D, 0x0A, 3, 0, 0, 0, 0x4D, 0x3C, 0x2B, 0x1A];
+        assert_eq!(follow(h, &broken), WZ_DISSECT_ERR_BAD_CAPTURE);
+        // Nothing at all is not an error: a writer that has created the file
+        // and written no byte of it yet is the ordinary first window.
+        assert_eq!(follow(h, &[]), WZ_DISSECT_OK);
+        unsafe { wz_dissect_live_close(h) };
+
+        assert_eq!(
+            unsafe { wz_dissect_live_follow(core::ptr::null_mut(), [0u8].as_ptr(), 1) },
+            WZ_DISSECT_ERR_INVALID_ARG
+        );
+        let h = open_live(WZ_DISSECT_LIMITS_NONE).expect("a handle opens");
+        assert_eq!(
+            unsafe { wz_dissect_live_follow(h, core::ptr::null(), 0) },
+            WZ_DISSECT_ERR_INVALID_ARG
+        );
+        unsafe { wz_dissect_live_close(h) };
     }
 }

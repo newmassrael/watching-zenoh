@@ -225,6 +225,18 @@ pub struct Packet {
     /// instant nobody recorded. A reader asking `time > 0` got a confident No
     /// and a latency came out as 0 ms.
     pub ts_ticks: Option<u64>,
+    /// R2373 (open-debt item 661) — [`Self::ts_ticks`] already put through the
+    /// `if_tsresol` of the interface that recorded it, at the moment the block
+    /// was read.
+    ///
+    /// Stored rather than resolved on demand because a SECTION BOUNDARY clears
+    /// the interface list: a reader that resolved afterwards, from the
+    /// interfaces a file ENDED with, would put an early packet's ticks through
+    /// a later section's resolution and be wrong by a factor of a thousand.
+    /// [`PcapngFile::ts_millis`] did exactly that until this field existed, and
+    /// it is the one fact a follower of a growing container could not have
+    /// agreed with [`parse`] about — the follower has no "afterwards".
+    pub ts_millis: Option<u64>,
     /// Bytes actually stored.
     pub data: Vec<u8>,
     /// Length the packet had on the wire.
@@ -232,6 +244,32 @@ pub struct Packet {
 }
 
 impl Packet {
+    /// One packet, with its capture time resolved against `iface` HERE, where
+    /// the interface that recorded it is still in hand.
+    ///
+    /// The one constructor the walk uses, so the three block types that carry a
+    /// packet cannot resolve it three ways.
+    fn resolved(
+        index: usize,
+        interface_id: u32,
+        iface: &Interface,
+        ts_ticks: Option<u64>,
+        data: Vec<u8>,
+        orig_len: u32,
+    ) -> Self {
+        let mut packet = Self {
+            index,
+            interface_id,
+            link_type: iface.link_type,
+            ts_ticks,
+            ts_millis: None,
+            data,
+            orig_len,
+        };
+        packet.ts_millis = packet.resolve_ts_millis(iface);
+        packet
+    }
+
     /// `true` when the capture stored fewer bytes than the wire carried.
     pub fn is_truncated(&self) -> bool {
         (self.data.len() as u32) < self.orig_len
@@ -240,14 +278,16 @@ impl Packet {
     /// This packet's capture time in MILLISECONDS, resolved against the
     /// interface that recorded it.
     ///
-    /// `iface` must be the interface named by [`Self::interface_id`];
-    /// [`PcapngFile::ts_millis`] is the safe form that looks it up.
+    /// `iface` must be the interface named by [`Self::interface_id`]. Callers
+    /// reading a parsed file want [`Self::ts_millis`], which is this answer
+    /// already computed against the right section's interface;
+    /// [`PcapngFile::ts_millis`] is the same value through the file.
     ///
     /// pcapng timestamps are a single 64-bit tick count since the Unix epoch,
     /// not the seconds/fraction pair classic pcap uses, so there is no
     /// `ts_secs` to expose — the split is a property of the old format rather
     /// than of the data.
-    pub fn ts_millis(&self, iface: &Interface) -> Option<u64> {
+    pub fn resolve_ts_millis(&self, iface: &Interface) -> Option<u64> {
         let ticks = self.ts_ticks?;
         let per_sec = iface.ticks_per_second();
         Some(if per_sec >= 1_000 {
@@ -364,12 +404,17 @@ impl PcapngFile {
     }
 
     /// `packet`'s capture time in milliseconds, resolved against its own
-    /// interface. `None` when the id is out of range, which [`parse`] does not
-    /// produce — it rejects such a packet — but which a hand-built value can.
+    /// interface. `None` for a block that carried no timestamp at all.
+    ///
+    /// R2373 (open-debt item 661) — reads [`Packet::ts_millis`], which the walk
+    /// resolved when the block was read. It used to look the interface up in
+    /// [`Self::interfaces`] HERE, which holds the LAST section's list: on a
+    /// multi-section capture that put a first-section packet's ticks through a
+    /// last-section `if_tsresol`. The bug was found while building the
+    /// follower, which cannot resolve afterwards and so had to be given the
+    /// answer the file's own reader would give.
     pub fn ts_millis(&self, packet: &Packet) -> Option<u64> {
-        self.interfaces
-            .get(packet.interface_id as usize)
-            .and_then(|i| packet.ts_millis(i))
+        packet.ts_millis
     }
 }
 
@@ -485,6 +530,487 @@ pub struct InterfaceStats {
     pub dropped: Option<u64>,
 }
 
+/// R2373 (open-debt item 661) — one thing a walk over a pcapng container
+/// produced.
+///
+/// Handed to the walk's sink by value rather than accumulated inside
+/// [`PcapngCursor`], because the two callers want opposite things with it:
+/// [`parse`] collects every packet into a [`PcapngFile`], and a FOLLOWER of a
+/// growing container pushes each one into a dissection and drops it. A cursor
+/// that accumulated would make the second one grow without bound for no reason
+/// but the first one's convenience.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PcapngYield {
+    /// A packet block, with its capture time ALREADY resolved against the
+    /// interface list as of that block. See [`Packet::ts_millis`].
+    Packet(Packet),
+    /// A Decryption Secrets Block's payload.
+    Secrets(DecryptionSecrets),
+    /// An Interface Statistics Block's counters.
+    Stats(InterfaceStats),
+    /// The obsolete Packet Block's per-block drop count, which is an INCREMENT
+    /// rather than a total. Yielded only when non-zero, because a zero must not
+    /// manufacture an [`InterfaceStats`] row the file never carried.
+    PacketBlockDrops {
+        /// Which interface lost them.
+        interface_id: u32,
+        /// How many, since the previous packet on that interface.
+        dropped: u64,
+    },
+}
+
+/// R2373 (open-debt item 661) — why a walk stopped.
+///
+/// The distinction this type carries is the whole reason a growing container
+/// can be read at all: a prefix that ends in the middle of a block is
+/// TRUNCATED for a file that will never grow and merely UNFINISHED for one
+/// still being written. The bytes are identical; only the caller knows which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Halt {
+    /// Every byte handed over was consumed; the walk ended on a block boundary.
+    Complete,
+    /// A partial block remains at the end. The error is the one a FINAL
+    /// container would have raised, CARRIED rather than raised so the caller
+    /// decides — [`parse`] raises it, a follower waits for more bytes.
+    Partial(PcapngError),
+}
+
+/// R2373 (open-debt item 661) — a RESUMABLE walk over a pcapng container.
+///
+/// # Why this exists rather than a second parser
+///
+/// [`parse`] reads a whole file, and a capture still being WRITTEN has no
+/// whole. Until this type existed, a consumer holding a growing pcapng had two
+/// options and both are worse than they look: re-parse the whole prefix every
+/// window, which restarts every counter and coordinate the reader hands out; or
+/// open the container itself, which is the second reader of the format that
+/// `wz_dissect_pcap_replay`'s own header paragraph forbids by name.
+///
+/// So the walk became the SSOT and [`parse`] became one of its two callers. The
+/// two cannot disagree about where a block ends, what an unknown block type
+/// costs, or which section's `if_tsresol` a packet's ticks go through, because
+/// there is one walk and both run it.
+///
+/// # What it holds across calls
+///
+/// Everything a block's meaning depends on that an EARLIER block established:
+/// the section's byte order, its interface list (cleared at each new section,
+/// exactly as [`parse`] always did), the packet index, and the accumulation
+/// budget for Decryption Secrets Blocks — which is a cap on the FILE and would
+/// be re-spent from zero by any per-window re-parse.
+#[derive(Debug, Clone)]
+pub struct PcapngCursor {
+    /// The interfaces of the section being read. Cleared by each SHB.
+    interfaces: Vec<Interface>,
+    /// Block types walked past, with a count each, in first-seen order.
+    skipped: Vec<SkippedBlock>,
+    /// Decryption-secret bytes retained so far, against
+    /// [`MAX_DECRYPTION_SECRETS_BYTES`].
+    dsb_bytes: usize,
+    /// How many sections have begun.
+    sections: usize,
+    /// Byte order of the section being read.
+    swapped: bool,
+    /// How far into the container complete blocks have been consumed.
+    consumed: usize,
+    /// The index the next packet will carry.
+    index: usize,
+}
+
+impl Default for PcapngCursor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PcapngCursor {
+    /// A walk positioned at the start of a container.
+    pub fn new() -> Self {
+        Self {
+            interfaces: Vec::new(),
+            skipped: Vec::new(),
+            dsb_bytes: 0,
+            sections: 0,
+            // The byte order of the section currently being read. Set by each
+            // SHB; the SHB's own type field is byte-order agnostic (it is a
+            // palindrome under swapping by construction), which is why the
+            // magic is inside it.
+            swapped: false,
+            consumed: 0,
+            index: 0,
+        }
+    }
+
+    /// How many bytes of the container have been consumed as COMPLETE blocks.
+    ///
+    /// A follower hands over the whole prefix it has on every call; this is
+    /// what tells the walk where to resume, and it is the reason a message
+    /// split across two windows is decoded exactly once.
+    pub fn consumed(&self) -> usize {
+        self.consumed
+    }
+
+    /// How many packets have been produced, which is the index the next one
+    /// will carry.
+    pub fn packets_produced(&self) -> usize {
+        self.index
+    }
+
+    /// How many sections have begun.
+    pub fn sections(&self) -> usize {
+        self.sections
+    }
+
+    /// The interfaces of the section currently being read.
+    pub fn interfaces(&self) -> &[Interface] {
+        &self.interfaces
+    }
+
+    /// Block types this walk stepped over, with a count each.
+    pub fn skipped_blocks(&self) -> &[SkippedBlock] {
+        &self.skipped
+    }
+
+    /// Walk every block that is COMPLETE in `bytes` beyond [`Self::consumed`],
+    /// handing each result to `on`.
+    ///
+    /// `bytes` is the container from offset zero — the whole prefix, not the
+    /// new tail. A pcapng suffix is not a container (it has no SHB and no IDB),
+    /// so a caller handing over only new bytes would have to splice a header
+    /// on, and a consumer that writes pcapng headers is a second WRITER as
+    /// surely as one that parses them is a second reader.
+    ///
+    /// A malformed block is an error and leaves the cursor at that block's
+    /// start. A block that is merely INCOMPLETE is [`Halt::Partial`], and the
+    /// same cursor takes the longer prefix on the next call.
+    ///
+    /// A `bytes` shorter than [`Self::consumed`] — a container that SHRANK,
+    /// which is a caller error — consumes nothing and reports
+    /// [`Halt::Partial`]. Only the caller can tell a shrink from a slow writer,
+    /// so only the caller can name it; [`crate::FollowError::Shrank`] is where
+    /// that is done.
+    pub fn advance<F>(&mut self, bytes: &[u8], mut on: F) -> Result<Halt, PcapngError>
+    where
+        F: FnMut(PcapngYield),
+    {
+        if self.consumed == 0 {
+            // The magic, before any length in the file is trusted. Fewer than
+            // four bytes is not yet WRONG on a container still being written,
+            // so it waits rather than failing.
+            if bytes.len() < 4 {
+                return Ok(Halt::Partial(PcapngError::Truncated { offset: 0 }));
+            }
+            let first = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+            if first != BT_SHB {
+                return Err(PcapngError::NotPcapng { found: first });
+            }
+        }
+        if bytes.len() < self.consumed {
+            return Ok(Halt::Partial(PcapngError::Truncated {
+                offset: bytes.len(),
+            }));
+        }
+
+        let mut off = self.consumed;
+        while off < bytes.len() {
+            if off + MIN_BLOCK_LEN > bytes.len() {
+                self.consumed = off;
+                return Ok(Halt::Partial(PcapngError::Truncated { offset: off }));
+            }
+            // A block type is read in the section's order, EXCEPT an SHB, whose
+            // order is not yet known. `BT_SHB` is `0x0A0D0D0A` — deliberately
+            // unchanged by byte swapping — so comparing either reading works.
+            let raw_type = [bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]];
+            let is_shb = u32::from_be_bytes(raw_type) == BT_SHB;
+            if is_shb {
+                // Read the byte-order magic BEFORE trusting any length in this
+                // block: `block_total_length` itself is in the section's order.
+                // The `MIN_BLOCK_LEN` guard above already secured these twelve
+                // bytes, which is why there is no second length check here.
+                let bom_raw = u32::from_le_bytes([
+                    bytes[off + 8],
+                    bytes[off + 9],
+                    bytes[off + 10],
+                    bytes[off + 11],
+                ]);
+                self.swapped = match bom_raw {
+                    BOM => false,
+                    x if x == BOM.swap_bytes() => true,
+                    other => {
+                        self.consumed = off;
+                        return Err(PcapngError::BadByteOrderMagic { found: other });
+                    }
+                };
+            }
+            let swapped = self.swapped;
+            let block_type = u32_at(bytes, off, swapped);
+            let total_len = u32_at(bytes, off + 4, swapped);
+            if total_len < MIN_BLOCK_LEN as u32 || !total_len.is_multiple_of(4) {
+                self.consumed = off;
+                return Err(PcapngError::BadBlockLength {
+                    offset: off,
+                    claimed: total_len,
+                });
+            }
+            let total = total_len as usize;
+            if off + total > bytes.len() {
+                // The block's own header says how long it is and the container
+                // does not hold that much YET. This is the case this type
+                // exists for, and the one place a growing capture differs from
+                // a damaged one.
+                self.consumed = off;
+                return Ok(Halt::Partial(PcapngError::Truncated { offset: off }));
+            }
+            let trailing = u32_at(bytes, off + total - 4, swapped);
+            if trailing != total_len {
+                self.consumed = off;
+                return Err(PcapngError::LengthMismatch {
+                    offset: off,
+                    leading: total_len,
+                    trailing,
+                });
+            }
+            // The body sits between the leading length and the trailing one.
+            let body = &bytes[off + 8..off + total - 4];
+
+            // From here the block is COMPLETE, so every remaining failure is a
+            // malformed block rather than a short container. `self.consumed` is
+            // left at `off` on each, so a caller that swallows the error and
+            // hands over more bytes cannot resume half way into a block.
+            match block_type {
+                BT_SHB => {
+                    self.sections += 1;
+                    // A new section restarts the interface numbering: ids in
+                    // the next section index ITS interface list, not the
+                    // previous one's. Not clearing this would attribute a
+                    // packet to an interface from a different section, with a
+                    // link type that may differ.
+                    self.interfaces.clear();
+                }
+                BT_IDB => {
+                    // linktype u16, reserved u16, snaplen u32, then options.
+                    if body.len() < 8 {
+                        self.consumed = off;
+                        return Err(PcapngError::Truncated { offset: off });
+                    }
+                    let link_type = u32::from(u16_at(body, 0, swapped));
+                    let snaplen = u32_at(body, 4, swapped);
+                    let ts_resol =
+                        scan_tsresol(&body[8..], swapped).unwrap_or(Interface::DEFAULT_TSRESOL);
+                    self.interfaces.push(Interface {
+                        link_type,
+                        ts_resol,
+                        snaplen,
+                    });
+                }
+                BT_EPB => {
+                    // interface_id u32, ts_high u32, ts_low u32, captured u32,
+                    // original u32, then the data padded to 4, then options.
+                    if body.len() < 20 {
+                        self.consumed = off;
+                        return Err(PcapngError::Truncated { offset: off });
+                    }
+                    let interface_id = u32_at(body, 0, swapped);
+                    let ts_high = u64::from(u32_at(body, 4, swapped));
+                    let ts_low = u64::from(u32_at(body, 8, swapped));
+                    let captured = u32_at(body, 12, swapped);
+                    let orig_len = u32_at(body, 16, swapped);
+                    let available = body.len() - 20;
+                    if captured as usize > available {
+                        self.consumed = off;
+                        return Err(PcapngError::BadCapturedLength {
+                            index: self.index,
+                            claimed: captured,
+                            available,
+                        });
+                    }
+                    let Some(iface) = self.interfaces.get(interface_id as usize).copied() else {
+                        self.consumed = off;
+                        return Err(PcapngError::UnknownInterface {
+                            index: self.index,
+                            interface_id,
+                        });
+                    };
+                    on(PcapngYield::Packet(Packet::resolved(
+                        self.index,
+                        interface_id,
+                        &iface,
+                        // The two halves are a single 64-bit count, high word
+                        // first. Reading them as a seconds/fraction pair — which
+                        // the classic layout invites — is wrong by construction.
+                        Some((ts_high << 32) | ts_low),
+                        body[20..20 + captured as usize].to_vec(),
+                        orig_len,
+                    )));
+                    self.index += 1;
+                }
+                BT_SPB => {
+                    // original_len u32, then the packet, padded to 4. An SPB has
+                    // NO captured length of its own: the stored bytes are whatever
+                    // the block holds, which is the original length unless the
+                    // capture ran with a snaplen — in which case the block is
+                    // shorter and the reader must take the block's word for it.
+                    if body.len() < 4 {
+                        self.consumed = off;
+                        return Err(PcapngError::Truncated { offset: off });
+                    }
+                    let Some(iface) = self.interfaces.first().copied() else {
+                        self.consumed = off;
+                        return Err(PcapngError::SimplePacketWithoutInterface {
+                            index: self.index,
+                        });
+                    };
+                    let orig_len = u32_at(body, 0, swapped);
+                    let stored = core::cmp::min(orig_len as usize, body.len() - 4);
+                    on(PcapngYield::Packet(Packet::resolved(
+                        self.index,
+                        0,
+                        &iface,
+                        // An SPB carries no timestamp at all, and the ABSENCE is
+                        // what travels rather than a plausible zero (R311y625).
+                        None,
+                        body[4..4 + stored].to_vec(),
+                        orig_len,
+                    )));
+                    self.index += 1;
+                }
+                BT_PB => {
+                    // The obsolete Packet Block: interface_id u16, drops u16, then
+                    // the same timestamp / lengths / data as an EPB. Read because
+                    // old captures still carry it and the alternative is skipping
+                    // every packet in such a file while reporting success.
+                    if body.len() < 20 {
+                        self.consumed = off;
+                        return Err(PcapngError::Truncated { offset: off });
+                    }
+                    let interface_id = u32::from(u16_at(body, 0, swapped));
+                    // R311y607 — the PB's own drop counter, which this reader used
+                    // to step over. It counts packets lost BETWEEN this packet and
+                    // the previous one on the same interface, so it is a per-block
+                    // increment rather than a total: accumulated into the same
+                    // place an ISB's `isb_ifdrop` lands, because a consumer asking
+                    // "did the capture tool lose anything" must not have to know
+                    // which block type the writer chose.
+                    let block_drops = u64::from(u16_at(body, 2, swapped));
+                    let ts_high = u64::from(u32_at(body, 4, swapped));
+                    let ts_low = u64::from(u32_at(body, 8, swapped));
+                    let captured = u32_at(body, 12, swapped);
+                    let orig_len = u32_at(body, 16, swapped);
+                    let available = body.len() - 20;
+                    if captured as usize > available {
+                        self.consumed = off;
+                        return Err(PcapngError::BadCapturedLength {
+                            index: self.index,
+                            claimed: captured,
+                            available,
+                        });
+                    }
+                    let Some(iface) = self.interfaces.get(interface_id as usize).copied() else {
+                        self.consumed = off;
+                        return Err(PcapngError::UnknownInterface {
+                            index: self.index,
+                            interface_id,
+                        });
+                    };
+                    // Yielded BEFORE the packet, and only when non-zero: the
+                    // count is what was lost leading UP to this block, so a
+                    // consumer that stops on the packet has already been told.
+                    if block_drops > 0 {
+                        on(PcapngYield::PacketBlockDrops {
+                            interface_id,
+                            dropped: block_drops,
+                        });
+                    }
+                    on(PcapngYield::Packet(Packet::resolved(
+                        self.index,
+                        interface_id,
+                        &iface,
+                        Some((ts_high << 32) | ts_low),
+                        body[20..20 + captured as usize].to_vec(),
+                        orig_len,
+                    )));
+                    self.index += 1;
+                }
+                BT_ISB => {
+                    // interface_id u32, ts_high u32, ts_low u32, then options.
+                    // The counters live ONLY in the options; the fixed part
+                    // carries no drop figure at all.
+                    if body.len() < 12 {
+                        self.consumed = off;
+                        return Err(PcapngError::Truncated { offset: off });
+                    }
+                    let interface_id = u32_at(body, 0, swapped);
+                    let opts = &body[12..];
+                    on(PcapngYield::Stats(InterfaceStats {
+                        interface_id,
+                        received: scan_u64_option(opts, swapped, OPT_ISB_IFRECV),
+                        dropped: scan_u64_option(opts, swapped, OPT_ISB_IFDROP),
+                    }));
+                }
+                // R311y625 (§1.4d) — skipped by length, which is what the format's
+                // self-describing block structure is FOR, and now COUNTED, which is
+                // what this crate's own rule requires of anything it drops. A
+                // reader that walks past a block silently reports the file it can
+                // read as if it were the file it was given.
+                // R311y658 (§1.2a) — the one skipped type whose BYTES are worth
+                // more than its count. Still recorded as skipped, because this
+                // reader does not act on it: the count says "there were keys here"
+                // and the payload is what a decryptor needs, and dropping the
+                // skipped entry would make the file look fully understood.
+                BT_DSB => {
+                    if body.len() >= 8 && self.dsb_bytes < MAX_DECRYPTION_SECRETS_BYTES {
+                        let secrets_type = u32::from_le_bytes([body[0], body[1], body[2], body[3]]);
+                        let len = u32::from_le_bytes([body[4], body[5], body[6], body[7]]) as usize;
+                        // The declared length is the file's claim; the block is the
+                        // evidence. A DSB whose secrets run past its own block is
+                        // truncated, and taking `min` keeps what is really there
+                        // rather than reading whatever follows in the buffer.
+                        let end = (8 + len).min(body.len());
+                        // R311y659 — bounded, like every other accumulation in this
+                        // crate. A capture may embed a key log of any size and this
+                        // is the only thing here that grows with the FILE's content
+                        // rather than with its packet count. The cap is on the
+                        // total across blocks, so a file that splits one huge log
+                        // across many DSBs is bounded the same as one that does not.
+                        //
+                        // R2373 — the budget lives on the CURSOR, so a follower
+                        // spends it once over the container's life. A door that
+                        // re-parsed each window would re-spend it from zero and
+                        // retain a multiple of the cap.
+                        let keep = (MAX_DECRYPTION_SECRETS_BYTES - self.dsb_bytes).min(end - 8);
+                        self.dsb_bytes += keep;
+                        on(PcapngYield::Secrets(DecryptionSecrets {
+                            secrets_type,
+                            secrets: body[8..8 + keep].to_vec(),
+                            truncated: 8 + keep < end,
+                        }));
+                    }
+                    self.count_skipped(BT_DSB);
+                }
+                other => self.count_skipped(other),
+            }
+            off += total;
+            self.consumed = off;
+        }
+        Ok(Halt::Complete)
+    }
+
+    /// Record one more block of `block_type` stepped over.
+    fn count_skipped(&mut self, block_type: u32) {
+        match self
+            .skipped
+            .iter_mut()
+            .find(|s: &&mut SkippedBlock| s.block_type == block_type)
+        {
+            Some(e) => e.count += 1,
+            None => self.skipped.push(SkippedBlock {
+                block_type,
+                count: 1,
+            }),
+        }
+    }
+}
+
 /// Parse a whole pcapng file from memory.
 ///
 /// Reads it up front for the same reason [`crate::pcap::parse`] does: flow
@@ -495,299 +1021,52 @@ pub struct InterfaceStats {
 /// format is designed for — name resolution, statistics, decryption-secret and
 /// custom blocks all appear in real captures and none of them carries packets.
 /// A reader that failed on them would reject most files wireshark writes.
+///
+/// R2373 (open-debt item 661) — the block walk itself moved to
+/// [`PcapngCursor`] and this is one of its two callers. What this function
+/// reads did not change; what changed is that the follower of a GROWING
+/// container is now the same walk rather than a second one, so the two cannot
+/// disagree about where a block ends.
 pub fn parse(bytes: &[u8]) -> Result<PcapngFile, PcapngError> {
+    // Kept ahead of the cursor so a file too short to hold one block reports
+    // TRUNCATION rather than a verdict on its magic: a `bytes.len()` in 4..12
+    // has enough to judge the magic and not enough to be a file, and this
+    // function has answered `Truncated { offset: 0 }` for it since it was
+    // written. The cursor cannot make that call — on a container still being
+    // written those same bytes are neither.
     if bytes.len() < MIN_BLOCK_LEN {
         return Err(PcapngError::Truncated { offset: 0 });
     }
-    let first = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-    if first != BT_SHB {
-        return Err(PcapngError::NotPcapng { found: first });
-    }
 
-    let mut interfaces: Vec<Interface> = Vec::new();
+    let mut cursor = PcapngCursor::new();
     let mut packets: Vec<Packet> = Vec::new();
     let mut interface_stats: Vec<InterfaceStats> = Vec::new();
-    // R311y625 (§1.4d) — block types stepped over, counted rather than dropped.
-    let mut skipped: Vec<SkippedBlock> = Vec::new();
     let mut dsb: Vec<DecryptionSecrets> = Vec::new();
-    let mut dsb_bytes = 0usize;
     // R311y607 — obsolete-Packet-Block drop counters, summed per interface.
     // A map rather than a Vec because the interface list is rebuilt at each
     // section boundary while these are accumulated across the whole file, and
     // an index into a list that is cleared underneath would attribute one
     // section's losses to another's interface.
     let mut pb_drops: alloc::collections::BTreeMap<u32, u64> = alloc::collections::BTreeMap::new();
-    let mut sections = 0usize;
-    // The byte order of the section currently being read. Set by each SHB;
-    // the SHB's own type field is byte-order agnostic (it is a palindrome
-    // under swapping by construction), which is why the magic is inside it.
-    let mut swapped = false;
-    let mut off = 0usize;
-    let mut index = 0usize;
 
-    while off < bytes.len() {
-        if off + MIN_BLOCK_LEN > bytes.len() {
-            return Err(PcapngError::Truncated { offset: off });
+    let halt = cursor.advance(bytes, |y| match y {
+        PcapngYield::Packet(p) => packets.push(p),
+        PcapngYield::Secrets(s) => dsb.push(s),
+        PcapngYield::Stats(s) => interface_stats.push(s),
+        PcapngYield::PacketBlockDrops {
+            interface_id,
+            dropped,
+        } => {
+            pb_drops
+                .entry(interface_id)
+                .and_modify(|d| *d += dropped)
+                .or_insert(dropped);
         }
-        // A block type is read in the section's order, EXCEPT an SHB, whose
-        // order is not yet known. `BT_SHB` is `0x0A0D0D0A` — deliberately
-        // unchanged by byte swapping — so comparing either reading works.
-        let raw_type = [bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]];
-        let is_shb = u32::from_be_bytes(raw_type) == BT_SHB;
-        if is_shb {
-            // Read the byte-order magic BEFORE trusting any length in this
-            // block: `block_total_length` itself is in the section's order.
-            if off + 12 > bytes.len() {
-                return Err(PcapngError::Truncated { offset: off });
-            }
-            let bom_raw = u32::from_le_bytes([
-                bytes[off + 8],
-                bytes[off + 9],
-                bytes[off + 10],
-                bytes[off + 11],
-            ]);
-            swapped = match bom_raw {
-                BOM => false,
-                x if x == BOM.swap_bytes() => true,
-                other => return Err(PcapngError::BadByteOrderMagic { found: other }),
-            };
-            sections += 1;
-            // A new section restarts the interface numbering: ids in the next
-            // section index ITS interface list, not the previous one's. Not
-            // clearing this would attribute a packet to an interface from a
-            // different section, with a link type that may differ.
-            interfaces.clear();
-        }
-        let block_type = u32_at(bytes, off, swapped);
-        let total_len = u32_at(bytes, off + 4, swapped);
-        if total_len < MIN_BLOCK_LEN as u32 || !total_len.is_multiple_of(4) {
-            return Err(PcapngError::BadBlockLength {
-                offset: off,
-                claimed: total_len,
-            });
-        }
-        let total = total_len as usize;
-        if off + total > bytes.len() {
-            return Err(PcapngError::Truncated { offset: off });
-        }
-        let trailing = u32_at(bytes, off + total - 4, swapped);
-        if trailing != total_len {
-            return Err(PcapngError::LengthMismatch {
-                offset: off,
-                leading: total_len,
-                trailing,
-            });
-        }
-        // The body sits between the leading length and the trailing one.
-        let body = &bytes[off + 8..off + total - 4];
-
-        match block_type {
-            BT_SHB => {}
-            BT_IDB => {
-                // linktype u16, reserved u16, snaplen u32, then options.
-                if body.len() < 8 {
-                    return Err(PcapngError::Truncated { offset: off });
-                }
-                let link_type = u32::from(u16_at(body, 0, swapped));
-                let snaplen = u32_at(body, 4, swapped);
-                let ts_resol =
-                    scan_tsresol(&body[8..], swapped).unwrap_or(Interface::DEFAULT_TSRESOL);
-                interfaces.push(Interface {
-                    link_type,
-                    ts_resol,
-                    snaplen,
-                });
-            }
-            BT_EPB => {
-                // interface_id u32, ts_high u32, ts_low u32, captured u32,
-                // original u32, then the data padded to 4, then options.
-                if body.len() < 20 {
-                    return Err(PcapngError::Truncated { offset: off });
-                }
-                let interface_id = u32_at(body, 0, swapped);
-                let ts_high = u64::from(u32_at(body, 4, swapped));
-                let ts_low = u64::from(u32_at(body, 8, swapped));
-                let captured = u32_at(body, 12, swapped);
-                let orig_len = u32_at(body, 16, swapped);
-                let available = body.len() - 20;
-                if captured as usize > available {
-                    return Err(PcapngError::BadCapturedLength {
-                        index,
-                        claimed: captured,
-                        available,
-                    });
-                }
-                let link_type = interfaces
-                    .get(interface_id as usize)
-                    .ok_or(PcapngError::UnknownInterface {
-                        index,
-                        interface_id,
-                    })?
-                    .link_type;
-                packets.push(Packet {
-                    index,
-                    interface_id,
-                    link_type,
-                    // The two halves are a single 64-bit count, high word
-                    // first. Reading them as a seconds/fraction pair — which
-                    // the classic layout invites — is wrong by construction.
-                    ts_ticks: Some((ts_high << 32) | ts_low),
-                    data: body[20..20 + captured as usize].to_vec(),
-                    orig_len,
-                });
-                index += 1;
-            }
-            BT_SPB => {
-                // original_len u32, then the packet, padded to 4. An SPB has
-                // NO captured length of its own: the stored bytes are whatever
-                // the block holds, which is the original length unless the
-                // capture ran with a snaplen — in which case the block is
-                // shorter and the reader must take the block's word for it.
-                if body.len() < 4 {
-                    return Err(PcapngError::Truncated { offset: off });
-                }
-                if interfaces.is_empty() {
-                    return Err(PcapngError::SimplePacketWithoutInterface { index });
-                }
-                let orig_len = u32_at(body, 0, swapped);
-                let stored = core::cmp::min(orig_len as usize, body.len() - 4);
-                packets.push(Packet {
-                    index,
-                    interface_id: 0,
-                    link_type: interfaces[0].link_type,
-                    // An SPB carries no timestamp at all, and the ABSENCE is
-                    // what travels rather than a plausible zero (R311y625).
-                    ts_ticks: None,
-                    data: body[4..4 + stored].to_vec(),
-                    orig_len,
-                });
-                index += 1;
-            }
-            BT_PB => {
-                // The obsolete Packet Block: interface_id u16, drops u16, then
-                // the same timestamp / lengths / data as an EPB. Read because
-                // old captures still carry it and the alternative is skipping
-                // every packet in such a file while reporting success.
-                if body.len() < 20 {
-                    return Err(PcapngError::Truncated { offset: off });
-                }
-                let interface_id = u32::from(u16_at(body, 0, swapped));
-                // R311y607 — the PB's own drop counter, which this reader used
-                // to step over. It counts packets lost BETWEEN this packet and
-                // the previous one on the same interface, so it is a per-block
-                // increment rather than a total: accumulated into the same
-                // place an ISB's `isb_ifdrop` lands, because a consumer asking
-                // "did the capture tool lose anything" must not have to know
-                // which block type the writer chose.
-                let block_drops = u64::from(u16_at(body, 2, swapped));
-                if block_drops > 0 {
-                    pb_drops
-                        .entry(interface_id)
-                        .and_modify(|d| *d += block_drops)
-                        .or_insert(block_drops);
-                }
-                let ts_high = u64::from(u32_at(body, 4, swapped));
-                let ts_low = u64::from(u32_at(body, 8, swapped));
-                let captured = u32_at(body, 12, swapped);
-                let orig_len = u32_at(body, 16, swapped);
-                let available = body.len() - 20;
-                if captured as usize > available {
-                    return Err(PcapngError::BadCapturedLength {
-                        index,
-                        claimed: captured,
-                        available,
-                    });
-                }
-                let link_type = interfaces
-                    .get(interface_id as usize)
-                    .ok_or(PcapngError::UnknownInterface {
-                        index,
-                        interface_id,
-                    })?
-                    .link_type;
-                packets.push(Packet {
-                    index,
-                    interface_id,
-                    link_type,
-                    ts_ticks: Some((ts_high << 32) | ts_low),
-                    data: body[20..20 + captured as usize].to_vec(),
-                    orig_len,
-                });
-                index += 1;
-            }
-            BT_ISB => {
-                // interface_id u32, ts_high u32, ts_low u32, then options.
-                // The counters live ONLY in the options; the fixed part
-                // carries no drop figure at all.
-                if body.len() < 12 {
-                    return Err(PcapngError::Truncated { offset: off });
-                }
-                let interface_id = u32_at(body, 0, swapped);
-                let opts = &body[12..];
-                interface_stats.push(InterfaceStats {
-                    interface_id,
-                    received: scan_u64_option(opts, swapped, OPT_ISB_IFRECV),
-                    dropped: scan_u64_option(opts, swapped, OPT_ISB_IFDROP),
-                });
-            }
-            // R311y625 (§1.4d) — skipped by length, which is what the format's
-            // self-describing block structure is FOR, and now COUNTED, which is
-            // what this crate's own rule requires of anything it drops. A
-            // reader that walks past a block silently reports the file it can
-            // read as if it were the file it was given.
-            // R311y658 (§1.2a) — the one skipped type whose BYTES are worth
-            // more than its count. Still recorded as skipped, because this
-            // reader does not act on it: the count says "there were keys here"
-            // and the payload is what a decryptor needs, and dropping the
-            // skipped entry would make the file look fully understood.
-            BT_DSB => {
-                if body.len() >= 8 && dsb_bytes < MAX_DECRYPTION_SECRETS_BYTES {
-                    let secrets_type = u32::from_le_bytes([body[0], body[1], body[2], body[3]]);
-                    let len = u32::from_le_bytes([body[4], body[5], body[6], body[7]]) as usize;
-                    // The declared length is the file's claim; the block is the
-                    // evidence. A DSB whose secrets run past its own block is
-                    // truncated, and taking `min` keeps what is really there
-                    // rather than reading whatever follows in the buffer.
-                    let end = (8 + len).min(body.len());
-                    // R311y659 — bounded, like every other accumulation in this
-                    // crate. A capture may embed a key log of any size and this
-                    // is the only thing here that grows with the FILE's content
-                    // rather than with its packet count. The cap is on the
-                    // total across blocks, so a file that splits one huge log
-                    // across many DSBs is bounded the same as one that does not.
-                    let keep = (MAX_DECRYPTION_SECRETS_BYTES - dsb_bytes).min(end - 8);
-                    dsb_bytes += keep;
-                    dsb.push(DecryptionSecrets {
-                        secrets_type,
-                        secrets: body[8..8 + keep].to_vec(),
-                        truncated: 8 + keep < end,
-                    });
-                }
-                let entry = skipped
-                    .iter_mut()
-                    .find(|s: &&mut SkippedBlock| s.block_type == BT_DSB);
-                match entry {
-                    Some(e) => e.count += 1,
-                    None => skipped.push(SkippedBlock {
-                        block_type: BT_DSB,
-                        count: 1,
-                    }),
-                }
-            }
-            other => {
-                let entry = skipped
-                    .iter_mut()
-                    .find(|s: &&mut SkippedBlock| s.block_type == other);
-                match entry {
-                    Some(e) => e.count += 1,
-                    None => skipped.push(SkippedBlock {
-                        block_type: other,
-                        count: 1,
-                    }),
-                }
-            }
-        }
-        off += total;
+    })?;
+    // A FILE does not grow, so the tail a follower would wait for is this
+    // reader's truncation.
+    if let Halt::Partial(e) = halt {
+        return Err(e);
     }
 
     // A Packet Block's per-block drop count is folded in as if it had been an
@@ -812,11 +1091,11 @@ pub fn parse(bytes: &[u8]) -> Result<PcapngFile, PcapngError> {
     }
 
     Ok(PcapngFile {
-        interfaces,
+        interfaces: cursor.interfaces,
         packets,
-        sections,
+        sections: cursor.sections,
         interface_stats,
-        skipped_blocks: skipped,
+        skipped_blocks: cursor.skipped,
         decryption_secrets: dsb,
     })
 }
@@ -1601,5 +1880,115 @@ mod tests {
             parse(&file),
             Err(PcapngError::BadBlockLength { claimed: 8, .. })
         ));
+    }
+
+    /// R2373 (open-debt item 661) — a packet's time is resolved against the
+    /// interface of ITS OWN section, not the one the file happened to end with.
+    ///
+    /// # The bug this pins, and how it was found
+    ///
+    /// [`PcapngFile::ts_millis`] used to look the interface up in
+    /// [`PcapngFile::interfaces`], which a section boundary CLEARS and refills:
+    /// on a multi-section capture it therefore put every earlier packet's ticks
+    /// through the LAST section's `if_tsresol`. Here that is microseconds
+    /// against milliseconds, so the first packet came back a thousand times too
+    /// late — 1 500 000 ms rather than 1 500.
+    ///
+    /// It was not found by reading this function. It was found by building a
+    /// reader for a container still being WRITTEN, which has no "afterwards" to
+    /// resolve in and so had to be handed the answer at the moment the block
+    /// was read. Once one door had to resolve early, the two doors disagreed,
+    /// and the disagreement is what named the older one as wrong.
+    #[test]
+    fn a_packets_time_is_resolved_against_its_own_sections_interface() {
+        // Two whole sections, one after the other, which is what a writer that
+        // restarted mid-file produces. The second declares MILLISECOND ticks
+        // where the first declared microseconds.
+        let mut file = write(&[(1, 6)], &[(0, 1_500_000, &[1, 2, 3])]);
+        file.extend_from_slice(&write(&[(1, 3)], &[(0, 7_000, &[4, 5, 6])]));
+
+        let parsed = parse(&file).expect("two sections are legal");
+        assert_eq!(parsed.sections, 2, "the fixture must carry two sections");
+        assert_eq!(parsed.packets.len(), 2);
+        assert_eq!(
+            parsed.ts_millis(&parsed.packets[0]),
+            Some(1_500),
+            "the first packet's ticks are MICROSECONDS, as its own section said"
+        );
+        assert_eq!(
+            parsed.ts_millis(&parsed.packets[1]),
+            Some(7_000),
+            "the second packet's ticks are MILLISECONDS, as its own section said"
+        );
+    }
+
+    /// R2373 (open-debt item 661) — a cursor fed the container in TWO PIECES
+    /// reads exactly what [`parse`] reads in one, at every cut.
+    ///
+    /// # The population is the container's length
+    ///
+    /// Every byte boundary of the fixture, so a block header cut between its
+    /// two length words, a packet cut inside its data and a prefix one byte
+    /// short of a trailing length are all in it because they exist rather than
+    /// because they were thought of. The empty population is refused below.
+    ///
+    /// This is the walk's own gate, one layer under the C door's: if these two
+    /// ever part, every door built on either of them parts with them.
+    #[test]
+    fn a_cursor_fed_in_two_pieces_reads_what_parse_reads_in_one() {
+        let file = write(
+            &[(1, 6), (101, 9)],
+            &[
+                (0, 1_000, &[1, 2, 3]),
+                (1, 2_000, &[4, 5, 6, 7, 8]),
+                (0, 3_000, &[9]),
+            ],
+        );
+        let whole = parse(&file).expect("the fixture reads");
+        assert_eq!(whole.packets.len(), 3);
+
+        let cuts: Vec<usize> = (0..=file.len()).collect();
+        assert!(cuts.len() > 1, "the population must not be empty");
+        let mut mid_block = 0usize;
+
+        for cut in cuts {
+            let mut cursor = PcapngCursor::new();
+            let mut packets: Vec<Packet> = Vec::new();
+            let mut sink = |y: PcapngYield| {
+                if let PcapngYield::Packet(p) = y {
+                    packets.push(p);
+                }
+            };
+            let halt = cursor
+                .advance(&file[..cut], &mut sink)
+                .expect("a prefix of a good container is never malformed");
+            assert!(
+                cursor.consumed() <= cut,
+                "the walk consumed {} of the {cut} byte(s) it was given",
+                cursor.consumed()
+            );
+            if cursor.consumed() < cut {
+                mid_block += 1;
+                assert!(
+                    matches!(halt, Halt::Partial(_)),
+                    "a walk that stopped short of {cut} reported Complete"
+                );
+            }
+            let resumed = cursor
+                .advance(&file, &mut sink)
+                .expect("the whole container reads");
+            assert_eq!(resumed, Halt::Complete);
+            assert_eq!(cursor.consumed(), file.len());
+            assert_eq!(
+                packets, whole.packets,
+                "the container split at byte {cut} read differently from the \
+                 same container read whole"
+            );
+        }
+        assert!(
+            mid_block > 0,
+            "no cut of this fixture landed inside a block, so resumption was \
+             never exercised"
+        );
     }
 }

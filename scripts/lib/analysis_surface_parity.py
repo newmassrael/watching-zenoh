@@ -448,6 +448,28 @@ ONLY_CAPI = {
         "half at all.",
         (),
     ),
+    # R2373 (open-debt item 661) — the door that CONTINUES a handle as a writer
+    # appends, which is the half the replay row above leaves open. Filed in the
+    # round that added the symbol, which is where this table's own header says
+    # the answering belongs.
+    "a GROWING capture container fed into an open handle": (
+        "wz_dissect_live_follow",
+        "OPEN DEBT on the CLI side (item 664), and the reason is measured "
+        "rather than argued. The record half of this is DELIBERATE for the "
+        "reason the replay row above gives -- a terminal renders for a person "
+        "and there is no flag that hands one 56-byte structs. But the "
+        "CONTAINER half is not: handed a capture a helper is still appending "
+        "to, `wz-analyze` today fails, because `Dissection::from_capture` "
+        "reports a block cut in half as `Truncated` and every flag it has goes "
+        "through that constructor. A person watching a capture being written "
+        "wants the document for what has been written, and the walk that "
+        "answers it now exists (`wz_capture::CaptureCursor`), so what is "
+        "missing here is a decision and a flag rather than a capability. It is "
+        "NOT taken silently: reading a partial file as if it were whole is the "
+        "shortfall this project refuses everywhere else, so the flag has to be "
+        "asked for.",
+        (),
+    ),
 }
 
 # CLI flags that are not capabilities of the analysis surface at all.

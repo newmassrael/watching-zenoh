@@ -473,6 +473,13 @@ extern "C" {
  * `unit_offset` the place inside it), and one was recovered from an encrypted
  * transport, walked while the plaintext was alive and never retained. */
 #define WZ_DISSECT_ERR_NO_BYTE_SOURCE (-7)
+/* R2373 -- a container handed to wz_dissect_live_follow came back SHORTER than
+ * what the handle has already read from it. Its own code and not BAD_CAPTURE,
+ * because the bytes are not the problem: a container only a writer appends to
+ * cannot shrink, so this says you handed over a DIFFERENT buffer -- a reopened
+ * file, a truncated one, a length taken from the wrong place. Folded into the
+ * capture error it would send you to inspect a capture that is fine. */
+#define WZ_DISSECT_ERR_CONTAINER_SHRANK (-8)
 
 /* R311y887 -- LIMIT PRESETS, for the doors that take one as an argument.
  *
@@ -1208,6 +1215,74 @@ int wz_dissect_live_open(int limits, wz_dissect_live **out);
 int wz_dissect_live_push(wz_dissect_live *h, unsigned int link_type,
                          uint64_t ts_ns, const unsigned char *bytes,
                          size_t len);
+
+/* ── R2373 (ABI 15) — A CONTAINER THAT IS STILL BEING WRITTEN ────────────
+ *
+ * Feed a GROWING capture container into an existing handle.
+ *
+ * wz_dissect_pcap_replay below takes a container and OPENS a handle; this
+ * takes a container and CONTINUES one. Between them they had a hole exactly
+ * the shape of a capture backend that is still writing -- a privileged helper
+ * appending to a pcapng and a reader mapping the same file up to a cursor the
+ * helper publishes after each complete block. That reader has bytes, they are
+ * a container, and nothing here would take them without also making a new
+ * handle.
+ *
+ * The handle remembers how far into the container it has parsed. Hand it the
+ * whole prefix you have -- a growing mmap gives you exactly that, at no copy
+ * -- and it consumes only the blocks that became complete since the last
+ * call. Coordinates, session context, the decryption-secret budget and the
+ * lost count all CONTINUE, exactly as they do across the
+ * wz_dissect_pcap_replay -> wz_dissect_live_push seam.
+ *
+ *     wz_dissect_live *h;
+ *     wz_dissect_live_open(WZ_DISSECT_LIMITS_LIVE_TAP, &h);
+ *     for (;;) {
+ *         size_t upto = published_cursor();     // your writer's own figure
+ *         if (wz_dissect_live_follow(h, mapped, upto)) { ... }
+ *         wz_dissect_record buf[256]; size_t n;
+ *         while (!wz_dissect_live_drain(h, buf, 256, &n) && n) { ... }
+ *     }
+ *
+ * WHY THE WHOLE PREFIX RATHER THAN THE NEW BYTES. A suffix of a pcapng is not
+ * a container: no Section Header, no Interface Description. Handing over
+ * [known, cursor) would mean splicing a header onto it, and a consumer that
+ * writes pcapng headers is a second WRITER as surely as one that parses them
+ * is a second reader.
+ *
+ * WHY NOT CALL wz_dissect_pcap_replay ON THE PREFIX EACH WINDOW. It fails on
+ * CORRECTNESS, not on speed. Each such call builds a NEW handle, so
+ * wz_dissect_live_lost restarts at zero -- and that counter is the only thing
+ * separating "the link went quiet" from "this reader could not keep up", so a
+ * consumer resetting it every window reports a floor as a total, permanently.
+ * Packet coordinates restart with it, which is the very thing the replay ->
+ * push seam is documented to avoid. The quadratic cost is real and it is the
+ * SECOND problem.
+ *
+ * A PREFIX ENDING MID-BLOCK IS LEGAL. It consumes nothing extra, and the next
+ * call with more bytes decodes that block. A door that worked only on
+ * block-aligned prefixes would hand the alignment rule back to you, which is
+ * format knowledge outside this library again.
+ *
+ * IT DOES NOT FINISH THE DISSECTION. A container still being written has no
+ * last packet, so the gap patience a file's end makes final is left unspent.
+ * That is the one behaviour separating this from wz_dissect_pcap_replay over
+ * the same bytes.
+ *
+ * EITHER FORMAT, chosen by the container's magic once, exactly as the replay
+ * door chooses it.
+ *
+ * `len` is how much of the container is READABLE AND COMMITTED right now, and
+ * it is an input length rather than a bound of any kind: this library reads no
+ * byte past it, imposes no ceiling by it, and discards nothing for it. What
+ * the handle RETAINS is still the preset wz_dissect_live_open was given, and
+ * wz_dissect_live_lost is still what that discarded.
+ *
+ * WZ_DISSECT_ERR_BAD_CAPTURE for a container that does not read.
+ * WZ_DISSECT_ERR_CONTAINER_SHRANK when `len` is below what this handle has
+ * already consumed. */
+int wz_dissect_live_follow(wz_dissect_live *h, const unsigned char *bytes,
+                           size_t len);
 
 /* Take the messages decoded since the last drain into `out`, which holds
  * `cap` records; `*written` receives how many were filled.

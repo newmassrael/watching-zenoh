@@ -50,7 +50,7 @@ import subprocess
 import sys
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 14
+EXPECTED_VERSION = 15
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -93,6 +93,19 @@ EXPECTED_SYMBOLS = {
     "wz_dissect_live_drain",
     "wz_dissect_live_lost",
     "wz_dissect_live_close",
+    # R2373 (open-debt item 661) — a GROWING capture container fed into a handle
+    # that already exists. The memory rule does not move with it: the handle is
+    # the one `wz_dissect_live_open` made and `wz_dissect_live_close` releases,
+    # and the container's bytes are read from a buffer the CALLER holds and
+    # keeps. What moves is the symbol set.
+    #
+    # It is a distinct symbol from `wz_dissect_pcap_replay` below rather than a
+    # flag on it, because the two differ in what they RETURN: that one opens a
+    # handle over a frozen file, this one continues an open handle as a writer
+    # appends. A caller polling a growing container through the replay door gets
+    # a fresh handle each window, which restarts the packet coordinate and the
+    # discard count — a floor reported as a total, permanently.
+    "wz_dissect_live_follow",
     # R2205 (open-debt item 560) — the BYTES a drained record was decoded from.
     # The memory rule did NOT move with it, and that is the fact worth pinning
     # here rather than assuming: this is the first door handing back something

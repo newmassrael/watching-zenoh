@@ -752,6 +752,146 @@ static int check_replay_door(void) {
     return 0;
 }
 
+/* R2373 (open-debt item 661) -- A CONTAINER THAT IS STILL BEING WRITTEN,
+ * driven from C.
+ *
+ * The door above closes the FROZEN case by handing back a new handle. This one
+ * continues an existing handle as a writer appends, which is the case a capture
+ * backend built out of two processes is actually in: a privileged helper
+ * appends to a pcapng and the reader maps the same file up to a cursor the
+ * helper publishes after each complete block.
+ *
+ * THE POPULATION IS THE FILE'S OWN LENGTH. Every prefix, byte by byte, rather
+ * than a handful of offsets someone thought were interesting -- a record header
+ * cut between two of its fields, a packet cut inside its payload and a prefix
+ * one byte short of a record's end are all in it because they exist. The
+ * assertion at every one of them is the same: two calls must yield exactly what
+ * one call yields.
+ *
+ * The container here is a CLASSIC pcap, deliberately. The Rust sweep beside
+ * this one walks a pcapng, and a door that resumed correctly in one container
+ * and not the other would pass either test alone. */
+static int check_follow_door(void) {
+    wz_dissect_live *h = NULL;
+    unsigned char frame[64];
+    unsigned char file[24 + 3 * (16 + 64)];
+    wz_dissect_record whole[8];
+    wz_dissect_record part[8];
+    size_t frame_len;
+    size_t file_len;
+    size_t written = 999;
+    size_t whole_written;
+    size_t cut;
+    size_t i;
+    size_t resumed_after_a_partial_record = 0;
+    int rc;
+
+    frame_len = udp_keepalive_frame(frame);
+    file_len = pcap_of_frames(file, frame, frame_len, 3);
+
+    /* What the whole container yields in ONE call, which every split must
+     * reproduce. */
+    rc = wz_dissect_live_open(WZ_DISSECT_LIMITS_NONE, &h);
+    CHECK(rc == WZ_DISSECT_OK, "follow live_open rc=%d", rc);
+    rc = wz_dissect_live_follow(h, file, file_len);
+    CHECK(rc == WZ_DISSECT_OK, "one-shot follow rc=%d", rc);
+    whole_written = 999;
+    rc = wz_dissect_live_drain(h, whole, 8, &whole_written);
+    CHECK(rc == WZ_DISSECT_OK, "one-shot drain rc=%d", rc);
+    /* THE POPULATION. A follow that parsed nothing would drain zero records and
+     * every comparison below would hold vacuously. */
+    CHECK(whole_written == 3, "expected 3 records from a 3-packet container, "
+                              "got %zu", whole_written);
+    wz_dissect_live_close(h);
+
+    for (cut = 0; cut <= file_len; cut++) {
+        size_t total = 0;
+        h = NULL;
+        rc = wz_dissect_live_open(WZ_DISSECT_LIMITS_NONE, &h);
+        CHECK(rc == WZ_DISSECT_OK, "live_open at cut %zu rc=%d", cut, rc);
+
+        /* EVERY prefix is legal, whatever it ends in. A door that refused one
+         * ending mid-record would hand the alignment rule back to the caller,
+         * which is pcap format knowledge outside this library again. */
+        rc = wz_dissect_live_follow(h, file, cut);
+        CHECK(rc == WZ_DISSECT_OK, "follow of a %zu-byte prefix rc=%d", cut, rc);
+        written = 999;
+        rc = wz_dissect_live_drain(h, part, 8, &written);
+        CHECK(rc == WZ_DISSECT_OK, "drain at cut %zu rc=%d", cut, rc);
+        CHECK(written <= whole_written,
+              "a prefix yielded %zu records, more than the whole container's "
+              "%zu", written, whole_written);
+        for (i = 0; i < written; i++) {
+            CHECK(part[i].anchor == whole[total + i].anchor,
+                  "at cut %zu record %zu anchored at %llu, not %llu", cut, i,
+                  (unsigned long long)part[i].anchor,
+                  (unsigned long long)whole[total + i].anchor);
+            CHECK(part[i].kind == whole[total + i].kind,
+                  "at cut %zu record %zu is kind %u, not %u", cut, i,
+                  (unsigned)part[i].kind, (unsigned)whole[total + i].kind);
+        }
+        total = written;
+        if (total < whole_written) {
+            resumed_after_a_partial_record++;
+        }
+
+        rc = wz_dissect_live_follow(h, file, file_len);
+        CHECK(rc == WZ_DISSECT_OK, "follow of the whole after cut %zu rc=%d",
+              cut, rc);
+        written = 999;
+        rc = wz_dissect_live_drain(h, part, 8, &written);
+        CHECK(rc == WZ_DISSECT_OK, "second drain at cut %zu rc=%d", cut, rc);
+        for (i = 0; i < written; i++) {
+            CHECK(total + i < whole_written,
+                  "a container split at byte %zu yielded more than %zu records:"
+                  " a message was decoded twice", cut, whole_written);
+            CHECK(part[i].anchor == whole[total + i].anchor,
+                  "at cut %zu resumed record %zu anchored at %llu, not %llu -- "
+                  "a coordinate the first call already spent", cut, i,
+                  (unsigned long long)part[i].anchor,
+                  (unsigned long long)whole[total + i].anchor);
+        }
+        total += written;
+        CHECK(total == whole_written,
+              "a container split at byte %zu yielded %zu records against %zu "
+              "read in one go: a message was lost at the seam", cut, total,
+              whole_written);
+        CHECK(wz_dissect_live_lost(h) == 0,
+              "nothing was discarded at cut %zu, got %llu", cut,
+              (unsigned long long)wz_dissect_live_lost(h));
+        wz_dissect_live_close(h);
+    }
+    CHECK(resumed_after_a_partial_record > 0,
+          "every prefix of this container decoded the whole of it, so the "
+          "resumption this door exists for was never exercised");
+
+    /* A CONTAINER THAT SHRANK is its own code. The capture is fine; the buffer
+     * is a different one, and reporting it as a parse failure would send a
+     * consumer to inspect bytes that are correct. */
+    h = NULL;
+    rc = wz_dissect_live_open(WZ_DISSECT_LIMITS_NONE, &h);
+    CHECK(rc == WZ_DISSECT_OK, "shrink live_open rc=%d", rc);
+    rc = wz_dissect_live_follow(h, file, file_len);
+    CHECK(rc == WZ_DISSECT_OK, "shrink setup follow rc=%d", rc);
+    rc = wz_dissect_live_follow(h, file, file_len - 1);
+    CHECK(rc == WZ_DISSECT_ERR_CONTAINER_SHRANK, "shrunk follow rc=%d", rc);
+    /* And the handle still works: the refusal was about the argument. */
+    rc = wz_dissect_live_follow(h, file, file_len);
+    CHECK(rc == WZ_DISSECT_OK, "follow after a refused shrink rc=%d", rc);
+    wz_dissect_live_close(h);
+
+    /* Nulls are refused before anything is dereferenced. */
+    rc = wz_dissect_live_follow(NULL, file, file_len);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null handle follow rc=%d", rc);
+    h = NULL;
+    rc = wz_dissect_live_open(WZ_DISSECT_LIMITS_NONE, &h);
+    CHECK(rc == WZ_DISSECT_OK, "null-arg live_open rc=%d", rc);
+    rc = wz_dissect_live_follow(h, NULL, 0);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null bytes follow rc=%d", rc);
+    wz_dissect_live_close(h);
+    return 0;
+}
+
 int main(void) {
     /* The symbol/memory-contract revision. A consumer refuses a library whose
      * memory rules moved; this asserts the value the header was written for. */
@@ -782,8 +922,14 @@ int main(void) {
      * R2205 -- 14 since wz_dissect_live_message_bytes joined it: the door that
      * hands back the BYTES a record was decoded from. One symbol, and the
      * memory rule deliberately left where it stands -- the bytes go into a
-     * buffer the caller owns, so there is nothing new to give back. */
-    CHECK(wz_dissect_abi_version() == 14, "abi version is %d, expected 14",
+     * buffer the caller owns, so there is nothing new to give back.
+     * R2373 -- 15 since wz_dissect_live_follow joined it: the door that feeds a
+     * GROWING container into a handle that already exists. One symbol, and
+     * neither the memory rule nor the record layout moved. It answers the half
+     * of the file question the replay door left open -- that one hands back a
+     * NEW handle, and a capture still being written has no moment at which a
+     * new handle is the right answer. */
+    CHECK(wz_dissect_abi_version() == 15, "abi version is %d, expected 15",
           wz_dissect_abi_version());
 
     /* A KeepAlive: one header byte, the smallest complete transport message,
@@ -1370,6 +1516,13 @@ int main(void) {
     /* R2171 (ABI 13) -- and the door that joins the two halves, so a FROZEN
      * capture can drive the record door a live tap uses. */
     if (check_replay_door() != 0) {
+        return 1;
+    }
+
+    /* R2373 (ABI 15) -- and the container that is still being WRITTEN, which
+     * the replay door cannot serve: it hands back a new handle, and a growing
+     * capture has no moment at which that is the right answer. */
+    if (check_follow_door() != 0) {
         return 1;
     }
 
