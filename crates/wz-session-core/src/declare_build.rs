@@ -2103,6 +2103,13 @@ mod tests {
     /// `ext_qos` zenoh stamps on every Declare, and a DeclFinal is a Declare.
     /// The test name is kept because what it gates is unchanged — that the
     /// terminator's BODY is a bare marker byte with no id and no body ext.
+    // R2386 — gated with its subject. The builder answers to `declare-final`
+    // now, so a `codec-declare`-without-`declare-final` build compiles this
+    // module and not the function it calls (E0425). Found by pre-push gate 4b,
+    // which reported it as "NO libtest summary": the run did not disagree with
+    // a count, it failed to BUILD, and the gate refuses to read a number off a
+    // broken run rather than calling the count wrong.
+    #[cfg(feature = "declare-final")]
     #[test]
     fn build_declare_final_emits_two_byte_marker() {
         let declare = build_declare_final();
@@ -2171,6 +2178,7 @@ mod tests {
     /// hard-errors on a DeclFinal without it), so the wire is exactly
     /// `[0xBE, VLE(id), ext_qos, 0x1A]` — the `I` flag and the id are the only
     /// difference from the unsolicited `build_declare_final`.
+    #[cfg(feature = "declare-final")]
     #[test]
     fn build_declare_final_reply_stamps_interest_id_and_i_flag() {
         let declare = build_declare_final_reply(9);
