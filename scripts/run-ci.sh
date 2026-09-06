@@ -11276,7 +11276,11 @@ layer_c1bn_passive_dissection_features() {
 # three other inline forms. `>= 1` catches the empty selection but not a set that
 # silently shrinks; the counts below are measured on this tree.
 layer_c1bg_cargo_test_storage_backend_filesystem() {
-    _runci_guarded_test "C1bg filesystem_storage" 17 \
+    # R2382: 17 -> 19. Two cases witnessing the `Unpersisted { visible: true }`
+    # arm R311y831 shipped and recorded as unwitnessed -- the injected-dir-fsync
+    # failure and its no-injection anti-vacuity twin. The label carries the
+    # count a second time and moves with it.
+    _runci_guarded_test "C1bg filesystem_storage" 19 \
         cargo test -p wz-runtime-tokio \
         --features storage-backend-filesystem --lib filesystem_storage --quiet || return 1
     # R311y280 — the live-driver composition + durability proof (+ its discriminator).

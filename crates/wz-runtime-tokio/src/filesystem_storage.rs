@@ -197,6 +197,24 @@ pub struct FilesystemStorage {
     /// The set of filenames currently in use, for O(log n) collision probing
     /// when allocating a filename for a new key.
     used: BTreeSet<String>,
+    /// R2382 — force the directory `fsync` to fail while the `rename` still
+    /// lands, which is the ONLY way to reach the
+    /// [`Unpersisted { visible: true }`](Unpersisted) arm.
+    ///
+    /// R311y831 built that arm and recorded, honestly, that it was NOT
+    /// witnessed: "no portable fixture makes fsync fail while rename succeeds",
+    /// and its probe P2 inverted the arm and killed nothing. That is true of
+    /// FIXTURES -- there is no filesystem state a test can arrange that fails
+    /// `sync_all` on a directory whose `rename` just succeeded -- and it is the
+    /// reason to inject at the SEAM instead. The two failure sides are the
+    /// whole point of `Unpersisted`, and one of them was shipped unexercised.
+    ///
+    /// `cfg(test)` rather than a port: unlike the entropy seam, nothing in
+    /// production ever wants a second implementation of "fsync this
+    /// directory", so a trait here would exist solely to be doubled. The
+    /// tests that need it live in this module.
+    #[cfg(test)]
+    fail_dir_sync: bool,
 }
 
 impl FilesystemStorage {
@@ -295,7 +313,21 @@ impl FilesystemStorage {
             }
         }
 
-        Ok(Self { dir, map, used })
+        Ok(Self {
+            dir,
+            map,
+            used,
+            #[cfg(test)]
+            fail_dir_sync: false,
+        })
+    }
+
+    /// R2382 — a store whose directory `fsync` always fails, for the one arm no
+    /// filesystem fixture can reach. Test-only by construction.
+    #[cfg(test)]
+    fn with_failing_dir_sync(mut self) -> Self {
+        self.fail_dir_sync = true;
+        self
     }
 
     /// Allocate an on-disk filename for a not-yet-stored key. `None` is the
@@ -323,6 +355,17 @@ impl FilesystemStorage {
     /// serialize, write a process-unique temp file, `fsync` it, `rename` it
     /// over the target, then `fsync` the directory so the rename itself
     /// survives a power loss.
+    /// `fsync` this store's directory — the step that makes a landed `rename`
+    /// durable. The one place [`fail_dir_sync`](Self::fail_dir_sync) is read,
+    /// so production and the injected-failure path differ in exactly one call.
+    fn dir_sync(&self) -> io::Result<()> {
+        #[cfg(test)]
+        if self.fail_dir_sync {
+            return Err(io::Error::other("injected dir fsync failure (R2382)"));
+        }
+        fsync_dir(&self.dir)
+    }
+
     fn persist(&self, file: &str, key: Option<&str>, data: &StoredData) -> Result<(), Unpersisted> {
         let bytes = serialize(key, data);
         let tmp_name = format!(
@@ -357,7 +400,8 @@ impl FilesystemStorage {
         // The rename LANDED: the directory now resolves `file` to the new
         // bytes, so a reopen in this process's lifetime reads them. Only the
         // durability of that directory entry is unconfirmed.
-        fsync_dir(&self.dir).map_err(|err| Unpersisted { visible: true, err })
+        self.dir_sync()
+            .map_err(|err| Unpersisted { visible: true, err })
     }
 }
 
@@ -735,6 +779,58 @@ mod tests {
             packed_id: 0x11,
             schema: Some("text/plain".to_string()),
         })
+    }
+
+    /// R2382 — THE `visible == true` ARM, which R311y831 shipped and recorded
+    /// as unwitnessed.
+    ///
+    /// The rename landed, so a REOPEN would show the new bytes; only the
+    /// directory `fsync` failed, so nothing above may record the mutation. Both
+    /// halves are asserted, and they pull in OPPOSITE directions -- that is the
+    /// whole content of the arm:
+    ///
+    /// * the caller gets `Err`, so no version record, no tombstone, no
+    ///   replication event (an aligning peer is never told this store holds it);
+    /// * the MIRROR MOVED anyway, because the mirror's invariant is "what a
+    ///   reopen would show", and a reopen would show the new value.
+    ///
+    /// An implementation that returned `Err` and left the mirror alone would
+    /// satisfy the first half and diverge from the disk -- which is exactly the
+    /// defect R311y831 fixed, one failure side over.
+    #[test]
+    fn a_landed_write_whose_dir_fsync_failed_moves_the_mirror_and_still_refuses() {
+        let dir = tempdir().unwrap();
+        let mut s = FilesystemStorage::open(dir.path().to_path_buf())
+            .unwrap()
+            .with_failing_dir_sync();
+
+        let outcome = s.put(Some("demo/a"), vec![1, 2, 3], None, ts(10));
+        assert!(
+            outcome.is_err(),
+            "an unconfirmed directory entry is not a committed put; got {outcome:?}"
+        );
+        assert_eq!(
+            s.get(Some("demo/a")).map(|e| e.payload.clone()),
+            Some(vec![1, 2, 3]),
+            "the rename LANDED, so a reopen would show this value and the mirror \
+             must show it too -- the mirror tracks the disk, not the caller's verdict",
+        );
+    }
+
+    /// R2382 ANTI-VACUITY twin: the SAME store without the injection commits.
+    ///
+    /// Without it the test above passes against a `put` that always fails, and
+    /// against an injection that is wired to something other than the directory
+    /// sync. This pins that the only difference is the injected step.
+    #[test]
+    fn the_same_write_without_the_injection_commits() {
+        let dir = tempdir().unwrap();
+        let mut s = FilesystemStorage::open(dir.path().to_path_buf()).unwrap();
+        assert_eq!(
+            s.put(Some("demo/a"), vec![1, 2, 3], None, ts(10)).unwrap(),
+            StorageInsertionResult::Inserted,
+            "the identical write commits when the directory sync is the real one",
+        );
     }
 
     // ---- in-process seam parity (mirror of MemoryStorage's contract) ----

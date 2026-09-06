@@ -99,7 +99,11 @@ WORKFLOW = pathlib.Path(".github/workflows/ci.yml")
 # comparable across it. The rule this establishes: a round that WIDENS the
 # detector re-baselines in the same commit and says so; a round that does not
 # touch the detector may only lower the number.
-FALSE_LOCALITY_CLAIMS = 52
+# R2382: 52 -> 51. `storage-backend-filesystem`'s claim deleted (its C1bg is a
+# hosted job step). Lowered here because the gate REFUSED the push otherwise --
+# its below-budget arm caught its own author leaving the ratchet up, which is
+# the half that stops a budget from admitting violations that no longer exist.
+FALSE_LOCALITY_CLAIMS = 51
 
 # A lane token as the reasons and the workflow both spell it: `Layer C1u`,
 # `C1aj`, or a bare single-letter layer (`Z`, `M`, `F`) when introduced by the
