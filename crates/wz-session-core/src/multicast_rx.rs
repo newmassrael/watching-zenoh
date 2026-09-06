@@ -35,6 +35,7 @@ use crate::multicast_dispatch::{FrameIngest, MulticastDispatcher};
 use crate::multicast_join::decode_join_qos;
 use crate::multicast_join::{decode_join, validate_join};
 use crate::multicast_params::MulticastParams;
+use crate::multicast_peer_lost::MulticastPeerLostReason;
 use crate::network_message::parse_frame_payload;
 use crate::wire_const;
 // R311mh — the reassembly-divergent tail SSOT (dispatch_multicast_inbound_reassembling
@@ -192,6 +193,37 @@ where
                         }
                         #[cfg(not(feature = "transport-qos"))]
                         dispatcher.ingest_join(join.zid, src, baseline, now_ms);
+                    } else {
+                        // R2379 (open-debt item 15, `session-multicast`) — the
+                        // JOIN named capabilities this node cannot speak, and
+                        // `validate_join` has already applied pico's exact
+                        // discriminator (version, `seq_num_res`, `req_id_res`,
+                        // `batch_size`, each against OUR OWN params). For an
+                        // UNKNOWN address that is simply a refused admission,
+                        // which is what this arm has always done. For an
+                        // ALREADY-ADMITTED one it is not: the peer is on the
+                        // group and changed the terms mid-session, and holding
+                        // it to its lease means mis-parsing everything it sends
+                        // until the lease runs out.
+                        //
+                        // pico DROPS it here (`src/transport/multicast/rx.c`,
+                        // the existing-peer branch, which updates SNs and lease
+                        // only when all three match). zenoh does NOT -- its
+                        // `handle_join_from_peer` ignores the inconsistent Join
+                        // and keeps the first-announced parameters. The two
+                        // upstreams disagree and wz follows pico, for the same
+                        // reachability reason recorded on
+                        // `MulticastPeerLostReason::CapabilitiesChanged`.
+                        //
+                        // `drop_by_src_with` is a no-op when nothing is
+                        // admitted at `src`, so the unknown-address case needs
+                        // no guard here -- the departure event cannot be
+                        // manufactured for a peer that never existed.
+                        dispatcher.drop_by_src_with(
+                            src,
+                            MulticastPeerLostReason::CapabilitiesChanged,
+                            |lost| on_event(IterationEvent::MulticastPeerLost(lost)),
+                        );
                     }
                 }
             }

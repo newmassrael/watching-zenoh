@@ -1264,9 +1264,28 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
         src: SocketAddr,
         on_lost: impl FnOnce(MulticastPeerLost),
     ) -> bool {
+        self.drop_by_src_with(src, MulticastPeerLostReason::Closed, on_lost)
+    }
+
+    /// R2379 — drop the peer at `src` for a NAMED reason: the general form
+    /// [`close_by_src_with`](MulticastDispatcher::close_by_src_with) is the
+    /// announced-departure special case of.
+    ///
+    /// A reason PARAMETER rather than a second eviction entry point, which is
+    /// the shape R2333 settled on this same file: the departure mechanics
+    /// (fire before `evict()` so the zid still exists, and only inside the
+    /// `Some` arm so an unattributable datagram cannot manufacture a
+    /// departure) are invariant across causes, and a copy per cause is what
+    /// lets the two drift.
+    pub fn drop_by_src_with(
+        &mut self,
+        src: SocketAddr,
+        reason: MulticastPeerLostReason,
+        on_lost: impl FnOnce(MulticastPeerLost),
+    ) -> bool {
         match self.find_by_src(src) {
             Some(idx) => {
-                on_lost(self.peers[idx].departure(MulticastPeerLostReason::Closed));
+                on_lost(self.peers[idx].departure(reason));
                 self.peers[idx].evict();
                 true
             }

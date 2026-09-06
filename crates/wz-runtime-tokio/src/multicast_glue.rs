@@ -1899,6 +1899,151 @@ mod tests {
         })
     }
 
+    /// R2379 — a JOIN with a batch size this node does not speak, from an
+    /// address whose peer is ALREADY ADMITTED, DROPS that peer.
+    ///
+    /// pico's existing-peer branch (`src/transport/multicast/rx.c`) is the
+    /// upstream: it compares `_seq_num_res` / `_req_id_res` / `_batch_size`
+    /// against its own constants and removes the peer from the list when any
+    /// differs, updating SNs and lease only when they all match. zenoh does the
+    /// opposite (`handle_join_from_peer` ignores the Join and keeps the peer),
+    /// so this test pins WHICH upstream wz follows — a fact no compile can
+    /// carry and the one an interop reader needs.
+    ///
+    /// The reason is asserted, not just the eviction: `CapabilitiesChanged` is
+    /// a third cause, and an implementation that reused `Closed` here would
+    /// tell an application the peer announced a clean departure it never made.
+    #[tokio::test]
+    async fn a_rejoin_with_unspeakable_capabilities_drops_the_admitted_peer() {
+        let peer_b = [0x01, 0x02, 0x03, 0x04];
+        let good = params(&peer_b);
+        // Same peer, same address, one capability changed mid-session.
+        let mut changed = params(&peer_b);
+        changed.batch_size = good.batch_size / 2;
+
+        let mut driver = FakeDriver::with([(join0(&good), src(2)), (join0(&changed), src(2))]);
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let clock = TokioTime::new();
+        let (seen, sink) = departure_sink();
+
+        let outcome = drive_multicast_session(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                tick_ms: 5,
+                max_iters: Some(8),
+            },
+            &mut driver,
+            &clock,
+            sink,
+            &mut idle_outbound(),
+        )
+        .await;
+        assert_eq!(outcome, MulticastOutcome::IterationLimit);
+        assert_eq!(
+            dispatcher.active_peers(),
+            0,
+            "the inconsistent re-JOIN must DROP the peer (pico), not be ignored \
+             while the peer keeps its slot to lease expiry (zenoh)",
+        );
+
+        let lost = departures(&seen);
+        assert_eq!(lost.len(), 1, "one departure, once; got {lost:?}");
+        assert_eq!(
+            lost[0].peer.as_slice(),
+            &peer_b,
+            "the event must name the peer that was dropped",
+        );
+        assert_eq!(
+            lost[0].reason,
+            wz_session_core::driver_loop::MulticastPeerLostReason::CapabilitiesChanged,
+            "the peer neither announced a departure nor went silent — it \
+             changed the terms, which is its own cause",
+        );
+    }
+
+    /// R2379 ANTI-VACUITY twin: a re-JOIN whose capabilities MATCH keeps the
+    /// peer and reports nothing.
+    ///
+    /// Without this, the test above passes just as well against an
+    /// implementation that dropped the peer on EVERY re-JOIN — which would
+    /// evict every peer at its first periodic beacon and take the whole group
+    /// down. It is also the branch `rejoin_updates_advertised_lease` covers one
+    /// layer down, asserted here at the drive loop.
+    #[tokio::test]
+    async fn a_matching_rejoin_keeps_the_peer_and_reports_nothing() {
+        let peer_b = [0x01, 0x02, 0x03, 0x04];
+        let good = params(&peer_b);
+        let mut driver = FakeDriver::with([(join0(&good), src(2)), (join0(&good), src(2))]);
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let clock = TokioTime::new();
+        let (seen, sink) = departure_sink();
+
+        let _ = drive_multicast_session(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                tick_ms: 5,
+                max_iters: Some(8),
+            },
+            &mut driver,
+            &clock,
+            sink,
+            &mut idle_outbound(),
+        )
+        .await;
+        assert_eq!(
+            dispatcher.active_peers(),
+            1,
+            "a periodic beacon from a live peer must not evict it",
+        );
+        assert!(
+            departures(&seen).is_empty(),
+            "a matching re-JOIN is not a departure; got {:?}",
+            departures(&seen),
+        );
+    }
+
+    /// R2379 — an unspeakable JOIN from an address with NO admitted peer
+    /// reports nothing.
+    ///
+    /// The refusal itself is old behaviour (`validate_join` has always dropped
+    /// it); what is new is that the refusal path now reaches the dispatcher, so
+    /// this pins that it cannot MANUFACTURE a departure for a peer that never
+    /// existed — the same invariant `close_by_src_with` states for an
+    /// unattributable Close.
+    #[tokio::test]
+    async fn an_unspeakable_join_from_an_unknown_peer_reports_nothing() {
+        let peer_b = [0x01, 0x02, 0x03, 0x04];
+        let mut changed = params(&peer_b);
+        changed.batch_size = changed.batch_size / 2;
+
+        let mut driver = FakeDriver::with([(join0(&changed), src(2))]);
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let clock = TokioTime::new();
+        let (seen, sink) = departure_sink();
+
+        let _ = drive_multicast_session(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                tick_ms: 5,
+                max_iters: Some(8),
+            },
+            &mut driver,
+            &clock,
+            sink,
+            &mut idle_outbound(),
+        )
+        .await;
+        assert_eq!(dispatcher.active_peers(), 0, "it was never admitted");
+        assert!(
+            departures(&seen).is_empty(),
+            "a peer that never joined cannot depart; got {:?}",
+            departures(&seen),
+        );
+    }
+
     /// An inbound Close reports the departing peer BY ZID, as an ANNOUNCED
     /// departure.
     ///

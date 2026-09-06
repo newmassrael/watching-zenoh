@@ -87,6 +87,27 @@ pub enum MulticastPeerLostReason {
     /// The peer's lease elapsed with no inbound message. An inference from
     /// silence: the peer may be gone, partitioned, or merely wedged.
     LeaseExpired,
+    /// R2379 — an admitted peer re-announced with capabilities this node
+    /// cannot speak, so it was dropped rather than held to its lease.
+    ///
+    /// A THIRD cause, not a third name for one of the two above, which is why
+    /// it is a variant rather than a reuse. The peer neither announced a
+    /// departure (it is still on the group, beaconing) nor went silent (its
+    /// JOIN arrived and was read) — it changed the terms mid-session. An
+    /// application told `Closed` would report a clean shutdown that never
+    /// happened; one told `LeaseExpired` would report a dead link that is
+    /// carrying traffic. Both are the exact conflation this enum's own doc
+    /// calls load-bearing.
+    ///
+    /// pico is the upstream here and the two disagree: its existing-peer JOIN
+    /// arm drops the peer when `_seq_num_res` / `_req_id_res` / `_batch_size`
+    /// differ from its own constants (`src/transport/multicast/rx.c`), while
+    /// zenoh's `handle_join_from_peer` IGNORES the inconsistent Join and keeps
+    /// the peer's first-announced parameters. wz follows pico, and the reason
+    /// is reachability rather than taste: a peer whose resolution or batch size
+    /// this node cannot decode produces frames it will mis-parse for as long as
+    /// the lease holds it, so continuing to hold it is worse than dropping it.
+    CapabilitiesChanged,
 }
 
 /// R311y784 — one peer's departure from the multicast group: who left and
