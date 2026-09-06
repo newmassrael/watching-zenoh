@@ -77,14 +77,56 @@ WORKFLOW = pathlib.Path(".github/workflows/ci.yml")
 # R2380 -- the remaining FALSE claims, to be driven to zero. Lowered by the
 # round that corrects an entry, in the same commit. See the module doc for why
 # this is a count and not a table of names.
-FALSE_LOCALITY_CLAIMS = 24
+#
+# R2381 RE-BASELINE, 24 -> 52, and it is recorded here rather than quietly
+# edited because raising this number is exactly what the gate's own failure
+# message forbids. The tree did NOT regress: the DETECTOR widened. R2380 keyed
+# the claim to `LOCAL-ONLY`, the wording the four atoms it was written against
+# happened to use, and graded everything else green. Widening it to the
+# ASSERTION -- `absent from ci.yml`, `rides NO hosted lane`, `unhosted` -- found
+# 28 more claims that were always false and always there, in atoms the gate had
+# been reporting clean, `query-get` and `query-queryable` among them.
+#
+# One of those 28 was found by the widening and the other by reading the
+# widened gate's OWN output: a fixed-offset window had been truncating
+# `--layer C1al` to `C1a`, a lane no workflow runs, so the gate reported that
+# claim TRUE and its true/false split was wrong. `claim_window` now cuts only
+# at token boundaries. The lesson is the one this workspace already holds about
+# grading your own gate -- the defect was visible only in the listing, never in
+# the verdict.
+#
+# A ratchet cannot survive a detector change by pretending the count is
+# comparable across it. The rule this establishes: a round that WIDENS the
+# detector re-baselines in the same commit and says so; a round that does not
+# touch the detector may only lower the number.
+FALSE_LOCALITY_CLAIMS = 52
 
 # A lane token as the reasons and the workflow both spell it: `Layer C1u`,
 # `C1aj`, or a bare single-letter layer (`Z`, `M`, `F`) when introduced by the
 # word Layer. The bare-letter form is deliberately NOT matched loose -- a lone
 # `Z` in prose is not a lane reference.
 LANE = re.compile(r"\bLayer\s+([A-Z][A-Za-z0-9]{0,4})\b|\b(C[0-9][a-z]{0,3})\b")
-CLAIM = re.compile(r"LOCAL-ONLY|local-only|LOCAL ONLY")
+# R2381 -- the claim is the ASSERTION, not one phrasing of it.
+#
+# R2380 shipped this keyed to `LOCAL-ONLY`, which is the wording the four atoms
+# it was written against happened to use. Testing the gate against wordings it
+# had not anticipated found the same fossil spelled `absent from ci.yml`,
+# `rides NO hosted lane` and `unhosted` in atoms it graded GREEN -- `query-get`
+# and `query-queryable` among them, whose C1j / C4c / C4d / C4e are every one a
+# hosted job step. A detector keyed to the examples its author saw reports green
+# over the rest of the class, which is this workspace's own warning about
+# grading your own gate.
+#
+# `not hosted` is deliberately NOT here: it occurs overwhelmingly inside
+# CORRECTIONS ("C1j IS hosted, the claim that it was not hosted is false"), and
+# a detector that reads a retraction as a claim would demand the retraction be
+# retracted.
+CLAIM = re.compile(
+    r"LOCAL-ONLY|local-only|LOCAL ONLY"
+    r"|absent from ci\.yml"
+    r"|rides? NO hosted lane|no hosted lane"
+    r"|\bunhosted\b"
+)
 
 # How far around the claim to look for the lane it is about. Wide enough for
 # "LOCAL-ONLY: lane C1v absent from ci.yml" and for "the LOCAL-ONLY C1u lane",
@@ -128,6 +170,27 @@ def live_reasons(root: pathlib.Path) -> dict[str, str]:
     return out
 
 
+def claim_window(reason: str, at: int) -> str:
+    """The text around a claim, cut only at TOKEN boundaries.
+
+    R2381 -- a fixed-offset slice truncates whatever token it lands in, and a
+    truncated lane is a DIFFERENT lane: cutting `--layer C1al` at the edge
+    yielded `C1a`, which no workflow runs, so the gate reported a false claim
+    as TRUE and its own true/false split was wrong. Measured on
+    `transport-link-unixpipe`, whose C1al is a hosted job step.
+
+    Extending outward to the nearest non-word character costs nothing and makes
+    the window's content independent of where the offsets happen to fall.
+    """
+    lo = max(0, at - WINDOW_BEFORE)
+    hi = min(len(reason), at + WINDOW_AFTER)
+    while lo > 0 and (reason[lo - 1].isalnum() or reason[lo - 1] == "_"):
+        lo -= 1
+    while hi < len(reason) and (reason[hi].isalnum() or reason[hi] == "_"):
+        hi += 1
+    return reason[lo:hi]
+
+
 def lanes_near(window: str) -> set[str]:
     return {a or b for a, b in LANE.findall(window)}
 
@@ -140,9 +203,7 @@ def audit(root: pathlib.Path):
     violations: list[tuple[str, str]] = []
     for atom, reason in sorted(live_reasons(root).items()):
         for m in CLAIM.finditer(reason):
-            window = reason[
-                max(0, m.start() - WINDOW_BEFORE) : m.start() + WINDOW_AFTER
-            ]
+            window = claim_window(reason, m.start())
             for lane in sorted(lanes_near(window)):
                 claims.append((atom, lane))
                 if lane in hosted:
