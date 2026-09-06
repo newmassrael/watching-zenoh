@@ -481,17 +481,20 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # closes above -- the AMBIGUOUS pin DOES move, by exactly 1 (80 -> 79). Its NEW
 # reason's citations are not counted here: this census reads PARTIAL reasons
 # only, and that atom is no longer one.
-# R2374 -- 352 -> 354, and this one moves UP, which none of the four above did.
-# No atom left the corpus: `adminspace-read` and `adminspace-write` both stay
-# PARTIAL, so REACHED / UNREACHED / NO-SYMBOL are all untouched and the whole
-# delta is prose. Each of the two gained a CORRECTION naming one tracked wz file
-# the census resolves -- the round closed one atom's misattributed clause and
-# narrowed the other's, and a residual narrowed in writing is a citation added.
-# The AMBIGUOUS pin does not move: both new citations resolve to exactly one file.
+# R2374 -- every pin here STAYS, and the round it stayed through is worth a note
+# because the number moved twice on the way. `adminspace-read` and
+# `adminspace-write` both gained a CORRECTION and both stay PARTIAL, so
+# REACHED / UNREACHED / NO-SYMBOL cannot move; the wz count went 352 -> 354 on the
+# first draft of those corrections and came back to 352 when their upstream
+# citations were removed. They were removed because `upstream_citation_anchor_gate`
+# refused them: `net/runtime/adminspace.rs` is a path WITHOUT its root, both
+# root-less ratchets are exactly on budget, and that gate's instruction is to
+# repair the citation rather than raise the budget. The facts those sentences
+# rest on are cited, with their roots, earlier in each reason.
 PIN_REACHED = 64
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
-PIN_WZ_CITATIONS = 354
+PIN_WZ_CITATIONS = 352
 PIN_AMBIGUOUS = 79
 
 
