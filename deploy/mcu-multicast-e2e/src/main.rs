@@ -124,7 +124,12 @@ fn main() -> ! {
         && report.peer_admitted
         && report.tx_fragmented
         && report.saw_push
-        && !report.saw_drop;
+        && !report.saw_drop
+        // R2375 — and the node left the group ANNOUNCED (§3.1 Running ->
+        // Stopped + a departing Close on the wire). ON-TARGET is the point: the
+        // host lane can prove the transition, only this one proves the MCU
+        // profile takes it on the CPU it ships on.
+        && report.departed;
 
     // The loopback-only SKIP concession applies ONLY to the plain-link build (the
     // cross-compile + footprint artifact): on QEMU with no routed multicast netif
@@ -155,13 +160,14 @@ fn main() -> ! {
         hprintln!(
             "R311mi FAIL: multicast roundtrip degraded (join_ok={} outcome={:?} \
              peer_admitted={} tx_fragmented={} saw_push={} saw_drop={} \
-             active_peers={})",
+             departed={} active_peers={})",
             report.join_ok,
             report.outcome,
             report.peer_admitted,
             report.tx_fragmented,
             report.saw_push,
             report.saw_drop,
+            report.departed,
             report.active_peers,
         );
         debug::exit(debug::EXIT_FAILURE);

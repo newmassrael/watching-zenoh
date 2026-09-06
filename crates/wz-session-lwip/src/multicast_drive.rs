@@ -82,6 +82,24 @@
 //! datagrams with no loop change. Off both features, Fragment tails drop (pico's
 //! "fragmentation deactivated" behaviour) and the TX seam emits whole Frames.
 //!
+//! ## Stop (R2375)
+//!
+//! Two ways out, and [`run_multicast_session_with_shutdown`] is the second:
+//! the `max_iters` budget ([`MulticastOutcome::IterationLimit`]), or the caller
+//! asking for a graceful `multicast.stop` — the §3.1 Running -> Stopped event
+//! ([`MulticastOutcome::Stopped`]). The stop arm multicasts the departing Close
+//! (`encode_multicast_close`, the SAME datagram the AP loop sends since
+//! R311y782) BEFORE driving the transition, so a group peer frees this member
+//! now rather than holding a stale entry until its lease expires.
+//!
+//! The signal is a `FnMut() -> bool` POLLED once per iteration, not a channel
+//! awaited on: the AP twin's `tokio::sync::watch::Receiver` has no `no_std`
+//! analogue, and a busy-poll loop has no suspension point to be woken at. A
+//! predicate composes with whatever the deploy already has — an ISR-set
+//! [`AtomicBool`](core::sync::atomic::AtomicBool), an application `Cell`, a
+//! countdown. [`run_multicast_session`] is that same body with a predicate that
+//! never fires.
+//!
 //! ## Not yet here (R311lt foundation; follow-on increments)
 //!
 //! - **`MulticastOutcome::LinkLost`** — the MCU poll loop has no link-loss
@@ -95,6 +113,7 @@ use wz_link_lwip::{Datagram, LwipLink};
 use wz_runtime_coop::{ClockSource, CoopRuntime, CoopTime};
 use wz_runtime_core::TimeSource;
 use wz_session_core::driver_loop::IterationEvent;
+use wz_session_core::handshake_encode::encode_multicast_close;
 use wz_session_core::multicast_dispatch::MulticastDispatcher;
 use wz_session_core::multicast_join::encode_join;
 use wz_session_core::multicast_params::{MulticastDriveConfig, MulticastOutcome};
@@ -328,8 +347,89 @@ pub fn run_multicast_session<C, F, G, const MAX_PEERS: usize>(
     runtime: &CoopRuntime<C>,
     link: &LwipLink,
     driver: &mut LwipMulticastDriver,
+    on_event: F,
+    next_tx: G,
+) -> MulticastOutcome
+where
+    C: ClockSource,
+    F: FnMut(IterationEvent<'_>),
+    G: FnMut() -> Option<MulticastTxItem>,
+{
+    run_multicast_session_inner(
+        dispatcher, cfg, runtime, link, driver, on_event, next_tx, None,
+    )
+}
+
+/// R2375 — [`run_multicast_session`] plus the GRACEFUL STOP signal: the §3.1
+/// `multicast.stop` event (Running -> Stopped), which the MCU loop had no way
+/// in for until this round.
+///
+/// `should_stop` is polled once at the top of every iteration; the first `true`
+/// multicasts the departing Close, drives the transition (which clears the peer
+/// table) and returns [`MulticastOutcome::Stopped`]. A predicate rather than a
+/// channel because this loop is `no_std` and single-task: the AP twin's
+/// `tokio::sync::watch::Receiver` has no MCU analogue, while a closure composes
+/// with whatever the deploy already has — an ISR-set
+/// [`AtomicBool`](core::sync::atomic::AtomicBool), a `Cell` the application
+/// writes, a countdown. It is polled, not awaited, because the busy-poll loop
+/// has no suspension point to wake from.
+///
+/// The AP twin additionally treats a CLOSED channel as a stop, which makes its
+/// handle an RAII shutdown. There is no analogue here and none is missing: a
+/// predicate cannot be "dropped" while the loop still holds it, so the only way
+/// to ask is to answer `true`.
+///
+/// Every other parameter is [`run_multicast_session`]'s, unchanged — that entry
+/// point is this one with a predicate that never fires, and both run ONE body.
+#[allow(clippy::too_many_arguments)]
+pub fn run_multicast_session_with_shutdown<C, F, G, H, const MAX_PEERS: usize>(
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+    cfg: MulticastDriveConfig<'_>,
+    runtime: &CoopRuntime<C>,
+    link: &LwipLink,
+    driver: &mut LwipMulticastDriver,
+    on_event: F,
+    next_tx: G,
+    mut should_stop: H,
+) -> MulticastOutcome
+where
+    C: ClockSource,
+    F: FnMut(IterationEvent<'_>),
+    G: FnMut() -> Option<MulticastTxItem>,
+    H: FnMut() -> bool,
+{
+    run_multicast_session_inner(
+        dispatcher,
+        cfg,
+        runtime,
+        link,
+        driver,
+        on_event,
+        next_tx,
+        Some(&mut should_stop),
+    )
+}
+
+/// The one drive loop both entry points above run. `should_stop` is the only
+/// thing that varies between them, and it is an `Option` rather than two copies
+/// of the body — the same call the AP twin made when its shutdown door landed
+/// (`multicast_glue::drive_multicast_session_inner`): a duplicated busy-poll
+/// would drift at the first arm anyone touches.
+///
+/// `&mut dyn FnMut` rather than a fourth generic: the predicate is called once
+/// per iteration against a loop whose cost is dominated by the lwIP pump, and a
+/// second monomorphisation of this body is ROM the MCU profile would pay for
+/// nothing.
+#[allow(clippy::too_many_arguments)]
+fn run_multicast_session_inner<C, F, G, const MAX_PEERS: usize>(
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+    cfg: MulticastDriveConfig<'_>,
+    runtime: &CoopRuntime<C>,
+    link: &LwipLink,
+    driver: &mut LwipMulticastDriver,
     mut on_event: F,
     mut next_tx: G,
+    mut should_stop: Option<&mut dyn FnMut() -> bool>,
 ) -> MulticastOutcome
 where
     C: ClockSource,
@@ -386,6 +486,53 @@ where
 
     loop {
         if dispatcher.session_state() != SessionFsmMulticastState::Running {
+            return MulticastOutcome::Stopped;
+        }
+        // R2375 — GRACEFUL STOP: the §3.1 Running -> Stopped event, the MCU twin
+        // of the AP loop's `select!` shutdown arm. POLLED at the top of the
+        // iteration rather than raced against RX because this is a busy-poll
+        // loop, not a `select!`: there is no concurrency here for a signal to be
+        // lost to, and a fixed position is what keeps the terminal reproducible
+        // under the frozen clock the MCU lanes drive.
+        //
+        // BEFORE the `max_iters` budget, deliberately: a caller that has asked
+        // to stop must get `Stopped` on the iteration its request becomes
+        // visible, not `IterationLimit` because the budget happened to run out
+        // on the same one. The budget stays the terminal for a caller that never
+        // asks.
+        let stop_requested = match should_stop.as_mut() {
+            Some(ask) => ask(),
+            None => false,
+        };
+        if stop_requested {
+            // R311y782 gave the AP loop's departure a WIRE half; until this
+            // round the MCU loop had no departure point to put one on, so an
+            // MCU member left the group silently and every peer held its entry
+            // until the lease expired. Announce first, THEN tear down — the
+            // order both upstreams use (zenoh `multicast/transport.rs:204-229`,
+            // pico `multicast/transport.c:164-171`), and the same one the AP
+            // stop arm takes.
+            //
+            // Best-effort like the JOIN beacon: multicast UDP has no
+            // acknowledgement, and a node already leaving has no recovery to
+            // take — its peers fall back to the lease sweep, which is exactly
+            // the pre-round behaviour. `send_to_group` already drops the error.
+            let dgram = encode_multicast_close();
+            driver.send_to_group(&dgram);
+            // Pump before returning so the datagram actually LEAVES. The body
+            // does the same after its TX drain, and for the same reason: on a
+            // loopback netif `send_to` only queues, so without this the loop
+            // would return having stopped WITHOUT having announced — and those
+            // are different claims (the AP twin keeps its `JoinHandle` alive to
+            // tell them apart).
+            link.poll_loopback();
+            link.check_timeouts();
+            runtime.run_until_idle();
+            // Drive the transition rather than just returning: `stop()` releases
+            // the multicast link and clears the peer table, exactly as the
+            // link-loss path does through the dispatcher. Returning the outcome
+            // without it would leave a Stopped session still holding peers.
+            dispatcher.stop();
             return MulticastOutcome::Stopped;
         }
         if let Some(limit) = max_iters {
@@ -1133,6 +1280,257 @@ mod tests {
             saw_push,
             "the fragmented Put was split by multicast_tx_emit, multicast to the \
              group, echoed back, and reassembled by the Fragment RX arm into one Push"
+        );
+
+        link.leave_multicast_group(group).expect("leave group");
+    }
+
+    // ── R2375 — the graceful stop, the MCU half of the AP loop's R311y772 /
+    //    R311y782 door (the AP module header carried this one as its residual) ──
+
+    /// Drain the group socket looking for a departing Close, pumping lwIP
+    /// between reads; `None` when 32 pumps produced none.
+    ///
+    /// A DRAIN rather than one read: our own JOIN beacons echo back on the same
+    /// loopback group, so the Close is not necessarily the next datagram in the
+    /// queue — and asserting on "the next one" would make the test depend on how
+    /// many beacons the preceding phase happened to emit.
+    fn drain_for_close<C: ClockSource>(
+        link: &LwipLink,
+        runtime: &CoopRuntime<C>,
+        driver: &mut LwipMulticastDriver,
+    ) -> Option<std::vec::Vec<u8>> {
+        for _ in 0..32 {
+            link.poll_loopback();
+            link.check_timeouts();
+            runtime.run_until_idle();
+            while let Some(dg) = driver.try_recv() {
+                let bytes = dg.data.as_slice();
+                if bytes.first().map(|h| h & 0x1f) == Some(wz_session_core::wire_const::T_MID_CLOSE)
+                {
+                    return Some(bytes.to_vec());
+                }
+            }
+        }
+        None
+    }
+
+    /// Admit a peer, THEN stop: the loop returns [`MulticastOutcome::Stopped`],
+    /// the peer table is cleared, and the departure is ANNOUNCED on the group.
+    ///
+    /// Two phases rather than one drive with an armed predicate, mirroring the
+    /// AP twin's shape: phase one admits the peer through the pre-round entry
+    /// point with no predicate at all; phase two re-enters the SAME dispatcher
+    /// with one that is already true, so the only thing that can end it is the
+    /// stop arm — and the peer that arm must clear is provably there when it
+    /// runs.
+    ///
+    /// The last assertion is the half the AP twin proves in a separate test: the
+    /// Close is observed coming BACK off the real lwIP group, so this is a WIRE
+    /// claim (the datagram left) and not only an FSM one. That distinction is
+    /// the whole reason the stop arm pumps before returning. A distinct port
+    /// (7457) from the fragment round trip (7456).
+    #[test]
+    fn run_multicast_session_stops_on_the_signal_and_announces_the_departure() {
+        let (_serial, link) = lwip_test_link();
+        let group = SESSION_MULTICAST_GROUP_DEFAULT;
+        let port: u16 = 7457;
+        let mut socket = bind_session_multicast_rx(&link, group, port).expect("bind + join group");
+
+        // The peer the stop must clear: a distinct zid (so it is not
+        // own-zid-filtered), injected before the socket is wrapped so the loop's
+        // first poll admits it — the peer-admit test's shape.
+        let peer = params(&[0x01, 0x02, 0x03, 0x04]);
+        let peer_join = encode_join(
+            &peer,
+            &MulticastTxConduits::new(sn::mask_from_res(peer.seq_num_res)),
+        );
+        socket
+            .send_to(group, port, &peer_join)
+            .expect("inject peer JOIN");
+
+        let mut driver = LwipMulticastDriver::new(socket, group, port);
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let runtime = CoopRuntime::new(FrozenClock);
+        let self_params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
+
+        // Phase 1 — no predicate at all: the pre-round entry point, pre-round
+        // behaviour.
+        let admitted = run_multicast_session(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &self_params,
+                tick_ms: 5,
+                max_iters: Some(12),
+            },
+            &runtime,
+            &link,
+            &mut driver,
+            |_event| {},
+            || None,
+        );
+        std::assert_eq!(admitted, MulticastOutcome::IterationLimit);
+        std::assert_eq!(
+            dispatcher.active_peers(),
+            1,
+            "the peer the stop must clear has to be there first"
+        );
+
+        // Phase 2 — the predicate is already true when the loop is entered.
+        let stopped = run_multicast_session_with_shutdown(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &self_params,
+                tick_ms: 5,
+                max_iters: Some(12),
+            },
+            &runtime,
+            &link,
+            &mut driver,
+            |_event| {},
+            || None,
+            || true,
+        );
+
+        std::assert_eq!(
+            stopped,
+            MulticastOutcome::Stopped,
+            "a stop request must end the loop as Stopped, not by budget"
+        );
+        std::assert_eq!(
+            dispatcher.session_state(),
+            SessionFsmMulticastState::Stopped
+        );
+        std::assert_eq!(
+            dispatcher.active_peers(),
+            0,
+            "stop() must run on the way out -- a Stopped session still holding \
+             peers is the defect the link-loss path already avoids"
+        );
+
+        let close = drain_for_close(&link, &runtime, &mut driver)
+            .expect("the departing Close must be observable on the group");
+        std::assert_eq!(
+            close.as_slice(),
+            &[wz_session_core::wire_const::T_MID_CLOSE, 0x00],
+            "the MCU departure must be the SAME datagram the AP loop sends: \
+             reason GENERIC with the S flag CLEAR (zenoh's multicast shape, and \
+             the reason encode_multicast_close records for choosing it)"
+        );
+
+        link.leave_multicast_group(group).expect("leave group");
+    }
+
+    /// ANTI-VACUITY. The identical fixture handed a predicate that NEVER fires
+    /// runs to its budget, keeps the peer, and puts NO Close on the group.
+    ///
+    /// Without this the test above proves only that some drive returned
+    /// Stopped and emitted a Close, which an unconditional `return` at the top
+    /// of the loop would also do. The predicate is handed to the SAME entry
+    /// point, so the difference between the two tests is the ANSWER and not the
+    /// door. A distinct port (7458).
+    #[test]
+    fn the_same_fixture_without_a_stop_request_runs_to_its_budget() {
+        let (_serial, link) = lwip_test_link();
+        let group = SESSION_MULTICAST_GROUP_DEFAULT;
+        let port: u16 = 7458;
+        let mut socket = bind_session_multicast_rx(&link, group, port).expect("bind + join group");
+
+        let peer = params(&[0x01, 0x02, 0x03, 0x04]);
+        let peer_join = encode_join(
+            &peer,
+            &MulticastTxConduits::new(sn::mask_from_res(peer.seq_num_res)),
+        );
+        socket
+            .send_to(group, port, &peer_join)
+            .expect("inject peer JOIN");
+
+        let mut driver = LwipMulticastDriver::new(socket, group, port);
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let runtime = CoopRuntime::new(FrozenClock);
+        let self_params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
+
+        let outcome = run_multicast_session_with_shutdown(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &self_params,
+                tick_ms: 5,
+                max_iters: Some(12),
+            },
+            &runtime,
+            &link,
+            &mut driver,
+            |_event| {},
+            || None,
+            || false,
+        );
+
+        std::assert_eq!(
+            outcome,
+            MulticastOutcome::IterationLimit,
+            "a predicate that never answers true must not stop the loop"
+        );
+        std::assert_eq!(
+            dispatcher.active_peers(),
+            1,
+            "and must not clear the peer table"
+        );
+        std::assert!(
+            drain_for_close(&link, &runtime, &mut driver).is_none(),
+            "no Close may reach the group when nothing asked the face to leave"
+        );
+
+        link.leave_multicast_group(group).expect("leave group");
+    }
+
+    /// A stop request BEATS an exhausted iteration budget.
+    ///
+    /// The loop polls the predicate before the `max_iters` check, and that
+    /// ordering is a decision rather than an accident: when both terminals come
+    /// due on the same iteration, a caller that ASKED to leave must leave
+    /// announced, not fall out silently because the budget happened to run out
+    /// first. `max_iters: Some(0)` is that coincidence in its smallest form —
+    /// the budget is already spent when the first iteration starts.
+    ///
+    /// Without this test the ordering is asserted only by a comment, and moving
+    /// the stop arm below the budget check would keep every other test in this
+    /// module green. A distinct port (7459).
+    #[test]
+    fn a_stop_request_beats_an_exhausted_iteration_budget() {
+        let (_serial, link) = lwip_test_link();
+        let group = SESSION_MULTICAST_GROUP_DEFAULT;
+        let port: u16 = 7459;
+        let socket = bind_session_multicast_rx(&link, group, port).expect("bind + join group");
+
+        let mut driver = LwipMulticastDriver::new(socket, group, port);
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let runtime = CoopRuntime::new(FrozenClock);
+        let self_params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
+
+        let outcome = run_multicast_session_with_shutdown(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &self_params,
+                tick_ms: 5,
+                max_iters: Some(0),
+            },
+            &runtime,
+            &link,
+            &mut driver,
+            |_event| {},
+            || None,
+            || true,
+        );
+
+        std::assert_eq!(
+            outcome,
+            MulticastOutcome::Stopped,
+            "the stop arm is polled before the budget, so a spent budget must \
+             not swallow a departure the caller asked for"
+        );
+        std::assert!(
+            drain_for_close(&link, &runtime, &mut driver).is_some(),
+            "and the departure it took must still have been announced"
         );
 
         link.leave_multicast_group(group).expect("leave group");

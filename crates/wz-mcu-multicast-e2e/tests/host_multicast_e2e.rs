@@ -79,4 +79,11 @@ fn multicast_profile_admits_peer_and_reassembles_fragmented_put_over_lwip() {
          the group, echoed back, and reassembled by the Fragment RX arm into \
          one Push; report = {report:#?}"
     );
+    assert!(
+        report.departed,
+        "R2375 — the node must then LEAVE ANNOUNCED: the departure drive takes \
+         §3.1 Running -> Stopped and clears the peer table, so a group peer \
+         frees this member now instead of holding it until the lease expires; \
+         report = {report:#?}"
+    );
 }

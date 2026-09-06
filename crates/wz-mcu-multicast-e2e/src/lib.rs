@@ -37,6 +37,13 @@
 //!    `next_sn 0` so the per-peer SN gate admits the chain in order, and the
 //!    R311mf Fragment RX arm reassembles + re-parses them back into the SAME
 //!    single `Push` the whole-`T_MID_FRAME` path would fan.
+//! 4. **the graceful departure (R2375)** — the node then re-enters the loop
+//!    asking to stop, which multicasts the departing Close and takes §3.1
+//!    Running -> Stopped with the peer table cleared. The MCU profile could not
+//!    reach that transition until R2375: the loop had no stop signal, so an MCU
+//!    member left silently and its peers held it until the lease expired. This
+//!    is the last §3.1 terminal, and it is proven here ON-TARGET as well as on
+//!    the host.
 //!
 //! ## Runtime proof: the host lane AND the on-target QEMU lane (R311y190)
 //!
@@ -63,7 +70,9 @@ use alloc::vec::Vec;
 
 use wz::link_lwip::rx_sockets::{bind_session_multicast_rx, SESSION_MULTICAST_GROUP_DEFAULT};
 use wz::runtime_coop::CoopRuntime;
-use wz::session_lwip::multicast_drive::{run_multicast_session, LwipMulticastDriver};
+use wz::session_lwip::multicast_drive::{
+    run_multicast_session, run_multicast_session_with_shutdown, LwipMulticastDriver,
+};
 
 // Re-export the trait a consumer must impl to supply monotonic time, so the
 // host test and the bin depend only on THIS crate (single-dep facade
@@ -148,6 +157,17 @@ pub struct MulticastE2eReport {
     /// A reassembly chain was dropped at ingest (out-of-order / capacity /
     /// `UnknownPeer`). Must be false: the in-order chain reassembles cleanly.
     pub saw_drop: bool,
+    /// R2375 — the §3.1 Running -> Stopped terminal: after the bounded round
+    /// trip the node RE-ENTERS the loop asking to leave, and the departure
+    /// drive came back [`MulticastOutcome::Stopped`] with the peer table
+    /// cleared. `false` on a node that never got that far (no join).
+    ///
+    /// The MCU profile could not take this transition until R2375 — the loop
+    /// had no stop signal, so an MCU member left the group silently and every
+    /// peer held its entry until the lease expired. Reported separately from
+    /// `outcome` on purpose: `outcome` stays the BOUNDED phase's terminal, so
+    /// the round-trip signals above keep meaning exactly what they meant.
+    pub departed: bool,
 }
 
 /// Drive the MCU multicast transport e2e to a verdict over the supplied
@@ -187,6 +207,7 @@ pub fn run_multicast_e2e<C: ClockSource>(link: &LwipLink, clock_source: C) -> Mu
                 active_peers: 0,
                 saw_push: false,
                 saw_drop: false,
+                departed: false,
             };
         }
     };
@@ -264,8 +285,39 @@ pub fn run_multicast_e2e<C: ClockSource>(link: &LwipLink, clock_source: C) -> Mu
 
     let active_peers = dispatcher.active_peers();
 
+    // ── R2375 — LEAVE THE GROUP ANNOUNCED. Re-enter the SAME dispatcher asking
+    //    to stop: the loop multicasts the departing Close, drives §3.1 Running
+    //    -> Stopped and clears the peer table. Until this round the MCU profile
+    //    could not do this — the loop had no stop signal — so an MCU member
+    //    went quiet and every group peer held its entry until the lease
+    //    expired. The AP router hat has driven the same transition since R2333;
+    //    this is the MCU host that was missing.
+    //
+    //    A SECOND drive rather than arming the predicate on the first: the
+    //    round-trip signals above are read off the dispatcher AFTER the loop,
+    //    and a stop folded into that drive would clear the peer table before
+    //    `active_peers` could witness it. Two phases keep each terminal
+    //    measuring one thing — the same reason the unit twin is two-phase.
+    let departure = run_multicast_session_with_shutdown(
+        &mut dispatcher,
+        MulticastDriveConfig {
+            params: &self_params,
+            tick_ms: 5,
+            max_iters: Some(MAX_ITERS),
+        },
+        &runtime,
+        link,
+        &mut driver,
+        |_event| {},
+        || None,
+        || true,
+    );
+    let departed = departure == MulticastOutcome::Stopped && dispatcher.active_peers() == 0;
+
     // Symmetric leave (best-effort; the bin exits the process anyway, the host
     // test runs in its own process — kept for cleanliness / parity with C1m).
+    // The IGMP leave AFTER the zenoh-level departure above: the Close has to
+    // ride the membership it is announcing on.
     let _ = link.leave_multicast_group(group);
 
     MulticastE2eReport {
@@ -276,6 +328,7 @@ pub fn run_multicast_e2e<C: ClockSource>(link: &LwipLink, clock_source: C) -> Mu
         active_peers,
         saw_push,
         saw_drop,
+        departed,
     }
 }
 

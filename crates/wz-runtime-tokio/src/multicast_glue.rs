@@ -101,10 +101,15 @@
 //! before driving the transition, which is where the reason byte and the
 //! S-flag choice (and the zenoh/pico disagreement behind them) are recorded.
 //! The link-loss door deliberately stays silent: there is no link left to
-//! announce on. The MCU loop
-//! (`wz_session_lwip::multicast_drive::run_multicast_session`) has no stop
-//! signal at all yet, so it has no departure point to announce from — that
-//! half is still open.
+//! announce on.
+//!
+//! R2375 closed the MCU half this header carried as its last open clause. The
+//! sync loop (`wz_session_lwip::multicast_drive::run_multicast_session_with_shutdown`)
+//! takes a `FnMut() -> bool` — a predicate rather than a `watch::Receiver`,
+//! because a busy-poll `no_std` loop has nothing to await on — and its stop arm
+//! sends the SAME `encode_multicast_close` datagram this one does before driving
+//! the transition. So a departing wz member announces itself on either profile,
+//! and `wz-mcu-multicast-e2e` drives it on-target under QEMU.
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
