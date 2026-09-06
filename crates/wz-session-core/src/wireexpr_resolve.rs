@@ -332,6 +332,102 @@ pub fn resolve_wireexpr_in(
     })
 }
 
+/// Resolve the keyexpr a `DeclKexpr` DECLARES — the one wireexpr on the wire
+/// whose mapping bit does not exist.
+///
+/// Every other wireexpr-bearing message carries `M` in its own header, so
+/// [`resolve_wireexpr_in`] reads the space off the variant tag and is right by
+/// construction. `D_KEXPR` does not. Bit 6 of its header is RESERVED —
+/// `zenoh-protocol/src/network/declare.rs:230-234` declares only `N` at `1<<5`
+/// and `Z` at `1<<7`, with `1<<6` commented out as `X: Reserved` — and zenoh's
+/// WireExpr codec drops the field on the way out (`mapping: _`,
+/// `zenoh-codec/src/core/wire_expr.rs:34-38`) and reads it back as
+/// `Mapping::DEFAULT` (`zenoh-codec/src/core/wire_expr.rs:78`). So on THIS
+/// message the arm is a DECODER CONSTANT, not a wire fact — and the two
+/// upstreams chose OPPOSITE constants:
+///
+/// - **zenoh** leaves the decoded `mapping` at `Mapping::DEFAULT`, which is
+///   `Receiver` (`zenoh-protocol/src/network/mod.rs:52-59`), so `register_expr`
+///   resolves the scope through `Tables::get_mapping(face, scope, Receiver)`
+///   into `FaceState::local_mappings` — the ids the RECEIVER declared
+///   (`zenoh/src/net/routing/dispatcher/resource.rs:942-953`,
+///   `zenoh/src/net/routing/dispatcher/tables.rs:227-237` and
+///   `zenoh/src/net/routing/dispatcher/face.rs:221-230`).
+/// - **zenoh-pico** decodes it with `remote_mapping = true` and stamps the peer
+///   token (`vendor/zenoh-pico/src/protocol/codec/declarations.c:181-186` into
+///   `vendor/zenoh-pico/src/protocol/codec/message.c:127-133`), so
+///   `_z_register_resource_inner` picks `peer->_remote_resources` — the
+///   SENDER's space (`vendor/zenoh-pico/src/session/resource.c:130-142`).
+///
+/// wz's generated decoder pins the `WireexprLocal` arm
+/// (`out/wz-codecs/decl_kexpr.rs:76` passes the arm selector `0x1u8` as a
+/// literal), which is pico's answer. NEITHER upstream ever EMITS a non-zero
+/// scope here — zenoh's two producers write `scope: 0`
+/// (`zenoh/src/api/session.rs:1539-1545` literally, and
+/// `zenoh/src/net/routing/dispatcher/resource.rs:710-711` through
+/// `impl From<String> for WireExpr`, which pins `scope: 0` at
+/// `zenoh-protocol/src/core/wire_expr.rs:209-217`); pico's two write
+/// `Z_RESOURCE_ID_NONE` (`vendor/zenoh-pico/src/net/primitives.c:96-103`) and
+/// `_z_keyexpr_alias_to_wire`, which leaves `_id` null
+/// (`vendor/zenoh-pico/src/session/keyexpr.c:500-504`) — so nothing has ever
+/// exercised the disagreement. What it means is that the ARM CANNOT BE TRUSTED
+/// TO NAME A SPACE on this message, so this resolver does not ask it. It
+/// consults BOTH spaces and answers only where they cannot disagree:
+///
+/// - `id == 0` → suffix verbatim, no table consulted. The only shape either
+///   upstream emits, and the reason the disagreement is latent rather than live.
+/// - exactly ONE space knows `id` → that space's base. This is the arm that
+///   WIDENS wz: a zenoh-style scope, naming an id WE declared, used to resolve
+///   to nothing here because the pinned arm sent the lookup to the peer's table.
+/// - both know it and AGREE → that base.
+/// - both know it and DISAGREE → `None`. The wire cannot say which was meant,
+///   and a wrong base makes every later reference to the newly-bound id
+///   confidently wrong; the caller's existing "unresolvable, bind nothing" path
+///   is the honest answer. This is the argument [`MappingSpaces`] already makes
+///   for refusing a wrong-space read, applied where the bit that would have
+///   decided it is ABSENT rather than merely unavailable.
+/// - neither knows it → `None`, which is pico's `Unknown scope` error path.
+///
+/// A caller holding only the peer's space ([`MappingSpaces::peer_only`]) gets
+/// exactly the pre-existing behaviour: with no second space there is nothing to
+/// disagree with, and the rule collapses to the one-space lookup.
+pub fn resolve_declared_keyexpr(
+    body: &WireexprOwnedVariant,
+    spaces: MappingSpaces<'_>,
+) -> Option<String> {
+    // The arm is deliberately NOT read for a space here — see the docblock.
+    // Both variants carry the same two fields; only the tag differs, and on
+    // D_KEXPR that tag came from the decoder rather than from a header bit.
+    let (id, suffix_opt) = match body {
+        WireexprOwnedVariant::WireexprLocal(a) => (a.id, a.suffix.as_deref()),
+        WireexprOwnedVariant::WireexprNonlocal(a) => (a.id, a.suffix.as_deref()),
+    };
+    if id == 0 {
+        return suffix_opt.map(str::to_string);
+    }
+    let peer_base = spaces.peer.get(&id).cloned();
+    let own_base = spaces.own.and_then(|own| own.resolve_own_mapping(id));
+    let base = match (peer_base, own_base) {
+        (Some(peer), Some(own)) if peer == own => peer,
+        // Both spaces claim the id under DIFFERENT literals. zenoh would take
+        // ours, pico would take the peer's, and the wire carries no bit to
+        // settle it: binding either is a coin flip whose loser mis-routes every
+        // later reference to the id this declaration is minting.
+        (Some(_), Some(_)) => return None,
+        (Some(peer), None) => peer,
+        (None, Some(own)) => own,
+        (None, None) => return None,
+    };
+    Some(match suffix_opt {
+        Some(s) => {
+            let mut out = base;
+            out.push_str(s);
+            out
+        }
+        None => base,
+    })
+}
+
 /// Which space an arm names. Local to the resolver — the public surface says
 /// it with the `M` bit already in the variant tag.
 enum Space {
@@ -351,11 +447,26 @@ enum Space {
 /// to `wz-session-core` (R311y196) a byte-identical copy lived in
 /// `wz-runtime-tokio::linkstate_forward`; the multicast ingress plane needs the
 /// same absorb from the no_std session core, so the one definition lives here.
+///
+/// R2385 — the declared keyexpr's own scope goes through
+/// [`resolve_declared_keyexpr`], not through [`resolve_wireexpr`], so this
+/// absorb and `SubscriberRegistry::absorb_declare` share ONE rule for the one
+/// message whose mapping bit is not on the wire. The behaviour HERE is
+/// unchanged: a forwarder face holds only the peer's space — it absorbs the
+/// peer's declarations and emits none of its own — so the pair collapses to the
+/// single-space lookup this always did. The rule is shared anyway because two
+/// copies of "which space does a D_KEXPR scope name" is two chances to answer
+/// it differently, and the whole point of the question is that the wire does
+/// not answer it.
 #[cfg(feature = "codec-declare")]
 pub fn absorb_keyexpr_into(table: &mut HashMap<u64, String>, declare: &DeclareOwned) {
     match &declare.body {
         DeclareOwnedVariant::CodecZenohDeclKexpr(d) => {
-            if let Some(literal) = resolve_wireexpr(&d.keyexpr.body, &*table) {
+            // Bound to a `let` before the insert so the immutable spaces borrow
+            // ends first, the same shape `absorb_declare` uses.
+            let literal =
+                resolve_declared_keyexpr(&d.keyexpr.body, MappingSpaces::peer_only(&*table));
+            if let Some(literal) = literal {
                 table.insert(d.id, literal);
             }
         }
@@ -586,5 +697,112 @@ mod mapping_bit_tests {
                 Some("home/temp"),
             );
         }
+    }
+
+    // ── R2385 — the DECLARED keyexpr, whose scope names a space the wire does
+    // not say (`resolve_declared_keyexpr`).
+
+    /// THE DISCRIMINATOR for the whole change: a scope only OUR space knows.
+    ///
+    /// This is the shape a zenoh peer would send — `register_expr` resolves a
+    /// D_KEXPR scope through `Mapping::DEFAULT`, which is `Receiver`, i.e. the
+    /// ids the RECEIVER declared. wz's decoder pins the `WireexprLocal` arm on
+    /// this message because the header has no bit 6 to read, so
+    /// [`resolve_wireexpr_in`] sends the lookup to the PEER's table and answers
+    /// `None`. Asserted here as the BEFORE state, in the same test, so the new
+    /// rule cannot be mistaken for a table that merely happened to be populated.
+    #[test]
+    fn a_declared_scope_only_our_space_knows_resolves_there() {
+        let mut peer = peer_space();
+        peer.remove(&7);
+        let own = own_space();
+        let spaces = MappingSpaces::with_own(&peer, &own);
+
+        assert_eq!(
+            resolve_wireexpr_in(&sender_mapped(7, Some("/inner")), spaces),
+            None,
+            "the arm-driven resolver reads the peer's table, which has no 7",
+        );
+        assert_eq!(
+            resolve_declared_keyexpr(&sender_mapped(7, Some("/inner")), spaces).as_deref(),
+            Some("ours/space/temp/inner"),
+            "a D_KEXPR scope is not the arm's to name; our space knows 7",
+        );
+    }
+
+    /// The pico-shaped scope — one only the PEER's space knows — keeps
+    /// resolving exactly as before. ANTI-VACUITY for the test above: if the new
+    /// rule had simply swapped which table it reads, this would break.
+    #[test]
+    fn a_declared_scope_only_the_peers_space_knows_still_resolves_there() {
+        let peer = peer_space();
+        let mut own = own_space();
+        own.remove(&7);
+        let spaces = MappingSpaces::with_own(&peer, &own);
+        assert_eq!(
+            resolve_declared_keyexpr(&sender_mapped(7, Some("/inner")), spaces).as_deref(),
+            Some("peers/space/temp/inner"),
+        );
+        assert_eq!(
+            resolve_declared_keyexpr(&receiver_mapped(7, None), spaces).as_deref(),
+            Some("peers/space/temp"),
+            "the ARM must not change the answer on this message",
+        );
+    }
+
+    /// Two spaces claiming the same id under DIFFERENT literals bind nothing.
+    ///
+    /// zenoh would take ours and pico the peer's; the wire carries no bit to
+    /// settle it. Today's code answers `peers/space/temp` here with total
+    /// confidence, and a wrong base mis-routes every later reference to the id
+    /// this declaration mints — so the refusal is the change's second half, not
+    /// a side effect of the first.
+    #[test]
+    fn a_declared_scope_both_spaces_claim_differently_binds_nothing() {
+        let (peer, own) = (peer_space(), own_space());
+        assert_ne!(peer.get(&7), own.get(&7), "the premise: they disagree");
+        let spaces = MappingSpaces::with_own(&peer, &own);
+        assert_eq!(
+            resolve_declared_keyexpr(&sender_mapped(7, None), spaces),
+            None,
+        );
+    }
+
+    /// Two spaces AGREEING is not the ambiguous case — the refusal is about the
+    /// answer differing, not about both tables being populated.
+    #[test]
+    fn a_declared_scope_both_spaces_agree_on_resolves() {
+        let peer = peer_space();
+        let mut own = own_space();
+        own.insert(7, "peers/space/temp".to_string());
+        let spaces = MappingSpaces::with_own(&peer, &own);
+        assert_eq!(
+            resolve_declared_keyexpr(&sender_mapped(7, Some("/x")), spaces).as_deref(),
+            Some("peers/space/temp/x"),
+        );
+    }
+
+    /// With only the peer's space the new rule IS the old one: nothing can
+    /// disagree, so a forwarder face — which absorbs the peer's declarations
+    /// and emits none of its own — is unchanged by this round.
+    #[test]
+    fn with_only_the_peers_space_the_declared_rule_is_the_one_space_lookup() {
+        let peer = peer_space();
+        let spaces = MappingSpaces::peer_only(&peer);
+        for arm in [sender_mapped(7, None), receiver_mapped(7, None)] {
+            assert_eq!(
+                resolve_declared_keyexpr(&arm, spaces).as_deref(),
+                Some("peers/space/temp"),
+            );
+        }
+        assert_eq!(
+            resolve_declared_keyexpr(&sender_mapped(9, None), spaces),
+            None
+        );
+        assert_eq!(
+            resolve_declared_keyexpr(&sender_mapped(0, Some("home/temp")), spaces).as_deref(),
+            Some("home/temp"),
+            "a literal scope still consults no table",
+        );
     }
 }

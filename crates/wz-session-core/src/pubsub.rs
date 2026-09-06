@@ -108,18 +108,29 @@ use crate::registry_error::RegisterError;
 
 // R311gb (Track 2) — `resolve_wireexpr` lives in the `alloc`-gated
 // `wireexpr_resolve` module and is reached only from the `alloc`
-// wire-dispatch paths (`dispatch_push` / `absorb_declare`), so the import
-// carries `alloc` in addition to the codec markers (else `codec-declare`
-// without `alloc` pulls an absent module).
+// wire-dispatch paths, so the import carries `alloc` in addition to the codec
+// markers (else `codec-declare` without `alloc` pulls an absent module).
+//
+// R2385 — the third consumer is now `respond_to_subscriber_interest`
+// (`declare-subscriber`), not `absorb_declare` (`codec-declare`): the declared
+// keyexpr moved to `resolve_declared_keyexpr` below, and leaving the wider
+// marker here would have been an import justified by a caller that no longer
+// exists — which a `codec-declare`-without-`declare-subscriber` build reports
+// as `unused_imports` under `-D warnings`.
 #[cfg(all(
     feature = "alloc",
     any(
         feature = "pubsub-put",
         feature = "pubsub-delete",
-        feature = "codec-declare"
+        feature = "declare-subscriber"
     )
 ))]
 use crate::wireexpr_resolve::resolve_wireexpr_in;
+// R2385 — the DECLARED keyexpr's own scope has a rule of its own (the D_KEXPR
+// header has no mapping bit), and `absorb_declare` is its only caller here, so
+// this import carries that arm's gate rather than the wider `any(..)` above.
+#[cfg(all(feature = "alloc", feature = "codec-declare"))]
+use crate::wireexpr_resolve::resolve_declared_keyexpr;
 // R311y739 — the two-space PAIR is `alloc`-gated only: the `own_mapping_space`
 // field and the `mapping_spaces()` accessor exist in every `alloc` profile,
 // including one with no wire-dispatch consumer compiled in, whereas the
@@ -1779,7 +1790,15 @@ impl<C: SampleSink> SubscriberRegistry<C> {
                 // BINDING `d.id -> literal` goes into the peer's space and only
                 // there: `d.id` is a number the PEER minted. Bound to a `let`
                 // before the insert so the immutable spaces borrow ends first.
-                let literal = resolve_wireexpr_in(&d.keyexpr.body, self.mapping_spaces());
+                //
+                // R2385 — through `resolve_declared_keyexpr`, not
+                // `resolve_wireexpr_in`. Both spaces were already reachable
+                // here, but the ARM decided which one was read, and on
+                // `D_KEXPR` the arm is a decoder constant rather than a wire
+                // bit: bit 6 of that header is Reserved, so wz pinned the
+                // `WireexprLocal` (peer's-space) arm and a zenoh peer's scope —
+                // which names an id WE declared — resolved to nothing.
+                let literal = resolve_declared_keyexpr(&d.keyexpr.body, self.mapping_spaces());
                 if let Some(literal) = literal {
                     self.peer_keyexpr_table.insert(d.id, literal);
                 }
@@ -3078,6 +3097,40 @@ mod tests {
         .unwrap()
     }
 
+    /// R2385 — a DeclKexpr whose declared keyexpr is itself SCOPED: `mapping_id`
+    /// is bound to `scope`'s literal plus `suffix`.
+    ///
+    /// The arm is `WireexprLocal` because that is what wz's decoder produces for
+    /// every inbound DeclKexpr — `out/wz-codecs/decl_kexpr.rs` passes the arm
+    /// selector as the literal `0x1u8`, since the D_KEXPR header has no bit 6 to
+    /// derive it from. So this is the wire shape, not a choice the fixture makes.
+    fn declare_kexpr_scoped(
+        mapping_id: u64,
+        scope: u64,
+        suffix: &str,
+    ) -> wz_codecs::declare::DeclareOwned {
+        wz_codecs::declare::Declare {
+            body: wz_codecs::declare::DeclareVariant::CodecZenohDeclKexpr(
+                wz_codecs::decl_kexpr::DeclKexpr {
+                    id: mapping_id,
+                    keyexpr: wz_codecs::wireexpr::Wireexpr {
+                        body: WireexprVariant::WireexprLocal(
+                            wz_codecs::wireexpr_local::WireexprLocal {
+                                id: scope,
+                                suffix_len: Some(suffix.len() as u64),
+                                suffix: Some(suffix),
+                            },
+                        ),
+                    },
+                    ..Default::default()
+                },
+            ),
+            ..Default::default()
+        }
+        .try_into_owned()
+        .unwrap()
+    }
+
     fn undeclare_kexpr(mapping_id: u64) -> wz_codecs::declare::DeclareOwned {
         wz_codecs::declare::Declare {
             body: wz_codecs::declare::DeclareVariant::CodecZenohUndeclKexpr(
@@ -3333,6 +3386,113 @@ mod tests {
             Some("ours/seven"),
             "an M=0 alias names OUR space; substituting the peer half here \
              would have answered `theirs/seven` with full confidence",
+        );
+    }
+
+    /// R2385 — a peer declaring a mapping ROOTED IN A PREFIX WE DECLARED now
+    /// binds, and the Push that follows fires the subscriber.
+    ///
+    /// This is zenoh's inbound reading of a D_KEXPR scope: `register_expr`
+    /// resolves it through `Mapping::DEFAULT`, which is `Receiver`, so the scope
+    /// names `FaceState::local_mappings` — the ids the RECEIVER declared. wz's
+    /// decoder pins the `WireexprLocal` arm on this message (bit 6 of the
+    /// D_KEXPR header is Reserved, so there is nothing to derive it from), which
+    /// sent the lookup to the peer's table; id 4 is not there, so the whole
+    /// declaration used to bind NOTHING and every later reference to id 9 went
+    /// unresolved.
+    ///
+    /// THE DISCRIMINATOR is the second subscriber. If the scope had been read
+    /// out of the peer's space the declaration would bind nothing and NEITHER
+    /// callback fires, so a silent regression here reads as zero rather than as
+    /// the wrong one — and the `theirs/temp` registration is what proves the
+    /// resolution went to our space rather than to whichever table was
+    /// non-empty.
+    #[test]
+    fn a_peer_mapping_scoped_on_a_prefix_we_declared_binds_and_fires() {
+        let mut registry = SubscriberRegistry::new();
+        registry.set_own_mapping_space(own_space(4, "ours/temp"));
+
+        let ours = Arc::new(AtomicUsize::new(0));
+        let theirs = Arc::new(AtomicUsize::new(0));
+        let (o, t) = (ours.clone(), theirs.clone());
+        registry.register("ours/temp/inner", move |_| {
+            o.fetch_add(1, Ordering::SeqCst);
+        });
+        registry.register("theirs/temp/inner", move |_| {
+            t.fetch_add(1, Ordering::SeqCst);
+        });
+
+        // The peer mints id 9 for "<the prefix you called 4>/inner".
+        registry.dispatch(
+            &NetworkMessage::Declare(Box::new(declare_kexpr_scoped(9, 4, "/inner"))),
+            Reliability::Reliable,
+        );
+        assert_eq!(
+            registry.resolve_inbound_mapping(9).as_deref(),
+            Some("ours/temp/inner"),
+            "the scope names an id WE declared; before R2385 this bound nothing",
+        );
+
+        registry.dispatch(
+            &NetworkMessage::Push(Box::new(push_with_mapping_id(9, None))),
+            Reliability::Reliable,
+        );
+        assert_eq!(ours.load(Ordering::SeqCst), 1);
+        assert_eq!(theirs.load(Ordering::SeqCst), 0);
+    }
+
+    /// ANTI-VACUITY for the test above, and the pico reading kept intact: a
+    /// scope naming an id THE PEER declared still resolves in the peer's space.
+    ///
+    /// pico decodes a D_KEXPR wireexpr with `remote_mapping = true` and stamps
+    /// the peer token, so `_z_register_resource_inner` takes
+    /// `peer->_remote_resources`. That is the arm wz always had; if R2385 had
+    /// merely swapped which table it reads, this test breaks.
+    #[test]
+    fn a_peer_mapping_scoped_on_a_prefix_the_peer_declared_still_binds() {
+        let mut registry = SubscriberRegistry::new();
+        registry.set_own_mapping_space(own_space(4, "ours/temp"));
+        registry.dispatch(
+            &NetworkMessage::Declare(Box::new(declare_kexpr_literal(5, "theirs/temp"))),
+            Reliability::Reliable,
+        );
+        registry.dispatch(
+            &NetworkMessage::Declare(Box::new(declare_kexpr_scoped(9, 5, "/inner"))),
+            Reliability::Reliable,
+        );
+        assert_eq!(
+            registry.resolve_inbound_mapping(9).as_deref(),
+            Some("theirs/temp/inner"),
+        );
+    }
+
+    /// A scope BOTH spaces claim, under different literals, binds nothing.
+    ///
+    /// The wire has no bit to say which was meant — zenoh would take ours, pico
+    /// the peer's — and a wrong base makes every later reference to id 9
+    /// confidently wrong. Before R2385 this bound `theirs/temp/inner` without
+    /// hesitating.
+    #[test]
+    fn a_scope_both_spaces_claim_differently_binds_nothing() {
+        let mut registry = SubscriberRegistry::new();
+        registry.set_own_mapping_space(own_space(4, "ours/temp"));
+        registry.dispatch(
+            &NetworkMessage::Declare(Box::new(declare_kexpr_literal(4, "theirs/temp"))),
+            Reliability::Reliable,
+        );
+        registry.dispatch(
+            &NetworkMessage::Declare(Box::new(declare_kexpr_scoped(9, 4, "/inner"))),
+            Reliability::Reliable,
+        );
+        assert_eq!(
+            registry.resolve_inbound_mapping(9),
+            None,
+            "two candidate bases and no bit to choose: bind nothing",
+        );
+        assert_eq!(
+            registry.resolve_inbound_mapping(4).as_deref(),
+            Some("theirs/temp"),
+            "the ambiguous scope must not disturb the binding it read",
         );
     }
 

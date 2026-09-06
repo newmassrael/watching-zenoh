@@ -613,6 +613,47 @@ impl KeyexprSpaces {
         self.resolve_parts(space, id, suffix)
     }
 
+    /// R2385 — resolve the keyexpr a `DeclKexpr` DECLARES, whose scope names a
+    /// space the wire does not say.
+    ///
+    /// [`Self::resolve`] reads the space off the variant tag, which is the `M`
+    /// bit for every message that HAS one. `D_KEXPR` has none: bit 6 of its
+    /// header is Reserved (`zenoh-protocol/src/network/declare.rs:230-234`), so
+    /// the tag on this one wireexpr is a decoder constant — pico's `remote`
+    /// against zenoh's `Receiver`, opposite answers, neither ever emitted. The
+    /// session plane's rule is
+    /// `wz_session_core::wireexpr_resolve::resolve_declared_keyexpr`; this is
+    /// the same rule over an observer's two flow-side tables, so a document
+    /// cannot report a keyexpr the session would have resolved differently.
+    ///
+    /// `Err` names the DECLARER's space and id when nothing resolved, matching
+    /// what [`Self::resolve`] reports for the same reference, and is also what
+    /// an ambiguous scope yields: two candidate bases and no bit to choose.
+    fn resolve_declared(
+        &self,
+        direction: Direction,
+        body: &WireexprOwnedVariant,
+    ) -> Result<String, (Direction, u64)> {
+        let (id, suffix) = match body {
+            WireexprOwnedVariant::WireexprLocal(a) => (a.id, a.suffix.as_deref()),
+            WireexprOwnedVariant::WireexprNonlocal(a) => (a.id, a.suffix.as_deref()),
+        };
+        if id == 0 {
+            return Ok(suffix.unwrap_or("").to_string());
+        }
+        let declarer = self.resolve_parts(direction, id, suffix);
+        let receiver = self.resolve_parts(direction.peer(), id, suffix);
+        match (declarer, receiver) {
+            (Ok(a), Ok(b)) if a == b => Ok(a),
+            // Both spaces claim the id under different literals; see the
+            // session-plane rule for why a coin flip is worse than a refusal.
+            (Ok(_), Ok(_)) => Err((direction, id)),
+            (Ok(a), Err(_)) => Ok(a),
+            (Err(_), Ok(b)) => Ok(b),
+            (Err(e), Err(_)) => Err(e),
+        }
+    }
+
     /// R311y701 (PF2) — the same resolution, from the PARTS a reader has when
     /// it holds a walked field tree rather than a decoded message.
     ///
@@ -694,17 +735,22 @@ impl KeyexprSpaces {
     ///
     /// A `DeclKexpr`'s own keyexpr may itself be aliased, so it is resolved
     /// against the tables as they stand before being bound — the composition
-    /// rule `wireexpr_resolve::absorb_keyexpr_into` uses, with the two-space
-    /// resolver in place of the one-space one. An alias whose base does not
-    /// resolve binds NOTHING: a half-known prefix would make every later
-    /// reference to the new id confidently wrong.
+    /// rule `wireexpr_resolve::absorb_keyexpr_into` uses, through
+    /// `Self::resolve_declared` (named in a code span, not linked: it is
+    /// private, and a public doc that links a private item is a C1bz finding)
+    /// rather than [`Self::resolve`], because the D_KEXPR header carries no
+    /// mapping bit for the arm to have come from
+    /// (R2385). An alias whose base does not resolve binds NOTHING: a half-known
+    /// prefix would make every later reference to the new id confidently wrong,
+    /// and so does an AMBIGUOUS one, which is why two disagreeing spaces bind
+    /// nothing either.
     pub fn absorb(&mut self, direction: Direction, declare: &wz_codecs::declare::DeclareOwned) {
         use wz_codecs::declare::DeclareOwnedVariant;
         match &declare.body {
             DeclareOwnedVariant::CodecZenohDeclKexpr(d) => {
                 // The id is minted in the SENDER's space regardless of the
                 // mapping bit on the keyexpr it names.
-                if let Ok(literal) = self.resolve(direction, &d.keyexpr.body) {
+                if let Ok(literal) = self.resolve_declared(direction, &d.keyexpr.body) {
                     self.tables[dir_index(direction)].insert(d.id, literal);
                 }
             }
@@ -2062,6 +2108,93 @@ pub(crate) mod tests {
             ..Default::default()
         }
         .encode_to_vec()
+    }
+
+    /// R2385 — a `DeclKexpr` binding `id` to `scope` + `suffix`, as a decoded
+    /// message rather than as bytes, so a `KeyexprSpaces` can absorb it
+    /// directly.
+    ///
+    /// The arm is `WireexprLocal` because that is what wz's decoder yields for
+    /// EVERY inbound DeclKexpr — the D_KEXPR header has no bit 6 to derive it
+    /// from, so `out/wz-codecs/decl_kexpr.rs` passes the selector as a literal.
+    /// The fixture is therefore the wire shape, not a choice.
+    fn declared(
+        id: u64,
+        scope: u64,
+        suffix: Option<&'static str>,
+    ) -> wz_codecs::declare::DeclareOwned {
+        wz_codecs::declare::Declare {
+            body: wz_codecs::declare::DeclareVariant::CodecZenohDeclKexpr(
+                wz_codecs::decl_kexpr::DeclKexpr {
+                    header: wz_session_core::wire_const::D_MID_KEXPR
+                        | wz_session_core::wire_const::FLAG_D_N,
+                    id,
+                    keyexpr: sender_space(scope, suffix),
+                    extensions: None,
+                },
+            ),
+            ..Default::default()
+        }
+        .try_into_owned()
+        .expect("fixture fits the owned form")
+    }
+
+    /// R2385 — an observer resolves a scoped declaration out of EITHER flow
+    /// side, because the D_KEXPR header carries no bit saying which one.
+    ///
+    /// B declares id 4; A then mints id 9 for "<4>/inner". zenoh reads that
+    /// scope in the RECEIVER's space (its decoded `mapping` stays
+    /// `Mapping::DEFAULT` = `Receiver`), which for a record travelling A→B is
+    /// B's — and before this round the arm sent the lookup to A's own table,
+    /// where 4 does not exist, so the observer bound nothing and reported id 9
+    /// unresolved for the rest of the capture.
+    #[test]
+    fn a_declared_scope_resolves_out_of_the_side_that_has_it() {
+        let mut spaces = KeyexprSpaces::new();
+        spaces.absorb(Direction::B, &declared(4, 0, Some("ours/temp")));
+        spaces.absorb(Direction::A, &declared(9, 4, Some("/inner")));
+        assert_eq!(
+            spaces.resolve(
+                Direction::A,
+                &sender_space(9, None).try_into_owned().unwrap().body
+            ),
+            Ok("ours/temp/inner".to_string()),
+        );
+    }
+
+    /// ANTI-VACUITY: the pico reading — a scope naming an id the DECLARER
+    /// itself bound — is unchanged. A swap of the two tables breaks this.
+    #[test]
+    fn a_declared_scope_the_declarer_itself_bound_still_resolves() {
+        let mut spaces = KeyexprSpaces::new();
+        spaces.absorb(Direction::A, &declared(5, 0, Some("theirs/temp")));
+        spaces.absorb(Direction::A, &declared(9, 5, Some("/inner")));
+        assert_eq!(
+            spaces.resolve(
+                Direction::A,
+                &sender_space(9, None).try_into_owned().unwrap().body
+            ),
+            Ok("theirs/temp/inner".to_string()),
+        );
+    }
+
+    /// Both sides claiming the scope under different literals binds NOTHING —
+    /// the observer must not report a keyexpr the wire cannot pin, and reporting
+    /// one is exactly what an analyzer's whole output is made of.
+    #[test]
+    fn a_declared_scope_both_sides_claim_differently_binds_nothing() {
+        let mut spaces = KeyexprSpaces::new();
+        spaces.absorb(Direction::A, &declared(4, 0, Some("theirs/temp")));
+        spaces.absorb(Direction::B, &declared(4, 0, Some("ours/temp")));
+        spaces.absorb(Direction::A, &declared(9, 4, Some("/inner")));
+        assert_eq!(
+            spaces.resolve(
+                Direction::A,
+                &sender_space(9, None).try_into_owned().unwrap().body
+            ),
+            Err((Direction::A, 9)),
+            "two candidate bases and no bit to choose: bind nothing",
+        );
     }
 
     /// `UndeclKexpr`: drop `id` from the SENDER's space.
