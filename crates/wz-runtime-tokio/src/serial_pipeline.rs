@@ -67,6 +67,7 @@ use crate::writer_queue::{OutboundQueue, WriterHandle};
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
 use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::link::{InterceptorLink, LinkEndpoints, LinkSubject};
+use wz_session_core::link::{LinkDropCause, LinkSendOutcome};
 use wz_session_core::locator::{SerialEndpoint, SerialTarget};
 use wz_session_core::serial_link::{
     encode_frame, DecodedFrame, HandshakeStep, SerialFrameReader, SerialHandshake, SerialRole,
@@ -399,7 +400,7 @@ impl BoxedLinkDriver for SerialWriteDriver {
         self.endpoints.as_ref()
     }
 
-    fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) {
+    fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
         // A single serial frame carries at most SERIAL_MTU payload bytes
         // (encode_frame rejects past it). The transport TX path now caps
         // its fragment budget to THIS link's MTU — [`Self::link_mtu`]
@@ -415,11 +416,13 @@ impl BoxedLinkDriver for SerialWriteDriver {
                 "wz-runtime-tokio: outbound serial frame {} bytes > {SERIAL_MTU}; dropping",
                 bytes.len()
             );
-            return;
+            return LinkSendOutcome::Dropped(LinkDropCause::Oversize);
         }
         if let Err(e) = self.tx.send(bytes.to_vec()) {
             log::warn!("wz-runtime-tokio: outbound serial channel closed; dropping frame ({e})");
+            return LinkSendOutcome::Dropped(LinkDropCause::WriterGone);
         }
+        LinkSendOutcome::Sent
     }
 
     fn open_blocking(&self) {
@@ -563,7 +566,10 @@ mod tests {
         let (mut b_in, _b_out, _b_writer) = wire_serial_stream(b, &pty_endpoint());
 
         let payload = b"hello-serial-frame";
-        a_out.send_blocking(payload, Reliability::Reliable);
+        assert_eq!(
+            a_out.send_blocking(payload, Reliability::Reliable),
+            LinkSendOutcome::Sent
+        );
 
         let event = tokio::time::timeout(Duration::from_secs(5), b_in.poll_event())
             .await

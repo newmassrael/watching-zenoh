@@ -65,6 +65,7 @@ use crate::writer_queue::{OutboundQueue, WriterHandle};
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
 use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::link::{InterceptorLink, LinkEndpoints, LinkSubject};
+use wz_session_core::link::{LinkDropCause, LinkSendOutcome};
 
 /// Conservative per-datagram MTU floor used when the connection has not yet
 /// reported a negotiated `max_datagram_size` (the QUIC initial datagram budget
@@ -167,7 +168,7 @@ impl BoxedLinkDriver for QuicDatagramWriteDriver {
         self.endpoints.as_ref()
     }
 
-    fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) {
+    fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
         // QUIC datagrams are best-effort by definition; the Reliability hint is
         // the session FSM's concern. The transport TX path caps its fragment
         // budget to THIS link's MTU ([`Self::link_mtu`] feeds
@@ -182,11 +183,13 @@ impl BoxedLinkDriver for QuicDatagramWriteDriver {
                 bytes.len(),
                 self.mtu
             );
-            return;
+            return LinkSendOutcome::Dropped(LinkDropCause::Oversize);
         }
         if let Err(e) = self.tx.send(bytes.to_vec()) {
             log::warn!("wz-runtime-tokio: outbound channel closed; dropping quic datagram ({e})");
+            return LinkSendOutcome::Dropped(LinkDropCause::WriterGone);
         }
+        LinkSendOutcome::Sent
     }
 
     fn open_blocking(&self) {
@@ -416,11 +419,19 @@ mod tests {
             tx,
             mtu: QUIC_DATAGRAM_LINK_MTU,
         };
-        driver.send_blocking(
-            &vec![0u8; QUIC_DATAGRAM_LINK_MTU + 1],
-            Reliability::BestEffort,
+        // R2371 — the drop is stated by the return value as well as inferred
+        // from the channel; see the stream-link twin for why both are kept.
+        assert_eq!(
+            driver.send_blocking(
+                &vec![0u8; QUIC_DATAGRAM_LINK_MTU + 1],
+                Reliability::BestEffort,
+            ),
+            LinkSendOutcome::Dropped(LinkDropCause::Oversize)
         );
-        driver.send_blocking(b"ok", Reliability::BestEffort);
+        assert_eq!(
+            driver.send_blocking(b"ok", Reliability::BestEffort),
+            LinkSendOutcome::Sent
+        );
         // Only the in-range datagram reached the channel.
         assert_eq!(rx.recv().await.as_deref(), Some(b"ok".as_slice()));
         assert_eq!(driver.link_mtu(), QUIC_DATAGRAM_LINK_MTU);

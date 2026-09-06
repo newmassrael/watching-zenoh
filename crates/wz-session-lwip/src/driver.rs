@@ -9,7 +9,7 @@ use core::cell::{Cell, RefCell};
 
 use wz_link_lwip::rx_sockets::{SessionRxSocket, SESSION_RX_SLOT_SIZE};
 use wz_link_lwip::Datagram;
-use wz_session_core::link::BoxedLinkDriver;
+use wz_session_core::link::{BoxedLinkDriver, LinkDropCause, LinkSendOutcome};
 use wz_session_core::reliability::Reliability;
 
 /// The session socket shared by the drive loop (inbound `try_recv`) and
@@ -79,15 +79,23 @@ impl LwipUdpDriver {
 }
 
 impl BoxedLinkDriver for LwipUdpDriver {
-    fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) {
+    fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
         // UDP is unreliable; the `reliability` hint is honoured by the
         // zenoh session layer's SN-window retransmit, not at the datagram
-        // seam. Best-effort send per the `()` trait contract: a transient
-        // pbuf exhaustion drops the datagram (the reliable channel recovers
-        // it), mirroring the AP adapter which enqueues without a
-        // synchronous delivery guarantee.
+        // seam. Best-effort send: a transient pbuf exhaustion drops the
+        // datagram (the reliable channel recovers it), mirroring the AP
+        // adapter which enqueues without a synchronous delivery guarantee.
+        //
+        // R2371 — that drop is now REPORTED rather than swallowed. lwIP's
+        // `send_to` failing is pbuf exhaustion or a dead netif, both of which
+        // mean the writer cannot take the bytes, so the cause is `WriterGone`;
+        // the MCU profile has no `transport-stats` build, but the seam must
+        // still tell the truth for the lanes that assert on it.
         let (addr, port) = self.peer.get();
-        let _ = self.socket.borrow_mut().send_to(addr, port, bytes);
+        match self.socket.borrow_mut().send_to(addr, port, bytes) {
+            Ok(_) => LinkSendOutcome::Sent,
+            Err(_) => LinkSendOutcome::Dropped(LinkDropCause::WriterGone),
+        }
     }
 
     fn open_blocking(&self) {

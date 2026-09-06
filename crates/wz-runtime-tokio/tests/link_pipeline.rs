@@ -17,7 +17,7 @@
 
 use tokio::net::TcpListener;
 use wz_runtime_tokio::link_pipeline::{dial_tcp, wire_tcp_stream};
-use wz_runtime_tokio::session_glue::BoxedLinkDriver;
+use wz_runtime_tokio::session_glue::{BoxedLinkDriver, LinkSendOutcome};
 use wz_runtime_tokio::{LinkDriver, LinkEvent, Reliability, TcpDriver, TxFrame};
 
 #[tokio::test]
@@ -39,7 +39,14 @@ async fn pipeline_round_trips_both_directions_through_codec_envelope() {
     // Outbound: send_blocking enqueues; the writer task frames it via the
     // codec; the peer reads the verbatim payload back.
     let out_payload = b"r311et-pipeline-out";
-    outbound.send_blocking(out_payload, Reliability::Reliable);
+    // R2371 — the outcome is asserted, not discarded: the whole assertion below
+    // depends on this write reaching the writer, and a refusal used to surface
+    // only as the peer's `poll_event` returning something else.
+    assert_eq!(
+        outbound.send_blocking(out_payload, Reliability::Reliable),
+        LinkSendOutcome::Sent,
+        "the stream driver must accept a payload well inside its frame budget"
+    );
     match peer.poll_event().await {
         LinkEvent::Rx(rx) => assert_eq!(rx.bytes, out_payload),
         other => panic!("expected outbound Rx, got {other:?}"),

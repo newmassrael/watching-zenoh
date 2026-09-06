@@ -556,6 +556,231 @@ mod chain_saturation_tests {
     }
 }
 
+/// R2371 (`transport-stats`) — classify ONE network message for the counters:
+/// which medium carried it, and which of upstream's four payload cells (if any)
+/// it charges.
+///
+/// # Why a free function over the typed message, and not a `match` at the seams
+///
+/// The two counting seams — the TX chokepoint and the RX frame-payload walk —
+/// see the same seven-MID enum, so one classifier serves both and the two
+/// directions cannot drift into disagreeing about what a `Push(Del)` is. The
+/// population is the ENUM: a new [`NetworkMessage`] variant makes the `match`
+/// below non-exhaustive and the crate stops compiling, which is what keeps a new
+/// message kind from silently counting as nothing.
+///
+/// # The four cells, and what falls outside them
+///
+/// Upstream's payload labels cover exactly `put` / `del` / `query` / `reply`
+/// (`commons/zenoh-stats/src/stats.rs` @ `MessageLabel::Put`, whose `Reply` and
+/// `ReplyErr` arms both fold onto `reply`). A `Push` or a `Request` carries a
+/// Put or a Del; a `Request` may instead carry a Query; a `Response` carries a
+/// Reply or an Err, and both are `reply`. Everything else — `Declare`,
+/// `Interest`, `Oam`, `ResponseFinal`, `Unknown` — is control plane: it counts
+/// toward `n_msgs` and toward no payload cell, which is upstream's shape and not
+/// an omission.
+///
+/// # `pl_bytes` is the PAYLOAD, not the envelope
+///
+/// The wire seam already counts encoded bytes as `bytes`. This counts what
+/// upstream's `pl_bytes` counts — the body's own payload — so a Del (a
+/// tombstone, no payload field at all) and a Query with no parameters both
+/// charge zero bytes against a non-zero message count, exactly as upstream's
+/// histogram does.
+///
+/// # `resolve_alias` and the SPACE axis
+///
+/// The admin/user split is a property of the LITERAL key expression, and a
+/// Wireexpr on the wire may be an ALIAS (`id != 0`) into the declaring side's id
+/// space. `resolve_alias` is how the caller lends whichever space it owns: the
+/// TX seam passes the session's own outbound mapping table, which is exactly the
+/// space its own `id`s name, so an outbound aliased admin expression classifies
+/// correctly.
+///
+/// An alias the resolver cannot resolve falls to [`StatSpace::User`] — see
+/// [`StatSpace::of_keyexpr`]. That is a DECIDED default rather than an
+/// oversight, and `an_unresolvable_alias_counts_as_user` pins it: the peer's id
+/// space lives on the face (the forwarder's per-face table), not on the session,
+/// so the inbound seam has no table to consult, and counting an unknown
+/// expression as admin would move ADMIN traffic counts on nothing more than an
+/// alias being used.
+#[cfg(feature = "transport-stats")]
+pub fn stats_class<F>(msg: &NetworkMessage, resolve_alias: F) -> crate::stats::NetworkStatsClass
+where
+    F: Fn(u64) -> Option<alloc::string::String>,
+{
+    use crate::stats::NetworkStatsClass;
+    match msg {
+        #[cfg(feature = "codec-push")]
+        NetworkMessage::Push(p) => push_stats_class(p, resolve_alias),
+        #[cfg(feature = "codec-request")]
+        NetworkMessage::Request(r) => request_stats_class(r, resolve_alias),
+        #[cfg(feature = "codec-response")]
+        NetworkMessage::Response(r) => response_stats_class(r, resolve_alias),
+        // Control plane: `n_msgs` and nothing else. Listed rather than caught by
+        // a wildcard so a NEW network MID has to be classified here on purpose.
+        #[cfg(feature = "codec-response-final")]
+        NetworkMessage::ResponseFinal(_) => NetworkStatsClass::control(),
+        #[cfg(feature = "codec-declare")]
+        NetworkMessage::Declare(_) => NetworkStatsClass::control(),
+        NetworkMessage::Oam(_) => NetworkStatsClass::control(),
+        NetworkMessage::Interest(_) => NetworkStatsClass::control(),
+        NetworkMessage::Unknown { .. } => NetworkStatsClass::control(),
+    }
+}
+
+/// The SPACE of a Wireexpr, resolving an alias through the caller's id space.
+/// See [`stats_class`]'s note on `resolve_alias`.
+#[cfg(all(
+    feature = "transport-stats",
+    any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response"
+    )
+))]
+fn stats_space_of<F>(
+    keyexpr: &wz_codecs::wireexpr::WireexprOwned,
+    resolve_alias: &F,
+) -> crate::stats::StatSpace
+where
+    F: Fn(u64) -> Option<alloc::string::String>,
+{
+    use wz_codecs::wireexpr::WireexprOwnedVariant as V;
+    let (id, suffix) = match &keyexpr.body {
+        V::WireexprNonlocal(b) => (b.id, b.suffix.as_deref()),
+        V::WireexprLocal(b) => (b.id, b.suffix.as_deref()),
+    };
+    if id == 0 {
+        // Fully literal: the suffix IS the whole expression.
+        return crate::stats::StatSpace::of_keyexpr(suffix.unwrap_or_default());
+    }
+    match resolve_alias(id) {
+        Some(prefix) => crate::stats::StatSpace::of_keyexpr(&prefix),
+        None => crate::stats::StatSpace::User,
+    }
+}
+
+/// Fold a classified body into a class, selecting the `shm` medium when the
+/// body's extension chain carries the SHM descriptor marker — the wz twin of
+/// upstream's `labels.shm`.
+#[cfg(all(
+    feature = "transport-stats",
+    any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response"
+    )
+))]
+fn stats_data_class(
+    message: crate::stats::StatMessage,
+    space: crate::stats::StatSpace,
+    pl_bytes: usize,
+    _extensions: Option<&[wz_codecs::ext_entry::ExtEntryOwned]>,
+) -> crate::stats::NetworkStatsClass {
+    let class = crate::stats::NetworkStatsClass::net(message, space, pl_bytes);
+    #[cfg(feature = "transport-shm")]
+    if _extensions.is_some_and(crate::extshm::body_has_shm_marker) {
+        return class.on_shm();
+    }
+    class
+}
+
+/// [`stats_class`] for a `Push` body — the pub-sub data plane. Shared by the TX
+/// chokepoint (which holds the typed body, not the enum) and the RX walk.
+#[cfg(all(feature = "transport-stats", feature = "codec-push"))]
+pub fn push_stats_class<F>(
+    push: &wz_codecs::push::PushOwned,
+    resolve_alias: F,
+) -> crate::stats::NetworkStatsClass
+where
+    F: Fn(u64) -> Option<alloc::string::String>,
+{
+    use crate::stats::StatMessage;
+    use wz_codecs::push::PushOwnedVariant as V;
+    let space = stats_space_of(&push.keyexpr, &resolve_alias);
+    match &push.body {
+        V::CodecZenohMsgPut(b) | V::Default { body: b, .. } => stats_data_class(
+            StatMessage::Put,
+            space,
+            b.payload_len as usize,
+            b.extensions.as_deref(),
+        ),
+        V::CodecZenohMsgDel(b) => {
+            stats_data_class(StatMessage::Del, space, 0, b.extensions.as_deref())
+        }
+    }
+}
+
+/// [`stats_class`] for a `Request` body — a Put, a Del, or a Query.
+#[cfg(all(feature = "transport-stats", feature = "codec-request"))]
+pub fn request_stats_class<F>(
+    request: &wz_codecs::request::RequestOwned,
+    resolve_alias: F,
+) -> crate::stats::NetworkStatsClass
+where
+    F: Fn(u64) -> Option<alloc::string::String>,
+{
+    use crate::stats::StatMessage;
+    use wz_codecs::request::RequestOwnedVariant as V;
+    let space = stats_space_of(&request.keyexpr, &resolve_alias);
+    match &request.body {
+        V::CodecZenohMsgPut(b) => stats_data_class(
+            StatMessage::Put,
+            space,
+            b.payload_len as usize,
+            b.extensions.as_deref(),
+        ),
+        V::CodecZenohMsgDel(b) => {
+            stats_data_class(StatMessage::Del, space, 0, b.extensions.as_deref())
+        }
+        V::CodecZenohQuery(b) | V::Default { body: b, .. } => stats_data_class(
+            StatMessage::Query,
+            space,
+            b.parameters_len.unwrap_or(0) as usize,
+            b.extensions.as_deref(),
+        ),
+    }
+}
+
+/// [`stats_class`] for a `Response` body. Reply and Err BOTH fold onto
+/// upstream's `reply` cell, which is upstream's own `MessageLabel::Reply |
+/// MessageLabel::ReplyErr` arm rather than a wz simplification.
+#[cfg(all(feature = "transport-stats", feature = "codec-response"))]
+pub fn response_stats_class<F>(
+    response: &wz_codecs::response::ResponseOwned,
+    resolve_alias: F,
+) -> crate::stats::NetworkStatsClass
+where
+    F: Fn(u64) -> Option<alloc::string::String>,
+{
+    use crate::stats::StatMessage;
+    use wz_codecs::response::ResponseOwnedVariant as V;
+    let space = stats_space_of(&response.keyexpr, &resolve_alias);
+    match &response.body {
+        V::CodecZenohReply(b) | V::Default { body: b, .. } => {
+            use wz_codecs::reply::ReplyOwnedVariant as RV;
+            match &b.body {
+                RV::CodecZenohMsgPut(p) | RV::Default { body: p, .. } => stats_data_class(
+                    StatMessage::Reply,
+                    space,
+                    p.payload_len as usize,
+                    p.extensions.as_deref(),
+                ),
+                RV::CodecZenohMsgDel(d) => {
+                    stats_data_class(StatMessage::Reply, space, 0, d.extensions.as_deref())
+                }
+            }
+        }
+        V::CodecZenohErr(b) => stats_data_class(
+            StatMessage::Reply,
+            space,
+            b.payload_len as usize,
+            b.extensions.as_deref(),
+        ),
+    }
+}
+
 // ── R311y578 — G4: the batch parse is best-effort for an OBSERVER while
 //    staying strict for a PARTICIPANT. The fixtures are OAM records
 //    (`N_MID_OAM = 0x1F`), whose codec is ungated in wz-codecs, so the

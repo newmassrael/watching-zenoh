@@ -32,7 +32,7 @@
 
 use alloc::string::String;
 
-use crate::link::{BoxedLinkDriver, SessionRuntime};
+use crate::link::{BoxedLinkDriver, LinkSendOutcome, SessionRuntime};
 use crate::locator::{AnyLocator, ParsedLocator, Proto};
 use crate::reliability::Reliability;
 use crate::send_declare_error::SendDeclareError;
@@ -368,10 +368,14 @@ impl<R: SessionRuntime> BoxedLinkDriver for SwappableLink<R>
 where
     R::LinkSink: Send + 'static,
 {
-    fn send_blocking(&self, bytes: &[u8], reliability: Reliability) {
+    fn send_blocking(&self, bytes: &[u8], reliability: Reliability) -> LinkSendOutcome {
+        // R2371 — the swap seam FORWARDS the inner driver's outcome. A
+        // reconnecting session's drops are the live link's drops; swallowing
+        // them here would make `n_dropped` read zero for exactly the sessions
+        // most likely to be dropping.
         R::with_mutex_mut(&self.inner, |sink| {
-            R::link_driver(sink).send_blocking(bytes, reliability);
-        });
+            R::link_driver(sink).send_blocking(bytes, reliability)
+        })
     }
 
     fn open_blocking(&self) {
@@ -432,8 +436,9 @@ impl<R: SessionRuntime> LocalSwappableLink<R> {
 }
 
 impl<R: SessionRuntime> BoxedLinkDriver for LocalSwappableLink<R> {
-    fn send_blocking(&self, bytes: &[u8], reliability: Reliability) {
-        R::link_driver(&self.inner.borrow()).send_blocking(bytes, reliability);
+    fn send_blocking(&self, bytes: &[u8], reliability: Reliability) -> LinkSendOutcome {
+        // R2371 — forwards, for the same reason as the `SwappableLink` twin.
+        R::link_driver(&self.inner.borrow()).send_blocking(bytes, reliability)
     }
 
     fn open_blocking(&self) {

@@ -150,7 +150,9 @@ use crate::accept_loop::{
 use crate::future_interest::{FutureQablStore, FutureSubStore};
 #[cfg(feature = "routing-interceptor-hotreload")]
 use crate::interceptor::InterceptorKeyexprCache;
-use crate::interceptor::{InterceptorChain, InterceptorContext};
+use crate::interceptor::{
+    InterceptorChain, InterceptorContext, InterceptorKind, InterceptorVerdict,
+};
 #[cfg(feature = "routing-interest-pending-gc")]
 use crate::interest_broker::{CurrentInterest, PendingCurrentInterests};
 use crate::linkstate_interest::LinkstatepeerInterest;
@@ -1172,15 +1174,15 @@ impl LinkstateForwarder {
     /// that face's state (subject zid + alias table) and runs the chain. The
     /// single seam consulted at the top of [`forward`](Self::forward), ahead of
     /// the kind-dispatch — never an inline `if deny` per message arm.
-    fn admit_inbound(&self, id: FaceId, msg: &NetworkMessage) -> bool {
+    fn admit_inbound(&self, id: FaceId, msg: &NetworkMessage) -> InterceptorVerdict {
         let chain = self.ingress_interceptors.borrow();
         if chain.is_empty() {
-            return true;
+            return InterceptorVerdict::Admit;
         }
         let faces = self.faces.borrow();
         // An unknown face has no relay path anyway; admit (nothing to gate).
         let Some(face) = faces.get(&id) else {
-            return true;
+            return InterceptorVerdict::Admit;
         };
         let ctx = FaceContext { face };
         // R311y508 (`routing-interceptor-hotreload`) — serve the verdict from
@@ -1217,7 +1219,12 @@ impl LinkstateForwarder {
     /// egress cache keys on it. The id is not re-derived here — every call site
     /// already had it in hand (it is the same `*id` the fan-out builder is
     /// called with), so this is a parameter, not a lookup.
-    fn admit_outbound(&self, id: FaceId, state: &FaceState, msg: &NetworkMessage) -> bool {
+    fn admit_outbound(
+        &self,
+        id: FaceId,
+        state: &FaceState,
+        msg: &NetworkMessage,
+    ) -> InterceptorVerdict {
         // `id` is the EGRESS cache key and has no other use, so with the cache
         // feature off it is genuinely unused. See the router twin for why it is
         // discarded here rather than renamed `_id`.
@@ -1225,7 +1232,7 @@ impl LinkstateForwarder {
         let _ = id;
         let chain = self.egress_interceptors.borrow();
         if chain.is_empty() {
-            return true;
+            return InterceptorVerdict::Admit;
         }
         let ctx = FaceContext { face: state };
         // R2348 (`routing-interceptor-hotreload`) — the EGRESS half of the
@@ -1261,6 +1268,65 @@ impl LinkstateForwarder {
         }
         chain.admit(&ctx, msg)
     }
+}
+
+/// R2371 (`transport-stats`) — charge ONE interceptor drop to the face's own
+/// session counters, on the counter upstream puts that reason on.
+///
+/// # The mapping is upstream's, and it is not onto
+///
+/// `commons/zenoh-stats/src/stats.rs` @ `ReasonLabel::Downsampling` is the whole
+/// set of interceptor reasons upstream counts: downsampling (messages) and
+/// low-pass (messages AND bytes). An ACL denial has no counter there, so
+/// [`InterceptorKind::AccessControl`] charges nothing here. That asymmetry is
+/// deliberate — inventing a `wz_acl_dropped` counter would export a number no
+/// zenoh dashboard reads, and folding an ACL denial into the downsampler's
+/// counter would make a rate-limit graph move on a policy change. The forwarder's
+/// own `interceptor_dropped` witness still counts every drop including this one,
+/// which is where an ACL denial remains visible.
+///
+/// # Why the message is re-classified here
+///
+/// The byte figure `low_pass_dropped_bytes` wants is the PAYLOAD size, which is
+/// exactly what [`wz_session_core::network_message::stats_class`] already
+/// derives for the network counters. Deriving it once, in one place, is what
+/// keeps a dropped Put's bytes measured the same way as a delivered Put's.
+#[cfg(feature = "transport-stats")]
+pub(crate) fn charge_interceptor_drop(
+    actions: &SessionLinkActions,
+    msg: &NetworkMessage,
+    kind: InterceptorKind,
+    flow: InterceptorFlow,
+) {
+    use wz_session_core::stats::StatDrop;
+    let reason = match kind {
+        InterceptorKind::Downsampling => StatDrop::Downsampling,
+        InterceptorKind::LowPass => StatDrop::LowPass,
+        // No upstream counter; see this function's docs.
+        InterceptorKind::AccessControl => return,
+    };
+    // The peer's alias space is not reachable from here either (the face table
+    // holds it, but a dropped message's SPACE moves no counter this function
+    // charges — only the kind and the byte count do), so the resolver is empty
+    // for the same stated reason the RX walk's is.
+    let class = wz_session_core::network_message::stats_class(msg, |_id| None);
+    let pl_bytes = class.payload.map_or(0, |p| p.pl_bytes);
+    match flow {
+        InterceptorFlow::Ingress => actions.stats.inc_rx_drop(reason, 1, pl_bytes),
+        InterceptorFlow::Egress => actions.stats.inc_tx_drop(reason, 1, pl_bytes),
+    }
+}
+
+/// The `transport-stats`-off twin: an interceptor drop still moves the
+/// forwarder's own witness, and nothing else. Kept as a real function rather
+/// than a `cfg` at each of the two call sites so the two flows cannot drift.
+#[cfg(not(feature = "transport-stats"))]
+pub(crate) fn charge_interceptor_drop(
+    _actions: &SessionLinkActions,
+    _msg: &NetworkMessage,
+    _kind: InterceptorKind,
+    _flow: InterceptorFlow,
+) {
 }
 
 /// Resolve the GOVERNED keyexpr a §5.16 ACL enforcer gates for `msg`, alias-aware
@@ -1731,9 +1797,14 @@ impl LinkstateForwarder {
                 // outbound is dropped for THIS face (not sent, not counted) and
                 // witnessed — the wz `Mux`-side enforcement that also covers this
                 // node's own originations (a `publish` reaches only `fan_out`).
-                if !self.admit_outbound(*id, state, &msg) {
+                let verdict = self.admit_outbound(*id, state, &msg);
+                if let Some(kind) = verdict.dropped_by() {
                     self.interceptor_dropped
                         .set(self.interceptor_dropped.get() + 1);
+                    // R2371 — attribute the drop to upstream's own per-reason
+                    // counter on the DESTINATION face's session, which is the
+                    // transport whose egress refused it.
+                    charge_interceptor_drop(&state.actions, &msg, kind, InterceptorFlow::Egress);
                     continue;
                 }
                 // a per-face send failure (link gone mid-fan-out) is skipped,
@@ -6215,9 +6286,20 @@ impl FaceForwarder for LinkstateForwarder {
             // denied message is dropped — not counted as received data, not
             // forwarded — and witnessed by `interceptor_dropped`. The empty-chain fast
             // path (no ACL configured) makes this a single predicate read.
-            if !self.admit_inbound(id, message) {
+            let verdict = self.admit_inbound(id, message);
+            if let Some(kind) = verdict.dropped_by() {
                 self.interceptor_dropped
                     .set(self.interceptor_dropped.get() + 1);
+                // R2371 — attribute the drop to upstream's own per-reason
+                // counter on the ARRIVING face's session. The face may be gone
+                // (an unknown face admits above, so reaching here means it was
+                // there), so the lookup is still fallible and a miss charges
+                // nothing rather than guessing a session.
+                if let Some(face) = self.faces.borrow().get(&id) {
+                    charge_interceptor_drop(&face.actions, message, kind, InterceptorFlow::Ingress);
+                }
+            }
+            if !verdict.is_admitted() {
                 continue;
             }
             match message {
@@ -11564,6 +11646,28 @@ mod tests {
             2,
             "two drops: demo/secret by the ACL, demo/data by the downsampler"
         );
+
+        // R2371 — the two drops are ATTRIBUTED, and this is the case that shows
+        // why the collapsed witness above was not enough: it reads `2` for a
+        // pair of drops made by DIFFERENT interceptors. Upstream keeps a counter
+        // per reason, and its set has one for downsampling and none for an ACL
+        // denial — so exactly ONE of these two drops reaches a stats counter.
+        #[cfg(feature = "transport-stats")]
+        {
+            let s = face_a.stats_report();
+            assert_eq!(
+                s.rx.downsampler_dropped_msgs, 1,
+                "the downsampler's drop is charged to the downsampler's counter"
+            );
+            assert_eq!(
+                s.rx.low_pass_dropped_msgs, 0,
+                "and does not bleed into the low-pass counter"
+            );
+            assert_eq!(
+                s.rx.n_dropped, 0,
+                "an interceptor drop is not a transport drop"
+            );
+        }
     }
 
     #[cfg(feature = "access-quota")]
@@ -11616,6 +11720,27 @@ mod tests {
             1,
             "the low-pass drop is witnessed"
         );
+
+        // R2371 — the attributed half. Low-pass is the ONE reason that charges
+        // bytes as well as messages (upstream's `low_pass_dropped_bytes`), and
+        // the byte figure is the PAYLOAD the cap refused, derived the same way a
+        // delivered Put's `pl_bytes` is.
+        #[cfg(feature = "transport-stats")]
+        {
+            let s = face_a.stats_report();
+            assert_eq!(
+                s.rx.low_pass_dropped_msgs, 1,
+                "the low-pass drop is charged to the low-pass counter"
+            );
+            assert_eq!(
+                s.rx.low_pass_dropped_bytes, 32,
+                "and carries the refused payload's bytes"
+            );
+            assert_eq!(
+                s.rx.downsampler_dropped_msgs, 0,
+                "and does not bleed into the downsampler's counter"
+            );
+        }
 
         // A small Put (under the limit) still relays.
         let small = build_push_literal("demo/data", b"hi").expect("build"); // 2 bytes

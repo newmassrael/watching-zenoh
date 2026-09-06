@@ -782,7 +782,7 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     use crate::{LinkDriver, LinkEvent, Reliability};
-    use wz_session_core::link::BoxedLinkDriver;
+    use wz_session_core::link::{BoxedLinkDriver, LinkSendOutcome};
 
     /// A unique FIFO base path under the system temp dir, unique across parallel
     /// tests via the pid + a per-process counter (no external tempfile dep).
@@ -872,7 +872,10 @@ mod tests {
         ] {
             let (_d_in, d_out, _d_writer) = wire_unixpipe_stream(dialer);
             let (mut a_in, _a_out, _a_writer) = wire_unixpipe_stream(acceptor);
-            d_out.send_blocking(payload, Reliability::Reliable);
+            assert_eq!(
+                d_out.send_blocking(payload, Reliability::Reliable),
+                LinkSendOutcome::Sent
+            );
             match a_in.poll_event().await {
                 LinkEvent::Rx(frame) => assert_eq!(frame.bytes, payload),
                 other => panic!("expected Rx, got {other:?}"),

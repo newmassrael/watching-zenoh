@@ -244,8 +244,71 @@ impl InterceptorLink {
 /// `u16`, so they never exceed it).
 pub const DEFAULT_LINK_MTU: usize = 65_535;
 
+/// What a [`BoxedLinkDriver::send_blocking`] did with the bytes it was handed —
+/// the DRIVER-LEVEL DROP HOOK (R2371).
+///
+/// Until R2371 that method returned `()`, so a driver that refused a write
+/// dropped it silently: the UDP and QUIC-datagram writers discard a datagram
+/// past their link MTU, and every channel-backed writer discards a write onto a
+/// closed channel, and in both cases the transport above was told nothing. The
+/// `transport-stats` atom carried that as its named blocker — a faithful
+/// `n_dropped` counter "needs a driver-level hook first" — and this is that
+/// hook.
+///
+/// It is deliberately a RETURN VALUE rather than a counter the driver owns.
+/// A driver counting its own drops would put the number somewhere the session
+/// cannot reach and the adminspace cannot render, and would leave every OTHER
+/// consumer of a refused write (a caller that wants to retry, a lane that wants
+/// to assert a drop happened) with nothing. The transport is where the outcome
+/// is already known to belong to a session.
+///
+/// `#[must_use]` is the point: a caller that ignores the outcome is back to the
+/// silent drop this type exists to end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "a refused write is the drop `transport-stats` counts; ignoring it \
+              restores the silent-drop behaviour this type replaced"]
+pub enum LinkSendOutcome {
+    /// The driver accepted the bytes — they are on the wire, or queued on a
+    /// writer that owns them now.
+    Sent,
+    /// The driver refused the bytes and they will never reach the wire.
+    Dropped(LinkDropCause),
+}
+
+impl LinkSendOutcome {
+    /// Whether this outcome is a drop — the predicate the stats seam charges on.
+    pub fn is_dropped(self) -> bool {
+        matches!(self, LinkSendOutcome::Dropped(_))
+    }
+}
+
+/// Why a driver refused a write.
+///
+/// These are wz's real drop reasons, and they are NOT upstream's: zenoh drops on
+/// CONGESTION, at a bounded priority queue wz does not have (see
+/// [`StatDrop::Transport`](crate::stats::StatDrop::Transport)). Naming them
+/// keeps a later reader from reading `n_dropped` as a congestion signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkDropCause {
+    /// The payload exceeded what this link can put in one write — a datagram
+    /// past the link MTU on UDP / QUIC-datagram, or a frame past the stream
+    /// envelope's length field. A well-formed session fragments to the
+    /// negotiated budget before reaching the driver, so this is the backstop
+    /// firing rather than the normal path.
+    Oversize,
+    /// The writer this driver feeds is gone — the task exited, or the channel's
+    /// receiver dropped. Every subsequent write on this link drops the same way
+    /// until the session notices the link is down.
+    WriterGone,
+}
+
 pub trait BoxedLinkDriver {
-    fn send_blocking(&self, bytes: &[u8], reliability: Reliability);
+    /// Hand `bytes` to the link, reporting whether they were accepted.
+    ///
+    /// R2371 — the return value is the drop hook; see [`LinkSendOutcome`]. A
+    /// driver that cannot refuse a write returns
+    /// [`LinkSendOutcome::Sent`] unconditionally, which is most of them.
+    fn send_blocking(&self, bytes: &[u8], reliability: Reliability) -> LinkSendOutcome;
     fn open_blocking(&self);
     fn close_blocking(&self);
 

@@ -461,7 +461,7 @@ mod tests {
 
     use wz_link_lwip::ipv4_addr_loopback;
     use wz_link_lwip::rx_sockets::bind_session_rx;
-    use wz_session_core::link::BoxedLinkDriver;
+    use wz_session_core::link::{BoxedLinkDriver, LinkSendOutcome};
     use wz_session_core::reliability::Reliability;
     use wz_session_core::session_actions::SessionLinkActions;
     use wz_session_core::session_init_params::SessionInitParams;
@@ -520,7 +520,14 @@ mod tests {
             let driver = LwipUdpDriver::new(socket, ipv4_addr_loopback(), port);
 
             let payload: &[u8] = b"stage4b wz-session-lwip driver send";
-            driver.send_blocking(payload, Reliability::Reliable);
+            // R2371 — the MCU driver reports its outcome too, and a refusal here
+            // (pbuf exhaustion, dead netif) would otherwise surface only as the
+            // loopback receive below finding nothing.
+            std::assert_eq!(
+                driver.send_blocking(payload, Reliability::Reliable),
+                LinkSendOutcome::Sent,
+                "the lwIP driver accepted the datagram"
+            );
             link.poll_loopback();
             link.check_timeouts();
 

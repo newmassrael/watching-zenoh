@@ -27,7 +27,9 @@ use std::sync::Mutex;
 
 use sce_rust_runtime::Hal;
 
-use wz_runtime_tokio::session_glue::{BoxedLinkDriver, SessionInitParams, SigningKey, WhatAmI};
+use wz_runtime_tokio::session_glue::{
+    BoxedLinkDriver, LinkSendOutcome, SessionInitParams, SigningKey, WhatAmI,
+};
 use wz_runtime_tokio::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
 
 /// Deterministic `SessionInitParams` matching the Layer 3 wire-interop
@@ -164,12 +166,13 @@ impl LifecycleRecordingDriver {
 }
 
 impl BoxedLinkDriver for LifecycleRecordingDriver {
-    fn send_blocking(&self, bytes: &[u8], reliability: Reliability) {
+    fn send_blocking(&self, bytes: &[u8], reliability: Reliability) -> LinkSendOutcome {
         self.inner
             .lock()
             .expect("lifecycle driver poisoned")
             .sends
             .push((bytes.to_vec(), reliability));
+        LinkSendOutcome::Sent
     }
     fn open_blocking(&self) {
         self.inner.lock().expect("lifecycle driver poisoned").opens += 1;
@@ -194,7 +197,9 @@ pub struct NoopOutboundDriver {
 }
 
 impl BoxedLinkDriver for NoopOutboundDriver {
-    fn send_blocking(&self, _bytes: &[u8], _reliability: Reliability) {}
+    fn send_blocking(&self, _bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
+        LinkSendOutcome::Sent
+    }
     fn open_blocking(&self) {}
     fn close_blocking(&self) {}
 }

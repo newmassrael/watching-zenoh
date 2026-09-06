@@ -34,8 +34,8 @@ use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy, SessionFsmUnicastState as S,
 };
 use wz_runtime_tokio::session_glue::{
-    new_session_actions, new_session_engine, poll_and_dispatch_one, BoxedLinkDriver, PeerInitCaps,
-    SessionActionsBinding, SessionLinkActions,
+    new_session_actions, new_session_engine, poll_and_dispatch_one, BoxedLinkDriver,
+    LinkSendOutcome, PeerInitCaps, SessionActionsBinding, SessionLinkActions,
 };
 // R311fr — DriverLoopOutcome is referenced only by the
 // transport-keepalive-gated r78 handshake test; gate the import to match
@@ -249,8 +249,9 @@ struct RecordingOutboundDriver {
 }
 
 impl BoxedLinkDriver for RecordingOutboundDriver {
-    fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) {
+    fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
         self.sent.lock().unwrap().push(bytes.to_vec());
+        LinkSendOutcome::Sent
     }
     fn open_blocking(&self) {}
     fn close_blocking(&self) {}

@@ -122,11 +122,77 @@ pub trait InterceptorContext {
     }
 }
 
+/// WHICH interceptor a chain verdict came from — R2371.
+///
+/// zenoh keeps a per-interceptor drop stat; wz used to collapse every drop into
+/// one count because [`InterceptorChain::admit`] returned a bare `bool` and
+/// could not say who dropped. This enum is what un-collapses it, and it is
+/// declared BY THE INTERCEPTOR ([`Interceptor::kind`]) rather than inferred from
+/// its position, so a new interceptor cannot join the chain without naming
+/// itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterceptorKind {
+    /// The §5.16 access-control enforcer denied the message.
+    ///
+    /// ⚠ This kind reaches NO stats counter, and that is upstream's shape rather
+    /// than an omission: the 1.10.0 counter set has drop counters for
+    /// downsampling and low-pass only
+    /// (`commons/zenoh-stats/src/stats.rs` @ `ReasonLabel::Downsampling`),
+    /// because an ACL denial is a policy outcome
+    /// its operator already knows about from the policy. It still moves the
+    /// forwarder's own [`crate::linkstate_forward::LinkstateForwarder::interceptor_dropped`]
+    /// witness.
+    AccessControl,
+    /// The downsampling rate limiter dropped the message.
+    Downsampling,
+    /// The low-pass size cap refused the message.
+    LowPass,
+}
+
+/// Whether a chain admitted a message, and if not, WHO dropped it.
+///
+/// Replaces the bare `bool` the chain used to return (R2371). The `bool` was
+/// what made `transport-stats` unable to charge `downsampler_dropped_msgs`
+/// separately from `low_pass_dropped_msgs`: the numbers existed but the
+/// attribution did not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "a chain verdict decides whether the message is relayed"]
+pub enum InterceptorVerdict {
+    /// Every interceptor admitted the message.
+    Admit,
+    /// The named interceptor dropped it; the chain short-circuited there, so no
+    /// later interceptor was consulted (zenoh's chain does the same).
+    Drop(InterceptorKind),
+}
+
+impl InterceptorVerdict {
+    /// Whether the message is admitted — the predicate the relay paths branch
+    /// on, so a caller that does not care WHO dropped reads the same as before.
+    pub fn is_admitted(self) -> bool {
+        matches!(self, InterceptorVerdict::Admit)
+    }
+
+    /// The interceptor that dropped, or `None` when admitted.
+    pub fn dropped_by(self) -> Option<InterceptorKind> {
+        match self {
+            InterceptorVerdict::Admit => None,
+            InterceptorVerdict::Drop(kind) => Some(kind),
+        }
+    }
+}
+
 /// One message interceptor — zenoh `InterceptorTrait::intercept(msg) -> bool`.
 /// Returns `true` to ADMIT the message, `false` to drop it. The implementation
 /// dispatches internally on the message kind (it checks only the kinds it
 /// governs and admits the rest).
 pub trait Interceptor {
+    /// Which interceptor this is — the attribution a chain verdict carries.
+    ///
+    /// Declared rather than derived: the chain holds `Box<dyn Interceptor>` and
+    /// has no other way to name what it just ran, and a positional guess would
+    /// go wrong the first time a build elides one interceptor's feature. R2371.
+    fn kind(&self) -> InterceptorKind;
+
     /// Whether to admit `msg`, given the per-message `ctx`.
     fn intercept(&self, ctx: &dyn InterceptorContext, msg: &NetworkMessage) -> bool;
 
@@ -268,16 +334,19 @@ impl InterceptorChain {
         ctx: &dyn InterceptorContext,
         msg: &NetworkMessage,
         cache: Option<&InterceptorKeyexprCache>,
-    ) -> bool {
+    ) -> InterceptorVerdict {
         let slots = cache.filter(|c| {
             c.version == self.version && c.per_interceptor.len() == self.interceptors.len()
         });
         match slots {
-            Some(c) => self
-                .interceptors
-                .iter()
-                .zip(c.per_interceptor.iter())
-                .all(|(i, slot)| i.intercept_cached(ctx, msg, slot.as_deref())),
+            Some(c) => {
+                for (i, slot) in self.interceptors.iter().zip(c.per_interceptor.iter()) {
+                    if !i.intercept_cached(ctx, msg, slot.as_deref()) {
+                        return InterceptorVerdict::Drop(i.kind());
+                    }
+                }
+                InterceptorVerdict::Admit
+            }
             None => self.admit(ctx, msg),
         }
     }
@@ -296,8 +365,19 @@ impl InterceptorChain {
     /// Whether to ADMIT `msg`: every interceptor must admit it (zenoh's chain
     /// runs each in order, dropping on the first that returns `false`). An
     /// empty chain admits.
-    pub fn admit(&self, ctx: &dyn InterceptorContext, msg: &NetworkMessage) -> bool {
-        self.interceptors.iter().all(|i| i.intercept(ctx, msg))
+    ///
+    /// R2371 — the verdict NAMES the interceptor that dropped. The short-circuit
+    /// is unchanged (`all` stopped at the first `false` too); what is new is
+    /// that the answer says which one, which is what lets `transport-stats`
+    /// charge upstream's separate downsampler / low-pass drop counters instead
+    /// of one collapsed total.
+    pub fn admit(&self, ctx: &dyn InterceptorContext, msg: &NetworkMessage) -> InterceptorVerdict {
+        for i in &self.interceptors {
+            if !i.intercept(ctx, msg) {
+                return InterceptorVerdict::Drop(i.kind());
+            }
+        }
+        InterceptorVerdict::Admit
     }
 }
 

@@ -2883,12 +2883,31 @@ fn declare_adminspace_metrics_get_returns_openmetrics_text() {
         .expect("query-get ON in this build");
 
     let got = String::from_utf8(payload.lock().unwrap().clone().expect("metrics replied")).unwrap();
-    assert_eq!(
-        got,
-        "# HELP zenoh_build Information about zenoh.\n\
-         # TYPE zenoh_build gauge\n\
-         zenoh_build{version=\"0.9.9\"} 1\n"
+    let build_info = "# HELP zenoh_build Information about zenoh.\n\
+                      # TYPE zenoh_build gauge\n\
+                      zenoh_build{version=\"0.9.9\"} 1\n";
+
+    // R2371 — this leg serves the build-info gauge FIRST and, when the node has
+    // counters, the `transport-stats` block after it (`adminspace` @
+    // `fn answer_admin_query`, whose own test pins the composition byte for
+    // byte). Which of the two shapes this build produces is decided by the
+    // feature, so the assertion is too — it used to hard-code the no-counter
+    // shape and therefore described only half the builds it compiled in.
+    assert!(
+        got.starts_with(build_info),
+        "the build-info gauge comes first\n{got}"
     );
+    #[cfg(feature = "transport-stats")]
+    {
+        // The session has emitted the query itself, so the block is present and
+        // its counters are live rather than all-zero.
+        assert!(
+            got.contains("\n# TYPE tx_bytes counter\n"),
+            "the counter block follows the gauge\n{got}"
+        );
+    }
+    #[cfg(not(feature = "transport-stats"))]
+    assert_eq!(got, build_info, "no counters, so the gauge stands alone");
     // text/plain = zenoh encoding id 4 -> wz packed_id 8 (id << 1), no schema.
     assert_eq!(*enc.lock().unwrap(), Some((8, None)));
 }
@@ -11128,6 +11147,62 @@ fn a_default_locality_query_runs_fires_it_did_not_stage_unless_the_drain_is_defe
             expect_ran,
             "{getter_policy:?}: whether an unrelated get ran the staged \
              subscriber callback on the calling thread"
+        );
+    }
+}
+
+/// R2371 — a write the LINK DRIVER refuses charges `n_dropped`, and charges
+/// NOTHING to the sent counters.
+///
+/// This is the test the `transport-stats` atom's driver-hook residual was
+/// blocked on. Before R2371 `send_blocking` returned `()`, so a refused write
+/// was invisible above the driver: `tx_bytes` and `tx_t_msgs` counted it as
+/// though it had reached the wire, and nothing anywhere could tell the two
+/// apart. There was no way to write this assertion at all.
+///
+/// The NEGATIVE half is the load-bearing one. A seam that charged `n_dropped`
+/// AND `bytes`/`t_msgs` would pass a `n_dropped == 1` check on its own while
+/// making `bytes` a counter of "bytes offered" rather than upstream's "bytes
+/// sent" — so the zeros below are what pin the meaning.
+#[cfg(all(feature = "transport-stats", feature = "codec-push"))]
+#[test]
+fn a_driver_refusal_charges_n_dropped_and_no_sent_counter() {
+    use wz_session_core::link::LinkDropCause;
+
+    for cause in [LinkDropCause::Oversize, LinkDropCause::WriterGone] {
+        let (actions, driver) = crate::test_fixtures::refusing_actions(cause);
+        actions
+            .send_push_literal("demo/refused", b"payload", true)
+            .expect("the transport accepted the send; the DRIVER is what refuses");
+
+        assert_eq!(
+            driver.offered_count(),
+            1,
+            "{cause:?}: the bytes were offered to the driver, which then refused \
+             them — a driver never called would zero these counters for the \
+             wrong reason"
+        );
+
+        let s = actions.stats_report();
+        assert_eq!(s.tx.n_dropped, 1, "{cause:?}: the refusal is charged");
+        assert_eq!(
+            s.tx.bytes, 0,
+            "{cause:?}: `bytes` counts SENT bytes; a refused write reached no wire"
+        );
+        assert_eq!(
+            s.tx.t_msgs, 0,
+            "{cause:?}: and no transport message left either"
+        );
+
+        // The NETWORK plane still counts it: the session was asked to send one
+        // Put, and it was — the refusal happened a layer below. `n_msgs` and
+        // `n_dropped` answer two different questions, which is why upstream
+        // keeps them in different label families.
+        assert_eq!(
+            s.tx.n_msgs_total(),
+            1,
+            "{cause:?}: the network message was dispatched; the WIRE write is \
+             what was refused"
         );
     }
 }

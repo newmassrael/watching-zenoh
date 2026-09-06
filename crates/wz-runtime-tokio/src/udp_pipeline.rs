@@ -96,6 +96,7 @@ use crate::link_interfaces::{ip_link_endpoints, ip_link_subject};
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
 use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::link::{InterceptorLink, LinkEndpoints, LinkSubject};
+use wz_session_core::link::{LinkDropCause, LinkSendOutcome};
 
 /// Maximum UDP payload (65535 IP datagram - 20 IPv4 header - 8 UDP header).
 /// A larger frame is a wz-side encoder bug; the driver drops it loud rather
@@ -650,7 +651,7 @@ impl BoxedLinkDriver for UdpWriteDriver {
         self.endpoints.as_ref()
     }
 
-    fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) {
+    fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
         // UDP link layer is best-effort by definition; the Reliability hint
         // is the session FSM's concern. The transport TX path now caps its
         // fragment budget to THIS link's MTU ([`Self::link_mtu`] feeds
@@ -665,11 +666,13 @@ impl BoxedLinkDriver for UdpWriteDriver {
                 "wz-runtime-tokio: outbound datagram {} bytes > {MAX_UDP_PAYLOAD}; dropping",
                 bytes.len()
             );
-            return;
+            return LinkSendOutcome::Dropped(LinkDropCause::Oversize);
         }
         if let Err(e) = self.tx.send(bytes.to_vec()) {
             log::warn!("wz-runtime-tokio: outbound channel closed; dropping datagram ({e})");
+            return LinkSendOutcome::Dropped(LinkDropCause::WriterGone);
         }
+        LinkSendOutcome::Sent
     }
 
     fn open_blocking(&self) {
@@ -765,8 +768,16 @@ mod tests {
     async fn write_driver_drops_oversize_datagram() {
         let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
         let driver = UdpWriteDriver::new(tx, LinkSubject::UNKNOWN, None);
-        driver.send_blocking(&vec![0u8; MAX_UDP_PAYLOAD + 1], Reliability::BestEffort);
-        driver.send_blocking(b"ok", Reliability::BestEffort);
+        // R2371 — the drop is stated by the return value as well as inferred
+        // from the channel; see the stream-link twin for why both are kept.
+        assert_eq!(
+            driver.send_blocking(&vec![0u8; MAX_UDP_PAYLOAD + 1], Reliability::BestEffort),
+            LinkSendOutcome::Dropped(LinkDropCause::Oversize)
+        );
+        assert_eq!(
+            driver.send_blocking(b"ok", Reliability::BestEffort),
+            LinkSendOutcome::Sent
+        );
         // Only the in-range datagram reached the channel.
         assert_eq!(rx.recv().await.as_deref(), Some(b"ok".as_slice()));
     }
@@ -807,7 +818,10 @@ mod tests {
         let (_a_in, a_out, a_writer) = wire_udp_socket(a, b_addr);
         let (mut b_in, _b_out, _b_writer) = wire_udp_socket(b, a_addr);
 
-        a_out.send_blocking(b"hello-datagram", Reliability::BestEffort);
+        assert_eq!(
+            a_out.send_blocking(b"hello-datagram", Reliability::BestEffort),
+            LinkSendOutcome::Sent
+        );
         match b_in.poll_event().await {
             LinkEvent::Rx(frame) => assert_eq!(frame.bytes, b"hello-datagram"),
             other => panic!("expected Rx, got {other:?}"),

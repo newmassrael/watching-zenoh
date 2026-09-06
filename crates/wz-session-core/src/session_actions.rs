@@ -1923,6 +1923,39 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     fn emit_on_link(&self, link: &LinkState<R>, bytes: &[u8], reliability: Reliability) {
         let now = self.clock.now_monotonic_ms();
         R::with_mutex_mut(&link.last_outbound_at, |slot| *slot = Some(now));
+
+        // R2371 (`transport-stats`) — charge ONE wire write to the counters, on
+        // the side the driver's `LinkSendOutcome` puts it.
+        //
+        // A write the driver ACCEPTED is one transport message of `wire_bytes`
+        // on the wire; a write it REFUSED reached no wire at all, so it charges
+        // `n_dropped` and leaves `bytes` / `t_msgs` alone — `bytes` is a counter
+        // of SENT bytes, and counting a refused write there would make the two
+        // disagree about the same event.
+        //
+        // The `1` is not a magic number: one call of this is one wire write, and
+        // one wire write is one transport message in this tree (see the
+        // `crate::stats` module docs on `t_msgs`). The byte figure travels with
+        // it because `StatDrop` takes both and only the LowPass arm reads the
+        // bytes — upstream's shape, kept rather than special-cased here.
+        //
+        // A CLOSURE rather than a method, deliberately: its only caller is this
+        // seam, whose `#[cfg]` is a seventeen-feature union. As a method it
+        // needed that union copied verbatim to stay alive in exactly the same
+        // builds, and the copy went stale immediately — Layer C1m's no_std lwip
+        // build compiles neither, and `-D dead-code` caught the method there.
+        // A closure is scoped to the seam by construction, so the two cannot
+        // drift apart at all.
+        let count_tx_wire = |_wire_bytes: usize, _outcome: crate::link::LinkSendOutcome| {
+            #[cfg(feature = "transport-stats")]
+            match _outcome {
+                crate::link::LinkSendOutcome::Sent => self.stats.inc_tx(_wire_bytes),
+                crate::link::LinkSendOutcome::Dropped(_) => {
+                    self.stats
+                        .inc_tx_drop(crate::stats::StatDrop::Transport, 1, _wire_bytes)
+                }
+            }
+        };
         // transport-compression — once compression is ACTIVE, every
         // post-establishment batch is lz4-wrapped here (the wz analogue of
         // zenoh's finalize-then-write-to-link), and the link layer then
@@ -1936,14 +1969,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         if self.compresses_batches() {
             let wrapped = crate::compression::compress_batch(bytes);
             // transport-stats — count the ACTUAL wire bytes (post-compression).
-            #[cfg(feature = "transport-stats")]
-            self.stats.inc_tx(wrapped.len());
-            link.link_driver().send_blocking(&wrapped, reliability);
+            let outcome = link.link_driver().send_blocking(&wrapped, reliability);
+            count_tx_wire(wrapped.len(), outcome);
             return;
         }
-        #[cfg(feature = "transport-stats")]
-        self.stats.inc_tx(bytes.len());
-        link.link_driver().send_blocking(bytes, reliability);
+        let outcome = link.link_driver().send_blocking(bytes, reliability);
+        count_tx_wire(bytes.len(), outcome);
     }
 
     /// R311y205 (transport-multilink IMPL-2b-iii) — emit on THIS binding's own
@@ -4108,6 +4139,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         priority: Priority,
         reliable: bool,
         worst_case_payload: usize,
+        _stats_class: crate::stats::NetworkStatsClass,
         encode_body: P,
     ) -> Result<(), SendWireError>
     where
@@ -4115,6 +4147,20 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             &mut sce_forge_runtime::codec::VecSink<'_>,
         ) -> Result<(), sce_forge_runtime::codec::CodecError>,
     {
+        // R2371 (`transport-stats`) — the NETWORK-message counters. Charged here
+        // and not at `emit_on_link` because one wire write carries a whole batch
+        // of these: the wire seam counts transport messages, this one counts the
+        // network messages inside them, and upstream keeps the same two families
+        // apart for the same reason.
+        //
+        // Counted at ENTRY, before the availability gate and the batch lock, so
+        // the number is "network messages this session was asked to send". A
+        // message the gate rejects never reaches a wire and so never reaches
+        // `n_dropped` either — `n_dropped` is the DRIVER's refusal, and
+        // conflating a typed `Err` return with a silent wire drop would put two
+        // different failures under one counter.
+        #[cfg(feature = "transport-stats")]
+        self.stats.inc_tx_network(&_stats_class);
         // R311y215 (transport-qos) — the EFFECTIVE Frame priority: the caller's
         // message priority when this session negotiated QoS, else forced to
         // DEFAULT (a non-QoS session has one PRIORITY conduit and writes no
@@ -4657,12 +4703,79 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         push: wz_codecs::push::PushOwned,
         reliable: bool,
     ) -> Result<(), SendWireError> {
+        let class = self.outbound_push_class(&push);
         self.dispatch_network_message(
             priority,
             reliable,
             wz_codecs::push::Push::MAX_ENCODED_BYTES,
+            class,
             crate::frame_encode::push_body(&push),
         )
+    }
+
+    /// R2371 (`transport-stats`) — classify an outbound `Push` for the network
+    /// counters, resolving an aliased key expression through THIS session's own
+    /// outbound mapping space.
+    ///
+    /// That table is the right one and the only right one: an `M=0` alias in a
+    /// message we are SENDING names OUR id space, which is exactly what
+    /// `outbound_mappings` holds
+    /// ([`Self::resolve_outbound_mapping`]). So an outbound admin-space publish
+    /// classifies as admin whether it went out literal or aliased — the accuracy
+    /// the inbound side cannot have, because the peer's space lives on the face.
+    ///
+    /// Without `transport-stats` the class is never read, and building it would
+    /// mean resolving a mapping (a mutex round-trip) per send for nothing, so
+    /// the feature-off arm returns the control class without touching the table.
+    #[cfg(feature = "codec-push")]
+    fn outbound_push_class(
+        &self,
+        _push: &wz_codecs::push::PushOwned,
+    ) -> crate::stats::NetworkStatsClass {
+        #[cfg(feature = "transport-stats")]
+        {
+            crate::network_message::push_stats_class(_push, |id| self.resolve_outbound_mapping(id))
+        }
+        #[cfg(not(feature = "transport-stats"))]
+        {
+            crate::stats::NetworkStatsClass::control()
+        }
+    }
+
+    /// [`Self::outbound_push_class`] for a `Request`.
+    #[cfg(feature = "codec-request")]
+    fn outbound_request_class(
+        &self,
+        _request: &wz_codecs::request::RequestOwned,
+    ) -> crate::stats::NetworkStatsClass {
+        #[cfg(feature = "transport-stats")]
+        {
+            crate::network_message::request_stats_class(_request, |id| {
+                self.resolve_outbound_mapping(id)
+            })
+        }
+        #[cfg(not(feature = "transport-stats"))]
+        {
+            crate::stats::NetworkStatsClass::control()
+        }
+    }
+
+    /// [`Self::outbound_push_class`] for a `Response`.
+    #[cfg(feature = "codec-response")]
+    fn outbound_response_class(
+        &self,
+        _response: &wz_codecs::response::ResponseOwned,
+    ) -> crate::stats::NetworkStatsClass {
+        #[cfg(feature = "transport-stats")]
+        {
+            crate::network_message::response_stats_class(_response, |id| {
+                self.resolve_outbound_mapping(id)
+            })
+        }
+        #[cfg(not(feature = "transport-stats"))]
+        {
+            crate::stats::NetworkStatsClass::control()
+        }
     }
 
     /// R311ms (Level B, B5b-2) — the UNICAST arm of the transport send seam:
@@ -4931,6 +5044,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             Priority::Control,
             reliable,
             wz_codecs::declare::Declare::MAX_ENCODED_BYTES,
+            // Control plane: `n_msgs` only, no payload cell (upstream's payload
+            // labels cover the four data kinds).
+            crate::stats::NetworkStatsClass::control(),
             crate::frame_encode::declare_body(&declare),
         )
     }
@@ -4958,6 +5074,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             Priority::Control,
             reliable,
             wz_codecs::oam::Oam::MAX_ENCODED_BYTES,
+            crate::stats::NetworkStatsClass::control(),
             crate::frame_encode::oam_body(&oam),
         )
     }
@@ -4969,11 +5086,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         request: wz_codecs::request::RequestOwned,
         reliable: bool,
     ) -> Result<(), SendWireError> {
+        let class = self.outbound_request_class(&request);
         self.dispatch_network_message(
             // Request/Response = the data plane; zenoh default `Priority::Data`.
             Priority::DEFAULT,
             reliable,
             wz_codecs::request::Request::MAX_ENCODED_BYTES,
+            class,
             crate::frame_encode::request_body(&request),
         )
     }
@@ -4986,10 +5105,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         response: wz_codecs::response::ResponseOwned,
         reliable: bool,
     ) -> Result<(), SendWireError> {
+        let class = self.outbound_response_class(&response);
         self.dispatch_network_message(
             Priority::DEFAULT,
             reliable,
             wz_codecs::response::Response::MAX_ENCODED_BYTES,
+            class,
             crate::frame_encode::response_body(&response),
         )
     }
@@ -5005,6 +5126,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             Priority::DEFAULT,
             reliable,
             wz_codecs::response_final::ResponseFinal::MAX_ENCODED_BYTES,
+            // A pure correlation marker — no key expression and no payload, so
+            // it is control plane even though it closes a data-plane exchange.
+            crate::stats::NetworkStatsClass::control(),
             crate::frame_encode::response_final_body(&response_final),
         )
     }
@@ -5028,6 +5152,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             Priority::Control,
             reliable,
             wz_codecs::interest::Interest::MAX_ENCODED_BYTES,
+            crate::stats::NetworkStatsClass::control(),
             crate::frame_encode::interest_body(&interest),
         )
     }

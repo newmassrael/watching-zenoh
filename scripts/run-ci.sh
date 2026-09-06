@@ -2547,6 +2547,17 @@ PY
     # has none. `--derive` re-reads it from upstream where that exists.
     python3 scripts/lib/sn_resolution_words.py --selftest || return 1
     python3 scripts/lib/sn_resolution_words.py --check || return 1
+    # R2371 (the `transport-stats` atom) — the counter SURFACE is upstream's, and
+    # nothing in the tree could say so: R2332 found four flat counters against a
+    # multi-axis registry, and every wz test passed the whole time because every
+    # wz test was written against the four. The population therefore comes from
+    # upstream's own `stats_default!` declarations, and the wz side is derived
+    # from `DirectionReport`'s field types plus the axis enums rather than from a
+    # second list here — a list would be the copy that went stale in the first
+    # place. `--check` SKIPs without a zenoh checkout (machine-local state); the
+    # `--require` arming flag is what a lane with one sets.
+    python3 scripts/lib/transport_stats_surface_gate.py --selftest || return 1
+    python3 scripts/lib/transport_stats_surface_gate.py --check || return 1
     # R2192 (open-debt item 530, the FIRST measured case) — a dependency this
     # tree's prose names is one cargo resolves, and one it DENIES is one
     # nothing reaches.

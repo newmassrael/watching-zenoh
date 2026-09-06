@@ -345,7 +345,14 @@ _ANY_TOKEN = re.compile(r"(?<![\w/.-])(\w[\w-]*)/[\w/.-]+\.rs")
 #: precisely the drift a line number reports as silence. The replacement names
 #: `pub enum ZRuntime` and `pub struct RuntimeParam` in the anchored form, so one
 #: line-form citation left the tree and the ratchet follows it down.
-LINE_BUDGET = 292
+#:
+#: 292 -> 291 (R2371). The `transport-stats` atom's module was rewritten against
+#: the pin, and its remaining 1.5.0-era line citation went with it: the counter
+#: it described (`tx_t_msgs` incremented per batch) is in a transport-side stats
+#: module that does not exist at 1.10.0 at all. The replacement claims are
+#: anchored on the stats crate that replaced it, so one more line-form citation
+#: left the tree.
+LINE_BUDGET = 291
 BARE_BUDGET = 60
 #: The root-less axis, after R2317 repaired the 49 citations that named a file
 #: gone at the pin. Same two-directional ratchet as LINE and BARE.
@@ -377,7 +384,13 @@ ROOTLESS_STALE_LINE_BUDGET = 1
 #: cited as a root-less fragment. It is now written with its IN-TREE root
 #: (`vendor/zenoh-pico/...`), which is where that file actually lives here, so
 #: the occurrence left this residue rather than moving between buckets.
-ROOTLESS_UNDECLARED_BUDGET = 671
+#: R2371 — 671 -> 668. The same `transport-stats` rewrite: its module doc carried
+#: three root-less citations into the transport-side stats module and its link /
+#: rx call sites (`unicast/universal/...`), all naming 1.5.0 paths that are gone
+#: at the pin. They did not move between buckets — the claims they supported were
+#: re-measured and re-anchored on the stats crate, so the occurrences left the
+#: root-less population outright.
+ROOTLESS_UNDECLARED_BUDGET = 668
 #: EVERY root-less occurrence, graded or not: `rootless_line + rootless_bare +
 #: residue`. One ratchet over the union of the three above, and it exists
 #: because those three CANNOT express the invariant that matters.
@@ -411,7 +424,10 @@ ROOTLESS_UNDECLARED_BUDGET = 671
 #: `z_get` example given its in-tree root. The total falls because the citation
 #: left the root-less population entirely, which is the one direction this
 #: number is allowed to move.
-ROOTLESS_TOTAL_BUDGET = 805
+#: R2371 — 805 -> 802, the same three occurrences as the budget above: the
+#: `transport-stats` module's root-less 1.5.0 citations, retired rather than
+#: rerooted, because the paths they named do not exist at the pin.
+ROOTLESS_TOTAL_BUDGET = 802
 
 #: A LIVE invocation of the RESOLUTION arm. R2242 split this gate in two and,
 #: in doing so, made `--resolve` a flag someone can simply stop passing: delete

@@ -38,7 +38,7 @@ use wz_runtime_tokio_test_support::fixture_session_init_params;
 use crate::observer::ApplicationLayerObserver;
 use crate::runtime_impl::TokioTime;
 use crate::session_glue::{
-    new_session_actions, BoxedLinkDriver, SessionInitParams, SessionLinkActions,
+    new_session_actions, BoxedLinkDriver, LinkSendOutcome, SessionInitParams, SessionLinkActions,
 };
 use crate::Reliability;
 
@@ -90,11 +90,12 @@ impl RecordingLinkDriver {
 }
 
 impl BoxedLinkDriver for RecordingLinkDriver {
-    fn send_blocking(&self, bytes: &[u8], reliability: Reliability) {
+    fn send_blocking(&self, bytes: &[u8], reliability: Reliability) -> LinkSendOutcome {
         self.frames
             .lock()
             .expect("recording driver mutex poisoned")
             .push((bytes.to_vec(), reliability));
+        LinkSendOutcome::Sent
     }
     fn open_blocking(&self) {}
     fn close_blocking(&self) {}
@@ -130,6 +131,66 @@ pub(crate) fn recording_driver() -> Arc<RecordingLinkDriver> {
     Arc::new(RecordingLinkDriver {
         frames: Mutex::new(Vec::new()),
     })
+}
+
+/// R2371 — a link driver that REFUSES every write, reporting the refusal
+/// through [`LinkSendOutcome`].
+///
+/// The `transport-stats` atom's `n_dropped` counter charges exactly this event,
+/// and before R2371 no fixture could produce it: the driver seam returned `()`,
+/// so a refused write was indistinguishable from a delivered one everywhere
+/// above the driver. A real UDP driver refuses on an oversize datagram, which
+/// needs a socket and a payload past the link MTU to reproduce; this refuses on
+/// contract, which is what lets the COUNTER be tested rather than the guard.
+///
+/// It still records, so a test can assert the bytes were offered — a driver that
+/// refused by never being called would pass a `n_dropped == 0` assertion for the
+/// wrong reason.
+#[cfg(feature = "transport-stats")]
+pub(crate) struct RefusingLinkDriver {
+    offered: Mutex<Vec<Vec<u8>>>,
+    cause: wz_session_core::link::LinkDropCause,
+}
+
+#[cfg(feature = "transport-stats")]
+impl RefusingLinkDriver {
+    /// How many writes were offered to (and refused by) this driver.
+    pub(crate) fn offered_count(&self) -> usize {
+        self.offered
+            .lock()
+            .expect("refusing driver mutex poisoned")
+            .len()
+    }
+}
+
+#[cfg(feature = "transport-stats")]
+impl BoxedLinkDriver for RefusingLinkDriver {
+    fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
+        self.offered
+            .lock()
+            .expect("refusing driver mutex poisoned")
+            .push(bytes.to_vec());
+        LinkSendOutcome::Dropped(self.cause)
+    }
+    fn open_blocking(&self) {}
+    fn close_blocking(&self) {}
+}
+
+/// A [`SessionLinkActions`] whose driver refuses every write with `cause`.
+#[cfg(feature = "transport-stats")]
+pub(crate) fn refusing_actions(
+    cause: wz_session_core::link::LinkDropCause,
+) -> (Arc<SessionLinkActions>, Arc<RefusingLinkDriver>) {
+    let driver = Arc::new(RefusingLinkDriver {
+        offered: Mutex::new(Vec::new()),
+        cause,
+    });
+    let actions = new_session_actions(
+        driver.clone(),
+        fixture_session_init_params(),
+        TokioTime::new(),
+    );
+    (actions, driver)
 }
 
 /// R2290 (open-debt item 626) — a link driver that answers ONE question per
@@ -199,7 +260,7 @@ impl ObserverProbeLinkDriver {
     feature = "liveliness-token"
 ))]
 impl BoxedLinkDriver for ObserverProbeLinkDriver {
-    fn send_blocking(&self, _bytes: &[u8], _reliability: Reliability) {
+    fn send_blocking(&self, _bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
         let armed = self.armed.lock().expect("probe arm mutex poisoned");
         if let Some(observer) = armed.as_ref() {
             // `try_lock`'s guard is dropped at the end of this statement, so
@@ -210,6 +271,7 @@ impl BoxedLinkDriver for ObserverProbeLinkDriver {
                 .expect("probe log mutex poisoned")
                 .push(lockable);
         }
+        LinkSendOutcome::Sent
     }
     fn open_blocking(&self) {}
     fn close_blocking(&self) {}

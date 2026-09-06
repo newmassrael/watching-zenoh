@@ -52,6 +52,7 @@ use crate::writer_queue::{OutboundQueue, WriterHandle};
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
 use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::link::{InterceptorLink, LinkSubject};
+use wz_session_core::link::{LinkDropCause, LinkSendOutcome};
 
 /// Dial a WebSocket-over-TCP connection — TCP-connect to `addr`, then run the
 /// RFC6455 client handshake ([`client_async`]) over it, returning the
@@ -211,7 +212,7 @@ impl BoxedLinkDriver for WsWriteDriver {
         self.endpoints.as_ref()
     }
 
-    fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) {
+    fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
         if bytes.len() > u16::MAX as usize {
             // Oversize: drop with a warn. zenoh's batch ceiling is 65535
             // (u16), so a larger frame is a wz-side encoder bug — loud.
@@ -219,11 +220,13 @@ impl BoxedLinkDriver for WsWriteDriver {
                 "wz-runtime-tokio: outbound ws frame {} bytes > 65535; dropping",
                 bytes.len()
             );
-            return;
+            return LinkSendOutcome::Dropped(LinkDropCause::Oversize);
         }
         if let Err(e) = self.tx.send(bytes.to_vec()) {
             log::warn!("wz-runtime-tokio: outbound ws channel closed; dropping frame ({e})");
+            return LinkSendOutcome::Dropped(LinkDropCause::WriterGone);
         }
+        LinkSendOutcome::Sent
     }
 
     fn open_blocking(&self) {

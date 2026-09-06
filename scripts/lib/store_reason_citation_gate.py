@@ -101,14 +101,30 @@ MIN_REASONS = 40
 #:
 #: 27 -> 26 (R2369). The `liveliness-subscriber` re-tag replaced that reason
 #: blob, and the one line-form citation it carried was the DEFECT the round
-#: repaired: `api/liveliness.rs:483-532` names a range past the end of a
-#: 331-line file at the pin, because the builder had moved. So this decrement
-#: retires a citation that was not merely mis-formatted but NOT RESOLVING AT
-#: ALL. ⚠ That same re-tag then tried to ADD a bare citation and this gate
-#: refused it, which is the ratchet working in its other direction: the first
-#: mention of the builder's new path carried no needle. Anchored, not budgeted.
+#: repaired: it named a line RANGE in the session API's liveliness module that
+#: runs past the end of that 331-line file at the pin, because the builder had
+#: moved. So this decrement retires a citation that was not merely
+#: mis-formatted but NOT RESOLVING AT ALL. ⚠ That same re-tag then tried to ADD
+#: a bare citation and this gate refused it, which is the ratchet working in its
+#: other direction: the first mention of the builder's new path carried no
+#: needle. Anchored, not budgeted.
+#:
+#: ⚠⚠ R2371 — the paragraph above DESCRIBES that path; it does not write it.
+#: The literal was here until R2371 and it cost a hosted Layer C0 red for two
+#: rounds: this file is tracked, so `upstream_citation_anchor_gate.py` scans it,
+#: and a repaired citation QUOTED in the prose explaining the repair is
+#: indistinguishable from a citation someone made -- it re-entered the very
+#: root-less population the repair had just left (99 against a budget of 98).
+#: That gate's own header carries the same warning about its own paragraphs;
+#: this is the same class arriving in the sibling file.
 LINE_BUDGET = 26
-BARE_BUDGET = 9
+#: 9 -> 7 (R2371). The `transport-stats` re-tag rewrote that atom's whole reason
+#: against the pin. Its two bare citations both named the 1.5.0-era
+#: transport-side stats module, which does not exist at 1.10.0 at all, so they
+#: were not repointed but RETIRED — the replacement claims are anchored on the
+#: stats crate that replaced it. One of the two was also a FINDING (see below),
+#: which is why both ratchets move in the same commit.
+BARE_BUDGET = 7
 
 #: FINDINGS -- claims that do not resolve at the pin. Seeded at the inherited
 #: count for the same reason the source gate seeded LINE_BUDGET at 294 rather
@@ -140,7 +156,14 @@ BARE_BUDGET = 9
 #: not fixed HERE because `set-inventory-status --reason` replaces a whole
 #: reason blob, so each is a surgical prose edit that belongs in its own commit
 #: with its own before/after -- not a side effect of landing the instrument.
-FINDINGS_BUDGET = 10
+#:
+#: 10 -> 9 (R2371). One of them was `transport-stats`, and it was repaired the
+#: way the paragraph above prescribes: in its OWN round, as part of re-grading
+#: that atom, not as a citation edit. Its unresolved claim named the 1.5.0
+#: transport-side stats module; the atom was re-measured against the pin and the
+#: claim replaced by anchored ones on the crate that succeeded it. That is the
+#: "stale GRADING -> re-grade the atom" arm of this gate's own advice, taken.
+FINDINGS_BUDGET = 9
 
 
 def live_reasons(root: pathlib.Path | None = None) -> dict[str, str]:

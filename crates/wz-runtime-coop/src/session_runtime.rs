@@ -244,6 +244,10 @@ mod cookie_nonce_draw_tests {
     use super::*;
     use alloc::vec;
     use wz_session_core::entropy::{EntropySource, EntropyUnavailable};
+    // R2371 — the driver-outcome type is named only by this module's test
+    // double, so the import lives HERE: at module level it is unused in the
+    // non-test build, which `-D unused-imports` refuses.
+    use wz_session_core::link::LinkSendOutcome;
     use wz_session_core::reliability::Reliability;
     use wz_session_core::session_init_params::SessionInitParams;
     use wz_session_core::signing_key::SigningKey;
@@ -252,7 +256,9 @@ mod cookie_nonce_draw_tests {
     struct NullDriver;
 
     impl BoxedLinkDriver for NullDriver {
-        fn send_blocking(&self, _bytes: &[u8], _reliability: Reliability) {}
+        fn send_blocking(&self, _bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
+            LinkSendOutcome::Sent
+        }
         fn open_blocking(&self) {}
         fn close_blocking(&self) {}
     }

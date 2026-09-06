@@ -178,6 +178,10 @@ fn acl_action(msg: &NetworkMessage) -> Option<GovernedAction> {
 }
 
 impl Interceptor for AclInterceptor {
+    fn kind(&self) -> super::InterceptorKind {
+        super::InterceptorKind::AccessControl
+    }
+
     fn intercept(&self, ctx: &dyn InterceptorContext, msg: &NetworkMessage) -> bool {
         // A kind this atom does not govern is admitted (zenoh's unmatched arms).
         let Some(governed) = acl_action(msg) else {

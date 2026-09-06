@@ -47,6 +47,39 @@ use alloc::vec::Vec;
 #[cfg(feature = "transport-lowlatency")]
 use wz_codecs::wire_const;
 
+/// R2371 (`transport-stats`) — charge one frame's worth of NETWORK messages,
+/// then hand the batch on untouched.
+///
+/// Placed on the parse RESULT rather than in the per-MID dispatch below because
+/// that is where the whole batch exists at once: a Frame carrying N network
+/// messages counts N here and 1 at the wire seam, which is the `n_msgs` /
+/// `t_msgs` distinction upstream draws. Both `parse_frame_payload` call sites —
+/// the lean lowlatency path and the framed path — route through here, so a frame
+/// cannot be counted on one and missed on the other.
+///
+/// # The alias resolver is EMPTY on this side, on purpose
+///
+/// Classification needs the literal key expression, and an inbound alias names
+/// the PEER's id space — which lives on the face (the forwarder's per-face
+/// table), not on this session. So an inbound aliased expression falls to
+/// [`crate::stats::StatSpace::User`], the decided default
+/// [`crate::network_message::stats_class`] documents. Passing a resolver that
+/// answers `None` states that rather than reaching for the wrong table: the
+/// session's OWN outbound space would resolve the peer's ids against our
+/// declarations, which is not a partial answer but a wrong one.
+#[cfg(feature = "codec-frame")]
+fn count_rx_network_messages<R: SessionRuntime, T: TimeSource>(
+    _actions: &SessionLinkActions<R, T>,
+    messages: alloc::vec::Vec<crate::network_message::NetworkMessage>,
+) -> alloc::vec::Vec<crate::network_message::NetworkMessage> {
+    #[cfg(feature = "transport-stats")]
+    for msg in &messages {
+        let class = crate::network_message::stats_class(msg, |_id| None);
+        _actions.stats.inc_rx_network(&class);
+    }
+    messages
+}
+
 /// Drive one already-polled `LinkEvent` through the inbound chain so the
 /// engine-free session FSM advances. The synchronous core of
 /// `wz-runtime-tokio::poll_and_dispatch_one` (whose sole `.await` —
@@ -165,7 +198,7 @@ fn dispatch_unit<R: SessionRuntime, T: TimeSource>(
                 Ok(messages) => DriverLoopOutcome::FramePayload {
                     reliable: true,
                     sn: 0,
-                    messages,
+                    messages: count_rx_network_messages(actions, messages),
                     has_ext: false,
                     extensions: Vec::new(),
                     // R311y221 — the lowlatency lean wire carries no Frame
@@ -545,7 +578,7 @@ fn dispatch_unit<R: SessionRuntime, T: TimeSource>(
                         Ok(messages) => DriverLoopOutcome::FramePayload {
                             reliable,
                             sn,
-                            messages,
+                            messages: count_rx_network_messages(actions, messages),
                             has_ext,
                             extensions,
                             // R311y221 — the true decoded band (already

@@ -1754,12 +1754,11 @@ mod tests {
     fn metrics_reply_appends_the_transport_stats_block() {
         let mut out = RecordingReply::default();
         let view = admin_view("@/a1b2/peer/metrics");
-        let stats = crate::stats::TransportStatsReport {
-            tx_bytes: 140,
-            tx_msgs: 2,
-            rx_bytes: 12,
-            rx_msgs: 1,
-        };
+        let mut stats = crate::stats::TransportStatsReport::default();
+        stats.tx.bytes = 140;
+        stats.tx.t_msgs = 2;
+        stats.rx.bytes = 12;
+        stats.rx.t_msgs = 1;
         let _ = answer_admin_query(
             &view,
             &mut out,

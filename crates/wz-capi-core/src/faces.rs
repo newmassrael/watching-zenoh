@@ -85,7 +85,8 @@ use wz_runtime_tokio::session::{
     TokioSession,
 };
 use wz_runtime_tokio::session_glue::{
-    new_session_actions, BoxedLinkDriver, InterceptorLink, IterationEvent, SessionLinkActions,
+    new_session_actions, BoxedLinkDriver, InterceptorLink, IterationEvent, LinkSendOutcome,
+    SessionLinkActions,
 };
 use wz_runtime_tokio::sink::SampleView;
 use wz_runtime_tokio::sync::Mutex as WzMutex;
@@ -675,7 +676,9 @@ fn face_matching_callback(
 struct InertLinkDriver;
 
 impl BoxedLinkDriver for InertLinkDriver {
-    fn send_blocking(&self, _bytes: &[u8], _reliability: Reliability) {}
+    fn send_blocking(&self, _bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
+        LinkSendOutcome::Sent
+    }
     fn open_blocking(&self) {}
     fn close_blocking(&self) {}
 }

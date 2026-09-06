@@ -39,6 +39,7 @@ use crate::{poll_framed, LinkDriver, LinkEvent, ReadState, Reliability, TxFrame}
 use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::link::LinkEndpoints;
 use wz_session_core::link::LinkSubject;
+use wz_session_core::link::{LinkDropCause, LinkSendOutcome};
 
 /// Inbound read half of a split byte-stream link — owns the read half `R`
 /// (any `AsyncRead`) and impls [`LinkDriver`] with `poll_event` reading one
@@ -180,7 +181,7 @@ impl BoxedLinkDriver for StreamWriteDriver {
         self.endpoints.as_ref()
     }
 
-    fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) {
+    fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
         if bytes.len() > u16::MAX as usize {
             // Oversize: drop with a warn rather than overflow the length prefix.
             // zenoh-pico's Z_BATCH_UNICAST_SIZE ceiling is 65535 and the
@@ -190,7 +191,7 @@ impl BoxedLinkDriver for StreamWriteDriver {
                 "wz-runtime-tokio: outbound frame {} bytes > 65535; dropping",
                 bytes.len()
             );
-            return;
+            return LinkSendOutcome::Dropped(LinkDropCause::Oversize);
         }
         let wire = if self.lowlatency.load(Ordering::Acquire) {
             // transport-lowlatency — 4-byte LE u32 length prefix + payload (zenoh's
@@ -210,7 +211,9 @@ impl BoxedLinkDriver for StreamWriteDriver {
         };
         if let Err(e) = self.tx.send(wire) {
             log::warn!("wz-runtime-tokio: outbound channel closed; dropping frame ({e})");
+            return LinkSendOutcome::Dropped(LinkDropCause::WriterGone);
         }
+        LinkSendOutcome::Sent
     }
 
     fn open_blocking(&self) {
@@ -286,8 +289,18 @@ mod tests {
             LinkSubject::UNKNOWN,
             None,
         );
-        driver.send_blocking(&vec![0u8; 65_536], Reliability::Reliable);
-        driver.send_blocking(b"ok", Reliability::Reliable);
+        // R2371 — the drop is now stated DIRECTLY by the return value, where it
+        // used to be inferred from what did NOT arrive on the channel. Both
+        // assertions are kept: the outcome is the driver's own claim, the
+        // channel read is the independent evidence for it.
+        assert_eq!(
+            driver.send_blocking(&vec![0u8; 65_536], Reliability::Reliable),
+            LinkSendOutcome::Dropped(LinkDropCause::Oversize)
+        );
+        assert_eq!(
+            driver.send_blocking(b"ok", Reliability::Reliable),
+            LinkSendOutcome::Sent
+        );
         // Only the in-range frame reached the channel, u16-framed at enqueue
         // (2-byte LE len=2 + "ok"); the oversize frame was dropped.
         assert_eq!(

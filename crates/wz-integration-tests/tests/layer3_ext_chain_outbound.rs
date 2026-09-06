@@ -24,7 +24,9 @@ use wz_codecs::ext_unit::ExtUnit;
 use wz_codecs::ext_zbuf::ExtZbuf;
 use wz_codecs::ext_zint::ExtZint;
 use wz_runtime_tokio::runtime_impl::TokioTime;
-use wz_runtime_tokio::session_glue::{new_session_actions, BoxedLinkDriver, ExtChainRole};
+use wz_runtime_tokio::session_glue::{
+    new_session_actions, BoxedLinkDriver, ExtChainRole, LinkSendOutcome,
+};
 use wz_runtime_tokio::Reliability;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
 use zenoh_pico_sys::{
@@ -65,7 +67,9 @@ const ENTRY2_ZBUF_VAL: [u8; 2] = [0xAB, 0xCD];
 /// the encode-only path in this test never reaches `send_blocking`.
 struct NoopDriver;
 impl BoxedLinkDriver for NoopDriver {
-    fn send_blocking(&self, _bytes: &[u8], _reliability: Reliability) {}
+    fn send_blocking(&self, _bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
+        LinkSendOutcome::Sent
+    }
     fn open_blocking(&self) {}
     fn close_blocking(&self) {}
 }

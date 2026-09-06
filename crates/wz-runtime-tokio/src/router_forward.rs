@@ -359,7 +359,7 @@ use crate::future_interest::{FutureQablStore, FutureSubStore};
 #[cfg(feature = "routing-interceptor-hotreload")]
 use crate::interceptor::InterceptorKeyexprCache;
 use crate::interceptor::{
-    InterceptorChain, InterceptorConfig, InterceptorContext, InterceptorFlow,
+    InterceptorChain, InterceptorConfig, InterceptorContext, InterceptorFlow, InterceptorVerdict,
 };
 #[cfg(feature = "routing-token-tables")]
 use crate::linkstate_forward::declare_token_wireexpr;
@@ -1350,14 +1350,15 @@ impl RouterForwarder {
     /// [`LinkstateForwarder::admit_inbound`](crate::linkstate_forward::LinkstateForwarder).
     /// Consulted at the top of [`forward`](FaceForwarder::forward) ahead of the
     /// kind-dispatch. Empty chain (no ACL) admits without touching the face table.
-    fn admit_inbound(&self, id: FaceId, msg: &NetworkMessage) -> bool {
+    fn admit_inbound(&self, id: FaceId, msg: &NetworkMessage) -> InterceptorVerdict {
         let chain = self.ingress_interceptors.borrow();
         if chain.is_empty() {
-            return true;
+            return InterceptorVerdict::Admit;
         }
         let faces = self.faces.borrow();
         let Some(face) = faces.get(&id) else {
-            return true; // an unknown face has no relay path anyway
+            // an unknown face has no relay path anyway
+            return InterceptorVerdict::Admit;
         };
         let ctx = RouterFaceContext { face };
         // R2348 (`routing-interceptor-hotreload`) — serve this (face, keyexpr)'s
@@ -1392,7 +1393,12 @@ impl RouterForwarder {
     /// Takes the already-borrowed `state` (not a `FaceId`) because the egress seams
     /// ([`fan_out_tier`](Self::fan_out_tier)) hold the `faces` borrow across the
     /// per-face loop. Empty chain admits without building a context.
-    fn admit_outbound(&self, id: FaceId, state: &RouterFaceState, msg: &NetworkMessage) -> bool {
+    fn admit_outbound(
+        &self,
+        id: FaceId,
+        state: &RouterFaceState,
+        msg: &NetworkMessage,
+    ) -> InterceptorVerdict {
         // `id` is the EGRESS cache key and has no other use, so with the cache
         // feature off it is genuinely unused. Discarded explicitly rather than
         // renamed `_id`: the name is what the call sites read, and a leading
@@ -1401,7 +1407,7 @@ impl RouterForwarder {
         let _ = id;
         let chain = self.egress_interceptors.borrow();
         if chain.is_empty() {
-            return true;
+            return InterceptorVerdict::Admit;
         }
         let ctx = RouterFaceContext { face: state };
         // R2348 — the EGRESS half, and the router's most-consulted seam: this
@@ -1570,9 +1576,19 @@ impl RouterForwarder {
                 // dropped for THIS face (not sent, not counted) and witnessed. The
                 // router twin of `LinkstateForwarder::fan_out`'s `admit_outbound`
                 // gate; empty chain (no ACL) is a no-op fast path.
-                if !self.admit_outbound(*id, state, &msg) {
+                let verdict = self.admit_outbound(*id, state, &msg);
+                if let Some(kind) = verdict.dropped_by() {
                     self.interceptor_dropped
                         .set(self.interceptor_dropped.get() + 1);
+                    // R2371 — the router twin of the linkstate forwarder's
+                    // attribution: charge the drop to the DESTINATION face's own
+                    // session on upstream's per-reason counter.
+                    crate::linkstate_forward::charge_interceptor_drop(
+                        &state.actions,
+                        &msg,
+                        kind,
+                        InterceptorFlow::Egress,
+                    );
                     continue;
                 }
                 if state
@@ -5483,9 +5499,16 @@ impl RouterForwarder {
         // Response / ResponseFinal / prompt final) by the destination's subject —
         // a denied reply is dropped and witnessed, not returned. The other egress
         // seam beside `fan_out_tier`.
-        if !self.admit_outbound(target, state, &msg) {
+        let verdict = self.admit_outbound(target, state, &msg);
+        if let Some(kind) = verdict.dropped_by() {
             self.interceptor_dropped
                 .set(self.interceptor_dropped.get() + 1);
+            crate::linkstate_forward::charge_interceptor_drop(
+                &state.actions,
+                &msg,
+                kind,
+                InterceptorFlow::Egress,
+            );
             return false;
         }
         state
@@ -5892,9 +5915,20 @@ impl FaceForwarder for RouterForwarder {
             // counted as received Push/Query, not routed) and witnessed. The router
             // twin of `LinkstateForwarder::forward`'s admit_inbound gate; the
             // empty-chain fast path (no ACL) is a single predicate read.
-            if !self.admit_inbound(id, message) {
+            let verdict = self.admit_inbound(id, message);
+            if let Some(kind) = verdict.dropped_by() {
                 self.interceptor_dropped
                     .set(self.interceptor_dropped.get() + 1);
+                if let Some(face) = self.faces.borrow().get(&id) {
+                    crate::linkstate_forward::charge_interceptor_drop(
+                        &face.actions,
+                        message,
+                        kind,
+                        InterceptorFlow::Ingress,
+                    );
+                }
+            }
+            if !verdict.is_admitted() {
                 continue;
             }
             match message {

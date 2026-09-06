@@ -336,6 +336,10 @@ fn message_size(msg: &NetworkMessage) -> Option<(LowPassMessage, usize, usize)> 
 }
 
 impl Interceptor for LowPassInterceptor {
+    fn kind(&self) -> super::InterceptorKind {
+        super::InterceptorKind::LowPass
+    }
+
     fn intercept(&self, ctx: &dyn InterceptorContext, msg: &NetworkMessage) -> bool {
         // A kind low-pass does not size is admitted (zenoh's early-return arms).
         let Some((message, payload, attachment)) = message_size(msg) else {

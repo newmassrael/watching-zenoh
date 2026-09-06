@@ -473,11 +473,19 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # UNREACHED moves. `citation_audit` over its OLD reason ALONE answers (9 wz, 0
 # ambiguous, 15 upstream), so the wz pin falls by exactly 9 (364 -> 355) and the
 # AMBIGUOUS pin again does not move at all.
-PIN_REACHED = 65
+# R2371 -- `transport-stats` CLOSED, the same shape a third time and ATTRIBUTED
+# the same way rather than netted. It owns symbols that tests reference, so it
+# sat in REACHED (65 -> 64) and neither UNREACHED nor NO-SYMBOL moves. Running
+# `citation_audit` over its OLD reason ALONE answers (3 wz, 1 ambiguous, 2
+# upstream), so the wz pin falls by exactly 3 (355 -> 352) and -- unlike the two
+# closes above -- the AMBIGUOUS pin DOES move, by exactly 1 (80 -> 79). Its NEW
+# reason's citations are not counted here: this census reads PARTIAL reasons
+# only, and that atom is no longer one.
+PIN_REACHED = 64
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
-PIN_WZ_CITATIONS = 355
-PIN_AMBIGUOUS = 80
+PIN_WZ_CITATIONS = 352
+PIN_AMBIGUOUS = 79
 
 
 class Fatal(Exception):

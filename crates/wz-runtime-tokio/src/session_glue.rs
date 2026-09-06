@@ -246,6 +246,10 @@ pub use wz_session_core::action_trace::ActionTrace;
 // TokioLinkDriverAdapter / UdpWriteDriver / TcpWriteDriver impls + external
 // callers keep naming crate::session_glue::BoxedLinkDriver.
 pub use wz_session_core::link::BoxedLinkDriver;
+// R2371 — the driver-level drop hook. Re-exported alongside the trait because a
+// downstream that implements `BoxedLinkDriver` through this facade needs the
+// outcome type to name its return.
+pub use wz_session_core::link::{LinkDropCause, LinkSendOutcome};
 // R2259 (open-debt item 593) — the two link facts the C link-events plane
 // reports, beside the trait that produces them. `linkstate_forward` already
 // re-exports `InterceptorLink`, but it is a ROUTING module and a consumer that
@@ -286,10 +290,19 @@ impl<D: LinkDriver + Send + 'static> TokioLinkDriverAdapter<D> {
 }
 
 impl<D: LinkDriver + Send + 'static> BoxedLinkDriver for TokioLinkDriverAdapter<D> {
-    fn send_blocking(&self, bytes: &[u8], reliability: Reliability) {
+    fn send_blocking(&self, bytes: &[u8], reliability: Reliability) -> LinkSendOutcome {
         let frame = TxFrame { bytes };
         let mut driver = self.driver.lock().unwrap();
-        let _ = self.handle.block_on(driver.send(&frame, reliability));
+        // R2371 — the async `LinkDriver::send` reports failure as an `Err`, and
+        // a frame the driver could not accept never reaches the wire, which is
+        // the same event `LinkSendOutcome::Dropped` names. `WriterGone` is the
+        // honest cause here: this adapter cannot tell an oversize refusal from
+        // any other driver error, and guessing `Oversize` would put a wrong
+        // reason on a real drop.
+        match self.handle.block_on(driver.send(&frame, reliability)) {
+            Ok(()) => LinkSendOutcome::Sent,
+            Err(_) => LinkSendOutcome::Dropped(LinkDropCause::WriterGone),
+        }
     }
 
     fn open_blocking(&self) {
@@ -4084,6 +4097,7 @@ mod reconnect_tx_tests {
     #[test]
     fn local_swappable_link_redirects_sends_after_swap() {
         use wz_session_core::link::BoxedLinkDriver as _;
+        use wz_session_core::link::LinkSendOutcome;
         use wz_session_core::reconnect::LocalSwappableLink;
         use wz_session_core::reliability::Reliability;
 
@@ -4091,14 +4105,22 @@ mod reconnect_tx_tests {
         let second = crate::test_fixtures::recording_driver();
         let link = LocalSwappableLink::<TokioRuntime>::new(first.clone());
 
-        link.send_blocking(b"frame-a", Reliability::Reliable);
+        // R2371 — the SWAP SEAM forwards the inner driver's outcome, so these
+        // are also the assertion that the forwarding is not swallowing it.
+        assert_eq!(
+            link.send_blocking(b"frame-a", Reliability::Reliable),
+            LinkSendOutcome::Sent
+        );
         assert_eq!(first.frame_count(), 1, "pre-swap emit lands on first");
         assert_eq!(second.frame_count(), 0);
 
         let old = link.swap(second.clone());
         drop(old);
 
-        link.send_blocking(b"frame-b", Reliability::Reliable);
+        assert_eq!(
+            link.send_blocking(b"frame-b", Reliability::Reliable),
+            LinkSendOutcome::Sent
+        );
         assert_eq!(
             first.frame_count(),
             1,

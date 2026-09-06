@@ -322,6 +322,10 @@ fn message_kind(msg: &NetworkMessage) -> Option<DownsamplingMessage> {
 }
 
 impl Interceptor for DownsamplingInterceptor {
+    fn kind(&self) -> super::InterceptorKind {
+        super::InterceptorKind::Downsampling
+    }
+
     fn intercept(&self, ctx: &dyn InterceptorContext, msg: &NetworkMessage) -> bool {
         // A kind zenoh does not throttle is admitted (its `false` arms).
         let Some(message) = message_kind(msg) else {

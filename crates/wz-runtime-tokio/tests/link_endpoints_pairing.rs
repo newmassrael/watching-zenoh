@@ -64,7 +64,7 @@
     )
 ))]
 
-use wz_session_core::link::LinkEndpoints;
+use wz_session_core::link::{LinkEndpoints, LinkSendOutcome};
 use wz_session_core::locator::{parse_any_locator, AnyLocator};
 
 /// Assert both halves of `pair` parse back through wz's own dial-side parser.
@@ -144,7 +144,17 @@ async fn udp_dial_and_demux_faces_report_mirrored_endpoints() {
 
     // UDP has no `accept()`: the demux pump learns a peer only from a datagram, so
     // the dialer must speak before the acceptor exists.
-    dial_out.send_blocking(b"probe", Reliability::BestEffort);
+    //
+    // R2371 — the outcome is ASSERTED rather than discarded. This probe is what
+    // the whole test depends on reaching the acceptor, so a driver that refused
+    // it used to fail the test five seconds later at the accept timeout, with
+    // nothing saying why. The `#[must_use]` on `LinkSendOutcome` is what surfaced
+    // this call site.
+    assert_eq!(
+        dial_out.send_blocking(b"probe", Reliability::BestEffort),
+        LinkSendOutcome::Sent,
+        "the udp driver must accept the probe that teaches the demux pump this peer"
+    );
 
     let (accepted, _peer) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         bound.accept_raw().await
