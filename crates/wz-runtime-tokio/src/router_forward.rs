@@ -880,6 +880,14 @@ pub struct RouterForwarder {
     /// [`future_pushes`](Self#structfield.future_pushes)). Rises once per CLIENT
     /// face told a newly-learned OR completeness-flipped queryable.
     future_qabl_pushes: Cell<usize>,
+    /// R2388 (open-debt item 671) — running total of declarations replayed to a
+    /// face that has just come up, by
+    /// [`replay_declarations_to_new_face`](Self::replay_declarations_to_new_face).
+    /// The witness that separates a FACE-UP replay from the FUTURE pushes above:
+    /// both emit the same unsolicited `DeclareSubscriber`, and without a counter
+    /// of its own a test cannot tell "the router told the new face what it
+    /// already knew" from "the router happened to learn something just then".
+    face_up_replays: Cell<usize>,
     /// §5.21 routing-token-tables (slice-4) — running total of unsolicited FUTURE
     /// `DeclareToken` pushes emitted by [`push_future_token`](Self::push_future_token),
     /// the token twin of [`future_pushes`](Self#structfield.future_pushes). Rises once
@@ -1117,6 +1125,7 @@ impl RouterForwarder {
             #[cfg(feature = "router-multicast-faces")]
             group_subs_advertised_peak: Cell::new(0),
             future_pushes: Cell::new(0),
+            face_up_replays: Cell::new(0),
             future_qabl_pushes: Cell::new(0),
             #[cfg(feature = "routing-token-tables")]
             future_token_pushes: Cell::new(0),
@@ -1251,6 +1260,17 @@ impl RouterForwarder {
     /// raced CURRENT dump.
     pub fn future_pushes_seen(&self) -> usize {
         self.future_pushes.get()
+    }
+
+    /// R2388 (open-debt item 671) — total declarations replayed to faces that
+    /// had just come up
+    /// ([`replay_declarations_to_new_face`](Self::replay_declarations_to_new_face)).
+    /// Separate from [`future_pushes_seen`](Self::future_pushes_seen) on purpose:
+    /// the two emit the SAME unsolicited `DeclareSubscriber`, so a test that
+    /// asserted only the future counter could not tell a face-up replay from a
+    /// subscription the router happened to learn at the same moment.
+    pub fn face_up_replays_seen(&self) -> usize {
+        self.face_up_replays.get()
     }
 
     /// Total unsolicited FUTURE `DeclareQueryable` pushes emitted — the R311y150
@@ -5522,6 +5542,94 @@ impl RouterForwarder {
     /// / [`synthesize_drained_fan_finals`]) hand their per-send `NetworkMessage`
     /// to (`NetworkMessage` is not `Clone`; the one-shot `Option` take feeds the
     /// at-most-once builder — the target face is looked up exactly once).
+    /// R2388 (open-debt item 671) — tell a face that has just come up what this
+    /// router ALREADY knows, unsolicited.
+    ///
+    /// Every other push in this file is triggered by LEARNING something: an
+    /// inbound declaration arrives on one face and is forwarded to the others
+    /// (`push_future_subscription` and its siblings). None of them fires on
+    /// face-up, so a peer that connects AFTER a declaration was learned only
+    /// ever hears about it by ASKING -- and a zenoh-pico peer in PEER mode over
+    /// unicast, whose remote is not a router, never asks: `_z_add_interest`
+    /// (`vendor/zenoh-pico/src/net/primitives.c`) writes on the wire only for a
+    /// client, a router peer, or multicast, and satisfies every other case from
+    /// the declarations the remote PUSHED (`_z_interest_replay_declare`, which
+    /// sits outside that condition). pico assumes the far side pushes, because
+    /// pico pushes -- `_z_interest_push_declarations_to_peer` runs on accept.
+    ///
+    /// Both upstreams do this and neither does it the same way. pico pushes to
+    /// every accepted peer. zenoh repropagates on a NEW TRANSPORT FACE
+    /// (`new_transport_unicast_face` calling `repropagate_subscribers` /
+    /// `_queryables` / `_tokens`), unsolicited -- the declares it emits carry
+    /// `interest_id: None` -- but only toward a north-bound face.
+    ///
+    /// ## Why this does NOT go through the FUTURE-interest store
+    ///
+    /// zenoh's mechanism is to SYNTHESISE an interest for the new face
+    /// (`INITIAL_INTEREST_ID` with `InterestOptions::ALL`) and let the ordinary
+    /// repropagation serve it. That does not port: this crate's future stores
+    /// admit a CLIENT face only and refuse a match-all target on purpose
+    /// ("match-all (target None) is not stored (current-dump parity)"), so
+    /// storing an ALL-interest here would break the invariant the store is
+    /// built on. The emit is therefore direct, and modelled on the one place
+    /// this file already solves the same problem --
+    /// [`re_advertise_self_cross_tier`](Self::re_advertise_self_cross_tier),
+    /// whose docblock says it exists "so a late-joining child converges on
+    /// self's full cross-tier bubble". That is this function's job too; only the
+    /// trigger and the destination differ (a new FACE, not a new tree child).
+    ///
+    /// The declaration carries decl id 0 and no `interest_id`, the same shape
+    /// the re-advertise emits. RESIDUAL, recorded rather than assumed: pico
+    /// keys a publisher's write filter on `(decl_id, peer)`, so whether a
+    /// first push at id 0 is enough for every consumer is not established here.
+    fn replay_declarations_to_new_face(&self, face: FaceId, tier: FaceTier) {
+        for keyexpr in self.derived_cross_tier_subs_into(tier) {
+            match build_declare_subscriber(0, 0, Some(&keyexpr)) {
+                Ok(decl) => {
+                    self.send_one_to_face(face, NetworkMessage::Declare(Box::new(decl)));
+                    self.face_up_replays.set(self.face_up_replays.get() + 1);
+                }
+                Err(e) => log::warn!(
+                    "router forward: face-up sub replay build failed for {keyexpr:?}: {e:?}"
+                ),
+            }
+        }
+        // The QUERYABLE plane, which carries a value the subscriber plane does
+        // not: `derived_cross_tier_qabl_info` is the MERGED completeness the
+        // re-advertise floods, so a late face is told the same thing a late tree
+        // child is rather than a default that a later merge would contradict.
+        for keyexpr in self.derived_cross_tier_qabls_into(tier) {
+            let Some(info) = self.derived_cross_tier_qabl_info(tier, &keyexpr) else {
+                continue;
+            };
+            match build_declare_queryable_with_info(&keyexpr, info) {
+                Ok(decl) => {
+                    self.send_one_to_face(face, NetworkMessage::Declare(Box::new(decl)));
+                    self.face_up_replays.set(self.face_up_replays.get() + 1);
+                }
+                Err(e) => log::warn!(
+                    "router forward: face-up qabl replay build failed for {keyexpr:?}: {e:?}"
+                ),
+            }
+        }
+        // The TOKEN plane. zenoh repropagates tokens on a new face alongside the
+        // other two (`repropagate_tokens`), and pico's accept-time push carries
+        // `_z_interest_send_decl_token`, so leaving it out would make this the
+        // only one of the three planes a late face never hears about.
+        #[cfg(feature = "routing-token-tables")]
+        for keyexpr in self.derived_cross_tier_tokens_into(tier) {
+            match build_declare_token(0, 0, Some(&keyexpr)) {
+                Ok(decl) => {
+                    self.send_one_to_face(face, NetworkMessage::Declare(Box::new(decl)));
+                    self.face_up_replays.set(self.face_up_replays.get() + 1);
+                }
+                Err(e) => log::warn!(
+                    "router forward: face-up token replay build failed for {keyexpr:?}: {e:?}"
+                ),
+            }
+        }
+    }
+
     fn send_one_to_face(&self, face: FaceId, msg: NetworkMessage) {
         let mut carrier = Some(msg);
         self.send_to_face(face, true, || {
@@ -5586,6 +5694,7 @@ impl FaceForwarder for RouterForwarder {
                 dirty.set(true);
             }
         }
+        self.replay_declarations_to_new_face(id, tier);
     }
 
     fn deregister(&self, id: FaceId) {
@@ -6262,6 +6371,47 @@ mod tests {
         NetworkMessage::Declare(Box::new(
             build_declare_subscriber(0, 0, Some(keyexpr)).expect("build declare"),
         ))
+    }
+
+    /// R2388 (open-debt item 671) — a face that comes up LATE is told what this
+    /// router already knew, without asking.
+    ///
+    /// Every other proactive push in this file fires when the router LEARNS a
+    /// declaration, so a peer that connects afterwards heard nothing unless it
+    /// sent an Interest. A zenoh-pico peer in PEER mode over unicast, whose
+    /// remote is not a router, never sends one -- it assumes the far side
+    /// pushes on accept, because that is what pico itself does.
+    ///
+    /// The order is the whole test: the subscription is learned BEFORE the peer
+    /// face exists, so nothing but a face-up replay can carry it. The counter is
+    /// asserted at 0 first for the same reason -- a `> 0` at the end proves the
+    /// replay ran rather than that some other push happened to fire, since both
+    /// paths emit the identical unsolicited `DeclareSubscriber`.
+    #[test]
+    fn a_late_face_is_told_the_subscriptions_the_router_already_had() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (client, _cs) = face(zid(0xAA), WIRE_CLIENT);
+        fwd.register(FaceId(0), &client);
+        forward_one(&fwd, FaceId(0), declare_sub("demo/data"));
+        assert_eq!(
+            fwd.face_up_replays_seen(),
+            0,
+            "no face has come up since the subscription was learned"
+        );
+
+        // The late joiner: it declared no interest and asked for nothing.
+        let (peer, sink_p) = face(zid(0xBB), WIRE_PEER);
+        sink_p.reset();
+        fwd.register(FaceId(1), &peer);
+
+        assert!(
+            fwd.face_up_replays_seen() > 0,
+            "the router must replay what it already knew to a face that just came up"
+        );
+        assert!(
+            sink_p.frame_count() > 0,
+            "the replay must reach the wire, not only the counter"
+        );
     }
 
     #[test]

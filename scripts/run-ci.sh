@@ -5676,9 +5676,15 @@ layer_c1ay_cargo_test_router_hat() {
     # R311y767 (carry N71) — every arm moves by ONE: the_router_emits_no_alias_of
     # _its_own is NOT cfg-gated (only the token leg INSIDE it is), so unlike the
     # y464 step below it lands in all six feature resolutions.
-    _runci_guarded_test "C1AY router_forward 137" 137 \
+    # R2388 (open-debt item 671) — every arm moves by ONE again:
+    # `a_late_face_is_told_the_subscriptions_the_router_already_had` carries no
+    # cfg, so it lands in all seven feature resolutions. MEASURED on two of them
+    # rather than inferred from the diff -- the bare arm printed 138 and the
+    # token arm 175 -- because a `#[cfg]`-hidden case is exactly what counting a
+    # diff gets wrong.
+    _runci_guarded_test "C1AY router_forward 138" 138 \
         cargo test -p wz-runtime-tokio --features routing-router-hat --lib router_forward --quiet || return 1
-    _runci_guarded_test "C1AY router_forward 139" 139 \
+    _runci_guarded_test "C1AY router_forward 140" 140 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,transport-qos --lib router_forward --quiet || return 1
     # R2346 — 140 -> 141, and ONLY this arm moves: the added test is
     # `#[cfg(feature = "access-acl")]`, so the five sibling resolutions that do
@@ -5699,7 +5705,7 @@ layer_c1ay_cargo_test_router_hat() {
     # unattributable message, which would strand a face that has merely not
     # finished its handshake. Still `#[cfg(feature = "access-acl")]`, so the
     # five sibling resolutions are unchanged for R2346's reason.
-    _runci_guarded_test "C1AY router_forward 142" 142 \
+    _runci_guarded_test "C1AY router_forward 143" 143 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,access-acl --lib router_forward --quiet || return 1
     # R2348 — a NEW arm, and it exists because without it this round's central
     # tests would have been compiled out while the lane stayed green. The router
@@ -5717,17 +5723,17 @@ layer_c1ay_cargo_test_router_hat() {
     # before the cache is consulted (the same vacuity that made R311y508's first
     # cross-impl leg prove nothing), so a cache test with no policy installed
     # tests nothing.
-    _runci_guarded_test "C1AY router_forward hotreload 145" 145 \
+    _runci_guarded_test "C1AY router_forward hotreload 146" 146 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-interceptor-hotreload,access-acl --lib router_forward --quiet || return 1
     # R311y464 — 171 -> 173: y463 added token_current_future_interest_replies_with_a
     # _client_token and token_current_future_interest_matches_a_wildcard_target, both
     # cfg(routing-token-tables), so ONLY this arm of the six moves. The other five
     # feature sets compile them out, which is why they still read 137/139/140/143/137.
-    _runci_guarded_test "C1AY router_forward 174" 174 \
+    _runci_guarded_test "C1AY router_forward 175" 175 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables --lib router_forward --quiet || return 1
-    _runci_guarded_test "C1AY router_forward 143" 143 \
+    _runci_guarded_test "C1AY router_forward 144" 144 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,transport-multicast --lib router_forward --quiet || return 1
-    _runci_guarded_test "C1AY router_forward 137" 137 \
+    _runci_guarded_test "C1AY router_forward 138" 138 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,adminspace-router-linkstate --lib router_forward --quiet || return 1
     # R311y786 (§5.21 router-connect-reconcile) — the re-dial BACKOFF. Until y786
     # the loop slept a `const RECONNECT_BACKOFF_MS = 1000`, so an unreachable
