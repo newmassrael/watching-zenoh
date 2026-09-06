@@ -338,38 +338,43 @@ pub fn resolve_wireexpr_in(
 /// Every other wireexpr-bearing message carries `M` in its own header, so
 /// [`resolve_wireexpr_in`] reads the space off the variant tag and is right by
 /// construction. `D_KEXPR` does not. Bit 6 of its header is RESERVED —
-/// `zenoh-protocol/src/network/declare.rs:230-234` declares only `N` at `1<<5`
-/// and `Z` at `1<<7`, with `1<<6` commented out as `X: Reserved` — and zenoh's
-/// WireExpr codec drops the field on the way out (`mapping: _`,
-/// `zenoh-codec/src/core/wire_expr.rs:34-38`) and reads it back as
-/// `Mapping::DEFAULT` (`zenoh-codec/src/core/wire_expr.rs:78`). So on THIS
-/// message the arm is a DECODER CONSTANT, not a wire fact — and the two
-/// upstreams chose OPPOSITE constants:
+/// `commons/zenoh-protocol/src/network/declare.rs` @ `// pub const X: u8 = 1 << 6; // 0x40 Reserved`
+/// leaves that message's flag module only `N` and `Z` — and zenoh's WireExpr
+/// codec drops the field on the way out
+/// (`commons/zenoh-codec/src/core/wire_expr.rs` @ `mapping: _,`) and reads it back as
+/// the default (`commons/zenoh-codec/src/core/wire_expr.rs` @ `mapping: Mapping::DEFAULT,`).
+/// So on THIS message the arm is a DECODER CONSTANT, not a wire fact — and the
+/// two upstreams chose OPPOSITE constants:
 ///
-/// - **zenoh** leaves the decoded `mapping` at `Mapping::DEFAULT`, which is
-///   `Receiver` (`zenoh-protocol/src/network/mod.rs:52-59`), so `register_expr`
-///   resolves the scope through `Tables::get_mapping(face, scope, Receiver)`
-///   into `FaceState::local_mappings` — the ids the RECEIVER declared
-///   (`zenoh/src/net/routing/dispatcher/resource.rs:942-953`,
-///   `zenoh/src/net/routing/dispatcher/tables.rs:227-237` and
-///   `zenoh/src/net/routing/dispatcher/face.rs:221-230`).
-/// - **zenoh-pico** decodes it with `remote_mapping = true` and stamps the peer
-///   token (`vendor/zenoh-pico/src/protocol/codec/declarations.c:181-186` into
-///   `vendor/zenoh-pico/src/protocol/codec/message.c:127-133`), so
-///   `_z_register_resource_inner` picks `peer->_remote_resources` — the
-///   SENDER's space (`vendor/zenoh-pico/src/session/resource.c:130-142`).
+/// - **zenoh** leaves the decoded `mapping` at its default, which IS `Receiver`
+///   (`commons/zenoh-protocol/src/network/mod.rs` @ `pub const DEFAULT: Self = Self::Receiver;`),
+///   so `zenoh/src/net/routing/dispatcher/resource.rs` @ `pub(crate) fn register_expr(`
+///   resolves the scope through
+///   `zenoh/src/net/routing/dispatcher/tables.rs` @ `0 => Some(&self.root_res),`
+///   into
+///   `zenoh/src/net/routing/dispatcher/face.rs` @ `Mapping::Receiver => self.local_mappings.get(prefixid),`
+///   — the ids the RECEIVER declared.
+/// - **zenoh-pico** decodes the same field with `remote_mapping` true
+///   (`vendor/zenoh-pico/src/protocol/codec/declarations.c` @ `z_result_t _z_decl_kexpr_decode(`,
+///   into
+///   `vendor/zenoh-pico/src/protocol/codec/message.c` @ `ke->_mapping = (remote_mapping) ? mapping : _Z_KEYEXPR_MAPPING_LOCAL;`)
+///   and stamps the peer token, so
+///   `vendor/zenoh-pico/src/session/resource.c` @ `_z_resource_slist_t *parent_resources =`
+///   reads the peer's remote resources — the SENDER's space.
 ///
 /// wz's generated decoder pins the `WireexprLocal` arm
-/// (`out/wz-codecs/decl_kexpr.rs:75` passes the arm selector `0x1u8` as a
-/// literal), which is pico's answer. NEITHER upstream ever EMITS a non-zero
-/// scope here — zenoh's two producers write `scope: 0`
-/// (`zenoh/src/api/session.rs:1539-1545` literally, and
-/// `zenoh/src/net/routing/dispatcher/resource.rs:710-711` through
-/// `impl From<String> for WireExpr`, which pins `scope: 0` at
-/// `zenoh-protocol/src/core/wire_expr.rs:209-217`); pico's two write
-/// `Z_RESOURCE_ID_NONE` (`vendor/zenoh-pico/src/net/primitives.c:96-103`) and
-/// `_z_keyexpr_alias_to_wire`, which leaves `_id` null
-/// (`vendor/zenoh-pico/src/session/keyexpr.c:500-504`) — so nothing has ever
+/// (the generated `decl_kexpr` decoder under `out/` passes the arm selector
+/// `0x1u8` as a literal), which is pico's answer. NEITHER upstream EMITS a non-zero
+/// scope here — zenoh's two producers write scope 0
+/// (`zenoh/src/api/session.rs` @ `pub(crate) fn declare_prefix<'a>(` literally,
+/// and `zenoh/src/net/routing/dispatcher/resource.rs` @ `pub fn decl_key(`
+/// through `commons/zenoh-protocol/src/core/wire_expr.rs` @ `impl From<String> for WireExpr<'_> {`,
+/// which pins it); pico's two set the declared wireexpr's id to its own
+/// no-mapping sentinel
+/// (`vendor/zenoh-pico/src/net/primitives.c` @ `z_result_t _z_declare_resource(`)
+/// and go through
+/// `vendor/zenoh-pico/src/session/keyexpr.c` @ `_z_wireexpr_t _z_keyexpr_alias_to_wire(`,
+/// which leaves the id null — so nothing has ever
 /// exercised the disagreement. What it means is that the ARM CANNOT BE TRUSTED
 /// TO NAME A SPACE on this message, so this resolver does not ask it. It
 /// consults BOTH spaces and answers only where they cannot disagree:

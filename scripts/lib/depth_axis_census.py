@@ -487,10 +487,14 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # REACHED / UNREACHED / NO-SYMBOL cannot move; the wz count went 352 -> 354 on the
 # first draft of those corrections and came back to 352 when their upstream
 # citations were removed. They were removed because `upstream_citation_anchor_gate`
-# refused them: `net/runtime/adminspace.rs` is a path WITHOUT its root, both
+# refused them: the adminspace runtime module was named WITHOUT its root, both
 # root-less ratchets are exactly on budget, and that gate's instruction is to
 # repair the citation rather than raise the budget. The facts those sentences
 # rest on are cited, with their roots, earlier in each reason.
+# ⚠ R2385 -- the sentence above HAD WRITTEN THAT PATH OUT while explaining its
+# removal, so it re-entered the very residue it was describing. Fourth sighting
+# of the class (R2241, R2318, R2371, here), and the first in THIS file. Described
+# now, never written. It is one of the occurrences debt 667 enumerates.
 # R2385 -- `declare-keyexpr` CLOSED, and the pins move for TWO reasons at once,
 # which is why both are written down instead of one number being adjusted.
 #

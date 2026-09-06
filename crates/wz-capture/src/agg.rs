@@ -618,7 +618,8 @@ impl KeyexprSpaces {
     ///
     /// [`Self::resolve`] reads the space off the variant tag, which is the `M`
     /// bit for every message that HAS one. `D_KEXPR` has none: bit 6 of its
-    /// header is Reserved (`zenoh-protocol/src/network/declare.rs:230-234`), so
+    /// header is Reserved
+    /// (`commons/zenoh-protocol/src/network/declare.rs` @ `// pub const X: u8 = 1 << 6; // 0x40 Reserved`), so
     /// the tag on this one wireexpr is a decoder constant — pico's `remote`
     /// against zenoh's `Receiver`, opposite answers, neither ever emitted. The
     /// session plane's rule is
@@ -2116,7 +2117,7 @@ pub(crate) mod tests {
     ///
     /// The arm is `WireexprLocal` because that is what wz's decoder yields for
     /// EVERY inbound DeclKexpr — the D_KEXPR header has no bit 6 to derive it
-    /// from, so `out/wz-codecs/decl_kexpr.rs` passes the selector as a literal.
+    /// from, so the generated `decl_kexpr` decoder passes it as a literal.
     /// The fixture is therefore the wire shape, not a choice.
     fn declared(
         id: u64,
