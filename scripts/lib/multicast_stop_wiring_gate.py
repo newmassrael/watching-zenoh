@@ -174,6 +174,48 @@ def line_of(src: str, offset: int) -> int:
     return src.count("\n", 0, offset) + 1
 
 
+# The block openers that REPEAT. `loop` is what a group face uses; `while` and
+# `for` are accepted because the property under test is "this drive call can run
+# more than once", and refusing a correct `while !stopped` shape would push a
+# future author to satisfy the gate rather than the requirement.
+REPEATING_BLOCK = re.compile(r"\b(loop|while|for)\s*$")
+
+
+def inside_repeating_block(src: str, offset: int) -> bool:
+    """Is `offset` lexically inside a `loop` / `while` / `for` body?
+
+    Walks OUTWARD from the call: scanning backwards, every `}` passed is a block
+    that closed before us (skip to its `{`), and every `{` reached at depth zero
+    is a block that ENCLOSES us. If any enclosing opener repeats, the call can
+    run more than once.
+
+    There is no need to stop at the function body: the depth accounting already
+    prevents escaping into a SIBLING function, because that function's closing
+    `}` is passed on the way out and its own `{` is consumed matching it. So the
+    walk simply runs out of enclosing blocks and answers no.
+
+    Text-level, like the rest of this gate: a `loop` inside a string literal
+    would fool it. That is the same exposure the existing checks carry and the
+    same reason it is acceptable -- this reads wz's own rustfmt'd source, not
+    hostile input, and the failure direction is a false PASS on source no one
+    writes by accident.
+    """
+    depth = 0
+    i = offset - 1
+    while i >= 0:
+        ch = src[i]
+        if ch == "}":
+            depth += 1
+        elif ch == "{":
+            if depth == 0:
+                if REPEATING_BLOCK.search(src[:i].rstrip()):
+                    return True
+            else:
+                depth -= 1
+        i -= 1
+    return False
+
+
 def entry_points(files: list[Path]) -> dict[str, bool]:
     """name -> is it shutdown-capable, read from each declaration's signature."""
     found: dict[str, bool] = {}
@@ -229,6 +271,23 @@ def audit(repo: Path) -> tuple[list[str], list[str], dict[str, bool]]:
                     f"{where} is shutdown-CAPABLE but passes `None` -- capability "
                     f"is not wiring; hand it a signal"
                 )
+                continue
+            # R2376 (open-debt item 15, `session-reconnect`) — REJOIN wiring, on
+            # the same derived population and for the same reason the stop check
+            # exists: a shipped face that runs its drive loop ONCE cannot come
+            # back from a `LinkLost`, and `cargo test` cannot fail on a missing
+            # `loop` any more than it could on a missing stop signal. Both group
+            # faces had exactly this shape -- bind once, drive once, return the
+            # outcome to a host that had already spawned and forgotten them --
+            # so an interface that dropped and returned took the face out for the
+            # life of the process.
+            if not inside_repeating_block(src, m.start()):
+                violations.append(
+                    f"{where} runs its unbounded drive ONCE -- the call is not "
+                    f"inside a loop, so a `LinkLost` ends this face permanently "
+                    f"and nothing re-joins the group (pico re-arms the same "
+                    f"reopen task from multicast lease failure)"
+                )
     return population, violations, points
 
 
@@ -265,18 +324,22 @@ def main() -> int:
     if violations:
         for v in violations:
             print(f"multicast-stop-wiring: {v}", file=sys.stderr)
+        # R2376 — "cannot be stopped by their host" was accurate while that was
+        # the only check; it is not now, and a summary that mis-describes its own
+        # violations is how a reader learns to distrust the line rather than the
+        # code. The per-violation lines above say which property failed.
         print(
             f"multicast-stop-wiring: FAIL -- {len(violations)} of "
-            f"{len(population)} unbounded shipped multicast drive loop(s) "
-            f"cannot be stopped by their host.",
+            f"{len(population)} unbounded shipped multicast drive loop(s) are "
+            f"not correctly wired to their host's lifecycle.",
             file=sys.stderr,
         )
         return 1
 
     print(
         f"multicast-stop-wiring: OK -- {len(population)} unbounded shipped "
-        f"multicast drive loop(s), all stoppable by their host "
-        f"({len(points)} entry point(s) read)."
+        f"multicast drive loop(s), all stoppable by their host and all able to "
+        f"re-join a lost group ({len(points)} entry point(s) read)."
     )
     return 0
 

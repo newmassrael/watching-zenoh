@@ -924,6 +924,13 @@ pub fn spawn_router_mcast_egress(
         // the `IP_MULTICAST_IF` pin when `#iface=` names one, so an unnarrowed
         // egress is unchanged and a narrowed one fails LOUDLY here rather than
         // sending out an interface the deploy did not name.
+        let clock = TokioTime::new();
+        // R2376 — the FIRST bind is the host's own call and its failure is
+        // reported as it always was; every LATER one is a re-join. The
+        // distinction matters: a face that never came up is a deploy error the
+        // operator must see, while a face that came up and lost its link is the
+        // transient this loop exists to ride out.
+        let mut rejoin = GroupRejoin::new("router multicast egress");
         let mut driver =
             match UdpDriver::bind_multicast_tx_v4(group, port, opts.as_socket_config()).await {
                 Ok(driver) => driver,
@@ -937,11 +944,16 @@ pub fn spawn_router_mcast_egress(
                     return None;
                 }
             };
-        let mut dispatcher =
-            MulticastDispatcher::<MCAST_MAX_PEERS>::new(MulticastConfig::new(params.lease_ms));
-        let clock = TokioTime::new();
-        Some(
-            drive_multicast_session_with_shutdown(
+        loop {
+            // A FRESH dispatcher per join — pico clears the transport
+            // (`_z_transport_clear`) before its reopen task re-enters `_z_open`,
+            // and for the same reason: the peer table describes members reached
+            // over the link that just died. Carrying it across would re-announce
+            // a group membership this face can no longer observe, and every
+            // entry would sit there until its lease aged out.
+            let mut dispatcher =
+                MulticastDispatcher::<MCAST_MAX_PEERS>::new(MulticastConfig::new(params.lease_ms));
+            let outcome = drive_multicast_session_with_shutdown(
                 &mut dispatcher,
                 MulticastDriveConfig {
                     params: &params,
@@ -958,10 +970,161 @@ pub fn spawn_router_mcast_egress(
                 &mut rx,
                 &mut shutdown,
             )
-            .await,
-        )
+            .await;
+            let Some(delay) = rejoin.wait_for(&outcome) else {
+                return Some(outcome);
+            };
+            driver = match rejoin_group_driver(
+                || UdpDriver::bind_multicast_tx_v4(group, port, opts.as_socket_config()),
+                &clock,
+                &mut rejoin,
+                &mut shutdown,
+                delay,
+            )
+            .await
+            {
+                Some(driver) => driver,
+                // The host stopped the face while it was down. Report the loss
+                // that took it down, not a synthetic stop: nothing re-joined, so
+                // no departure was announced on the wire.
+                None => return Some(outcome),
+            };
+        }
     });
     (tx, McastFaceStop { signal, task })
+}
+
+/// R2376 (open-debt item 15, `session-reconnect`) — the group face's REJOIN
+/// pacing, shared by the egress and ingress spawners.
+///
+/// # What was missing
+///
+/// Both group faces bound their socket ONCE, outside their drive loop, and
+/// returned the loop's [`MulticastOutcome`] straight to the host. So a
+/// `LinkLost` — an interface going down and coming back, the ordinary case this
+/// exists for — ended the face for the lifetime of the process. Nothing
+/// re-joined, and nothing said so beyond one log line from a task that was
+/// already gone.
+///
+/// pico does the opposite at the same point: `_zp_multicast_failed_result`
+/// (`vendor/zenoh-pico/src/transport/multicast/lease.c`) clears the transport
+/// and arms `_z_client_reopen_task_fn` — the SAME reopen task its unicast lease
+/// failure arms — which re-enters `_z_open` and rebuilds the multicast
+/// transport. The retry is the identical 1s re-arm.
+///
+/// # Why a struct and not a loop
+///
+/// The two spawners differ in what they drive (`_with_membership` versus
+/// `_with_shutdown`) and in the channels their closures capture, so a shared
+/// DRIVER would have to be generic over a closure returning a future that
+/// mutably borrows its environment — the shape that fights the borrow checker
+/// for no gain. What is genuinely common is the DECISION: is this outcome worth
+/// re-joining for, and how long should the face wait first. That is what lives
+/// here, so the two loops cannot drift on the part that carries the reasoning.
+#[cfg(all(feature = "transport-multicast", feature = "transport-link-udp"))]
+struct GroupRejoin {
+    period: crate::retry_period::RetryPeriod,
+    label: &'static str,
+}
+
+#[cfg(all(feature = "transport-multicast", feature = "transport-link-udp"))]
+impl GroupRejoin {
+    /// The face's retry schedule. zenoh's own shipped default — 1000 / 4000 /
+    /// x2 — rather than pico's flat 1s, and the divergence is deliberate: a
+    /// multicast face re-joins by re-binding a SOCKET, so a down interface
+    /// makes every attempt fail at the same syscall. pico's flat re-arm is a
+    /// per-session task on a device with one link; a router holding a group
+    /// face on a flapping NIC would spin at 1 Hz for as long as the outage
+    /// lasts. Growth bounded by the same 4s ceiling upstream uses keeps the
+    /// worst-case rejoin latency inside the 5s group lease.
+    fn new(label: &'static str) -> Self {
+        Self {
+            period: crate::retry_period::RetryPolicy::ZENOH_DEFAULT.period(),
+            label,
+        }
+    }
+
+    /// Whether `outcome` is worth re-joining for, and the wait before trying.
+    ///
+    /// `LinkLost` alone. The other two are NOT failures of the link:
+    /// [`MulticastOutcome::Stopped`] is the host's own signal (pico's reopen
+    /// task exits the same way, on an emptied session config) and
+    /// [`MulticastOutcome::IterationLimit`] is the test guard, which production
+    /// never arms — re-joining on either would turn a graceful stop into an
+    /// unstoppable face.
+    fn wait_for(&mut self, outcome: &MulticastOutcome) -> Option<u64> {
+        match outcome {
+            MulticastOutcome::LinkLost(cause) => {
+                let delay = self.period.next_ms();
+                log::warn!(
+                    "{}: group face lost ({cause:?}); re-joining in {delay}ms",
+                    self.label
+                );
+                Some(delay)
+            }
+            MulticastOutcome::Stopped | MulticastOutcome::IterationLimit => None,
+        }
+    }
+
+    /// The wait after a failed re-BIND, which is the same schedule: a join that
+    /// cannot be installed is the same outage as a link that dropped, and
+    /// giving up here would leave the face permanently absent for a transient
+    /// `ENETDOWN` — precisely the defect this type removes, one syscall over.
+    fn wait_for_bind_failure(&mut self, err: &std::io::Error) -> u64 {
+        let delay = self.period.next_ms();
+        log::warn!(
+            "{}: group re-join failed ({err}); retrying in {delay}ms",
+            self.label
+        );
+        delay
+    }
+}
+
+/// R2376 — wait out `first_delay`, then re-bind the group face, retrying until
+/// it comes back or the host stops it.
+///
+/// `bind` is the CALLER's own bind, handed in as a closure rather than selected
+/// from an enum here. The two faces bind differently — RX installs the group
+/// membership, TX takes an ephemeral port and pins `IP_MULTICAST_IF` — and the
+/// first shape of this helper named the halves in an enum, which cost a variant
+/// that no build using only the egress face could construct. Taking the bind
+/// itself is both smaller and open: a third kind of face needs no arm added.
+///
+/// Returns `None` when the host stopped the face while it was down, which is
+/// the caller's signal to report the ORIGINAL loss rather than a re-join it
+/// never made. Sleeping is RACED against the stop signal rather than serialized
+/// after it, so a shutdown during a long outage is observed at the signal
+/// instead of one backoff later — a face that ignores its stop until its next
+/// retry is a host that cannot shut down promptly, and the delay grows.
+#[cfg(all(feature = "transport-multicast", feature = "transport-link-udp"))]
+async fn rejoin_group_driver<F, Fut>(
+    mut bind: F,
+    clock: &crate::runtime_impl::TokioTime,
+    rejoin: &mut GroupRejoin,
+    shutdown: &mut tokio::sync::watch::Receiver<bool>,
+    first_delay: u64,
+) -> Option<crate::UdpDriver>
+where
+    F: FnMut() -> Fut,
+    Fut: core::future::Future<Output = std::io::Result<crate::UdpDriver>>,
+{
+    let mut delay = first_delay;
+    loop {
+        tokio::select! {
+            _ = clock.sleep(delay) => {}
+            // `changed()` errors only when every sender is gone, which is the
+            // host dropping the face's stop handle — the RAII half of
+            // `McastFaceStop`, and just as much a stop as a signalled one.
+            _ = shutdown.changed() => return None,
+        }
+        match bind().await {
+            Ok(driver) => {
+                log::info!("{}: group face re-joined", rejoin.label);
+                return Some(driver);
+            }
+            Err(e) => delay = rejoin.wait_for_bind_failure(&e),
+        }
+    }
 }
 
 /// R311y194 — router-multicast-faces INGRESS slice (I1): spawn the multicast group
@@ -1093,6 +1256,9 @@ pub fn spawn_router_mcast_ingress(
     // split at the same seam (`io/zenoh-transport/src/multicast/link.rs`
     // @ `ZRuntime::RX.spawn(async move {`).
     let task = WzRuntime::Rx.spawn(async move {
+        // R2376 — see the egress twin: the FIRST bind is a deploy error, every
+        // later one is a re-join of a face that had come up.
+        let mut rejoin = GroupRejoin::new("router multicast ingress");
         let mut driver =
             match UdpDriver::bind_multicast_v4(group, port, opts.as_socket_config()).await {
                 Ok(driver) => driver,
@@ -1104,16 +1270,18 @@ pub fn spawn_router_mcast_ingress(
                     return None;
                 }
             };
-        let mut dispatcher =
-            MulticastDispatcher::<MCAST_MAX_PEERS>::new(MulticastConfig::new(params.lease_ms));
         let clock = TokioTime::new();
         // Egress rides the separate `spawn_router_mcast_egress` helper; this loop is
         // RX-only. `drive_multicast_session` is bidirectional, so hold a dummy
         // outbound sender alive to keep its egress arm parked (a dropped receiver
         // would end the loop).
         let (_dummy_tx, mut dummy_rx) = tokio::sync::mpsc::unbounded_channel();
-        Some(
-            drive_multicast_session_with_membership(
+        loop {
+            // A FRESH dispatcher per join — see the egress twin: the peer table
+            // describes members reached over the link that just died.
+            let mut dispatcher =
+                MulticastDispatcher::<MCAST_MAX_PEERS>::new(MulticastConfig::new(params.lease_ms));
+            let outcome = drive_multicast_session_with_membership(
                 &mut dispatcher,
                 MulticastDriveConfig {
                     params: &params,
@@ -1170,8 +1338,25 @@ pub fn spawn_router_mcast_ingress(
                 },
                 Some(&mut shutdown),
             )
-            .await,
-        )
+            .await;
+            let Some(delay) = rejoin.wait_for(&outcome) else {
+                return Some(outcome);
+            };
+            driver = match rejoin_group_driver(
+                || UdpDriver::bind_multicast_v4(group, port, opts.as_socket_config()),
+                &clock,
+                &mut rejoin,
+                &mut shutdown,
+                delay,
+            )
+            .await
+            {
+                Some(driver) => driver,
+                // Stopped while down — report the loss that took the face out,
+                // not a re-join that never happened. Same contract as egress.
+                None => return Some(outcome),
+            };
+        }
     });
     (
         ingress_rx,
@@ -1303,6 +1488,53 @@ mod tests {
             // tick, advancing the loop to its iteration budget.
             core::future::pending().await
         }
+    }
+
+    /// R2376 — a LOST group face is worth re-joining, and the wait grows.
+    ///
+    /// The GROWTH is asserted, not just the presence of a wait: a schedule that
+    /// returned its initial period forever would satisfy "there is a delay"
+    /// while re-binding at 1 Hz through an outage, which is the behaviour the
+    /// zenoh-default schedule was chosen over pico's flat re-arm to avoid.
+    #[cfg(all(feature = "transport-multicast", feature = "transport-link-udp"))]
+    #[test]
+    fn a_lost_group_face_is_rejoined_on_a_growing_schedule() {
+        let mut rejoin = GroupRejoin::new("test face");
+        let first = rejoin
+            .wait_for(&MulticastOutcome::LinkLost(LostCause::PeerClosed))
+            .expect("a lost link is re-joined");
+        let second = rejoin
+            .wait_for(&MulticastOutcome::LinkLost(LostCause::OsError))
+            .expect("a second loss is re-joined too");
+        assert_eq!(first, 1000, "zenoh's shipped period_init_ms");
+        assert!(
+            second > first,
+            "the wait must GROW across consecutive losses ({first}ms then \
+             {second}ms); a flat schedule re-binds at 1 Hz for the whole outage"
+        );
+    }
+
+    /// R2376 — the two outcomes that are NOT link failures must not re-join.
+    ///
+    /// This is the arm that makes the face stoppable at all: `Stopped` is the
+    /// host's own signal (R2333 wired it), and a re-join on it would produce a
+    /// face that cannot be shut down — a strictly worse defect than the one the
+    /// re-join fixes. `IterationLimit` is the test guard, which production never
+    /// arms; honouring it would make a bounded test loop unbounded.
+    #[cfg(all(feature = "transport-multicast", feature = "transport-link-udp"))]
+    #[test]
+    fn a_stopped_or_bounded_face_is_not_rejoined() {
+        let mut rejoin = GroupRejoin::new("test face");
+        assert_eq!(
+            rejoin.wait_for(&MulticastOutcome::Stopped),
+            None,
+            "the host asked this face to stop; re-joining would make it unstoppable"
+        );
+        assert_eq!(
+            rejoin.wait_for(&MulticastOutcome::IterationLimit),
+            None,
+            "the bounded test guard ended the loop; re-joining would unbound it"
+        );
     }
 
     /// The drive loop admits a peer from an inbound JOIN (keyed by its source

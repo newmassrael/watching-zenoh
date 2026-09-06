@@ -1433,6 +1433,24 @@ fn main() -> ExitCode {
             // eid), so the capability resolves to disabled and the link is
             // unaffected.
             shm,
+            // R2376 — retain the reopen PLAN when this endpoint was DISCOVERED
+            // rather than typed. `--scout` above replaced `connect_opt` with the
+            // one locator a Hello advertised, and from there the supervisor
+            // could only re-dial that address; pico re-scouts instead
+            // (`_z_open`'s no-locator branch). Built only for `--reconnect`,
+            // because a one-shot open never reopens and would retain a plan
+            // nothing reads.
+            rescout: (scout_requested && reconnect).then(|| crate::args::RescoutPlan {
+                // Path-qualified rather than via the `use` at the top of this
+                // file: that import is `scouting-active`-gated, while this
+                // construction is feature-uniform like every other field of the
+                // variant (the flag PARSES in both builds and only its
+                // execution is gated — `resolve_scouted_locator`).
+                zid: zid_override
+                    .clone()
+                    .unwrap_or_else(|| crate::args::DEMO_ZID.to_vec()),
+                socket: scout_socket.clone(),
+            }),
         },
         (Some(_), Some(_)) => {
             eprintln!("wz-ap-demo: --listen and --connect are mutually exclusive");
@@ -2154,12 +2172,23 @@ fn main() -> ExitCode {
             lowlatency,
             compression,
             shm,
+            rescout,
         } => {
             // R2099 — the whole candidate list, in dial order; `establish_link`
             // takes the first that opens.
             log::info!("connect = {}", connect.join(","));
             if *reconnect {
                 log::info!("reconnect = on (long-lived supervised lifecycle)");
+            }
+            // R2376 — say WHICH pico branch this client's reopen takes. The two
+            // differ in what a link loss does (re-dial one address vs scout the
+            // group again), and until this line the banner reported a
+            // `--scout`ed client and a `--connect`ed one identically.
+            if rescout.is_some() {
+                log::info!(
+                    "reconnect plan = re-scout (the endpoint was discovered; a \
+                     link loss scouts the group again)"
+                );
             }
             if let Some(ca) = tls_ca {
                 log::info!("tls-ca  = {ca} (tls/ dial verifies server name localhost)");

@@ -2659,6 +2659,116 @@ async fn supervise_reconnect(
     .await
 }
 
+/// R2376 (open-debt item 15, `session-reconnect`) — give a supervised client
+/// the RE-SCOUTING reopen plan when its endpoint was discovered.
+///
+/// The socket is joined HERE rather than reused from
+/// [`scout_for_peer_locator`], and that is a deliberate cost: the discovery
+/// socket is bound, used and dropped before `run_demo` is entered, so
+/// threading it through would make the one-shot `--scout` path carry a handle
+/// only the supervised path can use. Joining once more at the point of need
+/// keeps the two paths independent, and a join that fails here is reported as
+/// what it is — the plan cannot be installed — rather than silently leaving the
+/// client on the re-dial branch it was meant to leave.
+///
+/// A no-op without a plan (`--connect`), which is pico's other branch.
+#[cfg(feature = "scouting-active")]
+async fn install_rescout_plan(
+    recon: &mut ReconnectingSession,
+    rescout: Option<&crate::args::RescoutPlan>,
+    clock: TokioTime,
+) -> io::Result<()> {
+    use wz::runtime_tokio::reconnect_scout::ScoutedGroup;
+    use wz::runtime_tokio::scouting_glue::ScoutParams;
+
+    let Some(plan) = rescout else {
+        return Ok(());
+    };
+    let (group, port) = plan.socket.group_and_port(SCOUT_GROUP, SCOUT_PORT);
+    let driver = wz::runtime_tokio::UdpDriver::bind_multicast_v4(
+        group,
+        port,
+        wz::runtime_tokio::McastSocketConfig {
+            iface: plan.socket.interface.as_deref(),
+            ttl: plan.socket.ttl,
+            extra_joins: &[],
+        },
+    )
+    .await
+    .map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!(
+                "wz-ap-demo: --scout --reconnect could not hold the scouting \
+                 group {group}:{port} for re-scouting: {e}"
+            ),
+        )
+    })?;
+    recon.set_targets(std::sync::Arc::new(ScoutedGroup::new(
+        driver,
+        ScoutParams {
+            version: DEMO_PROTO_VERSION,
+            what: SCOUT_WHAT,
+            zid: plan.zid.clone(),
+            timeout_ms: SCOUT_CYCLE_MS,
+            // Overwritten to `true` by `ScoutedGroup::new` (pico's
+            // `_z_locators_by_scout` passes `true`); named here so the value
+            // this path intends is visible beside the others.
+            exit_on_first: true,
+        },
+        clock,
+        SCOUT_TICK_MS,
+        format!("{group}:{port}"),
+    )));
+    log::info!(
+        "wz-ap-demo: reconnect plan = re-scout {group}:{port} \
+         (a link loss scouts the group again, then dials every locator the \
+          answering Hello advertised)"
+    );
+    Ok(())
+}
+
+/// The `scouting-active`-less build cannot install a plan: scouting is what the
+/// plan DOES. `--scout` is already refused at argv there
+/// (`resolve_scouted_locator`), so `None` is the only value this arm should
+/// ever see and the common case is a plain no-op.
+///
+/// A plan that arrives anyway is REFUSED, loudly, naming the group it could not
+/// hold — it is not passed over. The silent alternative is the exact defect this
+/// round removes, one level up: a client that believes it will re-scout, running
+/// on a build that will re-dial one address forever, with no line saying which
+/// of the two it got. The `--scout` guard and this feature agreeing is an
+/// invariant, and an invariant with no failure path is an assumption.
+#[cfg(not(feature = "scouting-active"))]
+async fn install_rescout_plan(
+    _recon: &mut ReconnectingSession,
+    rescout: Option<&crate::args::RescoutPlan>,
+    _clock: TokioTime,
+) -> io::Result<()> {
+    let Some(plan) = rescout else {
+        return Ok(());
+    };
+    // The operator's own `--scout-addr` text, NOT a resolved group: the
+    // resolver (`ScoutSocketArgs::group_and_port`) and the default constants
+    // are `scouting-active`-gated too, so this arm cannot name the group it
+    // would have joined. Reporting what was TYPED is the honest half, and it is
+    // the half that identifies the invocation to fix.
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!(
+            "wz-ap-demo: a re-scouting reconnect plan (--scout-addr {}, zid {}) \
+             needs the `scouting-active` feature; this build cannot scout, so \
+             the supervisor would silently re-dial one address instead \
+             (build: cargo build -p wz-ap-demo --features scouting-active)",
+            plan.socket.address.as_deref().unwrap_or("<default group>"),
+            plan.zid
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        ),
+    ))
+}
+
 /// R2158 — the line that makes a silently-defaulted schedule impossible to
 /// mistake for a configured one.
 ///
@@ -2798,6 +2908,7 @@ pub(crate) async fn run_demo(
         Role::Initiator {
             connect,
             reconnect: true,
+            rescout,
             ..
         } => {
             // R311py — one library seam owns the `--connect` string →
@@ -2845,7 +2956,7 @@ pub(crate) async fn run_demo(
             // thing in this binary a config file could not reach. Resolution
             // and announce live in `supervise_reconnect`, which is where they
             // are watchable.
-            let recon = supervise_reconnect(
+            let mut recon = supervise_reconnect(
                 primary,
                 params,
                 DialConfig::default(),
@@ -2856,6 +2967,12 @@ pub(crate) async fn run_demo(
             .map_err(|e| {
                 io::Error::other(format!("wz-ap-demo: reconnect session open failed: {e:?}"))
             })?;
+            // R2376 (open-debt item 15) — a DISCOVERED endpoint gets the
+            // re-scouting plan; a typed one keeps re-dialing itself. Applied
+            // AFTER the open on purpose: the first session is brought up by the
+            // address `--scout` already resolved (pico opens the scouted
+            // locator too), and only the REOPEN differs.
+            install_rescout_plan(&mut recon, rescout.as_ref(), session_clock).await?;
             log::info!(
                 "wz-ap-demo: reconnect-supervised session Established (--reconnect); \
                  link loss re-dials + replays declarations"

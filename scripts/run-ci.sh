@@ -5551,7 +5551,12 @@ layer_c1ax_cargo_test_routing_namespace() {
     #
     # R2333: 26 -> 27. One case, `the_membership_entry_point_also_stops_on_a_signal`.
     # The grep was run before the edit again, and all four sites moved by +1.
-    _runci_guarded_test "C1AX multicast_glue 27" 27 \
+    # R2376: 27 -> 29. Two cases, the group-face REJOIN decision
+    # (`a_lost_group_face_is_rejoined_on_a_growing_schedule` and
+    # `a_stopped_or_bounded_face_is_not_rejoined`). Same four sites, +2 each,
+    # and the numbers are the ones gate 4b PRINTED rather than counted off the
+    # diff -- the label carries the count a second time, so both move.
+    _runci_guarded_test "C1AX multicast_glue 29" 29 \
         cargo test -p wz-runtime-tokio --features transport-multicast,routing-namespace --lib multicast_glue --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-session-core --features routing-namespace,session-unicast,codec-push,codec-request,codec-response,codec-response-final,codec-declare,reassembly --all-targets --quiet -- -D warnings \
@@ -9070,11 +9075,13 @@ layer_c1p_multicast() {
 # R311y772. All FOUR guards move by the same +1, the same not-accidentally-gated
 # check the three rounds above ran.
 layer_c1q_multicast_glue() {
-    _runci_guarded_test C1q 24 cargo test -p wz-runtime-tokio --features transport-multicast --lib multicast_glue --quiet \
+    # R2376: 24/28/30 -> 26/30/32, the two group-face rejoin cases; the numbers
+    # are what gate 4b printed for each command, not a diff count.
+    _runci_guarded_test C1q 26 cargo test -p wz-runtime-tokio --features transport-multicast --lib multicast_glue --quiet \
         || return 1
-    _runci_guarded_test C1q 28 cargo test -p wz-runtime-tokio --features transport-multicast,reassembly --lib multicast_glue --quiet \
+    _runci_guarded_test C1q 30 cargo test -p wz-runtime-tokio --features transport-multicast,reassembly --lib multicast_glue --quiet \
         || return 1
-    _runci_guarded_test C1q 30 cargo test -p wz-runtime-tokio --features transport-multicast,transport-fragmentation --lib multicast_glue --quiet \
+    _runci_guarded_test C1q 32 cargo test -p wz-runtime-tokio --features transport-multicast,transport-fragmentation --lib multicast_glue --quiet \
         || return 1
     # R311y832 — the UDP multicast locator config surface (`ttl` / `join`, the
     # two keys of zenoh's `zenoh-link-udp` config module wz lacked). A NEW leg

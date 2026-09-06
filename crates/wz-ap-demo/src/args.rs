@@ -187,7 +187,44 @@ pub(crate) enum Role {
         /// feature-uniform, inert when `session-extshm` is unbuilt,
         /// initiator-only and one-shot-only. Combinable with both.
         shm: bool,
+        /// R2376 (open-debt item 15, `session-reconnect`) — the RE-SCOUTING
+        /// reopen plan, present exactly when this Initiator's endpoint came
+        /// from `--scout` rather than from `--connect`.
+        ///
+        /// `--scout` resolves ONE locator out of a Hello and from there the two
+        /// paths were deliberately "indistinguishable" (main.rs), which is right
+        /// for the one-shot open and WRONG for the supervised one: pico's reopen
+        /// task re-enters `_z_open`, whose no-locator branch scouts AGAIN
+        /// (`_z_locators_by_scout`), so a discovered peer that comes back at a
+        /// different address is found again. Carrying the plan rather than only
+        /// its first answer is what lets the supervisor do that.
+        ///
+        /// `None` for a `--connect` Initiator — that is pico's other branch,
+        /// which re-dials the configured endpoint and does not scout. Also
+        /// `None` without `--reconnect`: a one-shot open never reopens, so it
+        /// has no plan to retain.
+        rescout: Option<RescoutPlan>,
     },
+}
+
+/// R2376 — what a supervised `--scout` client needs to scout AGAIN after a link
+/// loss: the identity it announces and the group it announces on.
+///
+/// A named struct rather than two threaded parameters, for the reason the
+/// `StorageVolumeArgs` doc gives one field down: the zid is a `Vec<u8>` and
+/// the socket carries its own optionals, so a call site that took them
+/// positionally would be the shape a later edit transposes. It carries no
+/// window or cadence because those are the scouting path's own constants — the
+/// reopen plan scouts the way `--scout` scouts.
+#[derive(Clone, Debug)]
+pub(crate) struct RescoutPlan {
+    /// The zid the Scout announces, so a responder logging the scouter sees the
+    /// same identity the re-opened session then carries — the property
+    /// `scout_for_peer_locator` already keeps for the FIRST open.
+    pub(crate) zid: Vec<u8>,
+    /// The group, port, interface and TTL to re-scout on: the operator's
+    /// `--scout-addr` / `--scout-iface` / `--scout-ttl`, or the defaults.
+    pub(crate) socket: ScoutSocketArgs,
 }
 
 /// R219 — publisher-task operation kind. `Put` carries the

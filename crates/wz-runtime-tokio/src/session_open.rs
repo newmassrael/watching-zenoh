@@ -3483,6 +3483,19 @@ pub enum OpenError {
     /// capabilities are always compiled in; this is the honest half of wz's
     /// compile-time feature elision.
     UnsupportedCapability(wz_session_core::transport_mode::UnsupportedCapability),
+    /// R2376 — a reopen attempt's PLAN yielded no candidate to dial: the
+    /// scouting window closed with no Hello, so there is no address to try.
+    /// pico's `_Z_ERR_SCOUT_NO_RESULTS`, raised at the same point (`_z_open`'s
+    /// scout branch, which errors when `len == 0`) and classified the same way
+    /// — [`crate::reconnect::ReconnectingSession`]'s transient set admits it,
+    /// so the supervisor scouts again after its backoff instead of abandoning
+    /// the session.
+    ///
+    /// Distinct from [`Self::NoReachableLocator`], which means candidates
+    /// existed and every one of them failed: this one means the plan produced
+    /// none at all, and the two call for different operator action (nobody is
+    /// answering the group, versus the peer that answered will not accept).
+    NoTargets,
 }
 
 /// Build the session action layer + SCE engine for an open path, ready for

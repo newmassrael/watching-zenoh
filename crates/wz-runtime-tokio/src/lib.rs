@@ -1587,6 +1587,18 @@ pub mod interest_broker;
 ))]
 pub mod reconnect;
 
+/// R2376 — the RE-SCOUTING reopen plan (`session-reconnect`), pico's
+/// `_z_open` scout branch under `_z_client_reopen_task_fn`. Gated like
+/// [`reconnect`] plus `scouting-active`: the plan drives a real scouting
+/// cycle, so a build without the scouting FSM has no way to express it.
+#[cfg(all(
+    feature = "session-reconnect",
+    feature = "transport-link-tcp",
+    feature = "transport-unicast",
+    feature = "scouting-active"
+))]
+pub mod reconnect_scout;
+
 /// The 4-method `LinkDriver` trait. Matches
 /// docs/runtime-crate-tokio.md §2.1. Trust-class flavored variants
 /// (untrusted / session_arming / established_session) deferred to

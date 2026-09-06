@@ -35,6 +35,8 @@
 //! session — e.g. `send_close_with_reason` — so the drive loop terminates
 //! and observes the flag).
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -148,6 +150,78 @@ pub enum ReconnectError {
     Replay(ReplayDeclarationsError),
 }
 
+/// R2376 (open-debt item 15, `session-reconnect`) — where ONE reopen attempt
+/// gets its candidate locators.
+///
+/// pico does not re-dial a resolved address. `_z_client_reopen_task_fn`
+/// re-enters `_z_open` against the RETAINED CONFIG
+/// (`vendor/zenoh-pico/src/net/session.c`), so what survives a link loss is the
+/// PLAN, not the address the plan last resolved to. That distinction is the
+/// whole of this trait, and it is exactly where the two shipped implementations
+/// part:
+///
+/// * [`ConfiguredEndpoint`] — the `--connect` case. pico's `len > 0` branch
+///   opens `locators[0]` and does NOT fail over, so this yields exactly one
+///   candidate and a reconnect keeps re-dialing it. Behaviour-preserving: it is
+///   what the supervisor did unconditionally before this round.
+/// * [`ScoutedGroup`](crate::reconnect_scout::ScoutedGroup) — the case with no
+///   configured endpoint. pico's `else` branch RE-SCOUTS
+///   (`_z_locators_by_scout`, which takes the FIRST Hello and copies ALL of its
+///   locators) and then loops those until one opens.
+///
+/// Injected rather than an enum, and the reason is not taste: the scouting
+/// implementation needs the `scouting-active` feature and a bound multicast
+/// socket, so a cfg-gated variant would put the supervisor's own shape behind a
+/// feature flag. A caller with a third plan (a config-driven source, a test
+/// double) supplies its own without this file changing.
+pub trait ReconnectTargets: Send + Sync {
+    /// The candidates for ONE reopen attempt, most-preferred first.
+    ///
+    /// An EMPTY result is pico's `_Z_ERR_SCOUT_NO_RESULTS`: a real, RETRYABLE
+    /// outcome (nobody answered this window), not a broken plan. The supervisor
+    /// maps it to [`OpenError::NoTargets`], which its transient set admits, so
+    /// the next attempt asks again after the backoff — which is what makes a
+    /// scouted reconnect converge rather than give up on one silent window.
+    fn candidates<'a>(&'a self)
+        -> Pin<Box<dyn Future<Output = Vec<ReconnectLocator>> + Send + 'a>>;
+
+    /// How this source names itself in the supervisor's log line. The operator
+    /// question it answers is "what is my client actually trying to reach",
+    /// which a bare address cannot answer once the address is re-derived.
+    fn describe(&self) -> String;
+}
+
+/// The `--connect` plan: ONE configured endpoint, re-dialed every attempt.
+///
+/// The singleton is pico parity, not an oversight: `_z_open`'s config branch
+/// opens `locators[0]` and returns its error rather than trying the rest, so a
+/// configured client that cannot reach its endpoint retries THAT endpoint. The
+/// failover lives on the scout branch alone — see [`ReconnectTargets`].
+pub struct ConfiguredEndpoint {
+    locator: ReconnectLocator,
+}
+
+impl ConfiguredEndpoint {
+    /// Retain `locator` as the sole reopen candidate.
+    pub fn new(locator: ReconnectLocator) -> Self {
+        Self { locator }
+    }
+}
+
+impl ReconnectTargets for ConfiguredEndpoint {
+    fn candidates<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Vec<ReconnectLocator>> + Send + 'a>> {
+        // A `Named` arm still re-resolves DNS inside `dial_locator` on every
+        // attempt (R311pw), so "one candidate" is not "one address".
+        Box::pin(async move { vec![self.locator.clone()] })
+    }
+
+    fn describe(&self) -> String {
+        format!("configured endpoint {:?}", self.locator)
+    }
+}
+
 /// How [`ReconnectingSession::drive`] ended.
 #[derive(Debug)]
 pub enum ReconnectDriveOutcome {
@@ -175,7 +249,12 @@ pub enum ReconnectDriveOutcome {
 pub struct ReconnectingSession {
     actions: Arc<SessionLinkActions>,
     swappable: Arc<SwappableLink<TokioRuntime>>,
-    locator: ReconnectLocator,
+    /// R2376 — the retained reopen PLAN, not a retained address. Defaults to
+    /// [`ConfiguredEndpoint`] over the locator the session was opened with, so
+    /// every pre-existing caller keeps its exact behaviour; a caller that has
+    /// no configured endpoint (`--scout`) replaces it via
+    /// [`ReconnectingSession::set_targets`].
+    targets: Arc<dyn ReconnectTargets>,
     /// R311oe — the dial config RETAINED across reconnects (taken by value at
     /// open). A `tls/...` re-dial needs the same client config + server name
     /// the first dial used; cert-free transports hold a default here. Struct
@@ -290,39 +369,85 @@ impl ReconnectingSession {
         }
     }
 
-    /// One reopen attempt: re-dial the retained locator, swap the fresh
-    /// outbound into the [`SwappableLink`] (dropping the dead sink closes
-    /// the old writer channel, so the orphaned writer task exits on its
-    /// own — there is no tail worth draining to a dead link), build a
-    /// fresh engine over the SAME actions bundle, and re-run the shared
-    /// open handshake loop. The wz body of pico's `_z_open` re-run inside
-    /// `_z_client_reopen_task_fn`.
+    /// R2376 — replace the reopen PLAN.
+    ///
+    /// A SETTER for the same reason [`set_liveliness_flush`](Self::set_liveliness_flush)
+    /// is one: `open_session_with_reconnect` and its string-taking sibling are
+    /// pinned public entry points that take the locator of the FIRST open, and
+    /// the plan for later opens is a different question. `--scout` is exactly
+    /// the caller that answers it differently — it resolved one address to open
+    /// with, and must RE-SCOUT rather than re-dial that address once the link
+    /// dies (pico `_z_open`'s else branch).
+    pub fn set_targets(&mut self, targets: Arc<dyn ReconnectTargets>) {
+        self.targets = targets;
+    }
+
+    /// One reopen attempt: ask the retained PLAN for candidates, dial them in
+    /// order until one comes up, swap the fresh outbound into the
+    /// [`SwappableLink`] (dropping the dead sink closes the old writer channel,
+    /// so the orphaned writer task exits on its own — there is no tail worth
+    /// draining to a dead link), build a fresh engine over the SAME actions
+    /// bundle, and re-run the shared open handshake loop. The wz body of pico's
+    /// `_z_open` re-run inside `_z_client_reopen_task_fn`.
+    ///
+    /// The CANDIDATE LOOP is pico's, and so is its asymmetry: the config branch
+    /// yields one candidate and therefore cannot fail over, while the scout
+    /// branch yields the responding Hello's whole locator list and loops it
+    /// "until we successfully open one" (`net/session.c`). Both shapes fall out
+    /// of one loop here because the difference lives in the plan, not the
+    /// supervisor.
+    ///
+    /// The LAST candidate's error is what surfaces. That is the informative
+    /// one for the singleton plan (it is the only one), and for the scouted
+    /// plan every candidate came from the same Hello, so a caller reading
+    /// "connection refused" learns that the peer that answered is not
+    /// accepting — which is the actionable fact.
     async fn open_attempt(&self, clock: TokioTime) -> Result<OpenedSession, OpenError> {
-        // R311oe — re-dial with the RETAINED DialConfig, not a fresh default:
-        // a TLS session's reconnect needs the same client config + server name
-        // the first dial used, so the supervisor stored it at open (pico
-        // retains the session config in its reopen task). Cert-free transports
-        // (tcp/udp) hold a default config here, so this stays behaviour-
-        // preserving for them.
-        let dialed = dial_locator(self.locator.clone().into(), &self.dial_config)
+        let candidates = self.targets.candidates().await;
+        // pico's `_Z_ERR_SCOUT_NO_RESULTS`: nobody answered this window. A
+        // TRANSIENT condition, so the caller's backoff applies and the next
+        // attempt asks the plan again.
+        let mut last = OpenError::NoTargets;
+        for locator in candidates {
+            // R311oe — re-dial with the RETAINED DialConfig, not a fresh
+            // default: a TLS session's reconnect needs the same client config +
+            // server name the first dial used, so the supervisor stored it at
+            // open (pico retains the session config in its reopen task).
+            // Cert-free transports (tcp/udp) hold a default config here, so
+            // this stays behaviour-preserving for them.
+            let dialed = match dial_locator(locator.into(), &self.dial_config).await {
+                Ok(dialed) => dialed,
+                Err(err) => {
+                    last = OpenError::Dial(err);
+                    continue;
+                }
+            };
+            let (inbound, outbound, writer_handle) = wire_dialed_link(dialed);
+            let old = self.swappable.swap(outbound);
+            drop(old);
+            // R311ju — engine build + Initiator activation + open loop live
+            // once in `initiator_open` (shared with the first open), so the
+            // protocol-critical activation order cannot drift between the dial
+            // path and the reopen path.
+            match initiator_open(
+                inbound,
+                self.actions.clone(),
+                writer_handle,
+                clock,
+                self.open_max_iters,
+                self.tick_interval_ms,
+            )
             .await
-            .map_err(OpenError::Dial)?;
-        let (inbound, outbound, writer_handle) = wire_dialed_link(dialed);
-        let old = self.swappable.swap(outbound);
-        drop(old);
-        // R311ju — engine build + Initiator activation + open loop live once
-        // in `initiator_open` (shared with the first open), so the
-        // protocol-critical activation order cannot drift between the dial
-        // path and the reopen path.
-        initiator_open(
-            inbound,
-            self.actions.clone(),
-            writer_handle,
-            clock,
-            self.open_max_iters,
-            self.tick_interval_ms,
-        )
-        .await
+            {
+                Ok(opened) => return Ok(opened),
+                // A candidate that DIALED but did not reach Established is
+                // spent for this attempt exactly as a refused dial is: pico's
+                // open loop breaks only on success, so the next locator in the
+                // Hello gets its turn either way.
+                Err(err) => last = err,
+            }
+        }
+        Err(last)
     }
 
     /// Drive the session until the caller stops it or reconnection is
@@ -517,6 +642,12 @@ impl ReconnectingSession {
                 | OpenError::LinkLost(_)
                 | OpenError::HandshakeTimeout
                 | OpenError::Terminal
+                // R2376 — pico lists `_Z_ERR_SCOUT_NO_RESULTS` in exactly this
+                // set (`_z_client_reopen_task_fn`'s retry arm). A window in
+                // which nobody answered is the ordinary case for a client
+                // whose peer is still restarting, so treating it as permanent
+                // would abandon the session at the first quiet second.
+                | OpenError::NoTargets
         )
     }
 }
@@ -582,7 +713,10 @@ pub async fn open_session_with_reconnect(
     Ok(ReconnectingSession {
         actions: opened.actions.clone(),
         swappable,
-        locator,
+        // R2376 — the default plan is the endpoint this open was given, which
+        // is what the supervisor re-dialed unconditionally before this round.
+        // `--scout` overrides it with `set_targets`.
+        targets: Arc::new(ConfiguredEndpoint::new(locator)),
         dial_config,
         policy,
         open_max_iters: max_iters,
