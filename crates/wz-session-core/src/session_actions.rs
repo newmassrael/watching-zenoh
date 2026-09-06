@@ -101,7 +101,6 @@ use crate::namespace::NamespaceIngress;
     feature = "declare-subscriber",
     feature = "declare-queryable",
     feature = "declare-token",
-    feature = "declare-final",
     feature = "liveliness-token",
     feature = "transport-batching",
     feature = "transport-keepalive",
@@ -180,6 +179,19 @@ use crate::declare::local_token::build_token_reply;
 // import is dead in exactly the subset the comment above predicts (C4c's
 // `liveliness-sub-only` = codec-declare + declare-interest + liveliness-subscriber
 // pulls `declare-final` and reaches no builder).
+// R2386 — the SAME claim survived in this file's TWELVE OTHER `any(..)` gates,
+// which R311y350 did not sweep: the send plumbing (`send_wire`, `emit_on_link`,
+// `select_link`, `session_send_available`, `dispatch_network_message`,
+// `emit_frame_or_fragments`, `FrameEmit`, the fragment-credit taker and the two
+// outbound `Declare` match arms) each listed `declare-final` as a feature that
+// ORIGINATES an outbound message. None of them did after 138f842 — the deletion
+// left the feature naming a send seam it can no longer reach, which is the same
+// fossil `declare-final` had just been removed from four lines above. All twelve
+// are gone. The consequence is confined to a build where `declare-final` is the
+// SOLE list member (C4c `liveliness-sub-only`, whose only other declare plane is
+// `declare-interest`): there the outbound `Declare` arm now falls to the no-emit
+// catch arm, which is what the arm's own note already says a build with no
+// origination feature does.
 #[cfg(any(
     feature = "declare-keyexpr",
     feature = "declare-subscriber",
@@ -1359,7 +1371,6 @@ pub struct SessionLinkActions<R: SessionRuntime, T: TimeSource> {
     feature = "declare-subscriber",
     feature = "declare-queryable",
     feature = "declare-token",
-    feature = "declare-final",
     feature = "declare-interest",
     feature = "liveliness-token",
 ))]
@@ -1858,7 +1869,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "declare-subscriber",
         feature = "declare-queryable",
         feature = "declare-token",
-        feature = "declare-final",
         feature = "liveliness-token",
         feature = "transport-batching",
     ))]
@@ -1915,7 +1925,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "declare-subscriber",
         feature = "declare-queryable",
         feature = "declare-token",
-        feature = "declare-final",
         feature = "liveliness-token",
         feature = "transport-batching",
         feature = "transport-keepalive",
@@ -2195,7 +2204,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             feature = "declare-subscriber",
             feature = "declare-queryable",
             feature = "declare-token",
-            feature = "declare-final",
             feature = "declare-interest",
             feature = "liveliness-token",
         )
@@ -2593,7 +2601,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             feature = "declare-subscriber",
             feature = "declare-queryable",
             feature = "declare-token",
-            feature = "declare-final",
             feature = "liveliness-token",
             feature = "transport-batching",
         )
@@ -2763,7 +2770,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             feature = "declare-subscriber",
             feature = "declare-queryable",
             feature = "declare-token",
-            feature = "declare-final",
             feature = "declare-interest",
             feature = "liveliness-token",
         )
@@ -2788,7 +2794,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             feature = "declare-subscriber",
             feature = "declare-queryable",
             feature = "declare-token",
-            feature = "declare-final",
             feature = "declare-interest",
             feature = "liveliness-token",
         )
@@ -4130,7 +4135,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "declare-subscriber",
         feature = "declare-queryable",
         feature = "declare-token",
-        feature = "declare-final",
         feature = "declare-interest",
         feature = "liveliness-token",
     ))]
@@ -4443,7 +4447,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "declare-subscriber",
         feature = "declare-queryable",
         feature = "declare-token",
-        feature = "declare-final",
         feature = "declare-interest",
         feature = "liveliness-token",
     ))]
@@ -4933,7 +4936,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 feature = "declare-subscriber",
                 feature = "declare-queryable",
                 feature = "declare-token",
-                feature = "declare-final",
                 feature = "liveliness-token",
                 all(
                     feature = "codec-declare",
@@ -5022,9 +5024,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "declare-keyexpr",
         feature = "declare-subscriber",
         feature = "declare-queryable",
-        feature = "declare-token",
-        feature = "declare-final",
-        feature = "liveliness-token",
+        feature = "declare-token",        feature = "liveliness-token",
         // R311y513 — the ROUTING originator. Kept character-identical to the send
         // seam's arm gate: the arm must exist exactly where this fn does, and the
         // two drifting apart is the failure mode the R311mx note above describes.

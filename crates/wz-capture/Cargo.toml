@@ -190,6 +190,12 @@ path = "../wz-packet-fixtures"
 [dev-dependencies.wz-session-core]
 path = "../wz-session-core"
 default-features = false
+# R2386 — the interest fixtures in `interest.rs` / `report.rs` build their
+# terminator with `declare_build::build_declare_final_reply`, which is now
+# gated on `declare-final` rather than compiled by every `codec-declare`
+# build. A dev-dependency because the production dissector never BUILDS a
+# Final — it only reads one off the wire.
+features = ["declare-final"]
 
 # R311y605 — the JOIN test fixture is built by the CODEC's own encode rather
 # than by a hand-laid byte string, so a walker or a decode that disagrees with

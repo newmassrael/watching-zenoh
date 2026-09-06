@@ -982,6 +982,13 @@ routing-routes = [
 # decodes inbound topology with.
 routing-peer = [
     "routing-accept",
+    # R2386 — a routing peer ANSWERS interests: `linkstate_forward` and
+    # `router_forward` both close a CURRENT dump with
+    # `build_declare_final_reply`, and that builder is now gated on the atom
+    # named after it rather than on `codec-declare`. The edge was always real;
+    # it just used to be satisfied by the `codec-declare` line below happening
+    # to compile the builder for every declaration plane at once.
+    "declare-final",
     "dep:wz-routing-graph",
     "wz-codecs/codec-linkstate",
     "wz-session-core/codec-linkstate",

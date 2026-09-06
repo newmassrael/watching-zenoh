@@ -739,7 +739,13 @@ query-reply = ["codec-response"]
 # the field (and its session-side access) is gated in. Semantically
 # sound: an application cannot observe peer declarations without the
 # declare codec.
-declare-subscriber = ["codec-declare"]
+# R2386 — `declare-subscriber` gains `declare-final`. The session-local
+# SUBSCRIBER interest response is a chain TERMINATED by a `Declare(DeclFinal)`
+# (`send_declare_final_reply`, R311y530), so the terminator's builder is code
+# this plane reaches. It used to arrive by accident: the builder was
+# `codec-declare`-gated and this feature pulls `codec-declare`, so the
+# dependency held without ever being declared. Now it is declared.
+declare-subscriber = ["codec-declare", "declare-final"]
 declare-queryable = ["codec-declare"]
 # R311jf — keyexpr matching composition toggles (§5.6). Gate-only (no
 # dep): each strips a branch in `keyexpr_match.rs` (an always-compiled
@@ -779,7 +785,13 @@ declare-token = ["codec-declare"]
 declare-final = ["codec-declare"]
 declare-interest = ["codec-declare"]
 declare-undeclare = ["codec-declare"]
-liveliness-token = ["codec-declare"]
+# R2386 — `liveliness-token` gains `declare-final` for the same reason
+# `declare-subscriber` does: the TOKEN interest response is a chain of
+# `Declare(DeclToken)` closed by one `Declare(DeclFinal)`, and pico's requester
+# blocks until that terminator arrives
+# (`vendor/zenoh-pico/src/session/liveliness.c` @
+# `_z_liveliness_unregister_pending_query`).
+liveliness-token = ["codec-declare", "declare-final"]
 liveliness-subscriber = ["codec-declare"]
 # liveliness-get — requester-side snapshot get. The CURRENT Interest +
 # the inbound DeclToken / DeclFinal reply decode are the declaration

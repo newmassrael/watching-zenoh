@@ -190,7 +190,14 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             "adminspace-router-linkstate",
             "codec-fragment",
             "codec-keep-alive",
-            "declare-final",
+            # R2386 — `declare-final` LEFT this list. The claim was true when it
+            # was written and the round that made it false is the one that
+            # removed it: the feature now gates `declare_build::
+            # build_declare_final` / `build_declare_final_reply`, two `pub fn`s,
+            # where before it was necessary to nothing at all and merely
+            # OR-contributed to twelve `any(..)` gates. The census caught this
+            # on the first run after the change, which is the ratchet the
+            # comment above promises.
             "declare-keyexpr",
             "dissect-serde",
             "liveliness-subscriber",

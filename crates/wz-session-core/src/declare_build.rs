@@ -35,6 +35,13 @@ use crate::ext_nodeid::MESSAGE_FLAG_Z;
 /// peer reads as a truncated message rather than as a missing field.
 const DECLARE_ENVELOPE_HEADER: u8 = wire_const::N_MID_DECLARE | MESSAGE_FLAG_Z;
 
+// R2386 — gated with its one consumer, `build_declare_final`. The import was
+// unconditional while the builder was `codec-declare`-gated, so the two moved
+// together by accident; once the builder answers to `declare-final` the import
+// has to as well, or every downstream crate that carries a declaration plane
+// without the terminator fails `-D unused-imports` (measured: six crates on
+// Layer C1bz).
+#[cfg(feature = "declare-final")]
 use wz_codecs::decl_final::DeclFinalOwned;
 use wz_codecs::decl_kexpr::DeclKexprOwned;
 use wz_codecs::decl_queryable::DeclQueryableOwned;
@@ -821,6 +828,18 @@ pub fn build_undeclare_token_with_keyexpr(keyexpr: &str) -> Result<DeclareOwned,
 /// reply sequence.
 ///
 /// Wire shape: `[N_MID_DECLARE, 0x1A]` — exactly two bytes.
+///
+/// R2386 — gated on `declare-final`, the atom whose whole subject this is.
+/// It was `codec-declare`-gated, i.e. compiled by every build carrying ANY
+/// declaration plane, so the feature named after the terminator elided
+/// nothing: a pure publisher that never answers an interest still paid for
+/// the builder, and `liveliness-get = [.., "declare-final", ..]` named a
+/// dependency that changed no byte of the build. The knob is load-bearing
+/// now — `declare-final` off removes the Final push path and nothing else,
+/// and every plane that terminates an interest response declares the
+/// dependency in cargo instead of relying on `codec-declare` having
+/// compiled it anyway.
+#[cfg(feature = "declare-final")]
 pub fn build_declare_final() -> DeclareOwned {
     DeclareOwned {
         header: DECLARE_ENVELOPE_HEADER,
@@ -993,6 +1012,7 @@ pub fn build_declare_queryable_with_id_info(
 /// (`_Z_ERR_MESSAGE_ZENOH_DECLARATION_UNKNOWN`, `transport/unicast/rx.c`), and
 /// that error propagates up the frame reader. Both the `I` flag and the id field
 /// are set (see [`build_declare_subscriber_reply`] for the coupling).
+#[cfg(feature = "declare-final")]
 pub fn build_declare_final_reply(interest_id: u64) -> DeclareOwned {
     let mut declare = build_declare_final();
     stamp_interest_reply(&mut declare, interest_id);

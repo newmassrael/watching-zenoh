@@ -385,6 +385,33 @@ for _a in sorted(atoms):
     if not _ref:
         fail_untested_complete.append((_a, len(_owned)))
 
+# R2386 — invariant #7: an `active` atom must OWN a symbol, not merely be NAMED
+# in a gate.
+#
+# Invariant #3 counts cfg SITES, and a site is satisfied by an `any(..)` arm.
+# So an atom could be `active` -- "a real composition toggle the user can flip"
+# -- while flipping it elided nothing anywhere in the tree, because every site
+# naming it had 8+ other OR-contributors keeping the code. That is not a toggle;
+# it is a word in a list. `declare-final` sat in exactly that state from 138f842
+# (R311y346 deleted `send_declare_final`, its last solo gate) until R2386, and
+# invariant #3 reported it as a knob for every one of those rounds because it
+# still appeared in twelve `any(..)` gates in `session_actions.rs`.
+#
+# Invariant #6 caught it only INDIRECTLY and only once the atom reached COMPLETE:
+# owning nothing means no test can name anything, so the COMPLETE arm redded. An
+# atom that owns nothing while tagged PARTIAL stays invisible, and the tag is not
+# what is wrong with it.
+#
+# The population is DERIVED (`atom_test_graph.ownership()` re-parses every cfg in
+# `crates/**/*.rs` as a boolean expression and asks which features are NECESSARY),
+# never a list written here, and it is asserted non-empty: a check whose
+# population can silently become zero reports green for having looked at nothing.
+fail_unowning_active = [
+    _a for _a in sorted(atoms)
+    if atoms[_a] == "active" and not _atg.get(_a, (set(), set()))[0]
+]
+_active_pop = sum(1 for _a in atoms if atoms[_a] == "active")
+
 ok = True
 active_n = sum(1 for a in atoms if atoms[a] == "active")
 print("=== catalog status truthfulness audit ===")
@@ -548,6 +575,27 @@ if fail_untested_complete:
     print("      that (R311y339-y341 spent three rounds proving it); a test can.")
     print("      Either write a test that exercises this atom's own gated code,")
     print("      or the tag is PARTIAL and the residual is 'unproven by any lane'.")
+
+if _active_pop == 0:
+    ok = False
+    print("FAIL: invariant #7 had NO active atoms to judge -- the population is")
+    print("      empty, so its silence means nothing. Fix the inventory read.")
+
+if fail_unowning_active:
+    ok = False
+    print("FAIL: active but owning no cfg-necessary symbol: %d of %d active"
+          % (len(fail_unowning_active), _active_pop))
+    for a in fail_unowning_active:
+        print("    - %s  is named in a cfg but NECESSARY to none: turning it off"
+              % a)
+        print("      elides nothing, so it is not the toggle `active` claims."
+              )
+    print("      Either give the atom a gate of its own over the code it names")
+    print("      (and let every plane that needs that code declare the cargo")
+    print("      edge), or it is FOUNDATIONAL/reserved -- delivered whole under")
+    print("      another atom's feature. Removing it from the `any(..)` lists it")
+    print("      merely OR-contributes to is part of the first answer, not an")
+    print("      alternative to it.")
 
 if ok:
     print("catalog status truthfulness OK")
