@@ -748,7 +748,12 @@ fn apfull_storage_host_hotreload_state_flip_seen_by_a_real_pico() {
     let port_res = PortReservation::pick();
     let addr = format!("127.0.0.1:{}", port_res.port());
     let (mut host, mut host_log, captured) = spawn_apfull(
-        &["--storage-host", &addr],
+        // R2374 — `--config-write-permit`: this host's config-WRITE subscriber now
+        // consults `admin_write_permit`, and AP-FULL compiles `adminspace-write`
+        // in, so the storage-add / storage-del PUTs below are DENIED without the
+        // grant. Until R2374 the subscriber passed a literal `true` and this
+        // run-mode was the last one outside `permissions.write`.
+        &["--storage-host", &addr, "--config-write-permit"],
         "adminspace config GET at ",
         "storage-host",
     );

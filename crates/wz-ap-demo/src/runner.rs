@@ -6687,16 +6687,62 @@ fn admin_config_json_of(
 /// through the non-`Send` `register_local_queryable`; this host's
 /// [`Session::declare_queryable`] callback is `Send + 'static` (see above), so the
 /// same one-instance-read-per-request invariant needs an `Arc<Mutex<_>>`.
+/// R2374 (§5.23 `adminspace-read` / `adminspace-write`) — the `--storage-host`
+/// knobs, bundled.
+///
+/// Bundled for exactly the reason [`RouterHatOpts`] is: [`run_storage_host`] was
+/// at `clippy::too_many_arguments` with seven, and this round needed an eighth
+/// (`config_write_permit`). The struct absorbs the knob rather than widening an
+/// allow, which is the idiom R311y781 established here.
 #[cfg(feature = "adminspace-config-hotreload")]
-pub(crate) async fn run_storage_host(
-    listen: &str,
-    storage_dir: Option<String>,
-    plugin_paths: &[String],
-    dynamic_volume: Option<&crate::args::DynamicVolumeArgs>,
-    storage_gc: crate::args::StorageGcArgs,
-    no_admin_read: bool,
-    tuning: TransportTuning,
-) -> io::Result<()> {
+pub(crate) struct StorageHostOpts {
+    /// `--storage-host-dir <path>`: hosted storages ride a durable
+    /// `FilesystemVolume` rooted here rather than the volatile `mem` one.
+    pub storage_dir: Option<String>,
+    /// `--plugin <path.so>`, repeated: the dlopen'd plugin records that join the
+    /// statically composed subsystems in the admin `plugins` leg.
+    pub plugin_paths: Vec<String>,
+    /// `--storage-volume <path.so>` and its config, when one was given.
+    pub dynamic_volume: Option<crate::args::DynamicVolumeArgs>,
+    /// `--storage-gc-period-ms` / `--storage-gc-lifespan-ms`.
+    pub storage_gc: crate::args::StorageGcArgs,
+    /// R311y812 — `--no-admin-read` DENIES this host's admin GET gate. The same
+    /// bare presence flag `--peer` and `--router-hat` parse, so one spelling means
+    /// one thing across every run-mode that hosts an adminspace.
+    pub no_admin_read: bool,
+    /// R2374 — `--config-write-permit` PERMITS the config writes this host's
+    /// subscriber receives, the write-side twin of the flag above and the same
+    /// spelling `--peer` already parses.
+    ///
+    /// Until this round the storage host's config-WRITE subscriber passed a
+    /// hardcoded `true` and consulted no `admin_write_permit`, so
+    /// `permissions.write` had one shipping run-mode outside it. The permit is now
+    /// seeded here and RE-READ per PUT off the same live config the GET gate
+    /// reads, which is what upstream does inside `send_push`
+    /// (`net/runtime/adminspace.rs:394-396`).
+    pub config_write_permit: bool,
+    /// `--batch-size` / `--lease-ms`.
+    pub tuning: TransportTuning,
+}
+
+#[cfg(feature = "adminspace-config-hotreload")]
+pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io::Result<()> {
+    // Destructured back into the names the body already uses, so the bundle costs
+    // this one statement rather than a rename through four hundred lines. The
+    // bundle itself is `RouterHatOpts`' reason: this entry point was AT
+    // `clippy::too_many_arguments` and R2374 needed one more knob.
+    let StorageHostOpts {
+        storage_dir,
+        plugin_paths,
+        dynamic_volume,
+        storage_gc,
+        no_admin_read,
+        config_write_permit,
+        tuning,
+    } = opts;
+    let plugin_paths: &[String] = &plugin_paths;
+    let dynamic_volume = dynamic_volume.as_ref();
+
     use std::sync::atomic::Ordering::Relaxed;
 
     use wz::runtime_tokio::adminspace::{
@@ -6807,22 +6853,28 @@ pub(crate) async fn run_storage_host(
     // handler (`net/runtime/adminspace.rs:456-457`), so a runtime permission change
     // reaches the very next request where a captured bool never could.
     //
-    // `write: true` states this host's actual behaviour rather than the
-    // `PermissionsConf` default: its config-WRITE subscriber below permits writes
-    // unconditionally (it consults no `admin_write_permit`). Recording the truth
-    // here means a later round that wires the write gate finds the right seed
-    // instead of a `false` that never governed anything.
+    // R2374 — `write` is now the FLAG rather than a hardcoded `true`. The round
+    // before this one recorded `write: true` as "this host's actual behaviour",
+    // because its config-WRITE subscriber passed a literal permit and consulted no
+    // `admin_write_permit`; that was the truth and it was also the last shipping
+    // run-mode outside `permissions.write`. Seeded here, re-read per PUT below,
+    // and default-DENY like zenoh's `PermissionsConf` — a host that granted writes
+    // to anyone by default is the asymmetry the write gate exists to remove.
     let admin_cfg = std::sync::Arc::new(std::sync::Mutex::new(
         WzConfig::from_init_params(&params).with_admin_permissions(
             wz::runtime_tokio::adminspace::AdminSpacePermissions {
                 read: !no_admin_read,
-                write: true,
+                write: config_write_permit,
             },
         ),
     ));
     log::info!(
         "wz-ap-demo storage-host: adminspace read permit = {}",
         wz::runtime_tokio::admin_read_permit(&admin_permissions_of(&admin_cfg))
+    );
+    log::info!(
+        "wz-ap-demo storage-host: adminspace write permit = {}",
+        wz::runtime_tokio::admin_write_permit(&admin_permissions_of(&admin_cfg))
     );
     let version = env!("CARGO_PKG_VERSION").to_string();
     let locators = vec![format!("tcp/{local}")];
@@ -7076,22 +7128,57 @@ pub(crate) async fn run_storage_host(
         };
 
         // ── config-WRITE subscriber (Send+'static: captures pending + Strings) ──
-        // Mirrors run_peer's --config-writable handler (runner.rs write path). Writes
-        // are PERMITTED unconditionally in this mode (permit = true), so the witness
-        // needs no extra flag. wire -> intent ONLY: the apply (add_storage /
+        // Mirrors run_peer's --config-writable handler (runner.rs write path).
+        //
+        // R2374 — the permit is RESOLVED PER PUT off the same live config the GET
+        // gate reads, through the library `admin_write_permit` cfg site. It was a
+        // hardcoded `true`, which made this the one shipping run-mode that granted
+        // config-writes to anyone; upstream takes the config lock INSIDE
+        // `send_push` for exactly this reason (`adminspace.rs:394-396`), so a
+        // permit captured at setup could not answer a permission changed since.
+        //
+        // wire -> intent for the STORAGE intents: the apply (add_storage /
         // remove_storage) happens in the dispatch closure, which owns &mut manager.
+        // `AdminReadPermit` is the exception and it is applied HERE, because what
+        // it needs is this `Arc<Mutex<WzConfig>>` and nothing else -- routing it
+        // through the queue would delay a permission change until the next
+        // iteration event, and a permission that takes effect later than it was
+        // granted is the frozen permit again, one seam over.
         let sub_pending = pending.clone();
         let sub_prefix = write_prefix.clone();
+        let sub_cfg = admin_cfg.clone();
         let _config_write_sub: Option<Subscriber> = match session.declare_subscriber(
             write_key.clone(),
             SubscribeOptions::default(),
             move |sample: &dyn SampleView| {
+                let write_permitted =
+                    wz::runtime_tokio::admin_write_permit(&admin_permissions_of(&sub_cfg));
                 match parse_admin_config_write(
                     &sub_prefix,
                     sample.keyexpr(),
                     sample.payload(),
-                    true, // permit — this run-mode grants config-write for the witness
+                    write_permitted,
                 ) {
+                    AdminConfigWriteOutcome::Apply(AdminConfigWrite::AdminReadPermit(read)) => {
+                        // ONE read-modify-write of the same slice both gates pull
+                        // from, so the next GET sees this and no GET can see a
+                        // half-applied pair.
+                        match sub_cfg.lock() {
+                            Ok(mut c) => {
+                                let mut permissions = c.admin_permissions();
+                                permissions.read = read;
+                                c.set_admin_permissions(permissions);
+                                log::info!(
+                                    "wz-ap-demo storage-host: adminspace read permit set to \
+                                     {read} over the wire"
+                                );
+                            }
+                            Err(_) => log::warn!(
+                                "wz-ap-demo storage-host: config-write admin-read ignored; \
+                                 the config lock is poisoned"
+                            ),
+                        }
+                    }
                     AdminConfigWriteOutcome::Apply(intent) => {
                         log::info!(
                             "wz-ap-demo storage-host: config-write intent stashed: {intent:?}"
@@ -7101,9 +7188,14 @@ pub(crate) async fn run_storage_host(
                             .expect("storage-host pending mutex poisoned")
                             .push(intent);
                     }
-                    // permit is true here, so Denied is unreachable; handled for
-                    // completeness (the outcome enum is feature-independent).
-                    AdminConfigWriteOutcome::Denied => {}
+                    // R2374 — REACHABLE now, and reported the way zenoh reports it
+                    // (`adminspace.rs:397` logs an error on a denied write). Before
+                    // the permit was wired this arm could not be taken.
+                    AdminConfigWriteOutcome::Denied => log::error!(
+                        "wz-ap-demo storage-host: config-write on {} DENIED \
+                         (adminspace.permissions.write is false)",
+                        sample.keyexpr()
+                    ),
                     AdminConfigWriteOutcome::Malformed => log::warn!(
                         "wz-ap-demo storage-host: config-write malformed payload; ignored"
                     ),
@@ -7262,6 +7354,17 @@ pub(crate) async fn run_storage_host(
                         AdminConfigWrite::AclDeny(_) => log::warn!(
                             "wz-ap-demo storage-host: acl-deny config-write ignored \
                          (this mode hosts no interceptor chain)"
+                        ),
+                        // R2374 — never queued: the subscriber applies it where it
+                        // stands, because a permission that waited for the next
+                        // iteration event would take effect later than it was
+                        // granted. The arm exists so the match stays exhaustive and
+                        // so an intent that DID arrive here is reported rather than
+                        // dropped, which is what a `_` would have done.
+                        AdminConfigWrite::AdminReadPermit(read) => log::warn!(
+                            "wz-ap-demo storage-host: admin-read {read} reached the \
+                         dispatch queue; it is applied in the subscriber and \
+                         should never be stashed"
                         ),
                     }
                 }

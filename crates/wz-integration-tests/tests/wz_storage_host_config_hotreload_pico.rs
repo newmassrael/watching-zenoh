@@ -203,6 +203,14 @@ fn wz_storage_host_config_hotreload_state_flip_via_pico() {
         Command::new(&demo)
             .arg("--storage-host")
             .arg(&addr)
+            // R2374 — INERT on this lane's build and passed anyway. Layer E6h
+            // compiles `adminspace-config-hotreload` without `adminspace-write`,
+            // so `admin_write_permit` is the constant `true` and the PUTs below
+            // are permitted either way. The flag is here so that adding the write
+            // gate to this lane later cannot silently deny them — which is
+            // exactly what it did to three AP-FULL fixtures the moment the
+            // storage host stopped passing a literal permit.
+            .arg("--config-write-permit")
             .env("RUST_LOG", "info")
             .stdout(Stdio::null())
             .stderr(Stdio::from(h_writer))

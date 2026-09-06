@@ -246,6 +246,12 @@ fn spawn_storage_host(addr: &str, volume: VolumeArg<'_>, role: &str) -> StorageH
 
     let mut cmd = Command::new(wz_ap_demo_binary());
     cmd.arg("--storage-host").arg(addr);
+    // R2374 — this host's config-WRITE subscriber now consults
+    // `admin_write_permit`, and AP-FULL compiles `adminspace-write` in, so the
+    // `storage-add` PUT this fixture drives is DENIED without the grant. Until
+    // R2374 the subscriber passed a literal `true` and the flag was not needed;
+    // the default is now zenoh's `PermissionsConf` default, which is deny.
+    cmd.arg("--config-write-permit");
     if let VolumeArg::Load { so, config } = volume {
         cmd.arg("--storage-volume")
             .arg(so)

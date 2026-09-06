@@ -1065,6 +1065,26 @@ pub enum AdminConfigWrite {
     /// `.../config/storage-del <name>` — live-despawn the storage named `name`
     /// (RAII undeclare of its capture-sub + queryable). R311y239.
     RemoveStorage(String),
+    /// R2374 (§5.23 `adminspace-read`) — `.../config/admin-read true|false`: set
+    /// this node's `adminspace.permissions.read` on the LIVE config.
+    ///
+    /// # Why this key and not another bespoke one
+    ///
+    /// The three sub-keys above are wz-shaped affordances with no single upstream
+    /// pointer behind them. This one is different: `adminspace/permissions/read`
+    /// is a key upstream's own admin PUT can write, because upstream's config is a
+    /// json5 document and its write path routes any pointer into the live
+    /// `Config` (`net/runtime/adminspace.rs`). So a wz node that could not be told
+    /// to change its own read permit over the wire was NARROWER than upstream on a
+    /// key upstream carries -- which is a divergence, where inventing a fourth
+    /// bespoke intent would have been a widening.
+    ///
+    /// It is what makes the read gate's LIVENESS observable from outside the
+    /// process: before this, nothing on a wz node's wire could move its
+    /// permissions, so "the permit is re-read per GET" could only be witnessed by
+    /// a test that reached inside. See
+    /// `wz_storage_host_adminspace_read_permit_flips_over_the_wire`.
+    AdminReadPermit(bool),
 }
 
 #[cfg(feature = "adminspace-config-hotreload")]
@@ -1179,6 +1199,25 @@ pub fn parse_admin_config_write(
                 AdminConfigWriteOutcome::Malformed
             } else {
                 AdminConfigWriteOutcome::Apply(AdminConfigWrite::RemoveStorage(String::from(name)))
+            }
+        }
+        // R2374 (§5.23 adminspace-read) — `admin-read true|false`, the one sub-key
+        // here that names a key UPSTREAM's config document also carries
+        // (`adminspace/permissions/read`). Ungated for the reason this decoder is
+        // ungated everywhere: the gate is the VALUE `permissions_write`, not a
+        // `#[cfg]`, so a build with the read gate compiled out still decodes the
+        // intent and its host is free to apply it to a permit nothing consults.
+        //
+        // Strict `true` / `false` after trimming, and anything else is Malformed
+        // rather than falsy: a permission that reads "yes" as "deny" is the
+        // failure this whole gate exists to prevent, and a typo must be reported
+        // to the operator rather than silently locking or unlocking a node.
+        "admin-read" => {
+            let value = String::from_utf8_lossy(payload);
+            match value.trim() {
+                "true" => AdminConfigWriteOutcome::Apply(AdminConfigWrite::AdminReadPermit(true)),
+                "false" => AdminConfigWriteOutcome::Apply(AdminConfigWrite::AdminReadPermit(false)),
+                _ => AdminConfigWriteOutcome::Malformed,
             }
         }
         other => AdminConfigWriteOutcome::UnknownKey(String::from(other)),
@@ -1516,6 +1555,80 @@ mod tests {
         // no trailing sub-key -> NotAWrite (the demo's prior `else { return }`).
         let out = parse_admin_config_write(WRITE_PREFIX, "@/a1b2/peer/config", b"x", true);
         assert_eq!(out, AdminConfigWriteOutcome::NotAWrite);
+    }
+
+    /// R2374 (§5.23 adminspace-read) — `admin-read` decodes BOTH truth values, and
+    /// the population is the two of them rather than the one a test would reach
+    /// for. A decoder that recognised only `false` would pass a deny test and
+    /// leave a node no way back.
+    #[test]
+    fn parse_config_write_admin_read_decodes_both_truth_values() {
+        for (payload, want) in [(&b"true"[..], true), (&b"false"[..], false)] {
+            let out = parse_admin_config_write(
+                WRITE_PREFIX,
+                "@/a1b2/peer/config/admin-read",
+                payload,
+                true,
+            );
+            assert_eq!(
+                out,
+                AdminConfigWriteOutcome::Apply(AdminConfigWrite::AdminReadPermit(want)),
+                "payload {:?}",
+                core::str::from_utf8(payload)
+            );
+        }
+        // Surrounding whitespace is trimmed, as it is for every other sub-key: a
+        // shell that appends a newline must not lock a node out.
+        assert_eq!(
+            parse_admin_config_write(
+                WRITE_PREFIX,
+                "@/a1b2/peer/config/admin-read",
+                b" false\n",
+                true
+            ),
+            AdminConfigWriteOutcome::Apply(AdminConfigWrite::AdminReadPermit(false))
+        );
+    }
+
+    /// R2374 — anything that is not exactly `true` or `false` is MALFORMED, not
+    /// falsy.
+    ///
+    /// This is the arm worth its own test: the tempting decode is
+    /// `payload == b"true"`, which reads every typo as a DENY. A permission that
+    /// turns a misspelling into a locked node is the failure the gate exists to
+    /// prevent, and an operator gets told rather than obeyed.
+    #[test]
+    fn parse_config_write_admin_read_refuses_anything_but_the_two_words() {
+        for payload in [&b""[..], b"1", b"0", b"yes", b"no", b"True", b"FALSE"] {
+            assert_eq!(
+                parse_admin_config_write(
+                    WRITE_PREFIX,
+                    "@/a1b2/peer/config/admin-read",
+                    payload,
+                    true
+                ),
+                AdminConfigWriteOutcome::Malformed,
+                "payload {:?} must not be read as a permission",
+                core::str::from_utf8(payload)
+            );
+        }
+    }
+
+    /// R2374 — the write GATE precedes this decode too, like every other sub-key.
+    /// A node that honoured `admin-read` from an unpermitted writer would let
+    /// anyone on the wire grant themselves the read permit, which is a strictly
+    /// worse hole than the one the gate closes.
+    #[test]
+    fn parse_config_write_admin_read_is_refused_without_the_write_permit() {
+        assert_eq!(
+            parse_admin_config_write(
+                WRITE_PREFIX,
+                "@/a1b2/peer/config/admin-read",
+                b"true",
+                false
+            ),
+            AdminConfigWriteOutcome::Denied
+        );
     }
 
     // R311y239 — the config-hotreload storage-lifecycle decode (adminspace-config-hotreload).

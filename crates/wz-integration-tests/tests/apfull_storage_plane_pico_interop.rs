@@ -221,6 +221,11 @@ fn spawn_storage_host_with(
 
     let mut cmd = Command::new(wz_ap_demo_binary());
     cmd.arg("--storage-host").arg(addr);
+    // R2374 — this host's config-WRITE subscriber now consults
+    // `admin_write_permit`, and AP-FULL compiles `adminspace-write` in, so the
+    // `storage-add` / `storage-del` PUTs this fixture drives are DENIED without
+    // the grant. Until R2374 the subscriber passed a literal `true`.
+    cmd.arg("--config-write-permit");
     if let Some(d) = dir {
         cmd.arg("--storage-host-dir").arg(d);
     }

@@ -6407,7 +6407,10 @@ layer_c1ak_cargo_test_transport_stats() {
     # a deployment actually runs, which no lane composed before. The metrics leg's
     # own count is pinned by C1AM; this pins that turning the counters ON does not
     # change it, since the composition is driven by the VALUE, not by the cfg.
-    _runci_guarded_test C1ak 20 cargo test -p wz-session-core --features adminspace-metrics,transport-stats --lib adminspace --quiet \
+    # R2374 — 20 -> 23 for the three `admin-read` decode tests (the sub-key that
+    # lets the read permit be set over the wire). Ungated, like every other arm of
+    # `parse_admin_config_write`, so they are in this filter's population too.
+    _runci_guarded_test C1ak 23 cargo test -p wz-session-core --features adminspace-metrics,transport-stats --lib adminspace --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-stats --quiet -- -D warnings \
@@ -16479,8 +16482,15 @@ layer_e6h_adminspace_config_hotreload() {
 # SKIPs on the FOREIGN binary only (the pico CLI a machine may legitimately lack),
 # never on a wz one — the R311y265 rule; WZ_PICO_REQUIRE escalates that SKIP to a FAIL.
 layer_e6i_storage_host_adminspace_read_deny() {
+    # R2374 — `adminspace-write` joined the build, and it is load-bearing rather
+    # than additive. This lane now also witnesses that a config write is REFUSED
+    # without `--config-write-permit`, and `admin_write_permit` with the gate
+    # compiled out returns a constant `true` — so on the previous two-feature build
+    # the refusal arm could not be taken and the test failed for the right reason
+    # the first time it ran. The read-deny test above is unaffected: it writes
+    # nothing.
     (cd crates && cargo build -p wz-ap-demo \
-        --features adminspace-config-hotreload,adminspace-read --quiet) || return 1
+        --features adminspace-config-hotreload,adminspace-read,adminspace-write --quiet) || return 1
     if [[ ! -x target/zenoh-pico-cli/z_get ]]; then
         _pico_cli_unavailable "Layer E6i (pico storage-host adminspace read-deny z_get)" || return 1
         return 0

@@ -1160,15 +1160,22 @@ fn main() -> ExitCode {
             };
             run_storage_host_mode(
                 storage_host_listen,
-                parse_pair(rest, "--storage-host-dir"),
-                parse_repeated(rest, "--plugin"),
-                dynamic_volume,
-                storage_gc,
-                // R311y812 (§5.23 adminspace-read) — the SAME bare presence flag
-                // `--peer` and `--router-hat` parse, so one spelling means one thing
-                // across every run-mode that hosts an adminspace.
-                rest.iter().any(|a| a == "--no-admin-read"),
-                tuning,
+                crate::runner::StorageHostOpts {
+                    storage_dir: parse_pair(rest, "--storage-host-dir"),
+                    plugin_paths: parse_repeated(rest, "--plugin"),
+                    dynamic_volume,
+                    storage_gc,
+                    // R311y812 (§5.23 adminspace-read) — the SAME bare presence flag
+                    // `--peer` and `--router-hat` parse, so one spelling means one thing
+                    // across every run-mode that hosts an adminspace.
+                    no_admin_read: rest.iter().any(|a| a == "--no-admin-read"),
+                    // R2374 (§5.23 adminspace-write) — and its write-side twin, the
+                    // same spelling `--peer` parses. Absent = DENY, which is zenoh's
+                    // `PermissionsConf` default; this host granted unconditionally
+                    // until this round.
+                    config_write_permit: rest.iter().any(|a| a == "--config-write-permit"),
+                    tuning,
+                },
             )
         };
         #[cfg(not(feature = "adminspace-config-hotreload"))]
@@ -2643,15 +2650,7 @@ fn mesh_exit_code(outcome: std::io::Result<()>) -> ExitCode {
 /// just the admin GET queryable + config-write subscriber + the storage lifecycle
 /// apply (live-spawn / -despawn a `RuntimeStorageManager` storage).
 #[cfg(feature = "adminspace-config-hotreload")]
-fn run_storage_host_mode(
-    listen: String,
-    storage_dir: Option<String>,
-    plugins: Vec<String>,
-    dynamic_volume: Option<crate::args::DynamicVolumeArgs>,
-    storage_gc: crate::args::StorageGcArgs,
-    no_admin_read: bool,
-    tuning: crate::args::TransportTuning,
-) -> ExitCode {
+fn run_storage_host_mode(listen: String, opts: crate::runner::StorageHostOpts) -> ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().filter_or("RUST_LOG", "info")).init();
     let runtime = match build_demo_runtime() {
         Ok(rt) => rt,
@@ -2660,15 +2659,7 @@ fn run_storage_host_mode(
             return ExitCode::from(1);
         }
     };
-    match runtime.block_on(crate::runner::run_storage_host(
-        &listen,
-        storage_dir,
-        &plugins,
-        dynamic_volume.as_ref(),
-        storage_gc,
-        no_admin_read,
-        tuning,
-    )) {
+    match runtime.block_on(crate::runner::run_storage_host(&listen, opts)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("wz-ap-demo: {e}");
