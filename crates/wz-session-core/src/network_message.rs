@@ -597,8 +597,12 @@ mod chain_saturation_tests {
 /// space its own `id`s name, so an outbound aliased admin expression classifies
 /// correctly.
 ///
-/// An alias the resolver cannot resolve falls to [`StatSpace::User`] — see
-/// [`StatSpace::of_keyexpr`]. That is a DECIDED default rather than an
+/// An alias the resolver cannot resolve falls to
+/// [`StatSpace::User`](crate::stats::StatSpace::User) — see
+/// [`of_keyexpr`](crate::stats::StatSpace::of_keyexpr). Fully qualified because
+/// this module does not import the axis enums: an unqualified link here is
+/// exactly the shape that cost R2371 its first push. That is a DECIDED default
+/// rather than an
 /// oversight, and `an_unresolvable_alias_counts_as_user` pins it: the peer's id
 /// space lives on the face (the forwarder's per-face table), not on the session,
 /// so the inbound seam has no table to consult, and counting an unknown

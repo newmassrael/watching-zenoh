@@ -25,13 +25,24 @@
 //!   `low_pass_dropped_bytes` and `low_pass_dropped_msgs`;
 //!
 //! each of those in BOTH directions (`tx_` / `rx_`). wz carries the same set,
-//! and carries it as a PRODUCT of axis enums ([`StatMedium`], [`StatSpace`],
-//! [`StatMessage`]) rather than as four dozen hand-written fields, so the
-//! renderer WALKS the axes instead of naming them. Adding a variant to an axis
-//! changes the rendered surface with no edit to the renderer at all, which is
-//! what keeps the population derived rather than transcribed:
-//! [`TransportStatsReport::openmetrics_text`] cannot silently omit a
-//! combination, because it was never told the combinations.
+//! and carries it as a PRODUCT of axis enums
+//! ([`StatMedium`](crate::stats::StatMedium),
+//! [`StatSpace`](crate::stats::StatSpace),
+//! [`StatMessage`](crate::stats::StatMessage)) rather than as four dozen
+//! hand-written fields, so the renderer WALKS the axes instead of naming them.
+//! Adding a variant to an axis changes the rendered surface with no edit to the
+//! renderer at all, which is what keeps the population derived rather than
+//! transcribed:
+//! [`openmetrics_text`](crate::stats::TransportStatsReport::openmetrics_text)
+//! cannot silently omit a combination, because it was never told the
+//! combinations.
+//!
+//! (Every intra-doc link in THIS module header is fully qualified on purpose:
+//! the outer `///` on `pub mod stats;` in `lib.rs` merges with it and the pair
+//! resolves in the CRATE ROOT scope, where these names are not imported. The
+//! `///` docs on the items below are in module scope and need no prefix.
+//! R311y739 paid five broken links to learn this in a sibling module; R2371
+//! paid twelve here, at the pre-push doc-link budget.)
 //!
 //! The upstream anchor for the counting SEMANTICS — which direction prefix,
 //! which `medium` selector, which reason maps to which drop counter — is
@@ -49,8 +60,9 @@
 //! - **Network (`n_msgs`, the payload counters)** — the `session_actions`
 //!   module's `dispatch_network_message`, the single TX chokepoint all seven
 //!   typed `dispatch_*` wrappers land on, and the RX twin
-//!   [`TransportStats::inc_rx_network`] driven from the `drive` module's
-//!   frame-payload walk. Each TX wrapper hands down a [`NetworkStatsClass`]
+//!   [`inc_rx_network`](crate::stats::TransportStats::inc_rx_network) driven
+//!   from the `drive` module's frame-payload walk. Each TX wrapper hands down a
+//!   [`NetworkStatsClass`](crate::stats::NetworkStatsClass)
 //!   derived from its OWN typed message, so the classification is a parameter
 //!   the compiler demands of every sender rather than a `match` a new sender can
 //!   fall through.
@@ -101,7 +113,8 @@
 //! The counter therefore holds upstream's QUANTITY (transport messages the
 //! transport did not put on the wire) under upstream's NAME, for a REASON
 //! upstream does not have. That divergence is recorded here and on
-//! [`StatDrop::Transport`] rather than hidden behind a matching name — the same
+//! [`StatDrop::Transport`](crate::stats::StatDrop::Transport) rather than
+//! hidden behind a matching name — the same
 //! discipline the `wz_*_batches` decision applied, reaching the opposite answer
 //! because this time the quantity does match.
 //!
@@ -110,7 +123,8 @@
 //! This module's prose used to say the adminspace `stats` queryable "stays
 //! P4-deferred". Re-measured, it is not deferred: the `adminspace` module's
 //! metrics body appends this report's
-//! [`openmetrics_text`](TransportStatsReport::openmetrics_text) to the
+//! [`openmetrics_text`](crate::stats::TransportStatsReport::openmetrics_text)
+//! to the
 //! `@/<zid>/.../metrics` reply, `AdminAnswerCtx` carries the report, and the leg
 //! is covered end to end by `declare_adminspace_metrics_get_returns_openmetrics_text`
 //! and cross-impl against a real zenoh-pico `z_get` by
@@ -122,12 +136,15 @@
 //! pointer atomics.
 //!
 //! R311y810 — the MODULE is unconditional; only the COUNTING half
-//! ([`TransportStats`], its atomics and the `inc_*` seams) carries the gate.
-//! [`TransportStatsReport`] is plain integers, and a consumer that holds one in
+//! ([`TransportStats`](crate::stats::TransportStats), its atomics and the
+//! `inc_*` seams) carries the gate.
+//! [`TransportStatsReport`](crate::stats::TransportStatsReport) is plain
+//! integers, and a consumer that holds one in
 //! a struct field must be able to name the type in every feature combination;
 //! gating the type is how a cfg-gated `pub` struct field appears, which is the
 //! composability hazard Layer C1bf audits for. The AXIS enums and
-//! [`NetworkStatsClass`] are ungated for the same reason: the TX chokepoint
+//! [`NetworkStatsClass`](crate::stats::NetworkStatsClass) are ungated for the
+//! same reason: the TX chokepoint
 //! names the class in its signature, and that signature exists under the codec
 //! union rather than under `transport-stats`.
 
