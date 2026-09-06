@@ -1609,12 +1609,16 @@ jobs:
   # job's 30-minute budget. Its output is a pinned-version binary, so it caches
   # to a near-zero steady-state cost and only a cold cache pays.
   #
-  # NOT wired here, deliberately: Layer M (multicast). run-ci.sh marks it an
-  # "opt-in environment-flaky lane" — UDP multicast behaviour on a hosted
-  # runner is not something to bet a green build on, and a flaky gate is worse
-  # than an honest local-only one (no-flaky-ever). The multicast pico proofs
-  # therefore stay local-only until that flakiness is root-caused, and A4's
-  # EXECUTION line keeps saying so.
+  # Layer M (multicast) IS wired here — see its own step below, which carries
+  # the reasoning. R2375 struck the paragraph that used to stand here saying the
+  # opposite ("NOT wired here, deliberately", because a hosted runner might drop
+  # the IGMP join): R311y421 wired the lane onto this job with WZ_M_REQUIRE=1,
+  # and this header was never re-read. A job header that denies what the job
+  # does is worse than no header, because it is the half a reader reaches first
+  # — and the `transport-multicast` atom's reason still cited "opt-in Layer M,
+  # deliberately not wired" for the rounds in between, with this comment as its
+  # corroboration. run-ci.sh's own "opt-in" wording stays correct and is not the
+  # same claim: the lane is off by DEFAULT there and selected explicitly here.
   interop:
     name: cross-impl proof lanes (E2 + E5z + E6 + E6b + E6e + E6f + E6g + E6h + E6i + E7 + E8 + E8t + E9 + E10 + E11 + E12 + E13 + E14 + E15 + C1bp + Z)
     runs-on: ubuntu-22.04
