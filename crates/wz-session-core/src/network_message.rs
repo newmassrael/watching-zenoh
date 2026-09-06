@@ -603,7 +603,10 @@ mod chain_saturation_tests {
 /// this module does not import the axis enums: an unqualified link here is
 /// exactly the shape that cost R2371 its first push. That is a DECIDED default
 /// rather than an
-/// oversight, and `an_unresolvable_alias_counts_as_user` pins it: the peer's id
+/// oversight — it is `stats_space_of`'s `None` arm, and R2372 measured that NO
+/// TEST PINS IT (open-debt 662: R2371's prose named
+/// `an_unresolvable_alias_counts_as_user`, which exists in no file, and this
+/// module carries no test module at all). The reasoning: the peer's id
 /// space lives on the face (the forwarder's per-face table), not on the session,
 /// so the inbound seam has no table to consult, and counting an unknown
 /// expression as admin would move ADMIN traffic counts on nothing more than an
@@ -614,6 +617,21 @@ where
     F: Fn(u64) -> Option<alloc::string::String>,
 {
     use crate::stats::NetworkStatsClass;
+    // The three arms below are `resolve_alias`'s ONLY consumers and each is
+    // cfg-gated, so a build with all three off leaves the parameter genuinely
+    // unused and this crate's `-D warnings` refuses to compile. That build is
+    // not hypothetical: this crate's default set is `alloc` + the keyexpr
+    // matchers, so `--features transport-stats` alone reaches it, which is
+    // exactly the command Layer C1ak's first count guard runs.
+    // The union is the one `stats_space_of` already declares rather than a
+    // second list of the same three names, and binding it here keeps
+    // `unused_variables` live for every other name in this function.
+    #[cfg(not(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response"
+    )))]
+    let _ = &resolve_alias;
     match msg {
         #[cfg(feature = "codec-push")]
         NetworkMessage::Push(p) => push_stats_class(p, resolve_alias),

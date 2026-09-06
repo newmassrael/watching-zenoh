@@ -6374,16 +6374,21 @@ layer_c1aj_cargo_test_quic_datagram() {
 # R311y414 — both test steps were BARE; anchored count guards with the MEASURED
 # counts (2 counter unit / 1 e2e) now pin them.
 layer_c1ak_cargo_test_transport_stats() {
-    _runci_guarded_test C1ak 5 cargo test -p wz-session-core --features transport-stats --lib stats --quiet \
+    # R2372 — 5 -> 10 and 1 -> 2. R2371 added five stats unit tests and a second
+    # e2e, and moved neither constant; its push died at gate 4 (C1bz), which is
+    # BEFORE gate 4b, so nothing local ever read these. Both numbers are what the
+    # commands PRINTED, not what the diff counts.
+    _runci_guarded_test C1ak 10 cargo test -p wz-session-core --features transport-stats --lib stats --quiet \
         || return 1
-    _runci_guarded_test C1ak 1 cargo test -p wz-runtime-tokio --features transport-stats --test transport_stats_e2e --quiet \
+    _runci_guarded_test C1ak 2 cargo test -p wz-runtime-tokio --features transport-stats --test transport_stats_e2e --quiet \
         || return 1
     # R311y810 — the OpenMetrics renderer with the counting half OFF. The report
     # type and its rendering are unconditional (only the atomics are gated), and
     # this is what holds that apart: a build that never counts must still be able
     # to name and render a report, because a consumer carries one in a struct
     # field in every feature combination.
-    _runci_guarded_test C1ak 3 cargo test -p wz-session-core --no-default-features --features alloc --lib stats --quiet \
+    # R2372 — 3 -> 6, the same R2371 arithmetic on the alloc-only arm.
+    _runci_guarded_test C1ak 6 cargo test -p wz-session-core --no-default-features --features alloc --lib stats --quiet \
         || return 1
     # R311y811 — the BARE arm: no `alloc`, no `transport-stats`. R311y810 un-gated
     # this module precisely so its report type could be named in EVERY feature
@@ -6393,7 +6398,10 @@ layer_c1ak_cargo_test_transport_stats() {
     # super::*` became unused, and the crate's `-D warnings` test build broke —
     # surfacing on hosted CI inside Layer C1o (which compiles this binary only as
     # a side effect of filtering `keyexpr_match`) rather than in a stats lane.
-    _runci_guarded_test C1ak 1 cargo test -p wz-session-core --no-default-features --lib stats --quiet \
+    # R2372 — 1 -> 3 on the BARE arm. The three that reach it are the ones
+    # R311y811's comment above is about: ungated by `alloc` as well as by
+    # `transport-stats`.
+    _runci_guarded_test C1ak 3 cargo test -p wz-session-core --no-default-features --lib stats --quiet \
         || return 1
     # R311y810 — adminspace-metrics AND transport-stats together: the combination
     # a deployment actually runs, which no lane composed before. The metrics leg's

@@ -653,7 +653,7 @@ impl TransportStatsReport {
     /// `tx_n_msgs{medium="net"}`, `tx_z_put_msgs{space="user"}` — rather than a
     /// flattened name per combination. That is the closer mirror of upstream,
     /// whose 1.10.0 rewrite made these a LABEL-INDEXED registry
-    /// (`commons/zenoh-stats/src/labels.rs` @ `pub struct NetworkMessageLabels`)
+    /// (`commons/zenoh-stats/src/labels.rs` @ `pub enum MessageLabel`)
     /// rather than a flat struct, and it is what lets the renderer walk the axis
     /// enums instead of naming every product.
     ///
