@@ -2016,7 +2016,7 @@ mod tests {
     async fn an_unspeakable_join_from_an_unknown_peer_reports_nothing() {
         let peer_b = [0x01, 0x02, 0x03, 0x04];
         let mut changed = params(&peer_b);
-        changed.batch_size = changed.batch_size / 2;
+        changed.batch_size /= 2;
 
         let mut driver = FakeDriver::with([(join0(&changed), src(2))]);
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
