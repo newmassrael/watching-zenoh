@@ -2852,6 +2852,34 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// whole-session close (`FLAG_T_CLOSE_S` set), `false` when the session keeps
     /// running on links this one is not.
     ///
+    /// R2389 — the answer is TWO questions, asked in order, and the first is
+    /// the PHASE. Before `Established` there is no session to delete, so an
+    /// establishment reject is a LINK close whatever the link set says. zenoh
+    /// takes the same order structurally rather than by convention: its
+    /// establishment rejects never reach a transport at all, because both roles
+    /// fail through the same `step!` macro into `link.close(reason)`
+    /// (`unicast/establishment/open.rs:646`, `accept.rs:717`), and that function
+    /// builds `Close { reason, session: false }` (`unicast/link.rs:103-114`).
+    ///
+    /// zenoh-pico cannot arbitrate this half — on an establishment reject it
+    /// clears the message and returns the error (`unicast/transport.c:150-152`)
+    /// while its caller frees the link (`transport/manager.c:52-55`), sending no
+    /// Close at all — so zenoh is the only upstream that puts a byte here and the
+    /// answer is unanimous by default. That is exactly why this clause is
+    /// decidable where the one below is not: the disagreement recorded there is
+    /// between two ESTABLISHED-phase closes, and only one reference speaks before
+    /// Established.
+    ///
+    /// The gap was reachable and destructive rather than latent: a SECOND link
+    /// dialled to an already-aggregated peer runs its handshake on a throwaway
+    /// `SessionCore` whose link set is empty, so `link_count()` alone answered
+    /// "session" for it. zenoh's acceptor adds that link to the EXISTING
+    /// transport when its own side completes, so a wz initiator failing after
+    /// that (an `open_ack.timeout`, say) announced S=1 on a socket the peer had
+    /// already aggregated — and the peer `delete()`s the whole transport,
+    /// including the healthy links. Same class as the defect below, in the phase
+    /// before it.
+    ///
     /// Both Close emit sites route through here rather than through a literal,
     /// because the answer is a property of the LINK SET at emit time and neither
     /// site can see it otherwise. The teardown they serve is per-link by
@@ -2883,6 +2911,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// an outcome, and there the answer is unanimous.
     #[cfg(feature = "codec-close")]
     fn close_scope_is_session(&self) -> bool {
+        // R2389 — PHASE first. `established_at` is this link's "a session
+        // exists here" stamp: `record_established_at` sets it on every
+        // `Established` entry and only `reset_for_reopen` clears it, ahead of a
+        // re-handshake. So the whole of establishment — and the re-dial window
+        // of a reconnect — answers LINK, which is zenoh's `link.close`.
+        if !self.is_established() {
+            return false;
+        }
         #[cfg(feature = "transport-multilink")]
         {
             self.link_count() <= 1

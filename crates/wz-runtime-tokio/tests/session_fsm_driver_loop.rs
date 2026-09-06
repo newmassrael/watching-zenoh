@@ -968,3 +968,155 @@ async fn r311y823_malformed_frame_still_closes_invalid_on_the_wire() {
         CloseReason::Invalid as u8
     );
 }
+
+// ── R2389: the SCOPE BIT (`FLAG_T_CLOSE_S`) an establishment-phase
+//              reject puts on the wire.
+//
+// The reason byte above says WHY a handshake was refused; this bit says HOW
+// MUCH the peer should tear down, and zenoh's receiver branches on exactly
+// it -- `handle_close` calls `delete()` when the bit is set and
+// `del_link(link)` when it is clear (`unicast/universal/rx.rs:60-73`).
+//
+// zenoh's establishment closes are LINK closes on both roles. Every reject
+// in `open.rs` and `accept.rs` reaches the wire through the same `step!`
+// macro -> `link.close(reason)` (`open.rs:646`, `accept.rs:717`), and that
+// function builds `Close { reason, session: false }`
+// (`unicast/link.rs:103-114`). The rationale is structural rather than
+// stylistic: during establishment there is no transport to delete yet.
+//
+// zenoh-pico cannot arbitrate here, for the same reason it could not
+// arbitrate the reason byte: on an establishment reject it clears the
+// message and returns the error (`unicast/transport.c:150-152`) and its
+// caller frees the link (`transport/manager.c:52-55`) WITHOUT sending any
+// Close at all. So zenoh is the only upstream that puts a byte there, and
+// the answer is unanimous by default rather than chosen between references.
+//
+// That is what separates this clause from the one R311y839 deliberately
+// LEFT open. There the question was the last link of an ESTABLISHED
+// session, where the two references genuinely disagree (zenoh sends S=0
+// from every unicast site; zenoh-pico's lease-expiry close sets the bit,
+// `unicast/lease.c:99` -> `transport.c:322-324`) and both are reachable, so
+// it was not decidable. Before Established, only one reference speaks.
+//
+// wz derived the bit from the LINK SET alone (`close_scope_is_session` =
+// `link_count() <= 1`), and the aggregation set is populated at JOIN time,
+// so throughout establishment it is empty and the bit came out SET.
+//
+// REACHABLE AND DESTRUCTIVE, not latent: wz dialing a SECOND link to a peer
+// it already aggregates with runs that link's handshake on a throwaway
+// `SessionCore` whose link set is empty. zenoh's acceptor adds the link to
+// the EXISTING transport when it completes its side, so a wz initiator that
+// then fails (an `open_ack.timeout`, say) sends S=1 on a socket the peer has
+// already aggregated -- and the peer `delete()`s the whole transport,
+// including the healthy links. That is the same class R311y839 fixed for the
+// established phase, surviving in the phase before it.
+//
+// The three tests are ONE discriminator. D and E differ in the reason FAMILY
+// (ext vs body) and must AGREE on the scope, which is what says the bit
+// tracks the PHASE and not the family the reason split sorts on; F holds the
+// other side, where a session that really did establish keeps the byte
+// R311y839 deliberately did not move.
+
+/// The scope bit of the sole Close frame this session put on the wire, read
+/// off the emitted HEADER rather than through wz's own decoder -- the bytes
+/// are the thing under test, so projecting them back through the parser that
+/// reads them would assert the fix against itself.
+fn sole_close_scope(recorder: &LifecycleRecordingDriver) -> bool {
+    let snap = recorder.snapshot();
+    let closes: Vec<&(Vec<u8>, wz_runtime_tokio::Reliability)> = snap
+        .sends
+        .iter()
+        .filter(|(bytes, _)| bytes.first().map(|h| h & 0x1f) == Some(T_MID_CLOSE))
+        .collect();
+    assert_eq!(
+        closes.len(),
+        1,
+        "expected exactly one Close frame on the wire; sends were {:?}",
+        snap.sends
+    );
+    closes[0].0[0] & wz_codecs::wire_const::FLAG_T_CLOSE_S != 0
+}
+
+// ── R2389 D: an EXTENSION reject during establishment is a LINK close.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r2389_init_ack_patch_reject_closes_link_scoped_on_the_wire() {
+    use wz_session_wire_fixtures::craft_initack_wire_with_patch;
+
+    let (recorder, actions, mut engine) = fresh_recording_setup();
+    drive_to_sent_init_syn(&mut engine);
+
+    assert!(
+        !actions.is_established(),
+        "precondition: the reject happens BEFORE any session exists",
+    );
+
+    let wire = craft_initack_wire_with_patch(&[0xC0, 0x01], 2);
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(wire))]);
+
+    let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert!(
+        matches!(outcome, DriverLoopOutcome::InitAckPatchRejected),
+        "an InitAck patch above our InitSyn's must surface \
+         InitAckPatchRejected; got {outcome:?}"
+    );
+    assert_eq!(engine.get_current_state(), S::Closing);
+    assert!(
+        !sole_close_scope(&recorder),
+        "an establishment reject is a LINK close (zenoh's `link.close` \
+         sends `session: false`, unicast/link.rs:103-114) -- S=1 here makes \
+         a peer that has already aggregated this link delete() the whole \
+         transport",
+    );
+}
+
+// ── R2389 E: a BODY reject during establishment is a LINK close too.
+//               Different reason family from D, SAME scope.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r2389_init_ack_caps_reject_closes_link_scoped_on_the_wire() {
+    use wz_session_wire_fixtures::craft_initack_wire_with_caps;
+
+    let (recorder, actions, mut engine) = fresh_recording_setup();
+    drive_to_sent_init_syn(&mut engine);
+
+    let wire = craft_initack_wire_with_caps(&[0xC0, 0x01], 0x01, 0);
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(wire))]);
+
+    let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert!(
+        matches!(outcome, DriverLoopOutcome::InitAckCapsRejected),
+        "enlarged InitAck caps must surface InitAckCapsRejected; got {outcome:?}"
+    );
+    assert_eq!(engine.get_current_state(), S::Closing);
+    assert!(
+        !sole_close_scope(&recorder),
+        "the BODY family closes INVALID where the ext family closes GENERIC, \
+         but BOTH are pre-session and so both are LINK closes -- the scope \
+         bit tracks the phase, not the reason family",
+    );
+}
+
+// ── R2389 F (the CONTROL): once a session really exists, the single-link
+//               close keeps the SESSION scope R311y839 deliberately left in
+//               place. Without this the fix would read as "always clear".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r2389_an_established_session_still_closes_session_scoped() {
+    let (recorder, actions, mut engine) = fresh_recording_setup();
+    drive_to_sent_init_syn(&mut engine);
+
+    engine.process_event(E::InitAckReceived);
+    engine.process_event(E::OpenAckReceived);
+    assert_eq!(engine.get_current_state(), S::Established);
+    assert!(
+        actions.is_established(),
+        "precondition: this link now carries a session",
+    );
+
+    engine.process_event(E::SessionClose);
+    assert_eq!(engine.get_current_state(), S::Closing);
+    assert!(
+        sole_close_scope(&recorder),
+        "closing the only link of an ESTABLISHED session is closing the \
+         session -- that byte is R311y839's deliberate pico-shaped choice \
+         and this round does not move it",
+    );
+}

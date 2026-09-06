@@ -8589,8 +8589,14 @@ layer_c1ca_cargo_test_derived_initial_sn() {
 # same rejection rules: an establishment-EXTENSION reject closes GENERIC where
 # the body's size parameters close INVALID, and both are read off the Close
 # frame this session actually emitted rather than off the FSM action alone.
+# R2389 — 22 -> 25. The close-SCOPE half of the same frames: an
+# establishment reject is a LINK close (zenoh `unicast/link.rs:103-114`; pico
+# sends nothing there, so zenoh is unopposed), where wz derived the bit from
+# the link set alone and answered "session" for a phase that has none. Two
+# reason families that must AGREE on the scope, plus the established-phase
+# control that keeps the fix from reading as "always clear".
 layer_c1cb_cargo_test_init_ack_admission() {
-    _runci_guarded_test C1cb 22 \
+    _runci_guarded_test C1cb 25 \
         cargo test -p wz-runtime-tokio --test session_fsm_driver_loop --quiet || return 1
 }
 

@@ -193,12 +193,17 @@ fn r57_session_script_actions_produce_real_wire_bytes() {
         "OpenSyn body must contain the cookie payload"
     );
 
-    // Close — graceful session close, reason=Generic (0).
-    let close_flags = 0x20u8; // FLAG_T_CLOSE_S
-    let expected_close = vec![
-        close_flags | 0x03, /* T_MID_CLOSE */
-        0x00,               /* reason */
-    ];
+    // Close — reason=Generic (0), S CLEAR.
+    //
+    // R2389 — this fixture dispatches the actions directly and never
+    // drives a handshake, so its session was never Established and the
+    // scope is LINK. `close_scope_is_session` asks the phase before the
+    // link set, which is zenoh's rule for every pre-Established Close
+    // (`unicast/link.rs:103-114` builds `Close { reason, session: false }`,
+    // reached from both roles' `step!` macro). This byte was `0x20 | 0x03`
+    // until then, which claimed a whole-session teardown for a session that
+    // did not exist yet.
+    let expected_close = vec![0x03 /* T_MID_CLOSE, S clear */, 0x00 /* reason */];
     assert_eq!(snap.sends[2].0, expected_close, "Close wire bytes drift");
 
     // InitAck — flags=S|A|Z, includes cookie (R121f1 default ext

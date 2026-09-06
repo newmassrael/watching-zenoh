@@ -59,6 +59,25 @@
 //!
 //! # Why the single-link byte is NOT changed here, stated rather than hidden
 //!
+//! R2389 SCOPES this section to the ESTABLISHED phase, which is the only
+//! phase it was ever true of. The paragraph below weighs two references against
+//! each other, and that weighing only arises once both of them speak: before
+//! `Established`, zenoh-pico sends no Close at all on a handshake reject (it
+//! clears the message and returns the error, `unicast/transport.c:150-152`,
+//! while its caller frees the link, `transport/manager.c:52-55`), so zenoh's
+//! `session: false` stands alone and the pre-Established byte was decidable
+//! after all. It is derived from the phase now — `close_scope_is_session` asks
+//! `is_established()` before it asks the link set — and the witnesses are in
+//! `session_fsm_driver_loop.rs`.
+//!
+//! Note which citation made that reachable: `unicast/link.rs:103-113` is
+//! already named a few lines above, as the RECEIVE half's evidence that a stock
+//! zenoh sends S=0. The same line is the SEND half's rule, and R311y839 did not
+//! draw it — the reference was read for one direction only.
+//!
+//! What remains genuinely undecided is the last link of an established session,
+//! and that is what the rest of this section is about.
+//!
 //! The two references DISAGREE on the last-link case and BOTH are reachable, so
 //! it is not decidable the way the multilink case is. zenoh-pico's
 //! `_z_unicast_transport_close` passes `link_only = false`, which SETS the flag

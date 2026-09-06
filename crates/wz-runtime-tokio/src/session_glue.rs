@@ -1366,6 +1366,17 @@ mod tests {
     /// The aggregate case is `close_link_scope.rs`. Reliable channel
     /// is hard-pinned too (zenoh-pico drops Close on best-effort).
     ///
+    /// R2389 — that "this link IS the session" reading was only half
+    /// the question, and this fixture is on the other half: the scope is
+    /// now derived from the PHASE first and the link set second, and
+    /// `recording_actions()` never drives a handshake, so its session
+    /// was never Established. The expected header is therefore the
+    /// LINK-scoped one — which is what zenoh puts on every
+    /// pre-Established Close (`unicast/link.rs:103-114`). The four
+    /// vectors and this test's subject are untouched: the reason
+    /// discriminator is what varies here, and the header is pinned so a
+    /// silent change to it still has to be written down.
+    ///
     /// The trace counter for Close emits bumps once per call so a
     /// downstream test counting Close emits across the script + Rust
     /// paths sees the unified count.
@@ -1394,15 +1405,12 @@ mod tests {
                 1,
                 "exactly one wire emit per send_close_with_reason ({variant:?})",
             );
-            // Outer header = T_MID_CLOSE | _Z_FLAG_T_CLOSE_S. Body =
-            // reason byte. Total 2 bytes — Close has no other body
-            // fields (the Close codec is a fixed single-byte
-            // discriminator) and we hard-set FLAG_T_CLOSE_S to
-            // request graceful session close.
-            let expected = vec![
-                wire_const::T_MID_CLOSE | wire_const::FLAG_T_CLOSE_S,
-                reason_byte,
-            ];
+            // Outer header = T_MID_CLOSE, S CLEAR. Body = reason byte.
+            // Total 2 bytes — Close has no other body fields (the Close
+            // codec is a fixed single-byte discriminator). S is clear
+            // because this fixture never established: R2389 derives
+            // the scope from the phase before the link set.
+            let expected = vec![wire_const::T_MID_CLOSE, reason_byte];
             assert_eq!(
                 driver.frame_bytes(0),
                 expected,
