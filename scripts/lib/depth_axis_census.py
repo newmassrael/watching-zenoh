@@ -491,11 +491,31 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # root-less ratchets are exactly on budget, and that gate's instruction is to
 # repair the citation rather than raise the budget. The facts those sentences
 # rest on are cited, with their roots, earlier in each reason.
-PIN_REACHED = 64
+# R2385 -- `declare-keyexpr` CLOSED, and the pins move for TWO reasons at once,
+# which is why both are written down instead of one number being adjusted.
+#
+# THIS ROUND'S OWN DELTA, attributed the way every entry above attributes its
+# own: the atom sat in REACHED (it owns 57 symbols, all 57 referenced by tests),
+# so REACHED falls by exactly 1 and neither UNREACHED nor NO-SYMBOL moves.
+# `citation_audit` over its OLD reason ALONE answers (7 wz, 1 ambiguous, 9
+# upstream), so the wz pin falls by exactly 7 and the AMBIGUOUS pin by exactly 1.
+#
+# ⚠ THE INHERITED DRIFT, which this round ADOPTS rather than hides. These pins
+# were last correct at R2374. SEVEN atoms closed after it without following them
+# down -- `session-reconnect` (R2376), the four `transport-link-*` (R2380), and
+# `declare-token` / `declare-subscriber` (R2383) -- so REACHED had already fallen
+# 64 -> 57 before this round touched anything, and the wz / ambiguous pins
+# 352 -> 312 and 79 -> 75. The arithmetic is checkable: 64 - 7 = 57, which is what
+# the census printed at this commit's parent. The gate has therefore been RED on
+# the hosted run for four rounds, seen by nobody, which is the cost of a pin that
+# only the lane can check. The numbers below are the MEASURED values after this
+# round's mutation; the seven-atom part of the fall is bookkeeping, not a
+# measurement this round made.
+PIN_REACHED = 56
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
-PIN_WZ_CITATIONS = 352
-PIN_AMBIGUOUS = 79
+PIN_WZ_CITATIONS = 305
+PIN_AMBIGUOUS = 74
 
 
 class Fatal(Exception):

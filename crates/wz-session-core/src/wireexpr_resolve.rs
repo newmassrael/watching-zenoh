@@ -360,7 +360,7 @@ pub fn resolve_wireexpr_in(
 ///   SENDER's space (`vendor/zenoh-pico/src/session/resource.c:130-142`).
 ///
 /// wz's generated decoder pins the `WireexprLocal` arm
-/// (`out/wz-codecs/decl_kexpr.rs:76` passes the arm selector `0x1u8` as a
+/// (`out/wz-codecs/decl_kexpr.rs:75` passes the arm selector `0x1u8` as a
 /// literal), which is pico's answer. NEITHER upstream ever EMITS a non-zero
 /// scope here — zenoh's two producers write `scope: 0`
 /// (`zenoh/src/api/session.rs:1539-1545` literally, and
