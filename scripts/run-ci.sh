@@ -3546,6 +3546,23 @@ PY
     # so nothing matches reds the empty-population guard. Restoring each
     # returns rc=0.
     python3 scripts/lib/multicast_stop_wiring_gate.py || return 1
+    # R2380 (open-debt item 15) — a live atom reason that calls a run-ci lane
+    # LOCAL-only must agree with the workflow that runs it. Measured when the
+    # gate was written: 32 such claims across ~14 atoms and NOT ONE still true,
+    # every lane they named having been wired hosted by some later round that
+    # had no reason to read a link-scheme registry entry. Four atoms
+    # (transport-link-tls / -ws / -quic / -quic-datagram) carried it as their
+    # ONLY surviving residual and were PARTIAL for no other reason.
+    #
+    # It needs a GATE rather than a sweep because a sweep fixes today's count
+    # and the next lane wired starts it again: the claim is prose in a JSON
+    # store, the fact it asserts lives in a YAML workflow, and nothing read
+    # both. Ships with a ratchet (a COUNT, not a per-atom allowance table) that
+    # fails in BOTH directions -- above admits a new leak, below leaves the
+    # ratchet up after a repair. Enforcement MEASURED, three probes: budget one
+    # low reds the "rose" arm, one high reds the "left up" arm, and an empty
+    # claim population reds the subject-moved guard.
+    python3 scripts/lib/lane_locality_claim_gate.py || return 1
     # R2241 (unregistered open-debt item 581) — an upstream claim must still
     # MEAN something after upstream moves. `CLAUDE.md` asks for `file:line` on
     # every source claim, which is right for OUR sources (we move those lines
