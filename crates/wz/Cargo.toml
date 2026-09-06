@@ -1217,6 +1217,27 @@ domain-query = [
     # hand-maintained censuses. The store has 11 query atoms, not 10.
     "query-value",
 ]
+# R2387 (open-debt item 672) — the `router-*` namespace had NO domain bundle,
+# and that is not a small omission: `domain_census.py` iterates the BUNDLES and
+# derives each one's prefix from its own name, so a namespace nobody wrote a
+# bundle for is never checked by either of its two arms. Seven atoms sat outside
+# every domain and outside the census at once.
+#
+# Three of the seven reach a crate feature (`router-connect-reconcile` and
+# `router-multicast-faces` forward to `wz-runtime-tokio`, `router-hat-router`
+# through `routing-router-hat`); the other four are markers with an empty
+# forward. Listing markers is what every other domain does -- `routing-client`
+# is listed here and forwards to nothing -- so the bundle names all seven and
+# the census's subset check now has a subject.
+domain-router = [
+    "router-connect-reconcile",
+    "router-face-management",
+    "router-hat-multihat",
+    "router-hat-router",
+    "router-master-election",
+    "router-multicast-faces",
+    "router-orchestration",
+]
 domain-routing = [
     "routing-client",
     "routing-failover",

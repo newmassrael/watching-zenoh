@@ -123,6 +123,47 @@ CARRY = {
     ),
 }
 
+# R2387 (open-debt item 672) — the atom NAMESPACES that no `domain-<X>` bundle
+# covers, pinned as a SET for the same reason CARRY is: a count would let a
+# rename in, and this file already says so in as many words.
+#
+# ## Why a third arm was needed at all, measured
+#
+# Both arms below iterate the BUNDLES and derive each one's prefix from its own
+# NAME (`prefix = name[len("domain-"):] + "-"`). Neither ever starts from an
+# atom. So a namespace nobody wrote a `domain-` bundle for is not "passing" the
+# census -- it never ENTERS it, in either direction. MEASURED at R2387 before
+# the fix: 214 atoms, 147 of them in some bundle, 67 in none; of those 67 the
+# census could see 27 (storage 13 / routing 9 / transport 5, the three carried
+# rows) and was structurally blind to 40 across EIGHT namespaces. `domain-router`
+# was written the same round, which is why `router` is not in the set below and
+# the blind count is 33 rather than 40.
+#
+# That is the "a population drawn from the checker's own definition can never
+# fail" shape this workspace refuses elsewhere by name -- the `--census` leg
+# that may not be `--all-features`, and the atom-test graph's refusal to credit
+# an `any(..)` OR-contributor. It reached this file too, and nothing said so for
+# 72 rounds.
+#
+# ## What a row here means, and how it leaves
+#
+# It means "these atoms answer to no domain bundle, and until one exists the
+# subset arm cannot check them". It is NOT a blessing: shrink this set by
+# writing the bundle (`domain-router` is the worked example), never by deciding
+# a namespace deserves no domain. If some namespace genuinely should not have
+# one, that is an owner's decision and it belongs in prose next to the entry
+# that records it -- but the entry stays, because the point of this set is that
+# the absence is VISIBLE.
+UNBUNDLED_NAMESPACES = {
+    "adminspace",
+    "api",
+    "config",
+    "ext",
+    "plugin",
+    "rest",
+    "switchboard",
+}
+
 
 def facade_features(manifest_dir):
     """The `wz` facade's feature table, as cargo itself parses it."""
@@ -199,9 +240,43 @@ def audit(manifest_dir):
             phantom.append((name, extra))
             print(f"  domain census FAIL: {name} names non-atom(s): {', '.join(extra)}")
 
+    # R2387 (item 672) — THE ARM THAT STARTS FROM THE ATOMS. Everything above
+    # starts from a bundle, so it can only ever judge namespaces that already
+    # have one. This derives the namespaces from the STORE and asks which have
+    # no bundle at all; without it, writing no bundle is how an atom namespace
+    # leaves the census entirely, silently, forever.
+    unbundled = []
+    if not atoms:
+        # A population that reached zero reports green for having looked at
+        # nothing -- the failure this file's siblings each guard against.
+        print("  domain census FAIL: the store returned NO atoms, so this "
+              "census graded nothing; fix the store read before reading the "
+              "rows above")
+        unbundled.append(("<population>", set(), set()))
+    else:
+        bundled = {k[len("domain-"):] for k in feats if k.startswith("domain-")}
+        live = {a.split("-")[0] for a in atoms} - bundled
+        appeared, resolved = live - UNBUNDLED_NAMESPACES, UNBUNDLED_NAMESPACES - live
+        if appeared or resolved:
+            unbundled.append(("<namespaces>", appeared, resolved))
+        if appeared:
+            print("  domain census FAIL: atom namespace(s) with no `domain-` "
+                  f"bundle that UNBUNDLED_NAMESPACES does not cover: "
+                  f"{', '.join(sorted(appeared))} -- write the bundle, or add "
+                  "the name here with the reason it has none")
+        if resolved:
+            print("  domain census FAIL: "
+                  f"{', '.join(sorted(resolved))} now HAS a `domain-` bundle "
+                  "-- drop it from UNBUNDLED_NAMESPACES in this same commit so "
+                  "the set records the progress instead of overstating it")
+        if live:
+            print(f"  domain census carry: {len(live)} atom namespace(s) have "
+                  f"no `domain-` bundle, so the subset arm never reaches them: "
+                  f"{', '.join(sorted(live))}")
+
     print(f"  domain census: {len(carried)} carried / "
-          f"{len(new_divergence) + len(phantom)} new")
-    if new_divergence or phantom:
+          f"{len(new_divergence) + len(phantom) + len(unbundled)} new")
+    if new_divergence or phantom or unbundled:
         print("  A domain list is a census; disagreeing with the store is a lie with")
         print("  a number attached. To fix an OMISSION add the atom -- and check the")
         print("  wz facade actually FORWARDS it, since a missing forward, not a lazy")
