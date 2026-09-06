@@ -6718,8 +6718,9 @@ pub(crate) struct StorageHostOpts {
     /// hardcoded `true` and consulted no `admin_write_permit`, so
     /// `permissions.write` had one shipping run-mode outside it. The permit is now
     /// seeded here and RE-READ per PUT off the same live config the GET gate
-    /// reads, which is what upstream does inside `send_push`
-    /// (`net/runtime/adminspace.rs:394-396`).
+    /// reads, which is what upstream does by taking the config lock inside its
+    /// admin `send_push` handler -- the same divergence the read gate's own
+    /// frozen-permit clause named, on the write side.
     pub config_write_permit: bool,
     /// `--batch-size` / `--lease-ms`.
     pub tuning: TransportTuning,

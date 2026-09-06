@@ -1074,7 +1074,8 @@ pub enum AdminConfigWrite {
     /// pointer behind them. This one is different: `adminspace/permissions/read`
     /// is a key upstream's own admin PUT can write, because upstream's config is a
     /// json5 document and its write path routes any pointer into the live
-    /// `Config` (`net/runtime/adminspace.rs`). So a wz node that could not be told
+    /// `Config` -- the same admin handler this module's header already cites for
+    /// the read gate. So a wz node that could not be told
     /// to change its own read permit over the wire was NARROWER than upstream on a
     /// key upstream carries -- which is a divergence, where inventing a fourth
     /// bespoke intent would have been a widening.
