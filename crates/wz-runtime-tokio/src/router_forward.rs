@@ -1263,8 +1263,9 @@ impl RouterForwarder {
     }
 
     /// R2388 (open-debt item 671) — total declarations replayed to faces that
-    /// had just come up
-    /// ([`replay_declarations_to_new_face`](Self::replay_declarations_to_new_face)).
+    /// had just come up (`replay_declarations_to_new_face`, private: this doc
+    /// is public and rustdoc refuses a public->private intra-doc link, which is
+    /// what Layer C1bz caught when the first draft wrote one).
     /// Separate from [`future_pushes_seen`](Self::future_pushes_seen) on purpose:
     /// the two emit the SAME unsolicited `DeclareSubscriber`, so a test that
     /// asserted only the future counter could not tell a face-up replay from a
