@@ -418,7 +418,35 @@ GRADE_TAGS = ("PARTIAL:", "COMPLETE:")
 #: needle survives that move; a path with a line number does not.
 #:
 #: The split is 34 PARTIAL / 6 COMPLETE.
-BUDGET = 40
+#:
+#: R2414 moved it to 39 by re-declaring `adminspace-metrics`, and this one paid
+#: in PRODUCT rather than in prose. Re-measured at the pin, the metrics leg had
+#: drifted on FIVE axes at once, four of them in bytes a foreign consumer reads:
+#: the ENCODING (the pin's `application/openmetrics-text; version=1.0.0;
+#: charset=utf-8`, predefined id 15 plus schema, where wz sent text/plain), the
+#: TYPE (`info`, not `gauge`), the SAMPLE NAME (`zenoh_build_info`, not
+#: `zenoh_build`), the LABELS (`local_id` and `local_whatami` beside `version`),
+#: and the missing `# EOF` terminator. All five are fixed.
+#:
+#: THE ORDERING RULE THE ROUND HAD TO FIND BEFORE WRITING THE CODE. OpenMetrics
+#: ends at `# EOF`, and this node appends its transport-stats block AFTER the
+#: build-info block -- so copying upstream's literal, terminator included, into
+#: `metrics_text` would have buried the counters behind the end of the document.
+#: The terminator is its own function the caller appends last, and the
+#: composition test runs with transport-stats ON, the only configuration where
+#: that ordering can be wrong.
+#:
+#: AND A DEFECT IN THE ROUND'S OWN PREVIOUS WORK, found by auditing it rather
+#: than by a test. R2413's surface manifest rendered every encoding name through
+#: a two-arm helper whose else-branch answered `application/json`, and its gate
+#: built BOTH the declared and the observed name through that helper -- so this
+#: very change would have left both sides agreeing on a wrong name: green gate,
+#: lying document. Measured with the old helper restored and both sides moved:
+#: the manifest gate reported ok while an outside test failed. The helper now
+#: derives from the encoding module's id/MIME SSOT.
+#:
+#: The split is 33 PARTIAL / 6 COMPLETE.
+BUDGET = 39
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
