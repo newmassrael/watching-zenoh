@@ -738,7 +738,40 @@ def _grade_head(reason: str) -> str:
 #: atom. Neither §5.26 reason was wrong when written -- the tree moved underneath
 #: them, and only re-running the oracle said so. A grading-pin sweep that only
 #: re-reads the RESIDUALS will not catch this class; the proof line needs running.
-BUDGET = 37
+#: 37 -> 36 (R2425). `session-reconnect`, and the first atom in this series whose
+#: re-measurement changed what a residual MEANS rather than whether it holds.
+#: Four residuals, each re-measured at the pin instead of re-worded:
+#:
+#:   * re-scout and multi-locator failover needed no upstream read at all -- the
+#:     atom's OWN later stratum (R2376) already answers them and ships the
+#:     mechanism. A reader hitting the earlier clause first believes the gap is
+#:     open; it closed thirty lines below, which is the hazard of grading an
+#:     accreted reason by its first matching sentence.
+#:   * "no exponential backoff" is FALSE as written. Upstream still grows its
+#:     delay and its shipped default doubles to a ceiling, but wz has the
+#:     mechanism too (R311y526) under upstream's own field names. Only the
+#:     DEFAULT differs -- wz ships a factor of 1.0, a constant delay, chosen for
+#:     pico parity. A chosen default, not a missing capability.
+#:   * "no multicast reconnect" is a SHARED ABSENCE: upstream joins the group at
+#:     construction only and nothing re-establishes a lost multicast transport,
+#:     while unicast does have retry. So it is not a divergence, and listing it
+#:     as one overstated wz's gap.
+#:
+#: ⚠ THE METHOD IS THE PART WORTH COPYING, because three of this round's own
+#: first readings were wrong and each was wrong the SAME way -- one half measured
+#: and the other assumed. "One residual" was four; "the line rotted" was intact;
+#: "the residual is live" was already implemented in wz. A residual names two
+#: sides, so count the implementers on BOTH before writing the sentence.
+#:
+#: ⚠ And the multicast half nearly produced a fourth: `reconnect` appears nowhere
+#: in upstream's transport layer, so a term search returns an invalid negative
+#: rather than an absence. It was settled by reading the JOIN SITE.
+#:
+#: A CITATION DEFECT FOUND WHILE MEASURING, of the ungraded kind: the backoff
+#: clause cited its upstream module without the `commons/` root, and upstream
+#: keeps `zenoh/` and `commons/` as siblings, so the path resolved under no root
+#: and sat in no budget -- present, wrong, and invisible to every anchor gate.
+BUDGET = 36
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
