@@ -151,7 +151,16 @@ REFUSAL_TOKENS = frozenset({"code", "success"})
 # from R311y774-y778 plus R311y840's `spawn_wz_router` file, which is not a
 # coincidence: they are the ones whose red was actually misdiagnosed, so they are
 # where the check got written.
-CARRIED_SUBJECT = 232
+# 232 -> 228 (R2394). R2393 added two fixtures to
+# `wz_router_hat_connect_reconcile.rs` without the freshness call and this budget
+# went 232 -> 234, which is the direction that means "a new fixture needs the
+# demo ALIVE and does not check it". The repair this file prescribes for that
+# direction is the CALL, not a higher number, so R2394 added it -- and the call
+# is per FILE, so all SIX of that fixture's test fns left the carried bucket at
+# once, the four that predate R2393 included. Hence a move of four rather than
+# the two the red was about: 234 measured, 228 after the call, and this number
+# follows it DOWN in the same commit.
+CARRIED_SUBJECT = 228
 PROBE_ROUTE = 24
 REFUSAL_ONLY = 8
 

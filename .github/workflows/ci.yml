@@ -1984,6 +1984,17 @@ jobs:
       - name: Layer E7b — router-connect-reconcile (feature ON + OFF arms)
         run: bash scripts/run-ci.sh --layer E7b
 
+      # R2394 — E7b2 landed in scripts/run-ci.sh with R2393 and was never wired
+      # here, so Layer C0's lane-registration arm went red and the lane itself
+      # ran only in a local full sweep. That is the same omission the note above
+      # records for E7b / E7c, one round after the note. It sits beside E7b
+      # because it is the second PRODUCER of the same reconcile — a config-write
+      # PUT rather than the `--connect-after` CLI timer — and it builds its own
+      # binary, since E7b's feature set compiles the write path out and would
+      # pass vacuously.
+      - name: Layer E7b2 — router-connect-reconcile over the wire
+        run: bash scripts/run-ci.sh --layer E7b2
+
       - name: Layer E7c — adminspace-router-linkstate cross-node e2e
         run: bash scripts/run-ci.sh --layer E7c
 

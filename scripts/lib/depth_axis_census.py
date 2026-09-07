@@ -515,11 +515,32 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # only the lane can check. The numbers below are the MEASURED values after this
 # round's mutation; the seven-atom part of the fall is bookkeeping, not a
 # measurement this round made.
-PIN_REACHED = 56
+# R2394 -- `access-downsampling` RE-GRADED against the pin (open-debt item 675),
+# and as at R2385 the pins move for two reasons at once, so both are written.
+#
+# THIS ROUND'S OWN DELTA, measured with this file's own `citation_audit` over the
+# atom's OLD and NEW reason alone: 3 wz / 2 ambiguous before, 6 wz / 1 ambiguous
+# after, so the wz pin rises by exactly 3 and the AMBIGUOUS pin FALLS by exactly
+# 1. REACHED does not move at all -- the atom is COMPLETE and was already outside
+# the PARTIAL population this axis counts, which is also why renaming its
+# `message_kind` to `message_kinds` moves nothing here: a store-wide read shows
+# that symbol cited by this atom and no other.
+#
+# THE INHERITED DRIFT, adopted rather than hidden, exactly as the R2385 entry
+# above had to adopt its own. These pins were last correct at R2385. Since then
+# R2390 closed `transport-multicast`, which was a REACHED member, so REACHED had
+# already fallen 56 -> 55 before this round touched anything; and R2386-R2393
+# rewrote reasons without following the citation pins, which had already carried
+# wz 305 -> 311 and ambiguous 74 -> 76. The arithmetic is checkable against this
+# commit's parent and this round's own delta: 311 + 3 = 314 and 76 - 1 = 75,
+# which is what the census prints here. The gate has therefore been RED on the
+# hosted run since R2390 with nobody reading it -- the same cost the R2385 entry
+# recorded, for the same reason, four rounds later.
+PIN_REACHED = 55
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
-PIN_WZ_CITATIONS = 305
-PIN_AMBIGUOUS = 74
+PIN_WZ_CITATIONS = 314
+PIN_AMBIGUOUS = 75
 
 
 class Fatal(Exception):

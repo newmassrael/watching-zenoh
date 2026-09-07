@@ -49,8 +49,8 @@ use std::fs::File;
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    graceful_terminate, read_captured, spawn_on_ephemeral_port, wait_for_substring,
-    wz_ap_demo_binary, ChildGuard,
+    assert_demo_binary_newer_than_sources, graceful_terminate, read_captured,
+    spawn_on_ephemeral_port, wait_for_substring, wz_ap_demo_binary, ChildGuard,
 };
 
 /// Spawn a `--router-hat` node (presents wire `WhatAmI::Router`). Mirrors the
@@ -58,6 +58,14 @@ use wz_integration_tests::common::{
 /// helper cannot allocate, and gates on the router-hat listen marker.
 fn spawn_router_hat(label: &str, args: &[&str]) -> (ChildGuard, File, u16) {
     let stderr = tempfile::tempfile().expect("tempfile for node stderr");
+    // R2394 — the demo is this fixture's SUBJECT, not a readiness probe: both
+    // tests read a verdict out of the router's own behaviour, so a demo built
+    // before the connect-add arms landed would read as "wz does not honour a
+    // wire connect-add" and send the diagnosis to the routing layer for a defect
+    // that is in the build. R2393 added these two fixtures without the check and
+    // the binary-freshness lint went 232 -> 234; the repair the lint prescribes
+    // for that direction is the call, not a higher number.
+    assert_demo_binary_newer_than_sources(&wz_ap_demo_binary());
     spawn_on_ephemeral_port(
         &wz_ap_demo_binary(),
         args,
