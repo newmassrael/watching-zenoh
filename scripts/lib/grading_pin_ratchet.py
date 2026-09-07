@@ -869,7 +869,36 @@ def _grade_head(reason: str) -> str:
 #: construction, and the claim it supports belongs to `declare-interest` by this
 #: reason's own assignment -- so it is left for that atom's round rather than
 #: re-anchored here, where nobody would look for the verdict.
-BUDGET = 32
+#: 32 -> 31 (R2430). `api-compat-c`, the first PARTIAL of this series and the
+#: one that broke three assumptions the COMPLETE sweep had built up.
+#:
+#:   * ITS COUNTERPARTY IS A DIFFERENT REPOSITORY. It grades against zenoh-c,
+#:     not zenoh, so "is the oracle present" is a separate question from the
+#:     tree's own pin -- and the risk ranking this series derived (how much text
+#:     follows an atom's last version mention) measures TEXT STRUCTURE and says
+#:     nothing about oracle availability. The reference was present at the
+#:     matching tag; that was ESTABLISHED, not inherited.
+#:   * THE CORRECTION WAS AT OFFSET ZERO, not in the latest stratum. The reason
+#:     opens with a READ-THIS-FIRST banner disowning the counts in the
+#:     paragraphs below it and naming the LANE as the authority. Windowing
+#:     around the version match lands in the disowned text and never sees it, so
+#:     the rule is now three places: offset 0, then the latest stratum, then
+#:     around the match.
+#:   * ⚠⚠ AND THIS ROUND NEARLY MANUFACTURED A REGRESSION. Wanting a measured
+#:     rather than quoted figure, it rebuilt the cdylib with a plain
+#:     default-features build and got 22 of 29, all seven gaps in shared-memory
+#:     examples. That is not breakage: the LANE DERIVES its arm from the
+#:     oracle's headers and selects the shared-memory one, so a default build
+#:     has no such symbols to export. 22 of 29 answers a DIFFERENT QUESTION.
+#:     The familiar rule is that hand-chosen flags are more PERMISSIVE than the
+#:     lane's; the reverse variant is worse, because stricter flags produce a
+#:     LOWER number that reads as a defect. Either direction: the lane is the
+#:     oracle. Running it here passes and prints 29 of 29.
+#:
+#: Freshness was necessary and NOT sufficient: the artifact the census reads was
+#: four days behind the commit, and fixing that still left the wrong answer,
+#: because configuration was the variable that mattered.
+BUDGET = 31
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
