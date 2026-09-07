@@ -703,7 +703,42 @@ def _grade_head(reason: str) -> str:
 #: extractor; the true split at this budget is 33 PARTIAL / 5 COMPLETE, and every
 #: split figure the R2418..R2421 notes recorded understated PARTIAL. The COUNTS
 #: those rounds ratcheted were always right -- only the split was wrong.
-BUDGET = 38
+#:
+#: 38 -> 37 (R2423). `rest-http-bridge`, and it moved as a SIDE EFFECT of paying
+#: open-debt item 688 rather than as a sweep pick -- the item's own text told the
+#: round to check whether the two §5.26 atoms still declared 1.5.0 and to move the
+#: declaration with a measurement if so, because they sit on the seam it was
+#: closing. Its sibling `rest-sse-subscribe` needed nothing; R2408 had already
+#: re-declared it.
+#:
+#: BOTH STILL-OPEN RESIDUALS CONFIRMED AT THE PIN, which is the outcome this
+#: ratchet is least often used for and the one worth recording. The adminspace
+#: status leg is still upstream:
+#: `plugins/zenoh-plugin-rest/src/lib.rs` @ `fn adminspace_getter<'a>(`
+#: and so is the config surface:
+#: `plugins/zenoh-plugin-rest/src/config.rs` @ `pub work_thread_num: usize,`
+#: (each kept on ONE line: this file's `#:` continuation prefix is not one the
+#: anchor parser can step over, so a citation split across two of them silently
+#: degrades to the BARE form and spends that budget -- measured here, by doing
+#: it).
+#: The atom stays PARTIAL on both. Nothing was discharged; only the DECLARATION
+#: moved, from a version this tree does not pin to the one it does.
+#:
+#: WHAT THE RE-MEASUREMENT ACTUALLY CHANGED, and it is not in the residual list:
+#: the atom's A4 line claimed `rest-http-bridge` was "PROVEN both directions" by
+#: the zenohd-interop oracle, and at the pin that leg was RED -- an HTTP PUT into
+#: wz's bridge answered 500. So the stale half was not the residuals it grades
+#: but the PROOF it rests on. The cause was two layers below this atom (a sealed
+#: writer queue the F2 send gate could not see, R2423's own subject), and the
+#: bridge's share of it was that its 500 discarded the typed error where upstream
+#: puts it in the body. Both are now recorded on the atom.
+#:
+#: ⚠ THE LESSON, filed here because this ratchet is what makes it findable: an A4
+#: "PROVEN" line is a claim about a RUN, and it decays with nothing editing the
+#: atom. Neither §5.26 reason was wrong when written -- the tree moved underneath
+#: them, and only re-running the oracle said so. A grading-pin sweep that only
+#: re-reads the RESIDUALS will not catch this class; the proof line needs running.
+BUDGET = 37
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
