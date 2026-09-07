@@ -1002,7 +1002,39 @@ def _grade_head(reason: str) -> str:
 #: that it CANNOT be. Lower bound one, upper bound eight, settled only per atom.
 #: The failure mode is this sweep's most frequent by far -- a pattern that
 #: presumes its answer -- and it has now bitten the sweep's own bookkeeping.
-BUDGET = 27
+#: 27 -> 26 (R2435). `storage-backend-filesystem`, and it is the atom ledger
+#: `Round 2434` named as the ONLY one of the remaining set that was BLOCKED:
+#: its counterparty is a separate repository and only a 1.5.0 clone was here.
+#: The block was PROVISIONING, and provisioning discharged it -- that repository
+#: publishes a release whose manifest declares zenoh and four sibling crates at
+#: the pinned version, and fetching that tag into the reference clone made the
+#: grade re-makeable. So the last structural obstacle this sweep had named is
+#: gone; what remains is per-atom work.
+#:
+#: THE RE-MEASUREMENT REVERSED THE COMPARISON RATHER THAN CONFIRMING IT. The
+#: entry framed wz's durability path as a design choice merely "faithful at the
+#: seam". At the pin the counterparty has NO fsync at all -- `sync_all`,
+#: `sync_data` and `fsync` occur zero times across its whole source tree, at the
+#: pin AND at 1.5.0, so it is an absence and not a relocation -- it writes the
+#: target file in place with no temp-and-rename, and its metadata sidecar takes
+#: default (non-syncing) write options whose only flush runs on a non-default
+#: closure arm immediately before that database is destroyed. wz is STRICTLY
+#: STRONGER. The atom stays PARTIAL on a NEWLY measured axis instead: upstream's
+#: volume requires a per-storage config object and honours five backend
+#: properties out of it -- each checked at its USE site, this file's standing
+#: discriminator -- while wz's storage config carries no per-volume payload at
+#: all, so honouring them is a SEAM round rather than five knobs.
+#:
+#: ⚠ AND THE NEAR-MISS, because it is this file's own failure mode in a new
+#: costume. The counterparty's tags were first listed LEXICALLY and read from
+#: the tail, which hides the pinned release above the cut and puts 1.9.0 last.
+#: The sentence forming from that was "the counterparty does not version to the
+#: pin, so the residual is unsatisfiable" -- an EXEMPTION, which item 675
+#: forbids and which this ratchet could not tell from repayment. Version-sorting
+#: the same output refuted it. A PATTERN that presumes its answer is the mode
+#: this file keeps recording; an ORDERING that presumes it is harder to see,
+#: because nothing about reading a tail looks like a claim.
+BUDGET = 26
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
