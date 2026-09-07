@@ -6172,7 +6172,16 @@ layer_c1af_cargo_test_shm() {
     # `shm` selects even though the module is not the SHM one. The guard fired
     # on hosted CI one push later, which is what it is for; the count is the
     # measured 17.
-    _runci_guarded_test C1af 17 cargo test -p wz-session-core --features session-extshm,codec-push --lib shm --quiet \
+    # R2437 — 17 -> 18, and it is R311y878's case EXACTLY, which is what makes
+    # it worth a second note rather than a silent bump: the new selectee is
+    # `ext_chain::unknown_mandatory_ext_tests::every_recognised_establishment_ext_passes`,
+    # and the substring `shm` selects it because "e-stabli-SHM-ent" contains it.
+    # Nothing about that test is SHM. Twice now the collision has come from an
+    # ordinary English word rather than from a near-miss identifier, so expect a
+    # third: any test this crate gains with "establishment" in its name lands in
+    # this leg. The count stays the MEASURED one — the guard's own refusal says
+    # to move it to what the command printed, never to what the diff suggests.
+    _runci_guarded_test C1af 18 cargo test -p wz-session-core --features session-extshm,codec-push --lib shm --quiet \
         || return 1
     # R311y894 — the establishment SHM surface WITH THE DISSECTOR ON, which no
     # lane had. `dissect` and `session-extshm` are disjoint feature sets: the
@@ -6200,7 +6209,12 @@ layer_c1af_cargo_test_shm() {
     # names being added, before the push (open-debt 400).
     # The 17 leg above was RE-RUN and did NOT move: it selects no `dissect`, so
     # the test is not compiled there at all.
-    _runci_guarded_test C1af 27 cargo test -p wz-session-core --features session-extshm,dissect --lib shm --quiet \
+    # R2437 — 27 -> 28, the same "establishment" substring collision the leg
+    # above records. BOTH legs moved this time, unlike the R311y878 case, and
+    # the difference is the reason: that round's test was `#[cfg]`-gated to a
+    # feature only one leg carried, while this one sits behind no feature gate
+    # at all, so every leg whose filter matches compiles and runs it.
+    _runci_guarded_test C1af 28 cargo test -p wz-session-core --features session-extshm,dissect --lib shm --quiet \
         || return 1
     # Round 2037, open-debt item 330 — THE TRANSPORT-OAM BATCH WALK, which no
     # lane in this file was running.

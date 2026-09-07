@@ -128,7 +128,46 @@ pub mod establishment_ext_id {
     pub const COMPRESSION: u8 = 0x06;
     /// `_Z_MSG_EXT_ID_INIT_PATCH` — the z64 protocol patch LEVEL.
     pub const PATCH: u8 = 0x07;
+    /// R2437 — `init::ext::RegionName` — `zextzbuf!(0x8, false)`, a node's
+    /// region identity, carried on BOTH InitSyn and InitAck.
+    ///
+    /// ADDED BY THE PIN. This extension does not exist at zenoh 1.5.0 (the
+    /// establishment `ext/` directory there holds auth, compression, lowlatency,
+    /// multilink, patch, qos and shm and nothing else); 1.10.0 adds it, which is
+    /// how a grade taken at 1.5.0 goes stale by upstream GROWING rather than by
+    /// upstream moving.
+    ///
+    /// wz RECOGNISES it and does not IMPLEMENT it: it is listed here so
+    /// `ext_chain::reject_unknown_mandatory_ext` does not read a stock
+    /// 1.10.0 peer's announcement as an unknown extension, and so the id cannot
+    /// be handed to a future wz extension. Recognising is what upstream does at
+    /// the codec layer too — it has a real handler, so this id never reaches its
+    /// unknown-extension path. Being non-mandatory, the two treatments cannot
+    /// diverge for any peer that follows the spec; the listing is what keeps
+    /// that true for one that does not.
+    pub const REGION_NAME: u8 = 0x08;
 }
+
+/// R2437 — the establishment ext ids wz RECOGNISES, as a derived set rather
+/// than a typed list.
+///
+/// Built from the constants above so a new id cannot be added to the table and
+/// forgotten here — the failure that would make
+/// `ext_chain::reject_unknown_mandatory_ext` refuse an extension wz
+/// itself speaks. Recognised is deliberately WIDER than implemented:
+/// [`establishment_ext_id::REGION_NAME`] is in this set and wz implements
+/// nothing for it, because the question this set answers is "does wz know what
+/// this id means", which is what the unknown-extension rule turns on.
+pub const ESTABLISHMENT_EXT_IDS: [u8; 8] = [
+    establishment_ext_id::QOS,
+    establishment_ext_id::SHM,
+    establishment_ext_id::AUTH,
+    establishment_ext_id::MULTILINK,
+    establishment_ext_id::LOWLATENCY,
+    establishment_ext_id::COMPRESSION,
+    establishment_ext_id::PATCH,
+    establishment_ext_id::REGION_NAME,
+];
 
 /// Ext ids in the ZENOH-BODY space — the chain that rides a `Put` / `Del` /
 /// `Query` / `Reply` / `Err` body, which is a DIFFERENT carrier from

@@ -617,10 +617,24 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # be CLAIMED by the wrong one. Describe the path; do not type a naked basename.
 # Every other axis is UNCHANGED and that was read rather than assumed -- reached
 # 55, unreached 3, no-symbol 2, ambiguous 73 identical before and after.
+# Round 2437 -- `session-unicast-open` re-declared at the pin (open-debt item
+# 675), the mover again being this round. wz 306 -> 311, FIVE new citations, one
+# per site the round built: the unknown-mandatory-extension rule and its test
+# module in `crates/wz-session-core/src/ext_chain.rs`, the error variant in
+# `parse_error.rs`, the call site in `inbound.rs`, and the derived recognised-id
+# table in `ext_header.rs`.
+#
+# AMBIGUOUS HELD AT 73, and that is the R2436 lesson applied rather than
+# re-learned: that round raised it to 74 by typing a bare basename into store
+# prose, where it was CLAIMED as a wz citation though it was an upstream claim.
+# This round's reason names upstream paths from their repository root and
+# describes rather than abbreviates, so nothing landed in the wrong bucket.
+# Every other axis UNCHANGED and read rather than assumed -- reached 55,
+# unreached 3, no-symbol 2.
 PIN_REACHED = 55
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
-PIN_WZ_CITATIONS = 306
+PIN_WZ_CITATIONS = 311
 PIN_AMBIGUOUS = 73
 
 

@@ -48,6 +48,26 @@ pub enum InboundParseError {
     /// The session tears down (framing error) rather than trusting the peer.
     #[cfg(feature = "transport-compression")]
     CompressionFailed,
+    /// R2437 — an establishment ext chain carried an extension wz does not
+    /// recognise with the M (mandatory) bit SET.
+    ///
+    /// The wire spec's whole point in giving each extension an M bit is that
+    /// the sender declares whether a receiver may proceed without understanding
+    /// it, and upstream enforces exactly that: its unknown-extension reader logs
+    /// and continues for M clear, and returns `DidntRead` for M set
+    /// (`commons/zenoh-codec/src/common/extension.rs` @ `if u.is_mandatory()`).
+    /// Until this round wz read the M bit nowhere in production — measured, the
+    /// only three readers in the tree were assertions inside one integration
+    /// test — so wz completed a handshake on terms it had not understood, which
+    /// is the one outcome the bit exists to prevent.
+    ///
+    /// Distinct from [`Self::Codec`] for the reason [`Self::ReservedEncoding`]
+    /// is: nothing here is truncated or malformed. The bytes parse, and the
+    /// SENDER has said they may not be ignored.
+    UnknownMandatoryExt {
+        /// The unrecognised extension's id, so a refusal names what it refused.
+        ext_id: u8,
+    },
 }
 
 impl fmt::Display for InboundParseError {
@@ -67,6 +87,11 @@ impl fmt::Display for InboundParseError {
             Self::CompressionFailed => {
                 write!(f, "inbound compressed batch failed lz4 decompression")
             }
+            Self::UnknownMandatoryExt { ext_id } => write!(
+                f,
+                "inbound establishment ext {:#04x} is unknown and MANDATORY (M bit set)",
+                ext_id
+            ),
         }
     }
 }

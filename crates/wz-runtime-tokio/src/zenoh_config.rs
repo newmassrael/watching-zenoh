@@ -2542,6 +2542,20 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
         "foreign-node-config",
         "spawn_publishing_zenoh_zpub",
     ),
+    // R2437 — the FIRST naming of this key in `crates/`, and it arrived from the
+    // wire side rather than the config side. `zenoh_config.rs` itself used to
+    // record that `region_name` / `regionname` occur nowhere here; the pin's
+    // establishment gained a `RegionName` extension (id `0x8`, on InitSyn and
+    // InitAck), and the round that taught wz the unknown-MANDATORY-extension
+    // rule had to list that id as RECOGNISED so a stock 1.10.0 peer's
+    // announcement is skipped rather than refused.
+    //
+    // Listing an id is not honouring a key, and the citing line says so in the
+    // strongest form this ledger has: it is a TEST asserting wz ignores it. The
+    // anchor is `IGNORES` rather than `RECOGNISED` deliberately — the latter is
+    // on the same line and would satisfy the gate, but a future reader grepping
+    // it would meet a word that reads like support.
+    ("region_name", "asserted-ignored", "IGNORES"),
     (
         "scouting/gossip/autoconnect",
         "wz-has-it",

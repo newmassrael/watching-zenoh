@@ -1064,7 +1064,35 @@ def _grade_head(reason: str) -> str:
 #: kept byte-identical without that being mistaken for coverage. The atom stays
 #: PARTIAL on the per-STORAGE volume config axis, the SAME seam R2435 reached
 #: from the backend side, and it is deliberately not filed twice.
-BUDGET = 25
+#: 25 -> 24 (R2437). `session-unicast-open`, and this one is the case this whole
+#: ratchet was built for, finally observed: a 1.5.0 grade going stale because
+#: upstream GREW. Every prior mover here found a citation that had MOVED or a
+#: judgement that had rotted. This atom's judgements all HELD -- `compute_sn` is
+#: still at the very lines cited, the establishment Close still scopes to the
+#: link, the patch bail and the acceptor's unexamined store are exact -- and it
+#: was stale anyway, because the pin ADDS an establishment extension that did
+#: not exist at 1.5.0 (`RegionName`, id 0x8, on both InitSyn and InitAck; the
+#: 1.5.0 ext tree holds seven and this is the eighth). No amount of re-reading
+#: the OLD version can surface that. It is the direction item 675's text
+#: predicted -- "a count going UP is the honest result" -- reached from the one
+#: side nobody had hit.
+#:
+#: AND THE GROWTH FORCED A CORRECTNESS QUESTION THE ATOM HAD NEVER ASKED: what
+#: does wz do with an establishment extension it does not know? Upstream answers
+#: with the M bit -- skip when clear, refuse when set. wz answered nothing, and
+#: that was measured as a DERIVED population rather than a spot check: `.m()`
+#: had exactly three readers in the tree and all three were assertions inside
+#: one integration test, so no production path consulted it. wz would complete a
+#: handshake on terms a peer had explicitly marked as un-ignorable. Built and
+#: witnessed this round, with three damage probes each redding only its own
+#: claim -- notably the over-tight probe, which reds the NON-mandatory
+#: acceptance case and is what keeps the new rule from breaking every peer
+#: newer than wz.
+#:
+#: The atom stays PARTIAL on the region-identity gap the same reading opened.
+#: A residual list this reason had recorded as EMPTY is no longer empty, and
+#: that is a truthful re-grade rather than a regression.
+BUDGET = 24
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory

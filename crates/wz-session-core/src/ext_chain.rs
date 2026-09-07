@@ -117,3 +117,157 @@ pub(crate) fn decode_ext_chain(
     }
     Err(InboundParseError::ExtChainOverflow)
 }
+
+/// R2437 (§5.4 `session-unicast-open`) — refuse a decoded chain that carries an
+/// extension `known` does not list with the M (mandatory) bit SET.
+///
+/// ## Why this is a separate pass rather than part of the decode
+///
+/// [`decode_ext_chain`] is CARRIER-BLIND on purpose: the establishment chain,
+/// the zenoh-body chain and the scouting chain reuse the same numeric ids for
+/// different extensions (`ext_header` says so in as many words), so "is this id
+/// known" is a question only the caller — which knows the carrier — can answer.
+/// Folding a known-set into the decoder would either hard-code one carrier's
+/// table or make every caller pass one, and only the establishment caller has a
+/// rule to enforce today.
+///
+/// ## The rule, and where it comes from
+///
+/// Upstream's unknown-extension reader logs and CONTINUES when M is clear, and
+/// returns `DidntRead` when M is set
+/// (`commons/zenoh-codec/src/common/extension.rs` @ `if u.is_mandatory()`).
+/// That is the whole semantics of the bit: the SENDER declares whether a
+/// receiver that does not understand the extension may proceed anyway. Measured
+/// at the 1.10.0 pin, and measured in wz too — before this round the M bit had
+/// exactly three readers in the tree, all of them assertions inside one
+/// integration test, so no production path consulted it and wz would complete a
+/// handshake on terms it had not understood.
+///
+/// Non-mandatory unknowns are ACCEPTED and left in the chain for the caller to
+/// ignore, which is what keeps a newer peer interoperable: a stock 1.10.0 node
+/// announces `RegionName` (id `0x8`, non-mandatory) that wz implements nothing
+/// for, and refusing it would break a handshake both upstreams complete.
+#[allow(dead_code)]
+pub(crate) fn reject_unknown_mandatory_ext(
+    entries: &[ExtEntryOwned],
+    known: &[u8],
+) -> Result<(), crate::parse_error::InboundParseError> {
+    for entry in entries {
+        let id = entry.ext_id();
+        if entry.m() && !known.contains(&id) {
+            return Err(crate::parse_error::InboundParseError::UnknownMandatoryExt { ext_id: id });
+        }
+    }
+    Ok(())
+}
+
+// R2437 (§5.4 `session-unicast-open`) — the unknown-MANDATORY-extension rule,
+// which is upstream's `if u.is_mandatory()` arm and had no wz production reader
+// until this round. Both directions are pinned: the bit must REFUSE what it
+// names and must not refuse anything else, since an over-tight version of this
+// rule breaks the handshake with every peer newer than wz.
+#[cfg(test)]
+mod unknown_mandatory_ext_tests {
+    use super::*;
+    use crate::ext_header::{establishment_ext_id, ESTABLISHMENT_EXT_IDS};
+    use crate::parse_error::InboundParseError;
+
+    /// One chain entry with the given id and M bit. Built through the generated
+    /// setters rather than a byte literal, so the test cannot drift from the
+    /// header layout the decoder actually reads.
+    fn entry(ext_id: u8, mandatory: bool) -> ExtEntryOwned {
+        let mut e = wz_codecs::ext_entry::ExtEntry::new();
+        e.set_ext_id(ext_id);
+        e.set_m(mandatory);
+        e.set_z(false);
+        e.try_into_owned().expect("owned mirror")
+    }
+
+    /// THE DEFECT: an id wz does not recognise, sent as mandatory, is REFUSED
+    /// and the refusal names it. `0x0d` is outside the establishment table in
+    /// both directions -- upstream does not define it either, so no future
+    /// upstream release turns this case into a recognised extension by accident.
+    #[test]
+    fn an_unknown_mandatory_ext_is_refused_and_names_itself() {
+        let err = reject_unknown_mandatory_ext(&[entry(0x0d, true)], &ESTABLISHMENT_EXT_IDS)
+            .expect_err("unknown + mandatory must refuse");
+        assert_eq!(err, InboundParseError::UnknownMandatoryExt { ext_id: 0x0d });
+    }
+
+    /// THE INTEROP HALF, and the reason the rule is not simply "refuse unknown":
+    /// an unknown NON-mandatory extension is accepted, because the sender has
+    /// declared it skippable. Refusing here would break every peer that speaks a
+    /// newer wire than wz -- which upstream's own reader avoids by logging and
+    /// continuing on exactly this branch.
+    #[test]
+    fn an_unknown_non_mandatory_ext_is_accepted() {
+        assert_eq!(
+            reject_unknown_mandatory_ext(&[entry(0x0d, false)], &ESTABLISHMENT_EXT_IDS),
+            Ok(())
+        );
+    }
+
+    /// The concrete peer this protects: a stock 1.10.0 node announces
+    /// `RegionName` on id `0x8`, which wz implements nothing for. It is in the
+    /// recognised set and non-mandatory, so it must pass BOTH ways -- this is
+    /// the case that would have made the new rule an interop regression if the
+    /// id had been left out of the table.
+    #[test]
+    fn the_pins_region_name_ext_does_not_break_the_handshake() {
+        for mandatory in [false, true] {
+            assert_eq!(
+                reject_unknown_mandatory_ext(
+                    &[entry(establishment_ext_id::REGION_NAME, mandatory)],
+                    &ESTABLISHMENT_EXT_IDS
+                ),
+                Ok(()),
+                "wz IGNORES region_name -- nothing in this tree honours the key or \
+                 the extension carrying it; the id is listed only so the \
+                 unknown-mandatory rule never fires on a stock peer's announcement"
+            );
+        }
+    }
+
+    /// Every extension wz itself speaks passes, mandatory or not. Derived by
+    /// iterating the table rather than by listing ids again, so an id added to
+    /// `ESTABLISHMENT_EXT_IDS` is covered here without editing this test -- and
+    /// an id REMOVED from it fails here rather than silently starting to refuse
+    /// a live peer.
+    #[test]
+    fn every_recognised_establishment_ext_passes() {
+        for id in ESTABLISHMENT_EXT_IDS {
+            for mandatory in [false, true] {
+                assert_eq!(
+                    reject_unknown_mandatory_ext(&[entry(id, mandatory)], &ESTABLISHMENT_EXT_IDS),
+                    Ok(()),
+                    "recognised id {id:#04x} must never be refused"
+                );
+            }
+        }
+    }
+
+    /// The rule scans the WHOLE chain, not just its head. A mandatory unknown
+    /// hidden behind recognised entries is the shape a peer would actually send,
+    /// since the chain is built in id order and `0x0d` sorts last.
+    #[test]
+    fn a_mandatory_unknown_is_found_behind_recognised_entries() {
+        let chain = [
+            entry(establishment_ext_id::QOS, false),
+            entry(establishment_ext_id::PATCH, false),
+            entry(0x0d, true),
+        ];
+        let err = reject_unknown_mandatory_ext(&chain, &ESTABLISHMENT_EXT_IDS)
+            .expect_err("a later entry must still be reached");
+        assert_eq!(err, InboundParseError::UnknownMandatoryExt { ext_id: 0x0d });
+    }
+
+    /// An empty chain is not an error -- an Init with no extensions at all is a
+    /// conforming handshake and the commonest one.
+    #[test]
+    fn an_empty_chain_passes() {
+        assert_eq!(
+            reject_unknown_mandatory_ext(&[], &ESTABLISHMENT_EXT_IDS),
+            Ok(())
+        );
+    }
+}

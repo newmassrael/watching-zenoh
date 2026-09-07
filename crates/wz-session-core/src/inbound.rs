@@ -547,7 +547,17 @@ pub fn parse_inbound_consuming(bytes: &[u8]) -> Result<(InboundFrame, usize), In
             let body = InitBody::decode(&mut cursor, (flags >> 6) & 1, (flags >> 5) & 1)?
                 .try_into_owned()?;
             let extensions = if has_ext {
-                decode_ext_chain(&mut cursor)?
+                let entries = decode_ext_chain(&mut cursor)?;
+                // R2437 — the M (mandatory) bit, enforced for the first time on
+                // a wz production path. Applied HERE because this arm is the
+                // single site both InitSyn and InitAck reach, so the rule cannot
+                // hold on one role and not the other; upstream likewise enforces
+                // it in the codec, beneath either FSM.
+                crate::ext_chain::reject_unknown_mandatory_ext(
+                    &entries,
+                    &crate::ext_header::ESTABLISHMENT_EXT_IDS,
+                )?;
+                entries
             } else {
                 Vec::new()
             };
