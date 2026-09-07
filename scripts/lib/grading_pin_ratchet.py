@@ -266,8 +266,18 @@ GRADE_TAGS = ("PARTIAL:", "COMPLETE:")
 #: which is the defect the marker replaced. Each is paid by reading its claims
 #: and stamping the one token.
 #:
-#: The split is 42 PARTIAL / 11 COMPLETE.
-BUDGET = 53
+#: The split was 42 PARTIAL / 11 COMPLETE.
+#:
+#: 53 -> 52 (R2405). `access-extauth-usrpwd`, the second atom kept in the
+#: population by a SPELLING alone: R2339 re-measured it at the pin and wrote so
+#: in a third phrasing. Verified in FULL before stamping -- all five upstream
+#: anchors still resolve and all three wz-side clauses still hold, the last of
+#: them an ABSENCE (no crate defines either user-mutation verb), checked by
+#: counting definitions across the crate tree rather than by resolving an anchor.
+#: Tag untouched at PARTIAL; the residual clauses are confirmed, not withdrawn.
+#:
+#: The split is 41 PARTIAL / 11 COMPLETE.
+BUDGET = 52
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
