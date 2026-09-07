@@ -244,6 +244,45 @@ GONE_CITE = re.compile(
     r"`((?:[\w.-]+/)+[\w.-]+\.rs)`(?:\s*(?://[/!]?|#!?|\*)?\s*)@\s*REMOVED\b"
 )
 
+#: THE THIRD DIRECTION (R2416, unregistered open debt 682).
+#:
+#: Between "the file has the needle" and "no file has that path" sits the case
+#: an ordinary upstream refactor produces: THE MODULE SURVIVES AND THE THING IN
+#: IT DOES NOT. `@ REMOVED` is false for it (the path resolves) and the anchored
+#: form is false for it (the needle does not occur), so a true sentence could
+#: only be written in a shape nothing here graded. R2337 added that shape --
+#: `path` @ ABSENT `needle` -- and gave it an adjudicator for the STORE's atom
+#: reasons in `store_reasons_resolve.py`, whose third pattern this mirrors
+#: exactly.
+#:
+#: ⚠ IT WAS NOT ADDED HERE AT THE SAME TIME, and that omission is what open
+#: debt 682 was really sitting on. `store_reason_citation_gate.py` borrows
+#: `scan()` to grade those very reasons, and `scan()` masks the anchored form
+#: and the REMOVED marker but knew nothing of this one -- so every ABSENT claim
+#: fell through to BARE, a bucket whose own failure message says never raise its
+#: budget. MEASURED at the moment this landed: the sibling gate reported 3
+#: `@ ABSENT` claims and green, while this classifier charged the same 3 to a
+#: bare budget of 7 against a count of 14. A form one gate DEFINES and another
+#: gate FINES is not a budget breach; it is two readers of one grammar.
+#:
+#: RED WHEN THE NEEDLE COMES BACK -- that is the arm's whole point, and it is
+#: the same property the other two forms have, pointed the third way: a
+#: residual withdrawn because upstream dropped something becomes live again on
+#: its own, without anyone remembering to look.
+#:
+#: ⚠ THERE IS DELIBERATELY NO `absent == 0` POPULATION GUARD in `run()`, unlike
+#: the one `gone` carries a few hundred lines down, and the reason is measured
+#: rather than assumed: the tracked-file population holds ZERO occurrences of
+#: this form today (the only mentions are this comment and the sibling's own
+#: documentation, neither of which writes a rooted path before the marker), so
+#: such a guard would red on landing and say nothing true. The population lives
+#: in the store, and `store_reasons_resolve.py` already guards it there -- rc 1
+#: when no inventory reason carries an ABSENT claim. One guard, at the gate
+#: whose population is non-empty.
+ABSENT_CITE = re.compile(
+    rf"`({_PATH})`(?:\s*(?://[/!]?|#!?|\*)?\s*)@\s*ABSENT\s*`([^`\n]{{1,200}})`"
+)
+
 #: First segments that spell an upstream path WITHOUT its root. DECLARED, and
 #: judged for completeness by `rootless_candidates()` -- see the module doc.
 #: `hat` is the segment R2317 made visible and repaired; the rest of the
@@ -693,7 +732,8 @@ def scan(
     where the counts are still wanted but no path can be looked up.
     """
     counts = {"anchored": 0, "line": 0, "bare": 0, "rootless_line": 0,
-              "rootless_bare": 0, "rootless_stale_line": 0, "gone": 0}
+              "rootless_bare": 0, "rootless_stale_line": 0, "gone": 0,
+              "absent": 0}
     findings: list[Finding] = []
     lens: dict[str, int] = {}
 
@@ -748,6 +788,48 @@ def scan(
                 for i in range(a, b):
                     masked_g[i] = " "
             text = "".join(masked_g)
+
+        # THE ABSENCE-OF-A-NEEDLE MARKER, masked for the same reason the one
+        # above is: `ANCHOR_CITE` cannot match it (a word stands between the
+        # `@` and the backtick), so without this its path is counted a second
+        # time as BARE -- which is exactly how the live store came to sit seven
+        # over a bare budget nothing was allowed to raise.
+        absent_spans: list[tuple[int, int]] = []
+        for m in ABSENT_CITE.finditer(text):
+            counts["absent"] += 1
+            absent_spans.append(m.span())
+            path, needle = m.group(1), m.group(2)
+            # `rootless_loc is None` is the FORM-ARM signal, as in the block
+            # above: count the occurrence, resolve nothing.
+            if rootless_loc is None:
+                continue
+            if not (ref / path).is_file():
+                findings.append(
+                    Finding(
+                        rel,
+                        f"`{path}` is marked @ ABSENT, but the pin has no such "
+                        "file at all. That claim is about a path which is GONE, "
+                        "and the marker for it is @ REMOVED -- this one asserts "
+                        "that a file WHICH EXISTS no longer carries a needle",
+                    )
+                )
+            elif needle in (ref / path).read_text(errors="replace"):
+                findings.append(
+                    Finding(
+                        rel,
+                        f"`{needle}` is BACK in `{path}` at the pin, so the "
+                        "sentence asserting its absence has stopped being true. "
+                        "A residual withdrawn because upstream dropped this is "
+                        "live again -- re-read the claim, do not delete the "
+                        "marker",
+                    )
+                )
+        if absent_spans:
+            masked_a = list(text)
+            for a, b in absent_spans:
+                for i in range(a, b):
+                    masked_a[i] = " "
+            text = "".join(masked_a)
 
         # ANCHORED next, and its spans are removed so the path inside an
         # anchor is not counted a second time as BARE.
@@ -959,7 +1041,7 @@ def run(root: pathlib.Path, ref: pathlib.Path | None, resolve: bool) -> int:
         findings = []
     total = (counts["anchored"] + counts["line"] + counts["bare"]
              + counts["rootless_line"] + counts["rootless_bare"]
-             + counts["gone"])
+             + counts["gone"] + counts["absent"])
     candidates = rootless_candidates(root, files)
     # ONE pass over the tree for both slices of the same tally -- the residue
     # (candidate segments this axis does not grade) and the declared segments,
@@ -976,7 +1058,8 @@ def run(root: pathlib.Path, ref: pathlib.Path | None, resolve: bool) -> int:
         f"{counts['rootless_line']}/{counts['rootless_bare']} root-less "
         f"line/bare (budgets {ROOTLESS_LINE_BUDGET}/{ROOTLESS_BARE_BUDGET}) "
         f"over {len(ROOTLESS_SEGMENTS)} declared segment(s), "
-        f"{counts['gone']} marked @ REMOVED; {where}"
+        f"{counts['gone']} marked @ REMOVED, "
+        f"{counts['absent']} marked @ ABSENT; {where}"
     )
     print(
         f"  upstream-citation-anchor: root-less residue -- {undeclared} "
@@ -1349,6 +1432,51 @@ def selftest() -> int:
         c, f = scan_text(f"// `{GONE}` @ `fn a()`\n")
         if not f:
             failures.append("an anchor on a gone file did not red")
+
+        # 6c. THE ABSENCE-OF-A-NEEDLE FORM (R2416, open debt 682). Five rows,
+        #     and both mutations were run before they were written down:
+        #     removing the masking reds three of them (the double-count row it
+        #     exists for, plus the two whose fixture then leaks a second
+        #     finding), and removing the needle-is-back branch reds exactly one
+        #     -- the row written for it, and nothing else.
+        #     ⚠ EVERY ROW BELOW PASSES `floc`, and that is load-bearing rather
+        #     than symmetry with the root-less rows: `rootless_loc is None` is
+        #     this scanner's FORM-ARM signal, so a row written without it runs
+        #     the arm that resolves NOTHING and both finding rows pass
+        #     vacuously. Measured here -- the first draft omitted it and the two
+        #     rows that must red came back with an empty finding list.
+        c, f = scan_text(f"// `{UNICAST}` @ ABSENT `fn vanished()`\n", floc)
+        if c["absent"] != 1 or f:
+            failures.append(
+                f"an ABSENT claim that HOLDS must count and not red: {c} {f}"
+            )
+        # The masking row. This is the one the live population could not
+        # exercise for seven rounds, and the whole item's cost sat on it.
+        if c["bare"] != 0:
+            failures.append(
+                f"an ABSENT claim was ALSO charged as bare -- the form one gate "
+                f"defines cannot be fined by another: {c}"
+            )
+        c, f = scan_text(f"// `{UNICAST}` @ ABSENT `fn keeper()`\n", floc)
+        if len(f) != 1:
+            failures.append(
+                f"a needle that came BACK did not red, which is the only "
+                f"direction this form exists to catch: {f}"
+            )
+        c, f = scan_text(f"// `{GONE}` @ ABSENT `fn keeper()`\n", floc)
+        if len(f) != 1:
+            failures.append(
+                f"ABSENT on a path the pin does not have at all did not red -- "
+                f"that claim wants the REMOVED marker: {f}"
+            )
+        # The form arm counts it and resolves nothing, exactly like `gone`.
+        # The body is written through `scan_text` first so this row does not
+        # inherit whichever fixture the row above happened to leave behind --
+        # a case whose input is a side effect is a case that can rot silently.
+        scan_text(f"// `{UNICAST}` @ ABSENT `fn keeper()`\n")
+        c, f = scan(["f.rs"], base / "src", ref, None)
+        if c["absent"] != 1 or f:
+            failures.append(f"the form arm resolved the ABSENT axis: {c} {f}")
 
         # 6b. THE ROOT-LESS AXIS (R2317). Six rows, and the FIRST is the one the
         #     axis lives or dies on: adding `hat` to a pattern must not make the

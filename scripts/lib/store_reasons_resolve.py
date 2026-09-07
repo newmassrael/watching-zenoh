@@ -175,7 +175,17 @@ REASON_FLOOR = 100
 #: with synthetic counts; this asks a question about the real store, and mixing
 #: the two would make the classifier's own tests depend on how much of the
 #: track has been anchored so far.
-ANCHORED_FLOOR = 23
+#: 23 -> 143 (R2416), and the GAP is the finding rather than the fix. This floor
+#: exists to catch a rewrite that DELETES anchors, and R2416 is the first round
+#: since it was seated to rewrite a reason blob at all -- five of them, through
+#: `set-inventory-status`, which replaces the whole text rather than appending
+#: to it. Against a live count of 143, a floor of 23 would have let that round
+#: drop ONE HUNDRED AND TWENTY anchors and still print OK: the guard was being
+#: satisfied by a number nobody moved while the store grew underneath it, which
+#: is a ratchet that has stopped being one. Re-seated on what the store actually
+#: holds, measured either side of this round's own rewrite -- 138 before, 143
+#: after -- so the next rewrite is graded against the tree it edits.
+ANCHORED_FLOOR = 143
 
 
 class InputError(Exception):

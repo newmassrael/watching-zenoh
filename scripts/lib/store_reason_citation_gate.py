@@ -117,14 +117,36 @@ MIN_REASONS = 40
 #: root-less population the repair had just left (99 against a budget of 98).
 #: That gate's own header carries the same warning about its own paragraphs;
 #: this is the same class arriving in the sibling file.
-LINE_BUDGET = 26
+#: 26 -> 24 (R2416). Followed DOWN, not repaired: the two that left were
+#: carried out by the R2408..R2415 re-gradings, and this gate could not say so
+#: because the leg ahead of it in Layer Z was red the whole time. Ratchets only
+#: move down here; the direction is the gate's own instruction.
+LINE_BUDGET = 24
 #: 9 -> 7 (R2371). The `transport-stats` re-tag rewrote that atom's whole reason
 #: against the pin. Its two bare citations both named the 1.5.0-era
 #: transport-side stats module, which does not exist at 1.10.0 at all, so they
 #: were not repointed but RETIRED — the replacement claims are anchored on the
 #: stats crate that replaced it. One of the two was also a FINDING (see below),
 #: which is why both ratchets move in the same commit.
-BARE_BUDGET = 7
+#: 7 -> 6 (R2416), and this one was REPAIRED rather than followed. It stood at
+#: 14 against a budget of 7 -- seven over, on a ratchet whose failure message
+#: says never raise it -- and the overshoot was two defects, not one:
+#:
+#:   * THREE were `@ ABSENT` claims, the third citation direction R2337 gave
+#:     this tree. `store_reasons_resolve.py` grades them and reports green;
+#:     `scan()`, which this gate borrows, had never been taught the form, so it
+#:     charged them to BARE. Neither gate was wrong about the store -- they
+#:     disagreed about the grammar. Taught, in `upstream_citation_anchor_gate`.
+#:   * FIVE were written `path` @ the `needle` -- a word between the `@` and the
+#:     backtick, which defeats the anchor pattern in BOTH gates. They read as
+#:     anchors to a person and were graded by nobody: the path was checked for
+#:     existence and the needle was submitted to no resolver at all. Rewritten
+#:     in the store, each onto a literal verified to occur in the cited file at
+#:     the pin, which is what moved `anchored` 138 -> 143.
+#:
+#: The SIX that remain are a different defect and are left for their own rounds:
+#: prose that never claimed to be an anchor.
+BARE_BUDGET = 6
 
 #: FINDINGS -- claims that do not resolve at the pin. Seeded at the inherited
 #: count for the same reason the source gate seeded LINE_BUDGET at 294 rather
@@ -163,7 +185,10 @@ BARE_BUDGET = 7
 #: transport-side stats module; the atom was re-measured against the pin and the
 #: claim replaced by anchored ones on the crate that succeeded it. That is the
 #: "stale GRADING -> re-grade the atom" arm of this gate's own advice, taken.
-FINDINGS_BUDGET = 9
+#: 9 -> 8 (R2416). Followed DOWN, like LINE_BUDGET above and for the same
+#: reason: a re-grading between R2408 and R2415 retired one unresolved claim
+#: while this gate sat behind a red leg and could not report it.
+FINDINGS_BUDGET = 8
 
 
 def live_reasons(root: pathlib.Path | None = None) -> dict[str, str]:
@@ -230,8 +255,8 @@ def _verdict(reasons, ref, counts, findings) -> int:
 
     print(
         "store-reason-citations: %d live atom reason(s) -- %d anchored, %d "
-        "line-form (budget %d), %d bare (budget %d), %d marked absent, %d "
-        "unresolved (budget %d)"
+        "line-form (budget %d), %d bare (budget %d), %d marked @ REMOVED, "
+        "%d marked @ ABSENT, %d unresolved (budget %d)"
         % (
             len(reasons),
             counts.get("anchored", 0),
@@ -240,6 +265,7 @@ def _verdict(reasons, ref, counts, findings) -> int:
             counts.get("bare", 0),
             BARE_BUDGET,
             counts.get("gone", 0),
+            counts.get("absent", 0),
             len(findings),
             FINDINGS_BUDGET,
         )
@@ -352,6 +378,15 @@ def selftest() -> int:
         ("a path marked absent that STILL EXISTS is a finding",
          "The old module `%s` @ REMOVED -- upstream folded it away." % _LIVES,
          {"gone": 1}, 1),
+        # R2416. The third direction, and the row that pins THIS gate's stake in
+        # it: an `@ ABSENT` claim must land in its own bucket and NOT be charged
+        # to `bare`. Seven rounds of this gate's red were that one number.
+        ("a needle asserted absent, and it IS absent, is NOT a finding",
+         "The capability is gone: `%s` @ ABSENT `fn withdrawn()`." % _LIVES,
+         {"absent": 1, "bare": 0}, 0),
+        ("a needle asserted absent that came BACK is a finding",
+         "The capability is gone: `%s` @ ABSENT `needle_here`." % _LIVES,
+         {"absent": 1, "bare": 0}, 1),
     ]
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="wz-store-selftest-"))
     try:
