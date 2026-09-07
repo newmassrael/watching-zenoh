@@ -320,8 +320,32 @@ GRADE_TAGS = ("PARTIAL:", "COMPLETE:")
 #: the production caller was already gated on the atom's feature, so the callee
 #: was the half that disagreed.
 #:
-#: The split is 39 PARTIAL / 9 COMPLETE.
-BUDGET = 48
+#: The split was 39 PARTIAL / 9 COMPLETE.
+#:
+#: 48 -> 45 (R2409 + R2410 + R2411, three atoms in one commit).
+#:
+#: `time-hlc` (R2409): all four upstream claims hold, but one had to be chased
+#: past a FAILED first check -- the reason quotes the auto-stamp expression with
+#: one field missing, so a needle on it MISSES while the capability is intact one
+#: level deeper. A miss is a question, not an answer; reading that first check as
+#: a refutation would have discarded a residual upstream still has.
+#:
+#: `scouting-static` (R2410): a THIRD membership cause for this population. Not a
+#: stale grading and not a missing declaration -- a version label naming an
+#: upstream the atom never graded against. Its header says "vs zenoh-pico / zenoh
+#: 1.5.0" while every residual measures against pico and it holds zero anchored
+#: zenoh claims. Its pico line ranges are still ACCURATE, because a vendored
+#: submodule moves only when this tree bumps it: the citation rot this sweep kept
+#: finding is a property of citing an independently moving upstream.
+#:
+#: `session-extauth` (R2411): the cheapest full reading left, and cheap for a
+#: reusable reason -- a prior round had already restated its upstream halves as
+#: NEEDLES, so all six are commands rather than judgements. An atom whose claims
+#: are anchored can be re-verified end to end in one pass; one carrying the same
+#: claims as line numbers cannot be verified at all without re-deriving them.
+#:
+#: The split is 36 PARTIAL / 9 COMPLETE.
+BUDGET = 45
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
