@@ -815,7 +815,34 @@ def _grade_head(reason: str) -> str:
 #: So a value can hold while the thing you would search for stops existing, and
 #: an absence can be contradicted by a comment. The anchors written into the atom
 #: name the DECLARATIONS for that reason, not the words.
-BUDGET = 34
+#: 34 -> 33 (R2428). `query-timeout`, and the version-bearing clause is REFUTED
+#: rather than confirmed -- the second atom in this sweep whose refutation was
+#: already sitting in its OWN reason, unlinked, fourteen thousand characters
+#: below the sentence it refutes.
+#:
+#: The clause said wz's DEFAULT client path never expires, so the timeout error
+#: was unreachable there. The UPSTREAM half still holds at the pin (the config
+#: read is unconditional and the shipped default is ten seconds). The WZ half
+#: does not: with this atom ON the effective timeout resolves the `0` default to
+#: the module's default-timeout constant, which is also ten seconds, so the two
+#: agree in behaviour AND value on the default path. With the atom OFF there is
+#: no deadline -- but that is a cfg-gated atom being off, not a divergence.
+#:
+#: ⚠ ORDERING ACCRETED STRATA BY MARKER WORDS DOES NOT WORK, and this reason is
+#: the proof: searching it for `CLOSED` matches the prose "the SAME SIBLING
+#: ASYMMETRY y323 CLOSED", a reference to a different round. Order by POSITION,
+#: then read the later text. Grading an atom from its first version-bearing
+#: sentence is what produces a stale verdict, and it nearly did here twice.
+#:
+#: ⚠ AND THE ESTIMATE WAS WRONG IN BOTH DIRECTIONS across this sweep: this atom
+#: was scoped as a full round and took one edit, while two others scoped as cheap
+#: confirms were not. Derive the scope; do not estimate it.
+#:
+#: CITATION DEFECT, of the ungraded kind again but with a twist worth recording:
+#: the clause's pointers lack their roots, yet the defaults LINE NUMBER is still
+#: correct at the pin -- the constant has not moved. So this is not line rot, it
+#: is a missing root, and the two failure modes need different repairs.
+BUDGET = 33
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
