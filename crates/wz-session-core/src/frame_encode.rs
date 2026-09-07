@@ -891,22 +891,27 @@ pub fn build_fragment_drop_wire(sn: u64, reliable: bool, ext_qos: Option<Priorit
 /// header and the fragment codec writes the body.
 ///
 /// `first` (the chain's leading fragment) sets the header `Z` bit and inserts
-/// the [`FRAGMENT_FIRST_EXT_HEADER`] (`0x02`) ext byte between `VLE(sn)` and
-/// the payload — the chain-start marker a protocol-patch >= 1 peer requires
-/// (see [`FRAGMENT_FIRST_EXT_HEADER`]). Composed here rather than in the
+/// the `FRAGMENT_FIRST_EXT_HEADER` (`0x02`) ext byte between `VLE(sn)` and
+/// the payload — the chain-start marker a protocol-patch >= 1 peer requires.
+/// R2417 — the three private constants and the private writer this paragraph
+/// and the two below NAME are no longer LINKED, because this function is now
+/// `pub` and an intra-doc link from public documentation to a private item is
+/// a broken link the doc-link ratchet counts. They are code spans instead:
+/// the reader gets the same names, and the gate is told the truth. Composed
+/// here rather than in the
 /// fragment codec, symmetric with `inbound.rs`'s hand-rolled `T_MID_FRAGMENT`
 /// Z-gated ext-chain decode (the codec stays a pure `VLE(sn) + tail` SSOT; the
 /// transport-level R/M/Z flags + ext chain live at this frame-composer layer).
 ///
 /// R311y215 — `ext_qos` (`Some` iff a QoS chain) prepends a z64 `ext_qos`
-/// ([`write_qos_ext`]) ahead of any `FRAGMENT_FIRST` marker, in zenoh's
+/// (`write_qos_ext`) ahead of any `FRAGMENT_FIRST` marker, in zenoh's
 /// id-ascending order (`0x1` QoS, then `0x2` First;
 /// `zenoh-codec/src/transport/fragment.rs`). The ext-chain `Z` header bit is set
 /// whenever EITHER ext is present; the QoS ext carries the chain-continuation
 /// bit iff the First marker follows it.
 ///
 /// R2238 — `drop_marker` appends the `0x3 Drop` ext
-/// ([`FRAGMENT_DROP_EXT_HEADER`]) LAST, keeping the same id-ascending order
+/// (`FRAGMENT_DROP_EXT_HEADER`) LAST, keeping the same id-ascending order
 /// (`0x1` QoS, `0x2` First, `0x3` Drop). Every entry ahead of it now carries
 /// the chain-continuation bit, which is why `first` gates that bit through
 /// `drop_marker` too rather than being the chain's assumed tail. Production
@@ -915,8 +920,17 @@ pub fn build_fragment_drop_wire(sn: u64, reliable: bool, ext_qos: Option<Priorit
 /// zenoh's own header codec writes `ext_first` and `ext_drop` from separate
 /// `Option`s and a wz reader that could not decode the pair would be reading
 /// a shape upstream can emit.
+///
+/// R2417 — `pub` so a FIXTURE that has to speak a chain-start cannot spell the
+/// marker itself. The multicast beacon now announces this node's patch level,
+/// so a multicast peer admitted through the real encoder is held to the marker
+/// contract, and every hand-built marker-less chain in a test became a wire no
+/// such peer emits. One producer for that wire is the point: a second spelling
+/// of the `0x2` byte in a test fixture is the drift this composer exists to
+/// prevent, and it would drift SILENTLY, since a fixture that disagrees with
+/// production still parses.
 #[cfg(feature = "transport-fragmentation")]
-fn build_fragment_wire(
+pub fn build_fragment_wire(
     sn: u64,
     payload: &[u8],
     reliable: bool,

@@ -3175,18 +3175,27 @@ mod tests {
             payload
         }
 
-        /// One reliable `T_MID_FRAGMENT` datagram: `[flags|MID]` header +
-        /// the fragment body (`VLE(sn) + chunk`). `sn < 0x80` keeps the
-        /// VLE single-byte (the fixtures stay in that range).
-        fn fragment_dgram(sn: u8, more: bool, chunk: &[u8]) -> Vec<u8> {
+        /// One reliable `T_MID_FRAGMENT` datagram, through the PRODUCTION wire
+        /// composer.
+        ///
+        /// R2417 — it used to hand-build `[flags|MID][VLE(sn)][chunk]` here,
+        /// which was a marker-less chain no real peer sends any more: the
+        /// beacon these fixtures admit their peer with
+        /// ([`join0`]) now announces this node's protocol patch level, so the
+        /// peer is held to the `0x2 First` chain-start contract. `first` names
+        /// the chain's leading fragment and the composer writes the ext, so the
+        /// fixture cannot carry a second spelling of that byte.
+        fn fragment_dgram(sn: u8, more: bool, first: bool, chunk: &[u8]) -> Vec<u8> {
             assert!(sn < 0x80, "single-byte VLE fixture range");
-            let mut flags = wire_const::FLAG_T_FRAGMENT_R;
-            if more {
-                flags |= wire_const::FLAG_T_FRAGMENT_M;
-            }
-            let mut dgram = std::vec![flags | wire_const::T_MID_FRAGMENT, sn];
-            dgram.extend_from_slice(chunk);
-            dgram
+            wz_session_core::frame_encode::build_fragment_wire(
+                u64::from(sn),
+                chunk,
+                /*reliable=*/ true,
+                more,
+                first,
+                /*drop_marker=*/ false,
+                None,
+            )
         }
 
         /// A subscriber observer + fire counter for "demo/mc".
@@ -3219,8 +3228,8 @@ mod tests {
 
             let mut driver = FakeDriver::with([
                 (join, src(2)),
-                (fragment_dgram(0, true, head), src(2)),
-                (fragment_dgram(1, false, tail), src(2)),
+                (fragment_dgram(0, true, true, head), src(2)),
+                (fragment_dgram(1, false, false, tail), src(2)),
             ]);
             let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
             let clock = TokioTime::new();
@@ -3256,8 +3265,8 @@ mod tests {
             let batch = push_batch_bytes("demo/mc", b"orphan");
             let (head, tail) = batch.split_at(batch.len() / 2);
             let mut driver = FakeDriver::with([
-                (fragment_dgram(0, true, head), src(7)), // no prior JOIN
-                (fragment_dgram(1, false, tail), src(7)),
+                (fragment_dgram(0, true, true, head), src(7)), // no prior JOIN
+                (fragment_dgram(1, false, false, tail), src(7)),
             ]);
             let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
             let clock = TokioTime::new();
@@ -3304,9 +3313,9 @@ mod tests {
 
             let mut driver = FakeDriver::with([
                 (join, src(2)),
-                (fragment_dgram(0, true, head), src(2)),
+                (fragment_dgram(0, true, true, head), src(2)),
                 (stale_frame, src(2)),
-                (fragment_dgram(1, false, tail), src(2)),
+                (fragment_dgram(1, false, false, tail), src(2)),
             ]);
             let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
             let clock = TokioTime::new();
@@ -3359,11 +3368,11 @@ mod tests {
 
             let mut driver = FakeDriver::with([
                 (join_b_dgram, src(2)),
-                (fragment_dgram(5, true, b"poison-head"), src(2)),
+                (fragment_dgram(5, true, true, b"poison-head"), src(2)),
                 (std::vec![wire_const::T_MID_CLOSE, 0x00], src(2)),
                 (join0(&params(&peer_c)), src(3)), // recycles slot 0
-                (fragment_dgram(0, true, head), src(3)),
-                (fragment_dgram(1, false, tail), src(3)),
+                (fragment_dgram(0, true, true, head), src(3)),
+                (fragment_dgram(1, false, false, tail), src(3)),
             ]);
             let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
             let clock = TokioTime::new();

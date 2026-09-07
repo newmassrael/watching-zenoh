@@ -193,6 +193,22 @@ where
                         }
                         #[cfg(not(feature = "transport-qos"))]
                         dispatcher.ingest_join(join.zid, src, baseline, now_ms);
+                        // R2417 — negotiate this peer's protocol PATCH level off
+                        // the SAME beacon, after the admission above: the level
+                        // is the sole gate on reading its fragment chains under
+                        // the `0x2 First` / `0x3 Drop` rules, and both
+                        // references re-copy it from EVERY JOIN rather than only
+                        // the admitting one (pico
+                        // `src/transport/multicast/rx.c` @
+                        // `entry->common._patch = msg->_patch < _Z_CURRENT_PATCH
+                        // ? msg->_patch : _Z_CURRENT_PATCH`, at its refresh site
+                        // beside the lease and SN copies). A refused JOIN leaves
+                        // no slot, so this is a no-op exactly then.
+                        #[cfg(feature = "reassembly")]
+                        dispatcher.record_peer_patch(
+                            src,
+                            crate::multicast_join::decode_join_patch(bytes),
+                        );
                     } else {
                         // R2379 (open-debt item 15, `session-multicast`) — the
                         // JOIN named capabilities this node cannot speak, and
@@ -394,15 +410,21 @@ pub fn dispatch_multicast_inbound_reassembling<
                     more,
                     payload,
                     priority,
+                    markers,
                     ..
                 }) = parse_inbound(msg)
                 {
                     // R311y227 — the fragment's decoded `ext_qos` band selects its
                     // per-priority conduit gate + reassembly chain (DEFAULT for a
                     // non-qos peer, so the pre-R311y227 path is unchanged).
+                    // R2417 — `markers` is the fragment's own `0x2 First` /
+                    // `0x3 Drop` projection, which `parse_inbound` has always
+                    // decoded and this arm used to discard through the `..`.
+                    // Whether it is ACTED ON is the peer's negotiated patch
+                    // level, resolved inside the ingest from the peer table.
                     ingest_multicast_fragment_qos(
-                        dispatcher, reasm, src, reliable, sn, more, priority, &payload, now_ms,
-                        on_event,
+                        dispatcher, reasm, src, reliable, sn, more, priority, markers, &payload,
+                        now_ms, on_event,
                     );
                 }
             }
@@ -560,6 +582,167 @@ mod batch_walk_tests {
             polls, 1,
             "the frame BEHIND the beacon must be fanned: a walk that stopped \
              at the JOIN reports zero"
+        );
+    }
+
+    /// R2417 — the whole seam FROM THE WIRE: a beacon's announced patch level
+    /// reaches the peer table through this classifier, and it is what decides
+    /// whether that peer's fragment chains are read under the chain-boundary
+    /// rules.
+    ///
+    /// ## Why this test exists beside the dispatcher's own
+    ///
+    /// `multicast_dispatch`'s discriminator sets the level by calling
+    /// `record_peer_patch` directly, so it pins the GATE and says nothing about
+    /// where the level comes from. Everything between the beacon bytes and that
+    /// call is unproven there: this arm decoding the JOIN's extension chain,
+    /// and the Fragment arm passing the fragment's own markers instead of
+    /// discarding them through a `..`. Both were the defect — the markers were
+    /// decoded by `parse_inbound` and then dropped one call short of the
+    /// reassembly Router.
+    ///
+    /// Two peers, ONE difference: peer A's beacon is what `encode_join`
+    /// produces (an announcement), peer B's is that same beacon with its
+    /// extension chain removed and `Z` cleared — the wire a peer built without
+    /// fragmentation support emits. Both then send the SAME marker-less
+    /// fragment as a chain start, at the same SN, on the same clock.
+    #[test]
+    #[cfg(all(
+        feature = "reassembly",
+        feature = "transport-fragmentation",
+        feature = "codec-push"
+    ))]
+    fn an_announced_patch_level_reaches_the_peer_table_from_the_beacon() {
+        use crate::driver_loop::ReassemblyDropReason;
+        use crate::reassembly_dispatch::{ReassemblyConfig, ReassemblyDispatcher};
+
+        const PEER_B: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7448);
+
+        /// The same beacon with its announcement taken away: body only, `Z`
+        /// cleared. Derived from the production encoder so only the extension
+        /// chain differs between the two peers.
+        fn silent_join(zid: &[u8]) -> Vec<u8> {
+            let dgram = peer_join(zid);
+            let (_, consumed) = crate::join_decode::decode_join_body(dgram[0], &dgram[1..])
+                .expect("the real beacon's body decodes");
+            let mut out = dgram[..1 + consumed].to_vec();
+            out[0] &= !wire_const::FLAG_T_Z;
+            out
+        }
+
+        /// A chain-start fragment with NO extension chain at all — the wire a
+        /// patch-0 sender emits. `Z` clear, `M` set (more follow), `R` set.
+        fn markerless_first_fragment(sn: u8, payload: &[u8]) -> Vec<u8> {
+            let mut out = alloc::vec![
+                wire_const::T_MID_FRAGMENT
+                    | wz_codecs::wire_const::FLAG_T_FRAGMENT_R
+                    | wz_codecs::wire_const::FLAG_T_FRAGMENT_M,
+                sn,
+            ];
+            out.extend_from_slice(payload);
+            out
+        }
+
+        let local = params(&[0x11; 4]);
+        let mut d = running::<4>();
+        let mut drops: Vec<ReassemblyDropReason> = Vec::new();
+        let mut r: ReassemblyDispatcher<4, 4096> =
+            ReassemblyDispatcher::new(ReassemblyConfig::new(2, 5_000));
+
+        for (src, beacon, zid) in [
+            (PEER, peer_join(&[0x22; 4]), 0x22u8),
+            (PEER_B, silent_join(&[0x33; 4]), 0x33u8),
+        ] {
+            let _ = zid;
+            dispatch_multicast_inbound_reassembling(
+                &mut d,
+                &mut r,
+                &local,
+                &beacon,
+                src,
+                0,
+                &mut |_| {},
+            );
+            assert!(
+                d.peer_index_by_src(src).is_some(),
+                "both beacons admit their peer; only the announcement differs"
+            );
+            dispatch_multicast_inbound_reassembling(
+                &mut d,
+                &mut r,
+                &local,
+                &markerless_first_fragment(0, b"chain-start-without-a-marker"),
+                src,
+                1,
+                &mut |event| {
+                    if let IterationEvent::ReassemblyDropped(reason) = event {
+                        drops.push(reason);
+                    }
+                },
+            );
+        }
+
+        assert_eq!(
+            drops,
+            [ReassemblyDropReason::MissingStartMarker],
+            "exactly ONE of the two peers is held to the marker contract: the \
+             one whose beacon announced it. A level that never left the wire \
+             would give zero drops; a session-global gate would give two"
+        );
+
+        // And the announcing peer's REAL chain — the one wz's own TX emits,
+        // whose leading fragment carries the `0x2 First` ext — reassembles
+        // under the contract it announced.
+        //
+        // This leg exists because a CONTROL PROBE showed the assertion above
+        // does not need it: restoring the pre-round hard-coded
+        // `FragmentMarkers::NONE` at the ingest left that one GREEN, since a
+        // marker-less fixture cannot tell a discarded marker from an absent
+        // one. Nothing else in this file walked a marker off the wire.
+        let frame = crate::frame_encode::encode_frame_with_push(
+            1,
+            crate::push_build::build_push_literal("demo/mc", b"marked-chain-from-wire")
+                .expect("push fixture"),
+            true,
+        );
+        // An MTU under the frame's own length is what forces the re-frame; the
+        // `chain.len() > 1` assertion below is what checks it actually did.
+        let mtu = frame.len() / 2 + 8;
+        let mut tx = MulticastTxConduits::new(sn::mask_from_res(local.seq_num_res));
+        let chain =
+            crate::frame_encode::multicast_frame_or_fragments(frame, 1, true, mtu, &mut tx, None);
+        assert!(
+            chain.len() > 1,
+            "the fixture must actually fragment, or this leg witnesses nothing"
+        );
+
+        let mut payloads = 0usize;
+        let mut chain_drops: Vec<ReassemblyDropReason> = Vec::new();
+        for (i, dgram) in chain.iter().enumerate() {
+            dispatch_multicast_inbound_reassembling(
+                &mut d,
+                &mut r,
+                &local,
+                dgram,
+                PEER,
+                2 + i as u64,
+                &mut |event| match event {
+                    IterationEvent::Poll(crate::driver_loop::DriverLoopOutcome::FramePayload {
+                        ..
+                    }) => payloads += 1,
+                    IterationEvent::ReassemblyDropped(reason) => chain_drops.push(reason),
+                    _ => {}
+                },
+            );
+        }
+        assert!(
+            chain_drops.is_empty(),
+            "wz's own marked chain must not be refused by the contract wz \
+             announces: {chain_drops:?}"
+        );
+        assert_eq!(
+            payloads, 1,
+            "the marked chain reassembles into exactly one FramePayload"
         );
     }
 

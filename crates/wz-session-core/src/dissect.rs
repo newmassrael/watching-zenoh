@@ -7085,9 +7085,17 @@ mod tests {
         // ANTI-VACUITY, and it is the whole instrument: if the walk saw NO
         // extension at all then "no opaque row is emitted" would be true of a
         // blind test. The qos configuration above must contribute one.
+        // R2417 — `0x07` joined the set when the multicast beacon began
+        // announcing this node's protocol PATCH level, and this gate is what
+        // made the round check the obligation it names: id 7 is a `EXT_ENC_Z64`
+        // row of `ext_name::JOIN` ("patch") and NOT a `OPAQUE_ZBUF_BODIES` row,
+        // so the walker below already renders it by name rather than as hex,
+        // and no walker is owed. The `span.end` assertion above is what proves
+        // that rather than the row table alone: the dissector accounted for
+        // every byte of the new chain, MORE bit included.
         assert_eq!(
             emitted,
-            alloc::vec![0x01],
+            alloc::vec![0x01, 0x07],
             "the SET of extension ids `encode_join` emits changed. This is a \
              pinned set rather than a count because either direction matters: \
              one FEWER means this test can no longer see an extension and its \

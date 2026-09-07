@@ -439,6 +439,32 @@ struct PeerSlot {
     /// zenoh LEAKS the `mcast_faces` shell (`router.rs:239`, write-only Vec).
     #[cfg(feature = "multicast-declarations")]
     remote_subs: hashbrown::HashMap<u64, alloc::string::String>,
+    /// R2417 — the NEGOTIATED protocol patch level for this peer:
+    /// `min(CURRENT_PATCH, what its JOIN announced)`
+    /// ([`crate::extpatch::negotiate_patch`]). It is the sole gate on whether
+    /// this peer's fragment chains are read under the `0x2 First` / `0x3 Drop`
+    /// chain-boundary rules, which is what makes it PER PEER: one multicast
+    /// group multiplexes senders at different levels, and a patch-0 peer's
+    /// chain must not be refused for lack of a marker it never promised.
+    ///
+    /// Both references hold exactly this value in exactly this place, read at
+    /// the 1.10.0 pin: zenoh `io/zenoh-transport/src/multicast/transport.rs`
+    /// @ `patch: min(PatchType::CURRENT, join.ext_patch)`, a field of the
+    /// `TransportMulticastPeer` its `new_peer` inserts, consumed by
+    /// `io/zenoh-transport/src/multicast/rx.rs`
+    /// @ `if peer.patch.has_fragmentation_markers()`; and zenoh-pico
+    /// `src/transport/multicast/rx.c`
+    /// @ `entry->common._patch = msg->_patch < _Z_CURRENT_PATCH ? msg->_patch : _Z_CURRENT_PATCH`,
+    /// consumed at `src/transport/multicast/rx.c`
+    /// @ `_Z_PATCH_HAS_FRAGMENT_MARKERS(entry->common._patch)`.
+    ///
+    /// Re-negotiated from EVERY JOIN, not only the admitting one — pico
+    /// re-copies it at its refresh site like the lease and the SN pair, so a
+    /// peer that restarts at a different level is believed rather than held to
+    /// its first beacon. Cleared on [`Self::evict`] so a recycled slot never
+    /// reads a new peer's chain under a dead peer's level.
+    #[cfg(feature = "reassembly")]
+    patch: u8,
 }
 
 impl PeerSlot {
@@ -462,6 +488,10 @@ impl PeerSlot {
             whatami: None,
             #[cfg(feature = "multicast-declarations")]
             remote_subs: hashbrown::HashMap::new(),
+            // R2417 — a slot with no peer has announced nothing; the marker
+            // rules stay off until a JOIN says otherwise.
+            #[cfg(feature = "reassembly")]
+            patch: crate::extpatch::NO_PATCH,
         }
     }
 
@@ -573,6 +603,16 @@ impl PeerSlot {
             // union no longer counts them (the derive-not-store withdraw path — the
             // forwarder union-refcount then withdraws a keyexpr no live peer holds).
             self.remote_subs.clear();
+        }
+        // R2417 — drop this peer's negotiated patch level with the slot so a
+        // recycled index can never read a NEW peer's fragment chain under a dead
+        // peer's marker contract (the same recycle-safety the SN / namespace /
+        // alias resets above give). The direction that matters is DOWN: inheriting
+        // a stale patch-1 would refuse a patch-0 peer's whole chain for a start
+        // marker it never promised.
+        #[cfg(feature = "reassembly")]
+        {
+            self.patch = crate::extpatch::NO_PATCH;
         }
     }
 }
@@ -1085,6 +1125,50 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
         self.ingest_join_qos(zid, src, baseline, None, now_ms)
     }
 
+    /// R2417 — negotiate and store the protocol PATCH level the peer at `src`
+    /// announced on its JOIN (the private `PeerSlot::patch` field, whose own
+    /// doc carries both references' citations for it).
+    ///
+    /// `announced` is the level read off the beacon's extension chain
+    /// ([`crate::multicast_join::decode_join_patch`]); what is stored is
+    /// `min(CURRENT_PATCH, announced)`, so a peer announcing a level this build
+    /// does not implement is read at the level this build does.
+    ///
+    /// ## Why this is a SECOND call and not a `JoinBaseline` field
+    ///
+    /// [`JoinBaseline`] is built by
+    /// [`validate_join`](crate::multicast_join::validate_join) from the DECODED
+    /// `Join`, and the SCXML Join codec has no extension awareness at all — the
+    /// per-priority QoS advertisement rides `ingest_join_qos` as its own
+    /// argument for that same reason (R311y227). The patch level follows the
+    /// established seam rather than teaching the base-body validator to read a
+    /// trailer it cannot see.
+    ///
+    /// A `src` with no admitted peer is a NO-OP, which is what makes the call
+    /// order at the RX site safe: a JOIN that `validate_join` refused, or one
+    /// the qos-admission rule declined, leaves no slot for this to write into.
+    #[cfg(feature = "reassembly")]
+    pub fn record_peer_patch(&mut self, src: SocketAddr, announced: u8) {
+        if let Some(idx) = self.find_by_src(src) {
+            self.peers[idx].patch =
+                crate::extpatch::negotiate_patch(crate::extpatch::CURRENT_PATCH, announced);
+        }
+    }
+
+    /// R2417 — whether the peer in slot `peer_idx` negotiated the Fragment
+    /// chain-boundary markers (zenoh `PatchType::has_fragmentation_markers`,
+    /// pico `_Z_PATCH_HAS_FRAGMENT_MARKERS`).
+    ///
+    /// `false` for a free slot and for every peer that announced no level, so
+    /// the marker rules stay OFF unless a beacon turned them on — the direction
+    /// that cannot refuse a legitimate chain.
+    #[cfg(feature = "reassembly")]
+    pub fn peer_honours_fragment_markers(&self, peer_idx: usize) -> bool {
+        self.peers
+            .get(peer_idx)
+            .is_some_and(|p| crate::extpatch::has_fragmentation_markers(p.patch))
+    }
+
     /// Admit one inbound data Frame from the peer at source address `src`
     /// against its per-channel SN gate (§3.1 `Frame -> per-peer RxDispatch`;
     /// the §2.3 half-window rule, zenoh-pico `_z_multicast_handle_frame`).
@@ -1389,6 +1473,13 @@ pub fn multicast_chain_key(peer_idx: usize) -> [u8; 4] {
 /// entry, delegating to [`ingest_multicast_fragment_qos`] with `Priority::DEFAULT`.
 /// The pre-R311y227 surface + the tests use this; only the qos RX classifier
 /// ([`crate::multicast_rx`]) passes the fragment's decoded band.
+///
+/// R2417 — and the fragment's decoded chain-boundary markers, which this entry
+/// passes as [`FragmentMarkers::NONE`](crate::extfragment::FragmentMarkers::NONE):
+/// a caller that does not project the ext chain has no markers to hand over, and
+/// an absent marker must read as "this fragment carried none" rather than as a
+/// negotiation verdict — the peer's negotiated LEVEL is what decides whether the
+/// rules run at all, and that comes from the peer table either way.
 #[cfg(all(feature = "reassembly", feature = "alloc"))]
 #[allow(clippy::too_many_arguments)]
 pub fn ingest_multicast_fragment<
@@ -1419,6 +1510,7 @@ pub fn ingest_multicast_fragment<
         sn,
         more,
         crate::qos::Priority::DEFAULT,
+        crate::extfragment::FragmentMarkers::NONE,
         payload,
         now_ms,
         on_event,
@@ -1441,6 +1533,7 @@ pub fn ingest_multicast_fragment_qos<
     sn: u64,
     more: bool,
     priority: crate::qos::Priority,
+    markers: crate::extfragment::FragmentMarkers,
     payload: &[u8],
     now_ms: u64,
     on_event: &mut F,
@@ -1467,6 +1560,22 @@ pub fn ingest_multicast_fragment_qos<
             FragmentIngest::UnknownPeer | FragmentIngest::SessionNotRunning => return,
         };
     let key = multicast_chain_key(peer_idx);
+    // R2417 — arm the chain-boundary rules from THIS PEER's negotiated patch
+    // level before the fragment is classified, which is where a multicast plane
+    // differs from a unicast one: `crate::drive` writes the settled SESSION
+    // value because a unicast session has exactly one peer, while one multicast
+    // group multiplexes senders at different levels, so the write is per
+    // fragment and its source is the peer table
+    // ([`MulticastDispatcher::peer_honours_fragment_markers`]). The observer's
+    // own per-direction write (`crate::passive`) is the same shape.
+    //
+    // Both references gate the identical block on the identical per-peer value
+    // (read at the 1.10.0 pin): zenoh
+    // `io/zenoh-transport/src/multicast/rx.rs`
+    // @ `if peer.patch.has_fragmentation_markers()`, and zenoh-pico
+    // `src/transport/multicast/rx.c`
+    // @ `_Z_PATCH_HAS_FRAGMENT_MARKERS(entry->common._patch)`.
+    reasm.set_fragmentation_markers(dispatcher.peer_honours_fragment_markers(peer_idx));
     let mut completed: Option<DriverLoopOutcome> = None;
     let ingest_outcome = reasm.ingest(
         ReassemblyFragment {
@@ -1479,16 +1588,24 @@ pub fn ingest_multicast_fragment_qos<
             // `(peer, reliable, priority)`, so a qos peer's two-priority oversize
             // frames reassemble on independent chains. DEFAULT for a non-qos peer.
             priority,
-            // R311y578 — multicast carries NO negotiated patch level: a
-            // multicast Join advertises no `0x7` ext and there is no per-peer
-            // Init exchange to take a `min()` over, so the chain-boundary
-            // rules stay OFF on this transport and the descriptor is
-            // marker-less. Upstream gates the multicast RX block on the same
-            // `patch.has_fragmentation_markers()` (`multicast/rx.rs:216`),
-            // whose value there comes from the manager config rather than a
-            // per-peer negotiation; wiring that source is left to the round
-            // that gives multicast a patch level to read.
-            markers: crate::extfragment::FragmentMarkers::NONE,
+            // R2417 — the `0x2 First` / `0x3 Drop` markers this fragment
+            // carried, honoured iff the level armed above says its sender
+            // promised them. This clause used to read "multicast carries NO
+            // negotiated patch level: a multicast Join advertises no `0x7` ext
+            // and there is no per-peer Init exchange to take a `min()` over",
+            // and BOTH halves are false at the 1.10.0 pin: the JOIN carries the
+            // extension by name in both references -- zenoh
+            // `commons/zenoh-protocol/src/transport/join.rs`
+            // @ `pub type Patch = zextz64!(0x7, false);` inside `join::ext`,
+            // whose comment is "use the same id as Init", and zenoh-pico
+            // `include/zenoh-pico/protocol/ext.h` @ `_Z_MSG_EXT_ID_JOIN_PATCH`
+            // -- and the beacon IS the per-peer exchange the `min()` runs over.
+            // The same clause said upstream's value "comes from the manager
+            // config rather than a per-peer negotiation", which is false at the
+            // same pin: it is a field of the per-peer record,
+            // `io/zenoh-transport/src/multicast/transport.rs`
+            // @ `patch: min(PatchType::CURRENT, join.ext_patch)`.
+            markers,
         },
         sn_mask,
         now_ms,
@@ -2707,6 +2824,220 @@ mod tests {
                 FrameIngest::Admitted,
                 "the channel ring advanced across both fragment SNs"
             );
+        }
+
+        /// R2417 — the negotiation itself: what a beacon ANNOUNCES and what the
+        /// slot STORES are related by `min(CURRENT, announced)`, and the three
+        /// cases that differ are all here.
+        ///
+        /// The above-CURRENT case is the one worth pinning: a peer announcing a
+        /// level this build does not implement must be read at the level this
+        /// build DOES, not at its own — zenoh's
+        /// `min(PatchType::CURRENT, join.ext_patch)` and pico's
+        /// `msg->_patch < _Z_CURRENT_PATCH ? msg->_patch : _Z_CURRENT_PATCH`
+        /// are that clamp, and a store-what-you-heard implementation passes
+        /// every other case in this test.
+        #[test]
+        fn record_peer_patch_stores_the_negotiated_minimum() {
+            let mut d = running_dispatcher::<4>(5_000);
+            d.ingest_join(ZID_A, SRC_A, sn0(), 0);
+            d.ingest_join(ZID_B, SRC_B, sn0(), 0);
+            let a = d.peer_index_by_src(SRC_A).expect("A admitted");
+            let b = d.peer_index_by_src(SRC_B).expect("B admitted");
+
+            assert!(
+                !d.peer_honours_fragment_markers(a),
+                "a peer that has announced nothing yet is patch-0: the rules \
+                 stay off until a beacon turns them on"
+            );
+
+            d.record_peer_patch(SRC_A, crate::extpatch::CURRENT_PATCH);
+            assert!(d.peer_honours_fragment_markers(a));
+
+            d.record_peer_patch(SRC_B, crate::extpatch::NO_PATCH);
+            assert!(
+                !d.peer_honours_fragment_markers(b),
+                "an explicit patch-0 announcement is not the same as silence \
+                 for the peer, but it is the same for the rules"
+            );
+
+            // Above this build's level: clamped DOWN, and the marker rules are
+            // still on because CURRENT carries them.
+            d.record_peer_patch(SRC_B, crate::extpatch::CURRENT_PATCH + 7);
+            assert_eq!(
+                d.peers[b].patch,
+                crate::extpatch::CURRENT_PATCH,
+                "an announcement above CURRENT is stored AT current, never as \
+                 announced -- a later level's rules are not implemented here"
+            );
+
+            // A recycled slot must not inherit the level: the direction that
+            // matters is DOWN, since a stale patch-1 refuses a patch-0 peer's
+            // whole chain for a marker it never promised.
+            d.close_by_src(SRC_A);
+            assert!(
+                !d.peer_honours_fragment_markers(a),
+                "eviction clears the negotiated level with the slot"
+            );
+
+            // An address holding no peer is a no-op, which is what makes the
+            // RX site's call order safe after a refused admission.
+            d.record_peer_patch(SRC_C, crate::extpatch::CURRENT_PATCH);
+            assert!(d.peer_index_by_src(SRC_C).is_none());
+        }
+
+        /// R2417 — THE DISCRIMINATOR: the same marker-less chain start is
+        /// REFUSED from a peer that announced the markers and ADMITTED from one
+        /// that did not, and a marked chain start from the announcing peer is
+        /// admitted.
+        ///
+        /// ## Why this shape and not three separate cases
+        ///
+        /// Everything is held equal except the thing under test. Both peers are
+        /// on the SAME dispatcher and the SAME reassembly Router, run through
+        /// the SAME entry point with the SAME bytes, the same SN and the same
+        /// clock; the ONLY difference is the level their beacon announced. A
+        /// per-peer gate is exactly the claim that this difference decides the
+        /// outcome, so a test that varied the fixture too could not make it.
+        ///
+        /// Before this round the multicast path passed
+        /// `FragmentMarkers::NONE` unconditionally and armed nothing, so all
+        /// three legs below were the SAME leg: every chain was read
+        /// marker-less. That is why leg 1 is a REFUSAL — it is the behaviour
+        /// this transport did not have, in the direction both references have
+        /// it (zenoh `multicast/rx.rs` @ "First fragment received without start
+        /// marker", pico `multicast/rx.c` @ the
+        /// `_Z_PATCH_HAS_FRAGMENT_MARKERS` block).
+        #[test]
+        fn the_marker_rules_run_only_for_the_peer_that_announced_them() {
+            let mut d = running_dispatcher::<4>(5_000);
+            d.ingest_join(ZID_A, SRC_A, sn0(), 0);
+            d.ingest_join(ZID_B, SRC_B, sn0(), 0);
+            d.record_peer_patch(SRC_A, crate::extpatch::CURRENT_PATCH);
+            d.record_peer_patch(SRC_B, crate::extpatch::NO_PATCH);
+
+            let batch = push_batch_bytes("demo/mc", b"per-peer-marker-gate");
+            let (head, tail) = batch.split_at(batch.len() / 2);
+            let none = crate::extfragment::FragmentMarkers::NONE;
+            let first = crate::extfragment::FragmentMarkers {
+                first: true,
+                dropped: false,
+            };
+
+            // Leg 1 — the announcing peer, marker-less chain start: refused.
+            let mut cap = Captured::default();
+            {
+                let mut on_event = capture(&mut cap);
+                ingest_multicast_fragment_qos(
+                    &mut d,
+                    &mut reasm(),
+                    SRC_A,
+                    true,
+                    0,
+                    true,
+                    crate::qos::Priority::DEFAULT,
+                    none,
+                    head,
+                    0,
+                    &mut on_event,
+                );
+            }
+            assert_eq!(
+                cap.drops,
+                [ReassemblyDropReason::MissingStartMarker],
+                "a patch-1 peer's chain must start with the 0x2 First marker"
+            );
+            assert!(cap.payloads.is_empty());
+
+            // Leg 2 — the SAME peer, the SAME bytes, WITH the marker: admitted,
+            // and the chain completes on its tail. This leg is what pins the
+            // markers being threaded at all: with the pre-round hard-coded
+            // `NONE` the arming above would refuse this too.
+            //
+            // The SNs continue from leg 1 rather than repeating it: the per-peer
+            // SN gate runs BEFORE the reassembly rules and admitted SN 0 there,
+            // so re-sending it would be refused as out-of-order by the gate and
+            // this leg would pass or fail for the wrong reason.
+            let mut cap = Captured::default();
+            let mut r = reasm();
+            {
+                let mut on_event = capture(&mut cap);
+                ingest_multicast_fragment_qos(
+                    &mut d,
+                    &mut r,
+                    SRC_A,
+                    true,
+                    1,
+                    true,
+                    crate::qos::Priority::DEFAULT,
+                    first,
+                    head,
+                    0,
+                    &mut on_event,
+                );
+                ingest_multicast_fragment_qos(
+                    &mut d,
+                    &mut r,
+                    SRC_A,
+                    true,
+                    2,
+                    false,
+                    crate::qos::Priority::DEFAULT,
+                    none,
+                    tail,
+                    1,
+                    &mut on_event,
+                );
+            }
+            assert_eq!(
+                cap.payloads,
+                [(true, 2, 1)],
+                "the marked chain reassembles: one FramePayload at the final \
+                 fragment's SN"
+            );
+            assert!(cap.drops.is_empty());
+
+            // Leg 3 — the OTHER peer, the same marker-less start: admitted, and
+            // its chain completes. This is the leg a session-global gate gets
+            // wrong: arming the rules for the group would refuse this peer's
+            // whole chain for a promise it never made.
+            let mut cap = Captured::default();
+            let mut r = reasm();
+            {
+                let mut on_event = capture(&mut cap);
+                ingest_multicast_fragment_qos(
+                    &mut d,
+                    &mut r,
+                    SRC_B,
+                    true,
+                    0,
+                    true,
+                    crate::qos::Priority::DEFAULT,
+                    none,
+                    head,
+                    0,
+                    &mut on_event,
+                );
+                ingest_multicast_fragment_qos(
+                    &mut d,
+                    &mut r,
+                    SRC_B,
+                    true,
+                    1,
+                    false,
+                    crate::qos::Priority::DEFAULT,
+                    none,
+                    tail,
+                    1,
+                    &mut on_event,
+                );
+            }
+            assert_eq!(
+                cap.payloads,
+                [(true, 1, 1)],
+                "a patch-0 peer's marker-less chain still reassembles"
+            );
+            assert!(cap.drops.is_empty());
         }
 
         /// The reassembled bytes decode as the original Push network

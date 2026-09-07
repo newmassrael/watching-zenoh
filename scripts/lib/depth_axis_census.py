@@ -558,11 +558,40 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # and the R2385 block before it. The rule the three share: the pin moves with a
 # NAMED mover, so the next reader can tell an unpaid measurement from an unread
 # one.
+#
+# Round 2417 -- `transport-multicast` re-declared at the pin (open-debt item
+# 675), and this round's OWN delta on every axis here is ZERO, derived the same
+# way `Round 2412` derived its own: that atom is graded COMPLETE, and
+# `partial_atoms()` admits only PARTIAL reasons, so rewriting its whole reason
+# -- nine new anchored upstream citations included -- cannot reach any count on
+# this page. The census printed wz 301 / ambiguous 73 both before and after the
+# mutation, which is the check.
+#
+# THE INHERITED DRIFT, ADOPTED WITH BOTH MOVERS NAMED, because the attribution
+# is in hand rather than guessed. Replaying every store-touching commit since
+# the pin was last set through this file's own `citation_audit` moves the count
+# at exactly TWO commits and no other:
+#
+#   * the commit that re-declared `adminspace-metrics` (ledger `Round 2414`)
+#     -- wz -8, ambiguous -2;
+#   * the commit that re-declared `adminspace-core`   (ledger `Round 2415`)
+#     -- wz -6, ambiguous unchanged.
+#
+# The arithmetic is checkable and exact: 315 - 8 - 6 = 301 and 75 - 2 = 73,
+# which is what the census prints here. Both were item-675 re-gradings that
+# moved the RATCHET budget in their own commit and left these pins behind --
+# the same shape the two blocks above record, and for the same structural
+# reason: `grading_pin_ratchet.py` runs in the pre-push hook while this census
+# runs only in Layer C0, so a round that pays one instrument cannot see the
+# other object. Layer C0 has therefore been RED for the four rounds behind
+# those two commits, dying HERE before the citation gates that sit after it --
+# which is why a later reader must not read a green anchor gate as evidence
+# that this page was reached.
 PIN_REACHED = 55
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
-PIN_WZ_CITATIONS = 315
-PIN_AMBIGUOUS = 75
+PIN_WZ_CITATIONS = 301
+PIN_AMBIGUOUS = 73
 
 
 class Fatal(Exception):

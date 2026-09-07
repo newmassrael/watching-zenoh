@@ -43,16 +43,31 @@ use crate::sn::MulticastTxConduits;
 // `0x10`) | ENC_ZBUF (`0x40`) = `0x51` — byte-identical to zenoh-pico
 // `_Z_MSG_EXT_ID_JOIN_QOS` (protocol/ext.h:46) and zenoh's `join::ext::QoS::ID`.
 // A qos JOIN sets the transport-message `Z` header flag and appends this ZBUF ext
-// (`[0x51][VLE(len)][Priority::NUM * 2 VLE SNs]`) after the base body. wz emits
-// ONLY this JOIN ext, so it never carries the ext-chain MORE bit (`0x80`); a peer
-// that chains a Patch ext after it (pico, when fragmentation is on) still decodes
-// here because the QoS ext is emitted FIRST (transport.c:71 before :90).
+// (`[0x51][VLE(len)][Priority::NUM * 2 VLE SNs]`) after the base body. The QoS ext
+// is emitted FIRST when a Patch ext follows it, matching pico's own order
+// (transport.c @ `_Z_MSG_EXT_ID_JOIN_QOS` before `_Z_MSG_EXT_ID_JOIN_PATCH`), and
+// carries the chain-MORE bit (`0x80`) exactly then — see [`write_join_qos_ext`].
 #[cfg(feature = "transport-qos")]
 const JOIN_QOS_EXT_HEADER: u8 = 0x51;
 /// The ext-id mask (`_Z_EXT_FULL_ID_MASK`, ext.h:30) — strips the chain-MORE bit
 /// so a chained (`0xD1`) and an un-chained (`0x51`) QoS ext compare equal.
 #[cfg(feature = "transport-qos")]
 const EXT_FULL_ID_MASK: u8 = 0x7F;
+
+/// The JOIN Patch extension header byte — id `0x7`, Z64/ZINT encoding, NOT
+/// mandatory, built from the SAME named constants the Init half reads
+/// ([`crate::extpatch::peer_patch`]) rather than a fourth literal spelling of
+/// one wire fact.
+///
+/// Both references carry this extension ON A JOIN, and both negotiate it PER
+/// PEER off the beacon (read at the 1.10.0 pin, not inherited):
+/// `commons/zenoh-protocol/src/transport/join.rs`
+/// @ `pub type Patch = zextz64!(0x7, false);`, declared inside `join::ext`
+/// with the comment "use the same id as Init"; and zenoh-pico
+/// `include/zenoh-pico/protocol/ext.h` @ `_Z_MSG_EXT_ID_JOIN_PATCH`, which
+/// spells the identical byte as `(0x07 | _Z_MSG_EXT_ENC_ZINT)`.
+#[cfg(feature = "transport-fragmentation")]
+const JOIN_PATCH_EXT_HEADER: u8 = crate::extpatch::PATCH_EXT_ID | crate::ext_header::EXT_ENC_Z64;
 
 /// Frame a multicast JOIN datagram for `params`:
 /// `[T_MID_JOIN][version][cbyte][zid][S: res-cbyte + batch][lease vle]`
@@ -130,18 +145,49 @@ pub fn encode_join(params: &MulticastParams, tx_sn: &MulticastTxConduits) -> Vec
     if lease_in_seconds {
         flags |= wire_const::FLAG_T_JOIN_T;
     }
+    // R2417 — this node's protocol PATCH level rides a JOIN transport extension
+    // whenever it can emit the chain-boundary markers that level promises, which
+    // on this transport is exactly `transport-fragmentation`: that feature is the
+    // sole gate on `multicast_frame_or_fragments` re-framing an oversize frame at
+    // all, and the chain it then builds carries the `0x2 First` marker on its
+    // leading fragment (`frame_encode::FragmentChain`). Announcing a level whose
+    // markers this build cannot emit would be worse than silence — a patch-1
+    // receiver refuses a chain whose start marker never arrives ("First fragment
+    // received without start marker"), so the announcement is gated on the emit
+    // and not on the reassembly half.
+    //
+    // pico gates the same announcement on `Z_FEATURE_FRAGMENTATION`
+    // (`src/protocol/definitions/transport.c` @ `_z_t_msg_make_join`, where
+    // `has_patch` is `_patch != _Z_NO_PATCH` under that `#if`), and zenoh's
+    // multicast beacon carries the level unconditionally --
+    // `io/zenoh-transport/src/multicast/link.rs`
+    // @ `ext_patch: PatchType::CURRENT`, a field of the `Join` its tx task
+    // builds on every beacon interval.
+    #[cfg(feature = "transport-fragmentation")]
+    let has_patch = crate::extpatch::CURRENT_PATCH != crate::extpatch::NO_PATCH;
+    #[cfg(not(feature = "transport-fragmentation"))]
+    let has_patch = false;
     // R311y227 — the per-priority QoS-SN advertisement rides a JOIN transport
     // extension, so the `Z` (extensions-follow) header bit is set when this node
-    // offers qos on the group.
+    // offers qos on the group. R2417 — a Patch ext sets it too, so a NON-qos
+    // beacon that carries only the patch level still announces its chain
+    // (pico: `if (next_sn._is_qos || has_patch) _Z_SET_FLAG(_Z_FLAG_T_Z)`).
     #[cfg(feature = "transport-qos")]
-    if params.is_qos {
+    let emits_qos_ext = params.is_qos;
+    #[cfg(not(feature = "transport-qos"))]
+    let emits_qos_ext = false;
+    if emits_qos_ext || has_patch {
         flags |= wire_const::FLAG_T_Z;
     }
     dgram.push(flags | wire_const::T_MID_JOIN);
     dgram.extend_from_slice(&body);
     #[cfg(feature = "transport-qos")]
-    if params.is_qos {
-        write_join_qos_ext(&mut dgram, &tx_sn.advertise_per_priority());
+    if emits_qos_ext {
+        write_join_qos_ext(&mut dgram, &tx_sn.advertise_per_priority(), has_patch);
+    }
+    #[cfg(feature = "transport-fragmentation")]
+    if has_patch {
+        write_join_patch_ext(&mut dgram, crate::extpatch::CURRENT_PATCH);
     }
     dgram
 }
@@ -150,19 +196,94 @@ pub fn encode_join(params: &MulticastParams, tx_sn: &MulticastTxConduits) -> Vec
 /// (the zenoh `join::ext::QoS` / pico `_Z_MSG_EXT_ID_JOIN_QOS` ZBUF). The body is
 /// the LIVE per-priority `next_sn` each conduit will mint (`reliable` then
 /// `best_effort` per `Priority`, ascending), so a receiver seeds its per-priority
-/// RX baseline one before each. The header byte carries no chain-MORE bit (wz
-/// emits only this JOIN ext); the ZBUF is VLE-length-prefixed
+/// RX baseline one before each. The ZBUF is VLE-length-prefixed
 /// ([`crate::vle::write_zbuf`], the Zenoh080 ZBuf framing / pico
 /// `_z_zsize_encode(len)`).
+///
+/// R2417 — `more` sets the chain-MORE bit ([`crate::ext_header::EXT_FLAG_Z`])
+/// when a Patch ext follows this one, which is pico's own construction:
+/// `_Z_MSG_EXT_ID_JOIN_QOS | _Z_MSG_EXT_MORE(has_patch)`
+/// (`src/protocol/codec/transport.c`). It is a PARAMETER rather than a second
+/// literal header constant because the bit is a property of this ext's POSITION
+/// in the chain, not of its identity — the same reason
+/// [`crate::ext_chain::encode_ext_chain`] patches it per position.
 #[cfg(feature = "transport-qos")]
-fn write_join_qos_ext(out: &mut Vec<u8>, conduits: &[crate::sn::TxSn; crate::qos::Priority::NUM]) {
-    out.push(JOIN_QOS_EXT_HEADER);
+fn write_join_qos_ext(
+    out: &mut Vec<u8>,
+    conduits: &[crate::sn::TxSn; crate::qos::Priority::NUM],
+    more: bool,
+) {
+    out.push(if more {
+        JOIN_QOS_EXT_HEADER | crate::ext_header::EXT_FLAG_Z
+    } else {
+        JOIN_QOS_EXT_HEADER
+    });
     let mut body = Vec::new();
     for c in conduits.iter() {
         crate::vle::encode_vle_u64_into(&mut body, c.next_reliable);
         crate::vle::encode_vle_u64_into(&mut body, c.next_best_effort);
     }
     crate::vle::write_zbuf(out, &body);
+}
+
+/// R2417 — append the JOIN Patch extension: `[0x27][VLE(level)]`, the LAST ext
+/// in the chain (so no chain-MORE bit), byte-identical to pico's
+/// `_z_uint8_encode(_Z_MSG_EXT_ID_JOIN_PATCH)` + `_z_zint64_encode(_patch)` and
+/// to zenoh's `zextz64!(0x7, false)` Z64 body.
+///
+/// It is the TX half of the negotiation [`decode_join_patch`] reads back: the
+/// level says "my fragment chains carry `0x2 First` / `0x3 Drop`", which is why
+/// [`encode_join`] gates it on the feature that makes those markers reach the
+/// wire rather than on the one that reads them.
+#[cfg(feature = "transport-fragmentation")]
+fn write_join_patch_ext(out: &mut Vec<u8>, level: u8) {
+    out.push(JOIN_PATCH_EXT_HEADER);
+    crate::vle::encode_vle_u64_into(out, u64::from(level));
+}
+
+/// R2417 — the announcer's protocol PATCH level from a JOIN's extension chain,
+/// or [`crate::extpatch::NO_PATCH`] when the beacon carries none (no `Z` header
+/// flag, an unparseable chain, or a chain with no `0x7` entry).
+///
+/// ## Why this walks the whole chain rather than peeking one ext
+///
+/// [`decode_join_qos`] reads only the LEADING ext, which is correct for its own
+/// question because a qos beacon puts the QoS ext first. The Patch ext has no
+/// such fixed position: pico emits it after the QoS ext on a qos beacon and as
+/// the ONLY ext on a non-qos one, and it sets the `Z` header flag in both cases
+/// (`_z_t_msg_make_join`: `next_sn._is_qos || has_patch`). A reader that
+/// assumed a position would therefore see a patch level from exactly one of the
+/// two beacon shapes.
+///
+/// So this reuses the two SSOTs that already exist for the unicast half rather
+/// than hand-rolling a third walker: `crate::ext_chain::decode_ext_chain` for
+/// the Z-bit continuation loop (depth-bounded, so a malformed peer cannot pin
+/// the decoder — a code span rather than a link, because that module is private
+/// and this function is not) and [`crate::extpatch::peer_patch`] for the id /
+/// encoding match and the level projection. The Init and Join halves of one
+/// wire fact are read by one function each way.
+#[cfg(feature = "reassembly")]
+pub fn decode_join_patch(bytes: &[u8]) -> u8 {
+    let Some(&header) = bytes.first() else {
+        return crate::extpatch::NO_PATCH;
+    };
+    if header & 0x1f != wire_const::T_MID_JOIN {
+        return crate::extpatch::NO_PATCH;
+    }
+    if header & wire_const::FLAG_T_Z == 0 {
+        return crate::extpatch::NO_PATCH; // no extension chain -> no patch level
+    }
+    // The base body's width comes from the SHARED decode, exactly as
+    // `decode_join_qos` takes it (R311y605): the S-flag bit that selects two
+    // optional body fields is read in ONE place.
+    let Ok((_, consumed)) = crate::join_decode::decode_join_body(header, &bytes[1..]) else {
+        return crate::extpatch::NO_PATCH;
+    };
+    let mut cursor = sce_forge_runtime::codec::SceCursor::new(&bytes[1 + consumed..]);
+    match crate::ext_chain::decode_ext_chain(&mut cursor) {
+        Ok(entries) => crate::extpatch::peer_patch(&entries),
+        Err(_) => crate::extpatch::NO_PATCH,
+    }
 }
 
 /// R311y227 — decode the JOIN QoS-SN extension into the announcer's per-priority
@@ -320,18 +441,28 @@ mod tests {
         assert_eq!(decode_join_zid(&dgram), Some(&zid[..]));
     }
 
-    /// R311kq — a protocol-default config emits the minimal JOIN (S=0,
+    /// R311kq — a protocol-default config emits the minimal JOIN BODY (S=0,
     /// no optionals): omitted IS the honest advertisement of the
     /// protocol defaults (pico `make_join` sets S only off-default).
     /// The fixture's whole-second lease (5000ms) still rides the T flag
     /// (R311kr) — T is the lease UNIT, orthogonal to the S caps.
+    ///
+    /// R2417 — "minimal" is about the BODY optionals and no longer about the
+    /// whole datagram: a `transport-fragmentation` build now announces its
+    /// patch level in an extension, so the `Z` flag rides even at the protocol
+    /// defaults (pico does the same — its `_z_t_msg_make_join` sets `Z` on
+    /// `next_sn._is_qos || has_patch`, and `has_patch` is unconditional under
+    /// `Z_FEATURE_FRAGMENTATION`). The mask below therefore admits Z, and the
+    /// clause it protects — that S and the two optionals stay off — is
+    /// unchanged and still asserted.
     #[test]
     fn encode_join_is_minimal_at_protocol_defaults() {
         let p = protocol_default_params(&[0x01, 0x02, 0x03, 0x04]);
         let dgram = join0(&p);
         assert_eq!(dgram[0] & wire_const::FLAG_T_JOIN_S, 0, "no S flag");
         assert_eq!(
-            dgram[0] & !(wire_const::FLAG_T_JOIN_S | wire_const::FLAG_T_JOIN_T),
+            dgram[0]
+                & !(wire_const::FLAG_T_JOIN_S | wire_const::FLAG_T_JOIN_T | wire_const::FLAG_T_Z),
             wire_const::T_MID_JOIN
         );
         let join = decode_join(&dgram).expect("JOIN decodes");
@@ -360,6 +491,115 @@ mod tests {
         assert!(
             validate_join(&join, &p).is_some(),
             "same-config group admits the advertised caps"
+        );
+    }
+
+    // ── R2417: the JOIN's protocol PATCH level (id 0x7), the per-peer
+    //    negotiation both references run off the beacon ──
+
+    /// R2417 — the beacon ANNOUNCES this node's patch level, and it reads back
+    /// as that level through the production decoder.
+    ///
+    /// Both halves matter and neither implies the other: the bytes pin the wire
+    /// form against the two references (header `0x27` = id 7 | Z64, not
+    /// mandatory; then a VLE level), and the round trip pins that
+    /// [`decode_join_patch`] finds it where [`encode_join`] put it. A test that
+    /// only round-tripped would pass on any self-consistent private spelling.
+    #[test]
+    #[cfg(all(feature = "transport-fragmentation", feature = "reassembly"))]
+    fn a_beacon_announces_this_nodes_patch_level() {
+        let p = protocol_default_params(&[0x01, 0x02, 0x03, 0x04]);
+        let dgram = join0(&p);
+        assert_ne!(
+            dgram[0] & wire_const::FLAG_T_Z,
+            0,
+            "an announcing beacon sets Z: an extension chain follows"
+        );
+        assert_eq!(
+            &dgram[dgram.len() - 2..],
+            &[JOIN_PATCH_EXT_HEADER, crate::extpatch::CURRENT_PATCH],
+            "the chain ends with [0x27][VLE(level)] and no chain-MORE bit -- \
+             pico's `_z_uint8_encode(_Z_MSG_EXT_ID_JOIN_PATCH)` + \
+             `_z_zint64_encode(_patch)`, and zenoh's `zextz64!(0x7, false)`"
+        );
+        assert_eq!(
+            decode_join_patch(&dgram),
+            crate::extpatch::CURRENT_PATCH,
+            "the announced level reads back through the production decoder"
+        );
+    }
+
+    /// R2417 — a qos beacon carries BOTH extensions, and each decoder reads its
+    /// own off the same datagram.
+    ///
+    /// This is the case a positional reader gets wrong. The Patch ext is second
+    /// here and FIRST on the non-qos beacon above, so a decoder that peeked at
+    /// one offset would report a level from exactly one of the two shapes. The
+    /// chain-MORE bit on the QoS header is what makes the walk reach the second
+    /// entry at all, which is why it is asserted as a byte rather than inferred
+    /// from the patch level being found.
+    #[test]
+    #[cfg(all(
+        feature = "transport-qos",
+        feature = "transport-fragmentation",
+        feature = "reassembly"
+    ))]
+    fn a_qos_beacon_chains_the_patch_ext_behind_the_qos_ext() {
+        let mut p = params(&[0x01, 0x02, 0x03, 0x04]);
+        p.is_qos = true;
+        let dgram = join0(&p);
+        let (_, consumed) =
+            crate::join_decode::decode_join_body(dgram[0], &dgram[1..]).expect("body decodes");
+        assert_eq!(
+            dgram[1 + consumed],
+            JOIN_QOS_EXT_HEADER | crate::ext_header::EXT_FLAG_Z,
+            "the QoS ext chains to the Patch ext behind it -- pico's \
+             `_Z_MSG_EXT_ID_JOIN_QOS | _Z_MSG_EXT_MORE(has_patch)`"
+        );
+        assert!(
+            decode_join_qos(&dgram).is_some(),
+            "the qos advertisement is still readable with the chain grown"
+        );
+        assert_eq!(
+            decode_join_patch(&dgram),
+            crate::extpatch::CURRENT_PATCH,
+            "and so is the patch level BEHIND it"
+        );
+    }
+
+    /// R2417 — a beacon that announces nothing reads as
+    /// [`crate::extpatch::NO_PATCH`], which is the state the marker rules must
+    /// stay off for.
+    ///
+    /// The fixture is the real beacon with its chain REMOVED and `Z` cleared —
+    /// the wire a peer built without fragmentation support emits (pico with
+    /// `Z_FEATURE_FRAGMENTATION == 0`: `has_patch` false, so no ext and no `Z`).
+    /// Deriving it from the production encoder rather than hand-writing a
+    /// datagram keeps the body shape honest; only the announcement is taken
+    /// away.
+    #[test]
+    #[cfg(all(feature = "transport-fragmentation", feature = "reassembly"))]
+    fn a_beacon_that_announces_nothing_reads_as_no_patch() {
+        let p = protocol_default_params(&[0x01, 0x02, 0x03, 0x04]);
+        let dgram = join0(&p);
+        let (_, consumed) =
+            crate::join_decode::decode_join_body(dgram[0], &dgram[1..]).expect("body decodes");
+        let mut silent = dgram[..1 + consumed].to_vec();
+        silent[0] &= !wire_const::FLAG_T_Z;
+        assert_eq!(
+            decode_join_patch(&silent),
+            crate::extpatch::NO_PATCH,
+            "no chain means no announcement, not a default level"
+        );
+        // And the SAME truncation with `Z` still set is a chain that is not
+        // there: a decoder that walked past the body would read body-adjacent
+        // bytes as an ext header. It must refuse, not invent.
+        let mut lying = dgram[..1 + consumed].to_vec();
+        lying[0] |= wire_const::FLAG_T_Z;
+        assert_eq!(
+            decode_join_patch(&lying),
+            crate::extpatch::NO_PATCH,
+            "an unparseable chain is an absent announcement, never a level"
         );
     }
 
@@ -544,17 +784,18 @@ mod tests {
             }
         }
 
-        // A non-qos JOIN clears Z and carries no qos ext.
+        // A non-qos JOIN carries no qos ext. R2417 — it no longer clears Z:
+        // the `Z` flag says "an extension chain follows", and a non-qos beacon
+        // still announces its patch level, so what distinguishes the two
+        // beacons is the CHAIN CONTENT rather than the header bit. That is
+        // exactly what `decode_join_qos` reads, and it is the assertion that
+        // survived: a reader keyed on `Z` alone would have called this beacon
+        // qos.
         let mut p2 = params(&[0x01, 0x02, 0x03, 0x04]);
         p2.is_qos = false;
         let dgram2 = encode_join(
             &p2,
             &MulticastTxConduits::new(sn::mask_from_res(p2.seq_num_res)),
-        );
-        assert_eq!(
-            dgram2[0] & wire_const::FLAG_T_Z,
-            0,
-            "a non-qos JOIN clears the Z header flag"
         );
         assert!(
             decode_join_qos(&dgram2).is_none(),

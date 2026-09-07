@@ -473,7 +473,55 @@ GRADE_TAGS = ("PARTIAL:", "COMPLETE:")
 #: its own comment to EMISSION, since a pico client negotiates no SHM.
 #:
 #: The split is 32 PARTIAL / 6 COMPLETE.
-BUDGET = 38
+#:
+#: 38 -> 37 (ledger `Round 2417`) by re-declaring `transport-multicast`, and it
+#: is the first move here whose membership cause is an EXEMPTION rather than a
+#: version string. That atom's closing sentence read "the parity target is pico
+#: rather than zenoh -- this reason declares no zenoh 1.5.0 and so owes no pin
+#: re-measurement", and the only occurrence of the stale version in the whole
+#: reason was inside that denial. So this population has a FOURTH membership
+#: cause beside the three R2410 recorded: a reason that names the version only
+#: to argue it is not measured against it.
+#:
+#: THE EXEMPTION IS FALSE AT THE PIN, which is why the count could move at all.
+#: `io/zenoh-transport/src/multicast/` is a 2153-line multicast transport whose
+#: subjects are exactly that atom's -- a JOIN beacon on a `join_interval`
+#: timer, lease-driven peer expiry through `close::reason::EXPIRED`, a Close on
+#: teardown, and a per-peer receive record. An atom is not exempt from one
+#: reference because a second reference is closer to it, and an exemption is a
+#: grading claim that no instrument in this tree could object to -- item 675's
+#: whole argument, arriving as a clause instead of as a number.
+#:
+#: AND THE RE-MEASUREMENT REFUTED TWO SENTENCES IN THE PRODUCT CODE, not in the
+#: reason. The multicast reassembly ingest asserted that "a multicast Join
+#: advertises no `0x7` ext and there is no per-peer Init exchange to take a
+#: `min()` over", and that upstream's marker gate reads "the manager config
+#: rather than a per-peer negotiation". Both references carry the extension ON
+#: THE JOIN by name, and both hold the negotiated `min()` as a field of the
+#: per-peer record. A comment that names an ABSENT protocol feature is the
+#: sharpest form of R2415's finding: a reader has no reason to doubt it, and no
+#: gate can read it.
+#:
+#: The round's product is the four seams that were missing under it: the beacon
+#: announces this node's level, the QoS ext carries the chain-MORE bit when the
+#: Patch ext follows, the announced level is read by WALKING the chain (it sits
+#: second on a qos beacon and first on a non-qos one, so a positional reader
+#: finds it in one beacon shape of two), and the negotiated `min(CURRENT,
+#: announced)` is a per-peer slot field that arms the chain-boundary rules per
+#: fragment. Seven control probes, one of which found a hole in the round's own
+#: wire-level witness -- a marker-less fixture cannot tell a discarded marker
+#: from an absent one -- which was closed rather than noted.
+#:
+#: The grade STAYS COMPLETE, and the residual the re-measurement opened is
+#: filed as register item 684 against a different atom: wz's multicast emit
+#: builds its whole fragment chain before a byte leaves, so it can never send
+#: the `0x3 Drop` the round's RX half now honours. That is the fragment EMIT's
+#: gap, which `transport-fragmentation` claims as its subject; holding
+#: `transport-multicast` PARTIAL for it would double-count one gap across two
+#: atoms, which is the rule that atom's own text states.
+#:
+#: The split is 32 PARTIAL / 5 COMPLETE.
+BUDGET = 37
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
