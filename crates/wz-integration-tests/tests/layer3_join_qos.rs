@@ -70,8 +70,19 @@ fn pico_encode_qos_join(
 ) -> Vec<u8> {
     // SAFETY: standard wbuf-extract path (mirrors layer3_join.rs). The qos union
     // member `_qos` is fully written for all NUM priorities; `_is_qos = true`
-    // selects the per-priority encode arm. `_patch = 0` (= _Z_NO_PATCH) keeps the
-    // ext-chain MORE bit clear so the QoS ext header is a bare 0x51.
+    // selects the per-priority encode arm.
+    //
+    // R2421 (open debt 687) — `_patch` IS `_Z_CURRENT_PATCH`, not `_Z_NO_PATCH`.
+    // This is a CODEC-parity test, so both encoders must be handed the SAME
+    // logical message; wz emits the negotiated patch level on multicast JOIN
+    // since R2417, and handing pico `_Z_NO_PATCH` compared two different
+    // messages rather than two encoders. Driven at the patch level, pico's own
+    // `_z_join_encode` sets `_Z_MSG_EXT_MORE` on the QoS ext header (0x51 ->
+    // 0xd1) and then appends `_Z_MSG_EXT_ID_JOIN_PATCH` (0x07 | ENC_ZINT =
+    // 0x27) with the level as a zint — which is exactly what wz emits.
+    // Measured in the vendored pico 1.9.0: `_Z_CURRENT_PATCH 0x01`, and
+    // `Z_FEATURE_FRAGMENTATION` defaults to 1, so this is the DEFAULT build's
+    // wire, not an opt-in one.
     unsafe {
         let mut qos = [_z_coundit_sn_t {
             _reliable: 0,
@@ -100,7 +111,7 @@ fn pico_encode_qos_join(
             _req_id_res: params.req_id_res,
             _seq_num_res: params.seq_num_res,
             _version: params.version,
-            _patch: 0,
+            _patch: 1, // _Z_CURRENT_PATCH
         };
         let mut wbf = _z_wbuf_make(256, false);
         let ret = _z_join_encode(&mut wbf, flags, &msg);
@@ -197,8 +208,18 @@ fn layer3_join_qos_sn_ext_byte_equals_pico() {
         "qos JOIN must match zenoh-pico byte-for-byte;\n wz  ={wz:02x?}\n pico={pico:02x?}"
     );
     // The QoS-SN ext header (0x51 = id 0x1 | M | ENC_ZBUF) must be on the wire.
+    //
+    // R2421 (open debt 687) — COMPARED THROUGH pico's OWN ID MASK, not as a bare
+    // byte. `_Z_EXT_FULL_ID(h)` is `h & 0x7F` (`ext.h`), so the Z continuation
+    // bit is NOT part of an extension's identity: the same QoS-SN header reads
+    // 0x51 when it is the last extension and 0xd1 when a patch ext follows it.
+    // Looking for the literal 0x51 asserted "and nothing follows the QoS ext",
+    // which is a claim about the CHAIN wearing the costume of a claim about the
+    // header — and it went red the moment wz began negotiating the patch level
+    // on JOIN (R2417), for a reason that has nothing to do with QoS-SN.
     assert!(
-        wz.contains(&0x51),
-        "the qos JOIN must carry the 0x51 QoS-SN extension header"
+        wz.iter().any(|b| b & 0x7F == 0x51),
+        "the qos JOIN must carry the QoS-SN extension header (full id 0x51, \
+         with or without the Z continuation bit); wz = {wz:02x?}"
     );
 }
