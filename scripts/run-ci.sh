@@ -6478,7 +6478,7 @@ layer_c1ak_cargo_test_transport_stats() {
     # --range` is what found them, which is why it is the oracle and a hand grep
     # is not. The other seven are at run-ci.sh:6674, 6708, 6710, 6718, 6732, 6779
     # and 6781; a change to `mod tests` in adminspace.rs moves ALL of them.
-    _runci_guarded_test C1ak 27 cargo test -p wz-session-core --features adminspace-metrics,transport-stats --lib adminspace --quiet \
+    _runci_guarded_test C1ak 30 cargo test -p wz-session-core --features adminspace-metrics,transport-stats --lib adminspace --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-stats --quiet -- -D warnings \
@@ -6698,17 +6698,17 @@ layer_c1ba_cargo_clippy_transport_multilink() {
 # two self-sufficiency fixes that the slim build surfaced (the session/mod.rs
 # unused-ResponseSink import + the test-module dead-code re-gating).
 layer_c1am_cargo_test_adminspace() {
-    _runci_guarded_test "C1AM adminspace 27" 27 \
+    _runci_guarded_test "C1AM adminspace 30" 30 \
         cargo test -p wz-session-core --features adminspace-metrics --lib adminspace --quiet || return 1
     _runci_guarded_test "C1AM zid_hex 3" 3 \
         cargo test -p wz-session-core --features adminspace-core --lib zid_hex --quiet || return 1
     _runci_guarded_test "C1AM zid_to_zenoh_hex 1" 1 \
         cargo test -p wz-session-core --features storage-replication --lib zid_to_zenoh_hex --quiet || return 1
-    _runci_guarded_test "C1AM declare_adminspace 3" 3 \
+    _runci_guarded_test "C1AM declare_adminspace 4" 4 \
         cargo test -p wz-runtime-tokio --features adminspace-core,query-get --lib declare_adminspace --quiet || return 1
     _runci_guarded_test "C1AM admin_write_permit 1" 1 \
         cargo test -p wz-runtime-tokio --features adminspace-core,query-get --lib admin_write_permit --quiet || return 1
-    _runci_guarded_test "C1AM declare_adminspace 5" 5 \
+    _runci_guarded_test "C1AM declare_adminspace 6" 6 \
         cargo test -p wz-runtime-tokio --features adminspace-metrics,query-get --lib declare_adminspace --quiet || return 1
     # 6 -> 7: the LIVE-permit witness
     # (declare_adminspace_live_permit_source_flips_the_gate_at_runtime). It drives
@@ -6718,7 +6718,7 @@ layer_c1am_cargo_test_adminspace() {
     # atom recorded (zenoh re-reads the live config inside its admin handler,
     # net/runtime/adminspace.rs:456-457). Falsified by hoisting the permit read out
     # of the closure: that arm alone reds, the other six stay green.
-    _runci_guarded_test "C1AM declare_adminspace 7" 7 \
+    _runci_guarded_test "C1AM declare_adminspace 8" 8 \
         cargo test -p wz-runtime-tokio --features adminspace-read,adminspace-metrics,query-get --lib declare_adminspace --quiet || return 1
     _runci_guarded_test "C1AM admin_write_permit 1" 1 \
         cargo test -p wz-runtime-tokio --features adminspace-write,query-get --lib admin_write_permit --quiet || return 1
@@ -6732,9 +6732,9 @@ layer_c1am_cargo_test_adminspace() {
     # in BOTH directions (a one-way assertion would pass on a latch).
     _runci_guarded_test "C1AM admin_permissions 1" 1 \
         cargo test -p wz-runtime-tokio --features adminspace-read,adminspace-write,query-get --lib admin_permissions --quiet || return 1
-    _runci_guarded_test "C1AM adminspace 27" 27 \
+    _runci_guarded_test "C1AM adminspace 30" 30 \
         cargo test -p wz-session-core --features adminspace-introspection-handlers --lib adminspace --quiet || return 1
-    _runci_guarded_test "C1AM adminspace 28" 28 \
+    _runci_guarded_test "C1AM adminspace 31" 31 \
         cargo test -p wz-session-core --features adminspace-router-linkstate --lib adminspace --quiet || return 1
     # R311y828 25 -> 29: the storage_manager status SUB-TREE. Four legs — the
     # no-leaf CONTROL, the served sub-tree, the narrowed GET's own filtering, and
@@ -6742,9 +6742,9 @@ layer_c1am_cargo_test_adminspace() {
     # guard below because `wz-session-core`'s own `adminspace-config-hotreload`
     # does NOT compose `adminspace-plugins-handlers` (the runtime crate's does),
     # so the whole `tests::plugins` module is absent from that build.
-    _runci_guarded_test "C1AM adminspace 36" 36 \
+    _runci_guarded_test "C1AM adminspace 39" 39 \
         cargo test -p wz-session-core --features adminspace-plugins-handlers --lib adminspace --quiet || return 1
-    _runci_guarded_test "C1AM declare_adminspace 3" 3 \
+    _runci_guarded_test "C1AM declare_adminspace 4" 4 \
         cargo test -p wz-runtime-tokio --features adminspace-plugins-handlers,query-get --lib declare_adminspace --quiet || return 1
     _runci_guarded_test "C1AM compiled_plugins 1" 1 \
         cargo test -p wz-runtime-tokio --features adminspace-plugins-handlers,query-get --lib compiled_plugins --quiet || return 1
@@ -6756,7 +6756,7 @@ layer_c1am_cargo_test_adminspace() {
     # `@` inside a KEYEXPR left untouched (the delimiter must not narrow the keyexpr
     # grammar), and a name that itself contains `@` splitting on the last one. This
     # pin is why the count moved visibly instead of the module quietly growing.
-    _runci_guarded_test "C1AM adminspace 33" 33 \
+    _runci_guarded_test "C1AM adminspace 36" 36 \
         cargo test -p wz-session-core --features adminspace-config-hotreload --lib adminspace --quiet || return 1
     # R311y828 5 -> 6: the live manager's admin sub-tree render. It is gated on
     # `adminspace-plugins-handlers`, so the C1z sibling guard over the SAME module
@@ -6803,18 +6803,18 @@ layer_c1am_cargo_test_adminspace() {
 #      test-module dead-code (R311y38 re-gated them to their codec-response-final
 #      consumers), both of which only surface WITHOUT the full default codec set.
 layer_c1an_cargo_test_adminspace_nodefault() {
-    _runci_guarded_test "C1AN adminspace 23" 23 \
+    _runci_guarded_test "C1AN adminspace 26" 26 \
         cargo test -p wz-session-core --no-default-features --features adminspace-core --lib adminspace --quiet || return 1
-    _runci_guarded_test "C1AN adminspace 28" 28 \
+    _runci_guarded_test "C1AN adminspace 31" 31 \
         cargo test -p wz-session-core --no-default-features --features adminspace-router-linkstate --lib adminspace --quiet || return 1
-    _runci_guarded_test "C1AN declare_adminspace 3" 3 \
+    _runci_guarded_test "C1AN declare_adminspace 4" 4 \
         cargo test -p wz-runtime-tokio --no-default-features --features adminspace-core,query-get --lib declare_adminspace --quiet || return 1
-    _runci_guarded_test "C1AN declare_adminspace 5" 5 \
+    _runci_guarded_test "C1AN declare_adminspace 6" 6 \
         cargo test -p wz-runtime-tokio --no-default-features --features adminspace-metrics,query-get --lib declare_adminspace --quiet || return 1
     # 6 -> 7, the same live-permit witness C1AM pins — here on the slim build, so
     # the source-taking declare and its per-GET resolve compose without the default
     # feature set too.
-    _runci_guarded_test "C1AN declare_adminspace 7" 7 \
+    _runci_guarded_test "C1AN declare_adminspace 8" 8 \
         cargo test -p wz-runtime-tokio --no-default-features --features adminspace-read,adminspace-metrics,query-get --lib declare_adminspace --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-session-core --no-default-features --features adminspace-core --all-targets --quiet -- -D warnings \
