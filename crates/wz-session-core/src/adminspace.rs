@@ -3,7 +3,7 @@
 
 //! Admin space `local_data` — the `@/<zid>/<whatami>` introspection view the
 //! built-in admin queryable replies with. The wz mirror of zenoh
-//! `net/runtime/adminspace.rs`: `local_data` (`adminspace.rs:561-704`) + the
+//! `zenoh/src/net/runtime/adminspace.rs` @ `fn local_data` + the
 //! `@/<zid>/<whatami>/**` queryable keyexpr (`AdminSpace::start`,
 //! `adminspace.rs:159,341`).
 //!
@@ -115,7 +115,8 @@ pub const WZ_STATIC_PLUGIN_PATH: &str = "__static__";
 /// One leaf of a plugin's OWN admin sub-tree, below
 /// `@/<zid>/<whatami>/status/plugins/<id>` — the wz analogue of a single
 /// `Response` a zenoh plugin returns from `PluginControl::adminspace_getter`,
-/// which the adminspace dispatches at `net/runtime/adminspace.rs:987` and replies
+/// which the adminspace dispatches at
+/// `zenoh/src/net/runtime/adminspace.rs` @ `adminspace_getter` and replies
 /// as `serde_json::to_vec(&response.value)` with `APPLICATION_JSON` (`:992-996`).
 ///
 /// The wz shape is a SNAPSHOT rather than a callback because wz's plugins are
@@ -349,7 +350,9 @@ impl Default for AdminSpacePermissions {
 /// This exists because the gate's DIAGNOSTIC and the gate's DECISION live in
 /// different layers here. zenoh logs inside the gate itself
 /// (`tracing::error!("Received GET on '{}' but adminspace.permissions.read=false
-/// in configuration")`, `net/runtime/adminspace.rs:458-461`) because its adminspace
+/// in configuration")`,
+/// `zenoh/src/net/runtime/adminspace.rs` @ `permissions().read`) because its
+/// adminspace
 /// is a std, `tracing`-linked component. [`answer_admin_query`] is `no_std` +
 /// `alloc` and links no logger, so it REPORTS the deny to its caller and the host —
 /// which owns the log facade — emits the diagnostic. One gate, one decision, and
@@ -827,7 +830,9 @@ pub fn admin_surface_json(zid_hex: &str, whatami: &str) -> String {
 }
 
 /// The declaring-node buckets for an admin introspection entry — the wz analogue of
-/// zenoh's `hat::Sources` (`net/routing/hat/mod.rs:59`), which is the JSON body BOTH
+/// zenoh's `hat::Sources`
+/// (`zenoh/src/net/routing/hat/mod.rs` @ `struct Sources`), which is the JSON
+/// body BOTH
 /// the `subscribers_data` and `queryables_data` handlers serialize
 /// (`serde_json::to_string(&sub.1)`, zenoh `adminspace.rs:793,843`). zids are in
 /// zenoh `ZenohId` Display (hex) form. Serialized field order matches zenoh's serde
@@ -887,7 +892,8 @@ impl AdminEntityKind {
 /// One declared entity the per-entity admin introspection handlers reply for
 /// (§5.23 `adminspace-introspection-handlers`) — the wz analogue of a
 /// `subscribers_data` / `queryables_data` loop item (zenoh
-/// `net/runtime/adminspace.rs:781,831`). Keyed `@/<zid>/<whatami>/<kind>/<keyexpr>`,
+/// `zenoh/src/net/runtime/adminspace.rs` @ `fn subscribers_data` and
+/// @ `fn queryables_data`). Keyed `@/<zid>/<whatami>/<kind>/<keyexpr>`,
 /// body the entity's [`AdminSources`] (`{routers,peers,clients}`) — the SAME
 /// `Sources` body zenoh serializes for both kinds. ALWAYS compiled (like
 /// [`AdminSession`]) so [`answer_admin_query`]'s slice parameter is signature-stable
@@ -1041,7 +1047,8 @@ pub struct AdminAnswerCtx<'a> {
     /// The metrics leg appends its OpenMetrics rendering after the `zenoh_build`
     /// gauge, which is where zenoh appends
     /// `manager().get_stats().report().openmetrics_text()` under its own `stats`
-    /// feature (`net/runtime/adminspace.rs:722-730`). Carried on the CONTEXT
+    /// feature (`zenoh/src/net/runtime/adminspace.rs` @ `.stats()`). Carried on
+    /// the CONTEXT
     /// rather than read inside the answerer because the answerer is
     /// session-independent by contract: a Session passes its own report, while a
     /// mesh host has no equivalent to upstream's transport-MANAGER aggregate and
@@ -1266,7 +1273,8 @@ pub fn answer_admin_query(
 }
 
 /// The ROUTER-tier admin `linkstate/routers` key `@/<zid>/<whatami>/linkstate/routers`
-/// (zenoh `net/runtime/adminspace.rs:171`). Router-only in zenoh; the wz router host
+/// (zenoh `zenoh/src/net/runtime/adminspace.rs` @ `fn linkstate_data`).
+/// Router-only in zenoh; the wz router host
 /// (whatami `"router"`) is the sole caller.
 #[cfg(feature = "adminspace-router-linkstate")]
 fn admin_linkstate_routers_key(zid_hex: &str, whatami: &str) -> String {
@@ -1481,7 +1489,8 @@ pub enum AdminConfigWrite {
     ///
     /// The atom's last live residual said wz's runtime connect ADD is reachable only
     /// from a ONE-SHOT CLI argument (`--connect-after`), where upstream re-reads the
-    /// list on a config change (`net/runtime/orchestrator.rs` @ `update_peers`). That
+    /// list on a config change
+    /// (`zenoh/src/net/runtime/orchestrator.rs` @ `update_peers`). That
     /// is a DIVERGENCE on a capability upstream HAS, not a wz affordance nobody asked
     /// for — the same test that admitted the read permit and would have refused a
     /// bespoke fifth intent.
@@ -2464,7 +2473,8 @@ mod tests {
 
     /// R311y810 — the metrics leg APPENDS the counter block after the build-info
     /// gauge, which is where upstream appends its own
-    /// (`net/runtime/adminspace.rs:722-730`). Pinned on the ANSWERER, not on the
+    /// (`zenoh/src/net/runtime/adminspace.rs` @ `.stats()`). Pinned on the
+    /// ANSWERER, not on the
     /// renderer: the renderer's own shape is pinned in `stats.rs`, and what this
     /// adds is that the composition happens at all and in that order.
     #[cfg(feature = "adminspace-metrics")]

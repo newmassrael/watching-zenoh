@@ -5,7 +5,8 @@
 //!
 //! [`WzConfig`] is the TYPED union of wz runtime settings — the
 //! beyond-zenoh answer to zenoh's stringly `serde_json::Value` config
-//! blob (`zenoh-config api/config.rs`). Illegal config states are
+//! blob (`zenoh/src/api/config.rs` @ `pub struct Config`). Illegal config
+//! states are
 //! unrepresentable by construction: a field is a real Rust type
 //! (`WhatAmI`, `u16`, [`InterceptorConfig`]), not a JSON pointer into an
 //! untyped tree.
