@@ -197,11 +197,12 @@ GRADE_TAGS = ("PARTIAL:", "COMPLETE:")
 #:
 #: ⚠ THE OBVIOUS GENERALISATION IS FALSE and was measured before being acted on.
 #: `zenoh/` is a REAL upstream directory: the pinned checkout holds `zenoh/` and
-#: `commons/` as SIBLINGS at its root, so 19 of the 21 distinct `zenoh/...rs`
-#: citations in this store are correct exactly as written. Only a `zenoh/` placed
+#: `commons/` as SIBLINGS at its root, so 19 of the 21 distinct citations rooted
+#: at `zenoh/` in this store are correct exactly as written. Only a `zenoh/` placed
 #: before `commons/` is wrong. Strip that segment ONLY when the full path misses
 #: and the stripped one hits; a bulk edit breaks nineteen to fix two. A third
-#: state resolves neither way -- `zenoh/src/net/routing/router.rs`, cited by
+#: state resolves neither way -- the `router.rs` under `zenoh/src/net/routing/`,
+#: cited by
 #: `router-multicast-faces` -- and that is upstream restructuring under a stale
 #: grading, needing a re-measurement rather than a path edit.
 #:
