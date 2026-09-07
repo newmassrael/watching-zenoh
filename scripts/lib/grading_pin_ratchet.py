@@ -249,8 +249,25 @@ GRADE_TAGS = ("PARTIAL:", "COMPLETE:")
 #: switch has no case for a FINAL -- and was tested by counting the token that
 #: must not appear, because an anchor can only witness presence.
 #:
-#: The split is 42 PARTIAL / 12 COMPLETE.
-BUDGET = 54
+#: The split was 42 PARTIAL / 12 COMPLETE.
+#:
+#: 54 -> 53 (R2403). `runtime-tokio`, and what kept it in the population was a
+#: SPELLING: it already said its grade was re-measured at the pin, but wrote
+#: "PIN RE-DECLARATION" where this gate reads the exact token below. Measured,
+#: not declared. Re-verified on a full reading before the token was stamped --
+#: all six anchored upstream claims resolve and the load-bearing one was read for
+#: substance, five subsystems with rx at two workers, the rest at one, fifty
+#: blocking threads.
+#:
+#: ⚠ THE SPELLING IS EXACT ON PURPOSE, and the population shows what that costs
+#: and buys. One atom near-missed the token; SEVEN more assert a pin reading in a
+#: third spelling ("measured against the pin"). Widening the pattern to catch
+#: them is the wrong repair -- it would re-admit prose as the thing being graded,
+#: which is the defect the marker replaced. Each is paid by reading its claims
+#: and stamping the one token.
+#:
+#: The split is 42 PARTIAL / 11 COMPLETE.
+BUDGET = 53
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
