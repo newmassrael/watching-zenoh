@@ -287,8 +287,29 @@ GRADE_TAGS = ("PARTIAL:", "COMPLETE:")
 #: API-reachable because the length wrapper is still a public struct with both
 #: halves implemented on it.
 #:
-#: The split is 41 PARTIAL / 10 COMPLETE.
-BUDGET = 51
+#: The split was 41 PARTIAL / 10 COMPLETE.
+#:
+#: 51 -> 49 (R2407 + R2408, two atoms in one commit).
+#:
+#: `transport-link-unixpipe` (R2407) is the THIRD atom held here by a spelling
+#: alone, and it was declared across a round boundary on purpose: R2406 verified
+#: its four upstream anchors and REFUSED to stamp on that basis, because its
+#: prose carries a clause retracted as stale only after eight atoms shared it.
+#: Its population claim was then checked by its own instrument rather than
+#: re-counted -- the link-config-keys gate reproduces the eight-key figure the
+#: reason states.
+#:
+#: `rest-sse-subscribe` (R2408) is THE FIRST RESIDUAL THIS SWEEP REFUTED. It
+#: claimed upstream undeclares and terminates an SSE stream on a ten-second
+#: write timeout; neither mechanism exists at the pin -- no such duration and no
+#: undeclare anywhere in that plugin. Upstream subscribes through a FIFO handler
+#: that BLOCKS when full, so the divergence survives with a different shape:
+#: block versus drop-newest, not terminate versus drop-newest. Four atoms in a
+#: row had confirmed their residuals before this one refuted its, which is why a
+#: run of confirmations is not evidence that re-measuring is ceremonial.
+#:
+#: The split is 40 PARTIAL / 9 COMPLETE.
+BUDGET = 49
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
