@@ -5759,7 +5759,11 @@ layer_c1ay_cargo_test_router_hat() {
     # feature sets compile them out, which is why they still read 137/139/140/143/137.
     _runci_guarded_test "C1AY router_forward 177" 177 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables --lib router_forward --quiet || return 1
-    _runci_guarded_test "C1AY router_forward 146" 146 \
+    # R2415 — 146 -> 140. NOT this round's tests: `d7cd078f` re-gated the mcast
+    # egress plane from `transport-multicast` onto `router-multicast-faces`, so six
+    # tests that ran in this broad-feature lane now need the atom and no longer
+    # appear here. The number moves because the plane correctly is not there.
+    _runci_guarded_test "C1AY router_forward 140" 140 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,transport-multicast --lib router_forward --quiet || return 1
     _runci_guarded_test "C1AY router_forward 140" 140 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,adminspace-router-linkstate --lib router_forward --quiet || return 1

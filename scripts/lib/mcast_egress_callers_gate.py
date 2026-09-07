@@ -157,6 +157,16 @@ def call_sites(rel: str, text: str) -> list[tuple[int, str, list[str]]]:
                 cfgs += s_cfgs
                 is_test = is_test or s_test
             out.append((i + 1, "test" if is_test else "prod", cfgs))
+        # R2415 — the DEFINITION is emitted too, under its own scope name. The
+        # gate's second rule now asks whether the entry point EXISTS with the atom
+        # off, which is a question about where it is declared, not about who calls
+        # it. Its own `#[cfg]` sits in `own_cfgs`; enclosing `impl`/`mod` gates are
+        # on the stack, and both matter.
+        elif DEF.search(line) and not COMMENT.match(line):
+            cfgs = list(file_cfgs) + own_cfgs
+            for _, s_cfgs, _ in stack:
+                cfgs += s_cfgs
+            out.append((i + 1, "def", cfgs))
         depth += delta
         while stack and depth < stack[-1][0]:
             stack.pop()
@@ -168,6 +178,7 @@ def audit(root: pathlib.Path) -> tuple[list[str], list[str], list[str]]:
     findings: list[str] = []
     egress_only: list[str] = []
     prod: list[str] = []
+    defs: list[tuple[str, str]] = []
     population = 0
 
     for path in tracked_rust(root):
@@ -191,6 +202,8 @@ def audit(root: pathlib.Path) -> tuple[list[str], list[str], list[str]]:
                         f"mis-scoped-gate residual on the measurement that no such "
                         f"caller exists; one does now, so the residual needs re-reading"
                     )
+            elif scope == "def":
+                defs.append((site, joined))
             elif BROAD_FEATURE in joined and ATOM_FEATURE not in joined:
                 egress_only.append(site)
 
@@ -200,13 +213,35 @@ def audit(root: pathlib.Path) -> tuple[list[str], list[str], list[str]]:
             f"renamed or removed, and a scan that located nothing would report "
             f"green about a plane it never found"
         )
-    if not egress_only:
-        findings.append(
-            f"no TEST attaches an egress group with `{BROAD_FEATURE}` and without "
-            f"`{ATOM_FEATURE}`. That coverage is why R2343 refused to re-gate the "
-            f"plane onto the atom's own feature and withdrew the residual saying "
-            f"it should be; with it gone the withdrawal has no basis"
+    # R2415 — RULE 2, REPOINTED. It used to require a TEST that attaches with
+    # `BROAD_FEATURE` and without `ATOM_FEATURE`, which held R2343's finding that
+    # re-gating the plane would delete that coverage. `d7cd078f` re-gated it
+    # anyway, on a footprint argument this gate has no standing to overrule: with
+    # the atom off the production caller was already gone, so the callee was dead
+    # code. That resolved the residual R2343 had withdrawn, and made the old rule
+    # UNSATISFIABLE rather than merely unmet -- `attach_mcast_group` no longer
+    # EXISTS with the atom off, so no test can call it there.
+    #
+    # A rule nothing can satisfy is not a ratchet, it is a permanent red, and the
+    # honest move is neither to weaken it away nor to revert a deliberate change:
+    # it is to guard the invariant that now holds. So rule 2 asks the question
+    # `d7cd078f` answered -- is the entry point declared behind the atom, so the
+    # plane is unreachable when the atom is off? That is STRICTLY STRONGER than
+    # the old rule, which only ever sampled one caller.
+    if not defs:
+        raise InputError(
+            f"no definition of `{ENTRY_POINT}` in the tracked tree, so the gate "
+            f"cannot say where the plane is gated; a scan that found the calls "
+            f"but not the declaration would grade a question it never located"
         )
+    for site, joined in defs:
+        if ATOM_FEATURE not in joined:
+            findings.append(
+                f"{site} declares `{ENTRY_POINT}` without `{ATOM_FEATURE}`, so the "
+                f"egress plane is reachable with the atom off. That is the residual "
+                f"R2343 recorded and `d7cd078f` closed by re-gating; a build with "
+                f"the atom off must not carry the attach point"
+            )
     return findings, egress_only, prod
 
 
@@ -286,13 +321,30 @@ def selftest() -> int:
         [("prod", True)],
     )
     for label, src in (
-        ("a doc reference is not a call", "/// see attach_mcast_group(tx)\n"),
-        ("a line comment is not a call", "// fwd.attach_mcast_group(tx);\n"),
-        ("the definition is not a call", "pub fn attach_mcast_group(&self, tx: T) {}\n"),
+        ("a doc reference is neither call nor def", "/// see attach_mcast_group(tx)\n"),
+        ("a line comment is neither call nor def", "// fwd.attach_mcast_group(tx);\n"),
     ):
         got = call_sites("crates/x/src/a.rs", src)
         if got:
             failures.append(f"{label}: counted {got}")
+
+    # R2415 — the definition is still NOT a call, and that discrimination is what
+    # this case has always protected. What changed is that it is now EMITTED, under
+    # its own scope, because rule 2 asks where the entry point is declared. Asserting
+    # the scope rather than emptiness keeps the original discrimination: a definition
+    # mistaken for a `prod` call would still fail here.
+    got = call_sites("crates/x/src/a.rs", "pub fn attach_mcast_group(&self, tx: T) {}\n")
+    if [s for _, s, _ in got] != ["def"]:
+        failures.append(f"the definition is a def, never a call: counted {got}")
+
+    # And its gate is read from its own attribute, which is the whole of rule 2.
+    got = call_sites(
+        "crates/x/src/a.rs",
+        '#[cfg(feature = "router-multicast-faces")]\n'
+        "pub fn attach_mcast_group(&self, tx: T) {}\n",
+    )
+    if not (len(got) == 1 and got[0][1] == "def" and ATOM_FEATURE in " ".join(got[0][2])):
+        failures.append(f"the definition's own cfg must be read: counted {got}")
 
     for line in failures:
         print(f"  mcast-egress-callers: SELFTEST FAIL -- {line}")
@@ -324,10 +376,16 @@ def main(argv: list[str]) -> int:
             print(f"  mcast-egress-callers: FAIL -- {line}")
         return 1
 
+    # R2415 — the summary reports what the gate now GRADES. It used to end "which
+    # is why the gate stays where it is", a sentence about a position `d7cd078f`
+    # has since reversed; a green line asserting a superseded reason is the same
+    # class of stale claim this round found in `to_json`'s doc.
     print(
         f"  mcast-egress-callers: {len(prod)} production attach(es), all under "
-        f"`{ATOM_FEATURE}`; {len(egress_only)} test attach(es) reach the plane "
-        f"with `{BROAD_FEATURE}` alone -- which is why the gate stays where it is"
+        f"`{ATOM_FEATURE}`; the entry point is DECLARED behind `{ATOM_FEATURE}`, "
+        f"so a build with the atom off cannot reach the plane at all "
+        f"({len(egress_only)} test attach(es) with `{BROAD_FEATURE}` alone, which "
+        f"the re-gating made structurally impossible rather than merely absent)"
     )
     if "--verbose" in argv:
         for s in prod:
