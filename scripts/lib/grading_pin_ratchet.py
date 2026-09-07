@@ -924,7 +924,34 @@ def _grade_head(reason: str) -> str:
 #: that became a SYMBOL (so grepping the number finds nothing while the claim
 #: holds); and now a SYMBOL RENAMED under a line that did not move. Anchors
 #: should therefore name DECLARATIONS -- not lines, not words, not values.
-BUDGET = 30
+#: 30 -> 29 (R2432). `router-hat-router`, and TWO of its five residuals name
+#: machinery UPSTREAM HAS SINCE DELETED, so they are reframed rather than
+#: confirmed. Three stand and keep the atom PARTIAL.
+#:
+#:   * THE PER-PEER MASTER ELECTION residual grades wz's global route master
+#:     against an upstream accessor that walks a face's router links. That
+#:     accessor is gone at the pin -- checked TREE-WIDE, not in the cited file
+#:     alone, because absence in one file is not absence upstream. wz is not
+#:     missing a mechanism upstream has; upstream removed it. What wz's choice
+#:     should now be graded against is left open rather than invented.
+#:   * THE FAILOVER-BROKERING residual names a key upstream has NEUTERED
+#:     ITSELF: absent from the routing code, surviving only on the config
+#:     surface where upstream's own text says it is deprecated and has no
+#:     effect. The discriminator is not whether upstream KNOWS a key but
+#:     whether it HONOURS it -- so wz's absence now AGREES with upstream.
+#:
+#: ⚠ A FOURTH CITATION-ROT MODE, and the reason line numbers were worthless
+#: here: THE CITED FILE SHRANK. It is 642 lines at the pin while this entry
+#: cites into the 800s and 900s, so several pointers are PAST END OF FILE.
+#: Distinct from the three this sweep already catalogued -- a line that moved
+#: within its file, a value that became a symbol, a symbol renamed under an
+#: unmoved line -- and the only one where the citation cannot resolve AT ALL
+#: rather than resolving onto the wrong thing.
+#:
+#: The two removals are recorded with the `@ ABSENT` form, which lands in its
+#: own bucket and is charged to no budget -- the right shape for a citation
+#: whose POINT is that the symbol is gone.
+BUDGET = 29
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
