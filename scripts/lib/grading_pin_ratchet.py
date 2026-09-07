@@ -636,7 +636,32 @@ def _is_graded(reason: str) -> bool:
 #: `path` @ `needle` instead of line numbers.
 #:
 #: The split is 32 PARTIAL / 8 COMPLETE.
-BUDGET = 40
+#:
+#: R2420 40 -> 39, `storage-replication` -- the sibling COMPLETE of the pair
+#: R2418 exposed, and the SECOND consecutive round whose membership cause was a
+#: LABEL. Both `1.5.0` occurrences in that reason are one clause plus its own
+#: CORRECTION quoting it, and both name the ORACLE BINARY (open debt 638); R2354
+#: had already re-read the Digest shape, the `diff` algorithm and the bincode
+#: framing at the pin. Every upstream claim was re-read again here and none had
+#: moved -- the struct, `DigestDiff`, the retain-on-`other` diff walk, the whole
+#: publisher schedule, `determine_action`, bincode 1.3.3, xxhash-rust 0.8.
+#:
+#: WHAT THE RE-READ FOUND WAS THE FOUNDATION, NOT THE CONCLUSION. That atom's
+#: cross-impl claim rests on one captured literal, `ZENOHD_CONFIG_FINGERPRINT`,
+#: and TWO checks pin it while BOTH read only wz -- the Layer Z assertion, and
+#: `config_fingerprint_recipe_matches_zenoh_field_order`, whose own doc calls
+#: itself "a recipe lock, not an independent oracle". An upstream field added,
+#: reordered or widened leaves both green. The lock locks the lock, so the round
+#: built `replication_fingerprint_recipe_gate.py` to open the upstream side.
+#:
+#: ⚠ AND ITS FIRST DIAGNOSIS WAS FALSE INSIDE THE HOUR: "cargo test cannot fail
+#: on a recipe drift" is refuted by a probe -- swapping wz's `hot` and `warm`
+#: reds that test (`running 444 tests`, 1 failed). The wz half had an instrument
+#: all along; the claim shrank to the half that had none, and the probes that
+#: red BOTH instruments were written up as discriminating nothing.
+#:
+#: The split is 32 PARTIAL / 7 COMPLETE.
+BUDGET = 39
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory

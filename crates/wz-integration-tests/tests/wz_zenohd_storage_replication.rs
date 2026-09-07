@@ -14,10 +14,13 @@
 //! 1. **Config fingerprint parity (the foundation).** The digest / aligner
 //!    keyexprs embed `hash_configuration` — wz and zenohd only meet if their
 //!    fingerprints are EQUAL. The test pins wz's fingerprint for a known config
-//!    to the literal value a real zenohd 1.5.0 emits
-//!    (`3912446778783065544`, captured from the reference router's
-//!    "Published Digest" log), so a divergence in either xxh3 recipe fails here,
-//!    loudly, before any I/O.
+//!    to the literal value a real zenohd emits (`3912446778783065544`,
+//!    captured from a 1.5.0 reference router's "Published Digest" log), so a
+//!    divergence in WZ'S xxh3 recipe fails here, loudly, before any I/O.
+//!    ⚠ Not in UPSTREAM's: both sides of that assertion are wz-authored, so it
+//!    is green whatever the pin does. R2420 re-read the pin's recipe (unchanged,
+//!    seven ordered inputs) and moved the upstream half to a gate that derives
+//!    both sides from source — `replication_fingerprint_recipe_gate.py`.
 //! 2. **wz decodes zenohd's Digest.** zenohd publishes its digest on
 //!    `@-digest/<zenohd-zid>/<fp>`; wz's `spawn_digest_aligner` subscriber
 //!    receives + decodes it (zenoh -> wz bincode digest wire parity) and diffs.
@@ -106,11 +109,29 @@ const DATA_KEY: &str = "data/test/x";
 /// The value a pico `z_pub` seeds into zenohd's storage; wz must pull these
 /// exact bytes back over the replication aligner.
 const SEED_VALUE: &str = "hello-zenohd-replica";
-/// The config fingerprint a real zenohd 1.5.0 emits for the replication config
+/// The config fingerprint a real zenohd emits for the replication config
 /// `{key_expr:"data/test/**", interval:1.0s, sub_intervals:5, hot:6, warm:30,
 /// propagation_delay:250ms}` (captured from its "Published Digest" trace). wz's
 /// `ReplicationConfig` MUST hash to this same value or the two never meet on the
 /// `@-digest/<zid>/<fp>` keyexpr — this is the cross-impl wire-parity anchor.
+///
+/// The capture was taken from a 1.5.0 router. R2420 RE-READ THE RECIPE AT THE
+/// PIN rather than re-capturing (this machine's binary answers 1.5.0, open debt
+/// 638) and it is unchanged: seven ordered `Xxh3` inputs, same fields and same
+/// byte widths
+/// (`plugins/zenoh-plugin-storage-manager/src/replication/configuration.rs`
+/// @ `hasher.update(storage_key_expr.as_bytes())`, typed against
+/// `plugins/zenoh-backend-traits/src/config.rs` @ `pub struct ReplicaConfig`),
+/// so the literal still describes what a zenohd at the pin publishes.
+///
+/// ⚠ THE ASSERTION BELOW CANNOT ESTABLISH THAT. It compares wz's recipe with
+/// this literal, so it is green whenever wz is unchanged, WHATEVER upstream
+/// did — and `config_fingerprint_recipe_matches_zenoh_field_order` in
+/// `wz-session-core` has the same shape, both its sides being wz-authored. The
+/// upstream half is graded by `scripts/lib/replication_fingerprint_recipe_gate.py`
+/// (run-ci Layer C0 `--selftest`, Layer Z full), which derives the recipe from
+/// the pinned SOURCE on both sides; if upstream adds, reorders or widens a
+/// hashed field, that gate reds and this literal is stale.
 const ZENOHD_CONFIG_FINGERPRINT: u64 = 3912446778783065544;
 /// The ANSWER-direction entry: the key/value wz holds and an empty zenohd must
 /// pull off wz's aligner. A distinct key from [`DATA_KEY`] so the two tests read
@@ -125,13 +146,28 @@ const WZ_SEED_VALUE: &str = "hello-from-wz-replica";
 /// [`STORAGE_KEYEXPR`] (unambiguously wild, unambiguously routed to the
 /// storage's `data/test/**` subscription). zenohd's `process_sample` sees
 /// `is_wild()` → `register_wildcard_update` + inserts a `WildcardPut` log event
-/// keyed on the wildcard itself (service.rs:233-254). wz must pull THAT event
+/// keyed on the wildcard itself
+/// (`plugins/zenoh-plugin-storage-manager/src/storages_mgt/service.rs`
+/// @ `if key_expr.is_wild()`). wz must pull THAT event
 /// off the aligner and register it in its own `wildcard_puts` registry — the
 /// cross-impl proof that align-path wildcard-EVENT registration interoperates
 /// with the real zenoh. Distinct from concrete-value convergence, which
 /// propagates as a plain `Put` (zenoh `determine_action` collapses a
-/// materialized concrete event's action, log.rs:181-202) and never touches the
+/// materialized concrete event's action,
+/// `plugins/zenoh-plugin-storage-manager/src/replication/log.rs`
+/// @ `fn determine_action`) and never touches the
 /// receiver's wildcard registry.
+///
+/// R2420: that first citation READ `service.rs:233-254` until this round, and
+/// it was DEAD at the pin. A bare `service.rs` reads as the replication
+/// track's own
+/// (`plugins/zenoh-plugin-storage-manager/src/replication/service.rs`
+/// @ `pub(crate) struct ReplicationService`), which is 98 lines there, so the
+/// range named no code at all. And a bare FILENAME is outside every bucket
+/// `upstream_citation_anchor_gate.py` grades — its path matcher is
+/// root-anchored and the root-less axis needs a directory segment — so nothing
+/// could object. The line numbers happened to survive the move; the FILE did
+/// not.
 const WC_KEYEXPR: &str = "data/test/wild/**";
 const WC_SEED_VALUE: &str = "wildcard-from-zenohd";
 

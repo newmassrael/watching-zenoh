@@ -3108,6 +3108,27 @@ PY
     # misread.
     python3 scripts/lib/replication_log_funnel_gate.py --selftest >/dev/null || return 1
     python3 scripts/lib/replication_log_funnel_gate.py || return 1
+    # R2420 (unregistered open-debt item 675) — the CONFIG FINGERPRINT RECIPE,
+    # `--selftest` only on this layer. The full arm needs a pinned zenoh SOURCE
+    # tree and lives in Layer Z, for the reason the citation-resolution and
+    # serde-surface arms live there: that is the lane which provisions one.
+    #
+    # `storage-replication`'s cross-impl foundation is one captured literal,
+    # `ZENOHD_CONFIG_FINGERPRINT`, and the digest/aligner keyexprs embed it, so
+    # wz and a real zenohd meet only when their xxh3 recipes agree. Two checks
+    # already pin it and BOTH read only wz: the Layer Z assertion compares wz's
+    # recipe with the literal, and `config_fingerprint_recipe_matches_zenoh_
+    # field_order` compares wz's constructor with a hand-written sequence in the
+    # test body. Measured this round: swapping wz's `hot` and `warm` updates
+    # reds that test (444 tests, 1 failed), so the wz half HAS an instrument —
+    # and an upstream field added, reordered or widened leaves both of them
+    # green, because neither one opens the pin.
+    #
+    # The selftest drives ten rows over a synthetic pin, every floor emptied on
+    # its own so a population of zero FAILS, and carries the two shapes that
+    # defeated the first draft: a decoy `pub fn new(` that is not the recipe,
+    # and an argument whose width comes from a cast rather than a field's type.
+    python3 scripts/lib/replication_fingerprint_recipe_gate.py --selftest >/dev/null || return 1
     # R2311 (open-debt item 645) — the FOREIGN-QUERY READINESS gate. Both
     # foreign example families print their readiness line BEFORE the call that
     # declares, so a querier that dials the router separately can arrive first
@@ -14558,6 +14579,39 @@ layer_z_zenohd_interop() {
              "IMPLEMENT it, or to declare an ALIAS naming the wz counterpart" \
              "(which the gate then requires to exist); never to widen the" \
              "parser until the element stops being read."
+        return 1
+    fi
+    # R2420 (unregistered open-debt item 675) — the CONFIG FINGERPRINT RECIPE,
+    # on this layer for the reason the three checks above are: it needs a
+    # pinned zenoh SOURCE tree, and this is the lane that provisions one. Layer
+    # C0 runs its `--selftest` with no checkout.
+    #
+    # `storage-replication` is graded COMPLETE and its cross-impl foundation is
+    # a literal captured from a 1.5.0 router. This derives the recipe from the
+    # pin's own `Configuration::new` and from wz's `ReplicationConfig::new` and
+    # requires the same field and the same hashed BYTE WIDTH at every position,
+    # in order — a hash is not commutative, and `to_le_bytes()` on a `u64` and
+    # on a `u128` feed different byte counts for one value. It is the only
+    # instrument in the tree that opens the UPSTREAM side of that claim.
+    python3 scripts/lib/replication_fingerprint_recipe_gate.py
+    local fp_recipe_rc=$?
+    if [[ $fp_recipe_rc -eq 2 ]]; then
+        echo "  Z FAIL: the replication config-fingerprint recipe could not be" \
+             "READ, so NOTHING was graded — this is not a claim about wz's" \
+             "fingerprint. The lines above name what was missing (the wz" \
+             "module, or a pinned zenoh checkout carrying the storage plugin," \
+             "which needs a DELIBERATE clone: no build provisions it). A gate" \
+             "that cannot read its input must not report green."
+        return 1
+    elif [[ $fp_recipe_rc -ne 0 ]]; then
+        echo "  Z FAIL: the pin hashes a different field, order or width into" \
+             "the replication configuration fingerprint than wz does — see the" \
+             "lines above for the position. That fingerprint GATES digest" \
+             "exchange (the keyexpr segment plus the \`Digest::diff\`" \
+             "short-circuit), so this is wz and a real zenohd never meeting," \
+             "and \`ZENOHD_CONFIG_FINGERPRINT\` is stale. ⛔ Re-measure and" \
+             "MIRROR the pin; never widen the rename map to make the two" \
+             "sequences the same length."
         return 1
     fi
     # R2162 (unregistered open-debt item 199) — the UPSTREAM arm of the
