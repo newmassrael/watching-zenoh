@@ -608,8 +608,35 @@ fn admin_entity_key(zid_hex: &str, whatami: &str, kind: &str, pattern: &str) -> 
 /// (`@/<zid>/<whatami>/config`, single key) is itself beyond-zenoh (zenoh has no
 /// config READ).
 pub fn admin_config_write_key(zid_hex: &str, whatami: &str) -> String {
+    let mut s = admin_config_write_prefix(zid_hex, whatami);
+    s.push_str("**");
+    s
+}
+
+/// R2393 — the STRIP prefix `@/<zid>/<whatami>/config/` that
+/// [`parse_admin_config_write`] takes, the companion of the SUBSCRIPTION pattern
+/// [`admin_config_write_key`] returns.
+///
+/// # Why this is a function, and why the pattern above is now derived from it
+///
+/// The pattern and the prefix are one fact wearing two shapes, and nothing in the
+/// types relates them: the pattern ends `/**`, the prefix ends `/`, so passing the
+/// pattern where the prefix belongs type-checks, compiles, and yields a
+/// `strip_prefix` that can never match. Every PUT then decodes
+/// [`AdminConfigWriteOutcome::NotAWrite`], whose handler arm is correctly silent —
+/// so a host wired that way registers its subscriber, logs that it is hosting it,
+/// receives the samples, and applies nothing.
+///
+/// That is not hypothetical. Three shipping hosts need this prefix; two built it by
+/// hand from [`admin_config_key`] and the third built it from the PATTERN, and the
+/// mismatch survived its own round's unit tests because those tests pass the prefix
+/// as a LITERAL — the demo wiring was the only caller that had to derive it, and a
+/// demo is what no unit test drives. Deriving the pattern from the prefix gives the
+/// pair one origin, and `write_prefix_and_write_pattern_agree_on_the_subkey` pins
+/// that origin, so an edit to either shape has to keep the other true.
+pub fn admin_config_write_prefix(zid_hex: &str, whatami: &str) -> String {
     let mut s = admin_config_key(zid_hex, whatami);
-    s.push_str("/**");
+    s.push('/');
     s
 }
 
@@ -1396,6 +1423,56 @@ mod tests {
             "@/a1b2/peer/config/**"
         );
         assert_eq!(admin_root_key("0", "router"), "@/0/router");
+    }
+
+    /// R2393 — the SUBSCRIPTION pattern and the STRIP prefix agree, on the only
+    /// thing they must agree about: a concrete key the pattern matches, stripped by
+    /// the prefix, leaves exactly the sub-key [`parse_admin_config_write`] switches
+    /// on.
+    ///
+    /// This exists because the two shapes are interchangeable to the COMPILER and
+    /// not to `strip_prefix`. `82fd09b2` wired the router-hat's config-write handler
+    /// with `admin_config_write_key(..) + "/"` — the PATTERN where the PREFIX
+    /// belongs — which type-checks, registers, logs that it is hosting the
+    /// subscriber, and then decodes every arriving PUT as `NotAWrite`, whose arm is
+    /// silent by design. Every unit test of that round still passed: they pass the
+    /// prefix as a `const` literal, so not one of them had to DERIVE it.
+    ///
+    /// Written as a ROUND TRIP through the decoder rather than as two string
+    /// equalities, because an equality only re-states the constructors and would
+    /// still hold if both drifted the same direction. The control arm feeds the
+    /// decoder the PATTERN and requires `NotAWrite`, so this test discriminates
+    /// rather than restates: if the control ever starts decoding, the test has
+    /// stopped measuring anything.
+    #[test]
+    fn write_prefix_and_write_pattern_agree_on_the_subkey() {
+        let pattern = admin_config_write_key("a1b2", "router");
+        let prefix = admin_config_write_prefix("a1b2", "router");
+        assert_eq!(prefix, "@/a1b2/router/config/");
+        // One origin: the pattern IS the prefix with the `**` chunk appended, so an
+        // edit to either shape cannot silently drift from the other.
+        assert_eq!(pattern, format!("{prefix}**"));
+
+        // A concrete key under that pattern round-trips: the prefix strips, the
+        // remainder is the sub-key, and a real intent comes back.
+        let key = format!("{prefix}connect-add");
+        assert_eq!(
+            parse_admin_config_write(&prefix, &key, b"tcp/127.0.0.1:7447", true),
+            AdminConfigWriteOutcome::Apply(AdminConfigWrite::ConnectAdd(vec![String::from(
+                "tcp/127.0.0.1:7447"
+            )])),
+            "a key under the write PATTERN must decode when stripped by the write \
+             PREFIX; NotAWrite here means the two shapes have drifted apart"
+        );
+
+        // CONTROL — the defect itself, reproduced: the same key stripped by the
+        // PATTERN plus a slash must NOT decode.
+        assert_eq!(
+            parse_admin_config_write(&format!("{pattern}/"), &key, b"tcp/127.0.0.1:7447", true),
+            AdminConfigWriteOutcome::NotAWrite,
+            "the PATTERN where the PREFIX belongs must not decode — if this arm ever \
+             passes, this test no longer discriminates"
+        );
     }
 
     #[test]

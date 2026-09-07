@@ -5682,9 +5682,17 @@ layer_c1ay_cargo_test_router_hat() {
     # rather than inferred from the diff -- the bare arm printed 138 and the
     # token arm 175 -- because a `#[cfg]`-hidden case is exactly what counting a
     # diff gets wrong.
-    _runci_guarded_test "C1AY router_forward 138" 138 \
-        cargo test -p wz-runtime-tokio --features routing-router-hat --lib router_forward --quiet || return 1
+    # R2393 — every `router_forward` leg moves by TWO. Both added tests are UNGATED,
+    # so each lands in every feature combination below: the host-subscriber dispatch
+    # test, and `a_router_hosted_subscriber_is_re_advertised_to_a_late_joiner`, which
+    # exists because the round's first cut added the host-sub contributor to
+    # `self_advertises_sub_into` and NOT to `derived_cross_tier_subs_into` — the two
+    # are documented as the predicate and set form of one fact, nothing enforced it,
+    # and the whole feature was inert for any child that joined after registration.
+    # The bare arm was MEASURED at 140; the rest are what the guards printed.
     _runci_guarded_test "C1AY router_forward 140" 140 \
+        cargo test -p wz-runtime-tokio --features routing-router-hat --lib router_forward --quiet || return 1
+    _runci_guarded_test "C1AY router_forward 142" 142 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,transport-qos --lib router_forward --quiet || return 1
     # R2346 — 140 -> 141, and ONLY this arm moves: the added test is
     # `#[cfg(feature = "access-acl")]`, so the five sibling resolutions that do
@@ -5705,7 +5713,7 @@ layer_c1ay_cargo_test_router_hat() {
     # unattributable message, which would strand a face that has merely not
     # finished its handshake. Still `#[cfg(feature = "access-acl")]`, so the
     # five sibling resolutions are unchanged for R2346's reason.
-    _runci_guarded_test "C1AY router_forward 143" 143 \
+    _runci_guarded_test "C1AY router_forward 145" 145 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,access-acl --lib router_forward --quiet || return 1
     # R2348 — a NEW arm, and it exists because without it this round's central
     # tests would have been compiled out while the lane stayed green. The router
@@ -5723,17 +5731,17 @@ layer_c1ay_cargo_test_router_hat() {
     # before the cache is consulted (the same vacuity that made R311y508's first
     # cross-impl leg prove nothing), so a cache test with no policy installed
     # tests nothing.
-    _runci_guarded_test "C1AY router_forward hotreload 146" 146 \
+    _runci_guarded_test "C1AY router_forward hotreload 148" 148 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-interceptor-hotreload,access-acl --lib router_forward --quiet || return 1
     # R311y464 — 171 -> 173: y463 added token_current_future_interest_replies_with_a
     # _client_token and token_current_future_interest_matches_a_wildcard_target, both
     # cfg(routing-token-tables), so ONLY this arm of the six moves. The other five
     # feature sets compile them out, which is why they still read 137/139/140/143/137.
-    _runci_guarded_test "C1AY router_forward 175" 175 \
+    _runci_guarded_test "C1AY router_forward 177" 177 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables --lib router_forward --quiet || return 1
-    _runci_guarded_test "C1AY router_forward 144" 144 \
+    _runci_guarded_test "C1AY router_forward 146" 146 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,transport-multicast --lib router_forward --quiet || return 1
-    _runci_guarded_test "C1AY router_forward 138" 138 \
+    _runci_guarded_test "C1AY router_forward 140" 140 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,adminspace-router-linkstate --lib router_forward --quiet || return 1
     # R311y786 (§5.21 router-connect-reconcile) — the re-dial BACKOFF. Until y786
     # the loop slept a `const RECONNECT_BACKOFF_MS = 1000`, so an unreachable
@@ -6443,7 +6451,7 @@ layer_c1ak_cargo_test_transport_stats() {
     # R2374 — 20 -> 23 for the three `admin-read` decode tests (the sub-key that
     # lets the read permit be set over the wire). Ungated, like every other arm of
     # `parse_admin_config_write`, so they are in this filter's population too.
-    _runci_guarded_test C1ak 23 cargo test -p wz-session-core --features adminspace-metrics,transport-stats --lib adminspace --quiet \
+    _runci_guarded_test C1ak 26 cargo test -p wz-session-core --features adminspace-metrics,transport-stats --lib adminspace --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-stats --quiet -- -D warnings \
@@ -6663,7 +6671,7 @@ layer_c1ba_cargo_clippy_transport_multilink() {
 # two self-sufficiency fixes that the slim build surfaced (the session/mod.rs
 # unused-ResponseSink import + the test-module dead-code re-gating).
 layer_c1am_cargo_test_adminspace() {
-    _runci_guarded_test "C1AM adminspace 23" 23 \
+    _runci_guarded_test "C1AM adminspace 26" 26 \
         cargo test -p wz-session-core --features adminspace-metrics --lib adminspace --quiet || return 1
     _runci_guarded_test "C1AM zid_hex 3" 3 \
         cargo test -p wz-session-core --features adminspace-core --lib zid_hex --quiet || return 1
@@ -16643,6 +16651,47 @@ layer_e7b_router_connect_reconcile() {
         --test wz_router_hat_connect_reconcile wz_router_hat_reconcile_requires_feature -- --ignored --quiet) || return 1
 }
 
+# ─── Layer E7b2 — router-connect-reconcile: the connect list told over the WIRE ──
+#
+# R2393. E7b above drives the reconcile from the `--connect-after` CLI timer, which
+# was the atom's ONLY producer and the substance of its last live residual: upstream
+# re-enters `update_peers` when a live node's config changes, wz needed an operator
+# at the command line. This lane drives the SECOND producer — a config-WRITE PUT to
+# `@/<zid>/router/config/connect-add` reaching a subscriber the RouterForwarder
+# hosts.
+#
+# ITS OWN BINARY, and the feature set is why this is a separate lane rather than two
+# more tests in E7b: the config-write subscriber lives inside the
+# `adminspace-router-linkstate` block, which E7b does NOT build, and the writer is a
+# `--peer` (only `PeerOpts` parses `--put-key`), which needs `routing-peer`. Running
+# these against E7b's binary would compile the whole path out and pass vacuously —
+# the exact shape R311y269's uplift note warns about.
+#
+# THIS LANE EXISTS BECAUSE THE FEATURE SHIPPED INERT AND NOTHING NOTICED. Three
+# defects, none visible to any unit test: the handler took the subscription PATTERN
+# where the STRIP PREFIX belongs (every PUT decoded `NotAWrite`, an arm silent by
+# design); the router-hat's admin permissions were built `..Default::default()`, so
+# `write` was false with no flag to grant it; and `derived_cross_tier_subs_into` was
+# never taught the host-sub contributor its own doc claims it shares with
+# `self_advertises_sub_into`, so a child joining after registration never learned the
+# router wanted anything. A lane was the only instrument that could see any of them.
+#
+# The two tests are a positive/negative twin on ONE binary, so the permit is the only
+# variable: with `--config-write-permit` the wire PUT federates R1 to R2, without it
+# R1 logs the deny and stays isolated. Both edges are POSITIVE (a convergence log, a
+# deny log) rather than waits-for-absence. wz<->wz only — the write adds no new wire
+# format (a standard Put, cross-impl-proven by adminspace-write's own pico leg).
+layer_e7b2_router_connect_add_over_the_wire() {
+    (cd crates && cargo build -p wz-ap-demo \
+        --features router-hat-router,router-connect-reconcile,adminspace-router-linkstate,routing-peer,adminspace-write --quiet) || return 1
+    # `--test-threads=1`: both tests bind ephemeral ports and scrape their own
+    # node's zid out of a shared stderr genre; serial keeps each pair's logs
+    # unambiguous.
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_router_hat_connect_reconcile wz_router_hat_connect_add \
+        -- --ignored --test-threads=1 --quiet) || return 1
+}
+
 # ─── Layer E7c — adminspace-router-linkstate: router admin legs CROSS-NODE E2E ───
 #
 # The §5.23 `adminspace-router-linkstate` atom (R311y204) driven END TO END: a
@@ -17972,6 +18021,7 @@ run_layer E6h layer_e6h_adminspace_config_hotreload || overall=1
 run_layer E6i layer_e6i_storage_host_adminspace_read_deny || overall=1
 run_layer E7 layer_e7_router_hat || overall=1
 run_layer E7b layer_e7b_router_connect_reconcile || overall=1
+run_layer E7b2 layer_e7b2_router_connect_add_over_the_wire || overall=1
 run_layer E7c layer_e7c_router_adminspace_linkstate || overall=1
 run_layer E7g layer_e7g_router_adminspace_read_deny || overall=1
 run_layer E7u layer_e7u_router_hat_unixpipe_forward || overall=1

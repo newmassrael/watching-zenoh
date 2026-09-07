@@ -3995,17 +3995,34 @@ impl RouterForwarder {
             .map_or(0, |t| t.borrow().source_count(keyexpr))
     }
 
-    /// The keyexprs self should advertise into `target` mesh — client subs ∪ the
-    /// OPPOSITE mesh's native subs, deduped. The set form of
+    /// The keyexprs self should advertise into `target` mesh — client subs ∪ group
+    /// subs ∪ host subs ∪ the OPPOSITE mesh's native subs, deduped. The set form of
     /// [`self_advertises_sub_into`](Self::self_advertises_sub_into) (a `K` is in
-    /// this set IFF that predicate holds for `(target, K)` — same two sources), fed
-    /// to the tick re-advertise
+    /// this set IFF that predicate holds for `(target, K)` — the SAME contributors),
+    /// fed to the tick re-advertise
     /// ([`re_advertise_self_cross_tier`](Self::re_advertise_self_cross_tier)) for
     /// late-joining children.
+    ///
+    /// ⚠ THE `IFF` ABOVE IS A CONTRACT BETWEEN TWO FUNCTIONS AND NOTHING ENFORCES
+    /// IT. R2393 added `host_subscribes` as the fourth contributor to the PREDICATE
+    /// and left this SET at three, so the two disagreed for exactly the case the
+    /// round was built for: the register-time flood reached members already in the
+    /// mesh, the tick re-advertise silently omitted host subs, and a child that
+    /// joined LATER never learned the router wanted anything. A publisher behind
+    /// that child then dropped its Put for want of a route — no error anywhere, on
+    /// either side. Adding a contributor to one of these two REQUIRES adding it to
+    /// the other; `a_router_hosted_subscriber_is_re_advertised_to_a_late_joiner` is
+    /// what now fails if a later round forgets again.
     fn derived_cross_tier_subs_into(&self, target: FaceTier) -> Vec<String> {
         let mut set: HashSet<String> = HashSet::new();
         for keys in self.client_subs.borrow().values() {
             set.extend(keys.iter().cloned());
+        }
+        // R2393 — host subs, the fourth contributor, folded here for the same reason
+        // the group-sub aggregate below is: a late-joining tree child converges on
+        // self's cross-tier bubble for a subscription this router hosts too.
+        for sub in self.local_subscribers.borrow().iter() {
+            set.insert(sub.keyexpr.clone());
         }
         // §5.21 sub plane (S2) — the group-subscriber aggregate is a third source
         // in the tick re-advertise (a late-joining tree child converges on self's
@@ -6871,6 +6888,60 @@ mod tests {
             1,
             "a Put outside the declared pattern must NOT reach the handler"
         );
+    }
+
+    /// R2393 — a subscription the ROUTER hosts is in the set the tick re-advertise
+    /// floods to LATE-joining children, not only in the register-time flood.
+    ///
+    /// The two advertisement halves fail differently and only this one is silent.
+    /// `register_local_subscriber` floods immediately, so a member already in the
+    /// mesh learns the interest; a member that joins afterwards learns it only from
+    /// `derived_cross_tier_subs_into`, whose doc calls itself the set form of
+    /// `self_advertises_sub_into`. R2393 added the host-sub contributor to the
+    /// PREDICATE and not to the SET, and nothing anywhere failed: the router logged
+    /// that it was hosting the subscriber, the child connected, and a publisher
+    /// behind it dropped every Put for want of a route.
+    ///
+    /// So this asserts the SET, and asserts it AGREES WITH THE PREDICATE — the `iff`
+    /// the set's own doc claims. Asserting only the set would still pass if the
+    /// predicate lost the contributor instead, which is the same bug mirrored.
+    #[test]
+    fn a_router_hosted_subscriber_is_re_advertised_to_a_late_joiner() {
+        use wz_session_core::sink::SampleView;
+
+        let fwd = RouterForwarder::new(zid(0x01));
+        let ke = "@/aabb/router/config/**";
+
+        // Before registration the set omits it — so the assertion after is a CHANGE.
+        for tier in [FaceTier::Routers, FaceTier::LinkstatePeers] {
+            assert!(
+                !fwd.derived_cross_tier_subs_into(tier)
+                    .contains(&ke.to_string()),
+                "a router with no host subscriber must not re-advertise {ke} into {tier:?}"
+            );
+        }
+
+        fwd.register_local_subscriber(ke, Box::new(move |_s: &dyn SampleView| {}));
+
+        // The set now carries it, in BOTH meshes — this is what a late joiner reads.
+        for tier in [FaceTier::Routers, FaceTier::LinkstatePeers] {
+            assert!(
+                fwd.derived_cross_tier_subs_into(tier)
+                    .contains(&ke.to_string()),
+                "a host subscriber must be in the tick re-advertise set for {tier:?}; \
+                 without it a child that joins AFTER registration never learns the \
+                 router wants {ke}, and a publisher behind it drops its Put silently"
+            );
+            // And the set agrees with the predicate, which is the `iff` the set's own
+            // doc asserts and the invariant R2393 broke by updating only one side.
+            assert_eq!(
+                fwd.derived_cross_tier_subs_into(tier)
+                    .contains(&ke.to_string()),
+                fwd.self_advertises_sub_into(tier, "@/aabb/router/config/connect-add"),
+                "the re-advertise SET and the advertise PREDICATE must agree about a \
+                 host subscription in {tier:?} — they are two spellings of one fact"
+            );
+        }
     }
 
     #[cfg(feature = "transport-qos")]

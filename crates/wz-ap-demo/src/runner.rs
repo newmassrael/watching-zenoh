@@ -4831,22 +4831,20 @@ async fn run_peer_until(
     if config_writable {
         use wz::runtime_tokio::admin_write_permit;
         use wz::runtime_tokio::adminspace::{
-            admin_config_key, admin_config_write_key, parse_admin_config_write, AdminConfigWrite,
-            AdminConfigWriteOutcome,
+            admin_config_write_key, admin_config_write_prefix, parse_admin_config_write,
+            AdminConfigWrite, AdminConfigWriteOutcome,
         };
         use wz::runtime_tokio::sink::SampleView;
         use wz::runtime_tokio::zid_hex::zid_to_zenoh_hex;
         let zid_hex = zid_to_zenoh_hex(&params.zid);
         let whatami_str = params.whatami.to_str();
         let write_key = admin_config_write_key(&zid_hex, whatami_str);
-        // The `@/<zid>/peer/config/` prefix a PUT key's config sub-key hangs under
-        // (`admin_config_key` + the separating slash) — stripped to recover the
-        // sub-key the handler routes on.
-        let write_prefix = {
-            let mut p = admin_config_key(&zid_hex, whatami_str);
-            p.push('/');
-            p
-        };
+        // The `@/<zid>/peer/config/` prefix a PUT key's config sub-key hangs under —
+        // stripped to recover the sub-key the handler routes on. R2393 replaced the
+        // hand-rolled `admin_config_key(..) + '/'` with the shared derivation: this
+        // host spelled it correctly and a third one did not, and one origin is what
+        // makes the pattern/prefix pair impossible to mismatch.
+        let write_prefix = admin_config_write_prefix(&zid_hex, whatami_str);
         // R311y51/y52 (§5.23 adminspace-write) — the `permissions.write` gate, the
         // write-side mirror of the adminspace-read GET gate. `--config-writable`
         // HOSTS the write subscriber; `--config-write-permit` PERMITS the writes it
@@ -5586,6 +5584,18 @@ pub(crate) struct RouterHatOpts {
     /// shipping wz ROUTER applied it; the permit now rides the same live
     /// `WzConfig::admin_permissions` slice the peer host reads, re-resolved per GET.
     pub no_admin_read: bool,
+    /// R2393 (§5.23 adminspace-write) — `--config-write-permit` GRANTS this router's
+    /// config-WRITE gate, the write-side twin of `no_admin_read` above and the same
+    /// bare-presence flag `--peer` and `--storage-host` already parse.
+    ///
+    /// Absent = DENY, which is zenoh's `PermissionsConf` default. It has to exist
+    /// because the router-hat's admin permissions were built as
+    /// `{ read: !no_admin_read, ..Default::default() }`, and that `Default` is
+    /// `write: false` — so when R2393 first hosted a config-write subscriber here,
+    /// every PUT it received was `Denied` before the decoder ever ran, and no flag
+    /// could grant it. A subscriber whose gate cannot be opened is a surface with no
+    /// reachable behaviour.
+    pub config_write_permit: bool,
     /// R311y843 — `--batch-size` / `--lease-ms`, the two handshake values a stock
     /// zenoh config can move. The other four run modes take these as a parameter;
     /// this one carries them in the bundle for the reason the bundle exists —
@@ -5722,6 +5732,10 @@ async fn run_router_hat_until(
     // unconditional so the bundle is feature-stable; the local discard is what keeps
     // a build without those legs warning-clean.
     let no_admin_read = opts.no_admin_read;
+    // R2393 — the write-side twin, read into a local for the SAME reason: the field
+    // is unconditional so the bundle stays feature-stable, and only the
+    // `adminspace-router-linkstate` arm below consumes it.
+    let config_write_permit = opts.config_write_permit;
     // R2089 (open-debt item 222) — same shape again, one feature over: the
     // scouting socket is consumed only by the responder spawn below, which is
     // `scouting-responder`-gated. Read into a local HERE so the field is read in
@@ -5736,6 +5750,8 @@ async fn run_router_hat_until(
     let _ = multicast_locator;
     #[cfg(not(feature = "adminspace-router-linkstate"))]
     let _ = no_admin_read;
+    #[cfg(not(feature = "adminspace-router-linkstate"))]
+    let _ = config_write_permit;
     #[cfg(not(feature = "scouting-responder"))]
     let _ = scout_listen;
     use std::time::Duration;
@@ -6161,7 +6177,14 @@ async fn run_router_hat_until(
             wz::runtime_tokio::config::WzConfig::from_init_params(&params)
                 .with_admin_permissions(wz::runtime_tokio::adminspace::AdminSpacePermissions {
                     read: !no_admin_read,
-                    ..Default::default()
+                    // R2393 — the WRITE half, seeded from `--config-write-permit` and
+                    // re-read per PUT below. It was `..Default::default()` (write:
+                    // false) when this host first grew a config-write subscriber, so
+                    // the subscriber was reachable and its gate was not: every PUT
+                    // returned `Denied` before the decoder ran, and no flag existed to
+                    // grant it. Default-DENY is kept — zenoh's own `PermissionsConf`
+                    // default — the flag is what makes the grant expressible at all.
+                    write: config_write_permit,
                 })
                 // R311y786 — the SAME policy the face loop is handed, so the config
                 // GET reports the cadence actually in force rather than the default.
@@ -6257,14 +6280,21 @@ async fn run_router_hat_until(
         #[cfg(feature = "router-connect-reconcile")]
         {
             use wz::runtime_tokio::adminspace::{
-                admin_config_write_key, parse_admin_config_write, AdminConfigWrite,
-                AdminConfigWriteOutcome,
+                admin_config_write_key, admin_config_write_prefix, parse_admin_config_write,
+                AdminConfigWrite, AdminConfigWriteOutcome,
             };
             use wz::runtime_tokio::sink::SampleView;
             let write_key = admin_config_write_key(&write_zid_hex, whatami_str);
             let write_cfg = write_admin_cfg;
             let write_tx = reconcile_tx.clone();
-            let write_prefix = format!("{write_key}/");
+            // The STRIP prefix comes from `admin_config_write_prefix`, NOT from the
+            // subscription pattern above. The first cut of this host wrote
+            // `format!("{write_key}/")`, which is the PATTERN plus a slash
+            // (`@/<zid>/router/config/**/`) — it compiles, it registers, it logs, and
+            // then `strip_prefix` never matches, so every PUT decodes `NotAWrite` and
+            // is silently ignored. Both shapes now come from one origin in
+            // `wz-session-core`, which is what makes them impossible to mismatch.
+            let write_prefix = admin_config_write_prefix(&write_zid_hex, whatami_str);
             let write_handler = move |sample: &dyn SampleView| {
                 // Re-read per PUT off the SAME live config the GET gate reads —
                 // a permit captured at setup could not answer a permission changed
@@ -6279,12 +6309,20 @@ async fn run_router_hat_until(
                     write_permitted,
                 ) {
                     AdminConfigWriteOutcome::Apply(AdminConfigWrite::ConnectAdd(eps)) => {
-                        // Parsed with the SAME locator parser the `--connect-after`
-                        // path uses, so a string that dials from the CLI dials from
-                        // here identically. ALL-OR-NOTHING at this layer too: the
-                        // decoder rejected empty elements, and an element that does
-                        // not PARSE stops the whole batch rather than dialling its
-                        // parsable half.
+                        // ⚠ NOT the same entry point as `--connect-after`, and R2393
+                        // corrected this comment after claiming it was. The CLI path
+                        // goes through `resolve_mesh_dial_target`, which is ASYNC and
+                        // RESOLVES a DNS name before dialling; this handler is a sync
+                        // closure on the Push ingress and cannot await a resolver, so
+                        // it parses only. The consequence, stated rather than left to
+                        // be discovered: a NAMED endpoint is accepted here and then
+                        // refused downstream by the accept loop's `mesh_dial_plan`
+                        // fold (R2233), which warns by name. So the wire form takes
+                        // an IP locator; the CLI's accepted set is a strict superset.
+                        //
+                        // ALL-OR-NOTHING at this layer too: the decoder rejected
+                        // empty elements, and an element that does not PARSE stops
+                        // the whole batch rather than dialling its parsable half.
                         let mut locs = Vec::with_capacity(eps.len());
                         let mut bad: Option<String> = None;
                         for ep in &eps {
@@ -6977,8 +7015,9 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
     use std::sync::atomic::Ordering::Relaxed;
 
     use wz::runtime_tokio::adminspace::{
-        admin_config_key, admin_config_write_key, admin_queryable_key, answer_admin_query,
-        parse_admin_config_write, AdminAnswerCtx, AdminConfigWrite, AdminConfigWriteOutcome,
+        admin_config_key, admin_config_write_key, admin_config_write_prefix, admin_queryable_key,
+        answer_admin_query, parse_admin_config_write, AdminAnswerCtx, AdminConfigWrite,
+        AdminConfigWriteOutcome,
     };
     use wz::runtime_tokio::compiled_plugins_dyn;
     use wz::runtime_tokio::config::WzConfig;
@@ -7071,11 +7110,8 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
     let config_key = admin_config_key(&zid_hex, whatami_str); // @/<zid>/peer/config
     let write_key = admin_config_write_key(&zid_hex, whatami_str); // @/<zid>/peer/config/**
                                                                    // The `@/<zid>/peer/config/` prefix a config-write PUT's sub-key hangs under.
-    let write_prefix = {
-        let mut p = admin_config_key(&zid_hex, whatami_str);
-        p.push('/');
-        p
-    };
+                                                                   // R2393 — one shared derivation, see the peer host's note.
+    let write_prefix = admin_config_write_prefix(&zid_hex, whatami_str);
     // R311y812 — the config the admin `config` leg answers from is now HELD, not
     // rendered and dropped: it is this host's live permit source, the third and last
     // shipping run-mode to get one (peer R311y780, router-hat R311y781). The GET

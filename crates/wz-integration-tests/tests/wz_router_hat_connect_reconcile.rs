@@ -318,3 +318,259 @@ fn wz_router_hat_reconcile_requires_feature() {
          feature gate is not eliding the fire path\n--- router-hat stderr ---\n{r_captured}"
     );
 }
+
+// ── R2393 — the connect list told over the WIRE, not from the CLI ──────────────
+//
+// The atom's last live residual was that the runtime connect-list reconcile had
+// exactly ONE producer, the one-shot `--connect-after` timer, where upstream
+// re-enters `update_peers` whenever a live node's config changes. R2393 added the
+// second producer: a `RouterForwarder`-hosted config-WRITE subscriber that decodes
+// `.../config/connect-add <endpoint>` and feeds the same `ReconcileSender`.
+//
+// THESE TESTS EXIST BECAUSE THAT FEATURE SHIPPED BROKEN AND NOTHING NOTICED.
+// `82fd09b2` wired the handler with the subscription PATTERN where the STRIP PREFIX
+// belongs, so every PUT decoded `NotAWrite` — an arm that is silent by design — and
+// it built the router-hat's admin permissions with `..Default::default()`, whose
+// `write` is `false`, so the gate could not be opened by any flag even once the
+// prefix was right. Both defects are invisible to every unit test in the tree: the
+// decoder's tests pass the prefix as a `const` literal, and no test had ever driven
+// this host's write path. A lane is the only instrument that could have caught it,
+// and there was none.
+//
+// The pair is a positive/negative twin on the SAME binary, so the permit is the only
+// variable: with `--config-write-permit` the wire PUT federates R1 to R2, without it
+// R1 stays isolated and says the write was denied.
+
+/// Spawn a `--peer` writer that dials `addr` and PUTs `put_key` once per app tick.
+/// The writer is a peer rather than a router-hat because `--put-key` is a `PeerOpts`
+/// affordance — the router-hat run-mode parses no put flags.
+fn spawn_config_writer(
+    label: &str,
+    addr: &str,
+    put_key: &str,
+    payload: &str,
+) -> (ChildGuard, File) {
+    let stderr = tempfile::tempfile().expect("tempfile for writer stderr");
+    let (guard, reader, _port) = spawn_on_ephemeral_port(
+        &wz_ap_demo_binary(),
+        &[
+            "--peer",
+            "127.0.0.1:0",
+            "--connect",
+            addr,
+            // `--publish` is REQUIRED for `--put-key` to fire, and that is not
+            // obvious: the put drive sits inside the publisher's tick branch
+            // (`runner.rs`, `if let Some(key) = publish_key`), so a writer given
+            // only `--put-key` connects, logs nothing, and PUTs nothing — which is
+            // exactly what the first cut of this test observed. The key published
+            // here is inert: nothing subscribes to it.
+            "--publish",
+            "r2393/writer/tick",
+            "--put-key",
+            put_key,
+            "--put-payload",
+            payload,
+        ],
+        "peer: listening on 127.0.0.1:",
+        label,
+        stderr,
+    );
+    (guard, reader)
+}
+
+/// Read R1's advertised config-WRITE key out of its log and turn it into the
+/// concrete PUT target `@/<zid>/router/config/connect-add`.
+///
+/// Scraped rather than derived: the zid is assigned at startup, so deriving it in
+/// the test would duplicate the demo's own zid policy and could drift from it. The
+/// `/**` suffix assertion is what makes the strip below safe.
+fn connect_add_key(write_log: &str) -> String {
+    let write_key = write_log
+        .lines()
+        .find_map(|l| {
+            l.split_once("adminspace config WRITE at ")
+                .map(|(_, rest)| rest.split_whitespace().next().unwrap_or("").to_string())
+        })
+        .expect("router-hat logged its admin config-write keyexpr");
+    let base = write_key
+        .strip_suffix("/**")
+        .unwrap_or_else(|| panic!("config-write key lacks the /** pattern suffix: {write_key}"));
+    assert!(
+        base.starts_with("@/") && base.ends_with("/router/config"),
+        "scraped config-write base has the @/<zid>/router/config shape: {base}"
+    );
+    format!("{base}/connect-add")
+}
+
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo --features router-hat-router,router-connect-reconcile,adminspace-router-linkstate,routing-peer); Layer E7b2 runs via --ignored"]
+fn wz_router_hat_connect_add_over_the_wire_dials_the_new_endpoint() {
+    // R2 binds first so there is a live target to dial.
+    let (mut r2_guard, mut r2_reader, p_r2) =
+        spawn_router_hat("router-hat-2", &["--router-hat", "127.0.0.1:0"]);
+    let addr_r2 = format!("127.0.0.1:{p_r2}");
+
+    // R1: NO `--connect` and NO `--connect-after`. The ONLY path to R2 is a wire
+    // write, so a converged router tier can come from nothing else. The permit is
+    // GRANTED here; the twin below omits it.
+    let (mut r1_guard, mut r1_reader, p_r1) = spawn_router_hat(
+        "router-hat-1",
+        &["--router-hat", "127.0.0.1:0", "--config-write-permit"],
+    );
+    let addr_r1 = format!("127.0.0.1:{p_r1}");
+
+    let write_log = wait_for_substring(
+        &mut r1_reader,
+        "adminspace config WRITE at ",
+        Duration::from_secs(10),
+    )
+    .unwrap_or_else(|c| {
+        let _ = r1_guard.child_mut().kill();
+        let _ = r2_guard.child_mut().kill();
+        panic!(
+            "router-hat-1 never logged 'adminspace config WRITE at' — it did not \
+             register the config-write subscriber, so no wire write can reach \
+             it.\n--- router-hat-1 stderr ---\n{c}"
+        )
+    });
+    let put_key = connect_add_key(&write_log);
+
+    // The payload is an IP LOCATOR (`tcp/...`), not the bare `host:port` the CLI
+    // takes: this handler is a sync closure and parses without the CLI path's async
+    // resolver, which is written down where it diverges.
+    let (mut w_guard, mut w_reader) = spawn_config_writer(
+        "config-writer",
+        &addr_r1,
+        &put_key,
+        &format!("tcp/{addr_r2}"),
+    );
+
+    // The load-bearing edge: R1's router tier converges to 2. Nothing but the wire
+    // write could have dialed R2.
+    let converged = wait_for_substring(
+        &mut r1_reader,
+        "router-hat: routers-net converged (2 node(s))",
+        Duration::from_secs(20),
+    );
+
+    graceful_terminate(w_guard.child_mut(), Duration::from_secs(5));
+    graceful_terminate(r1_guard.child_mut(), Duration::from_secs(5));
+    graceful_terminate(r2_guard.child_mut(), Duration::from_secs(5));
+    let r1_captured = read_captured(&mut r1_reader);
+    let r2_captured = read_captured(&mut r2_reader);
+    let w_captured = read_captured(&mut w_reader);
+    eprintln!("--- router-hat-1 stderr ---\n{r1_captured}");
+    eprintln!("--- router-hat-2 stderr ---\n{r2_captured}");
+    eprintln!("--- config-writer stderr ---\n{w_captured}");
+
+    converged.unwrap_or_else(|c| {
+        panic!(
+            "router-hat-1 never converged its router tier to 2 within 20s — the \
+             config-write PUT to {put_key} did not reach the reconcile channel. R1 \
+             has no --connect and no --connect-after, so the WIRE write is the only \
+             path to R2. A silent failure here is the shape R2393 shipped: a \
+             mismatched strip prefix decodes every PUT as NotAWrite, whose arm logs \
+             nothing.\n--- router-hat-1 stderr at deadline ---\n{c}\n\
+             --- config-writer stderr ---\n{w_captured}"
+        )
+    });
+
+    // The apply log names the reconcile explicitly, so the convergence is attributed
+    // to the connect-add rather than to any other dial path.
+    assert!(
+        r1_captured.contains("config-write connect-add reconciled"),
+        "router-hat-1 converged but never logged the connect-add apply — the \
+         federation did not come from the wire write.\n\
+         --- router-hat-1 stderr ---\n{r1_captured}"
+    );
+    // And the write was neither denied nor mis-decoded.
+    assert!(
+        !r1_captured.contains("config-write on") || !r1_captured.contains("DENIED"),
+        "router-hat-1 logged a DENIED config write while holding \
+         --config-write-permit\n--- router-hat-1 stderr ---\n{r1_captured}"
+    );
+}
+
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo --features router-hat-router,router-connect-reconcile,adminspace-router-linkstate,routing-peer); Layer E7b2 runs via --ignored"]
+fn wz_router_hat_connect_add_is_denied_without_the_write_permit() {
+    // The NEGATIVE twin, and the control that makes the positive test mean
+    // something: identical binary, identical topology, identical PUT — the ONLY
+    // difference is the absent `--config-write-permit`. Without this arm the
+    // positive test could pass on a node that permits every write unconditionally,
+    // which is exactly the state the router-hat was in before R2393 gave it a flag
+    // (it permitted NOTHING, and nothing could tell).
+    // R2's own log is not read in this arm — the claim is about R1 refusing, and R2
+    // is only here so the endpoint the denied write names is genuinely dialable. If
+    // R2 were absent, a non-convergence would be explained by "nothing to dial"
+    // rather than by the deny, and the assertion would prove nothing.
+    let (mut r2_guard, _r2_reader, p_r2) =
+        spawn_router_hat("router-hat-2", &["--router-hat", "127.0.0.1:0"]);
+    let addr_r2 = format!("127.0.0.1:{p_r2}");
+
+    let (mut r1_guard, mut r1_reader, p_r1) =
+        spawn_router_hat("router-hat-1", &["--router-hat", "127.0.0.1:0"]);
+    let addr_r1 = format!("127.0.0.1:{p_r1}");
+
+    let write_log = wait_for_substring(
+        &mut r1_reader,
+        "adminspace config WRITE at ",
+        Duration::from_secs(10),
+    )
+    .unwrap_or_else(|c| {
+        let _ = r1_guard.child_mut().kill();
+        let _ = r2_guard.child_mut().kill();
+        panic!(
+            "router-hat-1 never logged 'adminspace config WRITE at' — the subscriber \
+             must be HOSTED regardless of the permit (host and permit are orthogonal, \
+             as they are on the peer host).\n--- router-hat-1 stderr ---\n{c}"
+        )
+    });
+    let put_key = connect_add_key(&write_log);
+
+    let (mut w_guard, mut w_reader) = spawn_config_writer(
+        "config-writer",
+        &addr_r1,
+        &put_key,
+        &format!("tcp/{addr_r2}"),
+    );
+
+    // A DENY is a POSITIVE edge here — the demo logs the refusal at error — so this
+    // is not a wait-for-absence. The convergence assertion below is what the deny
+    // implies, checked against the post-shutdown capture rather than by waiting.
+    let denied = wait_for_substring(&mut r1_reader, "config-write on", Duration::from_secs(20));
+
+    graceful_terminate(w_guard.child_mut(), Duration::from_secs(5));
+    graceful_terminate(r1_guard.child_mut(), Duration::from_secs(5));
+    graceful_terminate(r2_guard.child_mut(), Duration::from_secs(5));
+    let r1_captured = read_captured(&mut r1_reader);
+    let w_captured = read_captured(&mut w_reader);
+    eprintln!("--- router-hat-1 stderr ---\n{r1_captured}");
+    eprintln!("--- config-writer stderr ---\n{w_captured}");
+
+    denied.unwrap_or_else(|c| {
+        panic!(
+            "router-hat-1 never logged the config-write DENY within 20s — without \
+             --config-write-permit the write gate must refuse the PUT and say so \
+             (zenoh logs a denied write at error, adminspace.rs:397).\n\
+             --- router-hat-1 stderr at deadline ---\n{c}\n\
+             --- config-writer stderr ---\n{w_captured}"
+        )
+    });
+    assert!(
+        r1_captured.contains("DENIED"),
+        "the deny line must name the refusal\n--- router-hat-1 stderr ---\n{r1_captured}"
+    );
+    // The refusal is LOAD-BEARING: no dial happened.
+    assert!(
+        !r1_captured.contains("config-write connect-add reconciled"),
+        "a DENIED write must not reach the reconcile channel\n\
+         --- router-hat-1 stderr ---\n{r1_captured}"
+    );
+    assert!(
+        !r1_captured.contains("routers-net converged (2 node(s))"),
+        "a router whose config write was denied must NOT federate with the endpoint \
+         the denied write named — the permit is not load-bearing if it does\n\
+         --- router-hat-1 stderr ---\n{r1_captured}"
+    );
+}

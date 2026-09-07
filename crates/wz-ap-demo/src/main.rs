@@ -1065,6 +1065,14 @@ fn main() -> ExitCode {
                     // named and left open. Parsed identically (a bare presence flag) so
                     // one spelling means one thing across run-modes.
                     no_admin_read: rest.iter().any(|a| a == "--no-admin-read"),
+                    // R2393 (§5.23 adminspace-write) — the write-side twin, the SAME
+                    // bare presence flag `--peer` and `--storage-host` parse, so one
+                    // spelling means one thing across every run-mode that hosts an
+                    // adminspace. Absent = DENY (zenoh's `PermissionsConf` default).
+                    // Until this round the router-hat's write permit was a hardcoded
+                    // `Default` false with no flag to move it, so the config-write
+                    // subscriber R2393 added could never apply anything.
+                    config_write_permit: rest.iter().any(|a| a == "--config-write-permit"),
                     connect_retry,
                     // R2159 (open-debt item 229) — resolved against the same
                     // column the peer arm uses: upstream's `connect` defaults
