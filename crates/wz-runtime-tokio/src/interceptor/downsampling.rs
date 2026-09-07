@@ -349,7 +349,7 @@ impl DownsamplingInterceptor {
 ///   indeterminate KIND, and it is stricter than upstream rather than a port.
 fn message_kinds(msg: &NetworkMessage) -> &'static [DownsamplingMessage] {
     use DownsamplingMessage as M;
-    const DATA_EITHER: &[DownsamplingMessage] = &[];
+    const DATA_EITHER: &[DownsamplingMessage] = &[M::Put, M::Delete];
     match msg {
         NetworkMessage::Push(p) => match &p.body {
             PushOwnedVariant::CodecZenohMsgPut(_) => &[M::Put],
