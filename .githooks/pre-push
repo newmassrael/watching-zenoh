@@ -960,7 +960,17 @@ if ! python3 scripts/lib/framing_refusal_reachability_gate.py; then
     exit 1
 fi
 
-# ─── gate 2j — every link-drop cause has a decided disposition (R2423, item 688) ──
+# ─── gate 2u — every link-drop cause has a decided disposition (R2423, item 688) ──
+#
+# R2423b — labelled 2u, not 2j: `2j` was already the test-double witness gate
+# (R2293, item 625) and this block shipped as a SECOND 2j for one push. Nothing
+# dispatches on these labels, so the collision could not misroute a gate — but a
+# refusal prints the label, and two gates answering to one name makes that
+# message ambiguous. Measured while fixing it: 34 gate headers, THREE collided
+# labels (2e, 2j, 2k), of which only this one was mine; `2u`-`2z` are free.
+# Derive over HEADERS, never over mentions -- a mention count cannot tell one
+# gate named five times from two gates sharing a label, which is how 2k went
+# unnoticed here at first.
 # grades: worktree
 #
 # `BoxedLinkDriver::send_blocking` reports a refusal as
@@ -991,7 +1001,7 @@ fi
 # costs well under a second with nothing built.
 if ! python3 scripts/lib/link_drop_disposition_gate.py; then
     echo "" >&2
-    echo "pre-push: [gate 2j] link-drop disposition gate FAILED — a" >&2
+    echo "pre-push: [gate 2u] link-drop disposition gate FAILED — a" >&2
     echo "          \`LinkDropCause\` has no arm in \`emit_on_link\`'s disposition" >&2
     echo "          closure, or no \`#[test]\` body names it. The line above says" >&2
     echo "          which. Decide the cause at the seam AND witness it; a" >&2

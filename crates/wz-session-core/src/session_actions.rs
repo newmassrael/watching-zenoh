@@ -1970,8 +1970,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // produced by SEVEN production drivers — five tokio pipelines
         // (stream, udp, ws, serial, quic-datagram), the accept-side glue, and
         // the lwIP driver; the eighth, `wz-capi-core`'s `InertLinkDriver`, feeds
-        // no channel and so has no writer to lose — and every one of those
-        // refusals was consumed ONLY by the counter above, which is
+        // no channel and so has no writer to lose. The two remaining impls are
+        // the reconnect seam's FORWARDING wrappers (`SwappableLink` and
+        // `LocalSwappableLink` in `crate::reconnect`), and their forwarding is
+        // what makes this disposition reach the case that needs it most: a
+        // RECONNECTING session is the likeliest one to be holding a dead
+        // writer, and if either wrapper had swallowed the inner outcome the
+        // gate could never learn about it there. R2371 made them forward for
+        // the sibling reason — a swallowed drop would have made `n_dropped`
+        // read zero for exactly those sessions.
+        //
+        // Every one of those refusals was consumed ONLY by the counter above,
+        // which is
         // `transport-stats`-gated. On a DEFAULT build the drop was therefore
         // observed by nothing at all, while
         // [`LinkDropCause::WriterGone`]'s own doc said the writes keep dropping
