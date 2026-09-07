@@ -363,8 +363,31 @@ GRADE_TAGS = ("PARTIAL:", "COMPLETE:")
 #: R2405 confirmed at the pin that wz's accept path discards it. A reader
 #: deciding what to build starts at the handshake atom, not this one.
 #:
-#: The split is 35 PARTIAL / 8 COMPLETE.
-BUDGET = 43
+#: The split was 35 PARTIAL / 8 COMPLETE.
+#:
+#: 43 -> 41 (R2414 + R2415, two atoms in one commit), and this pair marks an
+#: INFLECTION worth planning around: of the 43 atoms in the population when the
+#: round began, FORTY-ONE carried zero anchored claims. The cheap, mechanically
+#: checkable ones are now spent. What is left carries its claims as line-form or
+#: root-less prose, which a reader must judge rather than a command settle, so
+#: the per-atom cost of every remaining round is structurally higher.
+#:
+#: `routing-router` (R2414) needed THREE KINDS of test for seven claims: an
+#: anchor resolved for a presence claim, three absences COUNTED TO ZERO (the
+#: withdrawn failover-brokering capability, which an anchor cannot witness), and
+#: three wz-side reads. It also demonstrates the line-number argument inside a
+#: single reason: its HEADER places a mapping at three digits where it now sits
+#: at four, six thousand lines later, while the CORRECTION cites the same fact by
+#: needle and is unaffected.
+#:
+#: `liveliness-history` (R2415): five claims across BOTH references, all holding,
+#: and its last standing clause is parity that must NOT be built -- replaying
+#: locally held tokens would diverge from zenoh and pico alike. A residual saying
+#: "do not fix this" is worth as much as one saying what to build, and is the
+#: kind a re-measurement can silently invert if nobody re-reads it.
+#:
+#: The split is 34 PARTIAL / 7 COMPLETE.
+BUDGET = 41
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
