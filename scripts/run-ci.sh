@@ -9104,10 +9104,21 @@ layer_c1l_reassembly() {
 # in neither reassembly-dependent module, so both arms move by the same 4 and
 # the step is untouched. Paid here rather than in y832 because that round's
 # hosted run is where it surfaced.
+#
+# Round 2417 moved the SECOND arm only, 56 -> 58, and THE STEP WITH IT: 16 -> 18.
+# The two cases are `fragment_pipeline`'s -- the per-peer patch negotiation and
+# the marker-gate discriminator -- and that module is gated on `reassembly` +
+# `codec-push`, so the first arm cannot see them. The step is the part of this
+# guard that carries meaning, and it moving is the correct reading here rather
+# than a defect: the round added tests that ONLY a reassembly build can reach.
+# The round's other four multicast cases are absent from all three arms, because
+# they need `transport-fragmentation` (which no arm here selects) -- so counting
+# the diff would have said +6 on this arm. The numbers below are what the
+# commands PRINTED.
 layer_c1p_multicast() {
     _runci_guarded_test C1p 40 cargo test -p wz-session-core --features session-multicast --lib multicast --quiet \
         || return 1
-    _runci_guarded_test C1p 56 cargo test -p wz-session-core --features session-multicast,reassembly,codec-push,codec-join --lib multicast --quiet \
+    _runci_guarded_test C1p 58 cargo test -p wz-session-core --features session-multicast,reassembly,codec-push,codec-join --lib multicast --quiet \
         || return 1
     # R311y633 (§17.6 / §11.2) — the arm that BUILDS `multicast_rx` and RUNS it.
     # The two arms above omit `codec-close`, and `pub mod multicast_rx` is gated
