@@ -549,8 +549,8 @@ pub const METRICS_ENCODING: &str = "application/openmetrics-text; version=1.0.0;
 /// adminspace.
 ///
 /// BEYOND-ZENOH, and named so rather than presented as parity: the pin (zenoh
-/// 1.10.0 `zenoh/src/net/runtime/adminspace.rs` @ `fn add_handlers`) registers
-/// no handler of this kind, so a
+/// 1.10.0 `zenoh/src/net/runtime/adminspace.rs` @ `macro_rules! add_handler`)
+/// registers no handler of this kind, so a
 /// consumer that finds this key has learned it is talking to wz. The `wz/` chunk
 /// exists for exactly that reason — every other admin key this module answers
 /// carries a name upstream also uses, so a wz-native leg needs a namespace of its
@@ -1490,7 +1490,7 @@ pub enum AdminConfigWrite {
     /// The atom's last live residual said wz's runtime connect ADD is reachable only
     /// from a ONE-SHOT CLI argument (`--connect-after`), where upstream re-reads the
     /// list on a config change
-    /// (`zenoh/src/net/runtime/orchestrator.rs` @ `update_peers`). That
+    /// (`zenoh/src/net/runtime/orchestrator.rs` @ `connect_peers`). That
     /// is a DIVERGENCE on a capability upstream HAS, not a wz affordance nobody asked
     /// for — the same test that admitted the read permit and would have refused a
     /// bespoke fifth intent.
