@@ -771,7 +771,30 @@ def _grade_head(reason: str) -> str:
 #: clause cited its upstream module without the `commons/` root, and upstream
 #: keeps `zenoh/` and `commons/` as siblings, so the path resolved under no root
 #: and sat in no budget -- present, wrong, and invisible to every anchor gate.
-BUDGET = 36
+#: 36 -> 35 (R2426). `query-target`, and here the VERDICT was the cheap half: the
+#: claim its close criterion rests on still holds at the pin, almost verbatim --
+#: upstream's queryable filter applies the completeness term as its own
+#: unconditional conjunct while `local` gates only the locality term. What the
+#: re-measurement actually bought was the CITATION FORM.
+#:
+#: Both halves of the old pointer were defective, and in ways this tree grades
+#: differently. The LINE had rotted far down the file, which is rot WITHIN a file
+#: and the one class an anchor-only gate structurally cannot catch. And the PATH
+#: began at `src`, while upstream keeps `zenoh/` and `commons/` as siblings -- so
+#: it resolved under no root and therefore sat in NO BUDGET. That is worth
+#: separating from "a weak citation": an unrooted citation is UNGRADED, and an
+#: ungraded citation is indistinguishable from a passing one, which is why two of
+#: these can sit in a COMPLETE atom for versions without anything objecting.
+#:
+#: The replacement needle occurs exactly ONCE in that file, which is what makes
+#: the line-to-anchor conversion sound rather than merely tidier -- an anchor on
+#: a needle with several matches would resolve while naming the wrong site.
+#:
+#: ⚠ The stale pointers are NOT requoted in the new block, deliberately: the
+#: store-reason census counts citation OCCURRENCES, so quoting a defective
+#: citation in order to correct it ADDS one. R2360 paid for that; this round
+#: declined to re-pay it.
+BUDGET = 35
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
