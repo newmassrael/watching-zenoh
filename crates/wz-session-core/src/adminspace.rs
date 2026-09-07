@@ -489,6 +489,274 @@ pub fn admin_config_key(zid_hex: &str, whatami: &str) -> String {
     s
 }
 
+/// R2413 (open-debt item 676) — the admin SURFACE keyexpr
+/// `@/<zid>/<whatami>/wz/surface`: the key under which this node describes its own
+/// adminspace.
+///
+/// BEYOND-ZENOH, and named so rather than presented as parity: the pin (zenoh
+/// 1.10.0 `net/runtime/adminspace.rs`) registers no handler of this kind, so a
+/// consumer that finds this key has learned it is talking to wz. The `wz/` chunk
+/// exists for exactly that reason — every other admin key this module answers
+/// carries a name upstream also uses, so a wz-native leg needs a namespace of its
+/// own or it becomes a name upstream can later collide with.
+pub fn admin_surface_key(zid_hex: &str, whatami: &str) -> String {
+    let mut s = admin_root_key(zid_hex, whatami);
+    s.push_str("/wz/surface");
+    s
+}
+
+/// How many replies one admin leg produces for a GET that intersects it.
+///
+/// R2413 — the axis a key list alone cannot carry. `config` answers once; the
+/// per-entity introspection leg answers ONE reply per declared subscriber or
+/// queryable, so its manifest row is a PATTERN and a consumer must not read a
+/// single reply as the whole leg. Without this, "the key is in the list and I got
+/// one reply" and "the key is in the list and I got all of it" are the same
+/// observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdminLegCardinality {
+    /// Exactly one reply, under the literal key in the row.
+    Single,
+    /// Zero or more replies under keys matching the row's pattern — one per live
+    /// item (a declared entity, a compiled-in plugin, a routing successor).
+    PerItem,
+}
+
+impl AdminLegCardinality {
+    /// The manifest word. `per-item` rather than `many` because zero is a normal
+    /// count for these legs and "many" reads as a promise of more than one.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Single => "single",
+            Self::PerItem => "per-item",
+        }
+    }
+}
+
+/// One row of the adminspace surface manifest: a key this BUILD answers, the
+/// encoding it answers in, and how many replies it produces.
+///
+/// R2413 — the row is built from the same `#[cfg]` that gates the reply leg, so
+/// the manifest and the answerer move together by construction. What keeps that
+/// true is not the co-location, though — it is
+/// `the_manifest_describes_exactly_the_legs_this_build_answers`, which derives the
+/// population by RUNNING [`answer_admin_query`] against a wildcard and comparing
+/// what it actually replied with what this table declares.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdminLeg {
+    /// The concrete key (`Single`) or the key pattern (`PerItem`), with this
+    /// node's zid and role already substituted — usable in a GET verbatim.
+    pub key: String,
+    /// The encoding this leg replies in, as the wire media type
+    /// (`application/json`, `text/plain`).
+    pub encoding: &'static str,
+    /// How many replies a GET intersecting this leg produces.
+    pub cardinality: AdminLegCardinality,
+}
+
+/// The media type string for an [`EncodingHint`](crate::sample::EncodingHint) this
+/// module replies with. Kept next to the legs rather than on `EncodingHint` itself
+/// because the manifest needs the IANA NAME a foreign consumer reads, while the
+/// wire carries the packed id — two renderings of one fact, and only this document
+/// needs the second.
+fn leg_encoding_name(hint: &crate::sample::EncodingHint) -> &'static str {
+    if hint.packed_id == crate::sample::EncodingHint::TEXT_PLAIN.packed_id {
+        "text/plain"
+    } else {
+        "application/json"
+    }
+}
+
+/// R2413 (open-debt item 676) — every admin leg THIS BUILD answers, in reply
+/// order.
+///
+/// # The question this exists to answer
+///
+/// A consumer asked (2026-09-07) how to tell, from the wire alone, which admin
+/// keys a node answers — because the answer is a property of the node's BUILD and
+/// six `#[cfg]`s move it. Measured at the time, live, on a wildcard GET: an
+/// `adminspace-core`-only build replies 2 keys, and one with metrics +
+/// introspection + plugins replies 3 (the extra being `metrics`; the other two
+/// legs fan out per item and a node with no declarations and no plugins produces
+/// none). Nothing on the wire said the difference was the build rather than the
+/// node's state, and nothing said what the missing keys would have been.
+///
+/// # Router legs
+///
+/// The `linkstate` / `route` legs live in [`answer_router_admin_query`], a
+/// different function with a different host. They are declared here anyway,
+/// predicated on `whatami == "router"`, because the router hat calls BOTH
+/// answerers for one GET (see the router-hat adminspace integration test) and a
+/// consumer sees one surface, not two. A peer never serves them, which is what the
+/// role predicate encodes.
+pub fn admin_legs(zid_hex: &str, whatami: &str) -> Vec<AdminLeg> {
+    use crate::sample::EncodingHint;
+    let mut legs = Vec::new();
+    let json = leg_encoding_name(&EncodingHint::APPLICATION_JSON);
+    let text = leg_encoding_name(&EncodingHint::TEXT_PLAIN);
+
+    // `local_data` — ungated, the one leg every adminspace build answers.
+    legs.push(AdminLeg {
+        key: admin_root_key(zid_hex, whatami),
+        encoding: json,
+        cardinality: AdminLegCardinality::Single,
+    });
+    #[cfg(feature = "adminspace-metrics")]
+    legs.push(AdminLeg {
+        key: admin_metrics_key(zid_hex, whatami),
+        encoding: text,
+        cardinality: AdminLegCardinality::Single,
+    });
+    legs.push(AdminLeg {
+        key: admin_config_key(zid_hex, whatami),
+        encoding: json,
+        cardinality: AdminLegCardinality::Single,
+    });
+    #[cfg(feature = "adminspace-introspection-handlers")]
+    for kind in [AdminEntityKind::Subscriber, AdminEntityKind::Queryable] {
+        legs.push(AdminLeg {
+            key: admin_entity_key(zid_hex, whatami, kind.as_str(), "**"),
+            encoding: json,
+            cardinality: AdminLegCardinality::PerItem,
+        });
+    }
+    #[cfg(feature = "adminspace-plugins-handlers")]
+    {
+        legs.push(AdminLeg {
+            key: admin_plugin_key(zid_hex, whatami, "*"),
+            encoding: json,
+            cardinality: AdminLegCardinality::PerItem,
+        });
+        legs.push(AdminLeg {
+            key: admin_plugin_status_path_key(zid_hex, whatami, "*"),
+            encoding: text,
+            cardinality: AdminLegCardinality::PerItem,
+        });
+        let mut leaves = admin_plugin_status_root_key(zid_hex, whatami, "*");
+        leaves.push_str("/**");
+        legs.push(AdminLeg {
+            key: leaves,
+            encoding: json,
+            cardinality: AdminLegCardinality::PerItem,
+        });
+    }
+    // The surface document itself. Listed because a leg a consumer can GET and
+    // cannot find in the manifest is exactly the ambiguity this document exists to
+    // remove — including when that leg is this one.
+    legs.push(AdminLeg {
+        key: admin_surface_key(zid_hex, whatami),
+        encoding: json,
+        cardinality: AdminLegCardinality::Single,
+    });
+    #[cfg(feature = "adminspace-router-linkstate")]
+    if whatami == "router" {
+        legs.push(AdminLeg {
+            key: admin_linkstate_routers_key(zid_hex, whatami),
+            encoding: text,
+            cardinality: AdminLegCardinality::Single,
+        });
+        legs.push(AdminLeg {
+            key: admin_linkstate_peers_key(zid_hex, whatami),
+            encoding: text,
+            cardinality: AdminLegCardinality::Single,
+        });
+        let mut successors = admin_route_successor_prefix(zid_hex, whatami);
+        successors.push_str("/**");
+        legs.push(AdminLeg {
+            key: successors,
+            encoding: json,
+            cardinality: AdminLegCardinality::PerItem,
+        });
+    }
+    // Silence the unused binding in a build that compiles no text/plain leg.
+    let _ = text;
+    legs
+}
+
+/// R2413 (open-debt item 676) — the root document fields this build emits as
+/// `null` BECAUSE IT DOES NOT SPEAK THEM, as dotted paths (`[]` = "every element
+/// of this array").
+///
+/// # The third question, and why the other two cannot answer it
+///
+/// The consumer's sharpest ask: seeing `"plugins":null` in `local_data`, is that
+/// "this node has no plugins" or "this build does not report plugins"? Measured
+/// live on 2026-09-07: an `adminspace-core`-only build emits `"plugins":null`, and
+/// one with `adminspace-plugins-handlers` and no started plugin emits
+/// `"plugins":{}`. So the bytes DO discriminate today — and nothing declared it,
+/// nothing gated it, and a consumer could only learn it by reading this tree.
+/// [`admin_legs`] cannot say it either: `plugins` is a FIELD of a leg that is in
+/// the list both ways.
+///
+/// This is the same hole `wz-capture`'s `doc_revision::planes` fills for the
+/// census document (R2180, open-debt item 554), and it is filled the same way — by
+/// DECLARING, in the document, which `null`s are the library's silence.
+///
+/// # Two of these are permanent, one is a build fact
+///
+/// `metadata` and `sessions[].weight` are `null` in every wz build; the pin fills
+/// both (`config.metadata()` at `local_data`, and a `links_info` lookup for
+/// `weight`). They are listed because a consumer cannot tell a permanent silence
+/// from a build-conditional one either, and both mean "do not wait for this".
+pub fn admin_unspoken_fields() -> Vec<&'static str> {
+    let mut fields = alloc::vec!["metadata"];
+    #[cfg(not(feature = "adminspace-plugins-handlers"))]
+    fields.push("plugins");
+    fields.push("sessions[].weight");
+    fields
+}
+
+/// R2413 (open-debt item 676) — the adminspace surface document: the body this
+/// node replies under [`admin_surface_key`].
+///
+/// ```json
+/// {"revision":1,
+///  "legs":[{"key":"@/<zid>/peer","encoding":"application/json","cardinality":"single"}, …],
+///  "unspoken":["metadata","plugins","sessions[].weight"]}
+/// ```
+///
+/// `revision` is the document's own contract number, the convention
+/// `wz-capture`'s `doc_revision` established for the dissect-side self-reports: it
+/// moves when a consumer that parsed the previous shape would misread this one,
+/// and NOT when a leg appears or disappears — that is what the document is FOR,
+/// and a revision that moved with the feature flags would tell a consumer to
+/// re-audit on every build.
+///
+/// # Resolving a key that two rows match — the MOST LITERAL row wins
+///
+/// Two rows can match one key, and exactly one pair does so today: the reserved
+/// `status/plugins/<id>/__path__` leaf is `text/plain` while the plugin's own
+/// status leaves beside it are JSON, so the rows are
+/// `…/status/plugins/*/__path__` and `…/status/plugins/*/**`. A keyexpr cannot
+/// say "every leaf EXCEPT `__path__`", so the overlap is not removable by naming
+/// — it is resolved by a stated rule instead: **the matching row with the most
+/// non-wildcard chunks describes the reply.** That is the discipline a keyexpr
+/// consumer already applies to overlapping subscriptions, and
+/// `the_manifest_describes_exactly_the_legs_this_build_answers` enforces both
+/// halves of it — that the rule picks a row, and that no two rows tie.
+///
+/// Merging the two into one row was the alternative and it loses the encoding
+/// axis, which is question two of the three this document exists to answer.
+pub fn admin_surface_json(zid_hex: &str, whatami: &str) -> String {
+    let mut out = String::from("{\"revision\":1,\"legs\":[");
+    for (i, leg) in admin_legs(zid_hex, whatami).iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str("{\"key\":");
+        push_json_str(&leg.key, &mut out);
+        out.push_str(",\"encoding\":");
+        push_json_str(leg.encoding, &mut out);
+        out.push_str(",\"cardinality\":");
+        push_json_str(leg.cardinality.as_str(), &mut out);
+        out.push('}');
+    }
+    out.push_str("],\"unspoken\":");
+    crate::json::push_str_array(admin_unspoken_fields(), &mut out);
+    out.push('}');
+    out
+}
+
 /// The declaring-node buckets for an admin introspection entry — the wz analogue of
 /// zenoh's `hat::Sources` (`net/routing/hat/mod.rs:59`), which is the JSON body BOTH
 /// the `subscribers_data` and `queryables_data` handlers serialize
@@ -901,6 +1169,24 @@ pub fn answer_admin_query(
                 }
             }
         }
+    }
+
+    // `wz/surface` (`@/<zid>/<whatami>/wz/surface`) — the node's description of
+    // its OWN adminspace: which keys this build answers, in which encoding, and
+    // which `local_data` nulls are silence rather than emptiness. R2413
+    // (open-debt item 676). Ungated within `adminspace-core`, deliberately: a
+    // build that has an adminspace but cannot say what is in it puts the consumer
+    // straight back to guessing, which is the whole defect. Emitted LAST so it
+    // does not displace an upstream-shaped reply from the position a consumer
+    // reading upstream's fan-out expects.
+    let surface_key = admin_surface_key(ctx.zid_hex, ctx.whatami);
+    let surface_chunks: Vec<&str> = surface_key.split('/').collect();
+    if crate::keyexpr_match::keyexpr_intersects_target(ke, &surface_chunks) {
+        out.reply_keyed_encoded(
+            &surface_key,
+            admin_surface_json(ctx.zid_hex, ctx.whatami).as_bytes(),
+            Some(&crate::sample::EncodingHint::APPLICATION_JSON),
+        );
     }
     AdminAnswerOutcome::Served
 }
@@ -2105,26 +2391,321 @@ mod tests {
         assert_eq!(body, metrics_text("0.1.0"));
     }
 
+    /// R2413 (open-debt item 676) — the manifest declares EXACTLY the legs this
+    /// build answers, with the encoding each one actually replied in.
+    ///
+    /// # Why the population is RUN rather than listed
+    ///
+    /// [`admin_legs`] is a table, and a test that re-read that table would pass on
+    /// any table, including one that has drifted away from the answerer it claims
+    /// to describe. So the population here is DERIVED: the fixture drives
+    /// [`answer_admin_query`] with a `**` GET and a node state that exercises every
+    /// per-item leg (one declaration of each entity kind, one STARTED plugin
+    /// carrying a status leaf), and the set of keys it actually replied is the
+    /// thing the manifest is compared against. A leg that stops firing, a leg that
+    /// fires and is not declared, and a declared leg that fires with a different
+    /// encoding are three distinct reds here.
+    ///
+    /// The fixture is what makes zero impossible: it declares items, so an
+    /// answerer that replied nothing fails at the `is_empty` guard rather than
+    /// reporting a vacuous agreement between two empty sets.
+    #[test]
+    fn the_manifest_describes_exactly_the_legs_this_build_answers() {
+        let mut out = RecordingReply::default();
+        let view = admin_view("@/a1b2/peer/**");
+        let _ = answer_admin_query(
+            &view,
+            &mut out,
+            &admin_ctx(true),
+            &[],
+            &fixture_declarations(),
+            &fixture_plugins(),
+            "{}",
+        );
+        assert!(
+            !out.replies.is_empty(),
+            "the wildcard GET fired no handler at all — the population this test \
+             derives is empty, so every comparison below would hold vacuously"
+        );
+
+        // What the build DECLARES, as (pattern, encoding, cardinality).
+        let declared = admin_legs("a1b2", "peer");
+        assert!(
+            !declared.is_empty(),
+            "the manifest declares no leg; see the guard above for why an empty \
+             population is a failure rather than an agreement"
+        );
+
+        // Every reply the answerer actually produced must be covered by exactly one
+        // declared row, and the encodings must agree.
+        for (i, (key, _)) in out.replies.iter().enumerate() {
+            let observed = out.encodings[i]
+                .as_ref()
+                .map(leg_encoding_name)
+                .expect("every admin leg replies with an explicit encoding");
+            let matching: Vec<&AdminLeg> = declared
+                .iter()
+                .filter(|leg| pattern_covers(&leg.key, key))
+                .collect();
+            assert!(
+                !matching.is_empty(),
+                "the answerer replied `{key}` and no declared leg describes it — a \
+                 reply the manifest cannot name sends the consumer straight back to \
+                 the guessing item 676 reported"
+            );
+            // The stated resolution rule: most non-wildcard chunks wins, and the
+            // winner must be unique. Asserting the tie is impossible is what keeps
+            // the rule a rule rather than a preference.
+            let best = matching
+                .iter()
+                .map(|leg| literal_chunks(&leg.key))
+                .max()
+                .expect("non-empty");
+            let winners: Vec<&&AdminLeg> = matching
+                .iter()
+                .filter(|leg| literal_chunks(&leg.key) == best)
+                .collect();
+            assert_eq!(
+                winners.len(),
+                1,
+                "`{key}` is matched by {} equally-literal rows ({:?}) — the \
+                 most-literal rule cannot pick between them, so the manifest is \
+                 ambiguous for this key",
+                winners.len(),
+                winners.iter().map(|l| &l.key).collect::<Vec<_>>()
+            );
+            assert_eq!(
+                winners[0].encoding, observed,
+                "leg `{}` is declared `{}` but replied `{observed}` for key `{key}`",
+                winners[0].key, winners[0].encoding
+            );
+        }
+
+        // And the other direction: every declared leg must have fired. The fixture
+        // supplies an item for each per-item leg precisely so that "declared but
+        // never observed" means the declaration is wrong, not that the fixture was
+        // too thin.
+        for leg in &declared {
+            let fired = out
+                .replies
+                .iter()
+                .any(|(key, _)| pattern_covers(&leg.key, key));
+            assert!(
+                fired,
+                "the manifest declares `{}` but the answerer never replied under \
+                 it — a key a consumer is told to GET and that answers nothing is \
+                 worse than an absent row",
+                leg.key
+            );
+        }
+    }
+
+    /// R2413 — `unspoken` names exactly the root-document fields this build emits
+    /// as `null`.
+    ///
+    /// Derived by PARSING the `local_data` body this build actually produced and
+    /// collecting its nulls, so the declaration is checked against bytes rather
+    /// than against the `#[cfg]`s that were used to write it. A field that becomes
+    /// real without leaving the list, and a field that turns `null` without
+    /// joining it, both fail here.
+    #[test]
+    fn unspoken_names_exactly_the_nulls_the_root_document_emits() {
+        let data = AdminLocalData {
+            zid_hex: String::from("a1b2"),
+            version: String::from("0.1.0"),
+            locators: alloc::vec![String::from("tcp/127.0.0.1:7447")],
+            // One session, so the `sessions[]` paths have an element to be null in.
+            sessions: alloc::vec![AdminSession {
+                peer_zid_hex: String::from("c3d4"),
+                whatami: Some(String::from("peer")),
+                links: alloc::vec![],
+            }],
+            plugins: fixture_plugins(),
+        };
+        let root: serde_json::Value =
+            serde_json::from_str(&data.to_json()).expect("local_data is JSON");
+
+        let mut observed: Vec<String> = Vec::new();
+        for (k, v) in root.as_object().expect("a JSON object") {
+            if v.is_null() {
+                observed.push(k.clone());
+            }
+        }
+        for (k, v) in root["sessions"][0]
+            .as_object()
+            .expect("the session entry is an object")
+        {
+            if v.is_null() {
+                observed.push(alloc::format!("sessions[].{k}"));
+            }
+        }
+        observed.sort();
+
+        let mut declared: Vec<String> = admin_unspoken_fields()
+            .iter()
+            .map(|s| String::from(*s))
+            .collect();
+        declared.sort();
+        assert_eq!(
+            observed, declared,
+            "`unspoken` must name exactly the nulls `local_data` emits: a null the \
+             list omits is the ambiguity item 676 reported, and a name the document \
+             no longer emits tells a consumer to expect silence that has ended"
+        );
+    }
+
+    /// R2413 — the DISCRIMINATOR the consumer asked for, exercised in the one
+    /// direction a single build can exercise it.
+    ///
+    /// Measured live on 2026-09-07: `plugins` is `null` without
+    /// `adminspace-plugins-handlers` and `{}` with it and no started plugin. So the
+    /// bytes already told the two apart and nothing said so, which is why the
+    /// manifest declares it. Each arm asserts the pairing this build can see — the
+    /// emitted shape AND the `unspoken` membership that explains it.
+    #[test]
+    fn the_plugins_null_and_the_manifest_agree_about_which_it_is() {
+        let data = AdminLocalData {
+            zid_hex: String::from("a1b2"),
+            version: String::from("0.1.0"),
+            locators: alloc::vec![],
+            sessions: alloc::vec![],
+            // Deliberately EMPTY: this is the case the consumer could not read.
+            plugins: alloc::vec![],
+        };
+        let root: serde_json::Value =
+            serde_json::from_str(&data.to_json()).expect("local_data is JSON");
+        let unspoken = admin_unspoken_fields();
+
+        #[cfg(feature = "adminspace-plugins-handlers")]
+        {
+            assert!(
+                root["plugins"].is_object() && root["plugins"].as_object().unwrap().is_empty(),
+                "a build that speaks plugins reports NONE as an empty object: {}",
+                data.to_json()
+            );
+            assert!(
+                !unspoken.contains(&"plugins"),
+                "this build speaks plugins, so `plugins` must not be listed as silence"
+            );
+        }
+        #[cfg(not(feature = "adminspace-plugins-handlers"))]
+        {
+            assert!(
+                root["plugins"].is_null(),
+                "a build without the feature emits `plugins: null`: {}",
+                data.to_json()
+            );
+            assert!(
+                unspoken.contains(&"plugins"),
+                "the `null` this build emits is silence, and only `unspoken` can say so"
+            );
+        }
+    }
+
+    /// The specificity a manifest row carries under the document's stated
+    /// resolution rule: how many of its chunks are literal rather than `*` / `**`.
+    fn literal_chunks(pattern: &str) -> usize {
+        pattern
+            .split('/')
+            .filter(|c| *c != "*" && *c != "**")
+            .count()
+    }
+
+    /// Does a manifest row's pattern cover this concrete reply key? `*` matches one
+    /// chunk, `**` matches zero or more — the keyexpr semantics the manifest
+    /// promises a consumer.
+    ///
+    /// Implemented HERE rather than delegated to
+    /// [`keyexpr_match::keyexpr_intersects_target`](crate::keyexpr_match) because
+    /// that matcher honours `*` only under `keyexpr-wildcard-single`, and this
+    /// build's own gate must not report agreement because a feature that reads
+    /// wildcards was compiled out. The first draft did delegate, and a
+    /// `--no-default-features` run failed on `@/a1b2/peer/plugins/storage_manager`
+    /// with `*` degraded to a literal chunk — a gate that passes for the wrong
+    /// reason in one direction fails for the wrong reason in the other.
+    fn pattern_covers(pattern: &str, key: &str) -> bool {
+        let p: Vec<&str> = pattern.split('/').collect();
+        let k: Vec<&str> = key.split('/').collect();
+        fn walk(p: &[&str], k: &[&str]) -> bool {
+            match p.first() {
+                None => k.is_empty(),
+                Some(&"**") => (0..=k.len()).any(|skip| walk(&p[1..], &k[skip..])),
+                Some(&"*") => !k.is_empty() && walk(&p[1..], &k[1..]),
+                Some(lit) => !k.is_empty() && k[0] == *lit && walk(&p[1..], &k[1..]),
+            }
+        }
+        walk(&p, &k)
+    }
+
+    /// The per-item fixture the manifest gate needs: one declared entity of EACH
+    /// introspection kind. Empty when the build has no introspection leg, which is
+    /// the same thing the manifest says.
+    fn fixture_declarations() -> Vec<AdminDeclaration> {
+        #[cfg(feature = "adminspace-introspection-handlers")]
+        {
+            alloc::vec![
+                AdminDeclaration {
+                    kind: AdminEntityKind::Subscriber,
+                    keyexpr: String::from("demo/example"),
+                    sources: AdminSources::default(),
+                },
+                AdminDeclaration {
+                    kind: AdminEntityKind::Queryable,
+                    keyexpr: String::from("demo/example"),
+                    sources: AdminSources::default(),
+                },
+            ]
+        }
+        #[cfg(not(feature = "adminspace-introspection-handlers"))]
+        Vec::new()
+    }
+
+    /// The per-item fixture for the plugins legs: one STARTED plugin carrying a
+    /// status leaf, so surfaces B and C both fan out. A non-started plugin would
+    /// exercise B alone and leave C's declaration unchecked.
+    fn fixture_plugins() -> Vec<AdminPlugin> {
+        #[cfg(feature = "adminspace-plugins-handlers")]
+        {
+            alloc::vec![AdminPlugin::wz_static(
+                "storage_manager",
+                "storage-manager",
+                Some("0.1.0"),
+                AdminPluginState::Started,
+            )
+            .with_status_leaves(alloc::vec![AdminPluginStatusLeaf::new("stores", "{}")])]
+        }
+        #[cfg(not(feature = "adminspace-plugins-handlers"))]
+        Vec::new()
+    }
+
     // R311y45 — a recording ReplyOut for the answer_admin_query unit tests:
     // captures each emitted (keyexpr, payload).
     #[derive(Default)]
     struct RecordingReply {
         replies: Vec<(String, Vec<u8>)>,
+        /// R2413 — the ENCODING each keyed reply carried, recorded in step with
+        /// `replies`. It used to be dropped on the floor (`_encoding`), which made
+        /// the manifest's encoding column unverifiable from here: a test can only
+        /// compare a declaration against a measurement it kept.
+        encodings: Vec<Option<crate::sample::EncodingHint>>,
     }
     impl crate::query_sink::ReplyOut for RecordingReply {
         fn reply(&mut self, payload: &[u8]) {
             self.replies.push((String::new(), payload.to_vec()));
+            self.encodings.push(None);
         }
         fn reply_keyed(&mut self, keyexpr: &str, payload: &[u8]) {
             self.replies.push((keyexpr.to_string(), payload.to_vec()));
+            self.encodings.push(None);
         }
         fn reply_keyed_encoded(
             &mut self,
             keyexpr: &str,
             payload: &[u8],
-            _encoding: Option<&crate::sample::EncodingHint>,
+            encoding: Option<&crate::sample::EncodingHint>,
         ) {
             self.replies.push((keyexpr.to_string(), payload.to_vec()));
+            self.encodings.push(encoding.cloned());
         }
         fn reply_del(&mut self) {}
         fn reply_err(&mut self, _: Option<u32>, _: Option<&str>, _: &[u8]) {}

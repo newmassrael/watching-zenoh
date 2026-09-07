@@ -2765,6 +2765,7 @@ dependencies = [
  "rustls-pemfile",
  "sce-forge-runtime",
  "sce-rust-runtime",
+ "serde_json",
  "socket2",
  "tempfile",
  "tokio",

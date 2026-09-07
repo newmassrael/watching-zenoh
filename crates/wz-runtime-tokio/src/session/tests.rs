@@ -2916,9 +2916,9 @@ fn declare_adminspace_metrics_get_returns_openmetrics_text() {
 #[test]
 fn declare_adminspace_wildcard_get_fires_local_data_and_metrics() {
     // A @/<zid>/<whatami>/** wildcard GET intersects the root key, the `/config`
-    // key (R311y40), AND the metrics key -> three replies, the faithful zenoh
-    // multi-handler fan-out (adminspace.rs:499-503 fires every handler whose key
-    // intersects).
+    // key (R311y40), the metrics key AND `wz/surface` (R2413) -> four replies, the
+    // faithful zenoh multi-handler fan-out (adminspace.rs:499-503 fires every
+    // handler whose key intersects).
     use wz_session_core::zid_hex::zid_to_zenoh_hex;
 
     let (session, _driver) = build_session();
@@ -2928,6 +2928,7 @@ fn declare_adminspace_wildcard_get_fires_local_data_and_metrics() {
     let root = format!("@/{zid_hex}/{whatami}");
     let config = format!("@/{zid_hex}/{whatami}/config");
     let metrics = format!("@/{zid_hex}/{whatami}/metrics");
+    let surface = format!("@/{zid_hex}/{whatami}/wz/surface");
 
     let _admin = session
         .declare_adminspace("0.9.9", Vec::new())
@@ -2950,6 +2951,15 @@ fn declare_adminspace_wildcard_get_fires_local_data_and_metrics() {
     assert!(keys.contains(&root), "local_data reply present: {keys:?}");
     assert!(keys.contains(&config), "config reply present: {keys:?}");
     assert!(keys.contains(&metrics), "metrics reply present: {keys:?}");
+    // R2413 (open-debt item 676) — and the surface document, which every
+    // adminspace build answers. Asserted POSITIVELY rather than added to the
+    // filter below: a consumer's first act is this wildcard GET, and the leg
+    // that tells it what the other keys are is the one whose absence would be
+    // least visible.
+    assert!(
+        keys.contains(&surface),
+        "wz/surface reply present: {keys:?}"
+    );
 
     // R311y630 — the FAN-OUT is stated as a shape rather than as the literal
     // `3` that stood here, because that literal was right for every feature
@@ -2965,7 +2975,9 @@ fn declare_adminspace_wildcard_get_fires_local_data_and_metrics() {
     let plugin_prefix = format!("@/{zid_hex}/{whatami}/plugins/");
     let unexpected: Vec<&String> = keys
         .iter()
-        .filter(|k| ![&root, &config, &metrics].contains(k) && !k.starts_with(&plugin_prefix))
+        .filter(|k| {
+            ![&root, &config, &metrics, &surface].contains(k) && !k.starts_with(&plugin_prefix)
+        })
         .collect();
     assert!(
         unexpected.is_empty(),
@@ -2978,6 +2990,94 @@ fn declare_adminspace_wildcard_get_fires_local_data_and_metrics() {
         sorted.len(),
         keys.len(),
         "every intersecting handler replies exactly once: {keys:?}"
+    );
+}
+
+/// R2413 (open-debt item 676) — the surface document arrives over the REAL query
+/// path, as JSON, describing keys that are answerable on this same node.
+///
+/// The unit gate in `wz-session-core` proves the manifest agrees with the
+/// answerer; it cannot prove the leg survives the session's queryable wiring, the
+/// encoding hint's trip through the reply builder, or that the keys it names are
+/// the keys this session actually serves. The consumer that filed item 676 said
+/// explicitly that it had never received a live adminspace reply and that its
+/// encoding claims came from reading this tree's tests — so the claim this
+/// document makes is pinned against BYTES OFF THE QUERY PATH, not against the
+/// emitter that produced them.
+#[cfg(all(feature = "query-get", feature = "adminspace-core"))]
+#[test]
+fn declare_adminspace_surface_document_arrives_over_the_query_path() {
+    use wz_session_core::zid_hex::zid_to_zenoh_hex;
+
+    let (session, _driver) = build_session();
+    let zid_hex = zid_to_zenoh_hex(&session.actions().params.zid);
+    let whatami = session.actions().params.whatami.to_str();
+    let surface = format!("@/{zid_hex}/{whatami}/wz/surface");
+
+    let _admin = session
+        .declare_adminspace("0.9.9", Vec::new())
+        .expect("adminspace-core ON in this build");
+
+    let body = Arc::new(Mutex::new(Option::<Vec<u8>>::None));
+    let enc = Arc::new(Mutex::new(Option::<(u32, Option<String>)>::None));
+    let b = body.clone();
+    let e = enc.clone();
+    session
+        .query(
+            &surface,
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+            move |reply| {
+                *b.lock().unwrap() = Some(reply.payload().to_vec());
+                *e.lock().unwrap() = reply
+                    .put_encoding()
+                    .map(|(id, s)| (id, s.map(str::to_string)));
+            },
+            |_| {},
+        )
+        .expect("query-get ON in this build");
+
+    let got = String::from_utf8(
+        body.lock()
+            .unwrap()
+            .clone()
+            .expect("the surface leg replied"),
+    )
+    .expect("the surface document is UTF-8");
+    // application/json = zenoh encoding id 5 -> wz packed_id 10 (id << 1), no
+    // schema. The consumer reads this to know the body is JSON before parsing it.
+    assert_eq!(*enc.lock().unwrap(), Some((10, None)));
+
+    let doc: serde_json::Value = serde_json::from_str(&got).expect("the surface document is JSON");
+    assert_eq!(
+        doc["revision"], 1,
+        "the document declares its contract: {got}"
+    );
+
+    // The document must name its OWN key, and the root key, with the concrete zid
+    // of THIS node — a manifest carrying a template would hand the consumer a key
+    // it has to build, which is the step this document exists to remove.
+    let legs = doc["legs"].as_array().expect("legs is an array");
+    let named: Vec<&str> = legs.iter().map(|l| l["key"].as_str().unwrap()).collect();
+    assert!(
+        named.contains(&surface.as_str()),
+        "the surface leg names itself: {named:?}"
+    );
+    assert!(
+        named.contains(&format!("@/{zid_hex}/{whatami}").as_str()),
+        "the surface leg names local_data: {named:?}"
+    );
+    // Every declared leg carries both other axes, and `unspoken` is present even
+    // when empty — a consumer must not have to tell "no silences" from "this build
+    // does not answer the question".
+    for leg in legs {
+        assert!(
+            leg["encoding"].is_string() && leg["cardinality"].is_string(),
+            "every leg row carries an encoding and a cardinality: {leg}"
+        );
+    }
+    assert!(
+        doc["unspoken"].is_array(),
+        "`unspoken` is always present: {got}"
     );
 }
 

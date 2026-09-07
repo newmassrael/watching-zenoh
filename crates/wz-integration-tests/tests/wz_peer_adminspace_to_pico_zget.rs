@@ -242,6 +242,42 @@ fn wz_peer_adminspace_decoded_by_pico_z_get() {
         "subscriber leg carries the zenoh Sources body naming A as the source peer\n  got: {sub_line}"
     );
 
+    // ── R2413 (item 676): the surface document, decoded by the FOREIGN client ─
+    // The consumer that filed 676 reads adminspace from another implementation and
+    // had never received a live reply. Everything else about this document is
+    // proven inside this tree, where the emitter and the reader are the same code;
+    // this assertion is the only one where a foreign decoder is what reads it.
+    let surface_key = format!("{root}/wz/surface");
+    let surface_line = out
+        .lines()
+        .find(|l| l.contains(&format!("('{surface_key}':")))
+        .unwrap_or_else(|| {
+            panic!(
+                "pico decoded no adminspace surface document at `{surface_key}`\n\
+                 --- z_get ---\n{out}"
+            )
+        });
+    // The document must name the legs this binary ACTUALLY answers, and its own
+    // gate assertion below is what makes that a measurement: `metrics` is not
+    // compiled in here, so a manifest naming it would be describing a different
+    // build than the one replying.
+    assert!(
+        surface_line.contains(&format!(r#""key":"{root}/subscriber/**""#)),
+        "the surface document names the introspection leg this binary answers\n  \
+         got: {surface_line}"
+    );
+    assert!(
+        !surface_line.contains(&format!(r#""key":"{root}/metrics""#)),
+        "adminspace-metrics is NOT compiled into this binary, so the surface \
+         document must not name it — a manifest that lists every leg the SOURCE \
+         has would answer the consumer's question wrongly and undetectably\n  \
+         got: {surface_line}"
+    );
+    assert!(
+        surface_line.contains(r#""unspoken":"#),
+        "the surface document carries the `null` disambiguation axis\n  got: {surface_line}"
+    );
+
     // ── the gate is real: metrics is NOT in this binary's features ──
     assert!(
         !out.contains(&format!("('{root}/metrics'")),

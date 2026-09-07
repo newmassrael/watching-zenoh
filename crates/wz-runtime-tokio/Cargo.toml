@@ -1931,6 +1931,13 @@ tokio = { version = "1", features = ["full", "test-util"] }
 # way to bind without listening (already in the tree transitively via
 # tokio). Dev-only: never compiled into the lib or the no_std targets.
 socket2 = "0.6"
+# R2413 (open-debt item 676) — TEST-ONLY. The adminspace SURFACE document is a
+# contract a foreign consumer parses with a real JSON reader, so the test that
+# pins it must parse it the same way: a substring assertion would pass on a
+# document that is no longer valid JSON, which is the one failure a consumer
+# cannot recover from. wz-session-core carries this dev-dep for the same reason
+# (its `dissect-serde` round-trip). Inert in the production artifact.
+serde_json = "1"
 # R311oa — generate a self-signed cert + key pair for the TLS loopback e2e
 # (tests/tls_e2e.rs): the acceptor's rustls ServerConfig needs a cert chain +
 # private key, and the dialer's ClientConfig must trust that cert (added to a
