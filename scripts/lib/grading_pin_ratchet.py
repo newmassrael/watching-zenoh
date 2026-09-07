@@ -607,7 +607,36 @@ def _is_graded(reason: str) -> bool:
 #: exactly this reason; read both numbers, never the stale one alone.
 #:
 #: The split is 32 PARTIAL / 9 COMPLETE.
-BUDGET = 41
+#:
+#: 41 -> 40 (ledger `Round 2419`) by re-declaring `storage-aligner`, and it is
+#: the FIRST atom paid out of the nine the R2418 predicate repair made visible.
+#: The stale count moved ALONE (41 -> 40, graded holding at 141), which is the
+#: discriminator written into the note above: an atom paid down moves one
+#: number, a predicate change moves both.
+#:
+#: ITS MEMBERSHIP CAUSE WAS A LABEL, NOT A STALE GRADE, which is R2410's third
+#: cause and R2396's finding about what this count means. The single `1.5.0` in
+#: that whole reason names THIS MACHINE'S ORACLE BINARY (open debt 638), not the
+#: upstream the atom was measured against. It was already graded at the pin and
+#: lacked only the declaration.
+#:
+#: THE ROUND'S PRODUCT IS A CORRECTED COUNT, not a relabelling. That reason
+#: claimed "Seven cases in storage_state tests
+#: aligner::wildcard_align::wildcard_production" and the module holds EIGHT, so
+#: its "reds 6 of 7" is really 6 OF 8. Read from the binary (`running 8 tests`),
+#: not counted over the file -- and the first attempt reported `running 0 tests`
+#: at rc=0, because that module needs `storage-mgr-wildcard-updates` on top of
+#: `storage-aligner`. rc=0 with zero tests is a dead probe, never an absence.
+#:
+#: All four of its probes were RE-RUN rather than inherited: red sets of 8 are
+#: 6 / 1 / 1 / 1, the last three singletons and PAIRWISE DISJOINT, so the sites
+#: really are separated. Two cases survive every probe, one of them the negative
+#: guard the reason itself predicted would. The three upstream citations all
+#: resolve at the pin, checkable only because a prior round wrote them as
+#: `path` @ `needle` instead of line numbers.
+#:
+#: The split is 32 PARTIAL / 8 COMPLETE.
+BUDGET = 40
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
