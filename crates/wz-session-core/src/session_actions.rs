@@ -3274,9 +3274,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `link.reconfigure(TransportLinkUnicastConfig { priorities:
     /// state.transport.ext_qos.priorities(), reliability:
     /// state.transport.ext_qos.reliability(), .. })`, which BOTH sides run once
-    /// establishment settles (`unicast/establishment/open.rs:694-706`,
-    /// `accept.rs:818-830`). That reconfigured `link.config` is precisely what the
-    /// egress `select` reads (`unicast/universal/tx.rs:81-90`), so upstream the
+    /// establishment settles
+    /// (`io/zenoh-transport/src/unicast/establishment/open.rs`
+    /// @ `let o_link = link_unicast.reconfigure(`,
+    /// `io/zenoh-transport/src/unicast/establishment/accept.rs`
+    /// @ `let a_link = link_unicast.reconfigure(`). That reconfigured
+    /// `link.config` is precisely what the egress `select` reads
+    /// (`io/zenoh-transport/src/unicast/universal/tx.rs`
+    /// @ `Reliability::from(tl.link.link.is_reliable())`), so upstream the
     /// handshake outcome — not the pre-handshake offer — is what routes traffic.
     ///
     /// Without this, wz negotiated a band faithfully and then ignored it: a link
@@ -3300,6 +3305,20 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// (`config.reliability.unwrap_or(Reliability::from(link.is_reliable()))`).
     /// That fallback difference is pre-existing and independent of the handshake;
     /// it is not silently folded in here.
+    ///
+    /// R2422 — re-measured at the 1.10.0 pin, and the two-band-source residual has
+    /// a THIRD face this block did not name: the NoQoS path. Upstream, either side
+    /// being NoQoS overwrites its OWN ext state with `State::NoQoS`
+    /// (`io/zenoh-transport/src/unicast/establishment/ext/qos.rs`
+    /// @ `*state_self = State::NoQoS.into();`), and the reconfigure then builds a
+    /// FRESH `TransportLinkUnicastConfig` whose `priorities` is that state's
+    /// `None` — so a NoQoS handshake leaves upstream selecting on reliability
+    /// alone. wz's caller returns before reaching this function on that path, so a
+    /// band `set_link_priority_range` installed at bring-up SURVIVES a NoQoS
+    /// negotiation and keeps restricting egress. It is the same divergence the
+    /// paragraph above names — wz has a band source upstream does not — seen on
+    /// the path where upstream has no band at all rather than on the narrowed one,
+    /// and it is not a separate gap.
     #[cfg(all(
         feature = "session-extqos",
         feature = "codec-init-body",

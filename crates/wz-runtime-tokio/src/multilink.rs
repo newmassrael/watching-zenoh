@@ -657,11 +657,15 @@ mod tests {
 
     /// R311y514 — the band that routes egress is the NEGOTIATED one, not the
     /// staged offer. zenoh rebuilds the link config from the handshake outcome on
-    /// BOTH sides (`establishment/open.rs:703-704` and `accept.rs:826-827`,
-    /// `priorities: state.transport.ext_qos.priorities()` into
-    /// `link.reconfigure`), and that same `link.config.priorities` is the input to
-    /// the egress `select` (`unicast/universal/tx.rs:81-90`). So a band the
-    /// containment narrowed must stop attracting the priorities it gave up.
+    /// BOTH sides (`io/zenoh-transport/src/unicast/establishment/open.rs`
+    /// @ `let o_link = link_unicast.reconfigure(` and
+    /// `io/zenoh-transport/src/unicast/establishment/accept.rs`
+    /// @ `let a_link = link_unicast.reconfigure(`, each fed
+    /// `priorities: state.transport.ext_qos.priorities()`), and that same
+    /// `link.config.priorities` is the input to the egress `select`
+    /// (`io/zenoh-transport/src/unicast/universal/tx.rs`
+    /// @ `ps.filter(|ps| ps.contains(&priority))`). So a band the containment
+    /// narrowed must stop attracting the priorities it gave up.
     ///
     /// The discriminator is the WIDTH tie-break: the secondary here covers every
     /// priority, so it wins Background only once the primary stops covering it.

@@ -587,10 +587,20 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # those two commits, dying HERE before the citation gates that sit after it --
 # which is why a later reader must not read a green anchor gate as evidence
 # that this page was reached.
+# Round 2422 -- `session-extqos` re-declared at the pin (open-debt item 675),
+# and this time the mover IS this round, not a neighbour. That atom is graded
+# PARTIAL, so unlike R2417's COMPLETE it sits inside `partial_atoms()` and its
+# rewritten reason reaches this page directly: wz 301 -> 302, one new citation of
+# `crates/wz-session-core/src/extqos.rs`, which the re-measurement names because
+# the false protocol-absence sentences it corrected are in that file. Every other
+# axis is UNCHANGED and that was read rather than assumed -- reached 55,
+# unreached 3, no-symbol 2, ambiguous 73 all identical before and after the
+# mutation, so the single-count move is the whole of this round's delta and no
+# neighbour's drift is being adopted here.
 PIN_REACHED = 55
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
-PIN_WZ_CITATIONS = 301
+PIN_WZ_CITATIONS = 302
 PIN_AMBIGUOUS = 73
 
 

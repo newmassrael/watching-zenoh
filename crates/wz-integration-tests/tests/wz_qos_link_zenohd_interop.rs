@@ -7,7 +7,8 @@
 //! ## What the atom is, and what was missing
 //!
 //! zenoh negotiates QoS at ext id `0x1` in one of two mutually exclusive forms
-//! (`commons/zenoh-protocol/src/transport/init.rs:147-148`):
+//! (`commons/zenoh-protocol/src/transport/init.rs`
+//! @ `pub type QoSLink = zextz64!(0x1, false)`):
 //! `QoS = zextunit!(0x1)`, a presence marker, and `QoSLink = zextz64!(0x1)`,
 //! whose z64 body packs the link's PRIORITY RANGE and RELIABILITY class. wz built
 //! the unit form under `transport-qos` and DECODED both as "this peer does QoS",
@@ -26,11 +27,16 @@
 //! ## Only one direction is reachable, and the reason is upstream's, not ours
 //!
 //! zenoh seeds its state from an ENDPOINT's `prio=` / `rel=` metadata
-//! (`Metadata::PRIORITIES` / `RELIABILITY`, `core/endpoint.rs:196-197`). On the
-//! DIAL side that is the dial endpoint, metadata included. On the ACCEPT side it
-//! is `link.get_src().to_endpoint()` (`accept.rs:672`) — and zenoh-link-tcp
+//! (`Metadata::PRIORITIES` / `RELIABILITY`,
+//! `commons/zenoh-protocol/src/core/endpoint.rs`
+//! @ `pub const PRIORITIES: &'static str = "prio";`). On the DIAL side that is
+//! the dial endpoint, metadata included. On the ACCEPT side it is
+//! `link.get_src().to_endpoint()`
+//! (`io/zenoh-transport/src/unicast/establishment/accept.rs`
+//! @ `let endpoint = link.get_src().to_endpoint();`) — and the TCP link
 //! constructs an accepted link's src locator with a HARD-CODED empty metadata
-//! string (`unicast.rs:103`, `Locator::new(TCP_LOCATOR_PREFIX, src_addr, "")`).
+//! string (`io/zenoh-links/zenoh-link-tcp/src/unicast.rs`
+//! @ `src_locator: Locator::new(TCP_LOCATOR_PREFIX, src_addr.to_string(), "")`).
 //!
 //! So a zenohd LISTENING on `tcp/…?prio=2-5` has no band at all, and pointing wz
 //! at it proves nothing about the containment: measured first, and it accepted a

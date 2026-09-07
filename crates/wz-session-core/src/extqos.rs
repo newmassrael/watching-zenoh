@@ -5,7 +5,8 @@
 //!
 //! zenoh negotiates the QoS transport (per-(priority,reliability) SN conduits)
 //! via ext id `0x1` on the Init transport message, in ONE of two mutually
-//! exclusive forms (`commons/zenoh-protocol/src/transport/init.rs:146-147`):
+//! exclusive forms (`commons/zenoh-protocol/src/transport/init.rs`
+//! @ `pub type QoSLink = zextz64!(0x1, false)`):
 //!   - `pub type QoS = zextunit!(0x1, false)` — the presence-only UNIT form a
 //!     peer with QoS enabled but NO per-link priority/reliability metadata sends;
 //!   - `pub type QoSLink = zextz64!(0x1, false)` — the z64 form a peer with
@@ -13,33 +14,47 @@
 //!     priority-range + reliability), NEVER alongside the unit.
 //! Both mean `is_qos = true`; only the absence of BOTH is `NoQoS`
 //! (`io/zenoh-transport/src/unicast/establishment/ext/qos.rs`
-//! `try_from_exts`). The capability is negotiated by AND of both sides — if
+//! @ `fn try_from_exts`). The capability is negotiated by AND of both sides — if
 //! EITHER peer is `NoQoS` the result is `NoQoS` (the `else { NoQoS }` arm in
 //! `recv_init_syn` / `recv_init_ack`).
 //!
-//! wz EMITS the presence-only UNIT form (`0x1`, ENC_UNIT, no body — byte-
-//! identical to what a default `qos`-on zenohd sends). wz DECODE tolerates BOTH:
+//! wz EMITS WHICHEVER FORM ITS OWN STATE SELECTS, the way zenoh's
+//! `State::to_exts` does: the presence-only UNIT form (`0x1`, ENC_UNIT, no body
+//! — byte-identical to what a default `qos`-on zenohd sends) while no per-link
+//! band or reliability is staged, and the z64 `QoSLink` the moment EITHER is.
+//! `encode_qos_ext_for` owns that choice, which is what makes the exclusivity
+//! structural. Under `--no-default-features` the z64 half is compiled out with
+//! `session-extqos` and the unit form is all there is.
+//!
+//! wz DECODE tolerates BOTH:
 //! [`peer_offered_qos`] matches ext id `0x1` regardless of the encoding nibble
 //! (`ext_id() = header & 0x0F` masks ENC_Z64 `0x20` and the M bit off), so a
 //! priority-configured zenohd advertising `QoSLink` is correctly read as
 //! `is_qos = true` and its z64 body is length-skipped by the generic
-//! `crate::ext_chain::decode_ext_chain` (no Init ext-chain desync). The
-//! `QoSLink` PRIORITY-RANGE semantics (the per-link `select` config) are
-//! deferred to the wz<->zenohd priority-range interop follow-on (S4); here
-//! `is_qos` decides only "per-priority conduits: `Priority::NUM` vs 1".
+//! `crate::ext_chain::decode_ext_chain` (no Init ext-chain desync). With only
+//! `transport-qos` on, that is the whole of it and `is_qos` decides just
+//! "per-priority conduits: `Priority::NUM` vs 1". `session-extqos` adds the
+//! BODY's meaning: `qos_state_try_from_u64` reads the band and the reliability
+//! bit out of it, the two merges below enforce the directional containment, and
+//! `SessionLinkActions::apply_negotiated_qos_to_link` pushes the negotiated
+//! outcome onto the link inputs `select_link` reads (R311y514).
 //!
-//! This module is the codec LAYER only — the `(0x1, ENC_UNIT, empty body)`
-//! envelope on Init, plus the presence projector the establishment demux
-//! (`crate::drive::dispatch_link_event`) feeds the inbound ext chain into. The
-//! per-session `is_qos` state, the offer staging into the Init role ext chains,
-//! the `&=` merge, and the QoS conduit / Frame `ext_qos` data path live in
+//! This module is the WIRE SHAPE and the negotiation ALGEBRA — the
+//! `(0x1, ENC_UNIT, empty body)` envelope on Init, the presence projector the
+//! establishment demux (`crate::drive::dispatch_link_event`) feeds the inbound
+//! ext chain into, the z64 body's pack and unpack, and the two directional
+//! merges mirroring zenoh's `recv_init_syn` / `recv_init_ack`. All of it is
+//! pure: nothing here reads or writes session state. The per-session `is_qos`
+//! and `qos_link` state, the offer staging into the Init role ext chains, the
+//! `&=` merge, the application of a merged outcome to the link, and the QoS
+//! conduit / Frame `ext_qos` data path live in
 //! [`crate::session_actions`] / [`crate::drive`]. It mirrors the
 //! [`crate::extlowlatency`] precedent (a distinct establishment ext on the same
 //! Init carrier, its own SSOT because QoS is a distinct id-`0x1` slot).
 //!
 //! QoS exclusivity: zenoh forbids `is_qos && is_lowlatency`
-//! (`io/zenoh-transport/src/unicast/manager.rs:264`
-//! `bail!("'qos' and 'lowlatency' options are incompatible")`). The guard lives
+//! (`io/zenoh-transport/src/unicast/manager.rs`
+//! @ `'qos' and 'lowlatency' options are incompatible`). The guard lives
 //! at the offer-injection point (`SessionLinkActions::set_qos_offer` refuses the
 //! QoS offer when a lowlatency offer is already staged), NOT in this codec.
 
@@ -48,7 +63,8 @@ use wz_codecs::ext_entry::ExtEntryOwned;
 use crate::unit_ext::{chain_has_ext_eid, encode_unit_ext};
 
 /// Z_EXT_QOS ext id on the Init establishment message — zenoh
-/// `init.rs:146-147` `zextunit!(0x1, false)` (unit) XOR `zextz64!(0x1, false)`
+/// `commons/zenoh-protocol/src/transport/init.rs`
+/// @ `pub type QoS = zextunit!(0x1, false)` (unit) XOR `zextz64!(0x1, false)`
 /// (link). The establishment messages have their own ext id space (0x1 QoS,
 /// 0x2 Shm, 0x3 Auth, 0x4 MultiLink, 0x5 LowLatency, 0x6 Compression,
 /// 0x7 Patch).
@@ -58,8 +74,12 @@ pub const QOS_EXT_ID: u8 = crate::ext_header::establishment_ext_id::QOS;
 /// (the [`crate::unit_ext`] mechanism at the QoS id). zenoh
 /// `State::QoS { priorities: None, reliability: None } -> Some(QoS::new())` =
 /// `zextunit!(0x1)`; the surrounding [`crate::ext_chain::encode_ext_chain`]
-/// applies the chain-continuation `Z` bit. wz never emits `QoSLink` (the z64
-/// priority-range form) — it carries no per-link endpoint metadata yet (S4).
+/// applies the chain-continuation `Z` bit.
+///
+/// This is the UNIT half only. Which of the two forms a session actually puts on
+/// the wire is `encode_qos_ext_for`'s decision, and it picks the z64 `QoSLink`
+/// whenever a band or a reliability class is staged — call THAT from a stage
+/// site, never this directly, or a configured band silently leaves the wire.
 pub fn encode_qos_ext() -> ExtEntryOwned {
     encode_unit_ext(QOS_EXT_ID)
 }
@@ -75,7 +95,9 @@ pub fn encode_qos_ext() -> ExtEntryOwned {
 /// claim: it accepts anything at id 0x1 in any encoding, present or future. Here
 /// the acceptance is deliberate and bounded, because zenoh's QoS genuinely IS a
 /// dual ext whose two forms both mean "this peer does QoS"
-/// (`transport/init.rs:147-148`, unit XOR z64 with superset/subset containment).
+/// (`commons/zenoh-protocol/src/transport/init.rs`
+/// @ `pub type QoS = zextunit!(0x1, false)`, unit XOR z64 with superset/subset
+/// containment).
 ///
 /// That reasoning does NOT generalise, which is why the loose match had to go:
 /// zenoh's `Shm` at id 0x2 is a ZBuf CHALLENGE, not a second spelling of a
@@ -102,7 +124,8 @@ pub const QOS_LINK_EXT_HEADER: u8 = QOS_EXT_ID | crate::ext_header::EXT_ENC_Z64;
 
 /// The per-link QoS metadata a peer advertises in the `QoSLink` body — the
 /// payload half of zenoh's `State::QoS { priorities, reliability }`
-/// (`io/zenoh-transport/src/unicast/establishment/ext/qos.rs`).
+/// (`io/zenoh-transport/src/unicast/establishment/ext/qos.rs`
+/// @ `priorities: Option<PriorityRange>`).
 ///
 /// The NoQoS/QoS discriminator itself is NOT duplicated here: wz already keeps
 /// it as `SessionLinkActions::is_qos`, so this type carries only what the z64
@@ -379,8 +402,9 @@ mod tests {
     /// RANK-2 faithfulness: a priority-configured zenohd sends `QoSLink` (a z64
     /// at id 0x1, header `0x21` = id 0x1 | ENC_Z64 0x20), NOT the unit.
     /// `peer_offered_qos` must STILL read it as QoS (else wz mis-negotiates
-    /// NoQoS against a QoS peer). The z64 body's range meaning is deferred (S4);
-    /// only the presence at id 0x1 matters here.
+    /// NoQoS against a QoS peer). Only the presence at id 0x1 is under test
+    /// here; the body's range meaning is `session-extqos`'s and is covered by
+    /// the `qos_link` cases below.
     #[test]
     fn peer_offer_detected_for_the_z64_qoslink_form() {
         let qos_link = ExtEntryOwned {

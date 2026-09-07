@@ -391,8 +391,22 @@ _ANY_TOKEN = re.compile(r"(?<![\w/.-])(\w[\w-]*)/[\w/.-]+\.rs")
 #: module that does not exist at 1.10.0 at all. The replacement claims are
 #: anchored on the stats crate that replaced it, so one more line-form citation
 #: left the tree.
-LINE_BUDGET = 291
-BARE_BUDGET = 60
+#: 291 -> 288, 60 -> 58 (R2422). The `session-extqos` atom was re-measured at the
+#: pin for open-debt item 675, and the five line-form citations its claim surface
+#: carried were all WRONG THERE, in three different ways: the QoS/QoSLink ext pair
+#: moved from 147-148 to 144-145 when `RegionName` was added above it, the
+#: qos/lowlatency bail moved from 264 to 286, and the LINE bucket had graded none
+#: of it because it only asks whether a line is past the end of the file. Three of
+#: those were rooted; the two bare ones named the establishment QoS ext module
+#: without saying what in it. All five are now `path` @ `needle`.
+#:
+#: ⚠ The paths are DESCRIBED and not spelled, and that is not style: this file is
+#: tracked, so it is inside the population it scans, and the first draft of this
+#: very comment pushed the root-less residue up by two the moment it typed two of
+#: them out. The warning three hundred lines below said so; writing it here as
+#: well is what a second firing earns.
+LINE_BUDGET = 288
+BARE_BUDGET = 58
 #: The root-less axis, after R2317 repaired the 49 citations that named a file
 #: gone at the pin. Same two-directional ratchet as LINE and BARE.
 #:
@@ -429,7 +443,16 @@ ROOTLESS_STALE_LINE_BUDGET = 1
 #: at the pin. They did not move between buckets — the claims they supported were
 #: re-measured and re-anchored on the stats crate, so the occurrences left the
 #: root-less population outright.
-ROOTLESS_UNDECLARED_BUDGET = 668
+#: R2422 — 668 -> 661. The same `session-extqos` re-measurement: seven root-less
+#: citations under UNGRADED first segments supported that atom's claims about
+#: where the handshake outcome is applied and where egress selection reads it.
+#: Every one named a line that had MOVED at the pin — the two `link.reconfigure`
+#: sites, the egress `select`, the acceptor's src-endpoint seed, the `prio`/`rel`
+#: metadata keys — and being root-less, nothing graded any of them. They were
+#: re-anchored WITH their roots, so the occurrences left this residue rather than
+#: moving between buckets. (Their paths are described rather than spelled, for the
+#: reason the LINE_BUDGET note above now carries.)
+ROOTLESS_UNDECLARED_BUDGET = 661
 #: EVERY root-less occurrence, graded or not: `rootless_line + rootless_bare +
 #: residue`. One ratchet over the union of the three above, and it exists
 #: because those three CANNOT express the invariant that matters.
@@ -466,7 +489,10 @@ ROOTLESS_UNDECLARED_BUDGET = 668
 #: R2371 — 805 -> 802, the same three occurrences as the budget above: the
 #: `transport-stats` module's root-less 1.5.0 citations, retired rather than
 #: rerooted, because the paths they named do not exist at the pin.
-ROOTLESS_TOTAL_BUDGET = 802
+#: R2422 — 802 -> 795, the same seven occurrences as the budget above: the
+#: `session-extqos` claim surface's root-less citations, re-anchored with their
+#: roots rather than retired, so they left the root-less population entirely.
+ROOTLESS_TOTAL_BUDGET = 795
 
 #: A LIVE invocation of the RESOLUTION arm. R2242 split this gate in two and,
 #: in doing so, made `--resolve` a flag someone can simply stop passing: delete

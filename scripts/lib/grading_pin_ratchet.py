@@ -196,8 +196,21 @@ def _is_graded(reason: str) -> bool:
     is that reason's own prose, and grading it would re-admit prose as the thing
     being measured -- the defect `PIN_DECLARED` above already replaced once.
     """
+    return _grade_head(reason) in GRADE_TAGS
+
+
+def _grade_head(reason: str) -> str:
+    """The reason's grade as ONE upper-cased word, or `""` when it has none.
+
+    R2422 — extracted so the population predicate and the PARTIAL/COMPLETE split
+    cannot drift apart again. They already did once: `_is_graded` stopped
+    splitting on a colon at R2418 and the split did not, which reported every
+    paren-headed atom in the population as COMPLETE. A shape read in two places
+    is a shape that will be read two ways, so there is now one reader.
+    """
     head = GRADE_HEAD.match(reason)
-    return bool(head) and head.group(1).upper() in GRADE_TAGS
+    return head.group(1).upper() if head else ""
+
 
 #: Seeded at what `--count` PRINTS for this commit's PARENT: 61.
 #:
@@ -660,8 +673,37 @@ def _is_graded(reason: str) -> bool:
 #: all along; the claim shrank to the half that had none, and the probes that
 #: red BOTH instruments were written up as discriminating nothing.
 #:
-#: The split is 32 PARTIAL / 7 COMPLETE.
-BUDGET = 39
+#: The split was reported as 32 PARTIAL / 7 COMPLETE. It was 33/6 -- see below.
+#:
+#: 39 -> 38 (R2422). `session-extqos`, the third membership-by-LABEL in a row and
+#: the third of the four atoms R2418 made countable. Its single `1.5.0` is
+#: "CROSS-IMPL PROVEN vs a live zenohd 1.5.0", the ORACLE BINARY again (open debt
+#: 638); every P= and C= claim in it cites the source with no version at all. So
+#: the DECLARATION was missing, not the measurement -- but the round was not free,
+#: and what it cost bought two findings.
+#:
+#: THE REFUTATION WAS IN PRODUCT CODE, and it is R2417's class exactly: the atom's
+#: own SSOT module opened by asserting wz "EMITS the presence-only UNIT form",
+#: that the QoSLink priority-range semantics "are deferred", and that the module
+#: "is the codec LAYER only". All three are refuted by the SECOND HALF OF THE SAME
+#: FILE -- the emit-form chooser, the z64 body codec, and the two containment
+#: merges -- and one item doc still said wz "never emits QoSLink ... yet". A stale
+#: grading asserting a protocol ABSENCE in a comment, outliving the rounds that
+#: built the thing it denies. Seventeen of that atom's upstream citations were
+#: re-read one by one and FOURTEEN were wrong at the pin, none of them graded by
+#: anything: the ext pair moved when `RegionName` was inserted above it, both
+#: `link.reconfigure` sites moved, the egress select moved, the acceptor's
+#: src-endpoint seed moved, and the TCP link crate MOVED PATH. All seventeen are
+#: now anchored.
+#:
+#: AND THE ROUND FOUND THIS FILE'S OWN RESIDUAL OF ITEM 686, by tripping over it:
+#: the PARTIAL/COMPLETE split still split on the colon R2418 removed from the
+#: population, so every paren-headed atom was tallied as COMPLETE and `--list`
+#: printed a parenthetical where a grade belongs. Repaired with one shared head
+#: extractor; the true split at this budget is 33 PARTIAL / 5 COMPLETE, and every
+#: split figure the R2418..R2421 notes recorded understated PARTIAL. The COUNTS
+#: those rounds ratcheted were always right -- only the split was wrong.
+BUDGET = 38
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
@@ -701,7 +743,22 @@ def stale(reasons: list[tuple[str, str]]) -> list[tuple[str, str, str]]:
         # PIN_DECLARED for why the naive predicate counted the repair as debt.
         if PIN_DECLARED in reason:
             continue
-        grade = reason.split(":", 1)[0]
+        # R2422 — THE SPLIT USED TO TURN ON THE SAME COLON THE POPULATION DID.
+        #
+        # R2418 (item 686) stopped `_is_graded` splitting on `":"` and admitted
+        # nine paren-headed reasons, but this line kept `reason.split(":", 1)[0]`
+        # — so for `PARTIAL (BUILT R311y506, ...)` the "grade" became the whole
+        # run of text up to the reason's first colon, which equals neither tag.
+        # Those rows therefore failed the `== "PARTIAL"` test and were tallied as
+        # COMPLETE, and `--list` printed a sixty-character parenthetical where an
+        # atom's grade belongs. The COUNT was always right; the SPLIT was not,
+        # and the split is what item 675's own text ranks the work by, calling
+        # COMPLETE the sharper half. Measured here: 32/6 reported, 33/5 true,
+        # with `storage-mgr-dynamic-volume-loading` the surviving mislabelled row
+        # — so every figure the R2418..R2421 entries recorded for the SPLIT
+        # understated PARTIAL by however many paren-headed atoms were in the
+        # population at the time. One head extractor, used by both.
+        grade = _grade_head(reason)
         where = ""
         for m in re.finditer(re.escape(STALE_VERSION), reason):
             start = max(0, m.start() - 60)
@@ -742,6 +799,30 @@ def main() -> int:
 
     rows = stale(reasons)
     count = len(rows)
+
+    # R2422 — EVERY ROW'S GRADE MUST BE ONE OF THE TWO TAGS, or this reader is
+    # reporting a split it cannot compute.
+    #
+    # This exists because the split silently disagreed with the population for
+    # four rounds and nothing could say so: `stale()` read the grade with the
+    # colon split R2418 had already removed from `_is_graded`, so a paren-headed
+    # reason yielded a sixty-character "grade" that equalled neither tag, failed
+    # the `== "PARTIAL"` test, and was tallied as COMPLETE. A printed number is
+    # not graded by being printed. This is the guard the repair earns: it FAILS on
+    # the pre-repair reader (`storage-mgr-dynamic-volume-loading` is the live
+    # witness) and passes on the shared extractor, so the two readings can never
+    # drift apart again without a red.
+    ungraded = [(a, g) for a, g, _ in rows if g not in GRADE_TAGS]
+    if ungraded:
+        print(
+            f"  grading-pin-ratchet: FAIL {len(ungraded)} row(s) carry a grade "
+            f"that is neither {GRADE_TAGS[0]} nor {GRADE_TAGS[1]}, so the split "
+            f"below would be counted wrong: "
+            + ", ".join(f"{a} -> {g[:40]!r}" for a, g in ungraded[:3])
+            + ". The population predicate and the split must read the reason's "
+            f"grade through the SAME extractor (`_grade_head`)."
+        )
+        return 1
 
     if args.count:
         print(count)

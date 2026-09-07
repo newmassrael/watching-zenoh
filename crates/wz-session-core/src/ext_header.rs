@@ -58,7 +58,9 @@ pub const fn ext_id(header: u8) -> u8 {
 /// two is a cross-impl defect this round measured on the wire. zenoh's id field is
 /// four bits, so two DIFFERENT extensions may share it and be told apart by their
 /// encoding; zenoh does that deliberately (`QoS = zextunit!(0x1, false)` beside
-/// `QoSLink = zextz64!(0x1, false)`, `transport/init.rs:147-148`, and
+/// `QoSLink = zextz64!(0x1, false)`,
+/// `commons/zenoh-protocol/src/transport/init.rs`
+/// @ `pub type QoSLink = zextz64!(0x1, false)`, and
 /// `init::ext::Shm = zextzbuf!(0x2, false)` beside wz's own UNIT offer at 0x2).
 /// Matching a capability by `ext_id` alone therefore accepts a peer's UNRELATED
 /// extension as an offer: a real `zenohd --features shared-memory` dialling wz
