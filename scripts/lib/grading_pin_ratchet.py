@@ -276,8 +276,19 @@ GRADE_TAGS = ("PARTIAL:", "COMPLETE:")
 #: counting definitions across the crate tree rather than by resolving an anchor.
 #: Tag untouched at PARTIAL; the residual clauses are confirmed, not withdrawn.
 #:
-#: The split is 41 PARTIAL / 11 COMPLETE.
-BUDGET = 52
+#: The split was 41 PARTIAL / 11 COMPLETE.
+#:
+#: 52 -> 51 (R2406). `ext-pubsub-serde-codec`, taken from the NEVER-READ half and
+#: taken for refutation odds rather than cheapness: a serialization-format atom
+#: is where a version move would land on the wire, and every residual in it has
+#: the form "upstream has X, wz does not", which a move can void from either
+#: side. None was voided -- all six subjects still exist upstream, so the gap
+#: list is confirmed rather than trimmed, and the wire residual is still
+#: API-reachable because the length wrapper is still a public struct with both
+#: halves implemented on it.
+#:
+#: The split is 41 PARTIAL / 10 COMPLETE.
+BUDGET = 51
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
