@@ -48,6 +48,30 @@ Both directions FAIL, which is this tree's established ratchet shape (see
   * BELOW the budget -- a round re-measured one. Lower the budget in that SAME
     commit, so the number can never quietly drift away from what it counts.
 
+## WHAT THE COUNT IS, and what it is NOT (R2396)
+
+It is the number of graded atoms that do NOT DECLARE a pin measurement. That is
+not the same as the number never measured at the pin, and the difference was
+found by this gate's SECOND customer rather than reasoned out in advance.
+
+`declare-token` was in the population, and R2383 had already re-measured it at
+the pin and written the result into the reason -- in its own words, before this
+marker existed. Measured at that commit, 14 of the 60 are in that position:
+their prose asserts a pin reading somewhere, in a spelling no regex can be
+trusted to grade, because "mentions 1.10.0" is exactly the substitution this
+gate exists to refuse.
+
+So the number over-states the WORK and states the DECLARATION exactly, which is
+the honest thing for it to measure: prose cannot be graded, a declaration can.
+Paying one of the 14 is therefore cheaper than paying a fresh one -- but it is
+NOT a stamp, and `declare-token` is the proof. Both of the pin claims R2383
+wrote cited a path that does not exist at the pin (one repository-name segment
+too many), so the round that stamped the marker had to read the pin to find the
+claims true and the citations dead. A round that had trusted the prose would
+have propagated two dead citations; a round that had read the citation gate's
+"unresolved" finding as a verdict on the CLAIM would have re-opened a grade that
+is correct. Verify, then declare.
+
 ## What it derives rather than declares
 
 The population is read out of the store: every `inventory_entries` value whose
@@ -116,8 +140,18 @@ GRADE_TAGS = ("PARTIAL:", "COMPLETE:")
 #: 61 -> 60 (R2394). The round re-measured `access-downsampling` against the pin,
 #: found the refutation described above, BUILT the missing kind rather than
 #: re-tagging, and re-declared that atom -- this ratchet's "removed one"
-#: direction. The split is 43 PARTIAL / 17 COMPLETE after the move.
-BUDGET = 60
+#: direction. The split was 43 PARTIAL / 17 COMPLETE after the move.
+#:
+#: 60 -> 59 (R2396). `declare-token`, and it is the case that taught this gate
+#: what its own number MEANS -- see WHAT THE COUNT IS BELOW. R2383 had already
+#: re-measured that atom at the pin and written the result down; what was
+#: missing was the DECLARATION, not the measurement. This round re-verified both
+#: of its claims by reading the pin -- the envelope writes ext_qos only when it
+#: differs from DEFAULT and counts it into the header's Z flag, and the body's
+#: extension chain is still consumed while that flag rides -- found them true,
+#: repaired the two dead paths they cited, and stamped the marker. The split is
+#: 43 PARTIAL / 16 COMPLETE after the move.
+BUDGET = 59
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
