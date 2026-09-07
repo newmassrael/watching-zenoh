@@ -344,8 +344,27 @@ GRADE_TAGS = ("PARTIAL:", "COMPLETE:")
 #: are anchored can be re-verified end to end in one pass; one carrying the same
 #: claims as line numbers cannot be verified at all without re-deriving them.
 #:
-#: The split is 36 PARTIAL / 9 COMPLETE.
-BUDGET = 45
+#: The split was 36 PARTIAL / 9 COMPLETE.
+#:
+#: 45 -> 43 (R2412 + R2413, two atoms in one commit).
+#:
+#: `declare-keyexpr` (R2412) is the FIRST READING on this seam rather than a
+#: missing declaration -- its text never names the pinned version at all -- and
+#: it was still the cheapest available, because a previous round had converted
+#: its upstream halves to ANCHORED form. Eleven claims, all resolving in one
+#: pass: the largest anchored set re-verified here, at less cost than atoms a
+#: third its size whose claims are line numbers. Its residual is wz-side and
+#: BUILDABLE BUT NOT SMALL -- the wire-expression arm is a type-level refinement
+#: made in the codec's SCXML source, so closing it is a codegen change.
+#:
+#: `access-acl` (R2413) is the sixth spelling variant. Both clauses hold on both
+#: halves, and the cross-atom CHAIN is now verified end to end: the username
+#: subject axis cannot be built until the usrpwd handshake keeps that value, and
+#: R2405 confirmed at the pin that wz's accept path discards it. A reader
+#: deciding what to build starts at the handshake atom, not this one.
+#:
+#: The split is 35 PARTIAL / 8 COMPLETE.
+BUDGET = 43
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
