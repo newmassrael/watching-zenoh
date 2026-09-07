@@ -149,9 +149,18 @@ GRADE_TAGS = ("PARTIAL:", "COMPLETE:")
 #: of its claims by reading the pin -- the envelope writes ext_qos only when it
 #: differs from DEFAULT and counts it into the header's Z flag, and the body's
 #: extension chain is still consumed while that flag rides -- found them true,
-#: repaired the two dead paths they cited, and stamped the marker. The split is
+#: repaired the two dead paths they cited, and stamped the marker. The split was
 #: 43 PARTIAL / 16 COMPLETE after the move.
-BUDGET = 59
+#:
+#: 59 -> 58 (R2398). `declare-subscriber`, the sibling `declare-token` shares an
+#: R2383 correction block with. Its two dead paths were PREDICTED from that
+#: shared block and then CHECKED rather than assumed -- the right order, because
+#: R2383's own closing paragraph warns that a shared block is not a shared
+#: verdict, and `declare-keyexpr` proves it by sharing the block and staying
+#: PARTIAL. Both pin claims re-read, the tree-side witness re-RUN rather than
+#: cited: 535 tests pass where that reason still records 530, so the frozen
+#: count had drifted by five. The split is 43 PARTIAL / 15 COMPLETE.
+BUDGET = 58
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
