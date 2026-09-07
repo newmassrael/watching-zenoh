@@ -3052,6 +3052,26 @@ PY
     # `.githooks/pre-push`, which is what makes it the LOCAL gate item 224 asks
     # for -- this lane is the hosted half.
     python3 scripts/lib/config_key_fixture_gate.py || return 1
+    # R2394 (unregistered open-debt item 675) — the GRADING-PIN ratchet. An
+    # atom's inventory reason opens with its grade and then says what the grade
+    # was measured against, and 61 of them still said 1.5.0 while this tree pins
+    # 1.10.0. A stale PARTIAL is merely old; a stale COMPLETE is a false claim of
+    # parity with an upstream that has since moved, asserted about the upstream
+    # this tree exists to replace. R2394 re-measured one and the measurement
+    # refuted it: `access-downsampling` was COMPLETE while the pin's filter reads
+    # Put and Del through separate selector bits wz could not express.
+    #
+    # It belongs beside the gate above for the same reason: BOTH SIDES ARE ON
+    # DISK. The population is derived from the store's own inventory and the pin
+    # is a literal, so it costs milliseconds with nothing built, and it runs in
+    # `.githooks/pre-push` too -- a gate the hook cannot see is one nobody reads.
+    #
+    # A ratchet rather than a red, because turning dozens of atoms red at once
+    # stops the tree and a gate that stops the tree gets switched off. Both
+    # directions FAIL: ABOVE means an atom was graded against the stale version
+    # (repair the GRADING, never the budget); BELOW means a round re-measured
+    # one (lower the budget in that same commit).
+    python3 scripts/lib/grading_pin_ratchet.py || return 1
     # R2366 (the `runtime-tokio` atom's last residual) — the SUBSYSTEM-SPAWN
     # gate. R311y825 built the five-runtime partition and nothing production
     # ever named a subsystem, so `WZ_RUNTIME` tuned runtimes no task ran on and
@@ -7594,7 +7614,33 @@ layer_c1y_cargo_test_routing_peer() {
     # `AclPolicy::decision`, so an enforcer returning before the call skipped
     # them for every unattributable face too. Unlike the round's other new test
     # this one is NOT in `router_forward`, so it moves this guard and not C1AY's.
-    _runci_guarded_test "C1y interceptor" 37 \
+    # R2394 — 37 -> 40, and the first of the three is a RED this round inherited
+    # rather than added. `a_real_del_attachment_ext_is_measured_at_the_del_id_
+    # not_the_put_one` landed in `low_pass.rs` with the Del-attachment ext-id
+    # fix and did not move this guard, so the lane had been failing at 38-vs-37
+    # on hosted CI ever since; the round that added the test is the one this
+    # comment attributes it to, not this one. The other two are R2394's own, and
+    # both exist because re-measuring `DownsamplingMessage` against the PIN
+    # refuted the doc comment that justified its shape: upstream's downsampling
+    # filter destructures the push body and reads Put and Del through separate
+    # selector bits, so the three-variant mirror could not express "throttle the
+    # deletes, leave the puts alone".
+    #
+    # Three damages were run, and each reds exactly ONE test — measured, not
+    # asserted, and the first draft of this comment claimed a pairing the probes
+    # then refuted:
+    #   * collapsing the classifier's two push arms into one kind reds only
+    #     `message_kind_classifies_the_bodies_zenoh_throttles`;
+    #   * making Put and Delete interchangeable inside `admit_at`'s selector
+    #     filter reds only `a_rule_on_puts_leaves_deletes_alone_on_the_same_
+    #     keyexpr`, the split's discriminator;
+    #   * making an unnameable push body resolve to NO kind reds only
+    #     `an_indeterminate_push_body_is_governed_by_either_data_kind`.
+    # The third test earned its shape the hard way: written against `admit_at`
+    # with a two-kind slice it went GREEN under its own damage, because nothing
+    # bound the classifier arm that produces that slice. It drives a real
+    # unknown-tag push now.
+    _runci_guarded_test "C1y interceptor" 40 \
         cargo test -p wz-runtime-tokio --features "$access" --lib interceptor --quiet || return 1
     # R311y509 — 211 -> 213: the peer's CURRENT liveliness-TOKEN dump, in its two
     # tiers. Each test is bound by a damage that reds it ALONE: disabling the client

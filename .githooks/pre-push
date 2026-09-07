@@ -378,6 +378,34 @@ if ! python3 scripts/lib/config_key_fixture_gate.py; then
     exit 1
 fi
 
+# ─── gate 2e — the grading-pin ratchet (R2394) ──────────────────────
+# grades: worktree
+#
+# An atom's reason opens with its grade -- PARTIAL or COMPLETE -- and then says
+# what that grade was measured against. Dozens still say 1.5.0 while this tree
+# pins 1.10.0. A stale PARTIAL is merely old; a stale COMPLETE asserts parity
+# with an upstream that has since moved, about the upstream this tree exists to
+# replace. R2394 re-measured one and the measurement refuted it inside ten
+# minutes, which is what unregistered open-debt item 675 predicted.
+#
+# HERE as well as in Layer C0, because a gate the hook cannot see is one nobody
+# reads until hosted CI says so -- the lesson items 666 and 667 were filed for.
+# UNCONDITIONAL and unscoped, for the reason gate 2d gives: it reads one JSON
+# file and costs milliseconds, and a wrong "this push does not touch it" reads
+# exactly like a pass.
+if ! python3 scripts/lib/grading_pin_ratchet.py; then
+    echo "" >&2
+    echo "pre-push: [gate 2e] grading-pin ratchet FAILED. ABOVE budget means an" >&2
+    echo "          atom is graded against a zenoh this tree does not pin --" >&2
+    echo "          re-measure it AT THE PIN and move its declaration; never" >&2
+    echo "          raise the budget, and never just substitute the version" >&2
+    echo "          string, which makes the claim true only in its letters." >&2
+    echo "          BELOW budget means this commit re-measured one: lower the" >&2
+    echo "          budget in the same commit and say which atom moved." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+
 # ─── gate 2k — the replication-log funnel (R2354) ───────────────────
 # grades: worktree
 #
