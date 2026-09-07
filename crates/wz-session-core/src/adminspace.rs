@@ -531,7 +531,7 @@ pub fn admin_config_key(zid_hex: &str, whatami: &str) -> String {
 }
 
 /// R2414 (open-debt items 675/677) — the metrics leg's encoding, the pin's own
-/// constant (`net/runtime/adminspace.rs` `METRICS_ENCODING`, zenoh 1.10.0).
+/// constant (`zenoh/src/net/runtime/adminspace.rs` @ `METRICS_ENCODING`).
 ///
 /// ONE literal for both the reply and the manifest row, so the document and the
 /// wire cannot drift: `encoding_from_mime` splits it on the FIRST `;` exactly as
@@ -546,7 +546,8 @@ pub const METRICS_ENCODING: &str = "application/openmetrics-text; version=1.0.0;
 /// adminspace.
 ///
 /// BEYOND-ZENOH, and named so rather than presented as parity: the pin (zenoh
-/// 1.10.0 `net/runtime/adminspace.rs`) registers no handler of this kind, so a
+/// 1.10.0 `zenoh/src/net/runtime/adminspace.rs` @ `fn add_handlers`) registers
+/// no handler of this kind, so a
 /// consumer that finds this key has learned it is talking to wz. The `wz/` chunk
 /// exists for exactly that reason — every other admin key this module answers
 /// carries a name upstream also uses, so a wz-native leg needs a namespace of its
@@ -1722,7 +1723,7 @@ fn parse_storage_add_payload(payload: &[u8]) -> Option<(String, String, Option<S
 /// The OpenMetrics build-info block the admin `@/<zid>/<whatami>/metrics` GET
 /// opens with. R2414 (open-debt items 675/677) re-measured this against the PIN
 /// and rewrote it; the shape below is zenoh 1.10.0's
-/// (`net/runtime/adminspace.rs`, the `#[cfg(not(feature = "stats"))]` literal).
+/// (`zenoh/src/net/runtime/adminspace.rs` @ `fn metrics`, its no-stats literal).
 ///
 /// # What the re-measure found — the previous body was wrong on four counts
 ///
@@ -2439,7 +2440,7 @@ mod tests {
     fn metrics_key_and_build_info_match_zenoh() {
         assert_eq!(admin_metrics_key("a1b2", "peer"), "@/a1b2/peer/metrics");
         // R2414 — byte-faithful to the PIN's build-info block (zenoh 1.10.0
-        // `net/runtime/adminspace.rs`, the no-stats literal): HELP + TYPE `info`
+        // `zenoh/src/net/runtime/adminspace.rs` @ `fn metrics`): HELP + TYPE `info`
         // + the `zenoh_build_info` sample carrying local_id, local_whatami and
         // version. Re-measured from 1.5.0, where this asserted a `gauge` named
         // `zenoh_build` with a version label alone — wrong on four counts.
