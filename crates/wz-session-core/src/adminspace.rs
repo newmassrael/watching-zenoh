@@ -57,6 +57,18 @@ pub struct AdminSession {
     pub whatami: Option<String>,
     /// The transport's links.
     pub links: Vec<AdminLink>,
+    /// R2415 (open-debt items 675/678) — whether this transport negotiated SHM,
+    /// the pin's `shm` field (`transport.is_shm()` at `transport_unicast_to_json`).
+    ///
+    /// UNGATED, and for the reason [`AdminAnswerCtx::stats`] records: a
+    /// `#[cfg]`-gated pub struct field forces a matching `#[cfg]` at every
+    /// construction site, and this tree has already been bitten by that when one
+    /// of those sites was a demo crate with no such feature of its own. Upstream
+    /// makes the same call from the other direction — it computes `shm` under
+    /// `shared-memory` and binds `false` without it, so the FIELD is
+    /// unconditional there too and only the VALUE is gated. A build without
+    /// `transport-shm` reports `false`, which is what it means.
+    pub shm: bool,
 }
 
 /// wz-native plugin state — the compile-time analogue of zenoh's `PluginState`
@@ -390,16 +402,38 @@ pub fn denied_read_diagnostic(keyexpr: &str) -> alloc::string::String {
 }
 
 impl AdminLocalData {
-    /// Serialize to the faithful zenoh `local_data` JSON object. zenoh builds
-    /// it with the `json!` macro then `serde_json::to_vec`
-    /// (`adminspace.rs:678-690`), and pins `serde_json` WITHOUT the
-    /// `preserve_order` feature — so its `Map` is a `BTreeMap` and the emitted
-    /// object keys are ALPHABETICALLY sorted, NOT `json!` source order. This
-    /// emitter matches those bytes exactly: top-level
-    /// `locators, metadata, plugins, sessions, version, zid`; each `sessions`
-    /// entry `links, peer, weight, whatami` (`transport_unicast_to_json`,
-    /// `:628-633`); each link `dst, src` (`link_to_json`, `:609-612`). Manual
-    /// emit (no `serde_json`) keeps the builder `alloc`-only and no_std-feasible.
+    /// Serialize to the zenoh `local_data` JSON object. zenoh builds it with the
+    /// `json!` macro then `serde_json::to_vec`, and pins `serde_json` WITHOUT
+    /// `preserve_order` — so its `Map` is a `BTreeMap` and the emitted object keys
+    /// are ALPHABETICALLY sorted, NOT `json!` source order. Key ORDER here is that
+    /// order: top-level `locators, metadata, plugins, sessions, version, zid`; each
+    /// `sessions` entry `links, peer, shm, weight, whatami`; each link `dst, src`.
+    /// Manual emit (no `serde_json`) keeps the builder `alloc`-only and
+    /// no_std-feasible.
+    ///
+    /// # R2415: this doc used to claim "matches those bytes exactly", and re-measured
+    /// # against the PIN (zenoh 1.10.0) that claim was FALSE
+    ///
+    /// It was written against zenoh 1.5.0 and never re-checked, which is open-debt
+    /// item 678 and the shape item 675 exists to close: a stale grade does not merely
+    /// age, it asserts something a later reader has no reason to doubt. At the pin a
+    /// session entry carries `links, peer, region, shm, weight, whatami`, and the
+    /// four fields divide into four DIFFERENT situations rather than one gap:
+    ///
+    /// * `shm` — CLOSED by this round. wz negotiates it already
+    ///   (`SessionActions::is_shm` under `transport-shm`); it simply was not
+    ///   reported. The field is now emitted, in its alphabetical position.
+    /// * `region` — upstream's own recent addition, still carrying a `FIXME(regions)`
+    ///   and recomputed per query there. wz has no analogue, so this is an honest
+    ///   ABSENCE, not a defect, and must not be written up as parity.
+    /// * `weight` — router-tier: upstream reads a `links_info` lookup, wz emits
+    ///   `null`. Named as a router-mode follow-up long before this round.
+    /// * `metadata` (top level) — upstream serves `config.metadata()`; wz's config
+    ///   has no such field at all, so this is a config-surface question.
+    ///
+    /// So the honest statement is the one above — the key ORDER is upstream's, and
+    /// the field SET diverges by the three named residuals. `admin_unspoken_fields`
+    /// is where a consumer learns which of them arrive as `null`.
     pub fn to_json(&self) -> String {
         let mut out = String::new();
         // R311y60 — the locators string array via the json::push_str_array SSOT.
@@ -430,7 +464,14 @@ impl AdminLocalData {
             }
             out.push_str("],\"peer\":");
             push_json_str(&session.peer_zid_hex, &mut out);
-            out.push_str(",\"weight\":null,\"whatami\":");
+            // R2415 — `shm` sits between `peer` and `weight` because upstream's
+            // serde_json Map is a BTreeMap and emits keys ALPHABETICALLY; inserting
+            // it anywhere else would be a different byte stream for the same facts.
+            out.push_str(if session.shm {
+                ",\"shm\":true,\"weight\":null,\"whatami\":"
+            } else {
+                ",\"shm\":false,\"weight\":null,\"whatami\":"
+            });
             match &session.whatami {
                 Some(w) => push_json_str(w, &mut out),
                 None => push_json_str("unknown", &mut out),
@@ -1904,13 +1945,18 @@ mod tests {
                     src: "tcp/127.0.0.1:7447".to_string(),
                     dst: "tcp/127.0.0.1:51000".to_string(),
                 }],
+                // R2415 — a session that DID negotiate SHM, so this test pins the
+                // `true` rendering and its alphabetical slot; the sibling below
+                // pins `false`. A single fixture would leave one of the two
+                // renderings unexercised.
+                shm: true,
             }],
             plugins: vec![],
         };
         // serde_json BTreeMap (alphabetical) key order at every level:
         // top locators/metadata/plugins/sessions/version/zid; session
-        // links/peer/weight/whatami; link dst/src. `plugins` = `null` (feature off)
-        // or `{}` (feature on, no STARTED plugin).
+        // links/peer/shm/weight/whatami; link dst/src. `plugins` = `null` (feature
+        // off) or `{}` (feature on, no STARTED plugin).
         #[cfg(not(feature = "adminspace-plugins-handlers"))]
         let plugins_tok = "null";
         #[cfg(feature = "adminspace-plugins-handlers")]
@@ -1921,7 +1967,7 @@ mod tests {
                 concat!(
                     r#"{{"locators":["tcp/127.0.0.1:7447"],"metadata":null,"plugins":{plugins_tok},"#,
                     r#""sessions":[{{"links":[{{"dst":"tcp/127.0.0.1:51000","src":"tcp/127.0.0.1:7447"}}],"#,
-                    r#""peer":"c3d4","weight":null,"whatami":"router"}}],"#,
+                    r#""peer":"c3d4","shm":true,"weight":null,"whatami":"router"}}],"#,
                     r#""version":"0.1.0","zid":"a1b2"}}"#
                 ),
                 plugins_tok = plugins_tok
@@ -1941,10 +1987,19 @@ mod tests {
                 peer_zid_hex: "c3d4".to_string(),
                 whatami: None,
                 links: vec![],
+                shm: false,
             }],
             plugins: vec![],
         };
         assert!(data.to_json().contains(r#""whatami":"unknown""#));
+        // R2415 — the `false` rendering and its alphabetical slot, the pair to the
+        // `true` case pinned above. `shm` sits between `peer` and `weight`.
+        assert!(
+            data.to_json()
+                .contains(r#""peer":"c3d4","shm":false,"weight":null"#),
+            "{}",
+            data.to_json()
+        );
     }
 
     #[test]
@@ -2629,6 +2684,7 @@ mod tests {
                 peer_zid_hex: String::from("c3d4"),
                 whatami: Some(String::from("peer")),
                 links: alloc::vec![],
+                shm: false,
             }],
             plugins: fixture_plugins(),
         };

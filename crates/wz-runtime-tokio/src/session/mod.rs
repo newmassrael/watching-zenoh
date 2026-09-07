@@ -3569,6 +3569,15 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                     // wz's own could not answer. An aggregating session reports one
                     // entry per physical link here.
                     links: actions.admin_links(),
+                    // R2415 (items 675/678) — the pin reports `shm` per transport
+                    // and wz already negotiates it; it simply was not surfaced. The
+                    // value is gated because `is_shm()` only exists under
+                    // `transport-shm`; a build without it reports `false`, which is
+                    // the same thing upstream binds when its own feature is off.
+                    #[cfg(feature = "transport-shm")]
+                    shm: actions.is_shm(),
+                    #[cfg(not(feature = "transport-shm"))]
+                    shm: false,
                 });
             }
             // The match+reply SSOT (root local_data / metrics / config + the read

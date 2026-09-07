@@ -2678,6 +2678,13 @@ impl LinkstateForwarder {
                     .unwrap_or_default(),
                 whatami: Some(String::from(peer_whatami_routing(&face.actions).to_str())),
                 links: face.actions.admin_links(),
+                // R2415 (items 675/678) — per FACE, the same way the pin reports it
+                // per transport: a mesh host holds N faces and each negotiates SHM
+                // on its own, so this is read off the face rather than off the host.
+                #[cfg(feature = "transport-shm")]
+                shm: face.actions.is_shm(),
+                #[cfg(not(feature = "transport-shm"))]
+                shm: false,
             })
             .collect()
     }

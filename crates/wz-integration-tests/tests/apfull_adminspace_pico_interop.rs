@@ -409,6 +409,22 @@ fn apfull_adminspace_plane_decoded_by_a_real_pico_z_get() {
         "the node record's `sessions` names the FOREIGN pico session that is asking \
          — the record is rendered from live state, not from configuration\n  got: {core}"
     );
+    // R2415 (open-debt items 675/678) — the pin's per-transport `shm` field, on the
+    // FORWARDER-hosted path. That path (`LinkstateForwarder::admin_sessions`) is
+    // reached only from wz-ap-demo, so no unit test can witness it: the lane IS the
+    // test, which is why the assertion lives here.
+    //
+    // SCOPED, and the scope matters: a pico client negotiates no SHM, so this
+    // witnesses that the field is EMITTED in its alphabetical slot with the correct
+    // rendering — not that the forwarder tracks a negotiated `true`. The value-
+    // tracking half is witnessed on the session-hosted path by
+    // `declare_adminspace_reports_the_negotiated_shm_flag`, whose control shows it
+    // fails when the wiring is replaced by a constant.
+    assert!(
+        core.contains(r#""shm":false,"weight":null"#),
+        "the session entry carries `shm` in the alphabetical slot the pin's \
+         BTreeMap emits it in (between `peer` and `weight`)\n  got: {core}"
+    );
 
     // ── adminspace-introspection-handlers — the per-entity view ─────
     let sub_key = format!("{root}/subscriber/demo/data");

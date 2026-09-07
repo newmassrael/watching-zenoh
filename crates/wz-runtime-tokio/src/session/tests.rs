@@ -2692,6 +2692,76 @@ fn query_allcomplete_target_loopback_fires_only_complete_queryable() {
 #[cfg(all(
     feature = "query-get",
     feature = "query-queryable",
+    feature = "adminspace-core",
+    feature = "transport-shm"
+))]
+#[test]
+fn declare_adminspace_reports_the_negotiated_shm_flag() {
+    // R2415 (open-debt items 675/678) — the `shm` field the pin reports per
+    // transport, read from the session's NEGOTIATED value rather than assumed.
+    //
+    // # This test exists because a control probe came back GREEN
+    //
+    // The wiring was `shm: actions.is_shm()`, and replacing it with a constant
+    // `false` passed every test in the crate — session-core pins both renderings
+    // of the FIELD, but nothing tied the runtime's value to the session's actual
+    // negotiation. A field that always reports the same thing is indistinguishable
+    // from one that reports nothing. So: flip the negotiated flag, then require the
+    // admin reply to follow it. Under the constant, this test fails and the rest
+    // still pass, which is what makes it the witness for the wiring specifically.
+    use wz_session_core::zid_hex::zid_to_zenoh_hex;
+
+    let (session, _driver) = build_session();
+    let zid_hex = zid_to_zenoh_hex(&session.actions().params.zid);
+    let whatami = session.actions().params.whatami.to_str();
+    let root = format!("@/{zid_hex}/{whatami}");
+
+    // A known peer, so `sessions[]` has an entry to carry the flag at all. The
+    // production path fills this from the INIT exchange; a unit test stamps the
+    // field directly, the same bypass `mark_session_established` uses.
+    *session
+        .actions()
+        .remote_peer_zid
+        .lock()
+        .expect("remote_peer_zid poisoned in test fixture") = Some(vec![0xc3, 0xd4]);
+    // The negotiated capability, set the way the establishment FSM sets it.
+    session.actions().set_shm_offer(true);
+
+    let _admin = session
+        .declare_adminspace("0.9.9", Vec::new())
+        .expect("adminspace-core ON in this build");
+
+    let payload = Arc::new(Mutex::new(Option::<Vec<u8>>::None));
+    let p = payload.clone();
+    session
+        .query(
+            &root,
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+            move |reply| {
+                *p.lock().unwrap() = Some(reply.payload().to_vec());
+            },
+            |_| {},
+        )
+        .expect("query-get ON in this build");
+
+    let got =
+        String::from_utf8(payload.lock().unwrap().clone().expect("local_data replied")).unwrap();
+    // A `sessions[]` entry exists only once a peer is known; when there is none the
+    // array is empty and this test would assert nothing at all — so require the
+    // entry first, and let its absence say so rather than pass silently.
+    assert!(
+        got.contains("\"sessions\":[{"),
+        "no session entry to carry `shm`, so this test would prove nothing\n{got}"
+    );
+    assert!(
+        got.contains("\"shm\":true"),
+        "the admin reply must report the session's NEGOTIATED shm, not a constant\n{got}"
+    );
+}
+
+#[cfg(all(
+    feature = "query-get",
+    feature = "query-queryable",
     feature = "adminspace-core"
 ))]
 #[test]
