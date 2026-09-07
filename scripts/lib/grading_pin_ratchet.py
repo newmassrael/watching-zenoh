@@ -978,7 +978,31 @@ def _grade_head(reason: str) -> str:
 #:
 #: The residuals are therefore NOT refuted -- they are RE-POINTABLE, and
 #: re-pointing them is a separate measurement this round did not make.
-BUDGET = 28
+#: 28 -> 27 (R2434). `access-extauth-pubkey`, and the SECOND atom in this sweep
+#: whose substantive work was already done and never seen by this instrument:
+#: R2336 refuted two residual clauses against the pinned upstream and
+#: re-measured the other two as holding, without writing the marker.
+#:
+#: RE-VERIFIED INDEPENDENTLY rather than taken on trust, and it holds exactly:
+#: upstream DECLARES the two pubkey config keys and READS NEITHER -- each leaf
+#: identifier occurs exactly ONCE in the pinned tree, on its own declaration
+#: line, and the loader stops at a TODO. So "no key_size knob" debited wz for a
+#: capability upstream does not have either. Same discriminator this file keeps
+#: arriving at: not whether upstream KNOWS a key, but whether it HONOURS it.
+#:
+#: ⚠⚠ AND A CORRECTION TO THIS SERIES' OWN ARITHMETIC. R2431 reported that
+#: EXACTLY ONE remaining atom had been measured-without-marker. That came from a
+#: regex requiring the phrase "re-measured against the PIN" -- and THIS atom
+#: says "were re-measured this round", so the pattern encoded a PHRASING and
+#: undercounted. On a broader test (any mention of the pinned version), EIGHT of
+#: twenty-eight mention it.
+#:
+#: That is an UPPER bound, not a count: mentioning the pin is not being measured
+#: against it, and at least one of the eight mentions it precisely to record
+#: that it CANNOT be. Lower bound one, upper bound eight, settled only per atom.
+#: The failure mode is this sweep's most frequent by far -- a pattern that
+#: presumes its answer -- and it has now bitten the sweep's own bookkeeping.
+BUDGET = 27
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
