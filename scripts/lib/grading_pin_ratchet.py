@@ -63,6 +63,33 @@ gate exists to refuse.
 
 So the number over-states the WORK and states the DECLARATION exactly, which is
 the honest thing for it to measure: prose cannot be graded, a declaration can.
+
+### What the MARKER means, measured (R2401)
+
+It means a round re-read THE CLAIMS IT NAMED at the pin. It does NOT mean every
+clause of that reason was verified, and the gap is not small. Deriving each
+declared atom's citation set from the store, classified against the checkout's
+own top-level directories:
+
+    atom                  rooted   wz   ROOT-LESS   (line-form)
+    declare-token              1    2          13           12
+    declare-subscriber         1    2          13           12
+    declare-interest           2    0           7            7
+    routing-namespace          0    3           5            4
+    scouting-responder         1    0           2            1
+
+EVERY rooted citation in all five resolves at the pin. So an audit asking "are
+the citations dead" reports clean, and the unread clauses hide entirely in the
+root-less set -- which does not even distinguish a wz path from an upstream one
+(`declare_build.rs` and `api/session.rs` sit side by side in those lists). That
+ambiguity is why the owner's 2026-09-01 decision bans line numbers on upstream
+claims, and why the source gate keeps a bare budget at all.
+
+A round that trusts this marker to SKIP a clause must derive that atom's claim
+set itself rather than inherit the declaring round's choice -- which is the
+failure the marker was invented to make impossible, reappearing one level up.
+R2394 is the proof it happens: it stamped three clauses it never read, and R2401
+found them true. Right, not known to be right.
 Paying one of the 14 is therefore cheaper than paying a fresh one -- but it is
 NOT a stamp, and `declare-token` is the proof. Both of the pin claims R2383
 wrote cited a path that does not exist at the pin (one repository-name segment
@@ -213,8 +240,17 @@ GRADE_TAGS = ("PARTIAL:", "COMPLETE:")
 #: difference between "right" and "known to be right" is what the marker is for.
 #: The atom now carries that provenance itself.
 #:
-#: The split is 42 PARTIAL / 13 COMPLETE.
-BUDGET = 55
+#: The split was 42 PARTIAL / 13 COMPLETE.
+#:
+#: 55 -> 54 (R2402). `declare-final`, chosen by a criterion R2401's audit forced:
+#: an atom whose claim set is small enough to read TO THE END, so its marker
+#: means the strong thing. All four of its upstream claims were read, not merely
+#: resolved, and all four hold. The fourth is an ABSENCE -- pico's write-filter
+#: switch has no case for a FINAL -- and was tested by counting the token that
+#: must not appear, because an anchor can only witness presence.
+#:
+#: The split is 42 PARTIAL / 12 COMPLETE.
+BUDGET = 54
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
