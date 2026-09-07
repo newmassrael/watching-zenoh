@@ -431,13 +431,24 @@ fn apfull_adminspace_plane_decoded_by_a_real_pico_z_get() {
     // y270's witness ends by asserting this leg is ABSENT, which is what makes its
     // own cfg-gate argument work. Requiring it PRESENT here, from one process that
     // also served the two legs above, is the claim no existing lane can make. The
-    // body spans several lines (OpenMetrics is newline-delimited), so the gauge is
+    // body spans several lines (OpenMetrics is newline-delimited), so the sample is
     // matched against the whole transcript rather than the header line.
+    //
+    // R2414 (open-debt items 675/677) — re-measured against the PIN (zenoh 1.10.0).
+    // This asserted `zenoh_build{version=` , the 1.5.0 gauge shape; the pin emits an
+    // `info` family whose sample is `zenoh_build_info` carrying local_id and
+    // local_whatami too, and closes the document with `# EOF`.
     let metrics = reply_body(&out, &format!("{root}/metrics"), "in the composed GET");
     assert!(
-        metrics.contains("zenoh_build{version="),
-        "the metrics leg carries the OpenMetrics zenoh_build gauge — scoped to that \
-         leg's own BODY, not to the transcript, so another leg cannot satisfy it\n  got: {metrics}"
+        metrics.contains("zenoh_build_info{local_id="),
+        "the metrics leg carries the pin's OpenMetrics `zenoh_build_info` sample — \
+         scoped to that leg's own BODY, not to the transcript, so another leg cannot \
+         satisfy it\n  got: {metrics}"
+    );
+    assert!(
+        metrics.contains("# EOF"),
+        "the metrics body is a complete OpenMetrics document, terminator included\n  \
+         got: {metrics}"
     );
 
     // ── adminspace-plugins-handlers — the compiled-in registry ──────
