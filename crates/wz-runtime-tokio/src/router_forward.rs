@@ -767,9 +767,13 @@ pub struct RouterForwarder {
     /// [`register_local_queryable`](Self::register_local_queryable)) and could not be
     /// TOLD anything: there was no way for a host to receive a Put, which is why the
     /// runtime connect-list reconcile had exactly one producer, a one-shot CLI timer.
-    /// `LinkstateForwarder` has carried this since R311y146; the router had only half
-    /// the pair, and the asymmetry was invisible until something needed the other
-    /// half.
+    /// `LinkstateForwarder` has carried this since R311y46 (§5.23 Phase 3a); the
+    /// router had only half the pair, and the asymmetry was invisible until something
+    /// needed the other half. (This line first cited R311y146, which IS a real round
+    /// in this file — the FUTURE-mode subscriber-interest store and the
+    /// pub-before-sub close — and not the one that built the peer twin. A wrong
+    /// citation that resolves to something plausible is the kind a reader confirms
+    /// rather than catches.)
     ///
     /// A host subscriber is the FOURTH contributor to
     /// [`self_advertises_sub_into`](Self::self_advertises_sub_into), beside client
@@ -4777,13 +4781,13 @@ impl RouterForwarder {
     /// [`LinkstateForwarder::register_local_subscriber`](crate::linkstate_forward::LinkstateForwarder::register_local_subscriber).
     ///
     /// Stores the handler in
-    /// [`local_subscribers`](Self#structfield.local_subscribers) — so a routed Put
+    /// `local_subscribers` — so a routed Put
     /// whose concrete key the pattern matches is delivered at the Push ingress, in
     /// ADDITION to the remote fan-out — and advertises the interest into BOTH meshes
     /// so a remote router or peer routes a matching Put toward this router at all.
     ///
     /// The advertisement is a FLOOD here and a DERIVE at
-    /// [`self_advertises_sub_into`](Self::self_advertises_sub_into), and both are
+    /// `self_advertises_sub_into`, and both are
     /// needed for the reason the queryable twin needs both: the flood tells the
     /// members that are ALREADY in the mesh, and the derive answers for a member
     /// that joins LATER, whose declare-fold asks this router what it wants. A flood

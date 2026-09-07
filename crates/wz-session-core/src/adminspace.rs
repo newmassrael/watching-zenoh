@@ -1117,7 +1117,7 @@ pub enum AdminConfigWrite {
     /// — dial these endpoints now, the wz analogue of upstream re-entering
     /// `update_peers` when a live node's connect list changes.
     ///
-    /// # Why this key is admissible, on the test [`AdminReadPermit`] used
+    /// # Why this key is admissible, on the test [`AdminReadPermit`](Self::AdminReadPermit) used
     ///
     /// The atom's last live residual said wz's runtime connect ADD is reachable only
     /// from a ONE-SHOT CLI argument (`--connect-after`), where upstream re-reads the

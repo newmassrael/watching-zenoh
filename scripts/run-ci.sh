@@ -16648,9 +16648,19 @@ layer_e7b_router_connect_reconcile() {
     # POSITIVE (feature ON): both the connect-added reconcile (slice 1) and the peer
     # auto-reconnect redial-on-drop (slice 2) against the reconcile binary; skip the
     # feature-off negative (it needs the no-reconcile binary below).
+    #
+    # R2393 — `--skip connect_add` too, and this filter is a POPULATION rather than a
+    # convenience. The selection is "every ignored test in the file except one NAME",
+    # so a test ADDED to the file joins it silently: R2393's two `connect_add` e2es
+    # need `adminspace-router-linkstate` (the cfg block the config-write subscriber
+    # lives in) and `routing-peer` (only `PeerOpts` parses `--put-key`), neither of
+    # which this binary carries, so they would have run here against a build with the
+    # whole path compiled out and failed on the missing subscriber. They have their
+    # own binary in Layer E7b2. (The default Layer E sweep needs no change: its
+    # `--skip wz_router` already covers the `wz_router_hat_` name prefix.)
     (cd crates && cargo build -p wz-ap-demo --features router-hat-router,router-connect-reconcile --quiet) || return 1
     (cd crates && cargo test -p wz-integration-tests \
-        --test wz_router_hat_connect_reconcile -- --ignored --skip requires_feature --quiet) || return 1
+        --test wz_router_hat_connect_reconcile -- --ignored --skip requires_feature --skip connect_add --quiet) || return 1
     # NEGATIVE (feature OFF): --connect-after inert on the router-hat-router-only
     # binary (rebuilt here so it never shares the reconcile build).
     (cd crates && cargo build -p wz-ap-demo --features router-hat-router --quiet) || return 1
@@ -17724,9 +17734,13 @@ layer_e13_apfull_storage_plane_pico() {
 
 # ─── Layer E15 — §5.21 router-connect-reconcile federation to a real zenoh-pico ───
 #
-# The reconcile's FOUR existing proofs (wz_router_hat_connect_reconcile.rs) are all
+# The reconcile's SIX existing proofs (wz_router_hat_connect_reconcile.rs) are all
 # wz<->wz and all assert a LINK-STATE COUNT; none asks whether the face the reconcile
-# dialed carries application data. This lane is the pair that does, with both endpoints
+# dialed carries application data. (R2393 moved FOUR -> SIX and re-checked the CLAIM
+# rather than only the number: its two `connect_add` e2es are also wz<->wz, the
+# positive one also gates on `routers-net converged (2 node(s))`, and neither asks
+# about the DIALED face -- their PUT arrives on the writer's own face. So the
+# distinction this lane draws is unchanged; only the count had rotted.) This lane is the pair that does, with both endpoints
 # foreign: leg 1 sends a real pico z_pub's sample across a federation face that did not
 # exist at startup to a real pico z_sub on the far router, and leg 2 is the calibration
 # that removes ONLY `--connect-after` and shows the same AP-full binary (multicast

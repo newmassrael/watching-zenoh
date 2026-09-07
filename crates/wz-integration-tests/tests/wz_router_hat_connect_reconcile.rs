@@ -340,6 +340,15 @@ fn wz_router_hat_reconcile_requires_feature() {
 // The pair is a positive/negative twin on the SAME binary, so the permit is the only
 // variable: with `--config-write-permit` the wire PUT federates R1 to R2, without it
 // R1 stays isolated and says the write was denied.
+//
+// CONTAINMENT — why the deny arm is not vacuous. `admin_write_permit` reads
+// `permissions.write` only under the `adminspace-write` cfg; with that feature
+// compiled OUT it returns a constant `true` (`wz-runtime-tokio/src/lib.rs:459-463`),
+// so every write would be APPLIED and a deny test would be asserting against a node
+// that permits everything. Layer E7b2 therefore NAMES `adminspace-write` in its
+// build, and the deny arm passing is itself the evidence that it is compiled in and
+// load-bearing: were it absent, the PUT would federate and this test would fail on
+// the missing deny rather than pass quietly.
 
 /// Spawn a `--peer` writer that dials `addr` and PUTs `put_key` once per app tick.
 /// The writer is a peer rather than a router-hat because `--put-key` is a `PeerOpts`
@@ -483,9 +492,13 @@ fn wz_router_hat_connect_add_over_the_wire_dials_the_new_endpoint() {
          federation did not come from the wire write.\n\
          --- router-hat-1 stderr ---\n{r1_captured}"
     );
-    // And the write was neither denied nor mis-decoded.
+    // And the write was not denied. Asserted on `DENIED` ALONE: the first cut wrote
+    // `!contains("config-write on") || !contains("DENIED")`, which is `!(A && B)` —
+    // it passes whenever either half is missing, so a capture holding a deny line
+    // with either wording drifted would satisfy it. The deny is one line carrying
+    // both, so the single check is both clearer and strictly stronger.
     assert!(
-        !r1_captured.contains("config-write on") || !r1_captured.contains("DENIED"),
+        !r1_captured.contains("DENIED"),
         "router-hat-1 logged a DENIED config write while holding \
          --config-write-permit\n--- router-hat-1 stderr ---\n{r1_captured}"
     );
