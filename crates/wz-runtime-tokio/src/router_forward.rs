@@ -321,7 +321,7 @@ use wz_codecs::wireexpr::WireexprOwned;
 // atom that makes `MulticastTxItem` + the drive loop available); the reserved
 // `router-multicast-faces` atom stays cfg-site-free until a run-mode wires
 // `attach_mcast_group` (a later slice, the reserved→active flip).
-#[cfg(feature = "transport-multicast")]
+#[cfg(feature = "router-multicast-faces")]
 use tokio::sync::mpsc::UnboundedSender;
 use wz_routing_graph::{Changes, LinkId, LinkstateNetwork, WhatAmI, Zid};
 use wz_session_core::declare_build::{
@@ -344,7 +344,7 @@ use wz_session_core::keyexpr_match::{keyexpr_includes_target, keyexpr_intersects
 use wz_session_core::linkstate_oam::{
     build_linkstate_oam_owned, try_parse_linkstate_oam, LinkstateOam,
 };
-#[cfg(feature = "transport-multicast")]
+#[cfg(feature = "router-multicast-faces")]
 use wz_session_core::multicast_tx::MulticastTxItem;
 use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::push_build::reliteralize_push;
@@ -530,7 +530,7 @@ struct RouterFaceState {
 /// is the INGRESS milestone). A group is a broadcast SINK: no zid, no ingress,
 /// never a delivery-lookup key (zenoh's per-peer `DummyPrimitives` ingress face
 /// lives in the separate `mcast_faces` plane, deferred).
-#[cfg(feature = "transport-multicast")]
+#[cfg(feature = "router-multicast-faces")]
 struct McastGroup {
     tx: UnboundedSender<MulticastTxItem>,
 }
@@ -545,7 +545,7 @@ struct McastGroup {
 /// and no graph link (zenoh's per-peer `DummyPrimitives` ingress face analog,
 /// `router.rs:229`), so [`resolve_inbound_keyexpr`](RouterForwarder::resolve_inbound_keyexpr)
 /// special-cases it against an empty alias table (literal-only).
-#[cfg(feature = "transport-multicast")]
+#[cfg(feature = "router-multicast-faces")]
 const MCAST_INGRESS_FACE: FaceId = FaceId(u64::MAX);
 
 /// A read-only, `Rc`-backed handle to one of a [`RouterForwarder`]'s two
@@ -618,7 +618,7 @@ pub struct RouterForwarder {
     /// sub-gated graph walk, so a Put with zero matched local subs still reaches
     /// the group. Empty until a run-mode [`attach_mcast_group`](Self::attach_mcast_group)s
     /// a drive loop's sender (the reserved→active wiring, a later slice).
-    #[cfg(feature = "transport-multicast")]
+    #[cfg(feature = "router-multicast-faces")]
     mcast_groups: RefCell<Vec<McastGroup>>,
     /// The OTHER on-group ROUTER member zids for the attached multicast group —
     /// the Designated-Router (DR) election candidate set (I3b loop-safe
@@ -1112,7 +1112,7 @@ impl RouterForwarder {
                 timestamping,
             ),
             faces: RefCell::new(HashMap::new()),
-            #[cfg(feature = "transport-multicast")]
+            #[cfg(feature = "router-multicast-faces")]
             mcast_groups: RefCell::new(Vec::new()),
             #[cfg(feature = "router-multicast-faces")]
             mcast_group_members: RefCell::new(Vec::new()),
@@ -2957,7 +2957,7 @@ impl RouterForwarder {
         // @ `fn egress_filter`): a Push that ARRIVED on the multicast
         // ingress face is NOT re-broadcast to a group — `false` on the unicast path
         // here, `true` on the [`route_mcast_ingress`](Self::route_mcast_ingress) path.
-        #[cfg(feature = "transport-multicast")]
+        #[cfg(feature = "router-multicast-faces")]
         self.broadcast_to_mcast_groups(
             reliable,
             priority,
@@ -2975,7 +2975,7 @@ impl RouterForwarder {
     /// drive loop stays a SEPARATE task from this `!Send` forwarder — the EGRESS
     /// half needs no single-task fold (that is the INGRESS milestone). Called by
     /// the router+multicast run-mode (a later slice); until then the plane is empty.
-    #[cfg(feature = "transport-multicast")]
+    #[cfg(feature = "router-multicast-faces")]
     pub fn attach_mcast_group(&self, tx: UnboundedSender<MulticastTxItem>) {
         self.mcast_groups.borrow_mut().push(McastGroup { tx });
     }
@@ -2996,7 +2996,7 @@ impl RouterForwarder {
     /// is RE-LITERALIZED against the resolved `keyexpr` first (a group leaf shares
     /// no expr-id alias table — an aliased id-only push would be a group blackhole),
     /// mirroring the client-leaf / mesh egress legs.
-    #[cfg(feature = "transport-multicast")]
+    #[cfg(feature = "router-multicast-faces")]
     fn broadcast_to_mcast_groups(
         &self,
         reliable: bool,
@@ -3142,7 +3142,7 @@ impl RouterForwarder {
         // yields None and is dropped (per-peer alias tracking is the deferred I3
         // milestone). The sentinel is not in `faces`, so this branch precedes the
         // faces lookup below (which would otherwise return None and drop it).
-        #[cfg(feature = "transport-multicast")]
+        #[cfg(feature = "router-multicast-faces")]
         if inbound == MCAST_INGRESS_FACE {
             return resolve_wireexpr(&push.keyexpr.body, &hashbrown::HashMap::new());
         }
@@ -6075,7 +6075,7 @@ impl FaceForwarder for RouterForwarder {
     /// [`MCAST_INGRESS_FACE`] id is disjoint from the dense unicast range, so the
     /// Client-tier fan-out's source self-skip (`id == inbound`) excludes no real
     /// subscriber.
-    #[cfg(feature = "transport-multicast")]
+    #[cfg(feature = "router-multicast-faces")]
     fn route_mcast_ingress(&self, priority: Priority, reliable: bool, push: &PushOwned) {
         // R311y227 — a multicast-received Push re-injects at the priority its frame
         // carried (the decoded ext_qos band surfaced by `multicast_rx`; DEFAULT on
@@ -13643,7 +13643,7 @@ mod tests {
     /// `zenoh/src/net/routing/dispatcher/tables.rs` @ `fn egress_filter`). The
     /// broadcast is UNCONDITIONAL — no subscriber is registered here, yet the
     /// group still receives it (zenoh's flat append, `pubsub.rs:1334`).
-    #[cfg(feature = "transport-multicast")]
+    #[cfg(feature = "router-multicast-faces")]
     #[test]
     fn mcast_group_receives_routed_push_and_echo_guards() {
         let fwd = RouterForwarder::new(zid(0x01));
@@ -13678,7 +13678,7 @@ mod tests {
     /// This closes the forwarder->sender half of the
     /// egress composition; the sender->group socket half is the Layer M loopback
     /// e2e `router_egress_helper_reaches_group_subscriber`.
-    #[cfg(feature = "transport-multicast")]
+    #[cfg(feature = "router-multicast-faces")]
     #[test]
     fn routed_push_broadcasts_to_attached_mcast_group() {
         let fwd = RouterForwarder::new(zid(0x01));
@@ -13720,7 +13720,7 @@ mod tests {
     /// `deliver_to_client_subscribers` / `compute_self_publish_forward`). Modeled by
     /// resolving the egressed keyexpr against an EMPTY table (the leaf's view): it
     /// must be the literal "demo/data", NOT the aliased id 7.
-    #[cfg(feature = "transport-multicast")]
+    #[cfg(feature = "router-multicast-faces")]
     #[test]
     fn aliased_routed_push_is_reliteralized_for_the_mcast_group() {
         let fwd = RouterForwarder::new(zid(0x01));
@@ -14061,7 +14061,7 @@ mod tests {
     /// `new_peer_multicast` DeMux ingress to local subs (`router.rs:213`). The
     /// synthetic `MCAST_INGRESS_FACE` id is disjoint from the client's FaceId, so
     /// the Client-tier source self-skip excludes no real subscriber.
-    #[cfg(feature = "transport-multicast")]
+    #[cfg(feature = "router-multicast-faces")]
     #[test]
     fn mcast_ingress_literal_push_delivers_to_a_client_subscriber() {
         let fwd = RouterForwarder::new(zid(0x01));
@@ -14086,7 +14086,7 @@ mod tests {
     /// a Push RECEIVED on the multicast ingress face is NOT re-broadcast to an
     /// attached multicast group (mcast->mcast is denied), so `route_mcast_ingress`
     /// threads `inbound_is_mcast = true` into the group-broadcast tail.
-    #[cfg(feature = "transport-multicast")]
+    #[cfg(feature = "router-multicast-faces")]
     #[test]
     fn mcast_ingress_push_is_echo_guarded_off_the_groups() {
         let fwd = RouterForwarder::new(zid(0x01));
@@ -14110,7 +14110,7 @@ mod tests {
     /// (never mis-resolved against a colliding peer expr-id). The literal test
     /// above DOES deliver through the same entry, so this pins the aliased-drop,
     /// not a dead entry.
-    #[cfg(feature = "transport-multicast")]
+    #[cfg(feature = "router-multicast-faces")]
     #[test]
     fn mcast_ingress_drops_an_aliased_id_only_push() {
         let fwd = RouterForwarder::new(zid(0x01));

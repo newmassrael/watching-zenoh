@@ -308,8 +308,20 @@ GRADE_TAGS = ("PARTIAL:", "COMPLETE:")
 #: row had confirmed their residuals before this one refuted its, which is why a
 #: run of confirmations is not evidence that re-measuring is ceremonial.
 #:
-#: The split is 40 PARTIAL / 9 COMPLETE.
-BUDGET = 49
+#: The split was 40 PARTIAL / 9 COMPLETE.
+#:
+#: 49 -> 48 (R2408). `router-multicast-faces`, and the FIRST move here that
+#: shipped PRODUCT CODE rather than a declaration. Its third residual said the
+#: multicast egress core was gated on the wrong feature, so turning the atom off
+#: did not remove the plane; measured before the edit, a build without the atom's
+#: feature compiled the whole plane. Every gate site in the router forwarder now
+#: names the atom's own feature. Safe by construction -- that feature implies the
+#: one it replaces, so it is strictly a narrowing -- and RIGHT by discriminator:
+#: the production caller was already gated on the atom's feature, so the callee
+#: was the half that disagreed.
+#:
+#: The split is 39 PARTIAL / 9 COMPLETE.
+BUDGET = 48
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
