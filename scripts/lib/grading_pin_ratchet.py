@@ -951,7 +951,34 @@ def _grade_head(reason: str) -> str:
 #: The two removals are recorded with the `@ ABSENT` form, which lands in its
 #: own bucket and is charged to no budget -- the right shape for a citation
 #: whose POINT is that the symbol is gone.
-BUDGET = 29
+#: 29 -> 28 (R2433). `adminspace-introspection-handlers`, and here THE CLAIM
+#: HOLDS WHILE EVERY COORDINATE OF ITS POINTERS IS WRONG -- a fifth rot mode and
+#: the widest yet. The shared-body premise survives: the struct upstream
+#: serializes for both entity kinds is intact with its three source buckets.
+#: Four dimensions of the pointers are not:
+#:
+#:   * NAMES -- the accessor family went from a get-form to a sourced-form, and
+#:     two changed NOUN (subscriptions -> subscribers, publications ->
+#:     publishers), so searching the old words finds nothing and reads as
+#:     REMOVAL when the code is right there.
+#:   * PATHS -- they moved into a hat module that did not exist when the entry
+#:     was written; the hat directory now carries a `broker` beside client, peer
+#:     and router.
+#:   * CONTAINER -- the return type is a map keyed by resource, not a vector of
+#:     pairs.
+#:   * LINES -- the cited pubsub file is 506 lines at the pin while the entry
+#:     cites into the 1190s, so those pointers are past END OF FILE.
+#:
+#: ⚠⚠ AND TWO OF THIS ROUND'S OWN READINGS WERE WRONG FIRST, both the same way:
+#: A GREP WHOSE PATTERN ENCODED ITS ANSWER. Searching for the three buckets as
+#: PUBLIC fields returned zero and briefly read as "the struct was reshaped" --
+#: they are merely PRIVATE. And a tree-wide hit for one accessor was a COMMENT
+#: naming a different function. A zero from a pattern that presumes its answer
+#: is not evidence; both were repaired only by opening the file.
+#:
+#: The residuals are therefore NOT refuted -- they are RE-POINTABLE, and
+#: re-pointing them is a separate measurement this round did not make.
+BUDGET = 28
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
