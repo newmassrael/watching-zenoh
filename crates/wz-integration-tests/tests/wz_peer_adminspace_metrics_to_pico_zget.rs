@@ -3,7 +3,10 @@
 
 //! R311y275 — FOREIGN-INTEROP ADMINSPACE METRICS: a real zenoh-pico `z_get` CLI
 //! reads a watching-zenoh routing peer's `@/<zid>/peer/metrics` admin leg and
-//! decodes the OpenMetrics build-info body wz serves (the `zenoh_build` gauge).
+//! decodes the OpenMetrics build-info body wz serves. R2414 re-measured that body
+//! against the pin (zenoh 1.10.0): it is the `zenoh_build` INFO family, whose
+//! sample is `zenoh_build_info` and which closes with `# EOF`. This line used to
+//! say "the `zenoh_build` gauge", which was the 1.5.0 shape.
 //!
 //! ## The gap this closes
 //!
@@ -157,9 +160,11 @@ fn wz_peer_adminspace_metrics_decoded_by_pico_z_get() {
 
     // ── adminspace-metrics: the OpenMetrics body, decoded by pico ───
     //
-    // The body is multi-line text/plain, so pico's `('key': 'value')` render spans
-    // output lines; assert against the whole capture. The key carries A's live zid,
-    // so a static fixture cannot satisfy it.
+    // The body is multi-line OpenMetrics text, so pico's `('key': 'value')` render
+    // spans output lines; assert against the whole capture. The key carries A's
+    // live zid, so a static fixture cannot satisfy it. (R2414: this said
+    // `text/plain`, which is the media type the leg sent before it was measured
+    // against the pin.)
     assert!(
         out.contains(&format!("('{metrics_key}':")),
         "pico decoded no adminspace-metrics leg at `{metrics_key}`\n--- z_get ---\n{out}"

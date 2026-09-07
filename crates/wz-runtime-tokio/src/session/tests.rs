@@ -2851,8 +2851,9 @@ fn declare_adminspace_config_get_returns_typed_config_json() {
 #[test]
 fn declare_adminspace_metrics_get_returns_openmetrics_text() {
     // §5.23 adminspace-metrics: a GET on @/<zid>/<whatami>/metrics fires the
-    // metrics dispatch branch and replies the OpenMetrics build-info body as
-    // text/plain (the wz mirror of zenoh's metrics handler, adminspace.rs:706).
+    // metrics dispatch branch and replies the OpenMetrics build-info body under
+    // the pin's own METRICS_ENCODING (R2414 — this comment said `text/plain`,
+    // which is what the leg sent while it was graded against zenoh 1.5.0).
     use wz_session_core::zid_hex::zid_to_zenoh_hex;
 
     let (session, _driver) = build_session();
