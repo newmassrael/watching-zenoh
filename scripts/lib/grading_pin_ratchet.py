@@ -194,8 +194,27 @@ GRADE_TAGS = ("PARTIAL:", "COMPLETE:")
 #: one count. That is the honest price of the remaining population, and a round
 #: that only takes the cheap ones will leave the expensive ones unread.
 #:
-#: The split is 42 PARTIAL / 14 COMPLETE.
-BUDGET = 56
+#: The split was 42 PARTIAL / 14 COMPLETE.
+#:
+#: 56 -> 55 (R2401). `scouting-responder`, a second expensive-half read. The
+#: grade HOLDS -- upstream's source-election rule is unchanged at the pin -- but
+#: one MECHANISM clause under it has rotted: the reason justifies wz dropping a
+#: socket whose address cannot be read by calling that upstream's own filter, and
+#: at the pin the socket type carries its interface address as an EAGER field, so
+#: no such filter exists at election time. A rotted justification under a
+#: conclusion that still holds is the same shape as a dead path, and is recorded
+#: rather than dropped.
+#:
+#: ⚠ THE SAME ROUND AUDITED ITS OWN FIRST MOVE, and found the gap this gate's
+#: docstring warns about. R2394 declared `access-downsampling` on the strength of
+#: the one claim it re-read and BUILT for, and carried three subsidiary clauses
+#: forward unread. All three were read at the pin in R2401 and all three HOLD, so
+#: the declaration was correct -- but it was under-verified when made, and the
+#: difference between "right" and "known to be right" is what the marker is for.
+#: The atom now carries that provenance itself.
+#:
+#: The split is 42 PARTIAL / 13 COMPLETE.
+BUDGET = 55
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
