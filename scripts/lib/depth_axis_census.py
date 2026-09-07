@@ -536,10 +536,32 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # which is what the census prints here. The gate has therefore been RED on the
 # hosted run since R2390 with nobody reading it -- the same cost the R2385 entry
 # recorded, for the same reason, four rounds later.
+#
+# Round 2412 -- `locator-iface` re-declared at the pin (open-debt item 675).
+#
+# THIS ROUND'S OWN DELTA ON EVERY AXIS HERE IS ZERO, and that is derived, not
+# assumed: `locator-iface` is graded COMPLETE, and `partial_atoms()` admits only
+# PARTIAL reasons, so a rewrite of that atom's whole reason -- fourteen new
+# anchored citations included -- cannot reach any count on this page. The census
+# printed 315 both before and after the mutation, which is the check.
+#
+# THE INHERITED DRIFT, adopted rather than hidden. The wz pin has been ONE low
+# since `5c6446bc` (ledger `Round 2405`, `access-extauth-usrpwd` verified in
+# full), which took that atom from 4 wz citations to 5 without moving the pin.
+# That is the whole of the +1: replaying every store-touching commit since the
+# pin was last set through this file's own `citation_audit` moves the count at
+# exactly one commit and no other. Six rounds ran red on the hosted lane behind
+# it, which is the cost this gate's own message names and the reason it is
+# adopted HERE rather than filed for later -- the attribution is in hand now.
+#
+# Adopting a neighbour's drift is what the R2394 block above did for R2386-R2393
+# and the R2385 block before it. The rule the three share: the pin moves with a
+# NAMED mover, so the next reader can tell an unpaid measurement from an unread
+# one.
 PIN_REACHED = 55
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
-PIN_WZ_CITATIONS = 314
+PIN_WZ_CITATIONS = 315
 PIN_AMBIGUOUS = 75
 
 

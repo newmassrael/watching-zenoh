@@ -386,8 +386,39 @@ GRADE_TAGS = ("PARTIAL:", "COMPLETE:")
 #: "do not fix this" is worth as much as one saying what to build, and is the
 #: kind a re-measurement can silently invert if nobody re-reads it.
 #:
-#: The split is 34 PARTIAL / 7 COMPLETE.
-BUDGET = 41
+#: The split was 34 PARTIAL / 7 COMPLETE.
+#:
+#: THE R-NUMBERS ABOVE ARE NOT LEDGER ENTRY IDS. The four labels R2412..R2415
+#: name ATOMS, two to a commit, while the ledger filed those two commits as
+#: `Round 2410` and `Round 2411`; a reader cannot resolve "R2414" to any entry.
+#: The ledger is this workspace's SSOT for round numbers (CLAUDE.md), so from
+#: here the provenance below cites the ENTRY ID and nothing else.
+#:
+#: 41 -> 40 (ledger `Round 2412`, one atom).
+#:
+#: `locator-iface` is the first COMPLETE atom taken after that inflection, and
+#: it shows what the inflection actually costs. Its seven upstream claims were
+#: written root-less, so the store citation gate had never graded ONE of them --
+#: the atom contributed zero to every bucket, anchored and defective alike. A
+#: grade two versions old could therefore sit here with no instrument able to
+#: object, which is the mechanism this whole item exists to close and not merely
+#: an untidy spelling. Re-measured at the pin the grade HOLDS, and the round's
+#: product is the conversion: fourteen anchored citations where there were none.
+#:
+#: THE RE-MEASUREMENT FOUND ONE CLAIM STATED BACKWARDS. The reason listed `ws`
+#: inside a clause about honouring the locator tail the way upstream does; at
+#: the pin upstream honours it on NEITHER ws arm, so wz does MORE there. A
+#: clause that reads as parity while naming an extension is the failure mode a
+#: later reader cannot detect, because both halves are individually true.
+#:
+#: It also confirms the citation-rot shape from the other direction. The quic
+#: route MOVED crates -- upstream consolidated quic socket construction into a
+#: module shared by quic and quic-datagram, the same one-SSOT choice wz made at
+#: y454 -- so the old location no longer finds it while the fact is unchanged. A
+#: needle survives that move; a path with a line number does not.
+#:
+#: The split is 34 PARTIAL / 6 COMPLETE.
+BUDGET = 40
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
