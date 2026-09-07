@@ -794,7 +794,28 @@ def _grade_head(reason: str) -> str:
 #: store-reason census counts citation OCCURRENCES, so quoting a defective
 #: citation in order to correct it ADDS one. R2360 paid for that; this round
 #: declined to re-pay it.
-BUDGET = 35
+#: 35 -> 34 (R2427). `transport-link-ws`, and the cheapest confirm in this series
+#: -- all three of its claims hold at the pin and the tag stays COMPLETE. Its one
+#: version-bearing sentence LOOKS like a single claim and is three (the link is
+#: not byte-streamed, its MTU is the 16-bit maximum, upstream has no wss), which
+#: is the shape that has made every atom in this series cost more than its first
+#: reading suggested.
+#:
+#: ⚠ BOTH survivable-looking checks are TERM-SEARCHABLE INTO THE WRONG VERDICT,
+#: and that is the finding rather than the confirmation:
+#:
+#:   * the MTU is no longer a NUMBER. It is the batch-size type's maximum, so
+#:     grepping the pinned crate for 65535 finds nothing and the claim reads
+#:     stale while holding.
+#:   * the pinned tree contains exactly ONE `WSS` token and it is a COMMENT
+#:     naming the PDU the MTU sizes. A case-insensitive sweep for the scheme
+#:     HITS, and a reader trusting that hit concludes upstream HAS wss -- the
+#:     opposite of the measured answer.
+#:
+#: So a value can hold while the thing you would search for stops existing, and
+#: an absence can be contradicted by a comment. The anchors written into the atom
+#: name the DECLARATIONS for that reason, not the words.
+BUDGET = 34
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
