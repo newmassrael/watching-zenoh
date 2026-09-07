@@ -159,8 +159,27 @@ GRADE_TAGS = ("PARTIAL:", "COMPLETE:")
 #: verdict, and `declare-keyexpr` proves it by sharing the block and staying
 #: PARTIAL. Both pin claims re-read, the tree-side witness re-RUN rather than
 #: cited: 535 tests pass where that reason still records 530, so the frozen
-#: count had drifted by five. The split is 43 PARTIAL / 15 COMPLETE.
-BUDGET = 58
+#: count had drifted by five. The split was 43 PARTIAL / 15 COMPLETE.
+#:
+#: 58 -> 57 (R2399). `declare-interest`, and it is the FIRST of these moves on a
+#: PARTIAL rather than a COMPLETE: the grade does not change, only the
+#: declaration and two dead paths. Both had a `zenoh/` segment that does not
+#: belong before `commons/`, and repairing them is what let the two claims be
+#: re-read at the pin -- `AGGREGATE` still has no upstream producer, and the
+#: Interest codec still writes ext_nodeid only when it differs from DEFAULT.
+#:
+#: ⚠ THE OBVIOUS GENERALISATION IS FALSE and was measured before being acted on.
+#: `zenoh/` is a REAL upstream directory: the pinned checkout holds `zenoh/` and
+#: `commons/` as SIBLINGS at its root, so 19 of the 21 distinct `zenoh/...rs`
+#: citations in this store are correct exactly as written. Only a `zenoh/` placed
+#: before `commons/` is wrong. Strip that segment ONLY when the full path misses
+#: and the stripped one hits; a bulk edit breaks nineteen to fix two. A third
+#: state resolves neither way -- `zenoh/src/net/routing/router.rs`, cited by
+#: `router-multicast-faces` -- and that is upstream restructuring under a stale
+#: grading, needing a re-measurement rather than a path edit.
+#:
+#: The split is 42 PARTIAL / 15 COMPLETE.
+BUDGET = 57
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
