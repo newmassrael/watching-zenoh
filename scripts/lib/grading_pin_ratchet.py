@@ -446,7 +446,33 @@ GRADE_TAGS = ("PARTIAL:", "COMPLETE:")
 #: derives from the encoding module's id/MIME SSOT.
 #:
 #: The split is 33 PARTIAL / 6 COMPLETE.
-BUDGET = 39
+#:
+#: R2415 moved it to 38 by re-declaring `adminspace-core`, and what that
+#: re-measure retracted is the sharpest instance of this item's whole argument.
+#: `AdminLocalData::to_json`'s own doc asserted it "matches those bytes exactly"
+#: against upstream. Graded against 1.5.0 and never rechecked, that assertion is
+#: FALSE at the pin -- and it is a falsehood no gate can catch, because a reader
+#: has no reason to doubt a doc comment that names byte-exactness. A stale grade
+#: does not merely age; it keeps asserting.
+#:
+#: FOUR FIELDS, FOUR DIFFERENT SITUATIONS, and the finding is that they are not
+#: one gap: `shm` was never missing (wz negotiates it and simply did not report
+#: it -- closed here, in the alphabetical slot upstream's BTreeMap emits);
+#: `region` is upstream's own recent addition with no wz analogue, an honest
+#: ABSENCE that must not be written up as parity; `weight` is router-tier and
+#: was already named as a follow-up; `metadata` is a config-surface question.
+#:
+#: AND THE ROUND WAS TAUGHT BY A GREEN CONTROL. The wiring passed every test --
+#: and so did replacing it with a constant. Nothing tied the runtime's value to
+#: the session's negotiation, so a field that always reports the same thing was
+#: indistinguishable from one that reports nothing. The fix was the missing
+#: witness, not deleting the probe: with the wiring 8 pass, with the constant 7
+#: pass and exactly the new test fails. The forwarder host, reachable only from
+#: wz-ap-demo, took its witness in Layer E12 instead -- and that leg is scoped in
+#: its own comment to EMISSION, since a pico client negotiates no SHM.
+#:
+#: The split is 32 PARTIAL / 6 COMPLETE.
+BUDGET = 38
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
