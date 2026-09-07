@@ -898,7 +898,33 @@ def _grade_head(reason: str) -> str:
 #: Freshness was necessary and NOT sufficient: the artifact the census reads was
 #: four days behind the commit, and fixing that still left the wrong answer,
 #: because configuration was the variable that mattered.
-BUDGET = 31
+#: 31 -> 30 (R2431). `ext-pubsub-advanced-cache`, and this one is about THIS
+#: GATE rather than about the atom: THE MEASUREMENT WAS ALREADY DONE AND THIS
+#: INSTRUMENT NEVER SAW IT. That reason states twice that every clause
+#: disposition was re-measured against the PIN, and records the checkout's
+#: presence as ESTABLISHED rather than inherited -- but it never wrote the
+#: marker string, and the marker is the only thing this file reads. So the
+#: budget has been counting a finished atom.
+#:
+#: MEASURED BEFORE GENERALISING: exactly ONE of the thirty-one remaining was in
+#: that state, so the count overstated the outstanding work by one and not
+#: systematically. That is why this is repaired in place instead of being given
+#: an instrument -- a one-off does not earn a gate.
+#:
+#: ⚠ THE MARKER WAS NOT RUBBER-STAMPED, and the re-read found what the earlier
+#: pass missed. The MECHANISM holds at the pin: upstream's advanced cache still
+#: decodes a sequence-number range and a max-sample cap out of its selector
+#: parameters. The CITED SYMBOL does not: `decode_range` is now
+#: `decode_sn_range`. A RENAME, not a removal -- and the old cited LINE RANGE
+#: still brackets the renamed function, so every line-based check on that
+#: citation would have PASSED while the name it asserts had ceased to exist.
+#:
+#: That is the third distinct citation-rot mode this sweep has recorded, and
+#: each defeats a different check: a line that moved WITHIN its file; a value
+#: that became a SYMBOL (so grepping the number finds nothing while the claim
+#: holds); and now a SYMBOL RENAMED under a line that did not move. Anchors
+#: should therefore name DECLARATIONS -- not lines, not words, not values.
+BUDGET = 30
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
