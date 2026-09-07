@@ -11400,3 +11400,94 @@ fn a_driver_refusal_charges_n_dropped_and_no_sent_counter() {
         );
     }
 }
+
+/// R2423 (open-debt item 688) — the F2 send gate learns from a `WriterGone`
+/// refusal, so the NEXT send rejects typed instead of vanishing.
+///
+/// ## What this pins, and why the gate could not see it before
+///
+/// [`LinkDropCause::WriterGone`] means the writer this driver feeds is gone, and
+/// its own doc says every later write "drops the same way until the session
+/// notices the link is down". Nothing implemented that noticing: the refusal was
+/// read ONLY by the `transport-stats` counter, which is not even compiled into a
+/// default build. So the F2 gate — whose stated purpose is that a data send
+/// "reject typed rather than vanish into a dead writer channel" — was gated on
+/// ESTABLISHMENT state alone, and a writer sealed under a live link (R2367's
+/// `WriterHandle` drop) was invisible to it.
+///
+/// What that produced, measured against a genuine zenohd on 2026-09-07: wz's
+/// REST bridge answered `200 OK` to an SSE subscribe whose
+/// `Declare(DeclSubscriber)` had reached no wire, because `declare_subscriber`
+/// was told the send succeeded. A `500` would have been correct and diagnosable;
+/// a `200` that streams keepalives forever is neither.
+///
+/// ## Why the FIRST send still succeeds here
+///
+/// It is the one that discovers the dead writer, and it genuinely was dispatched
+/// — the transport had no way to know before offering the bytes. `send_wire` is
+/// `()`-returning by design (batching means the flush that fails may carry an
+/// earlier message's bytes, so attributing a drop to one caller is not sound).
+/// The gate closing is therefore the honest repair: the session stops CLAIMING
+/// success from the next send onward.
+#[cfg(feature = "codec-push")]
+#[test]
+fn a_writer_gone_refusal_closes_the_f2_send_gate() {
+    use wz_session_core::link::LinkDropCause;
+    use wz_session_core::send_wire_error::SendWireError;
+
+    let (actions, driver) = crate::test_fixtures::refusing_actions(LinkDropCause::WriterGone);
+
+    // The discovering send. It reaches the driver — asserted, so a gate closed
+    // by a driver that was never called could not pass this for the wrong
+    // reason ([[reference_lesson_prescriptions_y878_y884]]: a dead probe and a
+    // negative result look alike).
+    actions
+        .send_push_literal("demo/writer-gone", b"first", true)
+        .expect("the transport accepts the first send; the DRIVER is what refuses");
+    assert_eq!(
+        driver.offered_count(),
+        1,
+        "the bytes were offered to the driver, which refused them"
+    );
+
+    // The one the gate now answers.
+    assert_eq!(
+        actions.send_push_literal("demo/writer-gone", b"second", true),
+        Err(SendWireError::TransportUnavailable),
+        "a send after a WriterGone refusal must reject typed, not vanish"
+    );
+    assert_eq!(
+        driver.offered_count(),
+        1,
+        "and it must reject BEFORE the driver — a second offered write would \
+         mean the gate closed after the bytes were already handed over, which \
+         is the vanishing this exists to stop"
+    );
+}
+
+/// R2423 (open-debt item 688) — the NEGATIVE half, and the one that makes the
+/// disposition a decision rather than a blanket.
+///
+/// [`LinkDropCause::Oversize`] is one frame too large for one write on a link
+/// that is otherwise healthy: the next, smaller write succeeds. Closing the F2
+/// gate on it would turn a single oversize frame into a dead session, so this
+/// pins that the gate stays OPEN — which is also what stops the sibling test
+/// above from passing under a seam that simply closes the gate on every refusal.
+#[cfg(feature = "codec-push")]
+#[test]
+fn an_oversize_refusal_leaves_the_f2_send_gate_open() {
+    use wz_session_core::link::LinkDropCause;
+
+    let (actions, driver) = crate::test_fixtures::refusing_actions(LinkDropCause::Oversize);
+
+    for attempt in ["first", "second"] {
+        actions
+            .send_push_literal("demo/oversize", attempt.as_bytes(), true)
+            .expect("an oversize refusal does not close the send gate");
+    }
+    assert_eq!(
+        driver.offered_count(),
+        2,
+        "both writes reached the driver — the gate never closed"
+    );
+}

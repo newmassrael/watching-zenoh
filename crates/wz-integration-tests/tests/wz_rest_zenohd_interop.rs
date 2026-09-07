@@ -348,6 +348,27 @@ struct Fixture {
     wz_rest: std::net::SocketAddr,
     _serve: tokio::task::JoinHandle<()>,
     _drive: tokio::task::JoinHandle<()>,
+    /// R2423 (open-debt item 688) — the outbound writer's liveness token, and
+    /// the reason BOTH legs of this file were red against a genuine zenohd.
+    ///
+    /// The drive task below is an `async move` block that names
+    /// `opened.inbound` / `.actions` / `.engine` / `.clock`, so Rust 2021's
+    /// disjoint capture moves exactly those four fields into it and leaves
+    /// `opened.writer_handle` to be dropped when `fixture()` returns. That drop
+    /// SEALS the writer (`WriterHandle`'s `Drop`, R2367): the socket closed
+    /// ~0.5 ms after Established, zenohd logged `RX task failed: … early eof`,
+    /// and the two legs then failed in the two ways a sealed queue produces —
+    /// `publish` rejecting typed once the FSM had run (`500`), and, in the
+    /// window BEFORE it did, a `declare_subscriber` that returned `Ok` for a
+    /// `Declare` which vanished, so the SSE leg served `200 OK` and streamed
+    /// nothing but keepalives for its whole budget.
+    ///
+    /// Every other zenohd-interop test in this crate drives the session INLINE,
+    /// keeping `opened` on the test's own stack, which is why this file was the
+    /// only one affected. Binding the handle into the fixture is the fix here;
+    /// the seam-side half of that round makes the vanished send observable at
+    /// all (`emit_on_link` now closes the F2 gate on `WriterGone`).
+    _writer: wz_runtime_tokio::writer_queue::WriterHandle,
 }
 
 async fn fixture() -> Fixture {
@@ -379,6 +400,9 @@ async fn fixture() -> Fixture {
         let _ = wz::rest::serve_on(listener, serve_session, zid).await;
     });
 
+    // Move the liveness token OUT before the drive task's disjoint capture can
+    // leave it behind — see `Fixture::_writer`.
+    let writer = opened.writer_handle;
     let timeouts = SessionTimeouts::spec_defaults();
     let drive_session = session.clone();
     let drive = tokio::spawn(async move {
@@ -400,6 +424,7 @@ async fn fixture() -> Fixture {
         wz_rest,
         _serve: serve,
         _drive: drive,
+        _writer: writer,
     }
 }
 

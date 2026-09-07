@@ -146,13 +146,20 @@ pub(crate) fn recording_driver() -> Arc<RecordingLinkDriver> {
 /// It still records, so a test can assert the bytes were offered — a driver that
 /// refused by never being called would pass a `n_dropped == 0` assertion for the
 /// wrong reason.
-#[cfg(feature = "transport-stats")]
+///
+/// R2423 (open-debt item 688) — the gate moved from `transport-stats` to
+/// `codec-push` because the refusal has a SECOND consumer now, and it is not a
+/// counter: `emit_on_link` disposes of each [`LinkDropCause`] on the F2 send
+/// gate, so this fixture is what witnesses that disposition per cause. That
+/// consumer is in the DEFAULT feature set, where the stats one is not, which is
+/// the whole reason the population had to widen.
+#[cfg(feature = "codec-push")]
 pub(crate) struct RefusingLinkDriver {
     offered: Mutex<Vec<Vec<u8>>>,
     cause: wz_session_core::link::LinkDropCause,
 }
 
-#[cfg(feature = "transport-stats")]
+#[cfg(feature = "codec-push")]
 impl RefusingLinkDriver {
     /// How many writes were offered to (and refused by) this driver.
     pub(crate) fn offered_count(&self) -> usize {
@@ -163,7 +170,7 @@ impl RefusingLinkDriver {
     }
 }
 
-#[cfg(feature = "transport-stats")]
+#[cfg(feature = "codec-push")]
 impl BoxedLinkDriver for RefusingLinkDriver {
     fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
         self.offered
@@ -177,7 +184,7 @@ impl BoxedLinkDriver for RefusingLinkDriver {
 }
 
 /// A [`SessionLinkActions`] whose driver refuses every write with `cause`.
-#[cfg(feature = "transport-stats")]
+#[cfg(feature = "codec-push")]
 pub(crate) fn refusing_actions(
     cause: wz_session_core::link::LinkDropCause,
 ) -> (Arc<SessionLinkActions>, Arc<RefusingLinkDriver>) {

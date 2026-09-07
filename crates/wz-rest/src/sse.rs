@@ -97,8 +97,13 @@ pub async fn stream<W: AsyncWriteExt + Unpin>(session: &TokioSession, keyexpr: S
         },
     ) {
         Ok(subscriber) => subscriber,
-        Err(_) => {
-            let bytes = Response::text(500, "Internal Server Error", "subscribe failed").encode();
+        // R2423 (open-debt item 688) — same as the write path: the typed error
+        // travels in the BODY instead of being flattened to a constant. This is
+        // the response a consumer sees when the `Declare(DeclSubscriber)` could
+        // not be emitted, and "subscribe failed" told them nothing about which
+        // of the six `SubscribeError` cases it was.
+        Err(e) => {
+            let bytes = Response::text(500, "Internal Server Error", &e.to_string()).encode();
             let _ = wr.write_all(&bytes).await;
             return;
         }

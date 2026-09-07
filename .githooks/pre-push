@@ -960,6 +960,46 @@ if ! python3 scripts/lib/framing_refusal_reachability_gate.py; then
     exit 1
 fi
 
+# ─── gate 2j — every link-drop cause has a decided disposition (R2423, item 688) ──
+# grades: worktree
+#
+# `BoxedLinkDriver::send_blocking` reports a refusal as
+# `LinkSendOutcome::Dropped(LinkDropCause)`. Seven production drivers produce
+# `WriterGone`, and until R2423 the ONLY consumer of any refusal was the
+# `n_dropped` counter — which is `transport-stats`-gated, so on a default build
+# the refusal was read by nothing at all. `WriterGone`'s own doc said the writes
+# keep dropping "until the session notices the link is down", naming a mechanism
+# that did not exist, while the F2 gate promised a send would "reject typed
+# rather than vanish into a dead writer channel" and read establishment state
+# only.
+#
+# What that cost, against a genuine zenohd: wz's REST bridge served `200 OK` on
+# an SSE subscribe whose `Declare` reached no wire, then streamed keepalives for
+# its whole budget, because `declare_subscriber` was told the send succeeded. A
+# consumer with only the HTTP responses could not attribute it and stopped their
+# pin migration on it.
+#
+# The seam's match is exhaustive, so the ARM half is partly the compiler's — but
+# only partly: a `_ => {}` compiles and silently un-decides every future
+# variant, which is exactly what this catches. The WITNESS half is not the
+# compiler's at all, and is the point: exhaustiveness is a decision, not a proof
+# that either arm fires (`reference_lesson_a_successor_chain_is_not_a_walk_over_
+# the_type`).
+#
+# Here as well as in Layer C0, for gate 2d's reason: both sides are on disk —
+# the enum, the seam and the tests are three tracked files — and reading them
+# costs well under a second with nothing built.
+if ! python3 scripts/lib/link_drop_disposition_gate.py; then
+    echo "" >&2
+    echo "pre-push: [gate 2j] link-drop disposition gate FAILED — a" >&2
+    echo "          \`LinkDropCause\` has no arm in \`emit_on_link\`'s disposition" >&2
+    echo "          closure, or no \`#[test]\` body names it. The line above says" >&2
+    echo "          which. Decide the cause at the seam AND witness it; a" >&2
+    echo "          \`_ => {}\` there un-decides every variant added later." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+
 # ─── gate 2h — the RUST half of the static gates, RUN (R2153, item 542) ──
 # grades: worktree
 #

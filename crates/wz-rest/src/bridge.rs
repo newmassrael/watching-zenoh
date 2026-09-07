@@ -336,7 +336,19 @@ fn handle_write(session: &TokioSession, zid: &[u8], req: &Request, is_delete: bo
 
     match result {
         Ok(_) => Response::empty(200, "OK"),
-        Err(_) => Response::text(500, "Internal Server Error", "publish failed"),
+        // R2423 (open-debt item 688) — the BODY carries the error, which is
+        // upstream's shape at the 1.10.0 pin:
+        // `plugins/zenoh-plugin-rest/src/lib.rs`
+        // @ `Err(err) => (StatusCode::INTERNAL_SERVER_ERROR`. This used to
+        // answer the constant `"publish failed"` and DISCARD the typed error,
+        // which is why
+        // a consumer holding only the HTTP response could not tell a dead
+        // session (`TransportUnavailable`) from an oversized payload
+        // (`ExceedsCapacity`) and had to report the 500 as unattributed. The
+        // status stays 500 for parity even though the transport case is
+        // arguably a 503: diverging on the code would break a client that reads
+        // it, while the body upstream already fills was simply empty here.
+        Err(e) => Response::text(500, "Internal Server Error", &e.to_string()),
     }
 }
 

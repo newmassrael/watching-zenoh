@@ -3052,6 +3052,19 @@ PY
     # `.githooks/pre-push`, which is what makes it the LOCAL gate item 224 asks
     # for -- this lane is the hosted half.
     python3 scripts/lib/config_key_fixture_gate.py || return 1
+    # R2423 (unregistered open-debt item 688) — every reason a link driver can
+    # REFUSE a write must have a decided disposition on the F2 send gate, and a
+    # test that witnesses it. Before this round the only consumer of a refusal
+    # was the `transport-stats` counter, so on a default build a `WriterGone`
+    # drop was observed by nothing: the session kept reporting success for sends
+    # that reached no wire, and wz's REST bridge served `200 OK` on an SSE
+    # subscribe whose `Declare` had vanished. The seam's match is exhaustive, but
+    # a `_ => {}` compiles and un-decides every later variant, and
+    # exhaustiveness is a decision rather than a proof that an arm fires — this
+    # grades both halves. Same lane as gate 2d for the same reason: three tracked
+    # files, nothing built.
+    python3 scripts/lib/link_drop_disposition_gate.py || return 1
+    python3 scripts/lib/link_drop_disposition_gate.py --selftest || return 1
     # R2394 (unregistered open-debt item 675) — the GRADING-PIN ratchet. An
     # atom's inventory reason opens with its grade and then says what the grade
     # was measured against, and 61 of them still said 1.5.0 while this tree pins

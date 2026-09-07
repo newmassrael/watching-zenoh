@@ -1965,6 +1965,56 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 }
             }
         };
+        // R2423 (open-debt item 688) — a REFUSED write also has a LIVENESS
+        // meaning, and until this round nothing read it. `WriterGone` is
+        // produced by SEVEN production drivers — five tokio pipelines
+        // (stream, udp, ws, serial, quic-datagram), the accept-side glue, and
+        // the lwIP driver; the eighth, `wz-capi-core`'s `InertLinkDriver`, feeds
+        // no channel and so has no writer to lose — and every one of those
+        // refusals was consumed ONLY by the counter above, which is
+        // `transport-stats`-gated. On a DEFAULT build the drop was therefore
+        // observed by nothing at all, while
+        // [`LinkDropCause::WriterGone`]'s own doc said the writes keep dropping
+        // "until the session notices the link is down" — a clause naming a
+        // mechanism that did not exist.
+        //
+        // What that cost: the F2 gate ([`Self::session_send_available`]) exists
+        // so a data send "rejects typed rather than vanishing into a dead writer
+        // channel", but it reads ESTABLISHMENT state only. A sealed writer
+        // (`WriterHandle`'s drop, R2367) is a second way for that channel to die
+        // and the gate could not see it, so between the seal and the FSM's
+        // terminal every send returned success while reaching no wire —
+        // `declare_subscriber` answered `Ok` for a subscription whose `Declare`
+        // never left the host. wz's REST bridge then served `200 OK` on an SSE
+        // stream that could only ever carry keepalives, which is what a consumer
+        // reported against a genuine zenohd on 2026-09-07.
+        //
+        // The disposition is per-cause and the match is EXHAUSTIVE on purpose: a
+        // later variant cannot inherit "counted, then ignored" by default, it has
+        // to be decided here (`link_drop_disposition_gate.py` grades that the
+        // decision is also WITNESSED, exhaustiveness being a decision and not a
+        // proof that either arm fires).
+        let dispose = |outcome: crate::link::LinkSendOutcome| {
+            let crate::link::LinkSendOutcome::Dropped(cause) = outcome else {
+                return;
+            };
+            match cause {
+                // TERMINAL for this link: the writer task is gone, so every
+                // later write drops identically. Closing the per-link F2 gate is
+                // what makes the NEXT send reject typed. Per-link, so a
+                // `transport-multilink` session fails the send OVER to a
+                // surviving link (`session_send_available` ORs the set) instead
+                // of emitting into a dead one.
+                crate::link::LinkDropCause::WriterGone => {
+                    R::with_mutex_mut(&link.transport_available, |g| *g = false);
+                }
+                // NOT terminal, and deliberately not gated: one frame exceeded
+                // what this link can put in a single write. The link is healthy
+                // and the next, smaller write succeeds — closing the gate here
+                // would turn a single oversize frame into a dead session.
+                crate::link::LinkDropCause::Oversize => {}
+            }
+        };
         // transport-compression — once compression is ACTIVE, every
         // post-establishment batch is lz4-wrapped here (the wz analogue of
         // zenoh's finalize-then-write-to-link), and the link layer then
@@ -1980,10 +2030,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // transport-stats — count the ACTUAL wire bytes (post-compression).
             let outcome = link.link_driver().send_blocking(&wrapped, reliability);
             count_tx_wire(wrapped.len(), outcome);
+            dispose(outcome);
             return;
         }
         let outcome = link.link_driver().send_blocking(bytes, reliability);
         count_tx_wire(bytes.len(), outcome);
+        dispose(outcome);
     }
 
     /// R311y205 (transport-multilink IMPL-2b-iii) — emit on THIS binding's own

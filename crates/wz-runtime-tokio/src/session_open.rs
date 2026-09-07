@@ -3239,6 +3239,28 @@ pub struct OpenedSession {
     pub engine: Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>,
     pub actions: Arc<SessionLinkActions>,
     pub inbound: InboundLink,
+    /// The outbound writer's lifecycle handle — a LIVENESS TOKEN, not a
+    /// teardown convenience. Dropping it SEALS the queue (R2367), after which
+    /// the writer finishes what is buffered, exits, and the link's socket
+    /// closes; the peer then sees the session go away.
+    ///
+    /// R2423 (open-debt item 688) — so a caller must keep it alive for as long
+    /// as it intends to send, and the way that gets violated is not a forgotten
+    /// `drop`. Rust 2021's disjoint closure capture takes only the FIELDS a
+    /// closure body names, so
+    ///
+    /// ```text
+    /// tokio::spawn(async move { drive_session_until_terminal(
+    ///     &mut opened.inbound, &opened.actions, &mut opened.engine, .. ).await });
+    /// ```
+    ///
+    /// captures four fields and leaves this one behind to be dropped at the end
+    /// of the enclosing scope — killing the session microseconds after
+    /// Established, with nothing in the source reading like a close. That is the
+    /// shape that broke wz's REST bridge against a genuine zenohd: `publish`
+    /// answered `500` and an SSE subscription answered `200` and then streamed
+    /// only keepalives. Move the whole `OpenedSession` into the task, or bind
+    /// this field somewhere that outlives the sends.
     pub writer_handle: WriterHandle,
     pub clock: TokioTime,
 }
