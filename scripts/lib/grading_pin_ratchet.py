@@ -178,8 +178,24 @@ GRADE_TAGS = ("PARTIAL:", "COMPLETE:")
 #: `router-multicast-faces` -- and that is upstream restructuring under a stale
 #: grading, needing a re-measurement rather than a path edit.
 #:
-#: The split is 42 PARTIAL / 15 COMPLETE.
-BUDGET = 57
+#: The split was 42 PARTIAL / 15 COMPLETE.
+#:
+#: 57 -> 56 (R2400). `routing-namespace`, and this one was chosen to REFUTE
+#: rather than to be cheap: a COMPLETE grade resting entirely on one round's
+#: arm-for-arm walk of a 283-line upstream module. The re-measurement came back
+#: NEGATIVE -- at the pin the module is 286 lines, every function in it was read,
+#: and what that walk recorded is still what upstream does. wz mirrors the whole
+#: ingress mechanism structure by structure, incomplete-declaration map and all
+#: four blocked-id sets included.
+#:
+#: A NEGATIVE RESULT IS A MEASUREMENT. This is the first move here that reads an
+#: atom NOBODY had read at the pin -- the previous three moved atoms whose prose
+#: already asserted a pin reading -- so it costs a full walk and buys the same
+#: one count. That is the honest price of the remaining population, and a round
+#: that only takes the cheap ones will leave the expensive ones unread.
+#:
+#: The split is 42 PARTIAL / 14 COMPLETE.
+BUDGET = 56
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
