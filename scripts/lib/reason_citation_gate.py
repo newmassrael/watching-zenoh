@@ -73,7 +73,33 @@ import sys
 # `transport-stats` atom's reason and moved neither ratchet. Both caught it on
 # the next run, which is the mechanism working; the baselines move here because
 # this is the commit that publishes that one.
-AMBIGUOUS_BASELINE = 103
+#
+# 103 -> 102 (ledger `Round 2418`), and this round ADOPTS the fall rather than
+# claiming it. The distinction is the whole of the note, because the failure
+# message above says "the baseline moves down in the same commit", which
+# presumes the commit is the one that resolved a citation. This one is not.
+#
+# ATTRIBUTED BY MEASUREMENT, not by proximity. The gate reads the inventory
+# through `mnemosyne-cli`, and it accepts a fixture (`WZ_REASON_INVENTORY`), so
+# the previous store could be scored directly: a fixture built from the
+# inventory at `e911d23c` — the tip before R2417 — yields the IDENTICAL row,
+# 948 citations / 348 unique / 102 ambiguous / 498 foreign. The fall therefore
+# predates R2417 and every commit in this session.
+#
+# R2417 WAS THE OBVIOUS SUSPECT AND WAS CLEARED. That round replaced the whole
+# `transport-multicast` reason and added nine anchored upstream citations, which
+# is exactly the shape that moved this ratchet at R2332. Scored with this file's
+# own `CITE` pattern against the suffix index, that atom's reason resolves 4
+# unique / 0 ambiguous / 0 foreign BEFORE and AFTER — it does not contribute to
+# this population at all, in either version.
+#
+# WHY IT COULD NOT BE SEEN. Layer C0 is fail-fast and was dying at leg 90 on
+# `depth_axis_census`; this gate is leg 110. R2417 repaired that census's pins,
+# C0 now reaches 110 of 156, and the first thing the twenty newly-reachable legs
+# did was surface this. That is the fail-fast lesson landing on its own author:
+# clearing the first red REPLACES the subject, and the next red appearing is not
+# a regression. Read `reached N of M`; the exit code was 1 on both sides.
+AMBIGUOUS_BASELINE = 102
 
 
 def ambiguous_baseline() -> int:

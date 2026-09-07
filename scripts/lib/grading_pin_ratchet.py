@@ -156,7 +156,48 @@ PIN_DECLARED = "PIN RE-DECLARED"
 #: The grade tags an inventory reason opens with. A reason that opens with
 #: neither is not a grading claim at all (the store also carries `debt-` items,
 #: whose reasons are register prose), so it is outside the population.
-GRADE_TAGS = ("PARTIAL:", "COMPLETE:")
+GRADE_TAGS = ("PARTIAL", "COMPLETE")
+
+#: The HEAD of a reason: its first word, whatever punctuation follows.
+#:
+#: R2418 (open-debt item 686) — THE POPULATION USED TO TURN ON A COLON, and that
+#: is how this gate's own completion condition could be reached while false.
+#: The test was `reason.startswith(("PARTIAL:", "COMPLETE:"))`, so a reason
+#: heading `PARTIAL (BUILT R311y506, ...)` or `COMPLETE (R2351; was PARTIAL)`
+#: was not a grading claim as far as this file could tell. NINE atoms head that
+#: way -- three `PARTIAL (`, six `COMPLETE (` -- and FOUR of the nine name the
+#: stale version with no pin marker, so they were stale gradings this ratchet
+#: could not count. Two of those four are COMPLETE, which is the half the
+#: register item calls sharper: a completion asserted against an upstream two
+#: versions gone, with no instrument able to object.
+#:
+#: ⚠ THE FIRST DRAFT OF THE FIX WAS WRONG AND WAS MEASURED BEFORE LANDING.
+#: `depth_axis_census.HEAD_TAG` looks like the thing to share, but it is a
+#: FIRST-WORD EXTRACTOR, not a grade test: used as this population's predicate
+#: it admits 214 reasons rather than 141, including atoms that were never graded
+#: at all (`FOUNDATIONAL`, `PHANTOM`, `OUT-OF-SCOPE`, `BEYOND-PICO` heads). The
+#: census pairs that regex with `head.group(1).upper() == "PARTIAL"` and it is
+#: the PAIR that decides. This mirrors that pair for both grades.
+#:
+#: The provenance of the spelling, which the fix does not need but a reader
+#: does: five of the six `COMPLETE (` reasons read `(R23NN; was PARTIAL)`, from
+#: R2350-R2354. One round-family introduced the form, which is why the escape
+#: arrived in a batch rather than one atom at a time -- a re-grading round moved
+#: the head and silently left this population.
+GRADE_HEAD = re.compile(r"\s*([A-Za-z][A-Za-z0-9-]*)")
+
+
+def _is_graded(reason: str) -> bool:
+    """Whether `reason` opens with a GRADE, punctuation-insensitively.
+
+    One predicate rather than a spelling, so a reason that heads
+    `COMPLETE (R2351; was PARTIAL)` is inside the population exactly as
+    `COMPLETE:` is. The comparison is on the FIRST WORD alone: anything after it
+    is that reason's own prose, and grading it would re-admit prose as the thing
+    being measured -- the defect `PIN_DECLARED` above already replaced once.
+    """
+    head = GRADE_HEAD.match(reason)
+    return bool(head) and head.group(1).upper() in GRADE_TAGS
 
 #: Seeded at what `--count` PRINTS for this commit's PARENT: 61.
 #:
@@ -521,7 +562,52 @@ GRADE_TAGS = ("PARTIAL:", "COMPLETE:")
 #: atoms, which is the rule that atom's own text states.
 #:
 #: The split is 32 PARTIAL / 5 COMPLETE.
-BUDGET = 37
+#:
+#: 37 -> 41 (ledger `Round 2418`, open-debt item 686) — AND THIS IS THE ONE MOVE
+#: IN THIS FILE'S HISTORY THAT GOES UP. Every entry above moves it DOWN, because
+#: down is a round paying an atom; the failure message a few lines below says in
+#: so many words never to raise it. Read it anyway, because the message cannot
+#: tell these two apart:
+#:
+#:   * the tree got WORSE — an atom was graded against the stale version. Repair
+#:     the grading. The budget does not move.
+#:   * the GATE started SEEING — the population predicate was repaired, so atoms
+#:     that were always stale are now counted. Nothing about the tree changed.
+#:
+#: This is the second. `_is_graded` above replaced a colon-sensitive
+#: `startswith` test, which had been silently excluding nine reasons whose head
+#: reads `PARTIAL (` or `COMPLETE (`. FOUR of the nine are stale, so the count
+#: rises by exactly four and the graded population by exactly nine: 37 -> 41 of
+#: 132 -> 141. Both deltas were derived BEFORE the edit landed and are the
+#: check on it.
+#:
+#: The four that entered, named so a later round cannot mistake them for new
+#: debt: `session-extqos` and `storage-mgr-dynamic-volume-loading` (PARTIAL),
+#: `storage-aligner` and `storage-replication` (COMPLETE). The last two are the
+#: reason item 686 is ranked critical rather than ordinary — a COMPLETE graded
+#: two versions back is a false statement, and these two carried it where this
+#: gate could not look.
+#:
+#: ⚠ WHAT THIS MOVE DOES NOT CLAIM. It does not pay any of the four down; it
+#: makes them countable. Item 675's own done condition is "the derived
+#: population is 0", and before this commit that zero was reachable while four
+#: stale gradings sat outside the derivation — the completion condition was
+#: false-reachable, which is the whole of item 686.
+#:
+#: ⚠⚠ AND THE CONTROL PROBE FOUND THE MIRROR OF THE SAME BLIND SPOT, in the
+#: DOWN direction, which the paragraph above only claimed for UP. Restoring the
+#: old colon-sensitive predicate takes the count to 37 of 132 and this gate
+#: reports "37 < 41 -- this commit re-measured an atom against the pin". No atom
+#: was re-measured; the POPULATION was narrowed. So neither direction's message
+#: can distinguish a round paying an atom from a round moving the predicate, and
+#: a future edit to `_is_graded` will be told the wrong story by this file's own
+#: output. The discriminator is the graded TOTAL beside the stale count: an atom
+#: paid down moves the stale count alone (41/141 -> 40/141), while a predicate
+#: change moves BOTH (37/132 vs 41/141). That pair is printed on every run for
+#: exactly this reason; read both numbers, never the stale one alone.
+#:
+#: The split is 32 PARTIAL / 9 COMPLETE.
+BUDGET = 41
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
@@ -541,7 +627,7 @@ def graded_reasons(store: dict) -> list[tuple[str, str]]:
         if not isinstance(entry, dict):
             continue
         reason = entry.get("reason") or ""
-        if reason.startswith(GRADE_TAGS):
+        if _is_graded(reason):
             out.append((atom_id, reason))
     return out
 
