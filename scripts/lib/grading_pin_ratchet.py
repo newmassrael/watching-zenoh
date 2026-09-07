@@ -842,7 +842,34 @@ def _grade_head(reason: str) -> str:
 #: the clause's pointers lack their roots, yet the defaults LINE NUMBER is still
 #: correct at the pin -- the constant has not moved. So this is not line rot, it
 #: is a missing root, and the two failure modes need different repairs.
-BUDGET = 33
+#: 33 -> 32 (R2429). `declare-queryable`, and with it the COMPLETE half of this
+#: ratchet reaches ZERO: every atom whose grade ASSERTED parity with a
+#: two-versions-old upstream has now been re-measured against the pin. What
+#: remains is 32 PARTIAL, which claim work is outstanding rather than finished --
+#: the half item 675's own text ranks as the less sharp one.
+#:
+#: Both of its residuals are REFUTED, and each was nearly got right for a wrong
+#: reason:
+#:
+#:   * THE MAPPING BIT. The clause cites the PEER-TABLE-ONLY resolver, whose rule
+#:     is that a non-zero id with M=0 yields nothing. A sibling resolver further
+#:     down the same module IS bit-aware, and reading that one instead makes the
+#:     residual look refuted for the wrong reason. The inbound queryable path
+#:     calls the bit-aware one with both spaces, so the case cannot arise -- but
+#:     that is established by reading the CITED site, not the plausible one.
+#:   * THE `ext_qos` ENVELOPE. Judged by the field being SET at three
+#:     construction sites, not by the helper being imported. An import and a doc
+#:     comment prove nothing about emission.
+#:
+#: ⚠ AND ITS TWO UPSTREAM POINTERS SHARE A DEFECT BUT NEED DIFFERENT REPAIRS,
+#: which is why they were not fixed as one: both lack their root, so both sat in
+#: NO budget. Beyond that, the face pointer STILL LANDS -- rooted, it names the
+#: two mapping tables the argument is about, and it is now anchored on them. The
+#: router-queries pointer has ROTTED WITHIN ITS FILE onto queryable-source
+#: construction, and the claim it supports belongs to `declare-interest` by this
+#: reason's own assignment -- so it is left for that atom's round rather than
+#: re-anchored here, where nobody would look for the verdict.
+BUDGET = 32
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
