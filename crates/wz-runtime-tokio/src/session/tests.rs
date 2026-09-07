@@ -2883,19 +2883,24 @@ fn declare_adminspace_metrics_get_returns_openmetrics_text() {
         .expect("query-get ON in this build");
 
     let got = String::from_utf8(payload.lock().unwrap().clone().expect("metrics replied")).unwrap();
-    let build_info = "# HELP zenoh_build Information about zenoh.\n\
-                      # TYPE zenoh_build gauge\n\
-                      zenoh_build{version=\"0.9.9\"} 1\n";
+    // R2414 (items 675/677) — re-measured against the PIN (zenoh 1.10.0). This
+    // used to assert a `zenoh_build` GAUGE with a version label alone, which was
+    // the 1.5.0 shape; the pin declares an `info` family whose sample is
+    // `zenoh_build_info` and carries local_id + local_whatami too.
+    let build_info = format!(
+        "# HELP zenoh_build Zenoh build version.\n\
+         # TYPE zenoh_build info\n\
+         zenoh_build_info{{local_id=\"{zid_hex}\",local_whatami=\"{whatami}\",version=\"0.9.9\"}} 1\n"
+    );
 
-    // R2371 — this leg serves the build-info gauge FIRST and, when the node has
+    // R2371 — this leg serves the build-info block FIRST and, when the node has
     // counters, the `transport-stats` block after it (`adminspace` @
     // `fn answer_admin_query`, whose own test pins the composition byte for
     // byte). Which of the two shapes this build produces is decided by the
-    // feature, so the assertion is too — it used to hard-code the no-counter
-    // shape and therefore described only half the builds it compiled in.
+    // feature, so the assertion is too.
     assert!(
-        got.starts_with(build_info),
-        "the build-info gauge comes first\n{got}"
+        got.starts_with(&build_info),
+        "the build-info block comes first\n{got}"
     );
     #[cfg(feature = "transport-stats")]
     {
@@ -2903,13 +2908,31 @@ fn declare_adminspace_metrics_get_returns_openmetrics_text() {
         // its counters are live rather than all-zero.
         assert!(
             got.contains("\n# TYPE tx_bytes counter\n"),
-            "the counter block follows the gauge\n{got}"
+            "the counter block follows the build-info block\n{got}"
         );
     }
     #[cfg(not(feature = "transport-stats"))]
-    assert_eq!(got, build_info, "no counters, so the gauge stands alone");
-    // text/plain = zenoh encoding id 4 -> wz packed_id 8 (id << 1), no schema.
-    assert_eq!(*enc.lock().unwrap(), Some((8, None)));
+    assert_eq!(
+        got,
+        build_info.clone() + "# EOF\n",
+        "no counters, so the build-info block stands alone before the terminator"
+    );
+    // R2414 — the document ends at its terminator, in EVERY build. Asserted
+    // outside the feature arms on purpose: the `transport-stats` arm above only
+    // checks that counters are present, and counters emitted AFTER `# EOF` would
+    // satisfy it while producing an invalid OpenMetrics document.
+    assert!(
+        got.ends_with("# EOF\n"),
+        "the OpenMetrics document ends at `# EOF`\n{got}"
+    );
+    // R2414 — the pin's own METRICS_ENCODING: `application/openmetrics-text`
+    // (predefined id 15 -> wz packed_id 31 with the schema bit set) carrying the
+    // remainder as schema. This used to be text/plain (id 4 -> packed 8), which
+    // is what a real zenoh node would NOT have sent.
+    assert_eq!(
+        *enc.lock().unwrap(),
+        Some((31, Some(String::from(" version=1.0.0; charset=utf-8"))))
+    );
 }
 
 #[cfg(all(feature = "query-get", feature = "adminspace-metrics"))]

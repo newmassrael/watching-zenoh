@@ -164,13 +164,29 @@ fn wz_peer_adminspace_metrics_decoded_by_pico_z_get() {
         out.contains(&format!("('{metrics_key}':")),
         "pico decoded no adminspace-metrics leg at `{metrics_key}`\n--- z_get ---\n{out}"
     );
+    // R2414 (open-debt items 675/677) — re-measured against the PIN (zenoh
+    // 1.10.0). These used to assert a `gauge` named `zenoh_build` with a version
+    // label alone, which was the 1.5.0 shape wz had been graded against.
     assert!(
-        out.contains("# TYPE zenoh_build gauge"),
-        "metrics body carries the zenoh_build OpenMetrics TYPE line\n--- z_get ---\n{out}"
+        out.contains("# TYPE zenoh_build info"),
+        "metrics body carries the zenoh_build OpenMetrics TYPE line, and the pin \
+         declares it `info` (not `gauge`)\n--- z_get ---\n{out}"
     );
     assert!(
-        out.contains("zenoh_build{version=\"") && out.contains("\"} 1"),
-        "metrics body carries the zenoh_build gauge with a version label\n--- z_get ---\n{out}"
+        out.contains("zenoh_build_info{local_id=\"")
+            && out.contains("local_whatami=\"")
+            && out.contains("\"} 1"),
+        "the pin's sample is `zenoh_build_info` carrying local_id + local_whatami \
+         + version — a FOREIGN decoder reading it is the point of this test\n\
+         --- z_get ---\n{out}"
+    );
+    // R2414 — and the document ends at its terminator. This binary has no
+    // `transport-stats`, so the terminator directly follows the build-info block;
+    // the ordering rule it encodes (EOF last, after any counters) is pinned by
+    // the composition test in wz-session-core.
+    assert!(
+        out.contains("# EOF"),
+        "the OpenMetrics document carries its terminator\n--- z_get ---\n{out}"
     );
 
     // ── the gate is real: the node record is NOT in a `{root}/metrics` reply ──

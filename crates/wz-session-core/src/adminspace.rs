@@ -489,6 +489,17 @@ pub fn admin_config_key(zid_hex: &str, whatami: &str) -> String {
     s
 }
 
+/// R2414 (open-debt items 675/677) — the metrics leg's encoding, the pin's own
+/// constant (`net/runtime/adminspace.rs` `METRICS_ENCODING`, zenoh 1.10.0).
+///
+/// ONE literal for both the reply and the manifest row, so the document and the
+/// wire cannot drift: `encoding_from_mime` splits it on the FIRST `;` exactly as
+/// upstream's `From<&str>` does, giving predefined id 15
+/// (`application/openmetrics-text`, agreed by zenoh, zenoh-pico and this crate's
+/// own table) plus the remainder as schema.
+#[cfg(feature = "adminspace-metrics")]
+pub const METRICS_ENCODING: &str = "application/openmetrics-text; version=1.0.0; charset=utf-8";
+
 /// R2413 (open-debt item 676) — the admin SURFACE keyexpr
 /// `@/<zid>/<whatami>/wz/surface`: the key under which this node describes its own
 /// adminspace.
@@ -548,23 +559,36 @@ pub struct AdminLeg {
     /// node's zid and role already substituted — usable in a GET verbatim.
     pub key: String,
     /// The encoding this leg replies in, as the wire media type
-    /// (`application/json`, `text/plain`).
-    pub encoding: &'static str,
+    /// (`application/json`, `text/plain`, …) — an OWNED string because it is
+    /// derived from the encoding SSOT rather than chosen from a fixed set, and a
+    /// schema-carrying encoding renders as `mime;schema`.
+    pub encoding: String,
     /// How many replies a GET intersecting this leg produces.
     pub cardinality: AdminLegCardinality,
 }
 
 /// The media type string for an [`EncodingHint`](crate::sample::EncodingHint) this
-/// module replies with. Kept next to the legs rather than on `EncodingHint` itself
-/// because the manifest needs the IANA NAME a foreign consumer reads, while the
-/// wire carries the packed id — two renderings of one fact, and only this document
-/// needs the second.
-fn leg_encoding_name(hint: &crate::sample::EncodingHint) -> &'static str {
-    if hint.packed_id == crate::sample::EncodingHint::TEXT_PLAIN.packed_id {
-        "text/plain"
-    } else {
-        "application/json"
-    }
+/// module replies with — DERIVED from the encoding SSOT, never enumerated here.
+///
+/// # R2414: this used to be a two-arm `if/else` whose `else` returned JSON
+///
+/// The first draft answered `text/plain` for the text/plain hint and
+/// `application/json` for *everything else*. That was accidentally right while
+/// this module replied exactly two encodings, and it was a trap for the moment it
+/// replied a third: the manifest gate builds BOTH the declared name and the
+/// observed name through this function, so a new encoding would have been given
+/// the same wrong name on both sides and the gate would have agreed with itself.
+/// A check whose predicate is supplied by its own definition cannot fail — the
+/// failure this repository keeps paying for, here planted inside the very gate
+/// built to prevent it.
+///
+/// [`encoding_to_mime`](crate::encoding::encoding_to_mime) already IS the
+/// id↔MIME SSOT (it knows all 53 predefined ids, `application/openmetrics-text`
+/// among them, and re-joins a schema with `;`), so deriving from it means a leg
+/// that changes encoding cannot change what the document says about it without
+/// the two disagreeing.
+fn leg_encoding_name(hint: &crate::sample::EncodingHint) -> String {
+    crate::encoding::encoding_to_mime(hint)
 }
 
 /// R2413 (open-debt item 676) — every admin leg THIS BUILD answers, in reply
@@ -592,31 +616,34 @@ fn leg_encoding_name(hint: &crate::sample::EncodingHint) -> &'static str {
 pub fn admin_legs(zid_hex: &str, whatami: &str) -> Vec<AdminLeg> {
     use crate::sample::EncodingHint;
     let mut legs = Vec::new();
-    let json = leg_encoding_name(&EncodingHint::APPLICATION_JSON);
-    let text = leg_encoding_name(&EncodingHint::TEXT_PLAIN);
+    // Closures, not values: each row owns its rendered name, and the rendering
+    // stays a call into the encoding SSOT rather than a constant captured once.
+    let json = || leg_encoding_name(&EncodingHint::APPLICATION_JSON);
+    let text = || leg_encoding_name(&EncodingHint::TEXT_PLAIN);
 
     // `local_data` — ungated, the one leg every adminspace build answers.
     legs.push(AdminLeg {
         key: admin_root_key(zid_hex, whatami),
-        encoding: json,
+        encoding: json(),
         cardinality: AdminLegCardinality::Single,
     });
     #[cfg(feature = "adminspace-metrics")]
     legs.push(AdminLeg {
         key: admin_metrics_key(zid_hex, whatami),
-        encoding: text,
+        // Derived from the SAME constant the reply uses, through the same SSOT.
+        encoding: leg_encoding_name(&crate::encoding::encoding_from_mime(METRICS_ENCODING)),
         cardinality: AdminLegCardinality::Single,
     });
     legs.push(AdminLeg {
         key: admin_config_key(zid_hex, whatami),
-        encoding: json,
+        encoding: json(),
         cardinality: AdminLegCardinality::Single,
     });
     #[cfg(feature = "adminspace-introspection-handlers")]
     for kind in [AdminEntityKind::Subscriber, AdminEntityKind::Queryable] {
         legs.push(AdminLeg {
             key: admin_entity_key(zid_hex, whatami, kind.as_str(), "**"),
-            encoding: json,
+            encoding: json(),
             cardinality: AdminLegCardinality::PerItem,
         });
     }
@@ -624,19 +651,19 @@ pub fn admin_legs(zid_hex: &str, whatami: &str) -> Vec<AdminLeg> {
     {
         legs.push(AdminLeg {
             key: admin_plugin_key(zid_hex, whatami, "*"),
-            encoding: json,
+            encoding: json(),
             cardinality: AdminLegCardinality::PerItem,
         });
         legs.push(AdminLeg {
             key: admin_plugin_status_path_key(zid_hex, whatami, "*"),
-            encoding: text,
+            encoding: text(),
             cardinality: AdminLegCardinality::PerItem,
         });
         let mut leaves = admin_plugin_status_root_key(zid_hex, whatami, "*");
         leaves.push_str("/**");
         legs.push(AdminLeg {
             key: leaves,
-            encoding: json,
+            encoding: json(),
             cardinality: AdminLegCardinality::PerItem,
         });
     }
@@ -645,26 +672,26 @@ pub fn admin_legs(zid_hex: &str, whatami: &str) -> Vec<AdminLeg> {
     // remove — including when that leg is this one.
     legs.push(AdminLeg {
         key: admin_surface_key(zid_hex, whatami),
-        encoding: json,
+        encoding: json(),
         cardinality: AdminLegCardinality::Single,
     });
     #[cfg(feature = "adminspace-router-linkstate")]
     if whatami == "router" {
         legs.push(AdminLeg {
             key: admin_linkstate_routers_key(zid_hex, whatami),
-            encoding: text,
+            encoding: text(),
             cardinality: AdminLegCardinality::Single,
         });
         legs.push(AdminLeg {
             key: admin_linkstate_peers_key(zid_hex, whatami),
-            encoding: text,
+            encoding: text(),
             cardinality: AdminLegCardinality::Single,
         });
         let mut successors = admin_route_successor_prefix(zid_hex, whatami);
         successors.push_str("/**");
         legs.push(AdminLeg {
             key: successors,
-            encoding: json,
+            encoding: json(),
             cardinality: AdminLegCardinality::PerItem,
         });
     }
@@ -746,7 +773,7 @@ pub fn admin_surface_json(zid_hex: &str, whatami: &str) -> String {
         out.push_str("{\"key\":");
         push_json_str(&leg.key, &mut out);
         out.push_str(",\"encoding\":");
-        push_json_str(leg.encoding, &mut out);
+        push_json_str(&leg.encoding, &mut out);
         out.push_str(",\"cardinality\":");
         push_json_str(leg.cardinality.as_str(), &mut out);
         out.push('}');
@@ -1046,26 +1073,31 @@ pub fn answer_admin_query(
         );
     }
 
-    // `metrics` (`@/<zid>/<whatami>/metrics`, text/plain) — under adminspace-metrics.
+    // `metrics` (`@/<zid>/<whatami>/metrics`, OpenMetrics text) — under
+    // adminspace-metrics. R2414 moved the encoding to the pin's own
+    // `METRICS_ENCODING` and the document now closes with `# EOF`.
     #[cfg(feature = "adminspace-metrics")]
     {
         let metrics_key = admin_metrics_key(ctx.zid_hex, ctx.whatami);
         let metrics_chunks: Vec<&str> = metrics_key.split('/').collect();
         if crate::keyexpr_match::keyexpr_intersects_target(ke, &metrics_chunks) {
-            let mut body = metrics_text(ctx.version);
+            let mut body = metrics_text(ctx.zid_hex, ctx.whatami, ctx.version);
             // R311y810 — the transport-stats composition, appended AFTER the
-            // build-info gauge exactly as upstream appends its own stats block
+            // build-info block exactly as upstream appends its own stats block
             // (adminspace.rs:722-730). A node without counters (or a build
-            // without the feature) emits the build-info block alone, which is
-            // byte-identical to what this leg served before. No `#[cfg]`: the
-            // gate is the VALUE being `None`, the same shape `ctx.read` uses.
+            // without the feature) emits the build-info block alone. No `#[cfg]`:
+            // the gate is the VALUE being `None`, the same shape `ctx.read` uses.
             if let Some(stats) = ctx.stats {
                 body.push_str(&stats.openmetrics_text());
             }
+            // R2414 — and the terminator LAST, after any counters. OpenMetrics
+            // ends at `# EOF`; emitting it inside `metrics_text` would bury the
+            // stats block behind the end of the document.
+            body.push_str(metrics_eof());
             out.reply_keyed_encoded(
                 &metrics_key,
                 body.as_bytes(),
-                Some(&crate::sample::EncodingHint::TEXT_PLAIN),
+                Some(&crate::encoding::encoding_from_mime(METRICS_ENCODING)),
             );
         }
     }
@@ -1646,22 +1678,55 @@ fn parse_storage_add_payload(payload: &[u8]) -> Option<(String, String, Option<S
     Some((String::from(name), String::from(key_expr), volume_id))
 }
 
-/// The OpenMetrics body the admin `@/<zid>/<whatami>/metrics` GET replies with
-/// (`text/plain`). Byte-faithful to zenoh's UNCONDITIONAL build-info block
-/// (`adminspace.rs:714-720`): a `zenoh_build` gauge carrying the node version.
-/// zenoh additionally appends `manager().get_stats().report().openmetrics_text()`
-/// under its `stats` feature (`:722-730`); the wz transport-stats OpenMetrics
-/// composition is a documented follow-up, so this v1 emits exactly the build-info
-/// block a zenoh built without `stats` emits.
+/// The OpenMetrics build-info block the admin `@/<zid>/<whatami>/metrics` GET
+/// opens with. R2414 (open-debt items 675/677) re-measured this against the PIN
+/// and rewrote it; the shape below is zenoh 1.10.0's
+/// (`net/runtime/adminspace.rs`, the `#[cfg(not(feature = "stats"))]` literal).
+///
+/// # What the re-measure found — the previous body was wrong on four counts
+///
+/// It was graded against zenoh 1.5.0 and had drifted on every axis at once: the
+/// HELP string, the TYPE (`gauge`, where the pin declares `info`), the sample
+/// name (`zenoh_build`, where the pin emits `zenoh_build_info`), and the label
+/// set (`version` alone, where the pin also carries `local_id` and
+/// `local_whatami`). An OpenMetrics `info` family named `zenoh_build` emits its
+/// sample as `zenoh_build_info`, which is why the two names differ by design.
+///
+/// # `# EOF` is NOT emitted here, and that is the point
+///
+/// OpenMetrics requires `# EOF` to be the LAST line, and this node appends its
+/// `transport-stats` block AFTER this block — so putting EOF here would place
+/// counters after the terminator and produce an invalid document. The caller
+/// closes the document instead. Upstream never has content after EOF either:
+/// its `descriptors=false` path strips every `#` line and re-appends `# EOF\n`
+/// at the end, which is what establishes EOF as terminal rather than positional.
+///
+/// ⚠ One deliberate divergence from the pin's literal, named rather than hidden:
+/// upstream writes `"# EOF\n "` — a stray space AFTER the final newline. wz does
+/// not copy it. It is a byte past the document terminator, it belongs to no line,
+/// and a strict reader may reject trailing content; copying a typo into a wire
+/// format is not fidelity. Everything before it is byte-for-byte the pin's.
 #[cfg(feature = "adminspace-metrics")]
-pub fn metrics_text(version: &str) -> String {
+pub fn metrics_text(zid_hex: &str, whatami: &str, version: &str) -> String {
     let mut out = String::new();
-    out.push_str("# HELP zenoh_build Information about zenoh.\n");
-    out.push_str("# TYPE zenoh_build gauge\n");
-    out.push_str("zenoh_build{version=\"");
+    out.push_str("# HELP zenoh_build Zenoh build version.\n");
+    out.push_str("# TYPE zenoh_build info\n");
+    out.push_str("zenoh_build_info{local_id=\"");
+    push_openmetrics_label(zid_hex, &mut out);
+    out.push_str("\",local_whatami=\"");
+    push_openmetrics_label(whatami, &mut out);
+    out.push_str("\",version=\"");
     push_openmetrics_label(version, &mut out);
     out.push_str("\"} 1\n");
     out
+}
+
+/// The OpenMetrics document terminator. Its own function so the ONE rule that
+/// governs it — last line, after everything — has one place to be stated and one
+/// place to be changed.
+#[cfg(feature = "adminspace-metrics")]
+pub fn metrics_eof() -> &'static str {
+    "# EOF\n"
 }
 
 /// Append `s` as an OpenMetrics label value (escape `\`, `"`, newline per the
@@ -2318,20 +2383,27 @@ mod tests {
     #[test]
     fn metrics_key_and_build_info_match_zenoh() {
         assert_eq!(admin_metrics_key("a1b2", "peer"), "@/a1b2/peer/metrics");
-        // Byte-faithful to zenoh's unconditional build-info block
-        // (adminspace.rs:714-720): HELP + TYPE gauge + the zenoh_build sample.
+        // R2414 — byte-faithful to the PIN's build-info block (zenoh 1.10.0
+        // `net/runtime/adminspace.rs`, the no-stats literal): HELP + TYPE `info`
+        // + the `zenoh_build_info` sample carrying local_id, local_whatami and
+        // version. Re-measured from 1.5.0, where this asserted a `gauge` named
+        // `zenoh_build` with a version label alone — wrong on four counts.
         assert_eq!(
-            metrics_text("0.1.0"),
-            "# HELP zenoh_build Information about zenoh.\n\
-             # TYPE zenoh_build gauge\n\
-             zenoh_build{version=\"0.1.0\"} 1\n"
+            metrics_text("a1b2", "peer", "0.1.0"),
+            "# HELP zenoh_build Zenoh build version.\n\
+             # TYPE zenoh_build info\n\
+             zenoh_build_info{local_id=\"a1b2\",local_whatami=\"peer\",version=\"0.1.0\"} 1\n"
         );
+        // The terminator is NOT part of this block — the caller appends it after
+        // any counters, because OpenMetrics ends at `# EOF`.
+        assert!(!metrics_text("a1b2", "peer", "0.1.0").contains("# EOF"));
+        assert_eq!(metrics_eof(), "# EOF\n");
     }
 
     #[cfg(feature = "adminspace-metrics")]
     #[test]
     fn metrics_label_escapes_pathological_version() {
-        assert!(metrics_text("v\"x").contains(r#"version="v\"x""#));
+        assert!(metrics_text("a1b2", "peer", "v\"x").contains(r#"version="v\"x""#));
     }
 
     /// R311y810 — the metrics leg APPENDS the counter block after the build-info
@@ -2366,8 +2438,16 @@ mod tests {
             .expect("the metrics leg replied");
         assert_eq!(
             body,
-            metrics_text("0.1.0") + &stats.openmetrics_text(),
-            "the counter block must follow the build-info gauge, in that order"
+            metrics_text("a1b2", "peer", "0.1.0") + &stats.openmetrics_text() + metrics_eof(),
+            "build-info, then the counter block, then the terminator — in that \
+             order. R2414: the terminator moving above the counters would bury \
+             them behind the end of the document."
+        );
+        // Stated separately from the equality above, because that equality would
+        // still hold if BOTH sides put EOF in the wrong place.
+        assert!(
+            body.ends_with("# EOF\n"),
+            "the document ends at its terminator:\n{body}"
         );
     }
 
@@ -2388,7 +2468,7 @@ mod tests {
             .find(|(k, _)| k == "@/a1b2/peer/metrics")
             .map(|(_, p)| String::from_utf8_lossy(p).into_owned())
             .expect("the metrics leg replied");
-        assert_eq!(body, metrics_text("0.1.0"));
+        assert_eq!(body, metrics_text("a1b2", "peer", "0.1.0") + metrics_eof());
     }
 
     /// R2413 (open-debt item 676) — the manifest declares EXACTLY the legs this
@@ -2498,6 +2578,36 @@ mod tests {
                 leg.key
             );
         }
+    }
+
+    /// R2414 (items 675/677) — the document names the metrics leg's media type by
+    /// its REAL name, not merely by a name it also uses on the other side.
+    ///
+    /// # Why the sibling gate cannot stand in for this
+    ///
+    /// `the_manifest_describes_exactly_the_legs_this_build_answers` compares the
+    /// declared name against the observed one, and BOTH are rendered by
+    /// [`leg_encoding_name`]. That catches a one-sided change and is blind to a
+    /// two-sided one — which is precisely the change a correct implementer makes.
+    /// Before R2414 that renderer answered `application/json` for anything that
+    /// was not text/plain, so moving the metrics leg to OpenMetrics would have
+    /// left both sides agreeing on `application/json`: green gate, lying document.
+    ///
+    /// This test is the outside check. It names the expected media type as a
+    /// LITERAL rather than deriving it, deliberately: a derivation here would go
+    /// through the same renderer and inherit whatever it says.
+    #[cfg(feature = "adminspace-metrics")]
+    #[test]
+    fn the_document_names_the_metrics_media_type_literally() {
+        let doc = admin_surface_json("a1b2", "peer");
+        assert!(
+            doc.contains(
+                r#""key":"@/a1b2/peer/metrics","encoding":"application/openmetrics-text; version=1.0.0; charset=utf-8""#
+            ),
+            "the metrics row must carry the OpenMetrics media type verbatim — a \
+             renderer that collapses unknown encodings to `application/json` \
+             passes its own sibling gate and lies here:\n{doc}"
+        );
     }
 
     /// R2413 — `unspoken` names exactly the root-document fields this build emits
