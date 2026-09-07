@@ -287,13 +287,142 @@ pub(crate) struct StorageGcArgs {
 
 #[cfg(feature = "adminspace-config-hotreload")]
 pub(crate) struct DynamicVolumeArgs {
-    /// The `.so` to `dlopen`. The volume's registry id is NOT taken from here —
-    /// it is what the `.so` itself declares, so two different libraries cannot be
-    /// registered under one operator-chosen name.
-    pub(crate) path: String,
-    /// The volume's own configuration string, verbatim. Its meaning belongs to the
-    /// volume; the bundled example volume reads it as a root directory.
-    pub(crate) config: Option<String>,
+    /// The `.so`s to `dlopen`, in argv order. A volume's registry id is NOT taken
+    /// from here — it is what the `.so` itself declares, so two different
+    /// libraries cannot be registered under one operator-chosen name.
+    pub(crate) paths: Vec<String>,
+    /// The `--storage-volume-config` values, in argv order and UNRESOLVED: which
+    /// volume each one configures is decided by [`bind_volume_configs`] once the
+    /// ids are known, because a wz volume declares its own id and nothing before
+    /// `dlopen` can read it.
+    pub(crate) configs: Vec<String>,
+}
+
+/// Whether `key` is shaped like a volume id rather than like a path — ASCII
+/// alphanumeric, `_` and `-`, non-empty.
+///
+/// This exists so [`bind_volume_configs`] can tell an operator who MEANT to name
+/// a volume and got the id wrong from one who never meant to name one at all. It
+/// is the shape the bundled example volume's declared id has (`wzvol_example`);
+/// a filesystem path reaches it only as a bare relative name with no `/` and no
+/// `.`, and such a config must be written `./a=b` to be read as a directory. That
+/// cost is paid deliberately: the alternative is reading `influx=/data` as a
+/// DIRECTORY called `influx=/data` when the operator misspelled a volume id.
+#[cfg(all(unix, feature = "storage-mgr-dynamic-volume-loading"))]
+fn looks_like_volume_id(key: &str) -> bool {
+    !key.is_empty()
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// R2436 (§5.24 `storage-mgr-dynamic-volume-loading`) — bind each
+/// `--storage-volume-config` value to the volume it configures, BY THE VOLUME'S
+/// DECLARED ID, and return one config per `volume_ids` entry in that order.
+///
+/// ## Why by name, and why this is upstream's shape rather than a wz invention
+///
+/// The residual this discharges said N volumes "need a pairing syntax, not a
+/// second `Vec`", and that pairing an i-th config to an i-th path by argv order
+/// "is an interface that misfires silently". Both halves are still true; what was
+/// missing is that upstream had already answered the first. At the pin a volume
+/// is not a positional entry at all — the storage manager's `volumes` field is a
+/// JSON OBJECT whose KEY is the volume's name (`plugins/zenoh-backend-traits` @
+/// `for (name, config) in configs`), each record carrying its own `__path__` and
+/// its remaining config INSIDE it, and a storage selects one by that same name
+/// through the volume-id field of its own record. So upstream never pairs by
+/// ordinal, duplicate names are impossible by construction, and a volume's config
+/// travels WITH the volume.
+///
+/// This function is the argv analogue of exactly that, and it deliberately reuses
+/// the id a wz volume ALREADY publishes: the one the `.so` declares, the one the
+/// load site logs, and the one a foreign client writes in
+/// `storage-add <name>@<volume_id>:<keyexpr>`. One namespace, three seams — an
+/// operator who can name a volume to a client can name it to this flag.
+///
+/// ## The accept / reject set, which is the whole content of this function
+///
+/// A value is KEYED iff the text before its first `=` is
+/// [`looks_like_volume_id`]; everything after that `=` is the config, verbatim,
+/// so a config may itself contain `=`. Any other value is BARE.
+///
+/// * KEYED naming a LOADED id binds to it.
+/// * KEYED naming an UNLOADED id is REFUSED naming the loaded ids. A config that
+///   silently applies to nothing is how a storage comes up on a default root the
+///   operator never asked for.
+/// * BARE is accepted only when exactly ONE volume is loaded — the shipped
+///   pre-R2436 spelling, which stays byte-identical so an operator script and
+///   Layer E14 keep working. With N loaded it is REFUSED naming the ids, because
+///   the one thing this must never do is guess which volume was meant.
+/// * Two configs for one volume is REFUSED rather than last-wins.
+///
+/// Returned as `Result` rather than exiting, for the reason
+/// [`parse_connect_retry`] gives: a parser that exits cannot be tested, and the
+/// accept/reject set above is what there is to test.
+///
+/// `volume_ids` is assumed duplicate-free; the load site refuses two `.so`s that
+/// declare one id before calling here, since that ambiguity is the volume set's
+/// to reject, not this binding's.
+#[cfg(all(unix, feature = "storage-mgr-dynamic-volume-loading"))]
+pub(crate) fn bind_volume_configs(
+    volume_ids: &[String],
+    configs: &[String],
+) -> Result<Vec<Option<String>>, String> {
+    let mut bound: Vec<Option<String>> = vec![None; volume_ids.len()];
+    let render_ids = || {
+        volume_ids
+            .iter()
+            .map(|id| format!("'{id}'"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    for value in configs {
+        let named = value
+            .split_once('=')
+            .filter(|(key, _)| looks_like_volume_id(key));
+        let (idx, config) = match named {
+            // An id-shaped key that IS loaded: the upstream binding.
+            Some((key, rest)) if volume_ids.iter().any(|id| id == key) => {
+                let idx = volume_ids
+                    .iter()
+                    .position(|id| id == key)
+                    .expect("the arm guard just found it");
+                (idx, rest.to_string())
+            }
+            // An id-shaped key that is NOT loaded. Refused rather than read as a
+            // directory literally called `<key>=<rest>`, which is the misfire this
+            // whole binding exists to remove.
+            Some((key, _)) => {
+                return Err(format!(
+                    "--storage-volume-config {value:?} names volume '{key}', which no loaded \
+                     --storage-volume declares (loaded: {}). A volume's id is what its .so \
+                     declares, not its path; write a literal path beginning with `./` if a \
+                     config really is a bare name containing `=`",
+                    render_ids()
+                ));
+            }
+            None if volume_ids.len() == 1 => (0, value.clone()),
+            None => {
+                return Err(format!(
+                    "--storage-volume-config {value:?} does not name a volume, and {} volumes \
+                     are loaded ({}). Write it as <volume_id>=<config>; the id is the one the \
+                     .so declares, the same one a client writes in \
+                     `storage-add <name>@<volume_id>:<keyexpr>`",
+                    volume_ids.len(),
+                    render_ids()
+                ));
+            }
+        };
+        if bound[idx].is_some() {
+            return Err(format!(
+                "--storage-volume-config given twice for volume '{}'; one volume takes one \
+                 config",
+                volume_ids[idx]
+            ));
+        }
+        bound[idx] = Some(config);
+    }
+    Ok(bound)
 }
 
 /// Every `<flag> <value>` pair in `args`, in argv order.
@@ -7282,5 +7411,146 @@ mod connect_retry_tests {
             vec![1000, 2000, 4000],
             "0 must mean unbounded here too, not an immediate clamp"
         );
+    }
+}
+
+// R2436 (§5.24 `storage-mgr-dynamic-volume-loading`) — the accept/reject set of
+// `bind_volume_configs`, which IS the N-volume pairing syntax the atom's residual
+// said was missing. Gated exactly as the function is, so no lane has to name a
+// feature these cases do not select.
+#[cfg(all(unix, feature = "storage-mgr-dynamic-volume-loading"))]
+#[cfg(test)]
+mod volume_config_binding_tests {
+    use super::*;
+
+    fn ids(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn cfgs(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The SHIPPED pre-R2436 spelling, byte-identical: one volume, one bare
+    /// config, bound verbatim. Layer E14's four legs and every operator script
+    /// pass exactly this, so it is pinned FIRST — a pairing syntax that broke the
+    /// singular case would have moved the residual rather than discharged it.
+    #[test]
+    fn one_volume_takes_a_bare_config_verbatim() {
+        assert_eq!(
+            bind_volume_configs(&ids(&["wzvol_example"]), &cfgs(&["/tmp/root"])),
+            Ok(vec![Some("/tmp/root".to_string())])
+        );
+    }
+
+    /// A volume needs no config, and absence is not an error — `configure(None)`
+    /// is what the trait takes and what the bundled example volume accepts.
+    #[test]
+    fn a_volume_with_no_config_binds_none() {
+        assert_eq!(
+            bind_volume_configs(&ids(&["a", "b"]), &[]),
+            Ok(vec![None, None])
+        );
+    }
+
+    /// THE atom: N volumes, each config bound BY THE VOLUME'S DECLARED ID, and
+    /// the binding is independent of argv order — which is the whole point.
+    /// `b`'s config is written FIRST and still lands on `b`, so an operator who
+    /// reorders the flags gets the same volume set. An ordinal pairing passes the
+    /// in-order case and fails this one.
+    #[test]
+    fn n_volumes_bind_by_name_not_by_argv_order() {
+        assert_eq!(
+            bind_volume_configs(&ids(&["a", "b"]), &cfgs(&["b=/second", "a=/first"])),
+            Ok(vec![
+                Some("/first".to_string()),
+                Some("/second".to_string())
+            ])
+        );
+    }
+
+    /// Only the FIRST `=` separates; the config keeps every later one verbatim.
+    /// A volume's config text is the volume's own language and may be `k=v`
+    /// pairs, which is what upstream's per-volume `rest` map holds.
+    #[test]
+    fn only_the_first_equals_separates() {
+        assert_eq!(
+            bind_volume_configs(&ids(&["a"]), &cfgs(&["a=k1=v1,k2=v2"])),
+            Ok(vec![Some("k1=v1,k2=v2".to_string())])
+        );
+    }
+
+    /// A bare config with N volumes loaded is REFUSED, not guessed. This is the
+    /// sentence the residual named: "pairing an i-th config to an i-th path by
+    /// argv order is an interface that misfires silently". Here it does not
+    /// misfire and it is not silent.
+    #[test]
+    fn a_bare_config_with_two_volumes_is_refused_naming_them() {
+        let err = bind_volume_configs(&ids(&["a", "b"]), &cfgs(&["/tmp/root"]))
+            .expect_err("ambiguous, must not bind");
+        assert!(err.contains("does not name a volume"), "{err}");
+        assert!(err.contains("'a'") && err.contains("'b'"), "{err}");
+        assert!(err.contains("<volume_id>=<config>"), "{err}");
+    }
+
+    /// An id-shaped key naming a volume that is not loaded is REFUSED rather than
+    /// read as a directory literally called `influx=/data`. With ONE volume
+    /// loaded this is the case that would otherwise fall through to the bare arm,
+    /// so it is the sharpest of the set.
+    #[test]
+    fn a_config_naming_an_unloaded_volume_is_refused_even_with_one_loaded() {
+        let err = bind_volume_configs(&ids(&["wzvol_example"]), &cfgs(&["influx=/data"]))
+            .expect_err("names a volume that does not exist");
+        assert!(err.contains("names volume 'influx'"), "{err}");
+        assert!(err.contains("'wzvol_example'"), "{err}");
+    }
+
+    /// A bare config that CONTAINS `=` is still a config: its prefix is not
+    /// id-shaped (a `/` disqualifies it), so it binds verbatim. The pairing
+    /// syntax must not capture a path an operator already ships.
+    #[test]
+    fn a_path_shaped_value_containing_equals_stays_bare() {
+        assert_eq!(
+            bind_volume_configs(&ids(&["a"]), &cfgs(&["/tmp/a=b"])),
+            Ok(vec![Some("/tmp/a=b".to_string())])
+        );
+        // The documented escape for the one ambiguous shape: a bare RELATIVE name
+        // containing `=`, whose prefix would otherwise look like an id.
+        assert_eq!(
+            bind_volume_configs(&ids(&["a"]), &cfgs(&["./x=b"])),
+            Ok(vec![Some("./x=b".to_string())])
+        );
+    }
+
+    /// Two configs for one volume is REFUSED rather than last-wins. Silent
+    /// last-wins is how a volume comes up on the root the operator typed FIRST
+    /// and then corrected, or the other way round, with nothing in the log.
+    #[test]
+    fn two_configs_for_one_volume_are_refused() {
+        let err = bind_volume_configs(&ids(&["a", "b"]), &cfgs(&["a=/one", "a=/two"]))
+            .expect_err("one volume takes one config");
+        assert!(err.contains("twice for volume 'a'"), "{err}");
+    }
+
+    /// The singular case's duplicate arm: the bare spelling is not a way around
+    /// the rule above.
+    #[test]
+    fn two_bare_configs_for_one_volume_are_refused() {
+        let err = bind_volume_configs(&ids(&["a"]), &cfgs(&["/one", "/two"]))
+            .expect_err("one volume takes one config");
+        assert!(err.contains("twice for volume 'a'"), "{err}");
+    }
+
+    /// The id-shape predicate's own boundary, pinned separately because both
+    /// directions are load-bearing: it decides whether a value is a KEY or a
+    /// CONFIG, and each mistake is one of the two misfires this round removed.
+    #[test]
+    fn the_id_shape_predicate_separates_ids_from_paths() {
+        for id in ["wzvol_example", "fs", "a-b", "v2", "A_1"] {
+            assert!(looks_like_volume_id(id), "{id} is id-shaped");
+        }
+        for path in ["", "/tmp/x", "./x", "a.b", "a b", "a/b", "a:b"] {
+            assert!(!looks_like_volume_id(path), "{path:?} is not id-shaped");
+        }
     }
 }

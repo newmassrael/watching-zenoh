@@ -1034,7 +1034,37 @@ def _grade_head(reason: str) -> str:
 #: the same output refuted it. A PATTERN that presumes its answer is the mode
 #: this file keeps recording; an ORDERING that presumes it is harder to see,
 #: because nothing about reading a tail looks like a claim.
-BUDGET = 26
+#: 26 -> 25 (R2436). `storage-mgr-dynamic-volume-loading`, the candidate ledger
+#: `Round 2422` pre-measured. Its grading citation named lines 124 and 220 of
+#: the storage-manager plugin's entry module; at the pin those lines of that
+#: 489-line file are `storages,` and `.stop();` and the file holds ZERO
+#: `libloading`. Re-derived here rather than inherited, and the inheritance was
+#: right: dlopen RELOCATED to the plugin-trait crate's dynamic-plugin module
+#: over zenoh-util's lib loader, so `@ ABSENT` is the true form and `@ REMOVED`
+#: would be a lie -- the path still resolves.
+#:
+#: THE RE-MEASUREMENT MOVED THE RESIDUAL'S PREMISE, WHICH IS A SECOND WAY A
+#: GRADE GOES STALE and the one R2435 opened the door to by asking which
+#: direction a comparison runs. This residual did not merely cite dead lines; it
+#: posed an OPEN DESIGN QUESTION -- "N needs a pairing syntax, not a second
+#: Vec" -- and at the pin upstream had already answered it. Its volume set is a
+#: NAME-KEYED OBJECT, not a positional list: each record carries its own path
+#: and config inside it and a storage selects one by that same name, so pairing
+#: by ordinal is impossible by construction rather than merely discouraged. wz
+#: was therefore not ahead of an unsolved problem but BEHIND a solved one. An
+#: atom can be stale about the QUESTION and not only about the answer, and
+#: nothing in this file's predicate can see that -- only reading the pin can.
+#:
+#: What was BUILT, since a re-declaration that ships no product is a re-tag: the
+#: operator seam went plural and binds each config to a volume BY THE VOLUME'S
+#: DECLARED ID, resolved after dlopen because a wz volume declares its own id.
+#: The control that restores ordinal pairing turns 6 of the 10 new cases red and
+#: leaves the 4 singular / back-compat ones green -- which is itself the finding
+#: that those 4 do not discriminate, and is why the shipped spelling could be
+#: kept byte-identical without that being mistaken for coverage. The atom stays
+#: PARTIAL on the per-STORAGE volume config axis, the SAME seam R2435 reached
+#: from the backend side, and it is deliberately not filed twice.
+BUDGET = 25
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory

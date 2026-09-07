@@ -1130,22 +1130,30 @@ fn main() -> ExitCode {
             // ignored: it is an operator who asked for a dynamic volume and typed
             // one flag, and silence would leave the storages on `mem` with nothing
             // said about why.
-            let volume_config = parse_pair(rest, "--storage-volume-config");
-            let dynamic_volume = match parse_pair(rest, "--storage-volume") {
-                Some(path) => Some(crate::args::DynamicVolumeArgs {
-                    path,
-                    config: volume_config,
-                }),
-                None => {
-                    if volume_config.is_some() {
-                        eprintln!(
-                            "wz-ap-demo: --storage-volume-config given without \
-                             --storage-volume; no volume is loaded and the config is \
-                             unused"
-                        );
-                    }
-                    None
+            //
+            // R2436 — both flags are REPEATABLE. A volume set is plural at the pin
+            // (the storage manager's `volumes` field is a name-keyed object, not a
+            // single record), and `parse_pair` keeps only the first occurrence, so
+            // until this round a second `--storage-volume` vanished without a word.
+            // Which config belongs to which volume is NOT decided here: a wz volume
+            // declares its own id inside the `.so`, so the binding is done by
+            // `args::bind_volume_configs` at the load site, once the ids exist.
+            let volume_configs = parse_pairs(rest, "--storage-volume-config");
+            let volume_paths = parse_pairs(rest, "--storage-volume");
+            let dynamic_volume = if volume_paths.is_empty() {
+                if !volume_configs.is_empty() {
+                    eprintln!(
+                        "wz-ap-demo: --storage-volume-config given without \
+                         --storage-volume; no volume is loaded and the config is \
+                         unused"
+                    );
                 }
+                None
+            } else {
+                Some(crate::args::DynamicVolumeArgs {
+                    paths: volume_paths,
+                    configs: volume_configs,
+                })
             };
             // R311y503 — the per-storage GC policy this host spawns storages
             // with. A malformed number is REPORTED and the default kept, rather

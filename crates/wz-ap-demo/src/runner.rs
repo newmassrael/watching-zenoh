@@ -6970,7 +6970,9 @@ pub(crate) struct StorageHostOpts {
     /// `--plugin <path.so>`, repeated: the dlopen'd plugin records that join the
     /// statically composed subsystems in the admin `plugins` leg.
     pub plugin_paths: Vec<String>,
-    /// `--storage-volume <path.so>` and its config, when one was given.
+    /// `--storage-volume <path.so>`, repeated, and the `--storage-volume-config`
+    /// values that configure them — unresolved, since a volume's id is what its
+    /// `.so` declares and the binding happens after `dlopen` (R2436).
     pub dynamic_volume: Option<crate::args::DynamicVolumeArgs>,
     /// `--storage-gc-period-ms` / `--storage-gc-lifespan-ms`.
     pub storage_gc: crate::args::StorageGcArgs,
@@ -7194,30 +7196,76 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
         // rather than merely read: whether the loaded volume claims Durable is the
         // one thing an operator needs to see before trusting a storage to it.
         use wz::runtime_tokio::storage_volume::Volume;
-        match DynamicVolume::load(&dv.path) {
-            Ok(vol) => match vol.configure(dv.config.as_deref()) {
-                Ok(()) => {
+
+        // R2436 — PHASE 1: dlopen every path and learn the id each `.so` declares.
+        // Configuration is deliberately NOT applied yet. It cannot be: a config is
+        // bound to a volume BY THAT DECLARED ID (upstream's shape — its `volumes`
+        // field is a name-keyed object, not a positional list), and no id exists
+        // before the library is mapped. A load failure is reported and skipped
+        // exactly as before, so one bad path does not take the volume set down.
+        let mut loaded: Vec<(String, &String, DynamicVolume)> = Vec::with_capacity(dv.paths.len());
+        for path in &dv.paths {
+            match DynamicVolume::load(path) {
+                Ok(vol) => {
                     let id = vol.id().to_string();
-                    let cap = vol.capability();
-                    manager.register_volume(id.clone(), Box::new(vol));
-                    log::info!(
-                        "wz-ap-demo storage-host: dlopen'd storage volume '{id}' from \
-                         {} ({cap:?}); a client mounts on it with \
-                         `storage-add <name>@{id}:<keyexpr>`",
-                        dv.path
-                    );
+                    // Two libraries declaring ONE id is refused, not last-wins.
+                    // `register_volume` documents that re-registering replaces, and
+                    // at the registry layer that is right; at the OPERATOR seam it
+                    // is the silent misfire this round exists to remove — the
+                    // storage would land on whichever `.so` was loaded last, with
+                    // both paths in the log and nothing saying which one won.
+                    if let Some((_, prior, _)) = loaded.iter().find(|(seen, _, _)| *seen == id) {
+                        log::warn!(
+                            "wz-ap-demo storage-host: storage volume from {path} declares id \
+                             '{id}', already declared by {prior} — it is NOT registered; one \
+                             id is one volume"
+                        );
+                        continue;
+                    }
+                    loaded.push((id, path, vol));
                 }
-                // A volume that refused its configuration is NOT registered: a
-                // storage hosted on one would look durable and persist nothing.
-                // The node keeps serving so an operator can reach its admin plane
-                // to diagnose exactly this.
-                Err(e) => log::warn!(
-                    "wz-ap-demo storage-host: storage volume from {} refused its \
-                     configuration: {e} — it is NOT registered",
-                    dv.path
-                ),
-            },
-            Err(e) => log::warn!("wz-ap-demo storage-host: storage volume load failed: {e}"),
+                Err(e) => {
+                    log::warn!(
+                        "wz-ap-demo storage-host: storage volume load failed for {path}: {e}"
+                    )
+                }
+            }
+        }
+
+        // R2436 — PHASE 2: bind each config to its volume by name. A refusal here
+        // is an OPERATOR error (an unknown id, an ambiguous bare config, two
+        // configs for one volume), not a volume's, so it is reported once and NO
+        // volume is registered: applying the configs that did resolve would leave
+        // the node serving a volume set the operator did not describe.
+        let ids: Vec<String> = loaded.iter().map(|(id, _, _)| id.clone()).collect();
+        match crate::args::bind_volume_configs(&ids, &dv.configs) {
+            Ok(bound) => {
+                // PHASE 3: configure and register, in argv order.
+                for ((id, path, vol), config) in loaded.into_iter().zip(bound) {
+                    match vol.configure(config.as_deref()) {
+                        Ok(()) => {
+                            let cap = vol.capability();
+                            manager.register_volume(id.clone(), Box::new(vol));
+                            log::info!(
+                                "wz-ap-demo storage-host: dlopen'd storage volume '{id}' from \
+                                 {path} ({cap:?}); a client mounts on it with \
+                                 `storage-add <name>@{id}:<keyexpr>`"
+                            );
+                        }
+                        // A volume that refused its configuration is NOT registered:
+                        // a storage hosted on one would look durable and persist
+                        // nothing. The node keeps serving so an operator can reach
+                        // its admin plane to diagnose exactly this.
+                        Err(e) => log::warn!(
+                            "wz-ap-demo storage-host: storage volume '{id}' refused its \
+                             configuration: {e} — it is NOT registered"
+                        ),
+                    }
+                }
+            }
+            Err(e) => {
+                log::warn!("wz-ap-demo storage-host: {e} — no dynamic storage volume is registered")
+            }
         }
     }
     // The INERT arm names its operand, and that is what makes it correct rather
@@ -7232,10 +7280,14 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
             "wz-ap-demo storage-host: --storage-volume {} given but this binary lacks \
              the `storage-mgr-dynamic-volume-loading` feature — INERT, nothing was \
              loaded{}",
-            dv.path,
-            match dv.config.as_deref() {
-                Some(c) => format!(" (--storage-volume-config {c} is unused)"),
-                None => String::new(),
+            dv.paths.join(", "),
+            if dv.configs.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " (--storage-volume-config {} is unused)",
+                    dv.configs.join(", ")
+                )
             }
         );
     }

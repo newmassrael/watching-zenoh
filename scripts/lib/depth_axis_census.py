@@ -597,10 +597,30 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # unreached 3, no-symbol 2, ambiguous 73 all identical before and after the
 # mutation, so the single-count move is the whole of this round's delta and no
 # neighbour's drift is being adopted here.
+# Round 2436 -- `storage-mgr-dynamic-volume-loading` re-declared at the pin
+# (open-debt item 675), and as in Round 2422 the mover IS this round. The atom is
+# graded PARTIAL, so its rewritten reason reaches this page directly: wz 302 ->
+# 306, FOUR new citations, and they are four because the re-measurement is a
+# PRODUCT change and each names a site it built or measured --
+# `crates/wz-ap-demo/src/args.rs` twice (the name-keyed binding and its test
+# module), `crates/wz-ap-demo/src/runner.rs` once (the duplicate-id refusal at the
+# load site), and `crates/wz-session-core/src/storage_config.rs` once, which is
+# the SEAM the atom stays PARTIAL on.
+#
+# AMBIGUOUS WAS MOVED AND THEN MOVED BACK, which is worth recording because the
+# first reason draft raised it 73 -> 74. The cause was a bare `lib.rs:124,220` in
+# the prose -- the upstream line-pair the grading citation used to name -- and a
+# bare filename matches many tracked files, so it landed as ambiguous rather than
+# as the upstream claim it was. Rewriting it as "lines 124 and 220 of the
+# storage-manager plugin's entry module" returned the count to 73. The rule this
+# instance adds to R2420's: a bare filename does not merely miss a bucket, it can
+# be CLAIMED by the wrong one. Describe the path; do not type a naked basename.
+# Every other axis is UNCHANGED and that was read rather than assumed -- reached
+# 55, unreached 3, no-symbol 2, ambiguous 73 identical before and after.
 PIN_REACHED = 55
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
-PIN_WZ_CITATIONS = 302
+PIN_WZ_CITATIONS = 306
 PIN_AMBIGUOUS = 73
 
 
