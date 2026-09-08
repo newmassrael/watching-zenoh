@@ -647,10 +647,17 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # the directory it names was merged away. All six were rewritten as prose
 # descriptions, keeping only anchored `path` @ `needle` forms. A dead path is
 # described, never cited.
+# Round 2439 -- `routing-token-tables` re-declared at the pin (open-debt 675).
+# wz 314 -> 315, ONE new citation: `router_forward.rs` @ `fn gateways_of`, the
+# module header this round deleted a false clause from. Only one because the
+# round's other work was RETIREMENT -- two residuals dropped for naming a
+# capability upstream deleted -- and retiring a claim adds no wz site.
+#
+# AMBIGUOUS HELD AT 73 for the fourth round running.
 PIN_REACHED = 55
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
-PIN_WZ_CITATIONS = 314
+PIN_WZ_CITATIONS = 315
 PIN_AMBIGUOUS = 73
 
 

@@ -1121,7 +1121,32 @@ def _grade_head(reason: str) -> str:
 #: The round also DELETED two false sentences from product code that had been
 #: asserting a missing capability this crate ships -- the registry-right /
 #: code-stale direction this atom's own entry recorded as unmeasured.
-BUDGET = 23
+#: 23 -> 22 (R2439). `routing-token-tables`, and BOTH of its named residuals
+#: retire for ONE cause: upstream DELETED the capability they debit wz for.
+#: `failover_brokering` occurs NINE times in the cited router token module at
+#: 1.5.0 and ZERO times in the whole of upstream's routing tree at the pin --
+#: absent, not relocated -- and the function the residuals name is gone from the
+#: entire source tree. What survives is a deprecated wrapper documented as
+#: having no effect, plus one upstream TEST whose name still carries the word,
+#: which is why a bare grep for the term does not read as zero.
+#:
+#: THE SAME DEPRECATION SHAPE AS R2438's PEER KEY, and that is now two
+#: independent residuals in this store resting on it: upstream's config denies
+#: unknown fields, so an UNKNOWN key is REFUSED while a DEPRECATED one is
+#: accepted and discarded. A residual whose remedy is "honour key K" owes a
+#: re-read of K's DEPRECATION at the pin, not just of K's spelling. Worth
+#: expecting more of: wz's config layer had ALREADY retired this key from its
+#: unhonoured lists (R2230) while this entry, on the ROUTING side, kept debiting
+#: it -- one deprecation reached one half of the store and not the other.
+#:
+#: The round also deleted the roadmap consequence from product code: a module
+#: header listed the deleted capability beside a live one as "off by default in
+#: zenoh", which put work upstream has REMOVED onto wz's own plan. Deferring
+#: that is worse than leaving it undone -- it reads as a known gap, so nobody
+#: re-measures it. ⚠ The first anchor written for the repointed peer citation
+#: (`fn declare_token`) does NOT exist in the merged file; a plausible upstream
+#: function name is not evidence one is there. Read the file.
+BUDGET = 22
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory

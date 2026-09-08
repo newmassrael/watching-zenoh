@@ -263,9 +263,19 @@
 //!   DIFFERENT candidate set than the global
 //!   `shared_nodes` route master — a real asymmetry. wz has no interceptor
 //!   ingress/egress plane yet, so C4 implements the global route master only; the
-//!   per-peer filter + `router_peers_failover_brokering` (off by default in zenoh)
-//!   land with the interceptor slice. The source-dimensioned route cache is a
-//!   data-path optimization (wz computes routes inline today) deferred with it.
+//!   per-peer filter lands with the interceptor slice. The source-dimensioned
+//!   route cache is a data-path optimization (wz computes routes inline today)
+//!   deferred with it.
+//!
+//!   R2438 — `router_peers_failover_brokering` LEFT this sentence, which used to
+//!   list it beside the per-peer filter as "off by default in zenoh" and thereby
+//!   put it on wz's roadmap. At the 1.10.0 pin it is not off by default, it is
+//!   GONE: `failover_brokering` occurs ZERO times in upstream's whole routing
+//!   tree (nine times in `hat/router/token.rs` alone at 1.5.0), the function
+//!   `propagate_forget_simple_token_to_peers` that drove it does not exist, and
+//!   the config key survives only as a deprecated wrapper upstream documents as
+//!   having no effect. Deferring work upstream has deleted is worse than leaving
+//!   it undone -- it reads as a known gap, so nobody re-measures it.
 //! - **Native-other-tier cross bubble — the ROUTER-NATIVE / non-master corner
 //!   (mechanism landed A2a/A2b; peer-native E2E landed A4; router-native E2E
 //!   UNIT-only)** — the canonical R311y120 black-hole is: a peer-source Push into a
