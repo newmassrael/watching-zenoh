@@ -107,7 +107,16 @@ FUNCTION = re.compile(r"^[A-Za-z_][A-Za-z0-9_ *]*\b(wz_replay_[a-z0-9_]+)\s*\(",
 
 
 def screaming(variant: str) -> str:
-    """`FlipBit` -> `FLIP_BIT`, the spelling every constant here uses."""
+    """`Mutation::FlipBit` -> the FLIP_BIT tail of `WZ_REPLAY_MUTATION_FLIP_BIT`.
+
+    R2446 — the tail is written WITHOUT backticks on purpose. This returns it
+    alone and the caller prepends the family prefix, so the bare word is not a
+    name in this tree: only the prefixed constant is. `prose_named_identifier_gate`
+    resolves a backticked span as itself or as the HEAD of a longer identifier,
+    and a tail satisfies neither -- so backticking it sent a reader looking for
+    a constant that does not exist. That is the gate's whole subject, and R2441
+    tripped it on this very line.
+    """
     return re.sub(r"(?<!^)(?=[A-Z])", "_", variant).upper()
 
 

@@ -1154,19 +1154,33 @@ def _grade_head(reason: str) -> str:
 #: finding rather than a shortfall. Every substantive claim in that reason
 #: survives at the pin -- the `Auto if time_range().is_some() => None` /
 #: `Auto => Latest` rule is verbatim intact, and the wire numbering R311y837
-#: settled is still zenoh's -- while EVERY line anchor in it is dead: the
-#: resolution moved from api/session.rs:2247-2252 to :2717-2718, `time_range`
-#: from api/selector.rs:145 to :164/:189, the rest plugin's copy from
-#: lib.rs:437-441 to :369/:371. That is R2412's split (the needle lives, the
-#: path:line dies) and it is why "re-measured" here means the anchors were
-#: re-read one by one, not that a version string was substituted.
+#: settled is still zenoh's -- while EVERY line anchor in it is dead. The
+#: resolution stood at 2247-2252 and now reads
+#: `zenoh/src/api/session.rs` @ `ConsolidationMode::Auto => ConsolidationMode::Latest`;
+#: `time_range` stood at 145 and now reads
+#: `zenoh/src/api/selector.rs` @ `fn time_range(&self) -> Option<ZResult<TimeRange>>`;
+#: the rest plugin's copy moved from 437-441 to :369/:371. That is R2412's
+#: split (the needle lives, the path:line dies) and it is why "re-measured"
+#: here means the anchors were re-read one by one, not that a version string
+#: was substituted.
+#:
+#: ⚠ R2446 REWROTE THE THREE ANCHORS ABOVE, and the rewrite is the same lesson
+#: one turn later: this paragraph ARGUED that the needle lives and the
+#: path:line dies, and then spelled its own citations as root-less `path:line`.
+#: `upstream_citation_anchor_gate` counted them -- two here, one in
+#: `liveliness.rs`, two more below -- and went red. A note that states a rule
+#: in the form the rule refuses is not graded by its own argument.
 #:
 #: ⚠ ONE CITATION WAS REPOINTED RATHER THAN CONFIRMED, and it is the kind a
 #: plausibility read would have waved through: the reason credited the
-#: consolidation NUMBERING to `zenoh-codec/src/zenoh/query.rs:38-44`, and at the
-#: pin that file only MAPS the enum -- the numbering is the declaration order in
-#: `zenoh-protocol/src/zenoh/query.rs`. The claim was right about the numbers and
-#: wrong about the crate.
+#: consolidation NUMBERING to
+#: `commons/zenoh-codec/src/zenoh/query.rs` @ `impl<W> WCodec<ConsolidationMode, &mut W> for Zenoh080`,
+#: and at the pin that file only MAPS the enum -- the numbering is the
+#: declaration order in
+#: `commons/zenoh-protocol/src/zenoh/query.rs` @ `pub enum ConsolidationMode {`.
+#: The claim was right about the numbers and wrong about the crate. ⚠ Both
+#: paths are rooted at `commons/`, NOT at `zenoh/commons/`: the crate
+#: directories sit directly under the workspace root at the pin.
 #:
 #: THE ROUND ALSO BUILT PRODUCT, because a re-declaration alone is a tag move.
 #: The residual that reason has named since R311y837 -- `wz-ap-demo`'s `--query`

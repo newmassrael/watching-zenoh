@@ -333,7 +333,8 @@ impl<R: SessionRuntime, T: TimeSource> Drop for LivelinessToken<R, T> {
         // duplicate UndeclToken.
         //
         // Round 2444 (open-debt item 675) — AND A FAILED RETRACTION IS LOGGED,
-        // which is upstream's shape re-read at the pin (`api/liveliness.rs`
+        // which is upstream's shape re-read at the pin
+        // (`zenoh/src/api/liveliness.rs`
         // @ `impl Drop for LivelinessToken`, whose body is
         // `if let Err(error) = self.undeclare_impl() { error!(error) }`).
         //
