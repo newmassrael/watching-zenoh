@@ -7022,6 +7022,21 @@ mod tests {
     /// lane. C1bn now carries a MULTICAST-UNION arm that selects the producer's
     /// features and pins this test BY NAME, exactly as R311y897 had to do for
     /// the auth walkers.
+    ///
+    /// # The cfg does not name the SECOND axis, and must not
+    ///
+    /// R2449 — one of the ids `encode_join` can emit is conditional on a
+    /// feature this cfg deliberately does NOT list: the patch announcement
+    /// rides `transport-fragmentation`. Adding it here would be the wrong
+    /// repair twice over — it would narrow the LINKAGE below (the opaque-row
+    /// claim is about builds that can produce a Join at all, not only ones that
+    /// can chain), and it would hide the disagreement this test is now able to
+    /// see. The expected set is derived from the capability instead, at the
+    /// assertion, so this test is correct in every build that compiles it
+    /// rather than in the one its author measured. Both arms of that
+    /// derivation are reached: Layer C1bn's multicast-union arm runs the
+    /// no-chain arm, and pre-push gate 2h's `wz-session-core` leg (which names
+    /// `transport-fragmentation`) runs the chaining one.
     #[cfg(all(
         feature = "session-multicast",
         feature = "codec-join",
@@ -7082,27 +7097,79 @@ mod tests {
         }
         emitted.sort_unstable();
 
+        // WHETHER THE PATCH ID IS OWED IS DERIVED FROM THE CAPABILITY, not
+        // spelled as a second copy of the producer's feature name. `encode_join`
+        // announces this node's protocol level only in a build that can emit the
+        // chain-boundary markers the level promises, so the honest expected set
+        // is a FUNCTION of that capability -- and the capability is something to
+        // ask the emitter rather than to declare: hand
+        // [`crate::frame_encode::multicast_frame_or_fragments`] a frame past the
+        // MTU and count the datagrams. One means this build passes an oversize
+        // frame through and owes no announcement; more than one means it chains
+        // and does. Deriving it also holds the two against each other, which a
+        // feature name cannot: a build that announces a level it cannot chain,
+        // or chains without announcing, reds here.
+        //
+        // R2449 -- this replaces a literal that was right for ONE build. R2417
+        // added the announcement and the pin `[0x01, 0x07]` in one commit and
+        // gated its SIBLING tests on the capability
+        // (`multicast_join::tests::a_beacon_announces_this_nodes_patch_level` is
+        // `#[cfg(all(transport-fragmentation, reassembly))]`) -- but not this
+        // pin, whose own `#[cfg]` names only the three features the LINKAGE
+        // below needs. MEASURED at `2941cdd8`, same test, same commit, two
+        // builds: `dissect,session-multicast,codec-join,transport-qos` fails
+        // `left: [1] right: [1, 7]`, and that set plus `transport-fragmentation`
+        // passes. So `encode_join` neither gained nor lost an extension; the pin
+        // was a single literal for a set that varies. Layer C1bn selects the
+        // first of those two and had been red every completed run since R2417,
+        // while pre-push gate 2h's `wz-session-core` leg selects the second and
+        // stayed green -- which is why no local gate ever contradicted it.
+        //
+        // Retyping the literal as `[0x01]` would be the same defect mirrored:
+        // right in this lane and wrong in every build that can chain. That is
+        // also what the paragraph above means by derived rather than declared.
+        let mut probe_tx = MulticastTxConduits::new(crate::sn::mask_from_res(base.seq_num_res));
+        let chains = crate::frame_encode::multicast_frame_or_fragments(
+            alloc::vec![0xAA; 4_096],
+            0,
+            true,
+            128,
+            &mut probe_tx,
+            None,
+        )
+        .len()
+            > 1;
+
         // ANTI-VACUITY, and it is the whole instrument: if the walk saw NO
         // extension at all then "no opaque row is emitted" would be true of a
-        // blind test. The qos configuration above must contribute one.
-        // R2417 — `0x07` joined the set when the multicast beacon began
-        // announcing this node's protocol PATCH level, and this gate is what
-        // made the round check the obligation it names: id 7 is a `EXT_ENC_Z64`
+        // blind test. The qos configuration above must contribute one, so `0x01`
+        // is in the expected set unconditionally and no build of this test can
+        // reach the linkage below on an empty walk.
+        // R2417 — `0x07` is the id the patch announcement rides: a `EXT_ENC_Z64`
         // row of `ext_name::JOIN` ("patch") and NOT a `OPAQUE_ZBUF_BODIES` row,
-        // so the walker below already renders it by name rather than as hex,
-        // and no walker is owed. The `span.end` assertion above is what proves
-        // that rather than the row table alone: the dissector accounted for
-        // every byte of the new chain, MORE bit included.
+        // so the walker below already renders it by name rather than as hex, and
+        // no walker is owed. The `span.end` assertion above is what proves that
+        // rather than the row table alone: the dissector accounted for every
+        // byte of the chain, MORE bit included.
+        let mut expected = alloc::vec![0x01u64];
+        if chains {
+            expected.push(0x07);
+        }
         assert_eq!(
-            emitted,
-            alloc::vec![0x01, 0x07],
-            "the SET of extension ids `encode_join` emits changed. This is a \
-             pinned set rather than a count because either direction matters: \
-             one FEWER means this test can no longer see an extension and its \
-             conclusion below is vacuous, one MORE means this tree started \
-             writing a Join extension it did not write before -- and if that id \
-             is a row of OPAQUE_ZBUF_BODIES, that row's reason is now false and \
-             a walker is owed",
+            emitted, expected,
+            "the SET of extension ids `encode_join` emits is not the set this \
+             build owes. It is a set rather than a count because either \
+             direction matters: one FEWER means this test can no longer see an \
+             extension and its conclusion below is vacuous, one MORE means this \
+             tree started writing a Join extension it did not write before -- \
+             and if that id is a row of OPAQUE_ZBUF_BODIES, that row's reason is \
+             now false and a walker is owed. `expected` is DERIVED from whether \
+             this build chains an oversize frame, so a mismatch on `0x07` alone \
+             is the announcement and the capability disagreeing: either a level \
+             is announced whose chain markers this build cannot emit (a patch-1 \
+             receiver then refuses the chain) or a build that chains announces \
+             nothing. Read the derivation above before touching either side -- \
+             re-pinning a literal is what put this test in one build's terms",
         );
 
         // THE LINKAGE. Every `Join` row declared opaque must be an id the
