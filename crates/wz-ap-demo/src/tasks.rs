@@ -106,6 +106,51 @@ pub(crate) const QUERY_RID: u64 = 1;
 /// (`send_request_query_with_meta_empty_emits_same_bytes_as_no_meta`,
 /// session_glue.rs), so every pre-existing Layer E fixture that greps this
 /// task's wire output keeps passing without a fixture edit.
+/// Round 2442 (open-debt item 675) — the Query's metadata, as a VALUE the task
+/// does not assemble inline.
+///
+/// # The defect this closes
+///
+/// This was four fields in a struct literal inside [`query_task`], and it left
+/// `consolidation` at `Option::None` — so the demo's `--query` transmitted no
+/// consolidation byte while every other requester in the tree resolved
+/// `Auto -> Latest` and sent it. The atom's own reason has named that residual
+/// since R311y837: the demo "hand-builds a QueryMetadata and calls
+/// send_request_query_with_meta directly, bypassing QueryOptions and every
+/// resolution rule on it", and sixteen e2e files drive `--query` as "wz the
+/// requester" without ever exercising the application path.
+///
+/// It is not a demo-only wart. `preset-ap-full` carries `query-consolidation`,
+/// so the AP-full binary COMPILES the capability in and had no path that
+/// reached it from argv — which is the second of Layer A5's two rules, stated
+/// in this crate's own manifest about a different feature.
+///
+/// # Why a function
+///
+/// So it can be asserted about without standing a session up. The task around
+/// it waits on Established and sleeps; the decision it was hiding is a pure
+/// function of two arguments.
+///
+/// # It resolves NOTHING itself
+///
+/// [`wz::runtime_tokio::query::wire_consolidation`] is the SSOT, shared with
+/// `QueryOptions`, and it carries the `query-consolidation` gate internally.
+/// A copy of the `Auto -> Latest` rule here would be a second opinion about a
+/// judgement both upstreams keep in exactly one place.
+fn query_metadata(parameters: Option<&str>, attachment_blob: Option<Vec<u8>>) -> QueryMetadata {
+    let parameters = parameters.map(|p| p.as_bytes().to_vec());
+    QueryMetadata {
+        // `None` requested: the demo exposes no `--query-consolidation` flag,
+        // so this is exactly the "caller named no mode" case zenoh resolves
+        // inside `get()` -- and the `_time` carve-out reaches it, because
+        // `--query-params` is what a reader types the selector into.
+        consolidation: wz::runtime_tokio::query::wire_consolidation(None, parameters.as_deref()),
+        parameters,
+        attachment: attachment_blob,
+        ..Default::default()
+    }
+}
+
 pub(crate) async fn query_task<T>(
     actions: Arc<SessionLinkActions>,
     spec: crate::args::QueryEmitSpec,
@@ -179,11 +224,7 @@ pub(crate) async fn query_task<T>(
         }
         None
     };
-    let meta = QueryMetadata {
-        parameters: parameters.as_ref().map(|p| p.as_bytes().to_vec()),
-        attachment: attachment_blob,
-        ..Default::default()
-    };
+    let meta = query_metadata(parameters.as_deref(), attachment_blob);
     actions
         .send_request_query_with_meta(QUERY_RID, /*mapping_id=*/ 0, Some(&keyexpr), &meta)
         .expect("demo query keyexpr is a fixed short literal, within codec bounds");
@@ -878,4 +919,76 @@ async fn publish_cycle<T>(
     }
     emit_one_push(session, keyexpr, operation, declare_id, idx);
     clock.sleep(PUBLISHER_BURST_INTERVAL_MS).await;
+}
+
+/// Round 2442 (open-debt item 675) — the demo's Query says what every other
+/// requester says.
+///
+/// Gated on this crate's own `query-consolidation` key, which BOTH presets name
+/// — so the DEFAULT build runs these, rather than only `preset-ap-full`. A
+/// residual about a path nobody exercises must not be closed by assertions
+/// nobody runs.
+#[cfg(all(test, feature = "query-consolidation"))]
+mod query_metadata_tests {
+    use super::query_metadata;
+    // Through `session_glue`, which is where this crate already reaches for the
+    // query types -- not a second import path for one enum.
+    use wz::runtime_tokio::session_glue::ConsolidationMode;
+
+    /// A demo `--query` naming no mode transmits LATEST.
+    ///
+    /// This is the residual the atom named: it transmitted NOTHING. The VALUE
+    /// is asserted rather than the presence of a mode, because "some byte went
+    /// out" would pass for `None` too — and `None` is precisely what the
+    /// resolution must not produce here.
+    #[test]
+    fn a_query_naming_no_mode_transmits_latest() {
+        let meta = query_metadata(None, None);
+        assert_eq!(
+            meta.consolidation,
+            Some(ConsolidationMode::Latest),
+            "zenoh resolves Auto -> Latest inside get(); the demo rode the \
+             Option::None default and transmitted no byte at all"
+        );
+    }
+
+    /// THE `_time` CARVE-OUT REACHES THE DEMO, through `--query-params` —
+    /// the flag a reader types a selector into.
+    ///
+    /// Both upstreams special-case a time-range selector to `None`, because
+    /// consolidating a historical range collapses exactly the samples that were
+    /// asked for. A demo resolving to Latest unconditionally would look correct
+    /// on the common path and silently destroy this one.
+    #[test]
+    fn a_time_range_selector_transmits_none() {
+        let meta = query_metadata(Some("_time=[now(-1h)..now()]"), None);
+        assert_eq!(
+            meta.consolidation,
+            Some(ConsolidationMode::None),
+            "a time-range get must not consolidate"
+        );
+    }
+
+    /// An ordinary selector is NOT the time-range case.
+    ///
+    /// The control for the test above: a carve-out firing on any non-empty
+    /// parameter string would satisfy that one and fail this.
+    #[test]
+    fn an_ordinary_selector_still_transmits_latest() {
+        let meta = query_metadata(Some("_sn=3..9"), None);
+        assert_eq!(meta.consolidation, Some(ConsolidationMode::Latest));
+    }
+
+    /// The other slots survive the extraction.
+    ///
+    /// It moved a struct literal into a function, and a field dropped in that
+    /// move would be invisible to the three assertions above.
+    #[test]
+    fn the_other_slots_are_unchanged_by_the_extraction() {
+        let meta = query_metadata(Some("_sn=3..9"), Some(vec![7, 8, 9]));
+        assert_eq!(meta.parameters.as_deref(), Some(b"_sn=3..9".as_slice()));
+        assert_eq!(meta.attachment.as_deref(), Some([7u8, 8, 9].as_slice()));
+        assert!(meta.target.is_none());
+        assert!(meta.value.is_none());
+    }
 }

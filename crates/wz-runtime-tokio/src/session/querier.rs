@@ -709,21 +709,17 @@ impl QueryOptions {
     /// [`Self::effective_accept_replies`] reads, and for the same R311y317
     /// reason: a caller can assign the field directly, so the gate must sit on
     /// the last hop that knows rather than on a setter.
+    /// Round 2442 (open-debt item 675) — the BODY moved to
+    /// [`crate::query::resolved_consolidation`] and this is now one of its two
+    /// callers. Nothing about the rule changed; what changed is that a caller
+    /// without a `QueryOptions` can reach it, which `wz-ap-demo`'s `--query`
+    /// could not, and so transmitted no mode at all.
     #[cfg(feature = "query-get")]
     pub(super) fn resolved_consolidation(&self) -> ConsolidationMode {
-        #[cfg(feature = "query-consolidation")]
-        {
-            let params = self
-                .parameters
-                .as_deref()
-                .and_then(|bytes| core::str::from_utf8(bytes).ok())
-                .unwrap_or("");
-            ConsolidationMode::resolve_auto(self.effective_consolidation(), params)
-        }
-        #[cfg(not(feature = "query-consolidation"))]
-        {
-            ConsolidationMode::None
-        }
+        crate::query::resolved_consolidation(
+            self.effective_consolidation(),
+            self.parameters.as_deref(),
+        )
     }
 
     /// R311y837 — THE WIRE READING, and since this round it is the LOCAL one
@@ -745,16 +741,13 @@ impl QueryOptions {
     /// all and must not acquire zenoh's default through the wire when it cannot
     /// honour it locally. That arm elides the field, which both upstreams' decoders
     /// read as `Auto` — the honest statement for a build that consolidates nothing.
+    /// Round 2442 (open-debt item 675) — the BODY moved to
+    /// [`crate::query::wire_consolidation`], for the reason on
+    /// [`Self::resolved_consolidation`]. The OFF-arm elision this doc describes
+    /// is now made in one place for every requester, not per call site.
     #[cfg(feature = "query-get")]
     pub(super) fn wire_consolidation(&self) -> Option<ConsolidationMode> {
-        #[cfg(feature = "query-consolidation")]
-        {
-            Some(self.resolved_consolidation())
-        }
-        #[cfg(not(feature = "query-consolidation"))]
-        {
-            None
-        }
+        crate::query::wire_consolidation(self.effective_consolidation(), self.parameters.as_deref())
     }
 
     /// See [`Self::effective_target`]. Resolves the `0` sentinel this type's

@@ -1146,7 +1146,36 @@ def _grade_head(reason: str) -> str:
 #: re-measures it. ⚠ The first anchor written for the repointed peer citation
 #: (`fn declare_token`) does NOT exist in the merged file; a plausible upstream
 #: function name is not evidence one is there. Read the file.
-BUDGET = 22
+#:
+#: 22 -> 21, Round 2442 (open-debt item 675): `query-consolidation`.
+#:
+#: THE ATOM THAT MOVED, AND WHAT THE RE-MEASUREMENT CHANGED. This is the first
+#: entry in this note whose re-measurement changed NO verdict, and that is the
+#: finding rather than a shortfall. Every substantive claim in that reason
+#: survives at the pin -- the `Auto if time_range().is_some() => None` /
+#: `Auto => Latest` rule is verbatim intact, and the wire numbering R311y837
+#: settled is still zenoh's -- while EVERY line anchor in it is dead: the
+#: resolution moved from api/session.rs:2247-2252 to :2717-2718, `time_range`
+#: from api/selector.rs:145 to :164/:189, the rest plugin's copy from
+#: lib.rs:437-441 to :369/:371. That is R2412's split (the needle lives, the
+#: path:line dies) and it is why "re-measured" here means the anchors were
+#: re-read one by one, not that a version string was substituted.
+#:
+#: ⚠ ONE CITATION WAS REPOINTED RATHER THAN CONFIRMED, and it is the kind a
+#: plausibility read would have waved through: the reason credited the
+#: consolidation NUMBERING to `zenoh-codec/src/zenoh/query.rs:38-44`, and at the
+#: pin that file only MAPS the enum -- the numbering is the declaration order in
+#: `zenoh-protocol/src/zenoh/query.rs`. The claim was right about the numbers and
+#: wrong about the crate.
+#:
+#: THE ROUND ALSO BUILT PRODUCT, because a re-declaration alone is a tag move.
+#: The residual that reason has named since R311y837 -- `wz-ap-demo`'s `--query`
+#: bypassing every resolution rule and transmitting no consolidation byte -- is
+#: paid, by moving the resolution into two shared free functions in
+#: `wz_runtime_tokio::query` that `QueryOptions` and the demo both call. Not a
+#: demo wart: `preset-ap-full` carries `query-consolidation`, so that binary
+#: compiled the capability in with no path reaching it from argv.
+BUDGET = 21
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory

@@ -139,7 +139,7 @@ default = ["preset-ap-client"]
 # demo-local opt-in on top of the framework preset (preset-ap-client in the wz
 # facade does NOT enable switchboard), so the framework footprint for other
 # preset-ap-client consumers is unchanged.
-preset-ap-client = ["wz/preset-ap-client", "switchboard"]
+preset-ap-client = ["wz/preset-ap-client", "switchboard", "query-consolidation"]
 # R311y480 — the AP-FULL preset had NO demo-side key at all, so
 # `preset-ap-full` was reachable only as `cargo build -p wz
 # --no-default-features --features preset-ap-full`: a LIBRARY typecheck
@@ -235,6 +235,9 @@ preset-ap-full = [
     "transport-link-unixpipe",
     "locator-iface",
     "query-attachment",
+    # Round 2442 (open-debt item 675) — see this key's own block below for why
+    # it is declared and why naming it here costs nothing.
+    "query-consolidation",
     "scouting-active",
     # R311y849 — the demo-side key for the same atom. Layer A5's second rule is
     # about the BINARY reaching the capability from argv: with the key declared
@@ -413,6 +416,28 @@ locator-iface = ["wz/locator-iface"]
 # the `attachment` MODULE, which does not exist when the gate is off, so this key
 # is what lets the OFF build say so out loud instead of failing to compile.
 query-attachment = ["wz/query-attachment"]
+# Round 2442 (open-debt item 675) — the demo-side cfg key for the consolidation
+# atom, and it exists for a DIFFERENT reason than `query-attachment` above.
+#
+# That key exists because the attachment MODULE vanishes when its gate is off,
+# so the demo cannot compile without knowing. Nothing here vanishes: the
+# resolution is behind `wz::runtime_tokio::query::wire_consolidation`, which
+# carries its own gate and answers `None` on an OFF build. The demo's PRODUCT
+# path therefore needs no key at all, and that is deliberate.
+#
+# The key is for the demo's TESTS. What `--query` transmits is Latest, or None
+# for a `_time` selector, or ELIDED on a build with no consolidation capability
+# — three different correct answers, and a test asserting the first two must
+# know which build it is in or it is asserting a value it was never promised.
+# Without this key the assertions would have to be gated on `query-attachment`,
+# which is a preset-ap-full member, and the default build would then run ZERO of
+# them: green by not running, on the very residual this round closes.
+#
+# Named in BOTH presets below, unlike `query-attachment`. It costs no footprint
+# in either: `wz/preset-ap-client` and `wz/preset-ap-full` each already enable
+# `wz/query-consolidation`, so this forwards a feature that is on regardless and
+# only makes the fact visible to `#[cfg]` in this crate.
+query-consolidation = ["wz/query-consolidation"]
 # R311y428 — opt-in ACTIVE multicast scouting (`--scout`), forwarding the wz
 # facade's `scouting-active` (which pulls the wz-runtime-tokio scouting FSM +
 # glue, and with them transport-link-udp + codec-scout + codec-hello). The
