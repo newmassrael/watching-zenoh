@@ -239,10 +239,33 @@ fn push_datagram_flow(
             note(&mut named, &mut disagreed, cap, index, "absent");
             continue;
         };
-        let Ok(crate::link::Transport::Udp(datagram)) =
+        // Round 2443 (open-debt item 694) — BOTH DATAGRAM ARMS, not one.
+        //
+        // This read `Transport::Udp(..)` alone, so every raweth (L2) frame fell
+        // through to the note below and the flow went out with `"messages":[]`
+        // — while `summary` counted the same frames and `census` read the node's
+        // zid off them. A downstream consumer measured exactly that split and
+        // reported it.
+        //
+        // The first pass tells the two apart deliberately (`Dissection`'s own
+        // `Transport::Udp` / `Transport::RawEth` arms, whose comment calls that
+        // site "the last place that knows which one it was") because a raweth
+        // flow is keyed by MAC with no ports. That distinction is about how a
+        // flow is NAMED. It is not a reason to refuse to read the payload back,
+        // and `Transport::RawEth` carries the same `Datagram` this arm binds —
+        // which is why `Dissection::push_tunnelled` already spells the pattern
+        // this way.
+        let Ok(crate::link::Transport::Udp(datagram) | crate::link::Transport::RawEth(datagram)) =
             crate::link::decapsulate(packet.link_type, packet.index, packet.data)
         else {
-            note(&mut named, &mut disagreed, cap, index, "not_udp");
+            // RENAMED with the widening, because the old word became false in
+            // the useful direction: with raweth accepted, a frame reaching here
+            // is TCP, vsock or undecodable on a flow the first pass called a
+            // datagram flow. "not_udp" named a UDP-shaped expectation that was
+            // never what this loop wanted, and it read as a defect in the
+            // CAPTURE when the fact was that the reader declined a link kind it
+            // knows.
+            note(&mut named, &mut disagreed, cap, index, "not_datagram");
             continue;
         };
         // The second read's own coordinates, against the first read's. Three
@@ -2359,6 +2382,117 @@ mod tests {
             "the Init names no key at all and must say so as `null` rather than \
              by omission, which is what keeps `message` a passenger: {keys:?} \
              in {out}"
+        );
+    }
+
+    /// Round 2443 (open-debt item 694) — A RAWETH FLOW RENDERS ITS MESSAGES,
+    /// BESIDE A UDP ONE.
+    ///
+    /// # The fixture MIXES the two link kinds, and that is the whole design
+    ///
+    /// The word `raweth` occurred ZERO times in this file before this round, so
+    /// the edit that widens the re-read had nothing here to grade it. The item
+    /// that reported this said so and named the trap by name: a population that
+    /// never mixes two conditions cannot grade the rule governing their
+    /// boundary — R2441 paid for that lesson one crate over, where a rule
+    /// written down since R311y703 turned out to be graded by nothing because
+    /// every fixture held capture times that were all present or all absent.
+    ///
+    /// So this capture carries BOTH: a UDP scout and a raweth INIT, in one
+    /// file, read by one call. A raweth-only fixture would pass just as well
+    /// against a build that had stopped reading UDP.
+    ///
+    /// # What it would have caught
+    ///
+    /// Before the widening the raweth flow went out as `"messages":[]` with a
+    /// `not_udp` disagreement, while `summary` counted the same frame and
+    /// `census` read the node's zid off it. One capture, three doors, two
+    /// answers.
+    #[test]
+    fn a_raweth_flow_renders_its_messages_beside_a_udp_flow() {
+        use crate::datagram_tests::{init_message, raweth_packet};
+
+        // THE SAME MESSAGE ON BOTH LINKS, so the only thing that differs is the
+        // link kind. A first cut put a SCOUT on the UDP side and it rendered no
+        // message row at all -- scouting is its own plane -- which would have
+        // made the UDP half of this fixture prove nothing.
+        let udp = udp_packet(
+            [192, 168, 1, 5],
+            43210,
+            [192, 168, 1, 9],
+            7447,
+            &init_message(),
+        );
+        let eth = raweth_packet(&init_message());
+
+        let mut d = Dissection::new();
+        d.push_packet_at(LINKTYPE_ETHERNET, 0, Some(0), &udp);
+        d.push_packet_at(LINKTYPE_ETHERNET, 1, Some(1), &eth);
+        d.finish();
+
+        assert_eq!(
+            d.datagram_flows().len(),
+            2,
+            "the fixture must MIX the two link kinds; one of them alone cannot \
+             grade the boundary this test exists for"
+        );
+
+        let file = crate::pcap::write(
+            LINKTYPE_ETHERNET,
+            &[(0, 0, udp.as_slice()), (1, 0, eth.as_slice())],
+        );
+        let out = fields_json(&d, &file, None, None);
+
+        assert!(
+            !out.contains("not_datagram"),
+            "both frames ARE datagrams -- one UDP, one raweth -- so neither may \
+             be refused by the second read: {out}"
+        );
+        assert!(
+            !out.contains("\"messages\":[]"),
+            "every datagram flow here carries a message, so an empty listing is \
+             the defect this test was written for: {out}"
+        );
+    }
+
+    /// THE NEGATIVE ARM: a link kind that genuinely is NOT a datagram is still
+    /// refused, and now says so under the honest name.
+    ///
+    /// Without this, "accept everything" would satisfy the test above. A TCP
+    /// segment found where the first pass recorded a datagram flow is a real
+    /// disagreement between two reads of one file, and widening the arm must
+    /// not have widened it to that.
+    #[test]
+    fn a_non_datagram_packet_is_still_refused_by_the_second_read() {
+        use crate::datagram_tests::init_message;
+
+        // A UDP datagram carrying a real message, so the flow HAS a frame for
+        // the second read to disagree about. A first cut used a SCOUT here and
+        // the flow had no frames at all, so the loop this test is about ran
+        // zero times and the assertion below failed on an empty document —
+        // a vacuous control, caught by the assertion rather than by review.
+        let udp = udp_packet(
+            [192, 168, 1, 5],
+            43210,
+            [192, 168, 1, 9],
+            7447,
+            &init_message(),
+        );
+        let mut d = Dissection::new();
+        d.push_packet_at(LINKTYPE_ETHERNET, 0, Some(0), &udp);
+        d.finish();
+
+        // The FILE disagrees with the dissection: index 0 holds a TCP segment,
+        // which is neither UDP nor raweth. The coordinates were inherited from
+        // the first read, so this is exactly the "two reads of one file" case.
+        let tcp = tcp_packet(1000, b"not a datagram at all");
+        let file = crate::pcap::write(LINKTYPE_ETHERNET, &[(0, 0, tcp.as_slice())]);
+        let out = fields_json(&d, &file, None, None);
+
+        assert!(
+            out.contains("not_datagram"),
+            "a TCP segment where the first read recorded a datagram flow must \
+             still be refused, under the name that says what happened: {out}"
         );
     }
 }

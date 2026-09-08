@@ -2647,9 +2647,19 @@ struct Disagreed {
 enum Disagreement {
     /// The second read has no packet at that index at all.
     Absent,
-    /// It has one, and does not read it as a UDP datagram.
-    NotUdp,
-    /// It is a UDP datagram, and it disagrees about these coordinates.
+    /// It has one, and does not read it as a DATAGRAM at all — neither UDP nor
+    /// raweth.
+    ///
+    /// Round 2443 (open-debt item 694) — was `NotUdp`, and the rename travels
+    /// with the widening that made the old word false. While the re-read
+    /// accepted only the UDP arm this fired for every raweth frame, which named
+    /// a UDP-shaped expectation the caller never had and read as a defect in
+    /// the CAPTURE rather than a refusal by the reader. It now fires only for a
+    /// TCP segment, a vsock record or an undecodable packet found where the
+    /// first pass recorded a datagram flow — a genuine disagreement between two
+    /// reads of one file.
+    NotDatagram,
+    /// It is a datagram, and it disagrees about these coordinates.
     Coordinates(Axes),
 }
 
@@ -2691,7 +2701,7 @@ impl Disagreement {
     fn kind(&self) -> &'static str {
         match self {
             Self::Absent => "absent",
-            Self::NotUdp => "not_udp",
+            Self::NotDatagram => "not_datagram",
             Self::Coordinates(_) => "coordinates",
         }
     }
@@ -2700,7 +2710,7 @@ impl Disagreement {
     fn sentence(&self) -> String {
         match self {
             Self::Absent => "the second read has no packet at this index".into(),
-            Self::NotUdp => "the second read does not read this packet as a UDP datagram".into(),
+            Self::NotDatagram => "the second read does not read this packet as a datagram".into(),
             Self::Coordinates(axes) => {
                 format!("the packet disagrees about: {}", axes.names().join(", "))
             }
@@ -3679,15 +3689,21 @@ fn datagram_field_rows(
                 );
                 continue;
             };
-            let Ok(wz_capture::link::Transport::Udp(datagram)) =
-                wz_capture::link::decapsulate(packet.link_type, packet.index, packet.data)
+            // Round 2443 (open-debt item 694) — BOTH DATAGRAM ARMS. The
+            // consumer reported this at the C ABI's `fields` door; the command
+            // line had the identical one-arm read, and nobody had run it over a
+            // raweth capture. See `fields_json`'s twin for the full reasoning.
+            let Ok(
+                wz_capture::link::Transport::Udp(datagram)
+                | wz_capture::link::Transport::RawEth(datagram),
+            ) = wz_capture::link::decapsulate(packet.link_type, packet.index, packet.data)
             else {
                 note_disagreement(
                     &mut named,
                     &mut disagreed,
                     messages_per_flow,
                     frame.stream_offset,
-                    Disagreement::NotUdp,
+                    Disagreement::NotDatagram,
                 );
                 continue;
             };
@@ -3760,15 +3776,20 @@ fn datagram_field_rows(
                 );
                 continue;
             };
-            let Ok(wz_capture::link::Transport::Udp(udp)) =
-                wz_capture::link::decapsulate(packet.link_type, packet.index, packet.data)
+            // Round 2443 (open-debt item 694) — the second of this function's
+            // two re-reads, widened with the first. Fixing one and not the
+            // other would leave the same flow answering differently depending
+            // on which listing asked.
+            let Ok(
+                wz_capture::link::Transport::Udp(udp) | wz_capture::link::Transport::RawEth(udp),
+            ) = wz_capture::link::decapsulate(packet.link_type, packet.index, packet.data)
             else {
                 note_disagreement(
                     &mut named,
                     &mut disagreed,
                     messages_per_flow,
                     datagram.packet_index,
-                    Disagreement::NotUdp,
+                    Disagreement::NotDatagram,
                 );
                 continue;
             };
@@ -4164,8 +4185,19 @@ fn collect_datagram_samples(dissection: &Dissection, file: Option<&Reread>, out:
                 out.unreachable += 1;
                 continue;
             };
-            let Ok(wz_capture::link::Transport::Udp(datagram)) =
-                wz_capture::link::decapsulate(packet.link_type, packet.index, packet.data)
+            // Round 2443 (open-debt item 694) — BOTH DATAGRAM ARMS, and this
+            // site is the one the report did NOT name.
+            //
+            // `unreachable` is counted honestly here, which is exactly why the
+            // defect was invisible: a raweth capture reported "N messages I
+            // could not reach" and the reason was this reader's refusal, not
+            // the capture. Since `samples()` is what `wz-replay` builds a plan
+            // from, a raweth capture yielded a plan of ZERO emissions with a
+            // floor that looked like an honest limitation.
+            let Ok(
+                wz_capture::link::Transport::Udp(datagram)
+                | wz_capture::link::Transport::RawEth(datagram),
+            ) = wz_capture::link::decapsulate(packet.link_type, packet.index, packet.data)
             else {
                 out.unreachable += 1;
                 continue;
@@ -5949,6 +5981,80 @@ mod tests {
         let mut w = vec![wz_session_core::wire_const::T_MID_FRAME, 0x00];
         w.extend_from_slice(record);
         w
+    }
+
+    /// Round 2443 (open-debt item 694) — a raweth (L2) frame around `payload`.
+    ///
+    /// Built here rather than borrowed: `wz-capture`'s `raweth_packet` is
+    /// `pub(crate)` to that crate, and `wz_session_core::raweth_link` is the
+    /// SSOT both spell it from, so this is the same header rather than a second
+    /// idea of one.
+    fn raweth_frame(payload: &[u8]) -> Vec<u8> {
+        use wz_session_core::raweth_link::{frame, RawEthHeader, DEFAULT_ETHTYPE};
+        let h = RawEthHeader::new(
+            [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+            [0x30, 0x03, 0xC8, 0x37, 0x25, 0xA1],
+            DEFAULT_ETHTYPE,
+            payload.len() as u16,
+        );
+        frame(&h, payload).expect("raweth frame")
+    }
+
+    /// Round 2443 (open-debt item 694) — SAMPLES COME OFF A RAWETH CAPTURE,
+    /// beside a UDP one.
+    ///
+    /// # The site the report did not name
+    ///
+    /// The consumer measured the C ABI's `fields` door. `collect_datagram_samples`
+    /// had the identical one-arm read and nobody had reported it, because it
+    /// counts `unreachable` HONESTLY: a raweth capture answered "N messages I
+    /// could not reach", which reads as a limitation of the capture rather than
+    /// as this reader declining a link kind it knows.
+    ///
+    /// What that cost is one crate further on. `samples()` is what `wz-replay`
+    /// builds a plan from, and R2441 has just put that plan half behind a C
+    /// door — so a raweth capture produced a plan of ZERO emissions with a
+    /// floor that looked like an honest one. No test in this crate called
+    /// `samples()` at all before this round, which is why it survived.
+    ///
+    /// # It MIXES the two link kinds, deliberately
+    ///
+    /// Same rule as the fields-door fixture: a raweth-only capture would pass
+    /// against a build that had stopped reading UDP, and a rule about the
+    /// boundary between two conditions cannot be graded by a population holding
+    /// one of them.
+    #[test]
+    fn a_raweth_capture_yields_samples_beside_a_udp_one() {
+        let record = frame_carrying(&put_declaring("demo/raweth", 0, b"payload"));
+        let eth = raweth_frame(&record);
+        let udp = udp_from_publisher(
+            9,
+            &frame_carrying(&put_declaring("demo/udp", 0, b"payload")),
+        );
+
+        let file = wz_capture::pcap::write(
+            wz_capture::link::LINKTYPE_ETHERNET,
+            &[(0, 0, udp.as_slice()), (1, 0, eth.as_slice())],
+        );
+        let got = samples(&file, None).expect("the fixture is a readable capture");
+
+        let keys: Vec<&str> = got.items.iter().map(|s| s.keyexpr.as_str()).collect();
+        assert!(
+            keys.contains(&"demo/raweth"),
+            "the raweth frame's Put must be replayable: {keys:?} \
+             (unreachable={})",
+            got.unreachable
+        );
+        assert!(
+            keys.contains(&"demo/udp"),
+            "and the UDP one still is, or this fixture proves nothing about the \
+             boundary: {keys:?}"
+        );
+        assert_eq!(
+            got.unreachable, 0,
+            "`unreachable` counted this reader's own refusal, which is what \
+             made the defect read as an honest floor"
+        );
     }
 
     /// One `Put` on `key` that DECLARES `encoding_id`, in zenoh's own wire
