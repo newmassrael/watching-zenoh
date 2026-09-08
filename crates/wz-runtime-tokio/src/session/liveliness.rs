@@ -212,8 +212,20 @@ impl<R: SessionRuntime, T: TimeSource> LivelinessToken<R, T> {
     /// ignored by the peer anyway, but suppressing it matches the
     /// textbook RAII consume contract across the wz handle family and
     /// frees the owned fields rather than `mem::forget` leaking them.
-    pub fn undeclare(mut self) {
-        self.teardown();
+    ///
+    /// Round 2444 (open-debt item 675) — IT RETURNS THE VERDICT NOW, where it
+    /// returned unit and discarded the wire result.
+    ///
+    /// The atom's reason has carried this since R311y440 and named upstream's
+    /// shape: zenoh's `LivelinessToken::undeclare` is
+    /// `impl Resolve<ZResult<()>>`, re-read at the pin this round. A retraction
+    /// that did not reach the wire leaves every peer believing this node is
+    /// still alive until the lease expires, and until now the one caller who
+    /// could have acted on that was the one caller not told about it.
+    ///
+    /// `Result` is `#[must_use]`, so a caller ignoring it now has to say so.
+    pub fn undeclare(mut self) -> Result<(), wz_session_core::send_wire_error::SendWireError> {
+        self.teardown()
     }
 
     /// R311lo — shared teardown for [`Self::undeclare`] + [`Drop`], the
@@ -229,9 +241,15 @@ impl<R: SessionRuntime, T: TimeSource> LivelinessToken<R, T> {
     /// is ever constructed so this never runs at runtime. The wire path
     /// is panic-free under normal operation; a poisoned driver path is a
     /// future-round carry.
-    fn teardown(&mut self) {
+    ///
+    /// Round 2444 (open-debt item 675) — IT CARRIES THE SEND RESULT OUT. The
+    /// emit's `let _ = ...` is gone: `with_mutex_mut` returns its closure's
+    /// value, so the verdict reaches whichever of the two callers asked for it.
+    /// `Ok(())` for an already-disarmed handle is the honest answer — nothing
+    /// was sent because nothing was owed.
+    fn teardown(&mut self) -> Result<(), wz_session_core::send_wire_error::SendWireError> {
         if !self.armed {
-            return;
+            return Ok(());
         }
         self.armed = false;
         // R311mw (B5b-2b-3) — route the `Declare(UndeclToken)` emit through the
@@ -261,11 +279,17 @@ impl<R: SessionRuntime, T: TimeSource> LivelinessToken<R, T> {
         // the liveliness plane. Found by deriving the population from the
         // drain rather than from the one handle that was caught.
         #[cfg(feature = "liveliness-token")]
-        R::with_mutex_mut(&self.session.observer, |obs| {
+        let sent = R::with_mutex_mut(&self.session.observer, |obs| {
+            // Round 2444 — the send's verdict, carried out of the closure
+            // rather than dropped on the floor. The UNREGISTER still happens
+            // whatever the emit answered, and that ordering is deliberate: a
+            // token whose retraction failed to reach the wire must still stop
+            // being replied to locally, or this node would keep answering
+            // interests for a token it has given up.
             #[cfg(all(feature = "declare-token", feature = "declare-undeclare"))]
-            {
+            let sent = {
                 let declare = wz_session_core::declare_build::build_undeclare_token(self.id);
-                let _ = self.session.send_network_message(
+                let sent = self.session.send_network_message(
                     wz_session_core::network_message::NetworkMessage::Declare(Box::new(declare)),
                     /*reliable=*/ true,
                     /*express=*/ false,
@@ -276,8 +300,14 @@ impl<R: SessionRuntime, T: TimeSource> LivelinessToken<R, T> {
                 // gone — a LivelinessToken cannot exist on a multicast
                 // session).
                 self.session.actions().prune_token_declaration(self.id);
-            }
+                sent
+            };
+            // A build without the declare pair emits nothing, so there is no
+            // wire verdict to report and `Ok(())` is what happened.
+            #[cfg(not(all(feature = "declare-token", feature = "declare-undeclare")))]
+            let sent = Ok(());
             obs.local_tokens.unregister(self.id);
+            sent
         });
         // R311mw / R2290 — `liveliness-token` implies `declare-token` +
         // `declare-undeclare`, and it is also what gates the CONSTRUCTOR, so a
@@ -287,7 +317,12 @@ impl<R: SessionRuntime, T: TimeSource> LivelinessToken<R, T> {
         // widened from the emit's gate to the block's because the emit now
         // lives inside the `liveliness-token` arm.
         #[cfg(not(feature = "liveliness-token"))]
-        let _ = &self.session;
+        {
+            let _ = &self.session;
+            Ok(())
+        }
+        #[cfg(feature = "liveliness-token")]
+        sent
     }
 }
 
@@ -296,7 +331,25 @@ impl<R: SessionRuntime, T: TimeSource> Drop for LivelinessToken<R, T> {
         // R311lo — RAII teardown; disarmed after an explicit
         // `undeclare`, so this frees the owned fields without emitting a
         // duplicate UndeclToken.
-        self.teardown();
+        //
+        // Round 2444 (open-debt item 675) — AND A FAILED RETRACTION IS LOGGED,
+        // which is upstream's shape re-read at the pin (`api/liveliness.rs`
+        // @ `impl Drop for LivelinessToken`, whose body is
+        // `if let Err(error) = self.undeclare_impl() { error!(error) }`).
+        //
+        // Drop is the one caller with nowhere to return a verdict to, so the
+        // choice is between saying it and swallowing it. Swallowing is what
+        // this did, and the consequence is not local: a token whose UndeclToken
+        // never reached the wire leaves every peer holding this node as alive
+        // until the lease expires, and nothing anywhere said so.
+        if let Err(error) = self.teardown() {
+            log::error!(
+                "wz: a liveliness token's retraction did not reach the wire \
+                 (token id {}): {error:?}. Peers will hold this node as alive \
+                 until the lease expires.",
+                self.id
+            );
+        }
     }
 }
 

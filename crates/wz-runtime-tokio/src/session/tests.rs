@@ -7636,6 +7636,57 @@ fn liveliness_token_drop_wire_frame_contains_undecl_token_bytes() {
     );
 }
 
+/// Round 2444 (open-debt item 675) — A RETRACTION THAT CANNOT REACH THE WIRE
+/// IS REPORTED, NOT SWALLOWED.
+///
+/// # Why the happy path cannot grade this
+///
+/// `undeclare` now returns the send's verdict, and the two tests below assert
+/// `Ok` — but a `teardown` that went back to `let _ = send(..); Ok(())` would
+/// satisfy both of them. Only a send that actually FAILS separates "the verdict
+/// is carried" from "the verdict is always Ok", so this is the test the change
+/// is really made of.
+///
+/// # What it costs when it is swallowed, which is not local
+///
+/// A liveliness token is a presence assertion. If its `UndeclToken` never
+/// reaches the wire, every peer holds this node as alive until the lease
+/// expires, and nothing anywhere said so. Upstream returns the result from
+/// `undeclare` and logs it on `Drop` for exactly this reason; both halves were
+/// re-read at the pin this round.
+#[cfg(feature = "liveliness-token")]
+#[test]
+fn a_retraction_that_cannot_reach_the_wire_is_reported_not_swallowed() {
+    use wz_session_core::link::LinkDropCause;
+    use wz_session_core::send_wire_error::SendWireError;
+
+    let (actions, driver) = crate::test_fixtures::refusing_actions(LinkDropCause::WriterGone);
+    let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let clock = Arc::new(TokioTime::new());
+    let session = TokioSession::new(actions, observer, clock);
+
+    // The DECLARE goes first and is what the driver refuses, closing the F2
+    // send gate. Asserted rather than assumed: if the declare never reached the
+    // driver, the gate would be closed for a different reason and this test
+    // would pass without its subject ever running.
+    let token = session
+        .declare_token("liveliness/devA", LivelinessOptions::default())
+        .expect("hardcoded canonical literal keyexpr");
+    assert_eq!(
+        driver.offered_count(),
+        1,
+        "the declare must have been OFFERED to the refusing driver, or the \
+         gate below closed for a reason this test did not create"
+    );
+
+    assert_eq!(
+        token.undeclare(),
+        Err(SendWireError::TransportUnavailable),
+        "the retraction could not go out, and the caller must be told rather \
+         than left believing the token was retracted"
+    );
+}
+
 #[cfg(feature = "liveliness-token")]
 #[test]
 fn liveliness_token_undeclare_consumes_handle_and_does_not_double_emit() {
@@ -7644,7 +7695,12 @@ fn liveliness_token_undeclare_consumes_handle_and_does_not_double_emit() {
         .declare_token("liveliness/devA", LivelinessOptions::default())
         .expect("hardcoded canonical literal keyexpr");
     assert_eq!(driver.frame_count(), 1);
-    token.undeclare();
+    // Round 2444 (open-debt item 675) — `undeclare` returns the wire verdict
+    // now, and this asserts it rather than discarding it. The frame count below
+    // says a frame went out; only this says the SEND agreed.
+    token
+        .undeclare()
+        .expect("the retraction reaches a driver that is up");
     assert_eq!(
         driver.frame_count(),
         2,
@@ -7726,7 +7782,9 @@ fn liveliness_token_undeclare_frees_session_clone_no_leak() {
         Arc::strong_count(session.observer()) > base,
         "the handle holds a Session clone (observer Arc count rises)",
     );
-    token.undeclare();
+    token
+        .undeclare()
+        .expect("the retraction reaches a driver that is up");
     assert_eq!(
         Arc::strong_count(session.observer()),
         base,

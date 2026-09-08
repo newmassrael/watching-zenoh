@@ -1175,7 +1175,36 @@ def _grade_head(reason: str) -> str:
 #: `wz_runtime_tokio::query` that `QueryOptions` and the demo both call. Not a
 #: demo wart: `preset-ap-full` carries `query-consolidation`, so that binary
 #: compiled the capability in with no path reaching it from argv.
-BUDGET = 21
+#:
+#: 21 -> 20, Round 2444 (open-debt item 675): `liveliness-token`.
+#:
+#: THE RE-MEASUREMENT REFUTED THE RESIDUAL THAT REASON LED WITH, and it is the
+#: first entry in this note to RETIRE a claim rather than re-anchor one. That
+#: atom was debited for ignoring the AGGREGATE bit on an inbound token interest,
+#: "where zenoh branches on it and answers an aggregate interest ONCE". At the
+#: pin zenoh does not branch on it for tokens -- it logs
+#: `Ignoring aggregate interest option for tokens (illegal)` and STRIPS the
+#: option -- and zenoh-pico never sends one, its single aggregate-setting site
+#: being the write filter, whose two callers ask about SUBSCRIBERS and
+#: QUERYABLES. Neither upstream has an aggregating token requester, so wz is not
+#: diverging and building the reply would implement what zenoh calls illegal.
+#:
+#: ⚠ WHAT THAT RETIRES IS A PAID-FOR DEFERRAL, which is the expensive kind.
+#: R311y769 read that residual meaning to close it, declined, and recorded an
+#: MCU-footprint blocker: carrying the aggregate reply's keyexpr would take
+#: `BoundedVec<DeclResponseItem, MAX_PENDING_DECLARES>` from ~512 B to ~8.4 KB,
+#: the microbit overflow this project has already paid for once, so "a closing
+#: round must pick a third shape". That design decision does not need making.
+#: Deferring what upstream has deleted or forbidden is worse than leaving it
+#: undone, because it reads as a known gap and nobody re-measures it -- the
+#: lesson R2439 recorded, arriving here from the other direction.
+#:
+#: THE OTHER THREE RESIDUALS ARE CONFIRMED at the pin and TWO ARE NOW BUILT:
+#: `LivelinessToken::undeclare` returns `Result<(), SendWireError>` where it
+#: returned unit, and `Drop` logs a retraction that did not reach the wire.
+#: Witnessed by a refusing driver, because the happy path cannot grade it --
+#: restoring the `let _ = ...` discard reds that one test and no other.
+BUDGET = 20
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
