@@ -1041,6 +1041,47 @@ if ! python3 scripts/lib/link_drop_disposition_gate.py; then
     exit 1
 fi
 
+# ─── gate 2w — a codec-elision witness holds its boundary (R2450, item 695) ──
+# grades: worktree
+#
+# `measure-codec-footprint.sh` pins, per codec, a SYMBOL NAME that must be
+# present in the baseline binary and absent from the minus build. That by-name
+# half exists because the byte half is unreliable — a delta between two 2.7MB
+# binaries tracks the CALLER's inline boundary — and it then inherited the same
+# weakness, because whether a NAME EXISTS is itself an inlining decision.
+#
+# Measured: codec-close was pinned on `encode_close` while that 86-byte function
+# happened to be out-of-line, nothing held it there, and a `wz-runtime-tokio`
+# change touching neither that file nor that feature moved it across the
+# threshold. Hosted Layer F shard 1/4 then redded `WITNESS MISSING codec-close`
+# on roughly twenty-five consecutive completed runs. Its sibling codec-keep-alive
+# never did: R311y878 gave that function `#[inline(never)]` in the same commit
+# that pinned it. One held by construction, the other by the optimizer's grace.
+#
+# HERE rather than only in Layer F, and that placement is the point. Layer F is
+# hosted-only by this file's own policy — a fast gate, not a CI mirror — which
+# is exactly how the red survived three days unread. Both sides are on disk: the
+# map is a bash array and the boundary is an attribute in a tracked `.rs`. The
+# selftest runs first because a gate that cannot fail is worth nothing.
+if ! python3 scripts/lib/witness_boundary_gate.py --selftest >/dev/null; then
+    echo "" >&2
+    echo "pre-push: [gate 2w] witness-boundary gate SELFTEST failed — it can no" >&2
+    echo "          longer tell a witness that holds a boundary from one that" >&2
+    echo "          does not, so its verdict on this push means nothing." >&2
+    exit 1
+fi
+if ! python3 scripts/lib/witness_boundary_gate.py; then
+    echo "" >&2
+    echo "pre-push: [gate 2w] witness-boundary gate FAILED — a codec's elision" >&2
+    echo "          witness names a function that is gone, ambiguous, in another" >&2
+    echo "          module, or WITHOUT \`#[inline(never)]\`. The line above says" >&2
+    echo "          which. Without the boundary the symbol's presence is an" >&2
+    echo "          optimizer decision, and an unrelated edit flips it into a" >&2
+    echo "          hosted Layer F red nobody can attribute." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+
 # ─── gate 2h — the RUST half of the static gates, RUN (R2153, item 542) ──
 # grades: worktree
 #

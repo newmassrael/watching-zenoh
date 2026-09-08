@@ -220,7 +220,38 @@ pub fn encode_open(
 /// difference — zenoh branches `delete()` vs `del_link(link)`
 /// (`io/zenoh-transport/src/unicast/universal/rx.rs:60-73`), which is why a
 /// per-link teardown announcing S=1 made a peer drop links wz was still using.
+///
+/// # Why `#[inline(never)]`, which is the MEASURED half
+///
+/// R2450 — TO GIVE `codec-close` A NAME THE ELISION GATE CAN SEE BY
+/// CONSTRUCTION, rather than by the optimizer's grace. R311y822 moved this
+/// codec's truthfulness claim off its byte delta and onto a by-name witness
+/// (`CODEC_ELISION_WITNESS[codec-close]` in
+/// `scripts/measure-codec-footprint.sh`), because a delta between two 2.7MB
+/// binaries tracks the CALLER's inline boundary at this magnitude rather than
+/// the codec. But it pinned this name while the name merely HAPPENED to exist:
+/// the per-symbol diff it recorded reads
+/// `-86 wz_session_core::handshake_encode::encode_close (86 -> 0)`, so the
+/// function was out-of-line that day and nothing held it there.
+///
+/// It did not stay. An 86-byte body reached from three call sites sits on the
+/// inline knife edge, and a `wz-runtime-tokio` change touching neither this
+/// file nor this feature pushed it across: hosted Layer F shard 1/4 has redded
+/// `WITNESS MISSING codec-close` on every completed run since the
+/// `15730672`..`249dc6d2` window (2026-09-05), which grew the runtime's spawn
+/// and writer-queue paths. Reproduced locally at `64f5a737`, and the cause is
+/// not ambiguous: the baseline symbol table holds 7455 names, both siblings
+/// `encode_init` and `encode_open` are among them, and this one is absent — so
+/// the codec is reachable and the table is readable, and inlining is the whole
+/// of it.
+///
+/// The attribute is the repair R311y878 made for `decode_keep_alive` and
+/// R311y802 made for `declare_envelope_extensions`, load-bearing for the
+/// reason both record: out-of-line, the inlining decision cannot FLIP between
+/// the baseline and the minus build, so the name the catalog's claim is
+/// checked by exists in one and not in the other.
 #[cfg(feature = "codec-close")]
+#[inline(never)]
 pub fn encode_close(reason: u8, session: bool) -> Vec<u8> {
     let parent_flags = if session {
         wire_const::FLAG_T_CLOSE_S

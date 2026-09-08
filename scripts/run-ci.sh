@@ -12945,7 +12945,21 @@ layer_f_codec_footprint() {
         echo "Layer F SKIP (python3 not on PATH; needed by measure-codec-footprint.sh)"
         return 0
     fi
-    bash scripts/measure-codec-footprint.sh
+    # R2450 (item 695 piece 3) — the AUTHORING half of the witness check, run
+    # ahead of the sixteen release builds below because it needs none of them.
+    # `CODEC_ELISION_WITNESS` pins a symbol name that must be present in the
+    # baseline binary, and until this gate existed nothing required the named
+    # function to carry the `#[inline(never)]` boundary that makes it present BY
+    # CONSTRUCTION. codec-close was pinned without one and redded this lane on
+    # every completed hosted run for three days; codec-keep-alive was pinned
+    # with one (R311y878) and stayed green. Statically the two are
+    # distinguishable in milliseconds, so a defect that used to cost four
+    # minutes of builds and an ambiguous three-cause message now reports itself
+    # first, by name. The selftest runs first: a gate that cannot fail is worth
+    # nothing.
+    python3 scripts/lib/witness_boundary_gate.py --selftest || return 1
+    python3 scripts/lib/witness_boundary_gate.py || return 1
+    bash scripts/measure-codec-footprint.sh || return 1
 }
 
 # ─── Layer G — cross-compile cortex-m wz-runtime-core lib build ────
