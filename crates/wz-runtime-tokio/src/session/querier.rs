@@ -714,12 +714,28 @@ impl QueryOptions {
     /// callers. Nothing about the rule changed; what changed is that a caller
     /// without a `QueryOptions` can reach it, which `wz-ap-demo`'s `--query`
     /// could not, and so transmitted no mode at all.
+    /// Round 2445 — THE CFG IS BACK AT THIS CALL SITE, and it is a different
+    /// concern from the one R2442 moved. The OFF-arm POLICY still lives in
+    /// `crate::query`, once, for both callers. What has to be decided here is
+    /// narrower: [`Self::effective_consolidation`] is gated on
+    /// `all(query-get, query-consolidation)` on purpose — its own doc records
+    /// that an accessor gated on `query-get` alone is DEAD CODE in the OFF
+    /// build and that Layer C1cf rejected it as such — so on that build there
+    /// is no accessor to call and `Option::None` is what the caller named.
+    ///
+    /// R2442 called it unconditionally and broke every
+    /// `query-get`-without-`query-consolidation` build. No LOCAL lane failed,
+    /// because nothing in the changed-crate set compiles that subset;
+    /// `Layer C1an` and `Layer C1bk` DID fail, hosted, on R2442's own run.
+    /// Those two are where this subset gets compiled, and neither is in the
+    /// pre-push set — so a round touching this seam runs them by hand.
     #[cfg(feature = "query-get")]
     pub(super) fn resolved_consolidation(&self) -> ConsolidationMode {
-        crate::query::resolved_consolidation(
-            self.effective_consolidation(),
-            self.parameters.as_deref(),
-        )
+        #[cfg(feature = "query-consolidation")]
+        let requested = self.effective_consolidation();
+        #[cfg(not(feature = "query-consolidation"))]
+        let requested = None;
+        crate::query::resolved_consolidation(requested, self.parameters.as_deref())
     }
 
     /// R311y837 — THE WIRE READING, and since this round it is the LOCAL one
@@ -745,9 +761,15 @@ impl QueryOptions {
     /// [`crate::query::wire_consolidation`], for the reason on
     /// [`Self::resolved_consolidation`]. The OFF-arm elision this doc describes
     /// is now made in one place for every requester, not per call site.
+    /// Round 2445 — the same accessor cfg as [`Self::resolved_consolidation`],
+    /// for the same reason and NOT a re-duplication of the OFF-arm policy.
     #[cfg(feature = "query-get")]
     pub(super) fn wire_consolidation(&self) -> Option<ConsolidationMode> {
-        crate::query::wire_consolidation(self.effective_consolidation(), self.parameters.as_deref())
+        #[cfg(feature = "query-consolidation")]
+        let requested = self.effective_consolidation();
+        #[cfg(not(feature = "query-consolidation"))]
+        let requested = None;
+        crate::query::wire_consolidation(requested, self.parameters.as_deref())
     }
 
     /// See [`Self::effective_target`]. Resolves the `0` sentinel this type's
