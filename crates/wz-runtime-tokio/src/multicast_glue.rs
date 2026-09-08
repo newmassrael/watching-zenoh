@@ -3154,7 +3154,17 @@ mod tests {
     // ── R311kn — multicast fragment RX: per-peer chains through the
     //    loop's reassembly Router ──
 
-    #[cfg(all(feature = "reassembly", feature = "codec-push", feature = "pubsub-put"))]
+    // R2448 — `codec-fragment` joins the list because `fragment_dgram` builds
+    // its wire through the production composer, exactly as `push_batch_bytes`
+    // builds its batch through the production push/frame encoders that
+    // `codec-push` / `pubsub-put` name. The module's cfg states every feature
+    // its FIXTURES need, not only the one its subject needs.
+    #[cfg(all(
+        feature = "reassembly",
+        feature = "codec-fragment",
+        feature = "codec-push",
+        feature = "pubsub-put"
+    ))]
     mod fragment_rx {
         use super::*;
         use std::sync::atomic::{AtomicUsize, Ordering};

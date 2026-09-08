@@ -78,7 +78,7 @@ const QOS_EXT_HEADER: u8 = 0x31;
 /// header + a single-byte `VLE(priority)` (priority is `0..=7`, always `< 0x80`,
 /// so the VLE is one byte). The fragment chunk-budget subtracts this on every
 /// fragment when QoS rides the chain (see [`fragment_chunk_size`]).
-#[cfg(feature = "transport-fragmentation")]
+#[cfg(all(feature = "codec-fragment", feature = "reassembly"))]
 const QOS_EXT_WIRE_BYTES: usize = 2;
 
 /// R311y215 — append one `ext_qos` extension (`[header][VLE(priority)]`) to
@@ -622,7 +622,7 @@ pub(crate) fn frame_wire_body(frame: &[u8], sn: u64, ext_qos: Option<Priority>) 
 /// vle_width(sn)`, and a ring-masked SN's real `vle_width` is `<= 9` (a
 /// 63-bit `seq_num_res` is the widest ring), so the ext rides the slack between
 /// the reserved max VLE width (10) and the real width — no chunk resize needed.
-#[cfg(feature = "transport-fragmentation")]
+#[cfg(all(feature = "codec-fragment", feature = "reassembly"))]
 const FRAG_HEADER_BUDGET: usize = 1 + 10;
 
 /// The `FRAGMENT_FIRST` transport extension header byte written after `VLE(sn)`
@@ -641,7 +641,7 @@ const FRAG_HEADER_BUDGET: usize = 1 + 10;
 /// SSOT the emit here and the RX interpretation in
 /// [`crate::reassembly_dispatch`] share. Before, the marker byte existed only
 /// on the TX side and no reader anywhere in the tree matched against it.
-#[cfg(feature = "transport-fragmentation")]
+#[cfg(all(feature = "codec-fragment", feature = "reassembly"))]
 const FRAGMENT_FIRST_EXT_HEADER: u8 = crate::extfragment::FRAGMENT_FIRST_EXT_ID;
 
 /// R2238 (open-debt item 580) — the `FRAGMENT_DROP` transport extension header
@@ -665,7 +665,7 @@ const FRAGMENT_FIRST_EXT_HEADER: u8 = crate::extfragment::FRAGMENT_FIRST_EXT_ID;
 /// `wz-integration-tests/tests/wz_chain_drop_zenohd_interop.rs` (open-debt
 /// item 575). zenoh-pico's one call site passes `false`
 /// (`src/transport/common/tx.c:466`).
-#[cfg(feature = "transport-fragmentation")]
+#[cfg(all(feature = "codec-fragment", feature = "reassembly"))]
 const FRAGMENT_DROP_EXT_HEADER: u8 = crate::extfragment::FRAGMENT_DROP_EXT_ID;
 
 /// Per-fragment payload capacity at this `mtu`. Floored at 1 so a pathological
@@ -915,7 +915,7 @@ pub fn build_fragment_drop_wire(sn: u64, reliable: bool, ext_qos: Option<Priorit
 /// (`0x1` QoS, `0x2` First, `0x3` Drop). Every entry ahead of it now carries
 /// the chain-continuation bit, which is why `first` gates that bit through
 /// `drop_marker` too rather than being the chain's assumed tail. Production
-/// reaches this through [`build_fragment_drop_wire`], where `first` is false
+/// reaches this through `build_fragment_drop_wire`, where `first` is false
 /// and the payload empty; the two are nonetheless INDEPENDENT here, because
 /// zenoh's own header codec writes `ext_first` and `ext_drop` from separate
 /// `Option`s and a wz reader that could not decode the pair would be reading
@@ -929,7 +929,28 @@ pub fn build_fragment_drop_wire(sn: u64, reliable: bool, ext_qos: Option<Priorit
 /// of the `0x2` byte in a test fixture is the drift this composer exists to
 /// prevent, and it would drift SILENTLY, since a fixture that disagrees with
 /// production still parses.
-#[cfg(feature = "transport-fragmentation")]
+/// R2448 — the gate NAMES what the body uses instead of the capability it
+/// serves. Spelling ONE `T_MID_FRAGMENT` message is a CODEC-level act
+/// (`codec-fragment`: the `wz_codecs::fragment` body this writes, plus the
+/// `crate::extfragment` marker ids); deciding to SPLIT a frame into a chain
+/// stays `transport-fragmentation` (`FragmentChain`, `fragment_body`,
+/// `fragment_chunk_size`, `build_fragment_drop_wire`). `reassembly` is the
+/// second conjunct because `crate::extfragment` — the marker-id SSOT this
+/// reads — is itself `any(reassembly, transport-fragmentation)`, so the pair
+/// is exactly "carries the fragment codec AND is in the fragment business at
+/// all". `transport-fragmentation` implies BOTH conjuncts
+/// (`= ["reassembly", "codec-fragment", "alloc"]`), so no build that had this
+/// composer loses it.
+///
+/// What that admits is the RX-only build's FIXTURE: an `reassembly` peer
+/// cannot fragment, but a test that feeds it a chain must spell the wire a
+/// fragmenting peer emits, and R2417's one-producer rule says that spelling
+/// exists once. Under the old gate it did not exist there at all, and the
+/// multicast fragment-RX fixture in `wz-runtime-tokio`'s `multicast_glue`
+/// referenced it anyway — a break that only `--features
+/// transport-multicast,reassembly` could show, which no local gate builds
+/// (hosted Layers C3 and C1q both died on it, one error, two lanes).
+#[cfg(all(feature = "codec-fragment", feature = "reassembly"))]
 pub fn build_fragment_wire(
     sn: u64,
     payload: &[u8],

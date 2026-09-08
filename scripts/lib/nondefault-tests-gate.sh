@@ -460,6 +460,37 @@ LEGS=(
         transport-stats,\
         zenoh-config\
         |"
+    # ── R2448 (open-debt items 695 / 374): the first COMBINATION leg ────
+    #
+    # Every row above names features to turn ON, and the widest of them turns on
+    # ALL of them -- which is why the header lists "a defect that needs feature A
+    # on and B off" as structurally out of reach (item 374). This row is the
+    # first one whose POINT is a feature left OFF: `reassembly` without
+    # `transport-fragmentation`. It is not a wider build, it is a DIFFERENT one,
+    # and the wide leg above cannot reach it precisely because it is wide.
+    #
+    # MEASURED, and this leg exists because the measurement was a red: hosted
+    # Layers C3 and C1q both died on
+    # `error[E0425]: cannot find function 'build_fragment_wire'`, ONE defect in
+    # two lanes, for fourteen consecutive completed runs. R2417 moved the
+    # multicast fragment-RX fixture onto the production wire composer, which was
+    # gated `transport-fragmentation`; the fixture's own module is gated
+    # `reassembly`. Nothing local built that pair -- pre-push gate 3 is default
+    # features (which has neither) and gate 7 is `--all-features` (which has
+    # both), so the ONE combination that breaks sat between the two local gates
+    # for the whole window.
+    #
+    # `hook`, not `lane`: the filter is one module and the whole leg is
+    # MEASURED at 33 tests. The two features are named rather than derived
+    # because a derived pair would drift into "all of them" -- the tautology the
+    # header refuses `--all-features` for.
+    #
+    # ⚠ This does NOT close item 374. It pins ONE point of the combination
+    # space, chosen because a red named it. The general instrument -- something
+    # that DERIVES which pairs are worth building -- is still absent, and the
+    # honest reading of this row is that the combination axis now has a
+    # population of one where it had none.
+    "wz-runtime-tokio|hook|transport-multicast,reassembly|multicast_glue"
 )
 
 # package|test-path|reason

@@ -620,7 +620,16 @@ codec-join = ["wz-codecs/codec-join", "wz-session-core/codec-join"]
 codec-response-final = ["wz-codecs/codec-response-final", "wz-session-core/codec-response-final", "wz-codecs-test-support/codec-response-final"]
 # R311f — codec-fragment forwards wz-codecs. session_glue.rs doesn't
 # import Fragment types; gate stays at wz-codecs level only.
-codec-fragment = ["wz-codecs/codec-fragment"]
+# R2448 — it now ALSO forwards wz-session-core, the same widening R311kt made
+# to codec-join above and for the same reason: the hoisted fragment WIRE SSOT
+# (`frame_encode::build_fragment_wire`) is consumed by this crate's multicast
+# drive-loop tests, so the 3-stage chain has a subject here now. The forward is
+# catalog-uniform (codec-frame / codec-join / codec-push / codec-declare /
+# codec-request / codec-response / codec-response-final all carry it) and adds
+# NO compiled code to a default build: session-core's `codec-fragment` gates
+# only items that ALSO require `reassembly`, which is off by default, and its
+# own `wz-codecs/codec-fragment` forward is already on from the first entry.
+codec-fragment = ["wz-codecs/codec-fragment", "wz-session-core/codec-fragment"]
 # R311g — codec-frame gates the Frame envelope INBOUND decode path:
 # wz-codecs `pub mod frame` + session_glue.rs `InboundFrame::Frame`
 # variant + `parse_inbound` `T_MID_FRAME` arm + `parse_frame_payload` +
