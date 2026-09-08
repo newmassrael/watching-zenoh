@@ -7296,6 +7296,88 @@ mod tests {
         );
     }
 
+    /// R2454 (open-debt item 698) — THE SECOND RENDERER SPELLS A CONTEXT ID
+    /// TOO, and this crate is where "the second renderer" was the whole
+    /// finding.
+    ///
+    /// # Why this test exists in a crate whose code did not change
+    ///
+    /// It did not, and that is the claim. Item 696 measured that a flow key is
+    /// rendered by eight emitters in TWO crates, and that the ZA-1039 reporter
+    /// could see only the C ABI's door — so a repair applied at the door it
+    /// reported would have left this surface saying `[3003:c837:25a1]:0` for a
+    /// MAC. The repair for both is one function, `Endpoint::addr_text`, and a
+    /// witness in only the crate that owns it would be a claim about a private
+    /// helper rather than about what `--flows` prints. Item 698's own body
+    /// warns that silence here is how the 1:4 shape returns.
+    ///
+    /// # What the brackets are, and why they are NOT widened
+    ///
+    /// `endpoint` wraps anything that is not a dotted quad in `[..]`, because
+    /// `a:b:c::1:7447` cannot be split back into an address and a port. A
+    /// decimal context id has no colon, so `[2]:7447` is wider than it needs to
+    /// be — and it stays, deliberately. The rule is SHAPE-BASED on purpose and
+    /// exempting one family from it would be a third opinion about what an
+    /// address looks like, which is the exact class of defect item 698 is
+    /// closing. It is asserted here so the form is pinned rather than
+    /// incidental.
+    #[test]
+    fn a_vsock_flow_spells_its_context_id_beside_a_udp_one() {
+        /// One `vsockmon` record (`linux/vsockmon.h`): the 32-byte
+        /// transport-independent header, then the payload. `op` 4 is
+        /// `AF_VSOCK_OP_PAYLOAD`.
+        fn vsockmon(
+            src_cid: u64,
+            src_port: u32,
+            dst_cid: u64,
+            dst_port: u32,
+            body: &[u8],
+        ) -> Vec<u8> {
+            let mut out = Vec::new();
+            out.extend_from_slice(&src_cid.to_le_bytes());
+            out.extend_from_slice(&dst_cid.to_le_bytes());
+            out.extend_from_slice(&src_port.to_le_bytes());
+            out.extend_from_slice(&dst_port.to_le_bytes());
+            out.extend_from_slice(&4u16.to_le_bytes());
+            out.extend_from_slice(&2u16.to_le_bytes()); // AF_VSOCK_TRANSPORT_VIRTIO
+            out.extend_from_slice(&0u16.to_le_bytes()); // no transport header
+            out.extend_from_slice(&[0u8, 0]); // reserved
+            out.extend_from_slice(body);
+            out
+        }
+
+        // A vsock link is SOCK_STREAM, so the KeepAlive carries the same 16-bit
+        // length prefix a tcp one does.
+        let ka = vec![1u8, 0, wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        let file = wz_capture::pcapng::write(
+            &[
+                (wz_capture::link::LINKTYPE_ETHERNET, 6),
+                (wz_capture::link::LINKTYPE_VSOCK, 6),
+            ],
+            &[
+                (0, 1_000_000, &scout_packet()),
+                (1, 2_000_000, &vsockmon(3, 40000, 2, 7447, &ka)),
+            ],
+        );
+
+        let (json, _) = analyze_with(&file, None, Format::Json, true, false).expect("parses");
+        assert!(
+            json.contains("\"low\":\"[2]:7447\"") && json.contains("\"high\":\"[3]:40000\""),
+            "a vsock endpoint reads as its decimal context id -- the locator's \
+             own spelling, `vsock/2:7447`: {json}"
+        );
+        assert!(
+            !json.contains("200:0:0:0") && !json.contains("300:0:0:0"),
+            "and the four-hex-group reading of the little-endian cid must be \
+             gone from this surface too, not only from the C ABI's: {json}"
+        );
+        assert!(
+            json.contains("192.168.1.5:43210"),
+            "while the UDP flow keeps its dotted quad -- the arm a repair that \
+             numbered every address would break: {json}"
+        );
+    }
+
     /// R311y668 (§1.2a) — the two halves are ONE array, and the separator
     /// between them is real.
     ///

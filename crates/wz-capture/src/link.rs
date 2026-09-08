@@ -343,17 +343,52 @@ impl Endpoint {
     /// those genuinely differ per surface, and folding them in would make one
     /// of the three change its output for a reason that is not this item's.
     ///
-    /// # What each kind spells, and the residue
+    /// # What each kind spells
     ///
-    /// [`LinkKind::RawEth`] spells the six MAC octets `aa:bb:...` in the
-    /// canonical lower-case form, which is what pico's own sources print.
-    /// Every other kind keeps EXACTLY the spelling it had, including
-    /// [`LinkKind::Vsock`], whose 8-byte context id still renders as four hex
-    /// groups. ⚠ That is stated rather than repaired: it is the same
-    /// inference reaching the same wrong shape one family over, it is now
-    /// ANSWERABLE because the row says `"link":"vsock"`, and changing a second
-    /// family's spelling in the round that closes item 696 would be a pattern
-    /// sweep over a population nobody derived. It is filed instead.
+    /// R2454 (open-debt item 698) finished the match, and the SHAPE of it is
+    /// the repair rather than any one arm. [`Self::ip_text`] is now reached by
+    /// NAMING the two IP families, never by falling out of the others: the
+    /// defect this method exists for was "not four bytes, therefore IPv6", and
+    /// a catch-all arm is that inference with a different spelling. A family
+    /// added to [`LinkKind`] now fails to compile here instead of silently
+    /// having its bytes read as an address.
+    ///
+    /// * [`LinkKind::RawEth`] — the six MAC octets `aa:bb:...` in the canonical
+    ///   lower-case form, which is what pico's own sources print.
+    /// * [`LinkKind::Tcp`] / [`LinkKind::Udp`] — an IP address, through
+    ///   [`Self::ip_text`]. These are the families that HAVE one.
+    /// * [`LinkKind::Vsock`] — the AF_VSOCK context id in DECIMAL, which is how
+    ///   the locator an operator typed spells it: `vsock/2:7447`, parsed by
+    ///   `wz_session_core::locator::parse_vsock_locator` as a `u32`. So the
+    ///   `addr` and `port` of a vsock endpoint reassemble into that locator
+    ///   exactly. It used to render `200:0:0:0` for context id 2 — the 8-byte
+    ///   little-endian cid pushed through the IPv6 branch, which is the same
+    ///   inference that made a MAC read `3003:c837:25a1`, one family over. It
+    ///   was answerable (the row says `"link":"vsock"`) and still wrong, which
+    ///   is why item 696 filed it rather than leaving it unsaid.
+    /// * [`LinkKind::Serial`] — NOTHING, and the empty string is a decision
+    ///   here rather than an accident of the bytes. A serial line has no
+    ///   addressing at all ([`FlowKey::serial_line`]), so there is no address
+    ///   to spell and no other family's spelling to borrow.
+    ///
+    /// ⚠ THE SERIAL ARM CHANGES NO DOCUMENT TODAY, which is stated because it
+    /// is the reason the arm is easy to leave out. `serial_line` is the only
+    /// constructor of a serial key and it writes a zero-length address, so the
+    /// IP branch it used to fall into returned `""` by walking an empty slice —
+    /// the right answer, reached by asking a link with no addresses which IP
+    /// address it has. Measured: the same fall-through given six bytes returns
+    /// `aaaa:aaaa:aaaa`. The value was inert; the route was the defect, and
+    /// `every_link_kind_spells_its_own_addresses` grades the arm on exactly
+    /// that input.
+    ///
+    /// # Why decimal and not a sentinel name for vsock
+    ///
+    /// `VMADDR_CID_HOST` is 2 and the locator grammar accepts the name, so
+    /// `"host"` was available. It is not used: `addr` is a value field a
+    /// consumer compares and joins on, a second vocabulary in it would be one
+    /// more closed set to declare per revision, and the numeric form is what
+    /// every other family's `addr` already is. A consumer that wants the name
+    /// has the number to look it up with.
     pub fn addr_text(&self, link: LinkKind) -> alloc::string::String {
         use core::fmt::Write as _;
         let a = self.addr();
@@ -367,7 +402,20 @@ impl Endpoint {
                     let _ = write!(s, "{b:02x}");
                 }
             }
-            LinkKind::Serial | LinkKind::Tcp | LinkKind::Udp | LinkKind::Vsock => {
+            LinkKind::Vsock => {
+                // `None` is unreachable through the one constructor -- the
+                // vsock strip writes `cid.to_le_bytes()`, always eight -- and
+                // the arm is EMPTY rather than a fall back to `ip_text`,
+                // because a fall back is how the four-hex-group reading would
+                // return the moment the invariant broke. An address this
+                // method cannot spell must not be spelled as another family's.
+                if let Some(cid) = self.vsock_cid() {
+                    let _ = write!(s, "{cid}");
+                }
+            }
+            // No address exists. See the doc above.
+            LinkKind::Serial => {}
+            LinkKind::Tcp | LinkKind::Udp => {
                 return self.ip_text();
             }
         }
@@ -2341,6 +2389,106 @@ fn strip_tcp(
 mod tests {
     use super::*;
     use alloc::vec;
+
+    /// R2454 (open-debt item 698) — ONE byte string, EVERY link kind, and
+    /// every kind spells it its own way.
+    ///
+    /// # Why the population is a walk and not a list of captures
+    ///
+    /// The defect this grades is a MISSING ARM, and a fixture-driven test
+    /// cannot see one: a family whose spelling nobody thought about is exactly
+    /// the family nobody wrote a capture for. [`LinkKind::all`] is an
+    /// exhaustive `match` over the enum, so the population here is derived from
+    /// the type — a variant added later arrives in this loop, and the `match`
+    /// below fails to compile until somebody decides what it spells.
+    ///
+    /// # Why the SAME bytes for all five
+    ///
+    /// Because the claim is that the spelling comes from the recorded link
+    /// kind and NOT from the shape of the address. Handing each family bytes
+    /// that suit it would grade the opposite claim: five different inputs
+    /// producing five different outputs is what a byte-sniffing renderer does
+    /// too. Six bytes is the sharpest single input available — it is a valid
+    /// MAC, it is not four so the IP branch reads it as hex groups, and it is
+    /// not eight so it is not a context id either.
+    ///
+    /// # The arms, and which of them is the anti-vacuity leg
+    ///
+    /// `Tcp` / `Udp` is. Without it every other assertion here is satisfied by
+    /// a renderer that had stopped spelling addresses altogether: two of the
+    /// remaining three expect the empty string. That arm is also the one that
+    /// records what the OLD fall-through did to a family with no IP address —
+    /// `aaaa:aaaa:aaaa` is what `Serial` returned before this round for any
+    /// input but the zero-length one its constructor happens to write.
+    #[test]
+    fn every_link_kind_spells_its_own_addresses() {
+        // A MAC, and pico's own default source MAC is the one already in this
+        // crate's fixtures; `0xAA` repeated is used instead so that the three
+        // readings of it are visibly the same bytes.
+        let bytes = [0xAAu8; 6];
+        let mut seen = 0usize;
+        for kind in LinkKind::all() {
+            let got = Endpoint::new(&bytes, 7447).addr_text(kind);
+            seen += 1;
+            match kind {
+                LinkKind::RawEth => assert_eq!(
+                    got, "aa:aa:aa:aa:aa:aa",
+                    "a raweth endpoint spells its MAC (item 696)"
+                ),
+                LinkKind::Tcp | LinkKind::Udp => assert_eq!(
+                    got, "aaaa:aaaa:aaaa",
+                    "an IP family still reads its bytes as an address, which is \
+                     what keeps the two empty arms below from passing on a \
+                     renderer that spells nothing"
+                ),
+                LinkKind::Vsock => assert_eq!(
+                    got, "",
+                    "six bytes are not a context id, so there is no cid to \
+                     spell -- and the answer must NOT be another family's \
+                     spelling of them, which is the `200:0:0:0` reading item \
+                     698 removed"
+                ),
+                LinkKind::Serial => assert_eq!(
+                    got, "",
+                    "a serial line has no addressing, whatever bytes a key \
+                     carries. Before item 698 this arm fell through to the IP \
+                     branch and answered `aaaa:aaaa:aaaa`"
+                ),
+            }
+        }
+        assert_eq!(
+            seen,
+            LinkKind::all().len(),
+            "the walk must cover the enum, or an unspelled family passes by \
+             never being asked"
+        );
+    }
+
+    /// R2454 (open-debt item 698) — and a REAL context id spells as the
+    /// locator spells it.
+    ///
+    /// The test above hands every family the same six bytes on purpose, which
+    /// means no arm of it ever sees a well-formed vsock address. This one does:
+    /// eight little-endian bytes, the shape `strip_vsockmon` writes, read back
+    /// as the decimal the operator's `vsock/<CID>:<PORT>` carried.
+    ///
+    /// `port` is asserted beside it because the two together are the claim —
+    /// `addr` and `port` of a vsock endpoint reassemble into the locator, and
+    /// an `addr` repaired while the port stayed a truncated 16-bit value would
+    /// satisfy half of it.
+    #[test]
+    fn a_vsock_endpoint_spells_its_context_id_as_the_locator_does() {
+        let e = Endpoint::new(&2u64.to_le_bytes(), 7447);
+        assert_eq!(e.vsock_cid(), Some(2), "the fixture is a real cid");
+        assert_eq!(e.addr_text(LinkKind::Vsock), "2");
+        assert_eq!(e.port, 7447, "vsock ports are 32 bits wide (R311y603)");
+
+        // The wildcard, which is the widest cid the ABI defines and the one a
+        // 16-bit or i32 reading would mangle. `VMADDR_CID_ANY` is
+        // `wz_session_core::locator`'s `0xFFFF_FFFF`.
+        let any = Endpoint::new(&0xFFFF_FFFFu64.to_le_bytes(), 0);
+        assert_eq!(any.addr_text(LinkKind::Vsock), "4294967295");
+    }
 
     /// The declared readable set IS the set the dispatch reads — both ways.
     ///

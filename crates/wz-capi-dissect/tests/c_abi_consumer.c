@@ -1435,8 +1435,15 @@ int main(void) {
      * The number is taken from `wz_capture::doc_revision`, which is where the
      * revision is DECLARED; reading it off the document this line checks would
      * agree with any value, which is the whole reason this literal is the
-     * consumer's own. */
-    revisioned[0].revision = 8;
+     * consumer's own.
+     * R2454 (item 698) -- 9: a VSOCK endpoint's `addr` stops being spelled as
+     * an IPv6 address. Context id 2 read `200:0:0:0`, the little-endian cid
+     * through the branch that made a MAC read `3003:c837:25a1`, and now reads
+     * `2`. NO KEY MOVED and no declared axis moved, so this number is the
+     * entire notice -- which makes THIS line the one a consumer of this ABI
+     * would notice it by, and moving it here in the same edit as the emitter is
+     * the only reason the fourth miss did not happen. */
+    revisioned[0].revision = 9;
     revisioned[0].doc = NULL;
     rc = wz_dissect_pcap_census(pcap, sizeof pcap, &revisioned[0].doc);
     CHECK(rc == WZ_DISSECT_OK, "census rc=%d", rc);
@@ -1486,8 +1493,11 @@ int main(void) {
      * it stops at the first. Worth the sentence: repairing only the row that
      * FIRED would have moved the failure rather than reduced it. Both are
      * repaired by R2453 (item 700), from wz_capture::doc_revision and not from
-     * the emitted document. */
-    revisioned[2].revision = 7;
+     * the emitted document.
+     * R2454 (item 698) -- 8: the census row's twin once more. Both flow objects
+     * here render the shared key whose vsock endpoints stopped being spelled as
+     * IPv6 addresses. No key moved; see the census row above. */
+    revisioned[2].revision = 8;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

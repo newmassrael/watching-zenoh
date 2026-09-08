@@ -143,7 +143,9 @@
  * @values fields direction
  *
  * Round 2447 -- AND WHICH LINK A FLOW WAS READ OFF, at census revision 8 and
- * field-document revision 7. Every flow object in both documents carries
+ * field-document revision 7 (the SPELLING rule below moved again at census 9 /
+ * fields 8; see the second warning). Every flow object in both documents
+ * carries
  *
  *     "flow":{"low":{"addr":"30:03:c8:37:25:a1","port":0},
  *             "high":{"addr":"aa:bb:cc:dd:ee:ff","port":0},
@@ -156,19 +158,33 @@
  *                    line with no addressing at all, whose key is empty in
  *                    every field).
  *
- * ⚠ READ `addr` THROUGH IT. The spelling depends on the link: `raweth` gives
- * six colon-separated MAC octets and every other kind gives an IP address --
- * dotted quad for four bytes, colon-separated hex groups otherwise. Before this
- * revision a raweth endpoint's six bytes went through the "not four, therefore
- * IPv6" branch and printed as `3003:c837:25a1`, which reads as a truncated
- * address and is why this key exists. The consumer that asked for it asked
- * specifically that it NOT be inferred from the endpoint shape, and it is not:
- * the library records the link kind where the frame is decapsulated.
+ * ⚠ READ `addr` THROUGH IT. The spelling depends on the link, and there is one
+ * rule per kind rather than one rule with exceptions:
  *
- * ⚠ AND `vsock` STILL SPELLS ITS CONTEXT ID as four hex groups, which is the
- * same inference reaching the same wrong shape one family over. It is now
- * ANSWERABLE -- the row says `"link":"vsock"` -- and it is recorded as
- * outstanding rather than quietly repaired in the same round.
+ *     `tcp` / `udp`  an IP address -- dotted quad for four bytes,
+ *                    colon-separated hex groups for sixteen.
+ *     `raweth`       six colon-separated MAC octets, lower case.
+ *     `vsock`        the AF_VSOCK context id in DECIMAL, so `addr` and `port`
+ *                    reassemble into the `vsock/<CID>:<PORT>` locator the
+ *                    endpoint was configured with.
+ *     `serial`       the empty string. A serial line has no addressing, so
+ *                    there is no address to spell; `port` is zero for the same
+ *                    reason.
+ *
+ * Before census revision 8 a raweth endpoint's six bytes went through a "not
+ * four, therefore IPv6" branch and printed as `3003:c837:25a1`, which reads as
+ * a truncated address and is why this key exists. The consumer that asked for
+ * it asked specifically that it NOT be inferred from the endpoint shape, and it
+ * is not: the library records the link kind where the frame is decapsulated.
+ *
+ * ⚠ AND `vsock` MOVED AT CENSUS REVISION 9 / FIELD-DOCUMENT REVISION 8, with no
+ * key changing. That same inference reached one family over: an 8-byte
+ * little-endian context id read as four hex groups, so cid 2 printed
+ * `"addr":"200:0:0:0"` -- a well-formed IPv6 address, and therefore the kind of
+ * wrong a consumer cannot detect. It now prints `"addr":"2"`. A consumer that
+ * parsed the old form has nothing in the key set to notice the change by, which
+ * is exactly what the revision number is for: pin it, and refuse a document
+ * whose revision you have not read this paragraph for.
  *
  * @values census link
  * @values fields link
@@ -294,7 +310,7 @@
  *
  * SO THE DOCUMENT CARRIES THE LIST. Its envelope reads
  *
- *     {"document":{"name":"census","revision":8,
+ *     {"document":{"name":"census","revision":9,
  *                  "planes":["exchanges","interests","keyexprs","nodes",
  *                            "payloads"]}, ...}
  *
@@ -340,11 +356,11 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":7,"key":"kind","values":[...],
+ *     {"name":"fields","revision":8,"key":"kind","values":[...],
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
- *     {"name":"census","revision":8,"key":"mode","values":[...],
+ *     {"name":"census","revision":9,"key":"mode","values":[...],
  *      "carries":null}
  *
  * `null` is a VALUE here and not an absence: it says the word is a PASSENGER --
@@ -1023,7 +1039,7 @@ int wz_dissect_declarations_diagnose(const char *declarations, char **out);
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":7,"key":"state",
+ *     "value_families":[{"name":"fields","revision":8,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,

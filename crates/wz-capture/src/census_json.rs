@@ -1012,6 +1012,124 @@ mod tests {
     /// private and `FlowKey` now keeps its link kind private too, so the only
     /// way to hold one is to decode one. A key asserted into existence could
     /// carry a kind no strip would ever have written.
+    /// R2454 (open-debt item 698) — AND THE CENSUS DOCUMENT SPELLS A CONTEXT
+    /// ID, which is a separate claim from the field document's.
+    ///
+    /// The two documents share `push_flow`, so it is tempting to grade the
+    /// repair once. The sibling above is why that is not enough: it measured
+    /// that a thin capture reaches a plane nobody predicted, and the census
+    /// document renders a flow key from FOUR planes rather than from a row
+    /// emitter. A vsock flow arrives here through the routing graph — both ends
+    /// name themselves in an INIT, so a node is placed and the flow is listed
+    /// under it — which is a different path to `push_flow` than
+    /// `fields_json::push_stream_flow` takes.
+    ///
+    /// It also grades the revision. Census revision 9 exists for exactly this
+    /// value and for nothing else, and a bump no test in this document can see
+    /// is a notice about a change nobody checked.
+    ///
+    /// The negative arm is the UDP flow in the same document, for the mixing
+    /// reason its sibling states twice.
+    #[test]
+    fn the_census_document_spells_a_vsock_context_id_beside_a_udp_address() {
+        use crate::datagram_tests::{init_message, udp_packet};
+        use crate::link::LINKTYPE_VSOCK;
+        use crate::node::tests::framed_init;
+
+        /// One `vsockmon` record (`linux/vsockmon.h`), op 4 =
+        /// `AF_VSOCK_OP_PAYLOAD`, with no transport header.
+        fn vsockmon(
+            src_cid: u64,
+            src_port: u32,
+            dst_cid: u64,
+            dst_port: u32,
+            body: &[u8],
+        ) -> Vec<u8> {
+            let mut out = Vec::new();
+            out.extend_from_slice(&src_cid.to_le_bytes());
+            out.extend_from_slice(&dst_cid.to_le_bytes());
+            out.extend_from_slice(&src_port.to_le_bytes());
+            out.extend_from_slice(&dst_port.to_le_bytes());
+            out.extend_from_slice(&4u16.to_le_bytes());
+            out.extend_from_slice(&2u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&[0u8, 0]);
+            out.extend_from_slice(body);
+            out
+        }
+
+        // BOTH DIRECTIONS name themselves, which is what places a node at each
+        // end and puts the flow in the routing graph. One INIT would decode and
+        // reach no plane that renders a key.
+        let file = crate::pcapng::write(
+            &[(LINKTYPE_ETHERNET, 6), (LINKTYPE_VSOCK, 6)],
+            &[
+                (
+                    0,
+                    1_000_000,
+                    udp_packet(
+                        [192, 168, 1, 5],
+                        43210,
+                        [192, 168, 1, 9],
+                        7447,
+                        &init_message(),
+                    )
+                    .as_slice(),
+                ),
+                (
+                    1,
+                    2_000_000,
+                    vsockmon(3, 40000, 2, 7447, &framed_init(&[0x11, 0x22, 0x33, 0x44])).as_slice(),
+                ),
+                (
+                    1,
+                    3_000_000,
+                    vsockmon(2, 7447, 3, 40000, &framed_init(&[0x55, 0x66, 0x77, 0x88])).as_slice(),
+                ),
+            ],
+        );
+        let d = Dissection::from_capture(&file).expect("the capture reads");
+        let doc = census_json(&d);
+
+        // ANTI-VACUITY: the flow must actually be IN the document, or every
+        // assertion below is about a string that is not there.
+        assert!(
+            doc.contains("\"link\":\"vsock\""),
+            "the vsock flow must reach a census plane, or this test grades \
+             nothing: {doc}"
+        );
+        assert!(
+            doc.contains("{\"addr\":\"2\",\"port\":7447}")
+                && doc.contains("{\"addr\":\"3\",\"port\":40000}"),
+            "both vsock endpoints spell their decimal context ids: {doc}"
+        );
+        assert!(
+            !doc.contains("200:0:0:0") && !doc.contains("300:0:0:0"),
+            "and the four-hex-group reading of the little-endian cid is gone \
+             from this document too: {doc}"
+        );
+        assert!(
+            doc.contains("{\"addr\":\"192.168.1.5\",\"port\":43210}"),
+            "while the UDP flow keeps its dotted quad -- the arm a repair that \
+             numbered every address would break: {doc}"
+        );
+        // THE REVISION IS THE ONLY NOTICE this value change has, so the
+        // document must actually carry it. Read from the table rather than
+        // written down again: a second literal would be one more copy to age.
+        let declared = crate::doc_revision::newest(crate::doc_revision::CENSUS)
+            .expect("the census document has a revision")
+            .revision;
+        assert!(
+            doc.contains(&alloc::format!("\"revision\":{declared}")),
+            "the document announces revision {declared}: {doc}"
+        );
+        assert!(
+            declared >= 9,
+            "and it is at least 9 -- the revision this spelling arrived at. A \
+             value that moved under a stationary key has no other notice"
+        );
+    }
+
     #[test]
     fn the_census_document_names_the_link_and_spells_its_addresses() {
         use crate::datagram_tests::{init_message, raweth_packet, udp_packet};

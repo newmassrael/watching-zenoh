@@ -2566,6 +2566,129 @@ mod tests {
         }
     }
 
+    /// R2454 (open-debt item 698) — the sibling above, one family over: a
+    /// VSOCK endpoint's `addr` is the context id the operator's locator names,
+    /// not four hex groups of its little-endian bytes.
+    ///
+    /// # What was wrong, measured before the repair
+    ///
+    /// Item 696 gave every flow object `link`, so a consumer could tell a MAC
+    /// from an address — and it left the vsock SPELLING alone and said so. The
+    /// row for a `vsock/2:7447` session read
+    /// `{"addr":"200:0:0:0","port":7447}`: `Endpoint::vsock_cid` had the
+    /// answer, `Endpoint::is_ipv4` said `false` for an 8-byte address, and the
+    /// IPv6 branch read the cid's little-endian bytes as four `u16` groups.
+    /// `2` came out as `200:0:0:0`, which is a well-formed IPv6 address and
+    /// therefore the kind of wrong a consumer cannot detect.
+    ///
+    /// # Why this fixture MIXES, exactly as the raweth one does
+    ///
+    /// A vsock-only capture cannot separate "the vsock row spells a cid" from
+    /// "every row spells the first eight bytes as a decimal", and the second
+    /// would be a worse defect than the one being repaired. The UDP flow in
+    /// this same document is the arm that refuses it.
+    ///
+    /// # `2` and `3` are the CIDs, and the row reassembles into the locator
+    ///
+    /// `wz_session_core::locator::parse_vsock_locator` reads `vsock/<CID>:<PORT>`
+    /// with the cid as a decimal `u32`, so `"addr":"2","port":7447` is exactly
+    /// the string an operator typed, split into the two fields this document
+    /// has for it. That is the whole spelling rule, and it is why the assertion
+    /// pins the pair rather than the address alone.
+    #[test]
+    fn a_vsock_flow_row_spells_its_context_id_beside_a_udp_one() {
+        use crate::datagram_tests::init_message;
+        use crate::link::LINKTYPE_VSOCK;
+
+        /// One `vsockmon` record with no transport header: a 32-byte
+        /// transport-independent header (`linux/vsockmon.h`) then the payload.
+        /// `op` is 4, `AF_VSOCK_OP_PAYLOAD`, the only op that carries bytes.
+        fn vsockmon(
+            src_cid: u64,
+            src_port: u32,
+            dst_cid: u64,
+            dst_port: u32,
+            body: &[u8],
+        ) -> Vec<u8> {
+            let mut out = Vec::new();
+            out.extend_from_slice(&src_cid.to_le_bytes());
+            out.extend_from_slice(&dst_cid.to_le_bytes());
+            out.extend_from_slice(&src_port.to_le_bytes());
+            out.extend_from_slice(&dst_port.to_le_bytes());
+            out.extend_from_slice(&4u16.to_le_bytes());
+            out.extend_from_slice(&2u16.to_le_bytes()); // AF_VSOCK_TRANSPORT_VIRTIO
+            out.extend_from_slice(&0u16.to_le_bytes()); // no transport header
+            out.extend_from_slice(&[0u8, 0]); // reserved
+            out.extend_from_slice(body);
+            out
+        }
+
+        // A vsock link is SOCK_STREAM and carries the same length-prefixed
+        // envelope tcp does, so the INIT goes on with its 16-bit prefix.
+        let init = init_message();
+        let mut framed = alloc::vec![init.len() as u8, 0];
+        framed.extend_from_slice(&init);
+        let vsock = vsockmon(3, 40000, 2, 7447, &framed);
+        let udp = udp_packet(
+            [192, 168, 1, 5],
+            43210,
+            [192, 168, 1, 9],
+            7447,
+            &init_message(),
+        );
+
+        // ONE capture, two interfaces of two link types — the mixing this
+        // test's doc requires, expressed in the file rather than assembled by
+        // hand, so the dissection and the byte offsets come from one read.
+        let file = crate::pcapng::write(
+            &[(LINKTYPE_ETHERNET, 6), (LINKTYPE_VSOCK, 6)],
+            &[
+                (0, 1_000_000, udp.as_slice()),
+                (1, 2_000_000, vsock.as_slice()),
+            ],
+        );
+        let d = Dissection::from_capture(&file).expect("the capture reads");
+        assert_eq!(
+            d.flows().len(),
+            1,
+            "the vsock session must be a stream flow, or the vsock half grades \
+             nothing: {:?}",
+            d.skipped()
+        );
+        assert_eq!(
+            d.datagram_flows().len(),
+            1,
+            "and the UDP datagram must be beside it, or the negative arm does"
+        );
+
+        let out = fields_json(&d, &file, None, None);
+
+        assert!(
+            out.contains("\"addr\":\"2\",\"port\":7447")
+                && out.contains("\"addr\":\"3\",\"port\":40000"),
+            "both vsock endpoints must read as their decimal context ids, \
+             paired with the 32-bit vsock port: {out}"
+        );
+        assert!(
+            !out.contains("200:0:0:0") && !out.contains("300:0:0:0"),
+            "and the four-hex-group reading of the little-endian cid must be \
+             GONE, not merely joined by a correct one: {out}"
+        );
+        assert!(
+            out.contains("\"link\":\"vsock\""),
+            "the row still names the link -- item 696's key is what makes the \
+             spelling above readable: {out}"
+        );
+        for ip in ["\"addr\":\"192.168.1.5\"", "\"addr\":\"192.168.1.9\""] {
+            assert!(
+                out.contains(ip),
+                "the UDP flow keeps its dotted quads ({ip}) -- the arm a \
+                 repair that spelled every address as a number would break: \
+                 {out}"
+            );
+        }
+    }
+
     /// THE NEGATIVE ARM: a link kind that genuinely is NOT a datagram is still
     /// refused, and now says so under the honest name.
     ///

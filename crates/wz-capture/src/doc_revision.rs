@@ -563,6 +563,31 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: CENSUS_R6_PLANES,
         carries: CENSUS_R8_CARRIES,
     },
+    // R2454 (open-debt item 698) — a VSOCK endpoint's `addr` stops being
+    // spelled as an IPv6 address. NO AXIS IN THIS TABLE MOVES, and every list
+    // below is revision 8's by name.
+    //
+    // Revision 8 repaired that inference for raweth and left it standing one
+    // family over, which item 696 recorded rather than swept. `addr` on a
+    // `vsock/2:7447` session read `"200:0:0:0"` — the 8-byte little-endian
+    // context id pushed through the "not four bytes, therefore IPv6" branch —
+    // and now reads `"2"`, the decimal the locator carries.
+    //
+    // ⚠ SO THIS REVISION IS THE ONLY NOTICE A CONSUMER GETS, which is the
+    // reason it exists at all. The key did not move, its family is not a closed
+    // vocabulary, and the plane it sits on is unchanged: a consumer diffing any
+    // declared axis between 8 and 9 finds nothing. See [`CENSUS_R9_KEYS`] for
+    // the paragraph that says WHAT moved, written where a reader comparing key
+    // sets will be standing.
+    DocumentShape {
+        document: CENSUS,
+        revision: 9,
+        keys: CENSUS_R9_KEYS,
+        retiring: &[],
+        families: CENSUS_R8_FAMILIES,
+        planes: CENSUS_R6_PLANES,
+        carries: CENSUS_R8_CARRIES,
+    },
     DocumentShape {
         document: FIELDS,
         revision: 1,
@@ -702,6 +727,22 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         document: FIELDS,
         revision: 7,
         keys: FIELDS_R7_KEYS,
+        retiring: &[],
+        families: FIELDS_R7_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R7_CARRIES,
+    },
+    // R2454 (open-debt item 698) — the census row's twin again, on the document
+    // the ZA-1039 report was reading. Both flow objects render one shared key,
+    // so both carry the repaired vsock spelling for the same reason they both
+    // carried `link`.
+    //
+    // NO AXIS MOVES; all three lists are revision 7's by name. See
+    // [`CENSUS_R9_KEYS`] for what changed and why the number is the notice.
+    DocumentShape {
+        document: FIELDS,
+        revision: 8,
+        keys: FIELDS_R8_KEYS,
         retiring: &[],
         families: FIELDS_R7_FAMILIES,
         planes: &[],
@@ -1403,6 +1444,37 @@ pub const CENSUS_R8_KEYS: &[&str] = &[
     "withdrawn_at",
     "zid",
 ];
+
+/// The census document's key set at revision 9 (R2454, open-debt item 698).
+///
+/// IDENTICAL to revision 8, and aliased for [`CENSUS_R2_KEYS`]' reason: a
+/// second hand-written copy of this list would be a claim that they are the
+/// same, checked by nobody, where the alias is that fact.
+///
+/// ⚠ A VALUE CHANGED WITHOUT ITS KEY MOVING — the second time, and this is the
+/// paragraph revision 8 wrote for the first. `addr` on a VSOCK endpoint used to
+/// read `200:0:0:0` for context id 2: eight little-endian bytes of a cid pushed
+/// through the same "not four bytes, therefore IPv6" branch that made a raweth
+/// MAC read `3003:c837:25a1`. It now reads `2`, the decimal an operator's
+/// `vsock/2:7447` locator carries, so a vsock endpoint's `addr` and `port`
+/// reassemble into the locator they came from.
+///
+/// [`ValueFamily`]'s residue paragraph names the class — a meaning that moves
+/// under a stationary key — and no axis in this module can express it: the key
+/// set is unchanged, `addr` draws from no closed vocabulary that could be
+/// declared, and the planes it sits on are the same four. The revision number
+/// is therefore the WHOLE notice a consumer gets, which is why the change is
+/// written down here rather than left to a commit message.
+///
+/// ⚠ Item 696 filed this rather than fixing it, and said why: repairing a
+/// second family's spelling in the round that closed the first would have been
+/// a sweep over a population nobody derived. The population was derived before
+/// this round changed anything — all five [`crate::link::LinkKind`] variants
+/// were rendered and judged one at a time — and the two that were wrong are the
+/// two this revision and its `serial` sibling cover. `serial` needed no
+/// revision: its endpoint carries no bytes, so its document value was already
+/// the empty string and only the ROUTE to it changed.
+pub const CENSUS_R9_KEYS: &[&str] = CENSUS_R8_KEYS;
 
 /// The census document's key set at revision 3 (R2123, open-debt item 453).
 ///
@@ -2513,6 +2585,13 @@ pub const FIELDS_R7_KEYS: &[&str] = &[
     "why",
     "wrong",
 ];
+
+/// The field document's key set at revision 8 (R2454, open-debt item 698).
+///
+/// IDENTICAL to revision 7 and aliased, for [`CENSUS_R9_KEYS`]' reason — which
+/// is also where the paragraph about what DID move lives, since the two
+/// documents render one shared flow key and moved together.
+pub const FIELDS_R8_KEYS: &[&str] = FIELDS_R7_KEYS;
 
 /// The value families the field document declares at revision 7.
 ///
@@ -4521,7 +4600,11 @@ mod tests {
             // family, and that family's carries verdict is declared — because
             // they are one change, and splitting them across revisions would
             // hand a consumer three notices for it.
-            (CENSUS, 8u32),
+            // R2454 (item 698) — to 9 when a vsock endpoint's `addr` stopped
+            // being spelled as an IPv6 address. NO KEY MOVED and no declared
+            // axis moved, so this assertion is the notice — the same shape the
+            // `FIELDS` entry below records for R2440, and for the same reason.
+            (CENSUS, 9u32),
             // R2175 (open-debt item 552) — the field document moved to 2 when
             // its PAYLOAD PLANE joined the pin (fifteen keys revision 1 had
             // never covered) and its first three value families were declared.
@@ -4549,7 +4632,11 @@ mod tests {
             // consumer report was reading when it found a raweth flow whose
             // `addr` said `3003:c837:25a1` and whose row said nothing at all
             // about the link.
-            (FIELDS, 7),
+            // R2454 (item 698) — to 8, the census row's twin again: the shared
+            // flow key's vsock endpoints stopped being spelled as IPv6
+            // addresses. The SECOND entry here whose revision moved while no
+            // declared axis did.
+            (FIELDS, 8),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.
