@@ -631,10 +631,26 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # describes rather than abbreviates, so nothing landed in the wrong bucket.
 # Every other axis UNCHANGED and read rather than assumed -- reached 55,
 # unreached 3, no-symbol 2.
+# Round 2438 -- `routing-peer` re-declared at the pin (open-debt item 675).
+# wz 311 -> 314, THREE new citations, and each names a site the round used as
+# evidence rather than decoration: `accept_loop.rs` @ `fn peer_loop` (the two
+# false sentences this round deleted), `lib.rs` @ `pub mod linkstate_forward`
+# (what refutes them), and the peer/zenohd interop test (R2236's two-leg proof
+# that the deprecated key is inert, which is why this round claims no repair
+# there).
+#
+# AMBIGUOUS HELD AT 73 for the third round running, and this time it took work:
+# the first draft of the reason carried SIX unanchored upstream paths and the
+# store citation gate refused it -- bare 6 -> 8, unresolved 8 -> 9. Two of them
+# were bare BASENAMES (`gateway.rs`, `gossip.rs`), which is the R2436 trap, and
+# one was a 1.5.0 path that cannot resolve at the pin BY CONSTRUCTION because
+# the directory it names was merged away. All six were rewritten as prose
+# descriptions, keeping only anchored `path` @ `needle` forms. A dead path is
+# described, never cited.
 PIN_REACHED = 55
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
-PIN_WZ_CITATIONS = 311
+PIN_WZ_CITATIONS = 314
 PIN_AMBIGUOUS = 73
 
 

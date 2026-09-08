@@ -1092,7 +1092,36 @@ def _grade_head(reason: str) -> str:
 #: The atom stays PARTIAL on the region-identity gap the same reading opened.
 #: A residual list this reason had recorded as EMPTY is no longer empty, and
 #: that is a truthful re-grade rather than a regression.
-BUDGET = 24
+#: 24 -> 23 (R2438). `routing-peer`, and it is the first mover here whose entry
+#: was written in a TAXONOMY the pin has dissolved. At 1.5.0 the peer tier was
+#: two hats and the residual names both; at the pin there is one, and the choice
+#: between link-state and gossip moved from a config key into gossip settings
+#: plus region bound. The key that residual tells every fixture to force is
+#: DEPRECATED WITH NO EFFECT -- and because that config denies unknown fields,
+#: an unknown key would have been REFUSED while a deprecated one is accepted and
+#: discarded, so supplying it yields neither error nor effect.
+#:
+#: THREE RESIDUALS, THREE DIFFERENT VERDICTS, which is the point worth keeping:
+#: one RETIRED by measurement (`transport_weights` debits wz for a peer-tier
+#: capability the pin moved to the ROUTER hat -- the shape
+#: `store_reasons_resolve.py` was built for, a debit for something upstream
+#: withdrew), one CONFIRMED still live (`namespace.rs` resolves at BOTH versions,
+#: so nothing about it moved and it was checked rather than assumed stale beside
+#: its stale neighbours), and one RESTATED at the pin (no gossip plane, which by
+#: the derivation IS what a stock peer runs). A round that re-grades an atom owes
+#: each clause its own verdict; "the entry is stale" is not one.
+#:
+#: TWO NEAR-MISSES, both caught by reading code instead of file names. The pin's
+#: `peer/` holds exactly the old `linkstate_peer` file set with `gossip.rs`
+#: absent, which reads as "p2p was dropped" -- it was RELOCATED, and the one hat
+#: does both. And the stock-peer chain was nearly derived from `Bound`'s
+#: `#[default] North`, which is irrelevant: `Region::Local` and `Region::South`
+#: both answer South, so the type default proves nothing about a hat's bound.
+#:
+#: The round also DELETED two false sentences from product code that had been
+#: asserting a missing capability this crate ships -- the registry-right /
+#: code-stale direction this atom's own entry recorded as unmeasured.
+BUDGET = 23
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory

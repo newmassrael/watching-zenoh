@@ -2830,11 +2830,24 @@ where
 /// isolated as `FaceFailed`) covers a dialed face too — an unreachable dial
 /// target surfaces as `FaceFailed` and the mesh keeps forming.
 ///
-/// Hold-only (this atom): a held mesh face routes nothing yet. Mesh forwarding
-/// needs zid-keyed loop suppression (a Put must not cycle a ring, which the
-/// star router's `src_id != dst` face skip does not prevent), the next
-/// `routing-peer` atom. So `peer_loop` takes the same `forwarder` seam as
-/// `accept_loop`; a hold-only node passes [`NoOpForwarder`].
+/// R2438 — THE TWO SENTENCES THAT WERE HERE WERE FALSE, and they had been
+/// asserting a missing capability for long enough that the atom's own registry
+/// entry flagged them (`routing-peer`: "the registry is right and the CODE is
+/// the thing that went stale, and nothing measures that direction either").
+/// They read: "a held mesh face routes nothing yet", and that mesh forwarding
+/// "needs zid-keyed loop suppression ... the next `routing-peer` atom".
+///
+/// Both are refuted by this crate: `linkstate_forward` is a shipped module
+/// (`crate::linkstate_forward`), it forwards Push, propagates Declare interest
+/// and routes Query / Response / ResponseFinal, and its tier tables are keyed by
+/// graph zid with a per-face psid-to-zid mapping — which IS the zid-keyed
+/// suppression the deleted sentence said was still owed. A held face routes
+/// whatever forwarder it was given.
+///
+/// The seam itself is unchanged and is why the comment could rot unnoticed:
+/// `peer_loop` takes the same `forwarder` parameter as `accept_loop`, so a node
+/// that genuinely wants no forwarding still passes [`NoOpForwarder`]. "Can be
+/// hold-only" is a caller's choice here; it was never this function's ceiling.
 #[cfg(feature = "routing-peer")]
 pub async fn peer_loop<S, F>(
     sources: FaceSources,
