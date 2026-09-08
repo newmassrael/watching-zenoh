@@ -2780,7 +2780,7 @@ impl FieldNote {
         let sentence = self.sentence();
         match self {
             Self::NotDecrypted { flow, .. } | Self::NothingWalkable { flow } => {
-                format!("  {} : {sentence}\n", endpoint(&flow.low))
+                format!("  {} : {sentence}\n", endpoint(&flow.low, flow.link()))
             }
             Self::CaptureNotReread => format!("  datagram flow(s): {sentence}\n"),
             Self::PayloadRuleRefused { .. } | Self::PayloadDeclarationUnbound { .. } => {
@@ -2812,8 +2812,8 @@ impl FieldNote {
             // defect R311y669 and R311y679 each removed once already.
             out.push_str(&format!(
                 ",\"low\":\"{}\",\"high\":\"{}\"",
-                endpoint(&flow.low),
-                endpoint(&flow.high)
+                endpoint(&flow.low, flow.link()),
+                endpoint(&flow.high, flow.link())
             ));
         }
         match self {
@@ -3376,12 +3376,16 @@ fn render_field_row(
     // for both would say every message travelled the same way -- a row that is
     // wrong about the one thing the direction letter beside it exists to state.
     let (dir, from, to) = match frame.direction {
-        wz_session_core::passive::Direction::A => {
-            ("A", endpoint(&flow.flow.low), endpoint(&flow.flow.high))
-        }
-        wz_session_core::passive::Direction::B => {
-            ("B", endpoint(&flow.flow.high), endpoint(&flow.flow.low))
-        }
+        wz_session_core::passive::Direction::A => (
+            "A",
+            endpoint(&flow.flow.low, flow.flow.link()),
+            endpoint(&flow.flow.high, flow.flow.link()),
+        ),
+        wz_session_core::passive::Direction::B => (
+            "B",
+            endpoint(&flow.flow.high, flow.flow.link()),
+            endpoint(&flow.flow.low, flow.flow.link()),
+        ),
     };
     match (format, row) {
         // R311y675 — the keys are `from` / `to` and NOT `low` / `high`. The
@@ -3974,8 +3978,16 @@ fn render_sink_row(
     // cannot disagree.
     let decrypted = at.decrypted();
     let (dir, from, to) = match direction {
-        wz_session_core::passive::Direction::A => ("A", endpoint(&flow.low), endpoint(&flow.high)),
-        wz_session_core::passive::Direction::B => ("B", endpoint(&flow.high), endpoint(&flow.low)),
+        wz_session_core::passive::Direction::A => (
+            "A",
+            endpoint(&flow.low, flow.link()),
+            endpoint(&flow.high, flow.link()),
+        ),
+        wz_session_core::passive::Direction::B => (
+            "B",
+            endpoint(&flow.high, flow.link()),
+            endpoint(&flow.low, flow.link()),
+        ),
     };
     // R2062 (open-debt item 478) — the misbinding plane learns WHO sent this
     // row, so `PUBLISHER MISLABELLING` can end "Fix the publisher at `X`".
@@ -4645,7 +4657,26 @@ fn flow_lines(d: &Dissection, format: Format, per_message: bool, cap: Option<usi
             // DTLS is still not recognised, so a plain datagram flow's state is
             // not "decrypted" and not a refusal -- it is not applicable, and
             // saying so is different from claiming either.
-            None => ("datagram", "-"),
+            //
+            // Round 2447 (open-debt item 696) — and a RAWETH flow says so here
+            // rather than reading `datagram` beside a UDP one. This column
+            // already mixes framings with link kinds: `serial` is a link and
+            // not a framing, and it sits here for the reason that row's own
+            // comment gives — a reader scanning `--flows` for "what did this
+            // capture carry" must not have to know that one transport answers
+            // somewhere else. raweth is that case exactly, and until now the
+            // only thing distinguishing it from UDP in this listing was an
+            // endpoint pair rendered in the wrong address family.
+            //
+            // Written as "UDP keeps the established word, every other kind
+            // says its own name" rather than as an arm per variant: a link
+            // kind added later then names itself here instead of joining
+            // `datagram` in silence, which is the direction this column's
+            // mistakes have always run.
+            None => match flow.flow.link() {
+                wz_capture::link::LinkKind::Udp => ("datagram", "-"),
+                other => (other.name(), "-"),
+            },
         };
         push_flow(
             &mut out,
@@ -4740,8 +4771,8 @@ fn push_flow(
         out.push_str(&format!(
             "{{\"low\":\"{}\",\"high\":\"{}\",\"framing\":\"{framing}\",\
              \"messages\":{messages},\"scouting\":{scouting},\"protection\":\"{state}\"",
-            endpoint(&key.low),
-            endpoint(&key.high),
+            endpoint(&key.low, key.link()),
+            endpoint(&key.high, key.link()),
         ));
         if let Some(rows) = rows {
             let (shown, omitted) = split_at_cap(rows, cap);
@@ -4763,8 +4794,8 @@ fn push_flow(
         out.push_str(&format!(
             "  {} <-> {}  {framing:<12} {messages} message(s)  \
              {scouting} scouting  {state}\n",
-            endpoint(&key.low),
-            endpoint(&key.high),
+            endpoint(&key.low, key.link()),
+            endpoint(&key.high, key.link()),
         ));
         if let Some(rows) = rows {
             let (shown, omitted) = split_at_cap(rows, cap);
@@ -4929,16 +4960,24 @@ fn message_name(frame: &wz_session_core::passive::PassiveFrame) -> String {
 }
 
 /// An endpoint as `addr:port`, IPv4 dotted or IPv6 hex-grouped.
-fn endpoint(e: &wz_capture::link::Endpoint) -> String {
-    let addr = e.addr();
-    if addr.len() == 4 {
-        format!("{}.{}.{}.{}:{}", addr[0], addr[1], addr[2], addr[3], e.port)
+fn endpoint(e: &wz_capture::link::Endpoint, link: wz_capture::link::LinkKind) -> String {
+    // Round 2447 (open-debt item 696) — the ADDRESS comes from
+    // `Endpoint::addr_text`, which spells it as the recorded link kind spells
+    // addresses. This surface asked `addr.len() == 4` and bracketed everything
+    // else, so pico's `30:03:c8:37:25:a1` printed as `[3003:c837:25a1]:0` —
+    // the same defect the census document had, in the crate the consumer
+    // report did not read. One spelling now, three call sites over there and
+    // this one here.
+    //
+    // The BRACKETS stay this surface's own decision and are not shared: they
+    // exist because `a:b:c:d::1:7447` cannot be parsed back into an address and
+    // a port, and a MAC has the identical ambiguity — so `[..]` goes round
+    // anything that is not a dotted quad, which is what it already did.
+    let addr = e.addr_text(link);
+    if e.is_ipv4() {
+        format!("{addr}:{}", e.port)
     } else {
-        let groups: Vec<String> = addr
-            .chunks(2)
-            .map(|c| format!("{:x}", u16::from_be_bytes([c[0], c[1]])))
-            .collect();
-        format!("[{}]:{}", groups.join(":"), e.port)
+        format!("[{addr}]:{}", e.port)
     }
 }
 
@@ -7187,6 +7226,73 @@ mod tests {
             json.contains("\"batch\":null"),
             "a scouting datagram is not inside a batch, and `null` says that \
              rather than claiming index zero: {json}"
+        );
+    }
+
+    /// Round 2447 (open-debt item 696) — A RAWETH FLOW SAYS SO IN THE FRAMING
+    /// COLUMN, AND ITS ENDPOINTS READ AS MACs.
+    ///
+    /// # What the listing said before
+    ///
+    /// `datagram`, exactly as a UDP flow does, with `[3003:c837:25a1]:0` in the
+    /// endpoint column — six MAC octets pushed through the "not four bytes,
+    /// therefore IPv6" branch. Two flows on two different links were therefore
+    /// distinguishable in this listing only by an address rendered in the wrong
+    /// family, which is the closest thing to a wrong answer a listing can give.
+    ///
+    /// # Why the framing column is the right home
+    ///
+    /// It already mixes framings with LINK KINDS: `serial` is a link and sits
+    /// here on the argument its own row records — a reader scanning `--flows`
+    /// for "what did this capture carry" must not have to know that one
+    /// transport answers somewhere else. raweth is that case exactly, and the
+    /// word comes from `wz_capture::link::LinkKind` rather than from a literal
+    /// here, so the CLI and the two JSON documents cannot end up with two
+    /// vocabularies for one fact.
+    ///
+    /// # The fixture MIXES, for R2443's reason
+    ///
+    /// A raweth-only capture cannot tell "the row says raweth" from "the row
+    /// says raweth for everything", and it cannot tell a MAC spelled correctly
+    /// from an address renderer that has stopped spelling IPv4.
+    #[test]
+    fn a_raweth_flow_says_which_link_it_is_beside_a_udp_one() {
+        let file = wz_capture::pcapng::write(
+            &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+            &[
+                (0, 1_000_000, &scout_packet()),
+                (
+                    0,
+                    2_000_000,
+                    &raweth_frame(&[wz_session_core::wire_const::T_MID_KEEP_ALIVE]),
+                ),
+            ],
+        );
+
+        let (json, _) = analyze_with(&file, None, Format::Json, true, false).expect("parses");
+        assert!(
+            json.contains("\"framing\":\"raweth\""),
+            "the raweth flow must name its link: {json}"
+        );
+        assert!(
+            json.contains("\"framing\":\"datagram\""),
+            "and the UDP flow must still read `datagram` -- a repair that named \
+             every datagram flow raweth would satisfy the assertion above: \
+             {json}"
+        );
+        assert!(
+            json.contains("[30:03:c8:37:25:a1]:0") && json.contains("[aa:bb:cc:dd:ee:ff]:0"),
+            "and its endpoints must read as MACs: {json}"
+        );
+        assert!(
+            !json.contains("3003:c837:25a1"),
+            "the three-group reading the consumer report measured must be gone: \
+             {json}"
+        );
+        assert!(
+            json.contains("192.168.1.5:43210"),
+            "while the UDP flow keeps its dotted quad -- the arm a MAC-shaped \
+             repair would break: {json}"
         );
     }
 

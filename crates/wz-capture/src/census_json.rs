@@ -903,33 +903,32 @@ fn push_latency(l: &crate::exchange::LatencySamples, out: &mut String) {
 /// consumption surfaces came to disagree in the first place, one level up.
 pub(crate) fn push_flow(flow: &crate::link::FlowKey, out: &mut String) {
     out.push_str("{\"low\":");
-    push_endpoint(&flow.low, out);
+    push_endpoint(&flow.low, flow.link(), out);
     out.push_str(",\"high\":");
-    push_endpoint(&flow.high, out);
-    out.push('}');
+    push_endpoint(&flow.high, flow.link(), out);
+    // Round 2447 (open-debt item 696) — WHICH LINK, on the flow object itself.
+    //
+    // The ZA-1039 consumer report asked for exactly this and said in its own
+    // words that it must not be inferred from the endpoint shape: it had a
+    // raweth flow whose `addr` read `3003:c837:25a1` and no key that would let
+    // it tell a MAC from a truncated IPv6 address. The answer is now a recorded
+    // fact on the key (`crate::link::LinkKind`), so every one of this
+    // function's callers carries it — including the four planes that hold a
+    // flow key and nothing else about the flow behind it.
+    //
+    // STRUCTURAL, on every flow object of every plane: a key a consumer has to
+    // test for cannot be switched on, which is the rule this document set
+    // states for `carried` and `keyexpr` one plane over.
+    let _ = write!(out, ",\"link\":\"{}\"}}", flow.link().name());
 }
 
-fn push_endpoint(e: &crate::link::Endpoint, out: &mut String) {
+fn push_endpoint(e: &crate::link::Endpoint, link: crate::link::LinkKind, out: &mut String) {
     out.push_str("{\"addr\":\"");
-    let addr = e.addr();
-    if e.is_ipv4() {
-        let _ = write!(out, "{}.{}.{}.{}", addr[0], addr[1], addr[2], addr[3]);
-    } else {
-        let groups: Vec<String> = addr
-            .chunks(2)
-            .map(|c| {
-                let mut s = String::new();
-                let _ = write!(s, "{:x}", u16::from_be_bytes([c[0], c[1]]));
-                s
-            })
-            .collect();
-        for (i, g) in groups.iter().enumerate() {
-            if i > 0 {
-                out.push(':');
-            }
-            out.push_str(g);
-        }
-    }
+    // Round 2447 (open-debt item 696) — the spelling comes from the LINK, and
+    // it is `Endpoint::addr_text` because two other surfaces spell an address
+    // too and all three had the same defect. See that method for what each kind
+    // spells and for the residue this leaves named.
+    out.push_str(&e.addr_text(link));
     let _ = write!(out, "\",\"port\":{}}}", e.port);
 }
 
@@ -981,6 +980,108 @@ mod tests {
     use crate::datagram_tests::tcp_packet;
     use crate::link::LINKTYPE_ETHERNET;
     use crate::Dissection;
+
+    /// Round 2447 (open-debt item 696) — THE CENSUS DOCUMENT NAMES THE LINK
+    /// EACH FLOW WAS READ OFF, AND SPELLS ITS ADDRESSES THAT LINK'S WAY.
+    ///
+    /// # Where in the document, and it was MEASURED rather than assumed
+    ///
+    /// A first draft of this test asserted over [`push_flow`] alone, on the
+    /// reasoning that a thin raweth capture reaches none of the four census
+    /// planes that render a flow key. That reasoning was WRONG and the
+    /// measurement is the whole reason it is not still here: this fixture puts
+    /// BOTH datagram flows in the routing graph's `nodes[].flows`, because the
+    /// zid the raweth INIT carries is evidence enough to place a node even
+    /// though the frame is inadmissible on the link. So the assertions below
+    /// are over the document a consumer is handed, not over an emitter called
+    /// by hand — which is what makes them cover the plane as well as the
+    /// rendering.
+    ///
+    /// # What the third arm is for
+    ///
+    /// The TCP flow in the fixture does NOT reach a census plane — its payload
+    /// decodes to nothing, so no node is placed for it — and it is asserted
+    /// through the shared emitter instead. That is stated rather than left to
+    /// look like the other two: the kind lives on the KEY, so the stream list
+    /// and the datagram list cannot answer differently, and the arm exists to
+    /// keep a repair that named every flow `raweth` from passing.
+    ///
+    /// # The keys are REAL, decapsulated from real frames
+    ///
+    /// R311y681's rule, and it is load-bearing here: `Endpoint` keeps its bytes
+    /// private and `FlowKey` now keeps its link kind private too, so the only
+    /// way to hold one is to decode one. A key asserted into existence could
+    /// carry a kind no strip would ever have written.
+    #[test]
+    fn the_census_document_names_the_link_and_spells_its_addresses() {
+        use crate::datagram_tests::{init_message, raweth_packet, udp_packet};
+
+        let udp = udp_packet(
+            [192, 168, 1, 5],
+            43210,
+            [192, 168, 1, 9],
+            7447,
+            &init_message(),
+        );
+        let eth = raweth_packet(&init_message());
+        let tcp = tcp_packet(1000, b"hello");
+
+        let mut d = Dissection::new();
+        d.push_packet_at(LINKTYPE_ETHERNET, 0, Some(0), &udp);
+        d.push_packet_at(LINKTYPE_ETHERNET, 1, Some(1), &eth);
+        d.push_packet_at(LINKTYPE_ETHERNET, 2, Some(2), &tcp);
+        d.finish();
+        assert_eq!(
+            d.datagram_flows().len(),
+            2,
+            "the fixture must MIX the datagram kinds, or neither arm below \
+             grades anything"
+        );
+        assert_eq!(d.flows().len(), 1, "and carry a stream flow beside them");
+
+        let doc = census_json(&d);
+
+        // THE RAWETH FLOW: named, and its MACs spelled as MACs. The addresses
+        // are `raweth_packet`'s own -- pico's default destination mapping, and
+        // the source it lays.
+        assert!(
+            doc.contains(
+                "{\"low\":{\"addr\":\"30:03:c8:37:25:a1\",\"port\":0},\
+                 \"high\":{\"addr\":\"aa:bb:cc:dd:ee:ff\",\"port\":0},\
+                 \"link\":\"raweth\"}"
+            ),
+            "the raweth flow must reach the document as a named link with two \
+             MACs; the defect this closes rendered its source MAC as the \
+             three-group address `3003:c837:25a1` with no key saying what it \
+             was: {doc}"
+        );
+        assert!(
+            !doc.contains("3003:c837:25a1"),
+            "and that three-group reading must be GONE, not merely joined by a \
+             correct one: {doc}"
+        );
+
+        // THE NEGATIVE ARM IN THE SAME DOCUMENT. Without it a renderer that
+        // said `raweth` for everything, or that had stopped spelling IPv4,
+        // would satisfy the assertion above.
+        assert!(
+            doc.contains(
+                "{\"low\":{\"addr\":\"192.168.1.5\",\"port\":43210},\
+                 \"high\":{\"addr\":\"192.168.1.9\",\"port\":7447},\
+                 \"link\":\"udp\"}"
+            ),
+            "a UDP flow must still be named udp and read as dotted quads: {doc}"
+        );
+
+        // THE STREAM ARM, through the emitter, for the reason this test's own
+        // doc gives: this fixture's TCP flow reaches no census plane.
+        let mut stream = String::new();
+        push_flow(&d.flows()[0].flow, &mut stream);
+        assert!(
+            stream.contains("\"link\":\"tcp\""),
+            "a stream flow must be named tcp: {stream}"
+        );
+    }
 
     /// R311y851 — the document reports a plane it cannot FEED by answering
     /// `null`, and it reports EVERY such plane that way.

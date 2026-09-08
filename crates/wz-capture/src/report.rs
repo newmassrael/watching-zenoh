@@ -257,11 +257,16 @@ fn window_text(m: &crate::interest::InterestMatch) -> String {
 /// function is used), and `pre-push` caught it on `wz-runtime-tokio`.
 #[cfg(feature = "network-codecs")]
 fn flow_text(flow: &crate::link::FlowKey) -> String {
+    // Round 2447 (open-debt item 696) — spelled by the LINK the key was read
+    // off, so this suffix names a raweth flow by its MACs. The line exists to
+    // tell two byte-identical findings apart, which a pair of endpoints
+    // rendered in the wrong family does less well than one rendered in the
+    // right one.
     alloc::format!(
         "  [{}:{} <-> {}:{}]",
-        addr_text(&flow.low),
+        flow.low.addr_text(flow.link()),
         flow.low.port,
-        addr_text(&flow.high),
+        flow.high.addr_text(flow.link()),
         flow.high.port
     )
 }
@@ -3204,8 +3209,8 @@ fn push_carrier_object(
             let _ = write!(
                 s,
                 "{{\"src\":\"{}\",\"dst\":\"{}\",\"proto\":{}}}",
-                addr_text(&hop.src),
-                addr_text(&hop.dst),
+                hop.src.ip_text(),
+                hop.dst.ip_text(),
                 hop.proto
             );
         }
@@ -3242,8 +3247,8 @@ fn push_carrier_line(
             let _ = write!(
                 chains,
                 "{}->{} proto {}",
-                addr_text(&hop.src),
-                addr_text(&hop.dst),
+                hop.src.ip_text(),
+                hop.dst.ip_text(),
                 hop.proto
             );
         }
@@ -3256,39 +3261,24 @@ fn push_carrier_line(
     } else {
         ""
     };
+    // Round 2447 (open-debt item 696) — the flow's own endpoints are spelled by
+    // the LINK they were read off, so a raweth flow inside GRETAP prints its
+    // MACs as MACs. The hop addresses above keep `ip_text`, which is the same
+    // spelling they always had and the honest one: a carrier hop is an outer IP
+    // address and has no link kind of its own.
+    //
+    // ⚠ The `{}:{}` port suffix is UNCHANGED for every kind, raweth included.
+    // A raweth endpoint's port is zero because pico's L2 link has none, and a
+    // row that dropped the suffix for one kind would put a second shape in one
+    // column — which is what a reader scanning it resolves against. The hop
+    // chain above is where a port must NOT be printed, and it never was.
     out.push(format!(
         "    {kind} {}:{} <-> {}:{} via {chains}{also}\n",
-        addr_text(&flow.low),
+        flow.low.addr_text(flow.link()),
         flow.low.port,
-        addr_text(&flow.high),
+        flow.high.addr_text(flow.link()),
         flow.high.port,
     ));
-}
-
-/// One endpoint's ADDRESS, without its port.
-///
-/// A carrier header has no port — [`crate::link::TunnelHop`] carries zero
-/// there and says so — and printing `10.0.0.1:0` beside a real `:7447` is how
-/// a reader concludes a tunnel terminates on port zero.
-fn addr_text(e: &crate::link::Endpoint) -> String {
-    use core::fmt::Write as _;
-    let a = e.addr();
-    let mut s = String::new();
-    if e.is_ipv4() {
-        let _ = write!(s, "{}.{}.{}.{}", a[0], a[1], a[2], a[3]);
-    } else {
-        for (i, c) in a.chunks(2).enumerate() {
-            if i > 0 {
-                s.push(':');
-            }
-            let _ = write!(
-                s,
-                "{:x}",
-                u16::from_be_bytes([c[0], *c.get(1).unwrap_or(&0)])
-            );
-        }
-    }
-    s
 }
 
 fn skips_text(sk: &crate::SkipCensus, s: &mut String) {

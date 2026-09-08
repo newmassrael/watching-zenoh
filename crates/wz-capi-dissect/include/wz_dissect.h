@@ -142,6 +142,37 @@
  * @values fields offset_space
  * @values fields direction
  *
+ * Round 2447 -- AND WHICH LINK A FLOW WAS READ OFF, at census revision 8 and
+ * field-document revision 7. Every flow object in both documents carries
+ *
+ *     "flow":{"low":{"addr":"30:03:c8:37:25:a1","port":0},
+ *             "high":{"addr":"aa:bb:cc:dd:ee:ff","port":0},
+ *             "link":"raweth"}
+ *
+ *     `link`         which kind of link the two endpoints were read off:
+ *                    `tcp`, `udp`, `raweth` (pico's L2 link, whose endpoints
+ *                    are MACs and whose ports are always zero), `vsock` (the
+ *                    endpoints are context ids) or `serial` (a point-to-point
+ *                    line with no addressing at all, whose key is empty in
+ *                    every field).
+ *
+ * ⚠ READ `addr` THROUGH IT. The spelling depends on the link: `raweth` gives
+ * six colon-separated MAC octets and every other kind gives an IP address --
+ * dotted quad for four bytes, colon-separated hex groups otherwise. Before this
+ * revision a raweth endpoint's six bytes went through the "not four, therefore
+ * IPv6" branch and printed as `3003:c837:25a1`, which reads as a truncated
+ * address and is why this key exists. The consumer that asked for it asked
+ * specifically that it NOT be inferred from the endpoint shape, and it is not:
+ * the library records the link kind where the frame is decapsulated.
+ *
+ * ⚠ AND `vsock` STILL SPELLS ITS CONTEXT ID as four hex groups, which is the
+ * same inference reaching the same wrong shape one family over. It is now
+ * ANSWERABLE -- the row says `"link":"vsock"` -- and it is recorded as
+ * outstanding rather than quietly repaired in the same round.
+ *
+ * @values census link
+ * @values fields link
+ *
  * R2182 -- AND THE FIELD TREE'S OWN DISCRIMINANT, at field-document revision 3:
  *
  *     `kind`          what a walked field holds, and therefore WHICH KEY comes
@@ -263,7 +294,7 @@
  *
  * SO THE DOCUMENT CARRIES THE LIST. Its envelope reads
  *
- *     {"document":{"name":"census","revision":7,
+ *     {"document":{"name":"census","revision":8,
  *                  "planes":["exchanges","interests","keyexprs","nodes",
  *                            "payloads"]}, ...}
  *
@@ -309,11 +340,11 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":6,"key":"kind","values":[...],
+ *     {"name":"fields","revision":7,"key":"kind","values":[...],
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
- *     {"name":"census","revision":7,"key":"mode","values":[...],
+ *     {"name":"census","revision":8,"key":"mode","values":[...],
  *      "carries":null}
  *
  * `null` is a VALUE here and not an absence: it says the word is a PASSENGER --
@@ -333,10 +364,12 @@
  * @carries census asker passenger
  * @carries census declarer passenger
  * @carries census kind passenger
+ * @carries census link passenger
  * @carries census mode passenger
  * @carries census offset_space passenger
  * @carries fields direction passenger
  * @carries fields kind discriminant
+ * @carries fields link passenger
  * @carries fields message passenger
  * @carries fields offset_space discriminant
  * @carries fields state discriminant
@@ -990,7 +1023,7 @@ int wz_dissect_declarations_diagnose(const char *declarations, char **out);
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":6,"key":"state",
+ *     "value_families":[{"name":"fields","revision":7,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,

@@ -7855,6 +7855,61 @@ mod datagram_tests {
         );
     }
 
+    /// Round 2447 (open-debt item 696) — THE KEY'S LINK KIND AND THE HANDSHAKE
+    /// ANSWER COME FROM ONE FACT, AND THIS IS WHERE THEY ARE HELD TOGETHER.
+    ///
+    /// # The drift this refuses
+    ///
+    /// Two places decide which link a datagram came off, one call apart.
+    /// `link::strip_raweth` / `strip_udp` stamp [`crate::link::LinkKind`] onto
+    /// the flow key, which is what reaches a document; [`Dissection::
+    /// push_packet_at`] picks the `DatagramLink` arm, which is what decides
+    /// whether the link has a handshake. Nothing in the type system joins them,
+    /// so a round that changed one could leave the other saying the opposite —
+    /// and the two answers surface in places nobody reads side by side: a JSON
+    /// key on one hand, a session phase on the other.
+    ///
+    /// # Why one assertion per capture and not one over a mixed one
+    ///
+    /// The join is per LINK, and the two links give OPPOSITE handshake answers.
+    /// A single capture asserting "some flow says raweth and some session is
+    /// unseen" would pass with the two facts attached to the wrong flows, which
+    /// is precisely the swap this exists to catch.
+    #[test]
+    fn the_flow_keys_link_kind_and_the_handshake_answer_cannot_disagree() {
+        use crate::link::LinkKind;
+        use wz_session_core::passive::SessionPhase;
+
+        // RAWETH: the key says raweth, and the link has no handshake, so an
+        // INIT on it opens nothing. Swap either decision alone and one of these
+        // two fails.
+        let mut d = Dissection::new();
+        d.push_packet(LINKTYPE_ETHERNET, 0, &raweth_packet(&init_message()));
+        let flow = &d.datagram_flows()[0];
+        assert_eq!(flow.flow.link(), LinkKind::RawEth, "the key names the link");
+        assert!(
+            matches!(flow.session.context().phase, SessionPhase::Unseen),
+            "and the SAME fact decides the handshake: pico's raweth link has \
+             none, so this INIT may not have opened a session: {:?}",
+            flow.session.context()
+        );
+
+        // UDP UNICAST: the key says udp, and the link DOES have a handshake.
+        let mut d = Dissection::new();
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            0,
+            &udp_packet([10, 0, 0, 1], 43210, [10, 0, 0, 2], 7447, &init_message()),
+        );
+        let flow = &d.datagram_flows()[0];
+        assert_eq!(flow.flow.link(), LinkKind::Udp, "the key names the link");
+        assert!(
+            !matches!(flow.session.context().phase, SessionPhase::Unseen),
+            "and the same fact opens the session here: {:?}",
+            flow.session.context()
+        );
+    }
+
     /// The same INIT over UNICAST UDP still establishes a session — the guard
     /// must key on the link and not on the message.
     #[test]

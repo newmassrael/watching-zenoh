@@ -319,6 +319,96 @@ impl Endpoint {
         self.addr_len == 4
     }
 
+    /// Round 2447 (open-debt item 696) — this endpoint's address, SPELLED AS
+    /// THE LINK IT WAS READ OFF SPELLS ADDRESSES.
+    ///
+    /// # Why the kind is a parameter and not read off the bytes
+    ///
+    /// Three renderers in two crates spelled an address before this method
+    /// existed — `census_json::push_endpoint` for the JSON documents,
+    /// `report::addr_text` for the summary's tunnel lines, and `wz-analyze`'s
+    /// own `endpoint` — and all three asked [`Self::is_ipv4`] and treated
+    /// everything else as IPv6. A 6-byte MAC therefore printed as
+    /// `3003:c837:25a1`, which is the ZA-1039 consumer report's second finding
+    /// and is a confidently wrong answer rather than a missing one. The link
+    /// kind is a RECORDED fact ([`FlowKey::link`]), so the spelling now comes
+    /// from what the strip saw rather than from a byte count downstream.
+    ///
+    /// # One spelling, three callers
+    ///
+    /// `push_flow`'s own doc gives the rule: two renderings of one key is how
+    /// two consumption surfaces came to disagree. The three above are three,
+    /// and this is where they meet. What is NOT shared is the surrounding
+    /// endpoint form — the port, and `[..]` around an IPv6 address — because
+    /// those genuinely differ per surface, and folding them in would make one
+    /// of the three change its output for a reason that is not this item's.
+    ///
+    /// # What each kind spells, and the residue
+    ///
+    /// [`LinkKind::RawEth`] spells the six MAC octets `aa:bb:...` in the
+    /// canonical lower-case form, which is what pico's own sources print.
+    /// Every other kind keeps EXACTLY the spelling it had, including
+    /// [`LinkKind::Vsock`], whose 8-byte context id still renders as four hex
+    /// groups. ⚠ That is stated rather than repaired: it is the same
+    /// inference reaching the same wrong shape one family over, it is now
+    /// ANSWERABLE because the row says `"link":"vsock"`, and changing a second
+    /// family's spelling in the round that closes item 696 would be a pattern
+    /// sweep over a population nobody derived. It is filed instead.
+    pub fn addr_text(&self, link: LinkKind) -> alloc::string::String {
+        use core::fmt::Write as _;
+        let a = self.addr();
+        let mut s = alloc::string::String::new();
+        match link {
+            LinkKind::RawEth => {
+                for (i, b) in a.iter().enumerate() {
+                    if i > 0 {
+                        s.push(':');
+                    }
+                    let _ = write!(s, "{b:02x}");
+                }
+            }
+            LinkKind::Serial | LinkKind::Tcp | LinkKind::Udp | LinkKind::Vsock => {
+                return self.ip_text();
+            }
+        }
+        s
+    }
+
+    /// This endpoint's address spelled as an IP ADDRESS — dotted quad when it
+    /// is four bytes long, colon-separated hex groups otherwise.
+    ///
+    /// Separate from [`Self::addr_text`] and public, because a TUNNEL HOP
+    /// ([`TunnelHop::src`]) is an endpoint with no flow and therefore no
+    /// [`LinkKind`]: it is an outer IP address by construction — the GRE walk
+    /// reads it out of an IP header — so asking it which link it came off would
+    /// be asking a question it has no answer to. Every OTHER caller goes
+    /// through `addr_text`, which is what makes the raweth spelling reachable.
+    ///
+    /// The ADDRESS only, with no port, and that is the caller's reason for
+    /// wanting it: a carrier header has none — [`TunnelHop`] carries zero there
+    /// and says so — and printing `10.0.0.1:0` beside a real `:7447` is how a
+    /// reader concludes a tunnel terminates on port zero.
+    pub fn ip_text(&self) -> alloc::string::String {
+        use core::fmt::Write as _;
+        let a = self.addr();
+        let mut s = alloc::string::String::new();
+        if self.is_ipv4() {
+            let _ = write!(s, "{}.{}.{}.{}", a[0], a[1], a[2], a[3]);
+        } else {
+            for (i, c) in a.chunks(2).enumerate() {
+                if i > 0 {
+                    s.push(':');
+                }
+                let _ = write!(
+                    s,
+                    "{:x}",
+                    u16::from_be_bytes([c[0], *c.get(1).unwrap_or(&0)])
+                );
+            }
+        }
+        s
+    }
+
     /// R311y607 — is this an IP MULTICAST address?
     ///
     /// The one question that tells a passive observer which zenoh message
@@ -372,6 +462,105 @@ impl Endpoint {
     }
 }
 
+/// Round 2447 (open-debt item 696) — WHICH KIND OF LINK a flow was read off.
+///
+/// # The hole this fills
+///
+/// Every plane in this crate renders a [`FlowKey`], and until this type the
+/// only thing a renderer could ask about one was the SHAPE of its address
+/// bytes. That is an inference, and it was wrong: a raweth endpoint is a
+/// 6-byte MAC, [`Endpoint::is_ipv4`] answers `false` for it, and the "not four,
+/// therefore IPv6" branch printed pico's `30:03:c8:37:25:a1` as the three-group
+/// address `3003:c837:25a1`. A consumer reading that key had no way to tell it
+/// from a truncated IPv6 address — which is the second claim of the ZA-1039
+/// consumer report, and the report asked in its own words for the answer NOT to
+/// be inferred from the endpoint shape.
+///
+/// The fact itself was never missing. `DatagramLink` has known it since
+/// R311y608 and threads it far enough to answer whether the link has a
+/// handshake; what it could not do is reach a document, because it is chosen
+/// one call ABOVE the flow and dropped one call below.
+///
+/// # Why it hangs off the KEY and not off each dissection
+///
+/// A [`FlowKey`] is what travels. Eight emitters in two crates render one, and
+/// the planes behind four of them — interests, exchanges and the routing
+/// graph's nodes and links — hold a key and nothing else about the flow it came
+/// from. Putting the answer on `FlowDissection` / [`crate::DatagramDissection`]
+/// instead would reach the two row emitters that already have one and leave the
+/// other six to infer, which is the state this closes.
+///
+/// It is also the flow's own IDENTITY rather than a fact about it: two flows
+/// whose addresses collide across link kinds are different flows, and the key
+/// now says so instead of resting on the address lengths happening to differ.
+///
+/// # Recorded where it is KNOWN
+///
+/// Each variant is written by the strip that built the key — there is exactly
+/// one constructor per kind — so no consumer re-derives it and no second
+/// opinion about it can exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum LinkKind {
+    /// pico's raweth L2 link: the endpoints are MACs and there are no ports.
+    RawEth,
+    /// A serial line: no addressing at all. See [`FlowKey::serial_line`].
+    Serial,
+    /// A TCP connection over IPv4 or IPv6.
+    Tcp,
+    /// A UDP flow over IPv4 or IPv6, unicast or toward a multicast group.
+    Udp,
+    /// An `AF_VSOCK` connection: the endpoints are context ids.
+    Vsock,
+}
+
+impl LinkKind {
+    /// The word this kind is emitted as.
+    pub fn name(self) -> &'static str {
+        match self {
+            LinkKind::RawEth => "raweth",
+            LinkKind::Serial => "serial",
+            LinkKind::Tcp => "tcp",
+            LinkKind::Udp => "udp",
+            LinkKind::Vsock => "vsock",
+        }
+    }
+
+    /// Every kind, from an exhaustive match so the array cannot fall behind.
+    ///
+    /// The `match` is the whole mechanism: a variant added later fails to
+    /// compile HERE, which is what makes this a WALK rather than a list beside
+    /// the enum that ages the moment the enum grows.
+    pub fn all() -> [LinkKind; 5] {
+        let one = |k: LinkKind| match k {
+            LinkKind::RawEth => LinkKind::RawEth,
+            LinkKind::Serial => LinkKind::Serial,
+            LinkKind::Tcp => LinkKind::Tcp,
+            LinkKind::Udp => LinkKind::Udp,
+            LinkKind::Vsock => LinkKind::Vsock,
+        };
+        [
+            one(LinkKind::RawEth),
+            one(LinkKind::Serial),
+            one(LinkKind::Tcp),
+            one(LinkKind::Udp),
+            one(LinkKind::Vsock),
+        ]
+    }
+
+    /// Every word [`Self::name`] can return, sorted, taken from [`Self::all`].
+    ///
+    /// The vocabulary a document declares comes from here, so a variant added
+    /// later widens the walk at `cargo build` and the family gate refuses the
+    /// revision that has not declared it. That is the rule
+    /// `the_declared_value_families_match_the_librarys_own_vocabularies`
+    /// applies to every other family in these documents.
+    pub fn names() -> alloc::vec::Vec<&'static str> {
+        let mut out: alloc::vec::Vec<&'static str> = Self::all().iter().map(|k| k.name()).collect();
+        out.sort_unstable();
+        out
+    }
+}
+
 /// A TCP connection, identified without regard to direction.
 ///
 /// The two endpoints are stored SORTED, so both directions of one connection
@@ -383,6 +572,19 @@ pub struct FlowKey {
     pub low: Endpoint,
     /// The greater.
     pub high: Endpoint,
+    /// Round 2447 (open-debt item 696) — the link these endpoints were read
+    /// off. See [`LinkKind`].
+    ///
+    /// LAST in the declaration, and that is load-bearing: the derived `Ord`
+    /// compares fields in order, so the endpoint pair keeps deciding the
+    /// ordering exactly as it did and this field is only ever a tiebreak
+    /// between two keys whose addresses and ports are identical.
+    ///
+    /// Private with an accessor, for [`Endpoint::new`]'s reason one level up: a
+    /// key outside this crate comes from a decapsulated packet rather than
+    /// being asserted into existence, and a kind a caller could set would be
+    /// one more place the answer can be wrong.
+    link: LinkKind,
 }
 
 impl FlowKey {
@@ -410,14 +612,36 @@ impl FlowKey {
         Self {
             low: end,
             high: end,
+            link: LinkKind::Serial,
         }
     }
 
-    fn new(a: Endpoint, b: Endpoint) -> (Self, bool) {
+    /// Round 2447 (open-debt item 696) — the link these endpoints were read
+    /// off, RECORDED by the strip that built the key rather than inferred from
+    /// the bytes by whoever renders it. See [`LinkKind`].
+    pub fn link(&self) -> LinkKind {
+        self.link
+    }
+
+    fn new(a: Endpoint, b: Endpoint, link: LinkKind) -> (Self, bool) {
         if a <= b {
-            (Self { low: a, high: b }, true)
+            (
+                Self {
+                    low: a,
+                    high: b,
+                    link,
+                },
+                true,
+            )
         } else {
-            (Self { low: b, high: a }, false)
+            (
+                Self {
+                    low: b,
+                    high: a,
+                    link,
+                },
+                false,
+            )
         }
     }
 }
@@ -1574,7 +1798,7 @@ fn strip_udp(
     }
     let src = Endpoint::new(src.addr(), src_port as u32);
     let dst = Endpoint::new(dst.addr(), dst_port as u32);
-    let (flow, from_low) = FlowKey::new(src, dst);
+    let (flow, from_low) = FlowKey::new(src, dst, LinkKind::Udp);
     Ok(Datagram {
         flow,
         from_low,
@@ -1681,7 +1905,7 @@ fn strip_raweth(bytes: &[u8], packet_index: usize) -> Option<Datagram> {
     // address it could route.
     let src = Endpoint::new(&header.smac, 0);
     let dst = Endpoint::new(&header.dmac, 0);
-    let (flow, from_low) = FlowKey::new(src, dst);
+    let (flow, from_low) = FlowKey::new(src, dst, LinkKind::RawEth);
     Some(Datagram {
         flow,
         from_low,
@@ -1949,7 +2173,7 @@ fn strip_vsockmon(bytes: &[u8], packet_index: usize) -> Result<VsockRecord, Skip
     // IP one in the shared key space.
     let src = Endpoint::new(&src_cid.to_le_bytes(), src_port);
     let dst = Endpoint::new(&dst_cid.to_le_bytes(), dst_port);
-    let (flow, from_low) = FlowKey::new(src, dst);
+    let (flow, from_low) = FlowKey::new(src, dst, LinkKind::Vsock);
     Ok(VsockRecord {
         flow,
         from_low,
@@ -2098,7 +2322,7 @@ fn strip_tcp(
     let flags = bytes[13];
     let src = Endpoint::new(src.addr(), src_port as u32);
     let dst = Endpoint::new(dst.addr(), dst_port as u32);
-    let (flow, from_low) = FlowKey::new(src, dst);
+    let (flow, from_low) = FlowKey::new(src, dst, LinkKind::Tcp);
     Ok(Segment {
         flow,
         from_low,

@@ -537,6 +537,32 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: CENSUS_R6_PLANES,
         carries: CENSUS_R6_CARRIES,
     },
+    // Round 2447 (open-debt item 696) — every flow object says WHICH LINK it
+    // was read off, and a raweth endpoint's `addr` stops being spelled as an
+    // IPv6 address.
+    //
+    // The ZA-1039 consumer report asked for the key and said in its own words
+    // that it must not be inferred from the endpoint shape. It is not: the
+    // answer is `crate::link::LinkKind`, recorded by the strip that built the
+    // key, so it reaches all four of this document's flow-rendering planes
+    // without any of them having to hold anything but the key.
+    //
+    // An ADDITION, so revision 7 has nothing to retire, and the families /
+    // carries axes move WITH it — `link` is a word a consumer switches on, and
+    // a family declared at one revision and a key added at another would be two
+    // notices for one change.
+    //
+    // ⚠ The planes axis is UNCHANGED and carried forward by name: `link` is a
+    // key on an object inside four planes, not a plane.
+    DocumentShape {
+        document: CENSUS,
+        revision: 8,
+        keys: CENSUS_R8_KEYS,
+        retiring: &[],
+        families: CENSUS_R8_FAMILIES,
+        planes: CENSUS_R6_PLANES,
+        carries: CENSUS_R8_CARRIES,
+    },
     DocumentShape {
         document: FIELDS,
         revision: 1,
@@ -662,6 +688,24 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         families: FIELDS_R6_FAMILIES,
         planes: &[],
         carries: FIELDS_R6_CARRIES,
+    },
+    // Round 2447 (open-debt item 696) — the census row's twin, on the document
+    // the ZA-1039 report was actually reading. Both of this document's flow
+    // objects gain `link`, because both render one shared flow key.
+    //
+    // An ADDITION. What a consumer pinned to revision 6 gains by moving is the
+    // key that tells it a `"port":0` endpoint whose `addr` has colons in it is
+    // a MAC and not a truncated address — and the spelling of that `addr`,
+    // which moved with it. See [`FIELDS_R7_KEYS`] for why the second half is
+    // written down here at all.
+    DocumentShape {
+        document: FIELDS,
+        revision: 7,
+        keys: FIELDS_R7_KEYS,
+        retiring: &[],
+        families: FIELDS_R7_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R7_CARRIES,
     },
     DocumentShape {
         document: SUMMARY,
@@ -1082,6 +1126,194 @@ pub const CENSUS_R7_KEYS: &[&str] = &[
     "kind",
     "last",
     "last_anchor",
+    "links",
+    "liveliness_token",
+    "locators",
+    "low",
+    "matched",
+    "max_flows_per_table",
+    "max_ms",
+    "max_scout_askers",
+    "mean_ms",
+    "messages",
+    "min_ms",
+    "mismatched",
+    "mode",
+    "name",
+    "narrowed_by_selector",
+    "nodes",
+    "non_monotonic",
+    "not_as_declared",
+    "offset_space",
+    "orphan_answers",
+    "orphan_responses",
+    "orphan_withdrawals",
+    "payload_bytes",
+    "payload_bytes_ceiling",
+    "payloads",
+    "planes",
+    "port",
+    "prefix",
+    "puts",
+    "queries",
+    "queryable",
+    "queryables",
+    "records",
+    "refused_missing_start_marker",
+    "refused_peer_quota",
+    "refused_pool_exhausted",
+    "rejected",
+    "replies",
+    "requests",
+    "restricted",
+    "revision",
+    "rows",
+    "scout",
+    "scout_askers",
+    "selection",
+    "share_bp",
+    "silent",
+    "skipped",
+    "skipped_packets",
+    "solicited_by",
+    "source_ahead_of_observer",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "subscriber",
+    "subscribers",
+    "subtrees",
+    "tokens",
+    "total_ms",
+    "total_payload_bytes",
+    "totals",
+    "unanswered",
+    "unattributed_bytes",
+    "unattributed_records",
+    "unattributed_requests",
+    "unclaimed",
+    "unclaimed_exact",
+    "unclosed",
+    "undecidable",
+    "undecided",
+    "undeclarations",
+    "undecompressible_batches",
+    "unjudged_answers",
+    "unknown_ids",
+    "unlocatable_records",
+    "unmeasured_payloads",
+    "unparsed_bytes",
+    "unread",
+    "unresolvable_fragments",
+    "unresolved",
+    "unresolved_declarations",
+    "unresolved_records",
+    "unsized_payloads",
+    "unstamped",
+    "walked_records",
+    "whatami",
+    "wire_bytes",
+    "withdrawn_at",
+    "zid",
+];
+
+/// The census document's key set at revision 8 (Round 2447, open-debt item
+/// 696).
+///
+/// Revision 7 PLUS `link`, which every flow object now carries: the kind of
+/// link the flow was read off, as `crate::link::LinkKind` recorded it. Four of
+/// this document's planes render a flow key — interests, exchanges, and the
+/// routing graph's nodes and links — and each of them gains the key, because
+/// the answer travels on the key itself rather than beside one of them.
+///
+/// An ADDITION, so revision 7 has nothing to retire.
+///
+/// ⚠ AND A VALUE CHANGED WITHOUT ITS KEY MOVING, which is stated here because
+/// no axis in this module can express it. `addr` on a raweth endpoint used to
+/// read `3003:c837:25a1` — six MAC octets pushed through the "not four bytes,
+/// therefore IPv6" branch — and now reads `30:03:c8:37:25:a1`. It is the same
+/// key carrying the same fact spelled correctly, and [`ValueFamily`]'s own
+/// residue paragraph is the nearest thing this contract has to a name for it:
+/// a meaning that moves under a stationary key. The revision is the notice,
+/// which is why the paragraph is here and not in a commit message.
+///
+/// Written out rather than aliased, for [`CENSUS_R3_KEYS`]' reason: an alias
+/// cannot express a difference.
+///
+/// MEASURED, like every set here: `the_census_documents_key_set_is_pinned`
+/// printed what the document emits and this was filled from that printout.
+pub const CENSUS_R8_KEYS: &[&str] = &[
+    "a",
+    "a_to_b",
+    "aborted_capacity_overflow",
+    "aborted_out_of_order",
+    "aborted_sender_dropped",
+    "aborted_superseded",
+    "addr",
+    "admissible",
+    "aggregate",
+    "anchor_intervals",
+    "anchors_exact",
+    "answers",
+    "answers_in_scope",
+    "asked_at",
+    "asker",
+    "asks",
+    "at_most_bytes",
+    "attributed_bytes",
+    "b",
+    "b_to_a",
+    "begun",
+    "by_kind",
+    "bytes",
+    "cancelled_at",
+    "caps",
+    "children",
+    "closed_at",
+    "completed",
+    "completion",
+    "consistent",
+    "continued",
+    "contradictions",
+    "count",
+    "declaration",
+    "declarations",
+    "declared",
+    "declared_at",
+    "declarer",
+    "declarer_zid",
+    "dels",
+    "descriptors",
+    "document",
+    "dropped_by_limits",
+    "elsewhere",
+    "errs",
+    "evidence",
+    "exchanges",
+    "first",
+    "first_anchor",
+    "first_reply",
+    "flow",
+    "flows",
+    "fragment_chains",
+    "frames",
+    "frames_per_flow",
+    "gaps",
+    "halted_batches",
+    "hello",
+    "high",
+    "id",
+    "inadmissible",
+    "init",
+    "interests",
+    "join",
+    "judged",
+    "keyexpr",
+    "keyexprs",
+    "keys",
+    "kind",
+    "last",
+    "last_anchor",
+    "link",
     "links",
     "liveliness_token",
     "locators",
@@ -1685,6 +1917,80 @@ pub const CENSUS_R6_CARRIES: &[KeyCarries] = &[
     },
 ];
 
+/// The value families the census document declares at revision 8.
+///
+/// Round 2447 (open-debt item 696) — revision 6's PLUS `link`, whose words come
+/// from [`LINK_KIND_R7`]. The same constant serves both documents because it is
+/// one vocabulary: the two documents render the SAME flow key through the same
+/// emitter, and declaring the words twice would be two lists to keep equal.
+///
+/// ⚠ That is the opposite of the choice `offset_space` made, and the difference
+/// is which fact each declaration is about. `offset_space` is declared
+/// separately per document because a consumer pins the two documents
+/// separately and each says its own words AT ITS OWN REVISION — and this
+/// constant still does that, since `CENSUS_R8_FAMILIES` and
+/// `FIELDS_R7_FAMILIES` are separate declarations that happen to name one set.
+/// What is shared is the SET, not the declaration.
+pub const CENSUS_R8_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "asker",
+        values: DIRECTION_R4,
+    },
+    ValueFamily {
+        key: "declarer",
+        values: DIRECTION_R4,
+    },
+    ValueFamily {
+        key: "kind",
+        values: INTEREST_KIND_R4,
+    },
+    ValueFamily {
+        key: "link",
+        values: LINK_KIND_R7,
+    },
+    ValueFamily {
+        key: "mode",
+        values: INTEREST_MODE_R4,
+    },
+    ValueFamily {
+        key: "offset_space",
+        values: ANCHOR_SPACE_R4,
+    },
+];
+
+/// What each census family's WORD decides about the keys beside it, at
+/// revision 8.
+///
+/// Round 2447 (open-debt item 696) — revision 6's PLUS `link`, a PASSENGER for
+/// the reason [`FIELDS_R7_CARRIES`] gives: a flow object is `low` / `high` /
+/// `link` for every kind of link.
+pub const CENSUS_R8_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "asker",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "declarer",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "kind",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "link",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "mode",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "offset_space",
+        shape: CarriesShape::Passenger,
+    },
+];
+
 /// The field document's key set at revision 2.
 ///
 /// MEASURED, never transcribed — item 400's prescription, and here it had to be
@@ -2128,6 +2434,184 @@ pub const FIELDS_R6_FAMILIES: &[ValueFamily] = FIELDS_R5_FAMILIES;
 /// discriminant — and it would have made the document's own shape depend on
 /// which ids a capture happened to declare.
 pub const FIELDS_R6_CARRIES: &[KeyCarries] = FIELDS_R5_CARRIES;
+
+/// The field document's key set at revision 7 (Round 2447, open-debt item 696).
+///
+/// Revision 6 PLUS `link`, on both of this document's flow objects — the stream
+/// half and the datagram half render one shared flow key, so neither can gain
+/// the key without the other.
+///
+/// An ADDITION, so revision 6 has nothing to retire.
+///
+/// ⚠ This is the document the ZA-1039 report was reading. Its second claim was
+/// that the row said `"addr":"3003:c837:25a1","port":0` for a raweth flow with
+/// nothing beside it saying the flow was raweth. Both halves move here: the key
+/// arrives, and `addr` on such an endpoint now spells the six MAC octets. See
+/// [`CENSUS_R8_KEYS`] for why the second half is written down rather than left
+/// to a commit message — no axis in this module can express a value whose
+/// spelling changed under a stationary key.
+///
+/// Written out rather than aliased: revision 6 could alias revision 5 because
+/// the set was unchanged, and this one is not.
+///
+/// MEASURED: `the_field_documents_key_set_is_pinned` printed what the document
+/// emits and this was filled from that printout.
+pub const FIELDS_R7_KEYS: &[&str] = &[
+    "addr",
+    "caps",
+    "capture_reread",
+    "carried",
+    "datagram_flows",
+    "declaration_checked",
+    "declared",
+    "descriptor_bytes",
+    "despite_encoding",
+    "direction",
+    "document",
+    "dropped_by_limits",
+    "end",
+    "example",
+    "fields",
+    "flow",
+    "flows",
+    "format",
+    "frames",
+    "frames_per_flow",
+    "high",
+    "keyexpr",
+    "kind",
+    "link",
+    "low",
+    "max_flows_per_table",
+    "max_scout_askers",
+    "message",
+    "message_at",
+    "messages",
+    "name",
+    "note",
+    "offset_space",
+    "omitted",
+    "path",
+    "payload_decode",
+    "payload_mapping",
+    "payload_mapping_counts_exact",
+    "payload_refusals",
+    "port",
+    "revision",
+    "samples",
+    "scout_askers",
+    "shown",
+    "skipped",
+    "skipped_packets",
+    "start",
+    "state",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "stream_flows",
+    "under",
+    "value",
+    "why",
+    "wrong",
+];
+
+/// The value families the field document declares at revision 7.
+///
+/// Round 2447 (open-debt item 696) — revision 6's PLUS `link`, whose words come
+/// from [`LINK_KIND_R7`].
+pub const FIELDS_R7_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "direction",
+        values: DIRECTION_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "kind",
+        values: FIELD_VALUE_KIND_R3,
+    },
+    ValueFamily {
+        key: "link",
+        values: LINK_KIND_R7,
+    },
+    ValueFamily {
+        key: "message",
+        values: MESSAGE_R5,
+    },
+    ValueFamily {
+        key: "offset_space",
+        values: ANCHOR_SPACE_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "state",
+        values: PAYLOAD_STATE_R2,
+    },
+    ValueFamily {
+        key: "under",
+        values: REFUSED_UNDER_R2,
+    },
+    ValueFamily {
+        key: "wrong",
+        values: MISBOUND_R2,
+    },
+];
+
+/// `flow.link` at census revision 8 and field revision 7 — SORTED.
+///
+/// Round 2447 (open-debt item 696). Every kind of link this reader recovers a
+/// flow off, as `crate::link::LinkKind` names them. `serial` is here for the
+/// same reason it is a word in `wz-analyze`'s framing column: a serial line is
+/// a link with no addressing at all, and the flow key it stands under is the
+/// empty one.
+///
+/// Written out rather than pointing at `LinkKind::names`, for
+/// [`ValueFamily::values`]' reason: a table that read the walk would widen with
+/// it and the revision would never have to move. The joint is
+/// `the_declared_value_families_match_the_librarys_own_vocabularies`, and the
+/// walk on its other side is bound to an exhaustive match, so a link kind added
+/// later fails there until a revision declares it.
+pub const LINK_KIND_R7: &[&str] = &["raweth", "serial", "tcp", "udp", "vsock"];
+
+/// What each field-document family's WORD decides about the keys beside it, at
+/// revision 7.
+///
+/// Round 2447 (open-debt item 696) — revision 6's PLUS `link`, a PASSENGER.
+/// The word decides nothing about the object it sits in: a flow object is
+/// `low` / `high` / `link` for every kind, because the two endpoints are the
+/// key whatever the link is and `port` is emitted structurally even where the
+/// link has none. What the word decides is how `addr` is SPELLED, which is a
+/// value and not a companion key — [`CarriesShape`] is about presence.
+pub const FIELDS_R7_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "direction",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "kind",
+        shape: CarriesShape::Discriminant(FIELD_VALUE_KIND_CARRIES_R4),
+    },
+    KeyCarries {
+        key: "link",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "message",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "offset_space",
+        shape: CarriesShape::Discriminant(FIELD_OFFSET_SPACE_CARRIES_R5),
+    },
+    KeyCarries {
+        key: "state",
+        shape: CarriesShape::Discriminant(PAYLOAD_STATE_CARRIES_R4),
+    },
+    KeyCarries {
+        key: "under",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "wrong",
+        shape: CarriesShape::Passenger,
+    },
+];
 
 /// Every shape each `fields[].kind` word's object takes, at field-document
 /// revision 4.
@@ -4031,7 +4515,13 @@ mod tests {
             // R2211 (item 565) — to 7 for the oldest reason of all, a key set
             // that GREW: the `fragment_chains` object, ten counters the
             // observer already computed and the aggregation plane discarded.
-            (CENSUS, 7u32),
+            // Round 2447 (item 696) — to 8 when every flow object gained
+            // `link`. THREE axes move together here, which no earlier census
+            // revision did: the key set grows, the vocabulary gains a sixth
+            // family, and that family's carries verdict is declared — because
+            // they are one change, and splitting them across revisions would
+            // hand a consumer three notices for it.
+            (CENSUS, 8u32),
             // R2175 (open-debt item 552) — the field document moved to 2 when
             // its PAYLOAD PLANE joined the pin (fifteen keys revision 1 had
             // never covered) and its first three value families were declared.
@@ -4054,7 +4544,12 @@ mod tests {
             // `message` stays a passenger because the key arrives on every
             // entry. This assertion is the notice, and item 692 is the axis
             // that could not give one.
-            (FIELDS, 6),
+            // Round 2447 (item 696) — to 7 when both flow objects gained
+            // `link`, the census row's twin. This is the document the ZA-1039
+            // consumer report was reading when it found a raweth flow whose
+            // `addr` said `3003:c837:25a1` and whose row said nothing at all
+            // about the link.
+            (FIELDS, 7),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.

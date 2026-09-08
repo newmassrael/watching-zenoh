@@ -1040,12 +1040,20 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 10] = [
+        let live: [(&str, &str, Vec<&'static str>); 12] = [
             (
                 rev::FIELDS,
                 "kind",
                 wz_session_core::dissect::FieldValue::kind_words(),
             ),
+            // Round 2447 (open-debt item 696) — `link` on BOTH documents, and
+            // both rows take the same walk. That is the point rather than a
+            // duplicate: the two documents declare the vocabulary separately,
+            // at their own revisions, and holding each declaration to the ONE
+            // walk is what keeps them from drifting into two answers about one
+            // enum.
+            (rev::FIELDS, "link", crate::link::LinkKind::names()),
+            (rev::CENSUS, "link", crate::link::LinkKind::names()),
             // R2223 (open-debt item 573) — the message vocabulary, and the row
             // whose walk is held to something outside itself. The others here
             // are successor chains checked against a derive or against each
@@ -2453,6 +2461,109 @@ mod tests {
             "every datagram flow here carries a message, so an empty listing is \
              the defect this test was written for: {out}"
         );
+    }
+
+    /// Round 2447 (open-debt item 696) — A FLOW ROW SAYS WHICH LINK IT WAS READ
+    /// OFF, AND ITS ENDPOINTS ARE SPELLED THE WAY THAT LINK SPELLS ADDRESSES.
+    ///
+    /// # The defect, which is the ZA-1039 report's second claim
+    ///
+    /// The reader knew the answer and threw it away. `DatagramLink::RawEth` is
+    /// chosen in `Dissection::push_packet_at`, whose own comment calls that the
+    /// last place that knows, and it reached exactly one question — whether the
+    /// link has a handshake. Nothing downstream carried it, so the document
+    /// emitted a flow whose two endpoints are 6-byte MACs and whose only
+    /// discriminator was `Endpoint::is_ipv4`. The `false` that answers sent
+    /// them down the IPv6 branch, and pico's source MAC `30:03:c8:37:25:a1`
+    /// went out as `"addr":"3003:c837:25a1","port":0` — three hex groups that
+    /// read as a truncated address, beside no key saying otherwise.
+    ///
+    /// # Why the fixture MIXES, and what each half grades
+    ///
+    /// R2443 wrote the mixing rule for the sibling above and this test needs it
+    /// twice over. A raweth-only capture cannot tell "the row says raweth" from
+    /// "the row says raweth for everything", and it cannot tell a MAC spelled
+    /// correctly from an address renderer that has stopped spelling IPv4. Both
+    /// halves are asserted here, on ONE document, so the repair cannot be a
+    /// widening that lost the other kind.
+    ///
+    /// # The discriminator is NOT the endpoint shape, and this is where that is
+    /// checked
+    ///
+    /// The report asked for that in its own words, and the reason is in this
+    /// crate one layer up: `link_handshake` exists precisely because pico's
+    /// default DMAC has a clear I/G bit, so an address rule reads its whole
+    /// deployment as a unicast link and is wrong about every frame. The same
+    /// mistake in a renderer is what this closes. What the document carries is
+    /// `crate::link::LinkKind`, written by the strip that decapsulated the
+    /// frame — so a MAC that happened to be four bytes long, or an IPv4 address
+    /// that happened to be six, would still be named correctly.
+    #[test]
+    fn a_datagram_flow_row_says_which_link_it_was_read_off() {
+        use crate::datagram_tests::{init_message, raweth_packet};
+
+        let udp = udp_packet(
+            [192, 168, 1, 5],
+            43210,
+            [192, 168, 1, 9],
+            7447,
+            &init_message(),
+        );
+        let eth = raweth_packet(&init_message());
+
+        let mut d = Dissection::new();
+        d.push_packet_at(LINKTYPE_ETHERNET, 0, Some(0), &udp);
+        d.push_packet_at(LINKTYPE_ETHERNET, 1, Some(1), &eth);
+        d.finish();
+        assert_eq!(
+            d.datagram_flows().len(),
+            2,
+            "the fixture must MIX the two link kinds, or neither half below \
+             grades anything"
+        );
+
+        let file = crate::pcap::write(
+            LINKTYPE_ETHERNET,
+            &[(0, 0, udp.as_slice()), (1, 0, eth.as_slice())],
+        );
+        let out = fields_json(&d, &file, None, None);
+
+        // THE KEY, both words, from one document.
+        assert!(
+            out.contains("\"link\":\"raweth\""),
+            "the raweth flow's row must say which link it is: {out}"
+        );
+        assert!(
+            out.contains("\"link\":\"udp\""),
+            "and the UDP flow's row must still say udp -- a repair that named \
+             every flow raweth would satisfy the assertion above: {out}"
+        );
+
+        // THE SPELLING, both families. The MACs are `raweth_packet`'s own:
+        // pico's default destination mapping and the source it lays.
+        for mac in [
+            "\"addr\":\"30:03:c8:37:25:a1\"",
+            "\"addr\":\"aa:bb:cc:dd:ee:ff\"",
+        ] {
+            assert!(
+                out.contains(mac),
+                "a raweth endpoint is a MAC and must be spelled as one ({mac}): \
+                 {out}"
+            );
+        }
+        assert!(
+            !out.contains("3003:c837:25a1"),
+            "and the three-group reading the consumer reported must be gone, \
+             not merely joined by a second one: {out}"
+        );
+        for ip in ["\"addr\":\"192.168.1.5\"", "\"addr\":\"192.168.1.9\""] {
+            assert!(
+                out.contains(ip),
+                "the UDP flow's endpoints are IPv4 and must still read as \
+                 dotted quads ({ip}) -- this is the arm a MAC-shaped repair \
+                 would break: {out}"
+            );
+        }
     }
 
     /// THE NEGATIVE ARM: a link kind that genuinely is NOT a datagram is still
