@@ -9929,7 +9929,21 @@ fn a_channel_liveliness_subscriber_delivers_an_owned_sample_to_its_receiver() {
 /// token, which is exactly what waiting for the peer's CURRENT reply would
 /// NOT give it behind a zenoh router: upstream suppresses re-declaring a
 /// token it has already declared to that face
-/// (`net/routing/hat/router/token.rs:127`).
+/// (`zenoh/src/net/routing/hat/broker/token.rs` @ `local_tokens.contains_key`,
+/// in `maybe_propagate_token`).
+///
+/// ⚠ R2440 REPOINTED THIS AND CORRECTED ITS SUBJECT. It cited the ROUTER
+/// hat's own token module by line number, which is where the per-face dedup
+/// sat at 1.5.0; at the pin that file mentions `local_tokens` NOWHERE and the
+/// cited line is a tracing arm. What the router hat dedups now is per-ROUTER-ZID on the
+/// link-state plane (`router_tokens.contains(&ctx.tables.zid)` in its
+/// `fn propagate_token`), which is a different suppression. The PER-FACE one
+/// this test's reasoning rests on lives in the hats that serve faces —
+/// `broker` for a router's south-bound client region, and `peer` / `client`
+/// with the same `local_tokens.contains_key` guard — selected per region in
+/// `zenoh/src/net/routing/gateway.rs` @ `(Bound::South, WhatAmI::Client)`.
+/// So the sentence above still holds behind a router; the file that states it
+/// is no longer the router hat's.
 #[cfg(all(
     feature = "liveliness-subscriber",
     feature = "liveliness-token",

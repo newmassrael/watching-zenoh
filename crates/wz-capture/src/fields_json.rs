@@ -74,6 +74,10 @@ use crate::payload_decode::{decode_payload, push_decoding, Declarations, Keyexpr
 /// only when a mapping exists, which is the rule the command line has followed
 /// since R311y699: a reader who declared no format is not told about payloads
 /// they did not ask about.
+///
+/// R2440 (open-debt item 691) — the RESOLVED KEYEXPR does not ride on that rule
+/// and never should have. It is emitted on every `carried` entry of every walked
+/// row whatever this argument is; see [`push_carried`].
 pub fn fields_json(
     d: &crate::Dissection,
     capture: &[u8],
@@ -192,7 +196,7 @@ fn push_stream_flow(
         );
         match flow.message_bytes(frame) {
             Err(why) => push_declined(&why, out),
-            Ok(bytes) => push_walk(bytes, frame, declarations.map(|d| (d, &spaces)), out),
+            Ok(bytes) => push_walk(bytes, frame, &spaces, declarations, out),
         }
         out.push('}');
     }
@@ -281,7 +285,7 @@ fn push_datagram_flow(
             dir_name(frame.direction),
             crate::anchor_space_of(frame).name()
         );
-        push_walk(message, frame, declarations.map(|d| (d, &spaces)), out);
+        push_walk(message, frame, &spaces, declarations, out);
         out.push('}');
     }
     let _ = write!(
@@ -303,10 +307,21 @@ fn push_datagram_flow(
 /// The walk is driven at base 0 so every span is message-relative; the row's
 /// own coordinate says where the message sits (see the module doc).
 ///
-/// R311y856 — `lens` is the payload mapping and the id table it resolves keyexprs
-/// through, or `None` for a caller that declared no format. It rides ONE
-/// argument because the two are one fact: a mapping with nothing to resolve
-/// against would silently miss every message a running capture names by id.
+/// `spaces` is the id table this flow has declared so far and `declarations` is
+/// the payload format mapping in force, or `None` for a caller that declared no
+/// format. TWO arguments, and R2440 (open-debt item 691) is what separated them.
+///
+/// R311y856 rode them as one `lens`, on the argument that they are one fact: a
+/// mapping with nothing to resolve against would silently miss every message a
+/// running capture names by id. That is true of the MAPPING and it was made to
+/// hold in the other direction too, where it is false. A resolved keyexpr is a
+/// property of the message; a payload format is the reader's own input; and
+/// pairing them meant the only door to the first was a declaration about the
+/// second. A consumer building a republisher reported the consequence — with no
+/// format declared it got `state: "no_rules"` and NO key, and with any format at
+/// all, even one matching nothing, it got a key — so whether a sample could be
+/// replayed turned on whether its reader had opinions about payloads. See
+/// [`push_carried`], which now resolves for every walked row.
 ///
 /// The payload block hangs off a WALKED tree and never off a declined row: a
 /// decline means the bytes are not the message the session framed, and decoding
@@ -315,7 +330,8 @@ fn push_datagram_flow(
 fn push_walk(
     bytes: &[u8],
     frame: &PassiveFrame,
-    lens: Option<(&Declarations<'_>, &crate::agg::KeyexprSpaces)>,
+    spaces: &crate::agg::KeyexprSpaces,
+    declarations: Option<&Declarations<'_>>,
     out: &mut String,
 ) {
     match wz_session_core::dissect::dissect_transport_message(bytes, 0) {
@@ -330,13 +346,13 @@ fn push_walk(
         Ok(field) => {
             let framed = message_name(frame);
             if walk_agrees(&field.name, &framed) {
+                let at = KeyexprAt::new(frame.direction, spaces);
                 out.push_str("\"name\":");
                 escape_into(&field.name, out);
                 out.push_str(",\"fields\":");
                 out.push_str(&to_json(&field));
-                push_carried(bytes, &field, out);
-                if let Some((declarations, spaces)) = lens {
-                    let at = KeyexprAt::new(frame.direction, spaces);
+                push_carried(bytes, &field, at, out);
+                if let Some(declarations) = declarations {
                     out.push_str(",\"payload_decode\":");
                     push_decoding(&decode_payload(&field, declarations, at), out);
                 } else if let Some(decoding) = crate::payload_decode::shm_decoding(&field) {
@@ -423,31 +439,98 @@ fn push_declined(why: &str, out: &mut String) {
 /// a disagreement and not a gap. It arrives under its walked name, where the
 /// declared-values gate reports it as a word no revision declares — the rule
 /// this workspace states as "unclassified is RED, not a pass".
-fn push_carried(bytes: &[u8], field: &wz_session_core::dissect::Field, out: &mut String) {
+///
+/// # R2440 (open-debt item 691) — AND THE KEY EACH ONE TRAVELLED UNDER
+///
+/// Every entry carries `keyexpr`, RESOLVED through
+/// [`crate::payload_decode::subtree_keyexpr`] — the same
+/// `KeyexprSpaces::resolve_parts` the payload plane uses, never a second copy of
+/// the rule. It is emitted for every walked row whatever the caller declared,
+/// and that is the item: the value was already computed on every frame (the
+/// table is folded in frame order above, ahead of the display cap) and the only
+/// door to it was `payload_decode.keyexpr`, which exists only when a payload
+/// FORMAT was declared. A consumer building a republisher out of a capture needs
+/// the key and does not care about payload formats; it was having to declare one
+/// it would never read, purely as a side channel. Emitting the key here couples
+/// nothing: a keyexpr is a property of the message, which is what this listing
+/// is about.
+///
+/// # `null` rather than an absent key, and why the ENTRY is the home
+///
+/// Emitted STRUCTURALLY on every entry, `null` where there is no key to name.
+/// That is [`crate::doc_revision::CarriesShape::Passenger`]'s own rule — an
+/// inapplicable companion arrives as `null` rather than absent — and here it is
+/// load-bearing twice over: a consumer cannot tell "this build stopped emitting
+/// it" from "this message has no key" out of an absence, and `message` would
+/// stop being a passenger the moment the word decided whether the key arrived.
+///
+/// The ENTRY and not the row, which is the placement the reporting consumer left
+/// to this tree. A row is one transport message and a `Frame` batches several
+/// network messages that need not share a key, so a row-level key would have to
+/// pick one of them — the pairing defect
+/// [`crate::payload_decode::keyexpr_and_payload`] measured one level down, where
+/// taking the first keyexpr under a batch paired it with another record's bytes.
+/// The entry is the smallest object that names ONE network message, so it is the
+/// only place where the key is a property of its subject.
+///
+/// A transport message that BATCHES records names no key of its own for the same
+/// reason: every keyexpr under it belongs to a record that has its own entry
+/// below. One that batches nothing is searched, so a transport MID that ever
+/// carries a `WireExpr` is answered by the structure rather than by a list of
+/// which MIDs do.
+fn push_carried(
+    bytes: &[u8],
+    field: &wz_session_core::dissect::Field,
+    at: KeyexprAt<'_>,
+    out: &mut String,
+) {
     use wz_session_core::dissect::MessageName;
     out.push_str(",\"carried\":[");
     let mut first = true;
-    let mut entry = |word: &str, span: &wz_session_core::dissect::Span, out: &mut String| {
+    let mut entry = |word: &str,
+                     span: &wz_session_core::dissect::Span,
+                     keyexpr: Option<String>,
+                     out: &mut String| {
         if !first {
             out.push(',');
         }
         first = false;
         out.push_str("{\"message\":");
         escape_into(word, out);
-        let _ = write!(out, ",\"start\":{},\"end\":{}}}", span.start, span.end);
+        let _ = write!(
+            out,
+            ",\"start\":{},\"end\":{},\"keyexpr\":",
+            span.start, span.end
+        );
+        match &keyexpr {
+            Some(keyexpr) => escape_into(keyexpr, out),
+            None => out.push_str("null"),
+        }
+        out.push('}');
     };
+    let records = batched_records(field);
     if let Some(message) = bytes
         .first()
         .and_then(|b| MessageName::of_transport(b & 0x1F))
     {
-        entry(message.name(), &field.span, out);
+        let keyexpr = if records.is_empty() {
+            crate::payload_decode::subtree_keyexpr(field, at)
+        } else {
+            None
+        };
+        entry(message.name(), &field.span, keyexpr, out);
     }
-    for record in batched_records(field) {
+    for record in records {
         let word = bytes
             .get(record.span.start)
             .and_then(|b| MessageName::of_network(b & 0x1F))
             .map_or(record.name.as_ref(), |m| m.name());
-        entry(word, &record.span, out);
+        entry(
+            word,
+            &record.span,
+            crate::payload_decode::subtree_keyexpr(record, at),
+            out,
+        );
     }
     out.push(']');
 }
@@ -1993,10 +2076,19 @@ mod tests {
         // THE CONTROL, on the number rather than on a second string: the
         // ordinary record shares this document and this call, and it is the
         // record that must still be told nothing.
-        assert!(
-            out.contains("\"keyexpr\""),
-            "the fixture must actually reach the walked rows, or the count \
-             above is over an empty document: {out}"
+        //
+        // R2440 (open-debt item 691) — COUNTED OVER `carried`, which is emitted
+        // once per WALKED row, and it used to be `out.contains("\"keyexpr\"")`.
+        // That string was reached only through the SHM block when this was
+        // written, and item 691 put a resolved `keyexpr` on every carried entry
+        // of every row: the old control would now hold over a document whose
+        // payload plane emitted nothing at all. A witness whose subject moves
+        // under it is a green that read nothing.
+        let rows = out.matches("\"carried\":[").count();
+        assert_eq!(
+            rows, 2,
+            "both records must reach the walked rows, or the count above is \
+             over a document holding one of them: {out}"
         );
     }
 
@@ -2152,6 +2244,114 @@ mod tests {
             declarations.unused().is_empty(),
             "both declarations applied: {:?}",
             declarations.unused()
+        );
+    }
+
+    /// R2440 (open-debt item 691) — THE RESOLVED KEYEXPR REACHES A READER THAT
+    /// DECLARED NO PAYLOAD FORMAT.
+    ///
+    /// # The coupling, as the consumer reported it
+    ///
+    /// The value was already computed for every frame — the id table is folded
+    /// in frame order, ahead of the display cap — and the only place it left the
+    /// library was `payload_decode.keyexpr`, a block emitted only when the
+    /// caller declared a payload FORMAT. So a reader that declared nothing got
+    /// `state: "no_rules"` and no key, and a reader that declared anything at
+    /// all — even a rule matching nothing — got a key. Whether a captured sample
+    /// could be REPUBLISHED therefore turned on whether its reader had opinions
+    /// about payload encodings, and a replay tool had to hand over a decoder
+    /// mapping it would never read purely as a side channel. That is the item,
+    /// and it is a coupling rather than a defect: the resolver, the
+    /// refuse-rather-than-guess rule and the payload block are each right about
+    /// their own subject.
+    ///
+    /// ⚠ The "just pass an empty mapping" answer is not even available, which is
+    /// worth stating because it is the first thing a reader tries:
+    /// [`fields_json`] folds an empty [`Declarations`] to `None` on its first
+    /// line, so the side channel demanded a mapping with a real rule in it.
+    ///
+    /// # The population is DERIVED from the document
+    ///
+    /// Not from a list of rows this test knows about: every JSON object in the
+    /// document that carries a `message` key IS a carried entry — that key is
+    /// emitted nowhere else — so the population comes from the shape of what was
+    /// rendered. A floor refuses to grade an empty one: a claim that every entry
+    /// carries a key is free when there are no entries.
+    ///
+    /// # And the value is one NEITHER shortcut produces
+    ///
+    /// The fixture's sample names its key by id against an inline declaration,
+    /// so the answer is `demo/sensor/temp`. Reading the suffix alone gives
+    /// `/temp` — asserted absent, because that is a WRONG key rather than a
+    /// missing one and a republisher would send live traffic to it — and the
+    /// `id == 0` literal path is not taken at all. A gate over the every-plane
+    /// capture, whose records are `id 0` plus a suffix, would pass on a build
+    /// holding no table.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn every_carried_entry_names_its_key_without_a_payload_format() {
+        use crate::doc_revision::object_scopes;
+
+        let (d, file) = crate::census_json::fed_tests::id_named_keyexpr_capture();
+
+        // NO DECLARATIONS. This is the door the reporting consumer reaches for,
+        // and the one the key used to be behind.
+        let out = fields_json(&d, &file, None, None);
+
+        assert!(
+            !out.contains("\"payload_decode\""),
+            "this reader declared no format, so no payload plane may be emitted \
+             -- otherwise the key below could be arriving through the very side \
+             channel this witness is about: {out}"
+        );
+
+        // THE POPULATION, derived: every object carrying `message` is a carried
+        // entry, and `message` is emitted in no other object.
+        let entries: Vec<Vec<(&str, &str)>> = object_scopes(&out)
+            .into_iter()
+            .filter(|scope| scope.iter().any(|(k, _)| *k == "message"))
+            .collect();
+        assert!(
+            entries.len() >= 3,
+            "the fixture must render the Init, the Declare's frame and the \
+             Push's -- {} carried entr(ies) reached this gate, and a claim over \
+             an empty population is free: {out}",
+            entries.len()
+        );
+
+        let missing: Vec<&str> = entries
+            .iter()
+            .filter(|scope| !scope.iter().any(|(k, _)| *k == "keyexpr"))
+            .filter_map(|scope| scope.iter().find(|(k, _)| *k == "message").map(|(_, v)| *v))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "every carried entry names its key or says `null`; {missing:?} \
+             carried neither, so a consumer cannot tell a message with no key \
+             from a build that stopped emitting one: {out}"
+        );
+
+        let keys: Vec<&str> = entries
+            .iter()
+            .filter_map(|scope| scope.iter().find(|(k, _)| *k == "keyexpr").map(|(_, v)| *v))
+            .collect();
+        assert!(
+            keys.contains(&"\"demo/sensor/temp\""),
+            "the sample's key is named by id against the inline declaration, so \
+             the resolved answer is `demo/sensor/temp`: {keys:?} in {out}"
+        );
+        assert!(
+            !keys.contains(&"\"/temp\""),
+            "`/temp` is what reading the suffix alone reports for a record \
+             published under `demo/sensor/temp` -- a WRONG key rather than a \
+             missing one, and live traffic sent to the wrong topic for anybody \
+             replaying it: {keys:?} in {out}"
+        );
+        assert!(
+            keys.contains(&"null"),
+            "the Init names no key at all and must say so as `null` rather than \
+             by omission, which is what keeps `message` a passenger: {keys:?} \
+             in {out}"
         );
     }
 }

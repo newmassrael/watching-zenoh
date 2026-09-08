@@ -1371,6 +1371,55 @@ pub(crate) mod fed_tests {
         every_plane_capture_with_file(keyexpr, None, false).0
     }
 
+    /// R2440 (open-debt item 691) — A CAPTURE WHOSE SAMPLE NAMES ITS KEY BY ID.
+    ///
+    /// The declaration is INLINE and the `Push` that follows carries `(id 17,
+    /// "/temp")` against it, so the key on the wire is `demo/sensor/temp` and
+    /// NEITHER shortcut reaches it: reading the suffix alone reports `/temp` —
+    /// the wrong-key failure `payload_decode`'s own doc measured, and a wrong
+    /// topic rather than a missing one for anybody replaying the sample — and
+    /// `id == 0`'s literal path is not taken at all.
+    ///
+    /// A fixture of its own rather than a widening of [`every_plane_capture`],
+    /// on that fixture's own rule: every caller of it sees byte-identical bytes
+    /// and the key-set pins are taken over exactly those. It is also the shape
+    /// the every-plane capture deliberately does NOT have — its records are
+    /// `id 0` plus a suffix, which resolves consulting no table, so a gate over
+    /// it alone would pass on a build that had no table at all.
+    ///
+    /// ⚠ ONE DIRECTION, and that is the point rather than an economy: the
+    /// declarer and the publisher are the same side, so the `M` bit names the
+    /// SENDER's space and the id resolves through the table this flow built.
+    ///
+    /// Gated exactly as its ONE caller is, for the reason
+    /// [`interest_pair_capture`] states three fixtures down and this one first
+    /// shipped without: the caller is the carries gate in `fields_json`, which
+    /// the `dissect` feature selects, so a fixture carrying only this module's
+    /// `network-codecs` gate is dead code in every DEFAULT build -- `dissect`
+    /// is default-off -- and `cargo test -p wz-capture` refuses it under
+    /// `-D warnings` before any test runs.
+    #[cfg(feature = "dissect")]
+    pub(crate) fn id_named_keyexpr_capture() -> (Dissection, Vec<u8>) {
+        let declare = framed_frame(
+            0,
+            &wz_session_core::declare_build::build_declare_kexpr(17, "demo/sensor")
+                .expect("the production keyexpr-declaration builder")
+                .try_as_borrowed()
+                .expect("re-borrow")
+                .encode_to_vec(),
+        );
+        let put = framed_frame(1, &push(sender_space(17, Some("/temp")), b"hello"));
+        let mut low = framed_init(&ZID_A);
+        low.extend_from_slice(&declare);
+        low.extend_from_slice(&put);
+        let packet = tcp_packet(1000, &low);
+        let mut d = Dissection::new();
+        d.push_packet_at(LINKTYPE_ETHERNET, 0, Some(0), &packet);
+        d.finish();
+        let file = crate::pcap::write(LINKTYPE_ETHERNET, &[(0, 0, packet.as_slice())]);
+        (d, file)
+    }
+
     /// R2184 (open-debt item 556) — TWO INTERESTS, ONE PER DIRECTION, IN TWO
     /// MODES, so the `requests` row is seen more than once with the word
     /// changed.

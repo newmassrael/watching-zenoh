@@ -452,7 +452,7 @@ ROOTLESS_STALE_LINE_BUDGET = 1
 #: re-anchored WITH their roots, so the occurrences left this residue rather than
 #: moving between buckets. (Their paths are described rather than spelled, for the
 #: reason the LINE_BUDGET note above now carries.)
-ROOTLESS_UNDECLARED_BUDGET = 661
+ROOTLESS_UNDECLARED_BUDGET = 660
 #: EVERY root-less occurrence, graded or not: `rootless_line + rootless_bare +
 #: residue`. One ratchet over the union of the three above, and it exists
 #: because those three CANNOT express the invariant that matters.
@@ -492,7 +492,7 @@ ROOTLESS_UNDECLARED_BUDGET = 661
 #: R2422 — 802 -> 795, the same seven occurrences as the budget above: the
 #: `session-extqos` claim surface's root-less citations, re-anchored with their
 #: roots rather than retired, so they left the root-less population entirely.
-ROOTLESS_TOTAL_BUDGET = 795
+ROOTLESS_TOTAL_BUDGET = 794
 
 #: A LIVE invocation of the RESOLUTION arm. R2242 split this gate in two and,
 #: in doing so, made `--resolve` a flag someone can simply stop passing: delete

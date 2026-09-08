@@ -83,3 +83,18 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # the crate that must invert it, because a second copy of the packet layout here
 # would be a second opinion about where a header ends.
 wz-tls-record = { path = "../wz-tls-record", features = ["fixtures"] }
+
+# R2440 — THE EDGE R2386 DID NOT DRAW, and it broke the build rather than a
+# test. That round narrowed `declare_build::build_declare_final_reply` from
+# `codec-declare` to `declare-final` and gave the cargo edge to every plane that
+# terminates an interest reply -- `declare-subscriber`, `liveliness-token`,
+# `routing-peer` and `wz-capture`'s dev-dep -- and this crate's interest fixture
+# builds its terminator with the same call. It was missed, so `cargo test -p
+# wz-analyze` has not COMPILED since: Layer C1bw runs exactly that command and
+# never reached it, because Layer C1cf reds earlier in the same fail-fast job.
+#
+# A dev-dependency for the reason `wz-capture`'s says: the command line READS a
+# Final off the wire and never builds one.
+[dev-dependencies.wz-session-core]
+path = "../wz-session-core"
+features = ["declare-final"]

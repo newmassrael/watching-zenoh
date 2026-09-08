@@ -271,7 +271,11 @@
 //!   list it beside the per-peer filter as "off by default in zenoh" and thereby
 //!   put it on wz's roadmap. At the 1.10.0 pin it is not off by default, it is
 //!   GONE: `failover_brokering` occurs ZERO times in upstream's whole routing
-//!   tree (nine times in `hat/router/token.rs` alone at 1.5.0), the function
+//!   tree (nine times in the router hat's own token module alone at 1.5.0 --
+//!   DESCRIBED rather than spelled as a path, because a 1.5.0 location is not a
+//!   citation anything can resolve, and written root-less it landed in
+//!   `upstream_citation_anchor_gate`'s ungraded bucket: R2440 measured the
+//!   ratchet ABOVE budget at `0793a8a5` on exactly this line), the function
 //!   `propagate_forget_simple_token_to_peers` that drove it does not exist, and
 //!   the config key survives only as a deprecated wrapper upstream documents as
 //!   having no effect. Deferring work upstream has deleted is worse than leaving

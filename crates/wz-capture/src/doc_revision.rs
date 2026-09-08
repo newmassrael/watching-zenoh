@@ -635,6 +635,34 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R5_CARRIES,
     },
+    // R2440 (open-debt item 691) — revision 6 puts `keyexpr` on every `carried`
+    // entry, RESOLVED, whatever the caller declared. It retires nothing.
+    //
+    // ⚠ THE ONE REVISION IN THIS TABLE THAT MOVES NO DECLARED AXIS, and that is
+    // stated rather than hidden. `keyexpr` was already in the key set — the
+    // payload plane emits it — the `message` family keeps its vocabulary, and it
+    // stays a PASSENGER because the new key arrives on EVERY entry whatever the
+    // word. So all three lists below are revision 5's, by name.
+    //
+    // What moved is the shape of the `carried` entry, and no axis here can see
+    // it: `keys` is a union over the whole document and cannot express "in this
+    // object too", and `carries` describes only what a WORD decides, which a key
+    // added uniformly decides nothing about. That hole is real and is filed as
+    // open-debt item 692 rather than papered over; this row is the notice a
+    // consumer gets in the meantime, which is what the revision number is for.
+    //
+    // An ADDITION, so a consumer pinned to revision 5 loses nothing. What it
+    // gains by moving is the key a republisher needs — the one value that used
+    // to be reachable only by declaring a payload format it would never read.
+    DocumentShape {
+        document: FIELDS,
+        revision: 6,
+        keys: FIELDS_R6_KEYS,
+        retiring: &[],
+        families: FIELDS_R6_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R6_CARRIES,
+    },
     DocumentShape {
         document: SUMMARY,
         revision: 1,
@@ -2070,6 +2098,36 @@ pub const FIELDS_R5_CARRIES: &[KeyCarries] = &[
         shape: CarriesShape::Passenger,
     },
 ];
+
+/// The field document's key set at revision 6 — revision 5's, unchanged.
+///
+/// R2440 (open-debt item 691). `carried[].keyexpr` is a key this document
+/// ALREADY emitted: `payload_decode` has carried `keyexpr` since revision 1, and
+/// [`DocumentShape::keys`] is a union over the whole document rather than a
+/// per-object shape. An alias rather than a copy, for the reason revision 3's
+/// alias of revision 2's states: two spellings of one set is two things to keep
+/// equal.
+pub const FIELDS_R6_KEYS: &[&str] = FIELDS_R5_KEYS;
+
+/// The value families the field document declares at revision 6 — revision 5's,
+/// unchanged.
+///
+/// R2440 (open-debt item 691). The new key is a keyexpr literal, which is an
+/// open set by construction and declares no vocabulary.
+pub const FIELDS_R6_FAMILIES: &[ValueFamily] = FIELDS_R5_FAMILIES;
+
+/// What each field-document family's WORD decides about the keys beside it, at
+/// revision 6 — revision 5's, unchanged.
+///
+/// R2440 (open-debt item 691) — `message` STAYS A PASSENGER, and the round chose
+/// the emission shape that keeps it one. `keyexpr` arrives on every `carried`
+/// entry whatever the word, `null` where the message names no key, so every word
+/// is still seen with one common companion set and nothing about the object is
+/// decided by the word. Emitting it only where a key resolved would have made
+/// `Push` bring a key `Init` never does, which is the definition of a
+/// discriminant — and it would have made the document's own shape depend on
+/// which ids a capture happened to declare.
+pub const FIELDS_R6_CARRIES: &[KeyCarries] = FIELDS_R5_CARRIES;
 
 /// Every shape each `fields[].kind` word's object takes, at field-document
 /// revision 4.
@@ -3989,7 +4047,14 @@ mod tests {
             // message vocabulary, which had never been declarable because the
             // only key carrying it was `name`, the union of every field name at
             // every depth of the walked tree.
-            (FIELDS, 5),
+            // R2440 (item 691) — to 6 when every `carried` entry gained a
+            // RESOLVED `keyexpr`. The only entry in this list whose revision
+            // moved while no declared axis did: the key was already in the set
+            // (the payload plane emits it), the vocabulary is unchanged, and
+            // `message` stays a passenger because the key arrives on every
+            // entry. This assertion is the notice, and item 692 is the axis
+            // that could not give one.
+            (FIELDS, 6),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.

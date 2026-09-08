@@ -182,8 +182,9 @@
  *
  * WHAT ARRIVES INSTEAD. Every walked message row carries
  *
- *     "carried":[{"message":"Frame","start":0,"end":41},
- *                {"message":"Push","start":3,"end":41}]
+ *     "carried":[{"message":"Frame","start":0,"end":41,"keyexpr":null},
+ *                {"message":"Push","start":3,"end":41,
+ *                 "keyexpr":"demo/sensor/temp"}]
  *
  * -- the transport message this row is, then every network message batched
  * inside it, each with the span its bytes occupy in the row's own coordinate
@@ -197,6 +198,39 @@
  *                    `Push`, `Request`, `Response`, `ResponseFinal`,
  *                    `Interest`, `Declare` inside a `Frame` batch. `Oam` is
  *                    both -- it has a transport MID and a network one.
+ *
+ * R2440 -- AND THE KEY THAT MESSAGE TRAVELLED UNDER, at field-document
+ * revision 6.
+ *
+ *     `keyexpr`      the RESOLVED key expression, or `null`.
+ *
+ * RESOLVED, which is the whole of it. The wire carries `(id, suffix)`, and this
+ * build folds every `Declare` of a key id as it walks -- in frame order, ahead
+ * of any display cap -- so an entry naming its key by id alone reports the
+ * literal that id was bound to. Reading the suffix yourself does NOT give you
+ * this: a message carrying both an id and a suffix has the id's base PREPENDED,
+ * so the suffix alone reports `/temp` for a record published under
+ * `demo/sensor/temp` -- a WRONG key rather than a missing one, which for
+ * anything replaying the capture is traffic sent to the wrong topic on a live
+ * network.
+ *
+ * UNCONDITIONAL. It does not depend on declaring a payload format, and until
+ * revision 6 it did: the value left this library only inside `payload_decode`,
+ * so a consumer with no format to declare could reach it only by handing over a
+ * decoder mapping it would never read. A key expression is a property of the
+ * message and has nothing to do with how its bytes are encoded.
+ *
+ * `null` means no key was named on this entry, and there are three ways to get
+ * it, all of them honest: the message carries no `WireExpr` at all (an `Init`,
+ * a `KeepAlive`); this capture holds no `Declare` binding the id it used, which
+ * is what a capture begun mid-session looks like; or the two id spaces bind the
+ * same id to different literals, where a guess would be worse than a refusal.
+ * It is emitted rather than omitted so a missing key cannot be confused with a
+ * build that stopped reporting one.
+ *
+ * A transport message that BATCHES gets `null` here even when the records
+ * inside it name keys: those keys belong to the records, each of which has its
+ * own entry. One `Frame` can carry several messages that share no key.
  *
  * ⚠ AN EMPTY `carried` IS A STATEMENT. A transport MID this build does not name
  * walks as the `Unknown` group -- the row says so under `name` -- and gets no
@@ -275,7 +309,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":5,"key":"kind","values":[...],
+ *     {"name":"fields","revision":6,"key":"kind","values":[...],
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
@@ -956,7 +990,7 @@ int wz_dissect_declarations_diagnose(const char *declarations, char **out);
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":5,"key":"state",
+ *     "value_families":[{"name":"fields","revision":6,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
