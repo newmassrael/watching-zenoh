@@ -1082,6 +1082,52 @@ if ! python3 scripts/lib/witness_boundary_gate.py; then
     exit 1
 fi
 
+# ─── gate 2x — a tracked capture is a function of its encoders (R2451, 699) ──
+# grades: worktree
+#
+# `captures/raweth-transport-messages.pcap` is the raweth input a C-ABI-only
+# consumer had no way to obtain: the dissection door already takes pcap bytes,
+# the framing is `pub` in `wz_session_core::raweth_link` and reached from no C
+# door, and this tree cannot capture one because its own zenoh-pico build has
+# `Z_FEATURE_RAWETH_TRANSPORT` off. The repair the item REFUSES is typing the
+# frame out by hand, because `raweth_framing_pico_layout` exists to catch what
+# a hand-laid frame gets wrong — the sender-order `ethtype` against the
+# big-endian `data_length`, the 16-byte width against the standard 14, the
+# 20-byte VLAN form — and a wrong fixture would be read back by this crate's
+# own parser, agree with itself, and ship.
+#
+# So the file is graded as a FUNCTION of the encoders that emitted it, and the
+# grading needs a gate here rather than in gate 3 for the reason open-debt item
+# 687 measured: the product is `wz-session-core` and the oracle is
+# `wz-capture`, so the changed-crate test gate reaches the fixture on neither
+# of the two pushes that can break it — an edit to the framing, or an edit to
+# the `.pcap` alone, which moves no crate directory at all.
+#
+# The selftest runs first, on gate 2w's rule: a gate that cannot fail is worth
+# nothing, and this one's whole job is to refuse a transcript in which the
+# oracles did not report. `--selftest` drives the matcher over an absent name,
+# a FAILED name and an EMPTY transcript, that last being what a filter matching
+# nothing leaves behind.
+if ! bash scripts/lib/capture_provenance_gate.sh --selftest >/dev/null; then
+    echo "" >&2
+    echo "pre-push: [gate 2x] capture-provenance gate SELFTEST failed — it can no" >&2
+    echo "          longer tell an oracle that reported from one that never ran," >&2
+    echo "          so its verdict on this push means nothing." >&2
+    exit 1
+fi
+if ! bash scripts/lib/capture_provenance_gate.sh; then
+    echo "" >&2
+    echo "pre-push: [gate 2x] a tracked capture is no longer what this" >&2
+    echo "          workspace's encoders emit, or the oracles that say so did" >&2
+    echo "          not report. The lines above name which." >&2
+    echo "          A capture is refreshed, never edited:" >&2
+    echo "            cargo test -p wz-capture --lib \\" >&2
+    echo "              refresh_the_tracked_raweth_capture -- --ignored" >&2
+    echo "          then re-run the suite to grade it. See captures/README.md." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+
 # ─── gate 2h — the RUST half of the static gates, RUN (R2153, item 542) ──
 # grades: worktree
 #
@@ -1199,6 +1245,10 @@ fi
 #     which need a built sce-codegen and are minutes, not seconds. Hosted-only.
 #   - `runtime/**` appears in CLAUDE.md's SPDX policy and DOES NOT EXIST in this
 #     tree (R311y794 checked). Nothing to map.
+#   - `captures/**` is deliberately NOT here (R2451). Gate 2x above already runs
+#     that directory's oracle UNCONDITIONALLY, which is stronger than a path
+#     mapping: an edit to the encoders that produce those bytes touches no path
+#     in this list at all, and that is the push the item's own seam is about.
 path_lanes=""
 if git diff --name-only "$diff_base..$local_sha" 2>/dev/null |
     grep -qE '^(\.github/workflows/|scripts/|\.githooks/|deploy/)'; then

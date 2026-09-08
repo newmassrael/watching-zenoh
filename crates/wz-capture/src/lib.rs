@@ -191,6 +191,17 @@ pub mod payload_decode;
 mod payload_described;
 pub mod pcap;
 pub mod pcapng;
+/// R2451 (open-debt item 699) — the oracle over `captures/`, the sample
+/// captures a C-ABI-only consumer reads because it has no way to produce them.
+///
+/// `#[cfg(test)]`: it ships no code, only the grading that keeps a tracked
+/// capture byte-identical to what this workspace's own encoders emit. It lives
+/// INSIDE the crate rather than in `tests/` because the population it draws
+/// from — `datagram_tests::transport_census` — is `pub(crate)`, and drawing the
+/// sample from the same list the MID censuses walk is what stops it falling
+/// behind the vocabulary it advertises.
+#[cfg(test)]
+mod raweth_capture_fixture;
 /// R311y615 (§1.1f) — the EXPORT plane: the analysis tables rendered for
 /// something that is not a Rust caller, with their loss counters structurally
 /// attached.
