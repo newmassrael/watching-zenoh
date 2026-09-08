@@ -77,7 +77,14 @@ use crate::payload_decode::{decode_payload, push_decoding, Declarations, Keyexpr
 ///
 /// R2440 (open-debt item 691) — the RESOLVED KEYEXPR does not ride on that rule
 /// and never should have. It is emitted on every `carried` entry of every walked
-/// row whatever this argument is; see [`push_carried`].
+/// row whatever this argument is; `push_carried` in this module is where.
+///
+/// R2441 — that reference is deliberately NOT an intra-doc link. `push_carried`
+/// is private, and a public item linking a private one is refused by
+/// `rustdoc::private-intra-doc-links` under `-D warnings`. Widening the
+/// function to satisfy a doc link would export a helper for a sentence's sake;
+/// naming it in prose points the reader who has the source, which is the only
+/// reader who can follow it either way.
 pub fn fields_json(
     d: &crate::Dissection,
     capture: &[u8],
