@@ -70,6 +70,12 @@ members = [
     # `no_std` dissector's — the third place both refuse.
     "wz-packet-socket",
     "wz-capi-dissect",
+    # Round 2441 (open-debt item 693) — the C ABI over `wz-replay`'s PLAN half.
+    # Its own crate rather than a door in `wz-capi-dissect` for the reason that
+    # crate is not a door in `wz-capi-c`: a consumer must be able to tell which
+    # half of the library it is linking. That one READS captures; this one
+    # answers questions about traffic that has not happened yet.
+    "wz-capi-replay",
     "wz-codecs",
     "wz-codecs-test-support",
     # R311y886 (open-debt item 357) — the RFC 1071 arithmetic the workspace's

@@ -3188,6 +3188,20 @@ jobs:
       - name: Layer C1bo — dissection C ABI from real C (R311y587)
         run: bash scripts/run-ci.sh --layer C1bo
 
+      # R2441 (open-debt item 693) — the REPLAY C ABI, in the same job as C1bo
+      # and for the same provisioning: a C compiler, a C++ compiler for the
+      # header's second language, and `nm` for the symbol set. Placed beside its
+      # sibling rather than in a job of its own because the two need exactly the
+      # same tools and neither needs anything else.
+      #
+      # The item it closes: a consumer linking the C ABI could not call
+      # wz-replay's plan half at all, so it implemented the pacing judgement a
+      # second time and reported that it had. Probed: dropping one `#define`
+      # from the header reds the vocabulary gate while every Rust test still
+      # passes, which is the class this leg exists for.
+      - name: Layer C1cj — replay C ABI from real C (R2441)
+        run: bash scripts/run-ci.sh --layer C1cj
+
       # R311y589 — runtime-zero-copy stopped being an empty flag and became the
       # first consumer of an `sce:kind="buffer-pool"` emit. Both arena arms run
       # here for the reason the lane's own comment gives: the seam's claim is

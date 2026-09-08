@@ -2484,6 +2484,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-capi-replay"
+version = "0.1.0"
+dependencies = [
+ "wz-capi-dissect",
+ "wz-cdylib-build",
+ "wz-replay",
+]
+
+[[package]]
 name = "wz-capture"
 version = "0.1.0"
 dependencies = [

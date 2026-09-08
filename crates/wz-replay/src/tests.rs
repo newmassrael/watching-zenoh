@@ -619,3 +619,75 @@ fn a_capture_paced_plan_says_the_clock_is_the_taps_and_not_the_senders() {
     ));
     assert!(!unmeasured.contains("CAPTURING host"), "{unmeasured}");
 }
+
+/// Round 2441 (open-debt item 693) — THE ANCHOR STICKS ACROSS A HOLE.
+///
+/// # Why this test is arriving now, years of rounds after the rule
+///
+/// The rule was written down in R311y703 and graded by NOTHING. Measured while
+/// extracting [`Pacing`]: damaging the anchor line so a sample with no capture
+/// time RESETS it left all 36 tests in this crate green. Every pacing test here
+/// walks a list whose times are either all present or all absent, and the rule
+/// is only observable on a list that mixes them.
+///
+/// That is the whole shape of open-debt item 693 one layer down. A judgement
+/// nobody can call is a judgement that drifts; a judgement nobody can FAIL is
+/// one that was already free to.
+#[test]
+fn a_sample_with_no_capture_time_does_not_reset_the_anchor() {
+    let schedule = Schedule {
+        timing: Timing::Capture,
+        gap_millis: 7,
+        max_gap_millis: None,
+        ..Schedule::default()
+    };
+    let mut pacing = Pacing::new(schedule);
+    assert_eq!(pacing.next(Some(1_000)), (0, TimingSource::Declared));
+    assert_eq!(pacing.next(None), (7, TimingSource::Unmeasurable));
+    assert_eq!(
+        pacing.next(Some(1_900)),
+        (900, TimingSource::Measured),
+        "the anchor is the last RESOLVABLE time, so this pair measures across \
+         the hole rather than starting over"
+    );
+    assert_eq!(pacing.emitted(), 3);
+}
+
+/// `plan` PACES ONLY THE SAMPLES IT TAKES, which is the property that made
+/// [`Pacing`] a walk with a count of its own rather than an indexed lookup.
+///
+/// A selector dropping the message between two kept ones widens the real
+/// interval, and the delay before the first TAKEN sample is zero however many
+/// samples the selector discarded before it.
+#[test]
+fn the_walk_counts_taken_samples_and_not_capture_positions() {
+    let taken = plan(
+        &samples(vec![
+            sample_at("other/a", b"skip", 1_000),
+            sample_at("demo/a", b"one", 2_000),
+            sample_at("other/b", b"skip", 2_500),
+            sample_at("demo/b", b"two", 4_000),
+        ]),
+        Schedule {
+            timing: Timing::Capture,
+            max_gap_millis: None,
+            ..Schedule::default()
+        },
+        Mutation::None,
+        Selection {
+            keyexpr: Some("demo/**"),
+            side: None,
+        },
+    );
+    assert_eq!(taken.emissions.len(), 2);
+    assert_eq!(taken.excluded, 2);
+    assert_eq!(
+        taken.emissions[0].delay_millis, 0,
+        "the first TAKEN sample waits for nothing, whatever preceded it"
+    );
+    assert_eq!(
+        taken.emissions[1].delay_millis, 2_000,
+        "4000-2000: the interval between the samples actually being sent"
+    );
+    assert_eq!(taken.emissions[1].timing, TimingSource::Measured);
+}

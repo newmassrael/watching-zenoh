@@ -1,0 +1,74 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# Round 2441 (open-debt item 693) — the C ABI over wz-replay's PLAN half.
+#
+# ## Why a crate of its own, and not a door in `wz-capi-dissect`
+#
+# That crate's own manifest makes this argument one layer up, about
+# `wz-capi-c`: a surface answerable to a different authority "would mean a
+# consumer could no longer tell which half of the library it was linking
+# against". The same sentence decides this. `wz-capi-dissect` is the READ half
+# -- bytes in, a description out, and nothing it exports decides what a program
+# will DO. Pacing and mutation are decisions about traffic that has not
+# happened yet, and `wz-replay`'s own header separates them from every observer
+# above `wz-capture` for that reason.
+#
+# Two mechanical consequences, either of which is sufficient on its own:
+#
+#   * `wz_dissect_abi_version` is "the number a consumer refuses a library by".
+#     Folding a second vocabulary into it moves that number for every consumer
+#     that reads captures and will never replay one.
+#   * `wz_dissect.h` opens by calling its memory rule "the whole contract", and
+#     R2102 spent a paragraph revising it for ONE exception. A second door with
+#     its own allocation story turns that contract into a list of exceptions.
+#
+# THE COST, stated rather than left to be discovered: a consumer that wants both
+# halves now links two artifacts. Accepted, because the plan half shares no
+# call, no handle and no allocation with the read half -- it takes scalars a
+# caller already holds and answers in scalars -- so the two libraries are
+# independent in fact and not only in name.
+[package]
+name = "wz-capi-replay"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial"
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+name = "wz_capi_replay"
+crate-type = ["cdylib", "rlib"]
+
+# R2103 (open-debt item 521) — the cdylib's SONAME. Every cdylib in this
+# workspace carries one; a consumer linking this by path would otherwise record
+# an absolute build-tree path in its own DT_NEEDED, which is the downstream
+# report that crate was written for.
+[build-dependencies]
+wz-cdylib-build = { path = "../wz-cdylib-build" }
+
+[dependencies]
+# `default-features = false` turns OFF `live`, and that is the point of the
+# line rather than an economy. The plan half is a set of pure functions over
+# scalars; the live half dials a session. A C door that pulled the session
+# runtime in would make this cdylib carry tokio and the `wz` facade in order to
+# compute a delay, and it would make this ABI's promise -- no sockets, no
+# threads, no callbacks -- an assertion about code that is present rather than
+# a fact about code that is absent.
+wz-replay = { path = "../wz-replay", default-features = false }
+
+# The READ half, as a DEV-dependency and never a real one.
+#
+# `WZ_REPLAY_NO_TIMESTAMP` must be the same number as `WZ_DISSECT_NO_TIMESTAMP`,
+# because a consumer feeding `wz_dissect_record.ts_ns` straight into
+# `wz_replay_plan_delays` is the case the downstream report asked for. Two
+# libraries agreeing on a constant is exactly the kind of fact that stops being
+# true quietly, so the agreement is MEASURED against that crate rather than
+# asserted in a comment beside a literal.
+#
+# A real dependency would make a consumer that only paces a plan carry a
+# dissector, which is the separation this crate's own header argues for.
+[dev-dependencies]
+wz-capi-dissect = { path = "../wz-capi-dissect" }

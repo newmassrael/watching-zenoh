@@ -10597,6 +10597,73 @@ layer_c1bq_zero_copy_arena() {
     _runci_lane_did C1bq "$tests" "arena test(s) over 2 suite(s), plus 2 clippy + 1 preset build"
 }
 
+layer_c1cj_replay_c_abi() {
+    # Round 2441 (open-debt item 693) — the REPLAY C ABI, driven from a real C
+    # translation unit.
+    #
+    # C1bo's argument, one crate over and with a sharper subject. The item this
+    # closes is not "a symbol is missing": it is that a consumer linking the C
+    # ABI could not CALL the plan half at all, and so implemented the pacing
+    # judgement a second time. A Rust test cannot show the fix — it links the
+    # rlib and would pass against a header saying something else. Only a C
+    # translation unit shows that the header compiles, that the symbols export
+    # under the names it declares, that a signature mixing `double` and
+    # `uint64_t` agrees on both sides, and that C's own `sizeof` / `offsetof`
+    # over the record match what the artifact reports.
+    #
+    # `cc` absent -> SKIP, not FAIL, exactly as C1bo: the Rust half and the two
+    # python gates below still run on every host, and a box without a C
+    # compiler is a provisioning fact. Hosted has one.
+    local out cc
+    cc="${CC:-cc}"
+
+    (cd crates && cargo clippy -p wz-capi-replay --all-targets --quiet -- -D warnings) || return 1
+    out="$(cd crates && cargo test -p wz-capi-replay --quiet 2>&1)" || { echo "$out"; return 1; }
+    grep -qE '^test result: ok\. [1-9][0-9]* passed' <<<"$out" || {
+        echo "  C1cj FAIL: wz-capi-replay ran no tests"; echo "$out"; return 1; }
+
+    # THE VOCABULARY GATE, and it runs whether or not a C compiler is here
+    # because its subject is source text rather than an artifact. It derives the
+    # variant set of every `pub enum` in `wz-replay`'s plan half and fails when
+    # the header does not name a constant for each -- the half of the mapping
+    # the Rust compiler structurally cannot see.
+    python3 scripts/lib/capi_replay_vocabulary.py || return 1
+
+    command -v "$cc" >/dev/null 2>&1 || {
+        echo "  C1cj SKIP (no C compiler: $cc); the vocabulary gate still ran"; return 0; }
+
+    # The cdylib the C side links. `--release` on purpose: it is the artifact a
+    # consumer ships against.
+    (cd crates && cargo build -p wz-capi-replay --release --quiet) || return 1
+
+    local bin
+    bin="$(mktemp -d)/c_abi_consumer"
+    out="$("$cc" -std=c11 -Wall -Wextra -Werror \
+        -I crates/wz-capi-replay/include \
+        crates/wz-capi-replay/tests/c_abi_consumer.c \
+        -L crates/target/release -lwz_capi_replay -o "$bin" 2>&1)" || {
+        echo "  C1cj FAIL: the C consumer did not compile or link"; echo "$out"; return 1; }
+    out="$(LD_LIBRARY_PATH=crates/target/release "$bin" 2>&1)" || {
+        echo "$out"; rm -rf "$(dirname "$bin")"; return 1; }
+    echo "$out"
+    rm -rf "$(dirname "$bin")"
+
+    # The header must compile as C++ too, for C1bo's stated reason: the product
+    # that consumes this ABI is C++, and a header that only works in C is found
+    # at integration time.
+    command -v c++ >/dev/null 2>&1 && {
+        out="$(c++ -fsyntax-only -x c++ -I crates/wz-capi-replay/include \
+            crates/wz-capi-replay/tests/c_abi_consumer.c 2>&1)" || {
+            echo "  C1cj FAIL: the header does not compile as C++"; echo "$out"; return 1; }
+    }
+
+    # And the SYMBOL SET, the revision and the record layout, all three read
+    # from that artifact rather than from the source an author just edited.
+    command -v nm >/dev/null 2>&1 || {
+        echo "  C1cj FAIL: nm is absent, so the ABI symbol set cannot be read"; return 1; }
+    python3 scripts/lib/capi_replay_abi_pin.py || return 1
+}
+
 layer_c1bo_dissect_c_abi() {
     # R311y587 — the dissection C ABI, driven from a REAL C translation unit.
     #
@@ -18105,6 +18172,7 @@ run_layer C1be layer_c1be_cargo_test_query_value || overall=1
 run_layer C1bf layer_c1bf_cargo_clippy_all_features || overall=1
 run_layer C1bn layer_c1bn_passive_dissection_features || overall=1
 run_layer C1bo layer_c1bo_dissect_c_abi || overall=1
+run_layer C1cj layer_c1cj_replay_c_abi || overall=1
 run_layer C1so layer_c1so_cdylib_soname || overall=1
 run_layer C1bt layer_c1bt_capture_no_default_features || overall=1
 run_layer C1bq layer_c1bq_zero_copy_arena || overall=1

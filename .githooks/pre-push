@@ -378,6 +378,37 @@ if ! python3 scripts/lib/config_key_fixture_gate.py; then
     exit 1
 fi
 
+# ─── gate 2v — the replay ABI names what wz-replay says (R2441) ─────
+# grades: worktree
+#
+# Open-debt item 693, and the same blind spot gate 2d exists for, one crate
+# over. `wz_replay.h` is not a crate: a push that edits ONLY the header — or
+# only the enum upstream — changes no package, so gate 3's changed-crate tests
+# can never fail on it, and the crate that moved is not the crate that fails.
+#
+# The half a compiler cannot see is the header. `wz-capi-replay` maps every
+# plan-half enum with an exhaustive `match`, so Rust holds Rust; a `#define` is
+# text in a file no Rust build reads, and a header naming five of six values
+# compiles, links, passes every ABI test, and tells a C consumer that a value
+# they WILL receive does not exist. `wz-capi-dissect` shipped exactly that once,
+# for a whole round.
+#
+# UNCONDITIONAL and source-text only, on gate 2d's reasoning: it reads three
+# files and costs well under a second, and a scope predicate is one more thing
+# that can be silently wrong — a mistaken "this push does not touch it" reads
+# exactly like a pass. The artifact-reading half of the pair
+# (`capi_replay_abi_pin.py`) stays hosted in Layer C1cj, because it needs a
+# release cdylib built first and that is not a cost an ordinary push should pay.
+if ! python3 scripts/lib/capi_replay_vocabulary.py; then
+    echo "" >&2
+    echo "pre-push: [gate 2v] the replay ABI vocabulary has drifted from" >&2
+    echo "          wz-replay's plan half. The line above names which enum" >&2
+    echo "          variant or constant, and in which direction." >&2
+    echo "          Hosted Layer C1cj is the only other thing that checks it." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+
 # ─── gate 2e — the grading-pin ratchet (R2394) ──────────────────────
 # grades: worktree
 #

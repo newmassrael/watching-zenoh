@@ -286,6 +286,80 @@ impl Schedule {
     }
 }
 
+/// Round 2441 (open-debt item 693) — the pacing WALK, over capture times alone.
+///
+/// # Why this is a type and not four lines inside [`plan`]
+///
+/// It was four lines inside [`plan`], and that is exactly as far as it could
+/// travel: a caller holding capture times but no [`Samples`] — every consumer
+/// of the C ABI, which cannot build a `Samples` at all — had to write the walk
+/// again. A downstream product did, and reported it.
+///
+/// The walk is not one expression. It is two coupled decisions, and the second
+/// is the one a second implementation gets wrong:
+///
+///  * a gap is the SATURATING difference of two capture times, so a capture
+///    whose clock steps backwards between two packets — which a merged or
+///    re-timestamped file can — yields zero rather than an enormous gap from a
+///    wrapped subtraction;
+///  * a sample with NO capture time does not reset the anchor. The previous
+///    resolvable time STICKS, so the pair after it measures across the hole
+///    rather than starting over. Resetting would silently replace one real
+///    interval with a declared gap and report [`TimingSource::Unmeasurable`]
+///    twice for one missing reading.
+///
+/// So the walk is a value with the anchor inside it, and [`plan`] is now one of
+/// its callers rather than its only site.
+///
+/// # It is a WALK, not an indexed lookup
+///
+/// [`Schedule::delay_from`] takes an index and a gap the caller already
+/// computed; this owns both. Feeding it in the wrong order gives a different
+/// answer, which is why the index is its own count and not the caller's.
+#[derive(Debug, Clone)]
+pub struct Pacing {
+    schedule: Schedule,
+    /// The last RESOLVABLE capture time seen, which is not the same as the
+    /// previous sample's — see this type's doc.
+    previous_at: Option<u64>,
+    /// How many emissions have been paced, which is the index
+    /// [`Schedule::delay_from`] answers about.
+    emitted: usize,
+}
+
+impl Pacing {
+    /// A walk that has paced nothing yet.
+    pub fn new(schedule: Schedule) -> Self {
+        Self {
+            schedule,
+            previous_at: None,
+            emitted: 0,
+        }
+    }
+
+    /// Pace the NEXT emission, given the capture time of the sample carrying
+    /// it, and say where its delay came from.
+    ///
+    /// `captured_at_millis` is `None` for a sample whose capture time this
+    /// reader could not resolve — which [`Sample::captured_at_millis`] names
+    /// three ways to reach, and none of them is zero.
+    pub fn next(&mut self, captured_at_millis: Option<u64>) -> (u64, TimingSource) {
+        let measured = match (self.previous_at, captured_at_millis) {
+            (Some(prev), Some(now)) => Some(now.saturating_sub(prev)),
+            _ => None,
+        };
+        let paced = self.schedule.delay_from(self.emitted, measured);
+        self.previous_at = captured_at_millis.or(self.previous_at);
+        self.emitted += 1;
+        paced
+    }
+
+    /// How many emissions this walk has paced.
+    pub fn emitted(&self) -> usize {
+        self.emitted
+    }
+}
+
 /// R311y700 ([REDACTED-REQ]) — what a fuzzing run does to a payload.
 ///
 /// # Why the mutations are named and seeded rather than random
@@ -548,21 +622,19 @@ pub fn plan(
     // previous sample's. A selector that drops the message between two kept
     // ones widens the real interval, and reproducing the narrower one would
     // play a conversation that never happened at that pace.
-    let mut previous_at: Option<u64> = None;
+    //
+    // Round 2441 (open-debt item 693) — that anchor and the saturating
+    // subtraction over it now live in [`Pacing`], because the C ABI paces
+    // capture times a caller already holds and cannot build a `Samples` to get
+    // here. Feeding only the TAKEN samples into the walk is what keeps the
+    // sentence above true: `excluded` never reaches it.
+    let mut pacing = Pacing::new(schedule);
     for sample in &samples.items {
         if !selection.takes(sample) {
             excluded += 1;
             continue;
         }
-        // Saturating: a capture whose clock steps BACKWARDS between two
-        // packets -- which a merged or re-timestamped file can -- yields zero
-        // rather than an enormous gap from a wrapped subtraction.
-        let measured = match (previous_at, sample.captured_at_millis) {
-            (Some(prev), Some(now)) => Some(now.saturating_sub(prev)),
-            _ => None,
-        };
-        let (delay_millis, timing) = schedule.delay_from(emissions.len(), measured);
-        previous_at = sample.captured_at_millis.or(previous_at);
+        let (delay_millis, timing) = pacing.next(sample.captured_at_millis);
         let outcome = mutation.apply(&sample.payload);
         emissions.push(PlannedEmission {
             delay_millis,
