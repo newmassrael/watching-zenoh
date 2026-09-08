@@ -274,11 +274,32 @@ pub const WZ_DISSECT_NO_TIMESTAMP: u64 = live::NO_TIMESTAMP;
 /// by name. [`WZ_DISSECT_ERR_CONTAINER_SHRANK`] arrived with it and moves
 /// nothing further: a constant is compiled in, not linked.
 ///
+/// R2453 (open-debt item 700) — 15 → 16, ADDING [`wz_dissect_live_census`] and
+/// [`wz_dissect_live_end`]. Two new symbols, so the revision moves under the
+/// rule this doc has stated since R311y748; the memory rule is untouched, since
+/// both act on the handle [`wz_dissect_live_open`] already made and
+/// [`wz_dissect_live_close`] already releases, and the one allocation the pair
+/// makes is a string released by [`wz_dissect_string_free`] like every other.
+///
+/// What the symbols answer is the direction R2373 left open. That round let
+/// bytes cross INTO an open handle; nothing let an AGGREGATE cross back out, so
+/// the analysis planes had four doors and every one of them took a container.
+/// A consumer watching a running link therefore had the records and none of the
+/// five planes, and the two ways to get them without a door are both refusals
+/// this header makes elsewhere — re-feeding a growing prefix restarts
+/// [`wz_dissect_live_lost`], and hand-aggregating the drained records is a
+/// second counter of what this library already counts.
+///
+/// The pair moves as ONE revision because it is one capability: measured, the
+/// census of a capture that ends on an unfilled gap differs before and after a
+/// feed is declared over, so a census door without [`wz_dissect_live_end`]
+/// could not give the answer the container doors give for the same bytes.
+///
 /// # Safety
 /// None; takes no arguments and touches no memory.
 #[no_mangle]
 pub extern "C" fn wz_dissect_abi_version() -> c_int {
-    15
+    16
 }
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
@@ -1779,6 +1800,122 @@ pub unsafe extern "C" fn wz_dissect_live_message_bytes(
     WZ_DISSECT_OK
 }
 
+/// R2453 (open-debt item 700) — THE ANALYSIS PLANES OVER A LIVE HANDLE.
+///
+/// # The gap this closes
+///
+/// Four census doors take a capture CONTAINER and, measured at the header the
+/// round this was filed, not one took a `wz_dissect_live *`. The five planes —
+/// `exchanges`, `interests`, `keyexprs`, `nodes`, `payloads` — were therefore
+/// reachable only by handing a whole container in, so a consumer watching a
+/// RUNNING link could learn that a message had arrived and could not learn
+/// which key carried it, who declared it, or whether a query was answered.
+///
+/// R2373 crossed this seam in the other direction: bytes INTO an open handle
+/// ([`wz_dissect_live_follow`]). This is the aggregate coming back OUT, and the
+/// pair is what lets a live consumer avoid the two workarounds that are
+/// available without it — re-feeding a growing prefix to a container door,
+/// which restarts [`wz_dissect_live_lost`] and cannot tell a total from a
+/// restart, and aggregating the drained records by hand, which is a second
+/// counter of facts this library already counts. A second counter does not
+/// fail; it diverges.
+///
+/// # Why ONE door here answers what FOUR answer over a container
+///
+/// The container family varies two axes — selector and limit preset — and
+/// names all four combinations. Over a handle the LIMIT axis is not an
+/// argument: it was chosen at [`wz_dissect_live_open`] and is a property of the
+/// handle, so taking it again here would be the same fact in two places and the
+/// two would part the first time a caller passed the other one. What is left is
+/// the selector, and an EMPTY selector is the identity. So every combination
+/// the container family names is reachable:
+///
+/// * `open(NONE)` + `census("")` is [`wz_dissect_pcap_census`]
+/// * `open(LIVE_TAP)` + `census("")` is [`wz_dissect_pcap_census_bounded`]
+/// * `open(NONE)` + `census(expr)` is [`wz_dissect_pcap_census_where`]
+/// * `open(LIVE_TAP)` + `census(expr)` is
+///   [`wz_dissect_pcap_census_where_limited`]
+///
+/// A door per combination would have been four names for a choice the handle
+/// has already made.
+///
+/// # It is a READ, and the handle is `const` to say so
+///
+/// Drawing a window must not change what the tap decodes. Exactly one act
+/// would, and it is not here: [`wz_dissect_live_end`].
+///
+/// A selector that does not compile returns [`WZ_DISSECT_ERR_SELECTOR`] and no
+/// string, exactly as the container doors do; for the position, call
+/// [`wz_dissect_selector_diagnose`].
+///
+/// # Safety
+/// `handle` must be a handle from [`wz_dissect_live_open`] that has not been
+/// closed, `selector` must be a NUL-terminated C string, and `out` must be a
+/// writable pointer to a `*mut c_char`. None may be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_live_census(
+    handle: *const live::LiveDissection,
+    selector: *const c_char,
+    out: *mut *mut c_char,
+) -> c_int {
+    if handle.is_null() || selector.is_null() || out.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let expr = match unsafe { std::ffi::CStr::from_ptr(selector) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return WZ_DISSECT_ERR_INVALID_ARG,
+    };
+    let filter = match wz_capture::filter::Filter::parse(expr) {
+        Ok(f) => f,
+        Err(_) => return WZ_DISSECT_ERR_SELECTOR,
+    };
+    // SAFETY: caller contract above.
+    write_string(unsafe { (*handle).census(&filter) }, out)
+}
+
+/// R2453 (open-debt item 700) — THE FEED ENDED: spend the patience a capture's
+/// last packet spends.
+///
+/// # Why the census door above is incomplete without this
+///
+/// A file ends, so every door taking `bytes, len` gives up on a reassembly gap
+/// that never filled, and the bytes BEHIND that gap decode as a discontinuity.
+/// A tap does not end, so a handle never reaches that moment on its own.
+///
+/// MEASURED on a capture whose last act is an unfilled gap: the census of the
+/// same bytes reports 32 walked records before this call and 94 after it. So a
+/// consumer replaying a finite capture through the live doors read a SHORT
+/// document, with no way to reach the answer the container doors give for those
+/// very bytes — and "the same bytes read two ways must agree" is the property
+/// this pair of doors is judged by.
+///
+/// # It does not close the handle
+///
+/// Feeding may continue: [`wz_dissect_pcap_replay`] has ended its feed since
+/// R2373 and still hands back a followable handle. "Ended" means the patience
+/// is spent, not that the handle is done — a tap that goes quiet and then
+/// speaks again is ordinary, and what it costs is that a gap a late
+/// retransmission would have filled is already a discontinuity. That is the
+/// same trade a file's end makes, made when the caller says so.
+///
+/// Releasing the handle is still [`wz_dissect_live_close`]'s job.
+///
+/// Returns nothing and null is a no-op: there is no way for this to fail, and
+/// an error channel with no error in it is one a consumer learns to ignore.
+///
+/// # Safety
+/// `handle` must be a handle from [`wz_dissect_live_open`] that has not been
+/// closed, or null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_live_end(handle: *mut live::LiveDissection) {
+    if handle.is_null() {
+        return;
+    }
+    // SAFETY: caller contract above.
+    unsafe { (*handle).end() };
+}
+
 /// R2102 — release a live handle. Null is a no-op.
 ///
 /// The other half of the revised memory rule: this handle outlives its call and
@@ -3004,8 +3141,23 @@ mod tests {
     ///
     /// Four segments, one lost, so the default patience is never remotely
     /// reached; only "the file ended" can release the tail.
-    #[test]
-    fn a_capture_that_ends_on_its_hole_still_reports_one() {
+    /// The segment size [`hole_capture`] cuts its stream into, and therefore
+    /// the number of bytes its one hole is missing.
+    const HOLE_SEG: usize = 129;
+
+    /// A capture whose last act is an UNFILLED reassembly gap: 64 framed
+    /// messages cut into [`HOLE_SEG`]-byte segments with the second segment
+    /// dropped, and far fewer segments than the default patience, so nothing
+    /// except the end of the feed can give up on it.
+    ///
+    /// R2453 (open-debt item 700) — hoisted out of the test below because a
+    /// second caller needs it and needs it to be the SAME capture. It is the
+    /// fixture that makes the feed-END axis gradable: the bytes behind the hole
+    /// decode only once the hole is given up on, so a census taken before that
+    /// moment is short and one taken after is whole. A pair of arms compared
+    /// over a capture with no hole would agree whether or not either of them
+    /// had ever declared the feed over, which is a green that grades nothing.
+    fn hole_capture() -> Vec<u8> {
         let mut stream = Vec::new();
         for i in 0..64u16 {
             let body = [
@@ -3020,12 +3172,11 @@ mod tests {
             stream.extend_from_slice(&(body.len() as u16).to_le_bytes());
             stream.extend_from_slice(&body);
         }
-        const SEG: usize = 129;
         let packets: Vec<Vec<u8>> = stream
-            .chunks(SEG)
+            .chunks(HOLE_SEG)
             .enumerate()
             .filter(|(i, _)| *i != 1)
-            .map(|(i, seg)| tcp_packet(1000 + (i * SEG) as u32, seg))
+            .map(|(i, seg)| tcp_packet(1000 + (i * HOLE_SEG) as u32, seg))
             .collect();
         assert!(
             packets.len() < wz_capture::tcp::DEFAULT_GAP_PATIENCE,
@@ -3038,12 +3189,17 @@ mod tests {
             .enumerate()
             .map(|(i, p)| (i as u32, 0u32, p.as_slice()))
             .collect();
-        let file = wz_capture::pcap::write(1, &records);
+        wz_capture::pcap::write(1, &records)
+    }
+
+    #[test]
+    fn a_capture_that_ends_on_its_hole_still_reports_one() {
+        let file = hole_capture();
 
         let json = call_summary(&file).expect("reads");
         assert!(
             json.contains("\"gaps_forced\":1")
-                && json.contains(&format!("\"gap_bytes_missing\":{SEG}")),
+                && json.contains(&format!("\"gap_bytes_missing\":{HOLE_SEG}")),
             "the end of the file is what gives up on the gap: {json}"
         );
         assert!(
@@ -3634,6 +3790,222 @@ mod tests {
         assert!(
             summary.contains("\"health\""),
             "the summary must still be the summary: {summary}"
+        );
+    }
+
+    /// Drive the LIVE census the way C does.
+    fn call_live_census(h: *const live::LiveDissection, selector: &str) -> Result<String, c_int> {
+        let sel = std::ffi::CString::new(selector).expect("no interior NUL");
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe { wz_dissect_live_census(h, sel.as_ptr(), &mut out) };
+        if rc != WZ_DISSECT_OK {
+            assert!(out.is_null(), "an error must not hand back a string");
+            return Err(rc);
+        }
+        assert!(!out.is_null(), "OK must come with a string");
+        let s = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("utf8")
+            .to_string();
+        unsafe { wz_dissect_string_free(out) };
+        Ok(s)
+    }
+
+    /// Feed `file` through the LIVE doors as `windows` GROWING PREFIXES — the
+    /// shape a consumer polling a container a writer is still appending to
+    /// has — then read the planes off the handle.
+    ///
+    /// `end` says whether the feed is declared over first, and it is a
+    /// parameter rather than always-true so that the test below can put the
+    /// door's own discriminator on both settings.
+    ///
+    /// C-shaped throughout, deliberately: a helper reaching for
+    /// `LiveDissection` directly would be grading the Rust rather than the
+    /// door, and the door is what the consumer has.
+    fn live_census_of(
+        file: &[u8],
+        windows: usize,
+        limits: c_int,
+        selector: &str,
+        end: bool,
+    ) -> String {
+        let mut h: *mut live::LiveDissection = core::ptr::null_mut();
+        assert_eq!(
+            unsafe { wz_dissect_live_open(limits, &mut h) },
+            WZ_DISSECT_OK,
+            "the handle opens"
+        );
+        for w in 1..=windows {
+            let upto = file.len() * w / windows;
+            assert_eq!(
+                unsafe { wz_dissect_live_follow(h, file.as_ptr(), upto) },
+                WZ_DISSECT_OK,
+                "prefix {upto} of {} follows",
+                file.len()
+            );
+        }
+        if end {
+            unsafe { wz_dissect_live_end(h) };
+        }
+        let census = call_live_census(h, selector).expect("the planes render");
+        unsafe { wz_dissect_live_close(h) };
+        census
+    }
+
+    /// R2453 (open-debt item 700) — THE SAME BYTES, READ TWO WAYS, AGREE.
+    ///
+    /// # Why this assertion and not "the planes arrived"
+    ///
+    /// The acceptance is the reporting consumer's, and it DERIVED it rather
+    /// than asking for a feature: "a plane came back" passes over an empty
+    /// document and this cannot. A door that rendered five empty tables, or one
+    /// that quietly grew a second aggregator over the drained records, answers
+    /// the first question and fails this one.
+    ///
+    /// # The population is TWO captures, and neither alone is enough
+    ///
+    /// `census_capture` has something to say in every plane, so an equality
+    /// here is not an equality between two empty documents — the
+    /// population-of-zero green this workspace keeps paying for, which the
+    /// reporter named before we did.
+    ///
+    /// `hole_capture` ends on an unfilled reassembly gap, so the FEED-END axis
+    /// actually moves: MEASURED, 32 walked records before the feed is declared
+    /// over and 94 after. Over `census_capture` alone the two arms agree
+    /// whether or not any feed was ever ended, so a door missing
+    /// [`wz_dissect_live_end`] entirely would pass — which is the same defect
+    /// in a different coat.
+    ///
+    /// `capture_one_flow_past_the_tap_cap` runs a ceiling into a bite, so the
+    /// LIMITS axis moves too. Without it the bounded arm would compare two
+    /// documents that a preset had never changed, which is a third face of the
+    /// same vacuity — and the assertion after the loop is what holds that claim
+    /// to a measurement rather than to this sentence.
+    ///
+    /// # And all four combinations the container family names
+    ///
+    /// One live door reaches them because the handle already holds the preset.
+    /// If that claim is wrong, the bounded arm and the narrowed arm are where
+    /// it shows.
+    #[test]
+    fn a_live_census_equals_the_container_census_over_the_same_bytes() {
+        for (what, file) in [
+            ("every plane populated", census_capture()),
+            ("ending on an unfilled gap", hole_capture()),
+            (
+                "running a ceiling into a bite",
+                capture_one_flow_past_the_tap_cap(),
+            ),
+        ] {
+            // ("", NONE) — the plain census door.
+            assert_eq!(
+                live_census_of(&file, 8, WZ_DISSECT_LIMITS_NONE, "", true),
+                call_census(&file).expect("the capture reads"),
+                "fed in 8 growing prefixes, the live planes must equal the \
+                 container's ({what})"
+            );
+            // ("", LIVE_TAP) — the bounded census door. The preset comes from
+            // `wz_dissect_live_open`, which is the whole reason this door takes
+            // no limits argument.
+            assert_eq!(
+                live_census_of(&file, 8, WZ_DISSECT_LIMITS_LIVE_TAP, "", true),
+                call_census_bounded(&file).expect("reads"),
+                "and under the live-tap ceiling ({what})"
+            );
+            // (expr, NONE) — the narrowed census door.
+            assert_eq!(
+                live_census_of(&file, 8, WZ_DISSECT_LIMITS_NONE, "kind == put", true),
+                call_census_where(&file, "kind == put").expect("reads"),
+                "and narrowed by a selector ({what})"
+            );
+            // (expr, LIVE_TAP) — the fourth combination, which over a container
+            // needed a fourth symbol and here needs none.
+            assert_eq!(
+                live_census_of(&file, 8, WZ_DISSECT_LIMITS_LIVE_TAP, "kind == put", true),
+                call_census_where_limited(&file, "kind == put", WZ_DISSECT_LIMITS_LIVE_TAP)
+                    .expect("reads"),
+                "and narrowed UNDER a ceiling ({what})"
+            );
+            // The window count must not be a coordinate either arm can see: one
+            // prefix per byte is the same feed cut as finely as it goes.
+            assert_eq!(
+                live_census_of(&file, file.len(), WZ_DISSECT_LIMITS_NONE, "", true),
+                call_census(&file).expect("reads"),
+                "and cut into single-byte prefixes ({what})"
+            );
+        }
+
+        // NOT VACUOUS ON THE LIMITS AXIS. The bounded arm compares two
+        // documents, and if no ceiling ever bit they would be the same document
+        // the unbounded arm already compared. So the bite is asserted, on the
+        // LIVE side, where the preset came from `wz_dissect_live_open`.
+        let biting = capture_one_flow_past_the_tap_cap();
+        let bounded = live_census_of(&biting, 8, WZ_DISSECT_LIMITS_LIVE_TAP, "", true);
+        assert!(
+            bounded.contains(LIVE_TAP_ONE_FLOW_BIT),
+            "the ceiling the handle was opened with must BITE, or the bounded \
+             arm above compared two unbounded documents: {bounded}"
+        );
+        assert!(
+            live_census_of(&biting, 8, WZ_DISSECT_LIMITS_NONE, "", true).contains(NO_CAPS_NO_BITE),
+            "and the same bytes with no ceiling must report no bite, or the \
+             preset is not what made the difference"
+        );
+
+        // NOT VACUOUS ON THE PLANES. The equality above is worth something only
+        // if the documents it compares have rows in them, and this is the
+        // assertion that says so — the reporter's own condition, kept inside
+        // this test rather than left to a lane.
+        let planes = live_census_of(&census_capture(), 8, WZ_DISSECT_LIMITS_NONE, "", true);
+        for present in [
+            "\"keyexpr\":\"demo/temp\"",
+            "\"zid\":\"a1a1a1a1\"",
+            "\"zid\":\"b2b2b2b2\"",
+            "\"requests\":1,\"completed\":1",
+            "\"kind\":\"subscriber\"",
+        ] {
+            assert!(
+                planes.contains(present),
+                "the live planes must carry {present}, or the equality above \
+                 is between two empty documents: {planes}"
+            );
+        }
+    }
+
+    /// R2453 (open-debt item 700) — AND THE FEED-END AXIS IS LOAD-BEARING.
+    ///
+    /// The discriminator for the test above. A door whose `end` did nothing
+    /// would satisfy every equality there if this property did not hold, so it
+    /// is asserted rather than assumed: over a capture that stops on an
+    /// unfilled gap, a live handle that has NOT been told its feed is over
+    /// reports a SHORTER census than the container doors do, because the bytes
+    /// behind the hole are still being waited for.
+    ///
+    /// That difference is correct live behaviour and not a defect — a gap a
+    /// retransmission may still fill is not one to give up on — which is why
+    /// the two are separate calls rather than one.
+    #[test]
+    fn a_live_census_is_short_until_the_feed_is_declared_over() {
+        let file = hole_capture();
+        let whole = call_census(&file).expect("reads");
+
+        let still_open = live_census_of(&file, 8, WZ_DISSECT_LIMITS_NONE, "", false);
+        assert_ne!(
+            still_open, whole,
+            "a handle still waiting on its gap cannot already agree with a \
+             reader that gave up on it"
+        );
+        assert!(
+            still_open.contains("\"walked_records\":32") && whole.contains("\"walked_records\":94"),
+            "and the difference is the bytes BEHIND the hole:\n  open:  \
+             {still_open}\n  whole: {whole}"
+        );
+        // Declaring it over is what closes the difference, on the same handle
+        // shape and the same bytes.
+        assert_eq!(
+            live_census_of(&file, 8, WZ_DISSECT_LIMITS_NONE, "", true),
+            whole,
+            "and ending the feed is what makes the two agree"
         );
     }
 
@@ -4284,7 +4656,21 @@ mod tests {
         // left open: that door hands back a new handle, and a capture still
         // being written has no moment at which a new handle is the right
         // answer.
-        assert_eq!(wz_dissect_abi_version(), 15);
+        //
+        // R2453 (open-debt item 700) — 16, TWO new symbols
+        // (`wz_dissect_live_census`, `wz_dissect_live_end`) and neither the
+        // memory rule nor the record layout moved: both act on the handle
+        // `wz_dissect_live_open` made, and the one allocation the pair makes is
+        // a string `wz_dissect_string_free` releases like every other.
+        //
+        // TWO symbols under ONE revision because they are one capability. R2373
+        // above let bytes cross INTO an open handle; this is the aggregate
+        // coming back OUT, and a census door without `_end` cannot give the
+        // answer the container doors give for the same bytes -- measured, a
+        // capture that stops on an unfilled gap reads 32 walked records before
+        // the feed is declared over and 94 after, because the bytes BEHIND a
+        // hole decode only once the hole is given up on.
+        assert_eq!(wz_dissect_abi_version(), 16);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT

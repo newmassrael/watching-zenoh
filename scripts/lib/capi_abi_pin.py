@@ -50,7 +50,7 @@ import subprocess
 import sys
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 15
+EXPECTED_VERSION = 16
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -114,6 +114,28 @@ EXPECTED_SYMBOLS = {
     # CALLER sized add nothing to release and run no callback, so the revision
     # moves for the symbol alone.
     "wz_dissect_live_message_bytes",
+    # R2453 (open-debt item 700) — the ANALYSIS PLANES over a live handle, and
+    # the call that declares its feed over. Two symbols and ONE revision,
+    # because they are one capability: measured, the census of a capture that
+    # ends on an unfilled gap differs before and after the feed is declared
+    # over (32 walked records against 94), so a census door shipped without
+    # `_end` could not give the answer the container doors give for the same
+    # bytes -- which is the property that pair is judged by.
+    #
+    # The memory rule does NOT move with them. Both act on the handle
+    # `wz_dissect_live_open` made and `wz_dissect_live_close` releases; the one
+    # allocation the pair makes is a string released by
+    # `wz_dissect_string_free`, exactly like every other document this ABI
+    # hands back, and `_end` allocates nothing at all.
+    #
+    # `_census` is a distinct symbol from the four `wz_dissect_pcap_census*`
+    # doors rather than a flag on them because it takes a HANDLE and not a
+    # container. It needs no limits argument of its own -- the preset was chosen
+    # at `wz_dissect_live_open` and taking it again here would be the same fact
+    # in two places -- which is why one live symbol reaches all four
+    # combinations the container family needs four names for.
+    "wz_dissect_live_census",
+    "wz_dissect_live_end",
     # R2171 (open-debt item 547) — the door BETWEEN the two families above and
     # the nine document doors below. It hands back the same opaque handle
     # `wz_dissect_live_open` does, so the memory rule does not move with it:

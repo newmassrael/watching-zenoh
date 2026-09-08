@@ -2,8 +2,22 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
-# R2451 (open-debt item 699) — RUN the oracle that keeps a tracked capture a
+# R2451 (no register item) — RUN the oracle that keeps a tracked capture a
 # function of the encoders that emitted it.
+#
+# Answers item 699 of the unregistered register, which lives OUTSIDE this
+# repository -- the reason the citation above reads "no register item", the
+# same position `capi_c_abi_pin.py` records for item 634. The item is named in
+# full here so a reader grepping for it lands on this file.
+#
+# ⚠ R2453 (item 700) — this line said `R2451 (open-debt item 699)`, which
+# `gate_provenance_lint.py` does not admit: its item grammar takes `§…`, `N<nn>`,
+# a store `debt-…` id, or `no register item`, and 699 has no store id (checked
+# against `--list-inventory`, not assumed). Layer C0 went red on the commit that
+# added this file and stayed red, which the round adding an unrelated door found
+# because C0 is not a gate `pre-push` runs. Repaired here rather than deferred:
+# a gate that cannot run grades nothing, and this one is the only oracle the
+# tracked capture has.
 #
 # ## Why a gate of its own rather than the changed-crate test gate
 #

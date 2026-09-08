@@ -315,7 +315,12 @@ impl LiveDissection {
         // R311y610 — a FILE has a last packet, so the patience an open gap is
         // waiting on will never be spent. This is the caller that knows it, and
         // it is the one thing `follow` deliberately does not do.
-        me.dissection.finish();
+        //
+        // R2453 (open-debt item 700) — through [`Self::end`], which is that act
+        // given a name so a LIVE feed can perform it too. One call site rather
+        // than two: a door that ended a feed differently from the way a file
+        // ends one is exactly the divergence this round is closing.
+        me.end();
         Ok(me)
     }
 
@@ -586,6 +591,66 @@ impl LiveDissection {
             ));
         };
         self.dissection.message_bytes_at(flow, origin, index)
+    }
+
+    /// R2453 (open-debt item 700) — THE ANALYSIS PLANES OF WHAT THIS HANDLE HAS
+    /// SEEN, as the same document the capture doors emit.
+    ///
+    /// `filter` narrows exactly as it does through
+    /// [`crate::wz_dissect_pcap_census_where`], and an EMPTY one selects
+    /// everything — which is why one method answers both the narrowed question
+    /// and the plain one.
+    ///
+    /// # Nothing here is new aggregation, and that is the point
+    ///
+    /// The planes were never missing from this half. `wz-capture` computes them
+    /// from a `&Dissection`, and this type has held one since R2102, so what
+    /// this returns is the SAME emitter the capture doors call rather than a
+    /// second one. That matters because the alternative a consumer reaches for
+    /// when a library has no door is to aggregate the drained records itself,
+    /// which puts a second counter of the same facts in the system — and a
+    /// second counter does not fail, it DIVERGES.
+    ///
+    /// # `&self`, and why that is load-bearing
+    ///
+    /// Rendering the planes must not change what the tap decodes. Exactly one
+    /// act would, and it is not here: giving up on an unfilled reassembly gap.
+    /// That is [`Self::end`], and it is a separate call so that a consumer
+    /// drawing a window cannot spend it by accident.
+    pub fn census(&self, filter: &wz_capture::filter::Filter) -> String {
+        wz_capture::census_json::census_json_where(&self.dissection, filter)
+    }
+
+    /// R2453 (open-debt item 700) — THE FEED ENDED: spend the patience that a
+    /// capture's last packet spends.
+    ///
+    /// # Why a live handle needs this at all
+    ///
+    /// A file ends, so the reader that opens one knows when to stop waiting for
+    /// a segment that never came; `Dissection::finish` is where every capture
+    /// door spends that. A tap does not end, so this handle never spends it,
+    /// and until this round there was no way to say the feed was over.
+    ///
+    /// MEASURED, on a capture whose last act is an unfilled gap: the census of
+    /// the same bytes reports 32 walked records before this call and 94 after
+    /// it. The bytes BEHIND a hole decode only once the hole is given up on, so
+    /// a consumer replaying a finite capture through the live door read a SHORT
+    /// document and had no way to reach the one the capture doors give for the
+    /// same bytes. That is the seam item 700 is about, in the one case a
+    /// regression can hold still.
+    ///
+    /// # It does not close the handle, and feeding may continue
+    ///
+    /// [`Self::from_capture`] has called this since R2373 and then leaves the
+    /// handle followable, so "ended" here means the patience is spent and not
+    /// that the handle is done. A tap that goes quiet and then speaks again is
+    /// the ordinary case, and the cost of having said so is that a gap which a
+    /// late retransmission would have filled is already a discontinuity —
+    /// which is the same trade a file's end makes, made deliberately.
+    ///
+    /// Releasing the handle is still [`crate::wz_dissect_live_close`]'s job.
+    pub fn end(&mut self) {
+        self.dissection.finish();
     }
 
     /// The lists this handle is currently tracking a watermark for. Used by the

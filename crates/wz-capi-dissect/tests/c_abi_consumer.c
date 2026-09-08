@@ -303,9 +303,46 @@ static int check_live_door(void) {
     CHECK(records[0].anchor == 5, "and it is the one left behind, got %llu",
           (unsigned long long)records[0].anchor);
 
+    /* R2453 (open-debt item 700) — THE ANALYSIS PLANES, off the handle this
+     * consumer has been feeding a packet at a time. Before this door a C
+     * program could learn that a message arrived and could not learn which key
+     * carried it without handing a whole container to a different family.
+     *
+     * The document is the census document, so the same reader and the same
+     * schema serve both halves -- checked by its envelope rather than by a
+     * plane's contents, which the Rust side asserts in full. */
+    {
+        char *census = NULL;
+        rc = wz_dissect_live_census(h, "", &census);
+        CHECK(rc == WZ_DISSECT_OK, "live_census rc=%d", rc);
+        CHECK(census != NULL, "OK must come with a string");
+        CHECK(strstr(census, "\"name\":\"census\"") != NULL,
+              "the live door must emit the CENSUS document: %s", census);
+        CHECK(strstr(census, "\"planes\":[") != NULL,
+              "and it must carry the plane list: %s", census);
+        wz_dissect_string_free(census);
+
+        /* An empty selector is the identity; a broken one is refused BY NAME
+         * and hands back nothing, exactly as the container doors do. */
+        census = NULL;
+        rc = wz_dissect_live_census(h, "kind ==", &census);
+        CHECK(rc == WZ_DISSECT_ERR_SELECTOR, "a bad selector rc=%d", rc);
+        CHECK(census == NULL, "a refused selector must not allocate");
+
+        /* Declaring the feed over is a separate call, so drawing a window
+         * cannot spend a gap's patience by accident. Null is a no-op. */
+        wz_dissect_live_end(NULL);
+        wz_dissect_live_end(h);
+        rc = wz_dissect_live_census(h, "", &census);
+        CHECK(rc == WZ_DISSECT_OK, "live_census after end rc=%d", rc);
+        wz_dissect_string_free(census);
+    }
+
     /* Nulls are refused before anything is dereferenced. A panic unwinding
      * across extern "C" is undefined behaviour and these are the calls that
      * would trip it. */
+    rc = wz_dissect_live_census(NULL, "", NULL);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null handle census rc=%d", rc);
     rc = wz_dissect_live_push(NULL, 1, 0, frame, frame_len);
     CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null handle push rc=%d", rc);
     rc = wz_dissect_live_push(h, 1, 0, NULL, 0);
@@ -928,8 +965,17 @@ int main(void) {
      * neither the memory rule nor the record layout moved. It answers the half
      * of the file question the replay door left open -- that one hands back a
      * NEW handle, and a capture still being written has no moment at which a
-     * new handle is the right answer. */
-    CHECK(wz_dissect_abi_version() == 15, "abi version is %d, expected 15",
+     * new handle is the right answer.
+     * R2453 -- 16 since wz_dissect_live_census and wz_dissect_live_end joined
+     * it: the analysis planes read off an OPEN handle, and the call that
+     * declares its feed over. TWO symbols and ONE revision, because they are
+     * one capability -- measured, a capture that stops on an unfilled gap
+     * reads 32 walked records before the feed is declared over and 94 after,
+     * so a census door without the second could not give the answer the
+     * container doors give for the same bytes. Neither the memory rule nor the
+     * record layout moved: both act on the handle wz_dissect_live_open made,
+     * and the one allocation is a string wz_dissect_string_free releases. */
+    CHECK(wz_dissect_abi_version() == 16, "abi version is %d, expected 16",
           wz_dissect_abi_version());
 
     /* A KeepAlive: one header byte, the smallest complete transport message,
@@ -1377,8 +1423,20 @@ int main(void) {
      * only this lane sees it. It is repaired here by R2223 rather than in a
      * round of its own because that round is adding a revision to the FIELD
      * document three lines down and would otherwise leave the same red
-     * standing on a second row. */
-    revisioned[0].revision = 7;
+     * standing on a second row.
+     * Round 2447 (item 696) -- 8: every flow object says WHICH LINK it was read
+     * off, and a raweth endpoint's `addr` stops being spelled as an IPv6
+     * address. An addition, so revision 7 retires nothing.
+     * ⚠ AND THE SAME MISS HAPPENED A THIRD TIME. That round moved the document
+     * and left this literal at 7, so Layer C1bo went red on the commit that did
+     * it and stayed red -- found by R2453 (item 700), which was adding a
+     * different door entirely and could not push past this lane. Repaired here
+     * rather than deferred, for the reason the R2211 paragraph above gives.
+     * The number is taken from `wz_capture::doc_revision`, which is where the
+     * revision is DECLARED; reading it off the document this line checks would
+     * agree with any value, which is the whole reason this literal is the
+     * consumer's own. */
+    revisioned[0].revision = 8;
     revisioned[0].doc = NULL;
     rc = wz_dissect_pcap_census(pcap, sizeof pcap, &revisioned[0].doc);
     CHECK(rc == WZ_DISSECT_OK, "census rc=%d", rc);
@@ -1415,8 +1473,21 @@ int main(void) {
      * listing of which MESSAGES it holds and where their bytes are. The word is
      * a closed family, which `name` could never be: `name` is every field name
      * at every depth of the tree, so a consumer splitting traffic by message
-     * was testing an open set against a hand-written list. */
-    revisioned[2].revision = 5;
+     * was testing an open set against a hand-written list.
+     * R2440 (item 691) -- 6 when `keyexpr` joined every `carried` entry,
+     * RESOLVED, whatever the caller declared. It moves no declared axis, which
+     * doc_revision states rather than hides.
+     * Round 2447 (item 696) -- 7: the census row's twin. Both of this
+     * document's flow objects gain `link`, because both render one shared flow
+     * key, and a raweth endpoint's `addr` stops being spelled as an IPv6
+     * address.
+     * ⚠ BOTH OF THOSE LEFT THIS LITERAL AT 5, so this row was red BEHIND the
+     * census row above -- a second stale pin the loop could not report, because
+     * it stops at the first. Worth the sentence: repairing only the row that
+     * FIRED would have moved the failure rather than reduced it. Both are
+     * repaired by R2453 (item 700), from wz_capture::doc_revision and not from
+     * the emitted document. */
+    revisioned[2].revision = 7;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

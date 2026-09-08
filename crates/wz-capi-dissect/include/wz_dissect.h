@@ -1453,6 +1453,73 @@ int wz_dissect_live_message_bytes(const wz_dissect_live *h,
                                   unsigned char *out, size_t cap,
                                   size_t *needed);
 
+/* ── R2453 (ABI 16) — THE ANALYSIS PLANES OVER A LIVE HANDLE ─────────────
+ *
+ * The census doors above take a capture CONTAINER, and until this revision not
+ * one of them took a wz_dissect_live *. So the five planes -- exchanges,
+ * interests, keyexprs, nodes, payloads -- were reachable only by handing a
+ * whole file in, and a consumer watching a RUNNING link could learn that a
+ * message arrived and could not learn which key carried it, who declared it,
+ * or whether a query was answered.
+ *
+ * wz_dissect_live_follow crossed this seam in the other direction: bytes into
+ * an open handle. This is the aggregate coming back out, and the pair is what
+ * removes the two workarounds a consumer is otherwise left with. Both are
+ * refusals this header already makes elsewhere. Re-feeding a growing prefix to
+ * a container door means a NEW dissection each window, so wz_dissect_live_lost
+ * returns to zero and the census's own cumulative counts -- records,
+ * declarations, total_payload_bytes, the gap group, dropped_by_limits -- can no
+ * longer be told from a restart. Aggregating the drained records by hand means
+ * a second counter of facts this library already counts, which does not fail:
+ * it diverges.
+ *
+ * ONE door here answers what FOUR answer over a container. That family varies
+ * two axes -- selector and limit preset -- and names all four combinations.
+ * Over a handle the LIMIT axis is not an argument: it was chosen at
+ * wz_dissect_live_open and is a property of the handle, so taking it again
+ * here would be the same fact in two places, and the two would part the first
+ * time a caller passed the other one. What is left is the selector, and an
+ * EMPTY selector is the identity, so:
+ *
+ *   open(NONE)     + census("")    is wz_dissect_pcap_census
+ *   open(LIVE_TAP) + census("")    is wz_dissect_pcap_census_bounded
+ *   open(NONE)     + census(expr)  is wz_dissect_pcap_census_where
+ *   open(LIVE_TAP) + census(expr)  is wz_dissect_pcap_census_where_limited
+ *
+ * It is a READ, and `h` is const to say so. Drawing a window must not change
+ * what the tap decodes; the one act that would is wz_dissect_live_end below.
+ *
+ * The document is the one the census doors emit, so a consumer keeps one
+ * reader and one schema across both halves. A selector that does not compile
+ * returns WZ_DISSECT_ERR_SELECTOR and no string; for the position, call
+ * wz_dissect_selector_diagnose. */
+int wz_dissect_live_census(const wz_dissect_live *h, const char *selector,
+                           char **out);
+
+/* R2453 (ABI 16) — THE FEED ENDED: spend the patience a capture's last packet
+ * spends.
+ *
+ * A file ends, so every door taking (bytes, len) gives up on a reassembly gap
+ * that never filled, and the bytes BEHIND that gap decode as a discontinuity.
+ * A tap does not end, so a handle never reaches that moment on its own.
+ *
+ * MEASURED on a capture whose last act is an unfilled gap: the census of the
+ * same bytes reports 32 walked records before this call and 94 after it.
+ * Without this, a consumer replaying a finite capture through the live doors
+ * reads a SHORT document and cannot reach the answer the container doors give
+ * for those very bytes -- which is the property this pair is judged by.
+ *
+ * It does NOT close the handle and feeding may continue: wz_dissect_pcap_replay
+ * has ended its feed since R2373 and still hands back a followable handle.
+ * "Ended" means the patience is spent, not that the handle is done. What that
+ * costs is a gap a late retransmission would have filled being already a
+ * discontinuity -- the same trade a file's end makes, made when you say so.
+ *
+ * Returns nothing and null is a no-op: nothing here can fail, and an error
+ * channel with no error in it is one a caller learns to ignore. Releasing the
+ * handle is still wz_dissect_live_close's job. */
+void wz_dissect_live_end(wz_dissect_live *h);
+
 /* Release a live handle. Null is a no-op, so your cleanup path needs no
  * guard of its own -- the same rule wz_dissect_string_free follows, and the
  * commonest source of a double free at an FFI seam. */

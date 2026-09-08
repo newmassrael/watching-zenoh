@@ -470,6 +470,34 @@ ONLY_CAPI = {
         "asked for.",
         (),
     ),
+    # R2453 (open-debt item 700) — the aggregate coming back OUT of an open
+    # handle, which is the direction the row above leaves open. Filed in the
+    # round that added the symbol, where this table's header says the answering
+    # belongs.
+    "the analysis planes of an OPEN handle": (
+        "wz_dissect_live_census",
+        "DELIBERATE, and structurally so. The command line has no handle to "
+        "take: it holds its dissection in its own process, reads a capture and "
+        "prints the planes, so `--census` is already the whole of "
+        "what a terminal can be asked here. What has no counterpart is the "
+        "ARGUMENT -- a dissection a caller keeps between windows -- for the "
+        "same reason the `wz_dissect_live_open` row above gives. The half a "
+        "PERSON would still want is not this symbol but the growing-container "
+        "flag already filed as open debt against `wz_dissect_live_follow` "
+        "above, and it is not double-counted here.",
+        (),
+    ),
+    "declaring a live feed OVER": (
+        "wz_dissect_live_end",
+        "DELIBERATE. A terminal run cannot NOT end its feed: every flag "
+        "`wz-analyze` has goes through `Dissection::from_capture`, which reads "
+        "a file to its last packet and spends the gap patience there, so there "
+        "is no moment at which a person could be offered this choice and none "
+        "at which withholding it would mean anything. The choice exists on this "
+        "surface only because a tap has no last packet -- see the door's own "
+        "paragraph in `crates/wz-capi-dissect/include/wz_dissect.h`.",
+        (),
+    ),
 }
 
 # CLI flags that are not capabilities of the analysis surface at all.
