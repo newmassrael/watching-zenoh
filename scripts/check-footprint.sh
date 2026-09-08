@@ -583,8 +583,110 @@ declare -A BASELINE_MC_TEXT=(
     # a toolchain term, not drift: it does not move across the bump, so the
     # INFO-axis `+8` a local run prints is this host's newlib, not a regression.
     # Old: 55164/55268 (Round 1955).
-    ["thumbv7m-none-eabi"]=55620
-    ["thumbv7em-none-eabihf"]=55604
+    #
+    # Round 2452 -- REBASED, and the bytes are ATTRIBUTED rather than absorbed.
+    # This artifact held hosted Layer Q red for the whole of open-debt item
+    # 695's fourteen-run window; Q.6 BOOTS this same feature set on all three
+    # mps2 machines and passed in every one of those runs, so the footprint
+    # gate was the only thing red and the code was never in question.
+    #
+    # THE SCE PIN IS NOT THE CAUSE, which is worth stating first because every
+    # rebase above but two blamed one and three pins moved in this window
+    # (85c44780 -> 084dfdbf47, 01455e64 -> 4fd846df76, 81b8fc7a -> d3db11c415).
+    # `vendor/lwip` did not move at all across the window. Measured, not
+    # assumed: at cab985a9 -- AFTER all three bumps -- this bin reads 55640
+    # against the 55620 above, i.e. +20, and the three pins together cost ~0.
+    # The prior was the strong one and the number refuted it.
+    #
+    # WHEN, by rebuilding the bin at waypoints in ONE detached worktree (same
+    # path throughout, so the path-derived term above is held constant; rustc
+    # 1.97.0; thumbv7m, which is the axis the bisect ran on):
+    #
+    #   | cab985a9  2026-08-28  after all 3 SCE pins |   55640 |   +20 |
+    #   | eb86598a  2026-09-04                       |   55700 |   +80 |
+    #   | dbc37215  2026-09-06                       |   55600 |   -20 |
+    #   | c69f7de4  2026-09-07                       |   55792 |  +172 |
+    #   | 67900182  2026-09-07  multicast per-peer   |   56324 |  +704 |
+    #   | 7cd5d4a2  2026-09-08  HEAD                 |   56520 |  +900 |
+    #
+    # So the band held until 2026-09-07 and ONE commit spends more than twice
+    # it: 67900182 (R2417, "multicast negotiates the protocol level per peer")
+    # is +532 on its own. Note the `-20` row in particular -- the accretion
+    # between the pin and 09-07 is churn inside the band in BOTH directions,
+    # not a slow leak anyone failed to notice.
+    #
+    # Nothing before cab985a9 was rebuilt, and the reason is a defect this tree
+    # already fixed: at the Round 2047 pin, `lwip-sys`'s bindgen half passed
+    # clang a `-none-eabi` triple without `-ffreestanding`, so it landed on the
+    # host's glibc `stdint.h` and died with seven `unknown type name` errors
+    # against a correct lwIP header. cab985a9 is that fix, and it is therefore
+    # the oldest commit in this window that BUILDS here. It is also why the
+    # window's low end is a measurement rather than the pinned literal.
+    #
+    # WHERE THE BYTES LANDED, by per-symbol ELF diff (`arm-none-eabi-nm -S`,
+    # `t`/`T` only) of the cab985a9 and HEAD builds -- total 50272 -> 51060 =
+    # +788 against a +880 section delta, the rest being padding:
+    #
+    #   -1386  __cortex_m_rt_main -- THE ABSORBER, per the warning above; its
+    #          delta is not its own cost and here it is NEGATIVE because code
+    #          left it for the two new out-of-line symbols underneath
+    #   +1248  CoopRuntime<SystickClockRef>::run_until_idle   (NEW)
+    #    +348  wz_runtime_coop::reassembly_rx::mcu_reassembly (NEW)
+    #    -208  __aeabi_memclr, which went away
+    #    +168  multicast_dispatch::PeerSlot::new              (NEW)
+    #     +98  reassembly_dispatch::apply_chain_boundary_markers (NEW)
+    #     +82  multicast_dispatch::MulticastDispatcher::clear_peers_if_stopped
+    #     +62  multicast_tx::multicast_tx_emit
+    #     +60  inbound::decode_oam
+    #     +50  handshake_encode::encode_close -- R2450's `#[inline(never)]`,
+    #          already attributed there (+36 section on both axes); it is a
+    #          symbol at all only because that round made it one
+    #     +46  multicast_join::encode_join
+    #     +46  multicast_dispatch::PeerSlot::evict
+    #     +42  drop_glue::<ReassemblyDispatcher<4, 4096>>
+    #     +38  multicast_dispatch::abort_peer_chains::<4, 4096, HeapStaging>
+    #     +34  inbound::parse_inbound_consuming
+    #     -32  RawVec<Vec<u8>>::grow_one, which went away
+    #     +28  reassembly_dispatch::ReassemblyDispatcher::find_active
+    #     +28  wz_lwip_any_link_up (NEW -- b154aa4a, a face losing its link)
+    #     +18  ext_chain::decode_ext_chain
+    #
+    # AND THE ISOLATED DIFF FOR 67900182 CORRECTS A NAME-BASED READING OF THAT
+    # TABLE, which is why it was measured separately (c69f7de4 -> 67900182,
+    # total 50394 -> 50866 = +472 against a +532 section delta):
+    #
+    #    +416  __cortex_m_rt_main -- the absorber again; the negotiation is
+    #          inlined into main, so ITS +416 is where 67900182's cost sits
+    #     +46  multicast_join::encode_join -- the beacon now spells a patch
+    #          level, the same extension R2449 re-derived the dissect pin from
+    #      +6  PeerSlot::evict
+    #      +4  PeerSlot::new
+    #
+    # `PeerSlot::new` and `::evict` ALREADY EXISTED at c69f7de4 (164 B and
+    # 40 B) and 67900182 adds 4 B and 6 B to them. Reading the whole-window
+    # table by symbol NAME would have charged this commit the per-peer slot it
+    # merely grew, and the isolated pair is what says otherwise.
+    #
+    # NOT A LEAK, and the axes say so independently of the names: `data` is 4
+    # on both sides and `bss` is 272268 hosted on both sides, so nothing new
+    # is being retained -- the whole delta is ROM. Every new symbol names a
+    # capability that deliberately landed in this window (per-peer multicast
+    # negotiation, chain boundary markers, an MCU face that can lose its link,
+    # the establishment mandatory bit), and the two largest numbers are the
+    # absorber and its callees trading places rather than new work.
+    #
+    # THE FIGURES ARE THE HOSTED ONES, for the reason Round 2047 gave: the
+    # hosted job is the gate that blocks main. Hosted run `34224738327`
+    # (`head_sha` 58ed706e, cross-checked against the commit) reads 56528 /
+    # 56620. The two commits between that read and HEAD cannot move this bin
+    # and were checked rather than assumed -- 786deefa touches `wz-capture`,
+    # which is absent from this bin's 76-crate `cargo tree`, and 7cd5d4a2 is
+    # store JSON only. This host reads 56516 / 56584 on the same tree, so the
+    # spread is +12 / +36 hosted-over-local: the same magnitude the Round 2047
+    # note records, and still not a constant to subtract.
+    # Old: 55620/55604 (Round 2047).
+    ["thumbv7m-none-eabi"]=56528
+    ["thumbv7em-none-eabihf"]=56620
 )
 # shellcheck disable=SC2034  # resolved through the `declare -n _bt/_bd/_bb`
                             # namerefs in the `case "$artifact"` dispatch below; shellcheck
