@@ -1450,8 +1450,20 @@ int main(void) {
      * because that set is over the whole document rather than per plane. So a
      * consumer diffing key sets between 9 and 10 finds nothing and THIS number
      * is again the entire notice. Moved in the same edit as the emitter, which
-     * is the discipline the paragraph above was written after three misses. */
-    revisioned[0].revision = 10;
+     * is the discipline the paragraph above was written after three misses.
+     * R2457 (item 702) -- 11: the keyexpr id space's unit became the SESSION,
+     * so a reference published on a session's second link resolves instead of
+     * rendering unresolved. A value moved under stationary keys, so once more
+     * this number is the entire notice.
+     * ⚠ AND THE DISCIPLINE FAILED ON THAT ROUND. R2457 did not move this line,
+     * and R2458 did not move the `fields` one below, so Layer C1bo went red on
+     * the census row with the fields row stale BEHIND it -- the same fail-fast
+     * shape the `fields` comment records for R2447 and R2453, arriving a second
+     * time. Four leaks of one class is why R2463 stopped writing paragraphs
+     * here and built `scripts/lib/doc_revision_consumer_pin.py`: it reads
+     * `doc_revision::DOCUMENT_HISTORY` and this file, reports EVERY stale pin
+     * rather than only the first, and runs in pre-push in about a second. */
+    revisioned[0].revision = 11;
     revisioned[0].doc = NULL;
     rc = wz_dissect_pcap_census(pcap, sizeof pcap, &revisioned[0].doc);
     CHECK(rc == WZ_DISSECT_OK, "census rc=%d", rc);
@@ -1504,8 +1516,16 @@ int main(void) {
      * the emitted document.
      * R2454 (item 698) -- 8: the census row's twin once more. Both flow objects
      * here render the shared key whose vsock endpoints stopped being spelled as
-     * IPv6 addresses. No key moved; see the census row above. */
-    revisioned[2].revision = 8;
+     * IPv6 addresses. No key moved; see the census row above.
+     * R2458 (item 703) -- 9: `keyexpr_cause` arrives on every `carried[]` entry,
+     * and under stationary keys this document's two flow folders stopped each
+     * building their own keyexpr id space. An ADDITION plus a value that moved,
+     * so the number is again the notice.
+     * ⚠ THIS IS THE ROW THAT STOOD STALE BEHIND THE CENSUS ONE, for the third
+     * time in this file's history. It was invisible because the C loop's
+     * `CHECK` aborts, so Layer C1bo can only ever report the FIRST mismatch --
+     * which is why the gate R2463 added reports all of them at once. */
+    revisioned[2].revision = 9;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

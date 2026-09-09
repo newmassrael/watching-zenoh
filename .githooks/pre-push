@@ -409,6 +409,36 @@ if ! python3 scripts/lib/capi_replay_vocabulary.py; then
     exit 1
 fi
 
+# ─── gate 2r — the C consumer's document revisions (R2463) ──────────
+# grades: worktree
+#
+# Open-debt item 695, and the THIRD member of the 2d / 2v family: a number that
+# lives in two crates, where the crate that moves it is not the crate that
+# fails. `doc_revision::DOCUMENT_HISTORY` is the SSOT; the copy is a literal in
+# `crates/wz-capi-dissect/tests/c_abi_consumer.c`, compiled only by hosted
+# Layer C1bo, so `cargo test -p wz-capture` structurally cannot see a drift.
+#
+# MEASURED, four leaks of one class: R2447 and R2453 left `fields` at 5 (that
+# file's own comment records it), then R2457 moved `census` 10 -> 11 and R2458
+# moved `fields` 8 -> 9 and neither moved the literal. The second of those was
+# INVISIBLE even once hosted went red, because the C loop's `CHECK` aborts and
+# C1bo therefore reports exactly one stale pin however many exist -- so the
+# round that repairs the row which fired moves the failure rather than reducing
+# it. This gate reports every one of them in a single run.
+#
+# UNCONDITIONAL, on gate 2d's argument: it reads two files, costs about a
+# second, and a scope predicate that is silently wrong reads exactly like a
+# pass.
+if ! python3 scripts/lib/doc_revision_consumer_pin.py; then
+    echo "" >&2
+    echo "pre-push: [gate 2r] a document revision the C consumer is written" >&2
+    echo "          against has drifted from doc_revision::DOCUMENT_HISTORY." >&2
+    echo "          The lines above name EVERY stale pin; hosted Layer C1bo" >&2
+    echo "          reports only the first, so fix them in one edit." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+
 # ─── gate 2e — the grading-pin ratchet (R2394) ──────────────────────
 # grades: worktree
 #

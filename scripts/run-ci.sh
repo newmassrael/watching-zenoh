@@ -2538,6 +2538,12 @@ PY
     # cannot cover gate 2c, which reads the previous hosted run and no file.
     python3 scripts/lib/hook_gate_boundary_gate.py --selftest || return 1
     python3 scripts/lib/hook_gate_boundary_gate.py --check || return 1
+    # R2463 (open-debt item 695) — pre-push gate 2r's own arms, beside its
+    # siblings and for their reason: the gate runs on every push, so the one
+    # place it is never exercised is the case it exists to refuse. Its selftest
+    # earned this line on its first run by finding a `relative_to` that raises
+    # instead of printing, on the very message a real failure would reach.
+    python3 scripts/lib/doc_revision_consumer_pin.py --selftest || return 1
     # R2288 (open-debt item 611) — the four SN-resolution words are upstream's,
     # and only two of them reached any oracle: the zenohd interop lane feeds
     # `"16bit"` and `"32bit"` to a real router, and what tied ANY of them to
