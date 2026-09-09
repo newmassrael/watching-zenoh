@@ -1394,7 +1394,26 @@ def _grade_head(reason: str) -> str:
 #: file, a valid line over new content, or a false clause beside its own repair,
 #: but a clause that is false because UPSTREAM SHRANK. Re-measuring must ask the
 #: direction, not only whether the coordinate still resolves.
-BUDGET = 8
+#:
+#: R2483 -- 8 -> 7: `routing-routes`, and the fifth form showed up again in the
+#: very next row, which is why it earned a taxonomy entry rather than a
+#: footnote. Three of its four standing clauses hold and are re-anchored (the
+#: query-route cache, the multi-hop declaration propagation, and the source
+#: dimension -- which has GROWN a second axis, `RegionMap<NodeIdMap<T>>`, so a
+#: future clause enumerating the key must name Region AND NodeId). The fourth
+#: splits: upstream does restore the querier's qos on a relayed reply, so that
+#: half stands, but a `Response` at the pin carries no `ext_nodeid` field at
+#: all, so the other half named a divergence on something the message type does
+#: not have. Withdrawn rather than re-declared.
+#:
+#: ⛔ AND A HANDED-DOWN PREMISE WAS FALSIFIED WHILE TAKING THIS ROW: the note
+#: that the five `ext-pubsub-*` rows "cannot be measured on this machine
+#: because zenoh-ext is absent" is WRONG. The pinned checkout carries
+#: `zenoh-ext/` as a workspace member, `advanced_publisher.rs` and its siblings
+#: included. That inherited absence had been quoted for twelve rounds, which is
+#: the failure `CLAUDE.md` names in its External references section: an absence
+#: is a fact to ESTABLISH, never to inherit. Every remaining row is measurable.
+BUDGET = 7
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
