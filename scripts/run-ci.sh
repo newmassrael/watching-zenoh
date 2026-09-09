@@ -16609,6 +16609,24 @@ layer_e6c_peer_multilink() {
     (cd crates && cargo clippy -p wz-ap-demo --features transport-multilink --quiet -- -D warnings) || return 1
     _runci_guarded_test E6c 1 cargo test -p wz-integration-tests \
         --test wz_peer_multilink_aggregate -- --ignored --quiet || return 1
+    # R2457 (open-debt item 702) — the same topology, TAPPED, and read with a
+    # question no other capture in this tree is asked: are the two links ONE
+    # keyexpr id space? Its own `--test` target and its own count, on the
+    # precedent the Ewirez family sets — one guarded step per capture, so a leg
+    # that stops running cannot hide inside another leg's tally.
+    #
+    # It is a SEPARATE capture from `wz_peer_multilink_aggregate` rather than an
+    # assertion added to it, because the tap changes the topology: A dials two
+    # PROXY ports instead of B's port twice, and folding the two would make that
+    # test's log witnesses depend on the relay.
+    #
+    # ⚠ WHY IT IS NOT A LEG OF `zenoh_multilink_body_foreign_witness`, where
+    # item 702 said the bytes already were: MEASURED this round, that capture is
+    # ONE flow — it asserts so itself — because `tap_proxy` accepts a single
+    # connection and `z_get` dials once. `max_links:2` is a budget there, not a
+    # second dial.
+    _runci_guarded_test E6c-keyexpr 1 cargo test -p wz-integration-tests \
+        --test wz_multilink_keyexpr_session_capture -- --ignored --quiet || return 1
 }
 
 # ─── Layer E6d — qos demo reachability: prioritized publish over aggregated multilink ─

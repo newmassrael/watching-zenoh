@@ -2646,14 +2646,18 @@ fn throughput_json(t: &ThroughputTable, s: &mut String) {
         if i > 0 {
             s.push(',');
         }
+        // R2457 (open-debt item 702) — the CAUSE beside the count, spelled the
+        // same way `crate::census_json` spells it: the two documents render the
+        // same rows and a reader must not have to learn which one says why.
         s.push_str(&format!(
-            "{{\"space\":\"{}\",\"id\":{},\"references\":{}}}",
+            "{{\"space\":\"{}\",\"id\":{},\"references\":{},\"cause\":\"{}\"}}",
             match u.space {
                 wz_session_core::passive::Direction::A => "A",
                 wz_session_core::passive::Direction::B => "B",
             },
             u.id,
-            u.references
+            u.references,
+            u.cause.name()
         ));
     }
     s.push_str("]}");

@@ -209,6 +209,18 @@ pub struct ObservedLink {
     pub b: usize,
     /// The flow that carried both halves.
     pub flow: FlowKey,
+    /// R2457 (open-debt item 702) — the list's index in
+    /// `crate::Dissection::message_lists`, which is what
+    /// [`SessionGrouping`] keys by.
+    ///
+    /// [`Self::flow`] cannot do that job. A TCP flow and a UDP flow may carry
+    /// the identical 5-tuple — `Dissection::message_lists_with_origin` says so
+    /// where it explains why an origin rides beside the key — so a grouping
+    /// keyed by [`FlowKey`] would hand one session's owners to the other
+    /// list. The index is the same one `crate::agg` and `crate::interest`
+    /// already take, from the same `enumerate()` over the same iterator, which
+    /// is what makes the three walks comparable at all.
+    pub list: usize,
 }
 
 /// R2456 (open-debt item 701) — WHERE one observation sits, as the three facts
@@ -523,12 +535,21 @@ impl NodeCensus {
     }
 
     fn record_link(&mut self, a: usize, b: usize, flow: &FlowKey) {
+        // R2457 — the LIST as well, read off `self.list` which
+        // `observe_flow` set for this walk. Two lists carrying the same flow
+        // key are two links, and deduping without it would drop the second.
+        let list = self.list;
         let already = self
             .links
             .iter()
-            .any(|l| l.a == a && l.b == b && &l.flow == flow);
+            .any(|l| l.a == a && l.b == b && &l.flow == flow && l.list == list);
         if !already {
-            self.links.push(ObservedLink { a, b, flow: *flow });
+            self.links.push(ObservedLink {
+                a,
+                b,
+                flow: *flow,
+                list,
+            });
         }
     }
 
@@ -683,6 +704,141 @@ pub fn nodes(dissection: &crate::Dissection) -> NodeCensus {
         census.observe_scouting(&flow.flow, &flow.scouting);
     }
     census
+}
+
+/// R2457 (open-debt item 702) — which SESSION each message list belongs to, and
+/// which side of it each direction is.
+///
+/// # What this is for
+///
+/// A keyexpr id is minted by a session and is a fact about that session.
+/// [`crate::agg::KeyexprSpaces`] used to key its tables by the flow's own
+/// direction, which is right only while a session has ONE link: under
+/// `transport/unicast/max_links: 2` a `DeclKexpr` leaves on the link that was
+/// dialled first and the data using the alias may leave on the second, and a
+/// per-flow table then holds the declaration in one instance and the reference
+/// in another. It never cross-resolved — the conservative direction — it simply
+/// could not resolve.
+///
+/// This is the map that raises the unit. Nothing else about the rule changes:
+/// two sessions still get separate tokens and their id `3`s stay unrelated.
+///
+/// # Why the node pair IS the session, exactly
+///
+/// Not an approximation, and this was checked upstream rather than assumed.
+/// zenoh keeps established unicast transports in
+/// `HashMap<ZenohIdProto, Arc<dyn TransportUnicastTrait>>`
+/// (`zenoh-transport-1.10.0/src/unicast/manager.rs:108`) and dispatches an
+/// arriving link on `guard.get(&config.zid)`
+/// (same file, `:800`): a zid it already holds a transport for means the link
+/// JOINS that transport, and only an unknown zid makes a new one. So a pair of
+/// zids can hold at most one unicast session, and grouping by the pair is the
+/// session rather than a band around it.
+///
+/// ⚠ The version read is the one this machine has provisioned in the registry
+/// cache — 1.10.0, where `CLAUDE.md`'s reference paragraph says 1.5.0. The file
+/// and lines are cited so the next reader can re-run the check rather than
+/// inherit it.
+///
+/// # What it CANNOT group, and why that is the fallback and not a bug
+///
+/// [`NodeCensus`] records a link only where BOTH ends named themselves with an
+/// INIT on one flow — see the module docs for why less than you would think
+/// counts. A capture that starts mid-session has no handshake in it, so its
+/// flows appear in no link, [`Self::owners`] answers
+/// [`crate::agg::SpaceOwner::Flow`] for them, and resolution reaches exactly as
+/// far as it did before R2457. That is the honest answer for such a flow, and
+/// it is REPORTED as such: a reference missed under a `Flow` owner is
+/// [`crate::agg::UnresolvedCause::NoSession`], which tells a consumer the
+/// declaration may be one flow over rather than absent.
+#[derive(Debug, Clone, Default)]
+pub struct SessionGrouping {
+    /// Per list index, the owner of each direction. Absent for a list this
+    /// capture could not attribute to a session.
+    by_list: alloc::collections::BTreeMap<usize, [crate::agg::SpaceOwner; 2]>,
+    /// How many distinct sessions the links named.
+    sessions: usize,
+}
+
+impl SessionGrouping {
+    /// Derive the grouping from a census's links.
+    ///
+    /// # The unit, spelled
+    ///
+    /// A SESSION is an unordered pair of node indices — see the type docs for
+    /// the upstream reading that makes the pair exact. A SIDE is a
+    /// `(session, node)`, and it is that and not the node alone because one
+    /// node holds a separate session, and so a separate id space, with each
+    /// peer it talks to.
+    pub fn of(census: &NodeCensus) -> Self {
+        use alloc::collections::BTreeMap;
+
+        // The session a node PAIR stands under, and the side token a
+        // `(session, node)` stands under. Both interned in link order, so the
+        // tokens a capture hands out do not depend on map internals.
+        let mut sessions: BTreeMap<(usize, usize), usize> = BTreeMap::new();
+        let mut sides: BTreeMap<(usize, usize), usize> = BTreeMap::new();
+        let mut by_list = BTreeMap::new();
+        for link in census.links() {
+            let pair = (link.a.min(link.b), link.a.max(link.b));
+            let next = sessions.len();
+            let session = *sessions.entry(pair).or_insert(next);
+            let mut token = |node: usize| {
+                let next = sides.len();
+                crate::agg::SpaceOwner::Session(*sides.entry((session, node)).or_insert(next))
+            };
+            // Direction A is `link.a` and B is `link.b`: `observe_flow` fills
+            // `ends` by `dir_index(frame.direction)` and hands them to
+            // `record_link` in that order. Reversing them here would resolve
+            // every reference against the peer's table, which is the failure
+            // `KeyexprSpaces::resolve` documents as never happening.
+            by_list.insert(link.list, [token(link.a), token(link.b)]);
+        }
+        Self {
+            sessions: sessions.len(),
+            by_list,
+        }
+    }
+
+    /// The two owners for one message list.
+    ///
+    /// [`crate::agg::SpaceOwner::Flow`] on both sides for a list this capture
+    /// could not attribute — which is the pre-R2457 behaviour, kept as the
+    /// fallback the type docs describe.
+    pub fn owners(&self, list: usize) -> [crate::agg::SpaceOwner; 2] {
+        self.by_list.get(&list).copied().unwrap_or([
+            crate::agg::SpaceOwner::Flow { list, side: 0 },
+            crate::agg::SpaceOwner::Flow { list, side: 1 },
+        ])
+    }
+
+    /// How many distinct sessions the links named.
+    ///
+    /// A session with two links is ONE here, which is the whole point: read
+    /// beside [`Self::grouped_lists`], a session count below the list count is
+    /// what a multilink capture looks like.
+    pub fn sessions(&self) -> usize {
+        self.sessions
+    }
+
+    /// How many message lists were attributed to a session.
+    ///
+    /// The rest fall back to per-flow spaces. A reader comparing this with the
+    /// number of lists in the capture learns how much of it began mid-session.
+    pub fn grouped_lists(&self) -> usize {
+        self.by_list.len()
+    }
+}
+
+/// The grouping for a whole capture, in one call.
+///
+/// The ordering this plane imposes, named where a caller meets it: the node
+/// census must be complete BEFORE the first keyexpr fold, because the fold
+/// resolves as it walks and a session it learns about later cannot retroactively
+/// bind an alias an earlier record referenced. See `crate::agg::aggregate_where`
+/// for what that costs and why the alternatives were not taken.
+pub fn session_grouping(dissection: &crate::Dissection) -> SessionGrouping {
+    SessionGrouping::of(&nodes(dissection))
 }
 
 // R311y851 — `pub(crate)`, on the precedent `exchange::tests` set and with the
@@ -1152,7 +1308,15 @@ pub(crate) mod tests {
         out
     }
 
-    fn init_wire(zid: &[u8]) -> Vec<u8> {
+    /// R2457 (open-debt item 702) — the SAME INIT without the length prefix,
+    /// which is what a datagram link carries.
+    ///
+    /// `pub(crate)` on the precedent this module's header states: the session
+    /// grouping's acceptance in `crate::agg` needs a capture where two flows
+    /// carry the same pair of zids, and a second hand-laid INIT layout there is
+    /// the copy that drifts. This one is pinned against the real decoder by the
+    /// tests above.
+    pub(crate) fn init_wire(zid: &[u8]) -> Vec<u8> {
         let mut wire = alloc::vec![
             wz_session_core::wire_const::T_MID_INIT,
             0x09,

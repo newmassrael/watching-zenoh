@@ -445,12 +445,17 @@ pub fn keyexprs_json(t: &ThroughputTable) -> String {
         if i > 0 {
             out.push(',');
         }
+        // R2457 (open-debt item 702) — the CAUSE beside the count. Without it
+        // "this capture began mid-session" and "a declaration is missing" are
+        // one number and a reader chasing the wrong one searches a capture
+        // that never held the answer. See `crate::agg::UnresolvedCause`.
         let _ = write!(
             out,
-            "{{\"space\":\"{}\",\"id\":{},\"references\":{}}}",
+            "{{\"space\":\"{}\",\"id\":{},\"references\":{},\"cause\":\"{}\"}}",
             dir_name(alias.space),
             alias.id,
-            alias.references
+            alias.references,
+            alias.cause.name()
         );
     }
     let (declared, undeclared) = t.declarations();
@@ -2010,8 +2015,23 @@ pub(crate) mod fed_tests {
 
     #[test]
     fn the_census_documents_key_set_is_pinned() {
+        // R2457 (open-debt item 702) — the fixture CARRIES the contradicting
+        // and unresolved records, and until this round it did not.
+        //
+        // `every_plane_capture` passes `contradicting: false`, so the
+        // `unresolved[]` array was emitted EMPTY on every run of this test and
+        // the keys of the object inside it reached no axis at all. Measured:
+        // `"unresolved"` was in the pinned set and `"space"` and `"references"`
+        // — which every row of it has carried since revision 1 — were not. A
+        // population of zero reports green, so this pin has been silent about
+        // that object for its whole life, and item 702's new `cause` would have
+        // joined the same silence.
+        //
+        // The `contradicting` arm is what reaches it, and it brings the
+        // contradiction plane's own keys with it — also previously unpinned,
+        // for the same reason and now for neither.
         let doc = census_json_where(
-            &every_plane_capture("demo/temp"),
+            &every_plane_capture_with_file("demo/temp", None, true).0,
             &crate::filter::Filter::any(),
         );
         let mut seen = json_keys(&doc);

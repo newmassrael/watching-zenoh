@@ -614,6 +614,43 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: CENSUS_R6_PLANES,
         carries: CENSUS_R8_CARRIES,
     },
+    // R2457 (open-debt item 702) — a keyexpr id space is keyed by SESSION, and
+    // an unresolved reference says WHICH of two failures it was.
+    //
+    // The addition a consumer reads is `cause` on every
+    // `keyexprs.unresolved[]` row: `no_declaration` where the session was named
+    // and nothing on it declared the id, `no_session` where the flow showed no
+    // handshake and a sibling link may hold the declaration this observer
+    // cannot reach. Folded into one `unresolved` count — which is what every
+    // revision before this emitted — "the capture started late" and "a
+    // declaration is missing" are the same number, and the consumer that asked
+    // for this derived the acceptance from exactly that: not "multilink
+    // resolves", which a build that simply widened every table would satisfy
+    // while cross-resolving two sessions, but that an unresolved reference
+    // SEPARATES the two.
+    //
+    // ⚠ SO THIS REVISION IS THE WHOLE NOTICE FOR TWO THINGS AGAIN, and the
+    // second is a VALUE moving under stationary keys — revision 9's class and
+    // revision 10's. Rows that read `unresolved` before now RESOLVE, on any
+    // capture of a session with more than one link: the id space's unit rose
+    // from the flow to the session, so a `DeclKexpr` sent on the first link
+    // now binds a reference sent on the second. Counts fall and rows appear,
+    // and no key moves to say so.
+    //
+    // ⚠ AND FIVE OF THE SIX NEW KEYS ARE A HOLE THIS ROUND FOUND RATHER THAN
+    // MADE — `at`, `reason`, `references`, `space`, `why` were already emitted
+    // and this table had never covered them. See [`CENSUS_R11_KEYS`] for the
+    // fixture that was the population, written where a reader comparing key
+    // sets will be standing.
+    DocumentShape {
+        document: CENSUS,
+        revision: 11,
+        keys: CENSUS_R11_KEYS,
+        retiring: &[],
+        families: CENSUS_R11_FAMILIES,
+        planes: CENSUS_R6_PLANES,
+        carries: CENSUS_R11_CARRIES,
+    },
     DocumentShape {
         document: FIELDS,
         revision: 1,
@@ -1538,6 +1575,249 @@ pub const CENSUS_R9_KEYS: &[&str] = CENSUS_R8_KEYS;
 /// this paragraph is here rather than in a commit message.
 pub const CENSUS_R10_KEYS: &[&str] = CENSUS_R9_KEYS;
 
+/// The census document's key set at revision 11 (R2457, open-debt item 702).
+///
+/// Revision 10's PLUS SIX, and only ONE of the six is new to the document.
+/// Written out and NOT aliased, for [`CENSUS_R3_KEYS`]' reason: the set MOVED,
+/// and an alias cannot say by how much.
+///
+/// * `cause` is this round's, on every `keyexprs.unresolved[]` row. See
+///   [`CENSUS_R11_FAMILIES`] for the two words it draws from and
+///   `crate::agg::UnresolvedCause` for why one `unresolved` count with two
+///   meanings was the thing worth ending.
+/// * `at`, `reason`, `references`, `space` and `why` were ALREADY EMITTED and
+///   this axis had never seen them.
+///
+/// ⚠ THAT SECOND GROUP IS A HOLE THIS ROUND FOUND, NOT ONE IT MADE, and the
+/// mechanism is worth stating because it is the one this file keeps meeting
+/// from new directions. `the_census_documents_key_set_is_pinned` drove
+/// `every_plane_capture`, which passes `contradicting: false` — so the
+/// `unresolved[]` and `contradictions[]` arrays were emitted EMPTY on every run
+/// this pin has ever made, and the keys of the objects inside them reached no
+/// axis at all. `"unresolved"` was pinned; `"space"` and `"references"`, which
+/// every row of it has carried since revision 1, were not. A population of zero
+/// reports green, and the fixture — not the rule — was the population. Item
+/// 702's `cause` would have joined that silence unremarked, which is how the
+/// hole was found: the new key did not move the set, and a key that is emitted
+/// and does not move the set is a pin reading nothing.
+///
+/// The test now drives the `contradicting` arm, so all three arrays are
+/// populated and the six keys are pinned for the first time.
+///
+/// MEASURED, like every set here: the test printed what it saw and this was
+/// filled from that printout.
+pub const CENSUS_R11_KEYS: &[&str] = &[
+    "a",
+    "a_to_b",
+    "aborted_capacity_overflow",
+    "aborted_out_of_order",
+    "aborted_sender_dropped",
+    "aborted_superseded",
+    "addr",
+    "admissible",
+    "aggregate",
+    "anchor_intervals",
+    "anchors_exact",
+    "answers",
+    "answers_in_scope",
+    "asked_at",
+    "asker",
+    "asks",
+    "at",
+    "at_most_bytes",
+    "attributed_bytes",
+    "b",
+    "b_to_a",
+    "begun",
+    "by_kind",
+    "bytes",
+    "cancelled_at",
+    "caps",
+    "cause",
+    "children",
+    "closed_at",
+    "completed",
+    "completion",
+    "consistent",
+    "continued",
+    "contradictions",
+    "count",
+    "declaration",
+    "declarations",
+    "declared",
+    "declared_at",
+    "declarer",
+    "declarer_zid",
+    "dels",
+    "descriptors",
+    "document",
+    "dropped_by_limits",
+    "elsewhere",
+    "errs",
+    "evidence",
+    "exchanges",
+    "first",
+    "first_anchor",
+    "first_reply",
+    "flow",
+    "flows",
+    "fragment_chains",
+    "frames",
+    "frames_per_flow",
+    "gaps",
+    "halted_batches",
+    "hello",
+    "high",
+    "id",
+    "inadmissible",
+    "init",
+    "interests",
+    "join",
+    "judged",
+    "keyexpr",
+    "keyexprs",
+    "keys",
+    "kind",
+    "last",
+    "last_anchor",
+    "link",
+    "links",
+    "liveliness_token",
+    "locators",
+    "low",
+    "matched",
+    "max_flows_per_table",
+    "max_ms",
+    "max_scout_askers",
+    "mean_ms",
+    "messages",
+    "min_ms",
+    "mismatched",
+    "mode",
+    "name",
+    "narrowed_by_selector",
+    "nodes",
+    "non_monotonic",
+    "not_as_declared",
+    "offset_space",
+    "orphan_answers",
+    "orphan_responses",
+    "orphan_withdrawals",
+    "payload_bytes",
+    "payload_bytes_ceiling",
+    "payloads",
+    "planes",
+    "port",
+    "prefix",
+    "puts",
+    "queries",
+    "queryable",
+    "queryables",
+    "reason",
+    "records",
+    "references",
+    "refused_missing_start_marker",
+    "refused_peer_quota",
+    "refused_pool_exhausted",
+    "rejected",
+    "replies",
+    "requests",
+    "restricted",
+    "revision",
+    "rows",
+    "scout",
+    "scout_askers",
+    "selection",
+    "share_bp",
+    "silent",
+    "skipped",
+    "skipped_packets",
+    "solicited_by",
+    "source_ahead_of_observer",
+    "space",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "subscriber",
+    "subscribers",
+    "subtrees",
+    "tokens",
+    "total_ms",
+    "total_payload_bytes",
+    "totals",
+    "unanswered",
+    "unattributed_bytes",
+    "unattributed_records",
+    "unattributed_requests",
+    "unclaimed",
+    "unclaimed_exact",
+    "unclosed",
+    "undecidable",
+    "undecided",
+    "undeclarations",
+    "undecompressible_batches",
+    "unjudged_answers",
+    "unknown_ids",
+    "unlocatable_records",
+    "unmeasured_payloads",
+    "unparsed_bytes",
+    "unread",
+    "unresolvable_fragments",
+    "unresolved",
+    "unresolved_declarations",
+    "unresolved_records",
+    "unsized_payloads",
+    "unstamped",
+    "walked_records",
+    "whatami",
+    "why",
+    "wire_bytes",
+    "withdrawn_at",
+    "zid",
+];
+
+/// WHY a keyexpr reference did not resolve, at census revision 11.
+///
+/// `crate::agg::UnresolvedCause::name` is the one place these are spelled, and
+/// this list is what makes them a vocabulary a consumer may switch on.
+pub const UNRESOLVED_CAUSE_R11: &[&str] = &["no_declaration", "no_session"];
+
+/// The census document's value families at revision 11 (R2457, item 702).
+///
+/// Revision 8's PLUS `cause`. The word decides nothing about the keys beside it
+/// — an `unresolved[]` row is `space` / `id` / `references` / `cause` under
+/// either — so [`CENSUS_R8_CARRIES`] gains it as a passenger and nothing else
+/// in this table moves.
+pub const CENSUS_R11_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "asker",
+        values: DIRECTION_R4,
+    },
+    ValueFamily {
+        key: "cause",
+        values: UNRESOLVED_CAUSE_R11,
+    },
+    ValueFamily {
+        key: "declarer",
+        values: DIRECTION_R4,
+    },
+    ValueFamily {
+        key: "kind",
+        values: INTEREST_KIND_R4,
+    },
+    ValueFamily {
+        key: "link",
+        values: LINK_KIND_R7,
+    },
+    ValueFamily {
+        key: "mode",
+        values: INTEREST_MODE_R4,
+    },
+    ValueFamily {
+        key: "offset_space",
+        values: ANCHOR_SPACE_R4,
+    },
+];
+
 /// The census document's key set at revision 3 (R2123, open-debt item 453).
 ///
 /// Revision 2 MINUS `first_packet`, which it announced, PLUS
@@ -2101,6 +2381,43 @@ pub const CENSUS_R8_FAMILIES: &[ValueFamily] = &[
 pub const CENSUS_R8_CARRIES: &[KeyCarries] = &[
     KeyCarries {
         key: "asker",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "declarer",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "kind",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "link",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "mode",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "offset_space",
+        shape: CarriesShape::Passenger,
+    },
+];
+
+/// What each census family's WORD decides about the keys beside it, at
+/// revision 11.
+///
+/// R2457 (open-debt item 702) — revision 8's PLUS `cause`, a PASSENGER: an
+/// `unresolved[]` row is `space` / `id` / `references` / `cause` whichever of
+/// the two words it carries. The word says where to look, not what is there.
+pub const CENSUS_R11_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "asker",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "cause",
         shape: CarriesShape::Passenger,
     },
     KeyCarries {
@@ -4673,7 +4990,15 @@ mod tests {
             // spelled by `keyexprs.rows[]`, because `keys` is a set over the
             // whole document and not a map from plane to key. This assertion is
             // the notice; the `FIELDS` entry below is the same shape for R2440.
-            (CENSUS, 10u32),
+            // R2457 (item 702) — to 11 when a keyexpr id space became keyed by
+            // SESSION and every `keyexprs.unresolved[]` row gained `cause`.
+            // Unlike the two entries above, this one moves THREE axes: the key
+            // set (six keys, of which five were emitted all along and unpinned
+            // — see `CENSUS_R11_KEYS`), the family list (`cause`) and the
+            // carries list. It also moves VALUES under stationary keys, which
+            // no axis here can see: a reference that read `unresolved` before
+            // now resolves on any capture of a session with more than one link.
+            (CENSUS, 11u32),
             // R2175 (open-debt item 552) — the field document moved to 2 when
             // its PAYLOAD PLANE joined the pin (fifteen keys revision 1 had
             // never covered) and its first three value families were declared.

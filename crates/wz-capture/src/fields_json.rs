@@ -1040,7 +1040,13 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 12] = [
+        let live: [(&str, &str, Vec<&'static str>); 13] = [
+            // R2457 (open-debt item 702) — WHY a keyexpr reference did not
+            // resolve. A key a consumer switches on precisely because the two
+            // words send it to different places: `no_session` says the
+            // declaration may be one flow over, `no_declaration` says it is not
+            // in this capture at all.
+            (rev::CENSUS, "cause", crate::agg::UnresolvedCause::names()),
             (
                 rev::FIELDS,
                 "kind",
@@ -1461,6 +1467,17 @@ mod tests {
         let interests = crate::census_json::census_json(
             &crate::census_json::fed_tests::interest_pair_capture(),
         );
+        // R2457 (open-debt item 702) — the capture that renders BOTH words of
+        // `cause`, which nothing else here does.
+        //
+        // This axis refused the family on the round it landed, and correctly:
+        // the four census documents above hold no unattributed flow, so every
+        // `unresolved[]` row they carry says `no_declaration` and the verdict
+        // would have been reached over a population of one word. The multilink
+        // fixture holds a NAMED session and a handshake-less flow in one
+        // capture, so it renders `no_declaration` and `no_session` together —
+        // which is the only shape that can grade the boundary between them.
+        let multilink = crate::census_json::census_json(&crate::agg::tests::multilink_session());
 
         let mut fields_docs: Vec<&String> = alloc::vec![&with, &without, &withl, &dgram];
         fields_docs.extend(arms.iter());
@@ -1468,7 +1485,7 @@ mod tests {
             (rev::FIELDS, fields_docs),
             (
                 rev::CENSUS,
-                alloc::vec![&census, &censusl, &censusdg, &interests],
+                alloc::vec![&census, &censusl, &censusdg, &interests, &multilink],
             ),
         ];
 

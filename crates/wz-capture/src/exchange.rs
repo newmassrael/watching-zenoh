@@ -343,17 +343,25 @@ impl ExchangeTable {
     /// the selection, and the difference is principled — that record was read,
     /// and a filter can judge it (to [`crate::filter::Truth::Unknown`] at worst, which
     /// [`Self::selection`] counts).
-    pub fn observe_flow_where(&mut self, frames: &[PassiveFrame], filter: &Filter) {
-        let mut spaces = KeyexprSpaces::new();
+    ///
+    /// R2457 (open-debt item 702) — `spaces` is the CAPTURE's and is handed in.
+    /// See [`crate::agg::SpaceOwner`] for why one instance per flow was the
+    /// wrong unit.
+    pub fn observe_flow_where(
+        &mut self,
+        frames: &[PassiveFrame],
+        filter: &Filter,
+        spaces: &mut KeyexprSpaces,
+    ) {
         let mut open: BTreeMap<(usize, u64), OpenExchange> = BTreeMap::new();
         for frame in frames {
             match &frame.carried {
                 Carried::Batch(batch) => {
-                    self.observe_batch(&mut spaces, &mut open, frame, batch, filter)
+                    self.observe_batch(spaces, &mut open, frame, batch, filter)
                 }
                 #[cfg(feature = "reassembly")]
                 Carried::Reassembled(batch) => {
-                    self.observe_batch(&mut spaces, &mut open, frame, batch, filter)
+                    self.observe_batch(spaces, &mut open, frame, batch, filter)
                 }
                 // Matched by name for the reason R311y614 matched them by name
                 // in the throughput plane: a new `Carried` variant must fail to
@@ -758,12 +766,36 @@ pub fn exchanges(dissection: &crate::Dissection) -> ExchangeTable {
 /// one: a reader compiles one selector and points it at throughput, exchanges
 /// and payloads, rather than learning a second vocabulary per plane.
 pub fn exchanges_where(dissection: &crate::Dissection, filter: &Filter) -> ExchangeTable {
+    exchanges_grouped(
+        dissection,
+        filter,
+        &crate::node::session_grouping(dissection),
+    )
+}
+
+/// R2457 (open-debt item 702) — the same correlation, against a grouping the
+/// caller already has.
+///
+/// The keyexpr a request carries is resolved here exactly as
+/// `crate::agg` resolves a record's, so the same per-flow id space was the same
+/// defect: a query issued on the second link of a `max_links: 2` session named
+/// an alias this plane could not expand. `crate::agg::aggregate_grouped` carries
+/// the ordering argument for both.
+pub fn exchanges_grouped(
+    dissection: &crate::Dissection,
+    filter: &Filter,
+    grouping: &crate::node::SessionGrouping,
+) -> ExchangeTable {
     let mut table = ExchangeTable::new();
     table.capture_origin_ms = dissection.capture_origin_ms();
+    let mut spaces = KeyexprSpaces::new();
     // R311y721 — see `agg::aggregate_where`: the dissection's enumeration, so
     // a producer that is not a flow at all still reaches this plane.
-    for (_, frames) in dissection.message_lists() {
-        table.observe_flow_where(frames, filter);
+    // R2457 — `.enumerate()`, because the grouping is keyed by list index and
+    // the three walks agree only by walking the same enumeration.
+    for (list, (_, frames)) in dissection.message_lists().enumerate() {
+        spaces.enter_flow(grouping.owners(list));
+        table.observe_flow_where(frames, filter, &mut spaces);
     }
     table
 }

@@ -743,12 +743,17 @@ impl InterestCensus {
         out
     }
 
-    /// Fold ONE flow's declarations in, resolving keyexprs against that flow's
-    /// own id spaces.
+    /// Fold ONE flow's declarations in, resolving keyexprs against the id
+    /// spaces of the SESSION that flow belongs to.
     ///
-    /// Per FLOW and not per capture, for the reason [`ThroughputTable`] states:
-    /// id spaces are per session, so one table across two flows would
-    /// cross-resolve them.
+    /// R2457 (open-debt item 702) — it read "per FLOW and not per capture, for
+    /// the reason [`ThroughputTable`] states: id spaces are per session, so one
+    /// table across two flows would cross-resolve them". The premise was right
+    /// and the conclusion one step too strong: per-session is what the sentence
+    /// asks for, and per-flow is a conservative band around it that is exact
+    /// while a session has one link and too tight when it has two. `spaces` is
+    /// now the CAPTURE's, keyed by [`crate::agg::SpaceOwner`], and two sessions
+    /// still get separate tokens.
     pub fn observe_flow(
         &mut self,
         flow: &FlowKey,
@@ -758,6 +763,7 @@ impl InterestCensus {
         // takes for the same reason: it is half the space token, and without it
         // two directions of two different flows are one number.
         list: usize,
+        spaces: &mut KeyexprSpaces,
     ) {
         // R2206 (open-debt item 561) — the SPACE is the frames', not an
         // argument. It used to be decided one layer up by a match over the
@@ -770,7 +776,6 @@ impl InterestCensus {
             self.anchors = crate::anchor_space_of(frame);
         }
         self.list = list;
-        let mut spaces = KeyexprSpaces::new();
         // The OPEN declaration per `(declarer, kind, id)`, as an index into
         // `self.interests`. Keyed on the kind as well as the id because zenoh
         // mints subscriber, queryable and token ids in separate spaces, and a
@@ -802,7 +807,7 @@ impl InterestCensus {
             for (message, _span) in batch.records() {
                 match message {
                     NetworkMessage::Declare(d) => self.observe_declare(
-                        &mut spaces,
+                        spaces,
                         &mut open,
                         &mut asked,
                         flow,
@@ -811,7 +816,7 @@ impl InterestCensus {
                         d,
                     ),
                     NetworkMessage::Interest(i) => {
-                        self.observe_interest(&spaces, &mut asked, flow, frame.direction, anchor, i)
+                        self.observe_interest(spaces, &mut asked, flow, frame.direction, anchor, i)
                     }
                     _ => {}
                 }
@@ -1262,13 +1267,30 @@ fn pattern_is_decidable(pattern: &str) -> bool {
 /// plane naming them would report a serial deployment as having declared
 /// nothing.
 pub fn interests(dissection: &crate::Dissection) -> InterestCensus {
+    interests_grouped(dissection, &crate::node::session_grouping(dissection))
+}
+
+/// R2457 (open-debt item 702) — the same census, against a grouping the caller
+/// already has.
+///
+/// A subscriber declared on the second link of a `max_links: 2` session names
+/// its keyexpr by an alias minted on the first, so this plane lost the same
+/// resolutions `crate::agg` did. `crate::agg::aggregate_grouped` carries the
+/// ordering argument.
+pub fn interests_grouped(
+    dissection: &crate::Dissection,
+    grouping: &crate::node::SessionGrouping,
+) -> InterestCensus {
     let mut census = InterestCensus::new();
+    let mut spaces = KeyexprSpaces::new();
     // Round 2019 (item 270) — `.enumerate()`, exactly as `agg::aggregate_where`
     // does. The two walks must agree on the list index or their space tokens
     // are not comparable, and they agree by walking the same enumeration of the
-    // same iterator.
+    // same iterator. R2457 — the session grouping is keyed by that same index,
+    // which is a third walk joining the agreement rather than a new rule.
     for (list, (flow, frames)) in dissection.message_lists().enumerate() {
-        census.observe_flow(&flow, frames, list);
+        spaces.enter_flow(grouping.owners(list));
+        census.observe_flow(&flow, frames, list, &mut spaces);
     }
     census
 }

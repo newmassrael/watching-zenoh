@@ -1051,21 +1051,23 @@ impl PayloadCensus {
     /// `key == app/**` and sees no findings has learned nothing about the rest
     /// of the capture. [`Self::selection`] is what makes that legible, and it is
     /// why the report renders it beside the finding count rather than under it.
+    ///
+    /// R2457 (open-debt item 702) — `spaces` is the CAPTURE's and is handed in.
+    /// See [`crate::agg::SpaceOwner`] for why one instance per flow was the
+    /// wrong unit.
     pub fn observe_flow_where(
         &mut self,
         frames: &[wz_session_core::passive::PassiveFrame],
         filter: &crate::filter::Filter,
+        spaces: &mut crate::agg::KeyexprSpaces,
     ) {
         use wz_session_core::passive::Carried;
 
-        let mut spaces = crate::agg::KeyexprSpaces::new();
         for frame in frames {
             match &frame.carried {
-                Carried::Batch(batch) => self.observe_batch(&mut spaces, frame, batch, filter),
+                Carried::Batch(batch) => self.observe_batch(spaces, frame, batch, filter),
                 #[cfg(feature = "reassembly")]
-                Carried::Reassembled(batch) => {
-                    self.observe_batch(&mut spaces, frame, batch, filter)
-                }
+                Carried::Reassembled(batch) => self.observe_batch(spaces, frame, batch, filter),
                 // Matched by name for the reason R311y614 matched them by name
                 // in the throughput plane: a new `Carried` variant must fail to
                 // compile here rather than join the silent set.
@@ -1328,11 +1330,34 @@ pub fn payloads_where(
     dissection: &crate::Dissection,
     filter: &crate::filter::Filter,
 ) -> PayloadCensus {
+    payloads_grouped(
+        dissection,
+        filter,
+        &crate::node::session_grouping(dissection),
+    )
+}
+
+/// R2457 (open-debt item 702) — the same census, against a grouping the caller
+/// already has.
+///
+/// This plane resolves the keyexpr a payload was published under, so a per-flow
+/// id space cost it the same thing it cost `crate::agg`: a sample published on
+/// the second link of a `max_links: 2` session had no literal to be filed
+/// under. `crate::agg::aggregate_grouped` carries the ordering argument.
+#[cfg(feature = "network-codecs")]
+pub fn payloads_grouped(
+    dissection: &crate::Dissection,
+    filter: &crate::filter::Filter,
+    grouping: &crate::node::SessionGrouping,
+) -> PayloadCensus {
     let mut census = PayloadCensus::new();
     census.capture_origin_ms = dissection.capture_origin_ms();
+    let mut spaces = crate::agg::KeyexprSpaces::new();
     // R311y721 — see `agg::aggregate_where`: the dissection's enumeration.
-    for (_, frames) in dissection.message_lists() {
-        census.observe_flow_where(frames, filter);
+    // R2457 — `.enumerate()`, because the grouping is keyed by list index.
+    for (list, (_, frames)) in dissection.message_lists().enumerate() {
+        spaces.enter_flow(grouping.owners(list));
+        census.observe_flow_where(frames, filter, &mut spaces);
     }
     census
 }

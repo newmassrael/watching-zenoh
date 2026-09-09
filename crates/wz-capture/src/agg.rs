@@ -537,6 +537,13 @@ pub struct UnresolvedAlias {
     pub id: u64,
     /// How many records referenced it.
     pub references: usize,
+    /// R2457 (open-debt item 702) — WHICH of the two failures this was.
+    ///
+    /// Part of the row's IDENTITY and not a decoration: the same id in the same
+    /// space can be missed on a flow whose session is known and on one whose
+    /// session is not, and folding those into one row would report a count with
+    /// two meanings. See [`UnresolvedCause`] for what a reader does with each.
+    pub cause: UnresolvedCause,
 }
 
 fn dir_index(d: Direction) -> usize {
@@ -575,20 +582,195 @@ pub(crate) fn record_unit_offset(
     Some((frame.unit_offset + batch_offset + record_offset) as u64)
 }
 
-/// The two keyexpr id spaces of ONE flow.
+/// R2457 (open-debt item 702) — WHOSE keyexpr id space a side's declarations
+/// land in.
+///
+/// # Why this is not a `Direction`
+///
+/// A keyexpr id is minted by a SESSION and is a fact about that session, but a
+/// capture hands out FLOWS. The two coincide only while a session has one link.
+/// Under `transport/unicast/max_links: 2` a `DeclKexpr` goes out on whichever
+/// link was dialled first and the data that uses the alias may go out on the
+/// second, so a table keyed by the flow's own direction holds the declaration
+/// in one instance and the reference in another and resolves neither.
+///
+/// The two variants are the two states a passive observer can be in, and
+/// keeping them apart is what lets [`UnresolvedAlias::cause`] say which one a
+/// failed lookup was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SpaceOwner {
+    /// One SIDE of a session this capture NAMED, shared by every link of it.
+    ///
+    /// The token is an index handed out by `crate::node::SessionGrouping`,
+    /// which mints one per `(session, node)` pair. Two sessions therefore never
+    /// share a token however their ids collide — the property the per-flow rule
+    /// was protecting, kept.
+    Session(usize),
+    /// One side of ONE flow, for a flow whose session this capture cannot name.
+    ///
+    /// The conservative fallback, and the ONLY behaviour before R2457. A
+    /// capture that joined a session already in progress has no handshake to
+    /// read, so `crate::node::NodeCensus` records no link for the flow and
+    /// nothing can say which session it belongs to. Resolution then reaches
+    /// exactly as far as it did before — the flow's own declarations and no
+    /// others — and a reference it misses is reported as
+    /// [`UnresolvedCause::NoSession`] rather than as a missing declaration,
+    /// because a sibling link outside this grouping may be holding the very
+    /// `DeclKexpr` that would have bound it.
+    Flow {
+        /// The list's index in `crate::Dissection::message_lists`.
+        list: usize,
+        /// `dir_index` of the direction. Not a [`Direction`], which is not
+        /// `Ord` and so cannot key the map these tokens key.
+        side: usize,
+    },
+}
+
+/// R2457 (open-debt item 702) — WHY a wire reference did not resolve.
+///
+/// The distinction a consumer asked for by name, and the reason it is not one
+/// `unresolved` count: folded together, "this capture started mid-session" and
+/// "a declaration is genuinely missing" are the same number, and a reader
+/// chasing the second when it has the first searches a capture that never held
+/// the answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum UnresolvedCause {
+    /// The session is NAMED and nothing on it ever declared this id.
+    ///
+    /// Every link of the session that this capture holds was folded into one
+    /// space, so the alias is genuinely absent here: either the `DeclKexpr`
+    /// predates the capture, or it was in a batch this build could not read
+    /// (which [`ThroughputGaps`] counts), or the sender referenced an id it
+    /// never minted.
+    NoDeclaration,
+    /// NO SESSION is known for the flow this reference travelled on.
+    ///
+    /// The flow never showed a two-sided handshake, so it stands alone under
+    /// [`SpaceOwner::Flow`] and a sibling link of the same session — if there
+    /// is one — is a separate space this observer cannot join it to. The
+    /// declaration may well be in the capture, one flow over.
+    NoSession,
+}
+
+impl UnresolvedCause {
+    /// The word an emitted document carries. A closed set, declared to
+    /// [`crate::doc_revision`] so a consumer can switch on it.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::NoDeclaration => "no_declaration",
+            Self::NoSession => "no_session",
+        }
+    }
+
+    /// Every word [`Self::name`] can return, WALKED rather than written down.
+    ///
+    /// The shape `crate::AnchorSpace::names` sets, and for its reason: `cause`
+    /// is a key a consumer SWITCHES on, so the census document declares its
+    /// vocabulary per revision and that declaration is joined to this walk. A
+    /// third cause added later is forced at `cargo build` rather than at
+    /// review.
+    pub fn names() -> alloc::vec::Vec<&'static str> {
+        let mut out = alloc::vec::Vec::new();
+        let mut cur = Some(Self::NoDeclaration);
+        while let Some(v) = cur {
+            out.push(v.name());
+            cur = v.next();
+        }
+        out
+    }
+
+    /// The next cause, so the walk above visits every arm without a list.
+    fn next(self) -> Option<Self> {
+        Some(match self {
+            Self::NoDeclaration => Self::NoSession,
+            Self::NoSession => return None,
+        })
+    }
+}
+
+/// The keyexpr id spaces a walk resolves against.
 ///
 /// Public because a consumer walking frames itself — a live tap, a replay —
 /// needs the same resolution without adopting [`ThroughputTable`]'s counters.
+///
+/// # R2457 (open-debt item 702) — one instance spans the CAPTURE, not one flow
+///
+/// It used to be `[BTreeMap<u64, String>; 2]`, one instance built per flow, and
+/// that made the unit of an id space the FLOW. The unit is the SESSION: see
+/// [`SpaceOwner`] for what a `max_links: 2` session does to a per-flow table.
+///
+/// So the tables are keyed by owner and the instance is created ONCE by the
+/// driver, which calls [`Self::enter_flow`] before each list to say which owner
+/// each direction of THAT list belongs to. Every link of one session names the
+/// same two owners and folds into one pair of tables; two sessions name
+/// different owners and stay apart.
+///
+/// [`Self::new`] leaves it in the state a single-flow caller wants — two
+/// anonymous [`SpaceOwner::Flow`] sides — so a live tap or a replay that never
+/// calls `enter_flow` behaves exactly as it did before this change.
 #[derive(Debug, Default, Clone)]
 pub struct KeyexprSpaces {
-    /// Indexed by [`Direction`]: the table of ids DECLARED by that side.
-    tables: [BTreeMap<u64, String>; 2],
+    /// The table of ids DECLARED by each owner.
+    ///
+    /// A map and not an array: the owners are not two, they are two per session
+    /// plus two per unattributable flow, and only the walk knows how many that
+    /// is.
+    tables: BTreeMap<SpaceOwner, BTreeMap<u64, String>>,
+    /// Which owner each [`Direction`] of the CURRENT list belongs to, as
+    /// [`Self::enter_flow`] last set it.
+    sides: [Option<SpaceOwner>; 2],
 }
 
 impl KeyexprSpaces {
-    /// Two empty spaces.
+    /// Two empty spaces, on an anonymous flow.
+    ///
+    /// The pre-R2457 behaviour exactly, and it is the right default for the
+    /// callers that have one flow and no census: `crate::fields_json`, a live
+    /// tap, a replay. A driver that HAS a session grouping calls
+    /// [`Self::enter_flow`] instead of relying on this.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// R2457 (open-debt item 702) — BEGIN a list, saying whose spaces its two
+    /// directions write into.
+    ///
+    /// Called once per list by the driver, before the fold. `owners` comes from
+    /// `crate::node::SessionGrouping::owners`, which answers
+    /// [`SpaceOwner::Session`] for a flow whose handshake this capture read and
+    /// [`SpaceOwner::Flow`] for one it did not.
+    ///
+    /// # Why this is a call and not a constructor argument
+    ///
+    /// The tables have to SURVIVE the list boundary — that is the entire fix. A
+    /// constructor taking the owners would be one instance per list again,
+    /// which is one instance per flow under a different name.
+    pub fn enter_flow(&mut self, owners: [SpaceOwner; 2]) {
+        self.sides = [Some(owners[0]), Some(owners[1])];
+    }
+
+    /// The owner of one direction of the current list.
+    ///
+    /// `Flow { list: 0, side }` before any [`Self::enter_flow`], which is what
+    /// makes [`Self::new`] the single anonymous flow it documents.
+    fn side(&self, space: Direction) -> SpaceOwner {
+        let i = dir_index(space);
+        self.sides[i].unwrap_or(SpaceOwner::Flow { list: 0, side: i })
+    }
+
+    /// R2457 (open-debt item 702) — why a lookup in `space` would fail.
+    ///
+    /// Read off the OWNER and not off the tables: an empty table under a
+    /// [`SpaceOwner::Session`] means the session declared nothing, which is
+    /// [`UnresolvedCause::NoDeclaration`], while any table at all under a
+    /// [`SpaceOwner::Flow`] leaves the sibling-link question open. The
+    /// distinction is about what the GROUPING knows, never about what happens
+    /// to be in a map.
+    pub fn cause(&self, space: Direction) -> UnresolvedCause {
+        match self.side(space) {
+            SpaceOwner::Session(_) => UnresolvedCause::NoDeclaration,
+            SpaceOwner::Flow { .. } => UnresolvedCause::NoSession,
+        }
     }
 
     /// Resolve one wire keyexpr seen travelling in `direction`.
@@ -676,7 +858,10 @@ impl KeyexprSpaces {
             // wire keyexprs and must not be routed through a space.
             return Ok(suffix.unwrap_or("").to_string());
         }
-        match self.tables[dir_index(space)].get(&id) {
+        // R2457 — the OWNER's table, which for a session is shared by every
+        // link of it. `side` is what turns the direction of THIS list into the
+        // owner that minted the id.
+        match self.tables.get(&self.side(space)).and_then(|t| t.get(&id)) {
             Some(base) => {
                 let mut out = base.clone();
                 if let Some(s) = suffix {
@@ -750,21 +935,40 @@ impl KeyexprSpaces {
         match &declare.body {
             DeclareOwnedVariant::CodecZenohDeclKexpr(d) => {
                 // The id is minted in the SENDER's space regardless of the
-                // mapping bit on the keyexpr it names.
+                // mapping bit on the keyexpr it names. R2457 — the sender's
+                // SESSION space where one is known, which is what puts a
+                // declaration sent on link 1 in reach of a reference sent on
+                // link 2.
                 if let Ok(literal) = self.resolve_declared(direction, &d.keyexpr.body) {
-                    self.tables[dir_index(direction)].insert(d.id, literal);
+                    self.tables
+                        .entry(self.side(direction))
+                        .or_default()
+                        .insert(d.id, literal);
                 }
             }
             DeclareOwnedVariant::CodecZenohUndeclKexpr(u) => {
-                self.tables[dir_index(direction)].remove(&u.id);
+                // Symmetric with the bind: an UNDECLARE withdraws the id from
+                // the space that minted it, which is the session's and not the
+                // link's. A withdrawal on the second link of a session must
+                // reach the binding the first link made.
+                if let Some(table) = self.tables.get_mut(&self.side(direction)) {
+                    table.remove(&u.id);
+                }
             }
             _ => {}
         }
     }
 
-    /// How many ids each side currently has bound — `[A, B]`.
+    /// How many ids each side of the CURRENT list currently has bound —
+    /// `[A, B]`.
+    ///
+    /// R2457 — of the current list's OWNERS, so two links of one session both
+    /// report the session's count rather than their own share of it. That is
+    /// the number a reader wants: the ids the side can resolve, which is what
+    /// the session bound.
     pub fn bound(&self) -> [usize; 2] {
-        [self.tables[0].len(), self.tables[1].len()]
+        [Direction::A, Direction::B]
+            .map(|d| self.tables.get(&self.side(d)).map(|t| t.len()).unwrap_or(0))
     }
 }
 
@@ -788,7 +992,10 @@ pub struct ThroughputTable {
     /// R311y919 — the KIND of the space above, which is what a document reports.
     anchor_kind: crate::AnchorSpace,
     rows: BTreeMap<String, KeyexprRow>,
-    unresolved: BTreeMap<(usize, u64), UnresolvedAlias>,
+    /// R2457 (open-debt item 702) — keyed by CAUSE as well as by space and id,
+    /// so the two failures [`UnresolvedCause`] separates cannot merge into one
+    /// row on their way to a document.
+    unresolved: BTreeMap<(usize, u64, UnresolvedCause), UnresolvedAlias>,
     declarations: usize,
     undeclarations: usize,
     records: usize,
@@ -1034,8 +1241,18 @@ impl ThroughputTable {
     /// `list` for two stream lists would make two spaces look like one, which
     /// is why the production callers pass `enumerate()`'s index rather than a
     /// number of their own.
-    pub fn observe_flow_where(&mut self, frames: &[PassiveFrame], filter: &Filter, list: usize) {
-        let mut spaces = KeyexprSpaces::new();
+    ///
+    /// R2457 (open-debt item 702) — `spaces` is the CAPTURE's, handed in rather
+    /// than built here. It used to be `KeyexprSpaces::new()` on this line, which
+    /// is what made the id space per-flow; the driver now owns one instance and
+    /// calls `KeyexprSpaces::enter_flow` before each list. See [`SpaceOwner`].
+    pub fn observe_flow_where(
+        &mut self,
+        frames: &[PassiveFrame],
+        filter: &Filter,
+        list: usize,
+        spaces: &mut KeyexprSpaces,
+    ) {
         for frame in frames {
             let anchor = frame.stream_offset;
             // R2206 (open-debt item 561) — the space comes off the FRAME now.
@@ -1056,9 +1273,7 @@ impl ThroughputTable {
             // reader can act on.
             self.anchor_kind = anchors;
             match &frame.carried {
-                Carried::Batch(batch) => {
-                    self.observe_batch(&mut spaces, frame, anchor, batch, filter)
-                }
+                Carried::Batch(batch) => self.observe_batch(spaces, frame, anchor, batch, filter),
                 #[cfg(feature = "reassembly")]
                 Carried::Reassembled(batch) => {
                     // R2211 (item 565) — a chain ENDED here, and this is the
@@ -1067,7 +1282,7 @@ impl ThroughputTable {
                     // deliver buffer, which is what turns the frame into this
                     // variant rather than `Fragment`.
                     self.chains.completed += 1;
-                    self.observe_batch(&mut spaces, frame, anchor, batch, filter)
+                    self.observe_batch(spaces, frame, anchor, batch, filter)
                 }
                 // R311y614 (§1.4i) — the arms that carry traffic this table
                 // cannot read are COUNTED. Matched by name rather than left to a
@@ -1272,12 +1487,17 @@ impl ThroughputTable {
                 }
             }
             Err((space, id)) => {
+                // R2457 (open-debt item 702) — the CAUSE is part of the key.
+                // Asked of the spaces rather than inferred here, because only
+                // they know whether the side is a named session or a lone flow.
+                let cause = spaces.cause(space);
                 self.unresolved
-                    .entry((dir_index(space), id))
+                    .entry((dir_index(space), id, cause))
                     .or_insert(UnresolvedAlias {
                         space,
                         id,
                         references: 0,
+                        cause,
                     })
                     .references += 1;
             }
@@ -1929,17 +2149,62 @@ pub fn aggregate(dissection: &crate::Dissection) -> ThroughputTable {
 /// table it gets back carries [`ThroughputTable::selection`] so the totals are
 /// never read without the count of records the selector could not judge.
 pub fn aggregate_where(dissection: &crate::Dissection, filter: &Filter) -> ThroughputTable {
+    aggregate_grouped(
+        dissection,
+        filter,
+        &crate::node::session_grouping(dissection),
+    )
+}
+
+/// R2457 (open-debt item 702) — the same aggregation, against a grouping the
+/// caller already has.
+///
+/// # The ORDER this fix costs, named
+///
+/// The keyexpr fold resolves as it WALKS — a `DeclKexpr` arriving later must
+/// not retroactively name an earlier record's alias, which
+/// `crate::exchange::ExchangeTable::observe_message` states as the rule for its
+/// own resolution and which this plane obeys too. So the session grouping has to
+/// be COMPLETE before the first record is folded, and the node census that
+/// produces it walks every message list. A caller of [`aggregate_where`] pays
+/// for that walk twice over a capture: once in the census, once in the fold.
+///
+/// Three ways out were weighed and two rejected:
+///
+/// * a SECOND PASS — this. The census walk is the cheap one: `crate::node`
+///   matches handshake message kinds and reads no payload, no keyexpr and no
+///   size, where this plane resolves and sizes every record. And a consumer
+///   rendering a report already computes the census for its own plane, which is
+///   why this entry point exists — hand it in and the second walk is not made
+///   at all.
+/// * a DEFERRED resolve — buffer the misses and re-resolve once every list is
+///   folded. REJECTED: it is precisely the retroactive naming the rule above
+///   forbids, and it would arrive silently, as a resolution rate that improved
+///   while the meaning of a resolved keyexpr quietly changed.
+/// * a live tap answering "not yet" — not an alternative but the FALLBACK. A
+///   tap has no completed census, calls no
+///   [`KeyexprSpaces::enter_flow`], and gets per-flow spaces plus
+///   [`UnresolvedCause::NoSession`] on what it misses, which is the honest
+///   answer rather than a deferral.
+pub fn aggregate_grouped(
+    dissection: &crate::Dissection,
+    filter: &Filter,
+    grouping: &crate::node::SessionGrouping,
+) -> ThroughputTable {
     let mut table = ThroughputTable::new();
     // R311y638 (§1.1r) — the origin comes from the DISSECTION, which is the
     // only thing that has seen every packet. Set before the first fold, so no
     // record is judged against a half-known capture.
     table.capture_origin_ms = dissection.capture_origin_ms();
+    // R2457 — ONE instance for the capture. Per-list it was the defect.
+    let mut spaces = KeyexprSpaces::new();
     // R311y721 — EVERY list this capture holds, through the dissection's own
     // enumeration. Naming the two flow tables here is what left this plane
     // blind to a serial line, which is in neither: see
     // `Dissection::message_lists`.
     for (list, (_, frames)) in dissection.message_lists().enumerate() {
-        table.observe_flow_where(frames, filter, list);
+        spaces.enter_flow(grouping.owners(list));
+        table.observe_flow_where(frames, filter, list, &mut spaces);
     }
     table
 }
@@ -3060,8 +3325,13 @@ pub(crate) mod tests {
         let filter = Filter::parse("elapsed < 5000").expect("parses");
 
         let mut by_hand = ThroughputTable::new();
+        // R2457 — a hand-folded plane holds its own spaces and never calls
+        // `enter_flow`, so every side is a `SpaceOwner::Flow`. That is the same
+        // reach this loop had before the session unit existed, which is what
+        // keeps this test about the elapsed term.
+        let mut spaces = KeyexprSpaces::new();
         for (list, flow) in d.datagram_flows().iter().enumerate() {
-            by_hand.observe_flow_where(&flow.frames, &filter, list);
+            by_hand.observe_flow_where(&flow.frames, &filter, list, &mut spaces);
         }
         assert_eq!(by_hand.selection().undecided, 1);
         assert_eq!(by_hand.rows().len(), 0);
@@ -4726,6 +4996,339 @@ pub(crate) mod tests {
         assert!(
             !throughput.rows().is_empty() && payloads.payloads() > 0,
             "a plane with no rows measured an empty walk"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // R2457 (open-debt item 702) — the keyexpr id space is keyed by SESSION.
+    // ---------------------------------------------------------------------
+
+    /// The two zids of the session every fixture below builds.
+    const ZID_A: [u8; 4] = [0xA1; 4];
+    const ZID_B: [u8; 4] = [0xB2; 4];
+
+    /// One UDP packet on the flow `sport <-> dport`, in the named direction.
+    ///
+    /// The PORTS are what make two links: a session with `max_links: 2` has one
+    /// zid pair over two 5-tuples, so the fixture varies the port and holds the
+    /// zids fixed. That is the shape `zenoh_multilink_body_foreign_witness`
+    /// puts on the wire with `transport/unicast/max_links: 2`.
+    fn link_packet(from_low: bool, sport: u16, dport: u16, wire: &[u8]) -> Vec<u8> {
+        if from_low {
+            udp_packet(LOW, sport, HIGH, dport, wire)
+        } else {
+            udp_packet(HIGH, dport, LOW, sport, wire)
+        }
+    }
+
+    /// A two-sided handshake on one link, which is what makes it a LINK: A
+    /// names itself, then B does. One INIT proves nothing — see
+    /// `crate::node`'s module docs.
+    fn handshake(sport: u16, dport: u16) -> Vec<(bool, u16, u16, Vec<u8>)> {
+        alloc::vec![
+            (true, sport, dport, crate::node::tests::init_wire(&ZID_A)),
+            (false, sport, dport, crate::node::tests::init_wire(&ZID_B)),
+        ]
+    }
+
+    /// Build a capture out of `(from_low, sport, dport, record)` rows, framing
+    /// every row that is not already a transport message of its own.
+    ///
+    /// `handshake` rows go on the wire bare — an INIT is a transport message —
+    /// and everything else is wrapped in a `Frame`, which is what carries a
+    /// network message.
+    fn multilink_capture(rows: &[(bool, u16, u16, Vec<u8>, bool)]) -> crate::Dissection {
+        let mut d = Dissection::new();
+        for (i, (from_low, sport, dport, record, framed)) in rows.iter().enumerate() {
+            let wire = if *framed {
+                crate::datagram_tests::frame_carrying(record)
+            } else {
+                record.clone()
+            };
+            d.push_packet(
+                LINKTYPE_ETHERNET,
+                i,
+                &link_packet(*from_low, *sport, *dport, &wire),
+            );
+        }
+        d.finish();
+        d
+    }
+
+    /// The fixture the acceptance below is graded on: ONE session over TWO
+    /// links, declaring on the first and publishing on the second.
+    ///
+    /// Plus two references that must stay unresolved for DIFFERENT reasons, so
+    /// neither arm of the split can be satisfied by an empty population:
+    ///
+    /// * id 9 on a session link — the session is named and nobody declared 9;
+    /// * id 7 on a THIRD flow that never handshook — the same id the session
+    ///   declared, deliberately, because a grouping that leaked across sessions
+    ///   would resolve it and this is what catches that.
+    ///
+    /// `pub(crate)` on the precedent `crate::exchange::tests` and
+    /// `crate::node::tests` set, and for the reason the carries axis in
+    /// `crate::fields_json` gave when it refused this round: `cause` arrived
+    /// there with ONE of its two words, and a family measured over one word is
+    /// classified on the strength of having looked at one thing. This is the
+    /// only fixture in the crate that renders both, because it is the only one
+    /// that holds a named session and an unattributed flow at once.
+    pub(crate) fn multilink_session() -> crate::Dissection {
+        let mut rows: Vec<(bool, u16, u16, Vec<u8>, bool)> = Vec::new();
+        for link in [(43210u16, 7447u16), (43211u16, 7447u16)] {
+            for (from_low, sport, dport, wire) in handshake(link.0, link.1) {
+                rows.push((from_low, sport, dport, wire, false));
+            }
+        }
+        // A declares id 7 on the FIRST link.
+        rows.push((true, 43210, 7447, declare_kexpr(7, "demo/temp"), true));
+        // A publishes under id 7 on the SECOND link. This is the whole item:
+        // the declaration and the reference are on different 5-tuples of one
+        // session.
+        rows.push((
+            true,
+            43211,
+            7447,
+            push(sender_space(7, None), &[0u8; 11]),
+            true,
+        ));
+        // A publishes under an id NOBODY declared, on a link of the session.
+        rows.push((
+            true,
+            43210,
+            7447,
+            push(sender_space(9, None), &[0u8; 5]),
+            true,
+        ));
+        // A third flow with NO handshake at all, referencing the same id 7.
+        rows.push((
+            true,
+            43212,
+            7447,
+            push(sender_space(7, None), &[0u8; 3]),
+            true,
+        ));
+        multilink_capture(&rows)
+    }
+
+    /// THE ANCHOR: the fixture really is one session over two links.
+    ///
+    /// Asserted rather than assumed, because every claim below is about what
+    /// the grouping does with it — and a fixture whose second link never
+    /// handshook would make the acceptance pass by having nothing to group.
+    #[test]
+    fn the_multilink_fixture_is_one_session_over_two_links() {
+        let d = multilink_session();
+        let census = crate::node::nodes(&d);
+        let grouping = crate::node::SessionGrouping::of(&census);
+        assert_eq!(
+            census.nodes().len(),
+            2,
+            "two zids and no more: {:?}",
+            census.nodes()
+        );
+        assert_eq!(
+            census.links().len(),
+            2,
+            "TWO links, or the fixture is not multilink: {:?}",
+            census.links()
+        );
+        assert_eq!(
+            grouping.sessions(),
+            1,
+            "and they are ONE session — that is the reduction under test"
+        );
+        assert_eq!(
+            grouping.grouped_lists(),
+            2,
+            "both handshaking flows are attributed; the third is not"
+        );
+    }
+
+    /// R2457 (open-debt item 702) — ACCEPTANCE, as the consumer derived it.
+    ///
+    /// NOT "multilink resolves", which a build that widened every table into one
+    /// would satisfy while cross-resolving two unrelated sessions. The claim is
+    /// the PAIR: a reference on the second link of a session resolves, AND an
+    /// unresolved reference says WHICH of the two failures it was —
+    /// `NoDeclaration` (the session is known and nothing declared this id) or
+    /// `NoSession` (this flow's session is unknown, so a sibling link may hold
+    /// the declaration). Folded into one count, a reader cannot tell a capture
+    /// that started late from a genuine gap, and searches the wrong thing.
+    #[test]
+    fn a_session_resolves_across_its_links_and_says_why_the_rest_did_not() {
+        let table = aggregate(&multilink_session());
+
+        // (1) The declaration on link 1 reaches the reference on link 2.
+        let rows = table.rows();
+        let row = rows
+            .iter()
+            .find(|r| r.keyexpr == "demo/temp")
+            .unwrap_or_else(|| {
+                panic!(
+                    "the second link's reference must resolve against the \
+                     first link's declaration; rows {:?}, unresolved {:?}",
+                    rows.iter().map(|r| &r.keyexpr).collect::<Vec<_>>(),
+                    table.unresolved()
+                )
+            });
+        assert_eq!(
+            row.per_direction[dir_index(Direction::A)].payload_bytes,
+            11,
+            "and it is the SECOND LINK's record that landed there — 11 bytes \
+             is the push sent on port 43211 and nothing else in the fixture \
+             carries that many"
+        );
+
+        // (2) Both unresolved arms are present, and they are DISTINGUISHED.
+        let unresolved = table.unresolved();
+        let no_decl: Vec<_> = unresolved
+            .iter()
+            .filter(|u| u.cause == UnresolvedCause::NoDeclaration)
+            .collect();
+        let no_session: Vec<_> = unresolved
+            .iter()
+            .filter(|u| u.cause == UnresolvedCause::NoSession)
+            .collect();
+        assert_eq!(
+            no_decl.iter().map(|u| u.id).collect::<Vec<_>>(),
+            alloc::vec![9],
+            "id 9 was referenced on a link of a KNOWN session and nobody \
+             declared it: {unresolved:?}"
+        );
+        assert_eq!(
+            no_session.iter().map(|u| u.id).collect::<Vec<_>>(),
+            alloc::vec![7],
+            "id 7 was referenced on a flow with no handshake — the same id the \
+             session bound, which is exactly the reference a grouping that \
+             leaked across sessions would have RESOLVED: {unresolved:?}"
+        );
+    }
+
+    /// ANTI-VACUITY for the fallback: a flow whose session is unknown resolves
+    /// its OWN declarations exactly as it did before R2457.
+    ///
+    /// The fallback is not "give up", it is "the pre-R2457 reach". Without this
+    /// the `NoSession` arm above would be satisfied by a build that had simply
+    /// stopped resolving on unattributed flows, which would be a regression
+    /// wearing the new cause as a costume.
+    #[test]
+    fn a_flow_with_no_handshake_still_resolves_its_own_declarations() {
+        let d = multilink_capture(&[
+            (true, 43212, 7447, declare_kexpr(3, "orphan/topic"), true),
+            (
+                true,
+                43212,
+                7447,
+                push(sender_space(3, None), &[0u8; 6]),
+                true,
+            ),
+        ]);
+        let grouping = crate::node::SessionGrouping::of(&crate::node::nodes(&d));
+        assert_eq!(
+            grouping.sessions(),
+            0,
+            "the fixture must have NO handshake, or it tests the other arm"
+        );
+        let table = aggregate(&d);
+        assert_eq!(
+            table.unresolved_records(),
+            0,
+            "the flow's own declaration still binds its own reference: {:?}",
+            table.unresolved()
+        );
+        assert!(
+            table.rows().iter().any(|r| r.keyexpr == "orphan/topic"),
+            "and the row is there: {:?}",
+            table.rows().iter().map(|r| &r.keyexpr).collect::<Vec<_>>()
+        );
+    }
+
+    /// THE PROPERTY THE PER-FLOW RULE WAS PROTECTING, kept: two SESSIONS'
+    /// id 3 are unrelated.
+    ///
+    /// The consumer drew this line first — the request was never "drop the
+    /// per-flow rule", it was "per-flow is a conservative band around the right
+    /// property". A grouping that keyed by node alone, or by nothing, would
+    /// resolve B's id 3 against C's declaration and report a keyexpr no
+    /// participant ever used. Two sessions sharing one endpoint is the shape
+    /// that catches it: node A talks to B and to C, and both peers mint id 3.
+    #[test]
+    fn two_sessions_of_one_node_do_not_share_an_id_space() {
+        let mut d = Dissection::new();
+        let mut i = 0;
+        let mut push_pkt =
+            |d: &mut Dissection, peer: [u8; 4], port: u16, wire: Vec<u8>, low: bool| {
+                let pkt = if low {
+                    udp_packet(LOW, port, peer, 7447, &wire)
+                } else {
+                    udp_packet(peer, 7447, LOW, port, &wire)
+                };
+                d.push_packet(LINKTYPE_ETHERNET, i, &pkt);
+                i += 1;
+            };
+        const ZID_C: [u8; 4] = [0xC3; 4];
+        const PEER_B: [u8; 4] = [10, 0, 0, 2];
+        const PEER_C: [u8; 4] = [10, 0, 0, 3];
+        for (peer, port, zid) in [(PEER_B, 43210u16, ZID_B), (PEER_C, 43211u16, ZID_C)] {
+            push_pkt(
+                &mut d,
+                peer,
+                port,
+                crate::node::tests::init_wire(&ZID_A),
+                true,
+            );
+            push_pkt(
+                &mut d,
+                peer,
+                port,
+                crate::node::tests::init_wire(&zid),
+                false,
+            );
+        }
+        // Each PEER declares id 3, to a different literal.
+        push_pkt(
+            &mut d,
+            PEER_B,
+            43210,
+            crate::datagram_tests::frame_carrying(&declare_kexpr(3, "b/only")),
+            false,
+        );
+        // A publishes under the peer's id 3 on the C session (M=0 — the
+        // RECEIVER's space, which is C's). C declared nothing, so this must NOT
+        // find B's binding.
+        push_pkt(
+            &mut d,
+            PEER_C,
+            43211,
+            crate::datagram_tests::frame_carrying(&push(receiver_space(3, None), &[0u8; 4])),
+            true,
+        );
+        d.finish();
+
+        let grouping = crate::node::SessionGrouping::of(&crate::node::nodes(&d));
+        assert_eq!(
+            grouping.sessions(),
+            2,
+            "the fixture must hold TWO sessions, or it grades nothing"
+        );
+        let table = aggregate(&d);
+        assert!(
+            !table.rows().iter().any(|r| r.keyexpr == "b/only"),
+            "C's id 3 must NOT resolve against B's declaration — that is the \
+             cross-resolution the per-flow rule existed to prevent, and it is \
+             still prevented: {:?}",
+            table.rows().iter().map(|r| &r.keyexpr).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            table
+                .unresolved()
+                .iter()
+                .map(|u| (u.id, u.cause))
+                .collect::<Vec<_>>(),
+            alloc::vec![(3, UnresolvedCause::NoDeclaration)],
+            "it is refused, and refused as a KNOWN session that never declared \
+             it rather than as an unknown flow"
         );
     }
 }

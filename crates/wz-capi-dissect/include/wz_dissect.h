@@ -128,12 +128,22 @@
  *                     span to the wrong one is silent.
  *     `asker`,        which end of the flow: `a` or `b`
  *     `declarer`
+ *     `cause`         on a `keyexprs.unresolved[]` row: WHY the reference did
+ *                     not resolve. `no_declaration` -- this capture holds the
+ *                     whole session and nothing on it ever declared the id, so
+ *                     the gap is real. `no_session` -- this flow showed no
+ *                     handshake, so the observer could not say which session
+ *                     it belongs to, and a SIBLING LINK of that session may be
+ *                     carrying the declaration. SWITCH on it: the two send you
+ *                     to different places, and a capture started mid-session
+ *                     yields the second in bulk.
  *
  * @values census kind
  * @values census mode
  * @values census offset_space
  * @values census asker
  * @values census declarer
+ * @values census cause
  *
  * The field document carries `offset_space` and `direction` with the same two
  * vocabularies, and they are declared SEPARATELY there -- a consumer pins the
@@ -310,7 +320,7 @@
  *
  * SO THE DOCUMENT CARRIES THE LIST. Its envelope reads
  *
- *     {"document":{"name":"census","revision":10,
+ *     {"document":{"name":"census","revision":11,
  *                  "planes":["exchanges","interests","keyexprs","nodes",
  *                            "payloads"]}, ...}
  *
@@ -360,7 +370,7 @@
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
- *     {"name":"census","revision":10,"key":"mode","values":[...],
+ *     {"name":"census","revision":11,"key":"mode","values":[...],
  *      "carries":null}
  *
  * `null` is a VALUE here and not an absence: it says the word is a PASSENGER --
@@ -378,6 +388,7 @@
  * test for.
  *
  * @carries census asker passenger
+ * @carries census cause passenger
  * @carries census declarer passenger
  * @carries census kind passenger
  * @carries census link passenger
@@ -455,6 +466,48 @@
  * scouting datagram's anchor has always been. A consumer that stored node
  * anchors from revision 9 or earlier and compared them across a discovery-only
  * node was comparing coordinates it could not have known were mislabelled.
+ *
+ * R2457 — REVISION 11: A KEYEXPR ID SPACE IS KEYED BY SESSION, AND AN
+ * UNRESOLVED REFERENCE SAYS WHY.
+ *
+ * A zenoh session may hold more than one link (`transport/unicast/max_links`).
+ * Until this revision the observer keyed each id space by the FLOW, so a
+ * `DeclKexpr` sent on the link that was dialled first and a record referencing
+ * that alias sent on the second landed in different tables and NEITHER
+ * resolved. It never cross-resolved — the error was always in the safe
+ * direction — but on a two-link session every reference published after the
+ * second link came up was reported unresolved.
+ *
+ * The unit is now the session, grouped by the zid pair the handshake named.
+ * That pair IS the session rather than an approximation: zenoh keys its
+ * established unicast transports by zid, so a second link with a zid it
+ * already holds joins that transport instead of making a new one. Two DIFFERENT
+ * sessions still get separate spaces, so their colliding ids stay unrelated.
+ *
+ * ⚠ SO VALUES MOVE UNDER STATIONARY KEYS, and on a multilink capture they move
+ * a lot: rows appear in `keyexprs.rows[]` that revision 10 reported as
+ * unresolved, and `unresolved_records` falls. If you stored counts from an
+ * earlier revision, they are not comparable across this boundary.
+ *
+ * Each `keyexprs.unresolved[]` row now carries `cause`:
+ *
+ *     {"space":"a","id":7,"references":41,"cause":"no_session"}
+ *
+ * `no_declaration` — the session was named and nothing on it declared the id.
+ * The gap is real: look for a lost batch, or a capture that began after the
+ * declaration.
+ *
+ * `no_session` — the flow this reference travelled on never showed a two-sided
+ * handshake, so the observer could not attribute it to a session at all. It
+ * still resolves that flow's OWN declarations, exactly as before, but a
+ * sibling link of the same session is a space it cannot join. This is what a
+ * capture started mid-session looks like, and it is the arm that says "start
+ * capturing earlier", not "hunt for a missing declaration".
+ *
+ * Folded into one `unresolved` count — which is all revision 10 could give
+ * you — those two are indistinguishable, and the consumer report that asked
+ * for this had derived exactly that: the acceptance is not that multilink
+ * resolves, it is that what STILL does not resolve says which of the two it is.
  *
  * wz_dissect_transport_message is the one door with no such revision, and
  * deliberately: its document is a FIELD TREE whose keys are the walkers' own
