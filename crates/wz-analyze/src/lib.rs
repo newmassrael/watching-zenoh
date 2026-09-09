@@ -4215,6 +4215,42 @@ pub fn samples(capture: &[u8], keylog: Option<&[u8]>) -> Result<Samples, Capture
     if !opener.log().is_empty() {
         dissection.decrypt_with(&mut opener);
     }
+    // R2462 (open-debt item 706) — THE QUIC PASS, which this entry point had
+    // never run.
+    //
+    // `decrypt_with` opens TLS records and nothing else: the QUIC recovery is
+    // `quic_pass`, and until this round its only caller was `analyze_request`.
+    // So a replay plan built from a QUIC capture held no `QuicStream` list at
+    // all -- measured, not inferred: on the same bytes `analyze` reports as
+    // `messages decoded: 6`, this walk's dissection listed its origins as
+    // `[Datagram, QuicDatagram, Datagram, QuicDatagram, Serial]`, with the three
+    // messages on the QUIC stream in none of them. Every message zenoh sent
+    // over QUIC was absent from the plan, and the absence read exactly like a
+    // capture that carried none.
+    //
+    // Unconditional, on `analyze_request`'s own argument: the Initial packet
+    // space needs no key, so a QUIC capture with no key log still yields its
+    // handshake. `quic_pass` returns before reading anything when the
+    // dissection holds no QUIC flow, so a capture without one pays one scan of
+    // the flow list.
+    //
+    // ABOVE the two index derivations below, which is load-bearing rather than
+    // tidy: they are positions in `Dissection::message_lists`, and this pass
+    // ADDS lists to it. Derived first, every index after a QUIC flow would name
+    // the wrong list -- the defect item 705 closed, arriving by a second route.
+    //
+    // R2460 (item 705) folded the sub-lists' declarations into `spaces`, and
+    // that fold has been unreachable from here ever since: this is the entry
+    // point that gives it a subject.
+    let mut recovered = FieldSink::new(None);
+    // The cid length can only be `None` here, and the residue is stated rather
+    // than hidden: `samples(capture, keylog)` has no such axis, so a capture
+    // taken mid-connection -- no Initial packet, therefore no declared short
+    // connection id length -- still opens nothing. `analyze --quic-cid-len` is
+    // where a reader supplies it. Widening this signature was judged separately
+    // and declined: `wz-replay` has no way to learn the number either, so the
+    // parameter would arrive at its call site as a `None` written twice.
+    quic_pass(capture, &mut dissection, opener.log(), None, &mut recovered);
     // R311y703 (RP4) — ONE second read, serving both halves. The datagram walk
     // already needed it for the bytes; the stream half needs it only for the
     // clock, and a second parse for that would read the same immutable slice
@@ -4244,7 +4280,14 @@ pub fn samples(capture: &[u8], keylog: Option<&[u8]>) -> Result<Samples, Capture
             collect_sample(flow, frame, &spaces, file.as_ref(), &mut out);
         }
     }
-    collect_datagram_samples(&dissection, &grouping, &mut spaces, file.as_ref(), &mut out);
+    collect_datagram_samples(
+        &dissection,
+        &grouping,
+        &mut spaces,
+        file.as_ref(),
+        &recovered,
+        &mut out,
+    );
     Ok(out)
 }
 
@@ -4258,6 +4301,7 @@ fn collect_datagram_samples(
     grouping: &wz_capture::node::SessionGrouping,
     spaces: &mut wz_capture::agg::KeyexprSpaces,
     file: Option<&Reread>,
+    recovered: &FieldSink,
     out: &mut Samples,
 ) {
     let flows = dissection.datagram_flows();
@@ -4267,7 +4311,19 @@ fn collect_datagram_samples(
     let Some(file) = file else {
         // Every datagram message is out of reach, and the count says so rather
         // than the plan quietly holding only the stream half.
-        out.unreachable += flows.iter().map(|f| f.frames.len()).sum::<usize>();
+        //
+        // R2462 (item 706) — INCLUDING the QUIC-recovered rows, which this arm
+        // would otherwise drop in silence. They do not need the file for their
+        // BYTES, but they need this walk for the space their keyexpr ids
+        // resolve in, and that space is folded below. `unreachable`'s own doc
+        // names this exact situation -- "the capture would not parse a second
+        // time" -- so the rows are counted there rather than under a new word.
+        out.unreachable += flows.iter().map(|f| f.frames.len()).sum::<usize>()
+            + recovered
+                .rows
+                .iter()
+                .filter(|(f, ..)| flows.iter().any(|d| d.flow == *f))
+                .count();
         return;
     };
     // R2459 (item 704) — the datagram half's list indices, and the SAME spaces
@@ -4340,6 +4396,42 @@ fn collect_datagram_samples(
         // census's schedule: after its cleartext pass, before the next flow.
         if let Some(row) = datagram_sublists.get(i) {
             wz_capture::node::absorb_datagram_sublists(flow, row, grouping, spaces);
+        }
+        // R2462 (open-debt item 706) — and the QUIC-RECOVERED messages, from
+        // the sink, at the point `datagram_field_rows` renders its own copy of
+        // them: after the sub-list fold, before the next flow. The two walks
+        // resolve a keyexpr id in the same state on purpose -- a listing and a
+        // replay plan of one capture that disagreed about what an id names is
+        // the shape item 705 was filed for, and putting this loop anywhere else
+        // in the flow would rebuild it here.
+        //
+        // These bytes cannot be re-read from the file the way the loop above
+        // re-reads its own: they were decrypted and reassembled, and
+        // `Dissection::message_bytes_at` answers `RecoveredPlaintextNotRetained`
+        // for exactly this list. The walk therefore happened inside
+        // `feed_quic_stream_with_sink` while the plaintext was alive, and this
+        // is the same `FieldSink` the field listing uses rather than a second
+        // one -- two walkers of one recovered stream would be two opinions
+        // about where its messages are, with nothing comparing them.
+        for (f, direction, origin, space, row) in &recovered.rows {
+            if *f != flow.flow {
+                continue;
+            }
+            let FieldRow::Walked(field) = row else {
+                out.undecodable += 1;
+                continue;
+            };
+            // The clock is available for exactly one of the two producers, and
+            // the SPACE is what says which. A recovered RFC 9221 datagram is
+            // reported at the capture packet it came out of, so the file can be
+            // asked; a recovered stream's offset is a byte into the reassembled
+            // plaintext, and asking the file for the timestamp of packet number
+            // 4131 would answer confidently about the wrong thing.
+            let captured_at = match space {
+                OffsetSpace::Packet => file.ts_millis(*origin),
+                OffsetSpace::StreamByte { .. } | OffsetSpace::CiphertextRecord => None,
+            };
+            push_sample(field, *direction, *origin, captured_at, spaces, out);
         }
     }
 }
@@ -6228,7 +6320,7 @@ mod tests {
     /// an `encoding` group only when it is, so a struct field alone would encode
     /// nothing and every assertion below would pass on a build that never
     /// looked. The wire word is `(id << 1) | has_schema`.
-    fn put_declaring(key: &str, encoding_id: u32, payload: &[u8]) -> Vec<u8> {
+    pub(crate) fn put_declaring(key: &str, encoding_id: u32, payload: &[u8]) -> Vec<u8> {
         wz_codecs::push::Push {
             header: wz_codecs::push::Push::default().header | wz_session_core::wire_const::FLAG_N_N,
             keyexpr: wz_codecs::wireexpr::Wireexpr {
@@ -9476,10 +9568,22 @@ mod quic_pass_tests {
     /// private: the fix would then change nothing observable and this test
     /// would pass identically before and after it. That is the vacuous shape,
     /// and it is avoided by putting the INIT pair on the stream itself.
-    #[test]
-    fn a_key_declared_on_a_quic_stream_reaches_the_next_flow() {
+    /// R2462 (open-debt item 706) — the fixture above, built ONCE for the two
+    /// readers that grade it.
+    ///
+    /// Extracted rather than copied because the two claims are about ONE
+    /// capture answering the same way twice: the field listing resolves the
+    /// id, and so must the replay plan. Two hand-laid captures would let one
+    /// drift and the disagreement they exist to catch would go on being
+    /// possible between them.
+    ///
+    /// Returns the capture, its key log, and the count of zenoh messages in
+    /// it — the last so a reader adding a message to this builder is sent to
+    /// the one place that states the total.
+    fn declaration_on_a_quic_stream_capture() -> (Vec<u8>, String, usize) {
         use super::tests::{
             frame_carrying, multilink_init, multilink_push_by_id, multilink_sender_space,
+            put_declaring,
         };
 
         const ZID_A: &[u8] = &[0xA1, 0xA1, 0xA1, 0xA1];
@@ -9522,10 +9626,20 @@ mod quic_pass_tests {
         let (h, o) = long_header(0, &[], &SCID, reply.len(), 0);
         let server_initial_packet = protect(&server_initial, 0, &h, o, &reply);
 
-        // The client's stream: its half of the handshake, then THE DECLARATION.
-        // Both are on the sub-list, which is the whole point.
+        // The client's stream: its half of the handshake, then THE DECLARATION,
+        // then A PUBLICATION OF ITS OWN. The first two are item 705's subject
+        // and the third is item 706's: a message that exists ONLY inside the
+        // QUIC stream, naming its key by literal so that whether it reaches a
+        // reader is a question about the QUIC pass alone and not about id
+        // resolution. The two claims are graded by two different assertions on
+        // this one capture, and each has its own control group.
         let mut client_stream = unit(&multilink_init(ZID_A));
         client_stream.extend_from_slice(&unit(&frame_carrying(&declare_kexpr(ID, "demo/temp"))));
+        client_stream.extend_from_slice(&unit(&frame_carrying(&put_declaring(
+            QUIC_NATIVE_KEY,
+            0,
+            QUIC_NATIVE_PAYLOAD,
+        ))));
         let client_keys = QuicKeys::derive(Suite::Aes128GcmSha256, &application_secret(false, 0));
         let payload = stream_frame(0, 0, &client_stream);
         let (h, o) = short_header(&SCID, 1);
@@ -9565,6 +9679,20 @@ mod quic_pass_tests {
             .collect();
         let capture = wz_capture::pcapng::write(&[(wz_capture::link::LINKTYPE_ETHERNET, 6)], &refs);
         let keylog = log_text(&random, 1);
+        // Four on the QUIC stream (the two INITs, the declaration and the
+        // native publication) and three on the cleartext flow.
+        (capture, keylog, 7)
+    }
+
+    /// R2462 (open-debt item 706) — the key the QUIC stream publishes under and
+    /// the bytes it carries, named once so the builder and both graders cannot
+    /// disagree about them.
+    const QUIC_NATIVE_KEY: &str = "demo/quic-native";
+    const QUIC_NATIVE_PAYLOAD: &[u8] = &[0x51, 0x55, 0x49, 0x43];
+
+    #[test]
+    fn a_key_declared_on_a_quic_stream_reaches_the_next_flow() {
+        let (capture, keylog, decoded) = declaration_on_a_quic_stream_capture();
 
         // THE FIXTURE'S OWN ANCHORS. Both are about the QUIC half existing at
         // all: a capture the recogniser refused, or one whose stream nobody
@@ -9582,10 +9710,9 @@ mod quic_pass_tests {
              {rendered}"
         );
         assert!(
-            rendered.contains("messages decoded: 6"),
-            "three on the QUIC stream (the two INITs and the declaration) and \
-             three on the cleartext flow -- a count below this means the \
-             sub-list carried less than the item needs: {rendered}"
+            rendered.contains(&format!("messages decoded: {decoded}")),
+            "a count below this means the sub-list carried less than the item \
+             needs: {rendered}"
         );
 
         // THE WALK — the human field LISTING. A rule that matches nothing, for
@@ -9623,13 +9750,98 @@ mod quic_pass_tests {
             "and nothing may still be reported as id-only: {text}"
         );
 
-        // THE REPLAY PLAN is deliberately NOT asserted here, and the reason is
-        // a finding rather than an omission: `samples` runs `decrypt_with` and
-        // never the QUIC pass, so its dissection holds no `QuicStream` list for
-        // this walk to miss. Its call site takes the same shared fold as the
-        // two above, but nothing can exercise it until that entry point opens
-        // QUIC — filed as its own item rather than smuggled in here, because a
-        // test that cannot fail is what this fixture was built to avoid.
+        // THE REPLAY PLAN is graded by `the_replay_plan_holds_what_a_quic_
+        // stream_carried`, on this same capture. R2460 left it unasserted here
+        // and said why: `samples` ran `decrypt_with` and never the QUIC pass,
+        // so its dissection held no `QuicStream` list for that walk to miss,
+        // and an assertion would have been one that could not fail. That is
+        // item 706, closed at R2462.
+    }
+
+    /// R2462 (open-debt item 706) — THE REPLAY PLAN, over the capture above.
+    ///
+    /// # The defect, measured before the repair
+    ///
+    /// [`samples`] built its dissection with `Dissection::from_capture` and
+    /// `decrypt_with` and stopped. `decrypt_with` opens TLS records; the QUIC
+    /// recovery is `quic_pass`, whose only caller was `analyze_request`. So the
+    /// plan a replay is built from held no `QuicStream` list at all: on these
+    /// same bytes, which `analyze` reports as seven messages decoded, the list
+    /// origins came out `[Datagram, QuicDatagram, Datagram, QuicDatagram,
+    /// Serial]` and every message the QUIC stream carried was in none of them.
+    ///
+    /// The sharper half is that the absence was INVISIBLE. A plan missing rows
+    /// nobody counted reads exactly like a capture that carried none — the
+    /// shape [`Samples::unreachable`] exists to prevent for the datagram half —
+    /// and R2460's fold of the QUIC sub-lists into `spaces` sat in this walk
+    /// with no route by which a sub-list could ever arrive.
+    ///
+    /// # Two claims, two control groups
+    ///
+    /// The assertions below are deliberately not one:
+    ///
+    /// * `demo/quic-native` exists ONLY inside the QUIC stream and names its
+    ///   key by literal, so it grades the PASS and nothing else. Delete the
+    ///   `quic_pass` call in [`samples`] and it disappears.
+    /// * `demo/temp` is published on the CLEARTEXT flow by numeric id, and the
+    ///   binding for that id was declared on the QUIC stream of the flow
+    ///   before it. It grades R2460's `absorb_datagram_sublists` call, which
+    ///   this round is the first thing able to reach. Delete that call and the
+    ///   sample becomes an `unresolved` count.
+    ///
+    /// Both are VALUE damages, which is the rule this workspace measures
+    /// against: a probe that fails to compile is not a red.
+    #[test]
+    fn the_replay_plan_holds_what_a_quic_stream_carried() {
+        let (capture, keylog, _) = declaration_on_a_quic_stream_capture();
+
+        let plan = samples(&capture, Some(keylog.as_bytes())).expect("the capture reads");
+        let keys: Vec<&str> = plan.items.iter().map(|s| s.keyexpr.as_str()).collect();
+
+        // CLAIM ONE — the QUIC pass. This publication was never on the wire in
+        // a form any re-read of the file can find.
+        let native = plan
+            .items
+            .iter()
+            .find(|s| s.keyexpr == QUIC_NATIVE_KEY)
+            .unwrap_or_else(|| {
+                panic!(
+                    "a message carried on the QUIC stream must reach the replay \
+                     plan; it holds {keys:?}"
+                )
+            });
+        assert_eq!(
+            native.payload, QUIC_NATIVE_PAYLOAD,
+            "and it must carry the bytes the stream carried, not another \
+             message's"
+        );
+        // The recovered stream's coordinate is a byte offset into the
+        // reassembled plaintext and not a packet index, so there is no
+        // timestamp to be had for it. Asserted rather than left open: a `Some`
+        // here would be this walk having asked the capture file for the arrival
+        // time of packet number `origin`, which is a confident answer about the
+        // wrong thing.
+        assert_eq!(
+            native.captured_at_millis, None,
+            "a recovered stream has no packet to date it by"
+        );
+
+        // CLAIM TWO — R2460's sub-list fold, reached for the first time. The
+        // id this resolves through was declared on the QUIC stream, and the
+        // message naming it travelled in the clear on the NEXT flow.
+        assert!(
+            keys.contains(&"demo/temp"),
+            "a reference resolved through a binding declared on a QUIC stream \
+             must reach the plan under its literal; it holds {keys:?}"
+        );
+        assert_eq!(
+            plan.unresolved, 0,
+            "and nothing may be left counted as id-only: {keys:?}"
+        );
+        assert_eq!(
+            plan.undecodable, 0,
+            "every message in this fixture is one this walker reads: {keys:?}"
+        );
     }
 
     /// R311y709 (Y2) — the same connection, captured AFTER its handshake.

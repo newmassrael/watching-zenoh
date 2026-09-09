@@ -258,13 +258,35 @@ BOTH = {
 # ABI. A reason that reads as "not done yet" is an open debt, and saying so is
 # this table's job.
 ONLY_CLI = {
+    # R2462 (open-debt item 706) — THE VERDICT IS UNCHANGED AND THE REASON IS
+    # REWRITTEN, because half of it was never true.
+    #
+    # It read that "keys carried inside the capture's own Decryption Secrets
+    # Blocks are already used by every door here". No door has ever used them.
+    # Decryption is `Dissection::decrypt_with`, which takes an opener the CALLER
+    # builds -- the accessor's own doc says so -- and no commit in
+    # `crates/wz-capi-dissect/Cargo.toml`'s crate has ever named it or the
+    # secrets accessor beside it, measured over that crate's whole history
+    # rather than over the current tree.
+    #
+    # The real reason was already in this file, 130 lines up: the cdylib must
+    # not depend on `wz-analyze` because that carries the TLS crate and through
+    # it `ring`. So the ABI cannot decrypt anything at all, by a dependency
+    # decision, and DELIBERATE stands -- on that ground instead of on a
+    # capability the ABI has never had.
+    #
+    # Found while deriving item 706's population: the QUIC recovery pass has the
+    # same boundary and for the same reason, so this row is where a reader is
+    # sent to learn why neither pass reaches the C surface.
     "TLS decryption from a key log": (
         "--keylog",
         "DELIBERATE. A key log is a file path a person supplies, and the ABI takes "
-        "capture BYTES rather than paths -- keys carried inside the capture's own "
-        "Decryption Secrets Blocks are already used by every door here. Widening "
-        "the ABI to take key material is a decision about handling secrets across "
-        "an FFI boundary, not an omission.",
+        "capture BYTES rather than paths. Neither is the binding constraint: the "
+        "cdylib must not depend on the crates that carry the crypto, so no door "
+        "here calls `Dissection::decrypt_with` and none opens the capture's own "
+        "Decryption Secrets Blocks either. Widening the ABI to take key material "
+        "is a decision about handling secrets across an FFI boundary AND about "
+        "what the cdylib links, not an omission.",
         (),
     ),
     "declaring a UDP port to be QUIC": (
