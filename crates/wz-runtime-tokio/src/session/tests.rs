@@ -7654,7 +7654,13 @@ fn liveliness_token_drop_wire_frame_contains_undecl_token_bytes() {
 /// expires, and nothing anywhere said so. Upstream returns the result from
 /// `undeclare` and logs it on `Drop` for exactly this reason; both halves were
 /// re-read at the pin this round.
-#[cfg(feature = "liveliness-token")]
+// R2461 (open-debt item 695) — `codec-push` belongs in this guard, and the
+// three sibling callers of `refusing_actions` already spell it that way
+// (`:11439` as `all(transport-stats, codec-push)`, `:11510` and `:11553`
+// bare). The fixture is `codec-push`-gated; with only `liveliness-token` here
+// the call site outlives it, and Layer C1j's `liveliness-token-only` subset
+// died at `E0425: cannot find function refusing_actions`.
+#[cfg(all(feature = "liveliness-token", feature = "codec-push"))]
 #[test]
 fn a_retraction_that_cannot_reach_the_wire_is_reported_not_swallowed() {
     use wz_session_core::link::LinkDropCause;
