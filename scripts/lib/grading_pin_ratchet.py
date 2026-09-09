@@ -1486,7 +1486,27 @@ def _grade_head(reason: str) -> str:
 #: that went longest without a correction carried four stale clauses between
 #: them. A densely corrected reason is not cheaper to CLOSE -- it is cheaper to
 #: RE-DECLARE, because less of it is false.
-BUDGET = 2
+#:
+#: R2489 -- 2 -> 1: `session-multicast`, whose divergence is a CHOICE BETWEEN
+#: TWO UPSTREAMS THAT DISAGREE, and both sides were confirmed at their own pins.
+#: zenoh refuses the inconsistent Join and KEEPS the peer --
+#: `io/zenoh-transport/src/multicast/rx.rs` @ `pub(super) fn handle_join_from_peer(`
+#: -- while zenoh-pico DROPS it, and against its OWN constants
+#: rather than the stored announcement. wz follows pico on reachability grounds,
+#: which this reason already argued and which still holds.
+#: Two things the measurement adds: upstream's peer-branch predicate does NOT
+#: include `batch_size` (that is checked only on the unknown-peer path), so the
+#: reason's implied comparison set is wider than the pin's; and pico's drop now
+#: fires a connectivity `peer_disconnected` event, which is the analogue of wz's
+#: `MulticastPeerLostReason::CapabilitiesChanged` -- so the "no foreign witness
+#: for the departure story" residual finally has a named foreign SIGNAL to
+#: witness against, where before it had only the absence of one.
+#: ⚠ A CITATION THAT DID NOT ANCHOR, caught by the count and repaired before the
+#: commit: the second needle was written `@ \`needle\`` with the path named only
+#: earlier in the sentence, so it parsed as a code span and the claim was
+#: UNGRADED -- anchored went +1 where +2 was due. A needle needs its own
+#: backticked path immediately before it, every time.
+BUDGET = 1
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
