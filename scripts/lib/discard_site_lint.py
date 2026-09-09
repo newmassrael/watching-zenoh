@@ -165,10 +165,16 @@ ALLOWED = [
     ),
     (
         "wz-capture/agg.rs",
-        "self.tables[dir_index(direction)].remove(&u.id);",
+        "table.remove(&u.id);",
         "an UNDECLARE ending a keyexpr binding. The BINDING is removed, not "
         "evidence -- the records it named are already in their rows, and the "
-        "id becoming unresolved again is the point (R311y622)",
+        "id becoming unresolved again is the point (R311y622). R2458 re-spelled "
+        "this line: R2457 made `KeyexprSpaces::tables` a map keyed by session "
+        "owner, so `self.tables[dir_index(direction)]` became "
+        "`self.tables.get_mut(&self.side(direction))` and the registered "
+        "literal stopped naming any site. This gate reported BOTH halves of "
+        "that -- an unaccounted removal AND a registration excusing nothing -- "
+        "which is why an exact match is what it registers",
     ),
     (
         "wz-capture/interest.rs",

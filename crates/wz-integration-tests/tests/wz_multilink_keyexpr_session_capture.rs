@@ -60,8 +60,8 @@ use std::time::{Duration, Instant};
 use wz_capture::agg::UnresolvedCause;
 use wz_capture::Dissection;
 use wz_integration_tests::common::{
-    graceful_terminate, listen_port, read_captured, wait_for_substring, wz_ap_demo_binary,
-    ChildGuard,
+    assert_demo_binary_newer_than_sources, graceful_terminate, listen_port, read_captured,
+    wait_for_substring, wz_ap_demo_binary, ChildGuard,
 };
 use wz_integration_tests::wire_tap::{synthesise_packets, tap_proxy, Recording, Side};
 
@@ -80,12 +80,19 @@ const LINK_TWO: (u16, u16) = (40002, 7448);
 /// binary, the same listen-log handshake, the same failure text naming the
 /// feature a missing binary would be missing.
 fn spawn_peer(label: &str, args: &[&str]) -> (ChildGuard, File, u16) {
+    let demo = wz_ap_demo_binary();
+    // R2458 — a stale demo here does not weaken the proof, it MISDIAGNOSES it:
+    // the failure would arrive as "the second link never carried the sample",
+    // which sends a reader into the keyexpr id space for a defect that is in
+    // the build. R2457 added this fixture without the check and the count guard
+    // said so; the sibling that already carried it makes the same argument.
+    assert_demo_binary_newer_than_sources(&demo);
     let stderr = tempfile::tempfile().expect("tempfile for peer stderr");
     let writer = stderr.try_clone().expect("dup peer stderr handle");
     let mut reader = stderr;
     let mut guard = ChildGuard::wrap(
         label.to_string(),
-        Command::new(wz_ap_demo_binary())
+        Command::new(&demo)
             .args(args)
             .env("RUST_LOG", "info")
             .stdout(Stdio::null())
