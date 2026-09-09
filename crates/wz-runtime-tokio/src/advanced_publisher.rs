@@ -177,6 +177,23 @@ pub enum AdvancedPublisherError {
     /// of the `tokio::spawn` panic.
     #[cfg(feature = "ext-pubsub-sample-miss-detection")]
     NoRuntime,
+    /// R2485 — [`Sequencing::Timestamp`] was asked for on a node that does not
+    /// stamp, so the timestamps this publisher's downstream de-duplication
+    /// keys on would not come from an HLC at all.
+    ///
+    /// Upstream refuses the same construction rather than degrading it:
+    /// `zenoh-ext/src/advanced_publisher.rs` @ `if conf.session.hlc().is_none() {`
+    /// guards a `bail!` naming the `timestamping` setting. wz models the same
+    /// absence — [`crate::node_clock::NodeHlc`] holds an `Option` and answers
+    /// [`is_stamping`](crate::node_clock::NodeHlc::is_stamping) `false` for a
+    /// role whose `timestamping.enabled` entry is off — so the state upstream
+    /// refuses to build on is reachable here and gets the same answer.
+    ///
+    /// The alternative wz used to take was silent: `FallbackStamp` would hand
+    /// out wall-clock stamps and the `@adv` keyexpr would still advertise the
+    /// `uhlc` discriminator, so a subscriber de-duplicating on those timestamps
+    /// was told they were HLC-quality when they were not.
+    TimestampingDisabled,
 }
 
 impl From<QueryableError> for AdvancedPublisherError {
@@ -234,6 +251,17 @@ where
     ) -> Result<Self, AdvancedPublisherError> {
         if local_zid.is_empty() || local_zid.len() > 16 {
             return Err(AdvancedPublisherError::InvalidZid);
+        }
+
+        // R2485 — refuse `Sequencing::Timestamp` on a node that does not stamp,
+        // which is upstream's own precondition
+        // (`zenoh-ext/src/advanced_publisher.rs` @ `if conf.session.hlc().is_none() {`).
+        // Checked here, beside the other preconditions and BEFORE the cache /
+        // token declarations, so a refusal never leaves a half-declared
+        // publisher to roll back. See [`AdvancedPublisherError::TimestampingDisabled`]
+        // for why degrading to the wall clock is worse than refusing.
+        if options.sequencing == Sequencing::Timestamp && !session.node_hlc().is_stamping() {
+            return Err(AdvancedPublisherError::TimestampingDisabled);
         }
 
         // R311y90 (review C5) — fail fast & clear if off-runtime: the heartbeat
@@ -1282,6 +1310,105 @@ mod tests {
         assert!(
             !should_emit_heartbeat(true, 0, 0),
             "nothing published -> skip"
+        );
+    }
+
+    /// R2485 — build a session whose node clock is on or off, by the ONE input
+    /// that decides it: the role `timestamping.enabled` is resolved against.
+    /// zenoh's shipped default is `{ router: true, peer: false, client: false }`,
+    /// so the role IS the switch and neither arm has to reach past the public
+    /// constructor to set it.
+    fn session_with_role(whatami: wz_codecs::whatami::WhatAmI) -> crate::session::TokioSession {
+        use std::sync::Mutex;
+
+        use crate::observer::ApplicationLayerObserver;
+        use crate::runtime_impl::TokioTime;
+        use crate::session::TokioSession;
+
+        let mut params = wz_runtime_tokio_test_support::fixture_session_init_params();
+        params.whatami = whatami;
+        let (actions, _driver) = crate::test_fixtures::recording_actions_with_params(params);
+        TokioSession::new(
+            actions,
+            Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+            Arc::new(TokioTime::new()),
+        )
+    }
+
+    /// R2485 — upstream refuses to construct an advanced publisher whose
+    /// sequencing is `Timestamp` when the session has no HLC
+    /// (`zenoh-ext/src/advanced_publisher.rs` @ `if conf.session.hlc().is_none() {`),
+    /// and wz now answers the same on the state it models identically.
+    ///
+    /// THE ARMS ARE THE POINT. A refusal test alone would pass on a build that
+    /// refused EVERYTHING, so the two arms beside it are what give this one a
+    /// subject: the same request succeeds on a stamping node, and the sequencing
+    /// upstream's own default carries (`None` — its builder promotes to
+    /// `Timestamp` only when a cache is attached) still succeeds on the
+    /// non-stamping one. That second arm is not decoration: wz's C ABI used to
+    /// hand `Timestamp` to every publisher declared with default options, so
+    /// without it this precondition would have refused the whole C surface.
+    #[test]
+    fn timestamp_sequencing_is_refused_on_a_node_that_does_not_stamp() {
+        use wz_codecs::whatami::WhatAmI;
+
+        let opts = |sequencing| AdvancedPublisherOptions {
+            sequencing,
+            cache: None,
+            publisher_detection: false,
+            sample_miss_detection: MissDetectionConfig::default(),
+        };
+
+        // A Peer does not stamp under zenoh's shipped default.
+        let peer = session_with_role(WhatAmI::Peer);
+        assert!(
+            !peer.node_hlc().is_stamping(),
+            "the fixture's premise: a Peer resolves timestamping.enabled to false"
+        );
+        assert!(
+            matches!(
+                AdvancedPublisher::declare(&peer, "demo/ts", opts(Sequencing::Timestamp), vec![1]),
+                Err(AdvancedPublisherError::TimestampingDisabled)
+            ),
+            "Timestamp sequencing on a non-stamping node is refused, not degraded"
+        );
+
+        // ANTI-VACUITY 1: the same request on a node that DOES stamp is accepted,
+        // so the refusal is about the clock and not about the sequencing mode.
+        //
+        // ⚠ GATED ON `time-hlc`, AND MEASURED RATHER THAN ASSUMED: without that
+        // feature `NodeHlc::is_stamping` answers false for EVERY role, so this
+        // arm's premise ("a Router stamps") is not merely unproven there, it is
+        // FALSE -- the first draft of this test asserted it unconditionally and
+        // went red on exactly that line while the two arms below passed. On such
+        // a build "Timestamp is never accepted" is the honest behaviour, and the
+        // `Sequencing::None` arm below is what keeps the refusal from being
+        // blanket.
+        #[cfg(feature = "time-hlc")]
+        {
+            let router = session_with_role(WhatAmI::Router);
+            assert!(
+                router.node_hlc().is_stamping(),
+                "the fixture's premise: a Router resolves timestamping.enabled to true"
+            );
+            assert!(
+                AdvancedPublisher::declare(
+                    &router,
+                    "demo/ts",
+                    opts(Sequencing::Timestamp),
+                    vec![1]
+                )
+                .is_ok(),
+                "a stamping node accepts Timestamp sequencing"
+            );
+        }
+
+        // ANTI-VACUITY 2: upstream's own default sequencing still declares on the
+        // non-stamping node, which is what keeps the C ABI's NULL-options path
+        // alive.
+        assert!(
+            AdvancedPublisher::declare(&peer, "demo/none", opts(Sequencing::None), vec![1]).is_ok(),
+            "Sequencing::None needs no clock and must stay declarable"
         );
     }
 }

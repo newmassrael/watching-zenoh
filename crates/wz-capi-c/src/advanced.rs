@@ -666,7 +666,17 @@ unsafe fn advanced_publisher_options(
     // Upstream's own default has cache + miss detection + detection all OFF, so
     // a NULL options pointer must not inherit wz's richer `Default`.
     out.cache = None;
-    out.sequencing = Sequencing::Timestamp;
+    // R2485 — the sequencing a declaration ENDS UP with is chosen by the two
+    // switches below, in upstream's own precedence, and NONE is what a publisher
+    // with neither gets. zenoh-pico spells the whole rule in one place
+    // (`vendor/zenoh-pico/src/api/advanced_publisher.c` @ `pub->_val._sequencing =
+    // _ZE_ADVANCED_PUBLISHER_SEQUENCING_NONE;`, the else of a
+    // miss-detection / cache / else chain) and zenoh-ext reaches the same values
+    // by promotion from a `Sequencing::None` builder default. wz used to seed
+    // `Timestamp` here, which was invisible only because nothing consulted the
+    // difference: `Timestamp` and `None` both render the `uhlc` discriminator
+    // and both mint no seqnum. R2485's declare-time HLC precondition consults it.
+    out.sequencing = Sequencing::None;
     out.publisher_detection = false;
     out.sample_miss_detection = MissDetectionConfig::default();
     if options.is_null() {
@@ -694,6 +704,16 @@ unsafe fn advanced_publisher_options(
                     _ => MissDetectionConfig::default(),
                 };
             }
+        } else if (*options).cache.is_enabled {
+            // R2485 — a cache WITHOUT miss detection selects Timestamp, which is
+            // the middle arm of upstream's chain: zenoh-ext promotes a `None`
+            // builder there —
+            // `zenoh-ext/src/advanced_publisher.rs`
+            // @ `pub fn cache(mut self, config: CacheConfig) -> Self {`
+            // — and zenoh-pico writes the same value in its own else-if. Miss
+            // detection WINS over it in both, which is why this is an `else if`
+            // and not a second `if`.
+            out.sequencing = Sequencing::Timestamp;
         }
         out.publisher_detection = (*options).publisher_detection;
     }

@@ -504,7 +504,14 @@ unsafe fn advanced_publisher_options(
     // pico's own default has cache + miss detection + detection all OFF, so a
     // NULL options pointer must not inherit wz's richer `Default`.
     out.cache = None;
-    out.sequencing = Sequencing::Timestamp;
+    // R2485 — NONE is what a publisher with neither switch gets, and pico spells
+    // that rule in one place: `vendor/zenoh-pico/src/api/advanced_publisher.c` @
+    // `pub->_val._sequencing = _ZE_ADVANCED_PUBLISHER_SEQUENCING_NONE;` is the
+    // else of a miss-detection / cache / else chain. wz seeded `Timestamp` here,
+    // which nothing could observe until R2485 gave `Timestamp` a declare-time
+    // precondition -- both values render the `uhlc` discriminator and mint no
+    // seqnum, so the divergence was real and inert at the same time.
+    out.sequencing = Sequencing::None;
     out.publisher_detection = false;
     out.sample_miss_detection = MissDetectionConfig::default();
     if options.is_null() {
@@ -530,6 +537,11 @@ unsafe fn advanced_publisher_options(
                 _ => MissDetectionConfig::default(),
             };
         }
+    } else if (*options).cache.is_enabled {
+        // R2485 — the middle arm of pico's chain: a cache without miss detection
+        // selects Timestamp. `else if` and not a second `if`, because pico's own
+        // chain lets miss detection win.
+        out.sequencing = Sequencing::Timestamp;
     }
     out.publisher_detection = (*options).publisher_detection;
     out

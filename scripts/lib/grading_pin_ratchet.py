@@ -1426,7 +1426,24 @@ def _grade_head(reason: str) -> str:
 #: rotted, and the citation census cannot tell a repair from a defect --
 #: line-form went 24 -> 25 and unresolved 8 -> 9 in one edit. Name the rotted
 #: coordinate descriptively and spell only the rooted replacement.
-BUDGET = 6
+#:
+#: R2485 -- 6 -> 5: `ext-pubsub-advanced-publisher`, and the FIRST row of this
+#: stretch that BUILT a clause instead of re-reading it. Four of its five
+#: residuals stand and are re-anchored; the fifth -- upstream refuses
+#: `Sequencing::Timestamp` on a session with no HLC -- is CLOSED by a declare
+#: -time precondition in `advanced_publisher.rs`, because the state upstream
+#: refuses to build on is reachable here too (`NodeHlc` holds an `Option`) and
+#: wz was degrading to wall-clock stamps while still advertising the `uhlc`
+#: discriminator.
+#: ⭐ THE BLAST-RADIUS SWEEP FOUND A SECOND DEFECT AND THE PAIR HAD TO SHIP
+#: TOGETHER: both production sites that ask for `Timestamp` are C ABIs setting
+#: it as the NULL-options DEFAULT, so the guard alone would have refused the
+#: whole C surface. zenoh-pico's own miss-detection / cache / else chain ends in
+#: NONE and wz had no else arm -- a divergence that was real and INERT at the
+#: same time, since `Timestamp` and `None` render the same discriminator and mint
+#: no seqnum, so nothing could observe it until the guard consulted the field.
+#: ⇒ WHEN ADDING A GUARD, ENUMERATE WHAT ALREADY SETS THE VALUE IT GUARDS.
+BUDGET = 5
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
