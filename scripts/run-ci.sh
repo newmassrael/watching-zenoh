@@ -6536,7 +6536,7 @@ layer_c1ak_cargo_test_transport_stats() {
     # --range` is what found them, which is why it is the oracle and a hand grep
     # is not. The other seven are at run-ci.sh:6674, 6708, 6710, 6718, 6732, 6779
     # and 6781; a change to `mod tests` in adminspace.rs moves ALL of them.
-    _runci_guarded_test C1ak 31 cargo test -p wz-session-core --features adminspace-metrics,transport-stats --lib adminspace --quiet \
+    _runci_guarded_test C1ak 32 cargo test -p wz-session-core --features adminspace-metrics,transport-stats --lib adminspace --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-stats --quiet -- -D warnings \
@@ -6756,7 +6756,7 @@ layer_c1ba_cargo_clippy_transport_multilink() {
 # two self-sufficiency fixes that the slim build surfaced (the session/mod.rs
 # unused-ResponseSink import + the test-module dead-code re-gating).
 layer_c1am_cargo_test_adminspace() {
-    _runci_guarded_test "C1AM adminspace 31" 31 \
+    _runci_guarded_test "C1AM adminspace 32" 32 \
         cargo test -p wz-session-core --features adminspace-metrics --lib adminspace --quiet || return 1
     _runci_guarded_test "C1AM zid_hex 3" 3 \
         cargo test -p wz-session-core --features adminspace-core --lib zid_hex --quiet || return 1
