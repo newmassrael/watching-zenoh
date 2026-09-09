@@ -347,7 +347,7 @@ fn push_stream_flow(
         );
         match flow.message_bytes(frame) {
             Err(why) => push_declined(&why, out),
-            Ok(bytes) => push_walk(bytes, frame, &spaces, declarations, out),
+            Ok(bytes) => push_walk(bytes, frame, spaces, declarations, out),
         }
         out.push('}');
     }
@@ -459,7 +459,7 @@ fn push_datagram_flow(
             dir_name(frame.direction),
             crate::anchor_space_of(frame).name()
         );
-        push_walk(message, frame, &spaces, declarations, out);
+        push_walk(message, frame, spaces, declarations, out);
         out.push('}');
     }
     let _ = write!(
