@@ -5256,7 +5256,7 @@ mod tests {
                 host: "example.org".to_string(),
                 port: 7447,
                 iface: None,
-                retry: wz_session_core::locator::LocatorRetry::default(),
+                retry: None,
             })
         );
     }
@@ -5282,7 +5282,7 @@ mod tests {
                 host: "example.org".to_string(),
                 port: 7447,
                 iface: None,
-                retry: wz_session_core::locator::LocatorRetry::default(),
+                retry: None,
             })
         );
         assert_eq!(

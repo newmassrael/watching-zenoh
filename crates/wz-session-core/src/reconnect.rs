@@ -84,8 +84,10 @@ pub enum ReconnectLocator {
         /// R2496 — the per-endpoint retry overrides, preserved across the
         /// narrowing for the reason `iface` is: a reconnect that dropped them
         /// would silently fall back to the global cadence on exactly the peers
-        /// an operator tuned by hand.
-        retry: crate::locator::LocatorRetry,
+        /// an operator tuned by hand. Boxed-when-present, exactly as
+        /// [`AnyLocator`] carries it — this narrowing moves the field through
+        /// unchanged, so it inherits the size reason with it.
+        retry: Option<alloc::boxed::Box<crate::locator::LocatorRetry>>,
     },
 }
 
@@ -472,7 +474,7 @@ mod reconnect_locator_tests {
             iface: None,
             mcast_ttl: None,
             mcast_join: alloc::vec::Vec::new(),
-            retry: crate::locator::LocatorRetry::default(),
+            retry: None,
         }
     }
 
@@ -496,7 +498,7 @@ mod reconnect_locator_tests {
             host: "example.org".into(),
             port: 7447,
             iface: None,
-            retry: crate::locator::LocatorRetry::default(),
+            retry: None,
         };
         let reconnectable =
             ReconnectLocator::try_from(any.clone()).expect("named is reconnectable");
@@ -507,7 +509,7 @@ mod reconnect_locator_tests {
                 host: "example.org".into(),
                 port: 7447,
                 iface: None,
-                retry: crate::locator::LocatorRetry::default(),
+                retry: None,
             }
         );
         assert_eq!(AnyLocator::from(reconnectable), any);

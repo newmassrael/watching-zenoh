@@ -86,6 +86,7 @@
 //! Still surfaced as parse errors rather than silently mis-parsed:
 //! - other transports not yet wired (`bt/...`).
 
+use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::net::SocketAddr;
@@ -190,7 +191,11 @@ pub struct ParsedLocator {
     pub mcast_join: Vec<String>,
     /// R2496 (`router-connect-reconcile`) — the PER-ENDPOINT connection-retry
     /// overrides carried on the same `#`-config tail. See [`LocatorRetry`].
-    pub retry: LocatorRetry,
+    ///
+    /// `None` — no override at all — for every locator whose tail is silent,
+    /// which is nearly all of them; BOXED when present for the reason R2496b
+    /// measured rather than assumed. See [`LocatorRetry`]'s size note.
+    pub retry: Option<Box<LocatorRetry>>,
 }
 
 /// R2496 — the per-endpoint connection-retry overrides a locator's `#`-config
@@ -213,6 +218,21 @@ pub struct ParsedLocator {
 /// compares. Bits are exact in both directions
 /// ([`LocatorRetry::period_increase_factor`] converts back), so the only thing
 /// given up is the direct read.
+///
+/// ⚠ CARRIED BEHIND A `Box`, and that is a MEASURED constraint rather than a
+/// style choice. Three `Option<u64>`s are 48 bytes, and [`ParsedLocator`] is
+/// returned BY VALUE in the `Err` position of
+/// `wz-runtime-tokio`'s `session_open::mesh_dial_plan` (which hands the whole
+/// locator back). Storing this inline took [`AnyLocator`] to 144 bytes —
+/// clippy's own measurement, "the `Err`-variant is at least 144 bytes" — and
+/// tripped `result_large_err` (128-byte ceiling) under `--no-default-features`,
+/// refusing R2496's push at the reduced-features gate.
+/// `Option<Box<Self>>` is 8, so a silent tail — the overwhelmingly common one —
+/// costs a pointer and NO allocation, and only an endpoint that actually names
+/// an override pays for one. The regression guard is
+/// `a_locator_stays_small_enough_to_hand_back_by_value` in this module's tests:
+/// it fails IN THIS CRATE, where the type lives, rather than only in the
+/// consumer whose `Result` happens to notice.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LocatorRetry {
     /// `#retry_period_init_ms=<n>` — the first wait before re-dialling.
@@ -229,9 +249,11 @@ impl LocatorRetry {
         self.period_increase_factor_bits.map(f64::from_bits)
     }
 
-    /// Does this tail carry NO retry override at all? The re-dial seam asks
-    /// this to decide whether it may keep the global policy untouched, which
-    /// is the common case and the one that must stay allocation-free.
+    /// Does this tail carry NO retry override at all? [`parse_retry`] asks it
+    /// once, at parse time, to decide whether the endpoint gets a boxed
+    /// override set or `None` — so the common case (a silent tail) stays
+    /// allocation-free. A caller holding `Option<Box<LocatorRetry>>` reads the
+    /// same fact off the `Option`; this is the predicate that PUTS it there.
     pub fn is_empty(&self) -> bool {
         self.period_init_ms.is_none()
             && self.period_max_ms.is_none()
@@ -490,14 +512,24 @@ fn parse_mcast_ttl(config: &str) -> Result<Option<u32>, LocatorParseError> {
 /// here, where zenoh's `zparse_default!` would take it and let the arithmetic
 /// carry the NaN into every subsequent wait. The accepted SET is otherwise
 /// identical.
-fn parse_retry(config: &str) -> Result<LocatorRetry, LocatorParseError> {
-    Ok(LocatorRetry {
+/// R2496b — `None` when the tail named none of the three, so a locator that
+/// says nothing about retry carries a pointer rather than 48 bytes of
+/// all-`None` (see [`LocatorRetry`]'s size note). This is the ONE place that
+/// can make that decision, because it is the only one that sees the whole span
+/// at once: every consumer downstream would have to re-derive `is_empty`.
+fn parse_retry(config: &str) -> Result<Option<Box<LocatorRetry>>, LocatorParseError> {
+    let parsed = LocatorRetry {
         period_init_ms: parse_config_u64(config, LOCATOR_RETRY_PERIOD_INIT_MS_KEY)?,
         period_max_ms: parse_config_u64(config, LOCATOR_RETRY_PERIOD_MAX_MS_KEY)?,
         period_increase_factor_bits: parse_config_factor_bits(
             config,
             LOCATOR_RETRY_PERIOD_INCREASE_FACTOR_KEY,
         )?,
+    };
+    Ok(if parsed.is_empty() {
+        None
+    } else {
+        Some(Box::new(parsed))
     })
 }
 
@@ -1083,8 +1115,10 @@ pub enum AnyLocator {
         iface: Option<String>,
         /// R2496 — the per-endpoint retry overrides from the same config tail,
         /// carried for the reason `iface` is: the tail belongs to the endpoint,
-        /// not to the address shape that happens to spell it.
-        retry: LocatorRetry,
+        /// not to the address shape that happens to spell it. `None` when the
+        /// tail is silent, boxed when it is not — the same shape, and the same
+        /// size reason, as [`ParsedLocator::retry`].
+        retry: Option<Box<LocatorRetry>>,
     },
     /// A serial endpoint (`serial/...`) — see [`SerialEndpoint`]. ALWAYS
     /// present (R311ny: the serial locator leaf is ungated), so a
@@ -1447,20 +1481,20 @@ mod tests {
              retry_period_max_ms=8000;retry_period_increase_factor=1.5",
         )
         .expect("valid locator with a retry tail");
-        assert_eq!(p.retry.period_init_ms, Some(500));
-        assert_eq!(p.retry.period_max_ms, Some(8000));
-        assert_eq!(p.retry.period_increase_factor(), Some(1.5));
-        assert!(!p.retry.is_empty());
+        let retry = p.retry.as_ref().expect("a tail that names three overrides");
+        assert_eq!(retry.period_init_ms, Some(500));
+        assert_eq!(retry.period_max_ms, Some(8000));
+        assert_eq!(retry.period_increase_factor(), Some(1.5));
+        assert!(!retry.is_empty());
     }
 
     #[test]
     fn a_locator_with_no_retry_tail_overrides_nothing() {
-        // ANTI-VACUITY for the test above: `is_empty` has to be able to say NO,
-        // or "the global policy stands" and "the tail was parsed" would look
-        // the same to the re-dial seam.
+        // ANTI-VACUITY for the test above: the absent case has to be able to
+        // say NO, or "the global policy stands" and "the tail was parsed"
+        // would look the same to the re-dial seam.
         let p = parse_locator("tcp/1.2.3.4:7447").expect("valid bare locator");
-        assert!(p.retry.is_empty());
-        assert_eq!(p.retry.period_increase_factor(), None);
+        assert!(p.retry.is_none());
     }
 
     #[test]
@@ -1469,7 +1503,12 @@ mod tests {
         // dropped, and it does not take the keys beside it down with it.
         let p = parse_locator("tcp/1.2.3.4:7447#nope=1;retry_period_init_ms=250")
             .expect("an unknown key is not an error");
-        assert_eq!(p.retry.period_init_ms, Some(250));
+        assert_eq!(
+            p.retry
+                .expect("the known key survives beside it")
+                .period_init_ms,
+            Some(250)
+        );
     }
 
     #[test]
@@ -1513,7 +1552,7 @@ mod tests {
         let p = parse_locator("tcp/1.2.3.4:7447#exit_on_failure=true")
             .expect("an unknown key is not an error");
         assert!(
-            p.retry.is_empty(),
+            p.retry.is_none(),
             "exit_on_failure must NOT be silently collected into the retry set"
         );
     }
@@ -1528,10 +1567,39 @@ mod tests {
             .expect("valid named locator with a retry tail");
         match l {
             AnyLocator::Named { retry, .. } => {
-                assert_eq!(retry.period_max_ms, Some(9000));
+                assert_eq!(
+                    retry.expect("the named tail's overrides").period_max_ms,
+                    Some(9000)
+                );
             }
             other => panic!("expected Named, got {other:?}"),
         }
+    }
+
+    /// R2496b — THE SIZE CEILING, guarded in the crate that owns the type.
+    ///
+    /// `wz-runtime-tokio`'s `session_open::mesh_dial_plan` hands a rejected
+    /// locator BACK — `Result<ParsedLocator, AnyLocator>` — so every byte added
+    /// to this family lands in an `Err` variant, and clippy refuses one of 128
+    /// bytes or more (`result_large_err`). R2496 added 48 inline and the
+    /// refusal arrived in a DIFFERENT crate, at the reduced-features gate,
+    /// after the whole push had run: the gate that noticed does not run when
+    /// only this crate changes. This fails here instead.
+    ///
+    /// 64-bit only — the ceiling is a property of this target class's layout,
+    /// and a 32-bit build is a different question with a different answer.
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn a_locator_stays_small_enough_to_hand_back_by_value() {
+        // The pin is the CEILING, not today's size: shrinking the type must not
+        // require editing this line, growing it past what a `Result` carries
+        // must.
+        let size = core::mem::size_of::<AnyLocator>();
+        assert!(
+            size < 128,
+            "AnyLocator is {size} bytes; clippy::result_large_err refuses an \
+             Err variant of 128 or more, and mesh_dial_plan returns one"
+        );
     }
 
     #[test]
@@ -1588,7 +1656,7 @@ mod tests {
                 host: "example.org".to_string(),
                 port: 7447,
                 iface: None,
-                retry: LocatorRetry::default(),
+                retry: None,
             })
         );
     }
@@ -1650,7 +1718,7 @@ mod tests {
                 host: "example.org".to_string(),
                 port: 7447,
                 iface: Some("eth0".to_string()),
-                retry: LocatorRetry::default(),
+                retry: None,
             })
         );
     }
@@ -1701,7 +1769,7 @@ mod tests {
                 host: "example.org".to_string(),
                 port: 7447,
                 iface: None,
-                retry: LocatorRetry::default(),
+                retry: None,
             })
         );
     }
@@ -1724,7 +1792,7 @@ mod tests {
                     host: "example.org".to_string(),
                     port: 7447,
                     iface: None,
-                    retry: LocatorRetry::default(),
+                    retry: None,
                 }),
                 "{s} should classify as Named"
             );
@@ -2070,7 +2138,7 @@ mod tests {
                 host: "example.org".to_string(),
                 port: 7447,
                 iface: Some("eth0".to_string()),
-                retry: LocatorRetry::default(),
+                retry: None,
             })
         );
     }
@@ -2311,7 +2379,7 @@ mod tests {
                 host: "example.org".to_string(),
                 port: 7447,
                 iface: None,
-                retry: LocatorRetry::default(),
+                retry: None,
             })
         );
     }

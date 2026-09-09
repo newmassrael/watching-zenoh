@@ -104,7 +104,15 @@ impl RetryPolicy {
     /// value, which is why this takes `Option`s rather than a whole policy: an
     /// endpoint that names only `retry_period_max_ms` must not also inherit a
     /// default `period_init_ms` from nowhere.
-    pub fn layered(self, overrides: &wz_session_core::locator::LocatorRetry) -> Self {
+    /// R2496b — `None` is an endpoint whose `#` tail named no override at all,
+    /// which the locator parser records as an absent set rather than an empty
+    /// one (see `wz_session_core::locator::LocatorRetry`'s size note). It
+    /// returns the global policy untouched, which is the same answer an
+    /// all-`None` set would have produced field by field.
+    pub fn layered(self, overrides: Option<&wz_session_core::locator::LocatorRetry>) -> Self {
+        let Some(overrides) = overrides else {
+            return self;
+        };
         Self {
             period_init_ms: overrides.period_init_ms.unwrap_or(self.period_init_ms),
             period_max_ms: overrides.period_max_ms.unwrap_or(self.period_max_ms),
