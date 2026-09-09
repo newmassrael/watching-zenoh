@@ -1243,7 +1243,22 @@ def _grade_head(reason: str) -> str:
 #: `send_push`, which is what wz's per-PUT permit pull was built to match.
 #: Re-checking a closed clause is the half a re-measurement usually skips, and
 #: it is the half that would notice a repair going stale.
-BUDGET = 18
+#:
+#: R2467 — 18 -> 17: `config-mutate-runtime`, and this is the first row on this
+#: track where the re-measurement MOVED something. Two of its residuals stand,
+#: but the change-notification one OVERSTATES upstream at the pin: the config
+#: notifier's `subscribe` has exactly ONE caller in the whole tree now, the
+#: plugins hotreload loop, and the connect/endpoints reactor the 1.5.0 wording
+#: cites is gone. wz's gap narrowed because UPSTREAM SHRANK, which is the
+#: direction a re-measurement is least likely to go looking for.
+#:
+#: ⚠ AND ONE CORRECTION'S CITATION HAD ROTTED INTO A DEAD NAME:
+#: `regen_interceptors` is absent from the pin; its substance survives as
+#: `update_config`, still `#[allow(dead_code)]` and still called only from
+#: three test sites. The CONCLUSION held; the symbol a reader would grep for
+#: did not. That is the failure this ratchet exists to surface, and it is
+#: invisible to any predicate that only asks which version number appears.
+BUDGET = 17
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
