@@ -103,11 +103,35 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 # 1.10.0, and this table RED-ed on the way through — in the falling direction,
 # which is the half a one-sided budget would have missed. That is the round this
 # gate was built one round early for.
+#
+# R2501 (open-debt item 711) — zenoh 0 -> 1, zenoh-c 0 -> 1, zenoh-pico 1 -> 2.
+# UPSTREAM PUBLISHED; the pins did not move. This is the RISING direction the
+# docstring above describes, and moving the table is the maintenance it asks
+# for: the row is the measurement, not a tolerance.
+#
+# ⚠ AND THIS ROW MOVE IS NOT THE PIN BUMP. The gate's own FAIL text says a
+# rising number "is open-debt item 579's work, not this table's" — but 579 is
+# CLOSED (R2236), and so are the two items above it: 578 built this gate and
+# handed its remaining condition to 581 (CLOSED R2228 / R2241). So the sentence
+# points at an owner that no longer exists, which is why item 711 was filed to
+# hold the position. It splits the work deliberately: moving this row is the
+# cheap per-observation MAINTENANCE, and bumping the real pins (1.10.0 -> next,
+# which drags Layer Z / Ewire re-verification behind it) is a ROUND that 711
+# still owes. ⛔ Do not let the first stand in for the second — that is how
+# "five minors behind" happens again, which is the thing item 578 existed to
+# prevent.
+#
+# ⚠⚠ THIS RED WAS INVISIBLE FOR THE WHOLE WINDOW, and that is why it arrives as
+# a jump rather than one release at a time: Layer U sits at step 18 behind the
+# C0 pair, which failed at leg 68 from R2448 until R2498 repaired it. Item 695
+# had predicted exactly this — it recorded Layer U as one of two legs that "have
+# never received a verdict since the window opened" and said to read them first
+# in the run where C0 is released. Run 34417146811 is that run.
 PINNED: dict[str, tuple[str, int]] = {
     "FreeRTOS/FreeRTOS-Kernel": ("MEASURED", 3),
-    "eclipse-zenoh/zenoh": ("MEASURED", 0),
-    "eclipse-zenoh/zenoh-c": ("MEASURED", 0),
-    "eclipse-zenoh/zenoh-pico": ("MEASURED", 1),
+    "eclipse-zenoh/zenoh": ("MEASURED", 1),
+    "eclipse-zenoh/zenoh-c": ("MEASURED", 1),
+    "eclipse-zenoh/zenoh-pico": ("MEASURED", 2),
     "lwip-tcpip/lwip": ("NO_RELEASES", 0),
     "newmassrael/scxml-core-engine": ("NO_RELEASES", 0),
     "zephyrproject-rtos/zephyr": ("PIN_NOT_A_RELEASE", 0),
