@@ -1298,7 +1298,24 @@ def _grade_head(reason: str) -> str:
 #: test module is gated on `codec-push`, which neither invocation enabled. The
 #: graders were not in the population. `running N tests` against a `--list` of
 #: the names is what exposed it -- an exit status could not have.
-BUDGET = 14
+#:
+#: R2473 — 14 -> 13: `api-compat-pico`, whose upstream half R2472 read the wz
+#: side of and then DECLINED the marker for, on the ground that claiming it
+#: would assert a measurement nobody had made. This round made it: both live
+#: divergences stand at the graded upstream -- pico aliases a static where wz
+#: copies, and pico optimizes a publisher's keyexpr where wz publishes the
+#: literal. Grade unmoved; the two are cost divergences, not wire defects.
+#:
+#: ⚠ WHICH UPSTREAM COUNTS HERE IS NOT THE TREE'S PIN, and the marker says so
+#: rather than letting the ratchet's name imply otherwise: this atom is graded
+#: against `vendor/zenoh-pico`, which its own residual heading and source line
+#: both name. The `1.5.0` string this gate keys on is CONTEXT in that entry --
+#: the tree's then-pin -- not a grading claim against the zenoh Rust crates. An
+#: atom can therefore leave this population by a measurement that never touches
+#: the version the population is named for, which is a property of the
+#: predicate rather than a hole in it, and is worth knowing before the next row
+#: with two upstreams is judged.
+BUDGET = 13
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
