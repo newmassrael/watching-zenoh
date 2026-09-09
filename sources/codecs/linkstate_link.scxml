@@ -25,7 +25,7 @@
      length-prefixed string for the locator-list repeat in `hello`.
 
      Wire shape:
-       byte 0+ : psid  (VLE u64, 1..=10 bytes — a neighbour link-state's
+       byte 0+ : psid  (VLE u64, 1..=9 bytes — a neighbour link-state's
                         psid, the small-int node id used by the spanning
                         -tree / shortest-path graph in net/protocol/
                         network.rs).

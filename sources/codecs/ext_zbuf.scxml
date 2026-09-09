@@ -16,7 +16,7 @@
      Used as the `enc=0x02` arm of `codec_zenoh_ext_entry`.
 
      Wire shape:
-       byte 0+ : value_len  (VLE u64, 1..=10 bytes)
+       byte 0+ : value_len  (VLE u64, 1..=9 bytes)
        bytes   : value      (length=value_len, max 32)
 
      Body byte-identical to SCE upstream codec_zenoh_ext_zbuf at
