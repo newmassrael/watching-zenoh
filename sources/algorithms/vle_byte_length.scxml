@@ -33,13 +33,21 @@
   into `tlv_advance` rather than being called directly — but at A3
   it is the missing piece that makes the walker tractable.
 
-  Boundary behavior:
-    - Valid VLE u64: 1..10 bytes (ceil(64/7) = 10).
+  Boundary behavior (R2492 — rewritten, not renumbered; the previous
+  text was wrong in KIND as well as in count):
+    - Valid VLE u64: 1..9 bytes. zenoh-pico defines `#define VLE_LEN 9`
+      and folds the ninth byte in unmasked, so that byte carries eight
+      DATA bits. The naive ceil(64/7) = 10 assumes seven data bits in
+      every byte and overcounts by one.
     - Unterminated VLE: returns `len(data)` if no byte with the high
-      bit clear is found. Caller treats a return value of 10 with
-      `(data[9] & 0x80) != 0` as a codec-level decode error
-      (`codec/vle-width-overflow` per RFC §5.B diagnostics; identical
-      framing to `vle_u64_decode`).
+      bit clear is found. ⚠ The over-length case is NOT diagnosable by
+      testing a continuation bit at the last byte — there is none to
+      test, because that bit is data. It is the COUNT reaching nine
+      with the chain still unterminated that means
+      `codec/vle-width-overflow` (RFC §5.B diagnostics; same framing as
+      `vle_u64_decode`). The old wording asked the caller to check
+      `(data[9] & 0x80)`, which is both one byte past the maximum and a
+      bit that has been repurposed.
 
   No SCE-upstream test fixture exists for VLE byte-length at vendor
   pin `1473f99f`; verify-codegen.sh Layer 2 (byte-golden) is N/A.

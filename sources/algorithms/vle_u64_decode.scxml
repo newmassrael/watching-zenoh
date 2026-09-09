@@ -9,10 +9,25 @@
 
   Wire shape (zenoh-pico `_z_zint_decode_u64`, RFC §5.B): continuation-
   bit chain of 7-bit groups, little-endian within each group; high bit
-  set on every byte except the last. A u64 takes at most 10 bytes
-  (ceil(64/7) = 10) — the `max-iter="10"` bound is the §5.A WCET
-  handle, codegen emits it as a `_Static_assert` friend on MCU and an
-  unroll hint on AP.
+  set on every byte except the last. A u64 takes at most NINE bytes,
+  which is the cited implementation's own bound: zenoh-pico defines
+  `#define VLE_LEN 9` and its decode loop stops at
+  `i != 7 * (VLE_LEN - 1)`, then folds the final byte in UNMASKED
+  (`*zint |= (uint64_t)b << i`), so the ninth byte's high bit is DATA
+  rather than a continuation flag. The naive ceil(64/7) = 10 counts
+  seven data bits in every byte and so overcounts by one.
+
+  R2492 — this paragraph used to read "at most 10 bytes … the
+  `max-iter="10"` bound is the §5.A WCET handle, codegen emits it as a
+  `_Static_assert` friend on MCU and an unroll hint on AP". All three
+  of those clauses were false: the byte count (see above), the
+  attribute (this source declares none, and `sce:max-iter` is schema-
+  legal only on `sce:while` while this body loops with `sce:foreach`),
+  and the emission (SCE's generator discards the value outright —
+  `let _ = max_iter; // RFC §synth-5-A runtime-counter guard lands in
+  A4 (build-time fold)`). No WCET handle is emitted for this source at
+  the current SCE pin; if one is wanted it is an upstream A4
+  dependency, not a line of prose here.
 
   Encode-direction sibling (RFC Appendix B worked example) requires
   the `cursor` and `Result` types that land in Phase A4+ (the §5.F
@@ -29,10 +44,13 @@
   six-backend parity gate from RFC §5.J.4.
 
   The body terminates on the first byte whose continuation bit is
-  clear, OR after 10 input bytes (the `max-iter` ceiling). The 10-byte
-  case implies an unterminated VLE — caller treats `byte_index >= 9`
-  with a still-set continuation bit as a codec-level decode error
-  (`codec/vle-width-overflow` per RFC §5.B diagnostics).
+  clear, OR after NINE input bytes. R2492 — the over-length case is NOT
+  detected by inspecting a continuation bit: the ninth byte carries
+  eight DATA bits (see the wire shape above), so there is no flag left
+  to test there. It is detected by the byte count reaching nine with
+  the chain still unterminated, which is what upstream's loop bound
+  expresses. A caller reporting `codec/vle-width-overflow` (RFC §5.B
+  diagnostics) keys on that count, not on `data[8] & 0x80`.
 -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
