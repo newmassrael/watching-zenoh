@@ -1506,7 +1506,27 @@ def _grade_head(reason: str) -> str:
 #: earlier in the sentence, so it parsed as a code span and the claim was
 #: UNGRADED -- anchored went +1 where +2 was due. A needle needs its own
 #: backticked path immediately before it, every time.
-BUDGET = 1
+#:
+#: R2490 -- 1 -> 0, AND THE RATCHET IS DONE: `session-matching`, the last row.
+#: It is unlike the four before it, and the difference is what the row teaches:
+#: ITS LIVE RESIDUALS ARE WITNESS GAPS, NOT DIVERGENCES. Its behaviour clauses
+#: were closed one at a time across R311y527, y771, y788, y798, y799 and y800,
+#: so what remains is not "wz does not do X" but "nothing FOREIGN has ever
+#: adjudicated that wz does X". Re-declaring such an atom cannot consist of
+#: re-reading upstream, because upstream agreement is not what is missing.
+#: The surviving behaviour clause is re-anchored and NARROWER than it reads:
+#: `zenoh/src/api/session.rs` @ `fn matching_status_local(` reads only the
+#: keyexpr on two arms but DOES honour completeness on the AllComplete arm, so
+#: "upstream ignores completeness" would be a widening a later round must not do.
+#:
+#: ⚠ WHAT REACHING ZERO DOES AND DOES NOT MEAN, said here because the number is
+#: the thing a later reader will quote: every GRADED atom now declares the tree's
+#: pin instead of 1.5.0, so open-debt item 675 closes and a CRITICAL leaves the
+#: census queue. It does NOT move `REMAINING WORK`, which is 60 and is moved only
+#: by whole-atom re-audits (item 15's rule). Sixteen rows were re-declared to get
+#: here; six clauses were WITHDRAWN as false, and more than half of those were
+#: false because wz had built the fix and no round struck the text.
+BUDGET = 0
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
