@@ -654,10 +654,55 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # capability upstream deleted -- and retiring a claim adds no wz site.
 #
 # AMBIGUOUS HELD AT 73 for the fourth round running.
+#
+# Round 2499 (open-debt item 710) -- wz 315 -> 346, THIRTY-ONE citations across
+# FIFTEEN rounds, reconstructed in bulk. This is the one entry in this block
+# that was not written by the round that moved the number, and the reason is
+# the point: THIS AXIS WAS BLIND FOR THE WHOLE STRETCH. The leg that checks it
+# sits at position 91 of `layer_c0_test_discipline`, and R2448 left that lane
+# failing at leg 68 -- `wz-session-core` / `codec-fragment` declared to gate no
+# public path while the scan found one -- so hosted C0 never reached this
+# check again. R2498 repaired leg 68; the lane then advanced to 91 and this
+# red is what it found. Every round below did the work it was FOR (the item
+# 675 re-declaration ratchet, which re-anchors an atom's reason to wz sites);
+# none of them was told it owed this block an entry, because nothing could
+# tell them.
+#
+#   Round 2469  adminspace-plugins-handlers       +1
+#   Round 2470  attachment-bytes                  +1
+#   Round 2471  attachment-bytes                  +3
+#   Round 2472  api-compat-pico                   +3
+#   Round 2475  attachment-bytes                  +1
+#   Round 2478  liveliness-get                    +3
+#   Round 2479  adminspace-router-linkstate       +1
+#   Round 2480  session-unicast-accept            +1
+#   Round 2483  routing-routes                    +1
+#   Round 2484  ext-pubsub-sample-miss-detection  +3
+#   Round 2485  ext-pubsub-advanced-publisher     +3
+#   Round 2486  ext-pubsub-advanced-history       +3
+#   Round 2487  ext-pubsub-advanced-recovery      +3
+#   Round 2488  ext-pubsub-advanced-subscriber    +1
+#   Round 2490  session-matching                  +3
+#
+# DERIVED, not reconstructed from memory: every store commit in the window was
+# replayed and these thirteen atoms' counts recomputed at each, by the same
+# rule `citation_audit` uses. The method validates against this block itself --
+# recomputing at the commit that last set the pin returns exactly 315 -- and
+# the fifteen deltas sum to exactly 31, so nothing is unaccounted for.
+# ⚠ ONE INFERENCE IS FLAGGED RATHER THAN HIDDEN: nine of the fifteen commits
+# carry their round's own ledger key, and six changed the store WITHOUT filing
+# an entry in the same commit. Those six are attributed to the first
+# `docs(atomic): file Round N` commit that follows them, which is an inference
+# from commit ORDER rather than a key read out of the blob.
+#
+# AMBIGUOUS HELD AT 73 for the fifth round running, and this time it held
+# across fifteen rounds nobody was watching -- as did reached 55, unreached 3
+# and no-symbol 2. Only the wz count moved, which is what a stretch of
+# re-declaration rounds should do to it.
 PIN_REACHED = 55
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
-PIN_WZ_CITATIONS = 315
+PIN_WZ_CITATIONS = 346
 PIN_AMBIGUOUS = 73
 
 
