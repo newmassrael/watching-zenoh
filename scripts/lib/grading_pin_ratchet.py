@@ -1344,7 +1344,21 @@ def _grade_head(reason: str) -> str:
 #: not, and nothing compares the two. That asymmetry is worth more than this
 #: row -- it says the remaining rows' upstream coordinates are less trustworthy
 #: than the doc comments sitting beside the code they describe.
-BUDGET = 11
+#:
+#: R2479 — 11 -> 10: `adminspace-router-linkstate`, re-measured at the pin with
+#: NO VERDICT CHANGED. Its four residuals stand -- upstream's linkstate handler
+#: still serves every non-Client hat where wz serves only from the router host,
+#: and still replies a DOT graph. The two clauses this atom had already flagged
+#: as citation-rotted were RE-ANCHORED with needles rather than left as prose.
+#:
+#: ⚠ AND THE PIN CARRIES A HAT THAT DID NOT EXIST WHEN THAT REASON WAS WRITTEN:
+#: `broker`, beside client, peer and router. Nothing in this round's claims
+#: turns on it -- the handler names `is_peer() || is_router()` explicitly -- but
+#: it is recorded because a FUTURE clause reasoning about "which hats serve
+#: what" must enumerate four. That is the shape of upstream drift this ratchet
+#: cannot see: not a claim going false, but the set a claim quantifies over
+#: growing underneath it.
+BUDGET = 10
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
