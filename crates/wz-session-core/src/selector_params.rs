@@ -130,6 +130,23 @@ fn split_kv(kv: &str) -> (&str, &str) {
     }
 }
 
+/// [`param_value`] over the RAW bytes a [`QueryView`](crate::query_sink::QueryView)
+/// carries, which is the shape every wire-side caller actually holds.
+///
+/// R2494 (open-debt item 677) — lifted here rather than re-typed at the second
+/// call site. `wz-runtime-tokio`'s advanced cache had this exact three-line
+/// adapter, under a comment recording why a copy is not a single source of
+/// truth: when the parameter DIALECT lived next to one consumer, the `&`-vs-`;`
+/// separator bug stayed live in `wz-rest/src/bridge.rs` one crate away. The
+/// dialect moved here then; the byte adapter follows it now, for the same
+/// reason and before a second copy can drift.
+///
+/// Non-UTF-8 parameters answer `None` — a selector this node cannot read is a
+/// selector whose keys it must not claim to have found.
+pub fn param_value_bytes<'a>(params: Option<&'a [u8]>, key: &str) -> Option<&'a str> {
+    param_value(core::str::from_utf8(params?).ok()?, key)
+}
+
 /// Join `parts` (each already `key=value`) into a parameter list.
 #[cfg(feature = "alloc")]
 pub fn join_params(parts: &[alloc::string::String]) -> alloc::string::String {

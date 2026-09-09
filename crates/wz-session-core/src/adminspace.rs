@@ -1139,6 +1139,35 @@ pub fn answer_admin_query(
             if let Some(stats) = ctx.stats {
                 body.push_str(&stats.openmetrics_text());
             }
+            // R2494 (open-debt item 677) — upstream's `descriptors` parameter,
+            // the ONE of its six metrics parameters that is honourable against
+            // this body. Upstream's own arm drops the `# HELP` / `# TYPE` lines
+            // and keeps the samples:
+            // `zenoh/src/net/runtime/adminspace.rs` @ `if query.parameters().get("descriptors") == Some("false") {`
+            //
+            // EQUALITY against `"false"`, not a presence test, and the
+            // difference is load-bearing here for the first time:
+            // [`crate::selector_params::param_value`] documents that a VALUELESS
+            // key yields `Some("")` (zenoh's own `get` semantics), so a bare
+            // `?descriptors` must leave the descriptors ON. Upstream's `==
+            // Some("false")` says the same; `is_some()` would not.
+            //
+            // ⚠ THE TERMINATOR IS NOT A DESCRIPTOR. Upstream strips every `#`
+            // line and re-appends `# EOF` with `.chain(["# EOF\n"])` because its
+            // terminator sits INSIDE the filtered text. wz appends
+            // `metrics_eof()` AFTER this filter's subject, so that re-append is
+            // a step this assembly already gives for free -- copying it would be
+            // cargo-culting upstream's workaround for a shape wz does not have.
+            if crate::selector_params::param_value_bytes(view.parameters(), "descriptors")
+                == Some("false")
+            {
+                let kept: alloc::string::String = body
+                    .lines()
+                    .filter(|l| !l.starts_with('#'))
+                    .map(|l| alloc::format!("{l}\n"))
+                    .collect();
+                body = kept;
+            }
             // R2414 — and the terminator LAST, after any counters. OpenMetrics
             // ends at `# EOF`; emitting it inside `metrics_text` would bury the
             // stats block behind the end of the document.
@@ -2475,6 +2504,55 @@ mod tests {
     /// gauge, which is where upstream appends its own
     /// (`zenoh/src/net/runtime/adminspace.rs` @ `.stats()`). Pinned on the
     /// ANSWERER, not on the
+    /// R2494 (open-debt item 677) — `descriptors=false` strips the `# HELP` and
+    /// `# TYPE` lines, which is the ONE of upstream's six metrics parameters
+    /// that is honourable against wz's body today. The other five quantify over
+    /// structure wz does not emit (no per-transport / per-link / per-key
+    /// breakdown, no disconnected reporting) or need a compressor this tree has
+    /// no dependency for, so implementing them would be five no-ops and a
+    /// manifest decision -- measured, not assumed.
+    ///
+    /// ⚠ THE TERMINATOR IS NOT A DESCRIPTOR. Upstream strips every `#` line and
+    /// re-appends `# EOF` with `.chain(["# EOF\n"])` because its terminator sits
+    /// INSIDE the filtered text; wz appends `metrics_eof()` after the filter's
+    /// subject, so copying that re-append here would be cargo-culting a step
+    /// wz's assembly already gives for free. The assertion below pins that.
+    #[cfg(feature = "adminspace-metrics")]
+    #[test]
+    fn metrics_descriptors_false_strips_help_and_type_but_not_eof() {
+        let mut out = RecordingReply::default();
+        let view = admin_view_with_params("@/a1b2/peer/metrics", "descriptors=false");
+        let mut stats = crate::stats::TransportStatsReport::default();
+        stats.tx.bytes = 140;
+        let _ = answer_admin_query(
+            &view,
+            &mut out,
+            &admin_ctx_with_stats(stats),
+            &[],
+            &[],
+            &[],
+            "{}",
+        );
+        let body = out
+            .replies
+            .iter()
+            .find(|(k, _)| k == "@/a1b2/peer/metrics")
+            .map(|(_, p)| String::from_utf8_lossy(p).into_owned())
+            .expect("the metrics leg replied");
+        assert!(
+            !body.contains("# HELP") && !body.contains("# TYPE"),
+            "descriptors=false strips HELP/TYPE; got:\n{body}"
+        );
+        assert!(
+            body.ends_with("# EOF\n"),
+            "the terminator survives the descriptor strip; got:\n{body}"
+        );
+        assert!(
+            body.contains("tx_bytes 140"),
+            "the SAMPLES survive -- only their descriptors go; got:\n{body}"
+        );
+    }
+
     /// renderer: the renderer's own shape is pinned in `stats.rs`, and what this
     /// adds is that the composition happens at all and in that order.
     #[cfg(feature = "adminspace-metrics")]
@@ -2508,6 +2586,14 @@ mod tests {
             "build-info, then the counter block, then the terminator — in that \
              order. R2414: the terminator moving above the counters would bury \
              them behind the end of the document."
+        );
+        // R2494 — the ANTI-VACUITY partner of the descriptors test below: with
+        // no parameter given, the `#` descriptor lines MUST still be there. A
+        // suppression test alone would pass against a build that never emitted
+        // them.
+        assert!(
+            body.contains("# HELP") && body.contains("# TYPE"),
+            "the default reply carries its descriptors; got:\n{body}"
         );
         // Stated separately from the equality above, because that equality would
         // still hold if BOTH sides put EOF in the wrong place.
@@ -2925,6 +3011,21 @@ mod tests {
             encoding: None,
             rid: 1,
             is_local: false,
+        }
+    }
+
+    /// R2494 (open-debt item 677) — the same view WITH a selector parameter
+    /// string, which `admin_view` above pins to `None`. Upstream reads six
+    /// parameters on the metrics leg; wz read none, and the channel was already
+    /// there (`QueryView::parameters`), so what was missing was a READ SITE and
+    /// a test that could see one.
+    fn admin_view_with_params<'a>(
+        keyexpr: &'a str,
+        parameters: &'a str,
+    ) -> crate::query_sink::BorrowedQuery<'a> {
+        crate::query_sink::BorrowedQuery {
+            parameters: Some(parameters.as_bytes()),
+            ..admin_view(keyexpr)
         }
     }
 
