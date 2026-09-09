@@ -564,7 +564,8 @@ fn vanishing_subscriber_peer(
         SigningKey, WhatAmI,
     };
     use wz_runtime_tokio::session_open::{
-        dial_endpoint, initiate_and_open_session, DialConfig, OpenedSession, DEFAULT_OPEN_TICK_MS,
+        dial_endpoint, initiate_and_open_session, DialConfig, OpenedSessionParts,
+        DEFAULT_OPEN_TICK_MS,
     };
     use wz_runtime_tokio::sync::Mutex as WzMutex;
 
@@ -600,13 +601,14 @@ fn vanishing_subscriber_peer(
         )
         .await
         .expect("handshake with the C listener");
-        let OpenedSession {
+        // R2455 — dismantling an `OpenedSession` goes through `into_parts`.
+        let OpenedSessionParts {
             mut engine,
             actions,
             inbound,
             writer_handle,
             ..
-        } = opened;
+        } = opened.into_parts();
 
         let observer = Arc::new(WzMutex::new(ApplicationLayerObserver::new()));
         let session = TokioSession::new(actions.clone(), observer, Arc::new(clock));

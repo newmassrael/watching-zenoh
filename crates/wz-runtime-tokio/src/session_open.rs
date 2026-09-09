@@ -3259,8 +3259,62 @@ pub struct OpenedSession {
     /// Established, with nothing in the source reading like a close. That is the
     /// shape that broke wz's REST bridge against a genuine zenohd: `publish`
     /// answered `500` and an SSE subscription answered `200` and then streamed
-    /// only keepalives. Move the whole `OpenedSession` into the task, or bind
-    /// this field somewhere that outlives the sends.
+    /// only keepalives.
+    ///
+    /// R2455 — that paragraph is now a description of history rather than a rule
+    /// the reader must remember: the [`Drop`] impl below makes the whole struct
+    /// the capture unit, so the shape above carries this field into the task by
+    /// construction and cannot leave it behind.
+    pub writer_handle: WriterHandle,
+    pub clock: TokioTime,
+}
+
+/// R2455 (open-debt item 695) — the capture unit is the WHOLE session, and this
+/// impl is what says so to the compiler.
+///
+/// Rust 2021's disjoint capture takes only the fields a `move` closure names,
+/// EXCEPT when the base's type implements `Drop`: then the closure captures the
+/// whole variable, because dismantling it would move the `Drop` out from under
+/// the value (rustc's capture truncation). So a body that names `inbound` /
+/// `engine` / `clock` now carries [`Self::writer_handle`] — the liveness token —
+/// along with them, and the "spawn a drive and seal the writer microseconds
+/// later" trap stops being reachable from source.
+///
+/// It was reachable, three times, and only the third was found by a gate: wz's
+/// REST bridge against a genuine zenohd (R2423, reported by a consumer), then
+/// `session_multilink_e2e` and `session_multilink_deploy_e2e`, whose
+/// `spawn_drive` helpers had exactly the documented shape and had been red on
+/// hosted CI since R2367 (`249dc6d2`) made a dropped handle SEAL its queue.
+/// R2423 wrote the trap down in [`Self::writer_handle`]'s doc and fixed the
+/// callers it knew of; prose does not reach the caller written next week.
+///
+/// The body is empty ON PURPOSE — the fields' own `Drop`s already do the work in
+/// declaration order, and what this impl contributes is the capture rule above.
+/// An empty impl reads like dead code, so it is pinned where deleting it is not
+/// quiet: `a_move_closure_carries_the_liveness_token_it_does_not_name` asserts
+/// this type declares `Drop` and fails the BUILD (`E0277`, naming this type) if
+/// it does not, and asserts the compiler rule underneath it with both arms.
+///
+/// The cost it accepts, stated rather than hidden: an `OpenedSession` can no
+/// longer be taken apart field by field (`E0509`). That is the point — teardown
+/// dismantles through [`OpenedSession::into_parts`], which hands the token back
+/// BY NAME so the caller writes down what happens to it.
+impl Drop for OpenedSession {
+    fn drop(&mut self) {}
+}
+
+/// The parts of a dismantled [`OpenedSession`] — what
+/// [`OpenedSession::into_parts`] hands back.
+///
+/// A named struct rather than a tuple because the LAST field is the point: a
+/// caller that takes a session apart is deciding the fate of the liveness token,
+/// and `parts.writer_handle` says which one where `parts.3` would not.
+pub struct OpenedSessionParts {
+    pub engine: Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>,
+    pub actions: Arc<SessionLinkActions>,
+    pub inbound: InboundLink,
+    /// The liveness token ([`OpenedSession::writer_handle`]). Dropping it seals
+    /// the writer; [`WriterHandle::drain`] seals it and awaits the flush.
     pub writer_handle: WriterHandle,
     pub clock: TokioTime,
 }
@@ -3341,14 +3395,44 @@ impl OpenedSession {
         self.actions.stats_report()
     }
 
+    /// R2455 — the ONE dismantle: consume this session into its parts, handing
+    /// the liveness token back BY NAME.
+    ///
+    /// The [`Drop`] impl on [`OpenedSession`] is what makes this the only route
+    /// (every field-by-field move is now `E0509`), and that is the trade: a
+    /// caller can no longer take the drive-time fields and leave
+    /// [`Self::writer_handle`] behind to be sealed by scope exit, because taking
+    /// anything means taking everything and saying so.
+    ///
+    /// The `unsafe` is the std-documented destructure of a `Drop` type and is
+    /// the only one this seam has.
+    pub fn into_parts(self) -> OpenedSessionParts {
+        // The value must not run its own `Drop` while its fields are being moved
+        // out from under it, which is exactly what `ManuallyDrop` suppresses.
+        let this = core::mem::ManuallyDrop::new(self);
+        // SAFETY: `this` is a `ManuallyDrop`, so nothing will ever drop the
+        // value these reads take ownership OF, and each field is read exactly
+        // once — so no value is duplicated and none is freed twice. The reads
+        // are of initialized, properly aligned fields of a live value.
+        unsafe {
+            OpenedSessionParts {
+                engine: core::ptr::read(&this.engine),
+                actions: core::ptr::read(&this.actions),
+                inbound: core::ptr::read(&this.inbound),
+                writer_handle: core::ptr::read(&this.writer_handle),
+                clock: core::ptr::read(&this.clock),
+            }
+        }
+    }
+
     pub async fn drain_to_close(self) {
-        let OpenedSession {
+        let OpenedSessionParts {
             engine,
             actions,
             inbound,
             writer_handle,
             clock: _,
-        } = self;
+        } = self.into_parts();
         drop(inbound);
         drop(engine);
         drop(actions);
@@ -5693,6 +5777,100 @@ mod tests {
             "the advertised quic-datagram locator must parse back as QuicDatagram"
         );
         drop(listener);
+    }
+
+    /// R2455 (open-debt item 695) — the invariant that stops a spawned drive
+    /// from sealing its own writer, in the two halves it actually rests on.
+    ///
+    /// ⓐ [`OpenedSession`] DECLARES `Drop`. ⓑ Declaring it is what makes a
+    /// `move` closure capture the WHOLE value instead of the fields its body
+    /// names. ⓐ is a fact about this tree, ⓑ a fact about the compiler, and the
+    /// liveness token rides into a `tokio::spawn` only while both hold.
+    ///
+    /// The end-to-end witnesses are `session_multilink_e2e` (Layer C1ba) and
+    /// `session_multilink_deploy_e2e` (Layer C1bn) — which is the problem: both
+    /// went red the day R2367 (`249dc6d2`) made a dropped handle SEAL its queue,
+    /// and stayed red because hosted C1ba sat behind a fail-fast that never
+    /// reached it and the C1bn leg is `lane`-scoped, so the pre-push hook never
+    /// ran it either. This test runs in the DEFAULT build, where the changed-crate
+    /// `cargo test -p wz-runtime-tokio` is what fails.
+    #[test]
+    fn a_move_closure_carries_the_liveness_token_it_does_not_name() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        // ⓐ. A `T: Drop` bound is satisfied ONLY by an explicit impl, which is
+        // the question here; `drop_bounds`' usual advice, `mem::needs_drop`, is
+        // true for anything holding a droppable field, and a FIELD's `Drop` is
+        // exactly what does not change capture.
+        #[allow(drop_bounds)]
+        fn declares_drop<T: Drop>() {}
+        declares_drop::<OpenedSession>();
+
+        // ⓑ, with both arms — the property IS the difference between them.
+        struct Token(Arc<AtomicBool>);
+        impl Drop for Token {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        // The two shapes of `OpenedSession`: a field the spawned body names, and
+        // a liveness token it does not.
+        struct Loose {
+            named: String,
+            _token: Token,
+        }
+        struct Whole {
+            named: String,
+            _token: Token,
+        }
+        impl Drop for Whole {
+            fn drop(&mut self) {}
+        }
+        // Taking the value BY VALUE and returning the closure is the real shape
+        // (`spawn_drive(opened)`): whatever the closure did not capture dies
+        // when this returns, which is what made the session vanish "microseconds
+        // after Established" with nothing in the source reading like a close.
+        // The body READS its field the way a drive loop does (`&mut
+        // opened.inbound`) rather than moving it out — which is also the only
+        // form the `Drop` arm admits, since moving a field out of a `Drop` type
+        // is the `E0509` this repair leans on.
+        fn spawn_like_loose(p: Loose) -> impl FnOnce() -> usize {
+            move || p.named.len()
+        }
+        fn spawn_like_whole(p: Whole) -> impl FnOnce() -> usize {
+            move || p.named.len()
+        }
+
+        let loose_sealed = Arc::new(AtomicBool::new(false));
+        let whole_sealed = Arc::new(AtomicBool::new(false));
+        let loose = spawn_like_loose(Loose {
+            named: "inbound".to_string(),
+            _token: Token(loose_sealed.clone()),
+        });
+        let whole = spawn_like_whole(Whole {
+            named: "inbound".to_string(),
+            _token: Token(whole_sealed.clone()),
+        });
+
+        assert!(
+            loose_sealed.load(Ordering::SeqCst),
+            "ANTI-VACUITY: with no `Drop` impl the closure took `named` alone \
+             and the token is ALREADY gone — that is the trap, and if this arm \
+             stops reproducing it the other one is measuring nothing"
+        );
+        assert!(
+            !whole_sealed.load(Ordering::SeqCst),
+            "with a `Drop` impl the closure captured the WHOLE value, so the \
+             token is still alive — the rule `OpenedSession` rests on"
+        );
+        assert_eq!(loose(), 7, "both closures still do their own work");
+        assert_eq!(whole(), 7);
+        assert!(
+            whole_sealed.load(Ordering::SeqCst),
+            "and the token dies WITH the closure, not before it — a session \
+             outlives its drive by exactly nothing"
+        );
     }
 
     #[tokio::test]

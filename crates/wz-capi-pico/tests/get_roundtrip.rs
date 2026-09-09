@@ -76,7 +76,7 @@ use wz_runtime_tokio::session_glue::{
 };
 use wz_runtime_tokio::session_open::{
     accept_and_open_session, accept_endpoint, dial_endpoint, initiate_and_open_session,
-    AcceptConfig, DialConfig, OpenedSession, DEFAULT_OPEN_TICK_MS,
+    AcceptConfig, DialConfig, OpenedSessionParts, DEFAULT_OPEN_TICK_MS,
 };
 use wz_runtime_tokio::sync::Mutex as WzMutex;
 
@@ -333,13 +333,14 @@ fn native_peer(endpoint: String, behaviour: PeerBehaviour, ready_tx: mpsc::Sende
         )
         .await
         .expect("handshake with the C listener");
-        let OpenedSession {
+        // R2455 — dismantling an `OpenedSession` goes through `into_parts`.
+        let OpenedSessionParts {
             mut engine,
             actions,
             inbound,
             writer_handle,
             ..
-        } = opened;
+        } = opened.into_parts();
 
         let observer = Arc::new(WzMutex::new(ApplicationLayerObserver::new()));
         let session = TokioSession::new(actions.clone(), observer, Arc::new(clock));

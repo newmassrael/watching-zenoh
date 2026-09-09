@@ -157,7 +157,7 @@ async fn udp_lossy_fragment_chain_aborts_then_channel_recovers() {
         .await
         .expect("initiator reaches Established over udp")
     };
-    let (mut opened_acc, mut opened_init) = tokio::join!(acc_open, init_open);
+    let (opened_acc, mut opened_init) = tokio::join!(acc_open, init_open);
 
     // ── Fragmentation precondition (R311nz): the UDP link MTU caps the
     //    negotiated TX budget so a ~4 KB Put splits into datagrams. Without it
@@ -179,6 +179,12 @@ async fn udp_lossy_fragment_chain_aborts_then_channel_recovers() {
     //    of the FIRST Put — dropping it leaves a gap that aborts P1's chain.
     //    The handshake is already done, so only the fragment stream is
     //    perturbed.
+    // R2455 — the acceptor is dismantled to hand its inbound half to the chaos
+    // wrapper, and an `OpenedSession` dismantles only through `into_parts` now
+    // (its `Drop` impl is what makes a spawned drive carry the writer handle).
+    // The parts keep this session's writer alive for the rest of the test, which
+    // is what the whole-struct binding did before.
+    let mut opened_acc = opened_acc.into_parts();
     let mut chaos_inbound =
         ChaosReadDriver::drop_nth_matching(opened_acc.inbound, 2, is_fragment_datagram);
 
@@ -398,7 +404,7 @@ async fn udp_duplicate_fragment_strands_then_channel_recovers() {
         .await
         .expect("initiator reaches Established over udp")
     };
-    let (mut opened_acc, mut opened_init) = tokio::join!(acc_open, init_open);
+    let (opened_acc, mut opened_init) = tokio::join!(acc_open, init_open);
 
     // ── Fragmentation precondition: the UDP link MTU caps the negotiated TX
     //    budget so each ~2 KB Put splits into datagrams.
@@ -411,6 +417,8 @@ async fn udp_duplicate_fragment_strands_then_channel_recovers() {
     // ── Wrap the acceptor's inbound driver to DUPLICATE the 1st fragment
     //    datagram (P1's first of two). The handshake is already done, so only
     //    the fragment stream is perturbed.
+    // R2455 — `into_parts` for the same reason as the drop leg above.
+    let mut opened_acc = opened_acc.into_parts();
     let mut chaos_inbound =
         ChaosReadDriver::duplicate_nth_matching(opened_acc.inbound, 1, is_fragment_datagram);
 
@@ -615,7 +623,7 @@ async fn udp_reordered_fragment_aborts_then_channel_recovers() {
         .await
         .expect("initiator reaches Established over udp")
     };
-    let (mut opened_acc, mut opened_init) = tokio::join!(acc_open, init_open);
+    let (opened_acc, mut opened_init) = tokio::join!(acc_open, init_open);
 
     assert_eq!(
         opened_init.actions.negotiated_batch_mtu(),
@@ -625,6 +633,8 @@ async fn udp_reordered_fragment_aborts_then_channel_recovers() {
 
     // ── Wrap the acceptor's inbound driver to REORDER the 2nd fragment datagram
     //    (P1's middle fragment) past its successor: F1, F3, F2.
+    // R2455 — `into_parts` for the same reason as the drop leg above.
+    let mut opened_acc = opened_acc.into_parts();
     let mut chaos_inbound =
         ChaosReadDriver::reorder_nth_matching(opened_acc.inbound, 2, is_fragment_datagram);
 

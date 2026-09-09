@@ -29,7 +29,7 @@ use wz::runtime_tokio::session_glue::{
     drive_session_until_terminal, IterationEvent, SessionInitParams, SessionTimeouts, WhatAmI,
 };
 use wz::runtime_tokio::session_open::{
-    accept_and_open_session, DialedLink, OpenedSession, DEFAULT_OPEN_TICK_MS,
+    accept_and_open_session, DialedLink, OpenedSessionParts, DEFAULT_OPEN_TICK_MS,
 };
 use wz::runtime_tokio::sync::Mutex;
 
@@ -142,7 +142,10 @@ pub async fn run_acceptor_e2e<H>(
     //           one epoch is shared across the open helper, Session, and
     //           the drive loop.
     let clock = TokioTime::new();
-    let OpenedSession {
+    // R2455 — an `OpenedSession` is taken apart ONLY through `into_parts`; its
+    // `Drop` impl is what makes a spawned drive carry the writer handle along
+    // with the fields it names instead of sealing it at scope exit.
+    let OpenedSessionParts {
         mut engine,
         actions,
         inbound,
@@ -156,7 +159,8 @@ pub async fn run_acceptor_e2e<H>(
         DEFAULT_OPEN_TICK_MS,
     )
     .await
-    .map_err(|e| std::io::Error::other(format!("session open failed: {e:?}")))?;
+    .map_err(|e| std::io::Error::other(format!("session open failed: {e:?}")))?
+    .into_parts();
     log::info!("{binary_name}: session Established; entering steady state");
 
     // ── Step 3: plane-specific setup. The observer is the same Arc the
@@ -249,7 +253,10 @@ pub async fn run_silent_acceptor_e2e(
     log::info!("{binary_name}: accepted peer {peer}");
 
     let clock = TokioTime::new();
-    let OpenedSession {
+    // R2455 — an `OpenedSession` is taken apart ONLY through `into_parts`; its
+    // `Drop` impl is what makes a spawned drive carry the writer handle along
+    // with the fields it names instead of sealing it at scope exit.
+    let OpenedSessionParts {
         mut engine,
         actions,
         inbound,
@@ -263,7 +270,8 @@ pub async fn run_silent_acceptor_e2e(
         DEFAULT_OPEN_TICK_MS,
     )
     .await
-    .map_err(|e| std::io::Error::other(format!("session open failed: {e:?}")))?;
+    .map_err(|e| std::io::Error::other(format!("session open failed: {e:?}")))?
+    .into_parts();
     log::info!("{binary_name}: session Established; entering steady state");
 
     let mut driver = inbound;

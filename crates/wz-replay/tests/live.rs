@@ -38,7 +38,7 @@ use wz::runtime_tokio::session_glue::{
     SessionInitParams, SessionTimeouts, SigningKey, WhatAmI,
 };
 use wz::runtime_tokio::session_open::{
-    accept_and_open_session, DialedLink, OpenedSession, DEFAULT_OPEN_TICK_MS,
+    accept_and_open_session, DialedLink, OpenedSessionParts, DEFAULT_OPEN_TICK_MS,
 };
 
 /// Bound on the acceptor's inbound poll, so a handshake regression fails fast
@@ -75,7 +75,8 @@ async fn the_binary_dials_a_peer_and_that_peer_decodes_the_captured_samples() {
                 )
                 .expect("accept");
         let clock = TokioTime::new();
-        let OpenedSession {
+        // R2455 — dismantling an `OpenedSession` goes through `into_parts`.
+        let OpenedSessionParts {
             mut engine,
             actions,
             inbound,
@@ -89,7 +90,8 @@ async fn the_binary_dials_a_peer_and_that_peer_decodes_the_captured_samples() {
             DEFAULT_OPEN_TICK_MS,
         )
         .await
-        .expect("the replay tool opens a session this peer accepts");
+        .expect("the replay tool opens a session this peer accepts")
+        .into_parts();
 
         let mut driver = inbound;
         let timeouts = SessionTimeouts::spec_defaults();
@@ -200,7 +202,8 @@ async fn the_alert_reaches_a_peer_and_a_clean_capture_sends_it_nothing() {
                 )
                 .expect("accept");
         let clock = TokioTime::new();
-        let OpenedSession {
+        // R2455 — dismantling an `OpenedSession` goes through `into_parts`.
+        let OpenedSessionParts {
             mut engine,
             actions,
             inbound,
@@ -214,7 +217,8 @@ async fn the_alert_reaches_a_peer_and_a_clean_capture_sends_it_nothing() {
             DEFAULT_OPEN_TICK_MS,
         )
         .await
-        .expect("the alert opens a session this peer accepts");
+        .expect("the alert opens a session this peer accepts")
+        .into_parts();
 
         let mut driver = inbound;
         let timeouts = SessionTimeouts::spec_defaults();
@@ -396,7 +400,8 @@ async fn an_alert_fans_to_every_destination_and_retries_the_one_that_is_down() {
                 )
                 .expect("accept");
         let clock = TokioTime::new();
-        let OpenedSession {
+        // R2455 — dismantling an `OpenedSession` goes through `into_parts`.
+        let OpenedSessionParts {
             mut engine,
             actions,
             inbound,
@@ -410,7 +415,8 @@ async fn an_alert_fans_to_every_destination_and_retries_the_one_that_is_down() {
             DEFAULT_OPEN_TICK_MS,
         )
         .await
-        .expect("the alert opens a session this peer accepts");
+        .expect("the alert opens a session this peer accepts")
+        .into_parts();
 
         let mut driver = inbound;
         let timeouts = SessionTimeouts::spec_defaults();

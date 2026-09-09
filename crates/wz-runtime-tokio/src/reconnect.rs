@@ -363,9 +363,14 @@ impl ReconnectingSession {
         let ReconnectingSession {
             actions, opened, ..
         } = self;
+        // R2455 — through `into_parts` because an `OpenedSession` no longer
+        // yields one field at a time (its `Drop` impl is what makes the whole
+        // session the closure-capture unit). The engine + inbound half still
+        // drop HERE, at the end of this statement, exactly as the field move
+        // dropped them.
         ReconnectTeardown {
             actions,
-            writer_handle: opened.writer_handle,
+            writer_handle: opened.into_parts().writer_handle,
         }
     }
 

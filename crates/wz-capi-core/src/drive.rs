@@ -30,7 +30,7 @@ use wz_runtime_tokio::session_glue::{
 };
 use wz_runtime_tokio::session_open::{
     bind_endpoint_with_config, dial_endpoint, initiate_and_open_session, AcceptConfig, DialConfig,
-    OpenedSession, DEFAULT_OPEN_TICK_MS,
+    OpenedSession, OpenedSessionParts, DEFAULT_OPEN_TICK_MS,
 };
 
 use crate::faces::{CApiForwarder, SharedSession, DIAL_FACE_ID};
@@ -258,14 +258,18 @@ async fn drive_dial(endpoint: String, whatami: WhatAmI, tls: CapiTlsConfig, ctx:
         }
     };
     let opened = initiate_and_open_session(dialed, params, clock, None, DEFAULT_OPEN_TICK_MS).await;
-    let OpenedSession {
+    // R2455 — an `OpenedSession` dismantles ONLY through `into_parts`, which is
+    // what carries the writer handle out by name rather than letting it fall out
+    // of a capture (`OpenedSession`'s `Drop` impl states the rule). This task
+    // holds it for the whole drive below, which is what it was already doing.
+    let OpenedSessionParts {
         mut engine,
         actions,
         inbound,
         writer_handle,
         ..
     } = match opened {
-        Ok(opened) => opened,
+        Ok(opened) => opened.into_parts(),
         Err(_) => {
             let _ = tx.send(false);
             return;

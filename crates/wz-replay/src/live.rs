@@ -42,7 +42,7 @@ use wz::runtime_tokio::session_glue::{
     drive_session_until_terminal, IterationEvent, SessionInitParams, SessionTimeouts, WhatAmI,
 };
 use wz::runtime_tokio::session_open::{
-    connect_and_open_session, DialConfig, OpenedSession, DEFAULT_OPEN_TICK_MS,
+    connect_and_open_session, DialConfig, OpenedSessionParts, DEFAULT_OPEN_TICK_MS,
 };
 use wz::runtime_tokio::sync::Mutex;
 use wz::runtime_tokio::Reliability;
@@ -147,7 +147,8 @@ async fn play_into_session(
 ) -> Result<usize, LiveError> {
     let clock = TokioTime::new();
     let cfg = DialConfig::default();
-    let OpenedSession {
+    // R2455 — dismantling an `OpenedSession` goes through `into_parts`.
+    let OpenedSessionParts {
         mut engine,
         actions,
         inbound,
@@ -164,7 +165,8 @@ async fn play_into_session(
         DEFAULT_OPEN_TICK_MS,
     )
     .await
-    .map_err(|e| LiveError::Open(format!("{e:?}")))?;
+    .map_err(|e| LiveError::Open(format!("{e:?}")))?
+    .into_parts();
     log::info!(
         "wz-replay: session Established; replaying {} emission(s)",
         plan.emissions.len()

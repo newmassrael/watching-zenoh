@@ -97,7 +97,7 @@ use wz::runtime_tokio::session_glue::{
 use wz::runtime_tokio::session_open::{
     accept_and_open_session_with_offer, accept_endpoint, dial_endpoint,
     initiate_and_open_session_with_offer, AcceptConfig, DialConfig, DialedLink, OpenError,
-    OpenedSession, SessionOffer, DEFAULT_OPEN_TICK_MS,
+    OpenedSession, OpenedSessionParts, SessionOffer, DEFAULT_OPEN_TICK_MS,
 };
 // R2099 (open-debt item 512) — the multi-bind helper's own two names, on the
 // same gate the helper carries: a build with neither binding run-mode compiles
@@ -3398,12 +3398,13 @@ pub(crate) async fn run_demo(
         // terminal. The engine + inbound half live in this stack frame (not
         // inside the future), so the shutdown select!-drop is cancel-safe.
         DriveSource::OneShot(opened) => {
-            let OpenedSession {
+            // R2455 — dismantling an `OpenedSession` goes through `into_parts`.
+            let OpenedSessionParts {
                 mut engine,
                 inbound,
                 writer_handle,
                 ..
-            } = *opened;
+            } = opened.into_parts();
             let mut driver = inbound;
             let outcome = race_against_shutdown(
                 drive_session_until_terminal(
@@ -7717,12 +7718,13 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
         // disconnects). The engine + inbound half live in this stack frame (not inside
         // the future), so the shutdown select!-drop stays cancel-safe (run_demo's
         // OneShot-arm shape). `None` max_iters = run until the client terminates.
-        let OpenedSession {
+        // R2455 — dismantling an `OpenedSession` goes through `into_parts`.
+        let OpenedSessionParts {
             mut engine,
             inbound,
             writer_handle,
             ..
-        } = opened;
+        } = opened.into_parts();
         let mut driver = inbound;
         let session_timeouts = SessionTimeouts::spec_defaults();
         let outcome = race_against_shutdown(
