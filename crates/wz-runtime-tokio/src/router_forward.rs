@@ -5816,20 +5816,60 @@ impl RouterForwarder {
                 ),
             }
         }
-        // The TOKEN plane. zenoh repropagates tokens on a new face alongside the
-        // other two (`repropagate_tokens`), and pico's accept-time push carries
-        // `_z_interest_send_decl_token`, so leaving it out would make this the
-        // only one of the three planes a late face never hears about.
+        // The TOKEN plane, and it is NOT the third copy of the two above: it
+        // fires for a mesh tier and never for a CLIENT face.
+        //
+        // # The citation that used to stand here was wrong, and measured so
+        //
+        // It read that "zenoh repropagates tokens on a new face alongside the
+        // other two (`repropagate_tokens`)". `repropagate_tokens` is defined in
+        // `hat/peer/token.rs` and `hat/client/token.rs` and in NEITHER case is
+        // it the router hat -- `hat/router/token.rs` does not have the function
+        // -- and the client hat's only call fires on that node's OWN northbound
+        // uplink coming up, asserted by `src_face.remote_bound.is_south()` and
+        // `owned_faces(..).count() == 1`. It is not "a new downstream client is
+        // told what we know". Read at the pinned 1.10.0, not recalled.
+        //
+        // So an upstream ROUTER pushes NO token to a new face unsolicited. Its
+        // token replay is the Interest path alone (`declare_token_interest`),
+        // which this file already ports and already states the rule for at
+        // `forward_interest`: the full-net token replay is CLIENT-DIRECTED and
+        // gated on the CURRENT bit.
+        //
+        // # What that made, and what the guard is
+        //
+        // A pico subscriber attaching WITHOUT `-h` sends FUTURE-only, and this
+        // loop pushed it every token the router already held before its Interest
+        // was ever read -- so "history off" replayed history. There is no
+        // CURRENT bit to consult at face-up because there is no Interest yet,
+        // which is why the fix is not another gate on this loop's contents but
+        // the recognition that a client face has no business in it.
+        //
+        // The guard is at the CALL rather than inside
+        // `derived_cross_tier_tokens_into`: its other caller is
+        // `re_advertise_self_cross_tier`, the mesh re-advertisement, which
+        // legitimately needs the derivation and which the upstream evidence
+        // above says nothing about. Narrowing the shared derivation would
+        // change that path silently.
+        //
+        // ⚠ STATED RATHER THAN HIDDEN: the strict reading of the evidence is
+        // that a router replays tokens to NO tier here. This keeps the mesh
+        // tiers, because wz ports a full-linkstate peer model zenoh has no hat
+        // for, so "what upstream's router does" does not settle what a wz
+        // cross-tier advertisement should do -- and nothing was measured about
+        // it. The Client arm is the one the evidence reaches.
         #[cfg(feature = "routing-token-tables")]
-        for keyexpr in self.derived_cross_tier_tokens_into(tier) {
-            match build_declare_token(0, 0, Some(&keyexpr)) {
-                Ok(decl) => {
-                    self.send_one_to_face(face, NetworkMessage::Declare(Box::new(decl)));
-                    self.face_up_replays.set(self.face_up_replays.get() + 1);
+        if !matches!(tier, FaceTier::Client) {
+            for keyexpr in self.derived_cross_tier_tokens_into(tier) {
+                match build_declare_token(0, 0, Some(&keyexpr)) {
+                    Ok(decl) => {
+                        self.send_one_to_face(face, NetworkMessage::Declare(Box::new(decl)));
+                        self.face_up_replays.set(self.face_up_replays.get() + 1);
+                    }
+                    Err(e) => log::warn!(
+                        "router forward: face-up token replay build failed for {keyexpr:?}: {e:?}"
+                    ),
                 }
-                Err(e) => log::warn!(
-                    "router forward: face-up token replay build failed for {keyexpr:?}: {e:?}"
-                ),
             }
         }
     }

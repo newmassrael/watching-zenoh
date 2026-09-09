@@ -62,15 +62,37 @@
 //! That flag is exactly the CURRENT bit on the wire —
 //! `history ? (CURRENT|FUTURE) : FUTURE` at
 //! `vendor/zenoh-pico/src/net/liveliness.c:196-205` — and wz gates the replay on
-//! that same bit (`interest.c()`), so the pair says the replay is caused by the
-//! atom and not by the token existing. Arm A also IS arm B's non-vacuity control:
-//! the same binary's subscriber demonstrably receives, so B's silence is the flag.
+//! that same bit (`interest.c()`, `router_forward.rs`), so the pair says the
+//! replay is caused by the atom and not by the token existing. Arm A also IS arm
+//! B's non-vacuity control: the same binary's subscriber demonstrably receives,
+//! so B's silence is the flag.
+//!
+//! ## ⚠ That claim was TRUE OF ONE PATH and false of the whole, until R2464
+//!
+//! The sentence above describes the INTEREST path, and the Interest path was
+//! never the only way a token reached a new client. `RouterForwarder`'s face-up
+//! replay pushed every token it already held to any face that came up, before
+//! that face's Interest had been read at all — so there was no CURRENT bit in
+//! the picture to gate on, and "history off" replayed history. Arm B failed for
+//! months, on hosted Layer E7, saying so in its own words.
+//!
+//! R2464 removed the client arm of that push, on the measured ground that an
+//! upstream ROUTER has no such push (`repropagate_tokens` is absent from
+//! `hat/router/token.rs`) — see `replay_declarations_to_new_face`. The header
+//! sentence is now true of the whole, and arm A is the evidence: it still
+//! passes, carried by the Interest path alone. MEASURED as a control, not
+//! assumed — inverting that path's client gate reds arm A and leaves arm B
+//! green, which is the two arms grading opposite directions.
 //!
 //! Measured before this file was written, 5 runs per arm on fresh ports:
 //! history ON `1 1 1 1 1`, history OFF `0 0 0 0 0`. Exactly ONE sample, never two
 //! — the count itself confirms the precondition is owned, since a token that
 //! pre-exists the subscriber's session is not proactively pushed to it and pico's
 //! own cache is empty when the subscriber is declared.
+//! ⚠ Those figures were taken on a tree where arm B's `0 0 0 0 0` could not have
+//! been produced by the code as it then stood, which is the one thing this file
+//! recorded that nothing checked. The ON-arm figures stand; the OFF-arm row is
+//! what Layer E7 has been reporting as `1` ever since.
 //!
 //! ## Build variant — this lane must OWN it
 //!
