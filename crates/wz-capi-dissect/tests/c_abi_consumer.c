@@ -1442,8 +1442,16 @@ int main(void) {
      * `2`. NO KEY MOVED and no declared axis moved, so this number is the
      * entire notice -- which makes THIS line the one a consumer of this ABI
      * would notice it by, and moving it here in the same edit as the emitter is
-     * the only reason the fourth miss did not happen. */
-    revisioned[0].revision = 9;
+     * the only reason the fourth miss did not happen.
+     * R2456 (item 701) -- 10: each `nodes[]` entry gained `last_anchor` and
+     * `anchors_exact`, so a consumer can say a node STOPPED appearing. NO KEY
+     * MOVED here either, and for a reason worth stating on this line: both
+     * words were already in the census key set, spelled by `keyexprs.rows[]`,
+     * because that set is over the whole document rather than per plane. So a
+     * consumer diffing key sets between 9 and 10 finds nothing and THIS number
+     * is again the entire notice. Moved in the same edit as the emitter, which
+     * is the discipline the paragraph above was written after three misses. */
+    revisioned[0].revision = 10;
     revisioned[0].doc = NULL;
     rc = wz_dissect_pcap_census(pcap, sizeof pcap, &revisioned[0].doc);
     CHECK(rc == WZ_DISSECT_OK, "census rc=%d", rc);

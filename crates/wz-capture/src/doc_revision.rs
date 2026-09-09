@@ -588,6 +588,32 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: CENSUS_R6_PLANES,
         carries: CENSUS_R8_CARRIES,
     },
+    // R2456 (open-debt item 701) — a node says when it was LAST named, so
+    // "this node is gone" becomes expressible. NO AXIS IN THIS TABLE MOVES, and
+    // every list below is revision 8's by name.
+    //
+    // The consumer report that asked for it derived the acceptance too, and the
+    // derivation is the part worth carrying: not "the key is present" — which a
+    // build pinning every node's last anchor to the newest one would satisfy,
+    // and that is WORSE than the absence because it reads as "everyone is still
+    // here" — but that a node which stopped appearing keeps a FROZEN anchor
+    // while the census around it goes on growing. That sentence is
+    // `crate::node::tests::a_node_that_stopped_appearing_keeps_the_anchor_it_\
+    // stopped_at`, and the emitted document is judged by its `_in_the_document`
+    // sibling.
+    //
+    // ⚠ SO THIS REVISION IS THE ONLY NOTICE A CONSUMER GETS, for two changes
+    // rather than one. See [`CENSUS_R10_KEYS`] for the paragraph that says what
+    // moved, written where a reader comparing key sets will be standing.
+    DocumentShape {
+        document: CENSUS,
+        revision: 10,
+        keys: CENSUS_R10_KEYS,
+        retiring: &[],
+        families: CENSUS_R8_FAMILIES,
+        planes: CENSUS_R6_PLANES,
+        carries: CENSUS_R8_CARRIES,
+    },
     DocumentShape {
         document: FIELDS,
         revision: 1,
@@ -1475,6 +1501,42 @@ pub const CENSUS_R8_KEYS: &[&str] = &[
 /// revision: its endpoint carries no bytes, so its document value was already
 /// the empty string and only the ROUTE to it changed.
 pub const CENSUS_R9_KEYS: &[&str] = CENSUS_R8_KEYS;
+
+/// The census document's key set at revision 10 (R2456, open-debt item 701).
+///
+/// IDENTICAL to revision 9, and aliased for [`CENSUS_R2_KEYS`]' reason: a second
+/// hand-written copy of this list would be a claim that they are the same,
+/// checked by nobody, where the alias is that fact.
+///
+/// ⚠ A KEY REACHED A PLANE IT WAS NOT ON, WHICH NO AXIS HERE CAN SEE — and the
+/// mechanism is the one revision 9's paragraph named for values, arriving at
+/// the same blind spot from the other side. Each `nodes[]` entry now carries
+/// `last_anchor` and `anchors_exact` beside its `first_anchor`, so a consumer
+/// can say a node STOPPED appearing. Both words were already in the key set,
+/// spelled by `keyexprs.rows[]` since revision 1, so [`DocumentShape::keys`] —
+/// a set over the WHOLE document — is unchanged by construction and could not
+/// have moved however far the plane grew.
+///
+/// The other three axes are silent for reasons of their own, each worth stating
+/// so the next reader does not re-derive them: `nodes` was already a plane, so
+/// [`DocumentShape::planes`] does not move; neither key draws from a closed
+/// vocabulary, so [`ValueFamily`] has nothing to declare; and neither decides
+/// the shape of the object it sits in, so [`KeyCarries`] has nothing either.
+///
+/// ⚠ AND ONE VALUE MOVED UNDER A STATIONARY KEY, which is revision 9's class
+/// exactly. `offset_space` on a node first named by a HELLO used to be
+/// whichever space the walk's LAST message list happened to be in — the node
+/// census's scouting producer read a field `observe_flow` sets and it never
+/// did — so a discovery-only node on a capture ending in a TCP list reported a
+/// capture-global packet index as `"stream_byte"`. It now reads `"packet"`,
+/// which is what a `ScoutingDatagram`'s `packet_index` has always been. The
+/// repair is not separable from the addition: an anchor PAIR is the first thing
+/// in this document that compares two anchors, and a leaked space is precisely
+/// what the new `anchors_exact` exists to notice.
+///
+/// So the revision number is the WHOLE notice for both halves, which is why
+/// this paragraph is here rather than in a commit message.
+pub const CENSUS_R10_KEYS: &[&str] = CENSUS_R9_KEYS;
 
 /// The census document's key set at revision 3 (R2123, open-debt item 453).
 ///
@@ -4604,7 +4666,14 @@ mod tests {
             // being spelled as an IPv6 address. NO KEY MOVED and no declared
             // axis moved, so this assertion is the notice — the same shape the
             // `FIELDS` entry below records for R2440, and for the same reason.
-            (CENSUS, 9u32),
+            // R2456 (item 701) — to 10 when each `nodes[]` entry gained
+            // `last_anchor` and `anchors_exact`, so a consumer can say a node
+            // STOPPED appearing. No declared axis moves again, and the key set
+            // could not have: both words have been in it since revision 1,
+            // spelled by `keyexprs.rows[]`, because `keys` is a set over the
+            // whole document and not a map from plane to key. This assertion is
+            // the notice; the `FIELDS` entry below is the same shape for R2440.
+            (CENSUS, 10u32),
             // R2175 (open-debt item 552) — the field document moved to 2 when
             // its PAYLOAD PLANE joined the pin (fifteen keys revision 1 had
             // never covered) and its first three value families were declared.

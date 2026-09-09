@@ -531,9 +531,17 @@ pub fn nodes_json(c: &NodeCensus) -> String {
             // consumer greps for keys, clippy and the doc build because a string
             // is a string. Nothing judged the DOCUMENT, which is open-debt item
             // 380 stated as an accident instead of a sentence.
+            // R2456 (open-debt item 701) — `last_anchor` and `anchors_exact`
+            // join the pair, in the sibling row's order and spelling. A node
+            // never leaves this cumulative plane, so the anchor it was LAST
+            // named at is the only thing in the document that can say it
+            // stopped appearing; `anchors_exact` is what stops the pair being
+            // read as an interval when the two ends are in different spaces.
+            // See `crate::node::ObservedNode::last_anchor`.
             ",\"evidence\":{{\"init\":{},\"join\":{},\"hello\":{},\"scout\":{},\
              \"inadmissible\":{},\"admissible\":{}}},\"offset_space\":\"{}\",\
-             \"first_anchor\":{},\"wire_bytes\":{}",
+             \"first_anchor\":{},\"last_anchor\":{},\"anchors_exact\":{},\
+             \"wire_bytes\":{}",
             e.init,
             e.join,
             e.hello,
@@ -542,6 +550,8 @@ pub fn nodes_json(c: &NodeCensus) -> String {
             e.admissible(),
             node.anchors.name(),
             node.first_anchor,
+            node.last_anchor,
+            node.anchors_exact,
             node.wire_bytes,
         );
         match c.share_bp(i) {
@@ -2217,11 +2227,19 @@ pub(crate) mod fed_tests {
         // specifically so the round that drops the old key would have to come
         // back and delete half of a literal, which is a smaller and louder
         // edit than relaxing an assertion. This is that edit.
+        // R2456 (open-debt item 701) — the node plane's needle carries its PAIR
+        // now, which is what moved this literal: `last_anchor` and
+        // `anchors_exact` sit between the two keys R2123 left adjacent. Kept as
+        // one long literal rather than shortened back to `"first_anchor"`,
+        // because adjacency is the whole point of this list — a needle that
+        // matched the throughput row's key would let one labelled plane stand
+        // for the node plane it is not.
         for anchor in [
-            "\"first_anchor\"",                  // the throughput rows
-            "\"first_anchor\":0,\"wire_bytes\"", // the node census, renamed
-            "\"declared_at\"",                   // the interest declarations
-            "\"asked_at\"",                      // the interest requests
+            "\"first_anchor\"", // the throughput rows
+            // the node census: the pair, and the flag that says it is one
+            "\"first_anchor\":0,\"last_anchor\":0,\"anchors_exact\":true,\"wire_bytes\"",
+            "\"declared_at\"", // the interest declarations
+            "\"asked_at\"",    // the interest requests
         ] {
             assert!(
                 over_tcp.contains(anchor),

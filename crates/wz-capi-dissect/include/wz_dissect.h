@@ -310,7 +310,7 @@
  *
  * SO THE DOCUMENT CARRIES THE LIST. Its envelope reads
  *
- *     {"document":{"name":"census","revision":9,
+ *     {"document":{"name":"census","revision":10,
  *                  "planes":["exchanges","interests","keyexprs","nodes",
  *                            "payloads"]}, ...}
  *
@@ -360,7 +360,7 @@
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
- *     {"name":"census","revision":9,"key":"mode","values":[...],
+ *     {"name":"census","revision":10,"key":"mode","values":[...],
  *      "carries":null}
  *
  * `null` is a VALUE here and not an absence: it says the word is a PASSENGER --
@@ -425,6 +425,36 @@
  * folds every flow and both directions, so `anchors_exact:false` says the
  * pair covers only part of it; the intervals say which parts there are and
  * how much of the row each holds.
+ *
+ * R2456 — REVISION 10 GIVES THE NODE ROWS THE SAME PAIR, and this one is worth
+ * a paragraph because of what it lets you ask:
+ *
+ *     "offset_space":"packet","first_anchor":4,"last_anchor":9,
+ *     "anchors_exact":true
+ *
+ * `last_anchor` is the anchor of the LAST message that named this node. The
+ * node plane is CUMULATIVE — a node that goes away is never removed from it —
+ * so with a first anchor alone "this node is gone" could not be asked of this
+ * document at all, and comparing two censuses could not answer it either: the
+ * earlier node set is always a subset of the later one. A node whose
+ * `last_anchor` stops moving while the census around it goes on growing is one
+ * that stopped appearing. How long a silence means something is YOUR
+ * threshold, but it is now measured against a coordinate this library gave
+ * you rather than one you had to invent.
+ *
+ * `anchors_exact` is the same warning it is on a throughput row, reached the
+ * same way: a node is named on many flows, an anchor is a coordinate in ONE
+ * space, and a node seen both on a UDP flow and inside a TCP stream has two
+ * numbers that cannot bound one interval. `false` means the pair covers only
+ * the observations in the space `offset_space` names — so treat the pair as an
+ * interval only when this is `true`.
+ *
+ * ⚠ Revision 10 also CHANGES A VALUE without moving its key. `offset_space` on
+ * a node first named by a HELLO used to report whichever space the reader's
+ * last message list was in; it now reports `"packet"`, which is what a
+ * scouting datagram's anchor has always been. A consumer that stored node
+ * anchors from revision 9 or earlier and compared them across a discovery-only
+ * node was comparing coordinates it could not have known were mislabelled.
  *
  * wz_dissect_transport_message is the one door with no such revision, and
  * deliberately: its document is a FIELD TREE whose keys are the walkers' own

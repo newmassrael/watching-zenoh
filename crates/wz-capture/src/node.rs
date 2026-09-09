@@ -111,9 +111,71 @@ pub struct ObservedNode {
     /// revision — `first_packet` announced as retiring — before the next
     /// revision drops it. See `crate::doc_revision`.
     pub first_anchor: usize,
+    /// R2456 (open-debt item 701) — capture anchor of the LAST message that
+    /// named it, which is what says a node STOPPED appearing.
+    ///
+    /// # The question [`Self::first_anchor`] alone cannot answer
+    ///
+    /// The consumer report that asked for this named the hole precisely: this
+    /// plane is CUMULATIVE, so a node never leaves the list, and diffing two
+    /// snapshots cannot report a departure either — the earlier set is always a
+    /// subset of the later one. With only a first anchor, "this node is gone"
+    /// is not expressible from the document at all, and the cumulative property
+    /// that makes it inexpressible is one this workspace wrote down itself, in
+    /// `wz_dissect_live_census`'s header.
+    ///
+    /// The sibling row has carried the pair since R311y918
+    /// (`crate::agg::KeyexprRow::last_anchor`), from the same walk and one line
+    /// away. Nothing had to be TRACKED to close this: this census's own
+    /// `intern_scouted` already receives the anchor of every observation and,
+    /// until now, used it to create the node and then dropped it.
+    ///
+    /// # Why `max` and not assignment
+    ///
+    /// A node is named on MANY flows ([`Self::flows`]), and the walk visits
+    /// flows in the flow table's order rather than in anchor order — so a
+    /// packet index from a later flow can be smaller than one already recorded.
+    /// Plain assignment would make this the anchor of the most recently WALKED
+    /// observation, which is not the same claim as the last one SEEN and would
+    /// let the value move backwards. The sibling row assigns because it folds
+    /// one list at a time; this plane does not have that luxury.
+    pub last_anchor: usize,
+    /// R2456 (open-debt item 701) — whether the pair above spans EVERY
+    /// observation of this node, or only those in the space that opened it.
+    ///
+    /// The node edition of [`crate::agg::KeyexprRow::anchors_exact`], here for
+    /// the same reason it is there and reached by a different route: a keyexpr
+    /// row folds both directions of many flows, and a node is named on many
+    /// flows too. An anchor is a coordinate in ONE space, so a node first seen
+    /// on a UDP flow (a capture-global packet index) and seen again inside a
+    /// TCP stream (a byte offset in that stream's direction) has two
+    /// coordinates that cannot bound one interval.
+    ///
+    /// Reporting the pair anyway would be the failure this field's own
+    /// acceptance test refuses: an interval whose ends are in different spaces
+    /// spans nothing, and a consumer cannot see that from the numbers. So a
+    /// foreign observation makes this `false` instead of extending the pair,
+    /// and [`Self::anchors`] keeps naming the space the pair IS in.
+    ///
+    /// Structural, like the sibling's: always emitted, `true` on the ordinary
+    /// single-space node, so a consumer never reads an absent key as "exact".
+    pub anchors_exact: bool,
     /// R311y919 (open-debt item 452) — which space [`Self::first_anchor`] is
     /// in. Read this before reading that.
+    ///
+    /// R2456 — and [`Self::last_anchor`], when [`Self::anchors_exact`].
     pub anchors: crate::AnchorSpace,
+    /// R2456 (open-debt item 701) — the space TOKEN the pair is in, which is
+    /// finer than [`Self::anchors`] and is why it is not emitted.
+    ///
+    /// [`crate::AnchorSpace`] says how to READ an anchor; this says which
+    /// coordinate system it is a number in. Two directions of two different
+    /// stream lists are all `StreamBytes` and are four spaces, so the KIND
+    /// cannot decide whether an observation extends the pair. The kind is what
+    /// a document reports, because a reader can act on it; the token exists
+    /// only to answer that question, and is `pub(crate)` for
+    /// `crate::agg::KeyexprRow::space`'s reason.
+    pub(crate) space: usize,
     /// Flows this zid was named on, in first-appearance order.
     pub flows: Vec<FlowKey>,
     /// R311y714 (§1.1f) — transport-unit bytes this node SENT, over the flows
@@ -149,12 +211,42 @@ pub struct ObservedLink {
     pub flow: FlowKey,
 }
 
+/// R2456 (open-debt item 701) — WHERE one observation sits, as the three facts
+/// a node's anchor pair needs and nothing else.
+///
+/// A struct rather than three parameters because they travel together and are
+/// meaningless apart: an anchor without its space is a number in an unstated
+/// coordinate system, which is the defect `crate::AnchorSpace` was introduced to
+/// end. Threading them separately through
+/// [`NodeCensus::intern`] / [`NodeCensus::intern_scouted`] would also put this
+/// census's second producer one argument away from passing the wrong one.
+#[derive(Debug, Clone, Copy)]
+struct At {
+    /// The observation's anchor, in [`Self::space`].
+    anchor: usize,
+    /// How to READ [`Self::anchor`] — what the document reports.
+    kind: crate::AnchorSpace,
+    /// WHICH coordinate system [`Self::anchor`] is a number in. See
+    /// [`ObservedNode::space`].
+    space: usize,
+}
+
 /// A capture read as a set of nodes and the links between them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NodeCensus {
     /// R311y919 (open-debt item 452) — the coordinate space of the list being
     /// walked, set once per [`Self::observe_flow`].
     anchors: crate::AnchorSpace,
+    /// R2456 (open-debt item 701) — which message list is being walked, set
+    /// once per [`Self::observe_flow`]. Half of the space token; see
+    /// [`Self::space_of`].
+    ///
+    /// On the census for [`Self::anchors`]' reason, and taken as an argument
+    /// for `crate::interest::InterestCensus::observe_flow`'s: without it, two
+    /// directions of two different stream lists are one number, and a node seen
+    /// on both would have its anchor pair silently extended across a boundary
+    /// the pair cannot cross.
+    list: usize,
     nodes: Vec<ObservedNode>,
     links: Vec<ObservedLink>,
     /// R311y714 (§1.1f) — unit bytes on a direction whose SENDER this capture
@@ -271,7 +363,17 @@ impl NodeCensus {
     /// `flow` is what makes a link answerable: two zids are peers because they
     /// named themselves on THE SAME flow in opposite directions, and a fold
     /// that took only the frames could not say that.
-    pub fn observe_flow(&mut self, flow: &FlowKey, frames: &[PassiveFrame]) {
+    pub fn observe_flow(
+        &mut self,
+        flow: &FlowKey,
+        frames: &[PassiveFrame],
+        // R2456 (open-debt item 701) — the list's index in
+        // `Dissection::message_lists()`, which `crate::agg` and
+        // `crate::interest` already take for the same reason: it is half the
+        // space token, and without it two directions of two different flows are
+        // one number.
+        list: usize,
+    ) {
         // R2206 (open-debt item 561) — the space is read off the frames rather
         // than handed in. It arrived as an argument decided one layer up by a
         // match over the message lists, and that second opinion was item 561.
@@ -281,6 +383,7 @@ impl NodeCensus {
         if let Some(frame) = frames.first() {
             self.anchors = crate::anchor_space_of(frame);
         }
+        self.list = list;
         // Per-direction, the last zid seen naming itself on an admissible
         // message. A flow that re-handshakes names the same pair again, and a
         // flow that is genuinely reused by a different node names the new one —
@@ -350,6 +453,23 @@ impl NodeCensus {
     /// No link is recorded here. A HELLO names its sender and a SCOUT names its
     /// asker, and neither states that a session was established — the INIT
     /// that would is on a different flow.
+    ///
+    /// # R2456 (open-debt item 701) — this producer names its own space
+    ///
+    /// A [`crate::ScoutingDatagram`]'s anchor is a `packet_index`, so this list
+    /// is always [`crate::AnchorSpace::PacketIndex`] and there is nothing to
+    /// read off a frame, because there are no frames here.
+    ///
+    /// It used to take the space from this census's own `anchors` field, which
+    /// [`Self::observe_flow`] sets and this method never did — so a node first
+    /// named by a HELLO inherited the space of whichever message list the walk
+    /// happened to finish on, and on a capture whose last list was a stream it
+    /// reported a capture-global packet index under `"offset_space":"stream"`.
+    /// Harmless while the document emitted one anchor per node and nothing
+    /// compared two; not harmless once [`ObservedNode::last_anchor`] joined it,
+    /// because a leaked space is exactly what
+    /// [`ObservedNode::anchors_exact`] exists to notice, and a token that is
+    /// itself a leak would have made the flag agree with anything.
     pub fn observe_scouting(&mut self, flow: &FlowKey, scouting: &[crate::ScoutingDatagram]) {
         for datagram in scouting {
             let Ok(decoded) = &datagram.frame else {
@@ -373,7 +493,14 @@ impl NodeCensus {
             if zid.is_empty() {
                 continue;
             }
-            let idx = self.intern_scouted(&zid, whatami, datagram.packet_index, flow);
+            // R2456 — PacketIndex by construction, not by inheritance. See the
+            // method doc.
+            let at = At {
+                anchor: datagram.packet_index,
+                kind: crate::AnchorSpace::PacketIndex,
+                space: self.space_of(crate::AnchorSpace::PacketIndex, Direction::A),
+            };
+            let idx = self.intern_scouted(&zid, whatami, at, flow);
             // R311y714 — the locator list, which only a HELLO carries. Taken
             // from the decoded body rather than from the flow's addresses: see
             // `ObservedNode::locators` for why the two are not the same claim.
@@ -405,6 +532,26 @@ impl NodeCensus {
         }
     }
 
+    /// R2456 (open-debt item 701) — the space token an observation is in.
+    ///
+    /// `crate::agg::ThroughputTable::observe_flow_where`'s composition, spelled
+    /// the same way for the same reason: every
+    /// [`crate::AnchorSpace::PacketIndex`] list shares one token because a
+    /// packet index is global to the capture, while a byte offset is absolute
+    /// only within its own list and its own direction.
+    ///
+    /// The KIND is a parameter rather than [`Self::anchors`] because this
+    /// census has a second producer. [`Self::observe_scouting`] folds a list
+    /// that carries no [`PassiveFrame`], so `self.anchors` is whatever the last
+    /// [`Self::observe_flow`] left there — see that method for what reading it
+    /// would have claimed.
+    fn space_of(&self, anchors: crate::AnchorSpace, dir: Direction) -> usize {
+        match anchors {
+            crate::AnchorSpace::PacketIndex => 0,
+            crate::AnchorSpace::StreamBytes => 1 + self.list * 2 + dir_index(dir),
+        }
+    }
+
     fn intern(
         &mut self,
         zid: &[u8],
@@ -412,16 +559,15 @@ impl NodeCensus {
         frame: &PassiveFrame,
         flow: &FlowKey,
     ) -> usize {
-        self.intern_scouted(zid, whatami, frame.stream_offset, flow)
+        let at = At {
+            anchor: frame.stream_offset,
+            kind: self.anchors,
+            space: self.space_of(self.anchors, frame.direction),
+        };
+        self.intern_scouted(zid, whatami, at, flow)
     }
 
-    fn intern_scouted(
-        &mut self,
-        zid: &[u8],
-        whatami: Option<u8>,
-        first_anchor: usize,
-        flow: &FlowKey,
-    ) -> usize {
+    fn intern_scouted(&mut self, zid: &[u8], whatami: Option<u8>, at: At, flow: &FlowKey) -> usize {
         let idx = match self.nodes.iter().position(|n| n.zid == zid) {
             Some(i) => i,
             None => {
@@ -429,8 +575,11 @@ impl NodeCensus {
                     zid: zid.to_vec(),
                     whatami,
                     evidence: NodeEvidence::default(),
-                    first_anchor,
-                    anchors: self.anchors,
+                    first_anchor: at.anchor,
+                    last_anchor: at.anchor,
+                    anchors_exact: true,
+                    anchors: at.kind,
+                    space: at.space,
                     flows: Vec::new(),
                     wire_bytes: 0,
                     locators: Vec::new(),
@@ -439,6 +588,19 @@ impl NodeCensus {
             }
         };
         let node = &mut self.nodes[idx];
+        // R2456 (open-debt item 701) — the pair belongs to the space that
+        // OPENED it, which is `crate::agg::ThroughputTable::observe_flow_where`'s
+        // rule and is here for the reason `ObservedNode::anchors_exact` states.
+        // An observation from another space cannot extend an interval it is not
+        // in; what it does instead is make the interval partial, which the node
+        // SAYS rather than absorbing the number and reporting a span that spans
+        // nothing.
+        if node.space == at.space {
+            // `max`, not assignment — see `ObservedNode::last_anchor`.
+            node.last_anchor = node.last_anchor.max(at.anchor);
+        } else {
+            node.anchors_exact = false;
+        }
         // FIRST role wins. A later message disagreeing about a node's role is a
         // finding, not a correction, and overwriting would hide it; the census
         // keeps what it first saw and the disagreement remains visible as two
@@ -506,8 +668,12 @@ pub fn nodes(dissection: &crate::Dissection) -> NodeCensus {
     // `quic/...` peer's Init is inside a QUIC stream and a serial peer's is
     // inside a COBS frame; a census that named the two flow tables would report
     // either deployment as having no participants at all.
-    for (flow, frames) in dissection.message_lists() {
-        census.observe_flow(&flow, frames);
+    // R2456 (open-debt item 701) — `enumerate()`'s index, not a number of this
+    // walk's own: it is half the space token, and two lists handed the same one
+    // would make two coordinate systems look like one. See
+    // `NodeCensus::space_of`.
+    for (list, (flow, frames)) in dissection.message_lists().enumerate() {
+        census.observe_flow(&flow, frames, list);
     }
     for flow in dissection.datagram_flows() {
         // The scouting list, which is where a discovery-only capture's nodes
@@ -1006,5 +1172,179 @@ pub(crate) mod tests {
         // lease, next_sn reliable / best-effort: one-byte VLE each.
         wire.extend_from_slice(&[0x0A, 0x00, 0x00]);
         wire
+    }
+
+    /// R2456 (open-debt item 701) — THE ACCEPTANCE, and it is the consumer's
+    /// own derivation rather than this round's.
+    ///
+    /// # Why "the key is there" is not the test
+    ///
+    /// The report that asked for [`ObservedNode::last_anchor`] wrote the
+    /// acceptance out and said why, and the why is the part that matters: a
+    /// build that pinned EVERY node's last anchor to the newest anchor in the
+    /// capture satisfies "the key is present and is a plausible number", and
+    /// that build is WORSE than the one with no key at all, because its
+    /// document reads "everyone is still here". This workspace has paid for the
+    /// cousin of that repeatedly under the name "a population of zero reports
+    /// green"; here the population is fine and the ORACLE is what would be
+    /// vacuous.
+    ///
+    /// So the claim under test is a MOVEMENT: while the census goes on growing,
+    /// the anchor of a node that stopped being named must STOP.
+    ///
+    /// # The three numbers, and what each one rules out
+    ///
+    /// `0xA1` is named at anchors 0 and 1 and then never again; `0xB2` is named
+    /// at 2, 3 and 4. So `A.last_anchor` must be 1, and each of the other two
+    /// values it could plausibly have is a different defect:
+    ///
+    /// * `0` — the field is `first_anchor` under a second name, which is the
+    ///   "nothing was actually recorded" build;
+    /// * `4` — every node is pinned to the newest anchor, which is the build
+    ///   the report named as worse than absence.
+    ///
+    /// A is named TWICE on purpose. With one appearance, `first` and `last`
+    /// coincide and the first defect above would pass.
+    #[test]
+    fn a_node_that_stopped_appearing_keeps_the_anchor_it_stopped_at() {
+        let mut d = Dissection::new();
+        // One multicast flow, five packets. A announces itself twice and goes
+        // quiet; B goes on announcing itself, so the census keeps growing.
+        for (packet, zid) in [(0usize, 0xA1u8), (1, 0xA1), (2, 0xB2), (3, 0xB2), (4, 0xB2)] {
+            d.push_packet(
+                LINKTYPE_ETHERNET,
+                packet,
+                &udp_packet(
+                    [10, 0, 0, 1],
+                    7447,
+                    [224, 0, 0, 224],
+                    7447,
+                    &join_message(&[zid; 4]),
+                ),
+            );
+        }
+        d.finish();
+
+        let census = nodes(&d);
+        let a = census.node(&[0xA1; 4]).expect("A named itself");
+        let b = census.node(&[0xB2; 4]).expect("B named itself");
+        // The census DID go on growing after A fell silent. Without this the
+        // assertion below would hold on a capture where nothing happened after
+        // A's last message, and would be testing arithmetic rather than the
+        // property.
+        assert!(
+            b.last_anchor > a.last_anchor,
+            "the fixture must keep growing after A stops: {a:?} {b:?}"
+        );
+        assert_eq!(
+            a.first_anchor, 0,
+            "A was first named by the capture's first packet: {a:?}"
+        );
+        assert_eq!(
+            a.last_anchor, 1,
+            "A's anchor must STOP where A stopped: 0 would mean nothing was \
+             recorded, {} would mean every node is pinned to the newest \
+             anchor and the document claims everyone is still here: {a:?}",
+            b.last_anchor
+        );
+        assert_eq!(b.last_anchor, 4, "B's anchor must still be moving: {b:?}");
+        // And the pair is over ONE space, so it is an interval a consumer may
+        // subtract. The mixed case is the next test.
+        assert!(a.anchors_exact && b.anchors_exact, "{a:?} {b:?}");
+    }
+
+    /// R2456 (open-debt item 701) — the reporter's OPEN QUESTION, answered by
+    /// measurement: a node's interval can be inexact, exactly as a keyexpr
+    /// row's can, so the node plane needs the flag too.
+    ///
+    /// The report asked whether an `anchors_exact` node edition was needed and
+    /// asked for an answer rather than a guess. It is needed, and this is the
+    /// capture that shows why: one zid names itself both on a multicast UDP
+    /// flow, where an anchor is a capture-global packet index, and inside a TCP
+    /// stream, where it is a byte offset in that stream's direction. Those two
+    /// numbers cannot bound one interval, and a pair reported as though they
+    /// could would be a span over nothing — the same defect the throughput row
+    /// has carried the flag for since R311y918.
+    ///
+    /// The CONTROL is the test above: an ordinary single-space node reports
+    /// `true`, so this flag is not hardwired to the answer that makes this
+    /// assertion pass.
+    #[test]
+    fn a_node_named_in_two_coordinate_spaces_says_its_pair_is_not_an_interval() {
+        let mut d = Dissection::new();
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            0,
+            &udp_packet(
+                [10, 0, 0, 1],
+                7447,
+                [224, 0, 0, 224],
+                7447,
+                &join_message(&[0xA1; 4]),
+            ),
+        );
+        // The SAME zid, inside a TCP stream. `stream_offset` is a byte offset
+        // here and a packet index above.
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            1,
+            &tcp_packet(1000, &framed_init(&[0xA1; 4])),
+        );
+        d.finish();
+
+        let a = census_of(&d, &[0xA1; 4]);
+        assert!(
+            !a.anchors_exact,
+            "the two anchors are in different spaces, so the pair spans \
+             nothing and the node must say so: {a:?}"
+        );
+    }
+
+    /// R2456 — and the DOCUMENT carries it, which is the surface a consumer
+    /// actually reads.
+    ///
+    /// Separate from the two above because they judge the census type and this
+    /// judges the emitted JSON. The rendering is where item 701 was reported
+    /// from, and this workspace has twice had a field that was right in the
+    /// struct and wrong on the way out.
+    #[test]
+    fn a_stopped_nodes_anchor_is_frozen_in_the_document_too() {
+        let mut d = Dissection::new();
+        for (packet, zid) in [(0usize, 0xA1u8), (1, 0xA1), (2, 0xB2), (3, 0xB2)] {
+            d.push_packet(
+                LINKTYPE_ETHERNET,
+                packet,
+                &udp_packet(
+                    [10, 0, 0, 1],
+                    7447,
+                    [224, 0, 0, 224],
+                    7447,
+                    &join_message(&[zid; 4]),
+                ),
+            );
+        }
+        d.finish();
+
+        let json = crate::census_json::nodes_json(&nodes(&d));
+        // BY VALUE and by adjacency, so a document that emitted the key with
+        // the newest anchor in it fails here rather than passing on the key's
+        // presence.
+        assert!(
+            json.contains("\"first_anchor\":0,\"last_anchor\":1,\"anchors_exact\":true"),
+            "A stopped at anchor 1 and the document must say so: {json}"
+        );
+        assert!(
+            json.contains("\"first_anchor\":2,\"last_anchor\":3,\"anchors_exact\":true"),
+            "B was still being named at anchor 3: {json}"
+        );
+    }
+
+    /// The one node this capture named, by zid.
+    fn census_of(d: &Dissection, zid: &[u8]) -> ObservedNode {
+        let census = nodes(d);
+        census
+            .node(zid)
+            .unwrap_or_else(|| panic!("the capture must name {zid:?}: {:?}", census.nodes()))
+            .clone()
     }
 }
