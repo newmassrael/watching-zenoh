@@ -128,7 +128,13 @@ DOORS = {
 EMITTERS = {
     CAPTURE_REPORT: ("health_json", "the summary document's health object"),
     CAPTURE_CENSUS: ("census_json_where", "the census document"),
-    CAPTURE_FIELDS: ("fields_json", "the field document"),
+    # R2458 (open-debt item 703) — the name moved to `fields_json_grouped`.
+    # `fields_json` is now a two-line wrapper that supplies a session grouping
+    # and delegates, so the body that RENDERS is the grouped one; pointing this
+    # at the wrapper would grade a function that emits no key at all. The gate
+    # caught its own subject being renamed out from under it, which is what an
+    # emitter table is for.
+    CAPTURE_FIELDS: ("fields_json_grouped", "the field document"),
 }
 
 

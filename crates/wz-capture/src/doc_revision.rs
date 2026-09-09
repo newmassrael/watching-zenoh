@@ -811,6 +811,34 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R7_CARRIES,
     },
+    // R2458 (open-debt item 703) — WHY a carried entry's `keyexpr` is `null`.
+    //
+    // An ADDITION: `keyexpr_cause` arrives on every `carried[]` entry, `null`
+    // where the entry named no keyexpr id at all and one of
+    // [`UNRESOLVED_CAUSE_R11`]'s two words where it named one this reader could
+    // not answer. Nothing retires.
+    //
+    // The number is the notice for a SECOND change under stationary keys, and
+    // that one is the item: this document's two flow folders each built their
+    // own keyexpr id space, so a `max_links: 2` session's second link rendered
+    // `"keyexpr":null` on references the census planes resolved. They now share
+    // the capture's one space, keyed by session. A consumer pinned to revision
+    // 8 that recorded "this key is unresolvable in this capture" must re-read
+    // it — the value under `keyexpr` can only have gone from `null` to a
+    // literal, never the other way, but a cached negative is still wrong.
+    //
+    // Written out rather than aliased for the reason [`CENSUS_R8_KEYS`] gives:
+    // no axis in this module can express a value whose spelling changed under a
+    // stationary key, so the paragraph is where that fact lives.
+    DocumentShape {
+        document: FIELDS,
+        revision: 9,
+        keys: FIELDS_R9_KEYS,
+        retiring: &[],
+        families: FIELDS_R9_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R9_CARRIES,
+    },
     DocumentShape {
         document: SUMMARY,
         revision: 1,
@@ -2972,6 +3000,80 @@ pub const FIELDS_R7_KEYS: &[&str] = &[
 /// documents render one shared flow key and moved together.
 pub const FIELDS_R8_KEYS: &[&str] = FIELDS_R7_KEYS;
 
+/// The field document's key set at revision 9 (R2458, open-debt item 703).
+///
+/// Revision 8's PLUS `keyexpr_cause`, on every `carried[]` entry — the word
+/// that tells `"keyexpr":null` meaning "nobody declared this id" from
+/// `"keyexpr":null` meaning "this capture never saw the flow's session". Its
+/// vocabulary is [`UNRESOLVED_CAUSE_R11`], the one the census document has
+/// declared since revision 11, because both documents render one enum.
+///
+/// An ADDITION, so revision 8 has nothing to retire.
+///
+/// ⚠ The key is only half of what moved; see the `DOCUMENT_HISTORY` row for the
+/// half no axis in this module can express — which references RESOLVE at all.
+///
+/// MEASURED: `the_field_documents_key_set_is_pinned` printed what the document
+/// emits and this was filled from that printout.
+pub const FIELDS_R9_KEYS: &[&str] = &[
+    "addr",
+    "caps",
+    "capture_reread",
+    "carried",
+    "datagram_flows",
+    "declaration_checked",
+    "declared",
+    "descriptor_bytes",
+    "despite_encoding",
+    "direction",
+    "document",
+    "dropped_by_limits",
+    "end",
+    "example",
+    "fields",
+    "flow",
+    "flows",
+    "format",
+    "frames",
+    "frames_per_flow",
+    "high",
+    "keyexpr",
+    "keyexpr_cause",
+    "kind",
+    "link",
+    "low",
+    "max_flows_per_table",
+    "max_scout_askers",
+    "message",
+    "message_at",
+    "messages",
+    "name",
+    "note",
+    "offset_space",
+    "omitted",
+    "path",
+    "payload_decode",
+    "payload_mapping",
+    "payload_mapping_counts_exact",
+    "payload_refusals",
+    "port",
+    "revision",
+    "samples",
+    "scout_askers",
+    "shown",
+    "skipped",
+    "skipped_packets",
+    "start",
+    "state",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "stream_flows",
+    "under",
+    "value",
+    "why",
+    "wrong",
+];
+
 /// The value families the field document declares at revision 7.
 ///
 /// Round 2447 (open-debt item 696) — revision 6's PLUS `link`, whose words come
@@ -3039,6 +3141,102 @@ pub const LINK_KIND_R7: &[&str] = &["raweth", "serial", "tcp", "udp", "vsock"];
 pub const FIELDS_R7_CARRIES: &[KeyCarries] = &[
     KeyCarries {
         key: "direction",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "kind",
+        shape: CarriesShape::Discriminant(FIELD_VALUE_KIND_CARRIES_R4),
+    },
+    KeyCarries {
+        key: "link",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "message",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "offset_space",
+        shape: CarriesShape::Discriminant(FIELD_OFFSET_SPACE_CARRIES_R5),
+    },
+    KeyCarries {
+        key: "state",
+        shape: CarriesShape::Discriminant(PAYLOAD_STATE_CARRIES_R4),
+    },
+    KeyCarries {
+        key: "under",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "wrong",
+        shape: CarriesShape::Passenger,
+    },
+];
+
+/// The value families the field document declares at revision 9.
+///
+/// R2458 (open-debt item 703) — revision 7's PLUS `keyexpr_cause`, whose words
+/// come from [`UNRESOLVED_CAUSE_R11`]. The same walk the census document's
+/// `cause` family is held to, declared separately here at this document's own
+/// revision: one enum, two declarations, and
+/// `the_declared_value_families_match_the_librarys_own_vocabularies` is the
+/// joint that keeps them from drifting into two answers about it.
+pub const FIELDS_R9_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "direction",
+        values: DIRECTION_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "keyexpr_cause",
+        values: UNRESOLVED_CAUSE_R11,
+    },
+    ValueFamily {
+        key: "kind",
+        values: FIELD_VALUE_KIND_R3,
+    },
+    ValueFamily {
+        key: "link",
+        values: LINK_KIND_R7,
+    },
+    ValueFamily {
+        key: "message",
+        values: MESSAGE_R5,
+    },
+    ValueFamily {
+        key: "offset_space",
+        values: ANCHOR_SPACE_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "state",
+        values: PAYLOAD_STATE_R2,
+    },
+    ValueFamily {
+        key: "under",
+        values: REFUSED_UNDER_R2,
+    },
+    ValueFamily {
+        key: "wrong",
+        values: MISBOUND_R2,
+    },
+];
+
+/// What each field-document family's WORD decides about the keys beside it, at
+/// revision 9.
+///
+/// R2458 (open-debt item 703) — revision 7's PLUS `keyexpr_cause`, a PASSENGER.
+/// The word decides nothing about the entry it sits in: a `carried[]` entry is
+/// `message` / `start` / `end` / `keyexpr` / `keyexpr_cause` whatever the cause
+/// says, because both of the last two are emitted structurally and `null` is
+/// what an inapplicable one carries. What the word decides is whether `keyexpr`
+/// beside it is `null`, which is a VALUE and not a companion key —
+/// [`CarriesShape`] is about presence.
+pub const FIELDS_R9_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "direction",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "keyexpr_cause",
         shape: CarriesShape::Passenger,
     },
     KeyCarries {
@@ -5030,7 +5228,13 @@ mod tests {
             // flow key's vsock endpoints stopped being spelled as IPv6
             // addresses. The SECOND entry here whose revision moved while no
             // declared axis did.
-            (FIELDS, 8),
+            // R2458 (item 703) — to 9 when every `carried` entry gained
+            // `keyexpr_cause`, and this document's two flow folders started
+            // sharing the capture's ONE keyexpr id space. Two changes under one
+            // number, and only the first is expressible as an axis: the second
+            // moved which references RESOLVE, which no list in this module can
+            // say.
+            (FIELDS, 9),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.

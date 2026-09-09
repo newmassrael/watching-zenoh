@@ -91,10 +91,45 @@ pub fn fields_json(
     max_messages_shown_per_flow: Option<usize>,
     declarations: Option<&Declarations<'_>>,
 ) -> String {
+    fields_json_grouped(
+        d,
+        capture,
+        max_messages_shown_per_flow,
+        declarations,
+        &crate::node::session_grouping(d),
+    )
+}
+
+/// R2458 (open-debt item 703) — the same document, against a grouping the
+/// caller already has.
+///
+/// The shape `crate::agg::aggregate_grouped` and `crate::payload::payloads_grouped`
+/// set at R2457 and for their reason: the node census must be complete before
+/// the first keyexpr fold, and a consumer rendering several planes has already
+/// paid for it. Handed in, the second walk is not made at all.
+///
+/// See `crate::node::session_grouping` for the ordering cost this imposes, and
+/// [`crate::agg::KeyexprSpaces`] for what the grouping buys — a declaration on
+/// one link of a `max_links: 2` session reaching a reference on the other.
+pub fn fields_json_grouped(
+    d: &crate::Dissection,
+    capture: &[u8],
+    max_messages_shown_per_flow: Option<usize>,
+    declarations: Option<&Declarations<'_>>,
+    grouping: &crate::node::SessionGrouping,
+) -> String {
     // A map with no rules answers `NoRules` for every message, so it renders
     // nothing either way -- folded here so the row renderers ask one question
     // rather than two.
     let declarations = declarations.filter(|d| !d.is_empty());
+    // R2458 (open-debt item 703) — which lists this document renders, DERIVED.
+    // See `RenderedLists`.
+    let lists = RenderedLists::of(d);
+    // R2458 — ONE instance for the capture, exactly as the census planes hold
+    // one. Per-folder it was the defect: two flows of one session each built
+    // their own tables, so a `DeclKexpr` that went out on the first link left
+    // every reference on the second unresolved.
+    let mut spaces = crate::agg::KeyexprSpaces::new();
     // R2100 (open-debt item 509) — the document's own revision, first key. See
     // `doc_revision`; the census document opens the same way.
     let mut out = String::from("{");
@@ -104,7 +139,20 @@ pub fn fields_json(
         if i > 0 {
             out.push(',');
         }
-        push_stream_flow(flow, max_messages_shown_per_flow, declarations, &mut out);
+        let mut own = None;
+        let spaces = enter(
+            &mut spaces,
+            &mut own,
+            grouping,
+            lists.stream.get(i).copied(),
+        );
+        push_stream_flow(
+            flow,
+            spaces,
+            max_messages_shown_per_flow,
+            declarations,
+            &mut out,
+        );
     }
     out.push_str("],\"datagram_flows\":[");
     let reread = Reread::of(capture);
@@ -112,8 +160,16 @@ pub fn fields_json(
         if i > 0 {
             out.push(',');
         }
+        let mut own = None;
+        let spaces = enter(
+            &mut spaces,
+            &mut own,
+            grouping,
+            lists.datagram.get(i).copied(),
+        );
         push_datagram_flow(
             flow,
+            spaces,
             reread.as_ref(),
             max_messages_shown_per_flow,
             declarations,
@@ -152,8 +208,97 @@ pub fn fields_json(
     out
 }
 
+/// R2458 (open-debt item 703) — the `Dissection::message_lists` index of every
+/// list THIS DOCUMENT renders.
+///
+/// # Why this is derived and not arithmetic
+///
+/// `crate::node::SessionGrouping` is keyed by list index, and the four census
+/// planes get theirs for free because they ARE
+/// `Dissection::message_lists().enumerate()`. This document is not: it renders
+/// `stream_flows` and `datagram_flows` as two arrays keyed to the two tables,
+/// so it has to say which enumeration position each row stands at. Computing
+/// that from table lengths would be a second copy of the enumeration's order —
+/// the exact shape `Dissection::message_lists` exists to end — and it would be
+/// WRONG today, because a datagram flow contributes one list plus one per QUIC
+/// stream plus one for its RFC 9221 datagrams.
+///
+/// So the origins are READ. Every list whose origin is `Stream` is one row of
+/// `d.flows()` in order, and every list whose origin is `Datagram` is one row
+/// of `d.datagram_flows()` in order, because those are the only two producers
+/// of those origins — see `Dissection::message_lists_with_origin`.
+///
+/// # The set, and what is NOT in it
+///
+/// Named arms and no catch-all, so a producer added to that enumeration has to
+/// be decided here rather than falling into a default:
+///
+/// * `Stream` and `Datagram` — RENDERED, one row each.
+/// * `QuicStream(_)` and `QuicDatagram` — NOT rendered, and structurally so.
+///   This document walks a message's own BYTES, and
+///   `Dissection::message_bytes_at` answers `NoByteSource` for both: a
+///   recovered QUIC stream's plaintext was never on the wire in that form and
+///   is not retained, and the RFC 9221 list anchors to a packet index whose
+///   re-read yields the PROTECTED bytes, not the ones the message was framed
+///   out of. `Reread` below has nothing to open them with.
+/// * `Serial` — NOT rendered. This document has two flow arrays and a serial
+///   line stands in neither table; `FlowKey::serial_line` is the empty key.
+///
+/// The lists left out are the subject of a separate report — they are absent
+/// from this document's ROWS, which is a rendering question, and this type only
+/// records which indices the rows it does render stand at.
+struct RenderedLists {
+    /// One index per `d.flows()` row, in order.
+    stream: alloc::vec::Vec<usize>,
+    /// One index per `d.datagram_flows()` row, in order — its cleartext list.
+    datagram: alloc::vec::Vec<usize>,
+}
+
+impl RenderedLists {
+    fn of(d: &crate::Dissection) -> Self {
+        let mut stream = Vec::new();
+        let mut datagram = Vec::new();
+        for (list, (_, origin, _)) in d.message_lists_with_origin().enumerate() {
+            match origin {
+                crate::MessageListOrigin::Stream => stream.push(list),
+                crate::MessageListOrigin::Datagram => datagram.push(list),
+                crate::MessageListOrigin::QuicStream(_)
+                | crate::MessageListOrigin::QuicDatagram
+                | crate::MessageListOrigin::Serial => {}
+            }
+        }
+        Self { stream, datagram }
+    }
+}
+
+/// Begin one list, on the spaces it writes into.
+///
+/// `Some(list)` is the ordinary path: the capture-wide instance, told whose
+/// tables this list's two directions belong to. `None` is a list
+/// [`RenderedLists`] did not name, which cannot happen for a row this document
+/// renders and is answered anyway rather than left to leak the PREVIOUS list's
+/// owners into it — that would resolve one flow's ids against another's, which
+/// is the one failure `KeyexprSpaces` documents as never happening. A private
+/// instance is the pre-R2458 reach exactly: per-flow tables, and
+/// `crate::agg::UnresolvedCause::NoSession` on what they miss.
+fn enter<'a>(
+    shared: &'a mut crate::agg::KeyexprSpaces,
+    own: &'a mut Option<crate::agg::KeyexprSpaces>,
+    grouping: &crate::node::SessionGrouping,
+    list: Option<usize>,
+) -> &'a mut crate::agg::KeyexprSpaces {
+    match list {
+        Some(list) => {
+            shared.enter_flow(grouping.owners(list));
+            shared
+        }
+        None => own.insert(crate::agg::KeyexprSpaces::new()),
+    }
+}
+
 fn push_stream_flow(
     flow: &crate::FlowDissection,
+    spaces: &mut crate::agg::KeyexprSpaces,
     cap: Option<usize>,
     declarations: Option<&Declarations<'_>>,
     out: &mut String,
@@ -167,7 +312,6 @@ fn push_stream_flow(
     // the bindings that were live when the message travelled, and a listing
     // that stopped absorbing where it stopped PRINTING would resolve later ids
     // against a table missing the declarations a held-back row carried.
-    let mut spaces = crate::agg::KeyexprSpaces::new();
     for frame in &flow.frames {
         spaces.absorb_frame(frame);
         if cap.is_some_and(|c| shown >= c) {
@@ -212,6 +356,7 @@ fn push_stream_flow(
 
 fn push_datagram_flow(
     flow: &crate::DatagramDissection,
+    spaces: &mut crate::agg::KeyexprSpaces,
     reread: Option<&Reread>,
     cap: Option<usize>,
     declarations: Option<&Declarations<'_>>,
@@ -225,7 +370,6 @@ fn push_datagram_flow(
     let mut named: Vec<(usize, &'static str)> = Vec::new();
     // The stream half's rule, unchanged: absorbed for every frame, ahead of
     // every reason this loop has for skipping one.
-    let mut spaces = crate::agg::KeyexprSpaces::new();
     for frame in &flow.frames {
         spaces.absorb_frame(frame);
         // `stream_offset` names the PACKET here: a datagram link has no stream
@@ -473,7 +617,7 @@ fn push_declined(why: &str, out: &mut String) {
 /// # R2440 (open-debt item 691) — AND THE KEY EACH ONE TRAVELLED UNDER
 ///
 /// Every entry carries `keyexpr`, RESOLVED through
-/// [`crate::payload_decode::subtree_keyexpr`] — the same
+/// [`crate::payload_decode::subtree_keyexpr_outcome`] — the same
 /// `KeyexprSpaces::resolve_parts` the payload plane uses, never a second copy of
 /// the rule. It is emitted for every walked row whatever the caller declared,
 /// and that is the item: the value was already computed on every frame (the
@@ -508,6 +652,23 @@ fn push_declined(why: &str, out: &mut String) {
 /// below. One that batches nothing is searched, so a transport MID that ever
 /// carries a `WireExpr` is answered by the structure rather than by a list of
 /// which MIDs do.
+///
+/// # R2458 (open-debt item 703) — AND WHY, when the key is `null`
+///
+/// `keyexpr_cause` beside it, from
+/// [`crate::payload_decode::subtree_keyexpr_outcome`]. A `null` key has two
+/// meanings that send a reader to opposite places, and this document could not
+/// tell them apart: the message referenced an id nothing in its session ever
+/// declared (`no_declaration`), or this capture never saw the flow's handshake
+/// so the declaration may be one link over (`no_session`). That split is the
+/// acceptance the consumer who filed item 702 derived; the census document has
+/// carried it since R2457 and this is the document a consumer walking MESSAGES
+/// reads.
+///
+/// The third state stays a `null` cause, and it is not the same fact: a message
+/// that references no keyexpr at all — a `KeepAlive`, or a `WireExpr` naming
+/// `id 0` with an empty suffix — has nothing to explain. A word for it would
+/// declare a failure where there was no reference.
 fn push_carried(
     bytes: &[u8],
     field: &wz_session_core::dissect::Field,
@@ -519,7 +680,7 @@ fn push_carried(
     let mut first = true;
     let mut entry = |word: &str,
                      span: &wz_session_core::dissect::Span,
-                     keyexpr: Option<String>,
+                     keyexpr: Option<Result<String, crate::agg::UnresolvedCause>>,
                      out: &mut String| {
         if !first {
             out.push(',');
@@ -533,8 +694,13 @@ fn push_carried(
             span.start, span.end
         );
         match &keyexpr {
-            Some(keyexpr) => escape_into(keyexpr, out),
-            None => out.push_str("null"),
+            Some(Ok(keyexpr)) => escape_into(keyexpr, out),
+            Some(Err(_)) | None => out.push_str("null"),
+        }
+        out.push_str(",\"keyexpr_cause\":");
+        match &keyexpr {
+            Some(Err(cause)) => escape_into(cause.name(), out),
+            Some(Ok(_)) | None => out.push_str("null"),
         }
         out.push('}');
     };
@@ -544,7 +710,7 @@ fn push_carried(
         .and_then(|b| MessageName::of_transport(b & 0x1F))
     {
         let keyexpr = if records.is_empty() {
-            crate::payload_decode::subtree_keyexpr(field, at)
+            crate::payload_decode::subtree_keyexpr_outcome(field, at)
         } else {
             None
         };
@@ -558,7 +724,7 @@ fn push_carried(
         entry(
             word,
             &record.span,
-            crate::payload_decode::subtree_keyexpr(record, at),
+            crate::payload_decode::subtree_keyexpr_outcome(record, at),
             out,
         );
     }
@@ -692,6 +858,273 @@ mod tests {
     use crate::Dissection;
 
     use alloc::vec;
+
+    /// R2458 (open-debt item 703) — a capture whose datagram table carries QUIC
+    /// SUB-LISTS, so the enumeration position of a row and its position in its
+    /// own table are different numbers.
+    ///
+    /// TWO datagram flows and the QUIC lists on the FIRST, because that is what
+    /// makes the second flow's list index disagree with its table index. One
+    /// flow would leave the two the same and the derivation would be graded by
+    /// a capture that cannot tell it from the arithmetic it replaced.
+    ///
+    /// Its own fixture rather than `tls_flow_tests::every_producer_corpus`,
+    /// which reaches the same producers: that one lives in a module named for
+    /// another subject and is private to it, and widening a fixture across
+    /// modules to reach one number is how a fixture acquires callers whose
+    /// needs pull against each other.
+    fn quic_bearing_dissection() -> Dissection {
+        use wz_session_core::passive::Direction;
+        use wz_session_core::wire_const::T_MID_KEEP_ALIVE;
+
+        const BATCH: usize = 4;
+        let keepalive = alloc::vec![T_MID_KEEP_ALIVE];
+        // One framing unit: a two-byte little-endian length prefix, then that
+        // many one-byte messages. The stream half needs a whole unit or the
+        // flow decodes nothing.
+        let mut unit = (BATCH as u16).to_le_bytes().to_vec();
+        unit.extend(core::iter::repeat_n(T_MID_KEEP_ALIVE, BATCH));
+
+        let mut d = Dissection::new();
+        d.push_packet(LINKTYPE_ETHERNET, 0, &tcp_packet(1000, &unit));
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            1,
+            &crate::datagram_tests::tcp_packet_reverse(2000, &unit),
+        );
+        for (i, (low, port)) in [([10u8, 0, 0, 1], 43210u16), ([10, 0, 0, 3], 43211)]
+            .into_iter()
+            .enumerate()
+        {
+            d.push_packet(
+                LINKTYPE_ETHERNET,
+                2 + i,
+                &udp_packet(low, port, [10, 0, 0, 2], 7447, &keepalive),
+            );
+        }
+        let flow = d.datagram_flows()[0].flow;
+        // Fed rather than pushed: this crate carries no cipher, so what a
+        // caller hands in is the plaintext it decrypted — which is exactly why
+        // those bytes are not retained and why this document cannot render
+        // them.
+        d.feed_quic_stream(flow, Direction::A, 7, false, &unit);
+        d.feed_quic_datagram(flow, Direction::A, 2, &keepalive);
+        d.finish();
+        d
+    }
+
+    /// R2458 (open-debt item 703) — THE LIST SET THIS DOCUMENT RENDERS, DERIVED
+    /// FROM THE ENUMERATION AND NOT FROM TABLE ARITHMETIC.
+    ///
+    /// [`RenderedLists`] exists because `SessionGrouping` is keyed by the
+    /// `Dissection::message_lists` position and this document is not that walk.
+    /// What is graded here is that the derivation LANDS: one index per rendered
+    /// row, and each index naming the list that row's frames actually are.
+    ///
+    /// The population is a QUIC-carrying capture on purpose. A datagram flow
+    /// contributes one list plus one per QUIC stream plus one for its RFC 9221
+    /// datagrams, so `datagram_flows[i]` is `flows.len() + i` only while no
+    /// capture holds a QUIC flow — an assumption that is true of most fixtures
+    /// here and false of the reader. This is the fixture where positional
+    /// arithmetic and the derivation disagree, which is what makes the
+    /// assertion mean something.
+    #[test]
+    fn the_field_document_names_a_list_index_for_every_row_it_renders() {
+        for (what, d) in [
+            ("multilink", crate::agg::tests::multilink_session()),
+            ("quic", quic_bearing_dissection()),
+        ] {
+            let lists = RenderedLists::of(&d);
+            assert_eq!(
+                lists.stream.len(),
+                d.flows().len(),
+                "{what}: one list index per stream row"
+            );
+            assert_eq!(
+                lists.datagram.len(),
+                d.datagram_flows().len(),
+                "{what}: one list index per datagram row"
+            );
+            // The index NAMES the row's own list, checked against the
+            // enumeration rather than against a second computation of it.
+            let all: Vec<(crate::link::FlowKey, crate::MessageListOrigin)> = d
+                .message_lists_with_origin()
+                .map(|(flow, origin, _)| (flow, origin))
+                .collect();
+            for (i, flow) in d.flows().iter().enumerate() {
+                assert_eq!(
+                    all[lists.stream[i]],
+                    (flow.flow, crate::MessageListOrigin::Stream),
+                    "{what}: stream row {i}"
+                );
+            }
+            for (i, flow) in d.datagram_flows().iter().enumerate() {
+                assert_eq!(
+                    all[lists.datagram[i]],
+                    (flow.flow, crate::MessageListOrigin::Datagram),
+                    "{what}: datagram row {i}"
+                );
+            }
+        }
+    }
+
+    /// THE ANTI-VACUITY HALF of the derivation: the QUIC fixture really does
+    /// hold lists this document does not render, so the test above is not
+    /// asserting that a positional guess happens to be right.
+    ///
+    /// Without it, a capture with no QUIC sub-list would satisfy every
+    /// assertion above under `datagram_flows[i] == flows.len() + i`, and the
+    /// derivation would be graded by a population that cannot tell it from the
+    /// arithmetic it replaced.
+    #[test]
+    fn the_quic_fixture_holds_lists_the_field_document_does_not_render() {
+        let d = quic_bearing_dissection();
+        let lists = RenderedLists::of(&d);
+        let total = d.message_lists_with_origin().count();
+        let rendered = lists.stream.len() + lists.datagram.len();
+        assert!(
+            rendered < total,
+            "the fixture must hold lists this document leaves out, or the \
+             derivation is graded against a capture where position and \
+             enumeration agree: {rendered} rendered of {total}"
+        );
+        let last = *lists.datagram.last().expect("a datagram row");
+        assert_ne!(
+            last,
+            lists.stream.len() + lists.datagram.len() - 1,
+            "and the LAST datagram row must not sit where the arithmetic would \
+             put it, or the disagreement is behind the rows this test reads"
+        );
+    }
+
+    /// Every `(keyexpr, keyexpr_cause)` pair the document carries, as the raw
+    /// JSON values so `null` and `"null"` cannot be confused.
+    #[cfg(feature = "network-codecs")]
+    fn carried_keys(doc: &str) -> Vec<(&str, &str)> {
+        crate::doc_revision::object_scopes(doc)
+            .into_iter()
+            .filter_map(|scope| {
+                let key = scope.iter().find(|(k, _)| *k == "keyexpr")?.1;
+                let cause = scope.iter().find(|(k, _)| *k == "keyexpr_cause")?.1;
+                Some((key, cause))
+            })
+            .collect()
+    }
+
+    /// R2458 (open-debt item 703) — ACCEPTANCE, inherited from item 702 word for
+    /// word and asked of the document R2457 did not reach.
+    ///
+    /// NOT "the multilink capture resolves", which a build that folded every
+    /// table into one would satisfy while cross-resolving two unrelated
+    /// sessions. The claim is the PAIR, on this document:
+    ///
+    /// 1. a reference on the SECOND link of a session resolves against the
+    ///    declaration that went out on the first;
+    /// 2. a reference that does NOT resolve says which of the two failures it
+    ///    was — `no_declaration` (the session is named and nobody declared this
+    ///    id) or `no_session` (this flow showed no handshake, so the
+    ///    declaration may be one link over).
+    ///
+    /// Folded into one `"keyexpr":null`, a reader cannot tell a capture that
+    /// started late from a genuine gap and searches the wrong thing. That is
+    /// the consumer's own sentence, and it is why the second half is asserted
+    /// as hard as the first.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn a_session_resolves_across_its_links_in_the_field_document() {
+        let (d, file) = crate::agg::tests::multilink_session_with_file();
+        let doc = fields_json(&d, &file, None, None);
+        let pairs = carried_keys(&doc);
+        assert!(
+            !pairs.is_empty(),
+            "the document rendered no carried entry at all, so nothing below \
+             could have failed: {doc}"
+        );
+
+        // (1) THE SECOND LINK'S REFERENCE RESOLVED. The declaration went out on
+        // port 43210 and the `Push` that names id 7 went out on 43211, so a
+        // per-flow space cannot produce this literal on the second flow.
+        let resolved = pairs
+            .iter()
+            .filter(|(key, _)| *key == "\"demo/temp\"")
+            .count();
+        assert!(
+            resolved >= 2,
+            "the declaration on link 1 names `demo/temp` and the reference on \
+             link 2 must resolve to it as well, so the literal stands on TWO \
+             entries; it stands on {resolved}: {pairs:?}"
+        );
+
+        // (2) AND THE REST SAY WHY, each arm with a population that is not
+        // empty. id 9 was referenced on a link of a KNOWN session that declared
+        // nothing for it; id 7 was referenced again on a third flow that never
+        // handshook — the SAME id the session bound, which is exactly the
+        // reference a grouping leaking across sessions would have resolved.
+        let no_declaration = pairs
+            .iter()
+            .filter(|(key, cause)| *key == "null" && *cause == "\"no_declaration\"")
+            .count();
+        let no_session = pairs
+            .iter()
+            .filter(|(key, cause)| *key == "null" && *cause == "\"no_session\"")
+            .count();
+        assert_eq!(
+            (no_declaration, no_session),
+            (1, 1),
+            "one reference of each kind, and DISTINGUISHED: {pairs:?}"
+        );
+
+        // The two columns never contradict: an entry that names a key does not
+        // also carry a reason it has none. `(null, null)` is NOT in that class
+        // and is the ordinary majority — a `KeepAlive` or an `Init` references
+        // no keyexpr, so there is nothing to resolve and nothing to explain.
+        let contradictory: Vec<&(&str, &str)> = pairs
+            .iter()
+            .filter(|(key, cause)| *key != "null" && *cause != "null")
+            .collect();
+        assert!(
+            contradictory.is_empty(),
+            "an entry names a key AND a reason it has none: {contradictory:?}"
+        );
+        // AND the quiet majority is not the whole document: without this the
+        // assertion above holds over a population where every pair is
+        // `(null, null)`, which is what a build that emitted the key and never
+        // filled it would produce.
+        assert!(
+            pairs
+                .iter()
+                .any(|(key, cause)| *key != "null" || *cause != "null"),
+            "every entry is (null, null), so nothing above was measured: {pairs:?}"
+        );
+    }
+
+    /// THE PROPERTY THE PER-FLOW RULE PROTECTED, kept in this document: a flow
+    /// whose session is unknown still resolves its OWN declarations.
+    ///
+    /// The fallback is not "give up", it is "the pre-R2458 reach". Without this
+    /// the `no_session` arm above would be satisfied by a build that had simply
+    /// stopped resolving on unattributed flows — a regression wearing the new
+    /// word as a costume.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn a_field_row_on_a_handshakeless_flow_still_resolves_its_own_declaration() {
+        let (d, file) = crate::agg::tests::orphan_flow_session_with_file();
+        let doc = fields_json(&d, &file, None, None);
+        let pairs = carried_keys(&doc);
+        let resolved = pairs
+            .iter()
+            .filter(|(key, _)| *key == "\"orphan/topic\"")
+            .count();
+        assert!(
+            resolved >= 2,
+            "the flow declared `orphan/topic` and referenced it, and both \
+             entries must name it: {pairs:?} in {doc}"
+        );
+        assert!(
+            pairs.iter().all(|(_, cause)| *cause == "null"),
+            "nothing on this flow is unresolved, so no entry says why: {pairs:?}"
+        );
+    }
 
     /// R2100 (open-debt item 509) — THE FIELD DOCUMENT'S KEY SET IS PINNED
     /// AGAINST ITS REVISION.
@@ -1040,13 +1473,23 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 13] = [
+        let live: [(&str, &str, Vec<&'static str>); 14] = [
             // R2457 (open-debt item 702) — WHY a keyexpr reference did not
             // resolve. A key a consumer switches on precisely because the two
             // words send it to different places: `no_session` says the
             // declaration may be one flow over, `no_declaration` says it is not
             // in this capture at all.
             (rev::CENSUS, "cause", crate::agg::UnresolvedCause::names()),
+            // R2458 (open-debt item 703) — the SAME enum on the field document,
+            // under the key that names its subject there. Two declarations of
+            // one vocabulary, each at its own document's revision, and both
+            // held to the one walk: that is the joint the `link` pair below
+            // makes the argument for.
+            (
+                rev::FIELDS,
+                "keyexpr_cause",
+                crate::agg::UnresolvedCause::names(),
+            ),
             (
                 rev::FIELDS,
                 "kind",
@@ -1478,8 +1921,17 @@ mod tests {
         // capture, so it renders `no_declaration` and `no_session` together —
         // which is the only shape that can grade the boundary between them.
         let multilink = crate::census_json::census_json(&crate::agg::tests::multilink_session());
+        // R2458 (open-debt item 703) — the SAME capture through THIS document,
+        // for the same reason one line up. `keyexpr_cause` arrives on the field
+        // document at revision 9 and nothing else rendered here holds an
+        // unattributable flow, so without this the family would be measured
+        // over `no_declaration` alone — the population-of-one verdict this axis
+        // refused at R2457, one document over.
+        let (multilink_d, multilink_file) = crate::agg::tests::multilink_session_with_file();
+        let multilink_fields = fields_json(&multilink_d, &multilink_file, None, None);
 
-        let mut fields_docs: Vec<&String> = alloc::vec![&with, &without, &withl, &dgram];
+        let mut fields_docs: Vec<&String> =
+            alloc::vec![&with, &without, &withl, &dgram, &multilink_fields];
         fields_docs.extend(arms.iter());
         let docs: [(&str, Vec<&String>); 2] = [
             (rev::FIELDS, fields_docs),

@@ -1180,6 +1180,39 @@ impl PayloadDecoding {
 /// The resolution itself is [`KeyexprSpaces::resolve_parts`], never a second
 /// copy of the rule.
 pub fn subtree_keyexpr(field: &Field, at: KeyexprAt<'_>) -> Option<String> {
+    subtree_keyexpr_outcome(field, at).and_then(Result::ok)
+}
+
+/// R2458 (open-debt item 703) — the same walk, answering WHY when it does not
+/// resolve.
+///
+/// `None` when this subtree references no keyexpr id at all: a `KeepAlive`
+/// carries none, and a `WireExpr` whose id is `0` with an empty suffix names
+/// none. `Some(Ok(literal))` when it resolved. `Some(Err(cause))` when a
+/// reference WAS made and the tables could not answer it, which is the state
+/// the consumer that filed item 702 asked to have split in two.
+///
+/// # Why the cause and not just the miss
+///
+/// [`crate::agg::UnresolvedCause`] carries the argument: folded into one
+/// silence, "this capture began mid-session" and "a declaration is genuinely
+/// missing" send a reader to opposite places. The census document has said
+/// which since R2457; this is the same fact on the FIELD document, which is
+/// the one a consumer walking messages reads.
+///
+/// # The traversal rule is [`subtree_keyexpr`]'s, unchanged
+///
+/// A `keyexpr` node that does not resolve does NOT stop the search: the
+/// siblings are still walked and a resolved one still wins. The cause reported
+/// is the FIRST miss, and only when no sibling resolved. That is what makes
+/// `subtree_keyexpr` an exact projection of this rather than a walk with
+/// different stopping behaviour — a quiet change to which keyexpr a batched
+/// record reports would be a WRONG key rather than a missing one, which is the
+/// defect this function's neighbours were written to end.
+pub fn subtree_keyexpr_outcome(
+    field: &Field,
+    at: KeyexprAt<'_>,
+) -> Option<Result<String, crate::agg::UnresolvedCause>> {
     if field.name == "keyexpr" {
         if let FieldValue::Nested(parts) = &field.value {
             let mut id = 0u64;
@@ -1203,15 +1236,29 @@ pub fn subtree_keyexpr(field: &Field, at: KeyexprAt<'_>) -> Option<String> {
             } else {
                 at.direction.peer()
             };
-            return at
-                .spaces
-                .resolve_parts(space, id, suffix)
-                .ok()
-                .filter(|k| !k.is_empty());
+            return match at.spaces.resolve_parts(space, id, suffix) {
+                Ok(keyexpr) if !keyexpr.is_empty() => Some(Ok(keyexpr)),
+                // Resolved to NOTHING: `id == 0` with no suffix names no
+                // keyexpr, so there is no reference here to explain. The
+                // pre-R2458 `.filter(|k| !k.is_empty())` said exactly this and
+                // this arm is where it lives now.
+                Ok(_) => None,
+                // R2457's rule, read off the OWNER rather than off the tables:
+                // see `KeyexprSpaces::cause`.
+                Err((space, _)) => Some(Err(at.spaces.cause(space))),
+            };
         }
     }
     if let FieldValue::Nested(children) = &field.value {
-        return children.iter().find_map(|c| subtree_keyexpr(c, at));
+        let mut first_miss = None;
+        for child in children {
+            match subtree_keyexpr_outcome(child, at) {
+                Some(Ok(keyexpr)) => return Some(Ok(keyexpr)),
+                Some(Err(cause)) => first_miss = first_miss.or(Some(cause)),
+                None => {}
+            }
+        }
+        return first_miss.map(Err);
     }
     None
 }

@@ -725,9 +725,16 @@ impl KeyexprSpaces {
     /// Two empty spaces, on an anonymous flow.
     ///
     /// The pre-R2457 behaviour exactly, and it is the right default for the
-    /// callers that have one flow and no census: `crate::fields_json`, a live
-    /// tap, a replay. A driver that HAS a session grouping calls
-    /// [`Self::enter_flow`] instead of relying on this.
+    /// callers that have one flow and no census: a live tap, a replay. A driver
+    /// that HAS a session grouping calls [`Self::enter_flow`] instead of
+    /// relying on this.
+    ///
+    /// ⚠ R2458 (open-debt item 703) struck `crate::fields_json` from that list,
+    /// where it had been the example. It was the last production folder still
+    /// building one instance per flow, so the field document rendered a
+    /// `max_links: 2` session's second link with every reference unresolved
+    /// while the census planes resolved the same bytes — the residue R2457 left
+    /// when it closed the census half of item 702 and not this one.
     pub fn new() -> Self {
         Self::default()
     }
@@ -5037,22 +5044,39 @@ pub(crate) mod tests {
     /// `handshake` rows go on the wire bare — an INIT is a transport message —
     /// and everything else is wrapped in a `Frame`, which is what carries a
     /// network message.
-    fn multilink_capture(rows: &[(bool, u16, u16, Vec<u8>, bool)]) -> crate::Dissection {
+    ///
+    /// R2458 (open-debt item 703) — and the pcap FILE those packets make.
+    ///
+    /// `crate::fields_json` reads the capture a SECOND time to slice a datagram
+    /// message's bytes out, so a `Dissection` alone leaves that document with
+    /// `"capture_reread":false` and no datagram rows at all — it could not be
+    /// asked to render this fixture. The shape and the reason are
+    /// `crate::census_json::fed_tests::every_plane_capture_with_file`'s, one
+    /// document over.
+    ///
+    /// The packet ORDER is the file order and the push index is the position in
+    /// it, which is what makes the re-read's `packet_index` agree with the first
+    /// pass's — the check `push_datagram_flow` makes on every row.
+    fn multilink_capture_with_file(
+        rows: &[(bool, u16, u16, Vec<u8>, bool)],
+    ) -> (crate::Dissection, Vec<u8>) {
         let mut d = Dissection::new();
+        let mut packets: Vec<Vec<u8>> = Vec::new();
         for (i, (from_low, sport, dport, record, framed)) in rows.iter().enumerate() {
             let wire = if *framed {
                 crate::datagram_tests::frame_carrying(record)
             } else {
                 record.clone()
             };
-            d.push_packet(
-                LINKTYPE_ETHERNET,
-                i,
-                &link_packet(*from_low, *sport, *dport, &wire),
-            );
+            let packet = link_packet(*from_low, *sport, *dport, &wire);
+            d.push_packet(LINKTYPE_ETHERNET, i, &packet);
+            packets.push(packet);
         }
         d.finish();
-        d
+        let refs: Vec<(u32, u32, &[u8])> =
+            packets.iter().map(|p| (0u32, 0u32, p.as_slice())).collect();
+        let file = crate::pcap::write(LINKTYPE_ETHERNET, &refs);
+        (d, file)
     }
 
     /// The fixture the acceptance below is graded on: ONE session over TWO
@@ -5074,6 +5098,18 @@ pub(crate) mod tests {
     /// only fixture in the crate that renders both, because it is the only one
     /// that holds a named session and an unattributed flow at once.
     pub(crate) fn multilink_session() -> crate::Dissection {
+        multilink_session_with_file().0
+    }
+
+    /// R2458 (open-debt item 703) — the same fixture, plus its capture file.
+    ///
+    /// `crate::fields_json` needs both, and it needs THIS fixture rather than a
+    /// second one: it is the only capture in the crate holding a named session
+    /// and an unattributable flow at once, so it is the only one that can render
+    /// `no_declaration` and `no_session` together. A family measured over one
+    /// word is classified on the strength of having looked at one thing, which
+    /// is the verdict the carries axis refused at R2457.
+    pub(crate) fn multilink_session_with_file() -> (crate::Dissection, Vec<u8>) {
         let mut rows: Vec<(bool, u16, u16, Vec<u8>, bool)> = Vec::new();
         for link in [(43210u16, 7447u16), (43211u16, 7447u16)] {
             for (from_low, sport, dport, wire) in handshake(link.0, link.1) {
@@ -5108,7 +5144,27 @@ pub(crate) mod tests {
             push(sender_space(7, None), &[0u8; 3]),
             true,
         ));
-        multilink_capture(&rows)
+        multilink_capture_with_file(&rows)
+    }
+
+    /// A single flow that never handshook, declaring an id and then using it.
+    ///
+    /// The FALLBACK's anti-vacuity fixture: `SessionGrouping` attributes
+    /// nothing here, so every space is a `SpaceOwner::Flow` and resolution must
+    /// still reach exactly as far as it did before R2457. R2458 gave it a name
+    /// and a capture file so `crate::fields_json` can ask the same question of
+    /// the field document.
+    pub(crate) fn orphan_flow_session_with_file() -> (crate::Dissection, Vec<u8>) {
+        multilink_capture_with_file(&[
+            (true, 43212, 7447, declare_kexpr(3, "orphan/topic"), true),
+            (
+                true,
+                43212,
+                7447,
+                push(sender_space(3, None), &[0u8; 6]),
+                true,
+            ),
+        ])
     }
 
     /// THE ANCHOR: the fixture really is one session over two links.
@@ -5214,16 +5270,7 @@ pub(crate) mod tests {
     /// wearing the new cause as a costume.
     #[test]
     fn a_flow_with_no_handshake_still_resolves_its_own_declarations() {
-        let d = multilink_capture(&[
-            (true, 43212, 7447, declare_kexpr(3, "orphan/topic"), true),
-            (
-                true,
-                43212,
-                7447,
-                push(sender_space(3, None), &[0u8; 6]),
-                true,
-            ),
-        ]);
+        let (d, _file) = orphan_flow_session_with_file();
         let grouping = crate::node::SessionGrouping::of(&crate::node::nodes(&d));
         assert_eq!(
             grouping.sessions(),

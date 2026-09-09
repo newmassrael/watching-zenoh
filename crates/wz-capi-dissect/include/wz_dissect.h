@@ -285,6 +285,44 @@
  * It is emitted rather than omitted so a missing key cannot be confused with a
  * build that stopped reporting one.
  *
+ * ⚠ Those three were one silence until revision 9, and the key below is what
+ * separates them. Do not tell them apart by inspection.
+ *
+ * R2458 -- AND WHY, at field-document revision 9.
+ *
+ *     `keyexpr_cause` `"no_declaration"`, `"no_session"`, or `null`.
+ *
+ * Read it whenever `keyexpr` is `null`. `null` here means there was no key to
+ * resolve, so nothing failed -- the `Init` and `KeepAlive` case above, and the
+ * batching `Frame` two paragraphs down. A WORD means a reference WAS made and
+ * this reader refused it:
+ *
+ *     `no_declaration`  the session is named and nothing on it ever declared
+ *                       this id. The declaration is not in this capture: it
+ *                       predates the file, or it was in a batch this build
+ *                       could not read, or the sender referenced an id it never
+ *                       minted.
+ *     `no_session`      no session is known for the flow this reference
+ *                       travelled on, because this capture never saw its
+ *                       handshake. The declaration may well be here, one link
+ *                       over -- so RE-CAPTURE from before the session opens
+ *                       rather than searching for a missing `Declare`.
+ *
+ * The two send you to opposite places, which is why they are not one count.
+ * The same enum reaches the census document under `cause`, at its revision 11.
+ *
+ * @values fields keyexpr_cause
+ *
+ * ⚠ REVISION 9 ALSO MOVED WHICH REFERENCES RESOLVE AT ALL, under a stationary
+ * `keyexpr`, and no `value_families` row can say so. Until it, this document
+ * folded a keyexpr id space PER FLOW, while a zenoh session with
+ * `transport/unicast/max_links` above 1 spreads one id space over several
+ * 5-tuples: a `Declare` that went out on the first link left every reference on
+ * the second reported as `null`. They now share the capture's one space, keyed
+ * by the session the handshakes named. If you cached "this id is unresolvable
+ * in this capture" from revision 8 or earlier, that negative may be wrong --
+ * the value can only have gone from `null` to a literal, never the other way.
+ *
  * A transport message that BATCHES gets `null` here even when the records
  * inside it name keys: those keys belong to the records, each of which has its
  * own entry. One `Frame` can carry several messages that share no key.
@@ -366,7 +404,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":8,"key":"kind","values":[...],
+ *     {"name":"fields","revision":9,"key":"kind","values":[...],
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
@@ -395,6 +433,7 @@
  * @carries census mode passenger
  * @carries census offset_space passenger
  * @carries fields direction passenger
+ * @carries fields keyexpr_cause passenger
  * @carries fields kind discriminant
  * @carries fields link passenger
  * @carries fields message passenger
@@ -1122,7 +1161,7 @@ int wz_dissect_declarations_diagnose(const char *declarations, char **out);
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":8,"key":"state",
+ *     "value_families":[{"name":"fields","revision":9,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
