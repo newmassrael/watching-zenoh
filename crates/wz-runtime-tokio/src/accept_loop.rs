@@ -1015,8 +1015,16 @@ async fn dial_face_after(
 
 /// Schedule a re-dial of a dropped/failed outbound peer IF it is still desired
 /// (`router-connect-reconcile` peer auto-reconnect — the wz analogue of zenoh's
-/// `closed_session` Peer/Router arm, `orchestrator.rs:1210`, gated on
-/// `peers.contains(endpoint)` `:1225`). Re-keys the dial-address index to the fresh
+/// `closed_session` Peer/Router arm --
+/// `zenoh/src/net/runtime/orchestrator.rs` @ `if session.runtime.whatami() != WhatAmI::Client {`,
+/// gated on the still-desired read
+/// `zenoh/src/net/runtime/orchestrator.rs` @ `if peers.contains(&endpoint) && zwrite!(session.endpoints).remove(&endpoint) {`).
+/// R2500 — those two were `orchestrator.rs:1210` and `:1225`, written against
+/// zenoh 1.5.0; at the 1.10.0 pin :1210 is a multicast-group link check and the
+/// file is 1497 lines, so both landed a reader on plausible unrelated code.
+/// Anchored rather than renumbered: a corrected number rots at the next bump,
+/// and a root-less `file.rs:N` is scored by no citation gate at all.
+/// Re-keys the dial-address index to the fresh
 /// [`FaceId`] BEFORE the backoff so the address stays CLAIMED across the drop->redial
 /// gap (a concurrent reconcile then dedups against it instead of opening a second
 /// link). A peer no longer in `desired` (removed from the connect list) is dropped,
