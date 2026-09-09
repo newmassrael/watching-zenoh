@@ -4469,10 +4469,37 @@ fn payload_block(
     match &decoding {
         PayloadDecoding::NoRules => unreachable!("returned above"),
         PayloadDecoding::NoPayload => String::new(),
-        PayloadDecoding::KeyexprUnresolved => String::from(
-            "    payload: this message names its keyexpr by id only, so no \
-             --payload-format rule can be tested against it\n",
-        ),
+        // R2459 (open-debt item 704) — AND WHICH OF THE TWO FAILURES IT WAS.
+        //
+        // The sentence used to end at "by id only", which is one silence over
+        // two facts that send a reader to opposite places — the split item 702's
+        // reporter asked for by name, carried by the census document since R2457
+        // (`cause`) and by the field document since R2458 (`keyexpr_cause`).
+        // This is the third surface, and a person reading a terminal is a
+        // consumer too: R2170 made exactly that argument one state over.
+        //
+        // The cause comes from `subtree_keyexpr_outcome`, which is the walk that
+        // decided the miss — never a second opinion reconstructed here. The
+        // `Ok` arm cannot occur (this state means it did not resolve) and the
+        // `None` arm means no `WireExpr` was found at all, which is not a
+        // failure to explain.
+        PayloadDecoding::KeyexprUnresolved => {
+            let why = match wz_capture::payload_decode::subtree_keyexpr_outcome(field, at) {
+                Some(Err(wz_capture::agg::UnresolvedCause::NoSession)) => {
+                    " -- this capture never saw the handshake of the flow it \
+                     travelled on, so the declaration may be one link over"
+                }
+                Some(Err(wz_capture::agg::UnresolvedCause::NoDeclaration)) => {
+                    " -- the session is known and nothing on it ever declared \
+                     that id, so the binding is not in this capture"
+                }
+                Some(Ok(_)) | None => "",
+            };
+            format!(
+                "    payload: this message names its keyexpr by id only, so no \
+                 --payload-format rule can be tested against it{why}\n"
+            )
+        }
         // R2170 (open-debt item 546) — the THIRD consumer of the vocabulary,
         // and the compiler is what found it: this is the TEXT surface, and the
         // arm is required because the match is exhaustive. Worth stating
@@ -7570,30 +7597,6 @@ mod tests {
         const ZID_B: &[u8] = &[0xB2, 0xB2, 0xB2, 0xB2];
         const ID: u64 = 7;
 
-        /// A bare INIT naming `zid` — a datagram carries no length prefix.
-        fn init(zid: &[u8]) -> Vec<u8> {
-            let mut wire = vec![
-                wz_session_core::wire_const::T_MID_INIT,
-                0x09,
-                (((zid.len() as u8) - 1) << 4) | 0x02,
-            ];
-            wire.extend_from_slice(zid);
-            wire
-        }
-
-        /// A `WireExpr` in the SENDER's space (`M = 1`).
-        fn sender_space(id: u64, suffix: Option<&str>) -> wz_codecs::wireexpr::Wireexpr<'_> {
-            wz_codecs::wireexpr::Wireexpr {
-                body: wz_codecs::wireexpr::WireexprVariant::WireexprLocal(
-                    wz_codecs::wireexpr_local::WireexprLocal {
-                        id,
-                        suffix_len: suffix.map(|s| s.len() as u64),
-                        suffix,
-                    },
-                ),
-            }
-        }
-
         fn declare_kexpr(id: u64, suffix: &str) -> Vec<u8> {
             wz_codecs::declare::Declare {
                 body: wz_codecs::declare::DeclareVariant::CodecZenohDeclKexpr(
@@ -7601,40 +7604,10 @@ mod tests {
                         header: wz_session_core::wire_const::D_MID_KEXPR
                             | wz_session_core::wire_const::FLAG_D_N,
                         id,
-                        keyexpr: sender_space(0, Some(suffix)),
+                        keyexpr: multilink_sender_space(0, Some(suffix)),
                         extensions: None,
                     },
                 ),
-                ..Default::default()
-            }
-            .encode_to_vec()
-        }
-
-        /// A `Push` naming its key by ID ALONE — the reference under test.
-        fn push_by_id(id: u64, payload: &[u8]) -> Vec<u8> {
-            wz_codecs::push::Push {
-                // NO `FLAG_N_N`, and that is the point of this record: the N
-                // flag says the `WireExpr` carries a SUFFIX, and this one names
-                // its key by id alone. `put_declaring` sets it because its key
-                // is a literal; copying it here made the decoder read a suffix
-                // that was not there and the record walked as `unparsed`.
-                header: wz_codecs::push::Push::default().header,
-                keyexpr: sender_space(id, None),
-                // The body is `put_declaring`'s, unchanged: the `0x40` header
-                // flag and the encoding group travel together, and a `MsgPut`
-                // built without them walks as `unparsed` — measured, on this
-                // test's first run.
-                body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
-                    header: wz_codecs::msg_put::MsgPut::default().header | 0x40,
-                    encoding: Some(wz_codecs::encoding::Encoding {
-                        packed_id: 0,
-                        schema_len: None,
-                        schema: None,
-                    }),
-                    payload_len: payload.len() as u64,
-                    payload,
-                    ..Default::default()
-                }),
                 ..Default::default()
             }
             .encode_to_vec()
@@ -7675,8 +7648,8 @@ mod tests {
         let mut packets: Vec<Vec<u8>> = Vec::new();
         // Both links handshake, naming the SAME zid pair.
         for host in [2u8, 3] {
-            packets.push(datagram(host, true, &init(ZID_A)));
-            packets.push(datagram(host, false, &init(ZID_B)));
+            packets.push(datagram(host, true, &multilink_init(ZID_A)));
+            packets.push(datagram(host, false, &multilink_init(ZID_B)));
         }
         // The declaration travels on LINK ONE...
         packets.push(datagram(
@@ -7688,7 +7661,7 @@ mod tests {
         packets.push(datagram(
             3,
             true,
-            &frame_carrying(&push_by_id(ID, &[7u8; 5])),
+            &frame_carrying(&multilink_push_by_id(ID, &[7u8; 5])),
         ));
 
         let refs: Vec<(u32, u64, &[u8])> = packets
@@ -7765,6 +7738,148 @@ mod tests {
             "and nothing may be left unresolved, which is where this sample \
              went before the grouping reached this walk"
         );
+    }
+
+    /// R2459 (open-debt item 704) — AN UNRESOLVED KEY SAYS WHICH FAILURE IT
+    /// WAS, IN THE TEXT A PERSON READS.
+    ///
+    /// The acceptance item 702's reporter derived, on its third surface. The
+    /// census document has carried `cause` since R2457 and the field document
+    /// `keyexpr_cause` since R2458; the terminal said "names its keyexpr by id
+    /// only" for BOTH causes, which sends a reader chasing a missing `Declare`
+    /// when the truth is that their capture started late — and the other way
+    /// round.
+    ///
+    /// # The fixture holds one of EACH, which is what makes it a grader
+    ///
+    /// One handshaking flow that declares nothing and publishes under id 9
+    /// (`no_declaration` — the session is named), and one flow with NO
+    /// handshake publishing under id 4 (`no_session` — a sibling link may hold
+    /// the binding). A capture holding only one of the two would classify this
+    /// on the strength of having looked at one thing, which is the
+    /// population-of-one pass this workspace keeps refusing.
+    #[test]
+    fn an_unresolved_key_says_which_failure_it_was_at_the_terminal() {
+        const ZID_A: &[u8] = &[0xA1, 0xA1, 0xA1, 0xA1];
+        const ZID_B: &[u8] = &[0xB2, 0xB2, 0xB2, 0xB2];
+
+        // `udp_from_publisher(2, ..)` and `udp_to_zenoh_port` are the two
+        // directions of ONE flow, which is what lets it handshake; publisher 4
+        // has no reverse builder and so stays unattributed, which is exactly
+        // the arm this fixture needs it for.
+        let packets: Vec<Vec<u8>> = vec![
+            udp_from_publisher(2, &multilink_init(ZID_A)),
+            udp_to_zenoh_port(&multilink_init(ZID_B)),
+            udp_from_publisher(2, &frame_carrying(&multilink_push_by_id(9, &[9u8; 4]))),
+            udp_from_publisher(4, &frame_carrying(&multilink_push_by_id(4, &[4u8; 4]))),
+        ];
+
+        let refs: Vec<(u32, u64, &[u8])> = packets
+            .iter()
+            .map(|p| (0u32, 1_000_000u64, p.as_slice()))
+            .collect();
+        let capture = wz_capture::pcapng::write(&[(wz_capture::link::LINKTYPE_ETHERNET, 6)], &refs);
+
+        // ANCHOR: exactly one flow is attributed and one is not, or one of the
+        // two arms below has an empty population.
+        let dissection = wz_capture::Dissection::from_capture(&capture).expect("the capture reads");
+        let grouping = wz_capture::node::session_grouping(&dissection);
+        assert_eq!(
+            (grouping.sessions(), grouping.grouped_lists()),
+            (1, 1),
+            "one named session and one unattributed flow is the whole fixture"
+        );
+
+        let rules = [String::from("nomatch/**=json")];
+        let text = analyze_request(&Request {
+            capture: &capture,
+            keylog: None,
+            format: Format::Text,
+            per_flow: true,
+            per_message: true,
+            messages_per_flow: None,
+            quic_ports: &[],
+            quic_cid_len: None,
+            payload_rules: &rules,
+            payload_field_names: &[],
+            serial_linktypes: &[],
+            census: Census::default(),
+            per_field: true,
+            bounded: false,
+            health: false,
+            select: None,
+            csv: None,
+        })
+        .expect("the capture reads")
+        .0;
+
+        assert!(
+            text.contains("nothing on it ever declared that id"),
+            "the reference on the NAMED session must say the binding is absent \
+             from this capture: {text}"
+        );
+        assert!(
+            text.contains("the declaration may be one link over"),
+            "and the one on the handshake-less flow must say the opposite, or \
+             the two failures are still one silence: {text}"
+        );
+    }
+
+    /// R2459 (open-debt item 704) — a bare INIT naming `zid`.
+    ///
+    /// A datagram carries no length prefix, so this is the transport message
+    /// itself. Module scope because the two item-704 fixtures both need a
+    /// handshake, and a second copy of a wire layout is the one that drifts.
+    fn multilink_init(zid: &[u8]) -> Vec<u8> {
+        let mut wire = vec![
+            wz_session_core::wire_const::T_MID_INIT,
+            0x09,
+            (((zid.len() as u8) - 1) << 4) | 0x02,
+        ];
+        wire.extend_from_slice(zid);
+        wire
+    }
+
+    /// A `WireExpr` in the SENDER's space (`M = 1`).
+    fn multilink_sender_space(id: u64, suffix: Option<&str>) -> wz_codecs::wireexpr::Wireexpr<'_> {
+        wz_codecs::wireexpr::Wireexpr {
+            body: wz_codecs::wireexpr::WireexprVariant::WireexprLocal(
+                wz_codecs::wireexpr_local::WireexprLocal {
+                    id,
+                    suffix_len: suffix.map(|s| s.len() as u64),
+                    suffix,
+                },
+            ),
+        }
+    }
+
+    /// A `Push` naming its key by ID ALONE — the reference item 704 is about.
+    ///
+    /// NO `FLAG_N_N`: that flag says the `WireExpr` carries a SUFFIX, and this
+    /// one does not. `put_declaring` sets it because its key is a literal, and
+    /// copying it here made the decoder read a suffix that was not there — the
+    /// record walked as `unparsed`, measured on this fixture's first run. The
+    /// `MsgPut` body is `put_declaring`'s unchanged, because the `0x40` header
+    /// flag and the encoding group travel together and a body without them
+    /// walks as `unparsed` too.
+    fn multilink_push_by_id(id: u64, payload: &[u8]) -> Vec<u8> {
+        wz_codecs::push::Push {
+            header: wz_codecs::push::Push::default().header,
+            keyexpr: multilink_sender_space(id, None),
+            body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
+                header: wz_codecs::msg_put::MsgPut::default().header | 0x40,
+                encoding: Some(wz_codecs::encoding::Encoding {
+                    packed_id: 0,
+                    schema_len: None,
+                    schema: None,
+                }),
+                payload_len: payload.len() as u64,
+                payload,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+        .encode_to_vec()
     }
 
     /// One UDP datagram to a zenoh port carrying `payload`.
