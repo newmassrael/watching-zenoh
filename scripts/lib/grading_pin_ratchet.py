@@ -1233,7 +1233,17 @@ def _grade_head(reason: str) -> str:
 #: machine, which the guide says to establish per machine rather than inherit --
 #: and the atoms below whose residuals cite `zenoh-ext` are the ones that stay
 #: unmeasurable here, because no `zenoh-ext` source is present at all.
-BUDGET = 19
+#:
+#: R2466 — 19 -> 18: `adminspace-write`, re-measured at the pin with NO VERDICT
+#: CHANGED IN EITHER DIRECTION. Both live residuals stand (the `PushBody::Del`
+#: half is still unrepresentable in wz's typed-intent decoder, and config writes
+#: still bypass the `ConfigValidator` seam), so the grade stays PARTIAL -- and
+#: the premise under its CLOSED clause was re-checked too rather than assumed:
+#: upstream still reads the write permit under the config lock inside
+#: `send_push`, which is what wz's per-PUT permit pull was built to match.
+#: Re-checking a closed clause is the half a re-measurement usually skips, and
+#: it is the half that would notice a repair going stale.
+BUDGET = 18
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
