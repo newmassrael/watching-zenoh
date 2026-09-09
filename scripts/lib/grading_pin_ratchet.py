@@ -1413,7 +1413,20 @@ def _grade_head(reason: str) -> str:
 #: included. That inherited absence had been quoted for twelve rounds, which is
 #: the failure `CLAUDE.md` names in its External references section: an absence
 #: is a fact to ESTABLISH, never to inherit. Every remaining row is measurable.
-BUDGET = 7
+#:
+#: R2484 -- 7 -> 6: `ext-pubsub-sample-miss-detection`, the FIRST row taken from
+#: the five that the false absence had closed. All three residuals stand, and
+#: one gets sharper rather than merely re-anchored: `CongestionControl::Block`
+#: occurs exactly ONCE in upstream's advanced publisher and it is on the
+#: SPORADIC arm, while the periodic arm declares its beacon publisher with none.
+#: The atom's own "STILL unwitnessed: the sporadic arm" and its Block residual
+#: are therefore ONE gap seen twice, not two.
+#: ⛔ AND THE ROUND RE-PROVED R2335'S RULE BY BREAKING IT: the first draft of the
+#: re-declaration QUOTED the rotted `path:line` in order to report that it had
+#: rotted, and the citation census cannot tell a repair from a defect --
+#: line-form went 24 -> 25 and unresolved 8 -> 9 in one edit. Name the rotted
+#: coordinate descriptively and spell only the rooted replacement.
+BUDGET = 6
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
