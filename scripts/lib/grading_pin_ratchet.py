@@ -1218,7 +1218,22 @@ def _grade_head(reason: str) -> str:
 #: returned unit, and `Drop` logs a retraction that did not reach the wire.
 #: Witnessed by a refusing driver, because the happy path cannot grade it --
 #: restoring the `let _ = ...` discard reds that one test and no other.
-BUDGET = 20
+#:
+#: R2465 — 20 -> 19: `adminspace-config-hotreload`, re-measured at the pin with
+#: NO VERDICT CHANGED. All four of its residuals stand (the ConfigDiff engine,
+#: AddVolume/DeleteVolume in the diff set, the ConfigValidator seam, and the
+#: config.subscribe() notification plane), so the grade stays PARTIAL and only
+#: the coordinates moved.
+#:
+#: ⚠ THE THING WORTH RECORDING is not the count but what made the measurement
+#: possible: three of those four claims live in `plugins/`, and this workspace's
+#: own guide says the registry cache never yields that tree because
+#: `zenoh-plugin-storage-manager` and `zenoh-backend-traits` are nobody's cargo
+#: dependency. A checkout at the pin that carries `plugins/` DOES exist on this
+#: machine, which the guide says to establish per machine rather than inherit --
+#: and the atoms below whose residuals cite `zenoh-ext` are the ones that stay
+#: unmeasurable here, because no `zenoh-ext` source is present at all.
+BUDGET = 19
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
