@@ -4206,18 +4206,30 @@ pub fn samples(capture: &[u8], keylog: Option<&[u8]>) -> Result<Samples, Capture
     // twice for one field.
     let file = Reread::of(capture);
     let mut out = Samples::default();
-    for flow in dissection.flows() {
+    // R2459 (open-debt item 704) — ONE id space for the capture, keyed by
+    // SESSION. See `field_lines` for the defect; here it is sharper. A sample's
+    // keyexpr is the name it will be RE-PUBLISHED under, so an id this walk
+    // cannot resolve does not become a mis-keyed sample — it becomes NO sample,
+    // counted in `Samples::unresolved`. On a `max_links: 2` capture that meant
+    // every reference published on the session's second link was silently
+    // absent from the replay plan.
+    let grouping = wz_capture::node::session_grouping(&dissection);
+    let stream_lists = wz_capture::node::stream_list_indices(&dissection);
+    let mut spaces = wz_capture::agg::KeyexprSpaces::new();
+    for (i, flow) in dissection.flows().iter().enumerate() {
         // R311y701 (PF2) — folded in frame order, the same rule the field
-        // listing follows. A sample's keyexpr is the name it will be
-        // RE-PUBLISHED under, so resolving it through a binding that was not
-        // live when it travelled would send a payload to the wrong topic.
-        let mut spaces = wz_capture::agg::KeyexprSpaces::new();
+        // listing follows: resolving through a binding that was not live when
+        // the record travelled would send a payload to the wrong topic.
+        match stream_lists.get(i) {
+            Some(&list) => spaces.enter_flow(grouping.owners(list)),
+            None => spaces = wz_capture::agg::KeyexprSpaces::new(),
+        }
         for frame in &flow.frames {
             spaces.absorb_frame(frame);
             collect_sample(flow, frame, &spaces, file.as_ref(), &mut out);
         }
     }
-    collect_datagram_samples(&dissection, file.as_ref(), &mut out);
+    collect_datagram_samples(&dissection, &grouping, &mut spaces, file.as_ref(), &mut out);
     Ok(out)
 }
 
@@ -4226,7 +4238,13 @@ pub fn samples(capture: &[u8], keylog: Option<&[u8]>) -> Result<Samples, Capture
 /// Scouting datagrams are deliberately NOT walked: a Scout or a Hello is
 /// discovery, carries no key expression and no application payload, and a
 /// replay of one would be a claim about traffic the application never sent.
-fn collect_datagram_samples(dissection: &Dissection, file: Option<&Reread>, out: &mut Samples) {
+fn collect_datagram_samples(
+    dissection: &Dissection,
+    grouping: &wz_capture::node::SessionGrouping,
+    spaces: &mut wz_capture::agg::KeyexprSpaces,
+    file: Option<&Reread>,
+    out: &mut Samples,
+) {
     let flows = dissection.datagram_flows();
     if flows.is_empty() {
         return;
@@ -4237,8 +4255,14 @@ fn collect_datagram_samples(dissection: &Dissection, file: Option<&Reread>, out:
         out.unreachable += flows.iter().map(|f| f.frames.len()).sum::<usize>();
         return;
     };
-    for flow in flows {
-        let mut spaces = wz_capture::agg::KeyexprSpaces::new();
+    // R2459 (item 704) — the datagram half's list indices, and the SAME spaces
+    // the stream half folded into. See `samples`.
+    let datagram_lists = wz_capture::node::datagram_list_indices(dissection);
+    for (i, flow) in flows.iter().enumerate() {
+        match datagram_lists.get(i) {
+            Some(&list) => spaces.enter_flow(grouping.owners(list)),
+            None => *spaces = wz_capture::agg::KeyexprSpaces::new(),
+        }
         for frame in &flow.frames {
             spaces.absorb_frame(frame);
             let Some(packet) = file.packet(frame.stream_offset) else {
@@ -4287,7 +4311,7 @@ fn collect_datagram_samples(dissection: &Dissection, file: Option<&Reread>, out:
                 frame.direction,
                 frame.stream_offset,
                 file.ts_millis(frame.stream_offset),
-                &spaces,
+                spaces,
                 out,
             );
         }
@@ -7515,6 +7539,22 @@ mod tests {
     /// one and the reference on link two, both from the same zid — so a
     /// per-flow table cannot answer it and a session-keyed one can.
     ///
+    /// # WHAT THIS FIXTURE CANNOT GRADE, found by a control probe coming back
+    /// GREEN
+    ///
+    /// Every flow here is a DATAGRAM flow, so the STREAM halves of both walks
+    /// — `field_lines`' own loop and `samples`' — never iterate. A probe that
+    /// restored per-flow spaces in `samples`' stream loop passed this whole
+    /// crate at exit 0, which is not evidence the loop is right: it is evidence
+    /// this capture never reaches it. The two arms that ARE graded here are
+    /// `datagram_field_rows` and `collect_datagram_samples`, each measured by
+    /// its own red.
+    ///
+    /// Recorded rather than repaired, because a second fixture over TCP is a
+    /// different capture and belongs to whoever needs that arm graded. What
+    /// must not happen is a later reader treating this test's green as covering
+    /// the stream path.
+    ///
     /// # Why a `--payload-format` rule that matches NOTHING
     ///
     /// The text surface names a resolved key only through `payload_block`, and
@@ -7701,6 +7741,29 @@ mod tests {
             !text.contains("names its keyexpr by id only"),
             "and nothing may still be reported as id-only, which is the \
              sentence a per-flow table produced for this exact row: {text}"
+        );
+
+        // R2459 — AND THE REPLAY PLAN, off the same capture. This is the
+        // sharper half of item 704: a sample's keyexpr is what it will be
+        // RE-PUBLISHED under, so an unresolvable id is not a mis-keyed sample,
+        // it is NO sample — counted in `unresolved` and absent from the plan.
+        // Per flow, this capture yielded zero emissions and a floor that looked
+        // like an honest limitation.
+        let plan = samples(&capture, None).expect("the capture reads");
+        assert_eq!(
+            plan.items
+                .iter()
+                .map(|s| s.keyexpr.as_str())
+                .collect::<Vec<_>>(),
+            vec!["demo/temp"],
+            "the plan must carry the second link's sample under the literal the \
+             FIRST link declared; unresolved = {}",
+            plan.unresolved
+        );
+        assert_eq!(
+            plan.unresolved, 0,
+            "and nothing may be left unresolved, which is where this sample \
+             went before the grouping reached this walk"
         );
     }
 
