@@ -249,7 +249,7 @@ impl LocatorRetry {
         self.period_increase_factor_bits.map(f64::from_bits)
     }
 
-    /// Does this tail carry NO retry override at all? [`parse_retry`] asks it
+    /// Does this tail carry NO retry override at all? `parse_retry` asks it
     /// once, at parse time, to decide whether the endpoint gets a boxed
     /// override set or `None` — so the common case (a silent tail) stays
     /// allocation-free. A caller holding `Option<Box<LocatorRetry>>` reads the
