@@ -1473,7 +1473,20 @@ def _grade_head(reason: str) -> str:
 #: RecoveryConfig<false>` each returning `RecoveryConfig<true>`) where wz has a
 #: plain struct, and the missing new-source guard has an axis -- GLOBAL vs
 #: PER-SOURCE, so wz can fire a heartbeat GET into the middle of a global pull.
-BUDGET = 3
+#:
+#: R2488 -- 3 -> 2: `ext-pubsub-advanced-subscriber`, and it is the CONTROL for
+#: the three rows before it: EVERY clause stands, none is stale, and each wz
+#: side is a measured zero rather than an assumed one (`timestamped_states`,
+#: `sample_miss_listener`, `detect_publishers`, `background` -- zero occurrences
+#: each). Its `Miss` divergence is a TYPE difference, `EntityGlobalId` behind an
+#: accessor against two public fields, not missing information.
+#: ⭐ WHY IT HAS NO STALE CLAUSE IS THE ORDERING SIGNAL: this reason carries the
+#: most recent careful CORRECTION of the five (R311y826), and that round wrote
+#: down the NEW divergence it introduced as well as what it built. The two rows
+#: that went longest without a correction carried four stale clauses between
+#: them. A densely corrected reason is not cheaper to CLOSE -- it is cheaper to
+#: RE-DECLARE, because less of it is false.
+BUDGET = 2
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
