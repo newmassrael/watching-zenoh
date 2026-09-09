@@ -175,6 +175,15 @@ pub fn fields_json_grouped(
             declarations,
             &mut out,
         );
+        // R2460 (open-debt item 705) — the flow's QUIC sub-lists, folded after
+        // its cleartext one and before the next flow, which is where the census
+        // folds them. This document renders no recovered QUIC row (see
+        // `RenderedLists`), so nothing of THIS flow changes; what changes is
+        // that a `DeclKexpr` carried on a QUIC stream now reaches the lists that
+        // come after it, exactly as it always did on the census plane.
+        if let Some(row) = lists.sub.get(i) {
+            crate::node::absorb_datagram_sublists(flow, row, grouping, spaces);
+        }
     }
     // Said rather than left to be inferred from empty datagram listings: a
     // capture this reader cannot parse a second time yields no datagram rows
@@ -252,6 +261,16 @@ struct RenderedLists {
     stream: alloc::vec::Vec<usize>,
     /// One index per `d.datagram_flows()` row, in order — its cleartext list.
     datagram: alloc::vec::Vec<usize>,
+    /// R2460 (open-debt item 705) — one ROW per `d.datagram_flows()` entry,
+    /// holding EVERY list that flow contributes in
+    /// `DatagramDissection::frame_lists_with_origin` order.
+    ///
+    /// Not a rendering fact and deliberately so: the lists past the first are
+    /// the ones the header above says this document does not render. They are
+    /// here because a list this document cannot SHOW still mints ids the lists
+    /// after it USE, and folding them is what keeps this document's answer to
+    /// "does this id resolve" the same as the census plane's.
+    sub: alloc::vec::Vec<alloc::vec::Vec<usize>>,
 }
 
 impl RenderedLists {
@@ -269,6 +288,7 @@ impl RenderedLists {
         Self {
             stream: crate::node::stream_list_indices(d),
             datagram: crate::node::datagram_list_indices(d),
+            sub: crate::node::datagram_flow_list_indices(d),
         }
     }
 }
@@ -860,6 +880,147 @@ mod tests {
     use crate::Dissection;
 
     use alloc::vec;
+
+    /// R2460 (open-debt item 705) — ACCEPTANCE: THIS DOCUMENT RESOLVES A KEY
+    /// DECLARED ON THE PREVIOUS FLOW'S QUIC SUB-LIST.
+    ///
+    /// # What was wrong
+    ///
+    /// `push_datagram_flow` folded `flow.frames` — the cleartext list — and
+    /// nothing else, so a `DeclKexpr` carried on a recovered QUIC stream went
+    /// into no table at all. `crate::agg`'s census planes walk
+    /// `Dissection::message_lists`, which is EVERY list, and resolved the same
+    /// id from the same bytes. One capture, two answers.
+    ///
+    /// # Why the declaration is on flow ONE and the reference on flow TWO
+    ///
+    /// Within a flow the enumeration folds the cleartext list BEFORE that
+    /// flow's QUIC sub-lists, so a declaration on the stream is legitimately
+    /// not yet in the table when the flow's own rows are read. What diverges is
+    /// the lists that come AFTER, which a one-flow capture cannot show.
+    ///
+    /// # Why the handshake is on the QUIC stream too
+    ///
+    /// `node::SessionGrouping` is keyed by LIST, not by flow — a link is
+    /// recorded only where both ends sent an INIT on that list. With the
+    /// handshake only on the cleartext list, the sub-list would fall to the
+    /// `agg::SpaceOwner::Flow` fallback, its declaration would be private, and
+    /// this test would pass with the fold removed. Fed as a length-prefixed
+    /// pair, which is what a stream carries.
+    #[test]
+    fn a_key_declared_on_a_quic_sublist_reaches_the_next_flow() {
+        use crate::node::tests::{framed_init, init_wire};
+        use wz_session_core::passive::Direction;
+        use wz_session_core::wire_const::T_MID_KEEP_ALIVE;
+
+        const ZID_A: &[u8] = &[0xA1, 0xA1, 0xA1, 0xA1];
+        const ZID_B: &[u8] = &[0xB2, 0xB2, 0xB2, 0xB2];
+        const ID: u64 = 7;
+
+        let declare = wz_codecs::declare::Declare {
+            body: wz_codecs::declare::DeclareVariant::CodecZenohDeclKexpr(
+                wz_codecs::decl_kexpr::DeclKexpr {
+                    header: wz_session_core::wire_const::D_MID_KEXPR
+                        | wz_session_core::wire_const::FLAG_D_N,
+                    id: ID,
+                    keyexpr: crate::datagram_tests::sender_space(0, Some("demo/temp")),
+                    extensions: None,
+                },
+            ),
+            ..Default::default()
+        }
+        .encode_to_vec();
+
+        // A REAL capture file, because this document renders a row only by
+        // RE-READING the bytes a message was framed out of: handed an empty
+        // slice it reports `capture_reread: false` and every flow comes out
+        // with no messages, which would make the claim below unfalsifiable.
+        let packets: Vec<Vec<u8>> = alloc::vec![
+            // FLOW ONE, in the clear: only a keepalive, so its cleartext list
+            // declares nothing and names nobody. Everything this flow
+            // contributes is on the sub-list fed below.
+            udp_packet(
+                [10, 0, 0, 1],
+                43210,
+                [10, 0, 0, 2],
+                7447,
+                &[T_MID_KEEP_ALIVE]
+            ),
+            // FLOW TWO, and it comes after: the same session's other link,
+            // whose handshake and whose REFERENCE are both in the clear.
+            udp_packet([10, 0, 0, 3], 43211, [10, 0, 0, 2], 7447, &init_wire(ZID_A)),
+            udp_packet([10, 0, 0, 2], 7447, [10, 0, 0, 3], 43211, &init_wire(ZID_B)),
+            udp_packet(
+                [10, 0, 0, 3],
+                43211,
+                [10, 0, 0, 2],
+                7447,
+                &crate::datagram_tests::frame_carrying(&crate::datagram_tests::push(
+                    crate::datagram_tests::sender_space(ID, None),
+                    &[7u8; 5],
+                )),
+            ),
+        ];
+        let refs: Vec<(u32, u64, &[u8])> = packets
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (0u32, 1_000_000 + i as u64 * 100, p.as_slice()))
+            .collect();
+        let capture = crate::pcapng::write(&[(LINKTYPE_ETHERNET, 6)], &refs);
+        let mut d = Dissection::from_capture(&capture).expect("the capture reads");
+
+        // THE SUB-LIST. Fed rather than pushed because this crate carries no
+        // cipher: what a caller hands in is the plaintext it decrypted. Both
+        // directions on ONE stream id, which is what records the link at THIS
+        // list's index and puts the declaration in the session's table.
+        let first = d.datagram_flows()[0].flow;
+        let mut opening = framed_init(ZID_A);
+        opening.extend_from_slice(&{
+            let framed = crate::datagram_tests::frame_carrying(&declare);
+            let mut unit = (framed.len() as u16).to_le_bytes().to_vec();
+            unit.extend_from_slice(&framed);
+            unit
+        });
+        d.feed_quic_stream(first, Direction::A, 0, false, &opening);
+        d.feed_quic_stream(first, Direction::B, 0, false, &framed_init(ZID_B));
+        d.finish();
+
+        // THE FIXTURE'S OWN ANCHOR: one session over two links, one of which is
+        // the QUIC sub-list. Without it the declaration is private and the
+        // claim below could not fail.
+        let grouping = crate::node::session_grouping(&d);
+        let inventory: Vec<(usize, String, usize)> = d
+            .message_lists_with_origin()
+            .enumerate()
+            .map(|(i, (_, origin, list))| {
+                (
+                    i,
+                    alloc::format!("{origin:?}"),
+                    wz_session_core::passive_messages::MessageList::as_slice(list).len(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            (grouping.sessions(), grouping.grouped_lists()),
+            (1, 2),
+            "one session, and its two links are the QUIC SUB-LIST of flow one \
+             and the cleartext list of flow two.\n  lists: {inventory:?}\n  \
+             links: {:?}",
+            crate::node::nodes(&d).links()
+        );
+
+        let json = fields_json(&d, &capture, None, None);
+        assert!(
+            json.contains("\"keyexpr\":\"demo/temp\""),
+            "the reference on flow two must resolve against the declaration \
+             carried on flow one's QUIC stream: {json}"
+        );
+        assert!(
+            !json.contains("\"keyexpr_cause\":\"no_declaration\""),
+            "and nothing may still report that the session declared nothing, \
+             which is the cause a walk of `flow.frames` alone produced: {json}"
+        );
+    }
 
     /// R2458 (open-debt item 703) — a capture whose datagram table carries QUIC
     /// SUB-LISTS, so the enumeration position of a row and its position in its

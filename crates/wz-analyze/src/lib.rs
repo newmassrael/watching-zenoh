@@ -3703,6 +3703,12 @@ fn datagram_field_rows(
     // derivation the stream half used. See `node::datagram_list_indices`: this
     // names the flow's CLEARTEXT list, which is the one this walk renders.
     let datagram_lists = wz_capture::node::datagram_list_indices(dissection);
+    // R2460 (open-debt item 705) — and every OTHER list each flow holds, which
+    // is where this listing's sharpest face was: it renders a `Declare`
+    // recovered from a QUIC stream (the `decrypted.rows` loop below) while
+    // never folding that stream's declarations, so one screen could print a
+    // binding and leave a later reference to it unresolved.
+    let datagram_sublists = wz_capture::node::datagram_flow_list_indices(dissection);
     for (i, flow) in dissection.datagram_flows().iter().enumerate() {
         let mut out = String::new();
         let mut notes: Vec<FieldNote> = Vec::new();
@@ -3809,6 +3815,15 @@ fn datagram_field_rows(
                     spaces,
                 },
             );
+        }
+        // R2460 (open-debt item 705) — the QUIC sub-lists, folded here: after
+        // the cleartext list's ordered pass and BEFORE the two producers below,
+        // which is both the census's order and what makes the `Declare` this
+        // listing prints from a QUIC stream reach the rows it prints after it.
+        // The helper restores this flow's cleartext owners, so the two loops
+        // below resolve against the space they always did.
+        if let Some(row) = datagram_sublists.get(i) {
+            wz_capture::node::absorb_datagram_sublists(flow, row, grouping, spaces);
         }
         // R311y679 — the SCOUTING list, which is where a discovery capture's
         // messages actually are. `frames` is the transport-MID space and a
@@ -4258,6 +4273,12 @@ fn collect_datagram_samples(
     // R2459 (item 704) — the datagram half's list indices, and the SAME spaces
     // the stream half folded into. See `samples`.
     let datagram_lists = wz_capture::node::datagram_list_indices(dissection);
+    // R2460 (open-debt item 705) — and the flow's other lists. Sharper here
+    // than in the listing: an id this walk cannot resolve is not a mis-keyed
+    // sample but NO sample, so a `DeclKexpr` carried on a QUIC stream used to
+    // drop every later record that named its alias straight into
+    // `Samples::unresolved`.
+    let datagram_sublists = wz_capture::node::datagram_flow_list_indices(dissection);
     for (i, flow) in flows.iter().enumerate() {
         match datagram_lists.get(i) {
             Some(&list) => spaces.enter_flow(grouping.owners(list)),
@@ -4314,6 +4335,11 @@ fn collect_datagram_samples(
                 spaces,
                 out,
             );
+        }
+        // R2460 (open-debt item 705) — this flow's QUIC sub-lists, on the
+        // census's schedule: after its cleartext pass, before the next flow.
+        if let Some(row) = datagram_sublists.get(i) {
+            wz_capture::node::absorb_datagram_sublists(flow, row, grouping, spaces);
         }
     }
 }
@@ -6115,7 +6141,7 @@ mod tests {
 
     /// A transport `Frame` carrying one network record, as
     /// `wz-capture`'s own datagram fixtures build one.
-    fn frame_carrying(record: &[u8]) -> Vec<u8> {
+    pub(crate) fn frame_carrying(record: &[u8]) -> Vec<u8> {
         let mut w = vec![wz_session_core::wire_const::T_MID_FRAME, 0x00];
         w.extend_from_slice(record);
         w
@@ -7830,7 +7856,11 @@ mod tests {
     /// A datagram carries no length prefix, so this is the transport message
     /// itself. Module scope because the two item-704 fixtures both need a
     /// handshake, and a second copy of a wire layout is the one that drifts.
-    fn multilink_init(zid: &[u8]) -> Vec<u8> {
+    ///
+    /// R2460 (open-debt item 705) — `pub(crate)` on that same argument: the
+    /// item-705 fixture needs this handshake INSIDE a QUIC stream, and it lives
+    /// in `quic_pass_tests` because the QUIC crypto fixture does.
+    pub(crate) fn multilink_init(zid: &[u8]) -> Vec<u8> {
         let mut wire = vec![
             wz_session_core::wire_const::T_MID_INIT,
             0x09,
@@ -7841,7 +7871,10 @@ mod tests {
     }
 
     /// A `WireExpr` in the SENDER's space (`M = 1`).
-    fn multilink_sender_space(id: u64, suffix: Option<&str>) -> wz_codecs::wireexpr::Wireexpr<'_> {
+    pub(crate) fn multilink_sender_space(
+        id: u64,
+        suffix: Option<&str>,
+    ) -> wz_codecs::wireexpr::Wireexpr<'_> {
         wz_codecs::wireexpr::Wireexpr {
             body: wz_codecs::wireexpr::WireexprVariant::WireexprLocal(
                 wz_codecs::wireexpr_local::WireexprLocal {
@@ -7862,7 +7895,7 @@ mod tests {
     /// `MsgPut` body is `put_declaring`'s unchanged, because the `0x40` header
     /// flag and the encoding group travel together and a body without them
     /// walks as `unparsed` too.
-    fn multilink_push_by_id(id: u64, payload: &[u8]) -> Vec<u8> {
+    pub(crate) fn multilink_push_by_id(id: u64, payload: &[u8]) -> Vec<u8> {
         wz_codecs::push::Push {
             header: wz_codecs::push::Push::default().header,
             keyexpr: multilink_sender_space(id, None),
@@ -9250,10 +9283,21 @@ mod quic_pass_tests {
     /// One UDP datagram of a QUIC connection, in the direction `from_client`
     /// says. Ethernet/IPv4, ports 51000 and 4433.
     fn udp(from_client: bool, payload: &[u8]) -> Vec<u8> {
+        udp_between(2, (51000, 4433), from_client, payload)
+    }
+
+    /// R2460 (open-debt item 705) — the same framing on a 5-tuple the caller
+    /// names, so the QUIC connection above and a second datagram flow beside it
+    /// come out of ONE Ethernet/IPv4/UDP layout. The item's fixture needs both,
+    /// and a second copy of a wire layout is the one that drifts.
+    ///
+    /// `from_client` is the `10.0.0.1` side either way, which is what lets a
+    /// caller put the same zid on that side of two different flows.
+    fn udp_between(peer: u8, ports: (u16, u16), from_client: bool, payload: &[u8]) -> Vec<u8> {
         let (src, dst) = if from_client {
-            (51000u16, 4433u16)
+            (ports.0, ports.1)
         } else {
-            (4433u16, 51000u16)
+            (ports.1, ports.0)
         };
         let mut udp = Vec::new();
         udp.extend_from_slice(&src.to_be_bytes());
@@ -9263,9 +9307,9 @@ mod quic_pass_tests {
         udp.extend_from_slice(payload);
 
         let (from, to) = if from_client {
-            ([10u8, 0, 0, 1], [10u8, 0, 0, 2])
+            ([10u8, 0, 0, 1], [10u8, 0, 0, peer])
         } else {
-            ([10u8, 0, 0, 2], [10u8, 0, 0, 1])
+            ([10u8, 0, 0, peer], [10u8, 0, 0, 1])
         };
         let mut ip = vec![0x45u8, 0];
         ip.extend_from_slice(&((20 + udp.len()) as u16).to_be_bytes());
@@ -9399,6 +9443,193 @@ mod quic_pass_tests {
             .collect();
         let capture = wz_capture::pcapng::write(&[(wz_capture::link::LINKTYPE_ETHERNET, 6)], &refs);
         (capture, log_text(random, 1), 3)
+    }
+
+    /// R2460 (open-debt item 705) — ACCEPTANCE: A KEY DECLARED ON A QUIC
+    /// SUB-LIST REACHES THE LISTS AFTER IT.
+    ///
+    /// # What was wrong
+    ///
+    /// The three walks keyed on `Dissection::datagram_flows` absorbed
+    /// `flow.frames` — the CLEARTEXT list — and nothing else. A datagram flow
+    /// holds one list per recovered QUIC stream plus one for its RFC 9221
+    /// datagrams, and those carry `DeclKexpr` too. The census planes never had
+    /// the defect because they walk `Dissection::message_lists`, which is every
+    /// list. So one capture answered "does this id resolve" two ways, and the
+    /// field document, the field listing and the replay plan all held the
+    /// wrong one.
+    ///
+    /// # Why TWO flows, and why the second one is where the claim is
+    ///
+    /// Inside one flow the enumeration folds the cleartext list BEFORE that
+    /// flow's QUIC sub-lists, so a declaration on the stream is legitimately
+    /// not in the table yet when the flow's own cleartext rows are read. What
+    /// diverges is everything AFTER it. A one-flow capture cannot show this,
+    /// which is why the reference below is on a second flow.
+    ///
+    /// # Why the handshake is INSIDE the QUIC stream
+    ///
+    /// `SessionGrouping` is keyed by LIST — see `node::ObservedLink::list` —
+    /// and a link is recorded only where both ends sent an INIT on that list.
+    /// Put the handshake only on the cleartext list and the QUIC sub-list falls
+    /// to the `agg::SpaceOwner::Flow` fallback, where its declarations are
+    /// private: the fix would then change nothing observable and this test
+    /// would pass identically before and after it. That is the vacuous shape,
+    /// and it is avoided by putting the INIT pair on the stream itself.
+    #[test]
+    fn a_key_declared_on_a_quic_stream_reaches_the_next_flow() {
+        use super::tests::{
+            frame_carrying, multilink_init, multilink_push_by_id, multilink_sender_space,
+        };
+
+        const ZID_A: &[u8] = &[0xA1, 0xA1, 0xA1, 0xA1];
+        const ZID_B: &[u8] = &[0xB2, 0xB2, 0xB2, 0xB2];
+        const ID: u64 = 7;
+        const PORTS: (u16, u16) = (50000, 7447);
+
+        /// A framed unit on a QUIC stream: `u16` little-endian length, then the
+        /// transport message. The shape `zenoh_over_quic_capture` builds.
+        fn unit(message: &[u8]) -> Vec<u8> {
+            let mut out = (message.len() as u16).to_le_bytes().to_vec();
+            out.extend_from_slice(message);
+            out
+        }
+
+        fn declare_kexpr(id: u64, suffix: &str) -> Vec<u8> {
+            wz_codecs::declare::Declare {
+                body: wz_codecs::declare::DeclareVariant::CodecZenohDeclKexpr(
+                    wz_codecs::decl_kexpr::DeclKexpr {
+                        header: wz_session_core::wire_const::D_MID_KEXPR
+                            | wz_session_core::wire_const::FLAG_D_N,
+                        id,
+                        keyexpr: multilink_sender_space(0, Some(suffix)),
+                        extensions: None,
+                    },
+                ),
+                ..Default::default()
+            }
+            .encode_to_vec()
+        }
+
+        let random: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(9).wrapping_add(4));
+        let (client_initial, server_initial) = QuicKeys::initial(QuicVersion::V1, &ICID);
+
+        let first = crypto_frame(0, &client_hello(&random));
+        let (h, o) = long_header(0, &ICID, &[], first.len(), 0);
+        let client_initial_packet = protect(&client_initial, 0, &h, o, &first);
+
+        let reply = crypto_frame(0, b"\x02\x00\x00\x04....");
+        let (h, o) = long_header(0, &[], &SCID, reply.len(), 0);
+        let server_initial_packet = protect(&server_initial, 0, &h, o, &reply);
+
+        // The client's stream: its half of the handshake, then THE DECLARATION.
+        // Both are on the sub-list, which is the whole point.
+        let mut client_stream = unit(&multilink_init(ZID_A));
+        client_stream.extend_from_slice(&unit(&frame_carrying(&declare_kexpr(ID, "demo/temp"))));
+        let client_keys = QuicKeys::derive(Suite::Aes128GcmSha256, &application_secret(false, 0));
+        let payload = stream_frame(0, 0, &client_stream);
+        let (h, o) = short_header(&SCID, 1);
+        let client_one_rtt = protect(&client_keys, 1, &h, o, &payload);
+
+        // The server's half, on the SAME stream id: one bidirectional stream is
+        // one list, and both ends naming themselves in it is what records the
+        // link at that list's index.
+        let server_keys = QuicKeys::derive(Suite::Aes128GcmSha256, &application_secret(true, 0));
+        let payload = stream_frame(0, 0, &unit(&multilink_init(ZID_B)));
+        let (h, o) = short_header(&[], 1);
+        let server_one_rtt = protect(&server_keys, 1, &h, o, &payload);
+
+        let packets = [
+            udp(true, &client_initial_packet),
+            udp(false, &server_initial_packet),
+            udp(true, &client_one_rtt),
+            udp(false, &server_one_rtt),
+            // THE SECOND FLOW, and it comes after: one more link of the SAME
+            // session, in the clear. `10.0.0.1` is ZID_A on both flows, so the
+            // reference below is minted by the node that declared.
+            udp_between(3, PORTS, true, &multilink_init(ZID_A)),
+            udp_between(3, PORTS, false, &multilink_init(ZID_B)),
+            // THE REFERENCE. Named by id alone, declared only on the QUIC
+            // stream of the flow before it.
+            udp_between(
+                3,
+                PORTS,
+                true,
+                &frame_carrying(&multilink_push_by_id(ID, &[7u8; 5])),
+            ),
+        ];
+        let refs: Vec<(u32, u64, &[u8])> = packets
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (0u32, 1_000_000 + i as u64 * 100, p.as_slice()))
+            .collect();
+        let capture = wz_capture::pcapng::write(&[(wz_capture::link::LINKTYPE_ETHERNET, 6)], &refs);
+        let keylog = log_text(&random, 1);
+
+        // THE FIXTURE'S OWN ANCHORS. Both are about the QUIC half existing at
+        // all: a capture the recogniser refused, or one whose stream nobody
+        // framed, has no sub-list to carry the declaration, and every claim
+        // below would then pass over a fixture that cannot state the item.
+        //
+        // The QUIC pass runs inside `analyze_request` and NOT inside
+        // `Dissection::decrypt_with`, so a dissection built here by hand would
+        // carry no `QuicStream` list — measured, and it is why this test asks
+        // the reader rather than assembling its own.
+        let (rendered, _) = analyze(&capture, Some(keylog.as_bytes())).expect("the capture reads");
+        assert!(
+            rendered.contains("4 of 4 packet(s) opened"),
+            "the QUIC half must be recognised and every packet opened: \
+             {rendered}"
+        );
+        assert!(
+            rendered.contains("messages decoded: 6"),
+            "three on the QUIC stream (the two INITs and the declaration) and \
+             three on the cleartext flow -- a count below this means the \
+             sub-list carried less than the item needs: {rendered}"
+        );
+
+        // THE WALK — the human field LISTING. A rule that matches nothing, for
+        // `the_field_listing_resolves_a_key_declared_on_the_sessions_other_link`'s
+        // reason: it makes a resolved key print its literal and an unresolved
+        // one say so, over the same row.
+        let rules = [String::from("nomatch/**=json")];
+        let text = analyze_request(&Request {
+            capture: &capture,
+            keylog: Some(keylog.as_bytes()),
+            format: Format::Text,
+            per_flow: true,
+            per_message: true,
+            messages_per_flow: None,
+            quic_ports: &[],
+            quic_cid_len: None,
+            payload_rules: &rules,
+            payload_field_names: &[],
+            serial_linktypes: &[],
+            census: Census::default(),
+            per_field: true,
+            bounded: false,
+            health: false,
+            select: None,
+            csv: None,
+        })
+        .expect("the capture reads")
+        .0;
+        assert!(
+            text.contains("no --payload-format rule covers `demo/temp`"),
+            "the listing must print the LITERAL it resolved to: {text}"
+        );
+        assert!(
+            !text.contains("names its keyexpr by id only"),
+            "and nothing may still be reported as id-only: {text}"
+        );
+
+        // THE REPLAY PLAN is deliberately NOT asserted here, and the reason is
+        // a finding rather than an omission: `samples` runs `decrypt_with` and
+        // never the QUIC pass, so its dissection holds no `QuicStream` list for
+        // this walk to miss. Its call site takes the same shared fold as the
+        // two above, but nothing can exercise it until that entry point opens
+        // QUIC — filed as its own item rather than smuggled in here, because a
+        // test that cannot fail is what this fixture was built to avoid.
     }
 
     /// R311y709 (Y2) — the same connection, captured AFTER its handshake.

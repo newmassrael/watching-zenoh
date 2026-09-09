@@ -888,6 +888,106 @@ pub fn datagram_list_indices(dissection: &crate::Dissection) -> alloc::vec::Vec<
     })
 }
 
+/// R2460 (open-debt item 705) — the `Dissection::message_lists` index of EVERY
+/// list a datagram flow holds, one row per `Dissection::datagram_flows` entry
+/// and in `DatagramDissection::frame_lists_with_origin` order.
+///
+/// # Why the flow's whole span and not only its first list
+///
+/// [`datagram_list_indices`] names the CLEARTEXT list, which is the one the two
+/// field documents render. The declarations are not all there: a QUIC sub-list
+/// carries `DeclKexpr` too, and the three production walks that absorbed
+/// `flow.frames` alone left those out of every per-flow table. The census
+/// planes never had the defect because they walk
+/// `Dissection::message_lists` — every list, one `KeyexprSpaces` — so the two
+/// renderings of one capture disagreed about whether an id resolves.
+///
+/// # Why an index per list rather than the flow's one owner reused
+///
+/// [`SessionGrouping`] is keyed by LIST — see [`ObservedLink::list`], and
+/// `by_list` above — because a link is recorded only where both ends sent an
+/// INIT on that list. A QUIC sub-list whose stream carried the handshake gets
+/// the SAME `agg::SpaceOwner::Session` token as its flow's cleartext list, and
+/// one that did not gets the `agg::SpaceOwner::Flow` fallback. Reusing the
+/// cleartext owner for every sub-list would resolve references the census
+/// leaves unresolved — more generous than the plane this is supposed to agree
+/// with, which is the same class of defect pointing the other way.
+///
+/// DERIVED, not counted: the enumeration emits a flow's lists contiguously and
+/// `MessageListOrigin::Datagram` is the first of each run, so a row opens at
+/// that origin and the QUIC origins join the row already open. `flows.len() + i`
+/// is what this replaces, and it is right only for a capture holding no QUIC
+/// flow.
+pub fn datagram_flow_list_indices(
+    dissection: &crate::Dissection,
+) -> alloc::vec::Vec<alloc::vec::Vec<usize>> {
+    let mut rows: alloc::vec::Vec<alloc::vec::Vec<usize>> = alloc::vec::Vec::new();
+    for (list, (_, origin, _)) in dissection.message_lists_with_origin().enumerate() {
+        match origin {
+            crate::MessageListOrigin::Datagram => rows.push(alloc::vec![list]),
+            crate::MessageListOrigin::QuicStream(_) | crate::MessageListOrigin::QuicDatagram => {
+                // Cannot precede its own `Datagram` — the enumeration emits the
+                // cleartext list first for every flow. Skipped rather than
+                // panicking if that ever stops holding, because a renderer is
+                // the wrong place to learn it: the zip below is what would then
+                // be short, and it is checked there.
+                if let Some(row) = rows.last_mut() {
+                    row.push(list);
+                }
+            }
+            crate::MessageListOrigin::Stream | crate::MessageListOrigin::Serial => {}
+        }
+    }
+    rows
+}
+
+/// R2460 (open-debt item 705) — fold a datagram flow's NON-cleartext lists into
+/// `spaces`, each under its own owners.
+///
+/// # The division of labour, and why the cleartext list is not here
+///
+/// The cleartext list is folded by the caller, one frame at a time, INTERLEAVED
+/// with rendering that list's rows: an id has to resolve through the binding
+/// that was live when the record travelled, or a replay re-publishes a payload
+/// under a name the sender never used. The sub-lists are folded whole, which is
+/// the generous form, and `wz-analyze`'s stream half states the reason for the
+/// identical decision about its own sink rows: a recovered row does not travel
+/// with the frame that produced it, so there is no point in the sequence to
+/// fold up to.
+///
+/// # The order is the census's, which is the whole point
+///
+/// `DatagramDissection::frame_lists_with_origin` runs Datagram → QuicStream* →
+/// QuicDatagram, and `agg::aggregate_grouped` sees those same lists in that
+/// same order because both project `Dissection::message_lists`. Folding here,
+/// after the caller's cleartext pass and before the next flow, puts this walk
+/// on the census's schedule — so the two renderings of one capture answer the
+/// same way about whether an id resolves, which is the disagreement item 705
+/// names.
+///
+/// Ends by re-entering the cleartext list's owners, so a caller that renders
+/// more of this flow afterwards is in the state it was in. The only effect on
+/// such a caller is the absorption.
+pub fn absorb_datagram_sublists(
+    flow: &crate::DatagramDissection,
+    lists: &[usize],
+    grouping: &SessionGrouping,
+    spaces: &mut crate::agg::KeyexprSpaces,
+) {
+    let mut pairs = flow.frame_lists_with_origin().zip(lists.iter());
+    // The cleartext list, dropped: see the division of labour above.
+    let _ = pairs.next();
+    for ((_, messages), &list) in pairs {
+        spaces.enter_flow(grouping.owners(list));
+        for frame in messages.as_slice() {
+            spaces.absorb_frame(frame);
+        }
+    }
+    if let Some(&cleartext) = lists.first() {
+        spaces.enter_flow(grouping.owners(cleartext));
+    }
+}
+
 /// The one walk both doors above project, so a producer added to
 /// `Dissection::message_lists_with_origin` moves both at once.
 fn list_indices(
