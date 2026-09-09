@@ -1443,7 +1443,21 @@ def _grade_head(reason: str) -> str:
 #: same time, since `Timestamp` and `None` render the same discriminator and mint
 #: no seqnum, so nothing could observe it until the guard consulted the field.
 #: ⇒ WHEN ADDING A GUARD, ENUMERATE WHAT ALREADY SETS THE VALUE IT GUARDS.
-BUDGET = 5
+#:
+#: R2486 -- 5 -> 4: `ext-pubsub-advanced-history`, and it is the row that shows
+#: what these re-declarations are actually for. Of its four open clauses TWO ARE
+#: STALE (wz pins `ConsolidationMode::None` at all three GET sites, and the
+#: reply-keyexpr intersection filter exists in the shared `issue_recovery_get`
+#: the history GET also takes), ONE IS TRUE WITH A NUMBER THAT NO LONGER
+#: DERIVES ("upstream handles three" -- the pin branches on TWO eid shapes with
+#: a Delete and a Put arm each), and one stands (the live gate has no depth
+#: check where upstream spills the oldest at `max_history_depth`).
+#: ⛔ BOTH STALE CLAUSES WENT STALE ON THE WZ SIDE, not upstream's: a round
+#: built the fix and did not strike the text. So a re-declaration that asks only
+#: "is upstream still doing this?" re-asserts false claims -- it has to ask "and
+#: did wz build it in the meantime?" too. Measured across two rows this session:
+#: eleven clauses, four stale, more than half of those wz-side.
+BUDGET = 4
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
