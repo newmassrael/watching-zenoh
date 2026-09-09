@@ -496,6 +496,7 @@ mod reconnect_locator_tests {
             host: "example.org".into(),
             port: 7447,
             iface: None,
+            retry: crate::locator::LocatorRetry::default(),
         };
         let reconnectable =
             ReconnectLocator::try_from(any.clone()).expect("named is reconnectable");
@@ -506,6 +507,7 @@ mod reconnect_locator_tests {
                 host: "example.org".into(),
                 port: 7447,
                 iface: None,
+                retry: crate::locator::LocatorRetry::default(),
             }
         );
         assert_eq!(AnyLocator::from(reconnectable), any);

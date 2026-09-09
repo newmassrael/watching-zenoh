@@ -338,10 +338,13 @@ const LOCATOR_MCAST_JOIN_KEY: &str = "join";
 ///
 /// ⚠ THE FOURTH KEY UPSTREAM READS THERE, `exit_on_failure`, IS DELIBERATELY
 /// NOT PARSED HERE, and the reason is that parsing it would be worse than
-/// leaving it: its consumer is the STARTUP-phase seam
-/// (`crate::startup_phase`), which this locator never reaches, so a parsed
-/// value would sit unread while the tail LOOKED honoured. It stays the named
-/// remainder of this residual rather than a field with no reader.
+/// leaving it: its consumer is the STARTUP-phase seam, which lives in
+/// `wz-runtime-tokio`'s `startup_phase` module and which this locator never
+/// reaches, so a parsed value would sit unread while the tail LOOKED honoured.
+/// It stays the named remainder of this residual rather than a field with no
+/// reader. (Named as a CRATE rather than written `crate::startup_phase`: this
+/// crate has no such module, and a code span is not resolved by rustdoc, so
+/// the wrong path would have read as true and failed nothing.)
 const LOCATOR_RETRY_PERIOD_INIT_MS_KEY: &str = "retry_period_init_ms";
 const LOCATOR_RETRY_PERIOD_MAX_MS_KEY: &str = "retry_period_max_ms";
 const LOCATOR_RETRY_PERIOD_INCREASE_FACTOR_KEY: &str = "retry_period_increase_factor";
