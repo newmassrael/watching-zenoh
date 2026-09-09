@@ -1377,7 +1377,24 @@ def _grade_head(reason: str) -> str:
 #: already states: the nonce is per BUNDLE, not per HANDSHAKE. A re-declaration
 #: that had trusted the early block would have re-asserted a false claim at the
 #: pin and called it measured.
-BUDGET = 9
+#:
+#: R2482 -- 9 -> 8: `router-connect-reconcile`, and this is the FIRST row whose
+#: re-measurement runs the other way. The clause that was still live read that
+#: upstream "re-enters `update_peers` on config change"; at the pin that name has
+#: ZERO occurrences in the whole checkout while the file survives, so it is an
+#: ABSENT claim rather than a moved coordinate. The replacement is DERIVED and
+#: not sampled: the config's change-observation API is one method (`subscribe`),
+#: so "everything that can react to a config change" is enumerable, and the pin
+#: holds exactly ONE caller of it -- the plugin loader, which discards every key
+#: not starting with `plugins`. So upstream at this pin has no connect-list
+#: reconcile on config change at all, and wz's `connect-add` write is AHEAD of it
+#: on that axis. The residual is withdrawn as written; the atom stays PARTIAL on
+#: the clauses that are about wz rather than about the comparison.
+#: ⚠ The rot taxonomy gains a FIFTH form with this row: not a moved range, a dead
+#: file, a valid line over new content, or a false clause beside its own repair,
+#: but a clause that is false because UPSTREAM SHRANK. Re-measuring must ask the
+#: direction, not only whether the coordinate still resolves.
+BUDGET = 8
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
