@@ -841,6 +841,67 @@ pub fn session_grouping(dissection: &crate::Dissection) -> SessionGrouping {
     SessionGrouping::of(&nodes(dissection))
 }
 
+/// R2459 (open-debt item 704) — the `Dissection::message_lists` index of each
+/// STREAM flow's list, in `Dissection::flows` order.
+///
+/// # Why a door, and why HERE
+///
+/// [`SessionGrouping::owners`] is keyed by the position in
+/// `Dissection::message_lists`, which the census planes get for free because
+/// they ARE that walk. A renderer keyed on the two FLOW TABLES is not, and it
+/// cannot compute the position either: a datagram flow contributes one list
+/// PLUS one per QUIC stream PLUS one for its RFC 9221 datagrams, so
+/// `flows.len() + i` is right only for a capture that holds no QUIC flow. Two
+/// such renderers exist — `crate::fields_json` and `wz-analyze`'s field
+/// listing — and a second copy of this derivation is exactly the drift
+/// `Dissection::message_lists` was made to end.
+///
+/// It lives beside the grouping rather than on `Dissection` because it answers
+/// that type's OWN question, inverted: `owners` maps a list index to a pair of
+/// spaces, and this maps a row of a flow table to its list index. One module
+/// owns the key space both directions.
+///
+/// DERIVED by reading the ORIGINS rather than by counting: every list whose
+/// origin is `MessageListOrigin::Stream` is one row of `flows()` in order,
+/// because that walk is the only producer of that origin.
+pub fn stream_list_indices(dissection: &crate::Dissection) -> alloc::vec::Vec<usize> {
+    list_indices(dissection, |origin| {
+        matches!(origin, crate::MessageListOrigin::Stream)
+    })
+}
+
+/// R2459 (open-debt item 704) — the `Dissection::message_lists` index of each
+/// DATAGRAM flow's CLEARTEXT list, in `Dissection::datagram_flows` order.
+///
+/// [`stream_list_indices`] carries the argument for both. The cleartext list is
+/// `MessageListOrigin::Datagram`, whose only producer is the first entry of
+/// `DatagramDissection::frame_lists_with_origin`, so the k-th such list is the
+/// k-th row of that table.
+///
+/// ⚠ This names the flow's FIRST list, not its only one. A caller that wants
+/// the flow's whole id space has to fold over
+/// `DatagramDissection::frame_lists`: the QUIC sub-lists carry declarations
+/// too, and open-debt item 705 is the three production walks that do not.
+pub fn datagram_list_indices(dissection: &crate::Dissection) -> alloc::vec::Vec<usize> {
+    list_indices(dissection, |origin| {
+        matches!(origin, crate::MessageListOrigin::Datagram)
+    })
+}
+
+/// The one walk both doors above project, so a producer added to
+/// `Dissection::message_lists_with_origin` moves both at once.
+fn list_indices(
+    dissection: &crate::Dissection,
+    want: impl Fn(crate::MessageListOrigin) -> bool,
+) -> alloc::vec::Vec<usize> {
+    dissection
+        .message_lists_with_origin()
+        .enumerate()
+        .filter(|(_, (_, origin, _))| want(*origin))
+        .map(|(list, _)| list)
+        .collect()
+}
+
 // R311y851 — `pub(crate)`, on the precedent `exchange::tests` set and with the
 // same trade named: the census EXPORT's end-to-end test needs a capture in
 // which two nodes named themselves, and the INIT builder for one lives here.

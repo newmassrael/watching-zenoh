@@ -255,19 +255,21 @@ struct RenderedLists {
 }
 
 impl RenderedLists {
+    /// R2459 (open-debt item 704) — the two doors on `Dissection`, not a walk
+    /// of its own.
+    ///
+    /// The origin match lived here until `wz-analyze`'s listing needed the same
+    /// answer. Leaving a copy behind would have made this the second
+    /// enumeration of one fact — and the two would not even have agreed for
+    /// long, because that listing RENDERS the recovered QUIC rows this document
+    /// cannot. What is shared is the INDEX; which origins a document renders
+    /// stays each document's own decision, and this type is where this
+    /// document's is written down.
     fn of(d: &crate::Dissection) -> Self {
-        let mut stream = Vec::new();
-        let mut datagram = Vec::new();
-        for (list, (_, origin, _)) in d.message_lists_with_origin().enumerate() {
-            match origin {
-                crate::MessageListOrigin::Stream => stream.push(list),
-                crate::MessageListOrigin::Datagram => datagram.push(list),
-                crate::MessageListOrigin::QuicStream(_)
-                | crate::MessageListOrigin::QuicDatagram
-                | crate::MessageListOrigin::Serial => {}
-            }
+        Self {
+            stream: crate::node::stream_list_indices(d),
+            datagram: crate::node::datagram_list_indices(d),
         }
-        Self { stream, datagram }
     }
 }
 
