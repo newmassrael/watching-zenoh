@@ -1358,7 +1358,24 @@ def _grade_head(reason: str) -> str:
 #: what" must enumerate four. That is the shape of upstream drift this ratchet
 #: cannot see: not a claim going false, but the set a claim quantifies over
 #: growing underneath it.
-BUDGET = 10
+#:
+#: R2480 — 10 -> 9: `session-unicast-accept`, and this is the first row on this
+#: track where a re-measurement found a residual clause STALE rather than a
+#: citation. Its four still-open clauses stand: upstream draws a cookie nonce
+#: per HANDSHAKE and rejects a mismatch, carries the negotiated ext state in
+#: the cookie, derives initial_sn from the zid pair, and enforces max_sessions
+#: against a live count.
+#:
+#: ⚠ BUT ITS EARLY BLOCK CLAIMS THE COOKIE MAC IS DETERMINISTIC OVER
+#: (key, peer_zid), AND THAT IS FALSE HERE: the MAC takes a nonce, and
+#: R311y813 / R311y819 install a per-bundle OS-entropy one. The rounds that
+#: fixed it recorded the repair FURTHER DOWN THE SAME REASON without striking
+#: the clause -- open-debt item 47's shape, found inside a single entry for the
+#: second time this session. The surviving defect is the narrower one the tail
+#: already states: the nonce is per BUNDLE, not per HANDSHAKE. A re-declaration
+#: that had trusted the early block would have re-asserted a false claim at the
+#: pin and called it measured.
+BUDGET = 9
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
