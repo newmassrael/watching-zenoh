@@ -1457,7 +1457,23 @@ def _grade_head(reason: str) -> str:
 #: "is upstream still doing this?" re-asserts false claims -- it has to ask "and
 #: did wz build it in the meantime?" too. Measured across two rows this session:
 #: eleven clauses, four stale, more than half of those wz-side.
-BUDGET = 4
+#:
+#: R2487 -- 4 -> 3: `ext-pubsub-advanced-recovery`, the first row read with
+#: R2486's both-directions rule applied from the start, and it pays: TWO of its
+#: seven clauses are STALE ON THE WZ SIDE and five stand. The stale pair is
+#: `consolidation(None)` -- the same repair, the same round, the same three GET
+#: sites as the sibling history atom, so ONE fix left TWO reasons unstruck --
+#: and "recovered samples lose timestamp/encoding/attachment", which is stale
+#: twice over: the function sets all three, and its own doc already records the
+#: single case that drops two of them as the WIRE's rule (pico gates attachment
+#: and encoding on `_is_put`, so a Del reply carries neither) rather than as a
+#: residual. Two survivors sharpened into something a repair can act on:
+#: upstream prevents the periodic+heartbeat pair with a TYPESTATE
+#: (`RecoveryConfig<const CONFIGURED: bool = true>`, both switches on `impl
+#: RecoveryConfig<false>` each returning `RecoveryConfig<true>`) where wz has a
+#: plain struct, and the missing new-source guard has an axis -- GLOBAL vs
+#: PER-SOURCE, so wz can fire a heartbeat GET into the middle of a global pull.
+BUDGET = 3
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
