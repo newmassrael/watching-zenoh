@@ -1328,7 +1328,23 @@ def _grade_head(reason: str) -> str:
 #: that file. That is precisely the rot the `path` @ `needle` rule exists to
 #: prevent, caught here only because the round re-read by symbol instead of
 #: trusting the range. The re-declaration replaces the range with needles.
-BUDGET = 12
+#:
+#: R2478 — 12 -> 11: `liveliness-get`, re-measured at the pin with NO VERDICT
+#: CHANGED. Both residuals stand: upstream still offers a handler/channel form
+#: beside the callback one, and still spawns a per-query task to reap a query on
+#: timeout, where wz is callback-only and its sweep is driven from OUTSIDE the
+#: library -- by the demo's ticker and by the C ABI, both re-read this round.
+#:
+#: ⚠ AND THIS ONE'S CITATION HAD ROTTED HARDER THAN R2477's: it named the wrong
+#: FILE, not merely a stale range. The handler form lives in
+#: `api/builders/liveliness.rs` at the pin while the residual cited
+#: `api/liveliness.rs`, so following the coordinate lands a reader where the
+#: claim cannot be checked either way. THE CORRECT PATH WAS ALREADY IN THIS
+#: TREE, in a `session/mod.rs` doc comment: the code knew and the store did
+#: not, and nothing compares the two. That asymmetry is worth more than this
+#: row -- it says the remaining rows' upstream coordinates are less trustworthy
+#: than the doc comments sitting beside the code they describe.
+BUDGET = 11
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
