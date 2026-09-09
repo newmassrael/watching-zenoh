@@ -442,14 +442,34 @@ async fn wz_rest_put_reaches_the_zenohd_rest_plugin() {
     let mut buf = Vec::new();
     let mut seen = None;
     'outer: for _ in 0..PUBLISH_ROUNDS {
-        let (status, _) = http_put(
+        let (status, body) = http_put(
             fx.wz_rest,
             WZ_TO_ZENOHD_KEY,
             "text/plain",
             WZ_TO_ZENOHD_VALUE,
         )
         .await;
-        assert_eq!(status, 200, "wz's bridge accepted the PUT");
+        // R2493 (open-debt item 683) — CARRY THE BODY INTO THE FAILURE. The
+        // bridge answers a failed publish with `500` and the TYPED error in the
+        // body (`wz-rest/src/bridge.rs`, the R2423 change made for exactly this
+        // reason). Asserting on the status alone threw that away, so this lane
+        // reported `left: 500 / right: 200` and named no cause -- the evidence
+        // was on the wire and the assertion discarded it.
+        //
+        // The body names ONE OF FOUR, read off the enum rather than off prose:
+        // `PublishError` is `ExceedsCapacity` | `TransportUnavailable` |
+        // `RequiresUnicast` | `FragmentChainAbandoned`. The last is
+        // DELIBERATELY not folded into `ExceedsCapacity` (a fragment TX budget
+        // that ran out mid-chain is not an oversized payload), and
+        // `RequiresUnicast` is documented as unreachable through the ordinary
+        // send seam. Two distinct `SendWireError`s fold INTO `ExceedsCapacity`,
+        // so even that one name covers two causes.
+        assert_eq!(
+            status,
+            200,
+            "wz's bridge accepted the PUT; body={}",
+            String::from_utf8_lossy(&body)
+        );
         for _ in 0..READ_SLICES {
             if !pump(&mut foreign, &mut buf).await {
                 break 'outer;
