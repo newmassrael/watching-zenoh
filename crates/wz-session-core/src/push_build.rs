@@ -1083,9 +1083,24 @@ mod tests {
         let exts = del.extensions.as_deref().expect("body ext chain populated");
         assert_eq!(exts.len(), 2, "source_info + attachment = 2 entries");
         assert_eq!(exts[0].header & 0x4F, 0x41, "source_info first");
+        // R2470 — the expected byte is a LITERAL, and that is the whole
+        // difference between this assertion and the one it replaced.
+        //
+        // It read `0x40 | crate::attachment::ATTACHMENT_EXT_ID_DEL`, comparing
+        // the emitted header against THE SAME CONSTANT THE PRODUCER USED. That
+        // is a tautology: it holds for every value the constant could take, so
+        // the test passed unchanged with the constant set to the Put's `0x03`
+        // -- measured, by doing exactly that. Its name and its message both
+        // said `0x02` and nothing pinned it, which is the shape this workspace
+        // already has a rule for: a check that compares a table against itself
+        // cannot fail, so the expectation has to come from outside the code
+        // under test. Its Put sibling above always used the literal `0x43`,
+        // which is why that arm was graded and this one was not.
+        //
+        // `0x42` is ENC_ZBUF (0x40) | the Del attachment id (0x02).
         assert_eq!(
             exts[1].header & 0x4F,
-            0x40 | crate::attachment::ATTACHMENT_EXT_ID_DEL,
+            0x42,
             "a Del body's attachment carries the DEL ext id (0x02), the one \
              upstream declares for THIS body -- emitting the Put id puts a byte \
              on the wire zenoh reads as ext_unknown",

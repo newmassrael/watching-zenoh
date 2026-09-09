@@ -1283,7 +1283,22 @@ def _grade_head(reason: str) -> str:
 #: variant is spelled `Info` and carries `#[default]`. wz's constant is
 #: upstream's default spelled upstream's way. Match on the code, not the prose
 #: beside it -- upstream's prose can be stale about upstream.
-BUDGET = 15
+#:
+#: R2470 — 15 -> 14: `attachment-bytes`, and this one was not a re-declaration
+#: with a measurement attached but the reverse. That atom's reason names an
+#: adversarial re-audit of the whole attachment surface as COMPLETE's
+#: precondition; the audit was done, every wire id stands at the pin, and it
+#: still did not license COMPLETE -- because it found the Del arm UNGRADED by a
+#: test written to grade it, asserting the emitted header against the same
+#: constant the producer reads. A tautology passes for every value, and it did.
+#:
+#: ⚠ THE FIRST ATTEMPT AT THAT PROBE WAS ITSELF VACUOUS, which is the part worth
+#: carrying into the next re-measurement: damaging the constant left 375 tests
+#: green in one crate and 415 in another, and the reason was that `push_build`'s
+#: test module is gated on `codec-push`, which neither invocation enabled. The
+#: graders were not in the population. `running N tests` against a `--list` of
+#: the names is what exposed it -- an exit status could not have.
+BUDGET = 14
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
