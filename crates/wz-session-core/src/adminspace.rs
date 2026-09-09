@@ -3019,6 +3019,14 @@ mod tests {
     /// parameters on the metrics leg; wz read none, and the channel was already
     /// there (`QueryView::parameters`), so what was missing was a READ SITE and
     /// a test that could see one.
+    ///
+    /// ⚠ GATED AT THE DEFINITION because its only caller is, exactly as
+    /// `admin_ctx_with_stats` above is. A feature subset that compiles the
+    /// caller out leaves this helper with no user, and `-D warnings` turns
+    /// `dead_code` into a compile error — which the default-feature lane
+    /// (pre-push gate 3) cannot see, so seven `run-ci.sh` adminspace legs
+    /// were what caught it.
+    #[cfg(feature = "adminspace-metrics")]
     fn admin_view_with_params<'a>(
         keyexpr: &'a str,
         parameters: &'a str,
