@@ -1337,8 +1337,10 @@ def _grade_head(reason: str) -> str:
 #:
 #: ⚠ AND THIS ONE'S CITATION HAD ROTTED HARDER THAN R2477's: it named the wrong
 #: FILE, not merely a stale range. The handler form lives in
-#: `api/builders/liveliness.rs` at the pin while the residual cited
-#: `api/liveliness.rs`, so following the coordinate lands a reader where the
+#: `zenoh/src/api/builders/liveliness.rs` @ `pub fn with<Handler>` at the pin,
+#: while the residual cited `zenoh/src/api/liveliness.rs` @ ABSENT `pub fn with<Handler>`
+#: -- the module survives and the builder is not in it.
+#: So following the coordinate lands a reader where the
 #: claim cannot be checked either way. THE CORRECT PATH WAS ALREADY IN THIS
 #: TREE, in a `session/mod.rs` doc comment: the code knew and the store did
 #: not, and nothing compares the two. That asymmetry is worth more than this

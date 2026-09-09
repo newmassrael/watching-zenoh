@@ -77,8 +77,9 @@
 //! months, on hosted Layer E7, saying so in its own words.
 //!
 //! R2464 removed the client arm of that push, on the measured ground that an
-//! upstream ROUTER has no such push (`repropagate_tokens` is absent from
-//! `hat/router/token.rs`) — see `replay_declarations_to_new_face`. The header
+//! upstream ROUTER has no such push --
+//! `zenoh/src/net/routing/hat/router/token.rs` @ ABSENT `fn repropagate_tokens`
+//! -- see `replay_declarations_to_new_face`. The header
 //! sentence is now true of the whole, and arm A is the evidence: it still
 //! passes, carried by the Interest path alone. MEASURED as a control, not
 //! assumed — inverting that path's client gate reds arm A and leaves arm B

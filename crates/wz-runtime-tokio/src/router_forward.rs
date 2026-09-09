@@ -5822,9 +5822,11 @@ impl RouterForwarder {
         // # The citation that used to stand here was wrong, and measured so
         //
         // It read that "zenoh repropagates tokens on a new face alongside the
-        // other two (`repropagate_tokens`)". `repropagate_tokens` is defined in
-        // `hat/peer/token.rs` and `hat/client/token.rs` and in NEITHER case is
-        // it the router hat -- `hat/router/token.rs` does not have the function
+        // other two (`repropagate_tokens`)". It is defined in
+        // `zenoh/src/net/routing/hat/peer/token.rs` @ `fn repropagate_tokens`
+        // and `zenoh/src/net/routing/hat/client/token.rs` @ `fn repropagate_tokens`
+        // and in NEITHER case is it the router hat --
+        // `zenoh/src/net/routing/hat/router/token.rs` @ ABSENT `fn repropagate_tokens`
         // -- and the client hat's only call fires on that node's OWN northbound
         // uplink coming up, asserted by `src_face.remote_bound.is_south()` and
         // `owned_faces(..).count() == 1`. It is not "a new downstream client is
