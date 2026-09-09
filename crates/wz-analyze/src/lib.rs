@@ -2314,22 +2314,52 @@ fn field_lines(
     // one, which concatenated JSON objects into a document no parser accepts.
     // Measured by running it: the array read `...}}{"from":...`.
     let mut emitted = 0usize;
-    for flow in dissection.flows() {
+    // R2459 (open-debt item 704) — the keyexpr id space is the SESSION's, and
+    // there is ONE of it for the whole capture.
+    //
+    // Per flow it was the defect, and it is the same one R2457 closed on the
+    // census planes and R2458 on the field DOCUMENT: a zenoh session with
+    // `transport/unicast/max_links` above 1 spreads one id space over several
+    // 5-tuples, so a `DeclKexpr` sent on the first link left every reference on
+    // the second printed as unresolved — while the census, reading the same
+    // bytes, resolved them. This listing and that document are two renderings
+    // of one capture, and they disagreed.
+    //
+    // `enter_flow` before each list says whose tables that list's two
+    // directions write into; `stream_list_indices` is what turns a row of the
+    // flow table into the `message_lists` position the grouping is keyed by.
+    let grouping = wz_capture::node::session_grouping(dissection);
+    let stream_lists = wz_capture::node::stream_list_indices(dissection);
+    let mut spaces = wz_capture::agg::KeyexprSpaces::new();
+    for (i, flow) in dissection.flows().iter().enumerate() {
         let mut shown = 0usize;
         let mut omitted = 0usize;
         let mut rows = String::new();
         let mut notes: Vec<FieldNote> = Vec::new();
-        // R311y701 (PF2) — this flow's keyexpr id tables, built AS THE ROWS ARE
-        // WALKED. In order rather than up front on purpose: an id can be
-        // undeclared and rebound, so a table folded to its final state would
-        // resolve an early reference through a later binding and print a
-        // keyexpr the sender never used.
+        // R311y701 (PF2) — the tables are folded AS THE ROWS ARE WALKED. In
+        // order rather than up front on purpose: an id can be undeclared and
+        // rebound, so a table folded to its final state would resolve an early
+        // reference through a later binding and print a keyexpr the sender
+        // never used.
         //
         // The granularity is the FRAMING UNIT and not the record, which is the
         // one place this differs from the throughput plane: a batch holding
         // `Declare(5)` then `Put(5)` resolves, and the reverse order -- which
         // no conforming sender emits -- would resolve too.
-        let mut spaces = wz_capture::agg::KeyexprSpaces::new();
+        //
+        // R2459 — what is no longer per flow is the TABLE the fold writes into.
+        // A flow this capture could not attribute to a session gets
+        // `SpaceOwner::Flow` from `owners`, which is the pre-R2459 reach
+        // exactly, so a capture that began mid-session is unchanged.
+        match stream_lists.get(i) {
+            Some(&list) => spaces.enter_flow(grouping.owners(list)),
+            // A row the enumeration did not name cannot happen for a flow this
+            // loop is walking, and it is answered anyway rather than left to
+            // leak the PREVIOUS list's owners into this one -- that would
+            // resolve one session's ids against another's, which is the one
+            // failure `KeyexprSpaces` documents as never happening.
+            None => spaces = wz_capture::agg::KeyexprSpaces::new(),
+        }
         for frame in &flow.frames {
             spaces.absorb_frame(frame);
             if let Some(cap) = messages_per_flow {
@@ -2449,6 +2479,10 @@ fn field_lines(
     //
     // Re-parsed rather than kept: the file is already in memory and parsing it
     // twice costs a walk that only a reader who asked for `--fields` pays.
+    // R2459 (item 704) — the SAME spaces instance the stream half folded into,
+    // carried across the seam. The two halves are one capture's id space, and
+    // handing this walk a fresh instance is how the datagram flows of a session
+    // whose declarations travelled on a stream link would go unresolved.
     datagram_field_rows(
         capture,
         DatagramWalk {
@@ -2458,6 +2492,8 @@ fn field_lines(
             messages_per_flow,
             payload_formats,
         },
+        &grouping,
+        &mut spaces,
         &mut emitted,
         &mut listings,
     );
@@ -3639,6 +3675,8 @@ struct DatagramWalk<'a> {
 fn datagram_field_rows(
     capture: &[u8],
     walk: DatagramWalk<'_>,
+    grouping: &wz_capture::node::SessionGrouping,
+    spaces: &mut wz_capture::agg::KeyexprSpaces,
     emitted: &mut usize,
     listings: &mut Vec<FlowListing>,
 ) {
@@ -3661,13 +3699,23 @@ fn datagram_field_rows(
         });
         return;
     };
-    for flow in dissection.datagram_flows() {
+    // R2459 (item 704) — the datagram half's list indices, from the same
+    // derivation the stream half used. See `node::datagram_list_indices`: this
+    // names the flow's CLEARTEXT list, which is the one this walk renders.
+    let datagram_lists = wz_capture::node::datagram_list_indices(dissection);
+    for (i, flow) in dissection.datagram_flows().iter().enumerate() {
         let mut out = String::new();
         let mut notes: Vec<FieldNote> = Vec::new();
-        // R311y701 (PF2) — this flow's keyexpr tables, on the same rule the
-        // stream listing follows: folded in frame order so an id resolves
-        // through the binding that was live when it travelled.
-        let mut spaces = wz_capture::agg::KeyexprSpaces::new();
+        // R311y701 (PF2) — the tables are folded on the same rule the stream
+        // listing follows: in frame order, so an id resolves through the
+        // binding that was live when it travelled.
+        //
+        // R2459 — and into the SESSION's tables, which the stream half has
+        // already been folding into. `spaces` arrives from there.
+        match datagram_lists.get(i) {
+            Some(&list) => spaces.enter_flow(grouping.owners(list)),
+            None => *spaces = wz_capture::agg::KeyexprSpaces::new(),
+        }
         let mut shown = 0usize;
         let mut omitted = 0usize;
         // R311y680 — messages whose packet did not vouch for itself.
@@ -3758,7 +3806,7 @@ fn datagram_field_rows(
                 &row,
                 PayloadLens {
                     formats: payload_formats,
-                    spaces: &spaces,
+                    spaces,
                 },
             );
         }
@@ -3837,7 +3885,7 @@ fn datagram_field_rows(
                 &FieldRow::Walked(field),
                 PayloadLens {
                     formats: payload_formats,
-                    spaces: &spaces,
+                    spaces,
                 },
             );
         }
@@ -3878,7 +3926,7 @@ fn datagram_field_rows(
                 row,
                 PayloadLens {
                     formats: payload_formats,
-                    spaces: &spaces,
+                    spaces,
                 },
             );
         }
