@@ -197,9 +197,12 @@ pub mod pcapng;
 /// `#[cfg(test)]`: it ships no code, only the grading that keeps a tracked
 /// capture byte-identical to what this workspace's own encoders emit. It lives
 /// INSIDE the crate rather than in `tests/` because the population it draws
-/// from — `datagram_tests::transport_census` — is `pub(crate)`, and drawing the
-/// sample from the same list the MID censuses walk is what stops it falling
-/// behind the vocabulary it advertises.
+/// from — `datagram_tests::transport_vocabulary` — is `pub(crate)`, and drawing
+/// the sample from the list the MID censuses are derived from is what stops it
+/// falling behind the vocabulary it advertises. R2454 moved that name off
+/// `transport_census`: the census is the vocabulary filtered to what the
+/// compiling build can NAME, and a committed capture must not be a function of
+/// that.
 #[cfg(test)]
 mod raweth_capture_fixture;
 /// R311y615 (§1.1f) — the EXPORT plane: the analysis tables rendered for
@@ -8101,14 +8104,35 @@ mod datagram_tests {
     /// one. Both are visible here: `Unknown { mid }` reds the transport half,
     /// and a scouting message that reached the transport decoder at all reds
     /// the scouting half by never appearing in `scouting`.
-    /// R311y611 (§1.4b) — the census's message list, shared by the three
-    /// framings that carry it.
+    /// R2454 (open-debt item 695) — the transport messages zenoh puts on a
+    /// datagram link. The VOCABULARY, which is a property of the PROTOCOL and
+    /// not of the build reading this.
     ///
-    /// Extracted so the datagram, stream and WebSocket censuses cannot drift
-    /// apart: a MID added here is demanded of all three, and a census that
-    /// covered one link kind is exactly how the stream path went unchecked
-    /// from R311y607 to R311y611.
-    pub(crate) fn transport_census() -> Vec<(&'static str, Vec<u8>)> {
+    /// ## Why this is a second function rather than the one below
+    ///
+    /// [`transport_census`] used to be both, and a tracked artifact was pinned
+    /// to the wrong half. Two populations were living in one return value:
+    ///
+    /// * what zenoh puts on the wire — build-INDEPENDENT, this;
+    /// * what THIS build can NAME — build-DEPENDENT, [`transport_census`],
+    ///   which is what the MID censuses want, since their whole claim is that
+    ///   no MID this build meets goes unnamed.
+    ///
+    /// `raweth_capture_fixture` draws a COMMITTED `.pcap` from the list, and a
+    /// committed file cannot be a function of the compiler flags of whoever
+    /// last regenerated it. Under `--no-default-features` the census is one
+    /// shorter, so the fixture's byte-identity oracle red on hosted Layer C1bt
+    /// (296 tracked against 260 emitted — measured as exactly the `Fragment`
+    /// packet record) while every default-feature lane, the pre-push capture
+    /// gate included, stayed green. The sharper face of the same defect is
+    /// the REFRESHER: run in a lean build it would have silently shrunk the
+    /// shipped sample to whatever that build could name.
+    ///
+    /// So the artifact draws from here and the censuses draw from below. The
+    /// coupling that made the split worth keeping is untouched in both
+    /// directions: a MID added to this list is demanded of all three framings
+    /// AND joins the tracked capture on the next refresh.
+    pub(crate) fn transport_vocabulary() -> Vec<(&'static str, Vec<u8>)> {
         use wz_session_core::wire_const as wc;
 
         // Each message is built by ITS OWN codec where one exists, so this
@@ -8170,29 +8194,81 @@ mod datagram_tests {
         // The transport namespace, on a UNICAST destination — the JOIN
         // included, since a JOIN reaching a unicast peer is still a transport
         // message and this census is about the DECODER, not the routing.
-        #[allow(unused_mut)] // the `reassembly` arm below is what mutates it
-        let mut census = alloc::vec![
+        //
+        // No `#[cfg]` anywhere in this list, and that is the point of the
+        // function: what zenoh writes on a datagram link does not change when
+        // this crate is compiled with fewer features. Which of these the build
+        // can NAME is a separate question, answered by `this_build_names`.
+        alloc::vec![
             ("Init", init),
             ("Open", open),
             ("Close", close),
             ("KeepAlive", keep_alive),
             ("Frame", frame),
             ("Join", join),
-        ];
-        // R311y609 — FRAGMENT is the one MID whose decoder is behind a
-        // wz-capture feature (`reassembly`, default-on), so a
-        // `--no-default-features` build genuinely cannot name it and the
-        // census must not demand it. Gated rather than dropped: without the
-        // arm, the default build would stop checking the MID this crate is
-        // most likely to lose.
-        //
-        // This surfaced only once the crate COMPILED without its default
-        // feature — before that the census never ran there at all.
-        #[cfg(feature = "reassembly")]
-        census.push(("Fragment", fragment));
-        #[cfg(not(feature = "reassembly"))]
-        let _ = fragment;
-        census
+            ("Fragment", fragment),
+        ]
+    }
+
+    /// R311y609 / R2454 — the vocabulary entries whose decoder THIS build did
+    /// not select. The one place in the crate where that is decided.
+    ///
+    /// FRAGMENT is the single MID whose decoder sits behind a wz-capture
+    /// feature (`reassembly`, default-on, forwarding to
+    /// `wz-session-core/reassembly`, whose `T_MID_FRAGMENT` arm carries the
+    /// `#[cfg]`), so a `--no-default-features` build genuinely cannot name it
+    /// and reads it back as `InboundFrame::Unknown`.
+    ///
+    /// ## Why a SET, and why `cfg!` rather than `#[cfg]`
+    ///
+    /// `#[cfg]` would compile one answer out, and a predicate that vanishes
+    /// with its subject is how a check comes to report green because there was
+    /// nothing left to ask. `cfg!` keeps both callers asking at run time.
+    ///
+    /// The set shape is what survived clippy, and the two rejected shapes are
+    /// worth the sentence because each rejection was THIS ROUND'S OWN DEFECT
+    /// in miniature. `cfg!` expands before the lints run, so in whichever build
+    /// clippy compiles it is already a bool literal:
+    ///
+    /// * as a `match`, `match_like_matches_macro` offered
+    ///   `!matches!(name, "Fragment")`;
+    /// * as an `if`/`else`, `needless_bool` offered `name != "Fragment"`.
+    ///
+    /// Both are the LEAN build's answer written down as source — they agree
+    /// with this list where `reassembly` is off and contradict it everywhere
+    /// else. Taking either suggestion would have re-committed, inside the
+    /// repair, the exact defect being repaired: one build's verdict recorded as
+    /// if it held for all of them. Neither lint is wrong about the shape it
+    /// sees; neither can see that the folded operand was a `cfg!`. A `const`
+    /// slice has no bool literal for them to reduce, and it says the domain
+    /// fact directly — WHICH messages this build cannot name, extensible to a
+    /// second one by adding a name rather than a branch.
+    const UNNAMEABLE: &[&str] = if cfg!(feature = "reassembly") {
+        &[]
+    } else {
+        &["Fragment"]
+    };
+
+    /// Whether THIS build can name `name`. See [`UNNAMEABLE`].
+    pub(crate) fn this_build_names(name: &str) -> bool {
+        !UNNAMEABLE.contains(&name)
+    }
+
+    /// R311y611 (§1.4b) — of the vocabulary, the messages THIS BUILD can name:
+    /// the census's message list, shared by the three framings that carry it.
+    ///
+    /// Extracted so the datagram, stream and WebSocket censuses cannot drift
+    /// apart: a MID added to [`transport_vocabulary`] is demanded of all three,
+    /// and a census that covered one link kind is exactly how the stream path
+    /// went unchecked from R311y607 to R311y611.
+    ///
+    /// Filtered rather than shortened: without the entry, the default build
+    /// would stop checking the MID this crate is most likely to lose.
+    pub(crate) fn transport_census() -> Vec<(&'static str, Vec<u8>)> {
+        transport_vocabulary()
+            .into_iter()
+            .filter(|(name, _)| this_build_names(name))
+            .collect()
     }
 
     /// R311y607 — see [`transport_census`]. The DATAGRAM half.

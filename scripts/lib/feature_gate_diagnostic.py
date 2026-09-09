@@ -188,7 +188,15 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             "adminspace-introspection-handlers",
             "adminspace-plugins-handlers",
             "adminspace-router-linkstate",
-            "codec-fragment",
+            # R2454 — `codec-fragment` LEFT this list, for the same reason
+            # `declare-final` did below and by the same route: the claim was
+            # true when R2207 derived it, and R2448 is the round that made it
+            # false. Widening `frame_encode::build_fragment_wire` off
+            # `transport-fragmentation` and onto `all(codec-fragment,
+            # reassembly)` attached this feature to a `pub fn` in a `pub mod`.
+            # It is DEFERRED below rather than probed because that single
+            # public site is COMPOUND -- which the census re-derives, so the
+            # marker cannot rot into a permission slip.
             "codec-keep-alive",
             # R2386 — `declare-final` LEFT this list. The claim was true when it
             # was written and the round that made it false is the one that
@@ -350,6 +358,7 @@ DEFERRED: dict[str, dict[str, str]] = {
             )
             for f in (
                 "attachment-bytes",
+                "codec-fragment",
                 "codec-hello",
                 "codec-linkstate",
                 "codec-scout",

@@ -31,9 +31,20 @@
 //! So no byte in the tracked file is written here:
 //!
 //! * every PAYLOAD is one transport message built by ITS OWN codec, taken from
-//!   `crate::datagram_tests::transport_census` — the same list the MID censuses
-//!   walk, so a MID added there joins this capture by construction and the
-//!   sample cannot fall behind the vocabulary it advertises;
+//!   `crate::datagram_tests::transport_vocabulary` — the list the MID censuses
+//!   are themselves derived from, so a MID added there joins this capture by
+//!   construction and the sample cannot fall behind the vocabulary it
+//!   advertises;
+//!
+//! ⚠ R2454 changed which of the two lists that is, and hosted Layer C1bt is
+//! what said so. It was `transport_census`, which is the vocabulary FILTERED
+//! to what the compiling build can name — one entry shorter at
+//! `--no-default-features`, where `reassembly` is off. A committed artifact
+//! cannot be a function of the flags of whoever last rebuilt it: the byte
+//! comparison below red at 296 against 260, and the REFRESHER would have
+//! silently shrunk the shipped sample to six messages had it been run there.
+//! The two callers are now split by which question they ask — see that
+//! function's own doc.
 //! * every FRAME is `raweth_link::frame`'s output, with pico's own default MACs
 //!   and ethertype (`DEFAULT_SMAC` / `DEFAULT_DMAC` / `DEFAULT_ETHTYPE`, each
 //!   cited to `link.c` where it is declared);
@@ -116,7 +127,7 @@ const PACKET_SPACING_MICROS: u32 = 1_000;
 /// refresher, so the file that is written and the file that is graded cannot be
 /// built by two different rules.
 fn rebuild() -> Vec<u8> {
-    let census = crate::datagram_tests::transport_census();
+    let census = crate::datagram_tests::transport_vocabulary();
     let frames: Vec<Vec<u8>> = census
         .iter()
         .enumerate()
@@ -233,6 +244,15 @@ fn the_tracked_raweth_capture_carries_both_header_widths() {
 /// transport message on a flow marked `raweth`. A capture that was byte-perfect
 /// and dissected to `Unknown { mid }` would satisfy the item's letter and be
 /// worthless to the consumer that asked for it.
+///
+/// R2454 — the expectation is DERIVED from the build's own claim rather than
+/// declared: `this_build_names` decides each entry, and the two outcomes are
+/// held against each other in both directions. A message the census claims and
+/// the reader cannot name reds; a message the census disclaims and the reader
+/// names anyway also reds, because then the census is what is stale. Spelling
+/// the feature here instead would make the test a tautology of the emitter's
+/// own `#[cfg]`, and both arms are live: the default build takes the first for
+/// all seven, `--no-default-features` takes the second for `Fragment`.
 #[test]
 fn the_tracked_raweth_capture_reaches_the_consumer_surface() {
     use wz_session_core::inbound::InboundFrame;
@@ -251,17 +271,25 @@ fn the_tracked_raweth_capture_reaches_the_consumer_surface() {
         "raweth",
         "the flow must SAY which link it was read off"
     );
-    let census = crate::datagram_tests::transport_census();
+    let vocabulary = crate::datagram_tests::transport_vocabulary();
     assert_eq!(
         flow.frames.len(),
-        census.len(),
-        "every message the census names must reach the reader"
+        vocabulary.len(),
+        "every message in the sample must reach the reader"
     );
-    for ((name, _), got) in census.iter().zip(flow.frames.iter()) {
+    for ((name, _), got) in vocabulary.iter().zip(flow.frames.iter()) {
+        let nameable = crate::datagram_tests::this_build_names(name);
         match &got.frame {
-            Ok(InboundFrame::Unknown { mid }) => panic!(
-                "{name} (MID {mid:#04x}) is in the sample and this build cannot \
-                 name it — the capture would teach a consumer nothing"
+            Ok(InboundFrame::Unknown { mid }) if nameable => panic!(
+                "{name} (MID {mid:#04x}) is in the sample, this build's census \
+                 claims it, and the reader could not name it — the capture \
+                 would teach a consumer nothing"
+            ),
+            Ok(InboundFrame::Unknown { .. }) => {}
+            Ok(_) if !nameable => panic!(
+                "{name} is OUTSIDE this build's census — `this_build_names` \
+                 says the codec is not selected — and the reader named it \
+                 anyway. The census gate is what is wrong, not the reader"
             ),
             Ok(_) => {}
             Err(e) => panic!("{name} failed to decode out of the sample: {e:?}"),

@@ -184,10 +184,24 @@ class Shape(typing.NamedTuple):
 #   * `compound-cfg`  -- EVERY public-item site of that feature is compound.
 #                        A single simple-cfg site refutes it: that one could
 #                        carry the probe.
-#   * `impl-method`   -- no public-item site under a SIMPLE cfg is at column
-#                        zero. A module-level item under a simple cfg is
-#                        exactly the shape the axis probes, so the deferral
-#                        would be declining work that is already possible.
+#   * `impl-method`   -- there IS a public-item site under a simple cfg, and
+#                        none of them is at column zero. A module-level item
+#                        under a simple cfg is exactly the shape the axis
+#                        probes, so the deferral would be declining work that
+#                        is already possible.
+#                        ⚠ R2454 added the FIRST half, and a green control
+#                        group is what found it missing. The obligation used to
+#                        be the second half alone -- purely negative -- which an
+#                        all-compound feature satisfies VACUOUSLY, since a
+#                        feature with no simple-cfg site has none at column zero
+#                        either. `impl-method` therefore SUBSUMED `compound-cfg`
+#                        and the two words could not be told apart on exactly
+#                        the input the vocabulary exists to separate: R2454
+#                        moved `wz-session-core` / `codec-fragment` here under
+#                        the wrong word on purpose and the gate passed it. A
+#                        marker that cannot refuse the neighbouring word is a
+#                        reason nobody measures, which is the escape hatch this
+#                        table's own header refuses one paragraph up.
 #   * `cfg-not-twin`  -- the package writes `cfg(not(feature = "x"))` for it,
 #                        so the feature swaps an implementation rather than
 #                        removing a path and there is no resolution error to
@@ -1642,7 +1656,8 @@ def defer_findings(sites: dict[tuple[str, str], list[Shape]]) -> list[str]:
                         f"of those can carry the probe."
                     )
             elif word == "impl-method":
-                bare = [s for s in found if not s.compound and s.column == 0]
+                simple = [s for s in found if not s.compound]
+                bare = [s for s in simple if s.column == 0]
                 if bare:
                     out.append(
                         f"`{pkg}` / `{feat}` is deferred as `impl-method` -- "
@@ -1652,6 +1667,22 @@ def defer_findings(sites: dict[tuple[str, str], list[Shape]]) -> list[str]:
                         f"under a simple cfg "
                         f"({', '.join(s.where for s in bare[:3])}), which is "
                         f"the shape the axis probes."
+                    )
+                elif not simple:
+                    # The POSITIVE half. Without it this arm passes any feature
+                    # whose every site is compound, because such a feature has
+                    # no simple site at column zero either -- so `impl-method`
+                    # would report clean on precisely the input `compound-cfg`
+                    # is the word for. See `DEFER_POLICY`.
+                    out.append(
+                        f"`{pkg}` / `{feat}` is deferred as `impl-method` -- "
+                        f"reachable only as `Type::name` -- and it has no "
+                        f"public-item site under a SIMPLE cfg at all: all "
+                        f"{len(found)} are compound "
+                        f"({', '.join(s.where for s in found[:3])}). rustc "
+                        f"names no feature for those, so the word that is true "
+                        f"here is `compound-cfg`; `impl-method` claims a shape "
+                        f"the sites do not show."
                     )
             elif word == "cfg-not-twin" and feat not in negated_in(pkg):
                 out.append(
@@ -2461,6 +2492,17 @@ def selftest() -> int:
         ("demo", "compound_bad"): [Shape("a.rs:2", True, 0), Shape("a.rs:3", False, 0)],
         ("demo", "method_ok"): [Shape("b.rs:1", False, 4)],
         ("demo", "method_bad"): [Shape("b.rs:2", False, 0)],
+        # R2454 — the shape a GREEN control group found: every site compound,
+        # deferred as `impl-method`. Nothing here is at column zero under a
+        # simple cfg, so the old purely-negative obligation reported clean and
+        # the two markers became indistinguishable on the one input that tells
+        # them apart. This entry is what keeps the positive half graded: the
+        # real tree has no such row, so without it the new arm's population is
+        # zero and it would pass by never running.
+        ("demo", "method_all_compound"): [
+            Shape("b.rs:3", True, 4),
+            Shape("b.rs:4", True, 0),
+        ],
         ("demo", "marker_missing"): [Shape("c.rs:1", True, 0)],
         ("demo", "marker_unknown"): [Shape("c.rs:2", True, 0)],
         ("demo", "gone"): [],
@@ -2470,6 +2512,7 @@ def selftest() -> int:
         "compound_bad": "@defer compound-cfg",
         "method_ok": "@defer impl-method",
         "method_bad": "@defer impl-method",
+        "method_all_compound": "@defer impl-method",
         "marker_missing": "no marker at all",
         "marker_unknown": "@defer someday",
         "gone": "@defer compound-cfg",
@@ -2480,7 +2523,13 @@ def selftest() -> int:
         got = {f.split("`")[3] for f in defer_findings(shapes)}
     finally:
         fgd.DEFERRED = real
-    want = {"compound_bad", "method_bad", "marker_missing", "marker_unknown"}
+    want = {
+        "compound_bad",
+        "method_bad",
+        "method_all_compound",
+        "marker_missing",
+        "marker_unknown",
+    }
     if got != want:
         print(
             f"feature-public-surface: SELFTEST FAIL -- the deferral policy must "
@@ -2540,7 +2589,9 @@ def selftest() -> int:
         "and an assertion; finds an item behind a stacked attribute; refuses "
         "to guess at a shape it does not know; and holds each `@defer` marker "
         "to what its sites say, refusing a simple-cfg site under "
-        "`compound-cfg`, a module-level one under `impl-method`, a missing "
+        "`compound-cfg`, a module-level one under `impl-method`, an "
+        "ALL-COMPOUND feature under `impl-method` (the word that used to be "
+        "satisfiable by having no simple site at all), a missing "
         "marker and an unknown word -- past two clean controls; and holds "
         "each `ABI_CONTRACT` row to the source, refusing a loose `pub fn`, a "
         "module that is one once opened, a `pub use`, a module file that is "
