@@ -7493,6 +7493,217 @@ mod tests {
         );
     }
 
+    /// R2459 (open-debt item 704) — ACCEPTANCE: THE FIELD LISTING RESOLVES A
+    /// KEY DECLARED ON THE SESSION'S OTHER LINK.
+    ///
+    /// # What was wrong, and why no existing test could see it
+    ///
+    /// `field_lines` built one `KeyexprSpaces` PER FLOW. A zenoh session with
+    /// `transport/unicast/max_links` above 1 spreads ONE keyexpr id space over
+    /// several 5-tuples, so a `DeclKexpr` sent on the first link left every
+    /// reference on the second printed as unresolved — while the census planes,
+    /// reading the same bytes, resolved them. Two renderings of one capture,
+    /// disagreeing. R2457 fixed the census planes and R2458 the field DOCUMENT;
+    /// this is the human listing, which is what `--fields` prints.
+    ///
+    /// # The fixture is TWO LINKS OF ONE SESSION, and that is asserted
+    ///
+    /// Two 5-tuples whose INIT pairs name the SAME two zids, which is what
+    /// makes them one session rather than two: `crate::node` records a link
+    /// only where both ends named themselves on one flow, and keys the session
+    /// by the zid PAIR, not by the address. The declaration goes out on link
+    /// one and the reference on link two, both from the same zid — so a
+    /// per-flow table cannot answer it and a session-keyed one can.
+    ///
+    /// # Why a `--payload-format` rule that matches NOTHING
+    ///
+    /// The text surface names a resolved key only through `payload_block`, and
+    /// a reader who declared no rule is told nothing at all (`NoRules` renders
+    /// empty). A rule that cannot match makes the two outcomes say different
+    /// sentences over the same row: a resolved key reaches `NoRule(keyexpr)`
+    /// and prints the LITERAL, an unresolved one reaches `KeyexprUnresolved`
+    /// and says "by id only". The rule is deliberately not `demo/**` — matching
+    /// would decode the payload and prove something else.
+    #[test]
+    fn the_field_listing_resolves_a_key_declared_on_the_sessions_other_link() {
+        const ZID_A: &[u8] = &[0xA1, 0xA1, 0xA1, 0xA1];
+        const ZID_B: &[u8] = &[0xB2, 0xB2, 0xB2, 0xB2];
+        const ID: u64 = 7;
+
+        /// A bare INIT naming `zid` — a datagram carries no length prefix.
+        fn init(zid: &[u8]) -> Vec<u8> {
+            let mut wire = vec![
+                wz_session_core::wire_const::T_MID_INIT,
+                0x09,
+                (((zid.len() as u8) - 1) << 4) | 0x02,
+            ];
+            wire.extend_from_slice(zid);
+            wire
+        }
+
+        /// A `WireExpr` in the SENDER's space (`M = 1`).
+        fn sender_space(id: u64, suffix: Option<&str>) -> wz_codecs::wireexpr::Wireexpr<'_> {
+            wz_codecs::wireexpr::Wireexpr {
+                body: wz_codecs::wireexpr::WireexprVariant::WireexprLocal(
+                    wz_codecs::wireexpr_local::WireexprLocal {
+                        id,
+                        suffix_len: suffix.map(|s| s.len() as u64),
+                        suffix,
+                    },
+                ),
+            }
+        }
+
+        fn declare_kexpr(id: u64, suffix: &str) -> Vec<u8> {
+            wz_codecs::declare::Declare {
+                body: wz_codecs::declare::DeclareVariant::CodecZenohDeclKexpr(
+                    wz_codecs::decl_kexpr::DeclKexpr {
+                        header: wz_session_core::wire_const::D_MID_KEXPR
+                            | wz_session_core::wire_const::FLAG_D_N,
+                        id,
+                        keyexpr: sender_space(0, Some(suffix)),
+                        extensions: None,
+                    },
+                ),
+                ..Default::default()
+            }
+            .encode_to_vec()
+        }
+
+        /// A `Push` naming its key by ID ALONE — the reference under test.
+        fn push_by_id(id: u64, payload: &[u8]) -> Vec<u8> {
+            wz_codecs::push::Push {
+                // NO `FLAG_N_N`, and that is the point of this record: the N
+                // flag says the `WireExpr` carries a SUFFIX, and this one names
+                // its key by id alone. `put_declaring` sets it because its key
+                // is a literal; copying it here made the decoder read a suffix
+                // that was not there and the record walked as `unparsed`.
+                header: wz_codecs::push::Push::default().header,
+                keyexpr: sender_space(id, None),
+                // The body is `put_declaring`'s, unchanged: the `0x40` header
+                // flag and the encoding group travel together, and a `MsgPut`
+                // built without them walks as `unparsed` — measured, on this
+                // test's first run.
+                body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
+                    header: wz_codecs::msg_put::MsgPut::default().header | 0x40,
+                    encoding: Some(wz_codecs::encoding::Encoding {
+                        packed_id: 0,
+                        schema_len: None,
+                        schema: None,
+                    }),
+                    payload_len: payload.len() as u64,
+                    payload,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }
+            .encode_to_vec()
+        }
+
+        /// One datagram on the link whose peer is `10.0.0.<host>`, in either
+        /// direction. The PORTS are fixed and the HOST varies, which is what
+        /// makes two 5-tuples out of one node pair.
+        fn datagram(host: u8, from_peer: bool, payload: &[u8]) -> Vec<u8> {
+            let (src, sport, dst, dport) = if from_peer {
+                ([10, 0, 0, host], 7447u16, [10, 0, 0, 1], 50000u16)
+            } else {
+                ([10, 0, 0, 1], 50000, [10, 0, 0, host], 7447)
+            };
+            let mut udp = Vec::new();
+            udp.extend_from_slice(&sport.to_be_bytes());
+            udp.extend_from_slice(&dport.to_be_bytes());
+            udp.extend_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+            udp.extend_from_slice(&0u16.to_be_bytes());
+            udp.extend_from_slice(payload);
+
+            let mut ip = vec![0x45u8, 0];
+            ip.extend_from_slice(&((20 + udp.len()) as u16).to_be_bytes());
+            ip.extend_from_slice(&[0, 0, 0, 0, 64, 17, 0, 0]);
+            ip.extend_from_slice(&src);
+            ip.extend_from_slice(&dst);
+            ip.extend_from_slice(&udp);
+
+            let mut eth = vec![0u8; 12];
+            eth.extend_from_slice(&[0x08, 0x00]);
+            eth.extend_from_slice(&ip);
+            while eth.len() < 60 {
+                eth.push(0);
+            }
+            eth
+        }
+
+        let mut packets: Vec<Vec<u8>> = Vec::new();
+        // Both links handshake, naming the SAME zid pair.
+        for host in [2u8, 3] {
+            packets.push(datagram(host, true, &init(ZID_A)));
+            packets.push(datagram(host, false, &init(ZID_B)));
+        }
+        // The declaration travels on LINK ONE...
+        packets.push(datagram(
+            2,
+            true,
+            &frame_carrying(&declare_kexpr(ID, "demo/temp")),
+        ));
+        // ...and the reference that needs it on LINK TWO. This is the item.
+        packets.push(datagram(
+            3,
+            true,
+            &frame_carrying(&push_by_id(ID, &[7u8; 5])),
+        ));
+
+        let refs: Vec<(u32, u64, &[u8])> = packets
+            .iter()
+            .map(|p| (0u32, 1_000_000u64, p.as_slice()))
+            .collect();
+        let capture = wz_capture::pcapng::write(&[(wz_capture::link::LINKTYPE_ETHERNET, 6)], &refs);
+
+        // THE FIXTURE'S OWN ANCHOR: one session over two links, or every claim
+        // below would pass by having nothing to group.
+        let dissection = wz_capture::Dissection::from_capture(&capture).expect("the capture reads");
+        let grouping = wz_capture::node::session_grouping(&dissection);
+        assert_eq!(
+            (grouping.sessions(), grouping.grouped_lists()),
+            (1, 2),
+            "the fixture must be ONE session over TWO links: {:?}",
+            wz_capture::node::nodes(&dissection).links()
+        );
+
+        let rules = [String::from("nomatch/**=json")];
+        let text = analyze_request(&Request {
+            capture: &capture,
+            keylog: None,
+            format: Format::Text,
+            per_flow: true,
+            per_message: true,
+            messages_per_flow: None,
+            quic_ports: &[],
+            quic_cid_len: None,
+            payload_rules: &rules,
+            payload_field_names: &[],
+            serial_linktypes: &[],
+            census: Census::default(),
+            per_field: true,
+            bounded: false,
+            health: false,
+            select: None,
+            csv: None,
+        })
+        .expect("the capture reads")
+        .0;
+
+        assert!(
+            text.contains("no --payload-format rule covers `demo/temp`"),
+            "the reference on link TWO must resolve against the declaration on \
+             link ONE, and the listing must print the LITERAL it resolved to: \
+             {text}"
+        );
+        assert!(
+            !text.contains("names its keyexpr by id only"),
+            "and nothing may still be reported as id-only, which is the \
+             sentence a per-flow table produced for this exact row: {text}"
+        );
+    }
+
     /// One UDP datagram to a zenoh port carrying `payload`.
     fn udp_to_zenoh_port(payload: &[u8]) -> Vec<u8> {
         let mut udp = Vec::new();
