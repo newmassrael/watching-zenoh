@@ -952,8 +952,16 @@ impl RedialSchedule {
     /// the FIRST re-dial of an outage is unchanged from the fixed-delay era —
     /// which is why adopting the growth does not move any timing a test that
     /// observes only the first re-dial depends on.
-    fn next_ms(&mut self, addr: SocketAddr) -> u64 {
-        let policy = self.policy;
+    /// R2496 — `overrides` is the endpoint's own `#`-tail retry span, layered
+    /// over the global policy at the moment the outage's period is CREATED.
+    /// Laid on here rather than at construction because the schedule is one
+    /// instance for the whole loop while the overrides belong to one address.
+    fn next_ms(
+        &mut self,
+        addr: SocketAddr,
+        overrides: &wz_session_core::locator::LocatorRetry,
+    ) -> u64 {
+        let policy = self.policy.layered(overrides);
         self.periods
             .entry(addr)
             .or_insert_with(|| policy.period())
@@ -1068,7 +1076,7 @@ fn schedule_redial(
     // Read once and reused in both the log and the dial, so the line an operator
     // sees is the delay actually applied, not a second call that would double the
     // growth.
-    let backoff_ms = redial.next_ms(addr);
+    let backoff_ms = redial.next_ms(addr, &target.retry);
     if announce {
         log::info!(
             "reconcile: re-dialing desired peer {addr} in {backoff_ms}ms (face {})",
@@ -1140,7 +1148,7 @@ fn schedule_multilink_redial(
     // re-add is tracked (a failed re-dial's Err arm finds it and retries).
     let addr = target.addr;
     ml_dial_endpoints.insert(id, (target.clone(), pref, band));
-    let backoff_ms = redial.next_ms(addr);
+    let backoff_ms = redial.next_ms(addr, &target.retry);
     if announce {
         log::info!(
             "multilink: re-adding dropped link to {addr} in {backoff_ms}ms (face {})",
@@ -2915,6 +2923,14 @@ mod tests {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
     }
 
+    /// R2496 — an endpoint whose `#`-tail names no retry override, which is
+    /// what every case below is about: these pin the GLOBAL policy's shape, and
+    /// the per-endpoint layering has its own case.
+    #[cfg(any(feature = "router-connect-reconcile", feature = "transport-multilink"))]
+    fn no_overrides() -> wz_session_core::locator::LocatorRetry {
+        wz_session_core::locator::LocatorRetry::default()
+    }
+
     /// The wait GROWS across the retries of one outage, per address. This is the
     /// defect R311y786 paid off: the fixed `RECONNECT_BACKOFF_MS` returned 1000
     /// forever, so a configured peer that was switched off was re-dialed at 1 Hz
@@ -2929,9 +2945,48 @@ mod tests {
         });
         let a = addr(7001);
         assert_eq!(
-            (0..5).map(|_| s.next_ms(a)).collect::<Vec<_>>(),
+            (0..5)
+                .map(|_| s.next_ms(a, &no_overrides()))
+                .collect::<Vec<_>>(),
             vec![100, 200, 400, 400, 400],
             "one address's retries must climb to the ceiling and stay there"
+        );
+    }
+
+    /// R2496 (`router-connect-reconcile`) — an endpoint's OWN `#`-tail decides
+    /// its cadence, which is what zenoh does per endpoint after resolving the
+    /// global block
+    /// (`commons/zenoh-config/src/connection_retry.rs` @ `pub fn get_retry_config(`).
+    ///
+    /// The second half is the ANTI-VACUITY arm and is not decoration: with the
+    /// layering removed both addresses would still climb 100/200/400, so a test
+    /// that only watched the tuned peer could not tell "the override applied"
+    /// from "the global happened to be those numbers".
+    #[cfg(any(feature = "router-connect-reconcile", feature = "transport-multilink"))]
+    #[test]
+    fn an_endpoints_own_tail_overrides_the_global_cadence() {
+        let mut s = RedialSchedule::new(RetryPolicy {
+            period_init_ms: 100,
+            period_max_ms: 400,
+            period_increase_factor: 2.0,
+        });
+        let tuned =
+            parse_locator("tcp/127.0.0.1:7001#retry_period_init_ms=25;retry_period_max_ms=50")
+                .expect("valid tuned locator")
+                .retry;
+        let a = addr(7001);
+        assert_eq!(
+            (0..4).map(|_| s.next_ms(a, &tuned)).collect::<Vec<_>>(),
+            vec![25, 50, 50, 50],
+            "the endpoint's own init and ceiling must be the ones that apply"
+        );
+        let b = addr(7002);
+        assert_eq!(
+            (0..3)
+                .map(|_| s.next_ms(b, &no_overrides()))
+                .collect::<Vec<_>>(),
+            vec![100, 200, 400],
+            "a peer whose tail says nothing keeps the GLOBAL cadence"
         );
     }
 
@@ -2947,15 +3002,15 @@ mod tests {
             period_increase_factor: 2.0,
         });
         let (a, b) = (addr(7001), addr(7002));
-        assert_eq!(s.next_ms(a), 100);
-        assert_eq!(s.next_ms(a), 200);
+        assert_eq!(s.next_ms(a, &no_overrides()), 100);
+        assert_eq!(s.next_ms(a, &no_overrides()), 200);
         assert_eq!(
-            s.next_ms(b),
+            s.next_ms(b, &no_overrides()),
             100,
             "a different peer's FIRST re-dial must be period_init_ms"
         );
         assert_eq!(
-            s.next_ms(a),
+            s.next_ms(a, &no_overrides()),
             400,
             "and the first peer's own growth continues"
         );
@@ -2975,11 +3030,11 @@ mod tests {
             period_increase_factor: 2.0,
         });
         let a = addr(7001);
-        assert_eq!(s.next_ms(a), 100);
-        assert_eq!(s.next_ms(a), 200);
+        assert_eq!(s.next_ms(a, &no_overrides()), 100);
+        assert_eq!(s.next_ms(a, &no_overrides()), 200);
         s.forget(a);
         assert_eq!(
-            s.next_ms(a),
+            s.next_ms(a, &no_overrides()),
             100,
             "a recovered peer's NEXT outage starts from period_init_ms"
         );
@@ -2996,7 +3051,7 @@ mod tests {
     fn a_recovered_address_leaves_no_entry_behind() {
         let mut s = RedialSchedule::new(RetryPolicy::ZENOH_DEFAULT);
         let a = addr(7001);
-        s.next_ms(a);
+        s.next_ms(a, &no_overrides());
         assert_eq!(s.periods.len(), 1);
         s.forget(a);
         assert!(
@@ -3013,7 +3068,9 @@ mod tests {
         let mut s = RedialSchedule::new(RetryPolicy::constant(1000));
         let a = addr(7001);
         assert_eq!(
-            (0..4).map(|_| s.next_ms(a)).collect::<Vec<_>>(),
+            (0..4)
+                .map(|_| s.next_ms(a, &no_overrides()))
+                .collect::<Vec<_>>(),
             vec![1000, 1000, 1000, 1000]
         );
     }

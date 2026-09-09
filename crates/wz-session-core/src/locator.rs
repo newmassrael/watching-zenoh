@@ -188,6 +188,55 @@ pub struct ParsedLocator {
     /// The `ttl` field above has no such dependence, which is why the two are
     /// typed differently.
     pub mcast_join: Vec<String>,
+    /// R2496 (`router-connect-reconcile`) — the PER-ENDPOINT connection-retry
+    /// overrides carried on the same `#`-config tail. See [`LocatorRetry`].
+    pub retry: LocatorRetry,
+}
+
+/// R2496 — the per-endpoint connection-retry overrides a locator's `#`-config
+/// tail may carry.
+///
+/// zenoh resolves retry per endpoint, layering these OVER the global
+/// `connect.retry` block:
+/// `commons/zenoh-config/src/connection_retry.rs` @ `pub fn get_retry_config(`
+/// reads `exit_on_failure`, `retry_period_init_ms`, `retry_period_max_ms` and
+/// `retry_period_increase_factor` off `endpoint.config()`, and that span is the
+/// `#` tail —
+/// `commons/zenoh-protocol/src/core/endpoint.rs` @ `pub const CONFIG_SEPARATOR: char = '#';`.
+/// `None` on a field means NO override: the global policy stands, which is what
+/// upstream's layering produces for an endpoint whose tail is silent.
+///
+/// ⚠ THE FACTOR IS STORED AS `f64::to_bits`, and the reason is structural
+/// rather than cosmetic: [`ParsedLocator`] derives `Eq`, [`AnyLocator`] embeds
+/// it and derives `Eq` too, and the [`crate::reconnect`] types inherit that. An
+/// `f64` field would force `Eq` off that whole family for one value nobody
+/// compares. Bits are exact in both directions
+/// ([`LocatorRetry::period_increase_factor`] converts back), so the only thing
+/// given up is the direct read.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LocatorRetry {
+    /// `#retry_period_init_ms=<n>` — the first wait before re-dialling.
+    pub period_init_ms: Option<u64>,
+    /// `#retry_period_max_ms=<n>` — the ceiling the growth settles at.
+    pub period_max_ms: Option<u64>,
+    /// `#retry_period_increase_factor=<f>`, held as bits (see the type doc).
+    period_increase_factor_bits: Option<u64>,
+}
+
+impl LocatorRetry {
+    /// The `retry_period_increase_factor` override, if the tail carried one.
+    pub fn period_increase_factor(&self) -> Option<f64> {
+        self.period_increase_factor_bits.map(f64::from_bits)
+    }
+
+    /// Does this tail carry NO retry override at all? The re-dial seam asks
+    /// this to decide whether it may keep the global policy untouched, which
+    /// is the common case and the one that must stay allocation-free.
+    pub fn is_empty(&self) -> bool {
+        self.period_init_ms.is_none()
+            && self.period_max_ms.is_none()
+            && self.period_increase_factor_bits.is_none()
+    }
 }
 
 /// Why a locator string did not parse into a [`ParsedLocator`]. Each
@@ -254,6 +303,9 @@ pub fn parse_locator(locator: &str) -> Result<ParsedLocator, LocatorParseError> 
         // share a grammar, and `?ttl=8` is not a multicast hop limit.
         mcast_ttl: parse_mcast_ttl(parts.config)?,
         mcast_join: parse_mcast_join(parts.config),
+        // R2496 — CONFIG span again, for the reason the two above take it: this
+        // is where zenoh reads the per-endpoint retry overrides too.
+        retry: parse_retry(parts.config)?,
     })
 }
 
@@ -276,6 +328,23 @@ const LOCATOR_MCAST_TTL_KEY: &str = "ttl";
 
 /// zenoh `UDP_MULTICAST_JOIN` config key (`zenoh-link-udp/src/lib.rs:110`).
 const LOCATOR_MCAST_JOIN_KEY: &str = "join";
+
+/// R2496 — the three PER-ENDPOINT retry-PERIOD keys, spelled exactly as zenoh
+/// reads them off `endpoint.config()` in
+/// `commons/zenoh-config/src/connection_retry.rs` @ `if let Some(val) = config.get("retry_period_init_ms") {`
+/// and its neighbours. The spelling is upstream's, not a wz choice: an operator
+/// moves an endpoint string between the two implementations unchanged, which is
+/// the whole point of honouring the span.
+///
+/// ⚠ THE FOURTH KEY UPSTREAM READS THERE, `exit_on_failure`, IS DELIBERATELY
+/// NOT PARSED HERE, and the reason is that parsing it would be worse than
+/// leaving it: its consumer is the STARTUP-phase seam
+/// (`crate::startup_phase`), which this locator never reaches, so a parsed
+/// value would sit unread while the tail LOOKED honoured. It stays the named
+/// remainder of this residual rather than a field with no reader.
+const LOCATOR_RETRY_PERIOD_INIT_MS_KEY: &str = "retry_period_init_ms";
+const LOCATOR_RETRY_PERIOD_MAX_MS_KEY: &str = "retry_period_max_ms";
+const LOCATOR_RETRY_PERIOD_INCREASE_FACTOR_KEY: &str = "retry_period_increase_factor";
 
 /// zenoh `Metadata::RELIABILITY` metadata key
 /// (`zenoh-protocol/src/core/endpoint.rs:196`).
@@ -401,6 +470,64 @@ fn parse_mcast_ttl(config: &str) -> Result<Option<u32>, LocatorParseError> {
                     value: value.to_string(),
                 })
         }
+    }
+}
+
+/// R2496 — the four per-endpoint retry overrides from the CONFIG span.
+///
+/// Each key follows this module's existing rule, the one
+/// [`parse_mcast_ttl`]'s doc states: an UNKNOWN key is forward-compat and
+/// dropped, while a KNOWN key whose value does not fit its shape is REFUSED
+/// rather than silently defaulted. That matters more here than for `ttl`,
+/// because the value being dropped would not be visible anywhere: a node whose
+/// `#retry_period_init_ms=500` was ignored comes up, dials, and re-dials at the
+/// global cadence with nothing to read.
+///
+/// ⚠ NAMED DIVERGENCE, in the safe direction: a NON-FINITE factor is refused
+/// here, where zenoh's `zparse_default!` would take it and let the arithmetic
+/// carry the NaN into every subsequent wait. The accepted SET is otherwise
+/// identical.
+fn parse_retry(config: &str) -> Result<LocatorRetry, LocatorParseError> {
+    Ok(LocatorRetry {
+        period_init_ms: parse_config_u64(config, LOCATOR_RETRY_PERIOD_INIT_MS_KEY)?,
+        period_max_ms: parse_config_u64(config, LOCATOR_RETRY_PERIOD_MAX_MS_KEY)?,
+        period_increase_factor_bits: parse_config_factor_bits(
+            config,
+            LOCATOR_RETRY_PERIOD_INCREASE_FACTOR_KEY,
+        )?,
+    })
+}
+
+/// `key=<u64>` from the CONFIG span.
+fn parse_config_u64(config: &str, key: &'static str) -> Result<Option<u64>, LocatorParseError> {
+    match lookup_param(config, key).filter(|v| !v.is_empty()) {
+        None => Ok(None),
+        Some(value) => {
+            value
+                .parse::<u64>()
+                .map(Some)
+                .map_err(|_| LocatorParseError::BadConfigValue {
+                    key,
+                    value: value.to_string(),
+                })
+        }
+    }
+}
+
+/// `key=<f64>` from the CONFIG span, stored as bits (see [`LocatorRetry`]).
+fn parse_config_factor_bits(
+    config: &str,
+    key: &'static str,
+) -> Result<Option<u64>, LocatorParseError> {
+    match lookup_param(config, key).filter(|v| !v.is_empty()) {
+        None => Ok(None),
+        Some(value) => match value.parse::<f64>() {
+            Ok(f) if f.is_finite() => Ok(Some(f.to_bits())),
+            _ => Err(LocatorParseError::BadConfigValue {
+                key,
+                value: value.to_string(),
+            }),
+        },
     }
 }
 
@@ -951,6 +1078,10 @@ pub enum AnyLocator {
         /// like [`ParsedLocator::iface`] so a DNS-named dial can also bind its
         /// outgoing socket to a NIC (`SO_BINDTODEVICE`). `None` = no bind.
         iface: Option<String>,
+        /// R2496 — the per-endpoint retry overrides from the same config tail,
+        /// carried for the reason `iface` is: the tail belongs to the endpoint,
+        /// not to the address shape that happens to spell it.
+        retry: LocatorRetry,
     },
     /// A serial endpoint (`serial/...`) — see [`SerialEndpoint`]. ALWAYS
     /// present (R311ny: the serial locator leaf is ungated), so a
@@ -1072,11 +1203,16 @@ pub fn parse_any_locator(locator: &str) -> Result<AnyLocator, AnyLocatorError> {
         // them here makes DNS-vs-numeric an address-token property the dial seam
         // routes on, instead of a raw-string re-inspection at each caller.
         Err(LocatorParseError::BadAddress(addr)) => match classify_named_ip(locator) {
-            Some((proto, host, port, iface)) => Ok(AnyLocator::Named {
+            Some((proto, host, port, iface, config)) => Ok(AnyLocator::Named {
                 proto,
                 host,
                 port,
                 iface,
+                // R2496 — a DNS-named endpoint carries the same `#`-config
+                // tail, so it carries the same retry overrides. Dropping them
+                // here would leave the silent-default defect standing for half
+                // the endpoint population.
+                retry: parse_retry(config).map_err(AnyLocatorError::Ip)?,
             }),
             None => Err(AnyLocatorError::Ip(LocatorParseError::BadAddress(addr))),
         },
@@ -1092,7 +1228,7 @@ pub fn parse_any_locator(locator: &str) -> Result<AnyLocator, AnyLocatorError> {
 /// not already parse numerically — is genuinely malformed (`None`). This only
 /// classifies the token SHAPE; it performs NO DNS resolution (that is the std
 /// dial layer's concern, per this module's deferral contract).
-fn classify_named_ip(locator: &str) -> Option<(Proto, String, u16, Option<String>)> {
+fn classify_named_ip(locator: &str) -> Option<(Proto, String, u16, Option<String>, &str)> {
     let (proto_str, addr) = locator.split_once('/')?;
     let proto = match proto_str {
         "tcp" => Proto::Tcp,
@@ -1121,7 +1257,12 @@ fn classify_named_ip(locator: &str) -> Option<(Proto, String, u16, Option<String
     if host.is_empty() || host.contains('/') || host.contains(':') {
         return None;
     }
-    Some((proto, host.to_string(), port, parse_iface(config)))
+    // R2496 — the CONFIG span rides out with the rest so the caller can parse
+    // the per-endpoint retry overrides from it. Returned rather than parsed
+    // here because a malformed retry value is an ERROR, and this function's
+    // `None` already means "not a name" — two different answers that must not
+    // share a channel.
+    Some((proto, host.to_string(), port, parse_iface(config), config))
 }
 
 #[cfg(test)]
@@ -1294,6 +1435,103 @@ mod tests {
     }
 
     #[test]
+    fn the_three_retry_overrides_parse_off_the_config_tail() {
+        // R2496 (`router-connect-reconcile`) — zenoh layers these OVER the
+        // global `connect.retry` block, per endpoint, off this same span:
+        // `commons/zenoh-config/src/connection_retry.rs` @ `pub fn get_retry_config(`.
+        let p = parse_locator(
+            "tcp/1.2.3.4:7447#retry_period_init_ms=500;\
+             retry_period_max_ms=8000;retry_period_increase_factor=1.5",
+        )
+        .expect("valid locator with a retry tail");
+        assert_eq!(p.retry.period_init_ms, Some(500));
+        assert_eq!(p.retry.period_max_ms, Some(8000));
+        assert_eq!(p.retry.period_increase_factor(), Some(1.5));
+        assert!(!p.retry.is_empty());
+    }
+
+    #[test]
+    fn a_locator_with_no_retry_tail_overrides_nothing() {
+        // ANTI-VACUITY for the test above: `is_empty` has to be able to say NO,
+        // or "the global policy stands" and "the tail was parsed" would look
+        // the same to the re-dial seam.
+        let p = parse_locator("tcp/1.2.3.4:7447").expect("valid bare locator");
+        assert!(p.retry.is_empty());
+        assert_eq!(p.retry.period_increase_factor(), None);
+    }
+
+    #[test]
+    fn an_unknown_key_beside_the_retry_keys_is_still_dropped() {
+        // The forward-compat rule is unchanged by R2496: an unknown KEY is
+        // dropped, and it does not take the keys beside it down with it.
+        let p = parse_locator("tcp/1.2.3.4:7447#nope=1;retry_period_init_ms=250")
+            .expect("an unknown key is not an error");
+        assert_eq!(p.retry.period_init_ms, Some(250));
+    }
+
+    #[test]
+    fn a_retry_period_that_is_not_a_number_is_refused() {
+        // The `ttl` reasoning, on a key whose silent default is INVISIBLE: a
+        // node whose `retry_period_init_ms` was dropped comes up, dials, and
+        // re-dials at the global cadence with nothing anywhere to read.
+        let e = parse_locator("tcp/1.2.3.4:7447#retry_period_init_ms=soon").expect_err("refused");
+        assert_eq!(
+            e,
+            LocatorParseError::BadConfigValue {
+                key: "retry_period_init_ms",
+                value: "soon".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_non_finite_retry_factor_is_refused() {
+        // NAMED DIVERGENCE, in the safe direction: zenoh's `zparse_default!`
+        // takes this and lets the NaN ride into every subsequent wait.
+        let e = parse_locator("tcp/1.2.3.4:7447#retry_period_increase_factor=nan")
+            .expect_err("refused");
+        assert_eq!(
+            e,
+            LocatorParseError::BadConfigValue {
+                key: "retry_period_increase_factor",
+                value: "nan".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn exit_on_failure_stays_an_unknown_key_here_and_says_so() {
+        // THE NAMED REMAINDER, pinned so a later round cannot mistake silence
+        // for coverage: upstream reads a fourth key off this span, and its
+        // consumer in wz is the startup-phase seam rather than the re-dial one.
+        // Parsing it here would leave a field no code reads while the tail
+        // looked honoured, so it stays an unknown key -- dropped, exactly like
+        // any other.
+        let p = parse_locator("tcp/1.2.3.4:7447#exit_on_failure=true")
+            .expect("an unknown key is not an error");
+        assert!(
+            p.retry.is_empty(),
+            "exit_on_failure must NOT be silently collected into the retry set"
+        );
+    }
+
+    #[test]
+    fn a_dns_named_endpoint_carries_its_retry_overrides_too() {
+        // Half the endpoint population is named, and the `#` tail belongs to the
+        // ENDPOINT rather than to the address shape that spells it. Dropping the
+        // overrides here would leave the silent-default defect standing for that
+        // half.
+        let l = parse_any_locator("tcp/example.org:7447#retry_period_max_ms=9000")
+            .expect("valid named locator with a retry tail");
+        match l {
+            AnyLocator::Named { retry, .. } => {
+                assert_eq!(retry.period_max_ms, Some(9000));
+            }
+            other => panic!("expected Named, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn join_collects_every_value_not_only_the_first() {
         // THE DISCRIMINATOR for the multi-value read. zenoh uses
         // `Parameters::values` here, not `get` (`multicast.rs:316`), so a
@@ -1347,6 +1585,7 @@ mod tests {
                 host: "example.org".to_string(),
                 port: 7447,
                 iface: None,
+                retry: LocatorRetry::default(),
             })
         );
     }
@@ -1408,6 +1647,7 @@ mod tests {
                 host: "example.org".to_string(),
                 port: 7447,
                 iface: Some("eth0".to_string()),
+                retry: LocatorRetry::default(),
             })
         );
     }
@@ -1458,6 +1698,7 @@ mod tests {
                 host: "example.org".to_string(),
                 port: 7447,
                 iface: None,
+                retry: LocatorRetry::default(),
             })
         );
     }
@@ -1480,6 +1721,7 @@ mod tests {
                     host: "example.org".to_string(),
                     port: 7447,
                     iface: None,
+                    retry: LocatorRetry::default(),
                 }),
                 "{s} should classify as Named"
             );
@@ -1825,6 +2067,7 @@ mod tests {
                 host: "example.org".to_string(),
                 port: 7447,
                 iface: Some("eth0".to_string()),
+                retry: LocatorRetry::default(),
             })
         );
     }
@@ -2065,6 +2308,7 @@ mod tests {
                 host: "example.org".to_string(),
                 port: 7447,
                 iface: None,
+                retry: LocatorRetry::default(),
             })
         );
     }

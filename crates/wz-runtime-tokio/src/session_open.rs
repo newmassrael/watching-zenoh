@@ -1988,6 +1988,9 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
             host,
             port,
             iface,
+            // R2496 — the retry tail is the RE-DIAL schedule's input, and this
+            // arm is a single dial (or bind): it has no schedule to layer over.
+            retry: _,
         } => match proto {
             Proto::Tcp => Ok(DialedLink::Tcp(
                 dial_tcp_host(&format!("{host}:{port}"), iface.as_deref()).await?,
@@ -2472,6 +2475,7 @@ pub async fn resolve_mesh_dial_target(target: &str) -> Result<AnyLocator, DialTa
             host,
             port,
             iface,
+            retry,
         } => {
             let addrs = crate::link_pipeline::resolve_locator_addrs(&host, port)
                 .await
@@ -2484,6 +2488,12 @@ pub async fn resolve_mesh_dial_target(target: &str) -> Result<AnyLocator, DialTa
                 iface,
                 mcast_ttl: None,
                 mcast_join: Vec::new(),
+                // R2496 — the resolved form keeps the endpoint's retry tail.
+                // The reconstruction already keeps the scheme and the bind for
+                // this reason; dropping the retry span here would mean a NAMED
+                // peer silently re-dialing at the global cadence while a
+                // numeric one honoured the operator's value.
+                retry,
             })
         }
         other => other,
@@ -2685,6 +2695,9 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
             host,
             port,
             iface,
+            // R2496 — the retry tail is the RE-DIAL schedule's input, and this
+            // arm is a single dial (or bind): it has no schedule to layer over.
+            retry: _,
         } => match proto {
             Proto::Tcp => Ok(BoundListener::Tcp(
                 bind_tcp_host(&format!("{host}:{port}"), iface.as_deref()).await?,
@@ -5243,6 +5256,7 @@ mod tests {
                 host: "example.org".to_string(),
                 port: 7447,
                 iface: None,
+                retry: wz_session_core::locator::LocatorRetry::default(),
             })
         );
     }
@@ -5268,6 +5282,7 @@ mod tests {
                 host: "example.org".to_string(),
                 port: 7447,
                 iface: None,
+                retry: wz_session_core::locator::LocatorRetry::default(),
             })
         );
         assert_eq!(

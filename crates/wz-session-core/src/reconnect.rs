@@ -81,6 +81,11 @@ pub enum ReconnectLocator {
         /// so a reconnect-supervised named dial keeps binding to the same
         /// interface. Mirrors [`AnyLocator::Named::iface`].
         iface: Option<String>,
+        /// R2496 — the per-endpoint retry overrides, preserved across the
+        /// narrowing for the reason `iface` is: a reconnect that dropped them
+        /// would silently fall back to the global cadence on exactly the peers
+        /// an operator tuned by hand.
+        retry: crate::locator::LocatorRetry,
     },
 }
 
@@ -127,11 +132,13 @@ impl From<ReconnectLocator> for AnyLocator {
                 host,
                 port,
                 iface,
+                retry,
             } => AnyLocator::Named {
                 proto,
                 host,
                 port,
                 iface,
+                retry,
             },
         }
     }
@@ -151,11 +158,13 @@ impl TryFrom<AnyLocator> for ReconnectLocator {
                 host,
                 port,
                 iface,
+                retry,
             } => Ok(ReconnectLocator::Named {
                 proto,
                 host,
                 port,
                 iface,
+                retry,
             }),
             AnyLocator::Serial(_) => Err(NotReconnectable::Serial),
             // R311xi — unix-domain socket: non-IP, not in the reconnect set
@@ -463,6 +472,7 @@ mod reconnect_locator_tests {
             iface: None,
             mcast_ttl: None,
             mcast_join: alloc::vec::Vec::new(),
+            retry: crate::locator::LocatorRetry::default(),
         }
     }
 

@@ -93,6 +93,27 @@ impl RetryPolicy {
         RetryPeriod::new(*self)
     }
 
+    /// R2496 (`router-connect-reconcile`) — this policy with a single
+    /// endpoint's overrides laid over it, field by field.
+    ///
+    /// zenoh resolves retry exactly this way: the global `connect.retry` block
+    /// first, then the endpoint's own config span on top —
+    /// `commons/zenoh-config/src/connection_retry.rs` @ `pub fn get_retry_config(`,
+    /// where each `if let Some(val) = config.get(..)` replaces one field and
+    /// leaves the rest. A field the tail is silent about keeps the global
+    /// value, which is why this takes `Option`s rather than a whole policy: an
+    /// endpoint that names only `retry_period_max_ms` must not also inherit a
+    /// default `period_init_ms` from nowhere.
+    pub fn layered(self, overrides: &wz_session_core::locator::LocatorRetry) -> Self {
+        Self {
+            period_init_ms: overrides.period_init_ms.unwrap_or(self.period_init_ms),
+            period_max_ms: overrides.period_max_ms.unwrap_or(self.period_max_ms),
+            period_increase_factor: overrides
+                .period_increase_factor()
+                .unwrap_or(self.period_increase_factor),
+        }
+    }
+
     /// Whether this policy ever grows its wait. Not used by the schedule
     /// itself; it is the predicate a caller (or a test) asks when the question
     /// is "is this deploy on the constant shape or the exponential one",
