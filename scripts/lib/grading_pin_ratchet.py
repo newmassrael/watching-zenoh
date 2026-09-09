@@ -1315,7 +1315,20 @@ def _grade_head(reason: str) -> str:
 #: the version the population is named for, which is a property of the
 #: predicate rather than a hole in it, and is worth knowing before the next row
 #: with two upstreams is judged.
-BUDGET = 13
+#:
+#: R2477 — 13 -> 12: `transport-qos`, re-measured at the pin with NO VERDICT
+#: CHANGED. All three sharpened residuals stand: upstream's pipeline is still
+#: always-on because a producer/consumer split makes its tx task the only
+#: writer, per-priority queue depth still has no wz meaning without one, and the
+#: drop-vs-block triad (`set_congested` / `is_droppable`) is still upstream and
+#: still absent here.
+#:
+#: ⚠ THE CITED LINE RANGE HAD MOVED while the substance had not -- the clause
+#: named `pipeline.rs:813-826` for the triad and those symbols now sit lower in
+#: that file. That is precisely the rot the `path` @ `needle` rule exists to
+#: prevent, caught here only because the round re-read by symbol instead of
+#: trusting the range. The re-declaration replaces the range with needles.
+BUDGET = 12
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
