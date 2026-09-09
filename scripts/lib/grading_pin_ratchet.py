@@ -1270,7 +1270,20 @@ def _grade_head(reason: str) -> str:
 #: issues two GETs on one session with a permit change between them), filed as
 #: open-debt item 665. A pin re-declaration says the behaviour being witnessed
 #: against is still the behaviour described; it does not build the instrument.
-BUDGET = 16
+#:
+#: R2469 — 16 -> 15: `adminspace-plugins-handlers`, re-measured at the pin with
+#: NO VERDICT CHANGED. All three still-open residuals stand: upstream's
+#: `PluginReport` still carries a per-plugin level AND messages where wz emits a
+#: constant, `PluginState::Declared` is still a state wz cannot reach without a
+#: PluginsManager, and the dlopen sub-tree is still a §5.22 question.
+#:
+#: ⚠ AND A TRAP FOR THE NEXT READER OF THAT UPSTREAM FILE, worth a line here
+#: because it would manufacture a divergence that does not exist: the report
+#: level enum's own doc comment lists "Normal / Warning / Error" while the
+#: variant is spelled `Info` and carries `#[default]`. wz's constant is
+#: upstream's default spelled upstream's way. Match on the code, not the prose
+#: beside it -- upstream's prose can be stale about upstream.
+BUDGET = 15
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
