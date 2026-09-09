@@ -1258,7 +1258,19 @@ def _grade_head(reason: str) -> str:
 #: three test sites. The CONCLUSION held; the symbol a reader would grep for
 #: did not. That is the failure this ratchet exists to surface, and it is
 #: invisible to any predicate that only asks which version number appears.
-BUDGET = 17
+#:
+#: R2468 — 17 -> 16: `adminspace-read`, re-measured at the pin with NO VERDICT
+#: CHANGED. Upstream's read gate is still evaluated per REQUEST against a config
+#: lock taken inside the query arm, and still logs its deny, so the clauses this
+#: atom already records as CLOSED are closed against the PIN and not only
+#: against 1.5.0 -- which is the half a re-declaration is for.
+#:
+#: ⚠ ITS OPEN RESIDUAL IS NOT AN UPSTREAM GAP AT ALL, and re-measuring cannot
+#: touch it: what is missing is a per-GET WITNESS in this tree (a client that
+#: issues two GETs on one session with a permit change between them), filed as
+#: open-debt item 665. A pin re-declaration says the behaviour being witnessed
+#: against is still the behaviour described; it does not build the instrument.
+BUDGET = 16
 
 #: A reader that matches nothing has stopped matching the store. Well below the
 #: real graded population (MEASURED at the landing commit: 312 inventory
