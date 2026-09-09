@@ -6534,8 +6534,14 @@ layer_c1ak_cargo_test_transport_stats() {
     # module and the round's first cut moved TWO of them, so six sat at their
     # pre-R2393 numbers with nothing local complaining — `guarded_count_gate.py
     # --range` is what found them, which is why it is the oracle and a hand grep
-    # is not. The other seven are at run-ci.sh:6674, 6708, 6710, 6718, 6732, 6779
-    # and 6781; a change to `mod tests` in adminspace.rs moves ALL of them.
+    # is not. The other seven are the remaining `--lib adminspace` invocations
+    # in this file; enumerate them with `grep -n 'lib adminspace' scripts/run-ci.sh`
+    # rather than by coordinate, and expect the guard's own reported line to be
+    # the `_runci_guarded_test` call ONE ABOVE a wrapped command. R2497 — this
+    # sentence used to LIST those seven coordinates and every one of them had
+    # rotted, inside a comment whose own subject is that a hand-held measurement
+    # cannot be trusted here. A change to `mod tests` in adminspace.rs moves ALL
+    # of them.
     _runci_guarded_test C1ak 32 cargo test -p wz-session-core --features adminspace-metrics,transport-stats --lib adminspace --quiet \
         || return 1
     (cd crates \
