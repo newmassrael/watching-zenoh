@@ -2538,6 +2538,20 @@ PY
     # failure mode item 717 is about. Paying 19s for that is the trade.
     python3 scripts/lib/bump_sweep.py --selftest || return 1
     python3 scripts/lib/bump_sweep.py --check || return 1
+    # R2540 (open-debt item 690) — the sweep above grades the GATES that carry a
+    # pin; this grades the LITERAL SITES themselves. A constant spelling the pin
+    # is a tripwire on purpose, so that a bump forces a human to re-derive the
+    # data the file is paired with; a tripwire whose file never READS the pin
+    # cannot trip. `upstream_feature_census.py` was that for five pushes — its
+    # comment asserted a binding its code did not make, so its constant and a
+    # hand-provisioned checkout could be stale together, agree, and go green
+    # everywhere except hosted. Placed beside the sweep for the same reason: it
+    # is offline and derives its population from the live pins, so it is
+    # runnable by hand mid-bump and needs no edit when a pin moves.
+    #
+    # MEASURED, warm: `--selftest` 0.04s, `--check` 0.4s.
+    python3 scripts/lib/pin_constant_binding_gate.py --selftest || return 1
+    python3 scripts/lib/pin_constant_binding_gate.py --check || return 1
     # R2283 (open-debt item 621) — and a COMMIT HOOK CHECK must say which
     # artifact it grades. `pre-commit`'s Check 2 picked its files out of the
     # index and then ran `cargo fmt` over the CHECKOUT; R2282 committed an

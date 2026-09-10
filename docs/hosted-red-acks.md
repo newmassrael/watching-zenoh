@@ -33,7 +33,7 @@ printed, `commit` is the tip being replaced (the sha the run graded), and
 |---|---|---|---|---|---|
 | R2496 | `34393145847` | `0df6bfeb` | C0 binary-dep · C0 (armed) provenance · C1bt wz-capture | 709 | R2498 |
 | R2497 | `34393145847` | `0df6bfeb` | C0 binary-dep · C0 (armed) provenance · C1bt wz-capture | 709 | R2498 |
-| R2535 | `34465003136` | `6b112827` | C0 sn-res-words selftest (two jobs, one cause) · C1ce census `unstable` row | 717 | |
+| R2535 | `34465003136` | `6b112827` | C0 sn-res-words selftest (two jobs, one cause) · C1ce census `unstable` row | 717 | R2535 |
 
 ## What the rows above say
 
@@ -53,3 +53,21 @@ warns about: the push it covers CARRIES both repairs — `d039d425` for the
 column is empty only because no hosted run has graded them yet. The round that
 reads run `34465003136`'s successor fills it in, and an empty column that
 survives that reading means the repair did not hold.
+
+R2540 did that reading, and it is why the column now says `R2535` rather than a
+later round: the repairs were already IN the push the row covers, so the round
+that carried them is the round that paid. Run `34479239610` on `787f00ed` — the
+first successor — came back `success` with all 21 jobs green, including the two
+that own the named causes (`default-off builds + gate provenance (Layers C0,
+C1cf)` for `sn-res-words`, and `§5.27 api-compat-c (C1ce + arms gate)` for the
+census row); runs `34483441810` and `34486390529` repeated it. A whole-run
+`success` is what makes those readings safe to quote here: this lane is
+fail-fast, so a green leg proves nothing when an earlier leg aborted, and only a
+run that reached the end proves the later ones ran at all.
+
+⚠ The outstanding-acknowledgement count this file exists to make countable is
+therefore ZERO as of R2540. That is a statement about ACKNOWLEDGEMENTS, not
+about hosted CI: R2540 measured two ratchets left red by R2539 (open-debt item
+720) which no row here covers, because no push has yet been made over them under
+an ack. A row appears when a push USES an ack, and a red nobody has pushed over
+is the register's business rather than this file's.

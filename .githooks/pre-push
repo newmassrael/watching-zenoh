@@ -378,6 +378,34 @@ if ! python3 scripts/lib/config_key_fixture_gate.py; then
     exit 1
 fi
 
+# ─── gate 2y — a script that spells a pin must read one (R2540) ─────
+# grades: worktree
+#
+# Open-debt item 690. A constant spelling the upstream pin is a TRIPWIRE, not a
+# copy: it exists so a bump FORCES a human to re-derive the data the file is
+# paired with. A tripwire whose file never READS the pin cannot trip — it just
+# grades against whatever it last said.
+#
+# `upstream_feature_census.py` was exactly that, and the cost is measured: its
+# constant was compared only to the zenoh SOURCE TREE it found, so on a machine
+# whose checkout is as stale as the constant the two AGREE and report green,
+# while hosted CI — which provisions AT the pin — is the only place that ever
+# disagrees. That is the shape R2535 paid a hosted red for.
+#
+# UNCONDITIONAL, for gate 2d's reason: it reads tracked files and costs ~0.4s,
+# and a scope predicate is one more thing that can be silently wrong. Its
+# population is DERIVED from the live pins, so a bump moves it with no edit here.
+if ! python3 scripts/lib/pin_constant_binding_gate.py --check; then
+    echo "" >&2
+    echo "pre-push: [gate 2y] pin-constant binding gate FAILED — a script spells" >&2
+    echo "          a current pin but reads none. The line above names the file" >&2
+    echo "          and line. Fix the BINDING, never the constant: read the pin" >&2
+    echo "          (a SSOT script, or the shared deriver) and refuse when the" >&2
+    echo "          two differ, in the mode that runs without a checkout." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+
 # ─── gate 2v — the replay ABI names what wz-replay says (R2441) ─────
 # grades: worktree
 #

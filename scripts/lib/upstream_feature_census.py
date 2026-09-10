@@ -116,7 +116,17 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "scripts" / "lib"))
+
+import upstream_release_distance as urd  # noqa: E402
+
 WORKSPACE_MANIFEST = ROOT / "crates" / "Cargo.toml"
+
+# The upstream this census grades, keyed the way the shared pin deriver keys it.
+# R2540 — reading the pin through `urd` rather than re-spelling a fourth copy
+# of `build-zenohd.sh`'s parse is the point: item 690's whole subject is a pin
+# spelled in more places than read one.
+UPSTREAM_URL = "https://github.com/eclipse-zenoh/zenoh"
 
 UPSTREAM_PACKAGE = "zenoh"
 # The pinned upstream. build-zenohd.sh asserts the same equality against the
@@ -131,6 +141,15 @@ UPSTREAM_PACKAGE = "zenoh"
 # feature 1.10.0 declares (no row outlived its subject), and TWO arrived
 # unjudged. `test` became a PINNED_NON_CAPABILITY and `uring` became an
 # UNANSWERED row — see both for the evidence each was judged on.
+#
+# R2540 (open-debt item 690) — the comment above asserted a binding this file
+# did not make. `build-zenohd.sh` does assert the same equality, but only when
+# it RUNS: on a machine whose zenoh checkout was provisioned by hand, this
+# constant and that checkout can be stale TOGETHER, agree, and report green,
+# while hosted CI — which provisions AT the pin — is the only place that ever
+# disagrees. That is the shape R2535 paid a hosted red for. `pin_arm` below now
+# makes the binding in code, in the DEFAULT mode, so it is readable offline and
+# without a provisioned tree.
 UPSTREAM_VERSION = "1.10.1"
 
 # Features that are upstream capability toggles by shape but not by meaning.
@@ -541,6 +560,46 @@ def shape_arm(owners: dict[str, list[str]]) -> tuple[list[str], list[tuple]]:
     return failures, rows
 
 
+def pinned_upstream() -> str | None:
+    """What this tree PINS zenoh at, from the shared deriver.
+
+    `None` when the deriver cannot name this upstream at all, which is a
+    different answer from a disagreement and is reported as its own failure:
+    a binding whose other end cannot be read is not a binding.
+    """
+    try:
+        pins = {**urd.submodule_pins(), **urd.script_pins(urd.tracked_paths())}
+    except Exception:  # noqa: BLE001 - a deriver that cannot run is UNREADABLE
+        return None
+    return pins.get(UPSTREAM_URL)
+
+
+def pin_arm() -> list[str]:
+    """Is the constant this table is graded at still the tree's pin?
+
+    Runs in the DEFAULT mode on purpose. The upstream arm needs a provisioned
+    zenoh source tree and so is deferred on most machines; this needs two
+    tracked files, so the one check that catches a moved pin is the one that
+    always runs.
+    """
+    pinned = pinned_upstream()
+    if pinned is None:
+        return [
+            f"the pin deriver could not name {UPSTREAM_URL}, so "
+            f"UPSTREAM_VERSION ({UPSTREAM_VERSION}) is compared against "
+            f"nothing. A binding whose other end cannot be read is not a "
+            f"binding"
+        ]
+    if pinned != UPSTREAM_VERSION:
+        return [
+            f"this table is graded at {UPSTREAM_VERSION} and the tree pins "
+            f"{pinned}. Move UPSTREAM_VERSION in a round that RE-JUDGES the "
+            f"rows -- a surface carried across a pin bump is one nobody "
+            f"re-read"
+        ]
+    return []
+
+
 def upstream_arm(rows: list[tuple]) -> list[str]:
     """Does the pinned surface still equal what upstream declares?"""
     failures: list[str] = []
@@ -779,6 +838,7 @@ def main() -> int:
         return 2
 
     failures, rows = shape_arm(owners)
+    failures += pin_arm()
 
     if args.upstream:
         try:
