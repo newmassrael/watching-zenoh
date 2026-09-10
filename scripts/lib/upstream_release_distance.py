@@ -152,20 +152,61 @@ PINNED: dict[str, tuple[str, int]] = {
 # outright: pin the threshold HERE, as a ratchet, or the next closing chain
 # takes it again.
 #
-# ## Why it is `None` rather than a number
+# ## The decision, taken (owner, 2026-09-10)
 #
-# Choosing the number is a decision about how closely this project chases
-# upstream, and the alternatives are genuinely different projects: ⑴ track every
-# release immediately, ⑵ open a bump ROUND once N releases behind, ⑶ bump only
-# when a feature needs it. That is the owner's call, and picking one here under
-# cover of maintenance would be deciding it quietly — the same move this gate
-# exists to make impossible for the distance itself.
+# R2521 left this `None` and said the three alternatives were genuinely
+# different projects: ⑴ track every release immediately, ⑵ open a bump ROUND
+# once N releases behind, ⑶ bump only when a feature needs it. Asked directly,
+# the owner chose ⑴ — track every release immediately.
 #
-# So the value stays `None` and the gate SAYS SO on every run, which is the one
-# thing prose could not do. When a number lands, `threshold_findings` already
-# enforces it and the selftest already grades that enforcement: the mechanism is
-# built, and only the policy is missing.
-BUMP_THRESHOLD: int | None = None
+# ## Why ⑴ is ZERO and not one
+#
+# The check below is `dist > threshold`, so the constant is how many releases
+# behind are TOLERATED, not how many trigger the round. "Track every release"
+# tolerates none, which is `0`. Declaring `1` would say "one release behind is
+# fine", a different policy that nobody chose. The selftest drives exactly this
+# case (`(0, [...])` in `threshold_cases`), so the reading is graded rather than
+# asserted here.
+#
+# ## What arming it does IMMEDIATELY, stated rather than discovered
+#
+# It reds Layer U, on purpose, and names the rows that owe a bump. That is the
+# ratchet working on its first run, not a defect: the policy is "we do not sit
+# behind", the tree IS behind, and a gate that stayed green on that would be the
+# acquiescence item 711 exists to end. Layer U is hosted-only and deliberately
+# absent from `pre-push`, so this blocks no developer's push.
+#
+# ⚠ THE SCOPE IS WIDER THAN THE QUESTION THAT SETTLED IT, and the correction
+# belongs next to the decision rather than in a round summary that scrolls away.
+# The question named the three zenoh pins at distance 1/1/2. The gate's derived
+# population is SEVEN repositories, and FOUR are past zero:
+#
+#     FreeRTOS/FreeRTOS-Kernel   distance=3   V11.1.0 -> V11.3.1 (submodule)
+#     eclipse-zenoh/zenoh-pico   distance=2   1.9.0-10-g3b3ab65c -> 1.10.1
+#     eclipse-zenoh/zenoh        distance=1   1.10.0 -> 1.10.1
+#     eclipse-zenoh/zenoh-c      distance=1   1.10.0 -> 1.10.1
+#
+# The policy does not change with scope — it is a rule about how far behind this
+# project sits, not a per-repository judgement — so the decision stands as
+# given. What the wider scope changes is the SIZE of the round it opens, and
+# FreeRTOS-Kernel (which drags the MCU deploy targets) was not in the owner's
+# view when they answered. If that is more than was meant, the value moves here
+# and the gate follows; it does not move quietly anywhere else.
+#
+# ⭐ MEASURED, and it cuts the other way from item 711's own cost estimate: the
+# zenoh family's move is 1.10.0 -> 1.10.1, a PATCH release. The entry feared a
+# "판올림" that moves the grading basis of the whole catalog, which is what a
+# minor bump does; a patch is a smaller thing. The re-verification item 579's
+# four done-when clauses demand (Layer Z / Ewire / Ewirez / Epico + the config
+# axis denominator) still has to RUN, because "a patch cannot break it" is a
+# prediction and this workspace grades predictions by running them.
+#
+# ⛔ THIS DOES NOT CLOSE ITEM 711. The entry splits it: ⒜ keeping the table on
+# the observation (paid R2501, and repeated every time upstream releases) and ⒝
+# the bump itself. Arming the ratchet is the THRESHOLD half of ⒝ — the half that
+# went missing when 578/579/581 all closed — not the bump. 711 closes when the
+# bump round has run.
+BUMP_THRESHOLD: int | None = 0
 
 
 def threshold_findings(
