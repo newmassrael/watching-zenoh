@@ -136,7 +136,19 @@ import tempfile
 # that agree: the `Build standalone` step of upstream's own release workflow
 # passes both axes ON, and the `zenoh_configure.h` that ships inside the
 # resulting package declares both. `--derive` re-runs exactly that.
-PIN = "1.10.0"
+#
+# R2531 — PIN 1.10.0 -> 1.10.1, RE-DERIVED and not merely retyped. R2527 moved
+# `install-zenoh-c.sh`'s `ZENOH_C_VERSION` and left this pair behind, and THIS
+# GATE IS WHAT CAUGHT IT: "install-zenoh-c.sh pins zenoh-c 1.10.1 and this
+# file's arm was derived at 1.10.0 ... re-derive with `--derive --require`
+# against a 1.10.1 checkout and move PIN and ARCHIVE_ARM together."
+#
+# ⭐ The re-derivation at 1.10.1 answers `unstable-shm` again — "upstream's
+# release workflow builds the package `unstable-shm`" — so ARCHIVE_ARM does NOT
+# move. That is a MEASUREMENT, not an assumption that a patch changes nothing:
+# which build upstream publishes is a per-release fact and this file exists
+# because the 1.5.0 -> 1.10.0 move retyped three sites without re-deriving any.
+PIN = "1.10.1"
 ARCHIVE_ARM = "unstable-shm"
 
 # The four ids are `install-zenoh-c-arm.sh`'s argument vocabulary and
