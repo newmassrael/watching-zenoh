@@ -297,38 +297,12 @@ impl RenderedLists {
     }
 }
 
-/// R2513 (open-debt item 713) — absorb every declaration of the capture, in
-/// CAPTURE order, each stamped with the packet that carried it.
-///
-/// # Why a renderer needs this and the folds do not
-///
-/// `crate::agg`, `crate::payload`, `crate::interest` and `crate::exchange` each
-/// walk the capture in order and resolve as they go, which is where their
-/// "a declaration must not name an earlier reference" rule comes from. A
-/// renderer cannot do that: this document is GROUPED BY FLOW, so its rows have
-/// to come out flow by flow whatever order the bytes arrived in. Before this
-/// round it absorbed while rendering, which made the table's contents depend on
-/// which flow was being printed — and a declaration that went out on the
-/// session's OTHER link was, for the flow printed first, in the future. Item 713
-/// is the consumer report where that arrived as `"cause":"no_declaration"`.
-///
-/// So the two halves are separated. Everything is absorbed here, and the rule
-/// the walk used to supply is supplied by the anchor instead: each row resolves
-/// AT its own packet (`crate::agg::KeyexprSpaces::at_packet`), so a later
-/// declaration still cannot name it. Nothing is resolved here — this pass only
-/// binds.
-#[cfg(feature = "network-codecs")]
-fn absorb_every_declaration(
-    d: &crate::Dissection,
-    grouping: &crate::node::SessionGrouping,
-    spaces: &mut crate::agg::KeyexprSpaces,
-) {
-    for (_flow, list, packet, frame) in d.message_frames_in_capture_order() {
-        spaces.enter_flow(grouping.owners(list));
-        spaces.at_packet(packet);
-        spaces.absorb_frame(frame);
-    }
-}
+/// R2515 — the pass itself moved to [`crate::agg::absorb_every_declaration`],
+/// which is where the table it fills lives. It was private here for one round,
+/// and `wz-analyze`'s two listings need the same pass for the same reason: a
+/// second copy of it is the second spelling of one rule, which is the shape this
+/// crate has paid for more than once.
+use crate::agg::absorb_every_declaration;
 
 /// Begin one list, on the spaces it writes into.
 ///

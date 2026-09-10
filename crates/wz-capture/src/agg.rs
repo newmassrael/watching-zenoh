@@ -1076,6 +1076,53 @@ impl KeyexprSpaces {
     }
 }
 
+/// R2515 (open-debt item 713) — absorb every declaration of the capture, in
+/// CAPTURE order, each stamped with the packet that carried it. Binds only;
+/// nothing is resolved here.
+///
+/// # Who needs this, and who does not
+///
+/// The FOLDS in this crate — this module, `crate::payload`, `crate::interest`
+/// and `crate::exchange` — walk the capture in order and resolve as they go,
+/// which is where their "a declaration must not name an earlier reference" rule
+/// comes from. They do not need this pass and do not call it.
+///
+/// A RENDERER cannot walk that way: its document is GROUPED BY FLOW, so its rows
+/// come out flow by flow whatever order the bytes arrived in. Absorbing while
+/// rendering made the table's contents depend on which flow was being printed,
+/// and a declaration that went out on the session's OTHER link was, for the flow
+/// printed first, in the future — which is open-debt item 713, reported by a
+/// consumer as `"cause":"no_declaration"` about a session whose own bytes
+/// carried the declaration.
+///
+/// So the two halves are separated: everything is bound here, and the rule the
+/// walk used to supply is supplied by the ANCHOR instead — each row resolves at
+/// its own packet ([`KeyexprSpaces::at_packet`]), so a declaration that followed
+/// it still cannot name it.
+///
+/// # Why it lives here, and BELOW the impl
+///
+/// It fills [`KeyexprSpaces`], and this module owns that. `crate::fields_json`
+/// had it privately for one round; `wz-analyze`'s two listings need the same
+/// pass for the same reason, and a copy per renderer is the second spelling of
+/// one rule — the shape this crate has paid for more than once.
+///
+/// ⚠ Below the `impl`, not above the struct, and that is not taste: placed above
+/// it this doc block MERGED with the struct's own, which left every `Self::` in
+/// the struct's text resolving against a free function. Layer C1bz reported it
+/// as two broken links, which is the gate doing exactly what it is for.
+pub fn absorb_every_declaration(
+    d: &crate::Dissection,
+    grouping: &crate::node::SessionGrouping,
+    spaces: &mut KeyexprSpaces,
+) {
+    for (_flow, list, packet, frame) in d.message_frames_in_capture_order() {
+        spaces.enter_flow(grouping.owners(list));
+        spaces.at_packet(packet);
+        spaces.absorb_frame(frame);
+    }
+}
+
 /// Per-keyexpr throughput over one or more flows.
 ///
 /// Rows are global (a keyexpr string means the same thing wherever it appears)
