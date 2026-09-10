@@ -105,6 +105,15 @@ pub mod fields_json;
 /// decode one has no declaration to fold, and every answer it gave would be a
 /// structural zero. A plane that cannot be fed is absent rather than empty.
 #[cfg(feature = "network-codecs")]
+/// R2517 (open-debt item 713) — the captures a CONSUMER of this crate can be
+/// graded against, defined once.
+///
+/// Behind a feature because a `#[cfg(test)]` fixture cannot cross a crate
+/// boundary, and `wz-analyze` renders these dissections through two listings
+/// that nothing currently grades. See the module docs for what is deliberately
+/// duplicated (packet byte layout) and what is not (the capture itself).
+#[cfg(feature = "fixtures")]
+pub mod fixtures;
 pub mod interest;
 /// R311y714 (§1.1f) — the capture read as NODES: zids, their roles, and the
 /// links where both ends named themselves. The one plane whose unit is not a

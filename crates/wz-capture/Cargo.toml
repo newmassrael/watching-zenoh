@@ -35,6 +35,21 @@ workspace = true
 default = ["reassembly", "network-codecs", "filter-wildcards"]
 reassembly = ["wz-session-core/reassembly"]
 
+# R2517 (open-debt item 713) — the shared CAPTURES, for consumers of this crate
+# that need to be graded on one.
+#
+# Off by default and carried by nobody in production: it exists because a
+# `#[cfg(test)]` fixture cannot cross a crate boundary, and `wz-analyze` renders
+# these dissections through two listings that nothing grades today (measured: 66
+# lib tests build no capture, 70 binary tests never name a second link). The
+# precedent is `wz-tls-record`'s own `fixtures` feature, which `wz-analyze`
+# already turns on the same way.
+#
+# It pulls `codec-*` through `network-codecs` because the captures carry real
+# `DeclKexpr` and `Push` records — a fixture that could not encode them would be
+# grading a shape rather than the wire.
+fixtures = ["network-codecs"]
+
 # R311y855 — the FIELD walker, and DEFAULT-OFF, which is the one place this
 # crate's default set says no.
 #
