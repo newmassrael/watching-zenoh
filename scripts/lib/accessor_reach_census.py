@@ -134,13 +134,23 @@ ROSTER: frozenset[tuple[str, str]] = frozenset(
         ("EncryptedFlow", "totals"),
         ("FlowDissection", "chain_loss"),
         ("FlowDissection", "context"),
-        ("FlowDissection", "packet_for"),
+        # R2514 (open-debt item 713) — `FlowDissection::packet_for` and
+        # `StreamAssembler::packet_for_offset` LEFT this roster by being asked,
+        # which is the way out this comment describes. R2513 gave the keyexpr
+        # tables an anchor, and the anchor is a capture-global packet index: the
+        # run map is what turns a stream frame's byte offset into one, so the
+        # field document now asks it for every row it renders and both shipped
+        # surfaces reach it.
+        #
+        # Struck rather than left with a note, because the gate is a ratchet in
+        # BOTH directions -- a row that turns out to be reached is a FAIL, and
+        # that is how this red arrived. Neither accessor was written for this;
+        # they were the map's own reason for existing, waiting for a caller.
         ("FlowDissection", "ws_resyncs"),
         ("FragmentStats", "any"),
         ("StreamAssembler", "fin_seen"),
         ("StreamAssembler", "held_segments"),
         ("StreamAssembler", "is_empty"),
-        ("StreamAssembler", "packet_for_offset"),
         ("StreamAssembler", "rst_seen"),
         ("StreamAssembler", "runs"),
         ("StreamAssembler", "synced_from_syn"),
