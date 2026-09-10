@@ -1061,23 +1061,41 @@ impl PayloadCensus {
         filter: &crate::filter::Filter,
         spaces: &mut crate::agg::KeyexprSpaces,
     ) {
+        for frame in frames {
+            self.observe_frame_where(frame, filter, spaces);
+        }
+    }
+
+    /// R2510 (open-debt item 713) — ONE frame, which is what the loop above
+    /// always was.
+    ///
+    /// Split out for [`payloads_grouped`], which walks the capture's frames in
+    /// CAPTURE order rather than list by list; `crate::agg` carries the argument
+    /// and `crate::Dissection::message_frames_in_capture_order` is the walk. This
+    /// plane resolves a keyexpr per payload, so list order cost it the same
+    /// thing: a publisher whose id was declared on the session's OTHER link had
+    /// its topic left blank on a finding against it.
+    pub fn observe_frame_where(
+        &mut self,
+        frame: &wz_session_core::passive::PassiveFrame,
+        filter: &crate::filter::Filter,
+        spaces: &mut crate::agg::KeyexprSpaces,
+    ) {
         use wz_session_core::passive::Carried;
 
-        for frame in frames {
-            match &frame.carried {
-                Carried::Batch(batch) => self.observe_batch(spaces, frame, batch, filter),
-                #[cfg(feature = "reassembly")]
-                Carried::Reassembled(batch) => self.observe_batch(spaces, frame, batch, filter),
-                // Matched by name for the reason R311y614 matched them by name
-                // in the throughput plane: a new `Carried` variant must fail to
-                // compile here rather than join the silent set.
-                Carried::Undecompressible => self.gaps.undecompressible_batches += 1,
-                #[cfg(feature = "reassembly")]
-                Carried::FragmentWithoutResolution => self.gaps.unresolvable_fragments += 1,
-                Carried::Nothing => {}
-                #[cfg(feature = "reassembly")]
-                Carried::Fragment(_) => {}
-            }
+        match &frame.carried {
+            Carried::Batch(batch) => self.observe_batch(spaces, frame, batch, filter),
+            #[cfg(feature = "reassembly")]
+            Carried::Reassembled(batch) => self.observe_batch(spaces, frame, batch, filter),
+            // Matched by name for the reason R311y614 matched them by name
+            // in the throughput plane: a new `Carried` variant must fail to
+            // compile here rather than join the silent set.
+            Carried::Undecompressible => self.gaps.undecompressible_batches += 1,
+            #[cfg(feature = "reassembly")]
+            Carried::FragmentWithoutResolution => self.gaps.unresolvable_fragments += 1,
+            Carried::Nothing => {}
+            #[cfg(feature = "reassembly")]
+            Carried::Fragment(_) => {}
         }
     }
 
@@ -1355,9 +1373,14 @@ pub fn payloads_grouped(
     let mut spaces = crate::agg::KeyexprSpaces::new();
     // R311y721 — see `agg::aggregate_where`: the dissection's enumeration.
     // R2457 — `.enumerate()`, because the grouping is keyed by list index.
-    for (list, (_, frames)) in dissection.message_lists().enumerate() {
+    // R2510 (open-debt item 713) — and in CAPTURE order, which is the same
+    // single pass this plane always made, walked the way `crate::agg`'s module
+    // heading states it. List order left a publisher's topic blank on a finding
+    // against that publisher whenever the id was declared on the session's other
+    // link; `crate::agg::aggregate_grouped` carries the whole argument.
+    for (_flow, list, frame) in dissection.message_frames_in_capture_order() {
         spaces.enter_flow(grouping.owners(list));
-        census.observe_flow_where(frames, filter, &mut spaces);
+        census.observe_frame_where(frame, filter, &mut spaces);
     }
     census
 }
@@ -1390,6 +1413,50 @@ pub(crate) mod tests_support {
                 // one of the three PUT flags -- and the record stopped decoding
                 // rather than merely losing its encoding (R311y617 added
                 // `FLAG_Z_PUT_E` on the strength of exactly that).
+                header: wz_codecs::msg_put::MsgPut::default().header
+                    | wz_codecs::wire_const::FLAG_Z_PUT_E,
+                encoding: Some(wz_codecs::encoding::Encoding {
+                    packed_id: (encoding_id as u32) << 1,
+                    schema_len: None,
+                    schema: None,
+                }),
+                payload_len: payload.len() as u64,
+                payload,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+        .encode_to_vec()
+    }
+
+    /// R2510 (open-debt item 713) — [`push_declaring`] keyed by an ALIAS rather
+    /// than by a literal.
+    ///
+    /// `push_declaring` writes `sender_space(0, Some(keyexpr))`, which is a
+    /// literal every reader resolves with no table at all. That is right for the
+    /// encoding assertions it serves and it is exactly wrong for an ordering
+    /// question: a literal resolves whatever order the fold walks in, so a
+    /// fixture built on it cannot fail. This one names `alias_id` and nothing
+    /// else, so the keyexpr on the resulting contradiction is the TABLE's answer.
+    ///
+    /// ⚠ AND IT CARRIES NO `FLAG_N_N`, which is the difference that matters:
+    /// that bit says "the wireexpr carries an inline keyexpr suffix"
+    /// (`wz_codecs::wire_const::FLAG_N_N`), so setting it on an alias tells the
+    /// decoder to read a suffix that is not there and the record stops decoding
+    /// ENTIRELY. Measured here: the first draft copied the flag from
+    /// `push_declaring`, whose keyexpr does carry a suffix, and the census read
+    /// ZERO payloads. It is the same trap `push_declaring`'s own comment records
+    /// about the three PUT flags, on a different header -- which is why the
+    /// guard below asserts `payloads() == 1` before it asserts anything about a
+    /// keyexpr: an undecodable fixture would otherwise read as an unresolved one.
+    pub(crate) fn push_declaring_aliased(
+        alias_id: u64,
+        encoding_id: u16,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        wz_codecs::push::Push {
+            keyexpr: fx::sender_space(alias_id, None),
+            body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
                 header: wz_codecs::msg_put::MsgPut::default().header
                     | wz_codecs::wire_const::FLAG_Z_PUT_E,
                 encoding: Some(wz_codecs::encoding::Encoding {
@@ -3085,7 +3152,7 @@ mod census_tests {
     use super::*;
     use crate::exchange::tests as fx;
 
-    use super::tests_support::{err_declaring, push_declaring};
+    use super::tests_support::{err_declaring, push_declaring, push_declaring_aliased};
 
     fn census(records: &[(bool, Vec<u8>)]) -> PayloadCensus {
         let stamped: Vec<(bool, Option<u64>, Vec<u8>)> = records
@@ -3142,6 +3209,50 @@ mod census_tests {
         assert_eq!(json_row.payloads, 2);
         assert_eq!(json_row.consistent, 1);
         assert_eq!(json_row.not_as_declared, 1);
+    }
+
+    /// R2510 (open-debt item 713) — the guard above, on the axis it could not
+    /// reach: the contradicting publisher's keyexpr was declared on the OTHER
+    /// LINK of its session.
+    ///
+    /// Its sibling keys every record literally, so the keyexpr it names is on
+    /// the record itself and no table is consulted. Here the record names `id 7`
+    /// and nothing else, and `id 7 -> demo/temp` went out on the session's other
+    /// link -- EARLIER on the wire (it is packet 4 and this is packet 5) and
+    /// LATER in the walk, because `Dissection::message_lists` yields the stream
+    /// lists in `flows()` order.
+    ///
+    /// So `Some("demo/temp")` is the whole claim. `None` is what this plane said
+    /// before R2510: a finding against a publisher, with the topic left blank,
+    /// in a capture that names it. That is the shape item 713's consumer report
+    /// described one plane over, where it arrived as `"cause":"no_declaration"`.
+    ///
+    /// The contradiction is the vehicle rather than the subject -- it is simply
+    /// the only output of this plane that carries a keyexpr at all, `EncodingRow`
+    /// being keyed by the declared encoding. The subject is WHEN the keyexpr
+    /// resolves.
+    #[test]
+    fn a_contradicting_publisher_is_named_with_a_keyexpr_its_sibling_link_declared() {
+        let c = payloads(
+            &crate::agg::tests::multilink_session_declaring_on_the_later_link_carrying(
+                push_declaring_aliased(7, ID_JSON, b"not json at all"),
+            ),
+        );
+
+        assert_eq!(c.payloads(), 1, "the aliased record was read at all");
+        let bad = c.contradictions();
+        assert_eq!(
+            bad.len(),
+            1,
+            "the payload contradicts its declaration whatever the keyexpr says: {bad:?}"
+        );
+        assert_eq!(
+            bad[0].keyexpr.as_deref(),
+            Some("demo/temp"),
+            "the sibling link's declaration names this publisher's topic; a \
+             finding with no topic is the false blank item 713 is about"
+        );
+        assert_eq!(bad[0].declared, "application/json");
     }
 
     /// R311y622 (§1.1o) — a payload the capture does not HOLD is named, not

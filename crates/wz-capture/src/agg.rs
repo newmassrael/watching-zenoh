@@ -5214,6 +5214,30 @@ pub(crate) mod tests {
     /// reported back as `"cause":"no_declaration"` -- a claim about the SESSION
     /// that the session's own bytes contradict.
     pub(crate) fn multilink_session_declaring_on_the_later_link() -> crate::Dissection {
+        multilink_session_declaring_on_the_later_link_carrying(push(
+            sender_space(7, None),
+            &[0u8; 11],
+        ))
+    }
+
+    /// R2510 — the same capture, with the REFERENCE record supplied.
+    ///
+    /// The two links, the handshakes that fix their walk order, the `id 7 ->
+    /// demo/temp` declaration on the later one and the packet order that puts it
+    /// first are all properties of item 713 and not of any one plane. Each plane
+    /// that grades the item needs its OWN reference record, though -- this
+    /// plane's observable is a row keyed by keyexpr, `crate::payload`'s is a
+    /// contradiction that names one -- so the record is the parameter and
+    /// everything around it is shared. A second builder per plane would be a
+    /// second definition of one capture, which is how two fixtures come to
+    /// disagree about which link is walked first.
+    ///
+    /// `reference` must be keyed `sender_space(7, None)` to be the thing under
+    /// test. A caller that keys it literally gets a capture that resolves
+    /// whatever the walk order is, which is a test that cannot fail.
+    pub(crate) fn multilink_session_declaring_on_the_later_link_carrying(
+        reference: Vec<u8>,
+    ) -> crate::Dissection {
         let mut rows: Vec<(bool, u16, u16, Vec<u8>, bool)> = Vec::new();
         for link in [(43210u16, 7447u16), (43211u16, 7447u16)] {
             for (from_low, sport, dport, wire) in handshake(link.0, link.1) {
@@ -5224,13 +5248,7 @@ pub(crate) mod tests {
         // goes out anywhere.
         rows.push((true, 43211, 7447, declare_kexpr(7, "demo/temp"), true));
         // A publishes under id 7 on the FIRST link, AFTER that declaration.
-        rows.push((
-            true,
-            43210,
-            7447,
-            push(sender_space(7, None), &[0u8; 11]),
-            true,
-        ));
+        rows.push((true, 43210, 7447, reference, true));
         multilink_capture_with_file(&rows).0
     }
 
