@@ -2513,6 +2513,31 @@ PY
     # In Layer C0 with its two siblings: `--check` reads nothing but the tree.
     python3 scripts/lib/zenoh_c_census_arm_reach.py --selftest || return 1
     python3 scripts/lib/zenoh_c_census_arm_reach.py --check || return 1
+    # R2538 (open-debt item 717) — THE BUMP SWEEP, and it belongs beside the two
+    # above because it RUNS them: its population is derived from the live pins,
+    # so a gate carrying a current pin literal is swept whether or not anyone
+    # remembers to add it here.
+    #
+    # The owner asked for "run it once and just look at what failed" when a
+    # version moves. What made a bump expensive was never the work — R2529
+    # settled three pins with one command each — it was DISCOVERY ORDER: three
+    # consecutive hosted runs on one bump failed three DIFFERENT subsets, and
+    # each fix opened the next. This reports every stale measurement from a
+    # single run, and it never returns early.
+    #
+    # ⚠ Placed in C0 rather than in a lane of its own on purpose: it is offline
+    # and seconds, so it can also be run BY HAND in the middle of a bump, which
+    # is the moment it is actually for. What it cannot reach is stated in its
+    # own header — the network half is Layer U's, and the oracle half is C1cc /
+    # C1ce's.
+    #
+    # MEASURED, warm: `--selftest` 0.8s, `--check` 19s. The `--check` half DOES
+    # re-run gates this lane already runs individually, and that duplication is
+    # deliberate rather than overlooked: its population is derived from the pins,
+    # so it reaches a pin-carrying gate NOBODY wired into this lane, which is the
+    # failure mode item 717 is about. Paying 19s for that is the trade.
+    python3 scripts/lib/bump_sweep.py --selftest || return 1
+    python3 scripts/lib/bump_sweep.py --check || return 1
     # R2283 (open-debt item 621) — and a COMMIT HOOK CHECK must say which
     # artifact it grades. `pre-commit`'s Check 2 picked its files out of the
     # index and then ran `cargo fmt` over the CHECKOUT; R2282 committed an
