@@ -601,6 +601,36 @@ impl Coverage {
     }
 }
 
+/// R2511 (open-debt item 713) — the correlation state a fold carries ACROSS
+/// frames: which declaration is open, and which request is live.
+///
+/// It was two locals of the per-list loop, so it was scoped per list by
+/// construction. The walk may now interleave two lists
+/// ([`InterestCensus::observe_frame`]), so the scope has to be said out loud —
+/// and it is said in the KEYS, each of which leads with the list index. That
+/// keeps today's behaviour exactly: one link's `Undeclare` cannot close the
+/// other's declaration, which is what a key without the list would allow.
+///
+/// ⚠ Whether it SHOULD close it is a real question and deliberately not
+/// answered here. Entity ids are minted per SESSION, so the same argument that
+/// moved the keyexpr tables from per-flow to per-session (R2457) applies —
+/// but that is a behaviour change owed its own fixture, and this type is what
+/// makes the two separable rather than deciding one by editing the other.
+#[derive(Debug, Clone, Default)]
+pub struct InterestCorrelation {
+    /// The OPEN declaration per `(list, declarer, kind, id)`, as an index into
+    /// `InterestCensus::interests`. Keyed on the kind as well as the id because
+    /// zenoh mints subscriber, queryable and token ids in separate spaces, and
+    /// a key without it would let a queryable's withdrawal close a subscriber's
+    /// declaration that happened to share a number.
+    open: BTreeMap<(usize, usize, InterestKind, u64), usize>,
+    /// The live request per `(list, asker, id)`. Keyed on the ASKER and not on
+    /// the direction the message travelled: an `Interest` goes one way and its
+    /// answers come back the other, so a map keyed by the travelling direction
+    /// would credit every answer to the wrong side.
+    asked: BTreeMap<(usize, usize, u64), usize>,
+}
+
 /// Every declaration this capture carried.
 #[derive(Debug, Clone, Default)]
 pub struct InterestCensus {
@@ -771,23 +801,51 @@ impl InterestCensus {
         // chose the coordinates; the serial line is what that cost. Every frame
         // of one list comes out of one producer, so the first answers for the
         // list -- and `the_space_a_list_reports_is_the_one_its_frames_carry`
-        // holds that rather than leaving it as a sentence.
-        if let Some(frame) = frames.first() {
-            self.anchors = crate::anchor_space_of(frame);
-        }
-        self.list = list;
-        // The OPEN declaration per `(declarer, kind, id)`, as an index into
-        // `self.interests`. Keyed on the kind as well as the id because zenoh
-        // mints subscriber, queryable and token ids in separate spaces, and a
-        // key without it would let a queryable's withdrawal close a
-        // subscriber's declaration that happened to share a number.
-        let mut open: BTreeMap<(usize, InterestKind, u64), usize> = BTreeMap::new();
-        // The live request per `(asker, id)`. Keyed on the ASKER and not on the
-        // direction the message travelled: an `Interest` goes one way and its
-        // answers come back the other, so a map keyed by the travelling
-        // direction would credit every answer to the wrong side.
-        let mut asked: BTreeMap<(usize, u64), usize> = BTreeMap::new();
+        // holds that rather than leaving it as a sentence. R2511 reads it off
+        // each frame instead, which is the same value for that reason and is
+        // what an interleaved walk needs.
+        let mut correlation = InterestCorrelation::default();
         for frame in frames {
+            self.observe_frame(flow, frame, list, &mut correlation, spaces);
+        }
+    }
+
+    /// R2511 (open-debt item 713) — ONE frame of one list, which is what the
+    /// loop above always was.
+    ///
+    /// Split out so a driver can choose its ORDER over the capture's frames;
+    /// [`interests_grouped`] now walks
+    /// [`crate::Dissection::message_frames_in_capture_order`], and
+    /// `crate::agg::aggregate_grouped` carries the argument for why.
+    ///
+    /// # What moved with the loop, and what deliberately did not
+    ///
+    /// The correlation maps were LOCALS of the per-list loop, so they were
+    /// scoped per list by construction. They are now a parameter — and each key
+    /// carries `self.list`, which keeps that scoping EXACTLY: the walk may
+    /// interleave two lists, and a map keyed without the list would let one
+    /// link's `Undeclare` close the other's declaration. That is a real
+    /// question — a session mints entity ids per SESSION, so arguably it
+    /// SHOULD close it, exactly as R2457 moved the keyexpr tables from per-flow
+    /// to per-session — and it is deliberately left open here. This round moves
+    /// the ORDER and nothing else; deciding the correlation's scope needs its
+    /// own fixture and its own round.
+    ///
+    /// `anchors` is likewise set per frame rather than from the list's first
+    /// frame. Same value, since every frame of one list comes out of one
+    /// producer (`the_space_a_list_reports_is_the_one_its_frames_carry` holds
+    /// that), and it has to be per frame once the walk can move between lists.
+    pub fn observe_frame(
+        &mut self,
+        flow: &FlowKey,
+        frame: &PassiveFrame,
+        list: usize,
+        correlation: &mut InterestCorrelation,
+        spaces: &mut KeyexprSpaces,
+    ) {
+        self.anchors = crate::anchor_space_of(frame);
+        self.list = list;
+        {
             let anchor = frame.stream_offset;
             let batch = match &frame.carried {
                 Carried::Batch(batch) => batch,
@@ -797,26 +855,20 @@ impl InterestCensus {
                 // `Carried` variant must fail to compile here instead of
                 // joining the silent set. None of these carries a batch, so
                 // none can carry a declaration.
-                Carried::Undecompressible => continue,
+                Carried::Undecompressible => return,
                 #[cfg(feature = "reassembly")]
-                Carried::FragmentWithoutResolution => continue,
-                Carried::Nothing => continue,
+                Carried::FragmentWithoutResolution => return,
+                Carried::Nothing => return,
                 #[cfg(feature = "reassembly")]
-                Carried::Fragment(_) => continue,
+                Carried::Fragment(_) => return,
             };
             for (message, _span) in batch.records() {
                 match message {
-                    NetworkMessage::Declare(d) => self.observe_declare(
-                        spaces,
-                        &mut open,
-                        &mut asked,
-                        flow,
-                        frame.direction,
-                        anchor,
-                        d,
-                    ),
+                    NetworkMessage::Declare(d) => {
+                        self.observe_declare(spaces, correlation, flow, frame.direction, anchor, d)
+                    }
                     NetworkMessage::Interest(i) => {
-                        self.observe_interest(spaces, &mut asked, flow, frame.direction, anchor, i)
+                        self.observe_interest(spaces, correlation, flow, frame.direction, anchor, i)
                     }
                     _ => {}
                 }
@@ -828,7 +880,7 @@ impl InterestCensus {
     fn observe_interest(
         &mut self,
         spaces: &KeyexprSpaces,
-        asked: &mut BTreeMap<(usize, u64), usize>,
+        correlation: &mut InterestCorrelation,
         flow: &FlowKey,
         direction: Direction,
         anchor: usize,
@@ -841,7 +893,10 @@ impl InterestCensus {
             // so there is nothing to record beyond the closure — and recording
             // it as a fresh request would put a scope-less row in the list that
             // `unanswered` would then have to special-case.
-            match asked.remove(&(dir, interest.interest_id)) {
+            match correlation
+                .asked
+                .remove(&(self.list, dir, interest.interest_id))
+            {
                 Some(at) => self.requests[at].cancelled_at = Some(anchor),
                 // A cancellation for a question this capture never saw. Same
                 // reading as an orphan answer: the tap started late.
@@ -879,15 +934,17 @@ impl InterestCensus {
             cancelled_at: None,
             anchors: self.anchors,
         });
-        asked.insert((dir, interest.interest_id), self.requests.len() - 1);
+        correlation.asked.insert(
+            (self.list, dir, interest.interest_id),
+            self.requests.len() - 1,
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
     fn observe_declare(
         &mut self,
         spaces: &mut KeyexprSpaces,
-        open: &mut BTreeMap<(usize, InterestKind, u64), usize>,
-        asked: &mut BTreeMap<(usize, u64), usize>,
+        correlation: &mut InterestCorrelation,
         flow: &FlowKey,
         direction: Direction,
         anchor: usize,
@@ -901,8 +958,8 @@ impl InterestCensus {
         // it and the table would still look plausible.
         let solicited_by = declare.interest_id;
         let answering = solicited_by.and_then(|id| {
-            let key = (dir_index(direction.peer()), id);
-            match asked.get(&key) {
+            let key = (self.list, dir_index(direction.peer()), id);
+            match correlation.asked.get(&key) {
                 Some(at) => Some(*at),
                 None => {
                     self.orphan_answers += 1;
@@ -942,7 +999,9 @@ impl InterestCensus {
                     anchor,
                     solicited_by,
                 );
-                open.insert((dir, InterestKind::Subscriber, d.id), at);
+                correlation
+                    .open
+                    .insert((self.list, dir, InterestKind::Subscriber, d.id), at);
                 declared = Some(at);
             }
             V::CodecZenohDeclQueryable(d) => {
@@ -956,7 +1015,9 @@ impl InterestCensus {
                     anchor,
                     solicited_by,
                 );
-                open.insert((dir, InterestKind::Queryable, d.id), at);
+                correlation
+                    .open
+                    .insert((self.list, dir, InterestKind::Queryable, d.id), at);
                 declared = Some(at);
             }
             V::CodecZenohDeclToken(d) => {
@@ -970,18 +1031,24 @@ impl InterestCensus {
                     anchor,
                     solicited_by,
                 );
-                open.insert((dir, InterestKind::LivelinessToken, d.id), at);
+                correlation
+                    .open
+                    .insert((self.list, dir, InterestKind::LivelinessToken, d.id), at);
                 declared = Some(at);
             }
             V::CodecZenohUndeclSubscriber(u) => {
-                self.withdraw(open, dir, InterestKind::Subscriber, u.id, anchor)
+                self.withdraw(correlation, dir, InterestKind::Subscriber, u.id, anchor)
             }
             V::CodecZenohUndeclQueryable(u) => {
-                self.withdraw(open, dir, InterestKind::Queryable, u.id, anchor)
+                self.withdraw(correlation, dir, InterestKind::Queryable, u.id, anchor)
             }
-            V::CodecZenohUndeclToken(u) => {
-                self.withdraw(open, dir, InterestKind::LivelinessToken, u.id, anchor)
-            }
+            V::CodecZenohUndeclToken(u) => self.withdraw(
+                correlation,
+                dir,
+                InterestKind::LivelinessToken,
+                u.id,
+                anchor,
+            ),
             // The keyexpr-alias arms are `spaces`' business, and `DeclFinal` /
             // an unknown tag declare no interest.
             V::CodecZenohDeclKexpr(_)
@@ -1117,13 +1184,13 @@ impl InterestCensus {
 
     fn withdraw(
         &mut self,
-        open: &mut BTreeMap<(usize, InterestKind, u64), usize>,
+        correlation: &mut InterestCorrelation,
         dir: usize,
         kind: InterestKind,
         id: u64,
         anchor: usize,
     ) {
-        match open.remove(&(dir, kind, id)) {
+        match correlation.open.remove(&(self.list, dir, kind, id)) {
             Some(at) => self.interests[at].withdrawn_at = Some(anchor),
             None => self.orphan_withdrawals += 1,
         }
@@ -1288,9 +1355,17 @@ pub fn interests_grouped(
     // are not comparable, and they agree by walking the same enumeration of the
     // same iterator. R2457 — the session grouping is keyed by that same index,
     // which is a third walk joining the agreement rather than a new rule.
-    for (list, (flow, frames)) in dissection.message_lists().enumerate() {
+    // R2511 (open-debt item 713) — and in CAPTURE order, which `crate::agg`'s
+    // module heading always claimed and the list-by-list walk was not. This
+    // plane resolves a declaration's keyexpr as it goes, so list order made it
+    // report a subscriber it could not name whenever the `DeclKexpr` had gone
+    // out on the session's OTHER link -- a finding whose own doc calls it "a
+    // capture that began after the `DeclKexpr`", said about a capture that read
+    // the binding two packets earlier.
+    let mut correlation = InterestCorrelation::default();
+    for (flow, list, frame) in dissection.message_frames_in_capture_order() {
         spaces.enter_flow(grouping.owners(list));
-        census.observe_flow(&flow, frames, list, &mut spaces);
+        census.observe_frame(&flow, frame, list, &mut correlation, &mut spaces);
     }
     census
 }
@@ -1857,6 +1932,42 @@ mod tests {
             !cov.unclaimed_exact,
             "a declaration this reader could not name might have covered it"
         );
+    }
+
+    /// R2511 (open-debt item 713) — the COMPLEMENT of the guard above: an alias
+    /// this capture DID see bound, on the other link of the same session.
+    ///
+    /// `DeclaredInterest::unresolved` is documented as a real finding — "a
+    /// capture that began after the `DeclKexpr` has a subscriber it cannot name,
+    /// which is different from having no subscriber". The sibling above is the
+    /// honest case: nothing ever bound id 9, so saying so is true. This is the
+    /// FALSE one. `id 7 -> demo/temp` went out two packets earlier on the
+    /// session's other link, and a walk that takes one list to its end before
+    /// starting the next had not read it yet — so this plane reported a
+    /// subscriber it could not name, about a capture that names it.
+    ///
+    /// The first assertion is anti-vacuity and comes first deliberately: an
+    /// undecodable fixture would otherwise read as an unresolved one, which is
+    /// how R2510 nearly mis-attributed the same class one plane over.
+    #[test]
+    fn a_declaration_resolves_against_an_alias_its_sibling_link_bound() {
+        let d = crate::agg::tests::multilink_session_declaring_on_the_later_link_carrying(
+            declare_sub_aliased(1, 7, None),
+        );
+        let census = interests(&d);
+        assert_eq!(
+            census.interests().len(),
+            1,
+            "the aliased declaration was read at all: {:?}",
+            census.interests()
+        );
+        let i = &census.interests()[0];
+        assert_eq!(
+            i.keyexpr.as_deref(),
+            Some("demo/temp"),
+            "the sibling link bound this alias BEFORE the declaration went out"
+        );
+        assert_eq!(i.unresolved, None, "so nothing is left to explain away");
     }
 
     fn interest_subs(id: u64, current: bool, future: bool, keyexpr: &str) -> Vec<u8> {
