@@ -203,13 +203,24 @@ PINNED: dict[str, tuple[str, int]] = {
 # case (`(0, [...])` in `threshold_cases`), so the reading is graded rather than
 # asserted here.
 #
-# ## What arming it does IMMEDIATELY, stated rather than discovered
+# ## ⛔ R2537 (open-debt item 716) — WHAT THIS CONSTANT NO LONGER DOES
 #
-# It reds Layer U, on purpose, and names the rows that owe a bump. That is the
-# ratchet working on its first run, not a defect: the policy is "we do not sit
-# behind", the tree IS behind, and a gate that stayed green on that would be the
-# acquiescence item 711 exists to end. Layer U is hosted-only and deliberately
-# absent from `pre-push`, so this blocks no developer's push.
+# It no longer FAILs, and the paragraph that used to stand here — "what arming
+# it does immediately: it reds Layer U, on purpose" — described exactly that.
+# The owner's decision of 2026-09-10 refined the policy: only a step the size of
+# 1.11.0 opens a bump round. A count cannot express that (a patch and a minor
+# are both one release), so `BUMP_GRADE` below became the round-opening
+# predicate and THIS one became the DRIFT REPORT that feeds it context.
+#
+# Measured before the change, on this file's own shipped functions: `judge`
+# returns `("MEASURED", 1)` for a pin one PATCH behind, one MINOR behind and one
+# MAJOR behind alike, and no value of this constant separates them — at 0 all
+# three open a round and at 1 or more none of them does.
+#
+# ⛔ The MEASUREMENT is untouched, which is the half the docstring above
+# protects. `PINNED` is still pinned in both directions and still REDs the
+# moment any distance moves, so a patch is still loud; what changed is that
+# being loud and owing a bump ROUND are now two different sentences.
 #
 # ⚠ THE SCOPE IS WIDER THAN THE QUESTION THAT SETTLED IT, and the correction
 # belongs next to the decision rather than in a round summary that scrolls away.
@@ -263,6 +274,162 @@ def threshold_findings(
     ]
     over.sort(key=lambda row: (-row[1], row[0]))
     return [f"{repo} is {dist} release(s) behind" for repo, dist in over]
+
+
+# ── R2537 (open-debt item 716): the GRADE, which is what opens a round ──────
+#
+# ## The defect was the UNIT, not the value
+#
+# `distance` is defined at the top of this file as "how many releases upstream
+# has published since the pinned one", so a PATCH and a MINOR are both one step.
+# Measured on the shipped code before this was written, and it is the whole
+# argument:
+#
+#     judge("1.10.0", ["1.10.1", ...])  ->  ("MEASURED", 1)
+#     judge("1.10.0", ["1.11.0", ...])  ->  ("MEASURED", 1)
+#     judge("1.10.0", ["2.0.0",  ...])  ->  ("MEASURED", 1)
+#
+# All three identical, and NO value of `BUMP_THRESHOLD` separates them: at 0 all
+# three open a round, at 1 or more none of them does. The owner's decision of
+# 2026-09-10 — "from now on only something big like 1.11.0 opens a bump round" —
+# is therefore not expressible as a count, whatever the count is set to. That is
+# why this is a second predicate rather than a new number.
+#
+# ## What must NOT happen, and the shape that avoids it
+#
+# This file's own docstring forbids the obvious shortcut: `DISTANCE` is "not a
+# budget somebody chose; it is the measurement, frozen". Turning the patch axis
+# off would revive, on that axis, exactly the "five minors behind and nobody
+# knew" that item 578 built this gate to prevent.
+#
+# So NOTHING about the measurement moves. `PINNED` stays pinned in BOTH
+# directions and still REDs the moment upstream publishes anything at all — that
+# red says "upstream moved, update the row". What changes is that a second,
+# narrower predicate now says "open a bump ROUND", and only it reads the grade.
+# Two different demands, which is why they are two predicates and not one
+# constant with a new meaning.
+#
+# ## Every verdict is answered BY NAME, and an unanswered axis is RED
+#
+# Four of the seven derived repositories are `MEASURED`; the other three are
+# `NO_RELEASES` x2 and `PIN_NOT_A_RELEASE` x1, and a semver grade is not a thing
+# they have. A predicate that quietly skipped them would be the confident zero
+# this workspace keeps paying for, so each verdict resolves to a NAMED answer
+# and anything that resolves to none is `ungraded`, which FAILs.
+#
+# `ungraded` is not a formality. `semver` refuses a tag it cannot read whole —
+# `1.9.0-10-g3b3ab65c`, the `git describe` shape a submodule pin takes, parses
+# to nothing rather than silently to `1.9.0`. Reading a describe as its base tag
+# is how a pin ten commits past a release would grade as being ON it.
+_SEMVER = re.compile(r"^[vV]?(\d+)\.(\d+)\.(\d+)$")
+
+# Ordered weakest to strongest; `bump_findings` compares by index, so the order
+# IS the policy and there is no second table saying which outranks which.
+GRADES = ("patch", "minor", "major")
+
+# The smallest step that opens a bump round (owner, 2026-09-10). A patch is
+# still measured, still printed, and does not open one.
+BUMP_GRADE: str = "minor"
+
+
+def semver(tag: str) -> tuple[int, int, int] | None:
+    """`(major, minor, patch)`, or `None` for a tag this cannot read WHOLE.
+
+    A partial read is worse than a refusal here: the grade is a comparison, and
+    comparing a describe's base tag against a real release would report a pin
+    that is ten commits past 1.9.0 as sitting exactly on it.
+    """
+    m = _SEMVER.match(tag.strip())
+    if not m:
+        return None
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+
+
+def step(pin: tuple[int, int, int], tag: tuple[int, int, int]) -> str | None:
+    """The grade of the move from `pin` to `tag`, or `None` if it is not ahead.
+
+    `None` covers equal and BACKWARDS, and backwards is deliberately not an
+    error here: a releases list can carry an older tag published later (a
+    maintenance release on an old line), and that is not a reason to open a
+    round on the new one.
+    """
+    if tag <= pin:
+        return None
+    if tag[0] != pin[0]:
+        return "major"
+    if tag[1] != pin[1]:
+        return "minor"
+    return "patch"
+
+
+def release_grade(
+    verdict: str, pin: str | None, tags: list[str], distance: int
+) -> tuple[str, str]:
+    """`(grade, why)` for one repository — a NAMED answer for every verdict.
+
+    `grade` is one of `GRADES`, or `none` (nothing ahead of the pin), or
+    `n/a` (the verdict has no release line to grade), or `ungraded` (an axis
+    this could not answer, which the caller must treat as RED).
+
+    The three non-`MEASURED` answers are derived FROM THE VERDICT, not from a
+    list of repository names — so a repository that changes class changes its
+    answer with it, and adding a repository cannot silently miss this axis.
+    """
+    if verdict == "NO_RELEASES":
+        return ("n/a", "the releases API answered with an empty list, so there "
+                       "is no release line to grade")
+    if verdict == "PIN_NOT_A_RELEASE":
+        return ("n/a", "the pin is not a point on the release line, so no step "
+                       "from it has a grade")
+    if verdict == "PIN_NOT_DERIVED":
+        return ("ungraded", "no structure here explains this repository's pin, "
+                            "so there is nothing to grade FROM")
+    if verdict != "MEASURED":
+        return ("ungraded", f"verdict {verdict} has no declared answer on this "
+                            f"axis; give it one rather than letting it pass")
+    if pin is None:
+        return ("ungraded", "MEASURED without a pin, which cannot happen and "
+                            "must not pass if it does")
+    base = semver(pin)
+    if base is None:
+        return ("ungraded", f"the pin {pin!r} is not a whole semver, so the "
+                            f"step from it cannot be graded")
+    newer = tags[:distance]
+    if not newer:
+        return ("none", "nothing has been published since the pin")
+    worst: str | None = None
+    for tag in newer:
+        ahead = semver(tag)
+        if ahead is None:
+            return ("ungraded", f"upstream tag {tag!r} is not a whole semver, "
+                                f"so the step to it cannot be graded")
+        moved = step(base, ahead)
+        if moved is None:
+            continue
+        if worst is None or GRADES.index(moved) > GRADES.index(worst):
+            worst = moved
+    if worst is None:
+        return ("none", "every release since the pin is at or behind it")
+    return (worst, f"upstream published {newer[0]} since {pin}")
+
+
+def bump_findings(graded: dict[str, tuple[str, str]], opens_at: str) -> list[str]:
+    """Rows that OPEN A BUMP ROUND, strongest first, plus every ungraded row.
+
+    An `ungraded` row is a finding whatever `opens_at` is: this axis exists to
+    answer a question, and a repository it could not answer for is the one case
+    where staying quiet would be indistinguishable from being satisfied.
+    """
+    floor = GRADES.index(opens_at)
+    out: list[tuple[int, str, str]] = []
+    for repo, (grade, why) in graded.items():
+        if grade == "ungraded":
+            out.append((len(GRADES), repo, f"{repo}: UNGRADED — {why}"))
+        elif grade in GRADES and GRADES.index(grade) >= floor:
+            out.append((GRADES.index(grade), repo,
+                        f"{repo}: {grade} — {why}"))
+    out.sort(key=lambda row: (-row[0], row[1]))
+    return [line for _, _, line in out]
 
 
 class Unmeasurable(RuntimeError):
@@ -473,6 +640,10 @@ def run(fetch=None, tc_fetch=None) -> int:
     pins = {**submodule_pins(), **script_pins(paths)}
 
     observed: dict[str, tuple[str, int]] = {}
+    # R2537 (item 716) — the TAGS are kept, not discarded. `judge` reduces them
+    # to an index, and an index cannot say whether the releases it counted were
+    # patches or minors; the grade axis below needs the tags themselves.
+    graded: dict[str, tuple[str, str]] = {}
     failures: list[str] = []
     for repo, url in sorted(repos.items()):
         try:
@@ -480,7 +651,9 @@ def run(fetch=None, tc_fetch=None) -> int:
         except Unmeasurable as exc:
             failures.append(str(exc))
             continue
-        observed[repo] = judge(pins.get(url), tags)
+        verdict, distance = judge(pins.get(url), tags)
+        observed[repo] = (verdict, distance)
+        graded[repo] = release_grade(verdict, pins.get(url), tags, distance)
 
     # The workflow's own version literals, checked against the pins above. A
     # `rustup toolchain install` is only meaningful next to the release that
@@ -586,19 +759,54 @@ def run(fetch=None, tc_fetch=None) -> int:
     else:
         over = threshold_findings(PINNED, BUMP_THRESHOLD)
         if over:
-            bad = True
-            print("upstream-release-distance: FAIL — past the declared threshold of")
-            print(f"    {BUMP_THRESHOLD} release(s):")
+            # R2537 (item 716) — REPORTED, not failed, and the distinction is
+            # the owner's decision of 2026-09-10. Drift past the threshold is
+            # still measured and still named here; what it no longer does on its
+            # own is open a bump ROUND. The grade axis below decides that.
+            #
+            # ⛔ This is NOT the measurement being turned off. `PINNED` above is
+            # pinned in both directions and REDs the moment any of these numbers
+            # moves, so "five minors behind and nobody knew" still cannot happen
+            # — it reds as a stale ROW rather than as an owed round.
+            print("upstream-release-distance: drift past the declared threshold of")
+            print(f"    {BUMP_THRESHOLD} release(s) — measured, and not on its own")
+            print("    a reason to open a round:")
             for line in over:
                 print(f"    {line}")
-            print("    The bump is a ROUND (Layer Z / Ewire re-verification comes")
-            print("    with it); open-debt item 579's four done-when clauses are the")
-            print("    template, and item 711 holds the position now.")
         else:
             print(
                 f"upstream-release-distance: threshold {BUMP_THRESHOLD} release(s),"
                 " and nothing is past it."
             )
+    # ── R2537 (open-debt item 716): the GRADE axis, which opens rounds ──────
+    #
+    # Printed for EVERY derived repository, including the ones that have no
+    # grade, because an axis that reports only its findings cannot be told from
+    # one that examined nobody. The population is asserted against the row count
+    # for the same reason: a zero here would otherwise read as "all clear".
+    print(f"  bump grade: opens at `{BUMP_GRADE}` or above; "
+          f"{len(graded)} repository(ies) answered")
+    for repo in sorted(graded):
+        grade, why = graded[repo]
+        print(f"    {repo:38s} {grade:9s} {why}")
+    if observed and not graded:
+        bad = True
+        print("upstream-release-distance: FAIL — repositories were measured and NONE")
+        print("    was graded, so this axis examined nobody. A population of zero")
+        print("    must not report all clear.")
+    opens = bump_findings(graded, BUMP_GRADE)
+    if opens:
+        bad = True
+        print("upstream-release-distance: FAIL — a bump ROUND is owed; upstream has")
+        print(f"    published a `{BUMP_GRADE}`-or-greater step since these pins:")
+        for line in opens:
+            print(f"    {line}")
+        print("    The bump is a ROUND (Layer Z / Ewire re-verification comes")
+        print("    with it); open-debt item 579's four done-when clauses are the")
+        print("    template, and item 711 holds the position now.")
+    else:
+        print(f"upstream-release-distance: no repository is a `{BUMP_GRADE}` or"
+              " greater step behind, so no bump round is owed.")
     print("upstream-release-distance:", "FAIL" if bad else "OK")
     return 1 if bad else 0
 
@@ -676,6 +884,118 @@ def selftest() -> int:
                 f" = {got_lines}, want {want_lines}"
             )
 
+    # ── R2537 (open-debt item 716): THE BOUNDARY, GRADED FROM BOTH SIDES ────
+    #
+    # The item's first done-when, in as many words: "1.11.0 opens and 1.10.2
+    # does not", BOTH arms, because one arm cannot grade a boundary. A suite
+    # holding only the opening arm passes on a predicate that opens on
+    # everything; one holding only the closing arm passes on a predicate that
+    # opens on nothing. So both are here and both are named.
+    #
+    # ⚠ The population on the live tree is currently ZERO — every MEASURED row
+    # sits at distance 0 since R2529, so `newer` is empty for all four and the
+    # grade is `none` everywhere. That is exactly the state in which a real run
+    # cannot exercise this, which is why the arms below are fixtures rather than
+    # a reading of `PINNED`: an arm that only runs when upstream happens to have
+    # released is an arm nobody is grading today.
+    grade_cases = [
+        # (label, verdict, pin, tags, distance) -> expected grade
+        ("a PATCH does not open a round",
+         ("MEASURED", "1.10.0", ["1.10.2", "1.10.1", "1.10.0"], 2), "patch"),
+        ("a MINOR opens a round",
+         ("MEASURED", "1.10.0", ["1.11.0", "1.10.0"], 1), "minor"),
+        ("a MAJOR opens a round",
+         ("MEASURED", "1.10.0", ["2.0.0", "1.10.0"], 1), "major"),
+        # The strongest step in the window wins, not the newest one: upstream
+        # publishing 1.11.0 and then a 1.11.1 must still open the round.
+        ("the strongest step in the window is the grade",
+         ("MEASURED", "1.10.0", ["1.11.1", "1.11.0", "1.10.0"], 2), "minor"),
+        ("nothing published since the pin has no grade",
+         ("MEASURED", "1.10.0", ["1.10.0", "1.9.0"], 0), "none"),
+        # The three NOT-MEASURED verdicts, each answered BY NAME. The item's
+        # third done-when: an axis with no answer must red, so these must come
+        # back `n/a` rather than falling through to a default.
+        #
+        # ⚠ THE GRADE ALONE IS NOT ENOUGH TO GRADE THIS, and a damage probe is
+        # what said so. Deleting the `PIN_NOT_DERIVED` branch outright left the
+        # suite GREEN, because the catch-all below it returns `ungraded` too —
+        # the verdict was right and the NAMING, which is what the item asks for,
+        # was gone. So each of these also pins a phrase only its own branch
+        # produces. The catch-all stays as a backstop; what it may not do is
+        # stand in for an answer silently.
+        ("NO_RELEASES is answered, not skipped",
+         ("NO_RELEASES", "1.0.0", [], 0), "n/a", "empty list"),
+        ("PIN_NOT_A_RELEASE is answered, not skipped",
+         ("PIN_NOT_A_RELEASE", "deadbeef", ["1.0.0"], 0), "n/a",
+         "not a point on the release line"),
+        ("PIN_NOT_DERIVED is UNGRADED, which reds",
+         ("PIN_NOT_DERIVED", None, ["1.0.0"], 0), "ungraded",
+         "nothing to grade FROM"),
+        # A `git describe` pin must NOT be read as its base tag. If it were,
+        # a pin ten commits past 1.9.0 would grade as sitting exactly on it.
+        ("a describe-shaped pin is ungraded, never its base tag",
+         ("MEASURED", "1.9.0-10-g3b3ab65c", ["1.11.0", "1.9.0-10-g3b3ab65c"], 1),
+         "ungraded"),
+        ("an unreadable upstream tag is ungraded",
+         ("MEASURED", "1.10.0", ["release-candidate", "1.10.0"], 1), "ungraded"),
+        # The `V` prefix is real: FreeRTOS-Kernel tags are `V11.3.1`.
+        ("a V-prefixed tag family grades like any other",
+         ("MEASURED", "V11.1.0", ["V11.3.1", "V11.1.0"], 1), "minor"),
+    ]
+    for case in grade_cases:
+        label, (verdict, pin, tags, distance), want_grade = case[:3]
+        want_why = case[3] if len(case) > 3 else None
+        got_grade, why = release_grade(verdict, pin, tags, distance)
+        if got_grade != want_grade:
+            bad += 1
+            print(f"  selftest FAIL: {label} — grade {got_grade!r}, want {want_grade!r}")
+        if not why:
+            bad += 1
+            print(f"  selftest FAIL: {label} — the answer carries no reason")
+        if want_why is not None and want_why not in why:
+            bad += 1
+            print(f"  selftest FAIL: {label} — the reason is {why!r}, which does not"
+                  f" name this verdict's own answer ({want_why!r}); a catch-all"
+                  f" standing in for a named branch is what this pins")
+
+    # And the PREDICATE over those grades, which is where the boundary actually
+    # lives. Driven as a table so the two arms sit next to each other and a
+    # change that collapses them fails visibly.
+    boundary = {
+        "a/patch": ("patch", "1.10.2 since 1.10.0"),
+        "a/minor": ("minor", "1.11.0 since 1.10.0"),
+        "a/major": ("major", "2.0.0 since 1.10.0"),
+        "a/none": ("none", "nothing since the pin"),
+        "a/na": ("n/a", "no release line"),
+        "a/broken": ("ungraded", "a tag this cannot read"),
+    }
+    opens = bump_findings(boundary, "minor")
+    opened = {line.split(":")[0] for line in opens}
+    for repo, want_open in (
+        ("a/minor", True),   # the item's arm ⑴: 1.11.0 OPENS
+        ("a/patch", False),  # the item's arm ⑵: 1.10.2 does NOT
+        ("a/major", True),
+        ("a/none", False),
+        ("a/na", False),
+        ("a/broken", True),  # an unanswered axis reds whatever the floor is
+    ):
+        if (repo in opened) != want_open:
+            bad += 1
+            print(f"  selftest FAIL: bump_findings at `minor` — {repo} "
+                  f"{'did not open' if want_open else 'opened'} a round")
+    # Strongest first, so a reader sees the biggest step at the top.
+    if opens and not opens[0].startswith(("a/broken", "a/major")):
+        bad += 1
+        print(f"  selftest FAIL: bump_findings did not sort strongest first: {opens}")
+    # The FLOOR is what the owner's decision sets, so moving it must move the
+    # verdict — otherwise the constant is decoration.
+    if {line.split(":")[0] for line in bump_findings(boundary, "patch")} < opened:
+        bad += 1
+        print("  selftest FAIL: lowering the floor to `patch` did not widen the set")
+    if "a/minor" in {line.split(":")[0] for line in bump_findings(boundary, "major")}:
+        bad += 1
+        print("  selftest FAIL: raising the floor to `major` still opened on a minor")
+
     # An API failure must be an exception, never an empty list that reads as
     # NO_RELEASES. This is the one distinction condition ③ is made of.
     def explode(_repo: str) -> list[str]:
@@ -747,7 +1067,8 @@ def selftest() -> int:
     # population it read.
     print(
         f"upstream-release-distance selftest: OK ({len(cases)} classifier case(s), "
-        f"{len(threshold_cases)} threshold case(s), the measure/observe split, "
+        f"{len(threshold_cases)} threshold case(s), {len(grade_cases)} grade "
+        f"case(s) plus the boundary from both sides, the measure/observe split, "
         f"the two zero-population arms, and the workflow-consistency arm with "
         f"its control)"
     )
