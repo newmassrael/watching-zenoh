@@ -4556,4 +4556,101 @@ mod tests {
             TokioTime,
         >,
     }
+
+    /// The `QueryTarget` every recorded outbound Request carries, read back with
+    /// session-core's OWN `ext_target` reader rather than a byte scan: the
+    /// target ext is a zint whose bytes could occur anywhere in a frame, so
+    /// "the bytes are in there" is not the same claim as "the Request carries
+    /// this target".
+    ///
+    /// A `None` entry is a Request whose Q_T ext is ABSENT, which is exactly
+    /// what a lost target pin looks like on the wire -- `read_request_target`
+    /// maps absence onto the never-transmitted `0 = BEST_MATCHING` default.
+    #[cfg(feature = "ext-pubsub-advanced-history")]
+    fn recorded_request_targets(
+        driver: &crate::test_fixtures::RecordingLinkDriver,
+    ) -> Vec<Option<wz_session_core::query_mode::QueryTarget>> {
+        use wz_session_core::inbound::{parse_inbound, InboundFrame};
+        use wz_session_core::network_message::{parse_frame_payload, NetworkMessage};
+        use wz_session_core::request_routing_context::read_request_target;
+
+        let mut targets = Vec::new();
+        for idx in 0..driver.frame_count() {
+            let bytes = driver.frame_bytes(idx);
+            // This session's OWN bytes, so a parse failure is a defect rather
+            // than a frame shape this helper may walk past.
+            let InboundFrame::Frame { payload, .. } =
+                parse_inbound(&bytes).expect("the session's own frame parses")
+            else {
+                continue;
+            };
+            for record in parse_frame_payload(&payload).expect("the session's own batch parses") {
+                if let NetworkMessage::Request(request) = record {
+                    targets.push(read_request_target(&request));
+                }
+            }
+        }
+        targets
+    }
+
+    /// R2507 — the WIRE half of R2505's `QueryTarget::All` pin. R2505 put the
+    /// pin in [`issue_recovery_get`] and graded it at the BUILDER, which cannot
+    /// tell a pin that reaches the peer from one that does not: `with_target` is
+    /// a documented silent no-op without `query-target`, and the field then
+    /// stays at the `None` sentinel that ELIDES Q_T from the frame. So the
+    /// subject here is the recorded frame, decoded.
+    ///
+    /// The discriminator is session-core's reader answering `None` for an absent
+    /// ext (`request_routing_context.rs` @ `pub fn read_request_target`): EVERY
+    /// way of losing the pin lands there -- the `with_target` call deleted, the
+    /// `"query-target"` line dropped from `ext-pubsub-advanced-recovery`'s
+    /// closure in `Cargo.toml`, or the emit path ceasing to thread the target
+    /// ([`crate::session::querier`] @ `pub(super) fn effective_target`).
+    ///
+    /// The SET is pinned, not a count: `vec![Some(All)]` also says this declare
+    /// emits exactly ONE Request, so a second GET appearing (or the history GET
+    /// disappearing) fails here instead of passing as "at least one was right".
+    /// An empty recording fails the same equality, which is the anti-vacuity
+    /// arm -- there is no filter for a zero population to slip through.
+    ///
+    /// ⛔ The cfg names ONLY `ext-pubsub-advanced-history`. Adding
+    /// `feature = "query-target"` would cfg this guard OUT of precisely the
+    /// build whose regression it exists to catch; the feature is implied here
+    /// anyway (history -> recovery -> query-target), so naming it would buy
+    /// nothing and cost the grading.
+    #[cfg(feature = "ext-pubsub-advanced-history")]
+    #[test]
+    fn the_history_get_puts_query_target_all_on_the_wire() {
+        use wz_session_core::query_mode::QueryTarget;
+
+        let (actions, driver) = crate::test_fixtures::recording_actions();
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let session = TokioSession::new(actions, observer, clock);
+
+        let _sub = AdvancedSubscriber::declare_with_options(
+            &session,
+            "demo/data",
+            AdvancedSubscriberOptions::new()
+                .with_history(HistoryConfig::new())
+                // Remote: the GET has to reach the LINK to be graded at all.
+                // SessionLocal is answered inside the declare and emits no
+                // Request, which is why the history arms that drive the reply
+                // registry directly drop their driver.
+                .with_get_locality(Locality::Remote),
+            |_s: Sample| {},
+            |_m: Miss| {},
+        )
+        .expect("history-enabled advanced subscriber declares");
+
+        assert_eq!(
+            recorded_request_targets(&driver),
+            vec![Some(QueryTarget::All)],
+            "the startup history GET must put Q_T = All on the wire. An absent \
+             target reads back as BEST_MATCHING, which a peer answers from ONE \
+             queryable -- a history GET answered by one queryable returns a \
+             strictly smaller history, so this is a delivery difference and not \
+             a cosmetic one"
+        );
+    }
 }

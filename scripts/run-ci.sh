@@ -7213,7 +7213,18 @@ layer_c1av_cargo_test_ext_pubsub_advanced_history() {
     # the diff would have said +2 for every leg and this file's own comment
     # above records that trap. The three recovery-WITHOUT-history legs
     # (:7124, :7146, :7169) correctly did NOT move.
-    _runci_guarded_test "C1av advanced_subscriber" 36 \
+    #
+    # R2507 — 36 -> 37: `the_history_get_puts_query_target_all_on_the_wire`,
+    # the WIRE half of R2505's `QueryTarget::All` pin. `ext-pubsub-advanced-
+    # history`-gated, so again only this lane moves. ⚠ MEASURED, and the
+    # measurement found something this count cannot express: the guard's
+    # absence-shape control (drop `"query-target"` from the recovery closure)
+    # stays GREEN here, because `query-target` is a DEFAULT feature and this
+    # lane does not pass `--no-default-features`. Its red only appears in the
+    # reduced build, where it printed `left: [None]`. So this lane grades the
+    # target's VALUE; the feature-closure line is graded by the reduced-features
+    # surface, not here.
+    _runci_guarded_test "C1av advanced_subscriber" 37 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-history,ext-pubsub-advanced-publisher,pubsub-allow-loop \
         --lib advanced_subscriber --quiet || return 1
     (cd crates \
