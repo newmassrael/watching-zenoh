@@ -10,9 +10,9 @@
 //! `session-unicast-open`'s last named residual, opened by R2437's
 //! re-derivation at the pin: the pin ADDED an establishment extension wz had
 //! never heard of. `init::ext::RegionName = zextzbuf!(0x8, false)`
-//! (`commons/zenoh-protocol/src/transport/init.rs`), a node's region identity
-//! carried on BOTH InitSyn and InitAck
-//! (`init.rs` @ `pub ext_region_name: Option<ext::RegionName>`). wz neither
+//! (`commons/zenoh-protocol/src/transport/init.rs`
+//! @ `pub ext_region_name: Option<ext::RegionName>`), a node's region identity
+//! carried on BOTH InitSyn and InitAck. wz neither
 //! emitted nor surfaced it; `region_name` existed only as an unhonoured
 //! config key.
 //!
@@ -104,7 +104,9 @@ async fn acceptor_answers(
 /// THE EMIT: a node with a region identity announces it on the InitAck.
 ///
 /// zenoh's acceptor returns `self.region_name.clone().map(name_to_ext)` from
-/// `send_init_ack` (`unicast/establishment/ext/region_name.rs`).
+/// `send_init_ack`
+/// (`io/zenoh-transport/src/unicast/establishment/ext/region_name.rs`
+/// @ `fn send_init_ack`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_node_with_a_region_announces_it_on_the_init_ack() {
     let (announced, _peer, close) = acceptor_answers(Some("north"), craft_initsyn_wire()).await;

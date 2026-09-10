@@ -3107,7 +3107,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// node's configured identity, at SEND time.
     ///
     /// Upstream returns `self.region_name.clone().map(name_to_ext)` from BOTH
-    /// `send_init_syn` and `send_init_ack` (`ext/region_name.rs`), so the
+    /// `send_init_syn` and `send_init_ack`
+    /// (`io/zenoh-transport/src/unicast/establishment/ext/region_name.rs`
+    /// @ `fn send_init_syn`), so the
     /// entry is present exactly when the node has an identity — and ABSENT,
     /// not empty, when it does not. The removal arm is what makes that true
     /// for a session whose identity was cleared after a first Init staged one.
@@ -7856,7 +7858,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             // R2539 — the `0x8` REGION-NAME entry, from THIS node's identity.
             // Upstream's opener returns `self.region_name.clone()
             // .map(name_to_ext)` from `send_init_syn`
-            // (`ext/region_name.rs`), so the entry is present exactly when
+            // (`io/zenoh-transport/src/unicast/establishment/ext/region_name.rs`
+            // @ `fn send_init_syn`), so the entry is present exactly when
             // the node has an identity and ABSENT when it does not.
             a.stage_local_region(ExtChainRole::InitSyn);
             let bytes = a
@@ -7989,7 +7992,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             // R2539 — the `0x8` REGION-NAME entry, from THIS node's identity.
             // Not a reflection and not a negotiation: upstream's acceptor
             // returns its OWN `region_name` from `send_init_ack`
-            // (`ext/region_name.rs`), exactly as its opener does from
+            // (`io/zenoh-transport/src/unicast/establishment/ext/region_name.rs`
+            // @ `fn send_init_ack`), exactly as its opener does from
             // `send_init_syn`, and the peer's announcement is only stored.
             // Staged here rather than at construction so a node whose
             // identity is set (or cleared) after the session exists still

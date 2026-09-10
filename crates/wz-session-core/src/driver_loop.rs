@@ -172,7 +172,8 @@ pub enum DriverLoopOutcome {
     /// ⚠ SYMMETRIC, unlike `InitAckPatchRejected`, and that is upstream's
     /// shape too: both `RegionNameFsm` receive arms are
     /// `ext.map(ext_to_name).transpose()?`
-    /// (`unicast/establishment/ext/region_name.rs` @ `fn recv_init_syn`,
+    /// (`io/zenoh-transport/src/unicast/establishment/ext/region_name.rs`
+    /// @ `fn recv_init_syn`,
     /// @ `fn recv_init_ack`), so an acceptor refuses a malformed InitSyn
     /// exactly as an initiator refuses a malformed InitAck. There is no
     /// negotiation to lower it into — a region name is an identity, not a

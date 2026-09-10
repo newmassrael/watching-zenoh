@@ -330,7 +330,8 @@ fn dispatch_unit<R: SessionRuntime, T: TimeSource>(
                 // R2539 — admit the peer's `0x8` REGION-NAME identity off
                 // every admitted Init, and REFUSE a present-but-malformed
                 // one. Upstream validates on receipt in both roles
-                // (`ext/region_name.rs` @ `fn recv_init_syn`,
+                // (`io/zenoh-transport/src/unicast/establishment/ext/region_name.rs`
+                // @ `fn recv_init_syn`,
                 // @ `fn recv_init_ack`, each `ext.map(ext_to_name)
                 // .transpose()?`), so an empty, over-long or non-UTF-8 value
                 // propagates an error out of the FSM rather than reading as

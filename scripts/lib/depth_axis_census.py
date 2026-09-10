@@ -699,7 +699,27 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # across fifteen rounds nobody was watching -- as did reached 55, unreached 3
 # and no-symbol 2. Only the wz count moved, which is what a stretch of
 # re-declaration rounds should do to it.
-PIN_REACHED = 55
+#
+# R2541 (open-debt item 720) — 55 -> 54, and the three falls below are ONE
+# EVENT: R2539 took `session-unicast-open` PARTIAL -> COMPLETE, so the atom left
+# this census's population and took its citations with it. A count that falls
+# because an atom was BUILT is the north star's own oracle moving; the pin owes
+# it a move in the same commit, which R2539 did not make and hosted CI caught
+# three times (run 34540131144, both C0 jobs and Layer Z).
+#
+# ⛔ DERIVED, not inferred from the commit subject. The R2538 store blob was
+# read back out of git and this atom's reason re-audited AT THAT COMMIT by the
+# same `citation_audit` the gate runs: it held wz=17 and ambiguous=2 there, and
+# the pins fell by exactly 17 and 2. `reach_partition` puts the survivors at
+# 54/3/2 against a population of 59, so `unreached` and `no_symbol` are
+# untouched and only the reached bucket lost a member.
+# ⚠ THE ATOM'S CURRENT REASON HOLDS wz=20, NOT 17, and the difference is not
+# noise: R2539's last commit ("resolve the three doc links this round added")
+# put three more citations into the same reason after this census had last
+# passed. Reading today's text would have said the fall should be 20 and left
+# three unaccounted for -- the count that matters is the one the reason held
+# when the pin was last green.
+PIN_REACHED = 54
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -710,8 +730,13 @@ PIN_NO_SYMBOL = 2
 # A declined feature is recorded as a DIVERGENCE rather than a gap, and a
 # divergence that names its guard is one a reader can check — which is exactly
 # the kind of citation this ratchet counts.
-PIN_WZ_CITATIONS = 347
-PIN_AMBIGUOUS = 73
+#
+# R2541 (open-debt item 720) — 347 -> 330 and 73 -> 71. Same event as the
+# reached pin above: `session-unicast-open` completing removed the 17 wz and 2
+# ambiguous citations its reason held at R2538. No surviving atom's citations
+# moved, which is why the arithmetic closes exactly rather than approximately.
+PIN_WZ_CITATIONS = 330
+PIN_AMBIGUOUS = 71
 
 
 class Fatal(Exception):
