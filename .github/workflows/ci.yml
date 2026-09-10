@@ -1388,9 +1388,30 @@ jobs:
         # `submodules: recursive` is load-bearing here for a reason the other
         # jobs' copies do not carry: C1cf iterates EVERY workspace member, and
         # `zenoh-pico-sys` builds the vendored zenoh-pico tree.
+        #
+        # R2530 — `fetch-depth: 0` IS LOAD-BEARING TOO, and R2525 got it wrong by
+        # copying `nondefault`'s checkout, whose comment says "this lane reads no
+        # history". That is true of C1cn; it is FALSE of Layer C0, which moved
+        # here in the same round. `scripts/lib/reason_citation_gate.py` builds
+        # its "ever" index from
+        # `git log --all --pretty=format: --name-only --diff-filter=ADR`
+        # to tell a path wz DELETED from one wz NEVER HAD, and on a depth-1
+        # clone that index holds only files that still exist.
+        #
+        # ⚠ THE SELFTEST IS WHAT CAUGHT IT, and what it caught is worse than a
+        # red: with no history the LIVE gate mis-classifies too, reading a
+        # citation into a deleted wz path as "upstream's, cited correctly"
+        # instead of a finding. A shallow clone did not break this gate, it made
+        # it LENIENT. The arm exists precisely because no live citation names a
+        # deleted path, so the rule would otherwise never execute.
+        # MEASURED both ways, in a depth-1 clone of this repo vs this one:
+        # `wz-ap-demo/src/link_driver.rs` (a real deletion) is visible 2x in the
+        # full history and 0x in the shallow, and the selftest reports
+        # `6/7 arm(s) pass` there against `7/7` here — the same arm hosted named.
         uses: actions/checkout@v4
         with:
           submodules: recursive
+          fetch-depth: 0
 
       - name: Restore apt archives (R311y882 — keep the mirror off the path)
         # See the `verdict-legs` copy for the measurement and for why RESTORE
