@@ -2517,6 +2517,72 @@ mod tests {
     /// INSIDE the filtered text; wz appends `metrics_eof()` after the filter's
     /// subject, so copying that re-append here would be cargo-culting a step
     /// wz's assembly already gives for free. The assertion below pins that.
+    /// R2533 (open-debt item 677) — wz DOES NOT COMPRESS ITS METRICS, and this
+    /// pins that the encoding it sends never claims otherwise.
+    ///
+    /// # The decision, and why it needs a guard rather than a comment
+    ///
+    /// Upstream gzips by DEFAULT — `zenoh/src/net/runtime/adminspace.rs` @ `if query.parameters().get("compression") != Some("false") {`
+    /// wraps the body in a `GzEncoder` and then appends `;content-encoding=gzip`
+    /// to the encoding string. The owner's decision (2026-09-10) is that wz does
+    /// NOT take a compressor: this tree has no gzip dependency anywhere, and
+    /// acquiring one would reach the no-alloc tier and the footprint lanes'
+    /// absolute pins for a metrics nicety.
+    ///
+    /// That is a parity DIVERGENCE, and a declined feature is only safe while
+    /// the wire stays honest about it. R2414 made wz send the pin's real
+    /// `METRICS_ENCODING` instead of `text/plain`, so the encoding string is now
+    /// load-bearing: a consumer reads it to decide whether to inflate. If a
+    /// later round ever copies upstream's suffix without copying its compressor,
+    /// every such consumer breaks on wz — and nothing else in this tree would
+    /// notice, because the body would still be valid OpenMetrics text.
+    ///
+    /// # What it grades
+    ///
+    /// The encoding wz ACTUALLY PUT ON THE REPLY, read back off the recorder
+    /// rather than re-derived from the constant — a test that compared
+    /// `METRICS_ENCODING` with itself would pass on any tree. The anti-vacuity
+    /// arm asserts the leg answered with the openmetrics encoding at all, so a
+    /// build that replies with nothing (or drops the encoding) cannot satisfy
+    /// the claim by emitting less.
+    #[cfg(feature = "adminspace-metrics")]
+    #[test]
+    fn metrics_encoding_never_claims_a_content_encoding() {
+        let mut out = RecordingReply::default();
+        let view = admin_view("@/a1b2/peer/metrics");
+        let _ = answer_admin_query(
+            &view,
+            &mut out,
+            &admin_ctx_with_stats(crate::stats::TransportStatsReport::default()),
+            &[],
+            &[],
+            &[],
+            "{}",
+        );
+        let (_, encoding) = out
+            .replies
+            .iter()
+            .zip(out.encodings.iter())
+            .find(|((k, _), _)| k == "@/a1b2/peer/metrics")
+            .expect("the metrics leg replied");
+        let hint = encoding
+            .as_ref()
+            .expect("the metrics leg carries an encoding");
+        let mime = crate::encoding::encoding_to_mime(hint);
+
+        // ANTI-VACUITY FIRST: the leg really is answering as openmetrics, so a
+        // build that dropped the encoding cannot pass the claim below.
+        assert!(
+            mime.starts_with("application/openmetrics-text"),
+            "the metrics leg must answer as openmetrics; got {mime:?}"
+        );
+        assert!(
+            !mime.contains("content-encoding") && !mime.contains("gzip"),
+            "wz does not compress metrics, so its encoding must not claim a \
+             content-encoding (owner decision, item 677); got {mime:?}"
+        );
+    }
+
     #[cfg(feature = "adminspace-metrics")]
     #[test]
     fn metrics_descriptors_false_strips_help_and_type_but_not_eof() {

@@ -6542,7 +6542,12 @@ layer_c1ak_cargo_test_transport_stats() {
     # rotted, inside a comment whose own subject is that a hand-held measurement
     # cannot be trusted here. A change to `mod tests` in adminspace.rs moves ALL
     # of them.
-    _runci_guarded_test C1ak 32 cargo test -p wz-session-core --features adminspace-metrics,transport-stats --lib adminspace --quiet \
+    # R2533 — 32 -> 33 (open-debt item 677). The added case pins that wz's
+    # metrics encoding never claims a `content-encoding`: the owner declined a
+    # gzip dependency, and a declined feature is only safe while the wire stays
+    # honest about it. Both this lane and C1AM count the same `--lib adminspace`
+    # population, so both move together or the pair disagrees about one crate.
+    _runci_guarded_test C1ak 33 cargo test -p wz-session-core --features adminspace-metrics,transport-stats --lib adminspace --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-stats --quiet -- -D warnings \
@@ -6762,7 +6767,7 @@ layer_c1ba_cargo_clippy_transport_multilink() {
 # two self-sufficiency fixes that the slim build surfaced (the session/mod.rs
 # unused-ResponseSink import + the test-module dead-code re-gating).
 layer_c1am_cargo_test_adminspace() {
-    _runci_guarded_test "C1AM adminspace 32" 32 \
+    _runci_guarded_test "C1AM adminspace 33" 33 \
         cargo test -p wz-session-core --features adminspace-metrics --lib adminspace --quiet || return 1
     _runci_guarded_test "C1AM zid_hex 3" 3 \
         cargo test -p wz-session-core --features adminspace-core --lib zid_hex --quiet || return 1
