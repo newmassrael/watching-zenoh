@@ -163,22 +163,19 @@ ALLOWED = [
         "a traversal's own work list, built and consumed inside one call; "
         "nothing captured is in it",
     ),
-    (
-        "wz-capture/agg.rs",
-        "table.remove(&u.id);",
-        "an UNDECLARE ending a keyexpr binding. The BINDING is removed, not "
-        "evidence -- the records it named are already in their rows, and the "
-        "id becoming unresolved again is the point (R311y622). R2458 re-spelled "
-        "this line: R2457 made `KeyexprSpaces::tables` a map keyed by session "
-        "owner, so `self.tables[dir_index(direction)]` became "
-        "`self.tables.get_mut(&self.side(direction))` and the registered "
-        "literal stopped naming any site. This gate reported BOTH halves of "
-        "that -- an unaccounted removal AND a registration excusing nothing -- "
-        "which is why an exact match is what it registers",
-    ),
+    # R2516 (open-debt item 713) — the `wz-capture/agg.rs` UNDECLARE row is GONE
+    # rather than re-spelled, and the difference is the point. R2513 gave each
+    # keyexpr id a BINDING HISTORY, so an undeclare no longer removes anything:
+    # it APPENDS `(anchor, None)`, which is what lets a reader anchored before
+    # the withdrawal still see the binding that was live then. There is no
+    # discard at that site any more, so a row excusing one would excuse nothing.
+    #
+    # Its old reason said the removal was of a BINDING and not of evidence. That
+    # was true, and the history makes it true structurally: the evidence is now
+    # kept, not merely argued to be elsewhere.
     (
         "wz-capture/interest.rs",
-        "match open.remove(&(dir, kind, id)) {",
+        "match correlation.open.remove(&(self.list, dir, kind, id)) {",
         "R311y869 — a declaration leaving the OPEN index because an "
         "`Undeclare` closed it. The DECLARATION is not discarded, which is "
         "that plane's central design point: it stays in `self.interests` and "
@@ -189,7 +186,7 @@ ALLOWED = [
     ),
     (
         "wz-capture/interest.rs",
-        "match asked.remove(&(dir, interest.interest_id)) {",
+        ".remove(&(self.list, dir, interest.interest_id))",
         "R311y870 — an `Interest(Final)` closing the asker's own request. The "
         "REQUEST is not discarded: it stays in `self.requests` and the removal "
         "only stamps `cancelled_at` on it, so a later answer cannot be credited "
