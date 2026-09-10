@@ -1003,6 +1003,12 @@ pub mod passive_keyexpr;
 /// for honouring the markers without refusing every patch-0 peer's chains.
 pub mod extpatch;
 
+/// SSOT for the `0x8` REGION-NAME establishment ext — a node's region
+/// identity, announced on Init and read off the peer's. The pin GREW this
+/// extension (it is absent from the 1.5.0 establishment `ext/` tree), and
+/// zenoh is its only reference: zenoh-pico has no region identity at all.
+pub mod extregion;
+
 #[cfg(feature = "transport-lowlatency")]
 pub mod extlowlatency;
 

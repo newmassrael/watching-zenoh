@@ -741,6 +741,24 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// wire in every build, and a session that cannot read it back would
     /// silently pin the markers off.
     pub negotiated_patch: R::Mutex<Option<u8>>,
+    /// R2539 — THIS node's region identity, the value staged onto every Init
+    /// this session sends (zenoh `RegionNameFsm::region_name`, the field its
+    /// `send_init_syn` and `send_init_ack` both return).
+    ///
+    /// `None` — no region identity — is the ordinary case and is what
+    /// upstream's own `Option` means: a node without one emits NO `0x8`
+    /// entry rather than an empty one, which is why
+    /// [`crate::extregion::RegionName`] cannot hold an empty string.
+    pub local_region: R::Mutex<Option<crate::extregion::RegionName>>,
+    /// R2539 — the PEER's region identity, as announced on its Init
+    /// (zenoh `State::other_region_name`, set by `recv_init_syn` on the
+    /// acceptor and `recv_init_ack` on the initiator).
+    ///
+    /// `None` before any Init is admitted AND when the peer announced none;
+    /// the two are not distinguished, exactly as upstream does not
+    /// distinguish them — its state field starts `None` and a peer without a
+    /// region leaves it `None`.
+    pub peer_region: R::Mutex<Option<crate::extregion::RegionName>>,
     /// transport-qos (R311y215) — the negotiated QoS-transport capability for
     /// THIS session (zenoh `TransportConfigUnicast::is_qos`). Seeded with the
     /// local offer ([`Self::set_qos_offer`]) at bring-up, then ANDed with the
@@ -1668,6 +1686,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // peer's; until then there is no agreed level and the
                 // Fragment chain-boundary markers stay off.
                 negotiated_patch: R::new_mutex(None::<u8>),
+                local_region: R::new_mutex(None::<crate::extregion::RegionName>),
+                peer_region: R::new_mutex(None::<crate::extregion::RegionName>),
                 // transport-qos — false until the AP layer offers it
                 // (`set_qos_offer`) and the peer's Init ext_qos offer is ANDed in.
                 #[cfg(feature = "transport-qos")]
@@ -3059,6 +3079,89 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let local = s.unwrap_or(crate::extpatch::CURRENT_PATCH);
             *s = Some(crate::extpatch::negotiate_patch(local, peer_patch));
         });
+    }
+
+    /// R2539 — give this session a region identity, or clear it.
+    ///
+    /// Separate from staging on purpose: zenoh holds the name on the FSM
+    /// (`RegionNameFsm::new(region_name)`, built once from config) and asks it
+    /// at every send, so the identity is a property of the node and the entry
+    /// is a property of the message. Staging at configure time would put the
+    /// InitAck's entry on a chain the acceptor has not begun.
+    pub fn set_local_region(&self, name: Option<crate::extregion::RegionName>) {
+        R::with_mutex_mut(&self.local_region, |s| *s = name);
+    }
+
+    /// This node's region identity, `None` when it has none.
+    pub fn local_region(&self) -> Option<crate::extregion::RegionName> {
+        R::with_mutex_mut(&self.local_region, |s| s.clone())
+    }
+
+    /// The PEER's region identity as announced on its Init, `None` when it
+    /// announced none or no Init has been admitted yet.
+    pub fn peer_region(&self) -> Option<crate::extregion::RegionName> {
+        R::with_mutex_mut(&self.peer_region, |s| s.clone())
+    }
+
+    /// R2539 — stage (or remove) this role's `0x8` REGION-NAME entry from the
+    /// node's configured identity, at SEND time.
+    ///
+    /// Upstream returns `self.region_name.clone().map(name_to_ext)` from BOTH
+    /// `send_init_syn` and `send_init_ack` (`ext/region_name.rs`), so the
+    /// entry is present exactly when the node has an identity — and ABSENT,
+    /// not empty, when it does not. The removal arm is what makes that true
+    /// for a session whose identity was cleared after a first Init staged one.
+    ///
+    /// In-place replacement rather than retain+push, the shape
+    /// [`Self::stage_negotiated_patch`] uses, so chain position does not move
+    /// under a re-stage.
+    pub fn stage_local_region(&self, role: ExtChainRole) {
+        let name = self.local_region();
+        R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
+            let want = crate::ext_header::ext_eid(crate::extregion::REGION_NAME_EXT_HEADER);
+            let at = chain
+                .iter()
+                .position(|e| crate::ext_header::ext_eid(e.header) == want);
+            match (name, at) {
+                (Some(name), Some(at)) => {
+                    if let Ok(entry) = crate::extregion::encode_region_name_ext(&name) {
+                        chain[at] = entry;
+                    }
+                }
+                (Some(name), None) => {
+                    if let Ok(entry) = crate::extregion::encode_region_name_ext(&name) {
+                        chain.push(entry);
+                    }
+                }
+                (None, Some(at)) => {
+                    chain.remove(at);
+                }
+                (None, None) => {}
+            }
+        });
+    }
+
+    /// R2539 — admit the peer's region identity off an Init's ext chain.
+    ///
+    /// `false` means the entry was THERE and its value is not a region name,
+    /// which upstream refuses: both receive arms are
+    /// `ext.map(ext_to_name).transpose()?`, and `ext_to_name` runs
+    /// `String::from_utf8` then `RegionName::try_from`, so a non-UTF-8, empty
+    /// or over-long value propagates an error out of the FSM. An ABSENT entry
+    /// is the benign case and leaves the field as it was.
+    ///
+    /// Called on every admitted Init, so the acceptor reads the InitSyn's and
+    /// the initiator the InitAck's — the both-sides shape
+    /// [`Self::negotiate_patch_against_peer`] has.
+    pub fn admit_peer_region(&self, extensions: &[ExtEntryOwned]) -> bool {
+        match crate::extregion::peer_region(extensions) {
+            Ok(None) => true,
+            Ok(Some(name)) => {
+                R::with_mutex_mut(&self.peer_region, |s| *s = Some(name));
+                true
+            }
+            Err(_) => false,
+        }
     }
 
     /// R311y838 — stage the ACCEPTOR's InitAck `0x7` PATCH entry at the level
@@ -7748,6 +7851,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                     crate::extshm::encode_shm_establishment_ext,
                 );
             }
+            // R2539 — the `0x8` REGION-NAME entry, from THIS node's identity.
+            // Upstream's opener returns `self.region_name.clone()
+            // .map(name_to_ext)` from `send_init_syn`
+            // (`ext/region_name.rs`), so the entry is present exactly when
+            // the node has an identity and ABSENT when it does not.
+            a.stage_local_region(ExtChainRole::InitSyn);
             let bytes = a
                 .encode_init_with_role(
                     /*is_ack=*/ false,
@@ -7875,6 +7984,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             // slot was constructed with. The patch was the one that still was
             // — `min()` had run and only the wire did not know.
             a.stage_negotiated_patch(ExtChainRole::InitAck);
+            // R2539 — the `0x8` REGION-NAME entry, from THIS node's identity.
+            // Not a reflection and not a negotiation: upstream's acceptor
+            // returns its OWN `region_name` from `send_init_ack`
+            // (`ext/region_name.rs`), exactly as its opener does from
+            // `send_init_syn`, and the peer's announcement is only stored.
+            // Staged here rather than at construction so a node whose
+            // identity is set (or cleared) after the session exists still
+            // announces the current one.
+            a.stage_local_region(ExtChainRole::InitAck);
             // R86 — Accepting-side cookie binding per RFC §5.M
             // anti-amplification. If the inbound InitSyn already arrived
             // (`inbound_peer_zid` slot populated by `handle_inbound`),

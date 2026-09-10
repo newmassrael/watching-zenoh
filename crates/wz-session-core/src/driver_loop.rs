@@ -162,6 +162,23 @@ pub enum DriverLoopOutcome {
     /// `min()`, never refused.
     #[cfg(feature = "codec-init-body")]
     InitAckPatchRejected,
+    /// R2539 — the peer's `init::ext::RegionName` (`0x8`) was PRESENT and its
+    /// value is not a region name: not UTF-8, empty, or over
+    /// [`crate::extregion::MAX_REGION_NAME_LEN`] bytes.
+    ///
+    /// An extension-handler failure, so it closes GENERIC through
+    /// `establishment.ext_rejected` like the patch above, not `INVALID`.
+    ///
+    /// ⚠ SYMMETRIC, unlike `InitAckPatchRejected`, and that is upstream's
+    /// shape too: both `RegionNameFsm` receive arms are
+    /// `ext.map(ext_to_name).transpose()?`
+    /// (`unicast/establishment/ext/region_name.rs` @ `fn recv_init_syn`,
+    /// @ `fn recv_init_ack`), so an acceptor refuses a malformed InitSyn
+    /// exactly as an initiator refuses a malformed InitAck. There is no
+    /// negotiation to lower it into — a region name is an identity, not a
+    /// level.
+    #[cfg(feature = "codec-init-body")]
+    InitRegionRejected,
     /// session-extqos (R311y506) — the peer's `init::ext::QoSLink` body could
     /// not be reconciled with ours: its priority band is not on the required
     /// side of the containment, its reliability contradicts ours, it carried

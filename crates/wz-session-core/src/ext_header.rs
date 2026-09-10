@@ -154,10 +154,18 @@ pub mod establishment_ext_id {
 /// Built from the constants above so a new id cannot be added to the table and
 /// forgotten here — the failure that would make
 /// `ext_chain::reject_unknown_mandatory_ext` refuse an extension wz
-/// itself speaks. Recognised is deliberately WIDER than implemented:
-/// [`establishment_ext_id::REGION_NAME`] is in this set and wz implements
-/// nothing for it, because the question this set answers is "does wz know what
-/// this id means", which is what the unknown-extension rule turns on.
+/// itself speaks.
+///
+/// Recognised may be WIDER than implemented, because the question this set
+/// answers is "does wz know what this id means" and not "does wz act on it" —
+/// which is what the unknown-extension rule turns on.
+///
+/// ⚠ R2539 — `REGION_NAME` used to be this note's standing EXAMPLE of the gap
+/// ("in this set and wz implements nothing for it"). It is not one any more:
+/// [`crate::extregion`] emits it, reads the peer's, and refuses a malformed
+/// value. Every id in this set is now implemented; the widening is a property
+/// the set is ALLOWED, not one it currently exercises, and a future id may use
+/// it again.
 pub const ESTABLISHMENT_EXT_IDS: [u8; 8] = [
     establishment_ext_id::QOS,
     establishment_ext_id::SHM,

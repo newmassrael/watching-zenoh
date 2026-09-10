@@ -144,9 +144,13 @@ pub(crate) fn decode_ext_chain(
 /// handshake on terms it had not understood.
 ///
 /// Non-mandatory unknowns are ACCEPTED and left in the chain for the caller to
-/// ignore, which is what keeps a newer peer interoperable: a stock 1.10.0 node
-/// announces `RegionName` (id `0x8`, non-mandatory) that wz implements nothing
-/// for, and refusing it would break a handshake both upstreams complete.
+/// ignore, which is what keeps a newer peer interoperable.
+///
+/// ⚠ R2539 — the example this sentence used to carry, `RegionName` (id `0x8`)
+/// as an extension "wz implements nothing for", is no longer one:
+/// [`crate::extregion`] implements it. The RULE is unchanged and its subject is
+/// any id absent from [`crate::ext_header::ESTABLISHMENT_EXT_IDS`]; what moved
+/// is only that this particular id stopped being an instance of it.
 #[allow(dead_code)]
 pub(crate) fn reject_unknown_mandatory_ext(
     entries: &[ExtEntryOwned],
@@ -207,11 +211,18 @@ mod unknown_mandatory_ext_tests {
         );
     }
 
-    /// The concrete peer this protects: a stock 1.10.0 node announces
-    /// `RegionName` on id `0x8`, which wz implements nothing for. It is in the
-    /// recognised set and non-mandatory, so it must pass BOTH ways -- this is
-    /// the case that would have made the new rule an interop regression if the
-    /// id had been left out of the table.
+    /// The concrete peer this protects: a stock node announces `RegionName` on
+    /// id `0x8`. It is in the recognised set and non-mandatory, so it must pass
+    /// BOTH ways -- this is the case that would have made the new rule an
+    /// interop regression if the id had been left out of the table.
+    ///
+    /// ⚠ R2539 CORRECTION — this assertion's message used to read "wz IGNORES
+    /// region_name -- nothing in this tree honours the key or the extension
+    /// carrying it". The second half is now FALSE: [`crate::extregion`] emits
+    /// the extension and reads the peer's, and a malformed value is REFUSED.
+    /// What this test still says is narrower and unchanged: the
+    /// unknown-mandatory rule does not fire on it, which is a statement about
+    /// the id being RECOGNISED and not about what wz does with the value.
     #[test]
     fn the_pins_region_name_ext_does_not_break_the_handshake() {
         for mandatory in [false, true] {
@@ -221,9 +232,9 @@ mod unknown_mandatory_ext_tests {
                     &ESTABLISHMENT_EXT_IDS
                 ),
                 Ok(()),
-                "wz IGNORES region_name -- nothing in this tree honours the key or \
-                 the extension carrying it; the id is listed only so the \
-                 unknown-mandatory rule never fires on a stock peer's announcement"
+                "region_name is RECOGNISED, so the unknown-mandatory rule never \
+                 fires on a stock peer's announcement -- whether or not wz acts \
+                 on the value, which since R2539 it does"
             );
         }
     }

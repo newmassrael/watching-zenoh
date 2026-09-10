@@ -149,6 +149,51 @@ fn patch_ext_chain(level: u8) -> [u8; 2] {
     [EXT_HDR_INIT_PATCH_ZINT, level]
 }
 
+/// R2539 — `init::ext::RegionName = zextzbuf!(0x8, false)` as a header
+/// byte: id `0x8`, ZBUF encoding (`0x40`), M clear.
+///
+/// Read at the pin from `commons/zenoh-protocol/src/transport/init.rs`
+/// @ `pub type RegionName = zextzbuf!(0x8, false)`. zenoh-pico has no
+/// region identity at all, so there is no second spelling to reconcile.
+pub const EXT_HDR_INIT_REGION_ZBUF: u8 = 0x48;
+
+/// R2539 — the `0x8` REGION-NAME ext as a lone terminal chain entry:
+/// header byte, single-byte VLE length, then the RAW bytes.
+///
+/// Takes bytes rather than `&str` deliberately: the value a peer puts on
+/// the wire is not required to be valid UTF-8, and refusing that is one of
+/// the three arms upstream's `ext_to_name` has. A fixture that could only
+/// express valid names could not present the input that fails.
+fn region_ext_chain(value: &[u8]) -> Vec<u8> {
+    assert!(value.len() < 0x80, "fixture: single-byte VLE length only");
+    let mut out = Vec::with_capacity(2 + value.len());
+    out.push(EXT_HDR_INIT_REGION_ZBUF);
+    out.push(value.len() as u8);
+    out.extend_from_slice(value);
+    out
+}
+
+/// R2539 — [`craft_initsyn_wire`] carrying a `0x8` REGION-NAME extension
+/// whose ZBuf body is `value`, verbatim.
+///
+/// Caps are the all-zero conforming advertisement, which is what makes a
+/// rejection this fixture produces DISCRIMINATING: it cannot be the
+/// size-parameter rule firing, because none of the three sizes moved.
+pub fn craft_initsyn_wire_with_region(value: &[u8]) -> Vec<u8> {
+    let mut wire = vec![
+        FLAG_T_Z | FLAG_T_INIT_S | T_MID_INIT,
+        0x05, // version
+        0x31, // cbyte: whatami=Peer wire(0x01), zid_len=4 (high nibble = 3)
+    ];
+    wire.extend_from_slice(&FIXTURE_PEER_ZID);
+    wire.extend_from_slice(&[
+        0x00, // sn_res (seq=0, req=0)
+        0x00, 0x00, // batch_size LE u16 = 0
+    ]);
+    wire.extend_from_slice(&region_ext_chain(value));
+    wire
+}
+
 /// R311y817 — [`craft_initack_wire`] carrying a `0x7` PATCH extension at
 /// `patch_level`, so an initiator-side test can present the acceptor
 /// announcement both references REFUSE when it exceeds the InitSyn's

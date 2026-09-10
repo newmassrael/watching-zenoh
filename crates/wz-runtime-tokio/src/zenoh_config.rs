@@ -2004,13 +2004,20 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     "qos/network",
     "qos/publication",
     // R2230 (open-debt item 579) — ARRIVED in 1.10.0, the gateway plane's other
-    // half. `region_name` / `regionname` occur nowhere in `crates/`; bare
-    // `region` occurs only in three unrelated senses (memory regions, SCXML
-    // parallel regions, prose). `zone`, `domain`, `cluster`, `site_id` and
-    // `tier` were searched too. ⚠ `routing-namespace` is NOT this: a keyexpr
-    // prefix, matched by no peer filter, and zenoh-ext group membership is an
-    // application-level named group over liveliness keys rather than an
-    // establishment-time node attribute.
+    // half. `zone`, `domain`, `cluster`, `site_id` and `tier` were searched
+    // too. ⚠ `routing-namespace` is NOT this: a keyexpr prefix, matched by no
+    // peer filter, and zenoh-ext group membership is an application-level named
+    // group over liveliness keys rather than an establishment-time node
+    // attribute.
+    //
+    // ⚠ R2539 — this note's survey clause ("`region_name` / `regionname` occur
+    // nowhere in `crates/`") is STRUCK rather than edited down, because it had
+    // already been false for two rounds: R2437 put the id in the recognised
+    // set, and this very file names the key twice. It stays UNHONOURED all the
+    // same, and for a reason the struck sentence could not express — the wire
+    // extension is now implemented (`wz_session_core::extregion`) and nothing
+    // reads this KEY to feed it. That is the gap; "the word is absent" never
+    // was.
     "region_name",
     // R2230 (item 579/582) — the peer twin and `peers_failover_brokering` left
     // with the surface; see [`WZ_EXTENSION_CONFIG_KEYS`]. The router weighting
@@ -2555,6 +2562,17 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
     // anchor is `IGNORES` rather than `RECOGNISED` deliberately — the latter is
     // on the same line and would satisfy the gate, but a future reader grepping
     // it would meet a word that reads like support.
+    //
+    // ⚠ R2539 — THE WIRE HALF IS NOW HONOURED AND THIS KEY IS STILL NOT, and
+    // the two must not be confused. `wz-session-core`'s `extregion` emits the
+    // `0x8` extension from a session's configured identity, reads the peer's,
+    // and refuses a malformed one — so a wz node CAN carry a region through
+    // establishment. What no code does is read this CONFIG KEY and set that
+    // identity: `SessionLinkActions::set_local_region` is the only way in, and
+    // nothing in the zenoh-config path calls it. So the classification stands
+    // on the axis this table grades, which is the key, and the anchor's own
+    // test message was corrected in the same commit rather than left to read
+    // as though the extension were still ignored too.
     ("region_name", "asserted-ignored", "IGNORES"),
     (
         "scouting/gossip/autoconnect",

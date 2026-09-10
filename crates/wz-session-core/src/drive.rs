@@ -327,6 +327,27 @@ fn dispatch_unit<R: SessionRuntime, T: TimeSource>(
                 // read the peer's; the negotiated level is the sole gate
                 // on the Fragment chain-boundary markers, so a session
                 // that never took it can only ever leave them off.
+                // R2539 — admit the peer's `0x8` REGION-NAME identity off
+                // every admitted Init, and REFUSE a present-but-malformed
+                // one. Upstream validates on receipt in both roles
+                // (`ext/region_name.rs` @ `fn recv_init_syn`,
+                // @ `fn recv_init_ack`, each `ext.map(ext_to_name)
+                // .transpose()?`), so an empty, over-long or non-UTF-8 value
+                // propagates an error out of the FSM rather than reading as
+                // "no region". It is an EXTENSION failure, so it leaves
+                // through `establishment.ext_rejected` (GENERIC) like the
+                // patch above rather than `framing.error` (INVALID).
+                //
+                // Placed before the patch `min()` for the same reason that
+                // one sits after its own reject: a refused Init must not have
+                // its other extensions merged into the session first.
+                #[cfg(feature = "codec-init-body")]
+                if let InboundFrame::Init { extensions, .. } = &frame {
+                    if !actions.admit_peer_region(extensions) {
+                        engine.process_event(E::EstablishmentExtRejected);
+                        return DriverLoopOutcome::InitRegionRejected;
+                    }
+                }
                 #[cfg(feature = "codec-init-body")]
                 if let InboundFrame::Init { extensions, .. } = &frame {
                     actions.negotiate_patch_against_peer(crate::extpatch::peer_patch(extensions));
