@@ -7206,7 +7206,14 @@ layer_c1au_cargo_test_ext_pubsub_sample_miss_detection() {
 # that finds every affected lane is over the full libtest path
 # (`advanced_subscriber::tests::<fn>`), not over the new function names.
 layer_c1av_cargo_test_ext_pubsub_advanced_history() {
-    _runci_guarded_test "C1av advanced_subscriber" 34 \
+    # R2504 — 34 -> 36: the two bounded-buffer cases R2503 added
+    # (`a_bounded_history_buffer_spills_the_oldest_and_delivers_it` and its
+    # forward-gap twin). Moved to what the command PRINTED, not to what the
+    # diff suggests — the twin is `all(history, recovery)`-gated, so counting
+    # the diff would have said +2 for every leg and this file's own comment
+    # above records that trap. The three recovery-WITHOUT-history legs
+    # (:7124, :7146, :7169) correctly did NOT move.
+    _runci_guarded_test "C1av advanced_subscriber" 36 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-history,ext-pubsub-advanced-publisher,pubsub-allow-loop \
         --lib advanced_subscriber --quiet || return 1
     (cd crates \

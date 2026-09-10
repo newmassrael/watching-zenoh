@@ -1832,6 +1832,7 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
             retransmission: false,
             #[cfg(feature = "ext-pubsub-advanced-history")]
             history_pending: false,
+            #[cfg(feature = "ext-pubsub-advanced-history")]
             max_history_depth: usize::MAX,
         }));
         let cb_state = Arc::clone(&state);
@@ -2480,6 +2481,7 @@ mod tests {
             retransmission: true,
             #[cfg(feature = "ext-pubsub-advanced-history")]
             history_pending: false,
+            #[cfg(feature = "ext-pubsub-advanced-history")]
             max_history_depth: usize::MAX,
         };
         let key = (vec![0x02u8], 7u32);
@@ -2543,6 +2545,7 @@ mod tests {
             retransmission: true,
             #[cfg(feature = "ext-pubsub-advanced-history")]
             history_pending: false,
+            #[cfg(feature = "ext-pubsub-advanced-history")]
             max_history_depth: usize::MAX,
         };
         let key = (vec![0x02u8], 7u32);
@@ -2828,6 +2831,7 @@ mod tests {
             retransmission: true,
             #[cfg(feature = "ext-pubsub-advanced-history")]
             history_pending: false,
+            #[cfg(feature = "ext-pubsub-advanced-history")]
             max_history_depth: usize::MAX,
         };
         state.sequenced.insert(
@@ -2871,6 +2875,7 @@ mod tests {
             retransmission: false,
             #[cfg(feature = "ext-pubsub-advanced-history")]
             history_pending: false,
+            #[cfg(feature = "ext-pubsub-advanced-history")]
             max_history_depth: usize::MAX,
         };
         plain.sequenced.insert(
@@ -3040,6 +3045,7 @@ mod tests {
             retransmission: true,
             #[cfg(feature = "ext-pubsub-advanced-history")]
             history_pending: false,
+            #[cfg(feature = "ext-pubsub-advanced-history")]
             max_history_depth: usize::MAX,
         };
         let key = (vec![0x09u8], 4u32);
@@ -3069,6 +3075,7 @@ mod tests {
             retransmission: false,
             #[cfg(feature = "ext-pubsub-advanced-history")]
             history_pending: false,
+            #[cfg(feature = "ext-pubsub-advanced-history")]
             max_history_depth: usize::MAX,
         };
         assert!(
@@ -3785,6 +3792,7 @@ mod tests {
             on_miss: Box::new(|_| {}),
             retransmission: false, // late-pub detection is NOT a retransmission concern
             history_pending: false,
+            #[cfg(feature = "ext-pubsub-advanced-history")]
             max_history_depth: usize::MAX,
         };
         let zid = vec![0x09u8];
