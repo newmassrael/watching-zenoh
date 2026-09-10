@@ -4120,6 +4120,84 @@ impl Dissection {
             )))
     }
 
+    /// R2508 (open-debt item 713) — every message of every list, in the order
+    /// the CAPTURE holds them, each beside the
+    /// [`Self::message_lists_with_origin`] index of the list it came from.
+    ///
+    /// # Why a walk in capture order is a different walk
+    ///
+    /// A fold that resolves keyexpr ids as it goes states its rule as "one
+    /// pass, in capture order" (`crate::agg`'s module docs), and a walk that
+    /// takes one list to its end before starting the next is in LIST order. For
+    /// a capture holding one list the two coincide, which is why the difference
+    /// went unnoticed. For a SESSION spanning two links they do not: a
+    /// declaration that went out on the second link before a reference on the
+    /// first is, in list order, in the future. Item 713 is the consumer report
+    /// where that arrived as `"cause":"no_declaration"` — a claim about the
+    /// session that the session's own bytes contradict.
+    ///
+    /// # The key, and why it is not `PassiveFrame::stream_offset`
+    ///
+    /// [`wz_session_core::passive::OffsetSpace`] says it outright: a packet
+    /// index is global to the capture and comparable across lists, a stream
+    /// byte offset is absolute only within one direction of one list. So the
+    /// space is read off each FRAME (never guessed from the list's kind — open
+    /// debt item 561 is what guessing cost) and a `StreamBytes` anchor is put
+    /// through its flow's run map, [`FlowDissection::packet_for`], which is the
+    /// map's whole purpose.
+    ///
+    /// A frame whose packet the run map cannot name keeps the position of the
+    /// last frame of its own list that had one. That is the honest fallback: it
+    /// preserves the list's internal order, which is never in doubt, and
+    /// declines to invent a capture-wide position for a frame that does not
+    /// have one. A capture where NO anchor resolves therefore walks exactly as
+    /// it did before this method existed.
+    ///
+    /// The sort is by `(packet, list, position)` and so is TOTAL: two frames of
+    /// one packet — a batch split across lists cannot happen, but two lists can
+    /// hold frames of the same index — keep list order, and within a list the
+    /// original order. Two runs over one capture cannot disagree.
+    ///
+    /// The row is `(flow, list, frame)` — the door's own tuple minus the origin
+    /// it has already consumed. The KEY rides along because the planes that
+    /// will follow `crate::agg` onto this walk need it: `crate::interest`'s fold
+    /// takes the flow key per list today, and a walk that dropped it would send
+    /// that plane back to a second enumeration to recover it.
+    pub fn message_frames_in_capture_order(
+        &self,
+    ) -> alloc::vec::Vec<(FlowKey, usize, &PassiveFrame)> {
+        let mut walk: alloc::vec::Vec<(usize, usize, usize, FlowKey, &PassiveFrame)> =
+            alloc::vec::Vec::new();
+        for (list, (flow, _origin, frames)) in self.message_lists_with_origin().enumerate() {
+            // The stream lists occupy the first `self.flows.len()` positions of
+            // the door above, by its own construction, so the run map is at the
+            // same index. The key is compared rather than assumed — a door that
+            // grew a producer in front of the stream half would otherwise hand
+            // out another flow's map in silence — and a mismatch falls back to
+            // the search.
+            let run_map = self
+                .flows
+                .get(list)
+                .filter(|f| f.flow == flow)
+                .or_else(|| self.flows.iter().find(|f| f.flow == flow));
+            let mut last = 0usize;
+            for (position, frame) in frames.iter().enumerate() {
+                let packet = match frame.offset_space {
+                    wz_session_core::passive::OffsetSpace::PacketIndex => Some(frame.stream_offset),
+                    wz_session_core::passive::OffsetSpace::StreamBytes => {
+                        run_map.and_then(|f| f.packet_for(frame.direction, frame.stream_offset))
+                    }
+                };
+                last = packet.unwrap_or(last);
+                walk.push((last, list, position, flow, frame));
+            }
+        }
+        walk.sort_by_key(|(packet, list, position, _, _)| (*packet, *list, *position));
+        walk.into_iter()
+            .map(|(_, list, _, flow, frame)| (flow, list, frame))
+            .collect()
+    }
+
     /// R2205 (open-debt item 560) — THE BYTES of one message of one list,
     /// addressed the way [`Self::message_lists_with_origin`] names it.
     ///

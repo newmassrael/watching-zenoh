@@ -1261,6 +1261,32 @@ impl ThroughputTable {
         spaces: &mut KeyexprSpaces,
     ) {
         for frame in frames {
+            self.observe_frame_where(frame, filter, list, spaces);
+        }
+    }
+
+    /// R2508 (open-debt item 713) — ONE frame of one list, which is what the
+    /// loop above always was.
+    ///
+    /// Split out so a driver can choose its own ORDER over the capture's
+    /// frames. [`Self::observe_flow_where`] takes a list to its end before the
+    /// next one begins, which is right for a caller holding one list and wrong
+    /// for one folding a whole capture: a session's id space spans its links,
+    /// and list order is not capture order. See
+    /// [`crate::Dissection::message_frames_in_capture_order`], which is what
+    /// [`aggregate_grouped`] now walks.
+    ///
+    /// `list` stays an argument for the reason it always was — it is half the
+    /// anchor token, and a caller that passed one number for two stream lists
+    /// would make two coordinate systems look like one.
+    pub fn observe_frame_where(
+        &mut self,
+        frame: &PassiveFrame,
+        filter: &Filter,
+        list: usize,
+        spaces: &mut KeyexprSpaces,
+    ) {
+        {
             let anchor = frame.stream_offset;
             // R2206 (open-debt item 561) — the space comes off the FRAME now.
             // It arrived as an argument, decided by a match over the message
@@ -2209,9 +2235,25 @@ pub fn aggregate_grouped(
     // enumeration. Naming the two flow tables here is what left this plane
     // blind to a serial line, which is in neither: see
     // `Dissection::message_lists`.
-    for (list, (_, frames)) in dissection.message_lists().enumerate() {
+    //
+    // R2508 (open-debt item 713) — and in the order the CAPTURE holds them, not
+    // list by list. The heading of this module is "One pass, in capture order",
+    // and until this round the walk was in LIST order: a session's two links are
+    // two lists, so a declaration sent on the second one could not name a
+    // reference sent earlier on the first, and the miss was reported as
+    // `UnresolvedCause::NoDeclaration` — a statement about the SESSION, made
+    // because of where the bytes were rather than when.
+    //
+    // `enter_flow` moves inside the loop with the frame, since consecutive
+    // frames need no longer belong to one list. It sets two slots; it is not a
+    // per-list setup step that this is now repeating.
+    //
+    // The rule the heading protects is untouched: the order is the capture's, so
+    // a declaration still cannot name a reference that preceded it. What changes
+    // is only that "preceded" is now measured on the capture and not on the walk.
+    for (_flow, list, frame) in dissection.message_frames_in_capture_order() {
         spaces.enter_flow(grouping.owners(list));
-        table.observe_flow_where(frames, filter, list, &mut spaces);
+        table.observe_frame_where(frame, filter, list, &mut spaces);
     }
     table
 }
@@ -5147,6 +5189,51 @@ pub(crate) mod tests {
         multilink_capture_with_file(&rows)
     }
 
+    /// R2508 (open-debt item 713) — the MIRROR of the fixture above: one
+    /// session over two links, declaring on the link this crate walks SECOND
+    /// and referencing on the one it walks FIRST.
+    ///
+    /// # Why this is not "the same test with the ports swapped"
+    ///
+    /// The two facts it separates are the whole item. On the WIRE the
+    /// declaration comes FIRST -- it is packet 4 and the reference is packet 5,
+    /// so a fold that honours this module's "one pass, in capture order"
+    /// heading must resolve it. In the WALK it comes second, because
+    /// `Dissection::message_lists` yields the stream lists in `flows()` order
+    /// and this session's second link is the second row. The sibling fixture
+    /// agrees on both orders at once and so cannot tell them apart; this one
+    /// disagrees, which is what makes it a discriminator.
+    ///
+    /// The flow order is FIXED by the handshakes, which are pushed for both
+    /// links before either carries a record -- so the walk order here is a
+    /// property of the fixture's construction and not of which port number is
+    /// larger.
+    ///
+    /// The consumer capture this reproduces (item 713) had 300 references on
+    /// the earlier flow and their declaration on the later one, and was
+    /// reported back as `"cause":"no_declaration"` -- a claim about the SESSION
+    /// that the session's own bytes contradict.
+    pub(crate) fn multilink_session_declaring_on_the_later_link() -> crate::Dissection {
+        let mut rows: Vec<(bool, u16, u16, Vec<u8>, bool)> = Vec::new();
+        for link in [(43210u16, 7447u16), (43211u16, 7447u16)] {
+            for (from_low, sport, dport, wire) in handshake(link.0, link.1) {
+                rows.push((from_low, sport, dport, wire, false));
+            }
+        }
+        // A declares id 7 on the SECOND link, and does it BEFORE any reference
+        // goes out anywhere.
+        rows.push((true, 43211, 7447, declare_kexpr(7, "demo/temp"), true));
+        // A publishes under id 7 on the FIRST link, AFTER that declaration.
+        rows.push((
+            true,
+            43210,
+            7447,
+            push(sender_space(7, None), &[0u8; 11]),
+            true,
+        ));
+        multilink_capture_with_file(&rows).0
+    }
+
     /// A single flow that never handshook, declaring an id and then using it.
     ///
     /// The FALLBACK's anti-vacuity fixture: `SessionGrouping` attributes
@@ -5258,6 +5345,52 @@ pub(crate) mod tests {
             "id 7 was referenced on a flow with no handshake — the same id the \
              session bound, which is exactly the reference a grouping that \
              leaked across sessions would have RESOLVED: {unresolved:?}"
+        );
+    }
+
+    /// R2508 (open-debt item 713) — the acceptance above, on the axis it could
+    /// not reach: WHEN a declaration binds, not merely WHERE.
+    ///
+    /// The sibling declares on the link this crate walks first, so it is
+    /// satisfied by a fold that resolves in walk order and by one that resolves
+    /// in capture order alike. This fixture pulls the two apart: the
+    /// declaration is packet 4 and the reference packet 5, so it precedes the
+    /// reference on the WIRE, while the link carrying it is walked SECOND.
+    ///
+    /// This module's own heading is what is being graded -- "One pass, in
+    /// capture order". A fold that walks list by list is in LIST order, and for
+    /// a session whose id space spans two links those are not the same order.
+    /// The rule the heading protects (no binding applied backwards) is
+    /// untouched: nothing here asks a later declaration to name an earlier
+    /// reference.
+    #[test]
+    fn a_declaration_names_a_later_reference_on_either_link_of_its_session() {
+        let table = aggregate(&multilink_session_declaring_on_the_later_link());
+
+        let rows = table.rows();
+        let row = rows
+            .iter()
+            .find(|r| r.keyexpr == "demo/temp")
+            .unwrap_or_else(|| {
+                panic!(
+                    "the declaration went out BEFORE this reference, on a link \
+                     of the same session, so it names it; rows {:?}, \
+                     unresolved {:?}",
+                    rows.iter().map(|r| &r.keyexpr).collect::<Vec<_>>(),
+                    table.unresolved()
+                )
+            });
+        assert_eq!(
+            row.per_direction[dir_index(Direction::A)].payload_bytes,
+            11,
+            "and it is the FIRST link's record that landed there — 11 bytes is \
+             the push sent on port 43210 and nothing else in this fixture \
+             carries that many"
+        );
+        assert!(
+            table.unresolved().is_empty(),
+            "nothing is left over to be explained away: {:?}",
+            table.unresolved()
         );
     }
 
