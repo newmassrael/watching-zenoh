@@ -320,7 +320,7 @@ pub struct AdvancedSubscriberOptions {
     /// · STILL TRUE — `Locality` and `QueryTarget` are different axes, and wz
     ///   still exposes no `query_target` KNOB on `AdvancedSubscriberOptions`.
     /// · NO LONGER TRUE — wz does not model the axis, but it now SENDS it:
-    ///   [`issue_recovery_get`] pins `QueryTarget::All` on every recovery and
+    ///   `issue_recovery_get` pins `QueryTarget::All` on every recovery and
     ///   history GET. Not exposing a knob is an API choice; sending no target
     ///   ext was a WIRE consequence, because an absent ext reads back as
     ///   BestMatching and one queryable then answers a history GET.
