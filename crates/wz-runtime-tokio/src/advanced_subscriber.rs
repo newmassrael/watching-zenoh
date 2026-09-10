@@ -562,6 +562,17 @@ struct State {
     /// history GET's terminal Final fires ([`State::finish_history`]).
     #[cfg(feature = "ext-pubsub-advanced-history")]
     history_pending: bool,
+    /// R2503 — the pending buffer's CEILING, from the same config the history
+    /// GET's `_max` selector uses. `usize::MAX` when the user set no bound,
+    /// which is upstream's own answer rather than a wz choice:
+    /// `zenoh-ext/src/advanced_subscriber.rs` @ `let max_history_depth = conf`
+    /// reads `.history.as_ref().and_then(|h| h.max_samples).unwrap_or(usize::MAX)`,
+    /// with the comment that an unbounded query "can receive unbounded number
+    /// of responses". So the buffer bound exists BECAUSE the selector bound
+    /// does, and one field carrying both roles is upstream's coupling, not a
+    /// second meaning invented here.
+    #[cfg(feature = "ext-pubsub-advanced-history")]
+    max_history_depth: usize,
 }
 
 #[cfg(not(feature = "ext-pubsub-advanced-recovery"))]
@@ -649,6 +660,8 @@ impl State {
         let retransmission = self.retransmission;
         #[cfg(feature = "ext-pubsub-advanced-history")]
         let history_pending = self.history_pending;
+        #[cfg(feature = "ext-pubsub-advanced-history")]
+        let max_history_depth = self.max_history_depth;
         let State {
             sequenced,
             on_sample,
@@ -669,6 +682,21 @@ impl State {
                 #[cfg(feature = "ext-pubsub-advanced-history")]
                 if history_pending {
                     state.pending_samples.insert(sn, sample);
+                    // R2503 — SPILL, and note the order: upstream inserts FIRST
+                    // and then checks, so the buffer transiently holds
+                    // depth + 1. Copying the order matters because the
+                    // alternative (check, then insert) drops the sample that
+                    // just arrived instead of the oldest one.
+                    // ⚠ The spill DELIVERS the oldest rather than dropping it
+                    // (`deliver_and_flush`, which also drains the contiguous
+                    // successors) — a "bounded" buffer that dropped would pass
+                    // a length assertion and silently lose a sample.
+                    // ⚠⚠ BEFORE the `return None` below, or it never runs.
+                    if state.pending_samples.len() >= max_history_depth {
+                        if let Some((old_sn, old)) = state.pending_samples.pop_first() {
+                            deliver_and_flush(state, old_sn, old, on_sample);
+                        }
+                    }
                     return None;
                 }
                 deliver_and_flush(state, sn, sample, on_sample);
@@ -681,6 +709,22 @@ impl State {
                 if retransmission {
                     // BUFFER; the recovery GET (below) back-fills the hole.
                     state.pending_samples.insert(sn, sample);
+                    // R2503 — the SAME ceiling as the history arm above. The
+                    // residual clause named only that arm, and a build that
+                    // trusted it would leave this one unbounded: upstream
+                    // guards BOTH inserts (`zenoh-ext/src/advanced_subscriber.rs`
+                    // spills after each).
+                    // ⚠ GATED, and that is upstream's answer rather than an
+                    // omission: `max_history_depth` is `usize::MAX` when there
+                    // is no history config, i.e. NO spill. With the history
+                    // feature off there is no `HistoryConfig` to read, and
+                    // unbounded is exactly what upstream does in that case.
+                    #[cfg(feature = "ext-pubsub-advanced-history")]
+                    if state.pending_samples.len() >= max_history_depth {
+                        if let Some((old_sn, old)) = state.pending_samples.pop_first() {
+                            deliver_and_flush(state, old_sn, old, on_sample);
+                        }
+                    }
                 } else {
                     // No retransmission: report the miss, deliver, advance.
                     on_miss(Miss {
@@ -1788,6 +1832,7 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
             retransmission: false,
             #[cfg(feature = "ext-pubsub-advanced-history")]
             history_pending: false,
+            max_history_depth: usize::MAX,
         }));
         let cb_state = Arc::clone(&state);
         let subscriber = session.declare_subscriber(
@@ -1901,6 +1946,12 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
             retransmission,
             #[cfg(feature = "ext-pubsub-advanced-history")]
             history_pending: history.is_some(),
+            // Upstream's own derivation, field for field — see the field's doc.
+            #[cfg(feature = "ext-pubsub-advanced-history")]
+            max_history_depth: history
+                .as_ref()
+                .and_then(|h| h.sample_depth)
+                .unwrap_or(usize::MAX),
         }));
         // R311y592 — the in-flight GET registry every issuing site below shares,
         // and that the returned subscriber cancels through on drop.
@@ -2429,6 +2480,7 @@ mod tests {
             retransmission: true,
             #[cfg(feature = "ext-pubsub-advanced-history")]
             history_pending: false,
+            max_history_depth: usize::MAX,
         };
         let key = (vec![0x02u8], 7u32);
         let mk = |sn: u32, v: u8| {
@@ -2491,6 +2543,7 @@ mod tests {
             retransmission: true,
             #[cfg(feature = "ext-pubsub-advanced-history")]
             history_pending: false,
+            max_history_depth: usize::MAX,
         };
         let key = (vec![0x02u8], 7u32);
         let mk = |sn: u32, v: u8| {
@@ -2775,6 +2828,7 @@ mod tests {
             retransmission: true,
             #[cfg(feature = "ext-pubsub-advanced-history")]
             history_pending: false,
+            max_history_depth: usize::MAX,
         };
         state.sequenced.insert(
             (vec![0x01u8], 1u32),
@@ -2817,6 +2871,7 @@ mod tests {
             retransmission: false,
             #[cfg(feature = "ext-pubsub-advanced-history")]
             history_pending: false,
+            max_history_depth: usize::MAX,
         };
         plain.sequenced.insert(
             (vec![0x01u8], 1u32),
@@ -2985,6 +3040,7 @@ mod tests {
             retransmission: true,
             #[cfg(feature = "ext-pubsub-advanced-history")]
             history_pending: false,
+            max_history_depth: usize::MAX,
         };
         let key = (vec![0x09u8], 4u32);
         state.sequenced.insert(
@@ -3013,6 +3069,7 @@ mod tests {
             retransmission: false,
             #[cfg(feature = "ext-pubsub-advanced-history")]
             history_pending: false,
+            max_history_depth: usize::MAX,
         };
         assert!(
             plain.handle_heartbeat(vec![0x01], 1, 9).is_none(),
@@ -3132,6 +3189,7 @@ mod tests {
             on_miss: Box::new(|_| {}),
             retransmission: true,
             history_pending: true,
+            max_history_depth: usize::MAX,
         };
         let key = (vec![0x02u8], 7u32);
         let mk = |sn: u32, v: u8| {
@@ -3153,6 +3211,116 @@ mod tests {
             *delivered.lock().unwrap(),
             vec![0xA0, 0xA1],
             "the buffered history flushes in order on completion"
+        );
+    }
+
+    /// R2503 clause (4), the HISTORY arm — a PAIR that differs only in the
+    /// bound, fed the identical two samples.
+    ///
+    /// ⚠ The delivered vector is the discriminator, never the buffer's length:
+    /// a bounded buffer that DROPPED the oldest would satisfy any length
+    /// assertion and lose a sample silently, which is the one outcome
+    /// upstream's delivering spill exists to prevent.
+    /// ⚠⚠ Upstream inserts FIRST and then spills, so with `depth = 2` the
+    /// spill fires on the SECOND sample, and `deliver_and_flush` then drains
+    /// the contiguous successor with it. Traced by hand before it was written
+    /// down — the first draft of this case asserted a third sample and would
+    /// have described a mechanism the code does not have.
+    #[cfg(feature = "ext-pubsub-advanced-history")]
+    #[test]
+    fn a_bounded_history_buffer_spills_the_oldest_and_delivers_it() {
+        let mk = |sn: u32, v: u8| {
+            let mut s = Sample::new_put("demo/data", vec![v]);
+            s.source_info = Some(SourceInfo::new(&[0x02], 7, sn));
+            s
+        };
+        let key = (vec![0x02u8], 7u32);
+
+        let feed = |depth: usize| {
+            let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
+            let d = Arc::clone(&delivered);
+            let mut state = State {
+                sequenced: HashMap::new(),
+                on_sample: Box::new(move |s: Sample| d.lock().unwrap().push(s.payload[0])),
+                on_miss: Box::new(|_| {}),
+                retransmission: true,
+                history_pending: true,
+                max_history_depth: depth,
+            };
+            state.handle_recovered(key.clone(), 0, mk(0, 0xA0));
+            state.handle_recovered(key.clone(), 1, mk(1, 0xA1));
+            let got = delivered.lock().unwrap().clone();
+            got
+        };
+
+        assert_eq!(
+            feed(2),
+            vec![0xA0, 0xA1],
+            "at the ceiling the oldest is DELIVERED (and its contiguous \
+             successor drained with it), not dropped"
+        );
+        // ANTI-VACUITY: the same two samples, no bound. Without this arm
+        // "the buffer is bounded" and "the test never filled it" look
+        // identical -- the population-of-zero shape this tree keeps meeting.
+        // `usize::MAX` is also upstream's own default when the user set no
+        // `max_samples`, so this pins the unbounded case as a BEHAVIOUR.
+        assert!(
+            feed(usize::MAX).is_empty(),
+            "with no bound the whole history waits for finish_history"
+        );
+    }
+
+    /// R2503 clause (4), the FORWARD-GAP arm — the site the residual clause
+    /// did NOT name.
+    ///
+    /// The clause spoke only of the history arm, and a build that trusted it
+    /// would have left this one unbounded; upstream guards BOTH inserts. Same
+    /// pair shape: identical samples, only the bound differs.
+    #[cfg(all(
+        feature = "ext-pubsub-advanced-history",
+        feature = "ext-pubsub-advanced-recovery"
+    ))]
+    #[test]
+    fn a_bounded_gap_buffer_spills_the_oldest_and_delivers_it() {
+        let mk = |sn: u32, v: u8| {
+            let mut s = Sample::new_put("demo/data", vec![v]);
+            s.source_info = Some(SourceInfo::new(&[0x02], 7, sn));
+            s
+        };
+        let key = (vec![0x02u8], 7u32);
+
+        let feed = |depth: usize| {
+            let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
+            let d = Arc::clone(&delivered);
+            let mut state = State {
+                sequenced: HashMap::new(),
+                on_sample: Box::new(move |s: Sample| d.lock().unwrap().push(s.payload[0])),
+                on_miss: Box::new(|_| {}),
+                retransmission: true,
+                // NOT the history arm: this exercises the `if retransmission`
+                // insert, which compiles with the history feature off.
+                history_pending: false,
+                max_history_depth: depth,
+            };
+            state.handle_recovered(key.clone(), 0, mk(0, 0xA0));
+            // Forward gaps: 2 and 3 buffer while 1 is missing.
+            state.handle_recovered(key.clone(), 2, mk(2, 0xA2));
+            state.handle_recovered(key.clone(), 3, mk(3, 0xA3));
+            let got = delivered.lock().unwrap().clone();
+            got
+        };
+
+        assert_eq!(
+            feed(2),
+            vec![0xA0, 0xA2, 0xA3],
+            "the gap buffer honours the SAME ceiling, delivering the oldest \
+             held sample rather than growing without bound"
+        );
+        assert_eq!(
+            feed(usize::MAX),
+            vec![0xA0],
+            "unbounded, the gap holds 2 and 3 for the recovery GET to \
+             back-fill -- which is what makes the bounded arm above a finding"
         );
     }
 
@@ -3234,6 +3402,7 @@ mod tests {
             on_miss: Box::new(|_| {}),
             retransmission: true,
             history_pending: true,
+            max_history_depth: usize::MAX,
         };
         let key = (vec![0x02u8], 7u32);
         let mk = |sn: u32, v: u8| {
@@ -3616,6 +3785,7 @@ mod tests {
             on_miss: Box::new(|_| {}),
             retransmission: false, // late-pub detection is NOT a retransmission concern
             history_pending: false,
+            max_history_depth: usize::MAX,
         };
         let zid = vec![0x09u8];
         // First detection opens a slot.
