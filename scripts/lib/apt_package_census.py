@@ -159,6 +159,13 @@ _add(
         # DERIVED below, and this lane names members individually rather than
         # running a `--workspace` command, so it never reaches zenoh-pico-sys.
         "nondefault",
+        # R2525 — Layer C0 + C1cf's own job, peeled off `ci` for item 590's
+        # budget. C1cf builds EVERY workspace member with default features OFF,
+        # so every reason on this row that reaches a member reaches it. ⚠ It
+        # DOES take `cmake`, unlike `nondefault` one line up: that lane iterates
+        # the 20 crates carrying a non-default feature, this one iterates all 53
+        # members, and `crates/zenoh-pico-sys` is one of them.
+        "defaults-off",
         "footprint",
         "interop",
         "cross-mcu",
@@ -186,6 +193,13 @@ _add(
         # DERIVED below, and this lane names members individually rather than
         # running a `--workspace` command, so it never reaches zenoh-pico-sys.
         "nondefault",
+        # R2525 — Layer C0 + C1cf's own job, peeled off `ci` for item 590's
+        # budget. C1cf builds EVERY workspace member with default features OFF,
+        # so every reason on this row that reaches a member reaches it. ⚠ It
+        # DOES take `cmake`, unlike `nondefault` one line up: that lane iterates
+        # the 20 crates carrying a non-default feature, this one iterates all 53
+        # members, and `crates/zenoh-pico-sys` is one of them.
+        "defaults-off",
         "footprint",
         "interop",
         "cross-mcu",
@@ -216,6 +230,13 @@ _add(
         # DERIVED below, and this lane names members individually rather than
         # running a `--workspace` command, so it never reaches zenoh-pico-sys.
         "nondefault",
+        # R2525 — Layer C0 + C1cf's own job, peeled off `ci` for item 590's
+        # budget. C1cf builds EVERY workspace member with default features OFF,
+        # so every reason on this row that reaches a member reaches it. ⚠ It
+        # DOES take `cmake`, unlike `nondefault` one line up: that lane iterates
+        # the 20 crates carrying a non-default feature, this one iterates all 53
+        # members, and `crates/zenoh-pico-sys` is one of them.
+        "defaults-off",
         "footprint",
         "feature-gates",
         "routing-adminspace",
@@ -281,8 +302,13 @@ _add(
     "zenoh-pico-sys's build script (the only `cmake` crate consumer in the "
     "workspace), reached directly or through wz-integration-tests' "
     "dev-dependency on it. DERIVED below, not believed.",
+    # R2525 — `defaults-off` joins for the reason this row states rather than an
+    # exception to it: Layer C1cf iterates EVERY workspace member, and
+    # `crates/zenoh-pico-sys` is a member, so the lane reaches the one `cmake`
+    # consumer by naming it. That is the same test the row already applies, and
+    # it is why `nondefault` is absent here while present on the rows above.
     ["ci", "validate-codegen", "interop", "feature-gates", "transport-modes",
-     "isolated-crates", "capi-c-arms", "e2e-demo", "dissect"],
+     "isolated-crates", "capi-c-arms", "e2e-demo", "dissect", "defaults-off"],
 )
 _add(
     "cmake",
@@ -330,6 +356,13 @@ _add(
         # DERIVED below, and this lane names members individually rather than
         # running a `--workspace` command, so it never reaches zenoh-pico-sys.
         "nondefault",
+        # R2525 — Layer C0 + C1cf's own job, peeled off `ci` for item 590's
+        # budget. C1cf builds EVERY workspace member with default features OFF,
+        # so every reason on this row that reaches a member reaches it. ⚠ It
+        # DOES take `cmake`, unlike `nondefault` one line up: that lane iterates
+        # the 20 crates carrying a non-default feature, this one iterates all 53
+        # members, and `crates/zenoh-pico-sys` is one of them.
+        "defaults-off",
         "footprint",
         "interop",
         "cross-mcu",
@@ -366,6 +399,13 @@ _add(
         # DERIVED below, and this lane names members individually rather than
         # running a `--workspace` command, so it never reaches zenoh-pico-sys.
         "nondefault",
+        # R2525 — Layer C0 + C1cf's own job, peeled off `ci` for item 590's
+        # budget. C1cf builds EVERY workspace member with default features OFF,
+        # so every reason on this row that reaches a member reaches it. ⚠ It
+        # DOES take `cmake`, unlike `nondefault` one line up: that lane iterates
+        # the 20 crates carrying a non-default feature, this one iterates all 53
+        # members, and `crates/zenoh-pico-sys` is one of them.
+        "defaults-off",
         "footprint",
         "interop",
         "cross-mcu",

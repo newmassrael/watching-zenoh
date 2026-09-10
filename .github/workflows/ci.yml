@@ -464,16 +464,11 @@ jobs:
           WZ_LINT_REQUIRE: "1"
         run: bash scripts/run-ci.sh --layer 0
 
-      - name: Layer C0 — binary-dep test #[ignore] discipline
-        # R235-hotfix — pre-flight scan: any wz-integration-tests
-        # `tests/*.rs` that calls wz_ap_demo_binary() or
-        # zenoh_pico_cli_binary( MUST mark every #[test] with an
-        # adjacent #[ignore = "..."] so Layer C1 (cargo test
-        # --workspace) skips it on fresh CI checkouts where the
-        # required binaries are not yet built. Catches the bug
-        # class at PR time rather than after Layer C1 panics with
-        # "binary not found" downstream.
-        run: bash scripts/run-ci.sh --layer C0
+      # R2525 — Layer C0 MOVED OUT of this job, to `defaults-off` below. It was
+      # 336s of the 1811s that took `job-budget-margin.sh` from warning at 90%
+      # to FAILING at 100%; see that job's header for the measurement, for why
+      # it travels with C1cf, and for why a split rather than a bigger
+      # `timeout-minutes`.
 
       - name: Layer C1 — cargo test --workspace
         run: bash scripts/run-ci.sh --layer C1
@@ -638,14 +633,10 @@ jobs:
         # else's installation. This one opens wz's own cdylib through ctypes.
         run: bash scripts/run-ci.sh --layer C1ch
 
-      - name: Layer C1cf — every crate builds with default features off
-        # R311y821 — nothing local built a SHRUNKEN feature combination of a
-        # changed crate, so a cfg-gated import behind an ungated signature was
-        # invisible to `--all-features` clippy BY CONSTRUCTION. The class fired
-        # twice (R311y809, R311y811) and the second reached origin. Measured
-        # cost: 49 of 53 members are already clean bare; the 4 that are not fail
-        # only in their TEST targets, and three of those are checked lib-only.
-        run: bash scripts/run-ci.sh --layer C1cf
+      # R2525 — Layer C1cf MOVED OUT of this job, to `defaults-off` below, in
+      # the same split that took Layer C0. 301s of the 1811s; the pair is what
+      # lands this job at ~1174s = 65%, and moving either alone left it at
+      # 82-84% inside a band it had already crossed twice.
 
       # R2163 — Layer C1cn MOVED OUT of this job, to `nondefault` below. It was
       # 562s of the 1790s that tripped `job-budget-margin.sh` at 99%, every lane
@@ -936,7 +927,9 @@ jobs:
         run: bash scripts/run-ci.sh --layer A5
 
       - name: Layer C0 (armed) — gate provenance citations resolve
-        # R311y747. Layer C0 also runs on the "validate + verify + test" job,
+        # R311y747. Layer C0 also runs on the `defaults-off` job (R2525 moved it
+        # there from "validate + verify + test" for item 590's budget; the
+        # sentence below described that job and the property survived the move),
         # where it is the SHAPE half only: that job deliberately does not
         # install mnemosyne-cli (~88s, split out here in R311y428), and
         # R311y743 gave `gate_provenance_lint` a store read without noticing.
@@ -1294,6 +1287,154 @@ jobs:
         # case the floor exists to catch, and if C1cn ever shrinks back under a
         # fifth of the budget it should hand the budget back rather than sit on
         # it. The alarm stays 90 for the reason the `ci` copy gives.
+        if: always()
+        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1800 90 20 '${{ job.status }}'
+
+  # ─────────────────────────────────────────────────────────────────
+  # R2525 (open-debt item 590) — the DEFAULTS-OFF + GATE-PROVENANCE job, peeled
+  # off `ci` when that job's margin step stopped warning and started failing.
+  #
+  # THE TRIGGER, and it is a crossing rather than a trend: item 590 recorded
+  # this job at 90% (R2236) and 95% (R2366); on run 34439546260 it read
+  # `job-budget-margin: elapsed 1811s of 1800s budget (100%)` and the job was
+  # cut at 30m15s against its own `timeout-minutes: 30`. It reports `cancelled`,
+  # which is NOT a sibling's fail-fast: Layer C1cn had failed sixteen minutes
+  # earlier, and a cascade does not wait sixteen minutes and then land on the
+  # minute of its own ceiling.
+  #
+  # WHICH LANES, from that job's own step timestamps rather than an estimate --
+  # successful steps summed to 1706s, largest first:
+  #
+  #     Layer C0      336s      <- moved here
+  #     Layer C1cf    301s      <- moved here
+  #     Layer C1      248s
+  #     Layer C1bv    116s
+  #     Checkout       99s
+  #     Layer C1h      85s
+  #     Free runner disk space   76s
+  #     ...every other lane <75s each
+  #
+  # ⚠ `Free runner disk space` was rank 1 at 259s when this was first planned
+  # and is now rank 7 at 76s. The old plan's lever died; the measurement is
+  # re-taken here rather than carried.
+  #
+  # WHY THESE TWO TOGETHER RATHER THAN THE BIGGEST ONE ALONE. Moving either by
+  # itself lands `ci` at 82-84% -- under the 90% alarm, but inside the band it
+  # has already crossed twice, and the growth is monotonic. Both lands it at
+  # ~1174s = 65%, which is the band R2163's split aimed at and hit.
+  #
+  # AND NOT INTO `nondefault`, which is where the precedent would point: that
+  # job is at 1097s with C1cn alone now 1030s. Adding C1cf makes it 78% and
+  # adding C0 as well makes it 96%. That shuffle buys one round, which is the
+  # exact failure job-budget-margin.sh warns about in its own text -- "a bigger
+  # number buys one atom's worth of time" applies to a bigger JOB too.
+  #
+  # WHY THE PAIR IS COHERENT AND NOT MERELY ADJACENT: C0 runs no cargo at all
+  # (it is `crossimpl_corpus.py` plus the gate-provenance selftests, and its
+  # 336s is python), so it can sit on any job and brings no provisioning of its
+  # own. C1cf is what decides this job's shape. Pairing them costs ONE setup
+  # instead of two.
+  #
+  # WHAT THIS JOB NEEDS, derived rather than copied. `cmake` IS on the list,
+  # unlike `nondefault`'s: apt_package_census.py decides cmake from
+  # `cargo tree -i cmake`, whose one consumer is `zenoh-pico-sys` -- and unlike
+  # C1cn, which iterates the 20 crates carrying a non-default feature, C1cf
+  # iterates EVERY workspace member, and `crates/zenoh-pico-sys` is one. So the
+  # same rule that keeps cmake off `nondefault` puts it on here.
+  #
+  # C0 STAYS THE SHAPE HALF. This job deliberately does not install
+  # mnemosyne-cli, exactly as `ci` did not, so the lane's store-reading half
+  # remains armed only on the job that provisions it (`WZ_C0_REQUIRE`, on the
+  # validate + codegen job). Moving the lane did not arm it somewhere new.
+  #
+  # PREDICTED LANDING, recorded so the next run can judge it rather than be
+  # told: ~84s of setup (this job's prep is `nondefault`'s, plus cmake) + 336 +
+  # 301 = ~721s, or 40% of the 1800s budget. Above the 20% floor. The FIRST run
+  # will exceed that: its rust-cache key is new and therefore cold.
+  defaults-off:
+    name: default-off builds + gate provenance (Layers C0, C1cf)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Budget stamp — start this job's own clock
+        # Same reason the `ci` job stamps: `timeout-minutes` measures from when
+        # the job is CREATED, and the margin gate needs elapsed RUN time.
+        run: date +%s > "$RUNNER_TEMP/wz_job_start"
+
+      - name: Checkout (with submodules)
+        # `submodules: recursive` is load-bearing here for a reason the other
+        # jobs' copies do not carry: C1cf iterates EVERY workspace member, and
+        # `zenoh-pico-sys` builds the vendored zenoh-pico tree.
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Restore apt archives (R311y882 — keep the mirror off the path)
+        # See the `verdict-legs` copy for the measurement and for why RESTORE
+        # and SAVE are split.
+        id: apt-archives
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            apt-${{ runner.os }}-${{ github.job }}-
+
+      - name: Install system dependencies
+        run: |
+          bash scripts/lib/apt-install.sh cmake libclang-dev libxml2-dev clang perl pkg-config
+
+      - name: Save apt archives
+        if: always() && env.WZ_APT_CACHE_DIRTY == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        run: rustup show
+
+      - name: Cache Cargo registry + build artifacts
+        # Its OWN key, for the reason footprint, interop, verdict-legs and
+        # nondefault each carry one: parallel jobs must not race a single
+        # cache save.
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates -> target
+          key: defaults-off
+
+      - name: Layer C0 — binary-dep test #[ignore] discipline
+        # R235-hotfix — pre-flight scan: any wz-integration-tests
+        # `tests/*.rs` that calls wz_ap_demo_binary() or
+        # zenoh_pico_cli_binary( MUST mark every #[test] with an
+        # adjacent #[ignore = "..."] so Layer C1 (cargo test
+        # --workspace) skips it on fresh CI checkouts where the
+        # required binaries are not yet built. Catches the bug
+        # class at PR time rather than after Layer C1 panics with
+        # "binary not found" downstream.
+        #
+        # R2525 — moved here from `ci` for item 590's budget. This is still the
+        # SHAPE half: no mnemosyne-cli on this job, so the store-reading arm
+        # stays SKIPped here and armed only where it is provisioned.
+        run: bash scripts/run-ci.sh --layer C0
+
+      - name: Layer C1cf — every crate builds with default features off
+        # R311y821 — nothing local built a SHRUNKEN feature combination of a
+        # changed crate, so a cfg-gated import behind an ungated signature was
+        # invisible to `--all-features` clippy BY CONSTRUCTION. The class fired
+        # twice (R311y809, R311y811) and the second reached origin. Measured
+        # cost: 49 of 53 members are already clean bare; the 4 that are not fail
+        # only in their TEST targets, and three of those are checked lib-only.
+        #
+        # R2525 — moved here from `ci` for item 590's budget.
+        run: bash scripts/run-ci.sh --layer C1cf
+
+      - name: Budget margin — this job's own clock
+        # The floor is 20, like `nondefault`'s and not `ci`'s 30: a job holding
+        # two lanes is the case the floor exists to catch, and if these two ever
+        # shrink back under a fifth of the budget they should hand it back
+        # rather than sit on it. The alarm stays 90 for the reason the `ci` copy
+        # gives.
         if: always()
         run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1800 90 20 '${{ job.status }}'
 
