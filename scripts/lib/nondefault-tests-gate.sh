@@ -174,7 +174,27 @@ LEGS=(
     # header: a named list is what makes the census a ratchet instead of a
     # tautology.
     "wz-capi-pico|hook|transport-link-quic,transport-link-tls,transport-link-unixpipe|"
-    "wz-capture|hook|dissect|"
+    # R2524 — `dissect` -> `dissect,fixtures`, and the route here is the point.
+    # R2520 added the `fixtures` feature (the shared item-713 captures, which a
+    # `#[cfg(test)]` fixture cannot carry across a crate boundary) and did NOT
+    # widen this row. The LEGS stayed green, because a leg only runs what its
+    # own feature list builds; the CENSUS arm is what noticed, and it is the
+    # half `--all-legs` does not cover:
+    #
+    #   nondefault-tests: FAIL -- wz-capture has 54 test(s) only a feature
+    #     build reaches; legs run 52 and SKIPS excuses 0, leaving 2 claimed by
+    #     NOTHING.
+    #       unclaimed: fixtures::tests::both_fixtures_carry_the_shape_they_claim
+    #       unclaimed: fixtures::tests::the_pair_resolves_in_opposite_directions
+    #
+    # ⚠ THE LESSON IS ABOUT THE LOCAL CHECK, not the table: running this script
+    # (even with `--all-legs`) exercises the legs and NOT `--census`, so a
+    # hand-run before a push reports green while Layer C1cn reds. Run
+    # `--census` too when a crate gains a feature.
+    # MEASURED before widening, per this block's own rule: `cargo test -p
+    # wz-capture --features dissect,fixtures` = 700 passed / 0 failed / 3
+    # ignored, exactly two more than `dissect` alone.
+    "wz-capture|hook|dissect,fixtures|"
     "wz-mcu-session-acceptor|hook|buffer-pool-session-rx-slim,reassembly|"
     "wz-packet-socket|hook|tap|"
     "wz-rest|hook|rest-sse-subscribe|"
