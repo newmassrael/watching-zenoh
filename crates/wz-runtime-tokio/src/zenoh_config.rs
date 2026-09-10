@@ -2003,22 +2003,15 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     "plugins_loading/search_dirs",
     "qos/network",
     "qos/publication",
-    // R2230 (open-debt item 579) — ARRIVED in 1.10.0, the gateway plane's other
-    // half. `zone`, `domain`, `cluster`, `site_id` and `tier` were searched
-    // too. ⚠ `routing-namespace` is NOT this: a keyexpr prefix, matched by no
-    // peer filter, and zenoh-ext group membership is an application-level named
-    // group over liveliness keys rather than an establishment-time node
-    // attribute.
-    //
-    // ⚠ R2539 — this note's survey clause ("`region_name` / `regionname` occur
-    // nowhere in `crates/`") is STRUCK rather than edited down, because it had
-    // already been false for two rounds: R2437 put the id in the recognised
-    // set, and this very file names the key twice. It stays UNHONOURED all the
-    // same, and for a reason the struck sentence could not express — the wire
-    // extension is now implemented (`wz_session_core::extregion`) and nothing
-    // reads this KEY to feed it. That is the gap; "the word is absent" never
-    // was.
-    "region_name",
+    // ⚠ R2539 — `region_name` LEFT THIS LIST for [`UNHONOURED_READER_GAP`],
+    // and the gate is what said it had to. R2230 filed it here as a capability
+    // wz does not have; this round BUILT the capability
+    // (`wz_session_core::extregion` emits the `0x8` extension and reads the
+    // peer's), so "beyond wz" became false in the direction this list cannot
+    // express. `unhonoured_kind_evidence_gate` refused the push with exactly
+    // that sentence — "either wz grew the thing, in which case these keys are
+    // reader gaps, not keys wz cannot act on" — after the round's own comment
+    // had argued the classification still stood. It did not.
     // R2230 (item 579/582) — the peer twin and `peers_failover_brokering` left
     // with the surface; see [`WZ_EXTENSION_CONFIG_KEYS`]. The router weighting
     // stays: upstream 1.10.0 still CARRIES it (`routing.router.linkstate`), so
@@ -2191,6 +2184,12 @@ pub const UNHONOURED_READER_GAP: &[&str] = &[
     "low_pass_filter",
     "plugins",
     "plugins_loading/enabled",
+    // R2539 — ARRIVED here from [`UNHONOURED_BEYOND_WZ`] the round wz grew the
+    // capability. `SessionLinkActions::set_local_region` gives a session its
+    // region identity and `wz_session_core::extregion` puts it on the Init
+    // wire; what no code does is READ this key and call that setter, which is
+    // this list's exact subject.
+    "region_name",
     "scouting/gossip/autoconnect",
     "scouting/gossip/autoconnect_strategy",
     "scouting/gossip/multihop",
@@ -2369,7 +2368,11 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
         "GatewayConf",
         &["gateway/south"],
     ),
-    ("a node region identity", "RegionName", &["region_name"]),
+    // ⚠ R2539 — the `RegionName` group is GONE from this list, not edited.
+    // Every row here claims wz has no such thing, and `unhonoured_kind_evidence
+    // _gate` checks that claim against wz's own code: it found `RegionName` at
+    // three files and refused the push. wz HAS a node region identity now; the
+    // key is a reader gap, which is a different list.
     (
         "per-keyexpr statistics",
         "StatsFilterConfig",
@@ -2557,23 +2560,25 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
     // rule had to list that id as RECOGNISED so a stock 1.10.0 peer's
     // announcement is skipped rather than refused.
     //
-    // Listing an id is not honouring a key, and the citing line says so in the
-    // strongest form this ledger has: it is a TEST asserting wz ignores it. The
-    // anchor is `IGNORES` rather than `RECOGNISED` deliberately — the latter is
-    // on the same line and would satisfy the gate, but a future reader grepping
-    // it would meet a word that reads like support.
+    // ⚠⚠ R2539 — KIND CHANGED, `asserted-ignored` -> `wz-has-it`, and the
+    // change was FORCED by the gate rather than chosen.
     //
-    // ⚠ R2539 — THE WIRE HALF IS NOW HONOURED AND THIS KEY IS STILL NOT, and
-    // the two must not be confused. `wz-session-core`'s `extregion` emits the
-    // `0x8` extension from a session's configured identity, reads the peer's,
-    // and refuses a malformed one — so a wz node CAN carry a region through
-    // establishment. What no code does is read this CONFIG KEY and set that
-    // identity: `SessionLinkActions::set_local_region` is the only way in, and
-    // nothing in the zenoh-config path calls it. So the classification stands
-    // on the axis this table grades, which is the key, and the anchor's own
-    // test message was corrected in the same commit rather than left to read
-    // as though the extension were still ignored too.
-    ("region_name", "asserted-ignored", "IGNORES"),
+    // R2437 filed this as `asserted-ignored` with the anchor `IGNORES`, a word
+    // in a test message asserting wz did nothing with the extension. That was
+    // true then. This round built the extension, and the round's FIRST attempt
+    // kept the kind — arguing in a comment right here that the classification
+    // still stood because the CONFIG axis had not moved. `unhonoured_kind_
+    // evidence_gate` refused the push twice over: the anchor word was gone
+    // (the test message it pointed at had been corrected in the same commit),
+    // and, more importantly, the group row claiming wz has no region identity
+    // was false against wz's own code.
+    //
+    // The honest kind is `wz-has-it`: the capability EXISTS
+    // (`wz_session_core::extregion`, reached through
+    // `SessionLinkActions::set_local_region`) and the zenoh-config reader was
+    // never taught to feed it. The key stays UNHONOURED either way — what
+    // moved is WHY, which is the only thing this table records.
+    ("region_name", "wz-has-it", "RegionName"),
     (
         "scouting/gossip/autoconnect",
         "wz-has-it",
