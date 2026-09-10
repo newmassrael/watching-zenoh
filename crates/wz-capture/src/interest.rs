@@ -1363,8 +1363,10 @@ pub fn interests_grouped(
     // capture that began after the `DeclKexpr`", said about a capture that read
     // the binding two packets earlier.
     let mut correlation = InterestCorrelation::default();
-    for (flow, list, frame) in dissection.message_frames_in_capture_order() {
+    for (flow, list, packet, frame) in dissection.message_frames_in_capture_order() {
         spaces.enter_flow(grouping.owners(list));
+        // R2513 — see `crate::agg::KeyexprSpaces::at_packet`.
+        spaces.at_packet(packet);
         census.observe_frame(&flow, frame, list, &mut correlation, &mut spaces);
     }
     census

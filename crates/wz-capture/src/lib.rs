@@ -4158,14 +4158,17 @@ impl Dissection {
     /// hold frames of the same index — keep list order, and within a list the
     /// original order. Two runs over one capture cannot disagree.
     ///
-    /// The row is `(flow, list, frame)` — the door's own tuple minus the origin
-    /// it has already consumed. The KEY rides along because the planes that
-    /// will follow `crate::agg` onto this walk need it: `crate::interest`'s fold
-    /// takes the flow key per list today, and a walk that dropped it would send
-    /// that plane back to a second enumeration to recover it.
+    /// The row is `(flow, list, packet, frame)` — the door's own tuple minus the
+    /// origin it has already consumed, plus the sort key itself. The KEY rides
+    /// along because the planes that follow `crate::agg` onto this walk need it
+    /// (`crate::interest`'s fold takes the flow key per list, and a walk that
+    /// dropped it would send that plane back to a second enumeration to recover
+    /// it); the PACKET rides along because it is what
+    /// [`crate::agg::KeyexprSpaces::at_packet`] takes, and a caller that had to
+    /// recompute it would be deriving this walk's own key a second time.
     pub fn message_frames_in_capture_order(
         &self,
-    ) -> alloc::vec::Vec<(FlowKey, usize, &PassiveFrame)> {
+    ) -> alloc::vec::Vec<(FlowKey, usize, usize, &PassiveFrame)> {
         let mut walk: alloc::vec::Vec<(usize, usize, usize, FlowKey, &PassiveFrame)> =
             alloc::vec::Vec::new();
         for (list, (flow, _origin, frames)) in self.message_lists_with_origin().enumerate() {
@@ -4194,7 +4197,7 @@ impl Dissection {
         }
         walk.sort_by_key(|(packet, list, position, _, _)| (*packet, *list, *position));
         walk.into_iter()
-            .map(|(_, list, _, flow, frame)| (flow, list, frame))
+            .map(|(packet, list, _, flow, frame)| (flow, list, packet, frame))
             .collect()
     }
 

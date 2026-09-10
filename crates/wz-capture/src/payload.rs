@@ -1378,8 +1378,10 @@ pub fn payloads_grouped(
     // heading states it. List order left a publisher's topic blank on a finding
     // against that publisher whenever the id was declared on the session's other
     // link; `crate::agg::aggregate_grouped` carries the whole argument.
-    for (_flow, list, frame) in dissection.message_frames_in_capture_order() {
+    for (_flow, list, packet, frame) in dissection.message_frames_in_capture_order() {
         spaces.enter_flow(grouping.owners(list));
+        // R2513 — see `crate::agg::KeyexprSpaces::at_packet`.
+        spaces.at_packet(packet);
         census.observe_frame_where(frame, filter, &mut spaces);
     }
     census

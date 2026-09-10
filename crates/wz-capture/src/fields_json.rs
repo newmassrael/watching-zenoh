@@ -130,6 +130,10 @@ pub fn fields_json_grouped(
     // their own tables, so a `DeclKexpr` that went out on the first link left
     // every reference on the second unresolved.
     let mut spaces = crate::agg::KeyexprSpaces::new();
+    // R2513 (open-debt item 713) — EVERY declaration of the capture, absorbed
+    // in capture order and stamped with the packet it went past at, before any
+    // row is rendered. See `absorb_every_declaration`.
+    absorb_every_declaration(d, grouping, &mut spaces);
     // R2100 (open-debt item 509) — the document's own revision, first key. See
     // `doc_revision`; the census document opens the same way.
     let mut out = String::from("{");
@@ -293,6 +297,39 @@ impl RenderedLists {
     }
 }
 
+/// R2513 (open-debt item 713) — absorb every declaration of the capture, in
+/// CAPTURE order, each stamped with the packet that carried it.
+///
+/// # Why a renderer needs this and the folds do not
+///
+/// `crate::agg`, `crate::payload`, `crate::interest` and `crate::exchange` each
+/// walk the capture in order and resolve as they go, which is where their
+/// "a declaration must not name an earlier reference" rule comes from. A
+/// renderer cannot do that: this document is GROUPED BY FLOW, so its rows have
+/// to come out flow by flow whatever order the bytes arrived in. Before this
+/// round it absorbed while rendering, which made the table's contents depend on
+/// which flow was being printed — and a declaration that went out on the
+/// session's OTHER link was, for the flow printed first, in the future. Item 713
+/// is the consumer report where that arrived as `"cause":"no_declaration"`.
+///
+/// So the two halves are separated. Everything is absorbed here, and the rule
+/// the walk used to supply is supplied by the anchor instead: each row resolves
+/// AT its own packet (`crate::agg::KeyexprSpaces::at_packet`), so a later
+/// declaration still cannot name it. Nothing is resolved here — this pass only
+/// binds.
+#[cfg(feature = "network-codecs")]
+fn absorb_every_declaration(
+    d: &crate::Dissection,
+    grouping: &crate::node::SessionGrouping,
+    spaces: &mut crate::agg::KeyexprSpaces,
+) {
+    for (_flow, list, packet, frame) in d.message_frames_in_capture_order() {
+        spaces.enter_flow(grouping.owners(list));
+        spaces.at_packet(packet);
+        spaces.absorb_frame(frame);
+    }
+}
+
 /// Begin one list, on the spaces it writes into.
 ///
 /// `Some(list)` is the ordinary path: the capture-wide instance, told whose
@@ -334,8 +371,21 @@ fn push_stream_flow(
     // the bindings that were live when the message travelled, and a listing
     // that stopped absorbing where it stopped PRINTING would resolve later ids
     // against a table missing the declarations a held-back row carried.
+    //
+    // R2513 (open-debt item 713) — the absorbing itself moved OUT, to a
+    // capture-ordered pre-pass over every list (`absorb_every_declaration`).
+    // This loop now only says WHERE each frame is, and the rule above is kept by
+    // the anchor rather than by the order this loop happens to run in: a
+    // declaration that went out on the session's OTHER link is in the table, and
+    // one that went out LATER than this frame is still not applied to it. That
+    // is the half a renderer could not have by walking, because its rows have to
+    // come out grouped by flow.
+    let mut last_packet = 0usize;
     for frame in &flow.frames {
-        spaces.absorb_frame(frame);
+        last_packet = flow
+            .packet_for(frame.direction, frame.stream_offset)
+            .unwrap_or(last_packet);
+        spaces.at_packet(last_packet);
         if cap.is_some_and(|c| shown >= c) {
             omitted += 1;
             // Round 2029 (item 298) — TELL THE RULE RUN. The misbinding verdict
@@ -390,14 +440,16 @@ fn push_datagram_flow(
     let (mut shown, mut omitted, mut emitted) = (0usize, 0usize, 0usize);
     let mut disagreed = 0usize;
     let mut named: Vec<(usize, &'static str)> = Vec::new();
-    // The stream half's rule, unchanged: absorbed for every frame, ahead of
-    // every reason this loop has for skipping one.
+    // The stream half's rule, unchanged: anchored for every frame, ahead of
+    // every reason this loop has for skipping one. R2513 (open-debt item 713) —
+    // the absorb moved to the capture-ordered pre-pass, exactly as in the stream
+    // half; see `absorb_every_declaration`.
     for frame in &flow.frames {
-        spaces.absorb_frame(frame);
         // `stream_offset` names the PACKET here: a datagram link has no stream
         // for an offset to be into, so the field carries the only anchor there
         // is.
         let index = frame.stream_offset;
+        spaces.at_packet(index);
         let Some(file) = reread else {
             continue;
         };
@@ -1258,6 +1310,108 @@ mod tests {
                 .iter()
                 .any(|(key, cause)| *key != "null" || *cause != "null"),
             "every entry is (null, null), so nothing above was measured: {pairs:?}"
+        );
+    }
+
+    /// R2513 (open-debt item 713) — the acceptance above on the axis it cannot
+    /// reach: WHEN the id resolves, not merely WHERE.
+    ///
+    /// Its capture declares on the link this crate walks FIRST, so it is
+    /// satisfied by a walk in list order and by one in capture order alike. This
+    /// one declares on the link walked SECOND, two packets BEFORE the reference
+    /// -- so `demo/temp` is what the session's own bytes say, and
+    /// `"keyexpr_cause":"no_declaration"` is a statement about the session that
+    /// the session contradicts.
+    ///
+    /// The document is GROUPED BY FLOW, which is why this is not the same fix
+    /// the folds took: `crate::agg`, `crate::payload`, `crate::interest` and
+    /// `crate::exchange` simply changed the order they walk in, and a renderer
+    /// cannot -- its rows have to come out per flow. So resolution is separated
+    /// from rendering instead.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn a_reference_resolves_against_the_later_links_declaration_in_the_field_document() {
+        let (d, file) =
+            crate::agg::tests::multilink_session_declaring_on_the_later_link_carrying_with_file(
+                crate::agg::tests::push_for_item_713(),
+            );
+        let doc = fields_json(&d, &file, None, None);
+        let pairs = carried_keys(&doc);
+        assert!(
+            !pairs.is_empty(),
+            "the document rendered no carried entry at all, so nothing below \
+             could have failed: {doc}"
+        );
+        // TWO, not "at least one". MEASURED: with the defect present the
+        // literal already stands on ONE entry -- the `DeclKexpr` itself, which
+        // carries `demo/temp` inline and resolves through no table at all. An
+        // `any()` here passes on that entry alone and grades nothing, which is
+        // what the first draft of this guard did. The SECOND is the reference.
+        assert_eq!(
+            pairs
+                .iter()
+                .filter(|(key, _)| *key == "\"demo/temp\"")
+                .count(),
+            2,
+            "the declaration names the topic inline and the reference must \
+             resolve to the same literal, so it stands on TWO entries: {pairs:?}"
+        );
+        assert_eq!(
+            pairs
+                .iter()
+                .filter(|(_, cause)| *cause == "\"no_declaration\"")
+                .count(),
+            0,
+            "and nothing is left claiming the session declared nothing: {pairs:?}"
+        );
+    }
+
+    /// R2513 (open-debt item 713) — THE OTHER HALF, and the one that makes the
+    /// guard above safe: a declaration that went out AFTER a reference must
+    /// still not name it.
+    ///
+    /// This document now absorbs the whole capture before rendering a row,
+    /// because a flow-grouped document cannot get `crate::agg`'s "one pass, in
+    /// capture order" rule from its walk. Absorbing everything up front is
+    /// precisely the retroactive naming that module weighed and refused — unless
+    /// each binding carries the packet it went past at and each row resolves at
+    /// its own. That is the whole content of
+    /// `crate::agg::KeyexprSpaces::at_packet`, and this is where it is graded:
+    /// with it, `id 7` is unbound when this reference travels; without it, the
+    /// pre-pass has already bound it and the row would name `demo/temp`.
+    ///
+    /// A pair, then, not a single claim. The guard above says a reader now sees
+    /// a declaration the OTHER LINK carried; this one says it still does not see
+    /// one from the FUTURE.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn a_declaration_that_followed_a_reference_still_does_not_name_it() {
+        let (d, file) =
+            crate::agg::tests::multilink_session_declaring_after_the_reference_with_file();
+        let doc = fields_json(&d, &file, None, None);
+        let pairs = carried_keys(&doc);
+        assert!(
+            !pairs.is_empty(),
+            "the document rendered no carried entry at all: {doc}"
+        );
+        // ONE `demo/temp`: the declaration's own inline literal, which consults
+        // no table. The reference must NOT have become a second one.
+        assert_eq!(
+            pairs
+                .iter()
+                .filter(|(key, _)| *key == "\"demo/temp\"")
+                .count(),
+            1,
+            "the declaration names the topic inline; the reference that PRECEDED \
+             it must not be named by it: {pairs:?}"
+        );
+        assert_eq!(
+            pairs
+                .iter()
+                .filter(|(key, cause)| *key == "null" && *cause == "\"no_declaration\"")
+                .count(),
+            1,
+            "and the reference says why, on the session's own terms: {pairs:?}"
         );
     }
 

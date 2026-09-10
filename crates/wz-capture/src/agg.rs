@@ -708,6 +708,13 @@ impl UnresolvedCause {
 /// [`Self::new`] leaves it in the state a single-flow caller wants — two
 /// anonymous [`SpaceOwner::Flow`] sides — so a live tap or a replay that never
 /// calls `enter_flow` behaves exactly as it did before this change.
+///
+/// R2513 (open-debt item 713) — what one keyexpr id did over a capture:
+/// `(anchor, Some(literal))` is a bind and `(anchor, None)` a withdrawal, in the
+/// order they went past. See [`KeyexprSpaces::at_packet`] for what the anchor is
+/// and why a history replaces the single value this table used to hold.
+type BindingHistory = Vec<(usize, Option<String>)>;
+
 #[derive(Debug, Default, Clone)]
 pub struct KeyexprSpaces {
     /// The table of ids DECLARED by each owner.
@@ -715,10 +722,39 @@ pub struct KeyexprSpaces {
     /// A map and not an array: the owners are not two, they are two per session
     /// plus two per unattributable flow, and only the walk knows how many that
     /// is.
-    tables: BTreeMap<SpaceOwner, BTreeMap<u64, String>>,
+    /// R2513 (open-debt item 713) — each id's BINDING HISTORY, not its current
+    /// binding: `(anchor, Some(literal))` is a bind and `(anchor, None)` an
+    /// undeclare, in the order they went past.
+    ///
+    /// # Why a history and not a value
+    ///
+    /// This module's rule is "one pass, in capture order", and its point is that
+    /// a declaration must not name a reference that came BEFORE it — ids are
+    /// undeclared and reused, so a late binding applied backwards attributes
+    /// traffic to a keyexpr that was not what the id meant when the bytes went
+    /// past. A single value gets that rule from the WALK: whoever folds last
+    /// wins. That works for a fold, which can walk in capture order, and not for
+    /// a RENDERER, whose rows have to come out grouped by flow.
+    ///
+    /// With the anchor beside each binding the rule stops depending on the walk.
+    /// A reader absorbs in any order and asks for the binding in effect AT its
+    /// own anchor, and the answer is the same one a capture-ordered fold would
+    /// have had. That is what lets `crate::fields_json` and `wz-analyze`'s
+    /// listings — five call sites of ONE resolver — resolve correctly while
+    /// still rendering flow by flow.
+    ///
+    /// ⚠ A driver that never calls [`Self::at_packet`] leaves every anchor at
+    /// `0`, and then "the last binding at or before 0" is simply the last one
+    /// pushed — which is exactly the value a map would have held. That is the
+    /// migration: every existing caller keeps today's behaviour to the byte.
+    tables: BTreeMap<SpaceOwner, BTreeMap<u64, BindingHistory>>,
     /// Which owner each [`Direction`] of the CURRENT list belongs to, as
     /// [`Self::enter_flow`] last set it.
     sides: [Option<SpaceOwner>; 2],
+    /// R2513 — WHERE IN THE CAPTURE the reader currently is, as
+    /// [`Self::at_packet`] last set it. Both an absorb and a resolve are taken
+    /// at this point.
+    at: usize,
 }
 
 impl KeyexprSpaces {
@@ -868,9 +904,9 @@ impl KeyexprSpaces {
         // R2457 — the OWNER's table, which for a session is shared by every
         // link of it. `side` is what turns the direction of THIS list into the
         // owner that minted the id.
-        match self.tables.get(&self.side(space)).and_then(|t| t.get(&id)) {
+        match self.binding_at(self.side(space), id) {
             Some(base) => {
-                let mut out = base.clone();
+                let mut out = base.to_string();
                 if let Some(s) = suffix {
                     out.push_str(s);
                 }
@@ -947,10 +983,16 @@ impl KeyexprSpaces {
                 // declaration sent on link 1 in reach of a reference sent on
                 // link 2.
                 if let Ok(literal) = self.resolve_declared(direction, &d.keyexpr.body) {
+                    // R2513 — APPENDED with the anchor it went past at, rather
+                    // than overwriting. See `tables`: with no anchor set this is
+                    // last-write-wins, which is what the map did.
+                    let at = self.at;
                     self.tables
                         .entry(self.side(direction))
                         .or_default()
-                        .insert(d.id, literal);
+                        .entry(d.id)
+                        .or_default()
+                        .push((at, Some(literal)));
                 }
             }
             DeclareOwnedVariant::CodecZenohUndeclKexpr(u) => {
@@ -958,8 +1000,16 @@ impl KeyexprSpaces {
                 // the space that minted it, which is the session's and not the
                 // link's. A withdrawal on the second link of a session must
                 // reach the binding the first link made.
+                // R2513 — the withdrawal is APPENDED too, so a reader anchored
+                // BEFORE it still sees the binding that was live then. Only for
+                // an id this space actually bound: an undeclare for an unknown
+                // id changed nothing when this was a `remove`, and creating a
+                // history for it here would make `bound` count a phantom.
+                let at = self.at;
                 if let Some(table) = self.tables.get_mut(&self.side(direction)) {
-                    table.remove(&u.id);
+                    if let Some(history) = table.get_mut(&u.id) {
+                        history.push((at, None));
+                    }
                 }
             }
             _ => {}
@@ -974,8 +1024,55 @@ impl KeyexprSpaces {
     /// the number a reader wants: the ids the side can resolve, which is what
     /// the session bound.
     pub fn bound(&self) -> [usize; 2] {
-        [Direction::A, Direction::B]
-            .map(|d| self.tables.get(&self.side(d)).map(|t| t.len()).unwrap_or(0))
+        // R2513 — the ids bound AT THIS POINT, which is what "currently has
+        // bound" already meant. A history whose latest entry at this anchor is
+        // an undeclare is not a binding, exactly as a removed key was not one.
+        [Direction::A, Direction::B].map(|d| {
+            let owner = self.side(d);
+            self.tables
+                .get(&owner)
+                .map(|t| {
+                    t.keys()
+                        .filter(|id| self.binding_at(owner, **id).is_some())
+                        .count()
+                })
+                .unwrap_or(0)
+        })
+    }
+
+    /// R2513 (open-debt item 713) — the binding in effect for `id` at
+    /// [`Self::at`], or `None` when the id is unbound there.
+    ///
+    /// The LAST entry at or before the anchor, scanned from the end: entries are
+    /// appended as the reader walks, so for a capture-ordered absorb the vector
+    /// is sorted by anchor and the first match from the back is the newest one
+    /// in effect. For entries sharing an anchor — every entry, for a caller that
+    /// sets none — the last pushed wins, which is what a map's `insert` did.
+    fn binding_at(&self, owner: SpaceOwner, id: u64) -> Option<&str> {
+        self.tables
+            .get(&owner)?
+            .get(&id)?
+            .iter()
+            .rev()
+            .find(|(anchor, _)| *anchor <= self.at)?
+            .1
+            .as_deref()
+    }
+
+    /// R2513 (open-debt item 713) — say WHERE IN THE CAPTURE the reader is.
+    ///
+    /// Both an absorb and a resolve are taken at this point: a declaration
+    /// absorbed here is stamped with it, and a reference resolved here sees only
+    /// the bindings at or before it. `packet` must be a CAPTURE-GLOBAL index —
+    /// `crate::Dissection::message_frames_in_capture_order` computes exactly that
+    /// (a stream frame's own `stream_offset` is a byte offset inside one
+    /// direction of one list and would order nothing across lists).
+    ///
+    /// A driver that never calls this leaves every anchor at `0` and keeps
+    /// last-write-wins, which is the behaviour every caller had before this
+    /// existed.
+    pub fn at_packet(&mut self, packet: usize) {
+        self.at = packet;
     }
 }
 
@@ -2251,8 +2348,13 @@ pub fn aggregate_grouped(
     // The rule the heading protects is untouched: the order is the capture's, so
     // a declaration still cannot name a reference that preceded it. What changes
     // is only that "preceded" is now measured on the capture and not on the walk.
-    for (_flow, list, frame) in dissection.message_frames_in_capture_order() {
+    for (_flow, list, packet, frame) in dissection.message_frames_in_capture_order() {
         spaces.enter_flow(grouping.owners(list));
+        // R2513 — see `KeyexprSpaces::at_packet`. A capture-ordered walk does
+        // not NEED the anchor; setting it keeps this plane's answer identical to
+        // the readers that do need it, rather than leaving two rules in one
+        // resolver.
+        spaces.at_packet(packet);
         table.observe_frame_where(frame, filter, list, &mut spaces);
     }
     table
@@ -5214,10 +5316,7 @@ pub(crate) mod tests {
     /// reported back as `"cause":"no_declaration"` -- a claim about the SESSION
     /// that the session's own bytes contradict.
     pub(crate) fn multilink_session_declaring_on_the_later_link() -> crate::Dissection {
-        multilink_session_declaring_on_the_later_link_carrying(push(
-            sender_space(7, None),
-            &[0u8; 11],
-        ))
+        multilink_session_declaring_on_the_later_link_carrying(push_for_item_713())
     }
 
     /// R2510 — the same capture, with the REFERENCE record supplied.
@@ -5238,6 +5337,63 @@ pub(crate) mod tests {
     pub(crate) fn multilink_session_declaring_on_the_later_link_carrying(
         reference: Vec<u8>,
     ) -> crate::Dissection {
+        multilink_session_declaring_on_the_later_link_carrying_with_file(reference).0
+    }
+
+    /// R2513 — the fixture above with the two records SWAPPED: the reference
+    /// goes out first and its declaration only afterwards.
+    ///
+    /// This is what grades the ANCHOR. Once a reader absorbs the whole capture
+    /// before rendering — which `crate::fields_json` now does, because a
+    /// flow-grouped document cannot get the rule from its walk — nothing about
+    /// the ORDER of absorbing protects "a declaration must not name a reference
+    /// that came before it". Only the anchor does. So this capture must leave
+    /// the reference UNRESOLVED, and a build whose `at_packet` did nothing would
+    /// resolve it and look like an improvement.
+    ///
+    /// Both links still handshake, so the session is named and the honest answer
+    /// is `no_declaration` rather than `no_session`.
+    ///
+    /// `dissect`-gated because its only reader is `crate::fields_json`, whose
+    /// whole test module is: the anchor it grades is only observable through a
+    /// document that renders a resolved keyexpr beside its cause, and that is
+    /// the one this crate builds behind that feature.
+    #[cfg(feature = "dissect")]
+    pub(crate) fn multilink_session_declaring_after_the_reference_with_file(
+    ) -> (crate::Dissection, Vec<u8>) {
+        let mut rows: Vec<(bool, u16, u16, Vec<u8>, bool)> = Vec::new();
+        for link in [(43210u16, 7447u16), (43211u16, 7447u16)] {
+            for (from_low, sport, dport, wire) in handshake(link.0, link.1) {
+                rows.push((from_low, sport, dport, wire, false));
+            }
+        }
+        // A publishes under id 7 on the FIRST link, before anyone has bound it.
+        rows.push((true, 43210, 7447, push_for_item_713(), true));
+        // A declares id 7 on the SECOND link, AFTER that reference went past.
+        rows.push((true, 43211, 7447, declare_kexpr(7, "demo/temp"), true));
+        multilink_capture_with_file(&rows)
+    }
+
+    /// R2513 — the reference record item 713's fixtures carry by default: a
+    /// `Push` naming `id 7` and nothing else, 11 bytes of payload.
+    ///
+    /// Named so a plane in another module can build the same capture the
+    /// no-argument fixture does. It must stay keyed by the ALIAS: a literal
+    /// resolves whatever order the walk takes, which is a test that cannot fail.
+    pub(crate) fn push_for_item_713() -> Vec<u8> {
+        push(sender_space(7, None), &[0u8; 11])
+    }
+
+    /// R2513 — the same capture, plus the pcap FILE it is made of.
+    ///
+    /// `crate::fields_json` reads the capture a SECOND time to slice a message's
+    /// bytes out, so a `Dissection` alone leaves that document with
+    /// `"capture_reread":false` and it cannot be asked to render this fixture at
+    /// all. The sibling `multilink_session_with_file` exists for the same reason
+    /// and this is its mirror.
+    pub(crate) fn multilink_session_declaring_on_the_later_link_carrying_with_file(
+        reference: Vec<u8>,
+    ) -> (crate::Dissection, Vec<u8>) {
         let mut rows: Vec<(bool, u16, u16, Vec<u8>, bool)> = Vec::new();
         for link in [(43210u16, 7447u16), (43211u16, 7447u16)] {
             for (from_low, sport, dport, wire) in handshake(link.0, link.1) {
@@ -5249,7 +5405,7 @@ pub(crate) mod tests {
         rows.push((true, 43211, 7447, declare_kexpr(7, "demo/temp"), true));
         // A publishes under id 7 on the FIRST link, AFTER that declaration.
         rows.push((true, 43210, 7447, reference, true));
-        multilink_capture_with_file(&rows).0
+        multilink_capture_with_file(&rows)
     }
 
     /// A single flow that never handshook, declaring an id and then using it.

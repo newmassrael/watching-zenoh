@@ -868,8 +868,10 @@ pub fn exchanges_grouped(
     // which is the same set of verdicts in the same sequence: the key leads with
     // the list, so `pop_first` still walks list by list.
     let mut open: OpenExchanges = BTreeMap::new();
-    for (_flow, list, frame) in dissection.message_frames_in_capture_order() {
+    for (_flow, list, packet, frame) in dissection.message_frames_in_capture_order() {
         spaces.enter_flow(grouping.owners(list));
+        // R2513 — see `crate::agg::KeyexprSpaces::at_packet`.
+        spaces.at_packet(packet);
         table.observe_frame_where(frame, filter, list, &mut open, &mut spaces);
     }
     table.drain_open(&mut open, filter);
