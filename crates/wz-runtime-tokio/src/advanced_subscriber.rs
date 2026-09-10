@@ -730,8 +730,12 @@ impl State {
                     // R2503 — the SAME ceiling as the history arm above. The
                     // residual clause named only that arm, and a build that
                     // trusted it would leave this one unbounded: upstream
-                    // guards BOTH inserts (`zenoh-ext/src/advanced_subscriber.rs`
-                    // spills after each).
+                    // guards BOTH inserts and spills after each --
+                    // `zenoh-ext/src/advanced_subscriber.rs` @ `if state.pending_samples.len() >= states.max_history_depth {`,
+                    // which occurs TWICE there, once per insert. (R2509 — the
+                    // needle is on the citation's own line: a path with none is
+                    // a BARE mention, and the bare budget is a ratchet that
+                    // reds the whole of Layers C0 and Z rather than this file.)
                     // ⚠ GATED, and that is upstream's answer rather than an
                     // omission: `max_history_depth` is `usize::MAX` when there
                     // is no history config, i.e. NO spill. With the history
