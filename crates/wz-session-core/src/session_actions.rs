@@ -3113,8 +3113,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// for a session whose identity was cleared after a first Init staged one.
     ///
     /// In-place replacement rather than retain+push, the shape
-    /// [`Self::stage_negotiated_patch`] uses, so chain position does not move
-    /// under a re-stage.
+    /// `stage_negotiated_patch` uses, so chain position does not move under a
+    /// re-stage. (That method is private, so this is deliberately NOT an
+    /// intra-doc link: a `pub` item's doc linking a private one is a broken
+    /// link the C1bz budget counts, which is how this round found it.)
     pub fn stage_local_region(&self, role: ExtChainRole) {
         let name = self.local_region();
         R::with_mutex_mut(self.ext_chain_slot(role), |chain| {

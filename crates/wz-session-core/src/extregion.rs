@@ -26,9 +26,9 @@
 //! ## What the value is allowed to be
 //!
 //! `zenoh` @ `commons/zenoh-protocol/src/core/region.rs` @ `fn validate`:
-//! NON-EMPTY and at most [`MAX_REGION_NAME_LEN`] bytes. Upstream's two error
-//! arms are `InvalidRegionNameError::{Empty, TooLong}`, mirrored by
-//! [`RegionNameError`].
+//! NON-EMPTY and at most [`crate::extregion::MAX_REGION_NAME_LEN`] bytes.
+//! Upstream's two error arms are `InvalidRegionNameError::{Empty, TooLong}`,
+//! mirrored by [`crate::extregion::RegionNameError`].
 //!
 //! ⚠⚠ AN EXTENSION THAT IS PRESENT BUT INVALID FAILS THE HANDSHAKE, and this
 //! is the half a reader can get backwards. Upstream's receive arms are
