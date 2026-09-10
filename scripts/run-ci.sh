@@ -10352,12 +10352,22 @@ layer_c1bz_docs_resolve() {
     # divergence -- had been carrying a broken link the whole time. The two
     # links R2352 ADDED both sit in a PRIVATE method's doc, which rustdoc does
     # not resolve without --document-private-items, so they are worth 0 here.
+    #
+    # R2528: wz-capi-pico 45 -> 44, and the gate's DOWNWARD arm is what asked
+    # for it -- "44 broken doc link(s) but the budget still says 45 — lower it
+    # in this commit". The removal is one link, and it went with the sentence
+    # that held it: `zp_spin_once`'s doc used to close on a paragraph about its
+    # `void` return "dereferenced under [`guarded`]", and 1.10.1 changed that
+    # return to `bool`, so the paragraph was rewritten and the link to the
+    # private `guarded` helper went with it. This is the arm that turns an
+    # unremarked doc edit into a named one, which is the whole reason the
+    # budget is watched in both directions.
     budget="
         wz:2
         wz-ap-demo:26
         wz-capi-c:45
         wz-capi-core:7
-        wz-capi-pico:45
+        wz-capi-pico:44
         wz-link-lwip:10
         wz-mcu-session-acceptor:4
         wz-routing-graph:6
