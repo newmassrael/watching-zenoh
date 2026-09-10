@@ -2361,7 +2361,30 @@ fn field_lines(
             // leak the PREVIOUS list's owners into this one -- that would
             // resolve one session's ids against another's, which is the one
             // failure `KeyexprSpaces` documents as never happening.
-            None => spaces = wz_capture::agg::KeyexprSpaces::new(),
+            //
+            // R2520 (open-debt item 713) — RENAME the sides, do not replace the
+            // instance. This arm used to reach for `KeyexprSpaces::new()`, which
+            // was free when each flow absorbed its own frames as it rendered.
+            // Since R2519 the table is filled ONCE, in capture order, before any
+            // row is drawn — so replacing it here would discard every binding
+            // for this flow AND every flow after it, `spaces` being carried by
+            // the loop.
+            //
+            // ⚠ MEASURED unreachable today: `stream_list_indices` collects one
+            // index per Stream-origin list and the door yields `self.flows`
+            // first, so `get(i)` is `Some` for every index this loop walks. This
+            // is a hardening, not a live repair — and it is owed anyway, because
+            // `Dissection::message_frames_in_capture_order`'s own doc
+            // contemplates the change that would make it reachable (a producer
+            // growing in front of the stream half).
+            //
+            // The anonymous owner is what `KeyexprSpaces::new` leaves and what
+            // `side()` falls back to, so the reach is unchanged: a row here
+            // finds no table and stays unresolved, as before.
+            None => spaces.enter_flow([
+                wz_capture::agg::SpaceOwner::Flow { list: 0, side: 0 },
+                wz_capture::agg::SpaceOwner::Flow { list: 0, side: 1 },
+            ]),
         }
         let mut last_packet = 0usize;
         for frame in &flow.frames {
@@ -3731,7 +3754,12 @@ fn datagram_field_rows(
         // already been folding into. `spaces` arrives from there.
         match datagram_lists.get(i) {
             Some(&list) => spaces.enter_flow(grouping.owners(list)),
-            None => *spaces = wz_capture::agg::KeyexprSpaces::new(),
+            // R2520 — rename the sides rather than replace the instance; see
+            // the stream half's arm for the reason and the measurement.
+            None => spaces.enter_flow([
+                wz_capture::agg::SpaceOwner::Flow { list: 0, side: 0 },
+                wz_capture::agg::SpaceOwner::Flow { list: 0, side: 1 },
+            ]),
         }
         let mut shown = 0usize;
         let mut omitted = 0usize;
@@ -4292,7 +4320,12 @@ pub fn samples(capture: &[u8], keylog: Option<&[u8]>) -> Result<Samples, Capture
         // the record travelled would send a payload to the wrong topic.
         match stream_lists.get(i) {
             Some(&list) => spaces.enter_flow(grouping.owners(list)),
-            None => spaces = wz_capture::agg::KeyexprSpaces::new(),
+            // R2520 — rename the sides rather than replace the instance; see
+            // the field listing's arm for the reason and the measurement.
+            None => spaces.enter_flow([
+                wz_capture::agg::SpaceOwner::Flow { list: 0, side: 0 },
+                wz_capture::agg::SpaceOwner::Flow { list: 0, side: 1 },
+            ]),
         }
         let mut last_packet = 0usize;
         for frame in &flow.frames {
@@ -4366,7 +4399,12 @@ fn collect_datagram_samples(
     for (i, flow) in flows.iter().enumerate() {
         match datagram_lists.get(i) {
             Some(&list) => spaces.enter_flow(grouping.owners(list)),
-            None => *spaces = wz_capture::agg::KeyexprSpaces::new(),
+            // R2520 — rename the sides rather than replace the instance; see
+            // the field listing's arm for the reason and the measurement.
+            None => spaces.enter_flow([
+                wz_capture::agg::SpaceOwner::Flow { list: 0, side: 0 },
+                wz_capture::agg::SpaceOwner::Flow { list: 0, side: 1 },
+            ]),
         }
         for frame in &flow.frames {
             // R2519 — anchored, not absorbed; `stream_offset` is the packet here.
