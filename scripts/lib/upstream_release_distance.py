@@ -137,6 +137,57 @@ PINNED: dict[str, tuple[str, int]] = {
     "zephyrproject-rtos/zephyr": ("PIN_NOT_A_RELEASE", 0),
 }
 
+# R2521 (open-debt item 711) — HOW FAR BEHIND IS TOO FAR, and it is deliberately
+# undeclared.
+#
+# ## Why the question lives here and not in a register paragraph
+#
+# The table above says what the distance IS. Nothing said what distance is
+# ACCEPTABLE, and that gap is not academic: item 578 built this gate so that
+# "five minors behind" could not happen unnoticed again, 579 bumped the pins
+# when the distance had reached NINE, and 581 carried the remainder. All three
+# are closed — and the sentence that held "when do we bump" closed with them.
+# Nobody removed it; it simply stopped existing, which is how a policy kept in
+# prose dies. Item 711 was filed to hold the position and says the repair
+# outright: pin the threshold HERE, as a ratchet, or the next closing chain
+# takes it again.
+#
+# ## Why it is `None` rather than a number
+#
+# Choosing the number is a decision about how closely this project chases
+# upstream, and the alternatives are genuinely different projects: ⑴ track every
+# release immediately, ⑵ open a bump ROUND once N releases behind, ⑶ bump only
+# when a feature needs it. That is the owner's call, and picking one here under
+# cover of maintenance would be deciding it quietly — the same move this gate
+# exists to make impossible for the distance itself.
+#
+# So the value stays `None` and the gate SAYS SO on every run, which is the one
+# thing prose could not do. When a number lands, `threshold_findings` already
+# enforces it and the selftest already grades that enforcement: the mechanism is
+# built, and only the policy is missing.
+BUMP_THRESHOLD: int | None = None
+
+
+def threshold_findings(
+    pinned: dict[str, tuple[str, int]], threshold: int | None
+) -> list[str]:
+    """Repos whose MEASURED distance is past `threshold`, worst first.
+
+    `None` yields nothing: an undeclared threshold cannot be exceeded, and
+    saying otherwise would make the gate red for a decision nobody has taken.
+    Only `MEASURED` rows can be past it — `NO_RELEASES` and `PIN_NOT_A_RELEASE`
+    carry a distance of 0 that means "not applicable", not "up to date".
+    """
+    if threshold is None:
+        return []
+    over = [
+        (repo, dist)
+        for repo, (verdict, dist) in pinned.items()
+        if verdict == "MEASURED" and dist > threshold
+    ]
+    over.sort(key=lambda row: (-row[1], row[0]))
+    return [f"{repo} is {dist} release(s) behind" for repo, dist in over]
+
 
 class Unmeasurable(RuntimeError):
     """The gate could not measure. Never a green."""
@@ -430,11 +481,48 @@ def run(fetch=None, tc_fetch=None) -> int:
             print(f"upstream-release-distance: FAIL — {repo}: pinned {want[0]}"
                   f" distance={want[1]}, observed {got[0]} distance={got[1]}.")
             if got[0] == "MEASURED" and want[0] == "MEASURED" and got[1] > want[1]:
-                print("    Upstream published a release. That is open-debt item 579's")
-                print("    work, not this table's — bump the pin, then this row.")
+                print("    Upstream published a release. Moving THIS ROW is the")
+                print("    maintenance; bumping the real pin is a round of its own,")
+                print("    and open-debt item 711 owes it.")
+                # R2521 — this used to name item 579, which is CLOSED (R2236),
+                # as are 578 and 581 above it. The sentence was true when it was
+                # written and became a pointer at nobody, which is precisely what
+                # item 711 was filed to hold. A gate that names a closed owner
+                # tells a reader to go nowhere.
     if any(v[0] == "PIN_NOT_DERIVED" for v in observed.values()):
         print("    PIN_NOT_DERIVED means the tree fetches a repository whose pin no")
         print("    structure here explains. Add the shape, never an exception.")
+    # R2521 (open-debt item 711) — the THRESHOLD, reported on every run whether
+    # or not it is declared. An undeclared one is the state item 711 exists for,
+    # and printing it is what keeps the question from disappearing again the way
+    # it did when 578/579/581 closed.
+    if BUMP_THRESHOLD is None:
+        worst = max(
+            (d for v, d in PINNED.values() if v == "MEASURED"), default=0
+        )
+        print("upstream-release-distance: NO BUMP THRESHOLD IS DECLARED — open-debt")
+        print("    item 711 owes that decision, and it is the owner's: track every")
+        print("    release, open a round at N behind, or bump only when a feature")
+        print(f"    needs it. Furthest behind right now: {worst} release(s).")
+        print("    This is a REPORT, not a failure: a gate must not red for a")
+        print("    decision nobody has taken. Set `BUMP_THRESHOLD` and the check")
+        print("    below starts enforcing it.")
+    else:
+        over = threshold_findings(PINNED, BUMP_THRESHOLD)
+        if over:
+            bad = True
+            print("upstream-release-distance: FAIL — past the declared threshold of")
+            print(f"    {BUMP_THRESHOLD} release(s):")
+            for line in over:
+                print(f"    {line}")
+            print("    The bump is a ROUND (Layer Z / Ewire re-verification comes")
+            print("    with it); open-debt item 579's four done-when clauses are the")
+            print("    template, and item 711 holds the position now.")
+        else:
+            print(
+                f"upstream-release-distance: threshold {BUMP_THRESHOLD} release(s),"
+                " and nothing is past it."
+            )
     print("upstream-release-distance:", "FAIL" if bad else "OK")
     return 1 if bad else 0
 
@@ -467,6 +555,50 @@ def selftest() -> int:
         if got != want:
             bad += 1
             print(f"  selftest FAIL: judge({pin!r}, {tags!r}) = {got}, want {want}")
+
+    # R2521 (open-debt item 711) — THE THRESHOLD IS GRADED, not merely declared.
+    #
+    # A constant nothing checks is prose in a constant's clothing, which is the
+    # failure this whole mechanism exists to end. So the four answers are driven:
+    # undeclared yields nothing (the gate must not red for an undecided policy),
+    # a distance past the line is reported WORST FIRST, a distance exactly on it
+    # is not past it, and the not-applicable verdicts never count as "behind" —
+    # `NO_RELEASES` carries a 0 that means the question does not apply, and a
+    # threshold reading it as "up to date" would be the confident zero this
+    # workspace keeps paying for.
+    table = {
+        "a/behind": ("MEASURED", 5),
+        "a/edge": ("MEASURED", 2),
+        "a/close": ("MEASURED", 1),
+        # ⚠ A NON-ZERO distance on a NOT-APPLICABLE verdict, which the live table
+        # cannot produce and which is exactly why it is here. MEASURED: with
+        # every non-measured row carrying 0, `dist > threshold` is false for them
+        # whatever the filter does, so the first draft of these cases stayed
+        # GREEN when the `verdict == "MEASURED"` guard was deleted — a control
+        # that graded nothing. The filter is what keeps "the question does not
+        # apply" from being read as "behind", and this row is what makes that
+        # claim falsifiable.
+        "a/none": ("NO_RELEASES", 9),
+        "a/tagless": ("PIN_NOT_A_RELEASE", 4),
+    }
+    threshold_cases = [
+        (None, []),
+        (2, ["a/behind is 5 release(s) behind"]),
+        (0, [
+            "a/behind is 5 release(s) behind",
+            "a/edge is 2 release(s) behind",
+            "a/close is 1 release(s) behind",
+        ]),
+        (5, []),
+    ]
+    for threshold, want_lines in threshold_cases:
+        got_lines = threshold_findings(table, threshold)
+        if got_lines != want_lines:
+            bad += 1
+            print(
+                f"  selftest FAIL: threshold_findings(threshold={threshold!r})"
+                f" = {got_lines}, want {want_lines}"
+            )
 
     # An API failure must be an exception, never an empty list that reads as
     # NO_RELEASES. This is the one distinction condition ③ is made of.
@@ -533,10 +665,15 @@ def selftest() -> int:
     if bad:
         print(f"upstream-release-distance selftest: FAIL ({bad})")
         return 1
+    # R2521 — the threshold cases are NAMED in the total, not folded into it. A
+    # summary that says "6 cases" while running ten cannot tell a reader which
+    # arms ran, and this workspace's standing rule is that a gate prints the
+    # population it read.
     print(
         f"upstream-release-distance selftest: OK ({len(cases)} classifier case(s), "
-        f"the measure/observe split, the two zero-population arms, and the "
-        f"workflow-consistency arm with its control)"
+        f"{len(threshold_cases)} threshold case(s), the measure/observe split, "
+        f"the two zero-population arms, and the workflow-consistency arm with "
+        f"its control)"
     )
     return 0
 
