@@ -140,7 +140,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 # risk from a Rust patch. That reasoning was right to hold the round back and
 # WRONG about the size: the entire public-header delta between 1.9.0 and 1.10.1
 # is one changed declaration (`zp_spin_once` void -> bool), a doc clarification
-# on `z_timestamp_new`, a `Z_TEST_HOOKS`-gated test override, and one doc word.
+# on `z_timestamp_new`, a test-hooks-gated override typedef (pico's own test
+# scaffolding, not consumer ABI), and one doc word.
 # Measured by diffing the headers, which is the same move that made R2527 cheap.
 #
 # R2529 (open-debt item 711) — FreeRTOS-Kernel 3 -> 0, V11.1.0 -> V11.3.1, and

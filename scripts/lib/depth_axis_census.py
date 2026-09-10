@@ -702,7 +702,15 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 PIN_REACHED = 55
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
-PIN_WZ_CITATIONS = 346
+# R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
+# one R2533 added to its reason when the owner declined a gzip dependency: the
+# reason now names `wz-session-core/src/adminspace.rs` as the file holding
+# `metrics_encoding_never_claims_a_content_encoding`, the guard that keeps the
+# encoding string from ever claiming a content-encoding wz cannot produce.
+# A declined feature is recorded as a DIVERGENCE rather than a gap, and a
+# divergence that names its guard is one a reader can check — which is exactly
+# the kind of citation this ratchet counts.
+PIN_WZ_CITATIONS = 347
 PIN_AMBIGUOUS = 73
 
 

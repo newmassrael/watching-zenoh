@@ -297,6 +297,19 @@ UPSTREAM_UNCARRIED = frozenset(
         "Z_LINK_CAP_TRANSPORT_RAWETH",
         "Z_LINK_CAP_TRANSPORT_UNICAST",
         "Z_LISTEN_MAX_CONNECTION_NB",
+        # R2534 — pico's idle-read-task sleep knob, entered because
+        # `wz-capi-pico/src/session.rs` cites it to explain why wz's single-shot
+        # spin call never answers false on a LIVE session: that branch exists
+        # upstream only when the knob is set, and wz has no task queue to be
+        # idle. The row below is deliberately the only place in this tree that
+        # spells the name.
+        # ⚠ THE COMMENT CANNOT CODE-SPELL IT. A first draft explained this in
+        # backticks and the gate then reported the tree as CARRYING the name —
+        # a classification defeated by its own justification. Describe, do not
+        # spell. (The 1.10.1 header-delta note in `upstream_release_distance.py`
+        # hit the same wall and was reworded instead of classified, because for
+        # a `scripts/lib` file this gate asks for ABSENT rather than this set.)
+        "Z_RUNTIME_IDLE_READ_TASK_SLEEP",
         "Z_LOCALITY_ANY",
         "Z_LOCALITY_REMOTE",
         "Z_LOCALITY_SESSION_LOCAL",

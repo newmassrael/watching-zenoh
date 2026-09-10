@@ -89,7 +89,24 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 # The router pin this mapping was derived at. Bound below to the one place that
 # states it, on `zenoh_c_archive_arm.py`'s rule: a constant nobody can catch
 # drifting is a constant that drifts.
-PIN = "1.10.0"
+#
+# R2534 — 1.10.0 -> 1.10.1, and RE-DERIVED against a 1.10.1 checkout rather than
+# retyped: `--derive --require` with `WZ_ZENOH_SRC` pointed at that tree reports
+# "4 (code, word) pair(s), all matching", so the MAPPING is unchanged and only
+# the pin moves. ⚠ The first attempt derived against `~/zenoh-ref`, which is
+# still 1.10.0 — moving the pin on that reading would have been precisely the
+# "carried across a pin bump" failure this constant's own FAIL text names.
+#
+# THIS IS THE THIRD SITE OF ONE CLASS in this stretch, after
+# `zenoh_c_archive_arm.py`'s (PIN, ARCHIVE_ARM) at R2531 and the zenoh-c census
+# row's (count, version) at R2532: a version bump has PAIRED constants gates
+# hold, and moving the version alone leaves each pair straddling two releases.
+# R2532's own carry said to grep the pin's value across `scripts/lib/` FIRST
+# instead of letting CI find them one round at a time; this round did that and
+# the derived population is exactly one more live constant — every other
+# `1.10.0` under `scripts/lib/` is prose or a selftest fixture, and
+# `oracle_pin_gate.py` DERIVES its pin from `build-zenohd.sh` so it self-updates.
+PIN = "1.10.1"
 BUILD_ZENOHD = "scripts/build-zenohd.sh"
 
 # code -> word, from `Bits`'s discriminants and `Bits::to_str`.
@@ -434,9 +451,17 @@ def selftest(tmp: pathlib.Path) -> int:
     case("an interop lane with no pair left reds",
          rc4 == 1 and "constant pair was parsed out of" in why)
 
+    # R2534 — the mutation is DERIVED from `PIN`, not spelled. It used to read
+    # `.replace('ZENOHD_VERSION:-1.10.0', ...)`, which silently stopped
+    # mutating anything the moment the pin moved to 1.10.1: the fixture matched
+    # nothing, no drift was simulated, and this arm reported that a moved pin
+    # does NOT red. A selftest that constructs its own subject by literal is one
+    # more copy of the constant, and this file exists because of that class.
+    # The replacement version is deliberately impossible so it can never
+    # collide with a real pin.
     rc5, why = verdict(dis, inter,
-                       pin.replace('ZENOHD_VERSION:-1.10.0',
-                                   'ZENOHD_VERSION:-1.11.0'))
+                       pin.replace(f"ZENOHD_VERSION:-{PIN}",
+                                   "ZENOHD_VERSION:-9.9.9"))
     case("a router pin that moved without re-deriving reds",
          rc5 == 1 and "and move PIN in the same commit" in why)
 
