@@ -238,8 +238,23 @@ impl ExchangeGaps {
 /// is what lets the language stay one language: `key == demo/** and replies ==
 /// 0` is one predicate over one view, not a request-time half joined to an
 /// outcome-time half.
+/// R2512 (open-debt item 713) — the exchanges a fold has opened and not yet
+/// closed, keyed `(list, asker, rid)`.
+///
+/// It was a local of the per-list loop, so the list scoped it by construction.
+/// The walk may now interleave two lists
+/// ([`ExchangeTable::observe_frame_where`]), so the scope is said in the KEY,
+/// which keeps today's behaviour exactly: a `ResponseFinal` on one link cannot
+/// close a `Request` opened on its sibling. It also keeps the drain
+/// deterministic and in the same sequence as before — `pop_first` over a
+/// list-leading key walks list by list.
+///
+/// ⚠ Whether a sibling link SHOULD close it is the same open question
+/// `crate::interest::InterestCorrelation` records, and neither round answers it.
+pub type OpenExchanges = BTreeMap<(usize, usize, u64), OpenExchange>;
+
 #[derive(Debug, Clone)]
-struct OpenExchange {
+pub struct OpenExchange {
     /// `None` when the request's keyexpr did not resolve — the exchange is
     /// still correlated and still timed, it just has no row to land in.
     keyexpr: Option<String>,
@@ -353,26 +368,9 @@ impl ExchangeTable {
         filter: &Filter,
         spaces: &mut KeyexprSpaces,
     ) {
-        let mut open: BTreeMap<(usize, u64), OpenExchange> = BTreeMap::new();
+        let mut open: OpenExchanges = BTreeMap::new();
         for frame in frames {
-            match &frame.carried {
-                Carried::Batch(batch) => {
-                    self.observe_batch(spaces, &mut open, frame, batch, filter)
-                }
-                #[cfg(feature = "reassembly")]
-                Carried::Reassembled(batch) => {
-                    self.observe_batch(spaces, &mut open, frame, batch, filter)
-                }
-                // Matched by name for the reason R311y614 matched them by name
-                // in the throughput plane: a new `Carried` variant must fail to
-                // compile here rather than join the silent set.
-                Carried::Undecompressible => self.unread.undecompressible_batches += 1,
-                #[cfg(feature = "reassembly")]
-                Carried::FragmentWithoutResolution => self.unread.unresolvable_fragments += 1,
-                Carried::Nothing => {}
-                #[cfg(feature = "reassembly")]
-                Carried::Fragment(_) => {}
-            }
+            self.observe_frame_where(frame, filter, 0, &mut open, spaces);
         }
         // Whatever is still open when the flow's frames run out was never
         // closed on the wire this observer saw. It is judged here — an unclosed
@@ -383,6 +381,65 @@ impl ExchangeTable {
         //
         // Drained in key order rather than by iterating and clearing, so the
         // sequence of verdicts over one flow does not depend on map internals.
+        self.drain_open(&mut open, filter);
+    }
+
+    /// R2512 (open-debt item 713) — ONE frame of one list, which is what the
+    /// loop above always was.
+    ///
+    /// Split out so a driver can choose its ORDER; [`exchanges_grouped`] walks
+    /// [`crate::Dissection::message_frames_in_capture_order`], and
+    /// `crate::agg::aggregate_grouped` carries the argument. This plane resolves
+    /// a request's keyexpr AT THE REQUEST, so list order cost it more than a
+    /// blank field: [`ExchangeRow`] is keyed by a `String`, so an unattributed
+    /// request gets no row, and the topic's latency distributions went missing
+    /// from the table whenever the `DeclKexpr` had gone out on the session's
+    /// other link.
+    ///
+    /// `list` leads the open-exchange key so the walk may interleave two lists
+    /// without one link's `ResponseFinal` closing the other's request. That
+    /// keeps today's behaviour exactly; whether a sibling link SHOULD close it
+    /// is the same open question `crate::interest::InterestCorrelation` records,
+    /// and this round does not answer it.
+    pub fn observe_frame_where(
+        &mut self,
+        frame: &PassiveFrame,
+        filter: &Filter,
+        list: usize,
+        open: &mut OpenExchanges,
+        spaces: &mut KeyexprSpaces,
+    ) {
+        match &frame.carried {
+            Carried::Batch(batch) => self.observe_batch(spaces, open, list, frame, batch, filter),
+            #[cfg(feature = "reassembly")]
+            Carried::Reassembled(batch) => {
+                self.observe_batch(spaces, open, list, frame, batch, filter)
+            }
+            // Matched by name for the reason R311y614 matched them by name
+            // in the throughput plane: a new `Carried` variant must fail to
+            // compile here rather than join the silent set.
+            Carried::Undecompressible => self.unread.undecompressible_batches += 1,
+            #[cfg(feature = "reassembly")]
+            Carried::FragmentWithoutResolution => self.unread.unresolvable_fragments += 1,
+            Carried::Nothing => {}
+            #[cfg(feature = "reassembly")]
+            Carried::Fragment(_) => {}
+        }
+    }
+
+    /// R2512 — judge whatever is still open, in key order.
+    ///
+    /// Whatever the walk did not see closed was never closed on the wire this
+    /// observer saw. An unclosed exchange is a complete OBSERVATION even though
+    /// it is an incomplete exchange, and `closed == no` is precisely the
+    /// selector that asks for these. Counted, never completed: a query whose
+    /// reply the capture missed is not a query that answered instantly.
+    ///
+    /// Drained by `pop_first` rather than by iterating and clearing, so the
+    /// sequence of verdicts does not depend on map internals — and since the key
+    /// now leads with the list, that sequence is list by list, which is what it
+    /// was when each list drained at its own end.
+    pub fn drain_open(&mut self, open: &mut OpenExchanges, filter: &Filter) {
         while let Some((_, entry)) = open.pop_first() {
             self.finish(entry, Ending::Unclosed, filter);
         }
@@ -391,7 +448,8 @@ impl ExchangeTable {
     fn observe_batch(
         &mut self,
         spaces: &mut KeyexprSpaces,
-        open: &mut BTreeMap<(usize, u64), OpenExchange>,
+        open: &mut OpenExchanges,
+        list: usize,
         frame: &PassiveFrame,
         batch: &BatchParse,
         filter: &Filter,
@@ -403,14 +461,22 @@ impl ExchangeTable {
         // R311y641 (§1.1n) — paired with the bytes each record came from, so
         // this plane can say WHERE a record was and not only that it was.
         for (message, span) in batch.records() {
-            self.observe_message(spaces, open, frame, message, span, filter);
+            self.observe_message(spaces, open, list, frame, message, span, filter);
         }
     }
 
+    // R2512 — the eighth argument is `list`, which the open-exchange key now
+    // leads with. Allowed rather than bundled, on this crate's own precedent:
+    // `crate::interest` carries the same attribute three times for the same
+    // shape — a per-message fold threading the spaces, the correlation state,
+    // the frame and its anchor. A struct invented here to satisfy the count
+    // would be a type whose only member is "the arguments of one function".
+    #[allow(clippy::too_many_arguments)]
     fn observe_message(
         &mut self,
         spaces: &mut KeyexprSpaces,
-        open: &mut BTreeMap<(usize, u64), OpenExchange>,
+        open: &mut OpenExchanges,
+        list: usize,
         frame: &PassiveFrame,
         message: &NetworkMessage,
         span: Option<(usize, usize)>,
@@ -421,7 +487,7 @@ impl ExchangeTable {
         match message {
             NetworkMessage::Declare(d) => spaces.absorb(direction, d),
             NetworkMessage::Request(r) => {
-                let key = (dir_index(direction), r.rid);
+                let key = (list, dir_index(direction), r.rid);
                 // Resolution happens HERE and not at the close, because a
                 // keyexpr id is resolved against the space as it stood when the
                 // request went past: a `DeclKexpr` arriving later must not
@@ -463,7 +529,7 @@ impl ExchangeTable {
             }
             NetworkMessage::Response(r) => {
                 // The reply travels back, so the rid lives in the PEER's space.
-                let key = (dir_index(direction.peer()), r.request_id);
+                let key = (list, dir_index(direction.peer()), r.request_id);
                 let Some(entry) = open.get_mut(&key) else {
                     self.gaps.orphan_responses += 1;
                     return;
@@ -478,7 +544,7 @@ impl ExchangeTable {
                 }
             }
             NetworkMessage::ResponseFinal(f) => {
-                let key = (dir_index(direction.peer()), f.request_id);
+                let key = (list, dir_index(direction.peer()), f.request_id);
                 let Some(entry) = open.remove(&key) else {
                     self.gaps.orphan_responses += 1;
                     return;
@@ -793,10 +859,20 @@ pub fn exchanges_grouped(
     // a producer that is not a flow at all still reaches this plane.
     // R2457 — `.enumerate()`, because the grouping is keyed by list index and
     // the three walks agree only by walking the same enumeration.
-    for (list, (_, frames)) in dissection.message_lists().enumerate() {
+    // R2512 (open-debt item 713) — and in CAPTURE order, the way
+    // `crate::agg`'s module heading always stated it. List order made this plane
+    // file a query as unattributed — with no row, so no latency either —
+    // whenever its `DeclKexpr` had gone out on the session's other link.
+    //
+    // The open exchanges are hoisted with the walk and drained once at the end,
+    // which is the same set of verdicts in the same sequence: the key leads with
+    // the list, so `pop_first` still walks list by list.
+    let mut open: OpenExchanges = BTreeMap::new();
+    for (_flow, list, frame) in dissection.message_frames_in_capture_order() {
         spaces.enter_flow(grouping.owners(list));
-        table.observe_flow_where(frames, filter, &mut spaces);
+        table.observe_frame_where(frame, filter, list, &mut open, &mut spaces);
     }
+    table.drain_open(&mut open, filter);
     table
 }
 
@@ -1321,6 +1397,44 @@ pub(crate) mod tests {
             Some(25),
             "the total still holds the measurement"
         );
+    }
+
+    /// R2512 (open-debt item 713) — the COMPLEMENT of the guard above: an alias
+    /// this capture DID see bound, on the other link of the same session.
+    ///
+    /// Above, id 99 was bound by nobody, so filing the exchange as unattributed
+    /// is true and the latency is kept anyway. Here `id 7 -> demo/temp` went out
+    /// two packets earlier on the session's OTHER link, and a walk that takes
+    /// one list to its end before starting the next had not read it yet.
+    ///
+    /// This plane loses more to that than a blank field. `ExchangeRow.keyexpr`
+    /// is a `String`, not an `Option`, so an unattributed request gets NO ROW AT
+    /// ALL: the topic's request count, its reply counts and both of its latency
+    /// distributions are absent from the table rather than merely unnamed. A
+    /// reader asking "how does `demo/temp` respond" is answered by silence about
+    /// a capture that measured it.
+    ///
+    /// `requests()` is asserted first as anti-vacuity: an undecodable fixture
+    /// would otherwise read as an unattributed one, which is the mis-attribution
+    /// R2510 nearly made one plane over.
+    #[test]
+    fn a_request_is_filed_under_a_keyexpr_its_sibling_link_bound() {
+        let t = exchanges(
+            &crate::agg::tests::multilink_session_declaring_on_the_later_link_carrying(
+                request_query(5, sender_space(7, None)),
+            ),
+        );
+
+        assert_eq!(t.requests(), 1, "the aliased request was read at all");
+        assert_eq!(
+            t.gaps().unattributed_requests,
+            0,
+            "the sibling link bound this alias BEFORE the request went out"
+        );
+        let row = t
+            .row("demo/temp")
+            .expect("so the exchange is filed under the topic the session named");
+        assert_eq!(row.requests, 1);
     }
 
     /// Slowest first, and an UNMEASURED row sorts last rather than first: an
