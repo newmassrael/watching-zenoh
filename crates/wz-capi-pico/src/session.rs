@@ -448,16 +448,37 @@ pub unsafe extern "C" fn zp_stop_lease_task(_zs: *mut z_loaned_session_t) -> ZRe
 /// work here — which is the honest statement of what wz's runtime model gives
 /// up, not a claim that the call is meaningless.
 ///
-/// `void` return: pico reports no status here, so a null or dead session cannot
-/// be signalled to the caller. The state lookup is still performed so the
-/// argument is dereferenced under [`guarded`] rather than by the C caller's next
-/// unrelated call.
+/// R2528 — the return type is `bool`, and it CHANGED under us. zenoh-pico
+/// 1.9.0 declared `void zp_spin_once(const z_loaned_session_t *zs);` and 1.10.1
+/// declares `bool zp_spin_once(const z_loaned_session_t *zs);`. That single
+/// declaration is the ENTIRE ABI delta of the public API headers between those
+/// releases — measured by diffing them, not supposed — so a drop-in that kept
+/// returning `void` would have been the one place the 1.10.1 bump made wz wrong.
+///
+/// Upstream's own words for the value: "Returns `false` if there are no more
+/// tasks that can be executed immediately. This can only happen when
+/// `Z_RUNTIME_IDLE_READ_TASK_SLEEP` is set to positive value; otherwise read
+/// tasks always reschedule immediately, and `true` is always returned unless the
+/// session is closed."
+///
+/// So under the default configuration the value reduces to "the session is
+/// still alive", and that is what wz answers. It is a strictly BETTER answer
+/// than the shim could give before: the previous doc here recorded, as a
+/// limitation, that "pico reports no status here, so a null or dead session
+/// cannot be signalled to the caller". Upstream has since given the call a
+/// channel for exactly that, and wz now uses it.
+///
+/// wz never returns `false` for "no work to do", and that is the same
+/// one-directional divergence the paragraphs above describe rather than a new
+/// one: wz has no task queue to be empty. `Z_RUNTIME_IDLE_READ_TASK_SLEEP` is a
+/// pico scheduling knob with no wz counterpart, so the branch that would return
+/// `false` on a live session does not exist here.
+///
+/// A panic yields `false` — a spin that unwound made no progress, and claiming
+/// otherwise is the direction that misleads.
 #[no_mangle]
-pub unsafe extern "C" fn zp_spin_once(zs: *const z_loaned_session_t) {
-    let _ = guarded(|| {
-        let _ = session_state(zs);
-        Z_OK
-    });
+pub unsafe extern "C" fn zp_spin_once(zs: *const z_loaned_session_t) -> bool {
+    guard_val(false, || session_state(zs).is_some())
 }
 
 // --- TX batching (pico `zp_batch_*`) ---------------------------------------

@@ -135,17 +135,22 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 # and the table red-ed on the way through exactly as it did then
 # (`pinned distance=1, observed distance=0`, twice).
 #
-# ⚠ zenoh-pico is NOT moved, and the gap is deliberate rather than overlooked:
-# it is 2 releases behind across a MINOR (1.9.0-10-g3b3ab65c -> 1.10.1) and it
-# is a vendored C submodule, so its bump is a different risk from a Rust patch
-# release and gets its own round. FreeRTOS-Kernel likewise (V11.1.0 ->
-# V11.3.1, and it drags the MCU deploy targets). Both still red the threshold
-# arm below, which is the correct state: the tree IS still behind.
+# R2528 (open-debt item 711) — zenoh-pico 2 -> 0. R2527 left it deliberately,
+# on the reasoning that a vendored C submodule crossing a MINOR is a different
+# risk from a Rust patch. That reasoning was right to hold the round back and
+# WRONG about the size: the entire public-header delta between 1.9.0 and 1.10.1
+# is one changed declaration (`zp_spin_once` void -> bool), a doc clarification
+# on `z_timestamp_new`, a `Z_TEST_HOOKS`-gated test override, and one doc word.
+# Measured by diffing the headers, which is the same move that made R2527 cheap.
+#
+# FreeRTOS-Kernel is still 3 behind (V11.1.0 -> V11.3.1) and drags the MCU
+# deploy targets, so it keeps its own round and still reds the threshold arm
+# below — which is the correct state while the tree IS behind on it.
 PINNED: dict[str, tuple[str, int]] = {
     "FreeRTOS/FreeRTOS-Kernel": ("MEASURED", 3),
     "eclipse-zenoh/zenoh": ("MEASURED", 0),
     "eclipse-zenoh/zenoh-c": ("MEASURED", 0),
-    "eclipse-zenoh/zenoh-pico": ("MEASURED", 2),
+    "eclipse-zenoh/zenoh-pico": ("MEASURED", 0),
     "lwip-tcpip/lwip": ("NO_RELEASES", 0),
     "newmassrael/scxml-core-engine": ("NO_RELEASES", 0),
     "zephyrproject-rtos/zephyr": ("PIN_NOT_A_RELEASE", 0),
