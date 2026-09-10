@@ -211,6 +211,21 @@ else:
     if [[ "${WZ_ACK_RED:-}" == "$rid" ]]; then
         echo "$context: previous run $rid is $conclusion — ACKNOWLEDGED via WZ_ACK_RED."
         echo "          Pay it off as its own round; this push proceeds."
+        # R2502 (open-debt item 695, done-when 3) — the acknowledgement used to
+        # end here, so the fact that a push published over a red lived exactly
+        # as long as the terminal scrollback. That is why the same run was
+        # acknowledged twice (R2496, R2497) with nothing accumulating. This
+        # PRINTS a pointer rather than writing the row itself: the hook runs
+        # after the commit, so a file written here would leave the pushed tree
+        # dirty, and the row belongs in the round's own commit anyway.
+        # ⚠ Deliberately not a refusal. The gate's own rationale above is that
+        # the fix must always be pushable; gating the escape on a committed row
+        # would put friction on the one push that must always work.
+        echo "          RECORD IT: add a row to docs/hosted-red-acks.md naming"
+        echo "          run $rid, the debt item that owns the red, and — when it"
+        echo "          is paid — the round that paid it. An empty \`paid\` column"
+        echo "          is an outstanding acknowledgement, which is the number"
+        echo "          that file exists to make countable."
         return 0
     fi
 
