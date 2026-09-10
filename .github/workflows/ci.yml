@@ -963,20 +963,23 @@ jobs:
           WZ_C0I_REQUIRE: "1"
         run: bash scripts/run-ci.sh --layer C0i
 
-      - name: Layer U — how many releases behind each pinned upstream is
-        # R2228 (open-debt item 578). Two rounds judged "what a genuine zenoh
-        # does" from a checkout pinned five minors back, and the only thing
-        # that surfaced it was a person asking. This lane asks instead.
-        #
-        # ⛔ THE ONLY STEP IN THIS WORKFLOW THAT NEEDS THE NETWORK, and it is
-        # given a token deliberately: unauthenticated the releases API is 60
-        # requests an hour per IP, which a shared runner exhausts, and item
-        # 578's condition ③ makes "could not measure" a FAILURE rather than a
-        # skip. So an outage reds this lane. That is the stated cost of not
-        # having a green that means nothing.
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: bash scripts/run-ci.sh --layer U
+      # R2526 — Layer U MOVED to the END of this job. It used to sit here, and
+      # what it masked is measured rather than supposed: item 711 recorded that
+      # when Layer U went green at R2501, SEVEN steps that had been `skipped`
+      # behind it turned success in one go — C0b, C0g, C0d, C0e, C0f, B, B2,
+      # which is exactly the run of steps that used to follow this line. R2523
+      # armed the release-distance ratchet, Layer U went red again by design,
+      # and the same seven stopped being graded — including Layer B2, the
+      # committed-codegen regen diff.
+      #
+      # A gate whose red is EXPECTED and TIME-DEPENDENT must not sit in front of
+      # gates that are neither. Layer U reds whenever upstream releases and
+      # whenever GitHub is unreachable; B2 reds when this repository's committed
+      # codegen has drifted. Ordering the second behind the first trades a real
+      # signal for an anticipated one.
+      #
+      # Moved rather than made non-blocking: `continue-on-error` would keep the
+      # position and give up the refusal, which is the half worth keeping.
 
       - name: Layer C0b — the job budget-margin gate discriminates both ways
         # R311y791. The `ci` job's last step runs
@@ -1044,6 +1047,26 @@ jobs:
         env:
           WZ_SCE_ORACLE_REQUIRE: "1"
         run: bash scripts/run-ci.sh --layer B2
+
+      - name: Layer U — how many releases behind each pinned upstream is
+        # R2228 (open-debt item 578). Two rounds judged "what a genuine zenoh
+        # does" from a checkout pinned five minors back, and the only thing
+        # that surfaced it was a person asking. This lane asks instead.
+        #
+        # ⛔ THE ONLY STEP IN THIS WORKFLOW THAT NEEDS THE NETWORK, and it is
+        # given a token deliberately: unauthenticated the releases API is 60
+        # requests an hour per IP, which a shared runner exhausts, and item
+        # 578's condition ③ makes "could not measure" a FAILURE rather than a
+        # skip. So an outage reds this lane. That is the stated cost of not
+        # having a green that means nothing.
+        #
+        # R2526 — LAST in this job on purpose; see the note at its old position
+        # for the seven steps its red was masking and why an expected,
+        # time-dependent red must not sit in front of gates that are neither.
+        # Nothing follows it here, so its refusal now costs only itself.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/run-ci.sh --layer U
 
   # ─────────────────────────────────────────────────────────────────
   # R311y791 — the VERDICT-LEG MUTATION job. Layer C0mut ran as step 11 of the
