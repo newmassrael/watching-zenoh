@@ -151,7 +151,11 @@ if [[ ! -f "$REF/CMakeLists.txt" ]]; then
     say "FAIL: zenoh-c's SOURCE checkout is absent at $REF."
     say "      The release archive install-zenoh-c.sh provisions is not enough —"
     say "      this build needs the repository:"
-    say "      git clone --depth 1 --branch 1.10.0 \\"
+    # R2527 — the branch is NOT restated here; see the same fix in
+    # check-capi-c-opaque-arms.sh. It was a second copy of
+    # install-zenoh-c.sh's ZENOH_C_VERSION (open-debt item 47).
+    say "      git clone --depth 1 --branch <ZENOH_C_VERSION, in \\"
+    say "      scripts/install-zenoh-c.sh> \\"
     say "      https://github.com/eclipse-zenoh/zenoh-c $REF"
     exit 1
 fi

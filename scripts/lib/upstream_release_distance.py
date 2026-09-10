@@ -127,10 +127,24 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 # had predicted exactly this — it recorded Layer U as one of two legs that "have
 # never received a verdict since the window opened" and said to read them first
 # in the run where C0 is released. Run 34417146811 is that run.
+#
+# R2527 (open-debt item 711) — zenoh 1 -> 0 and zenoh-c 1 -> 0, and THIS ONE IS
+# THE PIN BUMP, not the maintenance the clause above distinguishes it from. The
+# pins moved: `UPSTREAM_VERSION`, `ZENOHD_VERSION` and `ZENOH_C_VERSION` are all
+# 1.10.1. So this is the FALLING direction again, the same half R2229 exercised,
+# and the table red-ed on the way through exactly as it did then
+# (`pinned distance=1, observed distance=0`, twice).
+#
+# ⚠ zenoh-pico is NOT moved, and the gap is deliberate rather than overlooked:
+# it is 2 releases behind across a MINOR (1.9.0-10-g3b3ab65c -> 1.10.1) and it
+# is a vendored C submodule, so its bump is a different risk from a Rust patch
+# release and gets its own round. FreeRTOS-Kernel likewise (V11.1.0 ->
+# V11.3.1, and it drags the MCU deploy targets). Both still red the threshold
+# arm below, which is the correct state: the tree IS still behind.
 PINNED: dict[str, tuple[str, int]] = {
     "FreeRTOS/FreeRTOS-Kernel": ("MEASURED", 3),
-    "eclipse-zenoh/zenoh": ("MEASURED", 1),
-    "eclipse-zenoh/zenoh-c": ("MEASURED", 1),
+    "eclipse-zenoh/zenoh": ("MEASURED", 0),
+    "eclipse-zenoh/zenoh-c": ("MEASURED", 0),
     "eclipse-zenoh/zenoh-pico": ("MEASURED", 2),
     "lwip-tcpip/lwip": ("NO_RELEASES", 0),
     "newmassrael/scxml-core-engine": ("NO_RELEASES", 0),

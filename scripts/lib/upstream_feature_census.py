@@ -131,7 +131,7 @@ UPSTREAM_PACKAGE = "zenoh"
 # feature 1.10.0 declares (no row outlived its subject), and TWO arrived
 # unjudged. `test` became a PINNED_NON_CAPABILITY and `uring` became an
 # UNANSWERED row — see both for the evidence each was judged on.
-UPSTREAM_VERSION = "1.10.0"
+UPSTREAM_VERSION = "1.10.1"
 
 # Features that are upstream capability toggles by shape but not by meaning.
 # `default` and the implicit optional-dep feature are DERIVED (see the module

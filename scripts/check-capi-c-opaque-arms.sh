@@ -71,14 +71,20 @@ if [[ ! -f "$MANIFEST" ]]; then
     if [[ -n "${WZ_CAPI_C_ARMS_REQUIRE:-}" ]]; then
         say "FAIL — required (WZ_CAPI_C_ARMS_REQUIRE set) but zenoh-c's SOURCE"
         say "       checkout is absent. This needs the repository, not the release"
-        say "       archive: git clone --depth 1 --branch 1.10.0 \\"
+        # R2527 — the branch is NOT restated here. It was `1.10.0` hard-coded,
+        # a second copy of `install-zenoh-c.sh`'s `ZENOH_C_VERSION` with nothing
+        # measuring the gap (open-debt item 47), and the 1.10.1 bump would have
+        # made it wrong. Naming where the pin lives cannot go stale.
+        say "       archive: git clone --depth 1 --branch <ZENOH_C_VERSION, in \\"
+        say "       scripts/install-zenoh-c.sh> \\"
         say "       https://github.com/eclipse-zenoh/zenoh-c $REF"
         exit 1
     fi
     say "SKIP — zenoh-c's SOURCE checkout is absent at $REF."
     say "       The release archive install-zenoh-c.sh provisions does NOT carry"
     say "       build-resources/opaque-types, so this check needs the repo:"
-    say "       git clone --depth 1 --branch 1.10.0 \\"
+    say "       git clone --depth 1 --branch <ZENOH_C_VERSION, in \\"
+    say "       scripts/install-zenoh-c.sh> \\"
     say "       https://github.com/eclipse-zenoh/zenoh-c $REF"
     exit 0
 fi

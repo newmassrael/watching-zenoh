@@ -21,9 +21,12 @@
 # mirroring `build-zenohd.sh`'s role for the zenohd oracle.
 #
 # The version is PINNED, and the pin is the `ZENOH_C_VERSION` default below --
-# 1.10.0 as this is written. R2256 found this sentence still saying 1.5.0 long
+# read it there. R2256 found this sentence still saying 1.5.0 long
 # after the constant moved, which is the failure mode a pin written twice
 # always has: the reader believes the prose and the script obeys the constant.
+# R2527 struck the restated number this sentence still carried: it said "1.10.0
+# as this is written" one clause before telling the reader not to do that, and
+# the bump to 1.10.1 would have made it wrong for the third time.
 # Do not restate the number here again; the assertion at the bottom reads it. A
 # different zenoh-c is not a worse oracle, it is a DIFFERENT ABI — `zenoh_opaque.h`
 # is generated per version and per `Z_FEATURE_*` set, and Layer C1cc's layout leg
@@ -33,7 +36,7 @@
 
 set -euo pipefail
 
-ZENOH_C_VERSION="${ZENOH_C_VERSION:-1.10.0}"
+ZENOH_C_VERSION="${ZENOH_C_VERSION:-1.10.1}"
 PREFIX="${WZ_ZENOH_C_PREFIX:-$HOME/.local}"
 EXAMPLES_PARENT="${WZ_ZENOH_C_REF:-$HOME/zenoh-c-ref}"
 
