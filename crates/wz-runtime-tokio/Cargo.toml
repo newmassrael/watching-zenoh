@@ -315,8 +315,17 @@ ext-pubsub-advanced-publisher = [
 # ext-pubsub-advanced-subscriber (§5.25) — the per-source ordering/dedup
 # subscriber that consumes the publisher's SourceInfo seqnums. Needs the
 # subscriber (declare-subscriber) + the inbound source_info decode
-# (pubsub-source-info). The timestamped-dedup path is deferred (see the
-# module docs), so no pubsub-timestamp dependency yet.
+# (pubsub-source-info).
+# R2522 — `pubsub-timestamp` JOINS the set, replacing the "the timestamped-dedup
+# path is deferred, so no pubsub-timestamp dependency yet" this comment used to
+# carry. Upstream's `handle_sample` has THREE arms and the middle one orders a
+# source_info-less sample by its own timestamp; that arm now exists here. The
+# dependency is not decorative: `pubsub-timestamp` is what makes the INBOUND
+# `put.timestamp` project into `Sample::timestamp` at all
+# (`wz-session-core/src/pubsub.rs` @ `let body_timestamp = put.timestamp`), so
+# without it every sample reaching the arm carries `None` and the arm is a
+# population of zero — the exact "a feature no code reads makes the tail LOOK
+# honoured" shape R2505 refused one clause below.
 # R311y826 — `liveliness-token` joins the set: BOTH references let an advanced
 # subscriber opt into being detectable by declaring a liveliness token on
 # `<ke>/@adv/sub/<zid>/<eid>/[meta|_]` (zenoh-ext advanced_subscriber.rs:1151,
@@ -327,6 +336,7 @@ ext-pubsub-advanced-publisher = [
 ext-pubsub-advanced-subscriber = [
     "declare-subscriber",
     "pubsub-source-info",
+    "pubsub-timestamp",
     "liveliness-token",
 ]
 # R311y82 — ext-pubsub-advanced-subscriber + the gap-recovery query plane:

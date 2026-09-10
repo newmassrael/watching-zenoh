@@ -7028,7 +7028,15 @@ layer_c1aq_cargo_test_ext_pubsub_advanced() {
 # it uses no options; the detection tests themselves are recovery-gated and are
 # counted by C1at.
 layer_c1ar_cargo_test_ext_pubsub_advanced_sub() {
-    _runci_guarded_test "C1ar advanced_subscriber" 4 \
+    # R2522 — 4 -> 5. The added case is the TIMESTAMPED arm, upstream's middle
+    # `handle_sample` branch, which wz had deferred: a sample with no
+    # source_info but WITH a body timestamp is now ordered by that clock
+    # (strictly-newer, per timestamp-id) instead of delivered unconditionally.
+    # It runs HERE as well as on C1at/C1av because `State::deliver_unsequenced`
+    # is shared by the recovery-off `handle` and the recovery-on `handle_live`
+    # — one arm, both ingest paths, so both lanes must see it or the shared
+    # helper could rot on one side unseen.
+    _runci_guarded_test "C1ar advanced_subscriber" 5 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-subscriber,ext-pubsub-advanced-publisher,pubsub-allow-loop \
         --lib advanced_subscriber --quiet || return 1
     (cd crates \
@@ -7121,10 +7129,15 @@ layer_c1be_cargo_test_query_value() {
 # THIS lane rather than C1ar because `AdvancedSubscriberOptions` — and so the
 # detection knob — is behind the recovery gate.
 layer_c1at_cargo_test_ext_pubsub_advanced_recovery() {
-    _runci_guarded_test "C1at advanced_subscriber" 21 \
+    # R2522 — 21 -> 22 on BOTH legs. Same added case as C1ar: the timestamped
+    # arm. It reaches this lane through `handle_live`, the recovery-on ingest
+    # path, which shares `State::deliver_unsequenced` with the recovery-off
+    # `handle` — so a regression on either side is visible in both lanes rather
+    # than only in whichever one happens to be read.
+    _runci_guarded_test "C1at advanced_subscriber" 22 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-recovery,ext-pubsub-advanced-publisher,pubsub-allow-loop \
         --lib advanced_subscriber --quiet || return 1
-    # R311y836 — the SAME 21 cases again, with `query-consolidation` composed on
+    # R311y836 — the SAME 22 cases again, with `query-consolidation` composed on
     # top. Not a re-run for its own sake: `ext-pubsub-advanced-recovery` does not
     # pull `query-consolidation`, so in the leg above the three
     # `#[cfg(feature = "query-consolidation")]` pins in `advanced_subscriber.rs`
@@ -7143,7 +7156,7 @@ layer_c1at_cargo_test_ext_pubsub_advanced_recovery() {
     # being INCIDENTAL: C1 has it only because some other workspace member
     # happens to enable the feature, so a Cargo.toml edit elsewhere could retire
     # it silently. Here it is named.
-    _runci_guarded_test "C1at advanced_subscriber (query-consolidation)" 21 \
+    _runci_guarded_test "C1at advanced_subscriber (query-consolidation)" 22 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-recovery,ext-pubsub-advanced-publisher,pubsub-allow-loop,query-consolidation \
         --lib advanced_subscriber --quiet || return 1
     (cd crates \
@@ -7224,7 +7237,11 @@ layer_c1av_cargo_test_ext_pubsub_advanced_history() {
     # reduced build, where it printed `left: [None]`. So this lane grades the
     # target's VALUE; the feature-closure line is graded by the reduced-features
     # surface, not here.
-    _runci_guarded_test "C1av advanced_subscriber" 37 \
+    # R2522 — 37 -> 38, the same timestamped arm C1ar and C1at count. This lane
+    # is also where `ext-pubsub-advanced-history`'s clause (5) closes: that
+    # clause was open BECAUSE the timestamped arm was missing, so the history
+    # atom and the subscriber atom are answered by one build and graded here.
+    _runci_guarded_test "C1av advanced_subscriber" 38 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-history,ext-pubsub-advanced-publisher,pubsub-allow-loop \
         --lib advanced_subscriber --quiet || return 1
     (cd crates \

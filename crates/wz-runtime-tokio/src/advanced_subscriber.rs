@@ -14,17 +14,28 @@
 //!   by `(zid, eid)`. `sn == last + 1` delivers in order; `sn <= last` is a
 //!   duplicate / out-of-order-late sample and is DROPPED. A forward GAP
 //!   (`sn > last + 1`) is handled per the recovery mode (below).
-//! - **No sequenced source-id**: delivered immediately, no de-duplication.
+//! - **Timestamped** (R2522; no `SourceInfo`, but a body timestamp): keyed
+//!   by the TIMESTAMP's own id, ordered by the uhlc `(time, id)` relation.
+//!   A sample delivers only when it is STRICTLY newer than the newest
+//!   already delivered for that id, so a retransmission at an equal instant
+//!   and a late arrival at an older one are both DROPPED. This is what a
+//!   `Sequencing::Timestamp` publisher's samples get.
+//! - **Neither**: delivered immediately, no de-duplication — the fallback,
+//!   which is why it is read LAST.
 //!
-//! The TIMESTAMPED de-duplication path (a `Sequencing::Timestamp`
-//! publisher's samples, keyed by the timestamp id) is DEFERRED to the
-//! round that composes + tests a Timestamp-mode publisher. Its ordering
-//! primitive — `wz_session_core::sample::timestamp_strictly_newer` — is now
-//! a shared SSOT (R311y73 lifted it out of the storage-backend-gated
-//! `storage_state` so this ext-pubsub atom can consume it WITHOUT pulling
-//! storage), so the path is unblocked: when built it imports that fn. This
-//! round builds the SEQUENCED path the `SequenceNumber` publisher (the
-//! R311y69 default) produces.
+//! Those three are upstream's three `handle_sample` arms, in upstream's
+//! order; `State::deliver_unsequenced` holds the second and third, shared
+//! by both ingest paths. The ordering primitive is
+//! `wz_session_core::sample::timestamp_strictly_newer`, a shared SSOT since
+//! R311y73 lifted it out of the storage-backend-gated `storage_state` so
+//! this ext-pubsub atom could consume it WITHOUT pulling storage.
+//!
+//! R2522 replaced this paragraph's predecessor, which said the timestamped
+//! path was "DEFERRED to the round that composes + tests a Timestamp-mode
+//! publisher". No such publisher was needed in the end: `PublishOptions`
+//! already carries `with_timestamp`, so the mode's WIRE SHAPE — a Put with
+//! a body timestamp and no source_info — is reachable from the ordinary
+//! publish path, and that shape is all the subscriber arm keys on.
 //!
 //! ## Forward-gap handling: `Miss` vs recovery (R311y82)
 //!
@@ -566,6 +577,56 @@ struct RecoveryRequest {
 struct State {
     /// `(zid, eid)` -> per-source ordering state.
     sequenced: HashMap<(Vec<u8>, u32), SourceState>,
+    /// R2522 — TIMESTAMP-mode ordering: the newest instant delivered per
+    /// timestamp-id, which is the second of upstream's three `handle_sample`
+    /// arms (`zenoh-ext/src/advanced_subscriber.rs` @ `} else if let Some(timestamp) = sample.timestamp() {`).
+    ///
+    /// # Why the key is the TIMESTAMP's id and not a source_info zid
+    ///
+    /// These samples carry no source_info at all — that is what makes them the
+    /// timestamped case. Upstream keys on `*timestamp.get_id()`, so the identity
+    /// is the clock's, and two publishers sharing a zid share a state exactly as
+    /// they do upstream.
+    ///
+    /// # Why a bare instant and not a `SourceState`, and what that gives up
+    ///
+    /// Read at the pin rather than assumed, because the assumption was wrong:
+    /// upstream does NOT keep a bare instant. `zenoh-ext/src/advanced_subscriber.rs`
+    /// @ `timestamped_states: LruCache<ID, SourceState<Timestamp>>,` reuses the
+    /// SAME struct as the sequenced side, so the timestamped state carries
+    /// `pending_samples` and `pending_queries` too.
+    ///
+    /// Two of those fields genuinely do not apply here and one does:
+    ///
+    /// * `Miss` / `nb` — never computed for a timestamped source in either
+    ///   implementation. "The sample after this one" is not a thing a clock
+    ///   defines, and upstream's timestamped arm calls no miss handler.
+    /// * `pending_samples` / `pending_queries` — these DO apply, and wz does not
+    ///   have them yet. Upstream buffers a timestamped sample while a history
+    ///   GET is in flight (`if (states.global_pending_queries == 0 &&
+    ///   state.pending_queries == 0) || states.max_history_depth == 1`) so the
+    ///   older recovered samples deliver before the live ones, spilling through
+    ///   `flush_timestamped_source` at the depth bound. wz's map holds the
+    ///   ordering core only, so a timestamped source seen DURING the startup
+    ///   history query delivers live-first.
+    ///
+    /// That gap is a named residual of `ext-pubsub-advanced-history`, not an
+    /// oversight of this field: it is the same buffering the sequenced side gets
+    /// from `history_pending` + `max_history_depth` above, and it needs the
+    /// timestamped half of the late-publisher path
+    /// ([`parse_heartbeat_source`]'s `uhlc` shape) to have a subject at all.
+    ///
+    /// The comparison is `wz_session_core::sample::timestamp_strictly_newer`,
+    /// which already implements uhlc's `(time, 16-byte LE id)` `Ord` — the
+    /// primitive the storage plane's newer-wins gate keys off. STRICTLY newer,
+    /// so a retransmission at an equal instant is dropped; upstream's
+    /// `last_delivered.map(|t| t < *timestamp)` says the same.
+    ///
+    /// Ungated on purpose: `ext-pubsub-advanced-subscriber` (this module's own
+    /// gate) now pulls `pubsub-timestamp`, so a `#[cfg]` here would be
+    /// vacuously true — a condition that can never be false reads as coverage
+    /// while grading nothing.
+    timestamped: HashMap<Vec<u8>, wz_session_core::sample::TimestampHint>,
     on_sample: Box<dyn FnMut(Sample) + Send>,
     on_miss: Box<dyn FnMut(Miss) + Send>,
     /// R311y82 — whether forward gaps BUFFER + trigger a recovery GET (true,
@@ -593,14 +654,52 @@ struct State {
     max_history_depth: usize,
 }
 
+impl State {
+    /// R2522 — upstream's SECOND and THIRD `handle_sample` arms: what to do
+    /// with a sample that carries no `source_info`, and therefore no sequence
+    /// number to order on.
+    ///
+    /// Upstream splits that case in two — `zenoh-ext/src/advanced_subscriber.rs` @ `} else if let Some(timestamp) = sample.timestamp() {`
+    /// is the first half and its trailing `else` the second — and so does this:
+    ///
+    /// * WITH a timestamp — order by the clock. The sample is admitted only
+    ///   when its instant is STRICTLY newer than the newest already delivered
+    ///   for the same timestamp-id, so a retransmission at an equal instant and
+    ///   a late arrival at an older one are both dropped. Upstream's
+    ///   `state.last_delivered.map(|t| t < *timestamp).unwrap_or(true)` is the
+    ///   same predicate; [`wz_session_core::sample::timestamp_strictly_newer`]
+    ///   is the uhlc `(time, 16-byte LE id)` comparison it resolves to.
+    /// * WITHOUT one — there is nothing to order by and nothing to
+    ///   de-duplicate against, so deliver unconditionally. This is the arm wz
+    ///   already had, and the reason it must stay LAST: it is the fallback, not
+    ///   the rule.
+    ///
+    /// Shared by both ingest paths on purpose. `handle` (recovery off) and
+    /// `handle_live` (recovery on) are cfg-split, but this case does not depend
+    /// on retransmission at all — upstream runs one `handle_sample` for both —
+    /// so an ungated `impl` block keeps the two from drifting apart.
+    fn deliver_unsequenced(&mut self, view: &dyn SampleView) {
+        if let Some(ts) = view.timestamp() {
+            let newer = match self.timestamped.get(&ts.zid) {
+                Some(last) => wz_session_core::sample::timestamp_strictly_newer(ts, last),
+                None => true,
+            };
+            if newer {
+                self.timestamped.insert(ts.zid.clone(), ts.clone());
+                (self.on_sample)(Sample::from_view(view));
+            }
+            return;
+        }
+        (self.on_sample)(Sample::from_view(view));
+    }
+}
+
 #[cfg(not(feature = "ext-pubsub-advanced-recovery"))]
 impl State {
     /// The zenoh `handle_sample` state machine (retransmission-off subset).
     fn handle(&mut self, view: &dyn SampleView) {
         let Some(source_info) = view.source_info() else {
-            // No sequenced source-id: deliver, no de-duplication (the
-            // timestamped-dedup path is deferred — see the module docs).
-            (self.on_sample)(Sample::from_view(view));
+            self.deliver_unsequenced(view);
             return;
         };
         let key = (source_info.zid_prefix().to_vec(), source_info.eid);
@@ -609,6 +708,7 @@ impl State {
             sequenced,
             on_sample,
             on_miss,
+            ..
         } = self;
         let on_sample: &mut dyn FnMut(Sample) = &mut **on_sample;
         let on_miss: &mut dyn FnMut(Miss) = &mut **on_miss;
@@ -649,8 +749,11 @@ impl State {
     /// the state lock.
     fn handle_live(&mut self, view: &dyn SampleView) -> Option<RecoveryRequest> {
         let Some(source_info) = view.source_info() else {
-            // No sequenced source-id: deliver, no de-duplication.
-            (self.on_sample)(Sample::from_view(view));
+            // R2522 — the timestamped / bare arms, shared with the
+            // recovery-off `handle`; see [`State::deliver_unsequenced`].
+            // Neither can ask for a retransmission: a clock defines no "the
+            // sample after this one", so there is no gap to recover.
+            self.deliver_unsequenced(view);
             return None;
         };
         let key = (source_info.zid_prefix().to_vec(), source_info.eid);
@@ -1819,6 +1922,7 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
     {
         let state = Arc::new(Mutex::new(State {
             sequenced: HashMap::new(),
+            timestamped: HashMap::new(),
             on_sample: Box::new(on_sample),
             on_miss: Box::new(on_miss),
         }));
@@ -1869,6 +1973,7 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
     {
         let state = Arc::new(Mutex::new(State {
             sequenced: HashMap::new(),
+            timestamped: HashMap::new(),
             on_sample: Box::new(on_sample),
             on_miss: Box::new(on_miss),
             retransmission: false,
@@ -1984,6 +2089,7 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
 
         let state = Arc::new(Mutex::new(State {
             sequenced: HashMap::new(),
+            timestamped: HashMap::new(),
             on_sample: Box::new(on_sample),
             on_miss: Box::new(on_miss),
             retransmission,
@@ -2342,6 +2448,118 @@ mod tests {
             .expect("loopback sequenced publish")
     }
 
+    /// Publish `payload` under a TIMESTAMP and no source_info — the shape a
+    /// Timestamp-mode publisher emits.
+    ///
+    /// `zid` is the timestamp's own id, which is what upstream keys the
+    /// timestamped state on (`*timestamp.get_id()`), NOT a source_info zid:
+    /// these samples carry no source_info at all, which is the whole point.
+    fn put_timestamped(session: &TokioSession, payload: u8, time: u64, zid: &[u8]) -> usize {
+        session
+            .publish(
+                "demo/data",
+                &[payload],
+                PublishOptions::put()
+                    .with_locality(Locality::SessionLocal)
+                    .with_timestamp(wz_session_core::sample::TimestampHint {
+                        time,
+                        zid: zid.to_vec(),
+                    }),
+            )
+            .expect("loopback timestamped publish")
+    }
+
+    /// R2522 — TIMESTAMP-mode de-duplication: upstream's middle
+    /// `handle_sample` arm, which this subscriber now has.
+    ///
+    /// # What it grades
+    ///
+    /// Upstream's `handle_sample` has THREE arms, not two: sequenced (a
+    /// source_info sn), then TIMESTAMPED (`else if let Some(timestamp) =
+    /// sample.timestamp()`, keyed on `*timestamp.get_id()` and ordered by the
+    /// uhlc `(time, id)` Ord), then a bare deliver for a sample carrying
+    /// neither. wz had the first and the third; the middle one was the standing
+    /// residual of `ext-pubsub-advanced-subscriber` and the reason
+    /// `ext-pubsub-advanced-history`'s clause (5) was open — one build answers
+    /// both atoms, and this is the guard on it.
+    ///
+    /// # Why the fixture is a REPEATED timestamp
+    ///
+    /// It is the smallest observable difference. Upstream admits a sample only
+    /// when `state.last_delivered.map(|t| t < *timestamp).unwrap_or(true)`, so
+    /// the second arrival at an EQUAL timestamp is dropped — strictly, not
+    /// `<=`. Before R2522 wz delivered both, because nothing was recorded to
+    /// compare against; the RED this was written against read
+    /// `left: [[160], [161], [162], [163]]` / `right: [[160], [161]]`. The
+    /// trailing older-150 sample grades the other half of the claim: "ordered
+    /// by its own clock", not "de-duplicated by identity" — an identity-keyed
+    /// implementation would drop the repeat and still deliver the 150. The
+    /// final sample carries a SECOND timestamp-id at an instant older than
+    /// every one before it and must still deliver, which is what separates
+    /// "per-id state" from "one global newest instant"; the latter passes every
+    /// other assertion here.
+    ///
+    /// # The control
+    ///
+    /// Deleting the `if let Some(ts) = view.timestamp()` arm from
+    /// [`State::deliver_unsequenced`] must red THIS test and nothing else:
+    /// every other sample in this module carries a `source_info`, so it never
+    /// reaches the arm.
+    ///
+    /// The ordering primitive is NOT behind the storage gate, which the
+    /// residual's own text doubted:
+    /// `wz_session_core::sample::timestamp_strictly_newer` is `pub`, `alloc`-
+    /// gated, and implements uhlc's `(time, 16-byte LE id)` comparison.
+    #[test]
+    fn timestamped_samples_are_deduplicated_by_their_own_clock() {
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let session = TokioSession::new(actions, observer, clock);
+
+        let delivered = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+        let d = Arc::clone(&delivered);
+        let _sub = AdvancedSubscriber::declare(
+            &session,
+            "demo/data",
+            move |sample: Sample| d.lock().unwrap().push(sample.payload.clone()),
+            |_miss: Miss| {},
+        )
+        .expect("advanced subscriber declares against the test link");
+
+        let source = &[0xC3u8, 0xC3];
+        put_timestamped(&session, 0xA0, 100, source);
+        put_timestamped(&session, 0xA1, 200, source);
+        // The SAME instant from the SAME source: a retransmission, which the
+        // timestamped arm must drop because 200 is not strictly newer than 200.
+        put_timestamped(&session, 0xA2, 200, source);
+        // And an OLDER one, which is the other half of "ordered by its own
+        // clock" rather than "deduplicated by identity".
+        put_timestamped(&session, 0xA3, 150, source);
+        // A DIFFERENT clock, at an instant older than everything above. It must
+        // deliver: the state is keyed PER timestamp-id (upstream's
+        // `*timestamp.get_id()`), so one source's clock never suppresses
+        // another's. A single global "newest instant" would drop this, and
+        // would pass every assertion above.
+        put_timestamped(&session, 0xB0, 50, &[0xD4u8, 0xD4]);
+
+        // ANTI-VACUITY FIRST: the loopback really delivered something, so a
+        // dropped-everything build cannot satisfy the claim below.
+        let got = delivered.lock().unwrap().clone();
+        assert!(
+            !got.is_empty(),
+            "the SessionLocal loopback delivered nothing, so nothing below is \
+             being measured"
+        );
+        assert_eq!(
+            got,
+            vec![vec![0xA0u8], vec![0xA1u8], vec![0xB0u8]],
+            "a Timestamp-mode source is ordered by its OWN clock: the repeat at \
+             200 and the older 150 are both DROPPED, while the second source's \
+             older 50 still delivers because the state is keyed per timestamp-id"
+        );
+    }
+
     /// State-machine unit test (synthetic source, controlled sns): a source
     /// feeds 0,1, then 3 (a gap at 2), then a duplicate 1. The plain advanced
     /// subscriber must deliver 0,1,3 in order, fire one Miss(nb=1) on the
@@ -2518,6 +2736,7 @@ mod tests {
         let m = Arc::clone(&misses);
         let mut state = State {
             sequenced: HashMap::new(),
+            timestamped: HashMap::new(),
             on_sample: Box::new(move |s: Sample| d.lock().unwrap().push(s.payload[0])),
             on_miss: Box::new(move |miss: Miss| m.lock().unwrap().push(miss)),
             retransmission: true,
@@ -2582,6 +2801,7 @@ mod tests {
         let m = Arc::clone(&misses);
         let mut state = State {
             sequenced: HashMap::new(),
+            timestamped: HashMap::new(),
             on_sample: Box::new(move |s: Sample| d.lock().unwrap().push(s.payload[0])),
             on_miss: Box::new(move |miss: Miss| m.lock().unwrap().push(miss)),
             retransmission: true,
@@ -2868,6 +3088,7 @@ mod tests {
     fn periodic_requests_reask_each_source_once() {
         let mut state = State {
             sequenced: HashMap::new(),
+            timestamped: HashMap::new(),
             on_sample: Box::new(|_| {}),
             on_miss: Box::new(|_| {}),
             retransmission: true,
@@ -2912,6 +3133,7 @@ mod tests {
         // Retransmission OFF -> the periodic trigger is inert.
         let mut plain = State {
             sequenced: HashMap::new(),
+            timestamped: HashMap::new(),
             on_sample: Box::new(|_| {}),
             on_miss: Box::new(|_| {}),
             retransmission: false,
@@ -3082,6 +3304,7 @@ mod tests {
     fn handle_heartbeat_requests_bounded_get_when_ahead() {
         let mut state = State {
             sequenced: HashMap::new(),
+            timestamped: HashMap::new(),
             on_sample: Box::new(|_| {}),
             on_miss: Box::new(|_| {}),
             retransmission: true,
@@ -3112,6 +3335,7 @@ mod tests {
 
         let mut plain = State {
             sequenced: HashMap::new(),
+            timestamped: HashMap::new(),
             on_sample: Box::new(|_| {}),
             on_miss: Box::new(|_| {}),
             retransmission: false,
@@ -3234,6 +3458,7 @@ mod tests {
         let d = Arc::clone(&delivered);
         let mut state = State {
             sequenced: HashMap::new(),
+            timestamped: HashMap::new(),
             on_sample: Box::new(move |s: Sample| d.lock().unwrap().push(s.payload[0])),
             on_miss: Box::new(|_| {}),
             retransmission: true,
@@ -3290,6 +3515,7 @@ mod tests {
             let d = Arc::clone(&delivered);
             let mut state = State {
                 sequenced: HashMap::new(),
+                timestamped: HashMap::new(),
                 on_sample: Box::new(move |s: Sample| d.lock().unwrap().push(s.payload[0])),
                 on_miss: Box::new(|_| {}),
                 retransmission: true,
@@ -3343,6 +3569,7 @@ mod tests {
             let d = Arc::clone(&delivered);
             let mut state = State {
                 sequenced: HashMap::new(),
+                timestamped: HashMap::new(),
                 on_sample: Box::new(move |s: Sample| d.lock().unwrap().push(s.payload[0])),
                 on_miss: Box::new(|_| {}),
                 retransmission: true,
@@ -3447,6 +3674,7 @@ mod tests {
         let d = Arc::clone(&delivered);
         let mut state = State {
             sequenced: HashMap::new(),
+            timestamped: HashMap::new(),
             on_sample: Box::new(move |s: Sample| d.lock().unwrap().push(s.payload[0])),
             on_miss: Box::new(|_| {}),
             retransmission: true,
@@ -3830,6 +4058,7 @@ mod tests {
     fn handle_late_publisher_opens_one_slot_per_source() {
         let mut state = State {
             sequenced: HashMap::new(),
+            timestamped: HashMap::new(),
             on_sample: Box::new(|_| {}),
             on_miss: Box::new(|_| {}),
             retransmission: false, // late-pub detection is NOT a retransmission concern
