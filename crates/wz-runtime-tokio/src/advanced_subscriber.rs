@@ -309,10 +309,28 @@ pub struct AdvancedSubscriberOptions {
     /// to a remote publisher's `@adv` cache AND the local loopback; `SessionLocal`
     /// pins it to loopback (single-host composition — a loopback-only GET completes
     /// synchronously without the deadline sweep). wz models the GET reach as a
-    /// `Locality`; zenoh hardwires the GET destination to `Any` (the GET axis it
-    /// exposes is `query_target: QueryTarget`, advanced_subscriber.rs:143/638 — a
-    /// DIFFERENT axis wz does not model here). `Any` is the zenoh-faithful default;
-    /// the `SessionLocal` pin is a wz single-host superset.
+    /// `Locality`; zenoh hardwires the GET destination to `Any`. `Any` is the
+    /// zenoh-faithful default; the `SessionLocal` pin is a wz single-host
+    /// superset.
+    ///
+    /// R2505 — THIS PARAGRAPH USED TO SAY the GET axis upstream exposes is
+    /// `query_target: QueryTarget`, "a DIFFERENT axis wz does not model here".
+    /// Half of that is still true and half is now false, so both halves are
+    /// stated rather than the sentence quietly deleted:
+    /// · STILL TRUE — `Locality` and `QueryTarget` are different axes, and wz
+    ///   still exposes no `query_target` KNOB on `AdvancedSubscriberOptions`.
+    /// · NO LONGER TRUE — wz does not model the axis, but it now SENDS it:
+    ///   [`issue_recovery_get`] pins `QueryTarget::All` on every recovery and
+    ///   history GET. Not exposing a knob is an API choice; sending no target
+    ///   ext was a WIRE consequence, because an absent ext reads back as
+    ///   BestMatching and one queryable then answers a history GET.
+    /// ⚠ The old sentence also carried two upstream coordinates,
+    /// `advanced_subscriber.rs:143/638`, and BOTH were rot: at the 1.10.0 pin
+    /// :143 is the tail of a `retention_period` builder and :638 is inside the
+    /// `max_history_depth == 1` fast path. The field and its default are at
+    /// `zenoh-ext/src/advanced_subscriber.rs` @ `pub(crate) query_target: QueryTarget,`
+    /// and @ `query_target: QueryTarget::All,` — anchored, because a corrected
+    /// number rots again at the next pin bump.
     pub get_locality: Locality,
     /// Timeout applied to BOTH the recovery + history GETs (zenoh's builder
     /// `query_timeout`, shared by history + retransmission; default 10s). A
@@ -1027,6 +1045,26 @@ fn issue_recovery_get<R, T>(
     let final_pending = Arc::clone(pending);
     let final_finish = finish.clone();
     let sub_chunks: Vec<String> = sub_keyexpr.split('/').map(str::to_string).collect();
+    // R2505 — EVERY recovery / history GET carries `QueryTarget::All`, and it
+    // is pinned HERE rather than at the three call sites because this helper is
+    // the one seam all of them pass through: `session.query` below is the only
+    // GET this module issues.
+    //
+    // Upstream pins the same value on every one of its GETs --
+    // `zenoh-ext/src/advanced_subscriber.rs` @ `query_target: QueryTarget::All,`
+    // is the default its builder carries, applied at each `.get(..)`.
+    //
+    // ⚠ WHY IT MATTERS ON THE WIRE, which is where the defect lives: wz's own
+    // `query_mode.rs` records that `BEST_MATCHING (0)` is NEVER TRANSMITTED --
+    // an absent target ext reads back as BestMatching. So a GET with no target
+    // is answered by ONE queryable, and a history GET answered by one queryable
+    // can return a strictly smaller history. That is a delivery difference, not
+    // a cosmetic one.
+    //
+    // Fully qualified rather than imported, following this module's existing
+    // habit at the `with_consolidation` pins: a `use` is a doc-link edit here
+    // (Layer C1bz), and this needs none.
+    let opts = opts.with_target(wz_session_core::query_mode::QueryTarget::All);
     let issued = session.query(
         keyexpr,
         opts,

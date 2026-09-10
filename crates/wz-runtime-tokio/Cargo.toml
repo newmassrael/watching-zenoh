@@ -357,6 +357,18 @@ ext-pubsub-advanced-recovery = [
     # not never-expire); the explicit timeout still pins the recovery GET's own
     # bound. `with_timeout_ms` no-ops without this feature.
     "query-timeout",
+    # R2505 — the SAME reason as the line above, on the TARGET axis. The
+    # recovery / history GETs pin `QueryTarget::All` in `issue_recovery_get`,
+    # and `with_target` is a SILENT NO-OP without this feature: the field stays
+    # at its `None` sentinel, which elides the Q_T flag on the wire, so a peer
+    # reads BestMatching and ONE queryable answers. Without this line the call
+    # compiles, every test passes, and the axis is inert in exactly the builds
+    # this atom is about — "a field no code reads makes the tail LOOK
+    # honoured", which R2496 refused for `exit_on_failure`.
+    # MEASURED before adding, by closing the feature table transitively: the
+    # closure of `ext-pubsub-advanced-history` was 22 features and carried
+    # `query-timeout` but NOT `query-target`.
+    "query-target",
     "reply-source-info",
 ]
 # R311y562 — a NAMED passthrough for the reply-side source-info emit gate, so a
