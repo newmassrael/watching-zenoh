@@ -33,6 +33,7 @@ printed, `commit` is the tip being replaced (the sha the run graded), and
 |---|---|---|---|---|---|
 | R2496 | `34393145847` | `0df6bfeb` | C0 binary-dep · C0 (armed) provenance · C1bt wz-capture | 709 | R2498 |
 | R2497 | `34393145847` | `0df6bfeb` | C0 binary-dep · C0 (armed) provenance · C1bt wz-capture | 709 | R2498 |
+| R2535 | `34465003136` | `6b112827` | C0 sn-res-words selftest (two jobs, one cause) · C1ce census `unstable` row | 717 | |
 
 ## What the rows above say
 
@@ -45,3 +46,10 @@ hosted CI.
 
 ⚠ A row whose `paid` column is empty is an outstanding acknowledgement. That is
 the number this file exists to make countable.
+
+R2535's row is the shape the file was built for rather than the shape it
+warns about: the push it covers CARRIES both repairs — `d039d425` for the
+`sn-res-words` cause and this round's commit for the census row — so the `paid`
+column is empty only because no hosted run has graded them yet. The round that
+reads run `34465003136`'s successor fills it in, and an empty column that
+survives that reading means the repair did not hold.

@@ -421,7 +421,25 @@ const BASELINES: &[(&str, usize, &str, &str)] = &[
     // really did not carry the value — but the TREE did: `QueryView::source_info`
     // is filled by the receive path out of the query's own ext, so the work was
     // one layer of wiring rather than a new wire feature.
-    ("unstable", 0, "1.10.0", "C1ce"),
+    //
+    // R2535 — the VERSION moves 1.10.0 -> 1.10.1 and the COUNT does NOT, and it
+    // is the RE-MEASUREMENT that says so rather than an assumption that a patch
+    // is inert. A 1.10.1 `unstable` oracle was built (`install-zenoh-c-arm.sh
+    // unstable`, which is minutes of the whole zenoh graph) and the leg reports
+    // "wz defines 757 of the reference's 757 public symbols; 0 remain" — the
+    // same 757 the 1.10.0 build exported, so the reference side of this
+    // subtraction did not move at all. That agrees with what upstream's own
+    // diff says: `git diff 1.10.0 1.10.1` over the zenoh-c checkout touches
+    // Cargo files, `build.rs`, `install/` and `version.txt` and NOT one line of
+    // `src/`, so there was no new C entry point to define.
+    //
+    // ⛔ THE ROW WAS STALE FOR FIVE PUSHES AND ONLY HOSTED CI SAW IT, because
+    // the machine that produced those commits had a 1.10.0 oracle: the row said
+    // 1.10.0, the installed oracle said 1.10.0, and the version assertion above
+    // compared two stale numbers and passed. What made the local oracle stale is
+    // named at `install-zenoh-c.sh`'s examples branch — the source checkout the
+    // arm build copies from was never re-cloned when the pin moved.
+    ("unstable", 0, "1.10.1", "C1ce"),
     (
         "nounstable-shm",
         1,

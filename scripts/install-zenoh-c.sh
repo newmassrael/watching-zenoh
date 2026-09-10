@@ -83,8 +83,37 @@ else
 fi
 
 # ── 3. the example corpus ────────────────────────────────────────────────────
+#
+# R2535 — "already there" is not "at the pin", and the difference is what left
+# this workstation grading five pushes against the wrong upstream. This clone is
+# not merely the examples: it is the SOURCE CHECKOUT that
+# `install-zenoh-c-arm.sh` copies to build every non-published oracle arm, and
+# that `zenoh_c_archive_arm.py --derive` reads upstream's release workflow out
+# of. The presence test below skipped it whenever the directory existed, so
+# R2527's pin move to 1.10.1 re-fetched the ARCHIVE into $PREFIX — which the
+# assertion at the bottom of this file checks — and silently kept a 1.10.0
+# checkout here, which nothing checked. Hosted CI never saw it because its cache
+# key carries the version, so a bump is a cache miss and a fresh clone.
+#
+# The repair is the same rule this file already applies one section down: read
+# the version the artifact itself states and compare it to the pin. It FAILS on
+# a mismatch instead of re-cloning, for the same reason the assertion below
+# does — this directory is a git checkout an operator may have moved on purpose,
+# and `rm -rf` on it is not something a provisioning script should decide.
 if [[ -f "$EXAMPLES_PARENT/examples/z_put.c" ]]; then
-    say "examples already at $EXAMPLES_PARENT/examples"
+    checkout_version="$(tr -d '[:space:]' < "$EXAMPLES_PARENT/version.txt" 2>/dev/null || true)"
+    if [[ "$checkout_version" != "$ZENOH_C_VERSION" ]]; then
+        say "FAIL: the checkout at $EXAMPLES_PARENT is"
+        say "      '${checkout_version:-unreadable}', not the pinned $ZENOH_C_VERSION."
+        say "      It is the source every oracle ARM is built from and the tree"
+        say "      the archive-arm derivation reads, so a stale one grades wz"
+        say "      against an upstream this tree does not pin. Move it:"
+        say "        git -C $EXAMPLES_PARENT fetch --depth 1 origin tag $ZENOH_C_VERSION"
+        say "        git -C $EXAMPLES_PARENT checkout $ZENOH_C_VERSION"
+        say "      (or remove it and re-run to re-clone)"
+        exit 1
+    fi
+    say "checkout already at $EXAMPLES_PARENT ($checkout_version)"
 else
     say "cloning zenoh-c ${ZENOH_C_VERSION} examples into $EXAMPLES_PARENT"
     rm -rf "$EXAMPLES_PARENT"

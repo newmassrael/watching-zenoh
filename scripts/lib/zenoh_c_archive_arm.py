@@ -464,6 +464,46 @@ def capi_c_test_feature_sets(text: str) -> list[set[str]]:
 
 # ── the two derivations ──────────────────────────────────────────────────────
 
+def checkout_version(ref: pathlib.Path) -> str:
+    """The version a zenoh-c source checkout SAYS it is, from `version.txt`.
+
+    R2535 — the one input of `derive_from_upstream` that can tell 1.10.0 from
+    1.10.1. Both of the files that derivation reads (`CMakeLists.txt` and
+    `.github/workflows/release.yml`) are BYTE-IDENTICAL across those two tags,
+    measured with `git diff 1.10.0 1.10.1 --` over them, so the answer it
+    returns cannot witness which release produced it.
+
+    Raises rather than returning a sentinel: a version this cannot read is a
+    checkout that cannot be told apart from a build of another upstream, and
+    `install-zenoh-c-arm.sh` already treats that as a FAIL on both of its
+    routes.
+    """
+    text = (ref / "version.txt").read_text(encoding="utf-8").strip()
+    if not text:
+        raise ValueError(f"{ref}/version.txt is empty")
+    return text
+
+
+def grade_checkout_version(seen: str, ref: pathlib.Path) -> str | None:
+    """`None` when `seen` is the pin, else the FAIL text naming both numbers.
+
+    Split out from `cmd_derive` so the selftest can drive the DECISION rather
+    than only the reader: the two-armed control this was built from is a real
+    checkout moved between two tags, which no selftest can arrange.
+    """
+    if seen == PIN:
+        return None
+    return (
+        f"  archive-arm FAIL: this derivation read a zenoh-c {seen}\n"
+        f"    checkout and the tree pins {PIN}. The files it parses are\n"
+        f"    identical across some releases, so its answer cannot say\n"
+        f"    which one it came from — a derivation against the old\n"
+        f"    upstream looks exactly like one against the new. Move the\n"
+        f"    checkout to {PIN} (`git -C {ref} fetch --depth 1 origin\n"
+        f"    tag {PIN} && git -C {ref} checkout {PIN}`) and re-run."
+    )
+
+
 def derive_from_upstream(ref: pathlib.Path) -> str:
     """The arm upstream's OWN release workflow builds the package with.
 
@@ -741,8 +781,38 @@ def cmd_derive(require: bool, ref: pathlib.Path, prefix: pathlib.Path) -> int:
         else:
             print(f"  archive-arm SKIP — no zenoh-c source checkout at {ref} ({exc})")
         upstream = None
+    # R2535 — WHICH RELEASE THAT CHECKOUT IS, asserted before its answer is
+    # believed. `cmd_check` above binds this file's PIN to the installer's, so a
+    # bump re-opens the derivation; what nothing checked is that the re-opened
+    # derivation reads the NEW upstream. It does not follow from the answer: the
+    # two files `derive_from_upstream` parses are identical at 1.10.0 and
+    # 1.10.1, so a stale checkout returns `unstable-shm` just as confidently.
+    #
+    # Measured on this workstation at R2535, which is why this exists rather
+    # than being a hypothetical: `~/zenoh-c-ref` sat at 1.10.0 for the five
+    # pushes after R2527 moved the pin, and `--derive --require` printed
+    # "upstream's release workflow builds the package `unstable-shm`" and exited
+    # 0 every time. The gate that catches a pin moving without a re-derivation
+    # had inherited the very blindness it was built to escape.
+    #
+    # It is judged only when the checkout is THERE — an absent one is already
+    # the SKIP / FAIL above, and saying it twice would turn one fact into two.
     if upstream is not None:
         reached += 1
+        try:
+            seen = checkout_version(ref)
+        except (OSError, ValueError) as exc:
+            print(f"  archive-arm FAIL: {ref} is a zenoh-c checkout whose version\n"
+                  f"    cannot be read ({exc}), so which upstream this derivation\n"
+                  f"    read is unknown. A check that cannot read its input must not\n"
+                  f"    report green.", file=sys.stderr)
+            rc = 1
+        else:
+            print(f"  archive-arm: the checkout at {ref} is zenoh-c {seen}")
+            stale = grade_checkout_version(seen, ref)
+            if stale is not None:
+                print(stale, file=sys.stderr)
+                rc = 1
         print(f"  archive-arm: upstream's release workflow builds the package "
               f"`{upstream}`")
         if upstream != ARCHIVE_ARM:
@@ -927,6 +997,45 @@ def cmd_selftest() -> int:
              len(sentences("Run install-zenoh-c.sh first. Then build.")) == 2)
         case("a version is not a sentence end",
              len(sentences("The pin is 1.10.0 today.")) == 1)
+
+        # ── the CHECKOUT VERSION (R2535) ─────────────────────────────────
+        #
+        # `--derive` reads two files that are byte-identical across 1.10.0 and
+        # 1.10.1, so its answer cannot witness which release it came from. The
+        # reader and the decision are driven separately: the reader over real
+        # files, the decision over the pin, so neither can pass by standing in
+        # for the other.
+        ck = d / "checkout"
+        ck.mkdir()
+        (ck / "version.txt").write_text(f"{PIN}\n")
+        case("a checkout states its version", checkout_version(ck) == PIN)
+        case("the pin passes", grade_checkout_version(PIN, ck) is None)
+
+        # The mutation is DERIVED from `PIN` rather than spelled, so it cannot
+        # silently stop mutating when the pin moves -- the class R2534 paid for
+        # in `sn_resolution_words.py`'s own selftest.
+        older = PIN.rsplit(".", 1)[0] + ".0" if PIN.rsplit(".", 1)[1] != "0" \
+            else PIN + ".0"
+        stale_msg = grade_checkout_version(older, ck)
+        case("a checkout that is not the pin reds",
+             stale_msg is not None and older in stale_msg and PIN in stale_msg)
+
+        # An unreadable version is a FAIL rather than a pass: the reader raises
+        # and `cmd_derive` turns that into rc=1.
+        (ck / "version.txt").write_text("   \n")
+        empty_raised = False
+        try:
+            checkout_version(ck)
+        except ValueError:
+            empty_raised = True
+        case("an empty version.txt raises", empty_raised)
+        (ck / "version.txt").unlink()
+        absent_raised = False
+        try:
+            checkout_version(ck)
+        except OSError:
+            absent_raised = True
+        case("an absent version.txt raises", absent_raised)
 
         # ── the lattice arms (item 616) ──────────────────────────────────
         #
