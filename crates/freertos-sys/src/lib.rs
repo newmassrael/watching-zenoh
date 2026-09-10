@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 //
-//! `freertos-sys` — hand-written FFI for the FreeRTOS-Kernel V11.1.0 core task
+//! `freertos-sys` — hand-written FFI for the FreeRTOS-Kernel core task
 //! API used by the watching-zenoh **cooperative single-task profile**
 //! (`wz-runtime-freertos`, R311y24+). The vendored kernel C is statically
 //! compiled by `build.rs` only on a bare-metal Cortex-M cross target

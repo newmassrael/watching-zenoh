@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
-# freertos-sys — statically compiles the vendored FreeRTOS-Kernel V11.1.0
-# (vendor/freertos-kernel, MIT) for the cooperative single-task profile, plus
+# freertos-sys — statically compiles the vendored FreeRTOS-Kernel
+# (vendor/freertos-kernel, MIT — the submodule IS the pin; R2529 struck the
+# version this line used to restate, which had said V11.1.0 through the V11.3.1
+# bump if nobody had looked) for the cooperative single-task profile, plus
 # hand-written FFI for the core task API. Mirrors the lwip-sys/zenoh-pico-sys
 # shape: real C build only on a bare-metal cross target WITH a consumer-supplied
 # FreeRTOSConfig.h (via WZ_FREERTOS_CONFIG — symmetric with lwip-sys's
@@ -20,7 +22,7 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 readme.workspace = true
-description = "FFI bindings to vendored FreeRTOS-Kernel V11.1.0 (ARM_CM3 cooperative single-task profile; LAYER-2 RTOS)."
+description = "FFI bindings to the vendored FreeRTOS-Kernel (ARM_CM3 cooperative single-task profile; LAYER-2 RTOS)."
 build = "build.rs"
 # `links` exposes the build.rs `cargo:KEY=VALUE` metadata as DEP_FREERTOS_<KEY>
 # in dependents' build scripts (mirrors lwip-sys's links="lwip"), so a consumer

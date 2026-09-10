@@ -143,11 +143,26 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 # on `z_timestamp_new`, a `Z_TEST_HOOKS`-gated test override, and one doc word.
 # Measured by diffing the headers, which is the same move that made R2527 cheap.
 #
-# FreeRTOS-Kernel is still 3 behind (V11.1.0 -> V11.3.1) and drags the MCU
-# deploy targets, so it keeps its own round and still reds the threshold arm
-# below — which is the correct state while the tree IS behind on it.
+# R2529 (open-debt item 711) — FreeRTOS-Kernel 3 -> 0, V11.1.0 -> V11.3.1, and
+# with it EVERY MEASURED ROW IS AT ZERO. The declared threshold is 0, so the
+# threshold arm below now has nothing to report — which is the first time this
+# table has been able to say that since the gate was built.
+#
+# Measured first, as with the two before it, and the surface is small by
+# construction rather than by luck: `crates/freertos-sys` binds TEN symbols and
+# compiles FIVE files. All ten are still declared at V11.3.1, all five still
+# exist at their paths, the GCC/ARM_CM3 port directory is intact, `xTaskCreate`'s
+# prototype is unchanged, and the ARM_CM3 `portmacro.h` still typedefs
+# `BaseType_t` as `long`, `UBaseType_t` as `unsigned long` and `StackType_t` as
+# `uint32_t` — the three wz mirrors in `freertos-sys/src/lib.rs`.
+#
+# ⚠ AND THIS ONE WAS VERIFIED BY RUNNING, not only by reading, because the
+# toolchain happened to be present: Layer G's `G.14 cross-real freertos-sys
+# thumbv7m-none-eabi` and `G.15 wz-runtime-freertos` both compiled, and Layer Q's
+# `Q.frt run mcu-freertos-demo via qemu-system-arm mps2-an385` BOOTED the new
+# kernel and passed. A header read cannot tell you a scheduler still schedules.
 PINNED: dict[str, tuple[str, int]] = {
-    "FreeRTOS/FreeRTOS-Kernel": ("MEASURED", 3),
+    "FreeRTOS/FreeRTOS-Kernel": ("MEASURED", 0),
     "eclipse-zenoh/zenoh": ("MEASURED", 0),
     "eclipse-zenoh/zenoh-c": ("MEASURED", 0),
     "eclipse-zenoh/zenoh-pico": ("MEASURED", 0),

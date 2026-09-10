@@ -13410,7 +13410,7 @@ layer_g_cross_compile_cortex_m() {
             fail=1
         fi
         # G.14 (R311y25) freertos-sys cross-real — compiles the vendored
-        # FreeRTOS-Kernel V11.1.0 ARM_CM3 port + core + heap_4 against the
+        # FreeRTOS-Kernel ARM_CM3 port + core + heap_4 against the
         # cooperative-profile reference config, flipping freertos-sys's
         # `freertos_real_build` path on (= the LAYER-2 RTOS foundation). Runs
         # ONLY on thumbv7m-none-eabi: the vendored ARM_CM3 port is ARMv7-M /

@@ -2,8 +2,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 //
 // freertos-sys build.rs — statically compiles the vendored FreeRTOS-Kernel
-// V11.1.0 core + the GCC/ARM_CM3 (ARMv7-M / Cortex-M3) port + heap_4 via
-// cc::Build. Modelled on lwip-sys/build.rs.
+// core + the GCC/ARM_CM3 (ARMv7-M / Cortex-M3) port + heap_4 via cc::Build.
+// Modelled on lwip-sys/build.rs. The VERSION is the submodule's; R2529 struck
+// the restatement that used to sit on this line.
 //
 // KEY difference from lwip-sys: the lwIP NO_SYS core compiles on the host (x86)
 // AND cross. The FreeRTOS ARM_CM3 port is Cortex-M-SPECIFIC (port.c manipulates
