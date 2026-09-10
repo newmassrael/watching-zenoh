@@ -314,7 +314,21 @@ const BASELINES: &[(&str, usize, &str, &str)] = &[
     //     segment FILES. The provider's segments are process-local `Vec`s, so
     //     it has no value to carry and no witness to build. Left rather than
     //     closed as a no-op.
-    ("unstable-shm", 10, "1.10.0", "C1cc"),
+    // R2532 — the VERSION moves 1.10.0 -> 1.10.1 and the COUNT does NOT, and
+    // the count staying is a measurement rather than an assumption that a patch
+    // is inert: upstream's two standalone archives export the SAME 878 symbols,
+    // with the same ten `z_alloc_layout_*`, so the reference side of this
+    // subtraction did not move at all.
+    //
+    // ⚠ MEASURED WRONG FIRST, and the trap is worth the line because it reads
+    // exactly like a real regression: run the census after a plain
+    // `cargo build -p wz-capi-c` and the gap reports 122, not 10. The extra 112
+    // are wz's OWN shared-memory exports, absent because the default build
+    // omits them. `_runci_build_capi_c_for_oracle` picks the features by
+    // grepping the INSTALLED `zenoh_configure.h` for `Z_FEATURE_SHARED_MEMORY`
+    // and `Z_FEATURE_UNSTABLE_API`, so a hand-built cdylib is measured against
+    // an oracle it was not built for. Build it the way the lane does.
+    ("unstable-shm", 10, "1.10.1", "C1cc"),
     // R311y614 — the two arms that had NO oracle on any machine, and therefore
     // no row: the gate hard-FAILED on them rather than guessing a ceiling from
     // a neighbour. `scripts/install-zenoh-c-arm.sh` builds any of the four, so
