@@ -114,6 +114,25 @@ pub mod fields_json;
 /// duplicated (packet byte layout) and what is not (the capture itself).
 #[cfg(feature = "fixtures")]
 pub mod fixtures;
+/// R2518 — `network-codecs`-gated, which is what this plane always needed and
+/// never said.
+///
+/// It reads DECLARATIONS: `NetworkMessage::Declare` is `codec-declare`-gated in
+/// `wz-session-core`, and `network-codecs` is this crate's name for the set that
+/// forwards it. Ungated, the module referenced a variant that a reduced build
+/// does not have — `cargo build -p wz-capture --no-default-features --features
+/// reassembly` failed on it, which is exactly the set `wz-packet-socket` asks
+/// for (`default-features = false, features = ["reassembly"]`).
+///
+/// The whole module rather than the declare arm alone, on `crate::payload`'s
+/// precedent: gating the arm leaves the open-declaration index, `withdraw`,
+/// `judge_answer` and `space_of` compiled and unreachable, and the compiler said
+/// so as four dead-code errors. A plane whose subject is declarations does not
+/// have a useful half without them.
+///
+/// Both consumers already carry the feature (`wz-analyze`, and one integration
+/// test), so nothing that used this plane loses it.
+#[cfg(feature = "network-codecs")]
 pub mod interest;
 /// R311y714 (§1.1f) — the capture read as NODES: zids, their roles, and the
 /// links where both ends named themselves. The one plane whose unit is not a
