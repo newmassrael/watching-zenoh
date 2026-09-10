@@ -50,6 +50,18 @@ wz-packet-socket = { path = "../wz-packet-socket", features = ["tap"] }
 wz-session-core = { path = "../wz-session-core", features = ["dissect"] }
 
 [dev-dependencies]
+# R2519 (open-debt item 713) — the two-link CAPTURES, so this crate's listings
+# can be graded on the shape that shows the defect.
+#
+# `wz-capture` is already an ordinary dependency above; this row exists only to
+# add the `fixtures` feature for the test build, which Cargo unifies across the
+# two edges. Nothing production-facing gains it.
+#
+# It is here because MEASURED: this crate's 66 lib tests build no capture at all,
+# and its 70 binary tests drive captures heavily while never naming a second
+# link. So the listings are exercised end to end on the one shape where list
+# order and capture order coincide and the defect cannot appear.
+wz-capture = { path = "../wz-capture", features = ["dissect", "fixtures"] }
 # R311y673 — the three census planes report on Request / Response records, and
 # a fixture of KeepAlives makes all three answer zero HONESTLY. A test that
 # pinned those zeroes would pass just as well against planes that were never

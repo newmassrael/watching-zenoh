@@ -2331,6 +2331,9 @@ fn field_lines(
     let grouping = wz_capture::node::session_grouping(dissection);
     let stream_lists = wz_capture::node::stream_list_indices(dissection);
     let mut spaces = wz_capture::agg::KeyexprSpaces::new();
+    // R2519 (open-debt item 713) — see the sibling listing: bound in capture
+    // order up front, anchored per row below.
+    wz_capture::agg::absorb_every_declaration(dissection, &grouping, &mut spaces);
     for (i, flow) in dissection.flows().iter().enumerate() {
         let mut shown = 0usize;
         let mut omitted = 0usize;
@@ -2360,8 +2363,14 @@ fn field_lines(
             // failure `KeyexprSpaces` documents as never happening.
             None => spaces = wz_capture::agg::KeyexprSpaces::new(),
         }
+        let mut last_packet = 0usize;
         for frame in &flow.frames {
-            spaces.absorb_frame(frame);
+            // R2519 (open-debt item 713) — anchored, not absorbed; the table was
+            // filled in capture order before this loop. See the `spaces` setup.
+            last_packet = flow
+                .packet_for(frame.direction, frame.stream_offset)
+                .unwrap_or(last_packet);
+            spaces.at_packet(last_packet);
             if let Some(cap) = messages_per_flow {
                 if shown >= cap {
                     omitted += 1;
@@ -2407,9 +2416,11 @@ fn field_lines(
         // rebound an id would resolve an early row through the later binding,
         // and that is stated rather than hidden.
         if decrypted_coordinates(flow).is_some() {
-            for frame in &flow.frames {
-                spaces.absorb_frame(frame);
-            }
+            // R2519 — this arm existed to fold a flow the loop above SKIPS, so
+            // its declarations still reached later rows. The capture-order
+            // pre-pass does that for every list now, so there is nothing left
+            // for this to catch up on.
+            let _ = flow;
         }
         for (f, direction, origin, space, row) in &decrypted.rows {
             if *f != flow.flow {
@@ -3729,7 +3740,9 @@ fn datagram_field_rows(
         let mut disagreed = 0usize;
         let mut named: Vec<Disagreed> = Vec::new();
         for frame in &flow.frames {
-            spaces.absorb_frame(frame);
+            // R2519 — anchored, not absorbed. `stream_offset` IS the packet on a
+            // datagram link, so it is the anchor directly.
+            spaces.at_packet(frame.stream_offset);
             // The datagram coordinate: `stream_offset` names the PACKET, because
             // a datagram link has no stream to be offset within.
             // R311y680 — a packet the second read does not have, or one it
@@ -4267,6 +4280,12 @@ pub fn samples(capture: &[u8], keylog: Option<&[u8]>) -> Result<Samples, Capture
     let grouping = wz_capture::node::session_grouping(&dissection);
     let stream_lists = wz_capture::node::stream_list_indices(&dissection);
     let mut spaces = wz_capture::agg::KeyexprSpaces::new();
+    // R2519 (open-debt item 713) — every declaration of the capture, bound in
+    // CAPTURE order, before a single row is rendered. A listing comes out
+    // GROUPED BY FLOW, so it cannot get `wz_capture::agg`'s "one pass, in
+    // capture order" rule from its walk the way that crate's folds do; the rule
+    // arrives as an anchor per row instead.
+    wz_capture::agg::absorb_every_declaration(&dissection, &grouping, &mut spaces);
     for (i, flow) in dissection.flows().iter().enumerate() {
         // R311y701 (PF2) — folded in frame order, the same rule the field
         // listing follows: resolving through a binding that was not live when
@@ -4275,8 +4294,17 @@ pub fn samples(capture: &[u8], keylog: Option<&[u8]>) -> Result<Samples, Capture
             Some(&list) => spaces.enter_flow(grouping.owners(list)),
             None => spaces = wz_capture::agg::KeyexprSpaces::new(),
         }
+        let mut last_packet = 0usize;
         for frame in &flow.frames {
-            spaces.absorb_frame(frame);
+            // R2519 (open-debt item 713) — SAY WHERE, do not absorb here. The
+            // binding table was filled in capture order before this loop began
+            // (`absorb_every_declaration`), so a declaration on the session's
+            // other link is already in it; the anchor is what keeps one that
+            // FOLLOWED this frame from naming it.
+            last_packet = flow
+                .packet_for(frame.direction, frame.stream_offset)
+                .unwrap_or(last_packet);
+            spaces.at_packet(last_packet);
             collect_sample(flow, frame, &spaces, file.as_ref(), &mut out);
         }
     }
@@ -4341,7 +4369,8 @@ fn collect_datagram_samples(
             None => *spaces = wz_capture::agg::KeyexprSpaces::new(),
         }
         for frame in &flow.frames {
-            spaces.absorb_frame(frame);
+            // R2519 — anchored, not absorbed; `stream_offset` is the packet here.
+            spaces.at_packet(frame.stream_offset);
             let Some(packet) = file.packet(frame.stream_offset) else {
                 out.unreachable += 1;
                 continue;
@@ -10729,5 +10758,126 @@ mod quic_pass_tests {
              log question, not a capture question: {rendered}"
         );
         assert!(!outcome.complete);
+    }
+
+    /// R2519 (open-debt item 713) — render the field listing over a capture
+    /// whose keyexpr id was declared on the session's OTHER link.
+    ///
+    /// # Why this guard did not exist, which is the point
+    ///
+    /// This crate's listings resolve a keyexpr while walking flow by flow, and
+    /// nothing here has ever handed them a session with two links: measured, the
+    /// 66 lib tests build no capture at all and the 70 binary tests drive
+    /// captures heavily without ever naming a second link. So the listings ARE
+    /// exercised end to end — on the one shape where list order and capture
+    /// order coincide and this defect cannot appear.
+    ///
+    /// The capture comes from `wz_capture::fixtures` rather than being built
+    /// here, so there is ONE definition of which link carries the declaration.
+    /// Two builders is how two fixtures come to disagree about which link is
+    /// walked first, and then one quietly stops testing what its name says.
+    fn render_fields(capture: &[u8]) -> String {
+        // A `--payload-format` RULE, because that is where this crate's listing
+        // says out loud whether it resolved a keyexpr.
+        //
+        // MEASURED before writing the guard, which is the step this round first
+        // skipped: the text listing renders a reference's keyexpr as its RAW
+        // fields (`id = Uint(7)`, `mapping = Bits(1)`) and never prints a
+        // resolved literal — so `contains("demo/temp")` was answered by the
+        // DECLARATION's own inline suffix and graded nothing. With a rule
+        // present the listing prints ``payload `demo/temp` as protobuf:`` when
+        // it resolved, and "names its keyexpr by id only" when it did not.
+        let rules = [String::from("demo/**=protobuf")];
+        let request = Request {
+            capture,
+            keylog: None,
+            format: Format::Text,
+            per_flow: true,
+            per_message: true,
+            messages_per_flow: None,
+            quic_ports: &[],
+            quic_cid_len: None,
+            payload_rules: &rules,
+            payload_field_names: &[],
+            serial_linktypes: &[],
+            // EVERY CENSUS PLANE OFF, and that is the whole discriminator.
+            //
+            // MEASURED: with `Census::all()` both guards below passed BEFORE the
+            // listings were converted. The census planes render through
+            // `wz_capture::agg`, which already resolves in capture order, so the
+            // literal appeared in the document by a path that is not the
+            // listing — a green control, and a guard satisfied by the plane it
+            // is not about. With the censuses off the only thing that can name
+            // a keyexpr here is the field listing itself.
+            census: Census {
+                throughput: false,
+                exchanges: false,
+                payloads: false,
+                nodes: false,
+                interests: false,
+            },
+            per_field: true,
+            bounded: false,
+            health: true,
+            select: None,
+            csv: None,
+        };
+        let (rendered, _) = analyze_request(&request).expect("the fixture capture analyses");
+        rendered
+    }
+
+    /// The SIBLING LINK's declaration reaches this crate's listing.
+    ///
+    /// `demo/temp` is what the session's own bytes say: the `DeclKexpr` went out
+    /// two packets before the reference, on the other link of one session. A
+    /// listing that walks list by list has not read it yet when it renders the
+    /// first flow, and names nothing.
+    #[test]
+    fn a_listing_names_a_keyexpr_the_sibling_link_declared() {
+        let (dissection, file) = wz_capture::fixtures::multilink_declaring_on_the_later_link();
+        // ANTI-VACUITY FIRST, and it is the fixture's own claim rather than
+        // this crate's: two links, both handshaked, one session. A capture that
+        // had quietly become single-link would let every assertion below pass
+        // while grading nothing.
+        wz_capture::fixtures::check_shape(&dissection).expect("the fixture's shape");
+
+        let rendered = render_fields(&file);
+        assert!(
+            rendered.contains("payload `demo/temp`"),
+            "the sibling link bound this id BEFORE the reference went out, so \
+             the listing resolves it and the rule can be tested against it. \
+             What it says instead is the false claim item 713 is about:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("nothing on it ever declared that id"),
+            "and it must not say the session declared nothing, about a session \
+             whose own bytes carry the declaration:\n{rendered}"
+        );
+    }
+
+    /// AND STILL NOT THE FUTURE — the other half of the pair.
+    ///
+    /// The same two links with the records swapped: the reference travels first
+    /// and its declaration only afterwards. A listing that fixed the guard above
+    /// by absorbing every declaration up front passes that one and fails this,
+    /// which is exactly the mistake worth catching — `crate::agg`'s rule is that
+    /// a declaration must not name a reference that preceded it.
+    #[test]
+    fn a_listing_does_not_name_a_keyexpr_declared_after_the_reference() {
+        let (dissection, file) = wz_capture::fixtures::multilink_declaring_after_the_reference();
+        wz_capture::fixtures::check_shape(&dissection).expect("the fixture's shape");
+
+        let rendered = render_fields(&file);
+        assert!(
+            !rendered.contains("payload `demo/temp`"),
+            "this reference PRECEDED its declaration, so no rule may be tested \
+             against it — a reader that pre-absorbs without anchoring passes \
+             the guard above and fails here:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("names its keyexpr by id only"),
+            "and the listing says so rather than going quiet, which is the \
+             honest half of the same vocabulary:\n{rendered}"
+        );
     }
 }
