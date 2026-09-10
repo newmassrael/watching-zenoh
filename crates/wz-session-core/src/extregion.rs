@@ -52,7 +52,7 @@
 //! reader matching named constants, and a `grep` found a complete reader with
 //! no emit.
 
-use sce_forge_runtime::codec::CodecError;
+use sce_forge_runtime::codec::{CodecError, SceString};
 use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
 use wz_codecs::ext_zbuf::ExtZbufOwned;
 
@@ -89,8 +89,24 @@ pub enum RegionNameError {
 /// Constructed only through [`RegionName::new`], so a value that exists has
 /// already been through upstream's rule and no caller can stage an entry the
 /// peer would refuse.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RegionName(alloc::string::String);
+///
+/// ⚠ The carrier is this crate's PROFILE-AWARE [`SceString`] and not a plain
+/// `String`, because `wz-session-core` builds `no_std`. The first draft used
+/// `alloc::string::String` and compiled fine at default features while
+/// BREAKING `--no-default-features` outright — a whole-crate compile error that
+/// the default lane is structurally unable to see. What caught it was the
+/// guarded-count gate reporting "NO libtest summary … this gate measured
+/// nothing" on three `--no-default-features` invocations, an INPUT ERROR
+/// beside an overall rc of 0.
+///
+/// The capacity is [`MAX_REGION_NAME_LEN`] exactly, which upstream's own
+/// ceiling makes safe: a name this type can hold is one `validate` admits.
+/// ⚠ `Eq` is NOT derived: the no-alloc profile's `InlineStr` does not implement
+/// it, and deriving it here would be a second way this type compiles at default
+/// features and not at `--no-default-features`. `PartialEq` is all any caller
+/// here needs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RegionName(SceString<MAX_REGION_NAME_LEN>);
 
 impl RegionName {
     /// Upstream's `RegionName::validate`, in its order: empty first, then
@@ -103,12 +119,18 @@ impl RegionName {
         if s.len() > MAX_REGION_NAME_LEN {
             return Err(RegionNameError::TooLong);
         }
-        Ok(Self(alloc::string::String::from(s)))
+        // The length rule above is upstream's and runs FIRST, so the carrier's
+        // own capacity check below can only fire on a name this function has
+        // already admitted — it cannot. Mapped to `TooLong` rather than
+        // unwrapped so a future capacity change is a refusal and not a panic.
+        crate::codec_owned::owned_string(s)
+            .map(Self)
+            .map_err(|_| RegionNameError::TooLong)
     }
 
     /// The name as upstream's `as_str` gives it.
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 }
 
