@@ -445,6 +445,27 @@ if ! python3 scripts/lib/store_reason_citation_gate.py; then
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
     exit 1
 fi
+# R2551 — the THIRD gate of the same family, added for a measured reason rather
+# than by analogy. It grades cargo commands WRITTEN DOWN in prose: every feature
+# named in one must exist, and every site declared unresolvable must still be
+# there. R2547 rewrote a lane comment, deleting the quote an exemption existed
+# for, and hosted C0 redded on the orphan.
+#
+# ⚠ AND THE HONEST REASON IT REACHED HOSTED, because the obvious one is wrong:
+# this gate is NOT among the legs Layer C0 loses when it stops early. It sits at
+# run-ci.sh's prose block, ~1000 lines BEFORE `oracle_pin_gate`, and it PASSED in
+# the last local C0 run (which died later, at leg 148 of 166). It reached hosted
+# because C0 is a 166-leg lane nobody runs per change — the same argument that
+# put the two citation gates above into this hook, and the same 0.3s cost.
+if ! python3 scripts/lib/prose_feature_gate.py --check; then
+    echo "" >&2
+    echo "pre-push: [gate 2f] prose-feature gate FAILED — a cargo command written" >&2
+    echo "          down in prose names a feature that does not exist, or a site" >&2
+    echo "          declared unresolvable is gone. Deleting a quoted command means" >&2
+    echo "          deleting the declaration that excused it." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
 
 # ─── gate 2y — a script that spells a pin must read one (R2540) ─────
 # grades: worktree

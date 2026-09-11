@@ -102,11 +102,19 @@ UNRESOLVED_DECLARED: dict[tuple[str, str], str] = {
     ("scripts/lib/guarded_count_gate.py", "x"): (
         "the same fixture, second invented package (`other-crate`)"
     ),
-    ("scripts/run-ci.sh", "transport-link-vsock"): (
-        "prose quoting the environment-gated vsock command; the quote carries "
-        "no `-p` and `run-ci.sh` belongs to no crate, so the package is "
-        "implied by the paragraph rather than written"
-    ),
+    # R2551 — the `("scripts/run-ci.sh", "transport-link-vsock")` row is GONE,
+    # and its deletion is the whole repair for a hosted red. It excused one
+    # sentence: Layer C1ab's old comment quoting `cargo test --features
+    # transport-link-vsock -- --ignored` as the way to run the vsock legs by
+    # hand. R2547 rewrote that comment so the LANE runs them wherever
+    # `/dev/vsock` exists, which deleted the quote — and left the permission
+    # behind it with nothing to permit.
+    #
+    # This gate refuses that by design ("a declaration that outlives its
+    # subject is a permission slip nobody re-reads"), which is the citation
+    # gates' rule pointed the other way: they refuse a needle whose subject
+    # moved, this refuses an EXEMPTION whose subject is gone. A round that
+    # edits prose owes a look at what points AT that prose.
     ("scripts/run-ci.sh", "scouting-static"): (
         "a layer BANNER (`Layer C1k — cargo test ... --features "
         "scouting-static`), which names the lane rather than issuing it"
