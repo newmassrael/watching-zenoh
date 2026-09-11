@@ -203,6 +203,29 @@ pub enum AdvancedSubscribeError {
         /// The rejected length.
         len: usize,
     },
+    /// R2550 — a [`HistoryConfig`] bound was set to ZERO, which upstream
+    /// refuses at construction rather than honouring:
+    /// `zenoh-ext/src/advanced_subscriber.rs` @ `bail!("max_samples must not be zero")`
+    /// and @ `bail!("max_age must not be zero")`, both inside the `// Check config`
+    /// block its `AdvancedSubscriber::new` opens with.
+    ///
+    /// REFUSED HERE FOR THE SAME REASON IT IS REFUSED THERE, which is not
+    /// tidiness: a zero bound is a request for a history GET that can return
+    /// nothing, so honouring it would arm the whole history machinery — the
+    /// startup GET, the liveliness trigger, the pending buffer — around a
+    /// selector guaranteed to recover no sample. Upstream's own doc says the
+    /// builder fails on it twice over, once per knob.
+    ///
+    /// AT CONSTRUCTION, NOT AT THE SETTER, because that is where upstream puts
+    /// it and where wz has a `Result` to put it in: [`HistoryConfig`]'s setters
+    /// return `Self` and cannot refuse.
+    #[cfg(feature = "ext-pubsub-advanced-history")]
+    HistoryBoundZero {
+        /// Which knob was zero — `"max_samples"` or `"max_age"`, spelled as
+        /// upstream's builder names them so a reader porting a zenoh config
+        /// recognises the one they set.
+        knob: &'static str,
+    },
 }
 
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
@@ -2059,6 +2082,28 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
         OnSample: FnMut(Sample) + Send + 'static,
         OnMiss: FnMut(Miss) + Send + 'static,
     {
+        // R2550 — CHECK CONFIG FIRST, which is both upstream's order and the
+        // only order that means anything:
+        // `zenoh-ext/src/advanced_subscriber.rs` @ `bail!("max_samples must not be zero")`
+        // sits in the block `AdvancedSubscriber::new` opens with, before a
+        // single subscriber is declared. Refusing
+        // after the base subscriber went out would leave a declaration on the
+        // wire for a subscriber the caller never gets.
+        //
+        // The knob order is upstream's too — `max_samples` then `max_age` — so a
+        // caller who zeroed BOTH is told about the same one either reference
+        // would name.
+        #[cfg(feature = "ext-pubsub-advanced-history")]
+        if let Some(history) = options.history.as_ref() {
+            if history.sample_depth == Some(0) {
+                return Err(AdvancedSubscribeError::HistoryBoundZero {
+                    knob: "max_samples",
+                });
+            }
+            if history.max_age == Some(0.0) {
+                return Err(AdvancedSubscribeError::HistoryBoundZero { knob: "max_age" });
+            }
+        }
         // R311y91 (review M1) — recovery + history are INDEPENDENT (zenoh keeps
         // `.recovery()` / `.history()` separate): `retransmission` is driven by
         // `options.recovery`, `history_pending` by `options.history` — a
@@ -2854,6 +2899,68 @@ mod tests {
     /// live `0xA*` convention), re-keyed and delivered in order with no Miss.
     /// The genuine GET runs synchronously inside the gapped publish via the
     /// R311lh deferred-fire re-entrant drain.
+    /// R2550 — a ZERO history bound is REFUSED at construction, both knobs,
+    /// as upstream refuses it:
+    /// `zenoh-ext/src/advanced_subscriber.rs` @ `bail!("max_age must not be zero")`
+    /// is the second of the two arms it refuses with.
+    ///
+    /// Found by sweeping this atom's surface at the pin rather than by reading
+    /// its reason: the reason never carried a validation clause at all, because
+    /// no round had compared the two builders' `// Check config` blocks.
+    ///
+    /// The assertions name the knob, so a refusal that fires for the WRONG one
+    /// is a failure rather than a pass — and the both-zero case pins upstream's
+    /// ORDER (`max_samples` first), which is the only observable that tells the
+    /// two checks apart when a caller zeroes both.
+    #[cfg(all(
+        feature = "ext-pubsub-advanced-history",
+        feature = "ext-pubsub-advanced-recovery"
+    ))]
+    #[test]
+    fn history_bounds_of_zero_are_refused_at_construction() {
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let session = TokioSession::new(actions, observer, clock);
+
+        let declare = |history: HistoryConfig| {
+            AdvancedSubscriber::declare_with_options(
+                &session,
+                "demo/data",
+                AdvancedSubscriberOptions::new().with_history(history),
+                |_s: Sample| {},
+                |_m: Miss| {},
+            )
+            .map(|_| ())
+        };
+
+        match declare(HistoryConfig::default().max_samples(0)) {
+            Err(AdvancedSubscribeError::HistoryBoundZero { knob }) => {
+                assert_eq!(knob, "max_samples")
+            }
+            other => panic!("max_samples(0) must be refused, got {other:?}"),
+        }
+        match declare(HistoryConfig::default().max_age(0.0)) {
+            Err(AdvancedSubscribeError::HistoryBoundZero { knob }) => {
+                assert_eq!(knob, "max_age")
+            }
+            other => panic!("max_age(0.0) must be refused, got {other:?}"),
+        }
+        // BOTH zero: upstream checks max_samples first, so that is the knob a
+        // caller is told about. Pinning the order is what keeps the two arms
+        // from being interchangeable.
+        match declare(HistoryConfig::default().max_samples(0).max_age(0.0)) {
+            Err(AdvancedSubscribeError::HistoryBoundZero { knob }) => {
+                assert_eq!(knob, "max_samples", "upstream's order: max_samples first")
+            }
+            other => panic!("both-zero must be refused, got {other:?}"),
+        }
+        // ANTI-VACUITY: a NON-zero bound must still declare, or the three
+        // assertions above would pass on a subscriber that refuses everything.
+        declare(HistoryConfig::default().max_samples(1).max_age(1.0))
+            .expect("a non-zero history bound still declares");
+    }
+
     #[cfg(all(
         feature = "ext-pubsub-advanced-recovery",
         feature = "ext-pubsub-advanced-cache",

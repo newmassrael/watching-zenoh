@@ -7333,7 +7333,12 @@ layer_c1av_cargo_test_ext_pubsub_advanced_history() {
     # is also where `ext-pubsub-advanced-history`'s clause (5) closes: that
     # clause was open BECAUSE the timestamped arm was missing, so the history
     # atom and the subscriber atom are answered by one build and graded here.
-    _runci_guarded_test "C1av advanced_subscriber" 38 \
+    # R2550 — 38 -> 39 for the zero-history-bound refusal witness
+    # (`history_bounds_of_zero_are_refused_at_construction`). Moved to what the
+    # command PRINTED, not to what the diff suggests: the module's cases are
+    # `#[cfg]`-gated and counting the diff has produced the wrong number here
+    # before.
+    _runci_guarded_test "C1av advanced_subscriber" 39 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-history,ext-pubsub-advanced-publisher,pubsub-allow-loop \
         --lib advanced_subscriber --quiet || return 1
     (cd crates \

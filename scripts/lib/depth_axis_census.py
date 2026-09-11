@@ -795,7 +795,13 @@ PIN_NO_SYMBOL = 2
 # residual on `transport-link-serial` whose addendum adds wz=1 / ambiguous=0.
 # Net -6 and -1, each half measured by running `citation_audit` over that text
 # alone rather than inferred from the totals.
-PIN_WZ_CITATIONS = 309
+# R2550 — 309 -> 315, the RISING direction again and for the healthiest reason
+# this ratchet has: `ext-pubsub-advanced-history` stayed PARTIAL and its reason
+# gained six resolvable wz anchors while a pin-1.10.1 sweep recorded which of its
+# clauses are stale, which axis is clean, and where the surviving build starts.
+# Derived by auditing the ADDENDUM ALONE -- wz=6, ambiguous=0 -- so AMBIGUOUS
+# correctly does not move and the rise is accounted for exactly.
+PIN_WZ_CITATIONS = 315
 PIN_AMBIGUOUS = 66
 
 
