@@ -494,6 +494,11 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         "transport/link/tls/root_ca_certificate",
         "transport/link/tls/listen_certificate",
         "transport/link/tls/listen_private_key",
+        // R2568 — honoured by R2567 and left unclassed, which this leg's own
+        // gate caught. Upstream states no value for it either: DEFAULT_CONFIG
+        // carries `dictionary_file: null` beside `user` and `password`, so the
+        // resolved tree answers null exactly as it does for the TLS paths above.
+        "transport/auth/usrpwd/dictionary_file",
         "scouting/multicast/address",
         "scouting/multicast/interface",
         "scouting/multicast/ttl",
@@ -3253,11 +3258,30 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
     // key: `routing/peer/mode` left the surface because upstream retired it, not
     // because wz stopped reading it. Comparing against the surface half alone
     // would have quietly dropped a flag this binary must still accept.
+    // R2568 — `transport/auth/usrpwd/dictionary_file` is the SECOND key this
+    // leg's role forbids, and it is excepted for the same kind of reason as
+    // `listen/endpoints` rather than a new kind. In the usrpwd handshake the
+    // client is the INITIATOR and the RESPONDER is what reads the dictionary
+    // (wz feeds it to `responder_with_source`), so a node that only dials
+    // carries no such store — the mirror of a client that binds nothing.
+    // ⚠ Naming a staged file here instead would make this assertion PASS while
+    // making the sentence it asserts FALSE, since that sentence is "every
+    // honoured key a connecting client can carry". It would also put a path in
+    // front of a real zenohd, which reads the dictionary EAGERLY
+    // (`tokio::fs::read_to_string` in `from_config`) and refuses to start when
+    // it cannot — Layer Z feeds this fixture to one.
+    // ⚠ The comment lives HERE, above the statement, because the gate anchors
+    // the exception list on the chain itself and admits only whitespace between
+    // its links: a comment inside it reds with "could not anchor the fixture's
+    // own exception list", which is the gate refusing to carry its own copy.
+    // Open-debt 722 carries the redraw: two exceptions now share one reason, so
+    // the predicate wants to be a ROLE question and cannot ask one.
     let mut every_honoured: Vec<&str> = HONOURED_CONFIG_KEYS
         .iter()
         .chain(WZ_EXTENSION_HONOURED_KEYS)
         .copied()
         .filter(|k| *k != "listen/endpoints")
+        .filter(|k| *k != "transport/auth/usrpwd/dictionary_file")
         .collect();
     fixture_names.sort_unstable();
     every_honoured.sort_unstable();
