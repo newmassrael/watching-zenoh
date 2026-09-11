@@ -7338,7 +7338,13 @@ layer_c1av_cargo_test_ext_pubsub_advanced_history() {
     # command PRINTED, not to what the diff suggests: the module's cases are
     # `#[cfg]`-gated and counting the diff has produced the wrong number here
     # before.
-    _runci_guarded_test "C1av advanced_subscriber" 39 \
+    # R2553 — 39 -> 41 for the `uhlc` late-publisher build: the timestamped
+    # trigger's slot arithmetic and the composed loopback recovery of a late
+    # TIMESTAMPED publisher's cache. Both are `ext-pubsub-advanced-history`-
+    # gated, so again only this lane moves — MEASURED on all three legs, not
+    # inferred: C1ar printed 5 and C1at 22, unchanged, which is what this
+    # file's own repeated warning about counting the diff is about.
+    _runci_guarded_test "C1av advanced_subscriber" 41 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-history,ext-pubsub-advanced-publisher,pubsub-allow-loop \
         --lib advanced_subscriber --quiet || return 1
     (cd crates \

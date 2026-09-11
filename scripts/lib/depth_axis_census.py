@@ -801,7 +801,15 @@ PIN_NO_SYMBOL = 2
 # clauses are stale, which axis is clean, and where the surviving build starts.
 # Derived by auditing the ADDENDUM ALONE -- wz=6, ambiguous=0 -- so AMBIGUOUS
 # correctly does not move and the rise is accounted for exactly.
-PIN_WZ_CITATIONS = 315
+# R2553 — 315 -> 326, the rising direction for the same healthy reason R2550
+# gave, one round on: the `uhlc` late-publisher shape was BUILT, so
+# `ext-pubsub-advanced-history` gained anchors on the code that now exists (the
+# trigger, the GET, the reply-routing enum, the two witnesses) and
+# `ext-pubsub-advanced-subscriber` gained two on the retention residual the
+# build measured. Derived by auditing the TWO ADDENDA ALONE -- hist wz=9 /
+# ambiguous=0, sub wz=2 / ambiguous=0 -- which is why AMBIGUOUS correctly does
+# not move and 315 + 11 lands exactly on the 326 the census measures.
+PIN_WZ_CITATIONS = 326
 PIN_AMBIGUOUS = 66
 
 

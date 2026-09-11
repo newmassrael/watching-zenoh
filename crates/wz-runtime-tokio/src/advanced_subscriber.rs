@@ -163,6 +163,64 @@ struct SourceState {
     pending_queries: u64,
 }
 
+/// R2553 — per-TIMESTAMPED-source state: the sibling of [`SourceState`] for a
+/// publisher that orders by its timestamp's own id rather than by a sequence
+/// number (the `uhlc` discriminator [`AdvPublisherSource::Timestamped`] names).
+///
+/// # Why a separate struct rather than the same one
+///
+/// Upstream shares it — `zenoh-ext/src/advanced_subscriber.rs` @
+/// `timestamped_states: LruCache<ID, SourceState<Timestamp>>,` is the SAME
+/// `SourceState<T>` the sequenced map holds, parameterised on `Timestamp`
+/// instead of a sequence number. wz's [`SourceState`] is NOT generic (its
+/// `last_delivered` is a `u32` and its buffer a `BTreeMap<u32, Sample>`), so
+/// sharing it here would mean making the sequenced side generic over a
+/// parameter only one arm ever varies. The fields that survive the change of
+/// parameter are exactly the two below; the ones that do not — the miss
+/// arithmetic — are the ones upstream never runs for a timestamped source
+/// either. So the split follows the arithmetic rather than the type.
+///
+/// # What upstream carries here that this does not, and why it is not dropped quietly
+///
+/// * `pending_samples` — the reorder buffer. Absent by the deferral
+///   [`State::timestamped`] documents; it is the NEXT part of this build.
+/// * `alive` — upstream sets it from the liveliness Put/Delete pair and reads
+///   it in ONE place, `zenoh-ext/src/advanced_subscriber.rs` @
+///   `} else if state.alive {`, which is its LRU retention sweep. wz has no
+///   retention sweep and no LRU: neither this map nor `sequenced` is ever
+///   reclaimed, so an `alive` flag here would be written by the Delete arm and
+///   read by nobody. That is the shape this module's own `timestamped` doc
+///   calls out — "a condition that can never be false reads as coverage while
+///   grading nothing" — so the flag waits for the sweep that would read it, and
+///   the absence is recorded as a residual of the SUBSCRIBER surface (it is
+///   missing for the sequenced shape in exactly the same way) rather than of
+///   the `uhlc` shape this round builds.
+#[cfg(feature = "ext-pubsub-advanced-history")]
+#[derive(Default)]
+struct TimestampedState {
+    /// Newest instant delivered for this timestamp-id (`None` before the
+    /// first). Upstream's `last_delivered: Option<T>` at `T = Timestamp`.
+    last_delivered: Option<wz_session_core::sample::TimestampHint>,
+    /// In-flight history GETs for this source, the timestamped twin of
+    /// [`SourceState::pending_queries`]: the `uhlc` late-publisher trigger
+    /// opens a slot and the GET's terminal Final closes it, so a second token
+    /// Put for the same publisher while its cache GET is still outstanding does
+    /// not fan a duplicate.
+    pending_queries: u64,
+}
+
+/// The timestamped ordering state when the history feature is OFF: the `uhlc`
+/// late-publisher GET does not exist in that build, so there is no query to
+/// count. Kept as a distinct definition rather than a `#[cfg]`-d-away field so
+/// the history-off build carries no `pending_queries` it could never move —
+/// the same reason [`SourceState`] gates its own two recovery fields.
+#[cfg(not(feature = "ext-pubsub-advanced-history"))]
+#[derive(Default)]
+struct TimestampedState {
+    /// Newest instant delivered for this timestamp-id (`None` before the first).
+    last_delivered: Option<wz_session_core::sample::TimestampHint>,
+}
+
 /// R311y90 (review C5) — why declaring a RECOVERING advanced subscriber failed.
 /// Distinct from the base [`SubscribeError`] (which stays the plain
 /// `Session::declare_subscriber` surface): the recovery form additionally spawns
@@ -624,20 +682,23 @@ struct State {
     /// * `Miss` / `nb` — never computed for a timestamped source in either
     ///   implementation. "The sample after this one" is not a thing a clock
     ///   defines, and upstream's timestamped arm calls no miss handler.
-    /// * `pending_samples` / `pending_queries` — these DO apply, and wz does not
-    ///   have them yet. Upstream buffers a timestamped sample while a history
-    ///   GET is in flight (`if (states.global_pending_queries == 0 &&
-    ///   state.pending_queries == 0) || states.max_history_depth == 1`) so the
-    ///   older recovered samples deliver before the live ones, spilling through
+    /// * `pending_queries` — R2553 BUILT it ([`TimestampedState`]), because the
+    ///   `uhlc` late-publisher GET needs the same one-in-flight gate the
+    ///   sequenced side has.
+    /// * `pending_samples` — still absent, and still the named residual: upstream
+    ///   buffers a timestamped sample while a history GET is in flight
+    ///   (`if (states.global_pending_queries == 0 && state.pending_queries == 0)
+    ///   || states.max_history_depth == 1`) so the older recovered samples
+    ///   deliver before the live ones, spilling through
     ///   `flush_timestamped_source` at the depth bound. wz's map holds the
-    ///   ordering core only, so a timestamped source seen DURING the startup
-    ///   history query delivers live-first.
+    ///   ordering core plus the query gate, so a timestamped source seen DURING
+    ///   the startup history query still delivers live-first.
     ///
-    /// That gap is a named residual of `ext-pubsub-advanced-history`, not an
-    /// oversight of this field: it is the same buffering the sequenced side gets
-    /// from `history_pending` + `max_history_depth` above, and it needs the
-    /// timestamped half of the late-publisher path
-    /// ([`parse_heartbeat_source`]'s `uhlc` shape) to have a subject at all.
+    /// That remaining gap is a named residual of `ext-pubsub-advanced-history`,
+    /// not an oversight of this field: it is the same buffering the sequenced
+    /// side gets from `history_pending` + `max_history_depth` above, and the
+    /// order this doc prescribed — the `uhlc` shape first, so the buffering has
+    /// a subject — is the order R2552 + R2553 took.
     ///
     /// The comparison is `wz_session_core::sample::timestamp_strictly_newer`,
     /// which already implements uhlc's `(time, 16-byte LE id)` `Ord` — the
@@ -649,7 +710,7 @@ struct State {
     /// gate) now pulls `pubsub-timestamp`, so a `#[cfg]` here would be
     /// vacuously true — a condition that can never be false reads as coverage
     /// while grading nothing.
-    timestamped: HashMap<Vec<u8>, wz_session_core::sample::TimestampHint>,
+    timestamped: HashMap<Vec<u8>, TimestampedState>,
     on_sample: Box<dyn FnMut(Sample) + Send>,
     on_miss: Box<dyn FnMut(Miss) + Send>,
     /// R311y82 — whether forward gaps BUFFER + trigger a recovery GET (true,
@@ -703,17 +764,55 @@ impl State {
     /// so an ungated `impl` block keeps the two from drifting apart.
     fn deliver_unsequenced(&mut self, view: &dyn SampleView) {
         if let Some(ts) = view.timestamp() {
-            let newer = match self.timestamped.get(&ts.zid) {
-                Some(last) => wz_session_core::sample::timestamp_strictly_newer(ts, last),
-                None => true,
-            };
-            if newer {
-                self.timestamped.insert(ts.zid.clone(), ts.clone());
+            if self.admit_timestamped(ts) {
                 (self.on_sample)(Sample::from_view(view));
             }
             return;
         }
         (self.on_sample)(Sample::from_view(view));
+    }
+
+    /// R2553 — the same two arms for a sample that arrived as a QUERY REPLY
+    /// rather than through the subscription, i.e. out of a publisher's `@adv`
+    /// cache. Upstream needs no such twin because its GET callbacks call the
+    /// one `handle_sample` the live path calls; wz's recovered-reply path is
+    /// split out ([`recovered_sample_from_reply`]) and hands over an owned
+    /// [`Sample`], so the shared core is reached through this entry instead.
+    ///
+    /// IT EXISTS BECAUSE THE RECOVERY PATH WAS SEQUENCED-ONLY, which was a
+    /// silent drop rather than a deferral: `recovered_sample_from_reply` opened
+    /// with `reply.source_info()?`, and a timestamped publisher's cached sample
+    /// carries no `source_info` at all — that absence is what makes it
+    /// timestamped. So every reply from such a cache was discarded before any
+    /// ordering ran, and the startup `@adv/**` history GET recovered nothing
+    /// from a timestamped publisher even though it addressed its cache.
+    ///
+    /// Gated with its only caller: a recovery-OFF build issues no GET at all, so
+    /// there is no reply to route and `-D warnings` says so.
+    #[cfg(feature = "ext-pubsub-advanced-recovery")]
+    fn deliver_unsequenced_sample(&mut self, sample: Sample) {
+        if let Some(ts) = sample.timestamp.clone() {
+            if self.admit_timestamped(&ts) {
+                (self.on_sample)(sample);
+            }
+            return;
+        }
+        (self.on_sample)(sample);
+    }
+
+    /// The timestamped ordering predicate, shared by the live and recovered
+    /// entries above: `true` (and the instant recorded) when `ts` is STRICTLY
+    /// newer than the newest already delivered for the same timestamp-id.
+    fn admit_timestamped(&mut self, ts: &wz_session_core::sample::TimestampHint) -> bool {
+        let state = self.timestamped.entry(ts.zid.clone()).or_default();
+        let newer = match &state.last_delivered {
+            Some(last) => wz_session_core::sample::timestamp_strictly_newer(ts, last),
+            None => true,
+        };
+        if newer {
+            state.last_delivered = Some(ts.clone());
+        }
+        newer
     }
 }
 
@@ -1049,6 +1148,47 @@ impl State {
             false
         }
     }
+
+    /// R2553 — the same trigger for a TIMESTAMPED publisher, keyed by zid
+    /// alone. Upstream's is the `uhlc` half of the one liveliness callback:
+    /// `zenoh-ext/src/advanced_subscriber.rs` @ `.timestamped_states` reached
+    /// through `get_or_insert_mut(ID::from(zid), Default::default)` followed by
+    /// `state.pending_queries += 1`.
+    ///
+    /// THE KEY IS THE ZID AND NOT A `(zid, eid)` PAIR, which is the whole
+    /// reason this is a second method rather than the one above taking an
+    /// `Option<u32>`: a `uhlc` token names no entity, and the samples it will
+    /// recover are keyed by the TIMESTAMP's id — so the identity the GET opens
+    /// a slot for has to be the identity the replies land under, or the slot
+    /// belongs to a source no reply will ever close.
+    ///
+    /// wz's one-in-flight gate is kept here for the reason
+    /// [`Self::handle_late_publisher`] gives (upstream's own TODO notes the
+    /// un-deduped re-query); the RETURN is what says whether to issue.
+    #[cfg(feature = "ext-pubsub-advanced-history")]
+    fn handle_late_timestamped_publisher(&mut self, zid: Vec<u8>) -> bool {
+        let state = self.timestamped.entry(zid).or_default();
+        if state.pending_queries == 0 {
+            state.pending_queries += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// R2553 — a timestamped publisher's history GET completed: close the slot
+    /// its trigger opened. The twin of [`Self::finish_recovery`], and upstream's
+    /// `zenoh-ext/src/advanced_subscriber.rs` @ `impl Drop for TimestampedRepliesHandler`
+    /// minus the flush, which has nothing to flush until this state grows the
+    /// `pending_samples` buffer [`State::timestamped`] documents as the next
+    /// part. `saturating_sub` for the same reason the sequenced side uses it:
+    /// the failed-to-issue rollback runs this too.
+    #[cfg(feature = "ext-pubsub-advanced-history")]
+    fn finish_timestamped_recovery(&mut self, zid: &[u8]) {
+        if let Some(state) = self.timestamped.get_mut(zid) {
+            state.pending_queries = state.pending_queries.saturating_sub(1);
+        }
+    }
 }
 
 /// Deliver `sample` (sn = `sn`), advance `last_delivered`, then drain every
@@ -1209,11 +1349,23 @@ fn issue_recovery_get<R, T>(
             if !wz_session_core::pubsub::keyexpr_intersect_patterns(&sub, &reply_ke) {
                 return;
             }
-            if let Some((rkey, rsn, sample)) = recovered_sample_from_reply(reply) {
-                reply_states
-                    .lock()
-                    .expect("advanced subscriber state mutex poisoned")
-                    .handle_recovered(rkey, rsn, sample);
+            match recovered_sample_from_reply(reply) {
+                Some(RecoveredSample::Sequenced { key, sn, sample }) => {
+                    reply_states
+                        .lock()
+                        .expect("advanced subscriber state mutex poisoned")
+                        .handle_recovered(key, sn, sample);
+                }
+                // R2553 — a reply with no `source_info` is the timestamped /
+                // bare shape, not a malformed one: it takes the same arms the
+                // live subscription takes for such a sample.
+                Some(RecoveredSample::Unsequenced(sample)) => {
+                    reply_states
+                        .lock()
+                        .expect("advanced subscriber state mutex poisoned")
+                        .deliver_unsequenced_sample(sample);
+                }
+                None => {}
             }
         },
         move |rid| {
@@ -1331,11 +1483,40 @@ fn issue_recovery_query<R, T>(
     );
 }
 
-/// Re-key a recovery / history reply into a `(source-key, sn, Sample)` for the
-/// per-source ordering: read the source identity off the reply's source_info
-/// (the `reply-source-info` seam) + rebuild the sample. `None` for an Err reply
-/// or one with no source identity (it cannot be re-keyed — the answerer needs
-/// `reply-source-info` on). Shared by the recovery + history GETs.
+/// A recovery / history reply, rebuilt as a sample and routed to the ordering
+/// arm its own shape selects. `None` only for an Err reply.
+///
+/// R2553 — this return used to be `Option<((Vec<u8>, u32), u32, Sample)>`, and
+/// the tuple was the defect: it could only describe a SEQUENCED reply, so the
+/// function opened with `reply.source_info()?` and every reply without one was
+/// dropped at the `?`. A timestamped publisher's cached samples carry no
+/// `source_info` — that absence is the definition of the shape — so a whole
+/// publisher's cache was unreachable through both the startup `@adv/**` GET and
+/// the per-publisher one. Upstream has no such fork because its GET callbacks
+/// call `handle_sample` directly, the same entry the live subscription uses,
+/// which routes all three arms. The enum restores that: every arm the live path
+/// has, the recovered path now has too.
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+enum RecoveredSample {
+    /// Carried a `source_info`: order it by `(zid, eid)` + sequence number.
+    Sequenced {
+        /// The `(zid, eid)` source key.
+        key: (Vec<u8>, u32),
+        /// The reply's sequence number.
+        sn: u32,
+        /// The rebuilt sample.
+        sample: Sample,
+    },
+    /// No `source_info`: the timestamped / bare arms, ordered by the sample's
+    /// own timestamp when it has one and delivered unconditionally when it does
+    /// not — [`State::deliver_unsequenced_sample`].
+    Unsequenced(Sample),
+}
+
+/// Re-key a recovery / history reply for the per-source ordering: rebuild the
+/// sample and read the source identity off the reply's source_info (the
+/// `reply-source-info` seam) when it carries one. `None` for an Err reply.
+/// Shared by the recovery and history GETs.
 ///
 /// R311y561 — the DEL arm. A Del reply is now rebuilt as a Del sample rather
 /// than discarded: the `@adv` cache retains deletes since
@@ -1364,19 +1545,17 @@ fn issue_recovery_query<R, T>(
 /// reads the encoding only inside the `_is_put` branch
 /// (`vendor/zenoh-pico/src/protocol/codec/message.c:263,269-276`).
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
-fn recovered_sample_from_reply(reply: &dyn ReplyView) -> Option<((Vec<u8>, u32), u32, Sample)> {
+fn recovered_sample_from_reply(reply: &dyn ReplyView) -> Option<RecoveredSample> {
     let kind = reply.kind();
     if kind == ReplyKind::Err {
         return None;
     }
-    let source_info = reply.source_info()?;
-    let key = (source_info.zid_prefix().to_vec(), source_info.eid);
-    let sn = source_info.sn;
+    let source_info = reply.source_info();
     let mut sample = match kind {
         ReplyKind::Del => Sample::new_del(reply.keyexpr()),
         _ => Sample::new_put(reply.keyexpr(), reply.payload().to_vec()),
     };
-    sample.source_info = Some(source_info.clone());
+    sample.source_info = source_info.cloned();
     sample.timestamp = reply.timestamp().cloned();
     sample.attachment = reply.attachment().map(<[u8]>::to_vec);
     if let Some((packed_id, schema)) = reply.put_encoding() {
@@ -1385,7 +1564,14 @@ fn recovered_sample_from_reply(reply: &dyn ReplyView) -> Option<((Vec<u8>, u32),
             schema: schema.map(String::from),
         });
     }
-    Some((key, sn, sample))
+    match source_info {
+        Some(si) => Some(RecoveredSample::Sequenced {
+            key: (si.zid_prefix().to_vec(), si.eid),
+            sn: si.sn,
+            sample,
+        }),
+        None => Some(RecoveredSample::Unsequenced(sample)),
+    }
 }
 
 /// Build the startup history GET selector from the `_max` cap (`sample_depth`)
@@ -1538,16 +1724,80 @@ fn issue_late_publisher_query<R, T>(
     );
 }
 
+/// R2553 — the TIMESTAMPED twin of [`issue_late_publisher_query`]: the history
+/// GET for a publisher whose `@adv` token carries the `uhlc` discriminator.
+///
+/// # The target is the token's OWN key expression
+///
+/// Upstream queries `Selector::from((s.key_expr(), params))` — the liveliness
+/// sample's keyexpr verbatim, i.e. `<base>/@adv/pub/<zid>/uhlc/_`, the exact KE
+/// the publisher declared its cache queryable on. The sequenced path above
+/// instead builds a `<base>/@adv/*/<zid>/<eid>/**` wildcard, and both reach the
+/// same queryable; the difference is that a wildcard form would have to invent a
+/// spelling for the `uhlc` chunk in a second place, and this module's `@adv`
+/// SSOT exists to stop exactly that. So this one takes the token KE it was
+/// handed, which is both the faithful form and the one with no second spelling.
+///
+/// # No `_sn`, two history knobs
+///
+/// A timestamped source has no sequence numbers, so there is no range to ask
+/// for: the selector is [`history_selector`]'s `_max` + `_time` pair and
+/// nothing else — which is what upstream builds here too, the same two
+/// `historyconf` knobs its sequenced arm uses. R2550's zero-bound refusal
+/// therefore covers this GET as well, because it refuses the knobs before any
+/// selector is built from them.
+#[cfg(feature = "ext-pubsub-advanced-history")]
+#[allow(clippy::too_many_arguments)]
+fn issue_timestamped_late_publisher_query<R, T>(
+    session: &Session<R, T, Unicast>,
+    statesref: &Arc<Mutex<State>>,
+    pending: &Arc<PendingGets>,
+    base_keyexpr: &str,
+    token_keyexpr: &str,
+    zid: Vec<u8>,
+    sample_depth: Option<usize>,
+    max_age: Option<f64>,
+    dest: Locality,
+    timeout_ms: u32,
+) where
+    R: SessionRuntime,
+    T: TimeSource + 'static,
+    <R as SessionRuntime>::LinkSink: Send + Sync,
+    SessionLinkActions<R, T>: Send + Sync + 'static,
+{
+    let opts = QueryOptions::get()
+        .with_allowed_destination(dest)
+        .with_timeout_ms(timeout_ms)
+        .with_parameters(history_selector(sample_depth, max_age).into_bytes());
+    // R311y836 — pin the mode; see `issue_late_publisher_query`. The argument is
+    // identical and the stake is the same: a timestamped publisher's WHOLE cache
+    // arrives through this one GET.
+    #[cfg(feature = "query-consolidation")]
+    let opts = opts.with_consolidation(wz_session_core::query_mode::ConsolidationMode::None);
+    issue_recovery_get(
+        session,
+        statesref,
+        pending,
+        token_keyexpr,
+        base_keyexpr,
+        opts,
+        move |state| state.finish_timestamped_recovery(&zid),
+    );
+}
+
 /// R311y100 — the late-publisher liveliness callback body, factored out as a
 /// single source of truth the real liveliness subscriber closure is thin glue
 /// over: a plain readability extraction (the closure at the declare site calls
 /// only this fn). R311y101 drives it end-to-end through the real closure via an
 /// injected inbound `DeclToken` (`dispatch_declare`, see the composed test), so
-/// the closure's field extraction + captured args ARE exercised. On a `Put` for
-/// a sequenced publisher (a `uhlc` discriminator fails [`parse_heartbeat_source`]'s
-/// `eid` parse and is skipped — the documented timestamped-publisher
-/// faithful-subset deferral), open a recovery slot and issue the per-publisher
+/// the closure's field extraction + captured args ARE exercised. On a `Put`,
+/// open a recovery slot for the detected publisher and issue its per-publisher
 /// history GET (OUTSIDE the lock).
+///
+/// R2553 — BOTH shapes are handled now. A `uhlc` token takes the timestamped
+/// arm ([`issue_timestamped_late_publisher_query`]) instead of being declined,
+/// which is upstream's own branch: `zenoh-ext/src/advanced_subscriber.rs` @
+/// `if parsed.eid() == KE_UHLC {` and its `else if let Ok(eid)` sibling.
 #[cfg(feature = "ext-pubsub-advanced-history")]
 #[allow(clippy::too_many_arguments)]
 fn on_late_publisher_detected<R, T>(
@@ -1568,35 +1818,63 @@ fn on_late_publisher_detected<R, T>(
     SessionLinkActions<R, T>: Send + Sync + 'static,
 {
     // A Delete (the token's publisher left) needs no recovery.
+    //
+    // ⚠ R2553 MEASURED WHAT UPSTREAM DOES INSTEAD OF RETURNING, because the
+    // difference had been carried as an unexamined "wz returns early on every
+    // non-Put besides": upstream's Delete arms do exactly one thing, set
+    // `state.alive = false`, and that flag has exactly one reader — its LRU
+    // retention sweep. wz reclaims neither source map, so there is no reader to
+    // set it for; see [`TimestampedState`] for why the flag waits for the sweep
+    // rather than landing as a field nothing consults. The early return is
+    // therefore the same behaviour, not a shortcut past it, and it is the same
+    // for both shapes.
     if sample_kind != LivelinessSampleKind::Put {
         return;
     }
-    // R2552 — SEQUENCED ONLY, and now it says so rather than inheriting the
-    // restriction from a parser that could not express the other shape. A
-    // `uhlc` token reaches this arm and is declined HERE; handling it is the
-    // next part of this atom's build (upstream keys a timestamped source into
-    // its own state and queries it with the history knobs, no `_sn` range).
-    let Some(AdvPublisherSource::Sequenced { zid, eid }) = parse_heartbeat_source(sample_keyexpr)
-    else {
-        return;
-    };
-    let issue = statesref
-        .lock()
-        .expect("advanced subscriber state mutex poisoned")
-        .handle_late_publisher(zid.clone(), eid);
-    if issue {
-        issue_late_publisher_query(
-            session,
-            statesref,
-            pending,
-            base_keyexpr,
-            zid,
-            eid,
-            sample_depth,
-            max_age,
-            dest,
-            timeout_ms,
-        );
+    match parse_heartbeat_source(sample_keyexpr) {
+        Some(AdvPublisherSource::Sequenced { zid, eid }) => {
+            let issue = statesref
+                .lock()
+                .expect("advanced subscriber state mutex poisoned")
+                .handle_late_publisher(zid.clone(), eid);
+            if issue {
+                issue_late_publisher_query(
+                    session,
+                    statesref,
+                    pending,
+                    base_keyexpr,
+                    zid,
+                    eid,
+                    sample_depth,
+                    max_age,
+                    dest,
+                    timeout_ms,
+                );
+            }
+        }
+        Some(AdvPublisherSource::Timestamped { zid }) => {
+            let issue = statesref
+                .lock()
+                .expect("advanced subscriber state mutex poisoned")
+                .handle_late_timestamped_publisher(zid.clone());
+            if issue {
+                issue_timestamped_late_publisher_query(
+                    session,
+                    statesref,
+                    pending,
+                    base_keyexpr,
+                    sample_keyexpr,
+                    zid,
+                    sample_depth,
+                    max_age,
+                    dest,
+                    timeout_ms,
+                );
+            }
+        }
+        // A token whose discriminator is neither `uhlc` nor a `u32`, or whose
+        // shape is not an `@adv/pub` token at all: nothing to query.
+        None => {}
     }
 }
 
@@ -4278,6 +4556,52 @@ mod tests {
         assert_eq!(state.sequenced[&(zid, 5)].pending_queries, 1);
     }
 
+    /// R2553 — the TIMESTAMPED trigger's own slot arithmetic, and the property
+    /// the sequenced test above cannot state: the two maps are INDEPENDENT.
+    ///
+    /// A `uhlc` token and a numeric-entity token from the same zid are two
+    /// different publishers, and their slots must not alias — otherwise a
+    /// sequenced GET in flight would suppress the timestamped one for the same
+    /// node, which is a delivery loss with no symptom. The third assertion is
+    /// therefore the load-bearing one.
+    #[cfg(feature = "ext-pubsub-advanced-history")]
+    #[test]
+    fn handle_late_timestamped_publisher_opens_one_slot_per_zid() {
+        let mut state = State {
+            sequenced: HashMap::new(),
+            timestamped: HashMap::new(),
+            on_sample: Box::new(|_| {}),
+            on_miss: Box::new(|_| {}),
+            retransmission: false,
+            history_pending: false,
+            max_history_depth: usize::MAX,
+        };
+        let zid = vec![0x09u8];
+        let other = vec![0x0Au8];
+
+        // First detection opens a slot; a second while it is in flight does not.
+        assert!(state.handle_late_timestamped_publisher(zid.clone()));
+        assert_eq!(state.timestamped[&zid].pending_queries, 1);
+        assert!(!state.handle_late_timestamped_publisher(zid.clone()));
+        assert_eq!(state.timestamped[&zid].pending_queries, 1);
+
+        // A SEQUENCED publisher on the SAME zid is a different source: its slot
+        // is opened independently and leaves the timestamped one untouched.
+        assert!(state.handle_late_publisher(zid.clone(), 4));
+        assert_eq!(state.sequenced[&(zid.clone(), 4)].pending_queries, 1);
+        assert_eq!(state.timestamped[&zid].pending_queries, 1);
+
+        // A distinct zid gets its own slot.
+        assert!(state.handle_late_timestamped_publisher(other.clone()));
+        assert_eq!(state.timestamped[&other].pending_queries, 1);
+
+        // The GET's terminal Final closes the slot, re-opening the gate.
+        state.finish_timestamped_recovery(&zid);
+        assert_eq!(state.timestamped[&zid].pending_queries, 0);
+        assert!(state.handle_late_timestamped_publisher(zid.clone()));
+        assert_eq!(state.timestamped[&zid].pending_queries, 1);
+    }
+
     /// R311y100/y101 composed late-publisher recovery, driving the REAL
     /// liveliness subscriber closure end-to-end (R311y101 review MED): a
     /// publisher that appears AFTER the subscriber joined has its cache
@@ -4414,6 +4738,153 @@ mod tests {
             delivered.lock().unwrap().len(),
             before,
             "a Delete liveliness sample issues no recovery GET"
+        );
+    }
+
+    /// R2553 — the same end-to-end path for a TIMESTAMPED publisher, which is
+    /// the whole of this round and the arm that was silently dead.
+    ///
+    /// # Why this is a wz↔wz witness and needs no foreign oracle
+    ///
+    /// The atom's reason carried the `uhlc` shape as a "faithful-subset
+    /// deferral" against upstream. It is also a gap between wz's OWN two
+    /// halves, and that is cheaper to prove: `AdvancedPublisher` emits the
+    /// `uhlc` discriminator for `Sequencing::Timestamp` AND `Sequencing::None`
+    /// — two of its three modes, the second being the plainest configuration
+    /// there is — while the subscriber declined the token and dropped every
+    /// reply the cache would have sent. So a late-joining wz publisher was
+    /// invisible to a wz subscriber, with no second implementation involved.
+    ///
+    /// # The two independent defects this covers, and why one test can
+    ///
+    /// The token must be RECOGNISED (`on_late_publisher_detected`'s timestamped
+    /// arm, which did not exist) and the replies must be INGESTED
+    /// (`recovered_sample_from_reply`, which opened with `source_info()?` and
+    /// discarded exactly the samples a timestamped cache returns). Either alone
+    /// still delivers nothing, so a single delivered-payload assertion is
+    /// witness to both — and the control probes below damage them separately.
+    ///
+    /// Mirrors [`detect_late_publisher_recovers_a_post_join_publisher_cache`]
+    /// chunk for chunk, changing only what the shape changes: the token's `eid`
+    /// chunk is `uhlc`, and the cached samples carry NO `SourceInfo` and are
+    /// ordered by their timestamps alone.
+    #[cfg(all(
+        feature = "ext-pubsub-advanced-history",
+        feature = "ext-pubsub-advanced-publisher",
+        feature = "pubsub-allow-loop"
+    ))]
+    #[test]
+    fn detect_late_timestamped_publisher_recovers_a_post_join_publisher_cache() {
+        use hashbrown::HashMap;
+
+        use crate::advanced_cache::{AdvancedCache, CacheConfig, CachedSample};
+        use wz_session_core::sample::TimestampHint;
+
+        fn make_decl_token(id: u64, ke: &str) -> wz_codecs::declare::DeclareOwnedVariant {
+            use wz_codecs::decl_token::DeclToken;
+            use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
+            use wz_codecs::wireexpr_local::WireexprLocal;
+            let keyexpr = Wireexpr {
+                body: WireexprVariant::WireexprLocal(WireexprLocal {
+                    id: 0,
+                    suffix_len: Some(ke.len() as u64),
+                    suffix: Some(ke),
+                }),
+            };
+            wz_codecs::declare::DeclareVariant::CodecZenohDeclToken(DeclToken {
+                id,
+                keyexpr,
+                ..DeclToken::default()
+            })
+            .try_into_owned()
+            .unwrap()
+        }
+
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let session = TokioSession::new(actions, observer, clock);
+
+        let pub_zid = vec![0x11u8, 0x22];
+        let zid_hex = zid_to_zenoh_hex(&pub_zid);
+        // The KE a `Sequencing::Timestamp` / `Sequencing::None` publisher
+        // declares, built through the `@adv` SSOT so the test cannot drift from
+        // what `AdvancedPublisher::declare` emits.
+        let pub_adv_ke = crate::advanced_ke::publisher_adv_ke(
+            "demo/data",
+            &zid_hex,
+            crate::advanced_ke::KE_ADV_UHLC,
+        );
+
+        let cache =
+            AdvancedCache::declare(&session, pub_adv_ke.clone(), CacheConfig { max_samples: 8 })
+                .expect("advanced cache declares");
+
+        let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let d = Arc::clone(&delivered);
+        let _sub = AdvancedSubscriber::declare_with_options(
+            &session,
+            "demo/data",
+            AdvancedSubscriberOptions::new()
+                .with_history(HistoryConfig::new().detect_late_publishers())
+                .with_get_locality(Locality::SessionLocal),
+            move |sample: Sample| d.lock().unwrap().push(sample.payload[0]),
+            |_miss: Miss| {},
+        )
+        .expect("late-publisher-detecting subscriber declares");
+        assert!(
+            delivered.lock().unwrap().is_empty(),
+            "empty cache at declare -> the startup history GET recovers nothing"
+        );
+
+        // The LATE publisher caches samples with NO source_info — the shape
+        // that makes them timestamped — ordered only by their own clock.
+        for i in 0u8..3 {
+            cache.cache_sample(CachedSample::new(
+                "demo/data",
+                vec![i],
+                None,
+                TimestampHint {
+                    time: 100 + i as u64,
+                    zid: pub_zid.clone(),
+                },
+                crate::sample::SampleKind::Put,
+            ));
+        }
+
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .liveliness_subscribers
+            .dispatch_declare(&make_decl_token(91u64, &pub_adv_ke), &HashMap::new());
+        session.drain_deferred_fires();
+
+        assert_eq!(
+            *delivered.lock().unwrap(),
+            vec![0, 1, 2],
+            "a late TIMESTAMPED publisher's cached history was recovered through \
+             the real liveliness closure"
+        );
+
+        // The slot the trigger opened was closed by the GET's terminal Final,
+        // so the source is queryable again rather than wedged at one in flight.
+        // Asserted through the public surface the subscriber owns: a second
+        // token Put for the same publisher must re-issue, and re-issuing
+        // re-delivers nothing (the instants are no longer strictly newer),
+        // which is itself the timestamped ordering holding across a re-query.
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .liveliness_subscribers
+            .dispatch_declare(&make_decl_token(92u64, &pub_adv_ke), &HashMap::new());
+        session.drain_deferred_fires();
+        assert_eq!(
+            *delivered.lock().unwrap(),
+            vec![0, 1, 2],
+            "a re-detection re-queries but delivers no duplicate: the timestamped \
+             ordering drops an instant that is not strictly newer"
         );
     }
 
