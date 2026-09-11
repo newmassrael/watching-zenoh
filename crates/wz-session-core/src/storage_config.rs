@@ -29,14 +29,22 @@
 //! `storage-backend-rocksdb`. A header that contradicts the grade is worse than
 //! silence: it is read as a scope decision and stops the work being picked up.
 //!
-//! ⚠ The `volume_cfg` omission above STANDS as written, but it is a STANCE and
-//! not a measurement, so it does not settle the atom's open residual: upstream
-//! carries PER-STORAGE volume config while wz's per-volume config arrives once at
-//! LOAD time (`--storage-volume-config <text>`, bound by the volume's name). The
-//! seam that would close it already exists — [`crate::storage_volume::Volume`]'s
-//! `create_storage` takes `&StorageConfig` — so the open question is what a
-//! per-storage payload should BE here, given this module's typed-by-construction
-//! stance and that `wz-session-core` carries no `serde_json`.
+//! ⚠ R2571 — THE `volume_cfg` OMISSION ABOVE IS NO LONGER TRUE, and the open
+//! question it left ("what a per-storage payload should BE here") is answered.
+//! [`StorageConfig::volume_cfg`] carries it as a `Vec<(String, String)>`: wz
+//! types the SHAPE and reads none of the contents, which keeps the
+//! typed-by-construction stance while giving a backend exactly what upstream
+//! gives it. The answer was FORCED rather than chosen — [`StorageConfig::to_admin_json`]
+//! has to reproduce upstream's bare-string AND object renderings, and an opaque
+//! blob cannot produce the second without parsing itself apart.
+//!
+//! The two halves that made it reachable: the wire gained upstream's object form
+//! (`<name>@<volume_id>?<k>=<v>&…`, the `adminspace` module's
+//! `parse_storage_add_payload`), and [`crate::storage_volume::Volume`]'s
+//! `create_storage` already took `&StorageConfig`, so every backend can read it
+//! with no trait change. The LOAD-time `--storage-volume-config <text>` is a
+//! different axis and is unchanged: it configures a VOLUME by name, once; this
+//! configures a STORAGE's use of one.
 //!
 //! FOUNDATIONAL: always compiled under `storage-backend`, no own cfg toggle. The
 //! field is the model; the BEHAVIOR that reads each field is its own atom
@@ -47,6 +55,7 @@
 //! that R311y55 MVP config-free divergence).
 
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::time::Duration;
 
 /// Garbage-collection schedule for a storage's stale metadata — zenoh
@@ -110,6 +119,30 @@ pub struct StorageConfig {
     pub strip_prefix: Option<String>,
     /// The stale-metadata GC schedule (the `storage-mgr-garbage-collection` atom).
     pub garbage_collection: GarbageCollectionConfig,
+    /// R2571 — the PER-STORAGE volume payload, the wz analogue of zenoh's
+    /// `volume_cfg` (`plugins/zenoh-backend-traits/src/config.rs` @
+    /// `pub volume_cfg: JsonValue,`). EMPTY is upstream's `Value::Null`: the
+    /// storage named its volume with a bare id and carries no per-storage
+    /// configuration for it.
+    ///
+    /// # Why a pair list and not an opaque blob
+    ///
+    /// This module's header left the design question open ("what a per-storage
+    /// payload should BE here, given this module's typed-by-construction stance
+    /// and that `wz-session-core` carries no `serde_json`"), and the answer is
+    /// forced by the ADMIN side rather than chosen: [`Self::to_admin_json`] has
+    /// to reproduce upstream's two shapes — a bare string when there is no
+    /// payload, and an OBJECT with `id` inserted alongside the payload's own
+    /// keys when there is (`config.rs` @ `v.insert("id".into(), self.volume_id.clone().into());`).
+    /// An opaque `String` could not render the second without parsing itself
+    /// back apart, which would put the structure here anyway and in a worse
+    /// place. Pairs render directly.
+    ///
+    /// wz still never INTERPRETS the values — that is the backend's, exactly as
+    /// upstream hands `volume_cfg` through `create_storage` untouched — so the
+    /// typed-by-construction stance holds: this module types the SHAPE and reads
+    /// none of the contents.
+    pub volume_cfg: Vec<(String, String)>,
 }
 
 impl StorageConfig {
@@ -129,6 +162,9 @@ impl StorageConfig {
             complete: false,
             strip_prefix: None,
             garbage_collection: GarbageCollectionConfig::default(),
+            // Upstream's `Value::Null` arm: a storage that named its volume by a
+            // bare id carries no per-storage payload for it.
+            volume_cfg: Vec::new(),
         }
     }
 
@@ -156,7 +192,30 @@ impl StorageConfig {
             crate::json::escape_into(prefix, &mut out);
         }
         out.push_str(",\"volume\":");
-        crate::json::escape_into(&self.volume_id, &mut out);
+        if self.volume_cfg.is_empty() {
+            // Upstream's `Value::Null` arm — the bare volume id as a string.
+            crate::json::escape_into(&self.volume_id, &mut out);
+        } else {
+            // Upstream's `Value::Object` arm. It builds the payload's own map
+            // and THEN inserts `id` into it (`config.rs` @
+            // `v.insert("id".into(), self.volume_id.clone().into());`), so `id`
+            // wins over a payload key of the same name — reproduced here by
+            // emitting the payload first and `id` last, which is also what a
+            // last-wins JSON reader resolves to. The key ORDER differs from
+            // upstream's `serde_json::Map` (a `BTreeMap`, alphabetical); JSON
+            // object order is not semantic and every other body in this module
+            // is hand-rolled for the same no-`serde_json` reason.
+            out.push('{');
+            for (key, value) in &self.volume_cfg {
+                crate::json::escape_into(key, &mut out);
+                out.push(':');
+                crate::json::escape_into(value, &mut out);
+                out.push(',');
+            }
+            out.push_str("\"id\":");
+            crate::json::escape_into(&self.volume_id, &mut out);
+            out.push('}');
+        }
         out.push('}');
         out
     }
@@ -165,6 +224,54 @@ impl StorageConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// R2571 — upstream's `Value::Null` arm: no per-storage payload renders the
+    /// volume as a bare STRING (`config.rs` @
+    /// `Value::Null => Value::String(self.volume_id.clone()),`). This is the
+    /// shape every pre-R2571 storage produced, so it is also the back-compat
+    /// pin: a client parsing a wz admin body must not have to learn a new shape
+    /// because a field was added.
+    #[test]
+    fn admin_volume_is_a_bare_string_when_there_is_no_payload() {
+        let c = StorageConfig::new("demo", "demo/**", "mem");
+        assert!(c.volume_cfg.is_empty(), "the default is upstream's Null");
+        assert!(
+            c.to_admin_json().contains(r#""volume":"mem""#),
+            "got {}",
+            c.to_admin_json()
+        );
+    }
+
+    /// R2571 — upstream's `Value::Object` arm: a payload renders the volume as an
+    /// OBJECT and `id` is inserted alongside the payload's own keys
+    /// (`config.rs` @ `v.insert("id".into(), self.volume_id.clone().into());`).
+    #[test]
+    fn admin_volume_is_an_object_carrying_id_when_a_payload_is_present() {
+        let mut c = StorageConfig::new("demo", "demo/**", "fs");
+        c.volume_cfg = alloc::vec![
+            (String::from("dir"), String::from("/tmp/wz")),
+            (String::from("mode"), String::from("rw")),
+        ];
+        let body = c.to_admin_json();
+        assert!(
+            body.contains(r#""volume":{"dir":"/tmp/wz","mode":"rw","id":"fs"}"#),
+            "got {body}"
+        );
+    }
+
+    /// The payload's VALUES are escaped like every other string in this body —
+    /// they are operator text and may carry a quote or a backslash, and an
+    /// unescaped one would produce a body no JSON reader can parse.
+    #[test]
+    fn admin_volume_payload_is_escaped() {
+        let mut c = StorageConfig::new("demo", "demo/**", "fs");
+        c.volume_cfg = alloc::vec![(String::from("dir"), String::from("a\"b"))];
+        assert!(
+            c.to_admin_json().contains(r#""dir":"a\"b""#),
+            "{}",
+            c.to_admin_json()
+        );
+    }
 
     #[test]
     fn gc_default_matches_zenoh() {

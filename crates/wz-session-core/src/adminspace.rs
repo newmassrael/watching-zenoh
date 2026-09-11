@@ -1485,6 +1485,18 @@ pub enum AdminConfigWrite {
         /// [`to_storage_config`](Self::to_storage_config) resolves it to `"mem"`,
         /// and a host that maps storages onto its own volume still may.
         volume_id: Option<String>,
+        /// R2571 — the PER-STORAGE volume payload the client sent, the wire half
+        /// of [`StorageConfig::volume_cfg`](crate::storage_config::StorageConfig::volume_cfg).
+        /// EMPTY is upstream's `Value::Null`: the client named a bare volume id.
+        ///
+        /// Upstream's `volume` field is a string OR an object carrying a
+        /// mandatory `id` plus arbitrary backend keys
+        /// (`plugins/zenoh-backend-traits/src/config.rs` @
+        /// `Some(Value::Object(volume)) => {`). wz's wire had only the string
+        /// form; `@<volume_id>?<k>=<v>&…` is the object form, and the mandatory
+        /// `id` is structural here rather than checked — it is the `@` field
+        /// itself, which was already refused when empty.
+        volume_cfg: Vec<(String, String)>,
     },
     /// `.../config/storage-del <name>` — live-despawn the storage named `name`
     /// (RAII undeclare of its capture-sub + queryable). R311y239.
@@ -1549,17 +1561,28 @@ impl AdminConfigWrite {
                 name,
                 key_expr,
                 volume_id,
-            } => Some(crate::storage_config::StorageConfig::new(
-                name,
-                key_expr,
-                // A client that named NO volume resolves to the in-memory one,
-                // which is exactly what the pre-R311y497 wire always encoded — so
-                // a legacy `<name>:<keyexpr>` payload produces the identical
-                // config it always did. A host is free to map an un-named storage
-                // onto its own volume afterwards; it must NOT do that to a storage
-                // whose volume the client named.
-                volume_id.as_deref().unwrap_or(DEFAULT_STORAGE_VOLUME_ID),
-            )),
+                volume_cfg,
+            } => {
+                let mut config = crate::storage_config::StorageConfig::new(
+                    name,
+                    key_expr,
+                    // A client that named NO volume resolves to the in-memory one,
+                    // which is exactly what the pre-R311y497 wire always encoded — so
+                    // a legacy `<name>:<keyexpr>` payload produces the identical
+                    // config it always did. A host is free to map an un-named storage
+                    // onto its own volume afterwards; it must NOT do that to a storage
+                    // whose volume the client named.
+                    volume_id.as_deref().unwrap_or(DEFAULT_STORAGE_VOLUME_ID),
+                );
+                // R2571 — and the per-storage payload rides with it. This is the
+                // ONE place the wire's object form reaches a `StorageConfig`, and
+                // it is what keeps the field from being a knob nothing fills:
+                // `Volume::create_storage` already takes `&StorageConfig`, so
+                // every backend can read it with no trait change, exactly as
+                // upstream hands `volume_cfg` to `create_storage` untouched.
+                config.volume_cfg = volume_cfg.clone();
+                Some(config)
+            }
             _ => None,
         }
     }
@@ -1658,11 +1681,12 @@ pub fn parse_admin_config_write(
         // sub-key through to UnknownKey (signature-stable; the decoder is one SSOT).
         #[cfg(feature = "adminspace-config-hotreload")]
         "storage-add" => match parse_storage_add_payload(payload) {
-            Some((name, key_expr, volume_id)) => {
+            Some((name, key_expr, volume_id, volume_cfg)) => {
                 AdminConfigWriteOutcome::Apply(AdminConfigWrite::AddStorage {
                     name,
                     key_expr,
                     volume_id,
+                    volume_cfg,
                 })
             }
             None => AdminConfigWriteOutcome::Malformed,
@@ -1734,7 +1758,10 @@ pub const DEFAULT_STORAGE_VOLUME_ID: &str = "mem";
 /// addressable, and an empty volume (`demo@:ke`) is Malformed rather than a
 /// storage on a volume called "".
 #[cfg(feature = "adminspace-config-hotreload")]
-fn parse_storage_add_payload(payload: &[u8]) -> Option<(String, String, Option<String>)> {
+#[allow(clippy::type_complexity)]
+fn parse_storage_add_payload(
+    payload: &[u8],
+) -> Option<(String, String, Option<String>, Vec<(String, String)>)> {
     let text = String::from_utf8_lossy(payload);
     let (head, key_expr) = text.split_once(':')?;
     let head = head.trim();
@@ -1742,11 +1769,35 @@ fn parse_storage_add_payload(payload: &[u8]) -> Option<(String, String, Option<S
     if key_expr.is_empty() {
         return None;
     }
+    let mut volume_cfg: Vec<(String, String)> = Vec::new();
     let (name, volume_id) = match head.rsplit_once('@') {
         Some((n, v)) => {
             let (n, v) = (n.trim(), v.trim());
+            // R2571 — the object form: `@<volume_id>?<k>=<v>&<k>=<v>`. Split on
+            // the FIRST `?` so a `?` inside a value survives, the same polarity
+            // the `:` split above uses for the keyexpr. The volume id is what is
+            // left of it, so the mandatory-`id` rule upstream checks by hand
+            // (`config.rs` @ `misses mandatory string-typed field`) is
+            // structural here: an empty id is refused below either way.
+            let (v, cfg_text) = match v.split_once('?') {
+                Some((id, cfg)) => (id.trim(), Some(cfg)),
+                None => (v, None),
+            };
             if v.is_empty() {
                 return None;
+            }
+            if let Some(cfg) = cfg_text {
+                // A pair with no `=` is a client error, not a key with an empty
+                // value: refusing it is what keeps `?k` from silently becoming
+                // `k=""`. An empty KEY is refused for the same reason.
+                for pair in cfg.split('&') {
+                    let (key, value) = pair.split_once('=')?;
+                    let key = key.trim();
+                    if key.is_empty() {
+                        return None;
+                    }
+                    volume_cfg.push((String::from(key), String::from(value.trim())));
+                }
             }
             (n, Some(String::from(v)))
         }
@@ -1755,7 +1806,12 @@ fn parse_storage_add_payload(payload: &[u8]) -> Option<(String, String, Option<S
     if name.is_empty() {
         return None;
     }
-    Some((String::from(name), String::from(key_expr), volume_id))
+    Some((
+        String::from(name),
+        String::from(key_expr),
+        volume_id,
+        volume_cfg,
+    ))
 }
 
 /// The OpenMetrics build-info block the admin `@/<zid>/<whatami>/metrics` GET
@@ -2289,6 +2345,7 @@ mod tests {
                     name: String::from("demo"),
                     key_expr: String::from("demo/**"),
                     volume_id: None,
+                    volume_cfg: Vec::new(),
                 })
             );
         }
@@ -2328,6 +2385,7 @@ mod tests {
                     name: String::from("demo"),
                     key_expr: String::from("demo/**"),
                     volume_id: Some(String::from("wzvol_example")),
+                    volume_cfg: Vec::new(),
                 })
             );
             let AdminConfigWriteOutcome::Apply(intent) = out else {
@@ -2361,6 +2419,7 @@ mod tests {
                     name: String::from("mirror"),
                     key_expr: String::from("@/a1b2/peer/**"),
                     volume_id: None,
+                    volume_cfg: Vec::new(),
                 })
             );
         }
@@ -2381,7 +2440,95 @@ mod tests {
                     name: String::from("a@b"),
                     key_expr: String::from("demo/**"),
                     volume_id: Some(String::from("fsdyn")),
+                    volume_cfg: Vec::new(),
                 })
+            );
+        }
+
+        /// R2571 — upstream's OBJECT form for `volume`, which wz's wire had no
+        /// spelling for: `@<volume_id>?<k>=<v>&<k>=<v>` is
+        /// `volume: {id: …, k: v}` (`plugins/zenoh-backend-traits/src/config.rs`
+        /// @ `Some(Value::Object(volume)) => {`). The payload must reach the
+        /// CONFIG, not merely parse — that is the difference between a knob and
+        /// a knob nothing fills.
+        #[test]
+        fn storage_add_carries_a_per_storage_volume_payload() {
+            let out = parse_admin_config_write(
+                WRITE_PREFIX,
+                "@/a1b2/peer/config/storage-add",
+                b"demo@fsdyn?dir=/tmp/wz&mode=rw:demo/**",
+                true,
+            );
+            let AdminConfigWriteOutcome::Apply(intent) = out else {
+                panic!("expected Apply, got {out:?}")
+            };
+            let config = intent.to_storage_config().expect("AddStorage -> config");
+            assert_eq!(config.volume_id, "fsdyn");
+            assert_eq!(
+                config.volume_cfg,
+                alloc::vec![
+                    (String::from("dir"), String::from("/tmp/wz")),
+                    (String::from("mode"), String::from("rw")),
+                ],
+                "the payload reaches the config in wire order"
+            );
+        }
+
+        /// The string form still yields NO payload — upstream's `Value::Null`
+        /// arm. This is the back-compat pin: every pre-R2571 payload must
+        /// produce the config it always did.
+        #[test]
+        fn storage_add_without_a_payload_is_unchanged() {
+            let out = parse_admin_config_write(
+                WRITE_PREFIX,
+                "@/a1b2/peer/config/storage-add",
+                b"demo@fsdyn:demo/**",
+                true,
+            );
+            let AdminConfigWriteOutcome::Apply(intent) = out else {
+                panic!("expected Apply, got {out:?}")
+            };
+            let config = intent.to_storage_config().expect("AddStorage -> config");
+            assert_eq!(config.volume_id, "fsdyn");
+            assert!(config.volume_cfg.is_empty(), "no `?` means upstream's Null");
+        }
+
+        /// A pair with no `=`, or with an empty key, is MALFORMED rather than a
+        /// key with an empty value. Silently reading `?dir` as `dir=""` is how a
+        /// storage comes up configured differently from what the operator wrote.
+        #[test]
+        fn storage_add_payload_without_a_value_is_malformed() {
+            for payload in [
+                &b"demo@fsdyn?dir:demo/**"[..],
+                &b"demo@fsdyn?=rw:demo/**"[..],
+            ] {
+                assert_eq!(
+                    parse_admin_config_write(
+                        WRITE_PREFIX,
+                        "@/a1b2/peer/config/storage-add",
+                        payload,
+                        true,
+                    ),
+                    AdminConfigWriteOutcome::Malformed,
+                    "payload {:?} must not resolve",
+                    core::str::from_utf8(payload).unwrap(),
+                );
+            }
+        }
+
+        /// The mandatory `id` upstream checks by hand is STRUCTURAL here — it is
+        /// the `@` field, and an empty one was already refused. `@?k=v` has no
+        /// id, so it is Malformed for the reason it always was.
+        #[test]
+        fn storage_add_payload_without_a_volume_id_is_malformed() {
+            assert_eq!(
+                parse_admin_config_write(
+                    WRITE_PREFIX,
+                    "@/a1b2/peer/config/storage-add",
+                    b"demo@?dir=/tmp:demo/**",
+                    true,
+                ),
+                AdminConfigWriteOutcome::Malformed,
             );
         }
 
@@ -2401,6 +2548,7 @@ mod tests {
                     name: String::from("demo"),
                     key_expr: String::from("foo:bar/**"),
                     volume_id: None,
+                    volume_cfg: Vec::new(),
                 })
             );
         }
