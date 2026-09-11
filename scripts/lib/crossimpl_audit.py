@@ -583,7 +583,26 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # range) and its logic reads correct, yet that push landed. Either the hook did
 # not run for it or it was bypassed; both are unverified here, so nothing is
 # claimed.
-FOREIGN_ADJUDICATOR_LINKS = 890
+# R2562 — 890 -> 898, from `wz_multicast_departure_witnessed_by_pico.rs`: EIGHT
+# links across two tests (5 + 3), each adjudicated by a real zenoh-pico peer.
+# Measured, not counted off the diff: the audit read `898, declared 890` with the
+# file staged, which is exactly its eight lines.
+#
+# WHAT MAKES THEM NEW RATHER THAN MORE OF THE SAME, which is the distinction this
+# ratchet exists to record: `session-multicast` already had seven foreign proofs
+# and every one is marked `partial`, because each witnesses wz ARRIVING. Nothing
+# foreign had ever adjudicated wz LEAVING, which is why the atom's reason could
+# carry "no foreign witness for the departure story" with seven proofs standing.
+# These two tests close both halves of it — the announced departure (pico decodes
+# wz's multicast Close) and the inferred one (pico's lease sweep expires a silent
+# wz) — so they are claims on a plane no prior link reached.
+#
+# ⚠ They required the ORACLE to change, not just the corpus: the pico signal they
+# witness sits under `Z_FEATURE_CONNECTIVITY`, which the vendored default leaves
+# at 0, so the built `libzenohpico.so` exported ZERO `connectivit*` symbols before
+# this round. `scripts/build-zenoh-pico-cli.sh` now requests the flag, asserts it
+# against the GENERATED config.h, and installs `z_info`.
+FOREIGN_ADJUDICATOR_LINKS = 898
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

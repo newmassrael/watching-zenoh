@@ -94,7 +94,17 @@ INSTALL_DIR="$ROOT/target/zenoh-pico-cli"
 # the wz-side publisher has a counterparty that is not wz. Without it the TLS
 # legs could only be wz talking to wz, which is the one topology that cannot
 # distinguish "wz speaks TLS" from "wz and wz agree about something".
-TARGETS=(z_put z_pub z_sub z_get z_queryable z_querier z_liveliness z_sub_liveliness z_get_liveliness z_sub_attachment z_pub_attachment z_pong z_queryable_attachment z_advanced_sub z_advanced_pub z_ping z_get_lat z_pub_thr z_get_attachment z_sub_tls z_pub_tls)
+#
+# R2562 — `z_info` joins this list, and it is the only upstream example that
+# reports a peer DEPARTING. `session-multicast`'s standing residual is that wz's
+# departure story has no FOREIGN witness: wz emits a multicast Close and infers a
+# lease expiry, and every `wz-proves:` line naming that atom is marked `partial`
+# because the only readers of those departures were wz's own. `z_info` declares a
+# transport-events listener and prints `>> [Transport Event] Closed:` with the
+# departing peer's zid, so it is upstream ADJUDICATING a wz departure rather than
+# wz agreeing with itself. It needs `Z_FEATURE_CONNECTIVITY` below; without that
+# flag its whole connectivity body is `#if`-d out and the binary is a stub.
+TARGETS=(z_put z_pub z_sub z_get z_queryable z_querier z_liveliness z_sub_liveliness z_get_liveliness z_sub_attachment z_pub_attachment z_pong z_queryable_attachment z_advanced_sub z_advanced_pub z_ping z_get_lat z_pub_thr z_get_attachment z_sub_tls z_pub_tls z_info)
 
 if [[ ! -e "$VENDOR_DIR/.git" && ! -f "$VENDOR_DIR/CMakeLists.txt" ]]; then
     echo "build-zenoh-pico-cli: vendor/zenoh-pico/ not initialized." >&2
@@ -471,6 +481,20 @@ export PKG_CONFIG_PATH="$MBEDTLS_PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CO
 #
 # The cost of the flag is a real dependency, not a macro: see the Mbed TLS
 # provisioning above.
+#
+# R2562 — `Z_FEATURE_CONNECTIVITY=1` compiles pico's connectivity events API
+# (vendor default 0, CMakeLists.txt:318), which is what gives `z_info` a body and
+# gives this tree a foreign adjudicator for a DEPARTURE. It obeys the same
+# `1`-not-`ON` rule as the serial and TLS flags — `z_info.c:30` guards on
+# `Z_FEATURE_CONNECTIVITY == 1`, so `ON` would evaluate to 0 in that `#if` and
+# install an example whose whole connectivity body is compiled out.
+#
+# ⚠ IT HAS A PREREQUISITE, AND THAT IS WHY THE READ-BACK BELOW IS NOT A
+# FORMALITY HERE. `CMakeLists.txt:367` FORCES this flag back to 0 with a mere
+# `message(WARNING)` when `Z_FEATURE_UNSTABLE_API` is off. That arm is satisfied
+# — UNSTABLE_API is ON directly above — but "satisfied today" is exactly the
+# thing a read-back exists to keep true, because the failure is a warning in a
+# build log and a silently stubbed binary downstream.
 cmake -B "$BUILD_DIR" -S "$EXAMPLES_DIR" \
     -DCMAKE_C_STANDARD=11 \
     -DCMAKE_BUILD_TYPE=Release \
@@ -478,7 +502,8 @@ cmake -B "$BUILD_DIR" -S "$EXAMPLES_DIR" \
     -DZ_FEATURE_ADVANCED_PUBLICATION=1 \
     -DZ_FEATURE_ADVANCED_SUBSCRIPTION=1 \
     -DZ_FEATURE_LINK_SERIAL=1 \
-    -DZ_FEATURE_LINK_TLS=1 >&2
+    -DZ_FEATURE_LINK_TLS=1 \
+    -DZ_FEATURE_CONNECTIVITY=1 >&2
 
 # Read back what was actually COMPILED, not what was requested. Every
 # mechanism that turns a requested pico feature into a compiled-out one is
@@ -497,7 +522,8 @@ for expect in \
     "Z_FEATURE_ADVANCED_PUBLICATION 1" \
     "Z_FEATURE_ADVANCED_SUBSCRIPTION 1" \
     "Z_FEATURE_LINK_SERIAL 1" \
-    "Z_FEATURE_LINK_TLS 1"; do
+    "Z_FEATURE_LINK_TLS 1" \
+    "Z_FEATURE_CONNECTIVITY 1"; do
     if ! grep -qx "#define $expect" "$GENERATED_CONFIG"; then
         echo "build-zenoh-pico-cli: requested '$expect' but the GENERATED config.h says:" >&2
         grep -E "^#define ${expect%% *}( |$)" "$GENERATED_CONFIG" >&2 \
@@ -537,6 +563,7 @@ cmake -B "${BUILD_DIR}-st" -S "$EXAMPLES_DIR" \
     -DZ_FEATURE_ADVANCED_SUBSCRIPTION=1 \
     -DZ_FEATURE_LINK_SERIAL=1 \
     -DZ_FEATURE_LINK_TLS=1 \
+    -DZ_FEATURE_CONNECTIVITY=1 \
     -DZ_FEATURE_MULTI_THREAD=0 >&2
 
 # Same read-back discipline as the primary arm, and for a sharper reason: this

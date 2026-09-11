@@ -770,7 +770,15 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # the atom left this population. DERIVED: the departing reason re-audited to
 # wz=15, ambiguous=0, and it sat in the `reached` bucket — which is why
 # UNREACHED and NO_SYMBOL correctly hold while both other pins move.
-PIN_REACHED = 48
+# R2562 (the `session-multicast` close) — 48 -> 47, the same event shape an
+# EIGHTH time. Both of its standing residuals were disposed by BUILD rather than
+# by re-reading: the MCU re-join exists (R2561) and the departure story gained a
+# foreign witness for both halves — a real zenoh-pico peer adjudicating wz's
+# announced Close and its lease expiry. So the atom left this population.
+# DERIVED: the departing reason re-audited to wz=10, ambiguous=0, and it sat in
+# the `reached` bucket — which is why UNREACHED and NO_SYMBOL correctly hold
+# while both other pins move.
+PIN_REACHED = 47
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -860,7 +868,21 @@ PIN_NO_SYMBOL = 2
 # counted. DERIVED by re-auditing the DEPARTING text through this file's own
 # `citation_audit` rather than by subtracting the two totals: wz=15,
 # ambiguous=0, so 300 - 15 = 285 and AMBIGUOUS correctly holds at 56.
-PIN_WZ_CITATIONS = 285
+# R2562 -- 285 -> 275. `session-multicast` reaches COMPLETE and LEAVES this
+# PARTIAL-only population, so its whole reason goes with it. DERIVED by
+# re-auditing the DEPARTING text through this file's own `citation_audit` rather
+# than by subtracting totals: the PRE-round reason reads wz=10, ambiguous=0, so
+# 285 - 10 = 275 and AMBIGUOUS correctly holds at 56.
+#
+# ⚠ AUDIT THE PRE-ROUND TEXT, NOT THE TEXT NOW IN THE STORE, and this round is
+# the demonstration rather than a caution: the reason as it stands audits to
+# wz=11, because R2562's own correction cites the interop test it added. Using
+# that number gives 274 and disagrees with the measured 275 by one. The extra
+# citation was ADDED and DEPARTED in the same commit and was therefore never
+# counted -- exactly what R2559 recorded one pin-move above. The one-count
+# mismatch is the tell; it is arithmetic, not judgement, which is why it is
+# catchable.
+PIN_WZ_CITATIONS = 275
 PIN_AMBIGUOUS = 56
 
 
