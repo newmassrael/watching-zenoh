@@ -7285,7 +7285,14 @@ layer_c1au_cargo_test_ext_pubsub_sample_miss_detection() {
     # `pubsub-qos` — a DEFAULT feature this lane keeps, since it passes no
     # `--no-default-features`. It is a PAIR: its probe blocks BOTH arms, which a
     # single-arm assertion would have passed.
-    _runci_guarded_test "C1au advanced_publisher" 13 \
+    # R2559 — 13 -> 14, one case.
+    # `an_ill_formed_adv_keyexpr_is_refused_at_declare_in_every_configuration`
+    # discriminates HERE for the same reason the R2558 pair does: the refusal it
+    # asserts is reached through `AdvancedPublisherError::InvalidAdvKeyexpr`,
+    # which only this feature's tests name. The number is what the lane PRINTED,
+    # not what the diff suggests — `guarded_count_gate.py --range` is what moved
+    # it, and it read the run.
+    _runci_guarded_test "C1au advanced_publisher" 14 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-sample-miss-detection,ext-pubsub-advanced-recovery,pubsub-allow-loop \
         --lib advanced_publisher --quiet || return 1
     (cd crates \

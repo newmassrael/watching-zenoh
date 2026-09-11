@@ -762,7 +762,15 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # sixth time: its last residual (the group pin's missing local witness) was
 # built, so it left this population. DERIVED: the departing reason re-audited
 # to wz=14, ambiguous=10, and it sat in the `reached` bucket.
-PIN_REACHED = 49
+# R2559 (the `ext-pubsub-sample-miss-detection` close) — 49 -> 48, the same
+# event shape a seventh time. Its last residual, clause (3), was disposed by
+# MEASUREMENT rather than by assertion: the emptiness R2558 could not prove was
+# measured false (a beacon-only publisher accepted an ill-formed derived `@adv`
+# expression that the detection-on arm refused), and the refusal was built. So
+# the atom left this population. DERIVED: the departing reason re-audited to
+# wz=15, ambiguous=0, and it sat in the `reached` bucket — which is why
+# UNREACHED and NO_SYMBOL correctly hold while both other pins move.
+PIN_REACHED = 48
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -846,7 +854,13 @@ PIN_NO_SYMBOL = 2
 # tree's architecture. Derived by auditing the ADDENDUM ALONE -- wz=7,
 # ambiguous=0 -- so AMBIGUOUS correctly holds and 293 + 7 lands on the measured
 # 300.
-PIN_WZ_CITATIONS = 300
+# R2559 -- 300 -> 285. The same atom now reaches COMPLETE and LEAVES this
+# PARTIAL-only population, so its whole reason goes with it, the addendum this
+# round wrote included -- a citation added and departed in one commit was never
+# counted. DERIVED by re-auditing the DEPARTING text through this file's own
+# `citation_audit` rather than by subtracting the two totals: wz=15,
+# ambiguous=0, so 300 - 15 = 285 and AMBIGUOUS correctly holds at 56.
+PIN_WZ_CITATIONS = 285
 PIN_AMBIGUOUS = 56
 
 

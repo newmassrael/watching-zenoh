@@ -194,6 +194,37 @@ pub enum AdvancedPublisherError {
     /// `uhlc` discriminator, so a subscriber de-duplicating on those timestamps
     /// was told they were HLC-quality when they were not.
     TimestampingDisabled,
+    /// R2559 — the derived `@adv` key expression is not safe to put on the
+    /// wire: it either does not parse as a key expression, or it carries the
+    /// R299 bug-3 shape that zenoh-pico's canonizer aborts on (a peer
+    /// application that canonizes or joins the received key, not the receive
+    /// path itself — see the witness test for the measured caller set).
+    ///
+    /// Upstream cannot reach this state at all. Its suffix is assembled from
+    /// already-validated `KeyExpr` values by `Div`
+    /// (`zenoh-ext/src/advanced_publisher.rs` @ `let suffix = KE_ADV_PREFIX / KE_PUB / &id.zid().into_keyexpr();`),
+    /// so the derived expression is well-formed BY CONSTRUCTION and the only
+    /// construction-time failure left for it to propagate is the declaration
+    /// itself. wz takes the base as `impl Into<String>`, so the invalid state is
+    /// representable here and has to be refused somewhere.
+    ///
+    /// ⚠ IT USED TO BE REFUSED ONLY BY A CONFIGURATION ACCIDENT, which is the
+    /// measurement that put this variant here. The DECLARE seam gates what it
+    /// is handed
+    /// (`crates/wz-session-core/src/session_actions.rs` @ `check_outbound_keyexpr_pico_safe(suffix)?;`),
+    /// so the cache queryable and the liveliness token both refused. The beacon
+    /// is a PUSH, and no `send_push_*` seam carries that gate — so with
+    /// detection off and a heartbeat on, the SAME base string declared `Ok`,
+    /// published `Ok`, and answered `true` from
+    /// [`AdvancedPublisher::emit_heartbeat_once`]. Two configurations of one
+    /// publisher gave two answers about one string, and the beacon-only arm gave
+    /// the wrong one silently.
+    ///
+    /// ⚠ MEASURED, because the obvious reading is wrong: that beacon publish was
+    /// not failing and having its error dropped. There was no error.
+    /// [`Session::publish`] answers `Ok` on an ill-formed keyexpr, so the beacon
+    /// put a non-expression on the wire and no caller could learn it.
+    InvalidAdvKeyexpr(crate::keyexpr_canon::OutboundKeyexprError),
 }
 
 impl From<QueryableError> for AdvancedPublisherError {
@@ -341,6 +372,74 @@ where
             &zid_to_zenoh_hex(&local_zid),
             &discriminator,
         );
+
+        // R2559 — THE DERIVED `@adv` EXPRESSION HAS TO PARSE AS A KEY
+        // EXPRESSION, and this is the one place that can say so for every
+        // configuration at once.
+        //
+        // Upstream never needs the check: its suffix is `Div`-composed from
+        // values that are already `KeyExpr`, so the derived expression is
+        // well-formed by construction and the only thing its constructor has
+        // left to propagate is the beacon publisher's own declaration
+        // (`zenoh-ext/src/advanced_publisher.rs` @ `let publisher = conf.session.declare_publisher(&key_expr / &suffix).wait()?;`).
+        // wz takes the base as `impl Into<String>`, so the ill-formed state is
+        // representable here — and a representable invalid state has to be
+        // refused, not discovered later.
+        //
+        // ⚠ WHAT WAS MEASURED, because the shape is the whole argument for
+        // putting the check HERE rather than on the beacon: the refusal already
+        // existed, but it belonged to an unrelated option. `declare_token`
+        // validates its own input, so `publisher_detection: true` on
+        // `demo/foo?bar` was refused at declare — while the same base with
+        // detection off and a heartbeat on returned `Ok`, put `Ok`, and answered
+        // `true` from `emit_heartbeat_once`. One string, two configurations, two
+        // answers, and the silent one is the arm this atom is about.
+        //
+        // ⚠ AND THE SILENCE IS NOT WHERE IT LOOKS. The `let _ =` on the beacon
+        // publish is not swallowing an error: MEASURED, that publish returns
+        // `Ok` on an ill-formed keyexpr, because no `send_push_*` seam validates
+        // one — only the DECLARE seam does. So there was nothing to swallow, and
+        // no amount of checking the beacon's own result would have found this.
+        //
+        // THE PREDICATE IS THE DECLARE SEAM'S OWN FUNCTION, and the first draft
+        // of this check got that wrong in a way worth recording, because the
+        // comment asserted a binding the code did not have. It called
+        // `canonize_keyexpr` and claimed to be "the same predicate
+        // `declare_token` refuses through". It is not: the seam refuses through
+        // `check_outbound_keyexpr_pico_safe`
+        // (`crates/wz-session-core/src/session_actions.rs` @ `check_outbound_keyexpr_pico_safe(suffix)?;`),
+        // which is canon PLUS the R299 bug-3 family — the `**` + literal + `*`
+        // shape pico's canonizer aborts on. Canon alone ACCEPTS that shape,
+        // because the shape IS canonical; that is the whole reason the seam
+        // needs a second arm and a canon-only check cannot stand in for it.
+        //
+        // MEASURED, on `demo/**/c/*`: the beacon-only arm declared `Ok` while
+        // the detection arm refused with
+        // `PicoBugThreeFamily { offending_chunk: "*" }`. So the very defect this
+        // check exists to remove — one string, two configurations, two answers —
+        // survived the first draft inside a narrower and WORSE band, where the
+        // beacon does not merely put a non-expression on the wire but one whose
+        // canonizer a pico application aborts on (the witness test records the
+        // measured caller set — no receive path reaches it). A predicate that is a subset of the
+        // one it claims to match is not a second opinion; it is the same
+        // disagreement with a smaller domain.
+        //
+        // Calling the seam's own function is what makes "the two legs cannot
+        // drift apart" true rather than asserted. Its OUTPUT is nothing — it
+        // answers pass/fail and rewrites nothing — which is also what this site
+        // needs: the wire path emits the suffix verbatim, so canonizing here
+        // would silently rewrite a keyexpr the caller and the subscriber both
+        // spell the other way.
+        //
+        // Placed after the eid allocation because the expression needs the
+        // discriminator, and before the cache / token declarations so a refusal
+        // never leaves a half-declared publisher to roll back — the same
+        // ordering rule the `TimestampingDisabled` and `NoRuntime` preconditions
+        // above are placed by. The burnt entity id is the one residue, and it is
+        // the residue upstream accepts too: it declares its main publisher
+        // before it can fail on the suffix.
+        crate::keyexpr_canon::check_outbound_keyexpr_pico_safe(&adv_keyexpr)
+            .map_err(AdvancedPublisherError::InvalidAdvKeyexpr)?;
 
         let cache = match options.cache {
             Some(config) => Some(AdvancedCache::declare(
@@ -1472,6 +1571,148 @@ mod tests {
              is repaired by the next: blocking it is latency for nothing, and \
              upstream does not"
         );
+    }
+
+    /// R2559 — an ill-formed derived `@adv` expression is refused AT DECLARE,
+    /// and the verdict is the same whichever decorations the publisher asked
+    /// for.
+    ///
+    /// THE DEFECT THIS PINS WAS A DISAGREEMENT, NOT AN ABSENCE, and that is why
+    /// the assertion is a pair. wz already refused `demo/foo?bar` when
+    /// `publisher_detection` was on, because `declare_token` validates what it
+    /// is handed. With detection off and a heartbeat on — the configuration
+    /// THIS atom is about — the same base was MEASURED to declare `Ok`, to
+    /// `put` `Ok`, and to answer `true` from `emit_heartbeat_once` while every
+    /// beacon was dropped by `let _ = session.publish(..)`. One string, two
+    /// configurations, two answers, and the wrong one was the silent one.
+    ///
+    /// So what is asserted is the AGREEMENT. A test that pinned only the
+    /// beacon-only arm would pass just as well on a build that had moved the
+    /// disagreement rather than removed it.
+    ///
+    /// The three bases violate the chunk grammar three different ways, so what
+    /// refuses them is the seam's own checker rather than one hard-coded
+    /// character. A fourth case below is CANONICAL and still unsafe, which is
+    /// what pins the checker's identity rather than merely its effect.
+    #[cfg(feature = "ext-pubsub-sample-miss-detection")]
+    #[tokio::test]
+    async fn an_ill_formed_adv_keyexpr_is_refused_at_declare_in_every_configuration() {
+        use std::sync::Mutex;
+        use std::time::Duration;
+
+        use crate::observer::ApplicationLayerObserver;
+        use crate::runtime_impl::TokioTime;
+        use crate::session::TokioSession;
+
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        let session = TokioSession::new(
+            actions,
+            Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+            Arc::new(TokioTime::new()),
+        );
+
+        // No cache and no token: on this arm NOTHING else looks at the derived
+        // expression, which is exactly what made the old silence possible.
+        let beacon_only = || AdvancedPublisherOptions {
+            sequencing: Sequencing::SequenceNumber,
+            cache: None,
+            publisher_detection: false,
+            sample_miss_detection: MissDetectionConfig::default()
+                .heartbeat(Duration::from_millis(100)),
+        };
+        // The arm that already refused, kept as the comparison rather than
+        // assumed: it is the half of the pair that gives the other one a
+        // subject.
+        let detection_on = || AdvancedPublisherOptions {
+            sequencing: Sequencing::SequenceNumber,
+            cache: None,
+            publisher_detection: true,
+            sample_miss_detection: MissDetectionConfig::default(),
+        };
+
+        for base in ["demo/foo?bar", "demo//data", "demo/data/"] {
+            assert!(
+                matches!(
+                    AdvancedPublisher::declare(&session, base, beacon_only(), vec![0x09u8]),
+                    Err(AdvancedPublisherError::InvalidAdvKeyexpr(_))
+                ),
+                "a beacon-only publisher on {base:?} must be refused at declare; \
+                 before R2559 it declared Ok and then beaconed into nothing for \
+                 the life of the process"
+            );
+            assert!(
+                AdvancedPublisher::declare(&session, base, detection_on(), vec![0x09u8]).is_err(),
+                "the detection-on arm must keep refusing {base:?} — the two \
+                 configurations are being asked about ONE string"
+            );
+        }
+
+        // ANTI-VACUITY 1: a well-formed base still declares BOTH ways round, so
+        // the refusal is about the expression and not about beaconing (or about
+        // detection).
+        assert!(
+            AdvancedPublisher::declare(&session, "demo/data", beacon_only(), vec![0x09u8]).is_ok(),
+            "a well-formed base stays declarable on the beacon-only arm"
+        );
+        assert!(
+            AdvancedPublisher::declare(&session, "demo/data", detection_on(), vec![0x09u8]).is_ok(),
+            "a well-formed base stays declarable on the detection arm"
+        );
+
+        // THE ARM THAT CAUGHT THIS CHECK'S OWN FIRST DRAFT, and the reason it is
+        // a separate case rather than a fourth string in the loop above: it is
+        // CANONICAL. `demo/**/c/*` parses fine, so a canon-only predicate
+        // accepts it — and MEASURED, the first draft of this check did exactly
+        // that while the detection arm refused with
+        // `PicoBugThreeFamily { offending_chunk: "*" }`. The defect this test
+        // exists to pin had survived inside a narrower band.
+        //
+        // ⚠ WHAT THAT BAND COSTS IS STATED AS MEASURED, NOT AS THE SCARIER
+        // VERSION. The first draft of THIS COMMENT said such a keyexpr "aborts a
+        // pico peer", which overstates it. `assert(false)` sits inside
+        // `vendor/zenoh-pico/src/session/keyexpr.c` @ `zp_keyexpr_canon_status_t _z_keyexpr_canonize(char *start, size_t *len) {`,
+        // and every caller of that function is an application-facing API entry
+        // (`z_keyexpr_canonize`, its null-terminated twin, the two
+        // `*_autocanonize` constructors, and `z_keyexpr_join`). NO receive path
+        // calls it. So arrival alone does not abort: the peer aborts when its
+        // APPLICATION canonizes or joins the keyexpr it was handed, which is an
+        // ordinary thing for an application to do with a key it received.
+        //
+        // It is asserted BOTH WAYS for the same reason as the loop: what must
+        // hold is the agreement, not either arm's value.
+        for opts in [beacon_only(), detection_on()] {
+            assert!(
+                AdvancedPublisher::declare(&session, "demo/**/c/*", opts, vec![0x09u8]).is_err(),
+                "a base carrying the R299 bug-3 shape must be refused in EVERY \
+                 configuration: it is canonical, so only the seam's own \
+                 `check_outbound_keyexpr_pico_safe` catches it, and wz must not \
+                 emit a shape whose canonizer a peer application aborts on"
+            );
+        }
+
+        // ANTI-VACUITY 2 — THE BOUNDARY, which a population of well-formed and
+        // ill-formed bases alone would never grade: the predicate is "parses",
+        // NOT "is already canonical". MEASURED: `canonize_keyexpr("demo/$*/data")`
+        // answers `Ok("demo/*/data")`, so input != canon while the grammar
+        // holds, and `declare_token` accepts that base today. Tightening this
+        // check to an equality would refuse it here and diverge the two legs
+        // again, in the opposite direction from the defect above.
+        //
+        // ⚠ ASSERTED ON BOTH ARMS ON PURPOSE. The claim above is about what the
+        // DECLARE seam accepts, so testing only the beacon arm would leave that
+        // half INFERRED — and it WAS inferred, from a sibling input
+        // (`demo/$*$*/data`, which collapses to this one) rather than from this
+        // string. The second arm is what makes "the two legs agree here too" a
+        // measurement instead.
+        for opts in [beacon_only(), detection_on()] {
+            assert!(
+                AdvancedPublisher::declare(&session, "demo/$*/data", opts, vec![0x09u8]).is_ok(),
+                "a valid-but-non-canonical base stays declarable in EVERY \
+                 configuration: the wire suffix is emitted verbatim, so \
+                 canonizing it here would rewrite a keyexpr the caller and the \
+                 subscriber both spell the other way"
+            );
+        }
     }
 
     /// R311y93 (review V1) — the sporadic-heartbeat emit gate. Non-sporadic emits
