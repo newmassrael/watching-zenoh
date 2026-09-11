@@ -487,8 +487,8 @@ async fn unixpipe_link_ends_report_mirrored_dedicated_fifo_endpoints() {
 /// `SerialTarget` variants is what catches an emitter that hard-codes one spelling.
 ///
 /// Both ends reporting the same locator for `src` and `dst` is upstream's DIAL-side
-/// behaviour verbatim (`zenoh-link-serial/src/unicast.rs:310-315` passes its one
-/// `path` as both), so `assert_mirrored`'s distinctness rule does not apply.
+/// behaviour verbatim (`io/zenoh-links/zenoh-link-serial/src/unicast.rs` @ `async fn new_link(&self, endpoint: EndPoint) -> ZResult<LinkUnicast> {`
+/// passes its one `path` as both), so `assert_mirrored`'s distinctness rule does not apply.
 #[cfg(all(feature = "transport-link-serial", feature = "transport-unicast"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn serial_link_ends_report_their_own_endpoint_for_both_address_forms() {

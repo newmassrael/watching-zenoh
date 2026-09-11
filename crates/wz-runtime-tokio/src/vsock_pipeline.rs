@@ -133,8 +133,9 @@ pub fn wire_vsock_stream(
         // LITERAL rather than as `InterceptorLink::Vsock`'s scheme string: the
         // two happen to coincide, and deriving one from the other would assert
         // a coupling upstream does not have (its sibling addressless links name
-        // no interface at all). `zenoh-link-vsock/src/unicast.rs` @
-        // `vec!["vsock".to_string()]`. Without it an ACL narrowed by
+        // no interface at all).
+        // `io/zenoh-links/zenoh-link-vsock/src/unicast.rs` @ `vec!["vsock".to_string()]`.
+        // Without it an ACL narrowed by
         // `interfaces` -- the spelling a zenoh-authored config uses to target a
         // vsock link -- matches nothing here.
         addressless_link_subject(InterceptorLink::Vsock, vec!["vsock".to_string()]),
@@ -175,8 +176,9 @@ mod tests {
 
     /// R2548 — a WIRED vsock link names the pseudo-interface upstream names.
     ///
-    /// `zenoh-link-vsock/src/unicast.rs` @ `vec!["vsock".to_string()]` is the
-    /// only one of upstream's four ADDRESSLESS links that names an interface at
+    /// `io/zenoh-links/zenoh-link-vsock/src/unicast.rs` @ `vec!["vsock".to_string()]`
+    /// is the only one of upstream's four ADDRESSLESS links that names an
+    /// interface at
     /// all (serial reports tty device names; unixsock and unixpipe each report
     /// none and say "not supported"). wz used to report a definite-empty set for
     /// all four, which is true of the wire and wrong about upstream: an ACL

@@ -770,8 +770,8 @@ pub fn wire_unixpipe_stream(
         tx,
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         // R2548 — EMPTY, matching upstream:
-        // `zenoh-link-unixpipe/src/unix/unicast.rs` @ its `get_interface_names`
-        // logs "not supported" and returns none.
+        // `io/zenoh-links/zenoh-link-unixpipe/src/unix/unicast.rs` @ `vec![]`,
+        // whose `get_interface_names` logs "not supported" and returns none.
         addressless_link_subject(InterceptorLink::Unixpipe, Vec::new()),
         endpoints,
     ));

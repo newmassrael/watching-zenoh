@@ -237,7 +237,8 @@ pub fn wire_serial_stream(
     // R311y474 — the adminspace `{src,dst}` pair. BOTH ends are this tty's own
     // locator, which is upstream's DIAL-side behaviour verbatim: zenoh passes its
     // one `path` as both `src_path` and `dst_path`
-    // (`zenoh-link-serial/src/unicast.rs:310-315`). For a point-to-point tty that
+    // (`io/zenoh-links/zenoh-link-serial/src/unicast.rs` @ `async fn new_link(&self, endpoint: EndPoint) -> ZResult<LinkUnicast> {`).
+    // For a point-to-point tty that
     // is the honest answer — the device IS the link, and dialling that locator
     // from this host reaches this link.
     //
@@ -252,8 +253,8 @@ pub fn wire_serial_stream(
         tx,
         // R2548 — EMPTY, and this is the one call site where that is a KNOWN
         // divergence rather than a match. Upstream reports the tty device names
-        // (`zenoh-link-serial/src/unicast.rs` @
-        // `match z_serial::get_available_port_names()`), so an ACL narrowed by
+        // `io/zenoh-links/zenoh-link-serial/src/unicast.rs` @ `match z_serial::get_available_port_names()`
+        // is where it reads them, so an ACL narrowed by
         // `interfaces` can target a serial link there and cannot here. Left as
         // it stands rather than half-built: enumerating ports is
         // `transport-link-serial`'s work and belongs in that atom's round, with

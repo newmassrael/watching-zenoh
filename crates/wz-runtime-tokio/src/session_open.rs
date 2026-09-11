@@ -871,8 +871,8 @@ pub enum BoundListener {
 /// per-accept in [`BoundListener::accept_raw`]. That is upstream's shape, not an
 /// approximation of it: zenoh's `new_listener` creates NO port either — it
 /// records the endpoint and lets its accept task open the device
-/// (`zenoh-link-serial/src/unicast.rs:321-373`, whose `receive` opens the
-/// `ZSerial` and only then `accept()`s, `:436-453`).
+/// (`io/zenoh-links/zenoh-link-serial/src/unicast.rs` @ `async fn new_listener(&self, endpoint: EndPoint) -> ZResult<Locator> {`,
+/// whose accept task opens the `ZSerial` and only then accepts).
 ///
 /// A tty is POINT-TO-POINT: one device carries exactly one link. Upstream models
 /// that with an `is_connected` gate its accept task spins on before re-opening
@@ -1066,7 +1066,8 @@ impl BoundListener {
     /// ends that run: `Serial` is `false`, the first since R311y404 — one tty
     /// carries one peer, so there is no N to hold, and upstream agrees (its serial
     /// listener gates re-accept on the previous link having dropped,
-    /// `zenoh-link-serial/src/unicast.rs:430-433`). A SHIPPED quic listen DOES hit this predicate: the
+    /// `io/zenoh-links/zenoh-link-serial/src/unicast.rs` @ `while is_connected.load(Ordering::Acquire) {`).
+    /// A SHIPPED quic listen DOES hit this predicate: the
     /// `--router` (R311y405) + `--peer`/`--router-hat` (R311y406) CLI paths and pico all
     /// thread a cert (`--quic-cert` -> `AcceptConfig.quic`), so `bind_locator` binds
     /// rather than cert-absence-rejecting; only a cert-LESS bind is rejected first. This

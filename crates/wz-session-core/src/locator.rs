@@ -1007,7 +1007,7 @@ const VSOCK_SCHEME: &str = "vsock";
 
 /// Parse a zenoh `vsock/<CID>:<PORT>` locator into a [`VsockEndpoint`].
 ///
-/// Mirror of zenoh's `get_vsock_addr` (`zenoh-link-vsock/src/unicast.rs`): the
+/// Mirror of zenoh's `io/zenoh-links/zenoh-link-vsock/src/unicast.rs` @ `pub fn get_vsock_addr(`: the
 /// address after the `vsock/` scheme splits on `:` into exactly two parts
 /// (more or fewer is [`VsockLocatorError::BadAddress`]); each part accepts a
 /// case-insensitive sentinel string (`VMADDR_CID_HYPERVISOR` / `_LOCAL` /

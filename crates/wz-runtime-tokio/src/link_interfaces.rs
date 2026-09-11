@@ -105,14 +105,14 @@ pub fn ip_link_subject(protocol: InterceptorLink, local: Option<SocketAddr>) -> 
 /// of the WIRE and false of UPSTREAM, which gives the four addressless links
 /// FOUR different answers at the pin:
 ///
-/// * `zenoh-link-vsock/src/unicast.rs` @ `vec!["vsock".to_string()]` — a
-///   deliberate pseudo-interface, so an ACL narrowed by `interfaces` can target
-///   a vsock link at all;
-/// * `zenoh-link-serial/src/unicast.rs` @ `match z_serial::get_available_port_names()`
+/// * `io/zenoh-links/zenoh-link-vsock/src/unicast.rs` @ `vec!["vsock".to_string()]`
+///   — a deliberate pseudo-interface, so an ACL narrowed by `interfaces` can
+///   target a vsock link at all;
+/// * `io/zenoh-links/zenoh-link-serial/src/unicast.rs` @ `match z_serial::get_available_port_names()`
 ///   — the tty device names, without the path;
-/// * `zenoh-link-unixsock_stream/src/unicast.rs` @ `vec![]`, and
-///   `zenoh-link-unixpipe/src/unix/unicast.rs` @ the same, both declaring
-///   themselves "not supported".
+/// * `io/zenoh-links/zenoh-link-unixsock_stream/src/unicast.rs` @ `vec![]`, and
+///   `io/zenoh-links/zenoh-link-unixpipe/src/unix/unicast.rs` @ `vec![]` too,
+///   both declaring themselves "not supported".
 ///
 /// A helper that assumed one of those four made the other three UNEXPRESSIBLE,
 /// which is why the vsock divergence could not be fixed at its own call site

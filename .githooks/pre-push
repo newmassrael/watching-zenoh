@@ -409,6 +409,43 @@ if ! python3 scripts/lib/attachment_capacity_witness_gate.py; then
     exit 1
 fi
 
+# ─── gate 2f — an upstream citation's FORM, before it is published ──
+# grades: worktree
+#
+# R2549. These two gates already existed and already caught this; what they did
+# NOT do is run anywhere a developer would see them before pushing. Both live on
+# hosted Layer Z, so a malformed citation is discovered a full round late — and
+# that is not a hypothesis: R2546 wrote a bare upstream path, hosted redded, and
+# R2547 and R2548 each shipped more of the same class before the first verdict
+# came back. One defect, three rounds, purely from the length of the loop.
+#
+# Layer C0 is not the answer either: it stops early on this host's `zenohd`
+# oracles, which answer 1.10.0 against a 1.10.1 pin, so these gates sit behind a
+# red that has nothing to do with them.
+#
+# CHEAP AND CHECKOUT-FREE, which is what makes them hook material: the anchor
+# gate's FORM arm reads tracked files only (~8s) and the store-reason gate reads
+# the store (~0.5s). The RESOLUTION arm — does each path and needle still exist
+# upstream? — stays on Layer Z, which has the pinned tree; do not read a pass
+# here as "every citation resolves".
+if ! python3 scripts/lib/upstream_citation_anchor_gate.py; then
+    echo "" >&2
+    echo "pre-push: [gate 2f] upstream citation FORM gate FAILED — a citation is" >&2
+    echo "          bare, line-numbered, or missing its root. Write it as" >&2
+    echo "          \`<root-included path>\` @ \`<needle>\`, ON ONE LINE: the" >&2
+    echo "          scanner is line-based, so a path wrapped away from its" >&2
+    echo "          needle reads as bare." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+if ! python3 scripts/lib/store_reason_citation_gate.py; then
+    echo "" >&2
+    echo "pre-push: [gate 2f] store-reason citation gate FAILED — an atom reason's" >&2
+    echo "          upstream claim is bare or line-numbered. Same form rule." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+
 # ─── gate 2y — a script that spells a pin must read one (R2540) ─────
 # grades: worktree
 #

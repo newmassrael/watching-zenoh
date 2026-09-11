@@ -422,7 +422,8 @@ fn pty_end() -> PtyEnd {
 /// THE DISCRIMINATOR is the device that does not exist: binding it must still
 /// succeed. That is what separates "the bind records an endpoint" (upstream's
 /// shape — zenoh's `new_listener` creates no `ZSerial` either; its accept task
-/// does, `zenoh-link-serial/src/unicast.rs:321-373`) from "the bind opens the
+/// does, `io/zenoh-links/zenoh-link-serial/src/unicast.rs` @ `async fn new_listener(&self, endpoint: EndPoint) -> ZResult<Locator> {`)
+/// from "the bind opens the
 /// tty", which would `NotFound` here. It is also why the accept, not the bind, is
 /// where a serial listen can fail.
 ///
