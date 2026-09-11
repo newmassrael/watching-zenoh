@@ -17,6 +17,20 @@ pub(crate) const KE_ADV_PREFIX: &str = "@adv";
 /// The publisher kind chunk under `@adv` (zenoh `pub`): `@adv/pub/...`.
 pub(crate) const KE_ADV_PUB: &str = "pub";
 
+/// R2552 — the `<eid|uhlc>` discriminator's TIMESTAMPED spelling, i.e. the
+/// chunk that says a publisher orders by the timestamp's own id rather than by
+/// a sequence number. Upstream's is a key expression constant,
+/// `zenoh-ext/src/advanced_cache.rs` @ `pub(crate) static KE_UHLC: &keyexpr = ke!("uhlc");`,
+/// compared at `zenoh-ext/src/advanced_subscriber.rs` @ `if parsed.eid() == KE_UHLC {`.
+///
+/// IT BELONGS HERE BECAUSE BOTH SIDES OF ONE WIRE TOKEN MUST SPELL IT ONCE.
+/// The publisher wrote the literal inline while the subscriber had no reading
+/// for it at all, which is how a shared vocabulary drifts: this module is the
+/// `@adv` SSOT precisely so the emit and the parse cannot disagree, and the
+/// chunk that decides WHICH SHAPE a token names is the last one that should
+/// have been left to two independent string literals.
+pub(crate) const KE_ADV_UHLC: &str = "uhlc";
+
 /// The subscriber kind chunk under `@adv` (zenoh `KE_SUB`, admin.rs:56):
 /// `@adv/sub/...`. The sibling of [`KE_ADV_PUB`] — a subscriber that opts into
 /// detection publishes a liveliness token here so a third party can see it,

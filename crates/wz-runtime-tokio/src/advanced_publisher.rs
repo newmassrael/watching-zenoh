@@ -286,9 +286,13 @@ where
         // (zenoh advanced_publisher.rs:317-329). The `<eid>` discriminator
         // marks sequence-number sequencing; `uhlc` marks timestamp/none. The
         // KE shape is the shared `@adv` SSOT ([`crate::advanced_ke`]).
+        // R2552 — the timestamped spelling comes from the `@adv` SSOT rather
+        // than from a literal here: the subscriber must read the same chunk
+        // this writes, and two independent literals are how one wire
+        // vocabulary drifts into two.
         let discriminator = match options.sequencing {
             Sequencing::SequenceNumber => eid.to_string(),
-            Sequencing::Timestamp | Sequencing::None => "uhlc".to_string(),
+            Sequencing::Timestamp | Sequencing::None => crate::advanced_ke::KE_ADV_UHLC.to_string(),
         };
         let adv_keyexpr = crate::advanced_ke::publisher_adv_ke(
             &keyexpr,

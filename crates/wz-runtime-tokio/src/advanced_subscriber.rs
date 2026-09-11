@@ -1571,7 +1571,13 @@ fn on_late_publisher_detected<R, T>(
     if sample_kind != LivelinessSampleKind::Put {
         return;
     }
-    let Some((zid, eid)) = parse_heartbeat_source(sample_keyexpr) else {
+    // R2552 — SEQUENCED ONLY, and now it says so rather than inheriting the
+    // restriction from a parser that could not express the other shape. A
+    // `uhlc` token reaches this arm and is declined HERE; handling it is the
+    // next part of this atom's build (upstream keys a timestamped source into
+    // its own state and queries it with the history knobs, no `_sn` range).
+    let Some(AdvPublisherSource::Sequenced { zid, eid }) = parse_heartbeat_source(sample_keyexpr)
+    else {
         return;
     };
     let issue = statesref
@@ -1794,14 +1800,55 @@ impl Drop for RecoveryCancel {
     }
 }
 
-/// R311y84 — parse a heartbeat sample's keyexpr
-/// `<base>/@adv/pub/<zid_hex>/<eid>/_` back into its source `(zid, eid)`,
-/// the wz analogue of zenoh's `ke_liveliness::parse` (advanced_subscriber.rs:
-/// 1062). Returns `None` on a malformed beacon KE (bad `@adv/pub` layout,
-/// un-decodable zid hex, or non-numeric eid). The trailing `_` meta chunk +
-/// any further chunks are ignored.
+/// R2552 — WHICH SHAPE of `@adv` publisher a token key expression names.
+///
+/// The `<eid|uhlc>` chunk is a discriminator, not a number: wz's own publisher
+/// writes `eid.to_string()` for `Sequencing::SequenceNumber` and the literal
+/// `uhlc` for `Sequencing::Timestamp | Sequencing::None`
+/// (`crates/wz-runtime-tokio/src/advanced_publisher.rs` @ `let discriminator = match options.sequencing {`),
+/// and upstream splits on exactly that — `zenoh-ext/src/advanced_subscriber.rs` @ `if parsed.eid() == KE_UHLC {`.
+///
+/// THIS TYPE EXISTS BECAUSE ITS ABSENCE MADE THE TIMESTAMPED SHAPE
+/// UNEXPRESSIBLE. [`parse_heartbeat_source`] returned `Option<(Vec<u8>, u32)>`,
+/// so the only way to report a `uhlc` token was `None` — indistinguishable from
+/// a malformed key expression. Two of wz's own three sequencing modes emit that
+/// token, so a wz timestamped or unsequenced advanced publisher announced
+/// itself and wz's own advanced subscriber discarded the announcement. The
+/// handling of that shape is a later part; being able to NAME it is this one,
+/// and each caller now says which shapes it serves rather than being handed a
+/// pair it cannot question.
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
-fn parse_heartbeat_source(keyexpr: &str) -> Option<(Vec<u8>, u32)> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AdvPublisherSource {
+    /// `<eid>` — sequence-number sequencing, the only shape carrying the
+    /// per-source sequence numbers the recovery and heartbeat paths key on.
+    Sequenced {
+        /// The publisher's zid, decoded from the hex chunk.
+        zid: Vec<u8>,
+        /// The publisher's entity id.
+        eid: u32,
+    },
+    /// `uhlc` — timestamp / none sequencing, ordered by the timestamp's own id
+    /// rather than by a sequence number.
+    Timestamped {
+        /// The publisher's zid, decoded from the hex chunk.
+        zid: Vec<u8>,
+    },
+}
+
+/// R311y84 — parse an `@adv` publisher token keyexpr
+/// `<base>/@adv/pub/<zid_hex>/<eid|uhlc>/_` back into its source shape, the wz
+/// analogue of zenoh's `ke_liveliness::parse`. Returns `None` only on a
+/// MALFORMED key expression (bad `@adv/pub` layout, un-decodable zid hex, or a
+/// discriminator that is neither `uhlc` nor a `u32`). The trailing `_` meta
+/// chunk and any further chunks are ignored.
+///
+/// R2552 — the `uhlc` discriminator is now a VALUE rather than a parse failure.
+/// It was folded into `None` before, which conflated "this publisher orders by
+/// timestamp" with "this key expression is broken"; the two want opposite
+/// responses from a caller.
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+fn parse_heartbeat_source(keyexpr: &str) -> Option<AdvPublisherSource> {
     let chunks: Vec<&str> = keyexpr.split('/').collect();
     let adv = chunks
         .iter()
@@ -1810,8 +1857,12 @@ fn parse_heartbeat_source(keyexpr: &str) -> Option<(Vec<u8>, u32)> {
         return None;
     }
     let zid = zenoh_hex_to_zid(chunks.get(adv + 2)?)?;
-    let eid = chunks.get(adv + 3)?.parse::<u32>().ok()?;
-    Some((zid, eid))
+    let discriminator = *chunks.get(adv + 3)?;
+    if discriminator == crate::advanced_ke::KE_ADV_UHLC {
+        return Some(AdvPublisherSource::Timestamped { zid });
+    }
+    let eid = discriminator.parse::<u32>().ok()?;
+    Some(AdvPublisherSource::Sequenced { zid, eid })
 }
 
 /// A live advanced subscriber bound to a [`Session`]: owns the wrapped
@@ -2270,7 +2321,14 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
                     if hb_view.kind() != SampleKind::Put {
                         return;
                     }
-                    let Some((zid, eid)) = parse_heartbeat_source(hb_view.keyexpr()) else {
+                    // R2552 — SEQUENCED ONLY, and here that is INHERENT rather
+                    // than deferred: a heartbeat's payload IS a sequence number
+                    // (`z_deserialize::<u32>` below) and a timestamped
+                    // publisher has none to send, so a `uhlc` token on this
+                    // path would be a beacon with nothing to beacon.
+                    let Some(AdvPublisherSource::Sequenced { zid, eid }) =
+                        parse_heartbeat_source(hb_view.keyexpr())
+                    else {
                         return;
                     };
                     let Ok(hb_sn) = z_deserialize::<u32>(hb_view.payload()) else {
@@ -3364,13 +3422,31 @@ mod tests {
     }
 
     /// R311y84 heartbeat-source KE parser unit.
+    ///
+    /// R2552 — the `uhlc` case is the new one, and the assertion that matters
+    /// is that it is a VALUE and not `None`: it used to fall into the same
+    /// answer as a broken key expression, and the two want opposite responses.
+    /// A malformed discriminator (`xx`) must still be `None`, or "timestamped"
+    /// would become the catch-all that swallows real parse failures.
     #[cfg(feature = "ext-pubsub-advanced-recovery")]
     #[test]
     fn parse_heartbeat_source_round_trips_and_rejects_malformed() {
         let zid = vec![0x09u8, 0xAB];
         let ke = format!("demo/data/@adv/pub/{}/7/_", zid_to_zenoh_hex(&zid));
-        assert_eq!(parse_heartbeat_source(&ke), Some((zid, 7)));
-        // Malformed: no @adv, wrong marker, non-numeric eid.
+        assert_eq!(
+            parse_heartbeat_source(&ke),
+            Some(AdvPublisherSource::Sequenced {
+                zid: zid.clone(),
+                eid: 7
+            })
+        );
+        // The shape wz's own publisher emits for `Sequencing::{Timestamp,None}`.
+        let uhlc_ke = format!("demo/data/@adv/pub/{}/uhlc/_", zid_to_zenoh_hex(&zid));
+        assert_eq!(
+            parse_heartbeat_source(&uhlc_ke),
+            Some(AdvPublisherSource::Timestamped { zid })
+        );
+        // Malformed: no @adv, wrong marker, discriminator neither uhlc nor u32.
         assert_eq!(parse_heartbeat_source("demo/data"), None);
         assert_eq!(parse_heartbeat_source("demo/@adv/sub/ff/7/_"), None);
         assert_eq!(parse_heartbeat_source("demo/@adv/pub/ff/xx/_"), None);
@@ -3397,8 +3473,25 @@ mod tests {
         );
         assert_eq!(
             parse_heartbeat_source(&ke),
-            Some((zid, 7)),
-            "the publisher-built KE parses back to its (zid, eid) via the shared @adv SSOT"
+            Some(AdvPublisherSource::Sequenced {
+                zid: zid.clone(),
+                eid: 7
+            }),
+            "the publisher-built KE parses back to its source via the shared @adv SSOT"
+        );
+        // R2552 — the SAME round trip for the shape the publisher emits under
+        // `Sequencing::{Timestamp, None}`. Built through `publisher_adv_ke`
+        // with the SSOT constant, so this fails if either side ever spells the
+        // discriminator itself again.
+        let uhlc_ke = crate::advanced_ke::publisher_adv_ke(
+            "demo/data",
+            &zid_hex,
+            crate::advanced_ke::KE_ADV_UHLC,
+        );
+        assert_eq!(
+            parse_heartbeat_source(&uhlc_ke),
+            Some(AdvPublisherSource::Timestamped { zid }),
+            "a timestamped publisher's own KE parses back to the timestamped shape"
         );
     }
 
