@@ -7385,8 +7385,25 @@ layer_c1aw_cargo_test_ext_pubsub_group_membership() {
     _runci_guarded_test "C1aw group_membership" 6 \
         cargo test -p wz-session-core --features ext-pubsub-group-membership \
         --lib group_membership --quiet || return 1
-    _runci_guarded_test "C1aw group" 6 \
+    # R2557 — 6 -> 7: `the_member_query_pin_keeps_every_answer_on_one_key`,
+    # the first local witness the member-query consolidation pin has ever had.
+    # ⚠ It RUNS in this lane, which carries no `query-consolidation`, and
+    # passes there for the trivial reason that a build which consolidates
+    # nothing delivers both answers. Its DISCRIMINATION lives where the feature
+    # is on (C1at's query-consolidation leg): with the pin both answers land,
+    # without it `Latest` collapses them. Green here is not the proof.
+    _runci_guarded_test "C1aw group" 7 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-group-membership,pubsub-allow-loop \
+        --lib group --quiet || return 1
+    # R2557 — the SAME seven cases with `query-consolidation` ON, which is the
+    # only configuration in which the member-query pin can be discriminated.
+    # Without this leg the new witness would run only in the feature-off build,
+    # where it passes because nothing consolidates — a test green by not being
+    # asked the question. The pin's control probe (drop it, `Latest` collapses
+    # the two answers, 3 members become 2) reds HERE and nowhere else.
+    _runci_guarded_test "C1aw group (query-consolidation)" 7 \
+        cargo test -p wz-runtime-tokio \
+        --features ext-pubsub-group-membership,query-consolidation,pubsub-allow-loop,query-get \
         --lib group --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-session-core \

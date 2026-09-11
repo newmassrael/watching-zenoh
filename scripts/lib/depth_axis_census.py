@@ -758,7 +758,11 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # built, so it left this population. DERIVED: the departing reason re-audited to
 # wz=23, ambiguous=0, and it sat in the `reached` bucket — so REACHED falls by 1
 # and PIN_WZ_CITATIONS by 23, while UNREACHED and AMBIGUOUS correctly hold.
-PIN_REACHED = 50
+# R2557 (the `query-consolidation` close) — 50 -> 49, the same event shape a
+# sixth time: its last residual (the group pin's missing local witness) was
+# built, so it left this population. DERIVED: the departing reason re-audited
+# to wz=14, ambiguous=10, and it sat in the `reached` bucket.
+PIN_REACHED = 49
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -828,8 +832,15 @@ PIN_NO_SYMBOL = 2
 # rule, and the push path that has the QoS this reply path lacks. Derived by
 # auditing the ADDENDUM ALONE -- wz=4, ambiguous=0 -- so AMBIGUOUS correctly
 # holds and 303 + 4 lands exactly on the 307 the census measures.
-PIN_WZ_CITATIONS = 307
-PIN_AMBIGUOUS = 66
+# R2557 -- 307 -> 293 and AMBIGUOUS 66 -> 56, both falling for the healthy
+# reason: `query-consolidation` reached COMPLETE and left this PARTIAL-only
+# population, taking its reason's citations with it. Derived by auditing the
+# DEPARTING text alone -- wz=14, ambiguous=10 -- so 307 - 14 = 293 and
+# 66 - 10 = 56, exactly. ⚠ This is the first close in this stretch whose reason
+# carried AMBIGUOUS citations, which is why that pin moves here where R2555's
+# and R2556's left it alone.
+PIN_WZ_CITATIONS = 293
+PIN_AMBIGUOUS = 56
 
 
 class Fatal(Exception):

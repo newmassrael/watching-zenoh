@@ -584,14 +584,27 @@ fn issue_member_query<R, T>(
     // mode right before the get — `let qc = zenoh::query::ConsolidationMode::None;`
     // (`zenoh-ext/src/group.rs` @ `Received Keep Alive from unknown member`).
     //
-    // HONEST ABOUT ITS OWN WEIGHT: no test in this tree discriminates this pin,
-    // and that was MEASURED — a probe that dropped every caller's explicit mode
-    // reddened 16 cases and not one of them was a group case. Collapsing needs
-    // TWO answers on ONE member key, which needs a `Locality::Any` member
+    // R2557 — IT IS LOAD-BEARING, AND A LOCAL RED PROVES IT. This comment used
+    // to end "Do not read it as load-bearing", on the strength of a claim that
+    // was simply false: it said collapsing "needs a `Locality::Any` member
     // answered by both a loopback queryable and a wire peer; no fixture stages
-    // that. It is kept because the upstream site is the same call with the same
-    // decision, not because a local red proves it. Do not read it as
-    // load-bearing.
+    // that". No wire peer is needed.
+    // `crates/wz-session-core/src/reply.rs` @ `pub fn deliver_local_reply(&mut self, inbound: &InboundReply) {`
+    // funnels loopback replies through the SAME `fire_replies_for` matcher the
+    // wire path uses — one SSOT, as its own doc says — and `Session::query`
+    // builds its `ConsolidatingSink` from `opts.resolved_consolidation()`
+    // whichever side answers. So ONE loopback queryable answering this key
+    // twice stages the collapse, which is what
+    // [`tests::the_member_query_pin_keeps_every_answer_on_one_key`] does.
+    //
+    // Measured: with this pin the group receives BOTH answers (3 members);
+    // removing it resolves the unnamed mode to `Latest`, which collapses them
+    // by key and delivers only the newest (2 members).
+    //
+    // ⚠ THE LESSON OUTLIVES THE PIN: a comment that says a fixture is
+    // impossible is a claim about the code, and this one went unchecked for
+    // many rounds while the pin it guarded stayed ungraded. A negative claim is
+    // only true at the END of the path it describes.
     #[cfg(feature = "query-consolidation")]
     let opts = opts.with_consolidation(wz_session_core::query_mode::ConsolidationMode::None);
     let reply_state = Arc::clone(state);
@@ -711,6 +724,84 @@ mod tests {
             group_a
                 .wait_for_view_size(2, Duration::from_millis(0))
                 .await
+        );
+    }
+
+    /// R2557 — THE GROUP'S CONSOLIDATION PIN, witnessed at last.
+    ///
+    /// `issue_member_query` pins `ConsolidationMode::None`, and until now no
+    /// test in this tree discriminated it: a probe dropping every caller's
+    /// explicit mode reddened sixteen cases and not one was a group case. The
+    /// pin's own comment explained why, and THE EXPLANATION WAS WRONG —
+    /// collapsing was said to need "a `Locality::Any` member answered by both a
+    /// loopback queryable and a wire peer", which no fixture stages.
+    ///
+    /// It needs no wire peer. `crates/wz-session-core/src/reply.rs` @ `pub fn deliver_local_reply(&mut self, inbound: &InboundReply) {`
+    /// funnels loopback replies through the SAME `fire_replies_for` matcher the
+    /// wire path uses — its own doc calls that one SSOT — and
+    /// `Session::query` builds its `ConsolidatingSink` from
+    /// `opts.resolved_consolidation()` whichever path answers. So one loopback
+    /// queryable answering the member key TWICE is enough, and that is what
+    /// this stages.
+    ///
+    /// # The direction is inverted, which is the whole point
+    ///
+    /// The pin selects NO consolidation, so it is the presence of the pin that
+    /// lets BOTH answers through. Dropping it resolves the unnamed mode to
+    /// `Latest` (R311y836), which collapses the two by key and delivers only
+    /// the newest. The assertion is therefore "both arrived", and the control
+    /// probe is the pin's removal.
+    ///
+    /// Two distinct member ids on ONE key, deliberately: consolidation collapses
+    /// by KEY and not by payload, so two records under one key is exactly the
+    /// shape that makes the collapse observable in `size()`.
+    #[cfg(feature = "pubsub-allow-loop")]
+    #[tokio::test]
+    async fn the_member_query_pin_keeps_every_answer_on_one_key() {
+        use wz_session_core::group_membership::encode_member;
+        use wz_session_core::sample::TimestampHint;
+
+        let session = loopback_session();
+        let opts = GroupOptions::new().with_get_locality(Locality::SessionLocal);
+        let group = Group::join(&session, "grp", Member::new("a"), opts).expect("a joins");
+        assert_eq!(group.size(), 1, "only itself so far");
+
+        // A queryable on ONE absent member's key that answers TWICE, with
+        // distinct instants so a consolidating sink has something to order by.
+        let ghost_ke = member_keyexpr("grp", "ghost");
+        let _answerer = session
+            .declare_queryable(
+                ghost_ke.clone(),
+                crate::session::QueryableOptions::default(),
+                move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
+                    let ke = view.keyexpr().to_string();
+                    for (mid, time) in [("m1", 100u64), ("m2", 200u64)] {
+                        out.reply_keyed_stamped(
+                            &ke,
+                            &encode_member(&Member::new(mid)),
+                            None,
+                            &TimestampHint {
+                                time,
+                                zid: vec![0x7Au8],
+                            },
+                        );
+                    }
+                },
+            )
+            .expect("the ghost member's queryable declares");
+
+        let clock = Arc::new(TokioTime::new());
+        issue_member_query(&group.state, &group.session, &clock, "ghost".to_string());
+
+        assert_eq!(
+            group.size(),
+            3,
+            "the pin asks for NO consolidation, so both answers on the one \
+             member key are delivered: a + m1 + m2"
+        );
+        assert_eq!(
+            member_ids(&group.view()),
+            vec!["a".to_string(), "m1".to_string(), "m2".to_string()],
         );
     }
 
