@@ -913,6 +913,48 @@ pub mod common {
         [generated, vendored, mbedtls_include_dir()]
     }
 
+    /// The header set for compiling an upstream example against **wz's** cdylib:
+    /// the same vendored sources, but the `config.h` of the CLAIMED-SURFACE arm.
+    ///
+    /// R2566. A drop-in claim is "does upstream's own program link against wz",
+    /// and which `#if Z_FEATURE_*` branches exist to link is decided entirely by
+    /// the header set — as `compile_pico_example_against_wz_capi_with_includes`
+    /// already says, that set is the ONLY knob selecting them. Pointing the wz
+    /// arm at the WITNESS arm's `config.h` therefore demands wz be a drop-in for
+    /// every feature that arm happens to compile, claimed or not.
+    ///
+    /// Not hypothetical: R2562 set `Z_FEATURE_CONNECTIVITY=1` to obtain ONE
+    /// witness binary, which made `z_info.c` compile its `print_transport` /
+    /// `print_link` blocks, referencing `z_transport_zid` / `z_link_zid` /
+    /// `z_link_auth_identifier` — part of the 115-symbol connectivity surface
+    /// registered as `api-compat-pico`'s named gap. That leg had passed since
+    /// `25b49638` and began failing with no change to the test at all: the
+    /// header config moved underneath it.
+    ///
+    /// ⚠ The ORACLE arm must NOT use this. It links the real pico library, which
+    /// the WITNESS arm builds, so claimed-surface headers there would disagree
+    /// with the library being linked — a worse defect than the one this fixes.
+    /// Headers follow the library you link; that is the whole rule.
+    pub fn zenoh_pico_claimed_include_dirs() -> [PathBuf; 3] {
+        let root = project_root();
+        let vendored = root.join("vendor/zenoh-pico/include");
+        let generated = root.join("target/zenoh-pico-census/zenohpico/include");
+        assert!(
+            vendored.is_dir(),
+            "vendored zenoh-pico headers missing at {}; run \
+             `git submodule update --init vendor/zenoh-pico`",
+            vendored.display()
+        );
+        assert!(
+            generated.is_dir(),
+            "CLAIMED-SURFACE zenoh-pico config.h dir missing at {}; run \
+             scripts/build-zenoh-pico-cli.sh first (its census arm is the \
+             configuration wz claims to be a drop-in for)",
+            generated.display()
+        );
+        [generated, vendored, mbedtls_include_dir()]
+    }
+
     /// The Mbed TLS include dir every pico drop-in compile now needs.
     ///
     /// R311y534 — this is a consequence of `Z_FEATURE_LINK_TLS 1`, not a TLS-leg
@@ -1050,10 +1092,13 @@ pub mod common {
         example: &str,
         out_dir: &Path,
     ) -> Result<PathBuf, String> {
+        // R2566 — the CLAIMED-SURFACE headers, not the witness arm's. See
+        // `zenoh_pico_claimed_include_dirs` for why the wz arm and the oracle
+        // arm must not share a header set.
         compile_pico_example_against_wz_capi_with_includes(
             example,
             out_dir,
-            &zenoh_pico_include_dirs(),
+            &zenoh_pico_claimed_include_dirs(),
         )
     }
 

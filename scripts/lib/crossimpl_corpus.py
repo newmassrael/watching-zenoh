@@ -120,6 +120,20 @@ FOREIGN_ROOTS = {
     # so the resolver is the thing that must be shared, not the path.
     "zenoh_pico_shared_library": "pico-lib",
     "zenoh_pico_library_dir": "pico-lib",
+    # R2566 — the SAME real pico library, built to the surface wz claims to be a
+    # drop-in for (R2565 split the oracle: the witness arm compiles every feature
+    # so a witness binary can exercise them, the census arm is that configuration
+    # minus the one feature wz does not claim). It is no less foreign for being
+    # configured differently -- it is upstream's code, built by upstream's CMake.
+    #
+    # ⚠ REGISTERED BECAUSE R2565 FORGOT TO, and this dict's header predicted the
+    # consequence exactly: introducing the resolver without registering it made
+    # `pico_abi_symbol_census`'s gate invisible as a foreign reach, so Layer A4
+    # reported BOTH a self-witnessing test claiming foreign proof (A4-8) and a
+    # link count that had FELL by one (A4-9, 898 -> 897). One omission, two
+    # symptoms, and neither the compiler nor any test could see it: this audit
+    # binds by NAME, so a renamed route is an unreachable route.
+    "zenoh_pico_census_shared_library": "pico-lib",
     # R311y565 — the real `libzenohc.so`, zenoh's REFERENCE implementation, as a
     # library. Registered for the reason the pico entries above were registered
     # at R311y536, and it had the identical consequence: the `api-compat-c`

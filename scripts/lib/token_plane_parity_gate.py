@@ -1,6 +1,16 @@
 #!/usr/bin/env python3
-"""R2564 (open debt: none; closes the standing residual of `routing-token-tables`)
--- mechanise the function-by-function token-plane diff so the claim cannot rot.
+"""R2564 (no register item) -- mechanise the function-by-function token-plane
+diff so the claim cannot rot. It closes the standing residual of
+`routing-token-tables`, which is an ATOM grade rather than an open-debt row.
+
+R2566 corrected this header. It first read `R2564 (open debt: none; ...)`, which
+says the right thing in the wrong words: `gate_provenance_lint` accepts only the
+sanctioned item tokens (`§...`, `N<n>`, `debt-...`, `CENSUS`, `no register item`)
+precisely so the open-debt register can be queried BY MACHINE for whether an item
+is still open. A phrase that merely means "none" defeats that, and it reads as a
+citation to anyone skimming -- which is how it survived review here. It went
+undetected for two rounds because Layer C0 is fail-fast and earlier reds masked
+this gate entirely.
 
 WHY THIS EXISTS, and it is not "an audit written down". `routing-token-tables`
 stood PARTIAL on one residual, stated by its own reason as an UNDONE AUDIT
