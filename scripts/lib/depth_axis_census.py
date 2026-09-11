@@ -797,7 +797,17 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # DERIVED: the departing reason re-audited to wz=6, ambiguous=0, and it sat in
 # the `reached` bucket — which is why UNREACHED and NO_SYMBOL correctly hold
 # while both other pins move.
-PIN_REACHED = 45
+# R2570 (the `scouting-static` close) — 45 -> 44. Its ONE surviving residual was
+# disposed by BUILD, and the residual's own framing was half wrong: it measured
+# wz's single-session opener against pico's PEER arm, but that opener is pico's
+# CLIENT arm and complete as such. What wz lacked was the peer arm, whose base
+# was a LOSSY TYPE — one flat locator list plus an exclusive role, so `listen=`
+# plus `connect=` was unrepresentable rather than unimplemented — and whose
+# vehicle (the peer-mesh face loop) already existed with nothing routing a static
+# deploy to it. DERIVED: the departing reason re-audited to wz=9, ambiguous=0,
+# and it sat in the `reached` bucket — which is why UNREACHED and NO_SYMBOL
+# correctly hold while both other pins move.
+PIN_REACHED = 44
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -926,7 +936,16 @@ PIN_NO_SYMBOL = 2
 # AMBIGUOUS correctly holds at 56. Not counted by grep — R2564 recorded that a
 # hand count gets this wrong, because the audit counts citation TOKENS rather
 # than unique files.
-PIN_WZ_CITATIONS = 266
+#
+# R2570 — 266 -> 257, NINE citations, as `scouting-static` left the PARTIAL
+# corpus. DERIVED by running THIS module's own `citation_audit` over that atom
+# alone against the PRE-round text: (wz 9, ambiguous 0), so 266 - 9 = 257 and
+# AMBIGUOUS correctly holds at 56. Not counted by grep — R2564's note above
+# applies unchanged, and this round is a second witness for it: the same
+# pre-round reason also carries 18 citations the audit reads as UPSTREAM and
+# leaves unjudged, which a grep over the reason would have folded into the wz
+# count and overshot the delta by exactly those 18.
+PIN_WZ_CITATIONS = 257
 PIN_AMBIGUOUS = 56
 
 
