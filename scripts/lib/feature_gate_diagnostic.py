@@ -239,7 +239,14 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             "fields only, which the census re-derives every run"
         )
         for f in (
-            "access-extauth-usrpwd",
+            # R2571 — `access-extauth-usrpwd` LEFT this list. The claim above is
+            # that no `#[cfg]` in this package attaches the feature to a publicly
+            # visible item, and R2567 falsified it by building the shared
+            # credential store: `lib.rs` gates `pub mod extauth_usrpwd_store` on
+            # it. The declaration was true when written and the round that made
+            # it false did not come back for it, which is why TWO gates reported
+            # the same defect — this one and `feature_public_surface_census`,
+            # which imports these tables.
             "adminspace-metrics",
             "adminspace-read",
             "adminspace-router-linkstate",
