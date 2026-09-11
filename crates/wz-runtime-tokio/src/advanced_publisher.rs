@@ -433,6 +433,7 @@ where
             adv_keyexpr,
             #[cfg(feature = "ext-pubsub-sample-miss-detection")]
             _heartbeat_task: heartbeat_task,
+            #[cfg(feature = "ext-pubsub-sample-miss-detection")]
             heartbeat_sporadic: heartbeat_spawn_params(&options)
                 .map(|(_, sporadic)| sporadic)
                 .unwrap_or(false),
