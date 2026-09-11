@@ -27,6 +27,7 @@
 //! Wiring `AuthDispatch` into the live Init/Open exchange + a wz<->zenohd
 //! interop e2e are follow-on atoms.
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use hmac::{Hmac, Mac};
@@ -82,17 +83,137 @@ fn decode_open_syn(bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>), AuthError> {
     Ok((user, hmac))
 }
 
+/// Where a responder's `(user, password)` table LIVES — the seam that lets the
+/// table be SHARED and MUTATED while this `no_std` core stays ignorant of locks.
+///
+/// R2567. wz previously had no such seam: `UsrPwdMethod` OWNED its table by
+/// value, so every session got a private copy and runtime mutation was not
+/// expressible at all. zenoh's per-handshake FSM instead holds a REFERENCE to a
+/// shared store (`io/zenoh-transport/src/unicast/establishment/ext/auth/usrpwd.rs`
+///  @ `inner: &'a RwLock<AuthUsrPwd>`), which is precisely why its `add_user` /
+/// `del_user` take effect. Both of this atom's remaining residuals -- the config
+/// dictionary and runtime user mutation -- were consequences of that absence.
+///
+/// ⚠ THE ACCESSOR IS A CALLBACK, NOT A GETTER, AND THAT IS A SECURITY CHOICE.
+/// A `-> Option<Vec<u8>>` would copy a password into a fresh, un-zeroized heap
+/// buffer on every handshake -- strictly worse exposure than the borrow it
+/// replaces. Upstream does not do that either: it takes its read lock and passes
+/// the BORROWED password straight to `hmac::sign`, owning only the username,
+/// which is public. Lending under the lock is the shape that matches.
+///
+/// ⚠⚠ AND IT IS SYNCHRONOUS ON PURPOSE. Upstream's `recv_open_syn` is `async`
+/// and takes an async lock, but [`AuthMethod::accept_recv_open_syn`] is a sync
+/// trait method; following upstream here would force the whole auth plane async
+/// for one lookup. The runtime abstraction already offers exactly this shape --
+/// `wz_runtime_core`'s `with_mutex_mut` is a synchronous scoped callback -- so a
+/// runtime store implements this trait by lending through it.
+pub trait CredentialSource: Send {
+    /// Lend the password registered for `user`, if any, to `f`.
+    ///
+    /// Returns `f`'s value, or `None` when the user is unknown. The password
+    /// must not escape `f`: implementations may be holding a lock for exactly
+    /// as long as this call.
+    fn with_password_for(&self, user: &[u8], f: &mut dyn FnMut(&[u8]) -> bool) -> Option<bool>;
+}
+
+/// An in-memory `(user, password)` table — the source a caller-supplied `Vec`
+/// becomes, and the only one this `no_std` core provides.
+///
+/// A linear scan: auth dictionaries are small and this keeps the core free of
+/// hashing, exactly as the owned table it replaces did.
+pub struct InMemoryCredentials(CredentialTable);
+
+impl InMemoryCredentials {
+    pub fn new(table: CredentialTable) -> Self {
+        Self(table)
+    }
+}
+
+impl CredentialSource for InMemoryCredentials {
+    fn with_password_for(&self, user: &[u8], f: &mut dyn FnMut(&[u8]) -> bool) -> Option<bool> {
+        self.0
+            .iter()
+            .find(|(u, _)| u.as_slice() == user)
+            .map(|(_, p)| f(p.as_slice()))
+    }
+}
+
+/// A responder's `(user, password)` table.
+///
+/// R2567 — named because three signatures carry it and clippy is right that the
+/// bare tuple-vector reads poorly. Bytes rather than `String` for the reason
+/// [`AuthIdentity`](crate::auth_dispatch::AuthIdentity) gives: this is what the
+/// wire and the dictionary file supply, and demanding UTF-8 here would invent a
+/// validation upstream does not perform at this layer.
+pub type CredentialTable = Vec<(Vec<u8>, Vec<u8>)>;
+
+/// Why a dictionary line was refused. Upstream bails the whole load on any of
+/// these rather than skipping the line, and so does this.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DictionaryError {
+    /// No `:` on the line — upstream: "invalid format".
+    MissingSeparator,
+    /// Empty user before the `:`.
+    EmptyUser,
+    /// Empty password after the `:`.
+    EmptyPassword,
+}
+
+/// Parse a `user:password` dictionary into a credential table.
+///
+/// R2567, residual 2's PURE half. Upstream reads the file with `tokio::fs` and
+/// parses it in the same function; this core is `no_std`-shaped and must not
+/// grow file I/O, so only the parse lives here and the runtime does the read.
+/// That split is also what makes the rules testable without a filesystem.
+///
+/// THE RULES ARE UPSTREAM'S, taken from its code and pinned by its own tests
+/// (`usrpwd.rs` @ `async fn from_config`):
+/// * one `<user>:<password>` per line, each line trimmed;
+/// * blank lines skipped;
+/// * split on the FIRST `:`, so a PASSWORD may legally contain one;
+/// * an absent separator, an empty user, or an empty password fails the WHOLE
+///   load — upstream bails rather than skipping the line, and a dictionary that
+///   silently dropped a malformed entry would authenticate fewer users than its
+///   operator believes.
+pub fn parse_dictionary(text: &str) -> Result<CredentialTable, DictionaryError> {
+    let mut out = Vec::new();
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let idx = line.find(':').ok_or(DictionaryError::MissingSeparator)?;
+        let user = line[..idx].trim();
+        if user.is_empty() {
+            return Err(DictionaryError::EmptyUser);
+        }
+        let password = line[idx + 1..].trim();
+        if password.is_empty() {
+            return Err(DictionaryError::EmptyPassword);
+        }
+        out.push((user.as_bytes().to_vec(), password.as_bytes().to_vec()));
+    }
+    Ok(out)
+}
+
 /// The usrpwd auth method — the wz mirror of zenoh `AuthUsrPwd`. A node holds
-/// `credentials` to authenticate AS an initiator, and/or a `lookup` table to
+/// `credentials` to authenticate AS an initiator, and/or a credential SOURCE to
 /// authenticate peers AS a responder (a node may be both, like zenoh's
 /// `AuthUsrPwd { credentials, lookup }`).
 pub struct UsrPwdMethod {
     /// Initiator side: this peer's `(user, password)`; `None` = does not
     /// initiate usrpwd.
     credentials: Option<(Vec<u8>, Vec<u8>)>,
-    /// Responder side: the `(user, password)` table; empty = does not respond to
-    /// usrpwd (a linear scan — auth dictionaries are small + no_std-friendly).
-    lookup: Vec<(Vec<u8>, Vec<u8>)>,
+    /// Responder side: where the `(user, password)` table lives; `None` = does
+    /// not respond to usrpwd.
+    ///
+    /// R2567 — this was `Vec<(Vec<u8>, Vec<u8>)>` and its EMPTINESS was the
+    /// sentinel for "not a responder", read at four sites. `Option` makes that
+    /// a type instead of a length, and lets the table be shared rather than
+    /// copied per session. ⚠ An EMPTY table must still fold to `None`, or an
+    /// unconfigured responder silently inverts into one that rejects everybody;
+    /// upstream agrees, its `from_config` returns `None` in exactly that case.
+    source: Option<Box<dyn CredentialSource>>,
     /// Responder side: the challenge nonce sent on InitAck, INJECTED at
     /// construction (no RNG in the no_std core).
     nonce: u64,
@@ -105,7 +226,7 @@ impl UsrPwdMethod {
     pub fn initiator(user: Vec<u8>, password: Vec<u8>) -> Self {
         Self {
             credentials: Some((user, password)),
-            lookup: Vec::new(),
+            source: None,
             nonce: 0,
             recv_nonce: None,
         }
@@ -123,20 +244,44 @@ impl UsrPwdMethod {
     /// per-process value. A fixed / zero nonce here is a replay hole. usrpwd also
     /// assumes the transport beneath is already encrypted (TLS / QUIC), as zenoh
     /// does — it is not confidential on its own.
-    pub fn responder(lookup: Vec<(Vec<u8>, Vec<u8>)>, nonce: u64) -> Self {
+    ///
+    /// ⚠ R2567 — an EMPTY `lookup` folds to NO SOURCE, preserving the exact
+    /// meaning the empty-vec sentinel carried before. Wrapping it in a source
+    /// instead would turn "not configured as a responder" into "a responder
+    /// with zero users", i.e. one that rejects every peer — a silent inversion
+    /// of an authentication default that compiles and type-checks. Upstream
+    /// folds the same way: `from_config` yields `None`, not an empty table.
+    pub fn responder(lookup: CredentialTable, nonce: u64) -> Self {
+        match lookup.is_empty() {
+            true => Self {
+                credentials: None,
+                source: None,
+                nonce,
+                recv_nonce: None,
+            },
+            false => Self::responder_with_source(Box::new(InMemoryCredentials::new(lookup)), nonce),
+        }
+    }
+
+    /// A RESPONDER-side method reading a SHARED credential source.
+    ///
+    /// R2567 — the constructor residuals 2 and 3 need: the store outlives this
+    /// method and can be mutated (`add_user` / `del_user`) or loaded from a
+    /// dictionary file by the runtime, while each session's method merely
+    /// BORROWS through it. That is zenoh's arrangement, where the FSM holds
+    /// `&RwLock<AuthUsrPwd>` rather than a copy.
+    pub fn responder_with_source(source: Box<dyn CredentialSource>, nonce: u64) -> Self {
         Self {
             credentials: None,
-            lookup,
+            source: Some(source),
             nonce,
             recv_nonce: None,
         }
     }
 
-    fn password_for(&self, user: &[u8]) -> Option<&[u8]> {
-        self.lookup
-            .iter()
-            .find(|(u, _)| u.as_slice() == user)
-            .map(|(_, p)| p.as_slice())
+    /// Lend the password for `user` to `f`, or `None` when unknown / no source.
+    fn with_password_for(&self, user: &[u8], f: &mut dyn FnMut(&[u8]) -> bool) -> Option<bool> {
+        self.source.as_ref()?.with_password_for(user, f)
     }
 }
 
@@ -186,14 +331,14 @@ impl AuthMethod for UsrPwdMethod {
         // usrpwd.rs:372 bails "Expected extension" when configured and the offer
         // is absent. Without this, a peer presenting no usrpwd ext would silently
         // bypass usrpwd auth. The challenge itself is issued on InitAck.
-        if !self.lookup.is_empty() && sub.is_none() {
+        if self.source.is_some() && sub.is_none() {
             return Err(AuthError::Rejected("usrpwd: missing InitSyn offer"));
         }
         Ok(())
     }
 
     fn accept_init_ack(&mut self) -> Result<Option<AuthSubExt>, AuthError> {
-        if self.lookup.is_empty() {
+        if self.source.is_none() {
             return Ok(None);
         }
         Ok(Some(AuthSubExt::Z64(self.nonce)))
@@ -203,7 +348,7 @@ impl AuthMethod for UsrPwdMethod {
         &mut self,
         sub: Option<AuthSubExt>,
     ) -> Result<Option<AuthIdentity>, AuthError> {
-        if self.lookup.is_empty() {
+        if self.source.is_none() {
             // An initiator-role method authenticates nobody on this side.
             return Ok(None);
         }
@@ -220,9 +365,21 @@ impl AuthMethod for UsrPwdMethod {
         // oracle); wz hardens beyond it with IDENTICAL wire (both reject the
         // handshake — the difference is only timing, observable solely over a
         // real network, which usrpwd already assumes is TLS/QUIC-encrypted).
-        match self.password_for(&user) {
-            Some(password) => {
-                if !hmac_sha3_256_verify(&key, password, &hmac) {
+        //
+        // R2567 — the password is BORROWED for the length of the verify and
+        // never copied out. `with_password_for` lends it under whatever lock the
+        // source holds, so a shared runtime store can back this without the
+        // secret ever landing in a fresh, un-zeroized buffer. zenoh does the
+        // same: it takes its read lock and hands the borrowed password straight
+        // to `hmac::sign`, owning only the username.
+        let mut verified = false;
+        let found = self.with_password_for(&user, &mut |password| {
+            verified = hmac_sha3_256_verify(&key, password, &hmac);
+            verified
+        });
+        match found {
+            Some(_) => {
+                if !verified {
                     return Err(AuthError::Rejected("usrpwd: bad password"));
                 }
                 // R2566 — the username is RETURNED, not dropped. It is
@@ -244,7 +401,7 @@ impl AuthMethod for UsrPwdMethod {
     }
 
     fn accept_open_ack(&mut self) -> Result<Option<AuthSubExt>, AuthError> {
-        if self.lookup.is_empty() {
+        if self.source.is_none() {
             return Ok(None);
         }
         Ok(Some(AuthSubExt::Unit))
@@ -364,6 +521,103 @@ mod tests {
     fn an_initiator_role_method_authenticates_nobody() {
         let mut m = UsrPwdMethod::initiator(b"alice".to_vec(), b"s3cret".to_vec());
         assert_eq!(m.accept_recv_open_syn(None), Ok(None));
+    }
+
+    /// R2567 — the five cases UPSTREAM'S OWN TEST exercises, so the matrix is
+    /// derived rather than invented (`usrpwd.rs` @ `authenticator_usrpwd_config`
+    /// writes exactly these five files and asserts ok / err / err / err / err).
+    #[test]
+    fn the_dictionary_rules_are_upstreams() {
+        assert_eq!(
+            parse_dictionary("usr1:pwd1\n"),
+            Ok(alloc::vec![(b"usr1".to_vec(), b"pwd1".to_vec())])
+        );
+        assert_eq!(
+            parse_dictionary("usr1\n"),
+            Err(DictionaryError::MissingSeparator)
+        );
+        assert_eq!(
+            parse_dictionary("usr1:\n"),
+            Err(DictionaryError::EmptyPassword)
+        );
+        assert_eq!(parse_dictionary(":pwd1\n"), Err(DictionaryError::EmptyUser));
+        assert_eq!(parse_dictionary(":\n"), Err(DictionaryError::EmptyUser));
+    }
+
+    /// R2567 — three behaviours upstream's IMPLEMENTATION has that its tests do
+    /// not cover. Recorded separately because "upstream tests this" and
+    /// "upstream's code happens to do this" are different strengths of claim,
+    /// and a later round comparing against a newer upstream should know which
+    /// is which.
+    ///
+    /// The colon case is the one that matters in practice: splitting on the
+    /// LAST separator, or refusing extras, would silently truncate any password
+    /// containing `:` and lock out its user with a "bad password" that names the
+    /// wrong cause.
+    #[test]
+    fn the_dictionary_rules_upstream_only_implements() {
+        assert_eq!(
+            parse_dictionary("\n\n  \nusr1:pwd1\n\n"),
+            Ok(alloc::vec![(b"usr1".to_vec(), b"pwd1".to_vec())]),
+            "blank lines are skipped"
+        );
+        assert_eq!(
+            parse_dictionary("  usr1  :  pwd1  \n"),
+            Ok(alloc::vec![(b"usr1".to_vec(), b"pwd1".to_vec())]),
+            "lines and fields are trimmed"
+        );
+        assert_eq!(
+            parse_dictionary("usr1:a:b:c\n"),
+            Ok(alloc::vec![(b"usr1".to_vec(), b"a:b:c".to_vec())]),
+            "the FIRST colon splits, so a password may contain colons"
+        );
+    }
+
+    /// R2567 — a malformed line fails the WHOLE load rather than being skipped.
+    /// A dictionary that silently dropped an entry would authenticate fewer
+    /// users than its operator believes, with nothing anywhere saying so.
+    #[test]
+    fn one_bad_line_fails_the_whole_dictionary() {
+        assert_eq!(
+            parse_dictionary("good:pw\nbroken\nalso:fine\n"),
+            Err(DictionaryError::MissingSeparator)
+        );
+    }
+
+    /// R2567 — an EMPTY responder table means NOT CONFIGURED, not "configured
+    /// with nobody".
+    ///
+    /// This is the arm that guards the conversion from the old empty-vec
+    /// sentinel to `Option<Box<dyn CredentialSource>>`. Wrapping an empty table
+    /// in a source would compile, type-check and pass every other test here,
+    /// while inverting an authentication default: a node that does not respond
+    /// to usrpwd would become one that rejects every peer. The previous shape
+    /// could not express the bug; the new one can, so it is pinned. Upstream
+    /// folds identically -- `from_config` returns `None`, never an empty table.
+    #[test]
+    fn an_empty_responder_table_is_not_a_responder() {
+        let mut empty = UsrPwdMethod::responder(alloc::vec![], 0x1234_5678);
+        assert_eq!(
+            empty.accept_init_ack(),
+            Ok(None),
+            "an empty table must issue NO challenge -- it is not a responder"
+        );
+        assert_eq!(
+            empty.accept_recv_open_syn(None),
+            Ok(None),
+            "and must admit rather than reject, exactly as before the conversion"
+        );
+
+        // The twin that keeps the assertion above from passing vacuously: a
+        // NON-empty table is a responder and does issue a challenge.
+        let mut configured = UsrPwdMethod::responder(
+            alloc::vec![(b"alice".to_vec(), b"s3cret".to_vec())],
+            0x1234_5678,
+        );
+        assert!(
+            matches!(configured.accept_init_ack(), Ok(Some(_))),
+            "a configured responder must issue its challenge"
+        );
     }
 
     #[test]
