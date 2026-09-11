@@ -789,7 +789,15 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # begun decaying the same day. DERIVED: the departing reason re-audited to wz=4,
 # ambiguous=0, and it sat in the `reached` bucket — which is why UNREACHED and
 # NO_SYMBOL correctly hold while both other pins move.
-PIN_REACHED = 46
+# R2567 (the `access-extauth-usrpwd` close) — 46 -> 45. Its THREE residuals were
+# disposed by BUILD, and the three were one base: wz had no shared credential
+# store and no config-driven construction path for the auth plane, so neither a
+# dictionary loader nor runtime `add_user` / `del_user` was expressible against a
+# table each session OWNED by value. Building the store closed all three.
+# DERIVED: the departing reason re-audited to wz=6, ambiguous=0, and it sat in
+# the `reached` bucket — which is why UNREACHED and NO_SYMBOL correctly hold
+# while both other pins move.
+PIN_REACHED = 45
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -911,7 +919,14 @@ PIN_NO_SYMBOL = 2
 # round created. DERIVED by running THIS module's own `citation_audit` over that
 # atom alone, before and after: (wz 5, ambiguous 0) -> (wz 6, ambiguous 0), so
 # 271 + 1 = 272 and AMBIGUOUS correctly holds at 56.
-PIN_WZ_CITATIONS = 272
+#
+# R2567 — 272 -> 266, SIX citations, as `access-extauth-usrpwd` left the PARTIAL
+# corpus. DERIVED by running THIS module's own `citation_audit` over that atom
+# alone against the PRE-round text: (wz 6, ambiguous 0), so 272 - 6 = 266 and
+# AMBIGUOUS correctly holds at 56. Not counted by grep — R2564 recorded that a
+# hand count gets this wrong, because the audit counts citation TOKENS rather
+# than unique files.
+PIN_WZ_CITATIONS = 266
 PIN_AMBIGUOUS = 56
 
 
