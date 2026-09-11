@@ -321,7 +321,10 @@ pub fn wire_unixsock_stream(
     let outbound = Arc::new(StreamWriteDriver::new(
         tx,
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        addressless_link_subject(InterceptorLink::UnixsockStream),
+        // R2548 — EMPTY, matching upstream, which says so in its own words:
+        // `zenoh-link-unixsock_stream/src/unicast.rs` @ `vec![]` under a
+        // "not supported for now" debug line.
+        addressless_link_subject(InterceptorLink::UnixsockStream, Vec::new()),
         endpoints,
     ));
     (inbound, outbound, writer_handle)

@@ -250,7 +250,15 @@ pub fn wire_serial_stream(
     let locator = endpoint.locator_address_with_config();
     let outbound = Arc::new(SerialWriteDriver::new(
         tx,
-        addressless_link_subject(InterceptorLink::Serial),
+        // R2548 — EMPTY, and this is the one call site where that is a KNOWN
+        // divergence rather than a match. Upstream reports the tty device names
+        // (`zenoh-link-serial/src/unicast.rs` @
+        // `match z_serial::get_available_port_names()`), so an ACL narrowed by
+        // `interfaces` can target a serial link there and cannot here. Left as
+        // it stands rather than half-built: enumerating ports is
+        // `transport-link-serial`'s work and belongs in that atom's round, with
+        // the residual named on it rather than repaired in passing here.
+        addressless_link_subject(InterceptorLink::Serial, Vec::new()),
         Some(addressless_link_endpoints(
             InterceptorLink::Serial,
             &locator,

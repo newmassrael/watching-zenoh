@@ -769,7 +769,10 @@ pub fn wire_unixpipe_stream(
     let outbound = Arc::new(StreamWriteDriver::new(
         tx,
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        addressless_link_subject(InterceptorLink::Unixpipe),
+        // R2548 — EMPTY, matching upstream:
+        // `zenoh-link-unixpipe/src/unix/unicast.rs` @ its `get_interface_names`
+        // logs "not supported" and returns none.
+        addressless_link_subject(InterceptorLink::Unixpipe, Vec::new()),
         endpoints,
     ));
     (inbound, outbound, writer_handle)

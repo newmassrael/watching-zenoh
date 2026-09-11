@@ -129,7 +129,15 @@ pub fn wire_vsock_stream(
     let outbound = Arc::new(StreamWriteDriver::new(
         tx,
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        addressless_link_subject(InterceptorLink::Vsock),
+        // R2548 — the pseudo-interface upstream names for this link, as a
+        // LITERAL rather than as `InterceptorLink::Vsock`'s scheme string: the
+        // two happen to coincide, and deriving one from the other would assert
+        // a coupling upstream does not have (its sibling addressless links name
+        // no interface at all). `zenoh-link-vsock/src/unicast.rs` @
+        // `vec!["vsock".to_string()]`. Without it an ACL narrowed by
+        // `interfaces` -- the spelling a zenoh-authored config uses to target a
+        // vsock link -- matches nothing here.
+        addressless_link_subject(InterceptorLink::Vsock, vec!["vsock".to_string()]),
         endpoints,
     ));
     (inbound, outbound, writer_handle)
@@ -163,5 +171,49 @@ mod tests {
             .await
             .expect("accept one peer");
         let _client_stream = client.await.expect("client task").expect("client connect");
+    }
+
+    /// R2548 — a WIRED vsock link names the pseudo-interface upstream names.
+    ///
+    /// `zenoh-link-vsock/src/unicast.rs` @ `vec!["vsock".to_string()]` is the
+    /// only one of upstream's four ADDRESSLESS links that names an interface at
+    /// all (serial reports tty device names; unixsock and unixpipe each report
+    /// none and say "not supported"). wz used to report a definite-empty set for
+    /// all four, which is true of the wire and wrong about upstream: an ACL
+    /// narrowed by `interfaces` — the spelling a zenoh-authored config uses to
+    /// target a vsock link — matched nothing here while matching there.
+    ///
+    /// The expectation is a LITERAL, not `InterceptorLink::Vsock`'s scheme
+    /// string: comparing the emitted name against the constant the producer
+    /// reads would hold for every value it could take, which is the tautology
+    /// R2470 had to repair on the attachment ext's Del id.
+    ///
+    /// `#[ignore]` for the same reason as its sibling above — it needs a real
+    /// AF_VSOCK pair — and run by Layer C1ab wherever `/dev/vsock` exists.
+    #[tokio::test]
+    #[ignore = "needs AF_VSOCK loopback (vsock_loopback kernel module); run with --ignored on a vsock-capable host"]
+    async fn wired_link_subject_names_the_vsock_pseudo_interface() {
+        use wz_session_core::link::BoxedLinkDriver;
+
+        let mut listener =
+            bind_vsock(VMADDR_CID_LOCAL, VMADDR_PORT_ANY).expect("bind vsock loopback listener");
+        let port = listener.local_addr().expect("bound local addr").port();
+        let client = tokio::spawn(async move { dial_vsock(VMADDR_CID_LOCAL, port).await });
+        let server = accept_vsock_on(&mut listener)
+            .await
+            .expect("accept one peer");
+        let _client_stream = client.await.expect("client task").expect("client connect");
+
+        let (_inbound, outbound, _writer) = wire_vsock_stream(server);
+        let subject = outbound
+            .link_subject()
+            .expect("the vsock pipeline states a §5.16 subject");
+        assert_eq!(subject.protocol, Some(InterceptorLink::Vsock));
+        assert_eq!(
+            subject.interfaces.as_deref(),
+            Some(&["vsock".to_string()][..]),
+            "a vsock link must name the `vsock` pseudo-interface; an empty set \
+             leaves an `interfaces`-narrowed rule silently not governing it",
+        );
     }
 }

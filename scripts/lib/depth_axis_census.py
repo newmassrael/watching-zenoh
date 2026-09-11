@@ -749,7 +749,11 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # ⚠ The NEW reason's own citations are not in any of these numbers and must not
 # be looked for — a COMPLETE atom is outside this census's population, which is
 # exactly why the count falls when one is built.
-PIN_REACHED = 52
+# R2548 (the `transport-link-vsock` build) — 52 -> 51. That atom went PARTIAL ->
+# COMPLETE once its pin audit answered the four axes R2547 left open, so it left
+# this population and took its citations with it. DERIVED: the HEAD blob's reason
+# re-audited to wz=7, ambiguous=1, in the `reached` bucket.
+PIN_REACHED = 51
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -785,8 +789,14 @@ PIN_NO_SYMBOL = 2
 # difference is a measurement rather than a habit — that reason cited four
 # upstream paths whose basename also exists under `crates/`, which is what
 # ambiguity means here.
-PIN_WZ_CITATIONS = 315
-PIN_AMBIGUOUS = 67
+# R2548 — 315 -> 309 and 67 -> 66, and this move has TWO terms rather than one,
+# which is why it is written out: `transport-link-vsock` completing removed the
+# wz=7 / ambiguous=1 its reason held, and the SAME round registered a sibling
+# residual on `transport-link-serial` whose addendum adds wz=1 / ambiguous=0.
+# Net -6 and -1, each half measured by running `citation_audit` over that text
+# alone rather than inferred from the totals.
+PIN_WZ_CITATIONS = 309
+PIN_AMBIGUOUS = 66
 
 
 class Fatal(Exception):

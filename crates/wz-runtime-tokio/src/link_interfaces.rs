@@ -94,15 +94,34 @@ pub fn ip_link_subject(protocol: InterceptorLink, local: Option<SocketAddr>) -> 
 /// The §5.16 subject of a link that has no IP address at all — a unix stream
 /// socket, a named pipe, a serial tty, an AF_VSOCK channel.
 ///
-/// Its interface set is `Some(empty)`: a DEFINITE "this link is on no NIC", not
-/// an indeterminate one. A rule narrowed by `interfaces` therefore does not
-/// govern it, while a rule narrowed only by `link_protocols` still can. zenoh
-/// cannot draw that line — it reports `vec![]` for a failed lookup too
+/// Its interface set is DEFINITE (`Some`), never indeterminate: a rule narrowed
+/// by `interfaces` is answered rather than skipped. zenoh cannot draw that line
+/// — it reports `vec![]` for a failed lookup too
 /// (`io/zenoh-link-commons/src/unicast.rs:112-118`).
-pub fn addressless_link_subject(protocol: InterceptorLink) -> LinkSubject {
+///
+/// R2548 — THE NAMES ARE A PARAMETER, and that is the whole point of this
+/// signature. It used to take only the protocol and hard-code `Some(vec![])`,
+/// on the reasoning that a link with no IP address is on no NIC. That is true
+/// of the WIRE and false of UPSTREAM, which gives the four addressless links
+/// FOUR different answers at the pin:
+///
+/// * `zenoh-link-vsock/src/unicast.rs` @ `vec!["vsock".to_string()]` — a
+///   deliberate pseudo-interface, so an ACL narrowed by `interfaces` can target
+///   a vsock link at all;
+/// * `zenoh-link-serial/src/unicast.rs` @ `match z_serial::get_available_port_names()`
+///   — the tty device names, without the path;
+/// * `zenoh-link-unixsock_stream/src/unicast.rs` @ `vec![]`, and
+///   `zenoh-link-unixpipe/src/unix/unicast.rs` @ the same, both declaring
+///   themselves "not supported".
+///
+/// A helper that assumed one of those four made the other three UNEXPRESSIBLE,
+/// which is why the vsock divergence could not be fixed at its own call site
+/// without fixing this. Each caller now STATES its answer and can be read
+/// against the upstream link it mirrors.
+pub fn addressless_link_subject(protocol: InterceptorLink, interfaces: Vec<String>) -> LinkSubject {
     LinkSubject {
         protocol: Some(protocol),
-        interfaces: Some(Vec::new()),
+        interfaces: Some(interfaces),
     }
 }
 

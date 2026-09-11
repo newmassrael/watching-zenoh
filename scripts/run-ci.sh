@@ -5259,7 +5259,7 @@ layer_c1ab_cargo_test_vsock() {
         echo "  job that provisions the module)"
         return 0
     fi
-    _runci_guarded_test "Layer C1ab vsock dial/accept round-trip" 1 \
+    _runci_guarded_test "Layer C1ab vsock dial/accept round-trip" 2 \
         cargo test -p wz-runtime-tokio --features transport-link-vsock \
         --lib vsock_pipeline -- --ignored || return 1
     _runci_guarded_test "Layer C1ab vsock wz<->wz e2e" 2 \
