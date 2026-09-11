@@ -821,7 +821,14 @@ PIN_NO_SYMBOL = 2
 # AMBIGUOUS correctly holds at 66. ⚠ The count this pin tracks is a property of
 # how much is still OPEN, so an atom closing must lower it; a round that closed
 # an atom and left this pin up would be claiming residue it no longer has.
-PIN_WZ_CITATIONS = 303
+# R2556 -- 303 -> 307. `ext-pubsub-advanced-cache` stays PARTIAL (so it stays in
+# this population) and its reason gained four resolvable wz anchors: the new
+# completeness witness, and the three that NAME the blocker on its surviving
+# clause -- `response_sink.rs`'s signature, `response_build.rs`'s extension
+# rule, and the push path that has the QoS this reply path lacks. Derived by
+# auditing the ADDENDUM ALONE -- wz=4, ambiguous=0 -- so AMBIGUOUS correctly
+# holds and 303 + 4 lands exactly on the 307 the census measures.
+PIN_WZ_CITATIONS = 307
 PIN_AMBIGUOUS = 66
 
 

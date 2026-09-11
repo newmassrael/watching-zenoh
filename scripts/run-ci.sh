@@ -7080,7 +7080,11 @@ layer_c1ap_cargo_test_ext_pubsub_serde() {
 # runs it. The denied phrase is deliberately NOT quoted above — a quotation of
 # it is still an occurrence of it, and the gate is right to say so.
 layer_c1aq_cargo_test_ext_pubsub_advanced() {
-    _runci_guarded_test "C1aq advanced_" 17 \
+    # R2556 — 17 -> 18: `the_cache_queryable_does_not_promise_completeness`.
+    # It is gated on `query-target`, which this lane HAS because it does not
+    # pass `--no-default-features` (the same default-feature subtlety R2507
+    # recorded on C1av). MEASURED here rather than inferred from the diff.
+    _runci_guarded_test "C1aq advanced_" 18 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-publisher,query-get,pubsub-allow-loop \
         --lib advanced_ --quiet || return 1
     (cd crates \

@@ -209,12 +209,27 @@ where
     ) -> Result<Self, QueryableError> {
         let ring: CacheRing = Arc::new(Mutex::new(VecDeque::new()));
         let query_ring = Arc::clone(&ring);
-        // The cache is the authoritative answerer for its `@adv` suffix, so
-        // the queryable is COMPLETE (zenoh declares the cache queryable as a
-        // normal queryable; recovery/history gets target it directly).
+        // R2556 — INCOMPLETE, which is upstream's default and, more to the
+        // point, the only honest answer this queryable can give.
+        //
+        // wz used to declare `with_complete(true)` on the rationale that "the
+        // cache is the authoritative answerer for its `@adv` suffix". That
+        // rationale was wrong twice over. Upstream makes no `.complete()` call
+        // at all — `zenoh-ext/src/advanced_cache.rs` declares an ordinary
+        // queryable and so takes the builder default, `zenoh/src/api/session.rs` @ `complete: false,`
+        // — and the old comment's own parenthetical said as much while setting
+        // the flag anyway.
+        //
+        // AND THE FLAG IS A PROMISE THIS CACHE CANNOT KEEP. zenoh's own doc
+        // for it, `zenoh/src/api/builders/queryable.rs` @ `/// When queryable is declared as "complete", it promises to have all the data`,
+        // is the contract: a querier may ask for complete queryables ONLY
+        // (`QueryTarget::AllComplete`) and expect a whole answer. This
+        // queryable answers out of a ring bounded by `max_samples`, so it
+        // structurally does not have all the data — declaring otherwise is a
+        // false promise on the wire, not a local optimisation.
         let queryable = session.declare_queryable(
             queryable_keyexpr,
-            QueryableOptions::default().with_complete(true),
+            QueryableOptions::default(),
             move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
                 let guard = query_ring
                     .lock()
@@ -1044,6 +1059,59 @@ mod tests {
                 ("demo/k".to_string(), vec![2]),
             ],
             "the _time filter drops the out-of-range sample"
+        );
+    }
+
+    /// R2556 — the cache queryable is INCOMPLETE, witnessed through the
+    /// contract the flag actually governs rather than by reading the flag.
+    ///
+    /// A `QueryTarget::AllComplete` querier is answered ONLY by queryables
+    /// that promise to hold all the data
+    /// (`zenoh/src/api/builders/queryable.rs` @ `/// When queryable is declared as "complete", it promises to have all the data`),
+    /// so `get_matching_status()` against a live cache is a direct read of the
+    /// promise this declaration makes to the network. A ring bounded by
+    /// `max_samples` cannot keep that promise, and upstream accordingly
+    /// declares an ordinary queryable — `zenoh/src/api/session.rs` @ `complete: false,`
+    /// is the default it thereby takes.
+    ///
+    /// ⚠ WHY THIS TEST HAD TO BE WRITTEN AT ALL, which is the finding rather
+    /// than the fix: flipping the flag changed NOTHING in this module's other
+    /// eleven cases. The completeness of the cache's own queryable was
+    /// unwitnessed, so a false promise could sit on the wire indefinitely
+    /// without a single test noticing — the flag was graded by nobody.
+    #[cfg(all(feature = "query-target", feature = "query-get"))]
+    #[test]
+    fn the_cache_queryable_does_not_promise_completeness() {
+        use crate::observer::ApplicationLayerObserver;
+        use crate::runtime_impl::TokioTime;
+        use crate::session::TokioSession;
+        use wz_session_core::query_mode::QueryTarget;
+
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let session = TokioSession::new(actions, observer, clock);
+
+        let querier = session.declare_querier(
+            "demo/data/@adv/pub/ff/7/_",
+            crate::session::QueryOptions::get().with_target(QueryTarget::AllComplete),
+        );
+        assert!(
+            !querier.get_matching_status().matching,
+            "no queryable yet, so the AllComplete querier matches nothing"
+        );
+
+        let _cache = AdvancedCache::declare(
+            &session,
+            "demo/data/@adv/pub/ff/7/_".to_string(),
+            CacheConfig { max_samples: 8 },
+        )
+        .expect("advanced cache declares");
+
+        assert!(
+            !querier.get_matching_status().matching,
+            "a live cache still does not answer an AllComplete querier: a \
+             bounded ring makes no completeness promise"
         );
     }
 }
