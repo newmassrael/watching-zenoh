@@ -719,7 +719,22 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # passed. Reading today's text would have said the fall should be 20 and left
 # three unaccounted for -- the count that matters is the one the reason held
 # when the pin was last green.
-PIN_REACHED = 54
+#
+# R2544b (the `liveliness-token` build) — 54 -> 53, the SAME EVENT SHAPE as the
+# move above and paid in the SAME COMMIT this time. That atom went PARTIAL ->
+# COMPLETE, so it left this census's population and took its citations with it.
+#
+# ⛔ R2541 had to pay this class as its own round because R2539 built an atom
+# and did not move these pins; hosted CI then caught it in two C0 jobs. The
+# lesson is cheap to state and was expensive to learn: BUILDING AN ATOM MOVES
+# THIS CENSUS, so the build and the pin belong in one commit.
+#
+# DERIVED, not assumed: the pre-regrade reason was read back out of git at HEAD
+# and re-audited by the same `citation_audit` the gate runs — wz=6, ambiguous=0,
+# which is exactly what the two counts below fell by. `reach_partition` puts the
+# survivors at 53/3/2 over a population of 58, so `unreached` and `no_symbol`
+# are untouched and only the reached bucket lost its member.
+PIN_REACHED = 53
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -735,7 +750,12 @@ PIN_NO_SYMBOL = 2
 # reached pin above: `session-unicast-open` completing removed the 17 wz and 2
 # ambiguous citations its reason held at R2538. No surviving atom's citations
 # moved, which is why the arithmetic closes exactly rather than approximately.
-PIN_WZ_CITATIONS = 330
+#
+# R2544b — 330 -> 324, the six wz citations `liveliness-token`'s reason held
+# while it was PARTIAL. AMBIGUOUS does NOT move: that atom held none, which the
+# same re-audit says, so leaving 71 alone is a measurement rather than an
+# omission.
+PIN_WZ_CITATIONS = 324
 PIN_AMBIGUOUS = 71
 
 

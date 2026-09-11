@@ -112,9 +112,33 @@ impl LivelinessOptions {
 // and aliased `declare_token_aliased` paths cannot build a held token without
 // that registration, so the prior asymmetry (aliased skipped it) is
 // unrepresentable rather than test-guarded.
+/// R2544b — upstream's attribute, re-derived at the CURRENT pin
+/// (`zenoh/src/api/liveliness.rs` @ `pub struct LivelinessToken`, which carries
+/// `#[must_use]` with this same warning). It was this atom's remaining residual
+/// and the reason recorded it as "not re-read"; reading 1.10.1 directly settled
+/// it — upstream has the attribute, wz did not.
+///
+/// It matters more here than the usual `#[must_use]` does, because dropping the
+/// value is not merely wasteful: [`Drop`] RETRACTS the token, so
+/// `session.declare_token(..)` without a binding announces presence and
+/// withdraws it in the same expression, and the node ends up asserting nothing
+/// while the code reads as though it asserts something.
+#[must_use = "a liveliness token is dropped and UNDECLARED immediately if it is not bound to a variable, so an unbound declare asserts presence and retracts it in the same expression"]
 #[non_exhaustive]
 pub struct LivelinessToken<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> {
-    session: Session<R, T, Unicast>,
+    /// R2544b — the session, held WEAKLY, which is upstream's shape
+    /// (`zenoh/src/api/liveliness.rs` @ `session: WeakSession`).
+    ///
+    /// This was a STRONG clone, and that was the atom's last residual: a token
+    /// is an application-held handle, so a strong clone means a token the
+    /// application forgets to drop keeps its whole session — links, observer,
+    /// drive task — alive for as long as it lives. The presence assertion then
+    /// outlives the thing whose presence it asserts, which is the defect
+    /// stated in protocol terms rather than in refcount terms.
+    ///
+    /// R2543 made this expressible: a `Session` is one `Arc` now, so there is
+    /// something for a `Weak` to point at.
+    session: WeakSession<R, T, Unicast>,
     id: u64,
     keyexpr: String,
     options: LivelinessOptions,
@@ -164,7 +188,13 @@ impl<R: SessionRuntime, T: TimeSource> LivelinessToken<R, T> {
                 .expect("register on the alloc backing never exceeds declared capacity");
         });
         Self {
-            session,
+            // R2544b — DOWNGRADE here rather than taking the caller's clone.
+            // `new_held` still receives a strong `Session` because the
+            // registration above needs one, and both call sites hand it a
+            // `self.clone()` that dies with this frame — so the handle keeps a
+            // weak reference and the strong count returns to what it was
+            // before the declare.
+            session: session.downgrade(),
             id: token_id,
             keyexpr,
             options,
@@ -278,8 +308,31 @@ impl<R: SessionRuntime, T: TimeSource> LivelinessToken<R, T> {
         // had already gone out — the subscriber plane's measured defect, on
         // the liveliness plane. Found by deriving the population from the
         // drain rather than from the one handle that was caught.
+        // R2544b — UPGRADE ONCE, here, before the observer lock. Everything
+        // below needs the live session: the observer to lock, the link to emit
+        // on, the registry to unregister from. A `None` means all three are
+        // already gone with it.
+        //
+        // ⛔ THAT IS `Ok(())`, NOT `TransportUnavailable`, and the difference
+        // is a promise rather than a shade of meaning. That variant documents
+        // itself as "the caller retries after the session re-establishes" — a
+        // TRANSIENT condition. A dropped session never re-establishes, so
+        // answering with it would hand the caller a retry that can never
+        // succeed. And nothing is owed: the peer saw the session close, which
+        // already ended the presence this token asserted, so the retraction is
+        // MOOT rather than failed. `Drop` has no failure to log for the same
+        // reason.
+        //
+        // ⚠ This state cannot occur before this round: the token used to hold
+        // a STRONG clone, so the session could not die first. It is new, which
+        // is why it needs an answer written down rather than inferred.
         #[cfg(feature = "liveliness-token")]
-        let sent = R::with_mutex_mut(&self.session.observer, |obs| {
+        let Some(session) = self.session.upgrade() else {
+            self.armed = false;
+            return Ok(());
+        };
+        #[cfg(feature = "liveliness-token")]
+        let sent = R::with_mutex_mut(&session.observer, |obs| {
             // Round 2444 — the send's verdict, carried out of the closure
             // rather than dropped on the floor. The UNREGISTER still happens
             // whatever the emit answered, and that ordering is deliberate: a
@@ -289,7 +342,12 @@ impl<R: SessionRuntime, T: TimeSource> LivelinessToken<R, T> {
             #[cfg(all(feature = "declare-token", feature = "declare-undeclare"))]
             let sent = {
                 let declare = wz_session_core::declare_build::build_undeclare_token(self.id);
-                let sent = self.session.send_network_message(
+                // R2544b — through the UPGRADED handle, not `self.session`,
+                // which is now weak. Upgrading once above and reusing it here
+                // is what keeps the emit and the prune on the SAME session:
+                // upgrading twice could, in principle, answer `Some` and then
+                // `None` and leave the pair straddling a drop.
+                let sent = session.send_network_message(
                     wz_session_core::network_message::NetworkMessage::Declare(Box::new(declare)),
                     /*reliable=*/ true,
                     /*express=*/ false,
@@ -299,7 +357,7 @@ impl<R: SessionRuntime, T: TimeSource> LivelinessToken<R, T> {
                 // R311nc `if let Ok` guard for a possible multicast session is
                 // gone — a LivelinessToken cannot exist on a multicast
                 // session).
-                self.session.actions().prune_token_declaration(self.id);
+                session.actions().prune_token_declaration(self.id);
                 sent
             };
             // A build without the declare pair emits nothing, so there is no

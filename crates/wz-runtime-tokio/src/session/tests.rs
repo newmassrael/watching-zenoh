@@ -7778,22 +7778,35 @@ fn queryable_undeclare_frees_session_clone_no_leak() {
 /// guards that the consumed handle's owned fields are freed.
 #[cfg(feature = "liveliness-token")]
 #[test]
-fn liveliness_token_undeclare_frees_session_clone_no_leak() {
+fn a_liveliness_token_never_keeps_its_session_alive() {
     let (session, _driver) = build_session();
     // R2543 — this used to count `Arc::strong_count(session.observer())` as a
     // PROXY for "a Session clone exists", which worked only because the old
-    // value struct's `clone` bumped each field's own Arc separately. A handle
-    // is now one Arc over `SessionInner`, so the observer's count no longer
-    // moves and the proxy went blind while the behaviour it watched was
-    // unchanged. Counting the handle itself measures the subject instead of a
-    // side effect of how the subject used to be stored.
+    // value struct's `clone` bumped each field's own Arc separately. Counting
+    // the handle itself measures the subject instead of a side effect of how
+    // the subject used to be stored.
+    //
+    // ⛔ R2544b INVERTED THE MIDDLE ASSERTION, and that is the whole point of
+    // this round rather than an accommodation to it. This test was named
+    // `liveliness_token_undeclare_frees_session_clone_no_leak` and REQUIRED
+    // `strong_count() > base` after the declare — it demanded the very strong
+    // clone that was `liveliness-token`'s last open residual. With the handle
+    // weak there is no clone to demand, and "never holds one" is STRICTLY
+    // STRONGER than R311lo's original claim that undeclare frees the one it
+    // holds: the `mem::forget` leak that claim guarded is now unrepresentable
+    // instead of guarded. Renamed to say what it now proves, because a name
+    // promising the old assertion would hide that it changed.
     let base = session.strong_count();
     let token = session
         .declare_token("liveliness/devA", LivelinessOptions::default())
         .expect("hardcoded canonical literal keyexpr");
-    assert!(
-        session.strong_count() > base,
-        "the handle holds a strong Session clone (the handle count rises)",
+    assert_eq!(
+        session.strong_count(),
+        base,
+        "a declared token must hold its session WEAKLY — upstream's shape. A \
+         strong clone here means a token the application forgets to drop keeps \
+         the whole session alive, so the presence assertion outlives the thing \
+         whose presence it asserts",
     );
     token
         .undeclare()
@@ -7801,7 +7814,36 @@ fn liveliness_token_undeclare_frees_session_clone_no_leak() {
     assert_eq!(
         session.strong_count(),
         base,
-        "undeclare must free the handle's Session clone (no mem::forget leak)",
+        "and undeclare leaves the count where it was, because there was never \
+         a clone to give back",
+    );
+}
+
+/// R2544b — the arm that only a WEAK handle can reach: the session dies FIRST.
+///
+/// Before this round it was unrepresentable — the token's strong clone kept the
+/// session alive, so `undeclare` could never meet a dead one. It is therefore a
+/// new state that needs a defined answer, and the answer is that the retraction
+/// is MOOT rather than failed: the peer saw the session close, which already
+/// ended the presence this token asserted.
+#[cfg(feature = "liveliness-token")]
+#[test]
+fn a_token_outliving_its_session_reports_a_moot_retraction_not_a_failure() {
+    let (session, _driver) = build_session();
+    let token = session
+        .declare_token("liveliness/devB", LivelinessOptions::default())
+        .expect("hardcoded canonical literal keyexpr");
+
+    // The session goes away while the token is still held. This is the drop
+    // the old strong clone made impossible.
+    drop(session);
+
+    assert!(
+        token.undeclare().is_ok(),
+        "a retraction with no session left to send it is MOOT, not failed. \
+         ⛔ Never `TransportUnavailable` here: that variant promises the caller \
+         a retry once the session re-establishes, and a dropped session never \
+         does — it would be a retry that can never succeed",
     );
 }
 
