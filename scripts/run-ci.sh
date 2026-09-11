@@ -3758,6 +3758,15 @@ PY
     # here and is REQUIRED in Layer Z, exactly like the two gates above.
     python3 scripts/lib/upstream_link_config_keys_gate.py --selftest || return 1
     python3 scripts/lib/upstream_link_config_keys_gate.py --check || return 1
+    # R2564 — the token-plane diff `routing-token-tables` rests on, re-derived
+    # from upstream's own `HatTokenTrait` rather than asserted in prose. The
+    # atom's residual was an UNDONE AUDIT, and the sentence naming it had already
+    # rotted (it cited a 1184-line token.rs; at the pin that hat is 400 lines),
+    # which is why closing it in prose would only have restarted the decay. Same
+    # split as the three gates above: the SELFTEST needs nothing and runs here,
+    # the grade needs a zenoh source tree and is REQUIRED in Layer Z.
+    python3 scripts/lib/token_plane_parity_gate.py --selftest || return 1
+    python3 scripts/lib/token_plane_parity_gate.py --check || return 1
     return 0
 }
 
@@ -14746,6 +14755,15 @@ layer_z_zenohd_interop() {
     # residual is an ungraded gap, and an atom tagged COMPLETE may have none.
     if ! python3 scripts/lib/upstream_link_config_keys_gate.py --check --require; then
         echo "  Layer Z FAIL: an upstream link config key is graded by nobody" >&2
+        return 1
+    fi
+    # R2564 — the same shape again: the population is upstream's own
+    # `HatTokenTrait`, so this is the lane that can demand a source tree rather
+    # than defer. `routing-token-tables` is graded COMPLETE on this diff being
+    # complete; the day upstream adds or renames a token-plane method, that grade
+    # is stale and this is what says so instead of a paragraph quietly aging.
+    if ! python3 scripts/lib/token_plane_parity_gate.py --check --require; then
+        echo "  Layer Z FAIL: the token-plane diff behind routing-token-tables is stale" >&2
         return 1
     fi
     # R2080 (open-debt item 503) — the COMPLETENESS audit of the acceptance

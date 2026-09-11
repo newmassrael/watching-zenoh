@@ -778,7 +778,18 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # DERIVED: the departing reason re-audited to wz=10, ambiguous=0, and it sat in
 # the `reached` bucket — which is why UNREACHED and NO_SYMBOL correctly hold
 # while both other pins move.
-PIN_REACHED = 47
+# R2564 (the `routing-token-tables` close) — 47 -> 46, the same event shape a
+# NINTH time, but disposed by a route none of the eight before it used. This
+# atom's single standing residual was not a capability at all: its own reason
+# called it an UNDONE AUDIT, "a function-by-function diff of upstream's
+# 1184-line token.rs". That sentence had ALREADY rotted — at the pin the router
+# hat's token module is 400 lines — so the blocking clause described a file that
+# no longer exists. The diff was performed against the pin and then MECHANISED
+# (`scripts/lib/token_plane_parity_gate.py`), because a prose close would have
+# begun decaying the same day. DERIVED: the departing reason re-audited to wz=4,
+# ambiguous=0, and it sat in the `reached` bucket — which is why UNREACHED and
+# NO_SYMBOL correctly hold while both other pins move.
+PIN_REACHED = 46
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -882,7 +893,17 @@ PIN_NO_SYMBOL = 2
 # counted -- exactly what R2559 recorded one pin-move above. The one-count
 # mismatch is the tell; it is arithmetic, not judgement, which is why it is
 # catchable.
-PIN_WZ_CITATIONS = 275
+#
+# R2564 — 275 -> 271, four citations, as `routing-token-tables` left the PARTIAL
+# corpus. DERIVED by running THIS module's own `citation_audit` over that atom
+# alone against the PRE-round text: (wz 4, ambiguous 0), so 275 - 4 = 271 and
+# AMBIGUOUS correctly holds at 56. ⚠ The derivation is not optional here and a
+# hand grep got it WRONG: counting distinct `crates/...` paths in that reason
+# returns 1, because the audit counts citation TOKENS (path @ needle pairs), not
+# unique files. The one-count-style mismatch the note above calls a tell showed
+# up as a four-count one, and the fix was the same — use the module's function,
+# not a regex written to look like it.
+PIN_WZ_CITATIONS = 271
 PIN_AMBIGUOUS = 56
 
 
