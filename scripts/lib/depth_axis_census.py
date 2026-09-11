@@ -807,7 +807,15 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # deploy to it. DERIVED: the departing reason re-audited to wz=9, ambiguous=0,
 # and it sat in the `reached` bucket — which is why UNREACHED and NO_SYMBOL
 # correctly hold while both other pins move.
-PIN_REACHED = 44
+# R2571 (the `storage-mgr-dynamic-volume-loading` close) — 44 -> 43. Its ONE
+# named residual was disposed by BUILD: upstream carries a PER-STORAGE volume
+# payload and wz's `StorageConfig` carried none, which the entry itself had
+# called a SEAM rather than a missing knob — and that reading held, because
+# `Volume::create_storage` already took `&StorageConfig` and no trait changed.
+# DERIVED: the departing reason re-audited to wz=5, ambiguous=0, and it sat in
+# the `reached` bucket — which is why UNREACHED and NO_SYMBOL correctly hold
+# while both other pins move.
+PIN_REACHED = 43
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -945,7 +953,15 @@ PIN_NO_SYMBOL = 2
 # pre-round reason also carries 18 citations the audit reads as UPSTREAM and
 # leaves unjudged, which a grep over the reason would have folded into the wz
 # count and overshot the delta by exactly those 18.
-PIN_WZ_CITATIONS = 257
+#
+# R2571 — 257 -> 252, FIVE citations, as `storage-mgr-dynamic-volume-loading`
+# left the PARTIAL corpus. DERIVED by running THIS module's own `citation_audit`
+# over that atom alone against the PRE-round text: (wz 5, ambiguous 0), so
+# 257 - 5 = 252 and AMBIGUOUS correctly holds at 56. Not counted by grep —
+# R2564's note above applies, and the same pre-round reason carries 8 citations
+# the audit reads as UPSTREAM and leaves unjudged, which a grep would have
+# folded into the wz count and overshot by exactly those 8.
+PIN_WZ_CITATIONS = 252
 PIN_AMBIGUOUS = 56
 
 
