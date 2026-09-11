@@ -503,7 +503,19 @@ pub enum LocalDeliveryDrain {
     DriveTask,
 }
 
-pub struct Session<R: SessionRuntime, T: TimeSource, Tp>
+/// R2543 — the session's OWNED STATE, behind the [`Session`] handle's `Arc`.
+///
+/// Split out so a handle can hold a session WEAKLY. `liveliness-token`'s last
+/// residual is that wz's token keeps a strong clone where upstream's holds a
+/// `WeakSession`, so a live token keeps its whole session alive; a weak
+/// reference needs an `Arc` to be weak TO, and before this split there was
+/// none — [`Session`] was a value struct whose `clone` bumped each field's own
+/// `Arc` separately, which no `Weak` can point at.
+///
+/// ⚠ NOT `pub`-constructible and not part of the crate's surface: every method
+/// stays on [`Session`], which derefs here, so this split is invisible to
+/// callers and to the 72 `&self` methods that read these fields.
+pub struct SessionInner<R: SessionRuntime, T: TimeSource, Tp>
 where
     Tp: TransportState<R, T>,
 {
@@ -628,8 +640,84 @@ where
     final_holds: Arc<std::sync::Mutex<std::collections::HashMap<u64, FinalHold>>>,
 }
 
+/// The session HANDLE: a shared, cheaply-cloned pointer to [`SessionInner`].
+///
+/// R2543 made this a newtype over `Arc` where it used to be the state itself.
+/// The change is deliberately invisible: [`Deref`](core::ops::Deref) to the
+/// inner means every `&self` method and every `self.field` read keeps compiling
+/// unchanged, and `clone` becomes one refcount bump instead of nine field
+/// clones. What it BUYS is [`WeakSession`] — upstream's shape
+/// (`zenoh/src/api/liveliness.rs` @ `session: WeakSession`), which wz could not
+/// express while a session was a value struct.
+///
+/// ⛔ NO `DerefMut`, on purpose. Mutation through a shared handle is exactly
+/// what the old value struct made impossible and what this must not quietly
+/// introduce; the two by-value builders use `Arc::make_mut`, which forks when
+/// shared and so reproduces the old field-wise clone semantics EXACTLY.
+pub struct Session<R: SessionRuntime, T: TimeSource, Tp>(Arc<SessionInner<R, T, Tp>>)
+where
+    Tp: TransportState<R, T>;
+
+/// R2543 — a session held WEAKLY, upstream's `WeakSession`.
+///
+/// A handle that keeps a session alive is a leak with a protocol consequence:
+/// a liveliness token that outlives its owner goes on asserting presence for a
+/// node that has gone. Upgrading answers `None` once the last [`Session`] is
+/// dropped, which is the signal a handle needs to stop acting.
+pub struct WeakSession<R: SessionRuntime, T: TimeSource, Tp>(
+    std::sync::Weak<SessionInner<R, T, Tp>>,
+)
+where
+    Tp: TransportState<R, T>;
+
+impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> core::ops::Deref
+    for Session<R, T, Tp>
+{
+    type Target = SessionInner<R, T, Tp>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, Tp> {
+    /// Wrap owned state in a handle. The ONE place an `Arc` is minted, so the
+    /// refcount has a single origin.
+    pub(crate) fn from_inner(inner: SessionInner<R, T, Tp>) -> Self {
+        Self(Arc::new(inner))
+    }
+
+    /// Hand out a weak reference to this session; the counterpart of
+    /// [`WeakSession::upgrade`].
+    pub fn downgrade(&self) -> WeakSession<R, T, Tp> {
+        WeakSession(Arc::downgrade(&self.0))
+    }
+
+    /// How many handles share this session. Test-facing: it is how a leak is
+    /// PROVEN rather than argued -- a handle that should not keep a session
+    /// alive must not move this number.
+    #[cfg(test)]
+    pub(crate) fn strong_count(&self) -> usize {
+        Arc::strong_count(&self.0)
+    }
+}
+
+impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> WeakSession<R, T, Tp> {
+    /// The session, if it is still alive. `None` is not an error: it is the
+    /// answer that the owner has gone and this handle must stop acting.
+    pub fn upgrade(&self) -> Option<Session<R, T, Tp>> {
+        self.0.upgrade().map(Session)
+    }
+}
+
+impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Clone for WeakSession<R, T, Tp> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
 /// R311y531 — one request whose `ResponseFinal` is deferred; see
-/// [`Session::final_holds`].
+/// [`SessionInner::final_holds`].
 #[cfg(feature = "query-queryable")]
 #[derive(Default)]
 pub(crate) struct FinalHold {
@@ -657,6 +745,30 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Clone for Sessi
 where
     <Tp as TransportState<R, T>>::Payload: Clone,
 {
+    /// R2543 — ONE refcount bump where this used to clone nine fields.
+    ///
+    /// The `Payload: Clone` bound is KEPT even though this body no longer
+    /// clones a payload: [`SessionInner`]'s own `Clone` needs it, and that is
+    /// what the two by-value builders reach through `Arc::make_mut`. Dropping
+    /// the bound here would move the error to those and say less.
+    ///
+    /// The two field comments this replaces said a clone must SHARE the node
+    /// clock and the hold map rather than fork them. That is now true by
+    /// construction rather than by each field's own `clone` -- every field is
+    /// shared, because there is one `SessionInner` and all handles point at it.
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+}
+
+impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Clone for SessionInner<R, T, Tp>
+where
+    <Tp as TransportState<R, T>>::Payload: Clone,
+{
+    /// The old `Session::clone` body, moved here unchanged. It is reached ONLY
+    /// by `Arc::make_mut` in the by-value builders, and only when the handle is
+    /// shared -- which is exactly when the old code would have forked too, so
+    /// the semantics the builders see are the ones they always saw.
     fn clone(&self) -> Self {
         Self {
             local_delivery: self.local_delivery,
@@ -664,11 +776,11 @@ where
             observer: self.observer.clone(),
             fires: self.fires.clone(),
             clock: self.clock.clone(),
-            // An Arc bump, deliberately: a clone must SHARE the node clock, not
-            // fork it (see the field doc).
+            // An Arc bump, deliberately: a fork must SHARE the node clock, not
+            // copy it (see the field doc).
             node_hlc: self.node_hlc.clone(),
-            // Shared, for the same reason: a clone that forked the hold map
-            // would let one clone emit a terminator another clone still holds.
+            // Shared, for the same reason: a fork that copied the hold map
+            // would let one handle emit a terminator another still holds.
             #[cfg(feature = "query-queryable")]
             final_holds: self.final_holds.clone(),
         }
@@ -1155,8 +1267,16 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     /// the one host that needs the non-default gets it in the same expression
     /// that builds the session.
     #[must_use]
-    pub fn with_local_delivery_drain(mut self, drain: LocalDeliveryDrain) -> Self {
-        self.local_delivery = drain;
+    pub fn with_local_delivery_drain(mut self, drain: LocalDeliveryDrain) -> Self
+    where
+        <Tp as TransportState<R, T>>::Payload: Clone,
+    {
+        // R2543 — `make_mut` rather than a field write, because the handle is
+        // now shared. It forks ONLY when another handle exists, which is the
+        // case the old value struct forked too (`base.clone().with_…()` in the
+        // session tests is a real call site of exactly that shape), so this
+        // reproduces the previous semantics instead of changing them.
+        Arc::make_mut(&mut self.0).local_delivery = drain;
         self
     }
 
@@ -1554,7 +1674,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
             wz_session_core::multicast_tx::MulticastTxItem,
         >,
     ) -> Self {
-        Self {
+        Self::from_inner(SessionInner {
             local_delivery: LocalDeliveryDrain::default(),
             transport: transport::MulticastPayload {
                 #[cfg(feature = "codec-push")]
@@ -1578,7 +1698,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
             // multicast transport, and no auto-stamp consumer takes a multicast
             // session (both take `Session<R, T, Unicast>`).
             node_hlc: crate::node_clock::NodeHlc::disabled(),
-        }
+        })
     }
 
     /// R311mq (Level B, B5a) — the MULTICAST dispatch SSOT: fan one drive-loop
@@ -1733,7 +1853,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             actions.params.whatami,
             crate::node_clock::TimestampingEnabled::default(),
         );
-        let session = Self {
+        let session = Self::from_inner(SessionInner {
             // R311y554 — the default is the pre-policy behaviour; a host that
             // needs the drive-task hand-off opts in with
             // [`Self::with_local_delivery_drain`].
@@ -1752,7 +1872,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             node_hlc,
             #[cfg(feature = "query-queryable")]
             final_holds: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-        };
+        });
         // Forward the zid into the subscriber registry so wire-arrived
         // self-echo Pushes are dedup'd from session creation onward. The
         // `1..=16` range check inside `set_own_zid` quietly rejects an
@@ -1802,12 +1922,19 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// let session = TokioSession::new(actions, observer, clock)
     ///     .with_timestamping(TimestampingEnabled::default().with_role(role, on));
     /// ```
-    pub fn with_timestamping(mut self, enabled: crate::node_clock::TimestampingEnabled) -> Self {
-        self.node_hlc = crate::node_clock::NodeHlc::for_node(
+    pub fn with_timestamping(mut self, enabled: crate::node_clock::TimestampingEnabled) -> Self
+    where
+        <Unicast as TransportState<R, T>>::Payload: Clone,
+    {
+        // R2543 — see `with_local_delivery_drain` for why this is `make_mut`.
+        // The read of `transport.params` is taken BEFORE the mutable borrow so
+        // the two do not overlap.
+        let hlc = crate::node_clock::NodeHlc::for_node(
             &self.transport.params.zid,
             self.transport.params.whatami,
             enabled,
         );
+        Arc::make_mut(&mut self.0).node_hlc = hlc;
         self
     }
 

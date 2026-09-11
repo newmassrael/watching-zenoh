@@ -7780,19 +7780,26 @@ fn queryable_undeclare_frees_session_clone_no_leak() {
 #[test]
 fn liveliness_token_undeclare_frees_session_clone_no_leak() {
     let (session, _driver) = build_session();
-    let base = Arc::strong_count(session.observer());
+    // R2543 — this used to count `Arc::strong_count(session.observer())` as a
+    // PROXY for "a Session clone exists", which worked only because the old
+    // value struct's `clone` bumped each field's own Arc separately. A handle
+    // is now one Arc over `SessionInner`, so the observer's count no longer
+    // moves and the proxy went blind while the behaviour it watched was
+    // unchanged. Counting the handle itself measures the subject instead of a
+    // side effect of how the subject used to be stored.
+    let base = session.strong_count();
     let token = session
         .declare_token("liveliness/devA", LivelinessOptions::default())
         .expect("hardcoded canonical literal keyexpr");
     assert!(
-        Arc::strong_count(session.observer()) > base,
-        "the handle holds a Session clone (observer Arc count rises)",
+        session.strong_count() > base,
+        "the handle holds a strong Session clone (the handle count rises)",
     );
     token
         .undeclare()
         .expect("the retraction reaches a driver that is up");
     assert_eq!(
-        Arc::strong_count(session.observer()),
+        session.strong_count(),
         base,
         "undeclare must free the handle's Session clone (no mem::forget leak)",
     );
@@ -11567,5 +11574,72 @@ fn an_oversize_refusal_leaves_the_f2_send_gate_open() {
         driver.offered_count(),
         2,
         "both writes reached the driver — the gate never closed"
+    );
+}
+
+// ── R2543 — the Session handle is one shared Arc, and it can be held WEAKLY ──
+//
+// These grade the SPLIT itself (`Session` -> `Arc<SessionInner>`), which is the
+// foundation `liveliness-token`'s last residual needs: wz's token holds a strong
+// clone where upstream holds a `WeakSession`, and a weak reference needs an Arc
+// to be weak TO. Before this split there was none — a `Session` was a value
+// struct whose `clone` bumped each field's own Arc separately, and no `Weak` can
+// point at that.
+//
+// ⛔ They do NOT claim the token stops keeping its session alive. It still does:
+// converting the four handles that hold a strong clone is the next step, and a
+// test asserting otherwise would pass for the wrong reason today.
+
+#[test]
+fn a_session_clone_shares_one_inner_rather_than_forking_it() {
+    let (session, _driver) = build_session();
+    assert_eq!(
+        session.strong_count(),
+        1,
+        "a fresh session is held once — by itself"
+    );
+    let twin = session.clone();
+    assert_eq!(
+        session.strong_count(),
+        2,
+        "cloning a handle must SHARE the inner, not copy it: this is the whole \
+         difference between the old value struct and the Arc handle, and it is \
+         what makes a weak reference expressible at all"
+    );
+    drop(twin);
+    assert_eq!(
+        session.strong_count(),
+        1,
+        "dropping a clone releases its share and nothing else"
+    );
+}
+
+#[test]
+fn a_weak_session_upgrades_while_a_strong_handle_lives_and_not_after() {
+    let (session, _driver) = build_session();
+    let weak = session.downgrade();
+    assert_eq!(
+        session.strong_count(),
+        1,
+        "downgrading must not take a strong share — a handle that kept the \
+         session alive is exactly the defect this exists to remove"
+    );
+    let upgraded = weak.upgrade().expect("the owner is still alive");
+    assert_eq!(
+        session.strong_count(),
+        2,
+        "an upgrade hands back a real strong handle for as long as it is held"
+    );
+    drop(upgraded);
+
+    // The ONLY strong handle goes away. This is the arm that matters: without
+    // it, `upgrade()` returning `Some` proves nothing, because a weak reference
+    // that can never fail is indistinguishable from a strong clone.
+    drop(session);
+    assert!(
+        weak.upgrade().is_none(),
+        "once the last strong handle is dropped the weak one must answer None \
+         — that is the signal a handle needs in order to stop acting for a node \
+         that has gone"
     );
 }
