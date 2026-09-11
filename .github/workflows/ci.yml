@@ -2794,10 +2794,40 @@ jobs:
             ~/zephyrproject
             ~/zephyr-sdk-${{ env.ZEPHYR_SDK_VERSION }}
             ~/.cmake/packages/Zephyr-sdk
-          key: zephyr-${{ env.ZEPHYR_REF }}-sdk-${{ env.ZEPHYR_SDK_VERSION }}-py${{ steps.setuppy.outputs.python-version }}-v3
+          # R2563 — v3 -> v4, and the bump IS the verification rather than
+          # housekeeping. The provisioning step it guards runs only on a cache
+          # miss, so leaving the key alone would let a warm cache skip the very
+          # call this round repaired and return a green that means nothing. The
+          # bump forces one real reprovision, which is the only way to exercise
+          # the authenticated path; the pair is completed by hosted evidence on
+          # the other side -- run 34599628250 is the unauthenticated call
+          # failing, with the API's own 403 in the log.
+          key: zephyr-${{ env.ZEPHYR_REF }}-sdk-${{ env.ZEPHYR_SDK_VERSION }}-py${{ steps.setuppy.outputs.python-version }}-v4
 
       - name: Provision Zephyr (west + pinned source + SDK)
         if: steps.zephyr-cache.outputs.cache-hit != 'true'
+        # R2563 — `west sdk install` asks the GitHub releases API which SDK to
+        # fetch, and until this round it asked ANONYMOUSLY. Unauthenticated calls
+        # are rate-limited PER IP, and a hosted runner's IP is shared, so the
+        # budget can already be spent by strangers before this job starts. That
+        # is what killed run 34599628250: `Failed to fetch: 403 ... API rate limit
+        # exceeded for <runner IP>. (But here's the good news: Authenticated
+        # requests get a higher rate limit.)`
+        #
+        # ⚠ IT IS NOT FLAKE, AND THE THREE GREEN Qz RUNS BEFORE IT ARE NOT
+        # EVIDENCE THAT IT WORKS. This step is `if: cache-hit != 'true'`, so a
+        # warm cache SKIPS it entirely; those runs never made the call. The
+        # failure surfaces only on a cache miss, which is why it looks
+        # intermittent while being structural -- the same misreading R311y892
+        # recorded above ("which is why this read as flake for two runs").
+        #
+        # The token is NOT a wz credential: `secrets.GITHUB_TOKEN` is minted per
+        # run by Actions, and the call only reads PUBLIC release metadata from
+        # `zephyrproject-rtos/sdk-ng`, so no scope beyond the default is needed.
+        # Authenticating moves the limit from 60/hr shared across everyone on the
+        # runner's IP to 1000/hr for this repository.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         # Mirrors the dev-host setup 1:1 so the Qz lane's default paths
         # (~/zephyrproject/.venv + ~/zephyrproject/zephyr) resolve with no env
         # override. `west init --mr` only accepts a branch/tag (it runs
@@ -2821,7 +2851,19 @@ jobs:
           west update --narrow -o=--depth=1
           west zephyr-export
           pip install -r zephyr/scripts/requirements-base.txt
-          west sdk install -t arm-zephyr-eabi
+          # `--personal-access-token` is the mechanism zephyr's own sdk.py
+          # offers, and the one its rate-limit message prescribes by name: with
+          # it, `install_sdk` builds `Authorization: Bearer ...`; without it the
+          # header dict is literally `{}`. Verified against the pinned tree at
+          # ZEPHYR_REF rather than assumed from a newer upstream.
+          #
+          # ⚠ The same headers are reused to DOWNLOAD the SDK archive, whose
+          # `browser_download_url` redirects to another host. That is safe, and
+          # was checked rather than hoped: `requests` drops the Authorization
+          # header when a redirect changes host, so the asset fetch is
+          # unaffected by adding this.
+          west sdk install -t arm-zephyr-eabi \
+            --personal-access-token "$GITHUB_TOKEN"
           # Forensics: the manifest @ ZEPHYR_REF pins every module to an immutable
           # SHA (verified: west.yml has 0 branch-name revisions), so this snapshot
           # is reproducible; logging the resolved set makes it auditable post-hoc.
@@ -2865,7 +2907,15 @@ jobs:
             ~/zephyrproject
             ~/zephyr-sdk-${{ env.ZEPHYR_SDK_VERSION }}
             ~/.cmake/packages/Zephyr-sdk
-          key: zephyr-${{ env.ZEPHYR_REF }}-sdk-${{ env.ZEPHYR_SDK_VERSION }}-py${{ steps.setuppy.outputs.python-version }}-v3
+          # R2563 — v3 -> v4, and the bump IS the verification rather than
+          # housekeeping. The provisioning step it guards runs only on a cache
+          # miss, so leaving the key alone would let a warm cache skip the very
+          # call this round repaired and return a green that means nothing. The
+          # bump forces one real reprovision, which is the only way to exercise
+          # the authenticated path; the pair is completed by hosted evidence on
+          # the other side -- run 34599628250 is the unauthenticated call
+          # failing, with the API's own 403 in the log.
+          key: zephyr-${{ env.ZEPHYR_REF }}-sdk-${{ env.ZEPHYR_SDK_VERSION }}-py${{ steps.setuppy.outputs.python-version }}-v4
 
       - name: Cache Cargo registry + build artifacts
         uses: Swatinem/rust-cache@v2
