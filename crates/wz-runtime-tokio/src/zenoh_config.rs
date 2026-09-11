@@ -823,6 +823,22 @@ pub struct ZenohNodeConfig {
     pub connect: Vec<String>,
     /// `scouting/multicast/enabled`.
     pub multicast_scouting: bool,
+    /// R2567 — `transport/auth/usrpwd/dictionary_file`, the responder-side
+    /// `user:password` table's path.
+    ///
+    /// `None` = the key is absent, which is NOT the same as an empty table: a
+    /// node with no dictionary does not respond to usrpwd at all, whereas a
+    /// dictionary that parses to zero users is a configured responder holding
+    /// nobody. `UsrPwdMethod::responder` folds the latter to "not a responder"
+    /// deliberately, matching upstream's `from_config`, but the distinction has
+    /// to survive this far to be foldable at all.
+    ///
+    /// Carrying the PATH rather than the loaded table keeps this struct a
+    /// faithful mirror of the config file — every field maps to exactly one key,
+    /// as this struct's contract says — and leaves the read to
+    /// [`UsrPwdStore::from_dictionary_file`](crate::extauth_usrpwd_store::UsrPwdStore::from_dictionary_file),
+    /// which is where the filesystem belongs.
+    pub usrpwd_dictionary_file: Option<String>,
     /// R2063 (open-debt item 214) — `routing/peer/mode`, a
     /// [`WZ_EXTENSION_CONFIG_KEYS`] member since R2230.
     ///
@@ -1063,6 +1079,10 @@ impl Default for ZenohNodeConfig {
             listen: Vec::new(),
             connect: Vec::new(),
             multicast_scouting: true,
+            // R2567 — absent, which is upstream's default too: `UsrPwdConf`'s
+            // dictionary_file is an `Option` with no default path, and a node
+            // that names none does not respond to usrpwd.
+            usrpwd_dictionary_file: None,
             // R2063 (item 214) — upstream's default is `linkstate`
             // (`DEFAULT_CONFIG.json5`'s `routing.peer.mode`), and R2051's rule
             // applies: a documented default is not a behaviour, so this
@@ -1489,6 +1509,13 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     "mode",
     "connect/endpoints",
     "listen/endpoints",
+    // R2567 — the usrpwd responder dictionary. It MOVED here from
+    // `UNHONOURED_UPSTREAM_CONFIG_KEYS`; honouring a key is a move, not a
+    // deletion, because `wz_accepts` chains both lists to decide the acceptance
+    // boundary. Deleting it alone made wz REFUSE a file a real zenohd starts on
+    // — caught by this round's own config-parse test, which is the only thing
+    // that exercises the boundary rather than the reader.
+    "transport/auth/usrpwd/dictionary_file",
     "scouting/multicast/enabled",
     "timestamping/enabled",
     "transport/unicast/max_links",
@@ -1840,7 +1867,12 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     "transport/auth/pubkey/private_key_pem",
     "transport/auth/pubkey/public_key_file",
     "transport/auth/pubkey/public_key_pem",
-    "transport/auth/usrpwd/dictionary_file",
+    // R2567 — `transport/auth/usrpwd/dictionary_file` LEFT this list: wz now
+    // parses it into `ZenohNodeConfig::usrpwd_dictionary_file` and loads it
+    // through `UsrPwdStore::from_dictionary_file`. Its two siblings stay, and
+    // the distinction is real rather than tidy: `user` / `password` are the
+    // INITIATOR's own credentials, which wz takes from its caller rather than
+    // from a config file, so nothing here reads them yet.
     "transport/auth/usrpwd/password",
     "transport/auth/usrpwd/user",
     "transport/link/protocols",
@@ -2038,7 +2070,11 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     "transport/auth/pubkey/private_key_pem",
     "transport/auth/pubkey/public_key_file",
     "transport/auth/pubkey/public_key_pem",
-    "transport/auth/usrpwd/dictionary_file",
+    // R2567 — `transport/auth/usrpwd/dictionary_file` LEFT this list too, and
+    // leaving it was FORCED rather than chosen: every row here asserts a thing
+    // wz cannot act on, and wz now acts on this one. That is what a
+    // negative-assertion list is for — implementing the capability makes the row
+    // false, so the key cannot be honoured quietly.
     "transport/auth/usrpwd/password",
     "transport/auth/usrpwd/user",
     "transport/link/protocols",
@@ -2279,7 +2315,12 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
             "transport/auth/pubkey/private_key_pem",
             "transport/auth/pubkey/public_key_file",
             "transport/auth/pubkey/public_key_pem",
-            "transport/auth/usrpwd/dictionary_file",
+            // R2567 — the dictionary key left this group with the list above.
+            // The group's claim is that wz has no CREDENTIAL STORE; it now has
+            // one (`UsrPwdStore`), but only behind usrpwd's responder table, so
+            // the claim still holds for every key remaining here: the pubkey
+            // material has no store behind it, and usrpwd's `user` / `password`
+            // are initiator credentials this layer never reads from config.
             "transport/auth/usrpwd/password",
             "transport/auth/usrpwd/user",
         ],
@@ -2611,11 +2652,14 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
         "foreign-node-config",
         "zenohd",
     ),
-    (
-        "transport/auth/usrpwd/dictionary_file",
-        "foreign-node-config",
-        "zenohd",
-    ),
+    // R2567 — the `foreign-node-config` verdict for
+    // `transport/auth/usrpwd/dictionary_file` is GONE, because the evidence it
+    // stood on is gone: it said wz names this key only to configure a FOREIGN
+    // node (zenohd) in an interop test. wz now honours it for itself, so the row
+    // would be a recorded verdict about a state of affairs that no longer
+    // exists. The gate that caught this says exactly that -- "a verdict about
+    // evidence that is gone" -- which is why the row is removed rather than
+    // reworded.
     (
         "transport/auth/usrpwd/password",
         "foreign-node-config",
@@ -3847,6 +3891,18 @@ impl ZenohNodeConfig {
             out.multicast_scouting = v;
             named.push("scouting/multicast/enabled");
         }
+        // R2567 — the usrpwd dictionary. The PATH is taken here and read later:
+        // an ingest that touched the filesystem would make parsing a config
+        // depend on the machine it is parsed on, and this function is used to
+        // VALIDATE configs (including ones destined for another node).
+        if let Some(v) = want_string(
+            &doc,
+            "transport/auth/usrpwd/dictionary_file",
+            "a path to a user:password file",
+        )? {
+            out.usrpwd_dictionary_file = Some(v);
+            named.push("transport/auth/usrpwd/dictionary_file");
+        }
         // R311y845 — the scouting SOCKET. Upstream types `address` as a
         // `SocketAddr` and so refuses a malformed one at deserialization; the
         // parse here is what keeps that refusal, and it is worth keeping: the
@@ -4833,6 +4889,16 @@ mod tests {
                 "listen/endpoints",
                 r#"{ "listen": { "endpoints": ["tcp/1.2.3.4:7447"] } }"#,
             ),
+            // R2567 — the usrpwd responder dictionary. Driven off a PATH that
+            // need not exist: this reader takes the path and nothing else, and
+            // the file is read later by `UsrPwdStore::from_dictionary_file`. A
+            // fixture that required a real file would make config VALIDATION
+            // depend on the machine validating it, which is the thing the
+            // reader/loader split exists to avoid.
+            (
+                "transport/auth/usrpwd/dictionary_file",
+                r#"{ "transport": { "auth": { "usrpwd": { "dictionary_file": "/etc/wz/creds" } } } }"#,
+            ),
             (
                 "scouting/multicast/enabled",
                 r#"{ "scouting": { "multicast": { "enabled": false } } }"#,
@@ -5704,6 +5770,34 @@ mod tests {
         assert_eq!(json5, strict);
         assert_eq!(json5.config.mode, WhatAmI::Router);
         assert_eq!(json5.config.listen, vec!["tcp/0.0.0.0:7447".to_string()]);
+    }
+
+    /// R2567 — the usrpwd dictionary path is READ from config, and its absence
+    /// is distinguishable from its presence.
+    ///
+    /// The absent case is the half worth asserting: `None` means "this node does
+    /// not respond to usrpwd at all", which `UsrPwdMethod::responder` later
+    /// folds differently from a dictionary that parses to zero users. If ingest
+    /// collapsed absent into empty-string or empty-table, that distinction would
+    /// be gone before anything could act on it — and an unconfigured node would
+    /// become one that rejects every peer.
+    #[test]
+    fn the_usrpwd_dictionary_path_is_read_and_its_absence_is_distinguishable() {
+        let with_key = ZenohNodeConfig::from_json5(
+            r#"{"transport": {"auth": {"usrpwd": {"dictionary_file": "/etc/wz/creds"}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            with_key.config.usrpwd_dictionary_file.as_deref(),
+            Some("/etc/wz/creds"),
+            "the path must reach the parsed config"
+        );
+
+        let without = ZenohNodeConfig::from_json5(r#"{"mode": "peer"}"#).unwrap();
+        assert_eq!(
+            without.config.usrpwd_dictionary_file, None,
+            "an absent key is None, not an empty path"
+        );
     }
 
     #[test]
