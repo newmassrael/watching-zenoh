@@ -492,7 +492,16 @@ fn dispatch_unit<R: SessionRuntime, T: TimeSource>(
                             is_ack: false,
                             extensions,
                             ..
-                        } => Some(actions.with_auth(|d| d.accept_recv_open_syn(extensions))),
+                        } => Some(
+                            // R2566 — the accept stage's OUTPUT is an identity,
+                            // and this is the seam that lands it. Assigned
+                            // unconditionally (including `None`) so a
+                            // re-handshake that authenticates nobody clears the
+                            // previous principal instead of leaving it readable.
+                            actions
+                                .with_auth(|d| d.accept_recv_open_syn(extensions))
+                                .map(|id| actions.set_peer_auth_id(id)),
+                        ),
                         #[cfg(feature = "codec-open-body")]
                         InboundFrame::Open {
                             is_ack: true,

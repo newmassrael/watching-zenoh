@@ -903,7 +903,15 @@ PIN_NO_SYMBOL = 2
 # unique files. The one-count-style mismatch the note above calls a tell showed
 # up as a four-count one, and the fix was the same — use the module's function,
 # not a regex written to look like it.
-PIN_WZ_CITATIONS = 271
+#
+# R2566 — 271 -> 272, ONE citation, and it RISES rather than falls: unlike the
+# eight moves above, no atom left the PARTIAL corpus. `access-extauth-usrpwd`
+# stays PARTIAL (two of its three residuals are untouched) and gained a citation
+# in an appended correction -- `session_actions.rs` @ the `peer_auth_id` slot the
+# round created. DERIVED by running THIS module's own `citation_audit` over that
+# atom alone, before and after: (wz 5, ambiguous 0) -> (wz 6, ambiguous 0), so
+# 271 + 1 = 272 and AMBIGUOUS correctly holds at 56.
+PIN_WZ_CITATIONS = 272
 PIN_AMBIGUOUS = 56
 
 

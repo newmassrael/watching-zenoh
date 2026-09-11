@@ -127,6 +127,23 @@ impl AuthSubExt {
     }
 }
 
+/// The principal an auth method authenticated during the accept handshake — the
+/// wz analogue of zenoh's `UsrPwdId`
+/// (`io/zenoh-transport/src/unicast/establishment/ext/auth/mod.rs`
+///  @ `pub(crate) auth_id: UsrPwdId,`).
+///
+/// R2566. Bytes rather than a `String` because that is what the credential
+/// table is keyed by on this side (`UsrPwdMethod`'s lookup is
+/// `Vec<(Vec<u8>, Vec<u8>)>`) and what arrives on the wire; imposing UTF-8 here
+/// would invent a validation upstream does not perform at this layer and would
+/// make a legal-but-non-UTF-8 username unrepresentable rather than rejected.
+///
+/// NOT `Copy`, unlike its `AuthError` neighbour: it owns a heap buffer. That is
+/// the reason it is declared here rather than folded into that type's derive
+/// list, and the reason every read of it clones.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct AuthIdentity(pub Vec<u8>);
+
 /// An auth dispatch error. The handshake aborts on either: a malformed auth ext
 /// (the inner method chain did not decode) or a method rejecting the peer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,9 +204,29 @@ pub trait AuthMethod: Send {
     fn accept_init_ack(&mut self) -> Result<Option<AuthSubExt>, AuthError> {
         Ok(None)
     }
-    /// Consume the peer's OpenSyn sub-ext for this method (`None` if absent).
-    fn accept_recv_open_syn(&mut self, _sub: Option<AuthSubExt>) -> Result<(), AuthError> {
-        Ok(())
+    /// Consume the peer's OpenSyn sub-ext for this method (`None` if absent),
+    /// and surface the identity it AUTHENTICATED, if any.
+    ///
+    /// R2566 — the return type carries an identity because zenoh's does. A
+    /// method that verifies a credential has, at this exact point, learned WHO
+    /// the peer is, and it is the only point at which anyone knows: upstream's
+    /// per-method `recv_open_syn` returns the username and the accept FSM hands
+    /// it out as `RecvOpenSynOut { auth_id }`
+    /// (`io/zenoh-transport/src/unicast/establishment/ext/auth/mod.rs`
+    ///  @ `auth_id = UsrPwdId(Some(username));`), from where it reaches the
+    /// transport. wz returned `Result<(), _>` here, so `UsrPwdMethod` decoded
+    /// the username and then DROPPED it — a signature that forbade the right
+    /// answer, which is why the gap read as an ACL-layer deferral when it was
+    /// rooted in this line.
+    ///
+    /// `None` is the honest answer for a method that authenticates nothing at
+    /// this stage (pubkey proves key possession, not a named principal), and it
+    /// stays the default so a future method opts in rather than out.
+    fn accept_recv_open_syn(
+        &mut self,
+        _sub: Option<AuthSubExt>,
+    ) -> Result<Option<AuthIdentity>, AuthError> {
+        Ok(None)
     }
     /// Produce this method's OpenAck sub-ext (or `None`).
     fn accept_open_ack(&mut self) -> Result<Option<AuthSubExt>, AuthError> {
@@ -356,9 +393,40 @@ impl AuthDispatch {
     pub fn accept_init_ack(&mut self) -> Result<Option<ExtEntryOwned>, AuthError> {
         self.send_stage(|m| m.accept_init_ack())
     }
-    /// Accept side: consume the peer OpenSyn's auth ext.
-    pub fn accept_recv_open_syn(&mut self, peer_exts: &[ExtEntryOwned]) -> Result<(), AuthError> {
-        self.recv_stage(peer_exts, |m, s| m.accept_recv_open_syn(s))
+    /// Accept side: consume the peer OpenSyn's auth ext, and return the identity
+    /// a method authenticated (`None` when none did).
+    ///
+    /// R2566 — this is the wz analogue of zenoh's `RecvOpenSynOut`: the accept
+    /// stage's OUTPUT, not just its verdict. It does not store the answer,
+    /// deliberately. The dispatch outlives a re-handshake (the session's auth
+    /// slot persists across `reset_for_reopen`), so an identity cached here
+    /// would outlive the handshake that earned it; handing it to the caller
+    /// keeps its lifetime the caller's problem, which is where it belongs.
+    ///
+    /// A SECOND method claiming an identity is REFUSED rather than resolved by
+    /// order. Upstream cannot reach this state (exactly one usrpwd slot), so
+    /// there is no upstream precedent to mirror and nothing to silently agree
+    /// with; two principals for one session is a configuration this kernel has
+    /// no rule for, and picking one by iteration order would make the answer
+    /// depend on the order methods were installed in.
+    pub fn accept_recv_open_syn(
+        &mut self,
+        peer_exts: &[ExtEntryOwned],
+    ) -> Result<Option<AuthIdentity>, AuthError> {
+        let inner = Self::demux(peer_exts)?;
+        let mut authenticated: Option<AuthIdentity> = None;
+        for m in self.methods.iter_mut() {
+            let sub = find_method_sub_ext(&inner, m.id());
+            if let Some(id) = m.accept_recv_open_syn(sub)? {
+                if authenticated.is_some() {
+                    return Err(AuthError::Rejected(
+                        "auth: two methods authenticated different identities",
+                    ));
+                }
+                authenticated = Some(id);
+            }
+        }
+        Ok(authenticated)
     }
     /// Accept side: produce the OpenAck auth ext.
     pub fn accept_open_ack(&mut self) -> Result<Option<ExtEntryOwned>, AuthError> {
@@ -405,6 +473,12 @@ mod tests {
         accept_offered: Arc<AtomicBool>,
         accept_verified: Arc<AtomicBool>,
         open_confirmed: Arc<AtomicBool>,
+        /// R2566 — what this double CLAIMS to have authenticated. `None` for
+        /// every pre-existing use (the double proves mux/demux, not identity);
+        /// set by `boxed_claiming` for the aggregation tests, which need a
+        /// method that names a principal without dragging usrpwd's crypto into
+        /// this module's unit scope.
+        identity: Option<AuthIdentity>,
     }
 
     impl EchoMethod {
@@ -422,6 +496,7 @@ mod tests {
                 accept_offered,
                 accept_verified,
                 open_confirmed,
+                identity: None,
             }
         }
         fn boxed(id: u8, nonce: u64) -> Box<dyn AuthMethod> {
@@ -432,6 +507,17 @@ mod tests {
                 Arc::new(AtomicBool::new(false)),
                 Arc::new(AtomicBool::new(false)),
             ))
+        }
+        fn boxed_claiming(id: u8, nonce: u64, who: &[u8]) -> Box<dyn AuthMethod> {
+            let mut m = Self::new(
+                id,
+                nonce,
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(AtomicBool::new(false)),
+            );
+            m.identity = Some(AuthIdentity(who.to_vec()));
+            Box::new(m)
         }
     }
 
@@ -473,13 +559,18 @@ mod tests {
         fn accept_init_ack(&mut self) -> Result<Option<AuthSubExt>, AuthError> {
             Ok(Some(AuthSubExt::Z64(self.nonce)))
         }
-        fn accept_recv_open_syn(&mut self, sub: Option<AuthSubExt>) -> Result<(), AuthError> {
+        fn accept_recv_open_syn(
+            &mut self,
+            sub: Option<AuthSubExt>,
+        ) -> Result<Option<AuthIdentity>, AuthError> {
             let ok = sub == Some(AuthSubExt::Zbuf(self.nonce.to_le_bytes().to_vec()));
             self.accept_verified.store(ok, Ordering::SeqCst);
             if !ok {
                 return Err(AuthError::Rejected("nonce mismatch"));
             }
-            Ok(())
+            // This double proves the four-stage mux/demux, not identity; it
+            // authenticates a nonce echo and names nobody.
+            Ok(self.identity.clone())
         }
         fn accept_open_ack(&mut self) -> Result<Option<AuthSubExt>, AuthError> {
             Ok(Some(AuthSubExt::Unit))
@@ -488,6 +579,65 @@ mod tests {
 
     fn exts(ext: Option<ExtEntryOwned>) -> Vec<ExtEntryOwned> {
         ext.into_iter().collect()
+    }
+
+    /// Drive the accept side's OpenSyn stage over `ids` and hand back what it
+    /// authenticated, with the OpenSyn produced by a real peer dispatch rather
+    /// than hand-built — so the demux this exercises is the shipped one.
+    fn accept_open_syn_of(
+        accept_methods: Vec<Box<dyn AuthMethod>>,
+        ids: &[u8],
+        nonce: u64,
+    ) -> Result<Option<AuthIdentity>, AuthError> {
+        let mut accept = AuthDispatch::new(accept_methods);
+        let mut open = AuthDispatch::new(
+            ids.iter()
+                .map(|&id| EchoMethod::boxed(id, nonce))
+                .collect::<Vec<_>>(),
+        );
+        // The echo the open side sends on OpenSyn is keyed on the nonce it was
+        // handed on InitAck, so the first two stages have to run for real.
+        let init_syn = open.open_init_syn().unwrap();
+        accept.accept_recv_init_syn(&exts(init_syn)).unwrap();
+        let init_ack = accept.accept_init_ack().unwrap();
+        open.open_recv_init_ack(&exts(init_ack)).unwrap();
+        let open_syn = open.open_open_syn().unwrap();
+        accept.accept_recv_open_syn(&exts(open_syn))
+    }
+
+    /// R2566 — TWO methods each naming a principal is REFUSED, not resolved by
+    /// iteration order.
+    ///
+    /// The control that makes this mean something is the single-claimant arm
+    /// directly below: the same machinery, one claimant, must SUCCEED and return
+    /// that principal. Without it, a dispatch that rejected every identity would
+    /// pass this test.
+    #[test]
+    fn two_methods_claiming_an_identity_are_refused() {
+        let nonce = 0x4243_4445u64;
+        let two = alloc::vec![
+            EchoMethod::boxed_claiming(0x1, nonce, b"alice"),
+            EchoMethod::boxed_claiming(0x2, nonce, b"bob"),
+        ];
+        assert_eq!(
+            accept_open_syn_of(two, &[0x1, 0x2], nonce),
+            Err(AuthError::Rejected(
+                "auth: two methods authenticated different identities"
+            )),
+            "two principals for one session has no rule, so it must not be guessed"
+        );
+    }
+
+    /// The anti-vacuity half of the test above.
+    #[test]
+    fn one_method_claiming_an_identity_surfaces_it() {
+        let nonce = 0x4243_4445u64;
+        let one = alloc::vec![EchoMethod::boxed_claiming(0x2, nonce, b"alice")];
+        assert_eq!(
+            accept_open_syn_of(one, &[0x2], nonce),
+            Ok(Some(AuthIdentity(b"alice".to_vec()))),
+            "one claimant is the ordinary case and must still work"
+        );
     }
 
     #[test]

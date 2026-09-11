@@ -33,7 +33,7 @@ use hmac::{Hmac, Mac};
 use sce_forge_runtime::codec::SceCursor;
 use sha3::Sha3_256;
 
-use crate::auth_dispatch::{id, AuthError, AuthMethod, AuthSubExt};
+use crate::auth_dispatch::{id, AuthError, AuthIdentity, AuthMethod, AuthSubExt};
 use crate::vle::{read_zbuf, write_zbuf};
 
 /// A fixed dummy password the unknown-user reject path HMACs over so its cost
@@ -199,9 +199,13 @@ impl AuthMethod for UsrPwdMethod {
         Ok(Some(AuthSubExt::Z64(self.nonce)))
     }
 
-    fn accept_recv_open_syn(&mut self, sub: Option<AuthSubExt>) -> Result<(), AuthError> {
+    fn accept_recv_open_syn(
+        &mut self,
+        sub: Option<AuthSubExt>,
+    ) -> Result<Option<AuthIdentity>, AuthError> {
         if self.lookup.is_empty() {
-            return Ok(());
+            // An initiator-role method authenticates nobody on this side.
+            return Ok(None);
         }
         let Some(AuthSubExt::Zbuf(body)) = sub else {
             return Err(AuthError::Rejected("usrpwd: missing OpenSyn"));
@@ -221,7 +225,14 @@ impl AuthMethod for UsrPwdMethod {
                 if !hmac_sha3_256_verify(&key, password, &hmac) {
                     return Err(AuthError::Rejected("usrpwd: bad password"));
                 }
-                Ok(())
+                // R2566 — the username is RETURNED, not dropped. It is
+                // authenticated exactly here and nowhere later: past this
+                // point the credential is gone and no layer can re-derive who
+                // the peer is. zenoh carries the same value out of the same
+                // stage as `UsrPwdId(Some(username))`, and it is what feeds the
+                // ACL username subject, which is why `access-acl`'s Subject gap
+                // was rooted in this function rather than at the ACL layer.
+                Ok(Some(AuthIdentity(user)))
             }
             None => {
                 // Discarded — the verdict is fixed (reject); only the work
@@ -262,8 +273,15 @@ mod tests {
 
     /// Drive the full four-message usrpwd exchange through two dispatches and
     /// return the accept side's verdict (the OpenSyn verify is where a bad
-    /// credential surfaces).
-    fn run_handshake(initiator: UsrPwdMethod, responder: UsrPwdMethod) -> Result<(), AuthError> {
+    /// credential surfaces) TOGETHER WITH the identity it authenticated.
+    ///
+    /// R2566 widened the return: the OpenSyn stage is the only point at which
+    /// anyone knows who the peer is, so a helper that dropped it could not tell
+    /// "authenticated alice" from "authenticated somebody".
+    fn run_handshake(
+        initiator: UsrPwdMethod,
+        responder: UsrPwdMethod,
+    ) -> Result<Option<AuthIdentity>, AuthError> {
         let mut open = AuthDispatch::new(alloc::vec![Box::new(initiator) as _]);
         let mut accept = AuthDispatch::new(alloc::vec![Box::new(responder) as _]);
 
@@ -272,10 +290,10 @@ mod tests {
         let init_ack = accept.accept_init_ack()?;
         open.open_recv_init_ack(&into_exts(init_ack))?;
         let open_syn = open.open_open_syn()?;
-        accept.accept_recv_open_syn(&into_exts(open_syn))?;
+        let who = accept.accept_recv_open_syn(&into_exts(open_syn))?;
         let open_ack = accept.accept_open_ack()?;
         open.open_recv_open_ack(&into_exts(open_ack))?;
-        Ok(())
+        Ok(who)
     }
 
     #[test]
@@ -287,7 +305,65 @@ mod tests {
                 0x1234_5678,
             ),
         );
-        assert_eq!(r, Ok(()), "matching user/password authenticates");
+        assert_eq!(
+            r,
+            Ok(Some(AuthIdentity(b"alice".to_vec()))),
+            "matching user/password authenticates, AS alice"
+        );
+    }
+
+    /// R2566 — the identity that comes out is the one that was VERIFIED, not
+    /// merely the one the peer claimed.
+    ///
+    /// The discriminator is a responder whose table holds TWO users: a helper
+    /// that returned "some username" would be satisfied by either name, so the
+    /// handshake is run twice against the SAME table and each run must yield
+    /// its OWN principal. That is what makes this an identity assertion rather
+    /// than a presence one -- the previous signature could not have failed it,
+    /// because it returned nothing to compare.
+    #[test]
+    fn the_authenticated_username_is_the_one_returned() {
+        let table = alloc::vec![
+            (b"alice".to_vec(), b"s3cret".to_vec()),
+            (b"bob".to_vec(), b"hunter2".to_vec()),
+        ];
+        let as_alice = run_handshake(
+            UsrPwdMethod::initiator(b"alice".to_vec(), b"s3cret".to_vec()),
+            UsrPwdMethod::responder(table.clone(), 0x1234_5678),
+        );
+        let as_bob = run_handshake(
+            UsrPwdMethod::initiator(b"bob".to_vec(), b"hunter2".to_vec()),
+            UsrPwdMethod::responder(table, 0x1234_5678),
+        );
+        assert_eq!(as_alice, Ok(Some(AuthIdentity(b"alice".to_vec()))));
+        assert_eq!(as_bob, Ok(Some(AuthIdentity(b"bob".to_vec()))));
+        assert_ne!(as_alice, as_bob, "the two runs must not agree");
+    }
+
+    /// R2566 — a REJECTED handshake surfaces no identity at all, so nothing
+    /// downstream can read a principal out of a failed authentication. The
+    /// error arm carries no username by construction (`Result`'s `Err` has no
+    /// room for one), and this pins that it stays that way.
+    #[test]
+    fn a_rejected_handshake_yields_no_identity() {
+        let r = run_handshake(
+            UsrPwdMethod::initiator(b"alice".to_vec(), b"wrong".to_vec()),
+            UsrPwdMethod::responder(
+                alloc::vec![(b"alice".to_vec(), b"s3cret".to_vec())],
+                0x1234_5678,
+            ),
+        );
+        assert!(r.is_err(), "a bad password must not authenticate");
+        assert_eq!(r.ok().flatten(), None, "and must name nobody");
+    }
+
+    /// R2566 — an INITIATOR-role method (empty lookup) authenticates nobody on
+    /// the accept side. It is the arm that keeps `Some` meaningful: without it,
+    /// "returns an identity" and "is a responder" would be indistinguishable.
+    #[test]
+    fn an_initiator_role_method_authenticates_nobody() {
+        let mut m = UsrPwdMethod::initiator(b"alice".to_vec(), b"s3cret".to_vec());
+        assert_eq!(m.accept_recv_open_syn(None), Ok(None));
     }
 
     #[test]

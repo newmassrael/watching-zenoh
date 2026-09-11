@@ -694,6 +694,22 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// anticipated).
     #[cfg(feature = "session-extauth")]
     pub auth: R::Mutex<AuthDispatch>,
+    /// R2566 — WHO the accept-side handshake authenticated, once it has.
+    ///
+    /// The wz analogue of the `UsrPwdId` zenoh puts on the transport
+    /// (`io/zenoh-transport/src/unicast/authentication.rs` @ `set_username`).
+    /// Until this slot existed there was nowhere for the value to go, which is
+    /// why `UsrPwdMethod` decoded the username and dropped it and why the ACL
+    /// username subject read as an ACL-layer deferral: the gap was the absence
+    /// of this field, not a missing rule upstairs.
+    ///
+    /// It lives HERE rather than on the `auth` dispatch beside the method that
+    /// learned it, because the dispatch persists across `reset_for_reopen` and
+    /// an identity must not outlive the handshake that earned it. Cleared there
+    /// with the rest of the per-handshake state, so a re-handshake that fails or
+    /// authenticates a different principal cannot be read through a stale value.
+    #[cfg(feature = "session-extauth")]
+    pub peer_auth_id: R::Mutex<Option<crate::auth_dispatch::AuthIdentity>>,
     /// session-extshm (R311y507) — the SHM establishment CHALLENGE-RESPONSE
     /// state (`crate::extshm::ShmAuthDispatch`): this node's published auth
     /// segment plus the challenge read out of the peer's. Behind its own mutex
@@ -1677,6 +1693,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // `Auth::default()`); the AP layer installs the configured one.
                 #[cfg(feature = "session-extauth")]
                 auth: R::new_mutex(AuthDispatch::default()),
+                // R2566 — nobody is authenticated until an accept-side OpenSyn
+                // says so. `None` is the pre-handshake truth, not a placeholder.
+                #[cfg(feature = "session-extauth")]
+                peer_auth_id: R::new_mutex(None),
                 // transport-lowlatency — false until the AP layer offers it
                 // (`set_lowlatency_offer`) and the peer's offer is ANDed in.
                 #[cfg(feature = "transport-lowlatency")]
@@ -2503,6 +2523,26 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(feature = "session-extauth")]
     pub fn with_auth<U>(&self, f: impl FnOnce(&mut AuthDispatch) -> U) -> U {
         R::with_mutex_mut(&self.auth, f)
+    }
+
+    /// R2566 — record the principal the accept handshake just authenticated.
+    ///
+    /// Called with the OUTPUT of
+    /// [`AuthDispatch::accept_recv_open_syn`](crate::auth_dispatch::AuthDispatch::accept_recv_open_syn),
+    /// including its `None`: a stage that authenticated nobody must CLEAR any
+    /// earlier value rather than leave it standing, which is why this takes an
+    /// `Option` and assigns instead of taking a value and setting.
+    #[cfg(feature = "session-extauth")]
+    pub fn set_peer_auth_id(&self, id: Option<crate::auth_dispatch::AuthIdentity>) {
+        R::with_mutex_mut(&self.peer_auth_id, |slot| *slot = id);
+    }
+
+    /// The principal this session's peer authenticated as, if any — what an ACL
+    /// username subject reads. `None` when no method named one (an unauthenticated
+    /// session, or a pubkey-only one, which proves key possession and not a name).
+    #[cfg(feature = "session-extauth")]
+    pub fn peer_auth_id(&self) -> Option<crate::auth_dispatch::AuthIdentity> {
+        R::with_mutex_mut(&self.peer_auth_id, |slot| slot.clone())
     }
 
     /// R3b — run the auth dispatch's send stage for `role` and install the
@@ -7470,6 +7510,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             R::with_mutex_mut(&self.inbound_peer_zid, |slot| *slot = None);
             R::with_mutex_mut(&self.remote_peer_zid, |slot| *slot = None);
             R::with_mutex_mut(&self.peer_whatami, |slot| *slot = None);
+            // R2566 — the authenticated principal is HANDSHAKE-scoped and must
+            // not survive into the re-dial window. The `auth` dispatch itself
+            // persists here (its methods keep their configured credentials), so
+            // an identity cached beside the method would outlive the handshake
+            // that earned it; this slot is cleared with the rest of the
+            // per-handshake state, which is the reason it lives out here.
+            #[cfg(feature = "session-extauth")]
+            R::with_mutex_mut(&self.peer_auth_id, |slot| *slot = None);
             R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| *slot = None);
             // R311ke — the RX SN gate is handshake-scoped: the reopen
             // handshake's OpenSyn/OpenAck re-seeds both channels.

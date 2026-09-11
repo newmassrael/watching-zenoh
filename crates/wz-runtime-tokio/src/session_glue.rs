@@ -3987,6 +3987,58 @@ mod reconnect_tx_tests {
         );
     }
 
+    /// R2566 — the authenticated principal reaches SESSION state, and does not
+    /// outlive the handshake that earned it.
+    ///
+    /// The clearing half is the one worth a test rather than a comment. The
+    /// `auth` dispatch persists across `reset_for_reopen` (its methods keep
+    /// their configured credentials), so had the identity been cached beside the
+    /// method that learned it, a re-dial would have left the previous principal
+    /// readable through a handshake that never happened — an ACL subject
+    /// answering for a session that had not authenticated. Keeping the slot out
+    /// here, cleared with the rest of the per-handshake state, is what makes
+    /// that unreachable, and this pins it.
+    #[cfg(feature = "session-extauth")]
+    #[test]
+    fn an_authenticated_identity_reaches_session_state_and_is_handshake_scoped() {
+        use wz_session_core::auth_dispatch::AuthIdentity;
+
+        let params = wz_runtime_tokio_test_support::fixture_session_init_params();
+        let (actions, _driver) = crate::test_fixtures::recording_actions_with_params(params);
+
+        // Nobody is authenticated before a handshake says so.
+        assert_eq!(
+            actions.peer_auth_id(),
+            None,
+            "no principal before the handshake"
+        );
+
+        actions.set_peer_auth_id(Some(AuthIdentity(b"alice".to_vec())));
+        assert_eq!(
+            actions.peer_auth_id(),
+            Some(AuthIdentity(b"alice".to_vec())),
+            "the accept stage's output must be readable as session state"
+        );
+
+        // A re-handshake window must not be able to read the previous principal.
+        actions.reset_for_reopen();
+        assert_eq!(
+            actions.peer_auth_id(),
+            None,
+            "an identity must not survive reset_for_reopen"
+        );
+
+        // And a stage that authenticates nobody CLEARS rather than leaves the
+        // old value standing -- which is why the setter takes an Option.
+        actions.set_peer_auth_id(Some(AuthIdentity(b"bob".to_vec())));
+        actions.set_peer_auth_id(None);
+        assert_eq!(
+            actions.peer_auth_id(),
+            None,
+            "None must overwrite, not skip"
+        );
+    }
+
     /// R311y211 — reconnect×multilink coherence: with the y205
     /// `transport-multilink` × `session-reconnect` compile_error removed,
     /// `reset_for_reopen` must PRESERVE the shared outbound SN while a link is

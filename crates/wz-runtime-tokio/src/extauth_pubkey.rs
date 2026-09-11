@@ -56,7 +56,7 @@ use rsa::traits::PublicKeyParts;
 use rsa::{BigUint, Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey};
 use sce_forge_runtime::codec::SceCursor;
 
-use wz_session_core::auth_dispatch::{id, AuthError, AuthMethod, AuthSubExt};
+use wz_session_core::auth_dispatch::{id, AuthError, AuthIdentity, AuthMethod, AuthSubExt};
 use wz_session_core::vle::{read_zbuf, write_zbuf};
 
 /// Generate a fresh RSA keypair of `bits` size from OS entropy — for ephemeral
@@ -363,9 +363,12 @@ impl AuthMethod for PubKeyMethod {
         ))))
     }
 
-    fn accept_recv_open_syn(&mut self, sub: Option<AuthSubExt>) -> Result<(), AuthError> {
+    fn accept_recv_open_syn(
+        &mut self,
+        sub: Option<AuthSubExt>,
+    ) -> Result<Option<AuthIdentity>, AuthError> {
         if self.peer_pubkey.is_none() {
-            return Ok(());
+            return Ok(None);
         }
         let Some(AuthSubExt::Zbuf(body)) = sub else {
             return Err(AuthError::Rejected("pubkey: missing OpenSyn"));
@@ -377,7 +380,13 @@ impl AuthMethod for PubKeyMethod {
         if recovered != self.challenge.to_le_bytes() {
             return Err(AuthError::Rejected("pubkey: invalid nonce"));
         }
-        Ok(())
+        // R2566 — `None`, and it is a statement rather than a placeholder:
+        // pubkey proves the peer HOLDS a private key, which is not the same as
+        // naming a principal. zenoh agrees by construction — its `RecvOpenSynOut`
+        // carries only a `UsrPwdId`, and the pubkey arm contributes nothing to
+        // it. A key-to-identity mapping would be a policy this layer does not
+        // have, so inventing one here would be wz claiming more than upstream.
+        Ok(None)
     }
 
     fn accept_open_ack(&mut self) -> Result<Option<AuthSubExt>, AuthError> {
