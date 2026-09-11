@@ -169,8 +169,9 @@ struct SourceState {
 ///
 /// # Why a separate struct rather than the same one
 ///
-/// Upstream shares it — `zenoh-ext/src/advanced_subscriber.rs` @
-/// `timestamped_states: LruCache<ID, SourceState<Timestamp>>,` is the SAME
+/// Upstream shares it. At
+/// `zenoh-ext/src/advanced_subscriber.rs` @ `timestamped_states: LruCache<ID, SourceState<Timestamp>>,`
+/// it is the SAME
 /// `SourceState<T>` the sequenced map holds, parameterised on `Timestamp`
 /// instead of a sequence number. wz's [`SourceState`] is NOT generic (its
 /// `last_delivered` is a `u32` and its buffer a `BTreeMap<u32, Sample>`), so
@@ -185,8 +186,9 @@ struct SourceState {
 /// * `pending_samples` — the reorder buffer. Absent by the deferral
 ///   [`State::timestamped`] documents; it is the NEXT part of this build.
 /// * `alive` — upstream sets it from the liveliness Put/Delete pair and reads
-///   it in ONE place, `zenoh-ext/src/advanced_subscriber.rs` @
-///   `} else if state.alive {`, which is its LRU retention sweep. wz has no
+///   it in ONE place:
+///   `zenoh-ext/src/advanced_subscriber.rs` @ `} else if state.alive {`,
+///   which is its LRU retention sweep. wz has no
 ///   retention sweep and no LRU: neither this map nor `sequenced` is ever
 ///   reclaimed, so an `alive` flag here would be written by the Delete arm and
 ///   read by nobody. That is the shape this module's own `timestamped` doc
@@ -1796,8 +1798,9 @@ fn issue_timestamped_late_publisher_query<R, T>(
 ///
 /// R2553 — BOTH shapes are handled now. A `uhlc` token takes the timestamped
 /// arm ([`issue_timestamped_late_publisher_query`]) instead of being declined,
-/// which is upstream's own branch: `zenoh-ext/src/advanced_subscriber.rs` @
-/// `if parsed.eid() == KE_UHLC {` and its `else if let Ok(eid)` sibling.
+/// which is upstream's own branch at
+/// `zenoh-ext/src/advanced_subscriber.rs` @ `if parsed.eid() == KE_UHLC {`,
+/// together with its `else if let Ok(eid)` sibling.
 #[cfg(feature = "ext-pubsub-advanced-history")]
 #[allow(clippy::too_many_arguments)]
 fn on_late_publisher_detected<R, T>(
