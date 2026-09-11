@@ -15,8 +15,28 @@
 //! has no untyped config tree — a typed backend config arrives with its backend
 //! atom), the `replication: Option<ReplicaConfig>` (wz's replication is the
 //! SEPARATE §5.11 `storage-replication` track), and the `PluginConfig` /
-//! `VolumeConfig` plugin-LOADING wrapper (wz composes volumes at build time, not
-//! via dlopen — `storage-mgr-dynamic-volume-loading` is out-of-scope-AP).
+//! `VolumeConfig` plugin-LOADING wrapper.
+//!
+//! ⚠ R2542 — THE CLAUSE THAT USED TO CLOSE THAT SENTENCE IS STRUCK, because it
+//! was false at this commit and it was steering work. It read "wz composes
+//! volumes at build time, not via dlopen — `storage-mgr-dynamic-volume-loading`
+//! is out-of-scope-AP". Both halves are wrong now: R311y497 BUILT runtime dlopen
+//! of backend volumes, and this tree carries its three parts — the `wz-volume-abi`
+//! crate, `wz-runtime-tokio`'s `dynamic_volume.rs`, and the `<name>[@<volume_id>]`
+//! storage-add wire. The atom is graded PARTIAL by the inventory, not
+//! out-of-scope; the four atoms this store actually grades OUT-OF-SCOPE are
+//! `platform-qnx`, `scouting-passive`, `storage-backend-external-db` and
+//! `storage-backend-rocksdb`. A header that contradicts the grade is worse than
+//! silence: it is read as a scope decision and stops the work being picked up.
+//!
+//! ⚠ The `volume_cfg` omission above STANDS as written, but it is a STANCE and
+//! not a measurement, so it does not settle the atom's open residual: upstream
+//! carries PER-STORAGE volume config while wz's per-volume config arrives once at
+//! LOAD time (`--storage-volume-config <text>`, bound by the volume's name). The
+//! seam that would close it already exists — [`crate::storage_volume::Volume`]'s
+//! `create_storage` takes `&StorageConfig` — so the open question is what a
+//! per-storage payload should BE here, given this module's typed-by-construction
+//! stance and that `wz-session-core` carries no `serde_json`.
 //!
 //! FOUNDATIONAL: always compiled under `storage-backend`, no own cfg toggle. The
 //! field is the model; the BEHAVIOR that reads each field is its own atom
