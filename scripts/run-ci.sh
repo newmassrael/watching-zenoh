@@ -3097,6 +3097,24 @@ PY
     # `.githooks/pre-push`, which is what makes it the LOCAL gate item 224 asks
     # for -- this lane is the hosted half.
     python3 scripts/lib/config_key_fixture_gate.py || return 1
+    # R2546 — the ATTACHMENT CAPACITY WITNESS gate, closing the last clause of
+    # the `attachment-bytes` atom. `sce:max-size="32"` on the ext-zbuf body is
+    # the heap-free profile's capacity and is ADVISORY under `alloc`; that is
+    # what makes wz's attachment unbounded the way zenoh's is, and it is a claim
+    # about behaviour rather than a property of the type, so each carrier owes a
+    # witness. The attachment ext is declared at a different id per body (Put
+    # 0x03, Del 0x02, Query 0x05) through a different builder, so one carrier's
+    # big payload proves nothing about the next.
+    #
+    # A truncating damage probe measured which carriers were covered: it redded
+    # the Query witness and the reply's, and NOTHING on the two push-body arms.
+    # The gate also holds `QUERY_EXT_ZBUF_MAX_LEN` equal to the SCXML capacity,
+    # since a hand-written mirror of a codegen number is a tripwire only while
+    # something compares the two. Its selftest drives both arms plus the
+    # empty-population refusal. Same lane and the same reason as gate 2d above:
+    # every side is on disk and nothing has to be built.
+    python3 scripts/lib/attachment_capacity_witness_gate.py || return 1
+    python3 scripts/lib/attachment_capacity_witness_gate.py --selftest >/dev/null || return 1
     # R2423 (unregistered open-debt item 688) — every reason a link driver can
     # REFUSE a write must have a decided disposition on the F2 send gate, and a
     # test that witnesses it. Before this round the only consumer of a refusal

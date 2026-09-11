@@ -734,7 +734,22 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # which is exactly what the two counts below fell by. `reach_partition` puts the
 # survivors at 53/3/2 over a population of 58, so `unreached` and `no_symbol`
 # are untouched and only the reached bucket lost its member.
-PIN_REACHED = 53
+#
+# R2546 (the `attachment-bytes` build) — 53 -> 52, the same event shape a third
+# time and paid in the same commit again. That atom went PARTIAL -> COMPLETE
+# once its last clause was refuted by measurement and the carrier witnesses it
+# lacked were built, so it left this population and took its citations with it.
+#
+# DERIVED the same way, and the arithmetic closes exactly rather than
+# approximately: the HEAD blob's reason for that atom re-audited to wz=11,
+# ambiguous=4, upstream=11, and it sat in the `reached` bucket — so the three
+# pins below fall by 1, 11 and 4. Running the census against the stashed HEAD
+# store reproduced 53 / 324 / 71 green, which is the other half of the same
+# check: the fall is this atom's and no surviving atom's counts moved.
+# ⚠ The NEW reason's own citations are not in any of these numbers and must not
+# be looked for — a COMPLETE atom is outside this census's population, which is
+# exactly why the count falls when one is built.
+PIN_REACHED = 52
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -755,8 +770,15 @@ PIN_NO_SYMBOL = 2
 # while it was PARTIAL. AMBIGUOUS does NOT move: that atom held none, which the
 # same re-audit says, so leaving 71 alone is a measurement rather than an
 # omission.
-PIN_WZ_CITATIONS = 324
-PIN_AMBIGUOUS = 71
+#
+# R2546 — 324 -> 313 and 71 -> 67. Same event as the reached pin above:
+# `attachment-bytes` completing removed the 11 wz and 4 ambiguous citations its
+# reason held at HEAD. AMBIGUOUS DOES move this time, unlike R2544b's, and the
+# difference is a measurement rather than a habit — that reason cited four
+# upstream paths whose basename also exists under `crates/`, which is what
+# ambiguity means here.
+PIN_WZ_CITATIONS = 313
+PIN_AMBIGUOUS = 67
 
 
 class Fatal(Exception):

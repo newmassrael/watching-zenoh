@@ -378,6 +378,37 @@ if ! python3 scripts/lib/config_key_fixture_gate.py; then
     exit 1
 fi
 
+# ─── gate 2e — every attachment carrier witnesses its own capacity ──
+# grades: worktree
+#
+# R2546, closing the last clause of the `attachment-bytes` atom. The ext-zbuf
+# body's `sce:max-size="32"` is the INLINE profile's capacity and is ADVISORY
+# under `alloc` — that advisory-ness is the whole of wz's parity with zenoh's
+# unbounded attachment, and it is a claim about behaviour, so it needs a
+# witness. The carriers are not one: the attachment ext is declared at a
+# different id per body (Put 0x03, Del 0x02, Query 0x05) through a different
+# builder, so a big payload riding one says nothing about the others.
+#
+# MEASURED, not assumed: truncating the encoder at the declared capacity redded
+# exactly two tests — the Query carrier's and the reply's inner MsgPut — so a
+# publisher's own `put()` and `del()` had no witness at all. The gate is static
+# (an SCXML attribute, a `pub const` set, and `#[test]` bodies) and costs ~2s,
+# so it sits here for the same reason gate 2d does rather than behind a build.
+#
+# It also holds `QUERY_EXT_ZBUF_MAX_LEN` to the SCXML: a Rust constant spelling
+# a codegen capacity is a tripwire only while something compares the two, which
+# is gate 2y's rule one file over.
+if ! python3 scripts/lib/attachment_capacity_witness_gate.py; then
+    echo "" >&2
+    echo "pre-push: [gate 2e] attachment capacity witness gate FAILED — a" >&2
+    echo "          carrier's over-capacity behaviour is unproven, or the Rust" >&2
+    echo "          mirror of the codegen capacity has drifted from it. The" >&2
+    echo "          lines above name WHICH; a carrier without a witness is not" >&2
+    echo "          a missing test so much as an unproven parity claim." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+
 # ─── gate 2y — a script that spells a pin must read one (R2540) ─────
 # grades: worktree
 #

@@ -1107,6 +1107,105 @@ mod tests {
         );
     }
 
+    /// R2546 — a PUT push carries an attachment LONGER than the ext-zbuf
+    /// body's declared capacity (`sce:max-size="32"` on the `value` field of
+    /// `sources/codecs/ext_zbuf.scxml`).
+    ///
+    /// That number is the INLINE profile's capacity, and under `alloc` the
+    /// owned projection is a growable `Vec` where it is advisory — which is
+    /// the whole of wz's parity with zenoh here, since upstream's attachment
+    /// declares no ceiling at all (`commons/zenoh-protocol/src/zenoh/put.rs`
+    /// @ `pub type Attachment = zextzbuf!(0x3, false);`). "Advisory" is a
+    /// claim about behaviour and needs a witness per carrier.
+    ///
+    /// THIS ARM HAD NONE, and it was measured rather than noticed: damaging
+    /// `attachment::encode_attachment_ext` to truncate at the declared
+    /// capacity redded exactly two tests -- the QUERY carrier's
+    /// (`request_build`) and the reply's inner MsgPut (`response_build`) --
+    /// and nothing in this module. So a publisher's own `put()` was the
+    /// unproven path, on the most ordinary carrier there is. The 32 in the
+    /// assertion below is the literal from that SSOT rather than
+    /// `request_build::QUERY_EXT_ZBUF_MAX_LEN`, which a `codec-push`-only
+    /// subset cannot reach; `scripts/lib/attachment_capacity_witness_gate.py`
+    /// is what holds the two numbers together.
+    #[cfg(all(feature = "codec-push", feature = "pubsub-attachment"))]
+    #[test]
+    fn build_msg_put_with_meta_carries_an_attachment_over_the_declared_capacity() {
+        let big: Vec<u8> = (0..200u32).map(|i| (i % 251) as u8).collect();
+        assert!(
+            big.len() > 32,
+            "the payload must exceed the declared ext-zbuf capacity (32) or \
+             this witnesses nothing"
+        );
+        let put = build_msg_put_with_meta(b"payload", None, None, None, Some(&big)).unwrap();
+        let exts = put.extensions.as_deref().expect("body ext chain populated");
+        assert_eq!(exts.len(), 1, "attachment alone = 1 entry");
+        assert_eq!(
+            exts[0].header & 0x4F,
+            0x43,
+            "ENC_ZBUF (0x40) | the PUT body's attachment id (0x03)"
+        );
+        if let wz_codecs::ext_entry::ExtEntryOwnedVariant::CodecZenohExtZbuf(z) = &exts[0].body {
+            assert_eq!(
+                z.value_len,
+                big.len() as u64,
+                "the length prefix names the WHOLE payload, not the capacity"
+            );
+            assert_eq!(
+                z.value.as_slice(),
+                big.as_slice(),
+                "every byte past the declared capacity survived the owned \
+                 projection"
+            );
+        } else {
+            panic!("attachment must use ExtZbuf body");
+        }
+    }
+
+    /// R2546 — the same boundary on the DEL push arm, which is a SEPARATE
+    /// carrier rather than the same one twice: upstream declares the Del
+    /// body's attachment at its own id (`commons/zenoh-protocol/src/zenoh/
+    /// del.rs` @ `pub type Attachment = zextzbuf!(0x2, false);`) and wz emits
+    /// it through a distinct `PushBodyKind::Del` arm, which R2370 had to fix
+    /// after R311y769 fixed only the reply side.
+    ///
+    /// This carrier had no over-capacity witness of any kind — the id test
+    /// above uses a 14-byte payload — so a `del()` carrying a real attachment
+    /// was green by never being tried.
+    #[cfg(all(feature = "codec-push", feature = "pubsub-attachment"))]
+    #[test]
+    fn build_msg_del_with_meta_carries_an_attachment_over_the_declared_capacity() {
+        let big: Vec<u8> = (0..200u32).map(|i| (i % 251) as u8).collect();
+        assert!(
+            big.len() > 32,
+            "the payload must exceed the declared ext-zbuf capacity (32) or \
+             this witnesses nothing"
+        );
+        let del = build_msg_del_with_meta(None, None, Some(&big)).unwrap();
+        let exts = del.extensions.as_deref().expect("body ext chain populated");
+        assert_eq!(exts.len(), 1, "attachment alone = 1 entry");
+        assert_eq!(
+            exts[0].header & 0x4F,
+            0x42,
+            "ENC_ZBUF (0x40) | the DEL body's attachment id (0x02)"
+        );
+        if let wz_codecs::ext_entry::ExtEntryOwnedVariant::CodecZenohExtZbuf(z) = &exts[0].body {
+            assert_eq!(
+                z.value_len,
+                big.len() as u64,
+                "the length prefix names the WHOLE payload, not the capacity"
+            );
+            assert_eq!(
+                z.value.as_slice(),
+                big.as_slice(),
+                "every byte past the declared capacity survived the owned \
+                 projection"
+            );
+        } else {
+            panic!("attachment must use ExtZbuf body");
+        }
+    }
+
     #[cfg(all(feature = "codec-push", feature = "pubsub-qos"))]
     #[test]
     fn build_push_outer_extensions_emits_qos_with_zint_body() {
