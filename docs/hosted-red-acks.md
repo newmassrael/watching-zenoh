@@ -35,6 +35,7 @@ printed, `commit` is the tip being replaced (the sha the run graded), and
 | R2497 | `34393145847` | `0df6bfeb` | C0 binary-dep · C0 (armed) provenance · C1bt wz-capture | 709 | R2498 |
 | R2535 | `34465003136` | `6b112827` | C0 sn-res-words selftest (two jobs, one cause) · C1ce census `unstable` row | 717 | R2535 |
 | R2568 | `34611269702` | `efada3a9` | E z_info drop-in link · Z same (two jobs, one cause) · A4 cross-impl accessor · C0 gate-provenance | 721 | |
+| R2570 | `34640784537` | `85c21c02` | C1bn feature-gate-diagnostic · C0 lane-reach · A+B C0 (armed) provenance · E6 peer mesh | 721 | |
 
 ## What the rows above say
 
@@ -110,3 +111,36 @@ zid bucket split, which is the section a CONNECTIVITY=0 header set keeps. That
 is an argument, not a hosted verdict. The round that reads this run's successor
 fills the column in, and an empty column that survives that reading means the
 repair did not hold.
+
+## R2570's reading of R2568's row, and its own row
+
+R2568's `paid` column stays EMPTY, and that is the reading rather than an
+omission: run `34640784537` on `85c21c02` — the successor R2568 nominated —
+came back `failure`, so the run as a whole did not go green.
+
+But the reading is not "the repair did not hold", because the causes moved.
+R2568 named three, and they are separable in the successor:
+
+- **The `z_info` link failure is GONE.** It was the loudest of the three (34
+  undefined references to the `Z_FEATURE_CONNECTIVITY` family, in Layers E and
+  Z) and the successor's interop job shows `Built target z_info` with a
+  27352-byte binary. The whole `demo-spawning e2e lanes (Layers E + E3..E6u)`
+  job, red on the run R2568 acknowledged, is GREEN on the successor. That repair
+  held.
+- **`C0 gate-provenance` still reds**, now surfacing as the `validate + codegen`
+  job's own `Layer C0 (armed) — gate provenance citations resolve` step.
+- **The cross-impl job still reds**, at `Layer E6 — peer mesh` (rc=1, 23s)
+  rather than at the link failure it died on before.
+
+And one cause is NEW, arriving between the two runs rather than surviving from
+the first: `Layer C1bn` reds on `feature-gate-diagnostic: FAIL — wz-runtime-tokio
+/ access-extauth-usrpwd is both probed and declared to gate no public path, and
+those cannot both be true`. That names R2567's atom, so it belongs to the same
+arc rather than to the round that found it.
+
+⚠ THE ROW ABOVE IS R2570's ACKNOWLEDGEMENT, not a claim about its own work. The
+round pushed an atom promotion (`scouting-static` PARTIAL → COMPLETE) over the
+four reds listed, having run the lanes its change owns locally. Its `debt` column
+says 721 for the same reason R2568's does — that item owns the class in which a
+red survives a window because nothing local can see it — and, like every row
+here, an acknowledgement is not a repayment.
