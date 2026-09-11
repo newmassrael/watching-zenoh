@@ -8,7 +8,8 @@
 //! # Why it lives here and not in the session kernel
 //!
 //! `wz-session-core` is `no_std`-shaped. It owns the SEAM
-//! ([`CredentialSource`]) and the pure dictionary PARSER; this crate owns the
+//! ([`CredentialSource`](wz_session_core::extauth_usrpwd::CredentialSource))
+//! and the pure dictionary PARSER; this crate owns the
 //! machinery that needs `std` — a lock and a filesystem. That split is what lets
 //! the parse be tested without a filesystem and keeps file I/O out of a kernel
 //! that must build for MCUs.

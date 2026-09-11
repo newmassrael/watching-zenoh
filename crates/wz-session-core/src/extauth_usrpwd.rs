@@ -142,7 +142,7 @@ impl CredentialSource for InMemoryCredentials {
 ///
 /// R2567 — named because three signatures carry it and clippy is right that the
 /// bare tuple-vector reads poorly. Bytes rather than `String` for the reason
-/// [`AuthIdentity`](crate::auth_dispatch::AuthIdentity) gives: this is what the
+/// [`AuthIdentity`] gives: this is what the
 /// wire and the dictionary file supply, and demanding UTF-8 here would invent a
 /// validation upstream does not perform at this layer.
 pub type CredentialTable = Vec<(Vec<u8>, Vec<u8>)>;
