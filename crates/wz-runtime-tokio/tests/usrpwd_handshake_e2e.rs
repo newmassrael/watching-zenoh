@@ -47,7 +47,7 @@ use wz_runtime_tokio::{LinkEvent, RxFrame};
 use wz_runtime_tokio_test_support::{
     fixture_session_init_params, LifecycleRecordingDriver, QueueDriver,
 };
-use wz_session_core::auth_dispatch::AuthDispatch;
+use wz_session_core::auth_dispatch::{AuthDispatch, AuthIdentity};
 use wz_session_core::extauth::decode_auth_ext;
 use wz_session_core::extauth_usrpwd::UsrPwdMethod;
 use wz_session_core::locator::parse_any_locator;
@@ -203,6 +203,28 @@ async fn usrpwd_matching_credentials_reach_established_on_both_sides() {
     let init_trace = h.initiator_actions.trace_snapshot();
     assert_eq!(init_trace.send_open_syn, 1, "the initiator emitted OpenSyn");
 
+    // R2566 — THE JOIN. The dispatch-level tests prove the username is
+    // RETURNED, and a session-level test proves the slot holds and clears it;
+    // neither proves the two are connected. This is the only assertion that
+    // follows the value along its whole route -- real wire bytes ->
+    // `parse_inbound` -> `dispatch_link_event` -> the auth dispatch -> the
+    // session slot -- which is exactly where a "correct value on a wrong route"
+    // defect hides, because both halves pass in isolation.
+    assert_eq!(
+        h.responder_actions.peer_auth_id(),
+        Some(AuthIdentity(USER.to_vec())),
+        "the responder must know WHICH principal it authenticated, not merely \
+         that one did"
+    );
+    // The initiator authenticated nobody: it PROVED an identity to the peer
+    // rather than adjudicating one, so its own slot stays empty. Without this,
+    // a build that wrote the identity into both sides' slots would pass above.
+    assert_eq!(
+        h.initiator_actions.peer_auth_id(),
+        None,
+        "the initiator adjudicates no principal, so its slot must stay empty"
+    );
+
     // The wire-level proof of the SEND wiring: re-parse the InitSyn and confirm
     // the usrpwd auth ext (id 0x3) is actually on the wire (not silently empty).
     let frame = parse_inbound(&h.init_syn_wire).expect("InitSyn re-parses");
@@ -236,6 +258,18 @@ async fn usrpwd_bad_password_rejects_and_tears_down_the_responder() {
         h.responder_state,
         S::Closing,
         "a bad credential must drive the responder Accepting -> Closing"
+    );
+    // R2566 — the anti-vacuity half of the join assertion in the matching-
+    // credentials test above. A REJECTED handshake must leave no principal
+    // behind: the username reached `decode_open_syn` here too, and the thing
+    // being pinned is that it goes no further when the HMAC fails. Without this
+    // arm, an implementation that recorded the CLAIMED username before
+    // verifying it would satisfy the positive test and silently hand the ACL
+    // plane an unauthenticated identity.
+    assert_eq!(
+        h.responder_actions.peer_auth_id(),
+        None,
+        "a rejected handshake must not leave an authenticated principal"
     );
     assert_ne!(
         h.initiator_state,
