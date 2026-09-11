@@ -9361,10 +9361,21 @@ layer_c1l_reassembly() {
 # they need `transport-fragmentation` (which no arm here selects) -- so counting
 # the diff would have said +6 on this arm. The numbers below are what the
 # commands PRINTED.
+#
+# R2560 moved the FIRST TWO arms by one each, 40 -> 41 and 58 -> 59, and the
+# third not at all. The case is `multicast_params`'s
+# `only_a_lost_link_warrants_a_rejoin`, which pins the re-join judgement that
+# moved into `wz-session-core` this round. It sits in a module gated on
+# `session-multicast` alone, which is why every arm that selects that feature
+# sees it and the count moves in lockstep rather than by different amounts --
+# the opposite of the R2417 case above, where the added cases were reachable
+# only by a reassembly build. Both numbers are what the commands PRINTED;
+# `guarded_count_gate.py --range` named both, and it named the SECOND one only
+# in a line a truncated read of its own output had cut off.
 layer_c1p_multicast() {
-    _runci_guarded_test C1p 40 cargo test -p wz-session-core --features session-multicast --lib multicast --quiet \
+    _runci_guarded_test C1p 41 cargo test -p wz-session-core --features session-multicast --lib multicast --quiet \
         || return 1
-    _runci_guarded_test C1p 58 cargo test -p wz-session-core --features session-multicast,reassembly,codec-push,codec-join --lib multicast --quiet \
+    _runci_guarded_test C1p 59 cargo test -p wz-session-core --features session-multicast,reassembly,codec-push,codec-join --lib multicast --quiet \
         || return 1
     # R311y633 (§17.6 / §11.2) — the arm that BUILDS `multicast_rx` and RUNS it.
     # The two arms above omit `codec-close`, and `pub mod multicast_rx` is gated

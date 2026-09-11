@@ -1676,6 +1676,18 @@ mod tests {
             MulticastOutcome::LinkLost(LostCause::OsError),
             "a dropped carrier must end the loop as LinkLost, not by budget"
         );
+        // R2560 — bind THIS loop's real terminal to the shared re-join
+        // judgement, rather than asserting the judgement again in the abstract.
+        // Until this round that decision lived in `wz-runtime-tokio`, a crate
+        // this one does not depend on, so the MCU profile produced the terminal
+        // and could not ask what it meant. The question is now askable HERE,
+        // which is the seam the re-join wiring attaches to; that the answer is
+        // `true` and nothing yet acts on it is exactly the residual that stays
+        // open, and it is stated rather than implied.
+        std::assert!(
+            lost.warrants_rejoin(),
+            "the carrier-loss terminal is the one a group face re-joins after"
+        );
         std::assert_eq!(state, SessionFsmMulticastState::Stopped);
         std::assert_eq!(
             peers,

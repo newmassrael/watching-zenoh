@@ -1046,24 +1046,24 @@ impl GroupRejoin {
 
     /// Whether `outcome` is worth re-joining for, and the wait before trying.
     ///
-    /// `LinkLost` alone. The other two are NOT failures of the link:
-    /// [`MulticastOutcome::Stopped`] is the host's own signal (pico's reopen
-    /// task exits the same way, on an emptied session config) and
-    /// [`MulticastOutcome::IterationLimit`] is the test guard, which production
-    /// never arms — re-joining on either would turn a graceful stop into an
-    /// unstoppable face.
+    /// R2560 — the WHICH half is no longer decided here. It is
+    /// [`MulticastOutcome::warrants_rejoin`], beside the enum, because the MCU
+    /// profile produces the same terminals and could not reach this crate to
+    /// ask. What stays here is the WAIT, which is this runtime's own: a tokio
+    /// sleep paced by [`crate::retry_period::RetryPeriod`], against the coop
+    /// loop's very different answer. Splitting it that way is what makes "the
+    /// two loops cannot drift" true of all THREE consumers rather than of the
+    /// two that happen to live in this crate.
     fn wait_for(&mut self, outcome: &MulticastOutcome) -> Option<u64> {
-        match outcome {
-            MulticastOutcome::LinkLost(cause) => {
-                let delay = self.period.next_ms();
-                log::warn!(
-                    "{}: group face lost ({cause:?}); re-joining in {delay}ms",
-                    self.label
-                );
-                Some(delay)
-            }
-            MulticastOutcome::Stopped | MulticastOutcome::IterationLimit => None,
+        if !outcome.warrants_rejoin() {
+            return None;
         }
+        let delay = self.period.next_ms();
+        log::warn!(
+            "{}: group face lost ({outcome:?}); re-joining in {delay}ms",
+            self.label
+        );
+        Some(delay)
     }
 
     /// The wait after a failed re-BIND, which is the same schedule: a join that

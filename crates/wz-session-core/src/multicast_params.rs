@@ -222,3 +222,79 @@ pub enum MulticastOutcome {
     /// The bounded iteration budget was exhausted (test guard).
     IterationLimit,
 }
+
+impl MulticastOutcome {
+    /// Whether this terminal is one a group face should RE-JOIN after.
+    ///
+    /// R2560 — this judgement lives beside the type it interrogates, and that
+    /// placement is the whole point. R2376 built the same decision inside
+    /// `wz-runtime-tokio`'s `GroupRejoin`, whose own doc gives the reason it
+    /// exists: the two AP spawners differ in what they drive, so "what is
+    /// genuinely common is the DECISION: is this outcome worth re-joining for,
+    /// and how long should the face wait first", kept in one place "so the two
+    /// loops cannot drift on the part that carries the reasoning".
+    ///
+    /// ⚠ THAT ARGUMENT WAS RIGHT AND ITS PLACEMENT COULD NOT DELIVER IT. The
+    /// decision sat in a crate `wz-session-lwip` does not depend on, so the MCU
+    /// profile could not reach it at all — while PRODUCING the very type it
+    /// judges, since [`MulticastOutcome`] lives here and both profiles return
+    /// it. A judgement about a shared type, parked where only one of its two
+    /// producers can see it, does not prevent drift; it guarantees that the
+    /// second producer must either re-derive it or go without. The MCU loop
+    /// went without: since R2390 it DETECTS the carrier drop and returns
+    /// [`Self::LinkLost`], and nothing re-joins.
+    ///
+    /// The pacing deliberately does NOT move here. How long to wait is a
+    /// runtime question — a tokio sleep against a coop busy-poll — and the
+    /// schedule type also serves the reconnect supervisor and the router
+    /// re-dial, neither of which is multicast. Only the part that is a property
+    /// of THIS enum belongs with it.
+    ///
+    /// `LinkLost` alone, and the match is exhaustive on purpose: a fourth
+    /// terminal added later cannot compile until someone decides which side it
+    /// falls on. [`Self::Stopped`] is the host's own signal (pico's reopen task
+    /// exits the same way, on an emptied session config) and
+    /// [`Self::IterationLimit`] is the test guard production never arms —
+    /// re-joining on either would turn a graceful stop into an unstoppable
+    /// face.
+    pub fn warrants_rejoin(&self) -> bool {
+        match self {
+            Self::LinkLost(_) => true,
+            Self::Stopped | Self::IterationLimit => false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod rejoin_judgement_tests {
+    use super::*;
+
+    /// R2560 — the judgement over the WHOLE terminal vocabulary, asserted as a
+    /// set rather than one arm at a time.
+    ///
+    /// A test naming only `LinkLost` would pass on a predicate that answered
+    /// `true` for everything, which is the failure this decision exists to
+    /// prevent: re-joining on [`MulticastOutcome::Stopped`] turns a graceful
+    /// stop into a face the host cannot put down. So both directions are
+    /// pinned, and the negative arm is the load-bearing one.
+    ///
+    /// ⚠ WHAT PINS THE POPULATION IS NOT THIS TEST — it is the exhaustive
+    /// `match` in the function, which refuses to compile when a fourth terminal
+    /// is added. That is a stronger guard than any list here could be, because
+    /// a list would go stale silently while the compiler cannot.
+    #[test]
+    fn only_a_lost_link_warrants_a_rejoin() {
+        assert!(
+            MulticastOutcome::LinkLost(crate::link::LostCause::OsError).warrants_rejoin(),
+            "a dropped carrier is the outage this decision exists for"
+        );
+        assert!(
+            !MulticastOutcome::Stopped.warrants_rejoin(),
+            "the host's own stop must not be re-joined, or the face cannot be put down"
+        );
+        assert!(
+            !MulticastOutcome::IterationLimit.warrants_rejoin(),
+            "the test guard is not an outage; production never arms it"
+        );
+    }
+}
