@@ -1468,6 +1468,22 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
     // un-flagged default stamps — which makes `AlreadyTheBehaviour` a false
     // verdict there rather than a milder one. See the row in
     // `config_keys_the_demo_drops` for how that was measured.
+    // R2568 — the dictionary's decision site. It has no flag branch to sit in
+    // front of, because this binary has no auth plane at all, so the verdict is
+    // the whole site rather than a guard on one.
+    //
+    // Routed through `no_sink` rather than recording the verdict directly: that
+    // closure reads `config_keys_the_demo_drops()`, so the site and the list
+    // stay bound. Give the demo a real sink later and drop the list row, and
+    // this stops speaking — which the other direction of
+    // `every_key_this_build_drops_is_told_so_by_the_site_that_decides_it`
+    // catches, instead of leaving a site that lies about a key it no longer
+    // describes.
+    if named("transport/auth/usrpwd/dictionary_file") {
+        if let Some(effect) = no_sink("transport/auth/usrpwd/dictionary_file") {
+            exp.record("transport/auth/usrpwd/dictionary_file", effect);
+        }
+    }
     if named("timestamping/enabled") && no_sink("timestamping/enabled").is_some() {
         exp.record("timestamping/enabled", KeyEffect::NoSinkInThisBuild);
     } else if named("timestamping/enabled") {
@@ -2410,6 +2426,17 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
          the first attempt or the fourth.",
     ),
     (
+        "transport/auth/usrpwd/dictionary_file",
+        KIND_OFF_WIRE,
+        "expands to NO flag. This binary carries the three access knobs \
+         --acl-deny, --downsample and --max-payload and no auth flag at all, \
+         so the key is pinned in `config_keys_the_demo_drops()` and its \
+         decision site records NoSinkInThisBuild. Off-wire even where a sink \
+         DOES exist: the dictionary is a responder's local credential store, \
+         read to decide whether a handshake succeeds, and the frames carry a \
+         username and an HMAC rather than the store or its path.",
+    ),
+    (
         "transport/link/tls/root_ca_certificate",
         KIND_OFF_WIRE,
         "expands to `--tls-ca`. A trust store consulted BENEATH zenoh, during \
@@ -2481,6 +2508,25 @@ pub(crate) fn config_keys_the_demo_drops() -> Vec<&'static str> {
     // those on it (`orchestrator.rs:213`), so it now withholds them; see the
     // master switch in `expand_stock_zenoh_config`.
     let mut out: Vec<&'static str> = Vec::new();
+    // R2568 — the FIRST kind again, and the first row of it since R2145: a key
+    // with no sink AT ALL in this binary, which the doc above calls a legitimate
+    // state that has to be written down rather than hidden behind a report that
+    // calls it honoured. UNCONDITIONAL on purpose — there is no build of THIS
+    // binary in which the sink appears, so a `cfg!` guard would be a claim about
+    // a feature that does not exist here.
+    //
+    // MEASURED: `wz-ap-demo` names `usrpwd` and `extauth` ZERO times and its
+    // manifest carries no `access-extauth-*` feature. It holds the three §5.16
+    // interceptor knobs (`--acl-deny` / `--downsample` / `--max-payload`) and no
+    // auth plane, so the dictionary that builds a RESPONDER's credential store
+    // has nothing here to build.
+    //
+    // ⚠ NOT the R2145 case, and the difference is the whole reason this row is
+    // honest. `scouting/multicast/enabled` left this list because the demo
+    // genuinely should have honoured it — upstream gates real keys on it, so the
+    // demo now withholds them. Nothing here is withheld on the dictionary: the
+    // plane it configures is absent, not ignored.
+    out.push("transport/auth/usrpwd/dictionary_file");
     if !cfg!(feature = "routing-interest-pending-gc") {
         out.push("routing/interests/timeout");
     }
@@ -3397,6 +3443,21 @@ mod stock_config_tests {
                 LISTEN_ONLY,
                 r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      queries_default_timeout: 12000 }"#,
+            ),
+            // R2568 — honoured by R2567. This row exists so the table stays
+            // universal; the key reaches NOTHING here and is pinned in
+            // `config_keys_the_demo_drops()` for the first of that list's two
+            // kinds — no sink at all in this binary, because the demo carries
+            // the §5.16 interceptor knobs and no auth plane.
+            // The vacuity guard still bites: the reader must NAME the key from
+            // this document, which is what makes "reaches nothing" a measured
+            // claim about the DEMO rather than about a typo in this table.
+            (
+                "transport/auth/usrpwd/dictionary_file",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { auth: { usrpwd: {
+                       dictionary_file: "/etc/wz/usrpwd.txt" } } } }"#,
             ),
             (
                 "routing/interests/timeout",
