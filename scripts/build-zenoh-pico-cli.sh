@@ -532,6 +532,66 @@ for expect in \
     fi
 done
 
+# --- the CENSUS DENOMINATOR arm (R2565) ------------------------------------
+#
+# A THIRD configure+build whose only delta from the primary is
+# `Z_FEATURE_CONNECTIVITY=0`, and which builds the LIBRARY alone -- no examples,
+# so it costs a fraction of the primary.
+#
+# WHY A SECOND LIBRARY EXISTS AT ALL. `pico_abi_symbol_census` asks whether wz's
+# cdylib defines every public symbol the real library defines, and the answer
+# depends ENTIRELY on how that library was configured. R2562 turned CONNECTIVITY
+# on because it needed ONE witness binary (`z_info`) to report transport events,
+# and that silently moved this census's DENOMINATOR by 115 symbols -- turning a
+# clean axis red for a reason with nothing to do with wz's code. ONE ARTIFACT WAS
+# SERVING TWO CONTRACTS: the behavioural oracle wants every feature compiled in,
+# while the parity denominator wants exactly the surface wz claims to be a
+# drop-in for. Coupling them meant any future flag flipped for a witness would
+# re-scope a headline parity claim as a side effect. They are separated here.
+#
+# ⚠ THE DELTA IS ONE FLAG, DELIBERATELY, AND THIS IS NOT A STOCK-DEFAULT PICO.
+# The primary arm's other features (TLS, serial, advanced pub/sub, unstable API)
+# stay ON, because wz DOES define their symbols; dropping them would make this
+# census WEAKER than it was before R2562 rather than equal to it. The single
+# subtraction is the one feature wz does not implement, and it is REGISTERED as
+# `api-compat-pico`'s named gap rather than quietly discounted here.
+CENSUS_DIR="$ROOT/target/zenoh-pico-census"
+cmake -B "$CENSUS_DIR" -S "$EXAMPLES_DIR" \
+    -DCMAKE_C_STANDARD=11 \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DZ_FEATURE_UNSTABLE_API=ON \
+    -DZ_FEATURE_ADVANCED_PUBLICATION=1 \
+    -DZ_FEATURE_ADVANCED_SUBSCRIPTION=1 \
+    -DZ_FEATURE_LINK_SERIAL=1 \
+    -DZ_FEATURE_LINK_TLS=1 \
+    -DZ_FEATURE_CONNECTIVITY=0 >&2
+
+# The same read-back the primary arm gets, and for a sharper reason: this arm's
+# whole value is that its feature set differs from the primary's in EXACTLY one
+# place. If CONNECTIVITY silently came back on, the census would grade the same
+# surface twice and the separation above would be decorative; if one of the
+# others silently went off, the census would quietly stop grading symbols wz
+# already defines. Both directions are asserted.
+CENSUS_CONFIG="$CENSUS_DIR/zenohpico/include/zenoh-pico/config.h"
+if [[ ! -f "$CENSUS_CONFIG" ]]; then
+    echo "build-zenoh-pico-cli: census config.h missing: $CENSUS_CONFIG" >&2
+    exit 1
+fi
+for expect in \
+    "Z_FEATURE_ADVANCED_PUBLICATION 1" \
+    "Z_FEATURE_ADVANCED_SUBSCRIPTION 1" \
+    "Z_FEATURE_LINK_SERIAL 1" \
+    "Z_FEATURE_LINK_TLS 1" \
+    "Z_FEATURE_CONNECTIVITY 0"; do
+    if ! grep -qx "#define $expect" "$CENSUS_CONFIG"; then
+        echo "build-zenoh-pico-cli: census arm requested '$expect' but the GENERATED config.h says:" >&2
+        grep -E "^#define ${expect%% *}( |$)" "$CENSUS_CONFIG" >&2 \
+            || echo "  (not defined at all)" >&2
+        exit 1
+    fi
+done
+cmake --build "$CENSUS_DIR" --target zenohpico_shared -j"$(nproc)" >&2
+
 # --- the SINGLE-THREADED header arm ----------------------------------------
 #
 # A second CONFIGURE (no build) whose only delta is `Z_FEATURE_MULTI_THREAD=0`.
@@ -619,6 +679,12 @@ done
 # makes the stamp permanently unmatchable.
 vendored_oracle_stamp_root "$INSTALL_DIR" "$_wzpico_token"
 vendored_oracle_stamp_root "$BUILD_DIR" "$_wzpico_token"
+# R2565 — the census denominator is a foreign oracle under `target/` like the
+# other two, so it gets the same stamp for the same reason. An UNSTAMPED census
+# root would be the R2326 failure in its sharpest form: this artifact's entire
+# job is to be the denominator of a parity verdict, so a stale one renders that
+# verdict against a pico the tree no longer targets and reads as a wz defect.
+vendored_oracle_stamp_root "$CENSUS_DIR" "$_wzpico_token"
 
 # R2327b — verify the contract this script has just asserted, HERE, rather than
 # leaving a hosted lane to discover it. R2326 shipped a stamp that could never
@@ -635,6 +701,8 @@ restore_pico_example_patches
 vendored_oracle_assert_fresh "$INSTALL_DIR" build-zenoh-pico-cli \
     vendored_oracle_recipe_token "$VENDOR_DIR" "${BASH_SOURCE[0]}" || exit 1
 vendored_oracle_assert_fresh "$BUILD_DIR" build-zenoh-pico-cli \
+    vendored_oracle_recipe_token "$VENDOR_DIR" "${BASH_SOURCE[0]}" || exit 1
+vendored_oracle_assert_fresh "$CENSUS_DIR" build-zenoh-pico-cli \
     vendored_oracle_recipe_token "$VENDOR_DIR" "${BASH_SOURCE[0]}" || exit 1
 
 echo "build-zenoh-pico-cli: installed ${#TARGETS[@]} binaries to $INSTALL_DIR" >&2

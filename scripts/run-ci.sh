@@ -14631,6 +14631,25 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     # Reuses the demo built above (--features router-multicast-faces); past the pico guard.
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_router_hat_multicast_reach_pico_zsub -- --ignored --quiet) || return 1
+
+    # R2565 (paying R2562's lane-reach red) — the multicast DEPARTURE witnesses.
+    # R2562 added this fixture and registered it with no lane, which `lane_reach_gate`
+    # exists to refuse: both its legs are `#[ignore]` AND its stem carries Layer E's
+    # `multicast` skip token, so nothing on hosted CI ran it and nothing would have
+    # noticed if it rotted. Its entry accepted "hosted never runs this" as a residue
+    # without knowing a gate forbids a fixture NO lane runs at all -- a weaker claim
+    # than the one the gate makes.
+    #
+    # GUARDED, unlike the four siblings above, on the gate's own prescription: the
+    # legs are `#[ignore]`, so if that attribute is ever dropped the filter selects
+    # ZERO tests and an unguarded step passes in silence. The count is 2 -- the
+    # announced departure and the lease-expiry inference, which R2562 built so that
+    # neither can satisfy the other.
+    #
+    # Reuses the demo and the pico CLI provisioned above; reached only past the
+    # pico-CLI presence guard, so it never runs when the lane is SKIPping.
+    _runci_guarded_test M 2 cargo test -p wz-integration-tests \
+        --test wz_multicast_departure_witnessed_by_pico -- --ignored --quiet || return 1
 }
 
 # ─── Layer Z — wz <-> zenohd (zenoh-full reference router) interop ────

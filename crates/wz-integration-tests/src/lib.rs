@@ -1233,6 +1233,36 @@ pub mod common {
         root
     }
 
+    /// The pico library built as the ABI census's DENOMINATOR — the primary
+    /// arm's configuration minus `Z_FEATURE_CONNECTIVITY`.
+    ///
+    /// R2565. It exists because one artifact was serving two contracts. The
+    /// behavioural oracle ([`zenoh_pico_shared_library`]) wants every feature
+    /// compiled in, so a witness binary can exercise it; the parity census wants
+    /// exactly the surface wz claims to be a drop-in for. R2562 turned
+    /// CONNECTIVITY on to get ONE witness (`z_info` reporting transport events)
+    /// and moved this census's denominator by 115 symbols as a side effect,
+    /// reddening a clean axis for a reason that had nothing to do with wz's code.
+    ///
+    /// ⚠ This is NOT a stock-default pico, and the distinction is the whole
+    /// design: TLS, serial, advanced pub/sub and the unstable API stay ON here
+    /// because wz DOES define their symbols. Subtracting them would make the
+    /// census weaker than it was before R2562 rather than equal to it. Exactly
+    /// one feature is subtracted, and it is registered as `api-compat-pico`'s
+    /// named gap rather than quietly discounted.
+    pub fn zenoh_pico_census_shared_library() -> PathBuf {
+        let root = project_root().join("target/zenoh-pico-census");
+        assert_zenoh_pico_oracle_fresh(&root);
+        let path = root.join("lib").join("libzenohpico.so");
+        assert!(
+            path.is_file(),
+            "the ABI census denominator is missing at {}; run \
+             scripts/build-zenoh-pico-cli.sh first (it builds this arm)",
+            path.display()
+        );
+        path
+    }
+
     /// R2326 (unregistered open-debt item 10) — refuse a FOREIGN ORACLE that
     /// was provisioned from a different source state than the one this tree
     /// carries.
