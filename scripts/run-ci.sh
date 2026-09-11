@@ -5207,12 +5207,8 @@ layer_c1aa_cargo_test_unixsock() {
 #   2. runs `--lib vsock_pipeline` + `--test vsock_e2e`: these COMPILE the
 #      backend + the wz<->wz e2e and report them IGNORED. The live tests are
 #      `#[ignore]` because AF_VSOCK loopback (`VMADDR_CID_LOCAL`) needs the
-#      `vsock_loopback` kernel module, ABSENT in this sandbox (bind = EPERM, no
-#      /dev/vsock). They run on a vsock-capable host via
-#      `cargo test --features transport-link-vsock -- --ignored` (the Layer Z
-#      environment-gated pattern); the data path they would exercise is already
-#      proven by the TCP/TLS/unixsock lanes. The lane does NOT pass `--ignored`
-#      (it would EPERM-fail here) — it proves compile + correct-ignore;
+#      `vsock_loopback` kernel module. They then RUN, under 2a below, on any
+#      host that has it;
 #   3. clippy-gates the `transport-link-vsock` cfg (`--all-targets`, compiling
 #      the #[ignore] targets);
 #   4. clippy-gates the LIB under `--no-default-features --features
@@ -5221,20 +5217,54 @@ layer_c1aa_cargo_test_unixsock() {
 #      `transport-unicast` session-open integration). NO reconnect e2e: vsock is
 #      `NotReconnectable` (non-IP), like unixsock.
 #
-# R311y413 — HOSTED on ci.yml's feature-gates job. NO count-guard, deliberately:
-# every vsock test is `#[ignore]` (AF_VSOCK loopback needs the `vsock_loopback`
-# kernel module, absent on the runner), so this lane is a COMPILE + clippy gate —
-# the only lane building the vsock backend off-default. It stays robust without a
-# `N passed` guard: a cfg-out reddens at COMPILE, and a dropped `#[ignore]` runs
-# the test and EPERM-reddens on the module-less runner. The live data path is
-# proven by the TCP/TLS/unixsock lanes.
+# R311y413 — HOSTED on ci.yml's feature-gates job.
+#
+# R2547 — 2a: THE ROUND-TRIP NOW RUNS WHERE THE KERNEL ALLOWS IT, and until this
+# round it ran NOWHERE. The `transport-link-vsock` atom's standing residual was
+# "ZERO executing test coverage -- compile+clippy only", and the reason it stood
+# for so long is that BOTH halves of the sentence that created it were
+# machine-state prose: this lane's own comment asserted AF_VSOCK is "ABSENT in
+# this sandbox (bind = EPERM, no /dev/vsock)". MEASURED on 2026-09-11: `lsmod`
+# lists `vsock_loopback`, `/dev/vsock` is present, and both `#[ignore]`d e2e
+# tests pass in 0.33s. A capability a machine HAS is a fact to establish, not to
+# inherit from the sentence that was true when someone wrote it.
+#
+# So the lane PROBES rather than asserts. It does NOT invent an arming flag, and
+# that is a decision rather than an omission: `armed_skip_guard.py` refuses a
+# handle no job can turn ("a handle nothing can turn on is a verdict nobody can
+# reach"), and the job this lane runs on — feature-gates — does not provision the
+# module. The job that DOES is Layer Z's, which loads `vsock_loopback` as a hard
+# step and runs the zenohd->wz vsock interop count-guarded and no longer
+# `WZ_Z_REQUIRE`-exempt (R311y422). So the GUARANTEED vsock coverage is already
+# armed, on the job that earns it; these legs are the wz<->wz half, run wherever
+# the kernel allows and declared absent where it does not.
+#
+# The `--ignored` legs carry COUNT GUARDS, which the compile-only legs above
+# deliberately do not need: `cargo test -- --ignored` that selects nothing still
+# prints `0 passed` and exits 0, so an un-guarded run here would report green for
+# the exact defect this round closed. `_runci_guarded_test` refuses 0 by
+# construction.
 layer_c1ab_cargo_test_vsock() {
     (cd crates \
         && cargo test -p wz-session-core --features alloc --lib locator --quiet \
         && cargo test -p wz-runtime-tokio --features transport-link-vsock --lib vsock_pipeline --quiet \
         && cargo test -p wz-runtime-tokio --features transport-link-vsock --test vsock_e2e --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-vsock --quiet -- -D warnings \
-        && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-link-vsock --quiet -- -D warnings)
+        && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-link-vsock --quiet -- -D warnings) \
+        || return 1
+    if [[ ! -c /dev/vsock ]]; then
+        echo "  Layer C1ab SKIP (no /dev/vsock — the wz<->wz round-trip legs are"
+        echo "  compile-only on this host; load it with: sudo modprobe vsock_loopback."
+        echo "  The REQUIRED vsock coverage is Layer Z's zenohd->wz interop, on the"
+        echo "  job that provisions the module)"
+        return 0
+    fi
+    _runci_guarded_test "Layer C1ab vsock dial/accept round-trip" 1 \
+        cargo test -p wz-runtime-tokio --features transport-link-vsock \
+        --lib vsock_pipeline -- --ignored || return 1
+    _runci_guarded_test "Layer C1ab vsock wz<->wz e2e" 2 \
+        cargo test -p wz-runtime-tokio --features transport-link-vsock \
+        --test vsock_e2e -- --ignored || return 1
 }
 
 # ─── Layer C1ac — QUIC link: locator parse + wz-runtime-tokio backend ─

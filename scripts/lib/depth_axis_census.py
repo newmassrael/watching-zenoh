@@ -771,13 +771,21 @@ PIN_NO_SYMBOL = 2
 # same re-audit says, so leaving 71 alone is a measurement rather than an
 # omission.
 #
+# R2547 — 313 -> 315, and this one moves in the RISING direction, which is the
+# ratchet doing what it exists for rather than an atom leaving. `transport-link-
+# vsock` stayed PARTIAL and its reason gained two resolvable wz anchors while
+# recording that its coverage residual is stale: `link_interfaces.rs` and
+# `locator.rs`, named as two of the four axes its pin audit still owes. Derived
+# by running `citation_audit` over the ADDENDUM ALONE -- wz=2, ambiguous=0 --
+# so the rise is accounted for exactly and AMBIGUOUS correctly does not move.
+#
 # R2546 — 324 -> 313 and 71 -> 67. Same event as the reached pin above:
 # `attachment-bytes` completing removed the 11 wz and 4 ambiguous citations its
 # reason held at HEAD. AMBIGUOUS DOES move this time, unlike R2544b's, and the
 # difference is a measurement rather than a habit — that reason cited four
 # upstream paths whose basename also exists under `crates/`, which is what
 # ambiguity means here.
-PIN_WZ_CITATIONS = 313
+PIN_WZ_CITATIONS = 315
 PIN_AMBIGUOUS = 67
 
 
