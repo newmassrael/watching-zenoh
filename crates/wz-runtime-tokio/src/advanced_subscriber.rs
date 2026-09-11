@@ -760,39 +760,11 @@ impl State {
     ///   already had, and the reason it must stay LAST: it is the fallback, not
     ///   the rule.
     ///
-    /// Shared by both ingest paths on purpose. `handle` (recovery off) and
-    /// `handle_live` (recovery on) are cfg-split, but this case does not depend
-    /// on retransmission at all — upstream runs one `handle_sample` for both —
-    /// so an ungated `impl` block keeps the two from drifting apart.
-    fn deliver_unsequenced(&mut self, view: &dyn SampleView) {
-        if let Some(ts) = view.timestamp() {
-            if self.admit_timestamped(ts) {
-                (self.on_sample)(Sample::from_view(view));
-            }
-            return;
-        }
-        (self.on_sample)(Sample::from_view(view));
-    }
-
-    /// R2553 — the same two arms for a sample that arrived as a QUERY REPLY
-    /// rather than through the subscription, i.e. out of a publisher's `@adv`
-    /// cache. Upstream needs no such twin because its GET callbacks call the
-    /// one `handle_sample` the live path calls; wz's recovered-reply path is
-    /// split out ([`recovered_sample_from_reply`]) and hands over an owned
-    /// [`Sample`], so the shared core is reached through this entry instead.
-    ///
-    /// IT EXISTS BECAUSE THE RECOVERY PATH WAS SEQUENCED-ONLY, which was a
-    /// silent drop rather than a deferral: `recovered_sample_from_reply` opened
-    /// with `reply.source_info()?`, and a timestamped publisher's cached sample
-    /// carries no `source_info` at all — that absence is what makes it
-    /// timestamped. So every reply from such a cache was discarded before any
-    /// ordering ran, and the startup `@adv/**` history GET recovered nothing
-    /// from a timestamped publisher even though it addressed its cache.
-    ///
-    /// Gated with its only caller: a recovery-OFF build issues no GET at all, so
-    /// there is no reply to route and `-D warnings` says so.
-    #[cfg(feature = "ext-pubsub-advanced-recovery")]
-    fn deliver_unsequenced_sample(&mut self, sample: Sample) {
+    /// R2554 — ONE arm table, reached by every ingest path in every build. It
+    /// used to be two (a `&dyn SampleView` copy for the live paths and an owned
+    /// `Sample` copy for the recovered one), which is the duplication
+    /// [`State::route_sample`] documents the cost of.
+    fn deliver_unsequenced(&mut self, sample: Sample) {
         if let Some(ts) = sample.timestamp.clone() {
             if self.admit_timestamped(&ts) {
                 (self.on_sample)(sample);
@@ -800,6 +772,52 @@ impl State {
             return;
         }
         (self.on_sample)(sample);
+    }
+
+    /// R2554 — THE SHAPE FORK, and there is exactly one of it.
+    ///
+    /// Upstream's `handle_sample` is a single function with three arms, called
+    /// from nine sites; wz had the arms spread over THREE independent forks on
+    /// `source_info` — the recovery-off live path, the recovery-on live path,
+    /// and the reply path — and that is not a tidiness observation, it is the
+    /// measured generator of a shipped defect. R2522 built the timestamped arm
+    /// into TWO of the three; its commit message names the two it knew about
+    /// ("shared by handle and handle_live") and its diff never touches the
+    /// third, which sat 700 lines away over a different input type. A
+    /// timestamped publisher's whole cache was therefore unreachable through
+    /// every GET this module issues, for thirty rounds, and nothing could say
+    /// so because no single place listed the arms.
+    ///
+    /// So the fork lives here, once, and the terminal arms are taken here:
+    ///
+    /// * WITH a timestamp and no `source_info` — order by the clock
+    ///   ([`Self::deliver_unsequenced`]), STRICTLY newer per timestamp-id.
+    /// * WITH neither — nothing to order by and nothing to de-duplicate
+    ///   against, so deliver unconditionally. It must stay LAST: it is the
+    ///   fallback, not the rule.
+    /// * WITH `source_info` — the SEQUENCED arm, which is the one case this
+    ///   cannot finish itself, because what a forward gap may do differs by
+    ///   build (a recovery-off build reports a [`Miss`] and advances; a
+    ///   recovery-on build buffers and asks for a retransmission). That case is
+    ///   handed back to the caller with the source identity already read off
+    ///   the sample, so no caller re-derives it.
+    ///
+    /// Returning the identity rather than taking a `key` argument also removes
+    /// a state that could previously be constructed: the old
+    /// `ingest_sequenced(key, sn, sample, ..)` let a caller pass a key that
+    /// DISAGREED with the sample's own `source_info`. Every test did pass them
+    /// redundantly; production could not, but nothing said so.
+    fn route_sample(
+        &mut self,
+        sample: Sample,
+    ) -> Option<(wz_session_core::sample::SourceInfo, Sample)> {
+        match sample.source_info.clone() {
+            Some(source) => Some((source, sample)),
+            None => {
+                self.deliver_unsequenced(sample);
+                None
+            }
+        }
     }
 
     /// The timestamped ordering predicate, shared by the live and recovered
@@ -821,13 +839,18 @@ impl State {
 #[cfg(not(feature = "ext-pubsub-advanced-recovery"))]
 impl State {
     /// The zenoh `handle_sample` state machine (retransmission-off subset).
+    ///
+    /// R2554 — the shape decision is NOT made here any more; it is made once,
+    /// in [`State::route_sample`], which also takes the two terminal arms. What
+    /// is left here is the part that genuinely differs by build: a forward gap
+    /// in a build with no retransmission reports a [`Miss`] and advances past
+    /// it, where the recovery build buffers and asks.
     fn handle(&mut self, view: &dyn SampleView) {
-        let Some(source_info) = view.source_info() else {
-            self.deliver_unsequenced(view);
+        let Some((source, sample)) = self.route_sample(Sample::from_view(view)) else {
             return;
         };
-        let key = (source_info.zid_prefix().to_vec(), source_info.eid);
-        let sn = source_info.sn;
+        let key = (source.zid_prefix().to_vec(), source.eid);
+        let sn = source.sn;
         let State {
             sequenced,
             on_sample,
@@ -840,12 +863,12 @@ impl State {
         match state.last_delivered {
             // First sample from this source: deliver, record.
             None => {
-                on_sample(Sample::from_view(view));
+                on_sample(sample);
                 state.last_delivered = Some(sn);
             }
             // In order: deliver, advance.
             Some(last) if sn == last.wrapping_add(1) => {
-                on_sample(Sample::from_view(view));
+                on_sample(sample);
                 state.last_delivered = Some(sn);
             }
             // Forward gap (no retransmission): report the miss, deliver,
@@ -856,7 +879,7 @@ impl State {
                     source_eid: key.1,
                     nb: sn - last - 1,
                 });
-                on_sample(Sample::from_view(view));
+                on_sample(sample);
                 state.last_delivered = Some(sn);
             }
             // `sn <= last`: duplicate / out-of-order-late — drop.
@@ -872,36 +895,37 @@ impl State {
     /// source needs a `_sn`-range recovery GET; the caller issues it OUTSIDE
     /// the state lock.
     fn handle_live(&mut self, view: &dyn SampleView) -> Option<RecoveryRequest> {
-        let Some(source_info) = view.source_info() else {
-            // R2522 — the timestamped / bare arms, shared with the
-            // recovery-off `handle`; see [`State::deliver_unsequenced`].
-            // Neither can ask for a retransmission: a clock defines no "the
-            // sample after this one", so there is no gap to recover.
-            self.deliver_unsequenced(view);
-            return None;
-        };
-        let key = (source_info.zid_prefix().to_vec(), source_info.eid);
-        let sn = source_info.sn;
-        self.ingest_sequenced(key, sn, Sample::from_view(view), true)
+        self.ingest(Sample::from_view(view), true)
     }
 
-    /// Ingest a RECOVERED (retransmitted) reply sample — re-keyed by the
-    /// reply's `source_info` and ordered like a live sample, but never issues
-    /// a follow-on GET (the in-flight GET is what produced it).
-    fn handle_recovered(&mut self, key: (Vec<u8>, u32), sn: u32, sample: Sample) {
-        let _ = self.ingest_sequenced(key, sn, sample, false);
+    /// R2554 — THE ONE INGEST ENTRY of a recovery-enabled build, and upstream's
+    /// own shape: `zenoh-ext/src/advanced_subscriber.rs` @ `fn handle_sample(states: &mut State, sample: Sample) -> bool {`
+    /// is one function that every one of its nine call sites passes an owned
+    /// sample to — the live subscription and eight GET callbacks alike.
+    ///
+    /// `live` is the ONLY thing those callers differ by, and it means exactly
+    /// one thing: whether a forward gap may trigger a NEW recovery GET. A
+    /// recovered sample must not, because the GET that produced it is the one
+    /// already in flight.
+    fn ingest(&mut self, sample: Sample, live: bool) -> Option<RecoveryRequest> {
+        let (source, sample) = self.route_sample(sample)?;
+        self.ingest_sequenced(source, sample, live)
     }
 
-    /// The shared sequenced-ordering core (zenoh `handle_sample`
-    /// advanced_subscriber.rs:497-540). `live` gates whether a forward gap may
-    /// trigger a new recovery GET.
+    /// The sequenced-ordering arm (zenoh `handle_sample`
+    /// advanced_subscriber.rs:497-540), reached only through [`Self::ingest`].
+    ///
+    /// R2554 — the `key` / `sn` parameters are gone: they were always the
+    /// sample's own `source_info` read back out, and passing them separately
+    /// let a caller state an identity the sample contradicted.
     fn ingest_sequenced(
         &mut self,
-        key: (Vec<u8>, u32),
-        sn: u32,
+        source: wz_session_core::sample::SourceInfo,
         sample: Sample,
         live: bool,
     ) -> Option<RecoveryRequest> {
+        let key = (source.zid_prefix().to_vec(), source.eid);
+        let sn = source.sn;
         let retransmission = self.retransmission;
         #[cfg(feature = "ext-pubsub-advanced-history")]
         let history_pending = self.history_pending;
@@ -1351,23 +1375,15 @@ fn issue_recovery_get<R, T>(
             if !wz_session_core::pubsub::keyexpr_intersect_patterns(&sub, &reply_ke) {
                 return;
             }
-            match recovered_sample_from_reply(reply) {
-                Some(RecoveredSample::Sequenced { key, sn, sample }) => {
-                    reply_states
-                        .lock()
-                        .expect("advanced subscriber state mutex poisoned")
-                        .handle_recovered(key, sn, sample);
-                }
-                // R2553 — a reply with no `source_info` is the timestamped /
-                // bare shape, not a malformed one: it takes the same arms the
-                // live subscription takes for such a sample.
-                Some(RecoveredSample::Unsequenced(sample)) => {
-                    reply_states
-                        .lock()
-                        .expect("advanced subscriber state mutex poisoned")
-                        .deliver_unsequenced_sample(sample);
-                }
-                None => {}
+            // R2554 — the SAME entry the live subscription uses, which is what
+            // upstream's GET callbacks do (`handle_sample(states, s)`, at every
+            // one of them). `live = false`: the GET that produced this reply is
+            // the one already in flight, so a gap here must not fan another.
+            if let Some(sample) = recovered_sample_from_reply(reply) {
+                let _ = reply_states
+                    .lock()
+                    .expect("advanced subscriber state mutex poisoned")
+                    .ingest(sample, false);
             }
         },
         move |rid| {
@@ -1485,40 +1501,17 @@ fn issue_recovery_query<R, T>(
     );
 }
 
-/// A recovery / history reply, rebuilt as a sample and routed to the ordering
-/// arm its own shape selects. `None` only for an Err reply.
+/// Rebuild a recovery / history reply as a [`Sample`], field for field. `None`
+/// for an Err reply. Shared by the recovery and history GETs.
 ///
-/// R2553 — this return used to be `Option<((Vec<u8>, u32), u32, Sample)>`, and
-/// the tuple was the defect: it could only describe a SEQUENCED reply, so the
-/// function opened with `reply.source_info()?` and every reply without one was
-/// dropped at the `?`. A timestamped publisher's cached samples carry no
-/// `source_info` — that absence is the definition of the shape — so a whole
-/// publisher's cache was unreachable through both the startup `@adv/**` GET and
-/// the per-publisher one. Upstream has no such fork because its GET callbacks
-/// call `handle_sample` directly, the same entry the live subscription uses,
-/// which routes all three arms. The enum restores that: every arm the live path
-/// has, the recovered path now has too.
-#[cfg(feature = "ext-pubsub-advanced-recovery")]
-enum RecoveredSample {
-    /// Carried a `source_info`: order it by `(zid, eid)` + sequence number.
-    Sequenced {
-        /// The `(zid, eid)` source key.
-        key: (Vec<u8>, u32),
-        /// The reply's sequence number.
-        sn: u32,
-        /// The rebuilt sample.
-        sample: Sample,
-    },
-    /// No `source_info`: the timestamped / bare arms, ordered by the sample's
-    /// own timestamp when it has one and delivered unconditionally when it does
-    /// not — [`State::deliver_unsequenced_sample`].
-    Unsequenced(Sample),
-}
-
-/// Re-key a recovery / history reply for the per-source ordering: rebuild the
-/// sample and read the source identity off the reply's source_info (the
-/// `reply-source-info` seam) when it carries one. `None` for an Err reply.
-/// Shared by the recovery and history GETs.
+/// R2554 — it decides NOTHING about ordering, and that is the point. It used to
+/// return `Option<((Vec<u8>, u32), u32, Sample)>` and so had to open with
+/// `reply.source_info()?`, dropping every reply without one — which is exactly
+/// a timestamped publisher's whole cache. R2553 replaced the tuple with an enum
+/// that named both shapes; R2554 removes the fork from here altogether, because
+/// a reply is just a sample and [`State::route_sample`] is where a sample's
+/// shape is read. Upstream's GET callbacks do the same thing by construction:
+/// they hand the sample straight to `handle_sample`.
 ///
 /// R311y561 — the DEL arm. A Del reply is now rebuilt as a Del sample rather
 /// than discarded: the `@adv` cache retains deletes since
@@ -1547,17 +1540,16 @@ enum RecoveredSample {
 /// reads the encoding only inside the `_is_put` branch
 /// (`vendor/zenoh-pico/src/protocol/codec/message.c:263,269-276`).
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
-fn recovered_sample_from_reply(reply: &dyn ReplyView) -> Option<RecoveredSample> {
+fn recovered_sample_from_reply(reply: &dyn ReplyView) -> Option<Sample> {
     let kind = reply.kind();
     if kind == ReplyKind::Err {
         return None;
     }
-    let source_info = reply.source_info();
     let mut sample = match kind {
         ReplyKind::Del => Sample::new_del(reply.keyexpr()),
         _ => Sample::new_put(reply.keyexpr(), reply.payload().to_vec()),
     };
-    sample.source_info = source_info.cloned();
+    sample.source_info = reply.source_info().cloned();
     sample.timestamp = reply.timestamp().cloned();
     sample.attachment = reply.attachment().map(<[u8]>::to_vec);
     if let Some((packed_id, schema)) = reply.put_encoding() {
@@ -1566,14 +1558,7 @@ fn recovered_sample_from_reply(reply: &dyn ReplyView) -> Option<RecoveredSample>
             schema: schema.map(String::from),
         });
     }
-    match source_info {
-        Some(si) => Some(RecoveredSample::Sequenced {
-            key: (si.zid_prefix().to_vec(), si.eid),
-            sn: si.sn,
-            sample,
-        }),
-        None => Some(RecoveredSample::Unsequenced(sample)),
-    }
+    Some(sample)
 }
 
 /// Build the startup history GET selector from the `_max` cap (`sample_depth`)
@@ -3137,15 +3122,11 @@ mod tests {
         };
 
         // Live 0,1 in order — no recovery request.
-        assert!(state
-            .ingest_sequenced(key.clone(), 0, mk(0, 0xA0), true)
-            .is_none());
-        assert!(state
-            .ingest_sequenced(key.clone(), 1, mk(1, 0xA1), true)
-            .is_none());
+        assert!(state.ingest(mk(0, 0xA0), true).is_none());
+        assert!(state.ingest(mk(1, 0xA1), true).is_none());
         // Live gap at 2: sn 3 arrives. retransmission -> buffer + request GET.
         let req = state
-            .ingest_sequenced(key.clone(), 3, mk(3, 0xA3), true)
+            .ingest(mk(3, 0xA3), true)
             .expect("a forward gap with retransmission requests recovery");
         assert_eq!(
             (req.zid.clone(), req.eid),
@@ -3160,7 +3141,7 @@ mod tests {
         );
 
         // The recovery GET returns sn 2 — drains 2 then the buffered 3.
-        state.handle_recovered(key.clone(), 2, mk(2, 0xA2));
+        let _ = state.ingest(mk(2, 0xA2), false);
         state.finish_recovery(&key);
         assert_eq!(
             *delivered.lock().unwrap(),
@@ -3201,10 +3182,10 @@ mod tests {
             s
         };
 
-        state.ingest_sequenced(key.clone(), 0, mk(0, 0xB0), true);
+        let _ = state.ingest(mk(0, 0xB0), true);
         // Gap at 1: sn 2 buffered, GET requested for _sn=1..
         let req = state
-            .ingest_sequenced(key.clone(), 2, mk(2, 0xB2), true)
+            .ingest(mk(2, 0xB2), true)
             .expect("gap requests recovery");
         assert_eq!(req.from_sn, 1);
         // The GET finalises with NOTHING for sn 1 (the cache never had it).
@@ -3946,7 +3927,6 @@ mod tests {
             history_pending: true,
             max_history_depth: usize::MAX,
         };
-        let key = (vec![0x02u8], 7u32);
         let mk = |sn: u32, v: u8| {
             let mut s = Sample::new_put("demo/data", vec![v]);
             s.source_info = Some(SourceInfo::new(&[0x02], 7, sn));
@@ -3954,8 +3934,8 @@ mod tests {
         };
 
         // History in flight -> the recovered history buffers, nothing delivers.
-        state.handle_recovered(key.clone(), 0, mk(0, 0xA0));
-        state.handle_recovered(key.clone(), 1, mk(1, 0xA1));
+        let _ = state.ingest(mk(0, 0xA0), false);
+        let _ = state.ingest(mk(1, 0xA1), false);
         assert!(
             delivered.lock().unwrap().is_empty(),
             "samples buffer while the history GET is in flight"
@@ -3989,8 +3969,6 @@ mod tests {
             s.source_info = Some(SourceInfo::new(&[0x02], 7, sn));
             s
         };
-        let key = (vec![0x02u8], 7u32);
-
         let feed = |depth: usize| {
             let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
             let d = Arc::clone(&delivered);
@@ -4003,8 +3981,8 @@ mod tests {
                 history_pending: true,
                 max_history_depth: depth,
             };
-            state.handle_recovered(key.clone(), 0, mk(0, 0xA0));
-            state.handle_recovered(key.clone(), 1, mk(1, 0xA1));
+            let _ = state.ingest(mk(0, 0xA0), false);
+            let _ = state.ingest(mk(1, 0xA1), false);
             let got = delivered.lock().unwrap().clone();
             got
         };
@@ -4043,8 +4021,6 @@ mod tests {
             s.source_info = Some(SourceInfo::new(&[0x02], 7, sn));
             s
         };
-        let key = (vec![0x02u8], 7u32);
-
         let feed = |depth: usize| {
             let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
             let d = Arc::clone(&delivered);
@@ -4059,10 +4035,10 @@ mod tests {
                 history_pending: false,
                 max_history_depth: depth,
             };
-            state.handle_recovered(key.clone(), 0, mk(0, 0xA0));
+            let _ = state.ingest(mk(0, 0xA0), false);
             // Forward gaps: 2 and 3 buffer while 1 is missing.
-            state.handle_recovered(key.clone(), 2, mk(2, 0xA2));
-            state.handle_recovered(key.clone(), 3, mk(3, 0xA3));
+            let _ = state.ingest(mk(2, 0xA2), false);
+            let _ = state.ingest(mk(3, 0xA3), false);
             let got = delivered.lock().unwrap().clone();
             got
         };
@@ -4188,7 +4164,7 @@ mod tests {
             "no flush while history is pending (a flush would lose later history)"
         );
         // An older history reply (sn 0) arrives -> buffered (history-gated).
-        state.handle_recovered(key.clone(), 0, mk(0, 0xA0));
+        let _ = state.ingest(mk(0, 0xA0), false);
         // History completes -> flush 0,1 in order; sn 0 was NOT lost.
         state.finish_history();
         assert_eq!(
