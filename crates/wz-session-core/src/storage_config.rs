@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! §5.24 storage manager *config* — the declarative [`StorageConfig`] a storage
+//! §5.24 storage manager *config* — the declarative
+//! [`StorageConfig`](crate::storage_config::StorageConfig) a storage
 //! MANAGER uses to create + drive one named storage, the wz mirror of zenoh
 //! `zenoh-backend-traits` `StorageConfig` (`plugins/zenoh-backend-traits/src/config.rs:60`)
 //! + `GarbageCollectionConfig` (`:155`). The FOUNDATIONAL data model the
@@ -31,10 +32,11 @@
 //!
 //! ⚠ R2571 — THE `volume_cfg` OMISSION ABOVE IS NO LONGER TRUE, and the open
 //! question it left ("what a per-storage payload should BE here") is answered.
-//! [`StorageConfig::volume_cfg`] carries it as a `Vec<(String, String)>`: wz
-//! types the SHAPE and reads none of the contents, which keeps the
-//! typed-by-construction stance while giving a backend exactly what upstream
-//! gives it. The answer was FORCED rather than chosen — [`StorageConfig::to_admin_json`]
+//! [`StorageConfig::volume_cfg`](crate::storage_config::StorageConfig::volume_cfg)
+//! carries it as a `Vec<(String, String)>`: wz types the SHAPE and reads none of
+//! the contents, which keeps the typed-by-construction stance while giving a
+//! backend exactly what upstream gives it. The answer was FORCED rather than
+//! chosen — [`StorageConfig::to_admin_json`](crate::storage_config::StorageConfig::to_admin_json)
 //! has to reproduce upstream's bare-string AND object renderings, and an opaque
 //! blob cannot produce the second without parsing itself apart.
 //!
@@ -53,6 +55,15 @@
 //! turns a `StorageConfig` into a live storage is storage-mgr-multi-storage-host
 //! (which will pass it to [`crate::storage_volume::Volume::create_storage`], closing
 //! that R311y55 MVP config-free divergence).
+
+// ⚠ EVERY intra-doc link in the `//!` block above is written as a FULL
+// `crate::…` path, and that is not a style choice. lib.rs carries an outer `///`
+// doc on `pub mod storage_config;` (`lib.rs:1196`), so rustdoc MERGES the two
+// and resolves the merged text against the CRATE ROOT — where `StorageConfig` is
+// not in scope, even though it is declared in this very file. R2571 wrote two
+// bare `[`StorageConfig::…`]` links here and Layer C1bz redded at 539 against a
+// budget of 537. Item-level `///` docs further down are NOT merged and resolve
+// in module scope, which is why `[`Self::to_admin_json`]` on the field is fine.
 
 use alloc::string::String;
 use alloc::vec::Vec;

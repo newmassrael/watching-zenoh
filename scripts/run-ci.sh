@@ -10559,6 +10559,35 @@ layer_c1bz_docs_resolve() {
     # private `guarded` helper went with it. This is the arm that turns an
     # unremarked doc edit into a named one, which is the whole reason the
     # budget is watched in both directions.
+    #
+    # R2571: wz-session-core 537 -> 533, and the round arrived here from the
+    # UPWARD arm. R2571's storage-volume-payload work wrote two new links in
+    # storage_config.rs's `//!` block -- `[`StorageConfig::volume_cfg`]` and
+    # `[`StorageConfig::to_admin_json`]` -- and the count read 539. Both are the
+    # class this lane's header already names: lib.rs carries an outer `///` doc
+    # on `pub mod storage_config;` (`lib.rs:1196`), rustdoc MERGES it with the
+    # module's inner `//!`, and resolves the merged text against the CRATE ROOT,
+    # where `StorageConfig` is not in scope -- even though it is declared in that
+    # same file. "Fully qualifying is the fix", so both were rewritten as full
+    # `crate::storage_config::StorageConfig::…` paths rather than budgeted.
+    #
+    # The other FOUR are why the number lands below the old budget rather than
+    # back on it, and they are the same SEAM rather than a sweep: every remaining
+    # broken link naming the `StorageConfig` type went with them -- the bare
+    # `[`StorageConfig`]` opening storage_config.rs's own module doc, the one in
+    # storage_volume.rs:18, `[`StorageConfig::new`]` in adminspace.rs:1555 (an
+    # item-level `///` that fails for the OTHER reason in this family: the name is
+    # not imported at that module's scope, R2159's shape), and
+    # `[`Volume::create_storage`]` sharing the physical line with one of them.
+    # Fixing the two the push added and leaving the type's other four broken was
+    # the instance-not-base trade this workspace refuses.
+    #
+    # MEASURED both ways on this lane's own command (`cargo doc -p
+    # wz-session-core --no-deps --all-features`), error sets sorted and diffed:
+    # 539 before, 533 after, exactly those six lines removed and none added.
+    # storage_config.rs now carries a non-doc `//` note above its `use` block
+    # recording WHY every link in its `//!` is a full path, so the next author
+    # does not re-earn the upward arm.
     budget="
         wz:2
         wz-ap-demo:26
@@ -10570,7 +10599,7 @@ layer_c1bz_docs_resolve() {
         wz-routing-graph:6
         wz-runtime-coop:12
         wz-runtime-tokio:519
-        wz-session-core:537
+        wz-session-core:533
         wz-session-lwip:4
         wz-switchboard-codegen:8
         zenoh-pico-sys:3

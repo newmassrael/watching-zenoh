@@ -1552,7 +1552,8 @@ pub enum AdminConfigWrite {
 impl AdminConfigWrite {
     /// R311y239 — the intent → [`crate::storage_config::StorageConfig`] SSOT: an
     /// [`AddStorage`](Self::AddStorage) intent maps to a `StorageConfig` (zenoh-faithful
-    /// defaults, [`StorageConfig::new`]) the runtime storage manager spawns; any other
+    /// defaults, [`StorageConfig::new`](crate::storage_config::StorageConfig::new)) the
+    /// runtime storage manager spawns; any other
     /// intent yields `None`. Kept here (not at the runtime layer) because both the
     /// intent and `StorageConfig` are wz-session-core types — one mapping, no drift.
     pub fn to_storage_config(&self) -> Option<crate::storage_config::StorageConfig> {

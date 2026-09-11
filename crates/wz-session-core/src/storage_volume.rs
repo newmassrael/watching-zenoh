@@ -15,7 +15,9 @@
 //! strip-prefix, GC, wildcard-updates) compose ON this once `storage-mgr-config`
 //! lands.
 //!
-//! R311y57 — [`Volume::create_storage`] takes the declarative [`StorageConfig`]
+//! R311y57 — [`Volume::create_storage`](crate::storage_volume::Volume::create_storage)
+//! takes the declarative
+//! [`StorageConfig`](crate::storage_config::StorageConfig)
 //! (the storage-mgr-config data model). Divergences from zenoh: wz's
 //! `create_storage` is SYNC (zenoh's is `async`); it returns
 //! `Result<Box<dyn StorageBackend + Send>, VolumeError>` (R311y60 — fallible like
