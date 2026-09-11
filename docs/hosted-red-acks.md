@@ -34,6 +34,7 @@ printed, `commit` is the tip being replaced (the sha the run graded), and
 | R2496 | `34393145847` | `0df6bfeb` | C0 binary-dep · C0 (armed) provenance · C1bt wz-capture | 709 | R2498 |
 | R2497 | `34393145847` | `0df6bfeb` | C0 binary-dep · C0 (armed) provenance · C1bt wz-capture | 709 | R2498 |
 | R2535 | `34465003136` | `6b112827` | C0 sn-res-words selftest (two jobs, one cause) · C1ce census `unstable` row | 717 | R2535 |
+| R2568 | `34611269702` | `efada3a9` | E z_info drop-in link · Z same (two jobs, one cause) · A4 cross-impl accessor · C0 gate-provenance | 721 | |
 
 ## What the rows above say
 
@@ -65,9 +66,47 @@ census row); runs `34483441810` and `34486390529` repeated it. A whole-run
 fail-fast, so a green leg proves nothing when an earlier leg aborted, and only a
 run that reached the end proves the later ones ran at all.
 
+⚠ R2568 SUPERSEDES THE COUNT BELOW: it is ONE, not zero. Its row is the first
+outstanding acknowledgement since R2540, and the paragraph that follows was
+written when R2540 was the tip. The sentence is kept rather than rewritten
+because the reasoning in it is still the reasoning; only the number moved.
+
 ⚠ The outstanding-acknowledgement count this file exists to make countable is
 therefore ZERO as of R2540. That is a statement about ACKNOWLEDGEMENTS, not
 about hosted CI: R2540 measured two ratchets left red by R2539 (open-debt item
 720) which no row here covers, because no push has yet been made over them under
 an ack. A row appears when a push USES an ack, and a red nobody has pushed over
 is the register's business rather than this file's.
+
+## R2568's row
+
+The four failing jobs on run `34611269702` reduce to THREE causes, and all three
+are repaired in `7ee6b475`, which this push carries: an unregistered
+foreign-oracle accessor (Layer A4), an unsanctioned provenance token (Layer C0,
+`gate-provenance: FAIL` in that job's log), and a `z_info.c` link failure seen
+twice — Layers E and Z are the same defect against two different peers, 34
+undefined references to the `Z_FEATURE_CONNECTIVITY` family.
+
+⚠ The failing STEP name does not name the failing gate. The API reports
+`Layer C0 — binary-dep test`, and the gate that actually failed inside it was
+`gate-provenance`. Attributing from step names alone misreads this file's
+`failing steps` column; read the job log.
+
+The red dates to R2562, established by walking the runs backwards rather than by
+reading HEAD: `34593867110` (R2560) green, `34599628250` (R2561) red only on
+`Provision Zephyr`, `34603271323` (R2562) the first appearance of Layer E. R2562
+set `Z_FEATURE_CONNECTIVITY=1` on the primary pico arm to obtain one witness,
+and that flag made upstream `z_info.c` reference symbols wz does not export.
+
+The `debt` column names **721**, an item R2568 had to CREATE. No existing item
+owned the class: 687 is `CLOSED (R2421)` and the changed-crate mechanism is the
+diagnosis written inside that closed item's body — which is exactly why this red
+survived four hosted runs with nobody prompted.
+
+⚠ `paid` is EMPTY deliberately. The repair was verified by READING the guards:
+`z_info.c` guards connectivity at two sites, the in-`main` one sits after the
+`z_info_peers_zid` section, and the two failing tests assert the Peers/Routers
+zid bucket split, which is the section a CONNECTIVITY=0 header set keeps. That
+is an argument, not a hosted verdict. The round that reads this run's successor
+fills the column in, and an empty column that survives that reading means the
+repair did not hold.
