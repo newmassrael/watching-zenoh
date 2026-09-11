@@ -4021,12 +4021,22 @@ mod reconnect_tx_tests {
         );
 
         // A re-handshake window must not be able to read the previous principal.
-        actions.reset_for_reopen();
-        assert_eq!(
-            actions.peer_auth_id(),
-            None,
-            "an identity must not survive reset_for_reopen"
-        );
+        //
+        // R2566 — gated, because `reset_for_reopen`'s ENTIRE body is
+        // `#[cfg(feature = "session-reconnect")]`: without that feature it is a
+        // no-op, so this assertion would fail for a reason that has nothing to
+        // do with the identity slot. The set/read/clear arms above hold in both
+        // configurations and stay ungated, so narrowing this one costs no
+        // coverage where the behaviour exists.
+        #[cfg(feature = "session-reconnect")]
+        {
+            actions.reset_for_reopen();
+            assert_eq!(
+                actions.peer_auth_id(),
+                None,
+                "an identity must not survive reset_for_reopen"
+            );
+        }
 
         // And a stage that authenticates nobody CLEARS rather than leaves the
         // old value standing -- which is why the setter takes an Option.

@@ -204,8 +204,19 @@ impl MultiLinkDispatch {
         self.send_stage(|m| m.accept_init_ack())
     }
     /// Accept side: consume the peer OpenSyn's 0x4 ext (verifies the challenge).
+    ///
+    /// R2566 — the identity the stage now returns is DISCARDED here, and that is
+    /// a decision rather than an oversight. This plane is the 0x4 multilink ext,
+    /// which binds a second link to a logical session by the peer's ephemeral
+    /// PUBLIC KEY ([`Self::captured_peer_pubkey`]), not by a named principal;
+    /// the method it drives is the pubkey one, which names nobody and returns
+    /// `None` at this stage by construction. Propagating an identity out of here
+    /// would also be wrong in kind: a session's authenticated principal is
+    /// established on the AUTH ext plane and lives in the session's own slot, so
+    /// a second source for it is exactly the "two methods claiming an identity"
+    /// ambiguity `AuthDispatch::accept_recv_open_syn` refuses.
     pub fn accept_recv_open_syn(&mut self, peer_exts: &[ExtEntryOwned]) -> Result<(), AuthError> {
-        self.recv_stage(peer_exts, |m, s| m.accept_recv_open_syn(s))
+        self.recv_stage(peer_exts, |m, s| m.accept_recv_open_syn(s).map(|_| ()))
     }
     /// Accept side: produce the OpenAck 0x4 ext (the Unit confirmation).
     pub fn accept_open_ack(&mut self) -> Result<Option<ExtEntryOwned>, AuthError> {
