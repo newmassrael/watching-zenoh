@@ -2686,6 +2686,22 @@ PY
     # is the safe direction. Measured 0.2s.
     python3 scripts/lib/feature_public_surface_census.py --selftest || return 1
     python3 scripts/lib/feature_public_surface_census.py --check || return 1
+    # R2572 (§5.20 `switchboard`) — a facade feature must reach EVERY runtime
+    # that declares it. `crates/wz` forwards with cargo's optional-dep `?`,
+    # which yields the EMPTY SET when the dep is absent instead of erroring, so
+    # a forward naming one runtime is silently inert on the other profile while
+    # the facade goes on advertising the capability. MEASURED: `switchboard`
+    # named wz-runtime-tokio alone, so `wz --features runtime-coop,switchboard`
+    # activated nothing -- the §5.20 residual, sat for many rounds, while its
+    # neighbours (`codec-close`, the keyexpr family) all named both arms.
+    #
+    # The population is DERIVED from the manifests -- "every runtime crate that
+    # declares a feature of that name" -- so a capability that is genuinely
+    # AP-only simply is not declared by the MCU runtime and the rule never
+    # reaches it. No excuse list to rot. 151 forwards today; a population of
+    # zero is a FAILURE, not a pass.
+    python3 scripts/lib/facade_forward_gate.py --selftest >/dev/null || return 1
+    python3 scripts/lib/facade_forward_gate.py || return 1
     # R2208 (open-debt item 562) — WHAT A MACHINE MUST ALREADY HAVE for the
     # lanes this script arms, and the way to ask one.
     #

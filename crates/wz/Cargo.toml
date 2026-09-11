@@ -426,7 +426,15 @@ pubsub-timestamp = ["wz-runtime-tokio?/pubsub-timestamp"]
 
 # R311gi gc-2c — statechart switchboard facade forward (the AP dynamic
 # keyexpr -> SCXML domain-event inbound adapter; ⇒ codec-push).
-switchboard = ["wz-runtime-tokio?/switchboard"]
+#
+# R2572 — the MCU arm lands, so this forward is no longer AP-only. It used to
+# name `wz-runtime-tokio` alone, which made `wz --features
+# runtime-coop,switchboard` activate NOTHING: the optional-dep `?` syntax
+# silently yields the empty set when the named dep is absent, so the facade
+# reported a capability the MCU profile could not reach. That is the shape the
+# codec/keyexpr forwards above already avoid by naming BOTH runtimes, and this
+# line is now the same shape as `codec-close` and its siblings.
+switchboard = ["wz-runtime-tokio?/switchboard", "wz-runtime-coop?/switchboard"]
 
 # ----- domain: query (10 atomic, 10 active / 0 reserved) -----
 # R311cj — query-attachment + -selector-parameters + -reply-err wire-up.

@@ -182,6 +182,25 @@ keyexpr-wildcard-double = ["dep:wz-session-core", "wz-session-core/keyexpr-wildc
 keyexpr-dollar-star = ["dep:wz-session-core", "wz-session-core/keyexpr-dollar-star"]
 keyexpr-includes = ["dep:wz-session-core", "wz-session-core/keyexpr-includes"]
 
+# R2572 — the statechart switchboard (§5.20) on the MCU profile: the LAST leg
+# of the same facade -> runtime -> core funnel this crate already runs for
+# `scouting-static` / `reassembly` / `session-unicast`. Until now the facade's
+# `switchboard` forwarded to wz-runtime-tokio ALONE (crates/wz/Cargo.toml), so
+# `wz --features runtime-coop,switchboard` activated NOTHING and an MCU
+# consumer had to depend on wz-session-core directly to name the ingress port.
+# That was the atom's second residual, and it is a hole in the facade rather
+# than a missing capability: the core side has been MCU-ready since R311y824
+# made the generated value path take `&mut dyn EventInjector`.
+#
+# NO `alloc` requirement, and that asymmetry is the whole shape: the
+# `EventInjector` port the MCU generated static match calls is UNCONDITIONAL in
+# wz-session-core, while `SwitchboardRegistry` — the AP dynamic table — is
+# `all(alloc, switchboard)`. Forcing `alloc` here would deny the port to the
+# no-alloc profile that is its primary consumer (deploy/mcu-noheap-probe builds
+# with no `#[global_allocator]`). The crate-root re-exports in lib.rs carry the
+# split instead, so each profile sees exactly what it can have.
+switchboard = ["dep:wz-session-core", "wz-session-core/switchboard"]
+
 # R311y22b — no [build-dependencies]: the reassembly buffer-pool codegen moved
 # to the committed out/wz-runtime-coop/reassembly_pool_mcu.rs via the `xtask`
 # codegen SSOT, so this crate has no build script and pulls no sce-codegen.

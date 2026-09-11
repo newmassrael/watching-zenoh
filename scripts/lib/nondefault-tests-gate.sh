@@ -214,6 +214,7 @@ LEGS=(
         session-unicast,\
         session-unicast-accept,\
         session-unicast-open,\
+        switchboard,\
         transport-batching,\
         transport-keepalive,\
         transport-qos\

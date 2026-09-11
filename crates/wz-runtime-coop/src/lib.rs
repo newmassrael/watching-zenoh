@@ -196,6 +196,39 @@ pub mod session_runtime;
 #[cfg(feature = "scouting-static")]
 pub use wz_session_core::scout_static;
 
+// R2572 — re-export the switchboard ingress so the MCU profile reaches §5.20
+// through its runtime crate, the same facade -> runtime -> core route
+// `scout_static` above takes. Without this the feature forward alone would
+// close only half the atom's residual: `wz --features runtime-coop,switchboard`
+// would activate the core gate, but an MCU consumer still could not NAME the
+// port without depending on wz-session-core directly.
+//
+// The port is NOT alloc-gated, mirroring `scout_static`: `EventInjector` is
+// unconditional in wz-session-core because the MCU generated static match
+// (`out/mcu-noheap-probe/dispatch_switchboard.rs`) takes `&mut dyn
+// EventInjector` and that dispatch is what a no-alloc deploy calls.
+#[cfg(feature = "switchboard")]
+pub use wz_session_core::switchboard::EventInjector;
+
+// ⚠ `SwitchboardRegistry` / `SwitchboardEntry` are deliberately NOT re-exported
+// here, and the reason was MEASURED rather than assumed. The first attempt wrote
+// `#[cfg(all(feature = "switchboard", feature = "alloc"))]` over them and failed
+// to compile: that `alloc` is THIS crate's feature (`wz-runtime-core/alloc` +
+// portable-atomic), while the table is gated on wz-session-core's OWN `alloc`
+// (`wz-session-core/src/switchboard.rs` @ `pub use alloc_impl::{SwitchboardEntry, SwitchboardRegistry};`),
+// which this crate's `alloc` does not forward — two same-named features on
+// opposite sides of one crate edge. The repair is NOT to add
+// `wz-session-core/alloc` to the forward: that would impose alloc on the
+// no-alloc profile this whole leg exists for.
+//
+// It is that the table does not belong on this edge. §5.20 splits the surface
+// by profile — the AP DYNAMIC registry against the MCU GENERATED static match —
+// and the MCU side reaches its dispatch through the port above. Re-exporting the
+// AP table through the MCU runtime would advertise a surface this profile has no
+// consumer for. An alloc-bearing MCU deploy that later wants the dynamic table
+// should name it as its own feature forwarding `wz-session-core/alloc`, the way
+// `session-unicast` already does, rather than have it ride in on `alloc`.
+
 /// SCE-generated MCU reassembly buffer-pool config. The emit comes from
 /// `sources/network/reassembly_pool_mcu.scxml` (an `sce:kind="buffer-pool"`
 /// document, the SSOT). R311y22b: COMMITTED at
@@ -236,3 +269,58 @@ pub mod reassembly_pool_mcu {
 // the MCU main loop owns the dispatcher and feeds it decoded fragments.
 #[cfg(feature = "reassembly")]
 pub mod reassembly_rx;
+
+// R2572 — the §5.20 MCU reach witness. This does NOT re-test the switchboard
+// (wz-session-core owns that); it pins the one thing the atom's residual was
+// about: that the ingress port is nameable THROUGH THIS CRATE, so an MCU
+// consumer reaching `wz::runtime_coop::EventInjector` needs no direct
+// wz-session-core dependency. Deleting the `pub use` above makes this module
+// fail to resolve, which is the intended coupling -- the claim IS reachability,
+// so a name that cannot be written is exactly the failure to catch.
+//
+// No `alloc`: the impl below is a bare struct with integer counters, so the
+// witness holds on the same no-heap profile deploy/mcu-noheap-probe builds.
+#[cfg(all(test, feature = "switchboard"))]
+mod switchboard_reach_tests {
+    use super::EventInjector;
+
+    #[derive(Default)]
+    struct CountingInjector {
+        signals: u32,
+        values: u32,
+    }
+
+    impl EventInjector for CountingInjector {
+        fn inject(&mut self, _event_name: &str, _event_data: &str) {
+            self.signals += 1;
+        }
+
+        fn inject_value(&mut self, _event_name: &str, _payload: &[u8]) -> bool {
+            self.values += 1;
+            true
+        }
+    }
+
+    #[test]
+    fn the_ingress_port_is_nameable_through_the_mcu_runtime_crate() {
+        let mut inj = CountingInjector::default();
+        // Drive both arms through the port as the generated dispatch does:
+        // signal rows call `inject`, value rows call `inject_value`.
+        inj.inject("reset", "");
+        assert!(inj.inject_value("temp_reading", &[0x01, 0x02]));
+        assert_eq!((inj.signals, inj.values), (1, 1));
+    }
+
+    #[test]
+    fn the_value_arm_defaults_to_refusing_when_an_injector_does_not_override() {
+        // The port's `inject_value` default returns false, which is what keeps
+        // a signal-only injector from claiming a value binding it has not got.
+        // Pinned here because the MCU generated dispatch relies on the
+        // DISTINCTION between the two arms, not merely on the port existing.
+        struct SignalOnly;
+        impl EventInjector for SignalOnly {
+            fn inject(&mut self, _event_name: &str, _event_data: &str) {}
+        }
+        assert!(!SignalOnly.inject_value("temp_reading", &[0x01]));
+    }
+}

@@ -290,7 +290,19 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
     "wz-runtime-coop": (
         "the no_std runtime: reached through the facade's `runtime-coop`, so "
         "the facade row above is where a consumer-facing probe would sit",
-        frozenset({"alloc", "reassembly", "scouting-static", "session-unicast"}),
+        # R2572 — `switchboard` joins the row. It gates a crate-root `pub use`
+        # of the §5.20 ingress port, the same shape `scouting-static` already
+        # has here, and it arrived with the facade forward that made
+        # `wz --features runtime-coop,switchboard` activate anything at all.
+        frozenset(
+            {
+                "alloc",
+                "reassembly",
+                "scouting-static",
+                "session-unicast",
+                "switchboard",
+            }
+        ),
     ),
     "wz-runtime-core": (
         "the trait skeleton; its one non-default feature gates the alloc-only "
@@ -607,8 +619,13 @@ FACADE_ONLY: dict[str, frozenset[str]] = {
 # crate.
 #: package -> the features of its `OFF_AXIS` row the axis could probe today
 AXIS_REACHABLE: dict[str, frozenset[str]] = {
+    # R2572 — `switchboard` is reachable by the derivation, not excused from it:
+    # it gates `pub use wz_session_core::switchboard::EventInjector;` at the
+    # crate root, which is the simple crate-root shape this axis names. It goes
+    # in the same commit as the OFF_AXIS row above, so the row never states a
+    # reach the axis does not have.
     "wz-runtime-coop": frozenset(
-        {"alloc", "reassembly", "scouting-static", "session-unicast"}
+        {"alloc", "reassembly", "scouting-static", "session-unicast", "switchboard"}
     ),
     # R2298 — the last three, and they failed R2297's first clause on ONE
     # feature each for the SAME derivable reason. See the second clause of
