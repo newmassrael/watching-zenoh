@@ -7908,11 +7908,19 @@ layer_c1y_cargo_test_routing_peer() {
     # a count that moves names which tier moved.
     _runci_guarded_test "C1y linkstate+access" 214 \
         cargo test -p wz-runtime-tokio --features "$access" --lib linkstate --quiet || return 1
-    _runci_guarded_test "C1y extauth" 10 \
+    # R2567 — the three usrpwd counts move together because ONE structure landed
+    # under them: the shared credential store that closed `access-extauth-usrpwd`.
+    # 10 -> 17 is the `CredentialSource` seam and the dictionary parser (the pure
+    # half, testable with no filesystem); 4 -> 6 is the widened
+    # `accept_recv_open_syn` returning an identity, with its two-claimant reject;
+    # 3 -> 5 is the pair of e2e witnesses driving a REAL wire handshake, one user
+    # added after the method was built and one removed at runtime.
+    # Each number is what the command PRINTED, not what the diff suggests.
+    _runci_guarded_test "C1y extauth" 17 \
         cargo test -p wz-session-core --features access-extauth-usrpwd --lib extauth --quiet || return 1
-    _runci_guarded_test "C1y auth_dispatch" 4 \
+    _runci_guarded_test "C1y auth_dispatch" 6 \
         cargo test -p wz-session-core --features access-extauth-usrpwd --lib auth_dispatch --quiet || return 1
-    _runci_guarded_test "C1y usrpwd e2e" 3 \
+    _runci_guarded_test "C1y usrpwd e2e" 5 \
         cargo test -p wz-runtime-tokio --features access-extauth-usrpwd \
         --test usrpwd_handshake_e2e --quiet || return 1
     # R311y581 — 7 -> 11: R311y576 added the four initiator-gate tests and left
