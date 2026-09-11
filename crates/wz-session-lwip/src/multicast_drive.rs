@@ -428,6 +428,152 @@ where
     )
 }
 
+/// R2561 — [`run_multicast_session_with_shutdown`] that RE-JOINS the group
+/// after a lost carrier instead of ending the face for the life of the process.
+///
+/// # What was missing
+///
+/// The loop above has been able to DETECT a carrier drop since R2390 — it polls
+/// [`LwipLink::any_link_is_up`] and returns [`MulticastOutcome::LinkLost`] — and
+/// nothing acted on it. An interface going down and coming back, the ordinary
+/// case this exists for, ended the MCU face permanently. The AP twin got its
+/// re-join at R2376; this profile did not, and R2560 measured that no
+/// `rejoin` / `rebind` / `reopen` structure existed anywhere in
+/// `wz-session-lwip`, `wz-runtime-coop` or `wz-link-lwip`.
+///
+/// # Why a dispatcher FACTORY and not a `&mut` one
+///
+/// A re-join needs a FRESH dispatcher, and this is not a workaround for the
+/// FSM — it is what the AP twin already does, for a reason that is about the
+/// data rather than the state machine:
+/// `crates/wz-runtime-tokio/src/multicast_glue.rs` @ `// A FRESH dispatcher per join — see the egress twin: the peer table`
+/// says the old peer table "describes members reached over the link that just
+/// died". Carrying it across an outage would re-admit peers nobody has heard
+/// from on the new link.
+///
+/// ⚠ IT IS ALSO WHAT MAKES THE RE-JOIN WORK AT ALL, and the first draft of this
+/// function got that wrong by reusing one dispatcher. MEASURED: with the socket
+/// genuinely re-bound and the carrier back, the second run returned
+/// [`MulticastOutcome::Stopped`] immediately, because the loop's first act is
+/// `session_state() != Running` and `notify_link_lost` had driven the FSM into
+/// `Stopped` — a `<final>` in `sources/session/session_fsm_multicast.scxml`,
+/// which cannot carry an outgoing transition. That reading invites adding a
+/// resume edge to the statechart and regenerating. The AP twin shows the answer
+/// was already settled one crate away: do not resume a session that is over,
+/// start a new one. A fresh dispatcher enters at `Running` and needs no edge.
+///
+/// # Why the driver is taken BY VALUE, and why the drop is explicit
+///
+/// This is the one part that is not a matter of taste. `LwipMulticastDriver`
+/// owns its socket, and lwIP refuses a second bind to a live port:
+/// `vendor/lwip/src/core/udp.c` @ `/* port matches that of PCB in list and REUSEADDR not set -> reject */`
+/// returns `ERR_USE` unless every PCB on that port sets `SOF_REUSEADDR`, which
+/// [`wz_link_lwip::LwipUdpSocket::bind`] never does. So the tempting shape —
+/// hand this function a `&mut` and assign `*driver = rebind()?` — is not merely
+/// untidy, it CANNOT WORK: Rust evaluates the new bind while the old PCB is
+/// still installed. Taking the driver by value lets the `drop` happen before
+/// the re-bind, in that order, visibly. (The finite `MEMP_NUM_UDP_PCB` pool
+/// gives the same answer a second way: a transient double occupancy is a
+/// `PcbExhausted` risk on a device sized for one.)
+///
+/// # Why the wait is a poll and not a sleep
+///
+/// The AP twin races its backoff against a `watch::Receiver` in `select!`. This
+/// profile has no suspension point and takes its stop as a PREDICATE, so the
+/// wait is a DEADLINE polled beside `should_stop` — the same idiom this module
+/// already uses twice for `next_join_ms` and `next_sweep_ms`. A stop during an
+/// outage is therefore observed on the next poll rather than one backoff later,
+/// which is the property the AP's `select!` buys and this loop gets from its
+/// shape. `run_until_idle` is pumped inside the wait for the same reason the
+/// drive loop pumps it: a cooperative executor whose other tasks stop running
+/// while one face waits out an outage is a worse failure than the outage.
+///
+/// # The delay is CONSTANT, and that is the parity answer here
+///
+/// Not an oversight and not the AP's schedule. The AP faces grow their backoff
+/// (zenoh's 1000/4000/x2) because a router holding a group face on a flapping
+/// NIC would retry at 1 Hz for the length of the outage. This profile's parity
+/// target is pico, whose multicast lease failure arms the same reopen task its
+/// unicast failure does and re-arms FLAT:
+/// `vendor/zenoh-pico/src/net/session.c` @ `return _z_fut_fn_result_wake_up_after(1000);`.
+/// A constant delay is what the upstream this loop mirrors actually does.
+///
+/// Returns the ORIGINAL loss when the host stops the face while it is down, or
+/// when `rebind` gives up by answering `None` — never a re-join it did not make.
+///
+/// ⚠ `rejoin_delay_ms` is bounded by the CLOCK ADVANCING, because the wait is a
+/// poll rather than a sleep. A caller whose [`ClockSource`] does not advance —
+/// the `FrozenClock` this module's own tests use — must pass `0`, or the wait
+/// never reaches its deadline. That is a property of polling, not a defect to
+/// paper over with a spin count: on a device the clock is what moves, and a
+/// deadline that never arrives is a stopped clock the face cannot fix.
+#[allow(clippy::too_many_arguments)]
+pub fn run_multicast_session_rejoining<C, F, G, H, B, D, const MAX_PEERS: usize>(
+    mut new_dispatcher: D,
+    cfg: MulticastDriveConfig<'_>,
+    runtime: &CoopRuntime<C>,
+    link: &LwipLink,
+    driver: LwipMulticastDriver,
+    mut on_event: F,
+    mut next_tx: G,
+    mut should_stop: H,
+    mut rebind: B,
+    rejoin_delay_ms: u64,
+) -> MulticastOutcome
+where
+    C: ClockSource,
+    F: FnMut(IterationEvent<'_>),
+    G: FnMut() -> Option<MulticastTxItem>,
+    H: FnMut() -> bool,
+    B: FnMut() -> Option<LwipMulticastDriver>,
+    D: FnMut() -> MulticastDispatcher<MAX_PEERS>,
+{
+    // `MulticastDriveConfig` is neither `Copy` nor `Clone` and is consumed by
+    // each run, so its three fields are lifted out once rather than deriving
+    // `Copy` on a shared type for one caller's convenience.
+    let params = cfg.params;
+    let tick_ms = cfg.tick_ms;
+    let max_iters = cfg.max_iters;
+    let clock = CoopTime::new(runtime);
+    let mut driver = driver;
+    loop {
+        // A FRESH dispatcher per join, mirroring the AP twin: the previous peer
+        // table describes members reached over the link that just died, and the
+        // previous session FSM is in its `<final>` state.
+        let mut dispatcher = new_dispatcher();
+        let outcome = run_multicast_session_with_shutdown(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params,
+                tick_ms,
+                max_iters,
+            },
+            runtime,
+            link,
+            &mut driver,
+            &mut on_event,
+            &mut next_tx,
+            &mut should_stop,
+        );
+        if !outcome.warrants_rejoin() {
+            return outcome;
+        }
+        // Release the port BEFORE asking for it again — see the doc above.
+        drop(driver);
+        let deadline = clock.now_monotonic_ms().saturating_add(rejoin_delay_ms);
+        while clock.now_monotonic_ms() < deadline {
+            if should_stop() {
+                return outcome;
+            }
+            runtime.run_until_idle();
+        }
+        match rebind() {
+            Some(fresh) => driver = fresh,
+            None => return outcome,
+        }
+    }
+}
+
 /// The one drive loop both entry points above run. `should_stop` is the only
 /// thing that varies between them, and it is an `Option` rather than two copies
 /// of the body — the same call the AP twin made when its shutdown door landed
@@ -1605,6 +1751,91 @@ mod tests {
     /// one that dropped. Asserting only the outcome would let a copy of the
     /// stop arm pass.
     ///
+    /// R2561 — the face RE-JOINS after a lost carrier, which is the half
+    /// R2390 left undone: it taught this loop to DETECT the drop and nothing
+    /// acted on the answer.
+    ///
+    /// THE DISCRIMINATOR IS THE REBIND CALL, not the outcome. The loop already
+    /// returned `LinkLost` before this round, so an outcome assertion alone
+    /// would pass on the old behaviour. What could not happen before is the
+    /// loop being RE-ENTERED: `rebinds` counts that, and the returned outcome
+    /// is the SECOND run's terminal (`IterationLimit`), which the first run
+    /// could never have produced because it ended on a dead carrier.
+    ///
+    /// The carrier is restored INSIDE `rebind`, which is also what makes the
+    /// fixture honest: the re-join only succeeds because the interface came
+    /// back, exactly as it would on a device, rather than because the test
+    /// arranged for the loss to be cosmetic.
+    ///
+    /// `rejoin_delay_ms` is 0 because this fixture's clock is `FrozenClock` —
+    /// the wait is a poll bounded by the clock advancing, so any other value
+    /// would spin here forever. The function's own doc says so.
+    #[test]
+    fn a_lost_carrier_is_re_joined_and_the_loop_re_enters() {
+        let (_serial, link) = lwip_test_link();
+        let group = SESSION_MULTICAST_GROUP_DEFAULT;
+        let port: u16 = 7461;
+        let socket = bind_session_multicast_rx(&link, group, port).expect("bind + join group");
+        let driver = LwipMulticastDriver::new(socket, group, port);
+        let runtime = CoopRuntime::new(FrozenClock);
+        let self_params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
+
+        // Down BEFORE the first run, so it ends on the carrier rather than the
+        // budget — the terminal this round is about.
+        wz_link_lwip::set_all_netif_links(false);
+        let mut rebinds = 0usize;
+        let outcome = run_multicast_session_rejoining(
+            || MulticastDispatcher::<4>::new(MulticastConfig::new(5_000)),
+            MulticastDriveConfig {
+                params: &self_params,
+                tick_ms: 5,
+                max_iters: Some(6),
+            },
+            &runtime,
+            &link,
+            driver,
+            |_event| {},
+            || None,
+            || false,
+            || {
+                rebinds += 1;
+                wz_link_lwip::set_all_netif_links(true);
+                bind_session_multicast_rx(&link, group, port)
+                    .ok()
+                    .map(|s| LwipMulticastDriver::new(s, group, port))
+            },
+            0,
+        );
+        wz_link_lwip::set_all_netif_links(true);
+
+        std::assert_eq!(
+            rebinds,
+            1,
+            "a lost carrier must be RE-JOINED once; before R2561 the face ended \
+             for the life of the process and nothing re-bound"
+        );
+        // THE SECOND RUN'S OWN TERMINAL, which only a loop that genuinely
+        // re-entered AND ran can produce. The first run died on a dead carrier
+        // and could never reach a budget.
+        //
+        // ⚠ THIS ASSERTION FAILED ON THE FIRST DRAFT AND THE FAILURE IS WHY THE
+        // SIGNATURE TAKES A DISPATCHER FACTORY. That draft re-used one
+        // dispatcher and got `Stopped` here: the loop's first act is
+        // `session_state() != Running`, and `notify_link_lost` had already
+        // driven the FSM into `Stopped`, a `<final>` in
+        // `sources/session/session_fsm_multicast.scxml` that cannot carry an
+        // outgoing transition. The obvious reading of that is "the statechart
+        // needs a resume edge" — and it is wrong: the AP twin had already
+        // settled it by starting a NEW session per join rather than resuming a
+        // finished one. Re-using the dispatcher was the defect, not the FSM.
+        std::assert_eq!(
+            outcome,
+            MulticastOutcome::IterationLimit,
+            "the returned terminal must be the SECOND run's -- a fresh session \
+             that ran to its budget over the re-bound socket"
+        );
+    }
+
     /// The carrier is restored BEFORE any assertion, deliberately: lwIP's netif
     /// state is process-global and `lwip_test_link` hands out its lock through
     /// `PoisonError::into_inner`, so a panic with the link down would run every

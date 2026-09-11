@@ -9532,23 +9532,32 @@ layer_c1m_session_lwip() {
     # (the module does not compile without it). The first leg's new value came
     # from this gate rather than from counting; the other six are that
     # derivation, and this lane passing is what checks it.
-    _runci_guarded_test "C1m multicast" 9 \
+    #
+    # R2561 (the re-join) moved the same seven by ONE, and for the same reason
+    # read one round on: `a_lost_carrier_is_re_joined_and_the_loop_re_enters`
+    # carries no `#[cfg]` of its own and sits in the module `transport-multicast`
+    # gates, so it lands in every leg that turns that feature on and in neither
+    # of the two above. ⚠ Unlike R2390 above, NONE of these seven is a
+    # derivation: all nine legs were RUN and each number here is the one its own
+    # run PRINTED (2/2/10/11/12/11/14/10/12). That distinction is the paragraph
+    # below's whole subject, and it is cheap to honour — nine runs, ~8 minutes.
+    _runci_guarded_test "C1m multicast" 10 \
         cargo test -p wz-session-lwip --features transport-multicast --quiet || return 1
-    _runci_guarded_test "C1m multicast+push" 10 \
+    _runci_guarded_test "C1m multicast+push" 11 \
         cargo test -p wz-session-lwip --features transport-multicast,codec-push --quiet || return 1
-    _runci_guarded_test "C1m multicast+liveliness" 11 \
+    _runci_guarded_test "C1m multicast+liveliness" 12 \
         cargo test -p wz-session-lwip --features transport-multicast,liveliness-token --quiet || return 1
-    _runci_guarded_test "C1m multicast+queryable" 10 \
+    _runci_guarded_test "C1m multicast+queryable" 11 \
         cargo test -p wz-session-lwip \
         --features transport-multicast,query-queryable,codec-response,codec-response-final \
         --quiet || return 1
-    _runci_guarded_test "C1m multicast maximal" 13 \
+    _runci_guarded_test "C1m multicast maximal" 14 \
         cargo test -p wz-session-lwip \
         --features transport-multicast,codec-push,codec-response,codec-response-final,liveliness-token,query-queryable \
         --quiet || return 1
-    _runci_guarded_test "C1m multicast+reassembly" 9 \
+    _runci_guarded_test "C1m multicast+reassembly" 10 \
         cargo test -p wz-session-lwip --features transport-multicast,reassembly --quiet || return 1
-    _runci_guarded_test "C1m multicast+fragmentation" 11 \
+    _runci_guarded_test "C1m multicast+fragmentation" 12 \
         cargo test -p wz-session-lwip \
         --features transport-multicast,transport-fragmentation,codec-push --quiet || return 1
     (cd crates \
