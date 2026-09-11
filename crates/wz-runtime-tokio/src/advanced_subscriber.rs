@@ -209,6 +209,23 @@ struct TimestampedState {
     /// Put for the same publisher while its cache GET is still outstanding does
     /// not fan a duplicate.
     pending_queries: u64,
+    /// R2555 — the reorder buffer, upstream's `pending_samples: BTreeMap<T, Sample>`
+    /// at `T = Timestamp`. A live sample that arrives while a history GET is in
+    /// flight waits here so the OLDER recovered samples deliver ahead of it.
+    ///
+    /// # Why the key is a bare `u64` where upstream's is a whole `Timestamp`
+    ///
+    /// Not a simplification of the order — an application of the map it sits
+    /// in. This state is reached through `timestamped[ts.zid]`, so every sample
+    /// that can enter this buffer carries the SAME timestamp-id, and uhlc's
+    /// `(time, 16-byte LE id)` order therefore reduces to `time` exactly within
+    /// one state. `TimestampHint` is `Eq + Hash` but not `Ord`, so a
+    /// `BTreeMap<TimestampHint, _>` is not available anyway; the comparison
+    /// against `last_delivered` still goes through
+    /// [`wz_session_core::sample::timestamp_strictly_newer`], which is this
+    /// tree's single encoding of uhlc's `Ord` contract, rather than a second
+    /// `u64` comparison written here.
+    pending_samples: BTreeMap<u64, Sample>,
 }
 
 /// The timestamped ordering state when the history feature is OFF: the `uhlc`
@@ -764,14 +781,57 @@ impl State {
     /// used to be two (a `&dyn SampleView` copy for the live paths and an owned
     /// `Sample` copy for the recovered one), which is the duplication
     /// [`State::route_sample`] documents the cost of.
+    /// R2555 — and it now BUFFERS as well as orders, which is the arm's second
+    /// half and this atom's last residual. Upstream holds a timestamped sample
+    /// while a history GET is in flight so the older recovered samples deliver
+    /// ahead of it: `zenoh-ext/src/advanced_subscriber.rs` @ `if (states.global_pending_queries == 0 && state.pending_queries == 0)`
+    /// selects between delivering now and buffering, and the buffer drains
+    /// through `flush_timestamped_source`. wz's `history_pending` is that
+    /// `global_pending_queries == 0` test and [`TimestampedState::pending_queries`]
+    /// the per-source one.
+    ///
+    /// THE `max_history_depth == 1` ESCAPE IS UPSTREAM'S AND IS KEPT: a buffer
+    /// of one can hold nothing that reordering would help, so that build
+    /// delivers live rather than storing a single sample to hand straight back.
     fn deliver_unsequenced(&mut self, sample: Sample) {
-        if let Some(ts) = sample.timestamp.clone() {
-            if self.admit_timestamped(&ts) {
-                (self.on_sample)(sample);
+        let Some(ts) = sample.timestamp.clone() else {
+            (self.on_sample)(sample);
+            return;
+        };
+        #[cfg(feature = "ext-pubsub-advanced-history")]
+        let history_pending = self.history_pending;
+        #[cfg(feature = "ext-pubsub-advanced-history")]
+        let max_history_depth = self.max_history_depth;
+        let State {
+            timestamped,
+            on_sample,
+            ..
+        } = self;
+        let on_sample: &mut dyn FnMut(Sample) = &mut **on_sample;
+        let state = timestamped.entry(ts.zid.clone()).or_default();
+
+        // STRICTLY newer, so a retransmission at an equal instant and a late
+        // arrival at an older one are both dropped before anything else.
+        if let Some(last) = &state.last_delivered {
+            if !wz_session_core::sample::timestamp_strictly_newer(&ts, last) {
+                return;
+            }
+        }
+
+        #[cfg(feature = "ext-pubsub-advanced-history")]
+        if (history_pending || state.pending_queries != 0) && max_history_depth != 1 {
+            // R2555 — upstream's `entry(..).or_insert(sample)`: the FIRST
+            // sample at an instant wins, so a duplicate arriving while the
+            // buffer holds one does not displace it.
+            state.pending_samples.entry(ts.time).or_insert(sample);
+            if state.pending_samples.len() >= max_history_depth {
+                flush_timestamped(&ts.zid, state, on_sample);
             }
             return;
         }
-        (self.on_sample)(sample);
+
+        state.last_delivered = Some(ts);
+        on_sample(sample);
     }
 
     /// R2554 — THE SHAPE FORK, and there is exactly one of it.
@@ -819,20 +879,48 @@ impl State {
             }
         }
     }
+}
 
-    /// The timestamped ordering predicate, shared by the live and recovered
-    /// entries above: `true` (and the instant recorded) when `ts` is STRICTLY
-    /// newer than the newest already delivered for the same timestamp-id.
-    fn admit_timestamped(&mut self, ts: &wz_session_core::sample::TimestampHint) -> bool {
-        let state = self.timestamped.entry(ts.zid.clone()).or_default();
+/// R2555 — flush ONE timestamped source's reorder buffer, oldest instant
+/// first. The wz mirror of `zenoh-ext/src/advanced_subscriber.rs` @ `fn flush_timestamped_source(`,
+/// including both of its guards and its whole-buffer drain.
+///
+/// ⚠ THE `pending_queries != 0` GUARD IS UPSTREAM'S AND IS NOT A MISTAKE TO
+/// CORRECT HERE, though it reads like one: it means the depth-bound spill
+/// does NOTHING while this source's own GET is outstanding, so the buffer
+/// can exceed the bound until that GET completes. Upstream carries exactly
+/// that, and the guard is what makes the flush safe to call from all three
+/// of its sites without each re-testing it. The bound is honoured the
+/// moment the GET's terminal Final runs
+/// ([`State::finish_timestamped_recovery`]).
+///
+/// ⚠⚠ It drains the WHOLE buffer where the sequenced spill (R2503) pops
+/// only the oldest. That difference is upstream's too, and it follows from
+/// the ordering: the sequenced buffer is waiting for a specific missing
+/// sequence number to arrive and must keep the rest, while a clock defines
+/// no hole to wait for — everything held is simply older than now.
+///
+/// `zid` is the state's own map key, passed in so the comparison can go
+/// through [`wz_session_core::sample::timestamp_strictly_newer`] rather
+/// than an open-coded `u64` test.
+#[cfg(feature = "ext-pubsub-advanced-history")]
+fn flush_timestamped(zid: &[u8], state: &mut TimestampedState, on_sample: &mut dyn FnMut(Sample)) {
+    if state.pending_queries != 0 || state.pending_samples.is_empty() {
+        return;
+    }
+    for (time, sample) in std::mem::take(&mut state.pending_samples) {
+        let ts = wz_session_core::sample::TimestampHint {
+            time,
+            zid: zid.to_vec(),
+        };
         let newer = match &state.last_delivered {
-            Some(last) => wz_session_core::sample::timestamp_strictly_newer(ts, last),
+            Some(last) => wz_session_core::sample::timestamp_strictly_newer(&ts, last),
             None => true,
         };
         if newer {
-            state.last_delivered = Some(ts.clone());
+            state.last_delivered = Some(ts);
+            on_sample(sample);
         }
-        newer
     }
 }
 
@@ -1071,11 +1159,20 @@ impl State {
     /// `InitialRepliesHandler::drop` -> per-source `flush_sequenced_source`,
     /// advanced_subscriber.rs:1334-1352). A source with a per-source recovery GET
     /// still in flight is left for [`Self::finish_recovery`] to flush.
+    ///
+    /// R2555 — and the TIMESTAMPED sources too, which is the half that was
+    /// missing. Upstream's same handler drains both maps under the one
+    /// `global_pending_queries == 0` test: `zenoh-ext/src/advanced_subscriber.rs` @ `flush_timestamped_source(state, states.callback.as_ref());`
+    /// sits directly under the sequenced loop in `InitialRepliesHandler::drop`.
+    /// Without it a timestamped sample buffered during the startup GET would
+    /// never be handed back — the buffer would fill and stay full, which is
+    /// strictly worse than not buffering at all.
     #[cfg(feature = "ext-pubsub-advanced-history")]
     fn finish_history(&mut self) {
         self.history_pending = false;
         let State {
             sequenced,
+            timestamped,
             on_sample,
             on_miss,
             ..
@@ -1086,6 +1183,9 @@ impl State {
             if state.pending_queries == 0 {
                 flush_sequenced(state, &key.0, key.1, on_sample, on_miss);
             }
+        }
+        for (zid, state) in timestamped.iter_mut() {
+            flush_timestamped(zid, state, on_sample);
         }
     }
 
@@ -1204,15 +1304,33 @@ impl State {
 
     /// R2553 — a timestamped publisher's history GET completed: close the slot
     /// its trigger opened. The twin of [`Self::finish_recovery`], and upstream's
-    /// `zenoh-ext/src/advanced_subscriber.rs` @ `impl Drop for TimestampedRepliesHandler`
-    /// minus the flush, which has nothing to flush until this state grows the
-    /// `pending_samples` buffer [`State::timestamped`] documents as the next
-    /// part. `saturating_sub` for the same reason the sequenced side uses it:
-    /// the failed-to-issue rollback runs this too.
+    /// `zenoh-ext/src/advanced_subscriber.rs` @ `impl Drop for TimestampedRepliesHandler`.
+    /// `saturating_sub` for the same reason the sequenced side uses it: the
+    /// failed-to-issue rollback runs this too.
+    ///
+    /// R2555 — and it now FLUSHES, which R2553 recorded as the missing half:
+    /// the buffer this closes the last query on is the buffer
+    /// [`flush_timestamped`] drains, and upstream's handler does both in that
+    /// order. The `!history_pending` test is upstream's
+    /// `global_pending_queries == 0` guard — a per-source GET can complete
+    /// while the startup history GET is still running, and flushing then would
+    /// advance `last_delivered` past instants the startup GET is about to
+    /// return, dropping them on the strictly-newer test. That is the same trap
+    /// [`Self::finish_recovery`] documents on the sequenced side.
     #[cfg(feature = "ext-pubsub-advanced-history")]
     fn finish_timestamped_recovery(&mut self, zid: &[u8]) {
-        if let Some(state) = self.timestamped.get_mut(zid) {
+        let history_pending = self.history_pending;
+        let State {
+            timestamped,
+            on_sample,
+            ..
+        } = self;
+        let on_sample: &mut dyn FnMut(Sample) = &mut **on_sample;
+        if let Some(state) = timestamped.get_mut(zid) {
             state.pending_queries = state.pending_queries.saturating_sub(1);
+            if !history_pending {
+                flush_timestamped(zid, state, on_sample);
+            }
         }
     }
 }
@@ -3946,6 +4064,126 @@ mod tests {
             *delivered.lock().unwrap(),
             vec![0xA0, 0xA1],
             "the buffered history flushes in order on completion"
+        );
+    }
+
+    /// R2555 — the TIMESTAMPED twin of the test above, and this atom's last
+    /// residual made witnessable.
+    ///
+    /// It asserts the property that matters and that ordering alone cannot
+    /// give: a sample arriving LIVE while the startup history GET is in flight
+    /// must not overtake the OLDER samples that GET is about to return. Feed
+    /// the newer instant first, then the older two, and the delivered order is
+    /// the CLOCK's, not the arrival order — which is only possible if the live
+    /// one was held.
+    ///
+    /// ⚠ The discriminator is the delivered VECTOR, never the buffer's length:
+    /// a buffer that held the sample and then dropped it would satisfy "nothing
+    /// delivered early" exactly as well, and lose it. The R2503 sequenced pair
+    /// above records the same rule for the same reason.
+    ///
+    /// ⚠⚠ WITHOUT THE BUFFER this test does not merely fail, it fails in the
+    /// specific way the residual described: the live sample delivers first and
+    /// the two older ones are then DROPPED by the strictly-newer test, so the
+    /// subscriber loses history it successfully recovered. That is the measured
+    /// red the control probe produces.
+    #[cfg(feature = "ext-pubsub-advanced-history")]
+    #[test]
+    fn a_live_timestamped_sample_waits_for_the_history_it_would_overtake() {
+        let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let d = Arc::clone(&delivered);
+        let mut state = State {
+            sequenced: HashMap::new(),
+            timestamped: HashMap::new(),
+            on_sample: Box::new(move |s: Sample| d.lock().unwrap().push(s.payload[0])),
+            on_miss: Box::new(|_| {}),
+            retransmission: true,
+            history_pending: true,
+            max_history_depth: usize::MAX,
+        };
+        // No source_info: the timestamped shape. One timestamp-id throughout,
+        // so the state is the same one and the order is the clock's.
+        let mk = |time: u64, v: u8| {
+            let mut s = Sample::new_put("demo/data", vec![v]);
+            s.timestamp = Some(wz_session_core::sample::TimestampHint {
+                time,
+                zid: vec![0x02u8],
+            });
+            s
+        };
+
+        // The LIVE sample arrives first and is the NEWEST.
+        let _ = state.ingest(mk(300, 0xC3), true);
+        assert!(
+            delivered.lock().unwrap().is_empty(),
+            "a timestamped sample waits while the history GET is in flight"
+        );
+        // The history GET then returns two OLDER samples, out of order.
+        let _ = state.ingest(mk(200, 0xC2), false);
+        let _ = state.ingest(mk(100, 0xC1), false);
+        assert!(
+            delivered.lock().unwrap().is_empty(),
+            "recovered timestamped samples buffer too, so the drain can order them"
+        );
+
+        state.finish_history();
+        assert_eq!(
+            *delivered.lock().unwrap(),
+            vec![0xC1, 0xC2, 0xC3],
+            "the buffer drains by CLOCK order, not arrival order: the live \
+             sample that arrived first is delivered last because it is newest"
+        );
+    }
+
+    /// R2555 — the depth bound on the timestamped buffer, as a PAIR that
+    /// differs only in the bound and is fed the identical samples.
+    ///
+    /// `max_history_depth == 1` is upstream's escape hatch, not a degenerate
+    /// case to leave untested: that build must deliver LIVE rather than buffer,
+    /// because a buffer of one can hold nothing reordering would help. The
+    /// unbounded arm is the control that proves the difference is the bound and
+    /// not the samples.
+    #[cfg(feature = "ext-pubsub-advanced-history")]
+    #[test]
+    fn a_depth_of_one_delivers_live_where_an_unbounded_buffer_reorders() {
+        let feed = |depth: usize| {
+            let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
+            let d = Arc::clone(&delivered);
+            let mut state = State {
+                sequenced: HashMap::new(),
+                timestamped: HashMap::new(),
+                on_sample: Box::new(move |s: Sample| d.lock().unwrap().push(s.payload[0])),
+                on_miss: Box::new(|_| {}),
+                retransmission: true,
+                history_pending: true,
+                max_history_depth: depth,
+            };
+            let mk = |time: u64, v: u8| {
+                let mut s = Sample::new_put("demo/data", vec![v]);
+                s.timestamp = Some(wz_session_core::sample::TimestampHint {
+                    time,
+                    zid: vec![0x02u8],
+                });
+                s
+            };
+            let _ = state.ingest(mk(300, 0xC3), true);
+            let _ = state.ingest(mk(100, 0xC1), false);
+            state.finish_history();
+            let out = delivered.lock().unwrap().clone();
+            out
+        };
+
+        assert_eq!(
+            feed(1),
+            vec![0xC3],
+            "at depth 1 the live sample delivers immediately, and the older \
+             recovered one is then correctly dropped as not strictly newer"
+        );
+        assert_eq!(
+            feed(usize::MAX),
+            vec![0xC1, 0xC3],
+            "unbounded, both are held and drain in clock order — the same two \
+             samples, so the bound is what differs"
         );
     }
 

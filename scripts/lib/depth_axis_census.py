@@ -753,7 +753,12 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # COMPLETE once its pin audit answered the four axes R2547 left open, so it left
 # this population and took its citations with it. DERIVED: the HEAD blob's reason
 # re-audited to wz=7, ambiguous=1, in the `reached` bucket.
-PIN_REACHED = 51
+# R2555 (the `ext-pubsub-advanced-history` build) — 51 -> 50, the same event
+# shape a fifth time. Its last residual, the timestamped reorder buffer, was
+# built, so it left this population. DERIVED: the departing reason re-audited to
+# wz=23, ambiguous=0, and it sat in the `reached` bucket — so REACHED falls by 1
+# and PIN_WZ_CITATIONS by 23, while UNREACHED and AMBIGUOUS correctly hold.
+PIN_REACHED = 50
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -809,7 +814,14 @@ PIN_NO_SYMBOL = 2
 # build measured. Derived by auditing the TWO ADDENDA ALONE -- hist wz=9 /
 # ambiguous=0, sub wz=2 / ambiguous=0 -- which is why AMBIGUOUS correctly does
 # not move and 315 + 11 lands exactly on the 326 the census measures.
-PIN_WZ_CITATIONS = 326
+# R2555 -- 326 -> 303, and this fall is the ONE direction that needs no
+# apology: `ext-pubsub-advanced-history` reached COMPLETE, so its reason LEFT
+# this population, which is PARTIAL reasons only. Derived by auditing the
+# departing text alone -- wz=23, ambiguous=0 -- so 326 - 23 = 303 exactly, and
+# AMBIGUOUS correctly holds at 66. ⚠ The count this pin tracks is a property of
+# how much is still OPEN, so an atom closing must lower it; a round that closed
+# an atom and left this pin up would be claiming residue it no longer has.
+PIN_WZ_CITATIONS = 303
 PIN_AMBIGUOUS = 66
 
 
