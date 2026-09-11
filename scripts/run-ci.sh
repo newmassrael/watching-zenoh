@@ -9160,6 +9160,15 @@ layer_c1k_cargo_test_scouting_static() {
         cargo test -p wz-session-core --features scouting-static --lib scout_static --quiet || return 1
     _runci_guarded_test "C1k static_scout_open" 15 \
         cargo test -p wz-runtime-tokio --features scouting-static --test static_scout_open --quiet || return 1
+    # R2570 — the MULTI-PEER arm. Its feature pair is `scouting-static` PLUS
+    # `routing-peer`, so neither of the two legs above can reach it: the module
+    # and its test file are both `#[cfg]`'d out at `--features scouting-static`
+    # alone, and a cfg'd-out test target exits 0 having selected NOTHING. The
+    # guard counts are what make that visible rather than green.
+    _runci_guarded_test "C1k scouting_static" 6 \
+        cargo test -p wz-runtime-tokio --features scouting-static,routing-peer --lib scouting_static --quiet || return 1
+    _runci_guarded_test "C1k static_peer_faces" 2 \
+        cargo test -p wz-runtime-tokio --features scouting-static,routing-peer --test static_peer_faces --quiet || return 1
     (cd crates \
         && cargo build -p wz-session-core --no-default-features --features scouting-static --quiet \
         && cargo build -p wz-runtime-coop --features scouting-static --quiet \

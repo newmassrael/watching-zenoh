@@ -861,6 +861,20 @@ pub mod scouting_responder;
 #[cfg(all(feature = "scouting-active", feature = "routing-peer"))]
 pub mod scouting_autoconnect;
 
+// R2570 — the MULTI-PEER arm of static mode: a static deploy brought up as a
+// whole peer face set rather than as one session. pico dispatches a static
+// deploy on the node's mode and gives a PEER every configured locator (the
+// `_z_add_peers` tail of `_z_open_locators_peer`); wz's entire `scouting-static`
+// runtime surface was the single-session opener, which is pico's CLIENT arm, so
+// a peer-mode deploy naming three locators held one and dropped two.
+//
+// Gated on `scouting-static` (it reads the deploy) AND `routing-peer` (it feeds
+// the mesh face loop, which IS wz's multi-peer transport) — the same pairing
+// `scouting_autoconnect` carries, for the same reason: a build with the first
+// and not the second could resolve a deploy and would have nowhere to hold it.
+#[cfg(all(feature = "scouting-static", feature = "routing-peer"))]
+pub mod scouting_static;
+
 /// Round C — multicast transport drive loop (the AP host loop that drives
 /// the `wz-session-core` `MulticastDispatcher` over a UDP-multicast link:
 /// periodic JOIN beacon, RX classify -> dispatch, lease sweep). Gated on
