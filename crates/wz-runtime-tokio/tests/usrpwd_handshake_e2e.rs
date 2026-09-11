@@ -30,6 +30,7 @@
 use std::sync::Arc;
 
 use tokio::net::TcpListener;
+use wz_runtime_tokio::extauth_usrpwd_store::UsrPwdStore;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent as E, SessionFsmUnicastState as S,
@@ -92,6 +93,23 @@ struct HandshakeOutcome {
 /// authenticates with `(USER, initiator_password)`; the responder's lookup holds
 /// `(USER, PASSWORD)` and a fresh OS-entropy challenge nonce.
 async fn drive_handshake(initiator_password: &[u8]) -> HandshakeOutcome {
+    drive_handshake_with_responder(
+        initiator_password,
+        UsrPwdMethod::responder(vec![(USER.to_vec(), PASSWORD.to_vec())], 0),
+    )
+    .await
+}
+
+/// [`drive_handshake`] against a caller-supplied RESPONDER method.
+///
+/// R2567 — exists so a responder backed by a SHARED store can be driven over
+/// the same real wire path, which is the only way to show that a user added at
+/// runtime authenticates on a LATER handshake. Everything else is identical, so
+/// a leg built this way is the same witness as any other.
+async fn drive_handshake_with_responder(
+    initiator_password: &[u8],
+    responder_method: UsrPwdMethod,
+) -> HandshakeOutcome {
     // Fresh per-handshake challenge nonce from OS entropy (the AP-layer
     // injection — the no_std core draws none).
     let challenge_nonce =
@@ -109,10 +127,7 @@ async fn drive_handshake(initiator_password: &[u8]) -> HandshakeOutcome {
     // exercising the SAME path the production accept seam
     // (`accept_and_open_session_with_auth`) drives — not the constructor. This
     // keeps the responder replay-defense an exercised contract, not a dead API.
-    let responder_dispatch = AuthDispatch::new(vec![Box::new(UsrPwdMethod::responder(
-        vec![(USER.to_vec(), PASSWORD.to_vec())],
-        0,
-    )) as _]);
+    let responder_dispatch = AuthDispatch::new(vec![Box::new(responder_method) as _]);
 
     let init_actions = side(&init_driver, initiator_dispatch);
     let resp_actions = side(&resp_driver, responder_dispatch);
@@ -235,6 +250,66 @@ async fn usrpwd_matching_credentials_reach_established_on_both_sides() {
     assert!(
         decode_auth_ext(&extensions).is_some(),
         "the InitSyn must carry the Z_EXT_AUTH ext (the staged usrpwd offer)"
+    );
+}
+
+/// R2567 — a user added AT RUNTIME authenticates on a LATER handshake.
+///
+/// This is the property the shared store exists for, and the one wz could not
+/// express before it: `UsrPwdMethod` owned its table by value, so a mutation
+/// after the method was built reached nothing. zenoh's FSM holds a reference to
+/// a shared store for exactly this reason.
+///
+/// The ordering is the proof. The responder method is constructed FIRST, from an
+/// EMPTY store; `add_user` happens AFTER, and only then does the handshake run.
+/// A store that copied on clone — or a method that snapshotted its table — would
+/// still be empty here and the handshake would fail with "unknown user".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_user_added_after_the_method_was_built_authenticates() {
+    let store = UsrPwdStore::new();
+    // Built while the store is EMPTY, and handed a clone.
+    let responder = UsrPwdMethod::responder_with_source(Box::new(store.clone()), 0);
+    assert!(store.is_empty(), "the method was built from an empty store");
+
+    // The operator registers the user afterwards.
+    store.add_user(USER.to_vec(), PASSWORD.to_vec());
+
+    let h = drive_handshake_with_responder(PASSWORD, responder).await;
+    assert_eq!(
+        h.responder_state,
+        S::Established,
+        "a user added after construction must authenticate"
+    );
+    assert_eq!(
+        h.responder_actions.peer_auth_id(),
+        Some(AuthIdentity(USER.to_vec())),
+        "and must be identified as that principal"
+    );
+}
+
+/// R2567 — the negation: a user REMOVED at runtime stops authenticating.
+///
+/// Its own test rather than an assertion tacked onto the one above, because it
+/// pins the opposite direction: `del_user` must actually revoke. Without it, a
+/// store that only ever grew would satisfy the add case.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_user_removed_at_runtime_stops_authenticating() {
+    let store = UsrPwdStore::new();
+    store.add_user(USER.to_vec(), PASSWORD.to_vec());
+    let responder = UsrPwdMethod::responder_with_source(Box::new(store.clone()), 0);
+
+    assert!(store.del_user(USER), "the user was present to remove");
+
+    let h = drive_handshake_with_responder(PASSWORD, responder).await;
+    assert_eq!(
+        h.responder_state,
+        S::Closing,
+        "a revoked credential must be refused"
+    );
+    assert_eq!(
+        h.responder_actions.peer_auth_id(),
+        None,
+        "and must leave no principal behind"
     );
 }
 

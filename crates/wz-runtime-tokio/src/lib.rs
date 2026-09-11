@@ -723,6 +723,15 @@ pub mod session;
 #[cfg(feature = "access-extauth-pubkey")]
 pub mod extauth_pubkey;
 
+/// R2567 — the SHARED usrpwd credential store (`UsrPwdStore`), the wz analogue
+/// of zenoh's `RwLock<AuthUsrPwd>`. It carries runtime `add_user` / `del_user`
+/// and the `user:password` dictionary-file load, both of which need `std` (a
+/// lock and a filesystem) and so cannot live in the `no_std` session kernel —
+/// which keeps the `CredentialSource` seam and the pure parser instead. Gated
+/// on `access-extauth-usrpwd`.
+#[cfg(feature = "access-extauth-usrpwd")]
+pub mod extauth_usrpwd_store;
+
 /// R4b — re-export the `rsa` crate the pubkey method is built against: a
 /// `PubKeyMethod`'s constructors take `RsaPrivateKey` / `RsaPublicKey`, so a
 /// consumer must name those types, and re-exporting the exact version avoids a
