@@ -215,8 +215,8 @@ where
         // wz used to declare `with_complete(true)` on the rationale that "the
         // cache is the authoritative answerer for its `@adv` suffix". That
         // rationale was wrong twice over. Upstream makes no `.complete()` call
-        // at all — `zenoh-ext/src/advanced_cache.rs` declares an ordinary
-        // queryable and so takes the builder default, `zenoh/src/api/session.rs` @ `complete: false,`
+        // at all: it declares an ordinary queryable and so takes the builder
+        // default, `zenoh/src/api/session.rs` @ `complete: false,`
         // — and the old comment's own parenthetical said as much while setting
         // the flag anyway.
         //
