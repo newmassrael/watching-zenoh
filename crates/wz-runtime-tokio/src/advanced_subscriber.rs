@@ -737,13 +737,30 @@ struct State {
     /// deliver past the gap (false, the plain [`AdvancedSubscriber::declare`]).
     #[cfg(feature = "ext-pubsub-advanced-recovery")]
     retransmission: bool,
-    /// R311y86 — true while the startup history GET is in flight: a live sample
-    /// from an as-yet-undelivered source BUFFERS instead of delivering, so the
-    /// (older) history delivers first (zenoh `global_pending_queries`,
-    /// advanced_subscriber.rs:504-516). Cleared + the buffer flushed when the
-    /// history GET's terminal Final fires ([`State::finish_history`]).
+    /// R311y86 — how many GLOBAL history GETs are in flight. While it is
+    /// non-zero a live sample from an as-yet-undelivered source BUFFERS instead
+    /// of delivering, so the (older) history delivers first; the buffers flush
+    /// when the last one's terminal Final fires ([`State::finish_history`]).
+    ///
+    /// # Why a COUNT and not the `bool` this was until R2555
+    ///
+    /// Upstream's is a count — `zenoh-ext/src/advanced_subscriber.rs` @ `global_pending_queries: usize,`
+    /// — and wz's `bool` was adequate only because wz issued exactly ONE global
+    /// GET, at declare. A `bool` cannot tell "one outstanding" from "two", so
+    /// the FIRST completion would clear it and release every buffered sample
+    /// while a second GET was still returning older ones — which the
+    /// strictly-newer and dup-drop tests would then discard. The ordering this
+    /// module exists to provide would be silently lost, with no failing test,
+    /// because nothing today issues a second one.
+    ///
+    /// R2555 WIDENS IT BEFORE THE FEATURE THAT NEEDS IT, and the widening is
+    /// provably inert at the old population: this value was written exactly
+    /// twice — once at construction (0 or 1) and once to `false` in
+    /// `finish_history` — and nothing ever set it back, so it was monotonic 1
+    /// to 0 and never exceeded 1. The whole suite passing unchanged across the
+    /// change is therefore not merely reassuring, it is the proof.
     #[cfg(feature = "ext-pubsub-advanced-history")]
-    history_pending: bool,
+    global_pending_queries: usize,
     /// R2503 — the pending buffer's CEILING, from the same config the history
     /// GET's `_max` selector uses. `usize::MAX` when the user set no bound,
     /// which is upstream's own answer rather than a wz choice:
@@ -799,7 +816,7 @@ impl State {
             return;
         };
         #[cfg(feature = "ext-pubsub-advanced-history")]
-        let history_pending = self.history_pending;
+        let history_pending = self.global_pending_queries != 0;
         #[cfg(feature = "ext-pubsub-advanced-history")]
         let max_history_depth = self.max_history_depth;
         let State {
@@ -1016,7 +1033,7 @@ impl State {
         let sn = source.sn;
         let retransmission = self.retransmission;
         #[cfg(feature = "ext-pubsub-advanced-history")]
-        let history_pending = self.history_pending;
+        let history_pending = self.global_pending_queries != 0;
         #[cfg(feature = "ext-pubsub-advanced-history")]
         let max_history_depth = self.max_history_depth;
         let State {
@@ -1133,7 +1150,7 @@ impl State {
         // SequencedRepliesHandler::drop on `global_pending_queries == 0`,
         // advanced_subscriber.rs:1368).
         #[cfg(feature = "ext-pubsub-advanced-history")]
-        let history_pending = self.history_pending;
+        let history_pending = self.global_pending_queries != 0;
         let State {
             sequenced,
             on_sample,
@@ -1153,12 +1170,22 @@ impl State {
         }
     }
 
-    /// R311y86 — the startup history GET completed (its terminal Final fired):
-    /// clear `history_pending` and flush EVERY source's buffer in order, so the
-    /// history accumulated during the query delivers oldest-first (zenoh
-    /// `InitialRepliesHandler::drop` -> per-source `flush_sequenced_source`,
-    /// advanced_subscriber.rs:1334-1352). A source with a per-source recovery GET
-    /// still in flight is left for [`Self::finish_recovery`] to flush.
+    /// R311y86 — a GLOBAL history GET completed (its terminal Final fired):
+    /// close its slot and, when it was the LAST one, flush every source's
+    /// buffer in order, so the history accumulated during the query delivers
+    /// oldest-first (zenoh `InitialRepliesHandler::drop` -> per-source
+    /// `flush_sequenced_source`, advanced_subscriber.rs:1334-1352). A source
+    /// with a per-source recovery GET still in flight is left for
+    /// [`Self::finish_recovery`] to flush.
+    ///
+    /// R2555 — "when it was the LAST one" is the new half, and it is upstream's
+    /// own gate: `zenoh-ext/src/advanced_subscriber.rs` @ `if states.global_pending_queries == 0 {`
+    /// guards both of that handler's flush loops. Flushing on any completion
+    /// rather than the last would release buffered samples while another global
+    /// GET is still returning OLDER ones, which the strictly-newer and dup-drop
+    /// arms would then discard — losing history the subscriber had already
+    /// recovered. `saturating_sub` because the failed-to-issue rollback in
+    /// [`issue_recovery_get`] runs this too.
     ///
     /// R2555 — and the TIMESTAMPED sources too, which is the half that was
     /// missing. Upstream's same handler drains both maps under the one
@@ -1169,7 +1196,10 @@ impl State {
     /// strictly worse than not buffering at all.
     #[cfg(feature = "ext-pubsub-advanced-history")]
     fn finish_history(&mut self) {
-        self.history_pending = false;
+        self.global_pending_queries = self.global_pending_queries.saturating_sub(1);
+        if self.global_pending_queries != 0 {
+            return;
+        }
         let State {
             sequenced,
             timestamped,
@@ -1319,7 +1349,7 @@ impl State {
     /// [`Self::finish_recovery`] documents on the sequenced side.
     #[cfg(feature = "ext-pubsub-advanced-history")]
     fn finish_timestamped_recovery(&mut self, zid: &[u8]) {
-        let history_pending = self.history_pending;
+        let history_pending = self.global_pending_queries != 0;
         let State {
             timestamped,
             on_sample,
@@ -2436,7 +2466,7 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
             on_miss: Box::new(on_miss),
             retransmission: false,
             #[cfg(feature = "ext-pubsub-advanced-history")]
-            history_pending: false,
+            global_pending_queries: 0,
             #[cfg(feature = "ext-pubsub-advanced-history")]
             max_history_depth: usize::MAX,
         }));
@@ -2574,7 +2604,7 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
             on_miss: Box::new(on_miss),
             retransmission,
             #[cfg(feature = "ext-pubsub-advanced-history")]
-            history_pending: history.is_some(),
+            global_pending_queries: usize::from(history.is_some()),
             // Upstream's own derivation, field for field — see the field's doc.
             #[cfg(feature = "ext-pubsub-advanced-history")]
             max_history_depth: history
@@ -3228,7 +3258,7 @@ mod tests {
             on_miss: Box::new(move |miss: Miss| m.lock().unwrap().push(miss)),
             retransmission: true,
             #[cfg(feature = "ext-pubsub-advanced-history")]
-            history_pending: false,
+            global_pending_queries: 0,
             #[cfg(feature = "ext-pubsub-advanced-history")]
             max_history_depth: usize::MAX,
         };
@@ -3289,7 +3319,7 @@ mod tests {
             on_miss: Box::new(move |miss: Miss| m.lock().unwrap().push(miss)),
             retransmission: true,
             #[cfg(feature = "ext-pubsub-advanced-history")]
-            history_pending: false,
+            global_pending_queries: 0,
             #[cfg(feature = "ext-pubsub-advanced-history")]
             max_history_depth: usize::MAX,
         };
@@ -3638,7 +3668,7 @@ mod tests {
             on_miss: Box::new(|_| {}),
             retransmission: true,
             #[cfg(feature = "ext-pubsub-advanced-history")]
-            history_pending: false,
+            global_pending_queries: 0,
             #[cfg(feature = "ext-pubsub-advanced-history")]
             max_history_depth: usize::MAX,
         };
@@ -3683,7 +3713,7 @@ mod tests {
             on_miss: Box::new(|_| {}),
             retransmission: false,
             #[cfg(feature = "ext-pubsub-advanced-history")]
-            history_pending: false,
+            global_pending_queries: 0,
             #[cfg(feature = "ext-pubsub-advanced-history")]
             max_history_depth: usize::MAX,
         };
@@ -3889,7 +3919,7 @@ mod tests {
             on_miss: Box::new(|_| {}),
             retransmission: true,
             #[cfg(feature = "ext-pubsub-advanced-history")]
-            history_pending: false,
+            global_pending_queries: 0,
             #[cfg(feature = "ext-pubsub-advanced-history")]
             max_history_depth: usize::MAX,
         };
@@ -3920,7 +3950,7 @@ mod tests {
             on_miss: Box::new(|_| {}),
             retransmission: false,
             #[cfg(feature = "ext-pubsub-advanced-history")]
-            history_pending: false,
+            global_pending_queries: 0,
             #[cfg(feature = "ext-pubsub-advanced-history")]
             max_history_depth: usize::MAX,
         };
@@ -4042,7 +4072,7 @@ mod tests {
             on_sample: Box::new(move |s: Sample| d.lock().unwrap().push(s.payload[0])),
             on_miss: Box::new(|_| {}),
             retransmission: true,
-            history_pending: true,
+            global_pending_queries: 1,
             max_history_depth: usize::MAX,
         };
         let mk = |sn: u32, v: u8| {
@@ -4098,7 +4128,7 @@ mod tests {
             on_sample: Box::new(move |s: Sample| d.lock().unwrap().push(s.payload[0])),
             on_miss: Box::new(|_| {}),
             retransmission: true,
-            history_pending: true,
+            global_pending_queries: 1,
             max_history_depth: usize::MAX,
         };
         // No source_info: the timestamped shape. One timestamp-id throughout,
@@ -4155,7 +4185,7 @@ mod tests {
                 on_sample: Box::new(move |s: Sample| d.lock().unwrap().push(s.payload[0])),
                 on_miss: Box::new(|_| {}),
                 retransmission: true,
-                history_pending: true,
+                global_pending_queries: 1,
                 max_history_depth: depth,
             };
             let mk = |time: u64, v: u8| {
@@ -4216,7 +4246,7 @@ mod tests {
                 on_sample: Box::new(move |s: Sample| d.lock().unwrap().push(s.payload[0])),
                 on_miss: Box::new(|_| {}),
                 retransmission: true,
-                history_pending: true,
+                global_pending_queries: 1,
                 max_history_depth: depth,
             };
             let _ = state.ingest(mk(0, 0xA0), false);
@@ -4270,7 +4300,7 @@ mod tests {
                 retransmission: true,
                 // NOT the history arm: this exercises the `if retransmission`
                 // insert, which compiles with the history feature off.
-                history_pending: false,
+                global_pending_queries: 0,
                 max_history_depth: depth,
             };
             let _ = state.ingest(mk(0, 0xA0), false);
@@ -4373,7 +4403,7 @@ mod tests {
             on_sample: Box::new(move |s: Sample| d.lock().unwrap().push(s.payload[0])),
             on_miss: Box::new(|_| {}),
             retransmission: true,
-            history_pending: true,
+            global_pending_queries: 1,
             max_history_depth: usize::MAX,
         };
         let key = (vec![0x02u8], 7u32);
@@ -4757,7 +4787,7 @@ mod tests {
             on_sample: Box::new(|_| {}),
             on_miss: Box::new(|_| {}),
             retransmission: false, // late-pub detection is NOT a retransmission concern
-            history_pending: false,
+            global_pending_queries: 0,
             #[cfg(feature = "ext-pubsub-advanced-history")]
             max_history_depth: usize::MAX,
         };
@@ -4790,7 +4820,7 @@ mod tests {
             on_sample: Box::new(|_| {}),
             on_miss: Box::new(|_| {}),
             retransmission: false,
-            history_pending: false,
+            global_pending_queries: 0,
             max_history_depth: usize::MAX,
         };
         let zid = vec![0x09u8];
