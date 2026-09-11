@@ -1491,8 +1491,8 @@ pub enum AdminConfigWrite {
         ///
         /// Upstream's `volume` field is a string OR an object carrying a
         /// mandatory `id` plus arbitrary backend keys
-        /// (`plugins/zenoh-backend-traits/src/config.rs` @
-        /// `Some(Value::Object(volume)) => {`). wz's wire had only the string
+        /// (`plugins/zenoh-backend-traits/src/config.rs` @ `Some(Value::Object(volume)) => {`).
+        /// wz's wire had only the string
         /// form; `@<volume_id>?<k>=<v>&…` is the object form, and the mandatory
         /// `id` is structural here rather than checked — it is the `@` field
         /// itself, which was already refused when empty.

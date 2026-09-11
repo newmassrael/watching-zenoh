@@ -131,10 +131,10 @@ pub struct StorageConfig {
     /// The stale-metadata GC schedule (the `storage-mgr-garbage-collection` atom).
     pub garbage_collection: GarbageCollectionConfig,
     /// R2571 — the PER-STORAGE volume payload, the wz analogue of zenoh's
-    /// `volume_cfg` (`plugins/zenoh-backend-traits/src/config.rs` @
-    /// `pub volume_cfg: JsonValue,`). EMPTY is upstream's `Value::Null`: the
-    /// storage named its volume with a bare id and carries no per-storage
-    /// configuration for it.
+    /// `volume_cfg`
+    /// (`plugins/zenoh-backend-traits/src/config.rs` @ `pub volume_cfg: JsonValue,`).
+    /// EMPTY is upstream's `Value::Null`: the storage named its volume with a
+    /// bare id and carries no per-storage configuration for it.
     ///
     /// # Why a pair list and not an opaque blob
     ///
