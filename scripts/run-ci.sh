@@ -6921,7 +6921,7 @@ layer_c1am_cargo_test_adminspace() {
     # `@` inside a KEYEXPR left untouched (the delimiter must not narrow the keyexpr
     # grammar), and a name that itself contains `@` splitting on the last one. This
     # pin is why the count moved visibly instead of the module quietly growing.
-    _runci_guarded_test "C1AM adminspace 36" 36 \
+    _runci_guarded_test "C1AM adminspace 40" 40 \
         cargo test -p wz-session-core --features adminspace-config-hotreload --lib adminspace --quiet || return 1
     # R311y828 5 -> 6: the live manager's admin sub-tree render. It is gated on
     # `adminspace-plugins-handlers`, so the C1z sibling guard over the SAME module
@@ -8054,15 +8054,15 @@ layer_c1z_cargo_test_storage_driver() {
     # delta on exactly that lane is the check that the gate holds — a uniform
     # +6 would mean the gated test was compiled everywhere. All ten subsets
     # were re-measured; the two `-p wz-runtime-tokio` ones did not move.
-    _runci_guarded_test "C1z storage" 33 \
+    _runci_guarded_test "C1z storage" 36 \
         cargo test -p wz-session-core --features storage-backend --lib storage --quiet || return 1
-    _runci_guarded_test "C1z storage" 41 \
+    _runci_guarded_test "C1z storage" 44 \
         cargo test -p wz-session-core --features storage-mgr-multi-storage-host --lib storage --quiet || return 1
     _runci_guarded_test "C1z storage_manager_service" 5 \
         cargo test -p wz-runtime-tokio --features storage-mgr-multi-storage-host,declare-subscriber,pubsub-allow-loop,storage-mgr-strip-prefix --lib storage_manager_service --quiet || return 1
     _runci_guarded_test "C1z storage_strip_prefix" 6 \
         cargo test -p wz-session-core --features storage-mgr-strip-prefix --lib storage_strip_prefix --quiet || return 1
-    _runci_guarded_test "C1z storage" 46 \
+    _runci_guarded_test "C1z storage" 49 \
         cargo test -p wz-session-core --features storage-backend,storage-mgr-strip-prefix --lib storage --quiet || return 1
     # R2350 56 -> 62: the `storage-history` atom closed its named residual, so
     # its module gained five cases (a delete is now a versioned tombstone: the
@@ -8077,7 +8077,7 @@ layer_c1z_cargo_test_storage_driver() {
     # unify it in. The lane then re-measured the other seven at their old counts
     # (16 of 16 legs reached, all green) rather than assume them unaffected.
     # CONTROL: put 56 back and this leg alone reds — measured, not claimed.
-    _runci_guarded_test "C1z storage" 62 \
+    _runci_guarded_test "C1z storage" 65 \
         cargo test -p wz-session-core --features storage-history,storage-mgr-strip-prefix --lib storage --quiet || return 1
     # R2352 45 -> 49 / 59 -> 63: the `storage-mgr-wildcard-updates` atom closed
     # its named residual (dispatch-on-override-kind), and the new
@@ -8094,9 +8094,9 @@ layer_c1z_cargo_test_storage_driver() {
     # re-measured at their old counts in the same run rather than assumed
     # unaffected, and the two `-p wz-runtime-tokio` gc/aligner guards do not
     # move because every new case lives in wz-session-core's storage_state.rs.
-    _runci_guarded_test "C1z storage" 49 \
+    _runci_guarded_test "C1z storage" 52 \
         cargo test -p wz-session-core --features storage-mgr-wildcard-updates --lib storage --quiet || return 1
-    _runci_guarded_test "C1z storage" 63 \
+    _runci_guarded_test "C1z storage" 66 \
         cargo test -p wz-session-core --features storage-mgr-wildcard-updates,storage-mgr-strip-prefix --lib storage --quiet || return 1
     # R311y829 128 -> 132: the four publication-schedule tests. This is the
     # ONLY `-p wz-session-core --lib storage` subset that moved — the schedule
@@ -8150,7 +8150,7 @@ layer_c1z_cargo_test_storage_driver() {
     # `storage-aligner,storage-mgr-garbage-collection`, which is not a guard
     # here. The two `-p wz-runtime-tokio` aligner guards do NOT move (40 and 1,
     # re-measured, not assumed): every new case lives in wz-session-core.
-    _runci_guarded_test "C1z storage" 162 \
+    _runci_guarded_test "C1z storage" 165 \
         cargo test -p wz-session-core --features storage-aligner,storage-mgr-wildcard-updates --lib storage --quiet || return 1
     _runci_guarded_test "C1z storage_service" 9 \
         cargo test -p wz-runtime-tokio --features storage-mgr-complete-flag --lib storage_service --quiet || return 1
@@ -8160,7 +8160,7 @@ layer_c1z_cargo_test_storage_driver() {
     # requires the wildcard registries it sweeps, so this subset compiles the
     # four `override_dispatch` cases too. It carries no aligner, so it does NOT
     # gain the fifth.
-    _runci_guarded_test "C1z storage" 56 \
+    _runci_guarded_test "C1z storage" 59 \
         cargo test -p wz-session-core --features storage-mgr-garbage-collection --lib storage --quiet || return 1
     _runci_guarded_test "C1z storage_gc_service" 3 \
         cargo test -p wz-runtime-tokio --features storage-mgr-garbage-collection --lib storage_gc_service --quiet || return 1
