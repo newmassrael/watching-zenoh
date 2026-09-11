@@ -744,7 +744,7 @@ struct State {
     ///
     /// # Why a COUNT and not the `bool` this was until R2555
     ///
-    /// Upstream's is a count — `zenoh-ext/src/advanced_subscriber.rs` @ `global_pending_queries: usize,`
+    /// Upstream's is a count — `zenoh-ext/src/advanced_subscriber.rs` @ `global_pending_queries: u64,`
     /// — and wz's `bool` was adequate only because wz issued exactly ONE global
     /// GET, at declare. A `bool` cannot tell "one outstanding" from "two", so
     /// the FIRST completion would clear it and release every buffered sample
@@ -1347,6 +1347,23 @@ impl State {
     /// advance `last_delivered` past instants the startup GET is about to
     /// return, dropping them on the strictly-newer test. That is the same trap
     /// [`Self::finish_recovery`] documents on the sequenced side.
+    /// R2555 — open a GLOBAL history slot for a publisher with no readable
+    /// identity. Upstream's `states.global_pending_queries += 1` in the third
+    /// liveliness arm.
+    ///
+    /// UNCONDITIONAL, where the two keyed triggers return whether to issue:
+    /// their one-in-flight gate exists because a per-source slot can be
+    /// observed to be occupied, and here there is no source to observe. That is
+    /// upstream's behaviour too — its third arm increments without testing —
+    /// and the honest consequence is that repeated tokens from unidentifiable
+    /// publishers each cost a GET. The alternative would be de-duplicating on
+    /// the token key expression, which is a wz invention rather than a mirror,
+    /// so it is not taken here.
+    #[cfg(feature = "ext-pubsub-advanced-history")]
+    fn open_global_history_slot(&mut self) {
+        self.global_pending_queries += 1;
+    }
+
     #[cfg(feature = "ext-pubsub-advanced-history")]
     fn finish_timestamped_recovery(&mut self, zid: &[u8]) {
         let history_pending = self.global_pending_queries != 0;
@@ -1920,6 +1937,64 @@ fn issue_timestamped_late_publisher_query<R, T>(
     );
 }
 
+/// R2555 — the THIRD late-publisher GET: for a token whose zid chunk does not
+/// decode, so there is no source to key a slot on
+/// ([`AdvPublisherSource::Unidentified`]). Upstream's own arm,
+/// `zenoh-ext/src/advanced_subscriber.rs` @ `} else if s.kind() == SampleKind::Put {`.
+///
+/// # Why it is accounted GLOBALLY and what that buys
+///
+/// The other two GETs open a per-source slot so their replies flush in that
+/// source's order. This one has no identity to open a slot against, so it rides
+/// the GLOBAL count instead — which is upstream's `states.global_pending_queries += 1`
+/// paired with its `InitialRepliesHandler`, the same handler the startup
+/// `@adv/**` GET uses. The effect is the honest one: every source's buffer
+/// holds until this GET finishes too, because a reply from an unidentified
+/// publisher may be older than something already buffered and nothing else can
+/// say which source it belongs to.
+///
+/// ⚠ THIS IS THE CALLER THAT MAKES THE COUNT EXCEED ONE, which is why
+/// [`State::global_pending_queries`] had to stop being a `bool` in the commit
+/// before this one. On a flag, this GET's Final would have released every
+/// buffer while the startup GET was still returning older samples.
+#[cfg(feature = "ext-pubsub-advanced-history")]
+#[allow(clippy::too_many_arguments)]
+fn issue_unidentified_late_publisher_query<R, T>(
+    session: &Session<R, T, Unicast>,
+    statesref: &Arc<Mutex<State>>,
+    pending: &Arc<PendingGets>,
+    base_keyexpr: &str,
+    token_keyexpr: &str,
+    sample_depth: Option<usize>,
+    max_age: Option<f64>,
+    dest: Locality,
+    timeout_ms: u32,
+) where
+    R: SessionRuntime,
+    T: TimeSource + 'static,
+    <R as SessionRuntime>::LinkSink: Send + Sync,
+    SessionLinkActions<R, T>: Send + Sync + 'static,
+{
+    let opts = QueryOptions::get()
+        .with_allowed_destination(dest)
+        .with_timeout_ms(timeout_ms)
+        .with_parameters(history_selector(sample_depth, max_age).into_bytes());
+    // R311y836 — pin the mode; see the two GETs above. Same argument, same stake.
+    #[cfg(feature = "query-consolidation")]
+    let opts = opts.with_consolidation(wz_session_core::query_mode::ConsolidationMode::None);
+    issue_recovery_get(
+        session,
+        statesref,
+        pending,
+        token_keyexpr,
+        base_keyexpr,
+        opts,
+        // The GLOBAL finish, not a per-source one: this GET was counted
+        // globally because it has no source to be counted against.
+        |state| state.finish_history(),
+    );
+}
+
 /// R311y100 — the late-publisher liveliness callback body, factored out as a
 /// single source of truth the real liveliness subscriber closure is thin glue
 /// over: a plain readability extraction (the closure at the declare site calls
@@ -2008,8 +2083,30 @@ fn on_late_publisher_detected<R, T>(
                 );
             }
         }
-        // A token whose discriminator is neither `uhlc` nor a `u32`, or whose
-        // shape is not an `@adv/pub` token at all: nothing to query.
+        // R2555 — the publisher announced itself but wz cannot read its zid, so
+        // no per-source slot can be keyed. Upstream queries it anyway under the
+        // GLOBAL count, and so does this.
+        Some(AdvPublisherSource::Unidentified) => {
+            statesref
+                .lock()
+                .expect("advanced subscriber state mutex poisoned")
+                .open_global_history_slot();
+            issue_unidentified_late_publisher_query(
+                session,
+                statesref,
+                pending,
+                base_keyexpr,
+                sample_keyexpr,
+                sample_depth,
+                max_age,
+                dest,
+                timeout_ms,
+            );
+        }
+        // R2555 — this arm now means ONE thing, which it did not before: a key
+        // expression that is not an `@adv/pub` token, or whose discriminator is
+        // neither `uhlc` nor a `u32`. The zid case used to land here too and
+        // was the hidden third shape; it has its own arm above.
         None => {}
     }
 }
@@ -2231,6 +2328,21 @@ impl Drop for RecoveryCancel {
 /// handling of that shape is a later part; being able to NAME it is this one,
 /// and each caller now says which shapes it serves rather than being handed a
 /// pair it cannot question.
+///
+/// R2555 — AND IT WAS STILL ONE ARM SHORT, which the paragraph above predicts
+/// without noticing: upstream branches THREE ways here and this type offered
+/// TWO, so "an `@adv/pub` token whose zid I cannot read" had no spelling but
+/// `None` — the very sentence above, one case later. Upstream's third arm,
+/// `zenoh-ext/src/advanced_subscriber.rs` @ `} else if s.kind() == SampleKind::Put {`,
+/// still queries such a publisher's cache; it simply accounts for it globally,
+/// because with no identity there is no per-source slot to open.
+///
+/// THE RULE THIS LEAVES BEHIND, since the defect has now recurred three times
+/// in as many rounds (a parser tuple that hid `uhlc`, a reply tuple that hid
+/// the timestamped shape, and this): when wz mirrors an upstream dispatch, the
+/// wz type needs ONE VARIANT PER UPSTREAM ARM, and the check is to count the
+/// arms at the upstream branch rather than to enumerate the cases wz happened
+/// to notice.
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AdvPublisherSource {
@@ -2248,6 +2360,19 @@ enum AdvPublisherSource {
         /// The publisher's zid, decoded from the hex chunk.
         zid: Vec<u8>,
     },
+    /// R2555 — an `@adv/pub` token whose ZID CHUNK does not decode, so no
+    /// per-source state can be keyed for it. Upstream's third arm, and it is
+    /// NOT a rejection: the publisher's cache is still queried, accounted
+    /// globally instead of per source.
+    ///
+    /// Distinct from `None` on purpose, and that distinction is the whole
+    /// point of the variant. `None` means "this key expression is not an
+    /// `@adv/pub` token at all", which is unreachable in practice (the
+    /// liveliness subscriber is declared on `<base>/@adv/pub/**`, so nothing
+    /// else can arrive) and would have nothing to query if it were. Folding
+    /// the two together is what hid this case: one of them is a non-event and
+    /// the other is a publisher wz can still recover history from.
+    Unidentified,
 }
 
 /// R311y84 — parse an `@adv` publisher token keyexpr
@@ -2270,7 +2395,12 @@ fn parse_heartbeat_source(keyexpr: &str) -> Option<AdvPublisherSource> {
     if chunks.get(adv + 1) != Some(&crate::advanced_ke::KE_ADV_PUB) {
         return None;
     }
-    let zid = zenoh_hex_to_zid(chunks.get(adv + 2)?)?;
+    // R2555 — a zid chunk that does not decode is the UNIDENTIFIED shape, not a
+    // refusal. Upstream reaches its third arm by exactly this test failing
+    // (`ZenohId::from_str`), and still queries the publisher's cache.
+    let Some(zid) = zenoh_hex_to_zid(chunks.get(adv + 2)?) else {
+        return Some(AdvPublisherSource::Unidentified);
+    };
     let discriminator = *chunks.get(adv + 3)?;
     if discriminator == crate::advanced_ke::KE_ADV_UHLC {
         return Some(AdvPublisherSource::Timestamped { zid });
@@ -3856,7 +3986,24 @@ mod tests {
             parse_heartbeat_source(&uhlc_ke),
             Some(AdvPublisherSource::Timestamped { zid })
         );
+        // R2555 — an `@adv/pub` token whose ZID does not decode is the THIRD
+        // shape, not a rejection: upstream still queries such a publisher's
+        // cache. `zz` is not hex, so `zenoh_hex_to_zid` refuses it exactly
+        // where upstream's `ZenohId::from_str` refuses.
+        assert_eq!(
+            parse_heartbeat_source("demo/@adv/pub/zz/7/_"),
+            Some(AdvPublisherSource::Unidentified),
+            "an unreadable zid must be DISTINGUISHABLE from a non-token: one is \
+             a publisher whose history is still recoverable, the other is not"
+        );
+        // ... and the discriminator is not even reached in that case, so a
+        // `uhlc` token with an unreadable zid is the same shape.
+        assert_eq!(
+            parse_heartbeat_source("demo/@adv/pub/zz/uhlc/_"),
+            Some(AdvPublisherSource::Unidentified)
+        );
         // Malformed: no @adv, wrong marker, discriminator neither uhlc nor u32.
+        // These are the ONLY cases left that mean "nothing to query".
         assert_eq!(parse_heartbeat_source("demo/data"), None);
         assert_eq!(parse_heartbeat_source("demo/@adv/sub/ff/7/_"), None);
         assert_eq!(parse_heartbeat_source("demo/@adv/pub/ff/xx/_"), None);
@@ -4162,6 +4309,179 @@ mod tests {
             vec![0xC1, 0xC2, 0xC3],
             "the buffer drains by CLOCK order, not arrival order: the live \
              sample that arrived first is delivered last because it is newest"
+        );
+    }
+
+    /// R2555 — the THIRD liveliness arm, end to end through the real closure:
+    /// a publisher whose `@adv` token carries an UNREADABLE zid still has its
+    /// cache recovered.
+    ///
+    /// This is upstream's `} else if s.kind() == SampleKind::Put {` arm, which
+    /// wz had folded into the same `None` as "not a token at all" — so the
+    /// publisher announced itself, wz could not key a state for it, and wz
+    /// therefore recovered nothing rather than falling back to a global query.
+    ///
+    /// The token KE uses `zz` for the zid chunk: not hex, so it fails
+    /// `zenoh_hex_to_zid` exactly where upstream's `ZenohId::from_str` fails.
+    /// Everything else mirrors the sequenced and timestamped composed tests, so
+    /// the arm is what differs.
+    #[cfg(all(
+        feature = "ext-pubsub-advanced-history",
+        feature = "ext-pubsub-advanced-publisher",
+        feature = "pubsub-allow-loop"
+    ))]
+    #[test]
+    fn detect_unidentified_late_publisher_recovers_its_cache_globally() {
+        use hashbrown::HashMap;
+
+        use crate::advanced_cache::{AdvancedCache, CacheConfig, CachedSample};
+        use wz_session_core::sample::TimestampHint;
+
+        fn make_decl_token(id: u64, ke: &str) -> wz_codecs::declare::DeclareOwnedVariant {
+            use wz_codecs::decl_token::DeclToken;
+            use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
+            use wz_codecs::wireexpr_local::WireexprLocal;
+            let keyexpr = Wireexpr {
+                body: WireexprVariant::WireexprLocal(WireexprLocal {
+                    id: 0,
+                    suffix_len: Some(ke.len() as u64),
+                    suffix: Some(ke),
+                }),
+            };
+            wz_codecs::declare::DeclareVariant::CodecZenohDeclToken(DeclToken {
+                id,
+                keyexpr,
+                ..DeclToken::default()
+            })
+            .try_into_owned()
+            .unwrap()
+        }
+
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let session = TokioSession::new(actions, observer, clock);
+
+        // `zz` is not hex: the zid chunk does not decode.
+        let pub_adv_ke = "demo/data/@adv/pub/zz/7/_".to_string();
+        let cache =
+            AdvancedCache::declare(&session, pub_adv_ke.clone(), CacheConfig { max_samples: 8 })
+                .expect("advanced cache declares");
+
+        let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let d = Arc::clone(&delivered);
+        let _sub = AdvancedSubscriber::declare_with_options(
+            &session,
+            "demo/data",
+            AdvancedSubscriberOptions::new()
+                .with_history(HistoryConfig::new().detect_late_publishers())
+                .with_get_locality(Locality::SessionLocal),
+            move |sample: Sample| d.lock().unwrap().push(sample.payload[0]),
+            |_miss: Miss| {},
+        )
+        .expect("late-publisher-detecting subscriber declares");
+        assert!(delivered.lock().unwrap().is_empty());
+
+        for i in 0u8..3 {
+            cache.cache_sample(CachedSample::new(
+                "demo/data",
+                vec![i],
+                None,
+                TimestampHint {
+                    time: 100 + i as u64,
+                    zid: vec![0xEEu8],
+                },
+                crate::sample::SampleKind::Put,
+            ));
+        }
+
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .liveliness_subscribers
+            .dispatch_declare(&make_decl_token(93u64, &pub_adv_ke), &HashMap::new());
+        session.drain_deferred_fires();
+
+        assert_eq!(
+            *delivered.lock().unwrap(),
+            vec![0, 1, 2],
+            "a publisher wz cannot identify still has its cache recovered, via \
+             the GLOBAL history slot upstream uses for exactly this case"
+        );
+    }
+
+    /// R2555 — TWO global history GETs outstanding at once, which is the
+    /// scenario a `bool` could not represent and the reason the flag became a
+    /// count in the commit before the third liveliness arm.
+    ///
+    /// The startup GET is in flight when an unidentified publisher's token
+    /// opens a SECOND global slot. The first completion must NOT release the
+    /// buffers, because the second GET is still returning samples that may be
+    /// older than what is held — under a flag it would have, and the
+    /// strictly-newer test would then have discarded exactly those older
+    /// samples. So the assertion between the two completions is the whole
+    /// test: nothing delivered YET.
+    ///
+    /// ⚠ It drives `State` directly rather than through a session, because the
+    /// property is about the COUNT and a loopback GET completes synchronously —
+    /// which is precisely the arrangement in which two GETs are never
+    /// concurrent, and so the arrangement that cannot grade this.
+    #[cfg(feature = "ext-pubsub-advanced-history")]
+    #[test]
+    fn a_second_global_get_holds_the_buffers_the_first_would_have_released() {
+        let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let d = Arc::clone(&delivered);
+        let mut state = State {
+            sequenced: HashMap::new(),
+            timestamped: HashMap::new(),
+            on_sample: Box::new(move |s: Sample| d.lock().unwrap().push(s.payload[0])),
+            on_miss: Box::new(|_| {}),
+            retransmission: true,
+            // The startup GET, exactly as `declare_impl` sets it.
+            global_pending_queries: 1,
+            max_history_depth: usize::MAX,
+        };
+        let mk = |time: u64, v: u8| {
+            let mut s = Sample::new_put("demo/data", vec![v]);
+            s.timestamp = Some(wz_session_core::sample::TimestampHint {
+                time,
+                zid: vec![0x02u8],
+            });
+            s
+        };
+
+        // An unidentified publisher's token opens a SECOND global slot.
+        state.open_global_history_slot();
+        assert_eq!(state.global_pending_queries, 2);
+
+        let _ = state.ingest(mk(300, 0xC3), true);
+        assert!(
+            delivered.lock().unwrap().is_empty(),
+            "buffered, as expected"
+        );
+
+        // FIRST completion. A `bool` would be cleared here and everything held
+        // would be released while the second GET is still answering.
+        state.finish_history();
+        assert_eq!(state.global_pending_queries, 1);
+        assert!(
+            delivered.lock().unwrap().is_empty(),
+            "the first of two global GETs must NOT release the buffers"
+        );
+
+        // The second GET returns an OLDER sample -- the one a premature flush
+        // would have made undeliverable, because 300 would already be the
+        // newest delivered and 100 is not strictly newer than it.
+        let _ = state.ingest(mk(100, 0xC1), false);
+
+        // SECOND completion: now the buffers drain, in clock order.
+        state.finish_history();
+        assert_eq!(state.global_pending_queries, 0);
+        assert_eq!(
+            *delivered.lock().unwrap(),
+            vec![0xC1, 0xC3],
+            "both drain in clock order once the LAST global GET completes"
         );
     }
 
