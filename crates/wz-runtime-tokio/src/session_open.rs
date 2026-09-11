@@ -43,7 +43,7 @@ use wz_session_core::locator::{
     parse_any_locator, AnyLocator, AnyLocatorError, LocatorParseError, ParsedLocator, Proto,
 };
 #[cfg(feature = "scouting-static")]
-use wz_session_core::scout_static::{resolve_static_config, StaticRole};
+use wz_session_core::scout_static::{resolve_static_config, StaticConfigError};
 // R311y808 — the static dial arm's retry reuses the crate's ONE transcription of
 // zenoh's `ConnectionRetryConf` rather than growing a second schedule.
 #[cfg(feature = "scouting-static")]
@@ -5073,31 +5073,49 @@ impl<'a> StaticDeploy<'a> {
     }
 }
 
-/// Bring up the transport half a static deploy config asks for — the
-/// `listen=`-aware static-mode entry point, and the wz analog of pico's
-/// `_z_open` reading `_z_locators_by_config`'s `peer_op`
-/// (`vendor/zenoh-pico/src/net/session.c:87-118`, `:155-190`).
+/// Bring up ONE session from a static deploy config — the `listen=`-aware
+/// single-session static-mode entry point, and the wz analog of pico's
+/// CLIENT arm plus its listen-only bind (`vendor/zenoh-pico/src/net/session.c`
+/// @ `z_result_t _z_open_locators_client(_z_session_rc_t *zn, const _z_string_svec_t *connect_locators, const _z_id_t *zid,`
+/// and @ `z_result_t _z_open_bind_listener(_z_session_rc_t *zn, _z_string_t *locator, const _z_id_t *zid, _z_config_t *config,`).
 ///
-/// [`resolve_static_config`] decides which half from the `listen=` /
-/// `connect=` pair, BEFORE any socket is touched; this then brings that half
-/// up through the seam that already exists for it:
+/// [`resolve_static_config`] resolves the `listen=` / `connect=` pair BEFORE
+/// any socket is touched; this then brings up the half it can serve:
 ///
-/// - [`StaticRole::Open`] — dial the connect list in deploy order, first
+/// - `connect=` only — dial the connect list in deploy order, first
 ///   Established wins, exactly [`open_session_static`]'s contract above.
-/// - [`StaticRole::Listen`] — [`accept_endpoint`] binds the one configured
-///   endpoint and accepts on it, then [`accept_and_open_session`] drives the
-///   Accepting half of the handshake. The node's `whatami` is forced to
+/// - `listen=` only — [`accept_endpoint`] binds the configured endpoint and
+///   accepts on it, then [`accept_and_open_session`] drives the Accepting half
+///   of the handshake. The node's `whatami` is forced to
 ///   [`WhatAmI::Peer`](wz_codecs::whatami::WhatAmI) first, because pico's
-///   listen arm inserts `mode=peer` over whatever the config said
-///   (`session.c:96`, `:110`) — its default is `Z_WHATAMI_CLIENT`
-///   (`session.c:122`) and a client does not accept, so honouring the listen
-///   endpoint while leaving the role a client would announce a node that
-///   contradicts what it is doing.
+///   listen arm inserts `mode=peer` over whatever the config said — its
+///   default is `Z_WHATAMI_CLIENT` and a client does not accept, so honouring
+///   the listen endpoint while leaving the role a client would announce a node
+///   that contradicts what it is doing.
 ///
-/// An incoherent pair surfaces as [`OpenError::BadStaticConfig`]; an empty
-/// resolved locator list is the "configured locators are wrong / unreachable"
-/// diagnostic [`OpenError::NoReachableLocator`], which is where the empty
-/// config lands now that static mode has no scouting to fall through to.
+/// # What this vehicle does NOT serve
+///
+/// ONE session over ONE link, which is a ceiling on two configs rather than a
+/// property of static mode:
+///
+/// - `listen=` AND `connect=` together surface as
+///   [`OpenError::BadStaticConfig`]`(`[`ListenWithConnect`](StaticConfigError::ListenWithConnect)`)`,
+///   pico's `Z_FEATURE_UNICAST_PEER == 0` answer to the same pair.
+/// - a peer-mode deploy whose whole `connect=` list should become a held peer
+///   SET gets the first Established locator and no more, because that is all
+///   an [`OpenedSession`] can be.
+///
+/// Both are what `scouting_static::static_peer_sources` exists for: it takes
+/// the identical [`StaticDeploy`] and hands the whole deploy — the bound
+/// listen endpoint AND every connect locator — to the peer-mesh face loop,
+/// which is wz's multi-peer transport. (A code span rather than an intra-doc
+/// link: that module is gated on `routing-peer` too, so a build with static
+/// mode and no mesh would carry a link to an item it does not compile.)
+///
+/// An empty resolved config is the "configured locators are wrong /
+/// unreachable" diagnostic [`OpenError::NoReachableLocator`], which is where
+/// the empty config lands now that static mode has no scouting to fall
+/// through to.
 ///
 /// `accept_cfg` is consumed only by the Listen arm (a `tls/...` or `quic/...`
 /// listen endpoint needs its server cert); the dial arm takes `cfg`. Both are
@@ -5146,27 +5164,47 @@ pub async fn open_session_static_config(
         retry,
     } = deploy;
     let resolved = resolve_static_config(listen, connect).map_err(OpenError::BadStaticConfig)?;
-    let role = resolved.role;
-    let locators = resolved.locators;
-    if locators.is_empty() {
-        return Err(OpenError::NoReachableLocator);
+
+    // THIS vehicle's own refusal, and the reason it is spelled here rather
+    // than inside the resolution (R2570): a config naming both halves is
+    // perfectly resolvable, and what cannot serve it is this function — one
+    // session over one link. It is pico's `Z_FEATURE_UNICAST_PEER == 0` arm
+    // refusing the same pair (`vendor/zenoh-pico/src/net/session.c` @
+    // `_Z_ERROR("Multiple connect locators, or combined listen and connect locators, require peer support");`),
+    // and the multi-peer vehicle takes the identical `StaticConfig` and brings
+    // BOTH halves up.
+    //
+    // Decided on the POST-hygiene connect list — the ONE documented divergence
+    // from pico, which tests the raw `_z_config_get` pointer and would error
+    // on a connect list of nothing but blanks. wz has already defined a blank
+    // entry as not a locator, and refusing over a list it is about to discard
+    // would refuse a conflict that does not exist.
+    if resolved.forces_peer_mode() && !resolved.connect.is_empty() {
+        return Err(OpenError::BadStaticConfig(
+            StaticConfigError::ListenWithConnect,
+        ));
     }
 
-    // The role decides the announced identity BEFORE either half runs, which
+    // The config decides the announced identity BEFORE either half runs, which
     // is pico's own order: `_z_locators_by_config` inserts `mode=peer` while
-    // resolving, and `_z_open` reads the mode afterwards (session.c:110, :121).
+    // resolving, and `_z_open` reads the mode afterwards.
     let mut params = params;
-    if role.forces_peer_mode() {
+    if resolved.forces_peer_mode() {
         params.whatami = wz_codecs::whatami::WhatAmI::Peer;
     }
 
-    if role == StaticRole::Listen {
-        let endpoint = locators[0].as_str();
+    if let Some(endpoint) = resolved.listen.as_ref() {
+        let endpoint = endpoint.as_str();
         log::info!("wz session-open: static listen endpoint {endpoint:?} (mode=peer)");
         let accepted = accept_endpoint(endpoint, accept_cfg)
             .await
             .map_err(OpenError::Dial)?;
         return accept_and_open_session(accepted, params, clock, max_iters, tick_interval_ms).await;
+    }
+
+    let locators = resolved.connect;
+    if locators.is_empty() {
+        return Err(OpenError::NoReachableLocator);
     }
 
     let dial = async {

@@ -153,67 +153,61 @@ pub fn synth_static_locators<S: AsRef<str>>(connect: &[S]) -> StaticLocators {
     out
 }
 
-/// Which half of the transport a static deploy config asks for — the wz
-/// analog of zenoh-pico's `peer_op` out-parameter, set by
-/// `_z_locators_by_config` (`vendor/zenoh-pico/src/net/session.c:87-118`)
-/// and consumed by `_z_open_inner` -> `_z_new_transport`.
+/// The resolved static-mode deploy config: BOTH halves of the deploy, kept
+/// apart — the wz analog of what pico's `_z_locators_by_config` fills in
+/// (`vendor/zenoh-pico/src/net/session.c` @
+/// `static z_result_t _z_locators_by_config(_z_config_t *config, _z_string_svec_t *listen_locators,`).
 ///
-/// pico initialises `peer_op` to `_Z_PEER_OP_LISTEN` in `_z_open`
-/// (`session.c:160`) and only the *no*-`listen=` arm overwrites it with
-/// `_Z_PEER_OP_OPEN`, so "listen" is the default the connect list opts out
-/// of rather than a mode a config opts into. [`resolve_static_config`]
-/// reproduces that polarity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StaticRole {
-    /// `connect=` only — dial the configured locators. pico's
-    /// `_Z_PEER_OP_OPEN` (`session.c:103`, the `listen == NULL` arm).
-    Open,
-    /// `listen=` present — bind that endpoint and accept on it. pico's
-    /// `_Z_PEER_OP_LISTEN`, which also flips the node's `whatami`
-    /// (see [`Self::forces_peer_mode`]).
-    Listen,
+/// # Why the halves are two fields and not one list
+///
+/// pico hands its caller TWO svecs and keeps them two all the way down:
+/// `_z_open_locators` dispatches on the node's mode and passes
+/// `(listen_locator, connect_locators)` to `_z_open_locators_peer`, which
+/// binds the first and dials every member of the second (`session.c` @
+/// `z_result_t _z_open_locators_peer(_z_session_rc_t *zn, _z_string_t *listen_locator,`).
+/// The peer arm needs both AT ONCE — the listen endpoint is the primary
+/// transport and the connect list becomes the peer set — so a shape that can
+/// only carry one of them cannot express that arm at all.
+///
+/// This type used to be exactly that shape: one flat `locators` list plus an
+/// exclusive `StaticRole` (Open XOR Listen). The role decided which half
+/// survived resolution, so the other was gone by the time any vehicle saw the
+/// config, and "listen AND connect" was unrepresentable rather than merely
+/// unimplemented. R2570 replaced it with the two fields upstream itself keeps,
+/// so gaining a multi-peer vehicle is a new CONSUMER of this type rather than
+/// a change to it.
+pub struct StaticConfig {
+    /// `deploy.listen`, post-hygiene — the endpoint to BIND and accept on.
+    /// `None` when the key is absent or blank.
+    ///
+    /// One endpoint, not a list, because that is pico's own bound: it refuses
+    /// a multi-member listen set outright (`session.c` @
+    /// `_Z_ERROR("Multiple listen locators are not supported in zenoh-pico");`).
+    pub listen: Option<BoundedString<{ caps::MAX_LOCATOR_LEN }>>,
+    /// `deploy.connect[]`, post-hygiene, in deploy order — the locators to
+    /// DIAL, exactly what [`synth_static_locators`] yields.
+    pub connect: StaticLocators,
 }
 
-impl StaticRole {
-    /// Whether this role forces the node's `whatami` to `WhatAmI::Peer`.
+impl StaticConfig {
+    /// Whether this config forces the node's `whatami` to `WhatAmI::Peer`.
     ///
     /// pico's listen arm does two things, not one: it places the listen
     /// endpoint AND calls `_zp_config_insert(config, Z_CONFIG_MODE_KEY,
-    /// Z_CONFIG_MODE_PEER)` (`session.c:96` and `:110`), overriding
-    /// whatever `mode=` the config carried — a listening node is a peer by
-    /// construction, because pico's default is `Z_WHATAMI_CLIENT`
-    /// (`_z_config_get_mode`, `session.c:122`) and a client does not
-    /// accept. This is a *method* rather than a second field on
-    /// [`StaticConfig`] so the two effects cannot drift apart: they are one
-    /// fact about the role, read twice.
-    pub const fn forces_peer_mode(self) -> bool {
-        matches!(self, StaticRole::Listen)
-    }
-}
-
-/// The resolved static-mode deploy config: which half of the transport to
-/// bring up, and the locator list to bring it up on.
-///
-/// The wz analog of what pico's `_z_locators_by_config` hands back to
-/// `_z_open` — the `locators` svec plus the `peer_op` out-param — reshaped
-/// from two out-parameters into one returned value so the pair cannot be
-/// read apart. Produced by [`resolve_static_config`].
-pub struct StaticConfig {
-    /// Dial or accept. See [`StaticRole`].
-    pub role: StaticRole,
-    /// The locators, post-hygiene, in the order the session layer consumes
-    /// them.
+    /// Z_CONFIG_MODE_PEER)` (`session.c` @
+    /// `_zp_config_insert(config, Z_CONFIG_MODE_KEY, Z_CONFIG_MODE_PEER);`),
+    /// overriding whatever `mode=` the config carried — a listening node is a
+    /// peer by construction, because pico's default is `Z_WHATAMI_CLIENT`
+    /// (`_z_config_get_mode`) and a client does not accept. pico enforces the
+    /// same rule from the other side: `_z_open_locators` refuses a listen
+    /// endpoint in client mode (`session.c` @
+    /// `_Z_ERROR("Listen locators are not supported in client mode");`).
     ///
-    /// For [`StaticRole::Open`] this is `deploy.connect[]` verbatim, exactly
-    /// what [`synth_static_locators`] yields. For [`StaticRole::Listen`] it
-    /// holds the single `listen=` endpoint — pico places listen at index 0
-    /// and appends the connect tail as additional peers, but only under
-    /// `Z_FEATURE_UNICAST_PEER == 1`; wz has no `_z_new_peer` analog yet, so
-    /// it is the `#else` arm of that `#if` (see
-    /// [`StaticConfigError::ListenWithConnect`]). The field stays a LIST
-    /// rather than collapsing to one string precisely so gaining that analog
-    /// appends a tail here instead of changing this type.
-    pub locators: StaticLocators,
+    /// A *method* rather than a second field so the two effects cannot drift
+    /// apart: they are one fact about the config, read twice.
+    pub const fn forces_peer_mode(&self) -> bool {
+        self.listen.is_some()
+    }
 }
 
 impl core::fmt::Debug for StaticConfig {
@@ -223,69 +217,94 @@ impl core::fmt::Debug for StaticConfig {
     /// [`BoundedString`], which does implement `Debug`.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("StaticConfig")
-            .field("role", &self.role)
-            .field("locators", &&self.locators[..])
+            .field("listen", &self.listen)
+            .field("connect", &&self.connect[..])
             .finish()
     }
 }
 
-/// Why a `deploy.listen` + `deploy.connect[]` pair did not resolve.
+/// Why a `deploy.listen` + `deploy.connect[]` pair did not resolve, or why a
+/// vehicle refused the resolved config.
 ///
 /// Deliberately carries no owned string, unlike the `alloc`-gated
-/// `ScoutingModeError` above: this one is produced by the runtime resolution
-/// [`resolve_static_config`], which stays no-alloc, not by the
-/// deploy-string parser.
+/// `ScoutingModeError` above: this vocabulary is consumed on the no-alloc
+/// runtime path, not by the deploy-string parser.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StaticConfigError {
-    /// Both `listen=` and a non-empty `connect=` were configured.
+    /// Both `listen=` and a non-empty `connect=` were configured, and the
+    /// vehicle asked to bring the deploy up serves only ONE of them.
     ///
     /// This is pico's own answer under `Z_FEATURE_UNICAST_PEER == 0`:
-    /// `_z_locators_by_config` returns `_Z_ERR_GENERIC` for exactly this
-    /// pair (`vendor/zenoh-pico/src/net/session.c:107-108`), because
-    /// serving both halves needs the `_z_new_peer` multi-peer path that the
-    /// feature gates. wz is that build shape — `open_session_static` opens
-    /// exactly one session and has no `_z_new_peer` analog — so refusing is
-    /// parity, and refusing LOUDLY is the point: silently honouring one half
-    /// and dropping the other is how a deploy comes up listening on a
-    /// locator nobody dials.
+    /// `_z_open_locators_peer` refuses exactly this pair (`session.c` @
+    /// `_Z_ERROR("Multiple connect locators, or combined listen and connect locators, require peer support");`),
+    /// because serving both halves needs the multi-peer path that the feature
+    /// gates. Refusing LOUDLY is the point: silently honouring one half and
+    /// dropping the other is how a deploy comes up listening on a locator
+    /// nobody dials.
+    ///
+    /// R2570 moved the PRODUCER of this variant. It used to be raised by
+    /// [`resolve_static_config`] — a pure transform rendering a CAPABILITY
+    /// verdict, which is why gaining the capability could not change the
+    /// answer. It is raised by the single-session vehicle now, which is the
+    /// thing that actually cannot serve both halves; the multi-peer vehicle
+    /// takes the same config and brings up both.
     ListenWithConnect,
+    /// `listen=` is longer than [`caps::MAX_LOCATOR_LEN`] and cannot be
+    /// carried on the no-alloc backing.
+    ///
+    /// A REFUSAL rather than the skip [`synth_static_locators`] applies to an
+    /// over-long connect entry, and the asymmetry is deliberate: there are N
+    /// connect entries and dropping one leaves the deploy's shape intact,
+    /// while there is exactly one listen endpoint and dropping it turns a
+    /// listening node into a dial-only one. Same deploy-authoring bound, and
+    /// the same reason a truncation is never an option — a truncated endpoint
+    /// binds the wrong socket.
+    ///
+    /// Unreachable on the `alloc` AP backing, where the bound is advisory.
+    ListenTooLong,
 }
 
-/// Resolve `deploy.listen` + `deploy.connect[]` into the transport half to
-/// bring up and the locators to bring it up on — the wz analog of
-/// zenoh-pico's `_z_locators_by_config`
-/// (`vendor/zenoh-pico/src/net/session.c:87-118`).
+/// Resolve `deploy.listen` + `deploy.connect[]` into both halves of the
+/// static deploy — the wz analog of zenoh-pico's `_z_locators_by_config`
+/// (`vendor/zenoh-pico/src/net/session.c` @
+/// `static z_result_t _z_locators_by_config(_z_config_t *config, _z_string_svec_t *listen_locators,`).
 ///
-/// The four outcomes, each one arm of that function:
+/// The result is LOSSLESS: every configured half survives resolution, in the
+/// shape upstream keeps it, and no arm of the deploy is discarded here.
+/// Deciding WHICH halves a given vehicle can bring up is that vehicle's
+/// judgement — [`StaticConfigError::ListenWithConnect`] is raised by the
+/// single-session opener, which serves one — and this transform reports the
+/// config it was handed either way.
 ///
 /// | `listen=` | `connect=` | result | pico |
 /// |---|---|---|---|
-/// | absent | non-empty | [`StaticRole::Open`] over the connect list | `*peer_op = _Z_PEER_OP_OPEN`, `key = CONNECT` |
-/// | present | empty | [`StaticRole::Listen`] over the one endpoint | `key = LISTEN`, `mode = peer` |
-/// | present | non-empty | [`StaticConfigError::ListenWithConnect`] | `_Z_ERROR_RETURN(_Z_ERR_GENERIC)` |
-/// | absent | empty | [`StaticRole::Open`] over an empty list | early `return _Z_RES_OK`, empty svec |
+/// | absent | non-empty | `listen: None` + the connect list | `key = CONNECT`, dispatched by mode |
+/// | present | empty | the endpoint + an empty connect list | `key = LISTEN`, `mode = peer` |
+/// | present | non-empty | BOTH, for the vehicle to judge | peer arm binds then dials; `UNICAST_PEER == 0` refuses |
+/// | absent | empty | `None` + an empty list | early `return _Z_RES_OK`, empty svecs |
 ///
 /// The last row is why the empty case is not an error here: pico returns OK
-/// with an empty list and `_z_open` then falls through to *scouting*
-/// (`session.c:187-201`). Static mode is scouting expressed as absent, so wz
-/// has nothing to fall through to and the session layer turns the empty list
-/// into its "configured locators are wrong / unreachable" diagnostic — but
-/// that judgement belongs to the session layer, not to this pure transform,
-/// which reports the config it was handed.
+/// with empty svecs and the caller renders the verdict (`_z_open_locators`
+/// @ `_Z_ERROR("No listen or connect locators configured");`). Static mode is
+/// scouting expressed as absent, so wz has nothing to fall through to and the
+/// session layer turns the empty config into its "configured locators are
+/// wrong / unreachable" diagnostic — but that judgement belongs to the
+/// session layer, not to this transform.
 ///
 /// Hygiene matches [`synth_static_locators`] on both inputs: surrounding
 /// whitespace is trimmed and a blank `listen=` is treated as absent, because
-/// an empty config value is not an endpoint. One documented consequence:
-/// the `ListenWithConnect` refusal is decided on the POST-hygiene connect
-/// list, so `listen=... ` plus a `connect=` of nothing but blanks resolves to
-/// `Listen` rather than erroring. pico tests the raw `_z_config_get` pointer
-/// and would error; wz cannot, having already defined a blank entry as not a
-/// locator, and erroring on a list it is about to discard would be refusing a
-/// conflict that does not exist.
+/// an empty config value is not an endpoint.
 ///
 /// Generic over `S: AsRef<str>` for the same reason
 /// [`synth_static_locators`] is — AP feeds `&[String]`, the no-alloc MCU
 /// feeds `&[&str]` — and allocates nothing beyond what that synth does.
+///
+/// # Errors
+///
+/// [`StaticConfigError::ListenTooLong`] when the `listen=` endpoint exceeds
+/// the bounded-seam locator capacity. That is the ONLY refusal this transform
+/// renders, and it is about the INPUT not fitting the declared bounds rather
+/// than about what any vehicle can serve.
 pub fn resolve_static_config<S: AsRef<str>>(
     listen: Option<&str>,
     connect: &[S],
@@ -297,35 +316,18 @@ pub fn resolve_static_config<S: AsRef<str>>(
 
     let Some(listen) = listen else {
         return Ok(StaticConfig {
-            role: StaticRole::Open,
-            locators: connect_locators,
+            listen: None,
+            connect: connect_locators,
         });
     };
 
-    if !connect_locators.is_empty() {
-        return Err(StaticConfigError::ListenWithConnect);
-    }
-
     let mut endpoint: BoundedString<{ caps::MAX_LOCATOR_LEN }> = BoundedString::new();
     if endpoint.push_str(listen).is_err() {
-        // Over-long listen endpoint on the no-alloc backing: the same
-        // deploy-authoring bound `synth_static_locators` enforces per entry,
-        // and the same answer — skip rather than truncate, since a truncated
-        // endpoint binds the wrong socket. The empty list that results is the
-        // session layer's "configured locators are wrong" diagnostic.
-        return Ok(StaticConfig {
-            role: StaticRole::Listen,
-            locators: StaticLocators::new(),
-        });
+        return Err(StaticConfigError::ListenTooLong);
     }
-    let mut locators = StaticLocators::new();
-    // MAX_STATIC_CONNECT >= 1 on every profile, so this push cannot fail;
-    // the result is consumed rather than unwrapped to keep the no-alloc
-    // backing's capacity surface honest.
-    let _ = locators.push(endpoint);
     Ok(StaticConfig {
-        role: StaticRole::Listen,
-        locators,
+        listen: Some(endpoint),
+        connect: connect_locators,
     })
 }
 
@@ -396,66 +398,75 @@ mod tests {
     //    discriminators rather than one assertion spelled six ways.
 
     #[test]
-    fn resolve_connect_only_is_open_over_the_connect_list() {
-        // pico: `listen == NULL` -> `*peer_op = _Z_PEER_OP_OPEN`, key =
-        // CONNECT (session.c:103, :116).
+    fn resolve_connect_only_keeps_the_connect_list_and_no_listen() {
+        // pico: `listen == NULL` -> the CONNECT svec is filled and the LISTEN
+        // one stays empty.
         let connect = ["tcp/127.0.0.1:7447", "udp/127.0.0.1:7448"];
         let resolved = resolve_static_config(None, &connect).expect("connect-only resolves");
-        assert_eq!(resolved.role, StaticRole::Open);
-        assert_eq!(resolved.locators.len(), 2);
-        assert_eq!(resolved.locators[0], "tcp/127.0.0.1:7447");
-        assert_eq!(resolved.locators[1], "udp/127.0.0.1:7448");
+        assert!(resolved.listen.is_none());
+        assert_eq!(resolved.connect.len(), 2);
+        assert_eq!(resolved.connect[0], "tcp/127.0.0.1:7447");
+        assert_eq!(resolved.connect[1], "udp/127.0.0.1:7448");
     }
 
     #[test]
-    fn resolve_listen_only_is_listen_over_the_one_endpoint() {
-        // pico: `listen != NULL && connect == NULL` -> key = LISTEN
-        // (session.c:105-106), so the locator list is the listen endpoint.
+    fn resolve_listen_only_keeps_the_endpoint_and_an_empty_connect() {
+        // pico: `listen != NULL && connect == NULL` -> the LISTEN svec holds
+        // the endpoint and `mode=peer` is inserted.
         let empty: [&str; 0] = [];
         let resolved =
             resolve_static_config(Some("tcp/0.0.0.0:7447"), &empty).expect("listen-only resolves");
-        assert_eq!(resolved.role, StaticRole::Listen);
-        assert_eq!(resolved.locators.len(), 1);
-        assert_eq!(resolved.locators[0], "tcp/0.0.0.0:7447");
-    }
-
-    #[test]
-    fn resolve_listen_with_connect_is_refused_not_silently_halved() {
-        // pico: both set, no `_z_new_peer` -> `_Z_ERROR_RETURN(_Z_ERR_GENERIC)`
-        // (session.c:107-108). The failure this pins is the SILENT one: a
-        // resolution that dropped either half would return Ok here.
-        let connect = ["tcp/127.0.0.1:7447"];
-        // `.err()` rather than comparing the whole Result: StaticConfig holds
-        // a BoundedVec, which implements no PartialEq on either backing, and
-        // a derive here would exist only to serve this one assertion.
         assert_eq!(
-            resolve_static_config(Some("tcp/0.0.0.0:7448"), &connect).err(),
-            Some(StaticConfigError::ListenWithConnect)
+            resolved.listen.as_ref().map(BoundedString::as_str),
+            Some("tcp/0.0.0.0:7447")
         );
+        assert!(resolved.connect.is_empty());
     }
 
     #[test]
-    fn resolve_neither_is_open_over_an_empty_list_not_an_error() {
-        // pico: neither set -> early `return _Z_RES_OK` with an EMPTY svec
-        // (session.c:90-92), which `_z_open` reads as "now scout". The empty
-        // list is a fact this transform reports, not a verdict it renders.
+    fn resolve_listen_with_connect_keeps_both_halves() {
+        // THE arm the old shape could not express. pico's peer bring-up
+        // consumes both at once — bind the listen endpoint, then dial every
+        // connect member as a peer — so a resolution that dropped either half
+        // makes that vehicle unreachable no matter what it can do.
+        //
+        // A vehicle that serves only one half still refuses this config; that
+        // refusal is `StaticConfigError::ListenWithConnect`, and it is raised
+        // where the limit is rather than here.
+        let connect = ["tcp/127.0.0.1:7447", "tcp/127.0.0.1:7449"];
+        let resolved =
+            resolve_static_config(Some("tcp/0.0.0.0:7448"), &connect).expect("both halves resolve");
+        assert_eq!(
+            resolved.listen.as_ref().map(BoundedString::as_str),
+            Some("tcp/0.0.0.0:7448")
+        );
+        assert_eq!(resolved.connect.len(), 2);
+        assert_eq!(resolved.connect[0], "tcp/127.0.0.1:7447");
+        assert_eq!(resolved.connect[1], "tcp/127.0.0.1:7449");
+    }
+
+    #[test]
+    fn resolve_neither_is_empty_on_both_halves_not_an_error() {
+        // pico: neither set -> early `return _Z_RES_OK` with EMPTY svecs, and
+        // the CALLER renders the verdict. The empty config is a fact this
+        // transform reports, not a verdict it renders.
         let empty: [&str; 0] = [];
         let resolved = resolve_static_config(None, &empty).expect("neither is not an error");
-        assert_eq!(resolved.role, StaticRole::Open);
-        assert!(resolved.locators.is_empty());
+        assert!(resolved.listen.is_none());
+        assert!(resolved.connect.is_empty());
     }
 
     #[test]
     fn resolve_treats_a_blank_listen_as_absent() {
         // Config hygiene, the rule the connect entries already obey: an empty
-        // value is not an endpoint. So a blank listen must NOT flip the role,
-        // and must not collide with a real connect list either.
+        // value is not an endpoint. So a blank listen must NOT place a listen
+        // half, and must not disturb the connect one either.
         let connect = ["tcp/127.0.0.1:7447"];
         let resolved =
             resolve_static_config(Some("   "), &connect).expect("blank listen is absent");
-        assert_eq!(resolved.role, StaticRole::Open);
-        assert_eq!(resolved.locators.len(), 1);
-        assert_eq!(resolved.locators[0], "tcp/127.0.0.1:7447");
+        assert!(resolved.listen.is_none());
+        assert_eq!(resolved.connect.len(), 1);
+        assert_eq!(resolved.connect[0], "tcp/127.0.0.1:7447");
     }
 
     #[test]
@@ -463,31 +474,41 @@ mod tests {
         let empty: [&str; 0] = [];
         let resolved =
             resolve_static_config(Some("  tcp/0.0.0.0:7447 "), &empty).expect("listen resolves");
-        assert_eq!(resolved.locators[0], "tcp/0.0.0.0:7447");
+        assert_eq!(
+            resolved.listen.as_ref().map(BoundedString::as_str),
+            Some("tcp/0.0.0.0:7447")
+        );
     }
 
     #[test]
-    fn resolve_listen_with_an_all_blank_connect_is_listen() {
-        // The ONE documented divergence from pico, which tests the raw
-        // `_z_config_get` pointer and would error. wz decides the refusal on
-        // the post-hygiene list, because it has already defined a blank entry
-        // as not a locator — erroring on a list it is about to discard would
-        // refuse a conflict that does not exist.
+    fn resolve_listen_with_an_all_blank_connect_has_no_connect_half() {
+        // Post-hygiene, a connect list of nothing but blanks is not a connect
+        // list — the rule `synth_static_locators` already applies per entry.
+        // It is pinned separately because it is what a vehicle's
+        // listen-plus-connect refusal is decided on: this config must NOT
+        // read as "both halves" to the vehicle that serves one.
         let connect = ["", "   "];
         let resolved = resolve_static_config(Some("tcp/0.0.0.0:7447"), &connect)
             .expect("an all-blank connect is not a connect");
-        assert_eq!(resolved.role, StaticRole::Listen);
-        assert_eq!(resolved.locators[0], "tcp/0.0.0.0:7447");
+        assert_eq!(
+            resolved.listen.as_ref().map(BoundedString::as_str),
+            Some("tcp/0.0.0.0:7447")
+        );
+        assert!(resolved.connect.is_empty());
     }
 
     #[test]
-    fn listen_forces_peer_mode_and_open_does_not() {
+    fn listen_forces_peer_mode_and_connect_only_does_not() {
         // pico's listen arm does TWO things: it places the endpoint AND
-        // inserts `mode=peer` (session.c:96, :110). This pins the second one
-        // separately, so a resolution that placed the endpoint while leaving
-        // the node a client — pico's default, `session.c:122` — still fails.
-        assert!(StaticRole::Listen.forces_peer_mode());
-        assert!(!StaticRole::Open.forces_peer_mode());
+        // inserts `mode=peer`. This pins the second one separately, so a
+        // resolution that placed the endpoint while leaving the node a client
+        // — pico's default — still fails.
+        let empty: [&str; 0] = [];
+        let listening =
+            resolve_static_config(Some("tcp/0.0.0.0:7447"), &empty).expect("listen resolves");
+        assert!(listening.forces_peer_mode());
+        let dialing = resolve_static_config(None, &["tcp/127.0.0.1:7447"]).expect("connect-only");
+        assert!(!dialing.forces_peer_mode());
     }
 
     #[test]
