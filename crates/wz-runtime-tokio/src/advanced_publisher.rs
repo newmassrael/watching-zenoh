@@ -227,6 +227,13 @@ pub struct AdvancedPublisher<R: SessionRuntime, T: TimeSource> {
     /// when `MissDetectionConfig` set a `state_publisher` + sequencing is on.
     #[cfg(feature = "ext-pubsub-sample-miss-detection")]
     _heartbeat_task: Option<HeartbeatTask>,
+    /// R2558 — which beacon ARM this publisher is, retained because
+    /// [`Self::emit_heartbeat_once`] must publish with the SAME options the
+    /// timer does. The sporadic arm blocks under congestion and the periodic
+    /// arm does not ([`heartbeat_publish_options`]), so an on-demand beacon
+    /// that ignored the arm would be a second opinion about the same publisher.
+    #[cfg(feature = "ext-pubsub-sample-miss-detection")]
+    heartbeat_sporadic: bool,
 }
 
 impl<R, T> AdvancedPublisher<R, T>
@@ -252,6 +259,41 @@ where
         if local_zid.is_empty() || local_zid.len() > 16 {
             return Err(AdvancedPublisherError::InvalidZid);
         }
+
+        // R2558 — ASKING FOR MISS DETECTION *IS* ASKING FOR SEQUENCE NUMBERS,
+        // and until now wz let a caller state otherwise and then quietly did
+        // nothing.
+        //
+        // Upstream has NO sequencing knob: `Sequencing` is `pub(crate)` there
+        // and the field is private, so the mode is never a user choice at all —
+        // it is DERIVED from what was requested.
+        // `zenoh-ext/src/advanced_publisher.rs` @ `pub fn sample_miss_detection(mut self, config: MissDetectionConfig) -> Self {`
+        // assigns `Sequencing::SequenceNumber` as its FIRST statement, and
+        // `zenoh-ext/src/advanced_publisher.rs` @ `pub fn cache(mut self, config: CacheConfig) -> Self {`
+        // raises `None` to `Timestamp` the same way. The invalid pair is
+        // unrepresentable there by construction.
+        //
+        // wz exposes the knob (a superset, and its own three sequencing modes
+        // are real), so the pair IS representable here — which is why the
+        // request has to win somewhere. It wins HERE rather than in a setter
+        // because the fields are `pub`: a setter can be bypassed by a struct
+        // literal or a later assignment, and this is the one point every caller
+        // passes through, the C API included.
+        //
+        // ⚠ THE OLD BEHAVIOUR WAS THE WORST OF THE THREE OPTIONS. It did not
+        // refuse and it did not honour: `heartbeat_spawn_params` gates on
+        // `(state_publisher, sequencing)` and simply yielded `None`, so the
+        // publisher declared fine, published fine, and never beaconed — a
+        // caller who asked for miss detection got silence, with nothing to read
+        // it off. A documented no-op is a representable invalid state.
+        #[cfg(feature = "ext-pubsub-sample-miss-detection")]
+        let options = {
+            let mut options = options;
+            if options.sample_miss_detection.state_publisher.is_some() {
+                options.sequencing = Sequencing::SequenceNumber;
+            }
+            options
+        };
 
         // R2485 — refuse `Sequencing::Timestamp` on a node that does not stamp,
         // which is upstream's own precondition
@@ -359,7 +401,7 @@ where
                             // Non-sporadic emits every tick (emit_heartbeat skips
                             // sn==0); sporadic only when the sn advanced.
                             if should_emit_heartbeat(sporadic, sn, last_emitted)
-                                && emit_heartbeat(&hb_session, &hb_keyexpr, sn)
+                                && emit_heartbeat(&hb_session, &hb_keyexpr, sn, sporadic)
                             {
                                 last_emitted = sn;
                             }
@@ -391,6 +433,9 @@ where
             adv_keyexpr,
             #[cfg(feature = "ext-pubsub-sample-miss-detection")]
             _heartbeat_task: heartbeat_task,
+            heartbeat_sporadic: heartbeat_spawn_params(&options)
+                .map(|(_, sporadic)| sporadic)
+                .unwrap_or(false),
         })
     }
 
@@ -564,6 +609,7 @@ where
                 &self.session,
                 &self.adv_keyexpr,
                 seqnum.load(Ordering::Relaxed),
+                self.heartbeat_sporadic,
             ),
             None => false,
         }
@@ -610,6 +656,7 @@ fn emit_heartbeat<R, T>(
     session: &Session<R, T, Unicast>,
     adv_keyexpr: &str,
     seqnum_now: u32,
+    sporadic: bool,
 ) -> bool
 where
     R: SessionRuntime,
@@ -621,8 +668,40 @@ where
         return false;
     }
     let payload = z_serialize::<u32>(&(seqnum_now - 1));
-    let _ = session.publish(adv_keyexpr, &payload, PublishOptions::put());
+    let _ = session.publish(adv_keyexpr, &payload, heartbeat_publish_options(sporadic));
     true
+}
+
+/// R2558 — the beacon's publish options, and the two arms differ.
+///
+/// Upstream declares the SPORADIC arm's beacon publisher with
+/// `zenoh-ext/src/advanced_publisher.rs` @ `.congestion_control(CongestionControl::Block)`
+/// and the periodic arm's with none at all — that call occurs exactly ONCE in
+/// the file, on the sporadic side — and its own doc says so:
+/// `zenoh-ext/src/advanced_publisher.rs` @ `/// Each period, the last published sample's sequence number is sent with [`CongestionControl::Block`]`.
+///
+/// THE ASYMMETRY IS THE POINT AND IT IS NOT ARBITRARY. A sporadic beacon fires
+/// only when the sequence number MOVED, so each emission is the sole carrier of
+/// that advance: dropping it under congestion loses the very edge the beacon
+/// exists to announce, and the next tick will not re-send it because nothing
+/// moved again. A periodic beacon re-states the same number every period, so a
+/// dropped one is repaired by the next tick and blocking the publisher would
+/// buy latency for nothing.
+///
+/// Gated on `pubsub-qos`, which is the compile unit
+/// [`crate::session::PublishOptions::with_congestion_control`] lives in: a
+/// build without it has no way to say Block at all. The periodic arm needs
+/// nothing either way, so the ungated path is already correct for it — which is
+/// why the gate costs this function no correctness, only the ability to ask.
+#[cfg(feature = "ext-pubsub-sample-miss-detection")]
+fn heartbeat_publish_options(sporadic: bool) -> PublishOptions {
+    let opts = PublishOptions::put();
+    #[cfg(feature = "pubsub-qos")]
+    if sporadic {
+        return opts.with_congestion_control(wz_session_core::qos::CongestionControl::Block);
+    }
+    let _ = sporadic;
+    opts
 }
 
 /// RAII handle for the heartbeat beacon task: dropping it aborts the loop so a
@@ -1292,6 +1371,105 @@ mod tests {
         assert!(
             matches!(result, Err(AdvancedPublisherError::NoRuntime)),
             "heartbeat beacon off-runtime must fail clear with NoRuntime, not panic"
+        );
+    }
+
+    /// R2558 — ASKING FOR MISS DETECTION SETS THE SEQUENCING, witnessed
+    /// through behaviour rather than by reading the field back.
+    ///
+    /// A caller who asks for a heartbeat while naming `Sequencing::None` used
+    /// to get a publisher that declared fine, published fine and NEVER
+    /// BEACONED: `heartbeat_spawn_params` gates on `(state_publisher,
+    /// sequencing)` and yielded `None`, so nothing spawned and nothing said so.
+    /// Upstream cannot reach that state at all — its `sample_miss_detection`
+    /// builder assigns `Sequencing::SequenceNumber` as its first statement and
+    /// its `Sequencing` is `pub(crate)`, so the mode is never a user choice.
+    ///
+    /// THE DISCRIMINATOR IS THE SPAWN ATTEMPT, borrowed from the test above:
+    /// off a tokio runtime a beacon spawn fails clear with `NoRuntime`. So
+    /// "did the request win?" becomes observable without waiting on a timer —
+    /// before the fix this declare returned `Ok`, because there was no beacon
+    /// to spawn.
+    ///
+    /// `Sequencing::None` and not `Timestamp` on purpose: `Timestamp` carries
+    /// its own precondition (`TimestampingDisabled` on a non-stamping node), so
+    /// it could fail for a reason that has nothing to do with this coercion.
+    #[cfg(feature = "ext-pubsub-sample-miss-detection")]
+    #[test]
+    fn a_miss_detection_request_overrides_the_sequencing_the_caller_named() {
+        use std::sync::Mutex;
+        use std::time::Duration;
+
+        use crate::observer::ApplicationLayerObserver;
+        use crate::runtime_impl::TokioTime;
+        use crate::session::TokioSession;
+
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let session = TokioSession::new(actions, observer, clock);
+
+        let result = AdvancedPublisher::declare(
+            &session,
+            "demo/data",
+            AdvancedPublisherOptions {
+                // The caller names the mode that CANNOT carry miss detection.
+                sequencing: Sequencing::None,
+                cache: None,
+                publisher_detection: false,
+                sample_miss_detection: MissDetectionConfig::default()
+                    .heartbeat(Duration::from_millis(100)),
+            },
+            vec![0x09],
+        );
+        assert!(
+            matches!(result, Err(AdvancedPublisherError::NoRuntime)),
+            "the miss-detection request must win over the named sequencing, so \
+             a beacon IS spawned (and off-runtime that spawn fails clear); \
+             before R2558 this returned Ok and silently never beaconed"
+        );
+    }
+
+    /// R2558 — the beacon's congestion asymmetry, as a PAIR so the asymmetry
+    /// itself is what is asserted rather than one arm's value.
+    ///
+    /// Upstream blocks on the SPORADIC arm only — that
+    /// `.congestion_control(CongestionControl::Block)` occurs exactly once in
+    /// its advanced publisher and it is on that side. A test that pinned just
+    /// the sporadic arm would pass equally on a build that blocked BOTH, which
+    /// would be a different (and wrong) publisher: the periodic beacon restates
+    /// the same number every tick, so blocking it buys latency for nothing.
+    ///
+    /// This asserts the pure decision function both ways. ⚠ WHAT IT DOES NOT
+    /// REACH, stated rather than implied: it pins the DECISION, not the wiring
+    /// that carries `sporadic` from the spawn params and from
+    /// `heartbeat_sporadic` into it. No fixture in this module reads an emitted
+    /// frame's QoS back, so that hop is currently unwitnessed.
+    #[cfg(all(feature = "ext-pubsub-sample-miss-detection", feature = "pubsub-qos"))]
+    #[test]
+    fn only_the_sporadic_beacon_blocks_under_congestion() {
+        use wz_session_core::qos::CongestionControl;
+
+        let sporadic = heartbeat_publish_options(true);
+        assert_eq!(
+            sporadic
+                .qos
+                .expect("the sporadic arm names a QoS")
+                .congestion(),
+            CongestionControl::Block,
+            "a sporadic beacon fires only when the sn MOVED, so each emission is \
+             the sole carrier of that advance and must not be dropped"
+        );
+
+        let periodic = heartbeat_publish_options(false);
+        assert!(
+            periodic
+                .qos
+                .map(|q| q.congestion() != CongestionControl::Block)
+                .unwrap_or(true),
+            "a periodic beacon restates the same sn every tick, so a dropped one \
+             is repaired by the next: blocking it is latency for nothing, and \
+             upstream does not"
         );
     }
 

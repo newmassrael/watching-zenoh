@@ -7275,7 +7275,17 @@ layer_c1at_cargo_test_ext_pubsub_advanced_recovery() {
 # faithfulness test (the emitted payload decodes to last_sn on the @adv KE). Then
 # clippy-gates the producer surface + validates the facade forward target.
 layer_c1au_cargo_test_ext_pubsub_sample_miss_detection() {
-    _runci_guarded_test "C1au advanced_publisher" 11 \
+    # R2558 — 11 -> 13, two cases.
+    # `a_miss_detection_request_overrides_the_sequencing_the_caller_named`
+    # discriminates HERE because this lane carries
+    # `ext-pubsub-sample-miss-detection`, which is what compiles the coercion at
+    # all; its probe (drop the coercion, the declare returns Ok instead of
+    # NoRuntime) reds in this lane and nowhere else.
+    # `only_the_sporadic_beacon_blocks_under_congestion` additionally needs
+    # `pubsub-qos` — a DEFAULT feature this lane keeps, since it passes no
+    # `--no-default-features`. It is a PAIR: its probe blocks BOTH arms, which a
+    # single-arm assertion would have passed.
+    _runci_guarded_test "C1au advanced_publisher" 13 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-sample-miss-detection,ext-pubsub-advanced-recovery,pubsub-allow-loop \
         --lib advanced_publisher --quiet || return 1
     (cd crates \

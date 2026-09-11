@@ -839,7 +839,14 @@ PIN_NO_SYMBOL = 2
 # 66 - 10 = 56, exactly. ⚠ This is the first close in this stretch whose reason
 # carried AMBIGUOUS citations, which is why that pin moves here where R2555's
 # and R2556's left it alone.
-PIN_WZ_CITATIONS = 293
+# R2558 -- 293 -> 300. `ext-pubsub-sample-miss-detection` STAYS PARTIAL (so it
+# stays in this population) and its reason gained seven resolvable wz anchors:
+# the coercion site and its witness, the congestion decision and its pair, the
+# `heartbeat_sporadic` field, and the two sites that restate clause (3) on this
+# tree's architecture. Derived by auditing the ADDENDUM ALONE -- wz=7,
+# ambiguous=0 -- so AMBIGUOUS correctly holds and 293 + 7 lands on the measured
+# 300.
+PIN_WZ_CITATIONS = 300
 PIN_AMBIGUOUS = 56
 
 
