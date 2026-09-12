@@ -1377,6 +1377,15 @@ pub mod storage_service;
 #[cfg(feature = "storage-backend-filesystem")]
 pub mod filesystem_storage;
 
+/// R2573 — the key <-> relative-path translation the §5.11 fs storage will be
+/// rebuilt onto, per the owner's decision that wz's fs backend should MIRROR a
+/// user's directory tree rather than stay the hashed flat store
+/// [`filesystem_storage`] is today. Pure translation, no IO, and nothing calls
+/// it yet: the rules are pinned by test first so the rewire has a fixed
+/// contract to move onto instead of acquiring one as it goes.
+#[cfg(feature = "storage-backend-filesystem")]
+pub mod filesystem_keypath;
+
 /// R311y497 — the `storage-mgr-dynamic-volume-loading` atom (§5.24): a `dlopen`ed
 /// storage [`Volume`](wz_session_core::storage_volume::Volume), the storage-side
 /// twin of [`plugin`]. R311y256 deprecated this atom on an explicit CONDITION —
