@@ -594,8 +594,8 @@ fi
 # Gates read both, and several grade them against a PINNED number that is only
 # true if it moves in the commit that moves the measurement.
 #
-# MEASURED TWICE IN FOUR ROUNDS, which is why this is a block and not one more
-# line:
+# MEASURED THREE TIMES IN SIX ROUNDS, which is why this is a block and not one
+# more line:
 #   - R2572 took `switchboard` PARTIAL -> COMPLETE and moved two of
 #     `depth_axis_census`'s counts without moving its pins. Nothing local could
 #     say so; hosted Layer C0 is fail-fast and had already died at 14s on an
@@ -604,27 +604,43 @@ fi
 #   - R2575 added `netns-topology.sh` with no provenance citation in its
 #     header. `gate_provenance_lint.py` says so in one line and costs 0.13s,
 #     and it too ran only hosted.
-# In both, the commit that moved the subject does not touch the file holding
-# the verdict, so there is nothing for a careful reader to notice.
+#   - R2576 added an interop witness whose header states a dependency in prose
+#     that `prose_dep_graph_gate.py` could not fix the subject of. That gate
+#     costs 0.73s and ran only hosted, and THIS BLOCK WAS ALREADY STANDING:
+#     the population rule named the store and the scripts tree, and the corpus
+#     that red was `crates`. Two hosted runs died on it before R2578 looked.
+# In all three, the commit that moved the subject does not touch the file
+# holding the verdict, so there is nothing for a careful reader to notice.
 #
 # The MEMBERSHIP of this list is itself gated. `round_fed_gate_reach.py`
 # derives the population from the code -- a module whose AST names the store
-# file, OR names the scripts tree and globs it, plus whatever imports one,
-# transitively -- and FAILS when a member is neither run here nor carried by a
-# DEFERRED row with a measured reason. So a new one cannot be added quietly.
-# The closure is load-bearing rather than decoration:
-# `upstream_release_distance.py` names the store nowhere and reaches it through
-# an import.
+# file, OR enumerates the tracked corpus (`git ls-files`, or a glob under a
+# tracked top-level directory), plus whatever imports one, transitively -- and
+# FAILS when a member is neither run here nor carried by a DEFERRED row with a
+# measured reason. So a new one cannot be added quietly. The closure is
+# load-bearing rather than decoration: `upstream_release_distance.py` names the
+# store nowhere and reaches it through an import.
 #
-# COST, measured on this tree at R2576 as ONE BLOCK rather than as a sum of
-# separate runs, and quoted as a RANGE because three consecutive runs gave
-# 21.75s, 28.13s and 26.91s at load averages of 5.8 to 9.9. A single figure
-# here would have been the quietest of the three and would read as a promise
-# the hook cannot keep. Of it, `upstream_reads_the_surface` is ~9.4s and
-# `gate_reason_claims` ~5.6s; the other eighteen are ~6.8s together. Three
-# members are DEFERRED for cost or for needing the network, each with its
-# figure in that table, and the gate PRINTS them on every run so a deferral can
-# never read as coverage.
+# COST, measured on this tree as ONE BLOCK rather than as a sum of separate
+# runs, and quoted as a RANGE because a single figure would be the quietest run
+# and would read as a promise the hook cannot keep. At R2576, with twenty
+# members, three consecutive runs gave 21.75s, 28.13s and 26.91s at load
+# averages of 5.8 to 9.9. R2578 widened the population from 30 modules to 91
+# and this list to 62 members: SIX runs gave 68.42s, 68.43s, 70.17s, 74.58s,
+# 74.79s and 74.82s. The three FASTER ones were taken at load averages of 2.7
+# to 7.1 and the three slower at 3.8 to 4.8, so the spread is not load and a
+# figure picked off either triple would be a promise about the wrong thing. The
+# dearest of them are `genuine_axis_witness_gate` (13.68s),
+# `binary_freshness_lint` (11.46s) and `accessor_reach_census` (4.63s); the
+# other thirty-nine are under 2.3s each.
+# ⚠ 74s IS NOT A MIRROR OF HOSTED CI and this block is not a step toward one.
+# What `CLAUDE.md` reserves for hosted is the feature-subset matrix, C2 clippy,
+# Layers B/B2 codegen, F/G/Q/Z footprint / cross-compile / interop and every
+# non-default combination -- minutes each, and none of them a static read of
+# files this push already wrote. Six members are DEFERRED -- for cost, for
+# needing the network, for needing a BUILT artifact, and for MUTATING the tree
+# -- each with its figure in that table, and the gate PRINTS them on every run
+# so a deferral can never read as coverage.
 # ⚠ THE LIST HOLDS BARE NAMES AND THE INVOCATION CARRIES THE PREFIX, which is
 # not a style choice: `hook_gate_boundary_gate.py` grades every gate section by
 # what it RUNS, matching `(python3|bash)\s+scripts/` against the section's code.
@@ -635,8 +651,11 @@ fi
 # records about hiding a command inside a wrapper.
 # ⚠ WHAT THE BARE FORM COSTS, recorded rather than left as a silent count drop:
 # `hook_script_reference_gate.py` verifies that every `scripts/…` PATH a hook
-# names exists, and these twenty no longer appear as paths, so its population
-# fell from 66 to 46. A typo here is caught instead by python failing on the
+# names exists, and the twenty members R2576 moved into this array stopped
+# appearing as paths, so its population fell from 66 to 46. R2578's 42 were
+# never spelled here as paths, so they take nothing further from it -- and that
+# gate is itself a member below now, which is the repair for the class rather
+# than for the count. A typo here is caught instead by python failing on the
 # missing module -- which exits the hook, loudly -- and by
 # `round_fed_gate_reach.py`, whose population IS the scripts/lib directory.
 # Neither is a static path check; that is the trade.
@@ -661,6 +680,51 @@ round_fed_gates=(
     "lane_reach_gate.py --check"
     "python_floor_lint.py"
     "store_reader_lane_lint.py"
+    # R2578 -- the tracked corpus, which the first cut of the population rule
+    # did not name. Ordered cheapest-first inside this group so a form error
+    # or a stale pin surfaces before the three that cost seconds.
+    "accept_deadline_lint.py"
+    "capi_c_wz_door_header.py"
+    "hook_script_reference_gate.py --check"
+    "sn_resolution_words.py --check"
+    "zenoh_c_census_arm_reach.py --check"
+    "zenoh_c_oracle_arms.py --check"
+    "discard_site_lint.py"
+    "capi_c_config_verdict_population.py"
+    "dissect_name_census.py"
+    "layer_e_oracle_scope_gate.py"
+    "own_space_witness_lint.py"
+    "unsequenced_probe_lint.py"
+    "datagram_half_lint.py"
+    "relicense_spdx.py --check"
+    "discarded_evidence_lint.py"
+    "mcast_egress_callers_gate.py"
+    "solo_plane_page_lint.py"
+    "literal_wire_flag_lint.py"
+    "expired_blocker_lint.py"
+    "reason_citation_gate.py"
+    "payload_measurement_lint.py"
+    "feature_public_surface_census.py --check"
+    "self_counted_table_gate.py --check"
+    "prose_dep_graph_gate.py --check"
+    "capi_c_coverage.py"
+    "tcp_tuning_seam_gate.py"
+    "prose_build_closure_gate.py --check"
+    "root_relative_exclusion_lint.py"
+    "negotiated_axis_witness_gate.py --check"
+    "duplicate_module_lint.py"
+    "analysis_surface_config_free.py"
+    "message_producer_lint.py"
+    "analysis_surface_parity.py"
+    "packet_fixture_lint.py"
+    "zenoh_c_archive_arm.py --check"
+    "verdict_assertion_lint.py"
+    "narrow_vle_read_census.py"
+    "verdict_reason_lint.py"
+    "self_report_lint.py"
+    "accessor_reach_census.py"
+    "binary_freshness_lint.py"
+    "genuine_axis_witness_gate.py --check"
 )
 # ⚠ The module and its ARGUMENTS are expanded separately, and that too is
 # forced rather than chosen: `scripts/lib/"${cmd[@]}"` attaches the prefix to
