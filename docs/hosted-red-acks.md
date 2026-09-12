@@ -39,6 +39,7 @@ printed, `commit` is the tip being replaced (the sha the run graded), and
 | R2574 | `34659495427` | `df7369ec` | C0 python-floor lint, `facade_forward_gate` imports `tomllib` (two jobs, one cause) | — | R2574 |
 | R2576 | `34692815062` | `d21f7a16` | C0 gate-provenance, `netns-topology.sh` carries no citation (two jobs, one cause) | — | R2576 |
 | R2577 | `34697207229` | `cb57df67` | C0 hook-gate-boundary, `gate 2z` hid its commands in an array expansion (two jobs, one cause) | — | R2577 |
+| R2578 | `34701444387` | `f394e114` | C0 prose-dep-graph, a witness header's dependency clause took a pronoun subject (two jobs, one cause) | — | R2578 |
 
 ## What the rows above say
 
@@ -179,3 +180,16 @@ behind it. R2576 pays both and, more to the point, puts twenty-seven of the
 thirty gates that read the atomic store or the gate corpus into pre-push gate
 2z, so this particular shape -- a hosted-only gate whose subject a commit moved
 without being able to see it -- cannot produce a third round's red in silence.
+
+⚠⚠⚠ IT PRODUCED A THIRD ONE ANYWAY, and the R2578 row is it. The sentence above
+is correct about the shape and wrong about the reach, because "the thirty gates
+that read the atomic store or the gate corpus" was never the population -- it
+was the two corpora R2576's two instances happened to share. `prose_dep_graph`
+reads `crates/`, sat outside that set, and refused a header R2576 itself had
+written; two hosted runs died on it before anyone read them. R2578 re-derives
+the population from the CLASS -- a gate is round-fed when it enumerates TRACKED
+files -- which takes it from 30 modules to 91 and gate 2z from 20 members to 62.
+The honest reading of this row is therefore NOT "the gate failed": it is that a
+population written as a list of known subjects reports a clean surface over the
+subject it does not have, and the only fix is to state the class and derive the
+list from it.
