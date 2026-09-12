@@ -5481,6 +5481,38 @@ fn declare_publisher_asks_the_peer_for_matching_subscriber_declarations() {
     );
 }
 
+/// R2578 — the capability accessor must agree with the BEHAVIOUR it reports,
+/// not merely with its own `cfg!`.
+///
+/// Asserting `session_matching_compiled() == cfg!(feature = "session-matching")`
+/// inside this crate would be a tautology: same crate, same flag. What a
+/// consumer needs is the pairing — when the accessor says `true` a matching
+/// listener declares, and when it says `false` the declare is typed-rejected.
+/// This means something in BOTH builds, and it is the reason the accessor is
+/// worth having: `wz-ap-demo` cannot ask `cfg!` for a feature its own manifest
+/// does not declare, so a poll-based fixture has no other way to tell "the
+/// feature is off" from "the transition has not happened yet".
+#[cfg(feature = "codec-declare")]
+#[test]
+fn the_session_matching_accessor_agrees_with_what_a_declare_does() {
+    let (session, _driver) = build_session();
+    let pubr = session.declare_publisher("home/temp", PublishOptions::put());
+    let declared = pubr.declare_matching_listener(|_| {});
+    if crate::session::session_matching_compiled() {
+        assert!(
+            declared.is_ok(),
+            "the accessor says session-matching is compiled in, so a matching \
+             listener must declare",
+        );
+    } else {
+        assert!(
+            matches!(declared, Err(MatchingListenerError::FeatureDisabled)),
+            "the accessor says session-matching is absent, so the declare must \
+             be typed-rejected rather than silently accepted",
+        );
+    }
+}
+
 /// R2577 — the refcount, from the side that makes a naive `Drop` wrong: a
 /// CLONE is another live publisher, so it must NOT emit a second Interest, and
 /// dropping it must NOT retract the one the original still needs.

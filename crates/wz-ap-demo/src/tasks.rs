@@ -30,7 +30,8 @@ use wz::runtime_core::TimeSource;
 use wz::runtime_tokio::reply_sink::ReplyView;
 use wz::runtime_tokio::sample::SampleKind;
 use wz::runtime_tokio::session::{
-    LivelinessGetOptions, PublishAliasError, PublishOptions, TokioSession,
+    session_matching_compiled, LivelinessGetOptions, PublishAliasError, PublishOptions, Publisher,
+    TokioSession,
 };
 use wz::runtime_tokio::session_glue::{QueryMetadata, SessionLinkActions};
 use wz::runtime_tokio::Reliability;
@@ -84,6 +85,17 @@ const PUBLISHER_BURST_INTERVAL_MS: u64 = 200;
 /// yet — R121j-6 carry). The demo binary's purpose here is to
 /// drive the OUTBOUND Query path so a paired wz-ap-demo --queryable
 /// peer can fire its callback on the matched keyexpr.
+/// R2578 — how often `--matching-poll` re-reads the verdict. Fast enough that a
+/// fixture's own barrier, not this cadence, is what a timeout measures; slow
+/// enough that the line is a verdict rather than a stream. The task logs only
+/// CHANGES, so the cadence never appears in the output.
+const MATCHING_POLL_INTERVAL_MS: u64 = 50;
+
+/// R2578 — the poll's own Established wait. Same budget as the query task's, for
+/// the same reason: past it, the session never came up and the poll would report
+/// `false` for ever with no way to tell that from a genuine absence.
+const MATCHING_POLL_ESTABLISHED_TIMEOUT_MS: u64 = 5_000;
+
 const QUERY_HANDSHAKE_POLL_INTERVAL_MS: u64 = 50;
 const QUERY_HANDSHAKE_TIMEOUT_MS: u64 = 5_000;
 /// Exposed pub(crate) because `run_demo`'s ReplyRegistry register
@@ -148,6 +160,68 @@ fn query_metadata(parameters: Option<&str>, attachment_blob: Option<Vec<u8>>) ->
         parameters,
         attachment: attachment_blob,
         ..Default::default()
+    }
+}
+
+/// R2578 — `--matching-poll`: read `Publisher::get_matching_status` on a cadence
+/// and log every CHANGE, which is the COLD-ASK half of §5.4 `session-matching`.
+///
+/// ## The precondition line, and why a poll needs one where a listener does not
+///
+/// `declare_matching_listener` is typed-rejected with `session-matching` off, so
+/// a listener fixture separates "the feature is absent" from "the transition has
+/// not happened" by the `Err` alone. `get_matching_status` is gated on
+/// `declare-subscriber` ALONE and answers `false` in both cases, so a fixture
+/// waiting on a poll would time out identically either way and blame the wrong
+/// thing. The first line therefore reports the BUILD, and it asks
+/// `session_matching_compiled()` rather than `cfg!` — this crate declares no
+/// `session-matching` feature (it forwards `wz/preset-ap-*` while the gate lives
+/// on `wz-runtime-tokio`), so a `cfg!` written here reads `false` on every
+/// build, including one that carries the capability.
+///
+/// ## Why the verdict binds to the atom at all
+///
+/// Since R2577 the SUBSCRIBERS Interest that fills the registry this reads is
+/// emitted from `Session::declare_publisher` under
+/// `cfg(all(session-matching, declare-interest))`. Behind a router a neighbour
+/// forwards a `DeclSubscriber` only to a face that asked, so with the atom's
+/// feature off nothing asks and the remote half stays empty — which is what
+/// makes a poll leg a claim about `session-matching` and not merely about
+/// `declare-subscriber`.
+pub(crate) async fn matching_poll_task(publisher: Publisher, actions: Arc<SessionLinkActions>) {
+    let keyexpr = publisher.keyexpr().to_string();
+    let deadline_ms = MATCHING_POLL_ESTABLISHED_TIMEOUT_MS;
+    let mut waited_ms = 0u64;
+    while !actions.is_established() {
+        if waited_ms >= deadline_ms {
+            log::warn!(
+                "wz-ap-demo: matching_poll_task gave up waiting for Established \
+                 after {deadline_ms}ms; it has nothing to poll against"
+            );
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(
+            QUERY_HANDSHAKE_POLL_INTERVAL_MS,
+        ))
+        .await;
+        waited_ms += QUERY_HANDSHAKE_POLL_INTERVAL_MS;
+    }
+    log::info!(
+        "wz-ap-demo: POLLING MATCHING STATUS keyexpr='{keyexpr}' session-matching={}",
+        if session_matching_compiled() {
+            "on"
+        } else {
+            "off"
+        }
+    );
+    let mut last: Option<bool> = None;
+    loop {
+        let now = publisher.get_matching_status().matching;
+        if last != Some(now) {
+            log::info!("wz-ap-demo: MATCHING POLL keyexpr='{keyexpr}' matching={now}");
+            last = Some(now);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(MATCHING_POLL_INTERVAL_MS)).await;
     }
 }
 
@@ -549,6 +623,10 @@ pub(crate) async fn publisher_task<T>(
         // witness the remote's Undeclare. Named-and-ignored rather than dropped
         // from the bundle, so a future field cannot silently land in this task.
         matching_log: _,
+        // R2578 — the poll runs as its own task off a `Publisher` clone held by
+        // `SessionHandles`, so the burst task has nothing to do with it. Named
+        // rather than `..` so a future field cannot slip in unread here.
+        matching_poll: _,
     } = spec;
     // R235 — borrow the outbound actions handle for `trace_snapshot`
     // (Established gate polling) + `send_declare_keyexpr` (the

@@ -155,6 +155,13 @@ struct SessionHandles {
     /// alongside it because dropping it would take the listener's keyexpr with it.
     _publisher: Option<Publisher>,
     _matching_listener: Option<MatchingListener>,
+    /// R2578 — `--matching-poll`'s task handle. Held so the poll stops when the
+    /// session handles drop, rather than reading a registry whose session has
+    /// gone. The task owns its OWN `Publisher` clone: since R2577 a clone takes
+    /// a reference on the keyexpr's SUBSCRIBERS Interest and its `Drop`
+    /// releases one, so the ask outlives the task by exactly the handle above
+    /// and no longer.
+    _matching_poll_handle: Option<TokioJoinHandle<()>>,
     /// R311y775 — `--querier-matching-log`'s querier + its matching listener,
     /// held for the same RAII reason as the publisher pair above: the listener
     /// must outlive whatever drives the far edge, and dropping the querier would
@@ -1660,6 +1667,15 @@ fn install_session_handles(
     declare_spec: &DeclareEmitSpec,
     queryable_spec: Option<QueryableSpec>,
     matching_publisher_keyexpr: Option<&str>,
+    // R2578 — `--matching-poll`. A separate `bool` rather than a second
+    // keyexpr: both knobs hang off the SAME publisher, and giving the poll its
+    // own keyexpr parameter would let the two drift to different literals while
+    // the field doc says they cannot.
+    matching_poll: bool,
+    // R2578 — whether `--matching-log` asked for the LISTENER. The keyexpr above
+    // now means "declare a publisher", which either knob wants; this is what
+    // still means "and watch it", which only one does.
+    matching_listener_wanted: bool,
 ) -> SessionHandles {
     // R311y442 — the four declare-side knobs arrive as the `DeclareEmitSpec`
     // bundle rather than as four positional arguments. `--advanced-subscribe` +
@@ -1953,6 +1969,18 @@ fn install_session_handles(
     // remote's `DeclSubscriber` has already been dispatched would miss the very
     // edge it exists to observe and report nothing, silently.
     let (publisher, matching_listener) = match matching_publisher_keyexpr {
+        // R2578 — the publisher is declared for EITHER knob, but the listener
+        // only for `--matching-log`. MEASURED, and it is why this arm is split:
+        // the first cut routed `--matching-poll` through the same
+        // `Some(keyexpr)` and so silently installed a matching listener too,
+        // whose own Interest then answered the poll. The poll leg passed with
+        // the publisher's declare-time ask removed entirely -- a witness that
+        // proved nothing, caught only because the demo's own log carried
+        // `DECLARED MATCHING LISTENER` in a run that never asked for one.
+        Some(keyexpr) if !matching_listener_wanted => (
+            Some(session.declare_publisher(keyexpr, PublishOptions::default())),
+            None,
+        ),
         Some(keyexpr) => {
             let publisher = session.declare_publisher(keyexpr, PublishOptions::default());
             let keyexpr_for_log = keyexpr.to_string();
@@ -1983,6 +2011,22 @@ fn install_session_handles(
             }
         }
         None => (None, None),
+    };
+
+    // R2578 — `--matching-poll`: the COLD-ASK half. The listener above reports
+    // transitions a remote causes; this reads what a caller asking cold would
+    // see, which is the half §5.4's residual named and which no fixture has ever
+    // driven.
+    //
+    // The task owns a CLONE, deliberately: since R2577 a clone takes its own
+    // reference on the keyexpr's SUBSCRIBERS Interest and its `Drop` releases
+    // one, so the ask lives exactly as long as the poll does. Handing the task
+    // the only handle would have made `SessionHandles` stop holding the ask.
+    let matching_poll_handle = match (&publisher, matching_poll) {
+        (Some(pubr), true) => Some(PartitionedRuntime::APPLICATION.spawn(
+            crate::tasks::matching_poll_task(pubr.clone(), session.actions().clone()),
+        )),
+        _ => None,
     };
 
     // R311y775 — `--querier-matching-log`, the QUERYABLE-plane twin of the block
@@ -2206,6 +2250,7 @@ fn install_session_handles(
         _queryable: queryable,
         _publisher: publisher,
         _matching_listener: matching_listener,
+        _matching_poll_handle: matching_poll_handle,
         _querier: querier,
         _querier_matching_listener: querier_matching_listener,
         _querier_all_complete: querier_all_complete,
@@ -3172,10 +3217,26 @@ pub(crate) async fn run_demo(
         .with_timestamping(timestamping.map_for(node_whatami));
 
     // Read the matching knob BEFORE `publisher_spec` moves into spawn_tasks.
+    //
+    // R2578 — EITHER knob wants the publisher declared here. `--matching-log`
+    // needs it pre-drive because a transition listener installed after the
+    // inbound Declare has been dispatched misses the very edge it exists to
+    // watch; `--matching-poll` needs the same handle for a different reason,
+    // and one R2577 created: `declare_publisher` now takes a refcounted
+    // SUBSCRIBERS Interest and `Publisher::drop` releases it, so a publisher
+    // declared in a narrower scope would retract its own ask and then read
+    // `false` for ever.
     let matching_publisher_keyexpr: Option<&str> = publisher_spec
         .as_ref()
-        .filter(|spec| spec.matching_log)
+        .filter(|spec| spec.matching_log || spec.matching_poll)
         .map(|spec| spec.keyexpr.as_str());
+
+    let matching_poll_on = publisher_spec
+        .as_ref()
+        .is_some_and(|spec| spec.matching_poll);
+    let matching_listener_on = publisher_spec
+        .as_ref()
+        .is_some_and(|spec| spec.matching_log);
 
     let _handles = install_session_handles(
         &session,
@@ -3183,6 +3244,8 @@ pub(crate) async fn run_demo(
         &declare_spec,
         queryable_spec,
         matching_publisher_keyexpr,
+        matching_poll_on,
+        matching_listener_on,
     );
 
     // R311ot / R311oy — declare the outbound liveliness TOKEN SYNCHRONOUSLY in

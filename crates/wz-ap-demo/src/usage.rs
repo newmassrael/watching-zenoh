@@ -336,6 +336,16 @@ pub(crate) fn print_usage() {
     eprintln!("    --matching-log           install a Publisher matching listener on the");
     eprintln!("                             --publish keyexpr and log every TRANSITION");
     eprintln!("                             ('MATCHING STATUS ... matching=<bool>')");
+    // R2578 — the COLD-ASK twin. Documented beside its sibling rather than
+    // below the querier family: a reader choosing between them is choosing
+    // between "transitions a peer causes" and "what a caller asking cold sees",
+    // and that choice is only visible if the two lines sit together.
+    eprintln!("    --matching-poll          POLL get_matching_status on the --publish");
+    eprintln!("                             keyexpr, logging each CHANGE ('MATCHING POLL");
+    eprintln!("                             ... matching=<bool>'); its first line reports");
+    eprintln!("                             the build ('session-matching=on|off') because");
+    eprintln!("                             a poll answers false both when the feature is");
+    eprintln!("                             absent and when the transition has not landed");
     eprintln!("    --querier-matching-log <keyexpr>");
     eprintln!("                             the QUERYABLE-plane twin: a Querier on <keyexpr>");
     eprintln!("                             plus its matching listener, logging");

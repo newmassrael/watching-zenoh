@@ -2048,6 +2048,11 @@ fn main() -> ExitCode {
     // same path and surface the typed reject, because that arm is the
     // anti-vacuity twin the proof rests on.
     let matching_log = rest.iter().any(|a| a == "--matching-log");
+    // R2578 — `--matching-poll`, the same family and the same NOT-cfg-gated
+    // rule: the `session-matching`-OFF build must reach this path so its own
+    // arm is observable, which for a poll means the task reporting the build it
+    // was compiled from (see the field doc).
+    let matching_poll = rest.iter().any(|a| a == "--matching-poll");
     let publisher_spec: Option<PublisherSpec> = match (publish_opt, value_opt, delete_opt) {
         (Some(k), Some(v), None) => Some(PublisherSpec {
             keyexpr: k,
@@ -2056,6 +2061,7 @@ fn main() -> ExitCode {
             publish_after_ms,
             batch,
             matching_log,
+            matching_poll,
         }),
         (None, None, Some(k)) => Some(PublisherSpec {
             keyexpr: k,
@@ -2064,6 +2070,7 @@ fn main() -> ExitCode {
             publish_after_ms,
             batch,
             matching_log,
+            matching_poll,
         }),
         _ => None,
     };
@@ -2073,6 +2080,15 @@ fn main() -> ExitCode {
     if matching_log && publisher_spec.is_none() {
         eprintln!(
             "wz-ap-demo: --matching-log needs a publisher; pass --publish <keyexpr> \
+             --value <text> (or --delete <keyexpr>)"
+        );
+        return ExitCode::from(2);
+    }
+    // Same rule, same reason: a knob that silently does nothing is how a proof
+    // goes vacuous, and this one has no publisher to poll without a spec.
+    if matching_poll && publisher_spec.is_none() {
+        eprintln!(
+            "wz-ap-demo: --matching-poll needs a publisher; pass --publish <keyexpr> \
              --value <text> (or --delete <keyexpr>)"
         );
         return ExitCode::from(2);
@@ -2239,8 +2255,15 @@ fn main() -> ExitCode {
         publish_after_ms: after,
         batch: batch_on,
         matching_log: matching_on,
+        matching_poll: matching_poll_on,
     }) = &publisher_spec
     {
+        if *matching_poll_on {
+            log::info!(
+                "matching-poll = on (reads get_matching_status on a cadence; \
+                 the COLD-ASK half, which a transition listener never exercises)"
+            );
+        }
         if *batch_on {
             log::info!("batch   = on (burst rides ONE frame; zp_start_batching parity)");
         }

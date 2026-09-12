@@ -6896,7 +6896,37 @@ pub(crate) struct PublisherSpec {
     /// and rejects typed with the feature off. Its sibling
     /// `Publisher::get_matching_status` is gated on `declare-subscriber` ALONE, so
     /// polling would NOT bind the claim to `session-matching`.
+    ///
+    /// ⚠ R2578 — THAT LAST SENTENCE IS NO LONGER TRUE BEHIND A ROUTER, and
+    /// `--matching-poll` below exists because of it. The registry the poll reads
+    /// is filled by declarations a neighbour forwards only to a face that asked,
+    /// and since R2577 the Interest doing the asking is emitted from
+    /// `Session::declare_publisher` under
+    /// `cfg(all(session-matching, declare-interest))`. So with `session-matching`
+    /// off nothing asks, the remote half stays empty behind a router, and the
+    /// poll's verdict DOES depend on the atom's own gated code.
     pub(crate) matching_log: bool,
+    /// `--matching-poll` — declare a `Publisher` on the publish keyexpr and POLL
+    /// `Publisher::get_matching_status` on a cadence, logging each verdict
+    /// CHANGE. The twin of `--matching-log`, and deliberately a separate knob
+    /// rather than a mode of it: the listener reports TRANSITIONS the peer
+    /// causes, while the poll reports what a caller would see asking cold, which
+    /// is the half the §5.4 residual named.
+    ///
+    /// ⚠ ITS ANTI-VACUITY LINE CANNOT BE A `cfg!` HERE. This crate declares no
+    /// `session-matching` feature — it forwards `wz/preset-ap-*` while the gate
+    /// lives on `wz-runtime-tokio` — so `cfg!(feature = "session-matching")`
+    /// written in this crate is FALSE on every build, including one that carries
+    /// the capability. The task asks `session_matching_compiled()` instead,
+    /// which is the crate that owns the gate answering for itself.
+    ///
+    /// WHY THE POLL NEEDS THAT LINE AND THE LISTENER DOES NOT:
+    /// `declare_matching_listener` is typed-rejected with the feature off, so a
+    /// listener fixture tells "absent" from "not yet" by the `Err` alone.
+    /// `get_matching_status` is gated on `declare-subscriber` alone and answers
+    /// `false` in both cases, so without the build being reported a feature-off
+    /// run and a transition-never-happened run are the same timeout.
+    pub(crate) matching_poll: bool,
 }
 
 /// R121k-5 / R311oy — bundle of declare-emit keyexprs the demo emits once the

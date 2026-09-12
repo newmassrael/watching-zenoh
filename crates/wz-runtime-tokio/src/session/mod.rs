@@ -672,6 +672,26 @@ where
     matching_interests: Arc<std::sync::Mutex<MatchingInterestTable>>,
 }
 
+/// R2578 — does THIS build carry `session-matching`?
+///
+/// Exists because the question cannot be asked from anywhere else. A consumer
+/// that writes `cfg!(feature = "session-matching")` in its OWN crate gets
+/// `false` unless that crate happens to declare a feature by that name, and
+/// `wz-ap-demo` does not: it forwards `wz/preset-ap-*`, and the gate lives on
+/// `wz-runtime-tokio` (`session-matching = ["wz-session-core/session-matching"]`).
+/// So the obvious line prints `off` on an ON build -- a silent lie in exactly
+/// the place an anti-vacuity assertion is supposed to be load-bearing.
+///
+/// WHY A CONSUMER NEEDS IT AT ALL: `Publisher::declare_matching_listener` is
+/// typed-rejected when the feature is off, so a listener knob can distinguish
+/// "absent" from "not yet" by its own `Err`. A POLL cannot -- `get_matching_status`
+/// is gated on `declare-subscriber` alone and answers `false` in both cases --
+/// so a fixture that waits on a poll needs the build reported to it, or a
+/// feature-off run and a transition-never-happened run are the same timeout.
+pub const fn session_matching_compiled() -> bool {
+    cfg!(feature = "session-matching")
+}
+
 /// R2577 — `(plane, keyexpr) -> (interest id, live handles)`.
 ///
 /// Named rather than spelled inline because clippy's `type_complexity` refused
