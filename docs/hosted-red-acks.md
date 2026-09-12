@@ -36,6 +36,7 @@ printed, `commit` is the tip being replaced (the sha the run graded), and
 | R2535 | `34465003136` | `6b112827` | C0 sn-res-words selftest (two jobs, one cause) · C1ce census `unstable` row | 717 | R2535 |
 | R2568 | `34611269702` | `efada3a9` | E z_info drop-in link · Z same (two jobs, one cause) · A4 cross-impl accessor · C0 gate-provenance | 721 | |
 | R2570 | `34640784537` | `85c21c02` | C1bn feature-gate-diagnostic · C0 lane-reach · A+B C0 (armed) provenance · E6 peer mesh | 721 | |
+| R2574 | `34659495427` | `df7369ec` | C0 python-floor lint, `facade_forward_gate` imports `tomllib` (two jobs, one cause) | — | R2574 |
 
 ## What the rows above say
 
@@ -144,3 +145,25 @@ four reds listed, having run the lanes its change owns locally. Its `debt` colum
 says 721 for the same reason R2568's does — that item owns the class in which a
 red survives a window because nothing local can see it — and, like every row
 here, an acknowledgement is not a repayment.
+
+⚠ R2574's ROW IS THE UNUSUAL ONE: its `paid` is filled by the SAME round, and its
+`debt` is a dash rather than a number, because neither column means what the
+others mean here. The red was not a class this register already owns and not a
+red that survived a window nothing local could see — it was CAUSED by the push
+two rounds earlier, which added `scripts/lib/facade_forward_gate.py` to Layer C0
+reading manifests with `tomllib`, stdlib only from python 3.11 against a 3.10
+runner floor. R2574 fixed the cause (the gate now asks `cargo metadata`, so it
+parses no manifest format at all) and verified it with the lint that caught it:
+135 scripts scanned against 3.10, 0 findings. So the acknowledgement exists only
+because gate 2c reads the PREVIOUS run's conclusion, which is immutable — a
+repaired cause cannot turn a finished run green, and no amount of fixing removes
+the need for the ack.
+
+⚠⚠ WHAT THAT `paid` DOES NOT CLAIM, recorded because this layer's shape makes
+the overclaim easy. Layer C0 is fail-fast and the python-floor lint sits at
+`scripts/run-ci.sh:2026` while the gate that tripped it sits at `:2703`, with 104
+script-gate invocations between them. Every one of those was UNRUN on that push —
+including the new gate itself, which has therefore never executed in CI. `paid`
+here means the named cause is fixed and independently re-measured. It does not
+mean Layer C0 is green, and the next hosted run is the first evidence either
+way.
