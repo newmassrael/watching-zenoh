@@ -655,6 +655,61 @@ pub mod common {
         );
     }
 
+    /// R2579 — refuse a zenoh-c differential when the cdylib on disk is not the
+    /// ABI arm this oracle's header is. Hoisted out of
+    /// `zenoh_c_source_info_twice_and_diff.rs` on its SECOND consumer rather
+    /// than after a third: this workspace's rule is that a class leaking twice
+    /// gets a shared home, and a copied guard is the one that rots unevenly.
+    ///
+    /// MEASURED by the leg that first carried it, and the reason it is a hard
+    /// refusal rather than a warning: that leg's first run reported `put.rc=-5`
+    /// on wz against a clean reference, which reads exactly like a wz defect. It
+    /// was not — the cdylib was the unstable arm and the header the no-unstable
+    /// one, so the C program wrote an options struct smaller than wz read and
+    /// every field past the short prefix was garbage. A harness that reports an
+    /// ARM MISMATCH as a behavioural divergence is worse than no harness.
+    ///
+    /// `z_source_info_new` is the probe symbol because it is unstable-gated in
+    /// BOTH libraries, so its presence in wz's exports names the arm the cdylib
+    /// was built for. Layer C1cc builds the matching arm; a standalone
+    /// `cargo test` does not, which is precisely when this fires.
+    pub fn assert_zenoh_c_arm_pairing(include: &Path) {
+        let configure = std::fs::read_to_string(include.join("zenoh_configure.h"))
+            .expect("the oracle ships zenoh_configure.h");
+        let oracle_is_unstable = configure.contains("#define Z_FEATURE_UNSTABLE_API");
+        let out = Command::new("nm")
+            .arg("-D")
+            .arg("--defined-only")
+            .arg(wz_capi_c_cdylib())
+            .output()
+            .expect("nm reads the cdylib's dynamic symbols");
+        let wz_is_unstable = String::from_utf8_lossy(&out.stdout).contains("z_source_info_new");
+        assert_eq!(
+            wz_is_unstable,
+            oracle_is_unstable,
+            "ABI ARM MISMATCH: the cdylib on disk is the {} arm and this oracle's header \
+             is the {} one. Every field past the short prefix of a feature-conditional \
+             options struct would be read at the wrong offset, and any diff downstream \
+             would report that as a behavioural divergence. Build the matching arm \
+             (`cargo build -p wz-capi-c{}`) or run Layer C1cc, which does it for you.",
+            if wz_is_unstable {
+                "unstable"
+            } else {
+                "no-unstable"
+            },
+            if oracle_is_unstable {
+                "unstable"
+            } else {
+                "no-unstable"
+            },
+            if oracle_is_unstable {
+                ""
+            } else {
+                " --features zenoh-c-no-unstable-api"
+            },
+        );
+    }
+
     /// R311y498 — the §5.27 `api-compat-c` cdylib, the zenoh-c ABI's artifact.
     ///
     /// R2303 (open-debt item 636) gave it the same STALENESS guard the pico

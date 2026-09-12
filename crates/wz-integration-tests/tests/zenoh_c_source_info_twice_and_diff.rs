@@ -44,58 +44,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use wz_integration_tests::common::{
-    compile_zenoh_c_example, wz_capi_c_cdylib, zenoh_c_oracle, zenoh_c_shared_library,
-    PortReservation,
+    assert_zenoh_c_arm_pairing, compile_zenoh_c_example, wz_capi_c_cdylib, zenoh_c_oracle,
+    zenoh_c_shared_library, PortReservation,
 };
-
-/// Refuse to run when the cdylib on disk is not the arm this oracle's header is.
-///
-/// MEASURED, not anticipated: the first run of this leg reported `put.rc=-5` on
-/// wz against a clean reference, which reads exactly like a wz defect. It was
-/// not — the cdylib was the unstable arm and the header the no-unstable one, so
-/// the C program wrote a `z_put_options_t` smaller than wz read and every
-/// pointer past the short prefix was garbage. A harness that reports an ARM
-/// MISMATCH as a behavioural divergence is worse than no harness, so the pairing
-/// is asserted rather than assumed. Layer C1cc builds the matching arm; a
-/// standalone `cargo test` does not, which is precisely when this fires.
-fn assert_arm_pairing(include: &Path) {
-    let configure = std::fs::read_to_string(include.join("zenoh_configure.h"))
-        .expect("the oracle ships zenoh_configure.h");
-    let oracle_is_unstable = configure.contains("#define Z_FEATURE_UNSTABLE_API");
-    // `z_source_info_new` is unstable-gated in BOTH libraries, so its presence
-    // in wz's exports names the arm the cdylib was built for.
-    let out = Command::new("nm")
-        .arg("-D")
-        .arg("--defined-only")
-        .arg(wz_capi_c_cdylib())
-        .output()
-        .expect("nm reads the cdylib's dynamic symbols");
-    let wz_is_unstable = String::from_utf8_lossy(&out.stdout).contains("z_source_info_new");
-    assert_eq!(
-        wz_is_unstable,
-        oracle_is_unstable,
-        "ABI ARM MISMATCH: the cdylib on disk is the {} arm and this oracle's header \
-         is the {} one. Every field past the short prefix of a feature-conditional \
-         options struct would be read at the wrong offset, and the diff below would \
-         report that as a behavioural divergence. Build the matching arm \
-         (`cargo build -p wz-capi-c{}`) or run Layer C1cc, which does it for you.",
-        if wz_is_unstable {
-            "unstable"
-        } else {
-            "no-unstable"
-        },
-        if oracle_is_unstable {
-            "unstable"
-        } else {
-            "no-unstable"
-        },
-        if oracle_is_unstable {
-            ""
-        } else {
-            " --features zenoh-c-no-unstable-api"
-        },
-    );
-}
 
 /// The oracle, or `None` with a LOUD note naming what to do about it.
 fn oracle_or_note() -> Option<PathBuf> {
@@ -376,7 +327,7 @@ fn a_patched_upstream_put_carries_source_info_identically_on_wz_and_libzenohc() 
     let Some(include) = oracle_or_note() else {
         return;
     };
-    assert_arm_pairing(&include);
+    assert_zenoh_c_arm_pairing(&include);
     let (wz_stdout, ref_stdout) = run_both_arms(&include);
 
     // Asserted BEFORE the diff: two empty captures are equal, and the UNSTABLE
