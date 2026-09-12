@@ -1744,9 +1744,15 @@ impl SharedSession {
     }
 
     /// R2579 — every session a DECLARATION made through this registry reaches:
-    /// the faces AND the [local plane](Self::local). The read-side twin of what
-    /// [`Self::declare_subscriber`] and [`Self::declare_queryable`] write, which
-    /// both end with `self.local.declare_*`.
+    /// the faces AND the face-independent local plane. The read-side twin of
+    /// what [`Self::declare_subscriber`] and [`Self::declare_queryable`] write,
+    /// which both end with `self.local.declare_*`.
+    ///
+    /// ⚠ The plane is named in prose rather than linked: the field is PRIVATE,
+    /// and a `[…](Self::local)` link is one `cargo doc --all-features` counts as
+    /// broken. That cost this round a push — the C1bz budget for this crate went
+    /// 7 -> 8 and gate 4 refused it. `publish_all` a few methods up carries the
+    /// same link and is one of the seven already budgeted; do not copy it.
     ///
     /// ## Why this is not [`Self::face_sessions`], measured rather than argued
     ///
