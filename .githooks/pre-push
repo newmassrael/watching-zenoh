@@ -722,6 +722,11 @@ round_fed_gates=(
     "narrow_vle_read_census.py"
     "verdict_reason_lint.py"
     "self_report_lint.py"
+    # R2585 -- the corpus `#[ignore]` obligations Layer C0 carried INLINE until
+    # this round, so the derivation could not see them and the hosted run for
+    # dbc20e6f redded C0 and Layer E on two untokened legs. 3.51-3.98s over
+    # three runs at load 1.2-1.6, which is why it sits among the dearer members.
+    "test_discipline_gate.py --check"
     "accessor_reach_census.py"
     "binary_freshness_lint.py"
     "genuine_axis_witness_gate.py --check"
