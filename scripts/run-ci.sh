@@ -14431,6 +14431,30 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     # (the z_sub check above covers it — the same build script emits both).
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_subscriber_from_pico_multicast -- --ignored --quiet) || return 1
+    # R2586 — the `#join=` key with a FOREIGN sender: pico `z_pub` in its own
+    # network namespace publishes to a group wz reaches only through `#join=` on
+    # the `#iface=`-pinned veth end. The namespace is what makes the silent arms
+    # mean anything: on one host, IP_MULTICAST_ALL delivers the peer's own
+    # membership to wz whether or not wz joined. It needs non-interactive sudo, so
+    # the leg PROBES with the script the test itself builds with. Exit 2 means
+    # this host cannot build one, which is a skip unless the lane is armed; exit 4
+    # means the tools are present and the build broke, which is never a skip.
+    # Count-guarded: a renamed fn would otherwise select nothing and pass.
+    local netns_rc=0
+    # shellcheck source=scripts/lib/netns-topology.sh
+    (source scripts/lib/netns-topology.sh && netns_topology_probe) || netns_rc=$?
+    if (( netns_rc == 2 && ! m_required )); then
+        echo "Layer M SKIP pico->wz #join= across a namespace (this host cannot build" \
+             "a network namespace: no ip, or no non-interactive sudo)"
+    elif (( netns_rc != 0 )); then
+        echo "  Layer M FAIL: netns-topology probe rc=$netns_rc (4 = the build broke;" \
+             "2 under WZ_M_REQUIRE = this job was meant to provision it)" >&2
+        return 1
+    else
+        _runci_guarded_test "M pico->wz #join= across a namespace" 1 \
+            cargo test -p wz-integration-tests \
+            --test wz_multicast_extra_join_pico_netns_interop -- --ignored || return 1
+    fi
     # R311y193 — router-multicast-faces S4: a wz `--router-hat` egresses a routed,
     # re-literalized Put over the data-plane multicast group to a foreign pico
     # `z_sub -m peer` (the LAST slice, the atom's first cross-impl egress proof).
