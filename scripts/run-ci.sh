@@ -9529,7 +9529,12 @@ layer_c1q_multicast_glue() {
     # `udp_multicast_config_tests::…` does not contain that string. The tests
     # would have run in nobody's lane — the zero-population trap in its
     # "no lane watches this" form.
-    _runci_guarded_test C1q 4 cargo test -p wz-runtime-tokio --features transport-multicast,transport-link-udp --lib udp_multicast_config --quiet \
+    # R2584: 4 -> 7, and `locator-iface` joins the features. Three IPv6 cases
+    # were added, and one of them (the v6 pin read from the kernel's records) is
+    # gated on `locator-iface`, which this leg did not build — so without the
+    # feature it would have run in nobody's lane, the same trap as above. The
+    # number is what the command printed, not a diff count.
+    _runci_guarded_test C1q 7 cargo test -p wz-runtime-tokio --features transport-multicast,transport-link-udp,locator-iface --lib udp_multicast_config --quiet \
         || return 1
 }
 
