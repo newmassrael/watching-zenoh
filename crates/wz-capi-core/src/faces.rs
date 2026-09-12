@@ -255,7 +255,18 @@ struct FaceEntry {
     /// measured the rest of a declare's body to be runtime-free. What changed
     /// is that the guard is now a defence rather than the only thing holding
     /// the C entry point up.
-    runtime: tokio::runtime::Handle,
+    ///
+    /// R2580 — OPTIONAL, because the local plane is about to become a
+    /// `FaceEntry` too and it is constructed in `SharedSession::new`, which
+    /// runs on the C APPLICATION thread where `Handle::current()` panics.
+    /// `None` is therefore "this face has no captured runtime", not "the
+    /// runtime is gone": the two `enter()` sites simply do not enter. That is
+    /// sound for the plane on this field's own terms — its contract is "any
+    /// declaration that spawns", and R2366 already moved the one measured
+    /// spawner (the advanced publisher's beacon) onto the process partition,
+    /// so it no longer asks the caller's thread for a runtime. A real face
+    /// still captures `Some` at `face_up` and loses nothing.
+    runtime: Option<tokio::runtime::Handle>,
     /// R311y296 — the signal that this face's drive loop should re-arm its wake
     /// because a `z_get` just registered a pending query with a nearer deadline
     /// than whatever the loop is currently parked on. Owned per face because
@@ -842,8 +853,30 @@ struct Inner {
     /// released handles OUTSIDE it — is the one discipline the faces already
     /// follow. A `Subscriber` / `Queryable` handle owns an `Arc<CClosure>`, so
     /// releasing the last one runs the C `drop(context)`.
-    local_subs: BTreeMap<SubId, Subscriber<TokioRuntime>>,
-    local_qbls: BTreeMap<QblId, Queryable<TokioRuntime>>,
+    /// R2580 — the local plane AS A FACE, which is the repair for a defect
+    /// this field's two predecessors (`local_subs`, `local_qbls`) WERE.
+    ///
+    /// MEASURED: `FaceEntry` carries eight declaration slots and the plane used
+    /// to carry two, so six planes — liveliness tokens, liveliness subscribers,
+    /// matching listeners, advanced publishers, advanced subscribers — had
+    /// nowhere to put a local handle and every one of them simply skipped the
+    /// plane. That is eleven wrong call sites from ONE modelling decision, not
+    /// eleven oversights: a declaration site had to REMEMBER the plane, and
+    /// most did not. Giving the plane a face's shape means it has every slot by
+    /// construction and there is nothing left to forget.
+    ///
+    /// It is NOT a member of `faces`, and that is the other half of the repair:
+    /// the wire-subject readers (`face_snapshots`, `peer_identities`, the three
+    /// `batch_*` fans) keep walking `faces` and need no exclusion clause. The
+    /// narrow meaning stays the default exactly where it is the correct one,
+    /// instead of becoming a list that rots.
+    ///
+    /// `Option` only because `Inner` derives `Default` and a `TokioSession` has
+    /// no default; [`SharedSession::new`] populates it immediately and nothing
+    /// clears it. The `None` never reaches a caller — every declaration goes
+    /// through [`Inner::declaration_targets`], which is the one place that
+    /// unwraps it.
+    local_face: Option<FaceEntry>,
     subs: Vec<SubEntry>,
     next_sub_id: SubId,
     /// R311y559 — the session-scope ENTITY id counter the C ABIs' `z_*_id`
@@ -877,6 +910,39 @@ struct Inner {
     /// (`SendDeclareError::ReservedMappingIdZero`) and is also this crate's
     /// "not declared" discriminant in `z_loaned_keyexpr_t::_mapping`.
     next_kexpr_id: u64,
+}
+
+impl Inner {
+    /// R2580 — EVERY SESSION A DECLARATION REACHES: the live faces, and the
+    /// local plane. The one answer to that question, so no declaration site
+    /// decides it for itself.
+    ///
+    /// The eleven sites this replaces each wrote `faces.values_mut()` and six
+    /// of them were wrong, because the plane held no slot for what they were
+    /// declaring. Now the plane is a `FaceEntry` with all eight slots and this
+    /// is the iterator they walk, so being correct costs a site nothing and
+    /// being wrong is no longer expressible.
+    ///
+    /// ⚠ NOT the iterator for a question about the WIRE. `face_snapshots`,
+    /// `peer_identities` and the three `batch_*` fans keep `self.faces`: a
+    /// local plane is not a transport, has no peer identity, and has no batch
+    /// window. Those five are correct as they stand and this method is not for
+    /// them.
+    fn declaration_targets(&mut self) -> impl Iterator<Item = &mut FaceEntry> {
+        self.faces.values_mut().chain(self.local_face.iter_mut())
+    }
+
+    /// The shared-reference twin of [`Self::declaration_targets`], for the fans
+    /// that USE a declaration rather than install one — the advanced publisher's
+    /// `put` and `delete`, which reach handles they do not mutate.
+    ///
+    /// Two methods because `&` and `&mut` cannot be one in Rust, not because
+    /// they answer different questions: they must always name the same set, and
+    /// a `put` that skipped the plane would publish to every peer while the
+    /// session's own advanced subscriber heard nothing.
+    fn declaration_targets_ref(&self) -> impl Iterator<Item = &FaceEntry> {
+        self.faces.values().chain(self.local_face.iter())
+    }
 }
 
 /// The registry behind a `z_owned_session_t`, shared between the C thread
@@ -975,9 +1041,31 @@ impl SharedSession {
         let observer = Arc::new(WzMutex::new(ApplicationLayerObserver::new()));
         let local = TokioSession::new(actions, observer, Arc::new(clock))
             .with_local_delivery_drain(LocalDeliveryDrain::DriveTask);
+        // R2580 — the plane's face-shaped entry. Its `session` is a CLONE of
+        // the field above rather than a move: the two name one session, and the
+        // field stays where it is because `local_session` / `drive_local_plane`
+        // reach it OUTSIDE the registry lock, which is a locking discipline this
+        // repair had no business changing.
+        let mut inner = Inner::default();
+        inner.local_face = Some(FaceEntry {
+            session: local.clone(),
+            subs: BTreeMap::new(),
+            qbls: BTreeMap::new(),
+            tokens: BTreeMap::new(),
+            live_subs: BTreeMap::new(),
+            matches: BTreeMap::new(),
+            adv_pubs: BTreeMap::new(),
+            adv_subs: BTreeMap::new(),
+            // `None`: this constructor runs on the C application thread, where
+            // `Handle::current()` panics. See the field.
+            runtime: None,
+            // The plane's re-arm signal is `local_wake`, held beside the session
+            // for the same outside-the-lock reason; this one is never notified.
+            revised: Arc::new(Notify::new()),
+        });
         Ok(Self {
             zid: zid_bytes,
-            inner: StdMutex::new(Inner::default()),
+            inner: StdMutex::new(inner),
             clock,
             local,
             local_wake: Arc::new(Notify::new()),
@@ -1196,8 +1284,9 @@ impl SharedSession {
                 adv_pubs,
                 adv_subs,
                 // `face_up` runs on the drive task, so this IS the runtime the
-                // face is driven by.
-                runtime: tokio::runtime::Handle::current(),
+                // face is driven by. Always `Some` for a real face; see the
+                // field for why the type admits `None`.
+                runtime: Some(tokio::runtime::Handle::current()),
                 revised: Arc::new(Notify::new()),
             },
         );
@@ -1659,7 +1748,13 @@ impl SharedSession {
         let id = guard.next_token_id.checked_add(1)?;
         guard.next_token_id = id;
 
-        for face in guard.faces.values_mut() {
+        // R2580 — the local plane is in this walk. MEASURED against
+        // `libzenohc.so` before the repair: a token declared here and a
+        // liveliness subscriber on the SAME session saw nothing (`after=0`
+        // against upstream's `1`), while across a real face both saw it. The
+        // machinery was never broken; the declaration just never reached the
+        // plane, because the plane had no `tokens` slot to reach.
+        for face in guard.declaration_targets() {
             if let Ok(tok) = face
                 .session
                 .declare_token(keyexpr.clone(), LivelinessOptions::new())
@@ -1681,7 +1776,9 @@ impl SharedSession {
             if let Some(pos) = guard.tokens.iter().position(|e| e.id == id) {
                 guard.tokens.remove(pos);
             }
-            for face in guard.faces.values_mut() {
+            // R2580 — including the plane's, or a C `z_drop` on the token would
+            // leave the in-process copy alive and the DELETE sample unsent.
+            for face in guard.declaration_targets() {
                 if let Some(tok) = face.tokens.remove(&id) {
                     dropped.push(tok);
                 }
@@ -1710,7 +1807,10 @@ impl SharedSession {
         let id = guard.next_sub_id;
         guard.next_sub_id = guard.next_sub_id.wrapping_add(1);
 
-        for face in guard.faces.values_mut() {
+        // R2580 — the plane included, which is the receiving half of the same
+        // measurement: without it this subscriber cannot hear a token its own
+        // session declared, however many peers it has or has not.
+        for face in guard.declaration_targets() {
             if let Ok(sub) =
                 face.session
                     .declare_liveliness_subscriber(keyexpr.clone(), options.clone(), sink())
@@ -1966,7 +2066,15 @@ impl SharedSession {
         let id = guard.next_sub_id;
         guard.next_sub_id = guard.next_sub_id.wrapping_add(1);
 
-        for face in guard.faces.values_mut() {
+        // R311y557 — the LOCAL PLANE is in this walk, which is what makes an
+        // in-process put reach this subscriber whether or not a peer exists.
+        // Its `allowed_origin` is the caller's own, so a `Remote`-only
+        // subscriber still refuses its own session's put — the filter is
+        // applied by the registry, not by which registry holds it.
+        //
+        // R2580 — and it is in the walk rather than in a second block after it.
+        // The second block is what the other six planes did not have.
+        for face in guard.declaration_targets() {
             if let Ok(sub) = face.session.declare_subscriber(
                 keyexpr.clone(),
                 SubscribeOptions::default().with_allowed_origin(allowed_origin),
@@ -1974,18 +2082,6 @@ impl SharedSession {
             ) {
                 face.subs.insert(id, sub);
             }
-        }
-        // R311y557 — and on the LOCAL PLANE, which is what makes an in-process
-        // put reach this subscriber whether or not a peer exists. Its
-        // `allowed_origin` is the caller's own, so a `Remote`-only subscriber
-        // still refuses its own session's put — the filter is applied by the
-        // registry, not by which registry holds it.
-        if let Ok(sub) = self.local.declare_subscriber(
-            keyexpr.clone(),
-            SubscribeOptions::default().with_allowed_origin(allowed_origin),
-            sink(),
-        ) {
-            guard.local_subs.insert(id, sub);
         }
         guard.subs.push(SubEntry {
             id,
@@ -2185,7 +2281,8 @@ impl SharedSession {
             if let Some(pos) = guard.matches.iter().position(|e| e.id == id) {
                 entry = Some(guard.matches.remove(pos));
             }
-            for face in guard.faces.values_mut() {
+            // R2580 — the plane's watch too, now that it has one.
+            for face in guard.declaration_targets() {
                 if let Some(listener) = face.matches.remove(&id) {
                     removed.push(listener);
                 }
@@ -2239,18 +2336,15 @@ impl SharedSession {
             if let Some(pos) = guard.subs.iter().position(|entry| entry.id == id) {
                 dropped_entry = Some(guard.subs.remove(pos));
             }
-            for face in guard.faces.values_mut() {
+            // R311y557 — the local plane's copy comes out in the same walk and
+            // into the same out-of-lock drop list: with no face at all the plane
+            // holds the last `Arc<CClosure>` and dropping it here would run the
+            // C `drop(context)` under the registry lock — precisely the case the
+            // SSOT entry above was already careful about.
+            for face in guard.declaration_targets() {
                 if let Some(sub) = face.subs.remove(&id) {
                     dropped.push(sub);
                 }
-            }
-            // R311y557 — and the local plane's copy. Taken into the same
-            // out-of-lock drop list: with no face at all the plane now holds the
-            // last `Arc<CClosure>` and dropping it here would run the C
-            // `drop(context)` under the registry lock — which is precisely the
-            // case the SSOT entry above was already careful about.
-            if let Some(sub) = guard.local_subs.remove(&id) {
-                dropped.push(sub);
             }
             // The LIVELINESS subscriptions share this id space (see
             // `declare_liveliness_subscriber`), so an id belongs to exactly one
@@ -2260,7 +2354,9 @@ impl SharedSession {
                 let entry = guard.live_subs.remove(pos);
                 dropped_live_entry = Some(entry);
             }
-            for face in guard.faces.values_mut() {
+            // R2580 — the plane's liveliness subscriber comes out here too, the
+            // twin of the ordinary-subscriber walk above.
+            for face in guard.declaration_targets() {
                 if let Some(sub) = face.live_subs.remove(&id) {
                     dropped_live.push(sub);
                 }
@@ -2293,14 +2389,21 @@ impl SharedSession {
         let mut guard = self.lock();
         let id = guard.next_adv_pub_id;
         guard.next_adv_pub_id = guard.next_adv_pub_id.wrapping_add(1);
-        for face in guard.faces.values_mut() {
+        // R2580 — the plane included. MEASURED against `libzenohc.so`: an
+        // advanced publisher and an advanced subscriber on ONE session saw
+        // nothing (`after=0` against upstream's `2`), while across a real face
+        // both saw both puts. ⚠ The plane's `runtime` is `None`, so the guard
+        // below does not enter for it; that is sound on this field's own terms
+        // (R2366 moved the one measured spawner onto the process partition) and
+        // the in-process leg is what holds it to that.
+        for face in guard.declaration_targets() {
             let zid = face.session.actions().params.zid.clone();
             // Enter the face's own runtime: this call site is the C application
             // thread, and a declaration may spawn. R2366 moved the beacon onto
             // the `net` subsystem, which needs no ambient runtime, so this is
             // now a defence for the rest of the declare rather than the single
             // thing the beacon depended on. See `FaceEntry::runtime`.
-            let _guard = face.runtime.enter();
+            let _guard = face.runtime.as_ref().map(|rt| rt.enter());
             if let Ok(pub_) =
                 AdvancedPublisher::declare(&face.session, keyexpr.clone(), options, zid)
             {
@@ -2324,7 +2427,9 @@ impl SharedSession {
     pub fn advanced_publisher_put(&self, id: AdvPubId, payload: &[u8]) -> usize {
         let guard = self.lock();
         let mut delivered = 0usize;
-        for face in guard.faces.values() {
+        // R2580 — the plane included, or the put reaches every peer and not the
+        // session's own advanced subscriber.
+        for face in guard.declaration_targets_ref() {
             if let Some(pub_) = face.adv_pubs.get(&id) {
                 if pub_.put(payload).is_ok() {
                     delivered += 1;
@@ -2342,7 +2447,8 @@ impl SharedSession {
     pub fn advanced_publisher_delete(&self, id: AdvPubId) -> bool {
         let guard = self.lock();
         let mut delivered = false;
-        for face in guard.faces.values() {
+        // R2580 — the plane included, same reason as the put.
+        for face in guard.declaration_targets_ref() {
             if let Some(pub_) = face.adv_pubs.get(&id) {
                 delivered |= pub_.delete().is_ok();
             }
@@ -2360,7 +2466,8 @@ impl SharedSession {
             if let Some(pos) = guard.adv_pubs.iter().position(|entry| entry.id == id) {
                 guard.adv_pubs.remove(pos);
             }
-            for face in guard.faces.values_mut() {
+            // R2580 — the plane's copy too.
+            for face in guard.declaration_targets() {
                 if let Some(pub_) = face.adv_pubs.remove(&id) {
                     dropped.push(pub_);
                 }
@@ -2381,13 +2488,15 @@ impl SharedSession {
         let mut guard = self.lock();
         let id = guard.next_adv_sub_id;
         guard.next_adv_sub_id = guard.next_adv_sub_id.wrapping_add(1);
-        for face in guard.faces.values_mut() {
+        // R2580 — the plane included; the receiving half of the advanced
+        // measurement recorded on `declare_advanced_publisher`.
+        for face in guard.declaration_targets() {
             let (on_sample, on_miss) = (sink)();
             // Same reason as the publisher's: a `recovery.periodic_queries`
             // subscriber spawns a background task at declare time — and, since
             // R2366, that task names the `app` subsystem, so this guard is the
             // same defence-in-depth the publisher's now is.
-            let _guard = face.runtime.enter();
+            let _guard = face.runtime.as_ref().map(|rt| rt.enter());
             if let Ok(sub) = AdvancedSubscriber::declare_with_options(
                 &face.session,
                 keyexpr.clone(),
@@ -2419,7 +2528,8 @@ impl SharedSession {
             if let Some(pos) = guard.adv_subs.iter().position(|entry| entry.id == id) {
                 dropped_entry = Some(guard.adv_subs.remove(pos));
             }
-            for face in guard.faces.values_mut() {
+            // R2580 — the plane's copy too.
+            for face in guard.declaration_targets() {
                 if let Some(sub) = face.adv_subs.remove(&id) {
                     dropped.push(sub);
                 }
@@ -2463,7 +2573,12 @@ impl SharedSession {
         let id = guard.next_qbl_id;
         guard.next_qbl_id = guard.next_qbl_id.wrapping_add(1);
 
-        for face in guard.faces.values_mut() {
+        // R311y557 — the LOCAL PLANE is in this walk, which is what an
+        // in-process `z_get` reaches. The sink factory receives each target's
+        // OWN session for the reason it always did: an escaped query owes its
+        // deferred replies and its `ResponseFinal` to the session the query
+        // arrived on, and for a local query that session is the plane's.
+        for face in guard.declaration_targets() {
             if let Ok(qbl) = face.session.declare_queryable(
                 keyexpr.clone(),
                 queryable_options(complete, allowed_origin),
@@ -2471,18 +2586,6 @@ impl SharedSession {
             ) {
                 face.qbls.insert(id, qbl);
             }
-        }
-        // R311y557 — and on the LOCAL PLANE, which is what an in-process
-        // `z_get` reaches. The sink factory receives the PLANE's session for
-        // the same reason each face's receives its own: an escaped query owes
-        // its deferred replies and its `ResponseFinal` to the session the query
-        // arrived on, and for a local query that session is this one.
-        if let Ok(qbl) = self.local.declare_queryable(
-            keyexpr.clone(),
-            queryable_options(complete, allowed_origin),
-            sink(&self.local),
-        ) {
-            guard.local_qbls.insert(id, qbl);
         }
         guard.qbls.push(QblEntry {
             id,
@@ -2506,16 +2609,13 @@ impl SharedSession {
             if let Some(pos) = guard.qbls.iter().position(|entry| entry.id == id) {
                 dropped_entry = Some(guard.qbls.remove(pos));
             }
-            for face in guard.faces.values_mut() {
+            // R311y557 — the local plane's copy comes out in the same walk and
+            // into the same out-of-lock drop list (see `undeclare_subscriber`
+            // for why the plane's handle can be the last one alive).
+            for face in guard.declaration_targets() {
                 if let Some(qbl) = face.qbls.remove(&id) {
                     dropped.push(qbl);
                 }
-            }
-            // R311y557 — the local plane's copy, into the same out-of-lock drop
-            // list (see `undeclare_subscriber` for why the plane's handle can be
-            // the last one alive).
-            if let Some(qbl) = guard.local_qbls.remove(&id) {
-                dropped.push(qbl);
             }
         }
         // Drop OUTSIDE the lock — see `undeclare_subscriber`: the last
