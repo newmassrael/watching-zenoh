@@ -58,15 +58,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use wz_capi_pico::matching::{
-    z_closure_matching_status, z_closure_matching_status_move, z_matching_status_t,
-    z_owned_closure_matching_status_t, z_owned_matching_listener_t,
+    z_closure_matching_status, z_closure_matching_status_move, z_matching_listener_move,
+    z_matching_status_t, z_owned_closure_matching_status_t, z_owned_matching_listener_t,
     z_publisher_declare_matching_listener, z_publisher_get_matching_status,
+    z_undeclare_matching_listener,
 };
 use wz_capi_pico::{
-    z_config_default, z_config_loan_mut, z_config_move, z_declare_publisher, z_open,
-    z_owned_config_t, z_owned_publisher_t, z_owned_session_t, z_publisher_loan,
-    z_view_keyexpr_from_str, z_view_keyexpr_loan, z_view_keyexpr_t, zp_config_insert,
-    Z_CONFIG_LISTEN_KEY, Z_OK,
+    z_close, z_config_default, z_config_loan_mut, z_config_move, z_declare_publisher, z_open,
+    z_owned_config_t, z_owned_publisher_t, z_owned_session_t, z_publisher_loan, z_session_drop,
+    z_session_loan_mut, z_session_move, z_view_keyexpr_from_str, z_view_keyexpr_loan,
+    z_view_keyexpr_t, zp_config_insert, Z_CONFIG_LISTEN_KEY, Z_OK,
 };
 use wz_integration_tests::common::{zenoh_pico_cli_binary, ChildGuard, PortReservation};
 
@@ -186,6 +187,15 @@ fn await_log(seen: &Arc<Mutex<Vec<bool>>>, want: &[bool], what: &str) {
     );
 }
 
+/// Teardown through the capi's OWN lifecycle. `z_owned_session_t` is a C-shaped
+/// owned struct with no `Drop` impl, so a Rust `drop(session)` is a no-op that
+/// looks like a close -- the same two calls the wz-to-wz harness
+/// (`wz-capi-pico/tests/matching_multiface.rs`) uses, for the same reason.
+unsafe fn close_session(session: &mut z_owned_session_t) {
+    z_close(z_session_loan_mut(session), std::ptr::null());
+    z_session_drop(z_session_move(session));
+}
+
 fn spawn_resident_zsub(z_sub: &std::path::Path, endpoint: &str, label: &'static str) -> ChildGuard {
     ChildGuard::wrap(
         label,
@@ -217,9 +227,9 @@ fn a_vanished_pico_subscriber_is_purged_from_wz_matching_status() {
     let dropped = Arc::new(AtomicUsize::new(0));
 
     unsafe {
-        let listener = open_listen(port);
+        let mut listener = open_listen(port);
         let pubr = declare_publisher(&listener, c"demo/matching");
-        let _mlistener = declare_matching(&pubr, seen.clone(), dropped.clone());
+        let mut mlistener = declare_matching(&pubr, seen.clone(), dropped.clone());
 
         drop(port_res);
 
@@ -265,6 +275,21 @@ fn a_vanished_pico_subscriber_is_purged_from_wz_matching_status() {
 
         let _ = revived.child_mut().kill();
         let _ = revived.child_mut().wait();
-        drop(listener);
+
+        // Retract the watch through the capi rather than letting the handle go
+        // out of scope: the drop counter is what makes this an assertion rather
+        // than a courtesy -- the closure owns a boxed context, and if the
+        // retraction does not run its drop the context outlives the session.
+        assert_eq!(
+            z_undeclare_matching_listener(z_matching_listener_move(&mut mlistener)),
+            Z_OK
+        );
+        assert_eq!(
+            dropped.load(Ordering::SeqCst),
+            1,
+            "undeclaring the matching listener did not run the closure's drop, \
+             so its boxed context is leaked for the life of the process"
+        );
+        close_session(&mut listener);
     }
 }
