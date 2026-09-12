@@ -14465,7 +14465,12 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     # at line ~1220). ONE binary serves the `--router-hat` node + the
     # `--connect --publish` publisher. Reached only past the pico-CLI presence
     # guard above, so it never builds when the lane is SKIPping for a missing CLI.
-    (cd crates && cargo build -p wz-ap-demo --features router-multicast-faces --quiet) || return 1
+    # R2587 — `locator-iface` joins this build. The namespace `ttl` witness at the
+    # end of this lane pins the router's multicast face to a veth with `#iface=`,
+    # and a build without the feature only WARNS and sends out the default route,
+    # which R2587's first run measured as a reader in the namespace hearing nothing.
+    # Additive for the legs above: none of them names an interface.
+    (cd crates && cargo build -p wz-ap-demo --features router-multicast-faces,locator-iface --quiet) || return 1
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_router_hat_multicast_pico_interop -- --ignored --quiet) || return 1
     # R311y195 — router-multicast-faces INGRESS I2 (the reverse of S4): a real pico
@@ -14513,6 +14518,31 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     # pico-CLI presence guard, so it never runs when the lane is SKIPping.
     _runci_guarded_test M 2 cargo test -p wz-integration-tests \
         --test wz_multicast_departure_witnessed_by_pico -- --ignored --quiet || return 1
+
+    # R2587 — the multicast `ttl` key, adjudicated by zenohd ON THE WIRE. zenohd
+    # and this lane's router demo each get `#iface=<veth>;ttl=5` and then no key,
+    # and a libc `IP_RECVTTL` reader in the namespace must read the same header
+    # value from both: 5 and 1. One veth link does not decrement the field, so no
+    # routed hop is needed, because the key controls what the implementation
+    # writes, not how far the kernel forwards it. Two tests: the reader's own
+    # calibration (two TTLs it sets itself on `lo`) and the witness. Needs zenohd,
+    # the demo built above with `locator-iface`, and a namespace (the probe from
+    # the `#join=` leg).
+    if [[ ! -x "$m_zenohd" ]]; then
+        if (( m_required )); then
+            echo "  Layer M FAIL: zenohd absent ($m_zenohd) under WZ_M_REQUIRE=1; the ttl" >&2
+            echo "    witness has no other adjudicator." >&2
+            return 1
+        fi
+        echo "Layer M SKIP multicast ttl on the wire (zenohd not built)"
+    elif (( netns_rc != 0 )); then
+        echo "Layer M SKIP multicast ttl on the wire (no network namespace on this host)"
+    else
+        _runci_guarded_test "M multicast ttl on the wire vs zenohd" 2 \
+            cargo test -p wz-integration-tests \
+            --test wz_multicast_ttl_on_the_wire_netns_zenohd_interop \
+            -- --ignored --test-threads=1 || return 1
+    fi
 }
 
 # ─── Layer Z — wz <-> zenohd (zenoh-full reference router) interop ────
