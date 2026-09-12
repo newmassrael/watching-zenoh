@@ -452,6 +452,204 @@ pub fn multicast_interface_addresses() -> Option<Vec<IpAddr>> {
     None
 }
 
+/// R2584 — the kernel index of the interface named `name`.
+///
+/// IPv6 multicast selects an interface by INDEX where IPv4 selects it by address:
+/// `IPV6_MULTICAST_IF` and the `ipv6mr_interface` field of `IPV6_ADD_MEMBERSHIP`
+/// both take a `u32`. So a v6 `#iface=` needs a resolution the v4 honor never did.
+///
+/// A name that `if_nametoindex` does not know is [`IfaceResolveError::NotFound`],
+/// which also covers an interface removed between an earlier table walk and this
+/// call.
+#[cfg(unix)]
+pub fn interface_index_of_name(name: &str) -> Result<u32, IfaceResolveError> {
+    // An interior NUL cannot name a device, so it is absent rather than undetermined.
+    let c = std::ffi::CString::new(name).map_err(|_| IfaceResolveError::NotFound)?;
+    // SAFETY: `c` is a NUL-terminated C string that outlives the call, and
+    // `if_nametoindex` only reads it. It returns 0 when no interface has that name.
+    match unsafe { libc::if_nametoindex(c.as_ptr()) } {
+        0 => Err(IfaceResolveError::NotFound),
+        index => Ok(index),
+    }
+}
+
+/// Non-unix: no `if_nametoindex` here, so the index is undetermined.
+#[cfg(not(unix))]
+pub fn interface_index_of_name(_name: &str) -> Result<u32, IfaceResolveError> {
+    Err(IfaceResolveError::Undetermined)
+}
+
+/// R2584 — the indices of every interface that CARRIES `addr` as one of its own
+/// addresses: the wz counterpart of zenoh's `get_index_of_interface`
+/// (`commons/zenoh-util/src/net/mod.rs` @ `pub fn get_index_of_interface(addr: IpAddr) -> ZResult<u32> {`).
+///
+/// Built on [`interface_names_for`], which already answers "which interfaces
+/// carry this address", so the table walk stays in one place.
+///
+/// It returns EVERY carrier where upstream returns the first. Address uniqueness
+/// is not a kernel guarantee: a link-local `fe80::` address may sit on more than
+/// one interface. Which of them was first in upstream's interface snapshot is not
+/// something a config author can see, so the caller decides what several carriers
+/// mean (see [`multicast_iface_selector_v6`]).
+///
+/// The unspecified address is carried by NO interface here. [`interface_names_for`]
+/// maps it to every interface because a socket bound to the wildcard is on all of
+/// them, but no interface holds `::` as an address, so upstream's lookup finds none
+/// either.
+#[cfg(unix)]
+pub fn interface_indices_of_address(addr: IpAddr) -> Result<Vec<u32>, IfaceResolveError> {
+    if addr.is_unspecified() {
+        return Ok(Vec::new());
+    }
+    let names = interface_names_for(addr).ok_or(IfaceResolveError::Undetermined)?;
+    let mut indices = Vec::with_capacity(names.len());
+    for name in names {
+        match interface_index_of_name(&name) {
+            Ok(index) if !indices.contains(&index) => indices.push(index),
+            Ok(_) => {}
+            // The interface disappeared between the walk and the index lookup, so
+            // it no longer carries the address.
+            Err(IfaceResolveError::NotFound) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(indices)
+}
+
+/// Non-unix: no `getifaddrs`, so no carrier can be named.
+#[cfg(not(unix))]
+pub fn interface_indices_of_address(_addr: IpAddr) -> Result<Vec<u32>, IfaceResolveError> {
+    Err(IfaceResolveError::Undetermined)
+}
+
+/// R2584 — the one interface index an IPv6 address literal selects, or why it
+/// selects none.
+///
+/// Kept apart from the table walk so that each case can be tested without a
+/// host that has that shape. A host with one address on two interfaces is rare,
+/// but that case is exactly where upstream and wz differ.
+#[cfg(feature = "locator-iface")]
+fn the_one_carrier(iface: &str, carriers: &[u32]) -> std::io::Result<u32> {
+    match carriers {
+        [index] => Ok(*index),
+        // Upstream's own refusal: `bail!("No interface found with address {addr}")`.
+        [] => Err(std::io::Error::new(
+            std::io::ErrorKind::AddrNotAvailable,
+            format!(
+                "wz: locator #iface={iface} is an address no local interface carries, \
+                 so it cannot select a v6 multicast interface"
+            ),
+        )),
+        // Divergence from upstream, which takes the first carrier in its interface
+        // snapshot. That order is invisible to whoever wrote the config, so taking
+        // it would pin a NIC the config never chose. The v4 selector refuses a
+        // substituted interface for the same reason.
+        several => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "wz: locator #iface={iface} is carried by {} interfaces (indices \
+                 {several:?}), so it does not name one; give the interface name instead",
+                several.len()
+            ),
+        )),
+    }
+}
+
+/// R2584 — the `#iface=` value of a v6 MULTICAST locator, resolved to the
+/// interface INDEX that `IPV6_MULTICAST_IF` (egress) and `ipv6mr_interface`
+/// (join) both take.
+///
+/// Same contract as [`multicast_iface_selector_v4`]: `Ok(Some(index))` pin to
+/// that interface, `Ok(None)` do not pin (warning already logged), `Err` refuse to
+/// bind.
+///
+/// # Upstream's chain, and where wz stops following it
+///
+/// zenoh resolves a v6 `iface` in two steps
+/// (`io/zenoh-links/zenoh-link-udp/src/multicast.rs` @ `IpAddr::V6(_) => match zenoh_util::net::get_index_of_interface(local_addr.ip()) {`):
+/// first to an ADDRESS, either the literal or the named interface's first v6
+/// address, and then to the index of the interface carrying that address.
+///
+/// - An address literal follows that chain exactly: its carrier's index, and a
+///   refusal when nothing carries it. The one difference is an address carried
+///   by several interfaces; see `the_one_carrier`.
+/// - A NAME takes that interface's own index, once the interface is shown to be
+///   up, running and carrying a v6 address. Going through its first address
+///   instead, as upstream does, can land on a DIFFERENT interface when that
+///   address is also on another one.
+/// - A name whose interface carries no v6 address is refused. Upstream quietly
+///   uses the first non-loopback multicast interface instead, and wz's v4
+///   selector already refuses that substitution for the same reason.
+/// - An IPv4 literal is refused because the families differ. Upstream fails too:
+///   it calls `set_multicast_if_v4` on an IPv6 socket.
+#[cfg(feature = "locator-iface")]
+pub fn multicast_iface_selector_v6(iface: &str) -> std::io::Result<Option<u32>> {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    if iface.parse::<Ipv4Addr>().is_ok() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "wz: locator #iface={iface} is an IPv4 address and cannot select the \
+                 interface of an IPv6 multicast group (the protocols must match)"
+            ),
+        ));
+    }
+    let undetermined = || {
+        log::warn!(
+            "wz: locator #iface={iface} ignored for multicast \
+             (interface resolution unavailable on this platform)"
+        );
+        Ok(None)
+    };
+    if let Ok(addr) = iface.parse::<Ipv6Addr>() {
+        return match interface_indices_of_address(IpAddr::V6(addr)) {
+            Ok(carriers) => the_one_carrier(iface, &carriers).map(Some),
+            Err(IfaceResolveError::Undetermined) => undetermined(),
+            Err(e) => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("wz: locator #iface={iface} is {e}; refusing to bind the multicast socket"),
+            )),
+        };
+    }
+    match unicast_addresses_of_interface(iface) {
+        Ok(addrs) if addrs.iter().any(IpAddr::is_ipv6) => match interface_index_of_name(iface) {
+            Ok(index) => Ok(Some(index)),
+            Err(IfaceResolveError::Undetermined) => undetermined(),
+            Err(e) => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("wz: locator #iface={iface} is {e}; refusing to bind the multicast socket"),
+            )),
+        },
+        Ok(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::AddrNotAvailable,
+            format!(
+                "wz: locator #iface={iface} is up but carries no IPv6 address, so it \
+                 cannot select a v6 multicast interface (zenoh would silently \
+                 substitute another non-loopback interface; wz refuses rather than \
+                 pin a NIC the config did not name)"
+            ),
+        )),
+        Err(IfaceResolveError::Undetermined) => undetermined(),
+        Err(e) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("wz: locator #iface={iface} is {e}; refusing to bind the multicast socket"),
+        )),
+    }
+}
+
+/// Without `locator-iface` the v6 honor is not built either: warn and leave the
+/// socket on the kernel's default interface, as [`multicast_iface_selector_v4`]'s
+/// twin does.
+#[cfg(not(feature = "locator-iface"))]
+pub fn multicast_iface_selector_v6(iface: &str) -> std::io::Result<Option<u32>> {
+    log::warn!(
+        "wz: locator #iface={iface} ignored for multicast \
+         (build without the locator-iface feature)"
+    );
+    Ok(None)
+}
+
 /// R311y454 — the `#iface=` value of a v4 MULTICAST locator, resolved to the
 /// interface-selector address that `IP_MULTICAST_IF` (egress) and the
 /// `imr_interface` field of `IP_ADD_MEMBERSHIP` (join) both take.
@@ -497,6 +695,18 @@ pub fn multicast_iface_selector_v4(iface: &str) -> std::io::Result<Option<std::n
     // Upstream's first arm: an address literal needs no interface table.
     if let Ok(addr) = iface.parse::<Ipv4Addr>() {
         return Ok(Some(addr));
+    }
+    // R2584 — an IPv6 literal was looked up as an interface NAME and refused as
+    // "not found", which named the wrong fault. The fault is the family: upstream
+    // parses it as an address and then fails on the v4 socket. Say so.
+    if iface.parse::<std::net::Ipv6Addr>().is_ok() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "wz: locator #iface={iface} is an IPv6 address and cannot select the \
+                 interface of an IPv4 multicast group (the protocols must match)"
+            ),
+        ));
     }
     match unicast_addresses_of_interface(iface) {
         Ok(addrs) => match addrs.iter().find_map(|ip| match ip {
@@ -695,6 +905,147 @@ mod tests {
             std::io::ErrorKind::InvalidInput,
             "an unresolvable #iface= must refuse the bind; got {err:?}"
         );
+    }
+
+    /// R2584 — the loopback's kernel index, read from sysfs so that it does not
+    /// come from the `if_nametoindex` call the resolver itself makes.
+    ///
+    /// Without sysfs (not Linux) the resolver's own answer is used instead. The
+    /// name test below then checks `if_nametoindex` against itself, but the
+    /// address test still checks two lookups against each other.
+    fn loopback_index(lo: &str) -> u32 {
+        match std::fs::read_to_string(format!("/sys/class/net/{lo}/ifindex")) {
+            Ok(s) => s
+                .trim()
+                .parse()
+                .expect("sysfs ifindex is a decimal integer"),
+            Err(_) => interface_index_of_name(lo).expect("the loopback has an index"),
+        }
+    }
+
+    /// The loopback must carry `::1`, or every v6 test below is about an address
+    /// the host does not have. A host with IPv6 disabled FAILS here rather than
+    /// skipping, because a skipped selector test reports green while checking
+    /// nothing.
+    fn loopback_carrying_v6() -> &'static str {
+        let lo = loopback_iface_name();
+        let addrs = unicast_addresses_of_interface(lo).expect("the loopback resolves");
+        assert!(
+            addrs.contains(&IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)),
+            "{lo} carries no ::1, so IPv6 is disabled on this host and the v6 \
+             resolution cannot be checked; got {addrs:?}"
+        );
+        lo
+    }
+
+    /// An address resolves to the index of the interface holding it, checked
+    /// against sysfs. Both families go through the same lookup, and IPv4 is
+    /// included because a family filter hidden in it would pass a v6-only test.
+    #[test]
+    fn an_address_resolves_to_the_index_of_the_interface_that_carries_it() {
+        let lo = loopback_carrying_v6();
+        let want = loopback_index(lo);
+        for addr in [
+            IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+            IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        ] {
+            let got = interface_indices_of_address(addr).expect("the lookup runs");
+            assert!(
+                got.contains(&want),
+                "{addr} sits on {lo} (index {want}), so its carriers {got:?} must include it"
+            );
+        }
+    }
+
+    /// No interface holds the wildcard as an address. `interface_names_for`
+    /// returns every interface for it, for a different reason (a socket bound to
+    /// the wildcard is on all of them), and an index lookup that reused that
+    /// answer would let `#iface=::` pin some arbitrary interface.
+    #[test]
+    fn the_unspecified_address_is_carried_by_no_interface() {
+        let got = interface_indices_of_address(IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED))
+            .expect("the lookup runs");
+        assert!(got.is_empty(), ":: is no interface's address; got {got:?}");
+    }
+
+    /// A v6 `#iface=` NAME selects that interface's own index.
+    #[test]
+    #[cfg(feature = "locator-iface")]
+    fn a_v6_multicast_iface_given_a_name_selects_that_interfaces_index() {
+        let lo = loopback_carrying_v6();
+        let selector = multicast_iface_selector_v6(lo).expect("the loopback carries ::1");
+        assert_eq!(
+            selector,
+            Some(loopback_index(lo)),
+            "a v6 group pinned to {lo} must select {lo}'s index"
+        );
+    }
+
+    /// A v6 address LITERAL selects the interface that holds it: upstream's
+    /// address-then-index chain.
+    #[test]
+    #[cfg(feature = "locator-iface")]
+    fn a_v6_multicast_iface_given_an_address_selects_the_interface_carrying_it() {
+        let lo = loopback_carrying_v6();
+        let selector = multicast_iface_selector_v6("::1").expect("::1 is carried by the loopback");
+        assert_eq!(selector, Some(loopback_index(lo)));
+    }
+
+    /// An address no interface holds is refused. That matches upstream, which
+    /// `bail!`s when it finds no interface with that address. Unlike the v4 literal,
+    /// the address cannot be handed to the kernel as-is, because a v6 selector
+    /// is an index.
+    #[test]
+    #[cfg(feature = "locator-iface")]
+    fn a_v6_multicast_iface_no_interface_carries_refuses_the_bind() {
+        // 2001:db8::/32 (RFC3849) is reserved for documentation and never assigned.
+        let err = multicast_iface_selector_v6("2001:db8::7a")
+            .expect_err("an address nothing carries selects no interface");
+        assert_eq!(err.kind(), std::io::ErrorKind::AddrNotAvailable, "{err}");
+    }
+
+    /// The selection itself, for every carrier count, including the one this
+    /// host cannot produce: one address on SEVERAL interfaces. Upstream takes
+    /// whichever came first in its snapshot. wz refuses, because that order is
+    /// not something the config author chose.
+    #[test]
+    #[cfg(feature = "locator-iface")]
+    fn an_address_on_several_interfaces_names_none_of_them() {
+        assert_eq!(the_one_carrier("fe80::1", &[5]).expect("one carrier"), 5);
+        let none = the_one_carrier("fe80::1", &[]).expect_err("no carrier");
+        assert_eq!(none.kind(), std::io::ErrorKind::AddrNotAvailable);
+        let several = the_one_carrier("fe80::1", &[2, 5]).expect_err("two carriers");
+        assert_eq!(several.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(
+            several.to_string().contains("2 interfaces"),
+            "the refusal says how many interfaces claimed the address: {several}"
+        );
+    }
+
+    /// An address of the OTHER family is refused by both selectors and the
+    /// message names the family. Before R2584 the v4 selector looked a v6 literal
+    /// up as a NAME and reported "not found".
+    #[test]
+    #[cfg(feature = "locator-iface")]
+    fn a_multicast_iface_of_the_other_family_is_refused_by_both_selectors() {
+        let v6_given_v4 = multicast_iface_selector_v6("127.0.0.1").expect_err("family mismatch");
+        let v4_given_v6 = multicast_iface_selector_v4("::1").expect_err("family mismatch");
+        for err in [v6_given_v4, v4_given_v6] {
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{err}");
+            assert!(
+                err.to_string().contains("protocols must match"),
+                "the refusal names the family mismatch: {err}"
+            );
+        }
+    }
+
+    /// An absent name is a hard error for v6 as well.
+    #[test]
+    #[cfg(feature = "locator-iface")]
+    fn an_absent_v6_multicast_iface_refuses_the_bind_rather_than_warning() {
+        let err = multicast_iface_selector_v6("wz/no/such/dev")
+            .expect_err("an unnameable device must not yield a selector");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{err}");
     }
 
     /// The IFF_UP / IFF_RUNNING verdicts must agree with what sysfs independently
