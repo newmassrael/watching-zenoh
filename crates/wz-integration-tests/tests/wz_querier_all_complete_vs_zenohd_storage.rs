@@ -310,7 +310,7 @@ fn a_zenohd_storage_declared_incomplete_does_not_satisfy_it() {
 // wz-proves: session-matching zenohd->wz
 #[test]
 #[ignore = "binary-dep e2e (zenohd + storage-manager + wz-ap-demo); Layer Z runs it"]
-fn one_complete_includer_satisfies_the_querier_despite_an_incomplete_neighbour() {
+fn one_complete_zenohd_includer_satisfies_the_querier_despite_an_incomplete_neighbour() {
     let (captured, spoke) = run_against_storages(
         &[
             ("wide", WIDE_KEYEXPR, true),
@@ -349,7 +349,7 @@ fn one_complete_includer_satisfies_the_querier_despite_an_incomplete_neighbour()
 // wz-proves: session-matching zenohd->wz
 #[test]
 #[ignore = "binary-dep e2e (zenohd + storage-manager + wz-ap-demo); Layer Z runs it"]
-fn a_complete_storage_that_only_intersects_does_not_satisfy_an_all_complete_querier() {
+fn a_complete_zenohd_storage_that_only_intersects_does_not_satisfy_an_all_complete_querier() {
     let (captured, spoke) = run_against_storages(
         &[("narrow", NARROW_KEYEXPR, true)],
         WILDCARD_QUERIER_KEY,
