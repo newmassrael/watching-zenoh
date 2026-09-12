@@ -55,6 +55,19 @@ excluded="wz-ap-demo"
 
 cd "$(dirname "$0")/../../crates" || exit 1
 
+# R2585 — `--list-members` prints what the SWEEP would build, one `<pkg> <tier>`
+# per line, and builds nothing. It is the same flag, with the same output, as
+# `nondefault-features-gate.sh --list-members`: the member set is decided at run
+# time from cargo metadata, so a reader of this file's TEXT cannot tell which
+# crates it reaches. `apt_package_census.py` asks this instead. Until R2585 that
+# census credited Layer C1cf's cmake need to an unrelated string that named
+# `wz-integration-tests` elsewhere in the same job.
+list_members=0
+if [[ "${1:-}" == "--list-members" ]]; then
+    list_members=1
+    shift
+fi
+
 if [[ $# -gt 0 ]]; then
     members=("$@")
 else
@@ -64,6 +77,19 @@ else
         echo "  reduced-features FAIL: cargo metadata listed no workspace member" >&2
         exit 1
     fi
+fi
+
+if [[ $list_members -eq 1 ]]; then
+    for pkg in "${members[@]}"; do
+        if [[ " $excluded " == *" $pkg "* ]]; then
+            echo "$pkg excluded"
+        elif [[ " $lib_only " == *" $pkg "* ]]; then
+            echo "$pkg lib-only"
+        else
+            echo "$pkg all-targets"
+        fi
+    done
+    exit 0
 fi
 
 fail=0

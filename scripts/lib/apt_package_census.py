@@ -479,6 +479,68 @@ CMAKE_INVOCATION = re.compile(
 )
 
 
+# R2585 — the THIRD way a job reaches a workspace member, after `--workspace`
+# and naming the crate: a script that decides its members AT RUN TIME from
+# `cargo metadata`. Its text names no crate, so the two readers above could not
+# see it, and they did not. Layer C1cf iterates every member through
+# `reduced-features-gate.sh`, and `defaults-off`'s cmake need was credited for
+# as long as that job existed to a different string: Layer C0 carried an inline
+# heredoc whose code line held `cargo test -p wz-integration-tests`. R2585
+# moved that heredoc into a module, the string left C0's body, and this census
+# reported C1cf's cmake as unused. That report was false, and the green before it
+# had been true for the wrong reason.
+#
+# Resolved by ASKING, never by guessing from the text:
+#   * a script that offers `--list-members` is run with it, and the members it
+#     prints (minus any it marks `excluded`) are what it reaches. That is how a
+#     FILTERED enumeration is told apart from a full one:
+#     `nondefault-features-gate.sh` reads the same metadata and keeps 20 crates,
+#     neither of the two cmake consumers among them.
+#   * any other reached text that lists `cargo metadata --no-deps` packages
+#     reaches EVERY member, which is what an unfiltered listing is.
+# A script that cannot answer is a FAIL (RuntimeError), not an empty set.
+LIST_MEMBERS_FLAG = "--list-members"
+# OFFERING the flag is parsing it. `nondefault-tests-gate.sh` CALLS
+# `nondefault-features-gate.sh --list-members`, and running the caller with the
+# flag would do whatever its own argument handling does with a stranger.
+OFFERS_LIST_MEMBERS = re.compile(r'==\s*"--list-members"')
+METADATA_LISTING = re.compile(r"cargo metadata[^\n]*--no-deps")
+WORKSPACE_FLAG = re.compile(r"--workspace(?![\w-])")
+PACKAGES_READ = re.compile(r"""\[\s*["']packages["']\s*\]""")
+
+
+@functools.lru_cache(maxsize=None)
+def workspace_members() -> tuple[str, ...]:
+    """Every workspace member, from cargo's own metadata."""
+    proc = subprocess.run(
+        ["cargo", "metadata", "--no-deps", "--format-version", "1"],
+        cwd=ROOT / "crates", capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"`cargo metadata --no-deps` failed: {proc.stderr.strip()[:200]}")
+    names = tuple(sorted(p["name"] for p in json.loads(proc.stdout)["packages"]))
+    if not names:
+        raise RuntimeError("`cargo metadata --no-deps` listed no workspace member")
+    return names
+
+
+@functools.lru_cache(maxsize=None)
+def listed_members(rel: str) -> tuple[str, ...]:
+    """The members `scripts/<rel> --list-members` says it builds."""
+    proc = subprocess.run(
+        ["bash", str(ROOT / "scripts" / rel), LIST_MEMBERS_FLAG],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    rows = [line.split() for line in proc.stdout.splitlines() if line.strip()]
+    if proc.returncode != 0 or not rows:
+        raise RuntimeError(
+            f"`scripts/{rel} {LIST_MEMBERS_FLAG}` gave rc={proc.returncode} and "
+            f"{len(rows)} row(s); a script that decides its members at run time "
+            f"must be able to say which"
+        )
+    return tuple(r[0] for r in rows if len(r) < 2 or r[1] != "excluded")
+
+
 def job_reachable_text(path: Path = CI_YML) -> dict[str, str]:
     """job id -> everything that job runs, followed one level deep.
 
@@ -550,12 +612,46 @@ def job_reachable_text(path: Path = CI_YML) -> dict[str, str]:
             line for line in text.splitlines() if not line.lstrip().startswith("#")
         )
 
+    def with_helpers(fn: str) -> str:
+        """A layer's body plus every `run-ci.sh` helper it calls, transitively.
+
+        R2585 — C1bz lists every member through `_c1bz_crate_list` ->
+        `_c1bz_members`, and a reader that stops at the layer function sees
+        neither. Following calls is over-inclusive, which is the direction this
+        census may err in: it can only keep a package, never drop one.
+        """
+        seen: set[str] = set()
+        pending = [fn]
+        bodies = []
+        while pending:
+            name = pending.pop()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            body = code_only(layer_body(name))
+            bodies.append(body)
+            pending.extend(
+                called for called in re.findall(r"\b(_[a-z0-9_]+)\b", body)
+                if called in starts
+            )
+        return "\n".join(bodies)
+
+    def resolved_members(segment: str, rel: str | None) -> str:
+        """The member names a segment reaches at run time, as text."""
+        if rel is not None and OFFERS_LIST_MEMBERS.search(segment):
+            return "\n".join(listed_members(rel))
+        if METADATA_LISTING.search(segment) and PACKAGES_READ.search(segment):
+            return "\n".join(workspace_members())
+        return ""
+
     out: dict[str, str] = {}
     for j, lines in raw.items():
         text = code_only("\n".join(lines))
         parts = [text]
         for name in re.findall(r"--layer ([A-Za-z0-9]+)", text):
-            parts.append(code_only(layer_body(dispatch.get(name, ""))))
+            body = with_helpers(dispatch.get(name, ""))
+            parts.append(body)
+            parts.append(resolved_members(body, None))
         # `run-ci.sh` is followed PER LAYER above and must not be pulled in
         # whole here. It was, in this scan's second version, and the effect was
         # a check that could not say no: every job runs some `--layer` step, so
@@ -563,7 +659,10 @@ def job_reachable_text(path: Path = CI_YML) -> dict[str, str]:
         # derived arm accepted all thirteen while printing nothing. A gate that
         # answers yes to everything reads exactly like a gate that is happy.
         seen = {"run-ci.sh"}
-        pending = list(re.findall(r"scripts/([A-Za-z0-9_./-]+\.sh)", text))
+        # R2585 — from the LAYER BODIES too, not only the job's own `run:`
+        # lines. Layer C1cf's whole body is one `bash scripts/lib/…` call, and
+        # reading scripts from the job text alone never opened it.
+        pending = list(re.findall(r"scripts/([A-Za-z0-9_./-]+\.sh)", "\n".join(parts)))
         while pending:
             rel = pending.pop()
             if rel in seen:
@@ -574,26 +673,41 @@ def job_reachable_text(path: Path = CI_YML) -> dict[str, str]:
                 continue
             body = code_only(path.read_text())
             parts.append(body)
+            parts.append(resolved_members(body, rel))
             pending.extend(re.findall(r"scripts/([A-Za-z0-9_./-]+\.sh)", body))
         out[j] = "\n".join(parts)
     return out
 
 
-def jobs_needing_cmake() -> set[str]:
-    """Job ids whose reachable text builds a CMAKE_CRATES member or runs cmake.
+def jobs_needing_cmake() -> dict[str, str]:
+    """Job id -> the EVIDENCE that its reachable text builds a CMAKE_CRATES
+    member or runs cmake.
 
     A layer reaches the crate by running a `--workspace` cargo command (which
     builds every member, the crate included) or by naming it. A script reaches
     cmake by calling it. The scan is deliberately OVER-inclusive: a job it does
     not name is a job with no mention anywhere in anything it runs, which is
     the only direction a removal may be argued from.
+
+    R2585 — the evidence is RETURNED and printed, not only the verdict. Before
+    that round this returned a set, so a job satisfied by the wrong string was
+    indistinguishable from one satisfied by the right one. `defaults-off` and
+    `validate-codegen` were both satisfied by a heredoc string for as long as it
+    existed, and nothing printed would have shown it.
     """
-    needing = set()
+    needing: dict[str, str] = {}
     for j, text in job_reachable_text().items():
-        if "--workspace" in text or any(c in text for c in CMAKE_CRATES):
-            needing.add(j)
-        elif CMAKE_INVOCATION.search(text):
-            needing.add(j)
+        evidence = []
+        # R2585 — `--workspace` as a FLAG, not a prefix. A substring test also
+        # matched `--workspace-root "$ROOT/vendor/sce"` in `verify-codegen.sh`,
+        # which names another project's root and builds no member here.
+        if WORKSPACE_FLAG.search(text):
+            evidence.append("--workspace")
+        evidence.extend(f"names {c}" for c in CMAKE_CRATES if c in text)
+        if CMAKE_INVOCATION.search(text):
+            evidence.append("invokes cmake")
+        if evidence:
+            needing[j] = ", ".join(evidence)
     return needing
 
 
@@ -998,7 +1112,12 @@ def main() -> int:
 
     # The DERIVED arm. Only ever runs against jobs that install `cmake`; a job
     # that does not is none of this check's business.
-    needing = jobs_needing_cmake()
+    try:
+        needing = jobs_needing_cmake()
+    except (OSError, RuntimeError, json.JSONDecodeError) as e:
+        print(f"  apt-packages FAIL: the cmake arm could not resolve what a job "
+              f"builds: {e}", file=sys.stderr)
+        return 1
     for job in sorted(j for j, pkgs in sites.items() if "cmake" in pkgs):
         if job in needing or job in DECLARED_OUTSIDE_CARGO:
             continue
@@ -1047,6 +1166,11 @@ def main() -> int:
         f"{len(baseline)} package(s) on EVERY job ({' '.join(sorted(baseline))}) "
         f"documented in {len(documented_prereqs())} README(s)"
     )
+    # R2585 — what each cmake site was derived FROM, so a job satisfied by the
+    # wrong text reads differently from one satisfied by the right text.
+    for job in sorted(j for j, pkgs in sites.items() if "cmake" in pkgs):
+        why = DECLARED_OUTSIDE_CARGO.get(job) or needing[job]
+        print(f"    cmake on `{job}`: {why}")
     return 0
 
 
