@@ -6083,6 +6083,141 @@ pub mod common {
         }
     }
 
+    /// R2587 — the IP TTL field of the next datagram to arrive for `group:port` on
+    /// the interface holding `iface_addr`, or `None` if nothing arrives within
+    /// `timeout`.
+    ///
+    /// This reads the HEADER, through the kernel's `IP_RECVTTL` control message.
+    /// A multicast `ttl` key's whole effect is the value an implementation writes
+    /// into that field, and one veth link does not decrement it. So the field is
+    /// observable without the routed hop that observing a datagram's REACH would
+    /// need. It shares no code with wz's socket layer: it is plain libc, so it can
+    /// adjudicate wz and a foreign implementation alike.
+    ///
+    /// The socket is wildcard-bound with `SO_REUSEADDR`, the only shape that
+    /// receives group traffic, and joined on `iface_addr` so the membership lands on
+    /// the interface the caller named rather than the default route's.
+    pub fn read_multicast_ttl_v4(
+        group: Ipv4Addr,
+        port: u16,
+        iface_addr: Ipv4Addr,
+        timeout: Duration,
+    ) -> Option<u8> {
+        // SAFETY for every block below: plain POSIX socket calls on a descriptor
+        // this function owns and closes on every return; every pointer passed
+        // refers to a live local of the stated size.
+        let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
+        assert!(fd >= 0, "socket(): {}", std::io::Error::last_os_error());
+        struct Fd(i32);
+        impl Drop for Fd {
+            fn drop(&mut self) {
+                unsafe { libc::close(self.0) };
+            }
+        }
+        let fd = Fd(fd);
+        let set = |level: i32, name: i32, val: &[u8]| {
+            let rc = unsafe {
+                libc::setsockopt(
+                    fd.0,
+                    level,
+                    name,
+                    val.as_ptr().cast(),
+                    val.len() as libc::socklen_t,
+                )
+            };
+            assert_eq!(
+                rc,
+                0,
+                "setsockopt({level},{name}): {}",
+                std::io::Error::last_os_error()
+            );
+        };
+        let one = 1i32.to_ne_bytes();
+        set(libc::SOL_SOCKET, libc::SO_REUSEADDR, &one);
+
+        let bind_addr = libc::sockaddr_in {
+            sin_family: libc::AF_INET as libc::sa_family_t,
+            sin_port: port.to_be(),
+            sin_addr: libc::in_addr { s_addr: 0 },
+            sin_zero: [0; 8],
+        };
+        let rc = unsafe {
+            libc::bind(
+                fd.0,
+                (&bind_addr as *const libc::sockaddr_in).cast(),
+                std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+            )
+        };
+        assert_eq!(
+            rc,
+            0,
+            "bind(0.0.0.0:{port}): {}",
+            std::io::Error::last_os_error()
+        );
+
+        let mreq = libc::ip_mreq {
+            imr_multiaddr: libc::in_addr {
+                s_addr: u32::from(group).to_be(),
+            },
+            imr_interface: libc::in_addr {
+                s_addr: u32::from(iface_addr).to_be(),
+            },
+        };
+        let mreq_bytes = unsafe {
+            std::slice::from_raw_parts(
+                (&mreq as *const libc::ip_mreq).cast::<u8>(),
+                std::mem::size_of::<libc::ip_mreq>(),
+            )
+        };
+        set(libc::IPPROTO_IP, libc::IP_ADD_MEMBERSHIP, mreq_bytes);
+        set(libc::IPPROTO_IP, libc::IP_RECVTTL, &one);
+        let tv = libc::timeval {
+            tv_sec: timeout.as_secs() as libc::time_t,
+            tv_usec: timeout.subsec_micros() as libc::suseconds_t,
+        };
+        let tv_bytes = unsafe {
+            std::slice::from_raw_parts(
+                (&tv as *const libc::timeval).cast::<u8>(),
+                std::mem::size_of::<libc::timeval>(),
+            )
+        };
+        set(libc::SOL_SOCKET, libc::SO_RCVTIMEO, tv_bytes);
+
+        let mut buf = [0u8; 65_536];
+        let mut control = [0u8; 256];
+        let mut iov = libc::iovec {
+            iov_base: buf.as_mut_ptr().cast(),
+            iov_len: buf.len(),
+        };
+        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+        msg.msg_iov = &mut iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = control.as_mut_ptr().cast();
+        msg.msg_controllen = control.len() as _;
+        let n = unsafe { libc::recvmsg(fd.0, &mut msg, 0) };
+        if n < 0 {
+            let err = std::io::Error::last_os_error();
+            assert!(
+                matches!(
+                    err.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ),
+                "recvmsg: {err}"
+            );
+            return None;
+        }
+        let mut cmsg = unsafe { libc::CMSG_FIRSTHDR(&msg) };
+        while !cmsg.is_null() {
+            let hdr = unsafe { &*cmsg };
+            if hdr.cmsg_level == libc::IPPROTO_IP && hdr.cmsg_type == libc::IP_TTL {
+                let ttl = unsafe { std::ptr::read_unaligned(libc::CMSG_DATA(cmsg).cast::<i32>()) };
+                return Some(u8::try_from(ttl).expect("an IP TTL fits in a byte"));
+            }
+            cmsg = unsafe { libc::CMSG_NXTHDR(&msg, cmsg) };
+        }
+        panic!("a datagram arrived but the kernel attached no IP_TTL control message");
+    }
+
     impl Drop for NetnsPair {
         fn drop(&mut self) {
             // A process spawned through `sudo` is not reachable by killing the

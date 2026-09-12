@@ -638,7 +638,13 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # end. The namespace is what lets the silent arms discriminate: on one host the
 # peer's own membership reaches wz through IP_MULTICAST_ALL. Partial because
 # `ttl` is still unwitnessed by any foreign party.
-FOREIGN_ADJUDICATOR_LINKS = 903
+# R2587 — 903 -> 904: `transport-link-udp` zenohd->wz (partial), the `ttl` key
+# adjudicated by zenohd ON THE WIRE. zenohd and the wz router demo each get
+# `#iface=<veth>;ttl=5` and then no key, and a libc `IP_RECVTTL` reader inside a
+# namespace must read the same IP header value from both (5, then 1). The key sets
+# the header field and one link does not decrement it, so no routed hop is
+# needed. Reach across routers is kernel forwarding, and this claim does not cover it.
+FOREIGN_ADJUDICATOR_LINKS = 904
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
