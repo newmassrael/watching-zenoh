@@ -38,6 +38,7 @@ printed, `commit` is the tip being replaced (the sha the run graded), and
 | R2570 | `34640784537` | `85c21c02` | C1bn feature-gate-diagnostic · C0 lane-reach · A+B C0 (armed) provenance · E6 peer mesh | 721 | |
 | R2574 | `34659495427` | `df7369ec` | C0 python-floor lint, `facade_forward_gate` imports `tomllib` (two jobs, one cause) | — | R2574 |
 | R2576 | `34692815062` | `d21f7a16` | C0 gate-provenance, `netns-topology.sh` carries no citation (two jobs, one cause) | — | R2576 |
+| R2577 | `34697207229` | `cb57df67` | C0 hook-gate-boundary, `gate 2z` hid its commands in an array expansion (two jobs, one cause) | — | R2577 |
 
 ## What the rows above say
 
