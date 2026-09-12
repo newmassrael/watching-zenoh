@@ -638,9 +638,9 @@ pub fn multicast_iface_selector_v6(iface: &str) -> std::io::Result<Option<u32>> 
     }
 }
 
-/// Without `locator-iface` the v6 honor is not built either: warn and leave the
-/// socket on the kernel's default interface, as [`multicast_iface_selector_v4`]'s
-/// twin does.
+/// The build without `locator-iface` compiles the v6 honor out as it does the v4
+/// one: warn, and leave the socket on the kernel's default interface, as
+/// [`multicast_iface_selector_v4`]'s twin does.
 #[cfg(not(feature = "locator-iface"))]
 pub fn multicast_iface_selector_v6(iface: &str) -> std::io::Result<Option<u32>> {
     log::warn!(
