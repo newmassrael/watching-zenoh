@@ -2704,15 +2704,22 @@ PY
     python3 scripts/lib/facade_forward_gate.py || return 1
     # R2576 — a gate fed by what a ROUND changes must run where the round
     # happens. A round mutates the atomic store (it closes an atom) and the
-    # gate corpus under scripts/ (it writes the instrument), and gates read
+    # tracked corpus (it writes the code and the instrument), and gates read
     # both against pinned numbers that only stay true if they move in the same
-    # commit. Measured twice in four rounds: R2572 closed `switchboard` and
-    # moved two of `depth_axis_census`'s counts and neither pin, while this
+    # commit. Measured three times in six rounds: R2572 closed `switchboard`
+    # and moved two of `depth_axis_census`'s counts and neither pin, while this
     # fail-fast layer had already died at 14s on an unrelated lint; R2575 added
     # a gate script with no provenance citation, which `gate_provenance_lint`
-    # states in one line and 0.13s. Population DERIVED from the code (two seed
-    # rules plus the transitive importers), deferrals carry a measured cost and
-    # are PRINTED, and an empty population is a FAILURE.
+    # states in one line and 0.13s; R2576 added a witness whose header states a
+    # dependency `prose_dep_graph_gate` could not fix the subject of, and that
+    # one red TWICE here before anyone read it. R2578 is why the third instance
+    # is on this list: the seed rules named the store and scripts/, so the
+    # corpus that red -- crates/ -- was outside the population that gate
+    # derives. A seed is now any module enumerating TRACKED files, by
+    # `git ls-files` or by a glob under a directory `git ls-files` reports.
+    # Population DERIVED from the code (those seed rules plus the transitive
+    # importers), deferrals carry a measured reason and are PRINTED, and an
+    # empty population is a FAILURE.
     python3 scripts/lib/round_fed_gate_reach.py --selftest >/dev/null || return 1
     python3 scripts/lib/round_fed_gate_reach.py || return 1
     # R2208 (open-debt item 562) — WHAT A MACHINE MUST ALREADY HAVE for the
