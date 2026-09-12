@@ -4585,9 +4585,8 @@ fn declare_querier_returns_handle_with_keyexpr_and_options() {
 /// neighbour WHO ANSWERS, because `Querier::get_matching_status` counts remote
 /// queryables and a face is only told about the ones it asked for. zenoh-pico
 /// makes the same ask from `z_declare_querier` --
-/// `vendor/zenoh-pico/src/api/api.c` @
-/// `_z_write_filter_create(zs, &querier->_val._filter` with
-/// `_Z_INTEREST_FLAG_QUERYABLES`.
+/// `vendor/zenoh-pico/src/api/api.c` @ `_z_write_filter_create(zs, &querier->_val._filter`
+/// with `_Z_INTEREST_FLAG_QUERYABLES`.
 #[cfg(all(
     feature = "session-matching",
     feature = "declare-interest",
@@ -5409,16 +5408,17 @@ fn declare_publisher_returns_handle_with_keyexpr_and_options() {
 /// carried no reason beyond restating the behaviour.
 ///
 /// The pin was wrong against BOTH references, read at this tree's pin rather
-/// than recalled: `zenoh/src/api/session.rs` @
-/// `pub(crate) fn declare_publisher_inner(` sends an Interest with
+/// than recalled:
+/// `zenoh/src/api/session.rs` @ `pub(crate) fn declare_publisher_inner(`
+/// sends an Interest with
 /// `InterestOptions::KEYEXPRS + InterestOptions::SUBSCRIBERS`, and zenoh-pico
 /// does the same inside `z_declare_publisher` at
 /// `vendor/zenoh-pico/src/api/api.c` @ `_z_write_filter_create(zs, &pub->_val._filter`.
 /// A neighbour only forwards `DeclSubscriber` for a resource the face has
-/// asked about -- `zenoh/src/net/routing/hat/peer/pubsub.rs` @
-/// `.remote_interests` filters on `i.options.subscribers() && i.matches(res)`
-/// -- so without this a bare `get_matching_status()` poll reads a registry
-/// nobody was asked to fill.
+/// asked about --
+/// `zenoh/src/net/routing/hat/peer/pubsub.rs` @ `.remote_interests`
+/// filters on `i.options.subscribers() && i.matches(res)` -- so without this a
+/// bare `get_matching_status()` poll reads a registry nobody was asked to fill.
 #[cfg(all(
     feature = "session-matching",
     feature = "declare-subscriber",

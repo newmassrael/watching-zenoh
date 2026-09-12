@@ -218,7 +218,8 @@ impl<R: SessionRuntime, T: TimeSource> Publisher<R, T> {
     /// retracts it with the matching `Interest(Final)`. That emit is what
     /// makes the watch work against a zenoh ROUTER, which forwards a
     /// subscriber declaration to a face only if that face registered such an
-    /// interest (`hat/router/pubsub.rs:120-125`). A failed emit is surfaced
+    /// interest — `zenoh/src/net/routing/hat/peer/pubsub.rs` @ `.remote_interests`
+    /// is where that filter lives at the pin. A failed emit is surfaced
     /// as `Err(MatchingListenerError::Wire)` with NO watch registered, rather
     /// than a listener that can never fire.
     ///
@@ -278,15 +279,15 @@ impl<R: SessionRuntime, T: TimeSource> Publisher<R, T> {
             // the watch already installed — the same register-first ordering
             // the liveliness subscriber declare uses, and for the same race.
             //
-            // ⚠ R2577 CORRECTED THE CITATION THAT SENTENCE CARRIED. It named
-            // `hat/router/pubsub.rs:120-125`, and at this tree's pin that file
-            // holds no interest logic at all — its `propagate_subscriber`
+            // ⚠ R2577 CORRECTED THE CITATION THAT SENTENCE CARRIED. It pointed
+            // at line numbers in the ROUTER hat, and at this tree's pin that
+            // file holds no interest logic at all:
+            // `zenoh/src/net/routing/hat/router/pubsub.rs` @ `fn propagate_subscriber(`
             // reaches net children only. The gate is real and lives on the
-            // hats that own a client's face:
+            // hats that own a client's face —
             // `zenoh/src/net/routing/hat/peer/pubsub.rs` @ `.remote_interests`
-            // and `zenoh/src/net/routing/hat/broker/pubsub.rs` @
-            // `.remote_interests`, each filtering
-            // `i.options.subscribers() && i.matches(res)`.
+            // and `zenoh/src/net/routing/hat/broker/pubsub.rs` @ `.remote_interests`,
+            // each filtering `i.options.subscribers() && i.matches(res)`.
             //
             // ⚠ R2577 ALSO RETIRED THE DIVERGENCE THIS COMMENT USED TO
             // RECORD. It said wz could not emit the Interest from

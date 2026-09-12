@@ -415,7 +415,22 @@ BARE_BUDGET = 58
 #: occurrences that already existed out of the residue, which fell by exactly
 #: 59 in the same commit. `ROOTLESS_TOTAL_BUDGET` below is what makes that a
 #: measurement rather than a claim -- see its comment.
-ROOTLESS_LINE_BUDGET = 98
+#:
+#: R2577 — 98 -> 95. THREE root-less line citations left the tree in one commit
+#: and none was retyped: they were the same dead claim in three places, a
+#: LINE-NUMBERED reference into the router hat's pubsub file, cited as the
+#: reason a router withholds a subscriber declaration from a face that
+#: registered no interest. At the pin that file carries no interest logic at
+#: all -- `zenoh/src/net/routing/hat/router/pubsub.rs` @ `fn propagate_subscriber(`
+#: reaches net children only. The filter lives on the hats that own a client's
+#: face, so those sites now name
+#: `zenoh/src/net/routing/hat/peer/pubsub.rs` @ `.remote_interests` WITH its
+#: root, which is why this ratchet falls rather than merely moving.
+#: ⚠ The dead citation is DESCRIBED here rather than quoted: writing it out
+#: would have re-added the very root-less occurrence this entry records
+#: removing, and the first draft of this comment did exactly that (793 against
+#: a budget of 791, caught by this gate on its own source).
+ROOTLESS_LINE_BUDGET = 95
 ROOTLESS_BARE_BUDGET = 36
 #: Root-less LINE citations whose file EXISTS at the pin but whose line number
 #: is past its end -- 1.5.0 line numbers on files that shrank. Measured, not
@@ -492,7 +507,12 @@ ROOTLESS_UNDECLARED_BUDGET = 660
 #: R2422 — 802 -> 795, the same seven occurrences as the budget above: the
 #: `session-extqos` claim surface's root-less citations, re-anchored with their
 #: roots rather than retired, so they left the root-less population entirely.
-ROOTLESS_TOTAL_BUDGET = 794
+#: R2577 — 794 -> 791, the same three occurrences as the budget above: the dead
+#: router-hat claim, re-anchored with its root onto the hats that actually carry
+#: the filter, so they left the root-less population rather than moving between
+#: its halves. (Named in prose here for the reason that entry records: quoting
+#: the retired path would re-add the occurrence being removed.)
+ROOTLESS_TOTAL_BUDGET = 791
 
 #: A LIVE invocation of the RESOLUTION arm. R2242 split this gate in two and,
 #: in doing so, made `--resolve` a flag someone can simply stop passing: delete
