@@ -616,12 +616,15 @@ fi
 # `upstream_release_distance.py` names the store nowhere and reaches it through
 # an import.
 #
-# COST, measured warm on this tree at R2576 as ONE BLOCK rather than as a sum
-# of separate runs: 21.75s for the twenty below, of which
-# `upstream_reads_the_surface` is 9.4s and `gate_reason_claims` 5.6s -- the
-# other eighteen are 6.8s together. Three members are DEFERRED for cost or for
-# needing the network, each with its figure in that table, and the gate PRINTS
-# them on every run so a deferral can never read as coverage.
+# COST, measured on this tree at R2576 as ONE BLOCK rather than as a sum of
+# separate runs, and quoted as a RANGE because three consecutive runs gave
+# 21.75s, 28.13s and 26.91s at load averages of 5.8 to 9.9. A single figure
+# here would have been the quietest of the three and would read as a promise
+# the hook cannot keep. Of it, `upstream_reads_the_surface` is ~9.4s and
+# `gate_reason_claims` ~5.6s; the other eighteen are ~6.8s together. Three
+# members are DEFERRED for cost or for needing the network, each with its
+# figure in that table, and the gate PRINTS them on every run so a deferral can
+# never read as coverage.
 round_fed_gates=(
     "scripts/lib/round_fed_gate_reach.py"
     "scripts/lib/depth_axis_census.py"
