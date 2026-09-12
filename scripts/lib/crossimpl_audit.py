@@ -624,7 +624,15 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # leg whose first run was a defect report. Marked `partial`: it covers the
 # QUERYABLE plane's local half on one ABI, and the matching LISTENER still
 # installs per face.
-FOREIGN_ADJUDICATOR_LINKS = 900
+#
+# R2581 (+2, 902) -- `session-matching`'s residual (3), SEVERAL queryables of
+# DIFFERENT completeness behind one zenohd. Two legs, each with a control that
+# reds IT and nothing else: the aggregate (one complete includer satisfies the
+# querier despite an incomplete neighbour) and inclusion (a COMPLETE storage
+# that merely intersects does not). Both need a WILDCARD querier keyexpr --
+# against the literal the older pair uses, every intersecting queryable also
+# includes, so those two legs cannot see either axis.
+FOREIGN_ADJUDICATOR_LINKS = 902
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

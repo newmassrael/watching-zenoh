@@ -16440,7 +16440,11 @@ scripts/build-zenohd.sh from a source checkout)" || return 1
     # INSIDE this block rather than beside the three legs above because the
     # storage-manager plugin is its prereq, and the absent-plugin branch above
     # returns from the whole lane.
-    _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" \
+    # R2581 — FOUR legs now. The two added put the `includes` half of the
+    # AllComplete predicate under test, which the original pair structurally
+    # cannot: they query a LITERAL keyexpr, and every queryable that intersects
+    # a literal also includes it.
+    _runci_guarded_test Z 4 env WZ_ZENOHD_BIN="$zenohd" \
         WZ_STORAGE_MANAGER_SO="$plugin" cargo test -p wz-integration-tests \
         --test wz_querier_all_complete_vs_zenohd_storage \
         -- --ignored --quiet --test-threads=1 || return 1
