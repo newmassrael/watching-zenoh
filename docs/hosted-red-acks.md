@@ -40,6 +40,7 @@ printed, `commit` is the tip being replaced (the sha the run graded), and
 | R2576 | `34692815062` | `d21f7a16` | C0 gate-provenance, `netns-topology.sh` carries no citation (two jobs, one cause) | — | R2576 |
 | R2577 | `34697207229` | `cb57df67` | C0 hook-gate-boundary, `gate 2z` hid its commands in an array expansion (two jobs, one cause) | — | R2577 |
 | R2578 | `34701444387` | `f394e114` | C0 prose-dep-graph, a witness header's dependency clause took a pronoun subject (two jobs, one cause) | — | R2578 |
+| R2585 | `34713345823` | `dbc20e6f` | C0 skip-token naming, two R2581 `zenohd` legs carried no token (two C0 jobs) · E ran the same two legs without zenohd (three jobs, one cause) | — | R2585 |
 
 ## What the rows above say
 
