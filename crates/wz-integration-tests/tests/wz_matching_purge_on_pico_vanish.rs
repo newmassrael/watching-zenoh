@@ -202,7 +202,9 @@ fn spawn_resident_zsub(z_sub: &std::path::Path, endpoint: &str, label: &'static 
     )
 }
 
-// wz-proves: session-matching pico-vanish->wz
+// `partial`: this closes ONE of the atom's four witness gaps -- the link-loss
+// purge -- and says nothing about the other three.
+// wz-proves: session-matching pico->wz partial
 #[test]
 #[ignore = "binary-dep e2e (zenoh-pico CLI); Layer E runs via --ignored"]
 fn a_vanished_pico_subscriber_is_purged_from_wz_matching_status() {

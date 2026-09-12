@@ -602,7 +602,19 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # at 0, so the built `libzenohpico.so` exported ZERO `connectivit*` symbols before
 # this round. `scripts/build-zenoh-pico-cli.sh` now requests the flag, asserts it
 # against the GENERATED config.h, and installs `z_info`.
-FOREIGN_ADJUDICATOR_LINKS = 898
+#
+# The foreign VANISH round takes it to 899, in
+# wz_matching_purge_on_pico_vanish.rs. ONE new leg, ONE link, and the +1 is the
+# whole point of this counter rather than of the per-atom bit: `session-matching`
+# was already `partial` with several pico witnesses, and every one of them
+# adjudicates a DECLARED transition -- a subscriber arriving, or leaving by a
+# retraction wz READS. Nothing foreign had ever adjudicated a peer that simply
+# STOPS. This leg SIGKILLs a real pico `z_sub`, which cannot send an
+# UndeclSubscriber by any path (without `-n` that binary never leaves its
+# `while (1)` and so never reaches its own `z_drop`), so only the link-loss
+# purge can lower wz's verdict. Marked `partial`: it closes ONE of that atom's
+# four witness gaps and says nothing about the other three.
+FOREIGN_ADJUDICATOR_LINKS = 899
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
