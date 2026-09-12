@@ -830,7 +830,16 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # `.githooks/pre-push`, beside `grading_pin_ratchet.py`, which is the sibling
 # pin gate that was already there. A pin the closing commit cannot see is a pin
 # that moves a round late by construction.
-PIN_REACHED = 42
+#
+# R2582 — 42 -> 41: `session-matching` went PARTIAL -> COMPLETE, and it was one
+# of the atoms an executing test reaches, so it leaves this count with the
+# population. Its three named residuals were CLOSED rather than relabelled --
+# (1) refuted by an ask-removed control on BOTH routing hats, (2) a divergence
+# built, repaired and witnessed against the zenoh-c reference, (3) two
+# mixed-completeness legs each with a control that reds it alone. Moved in the
+# same commit as the grade, which is the whole of what this pin's history above
+# is about.
+PIN_REACHED = 41
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -1030,8 +1039,19 @@ PIN_NO_SYMBOL = 2
 # in neither pin: they name zenoh and zenoh-pico files this tree holds no
 # oracle for. A reader comparing "citations added" against this delta would
 # otherwise find seven where the pin moved by two.
-PIN_WZ_CITATIONS = 258
-PIN_AMBIGUOUS = 56
+#
+# R2582 — 258 -> 237 and 56 -> 45, and for the OPPOSITE reason to the two rises
+# above: an atom LEFT the corpus. `session-matching` went PARTIAL -> COMPLETE,
+# and a COMPLETE atom's reason is outside the population by construction, so
+# every citation it carried leaves with it. DERIVED, not read off the diff: the
+# R2577 entry directly above measured this atom alone with `citation_audit` at
+# (wz 21, ambiguous 11), so 258 - 21 = 237 and 56 - 11 = 45, which is exactly
+# what the census now reports. The CORRECTION clause appended to that reason in
+# the same mutation adds no `.rs` / `.c` / `.h` citation, so it moves neither
+# number -- checked, because a new clause that DID cite a wz file would have made
+# these deltas smaller and still looked plausible.
+PIN_WZ_CITATIONS = 237
+PIN_AMBIGUOUS = 45
 
 
 class Fatal(Exception):
