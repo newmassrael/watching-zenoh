@@ -1218,11 +1218,28 @@ pub struct Querier<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> 
 
 impl<R: SessionRuntime, T: TimeSource> Clone for Querier<R, T> {
     fn clone(&self) -> Self {
+        // R2577 — a clone is another live querier on this keyexpr, so it takes
+        // its own reference on the session's QUERYABLES Interest. See
+        // `Publisher`'s pair for why the count cannot live on the handle.
+        #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
+        self.session
+            .acquire_matching_interest(crate::session::MatchingPlane::Queryables, &self.keyexpr);
         Self {
             session: self.session.clone(),
             keyexpr: self.keyexpr.clone(),
             options: self.options.clone(),
         }
+    }
+}
+
+/// R2577 — the querier's half of the Interest lifecycle, the mirror of
+/// `Publisher`'s. Only the LAST live handle on a keyexpr retracts, because the
+/// count lives on the session rather than on this handle.
+impl<R: SessionRuntime, T: TimeSource> Drop for Querier<R, T> {
+    fn drop(&mut self) {
+        #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
+        self.session
+            .release_matching_interest(crate::session::MatchingPlane::Queryables, &self.keyexpr);
     }
 }
 

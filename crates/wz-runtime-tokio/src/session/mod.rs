@@ -638,6 +638,65 @@ where
     /// to hold and the map would be a field no code path can reach.
     #[cfg(feature = "query-queryable")]
     final_holds: Arc<std::sync::Mutex<std::collections::HashMap<u64, FinalHold>>>,
+    /// R2577 — the SUBSCRIBERS Interest a publisher owns, REFCOUNTED by
+    /// keyexpr: `keyexpr -> (interest_id, live publisher handles)`.
+    ///
+    /// ## Why this exists at all
+    ///
+    /// `Publisher::get_matching_status` answers from
+    /// `RemoteSubscriberRegistry`, and that registry is fed by inbound
+    /// `Declare(DeclSubscriber)` records. A neighbour only SENDS those for a
+    /// resource its face has declared an interest in: measured at the pin,
+    /// `zenoh/src/net/routing/hat/peer/pubsub.rs` @ `.remote_interests` and
+    /// `zenoh/src/net/routing/hat/broker/pubsub.rs` @ `.remote_interests` both
+    /// filter on `i.options.subscribers() && i.matches(res)` before notifying a
+    /// face. Until R2577 wz emitted that Interest ONLY from
+    /// `Publisher::declare_matching_listener`, so a bare
+    /// `get_matching_status()` poll read a registry nothing had been asked to
+    /// fill -- the §5.4 `session-matching` residual.
+    ///
+    /// ## Why a REFCOUNT rather than a per-handle interest
+    ///
+    /// `Publisher` is `Clone` (publisher.rs), so "retract when this handle
+    /// drops" would cut a live publisher's interest the moment any clone fell
+    /// out of scope. Upstream has exactly this problem and solves it the same
+    /// way: `zenoh/src/api/session.rs` @ `pub(crate) fn declare_publisher_inner(`
+    /// declares only when no twin publisher already covers the keyexpr, and
+    /// `zenoh/src/api/session.rs` @ `pub(crate) fn undeclare_publisher_inner(`
+    /// sends `InterestMode::Final` only when the one going away was the last.
+    /// wz has no `remote_id` table, so the keyexpr string IS the key here.
+    ///
+    /// Shared on a fork, never copied: two handles that each believed they
+    /// owned the count would emit a Final the other still needs.
+    #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
+    matching_interests:
+        Arc<std::sync::Mutex<std::collections::HashMap<(MatchingPlane, String), (u64, usize)>>>,
+}
+
+/// R2577 — which declaration plane a matching Interest asks about.
+///
+/// ONE seam for both planes rather than two tables: a publisher's matching
+/// status counts SUBSCRIBERS and a querier's counts QUERYABLES, and the only
+/// thing that differs between them is the kind bit on the wire. Two tables
+/// would be two things to keep in step, and this tree has paid for that shape
+/// before.
+#[cfg(all(feature = "session-matching", feature = "declare-interest"))]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(crate) enum MatchingPlane {
+    /// A publisher asking who subscribes.
+    Subscribers,
+    /// A querier asking who answers.
+    Queryables,
+}
+
+#[cfg(all(feature = "session-matching", feature = "declare-interest"))]
+impl MatchingPlane {
+    fn kinds(self) -> wz_session_core::interest_build::InterestKinds {
+        match self {
+            Self::Subscribers => wz_session_core::interest_build::InterestKinds::SUBSCRIBERS,
+            Self::Queryables => wz_session_core::interest_build::InterestKinds::QUERYABLES,
+        }
+    }
 }
 
 /// The session HANDLE: a shared, cheaply-cloned pointer to [`SessionInner`].
@@ -783,6 +842,11 @@ where
             // would let one handle emit a terminator another still holds.
             #[cfg(feature = "query-queryable")]
             final_holds: self.final_holds.clone(),
+            // Shared for the same reason, one step sharper: the map holds a
+            // REFCOUNT, and a fork that copied it would let one handle emit an
+            // Interest(Final) while the other still has publishers standing.
+            #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
+            matching_interests: self.matching_interests.clone(),
         }
     }
 }
@@ -1689,6 +1753,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
             // ever put an entry here.
             #[cfg(feature = "query-queryable")]
             final_holds: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
+            matching_interests: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             // R311y450 — a multicast session is handshake-free, so it has
             // neither of the two inputs the node clock is gated on: no
             // `SessionInitParams` means no zid to derive a `uhlc::ID` from and no
@@ -1872,6 +1938,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             node_hlc,
             #[cfg(feature = "query-queryable")]
             final_holds: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
+            matching_interests: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         });
         // Forward the zid into the subscriber registry so wire-arrived
         // self-echo Pushes are dedup'd from session creation onward. The
@@ -3213,9 +3281,20 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         keyexpr: impl Into<String>,
         options: QueryOptions,
     ) -> Querier<R, T> {
+        let keyexpr = keyexpr.into();
+        // R2577 — the QUERYABLES mirror of the publisher's ask, and it lands in
+        // the same round for the reason the seam is shared: `Querier` has the
+        // identical shape (`Clone`, no `Drop`, infallible by-value declare) and
+        // `Querier::get_matching_status` reads a queryable registry the
+        // neighbour fills only for a face that asked. zenoh-pico declares its
+        // querier's filter the same way -- `vendor/zenoh-pico/src/api/api.c` @
+        // `_z_write_filter_create(zs, &querier->_val._filter` with
+        // `_Z_INTEREST_FLAG_QUERYABLES`.
+        #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
+        self.acquire_matching_interest(MatchingPlane::Queryables, &keyexpr);
         Querier {
             session: self.clone(),
-            keyexpr: keyexpr.into(),
+            keyexpr,
             options,
         }
     }
@@ -3275,11 +3354,98 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         keyexpr: impl Into<String>,
         options: PublishOptions,
     ) -> Publisher<R, T> {
+        let keyexpr = keyexpr.into();
+        // R2577 — ASK THE NEIGHBOUR FOR THE DECLARATIONS THIS PUBLISHER'S
+        // MATCHING STATUS IS COMPUTED FROM, at DECLARE time, which is where
+        // both upstreams ask. Until this round the only asker was
+        // `declare_matching_listener`, so a bare `get_matching_status()` poll
+        // read a registry nobody had been asked to fill. Refcounted by keyexpr
+        // (see the `matching_interests` field doc) because `Publisher` is
+        // `Clone`.
+        #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
+        self.acquire_matching_interest(MatchingPlane::Subscribers, &keyexpr);
         Publisher {
             session: self.clone(),
-            keyexpr: keyexpr.into(),
+            keyexpr,
             options,
         }
+    }
+
+    /// R2577 — take a reference on this keyexpr's matching Interest, emitting
+    /// it the first time and never again while a handle stands.
+    ///
+    /// The emit has no error channel to return into: `declare_publisher` and
+    /// `declare_querier` are infallible by value and every caller in the tree
+    /// relies on that. A failed emit is therefore DROPPED exactly as a dead
+    /// link drops it -- the same `F2` argument
+    /// `SessionActions::send_interest_final` records for the retraction side --
+    /// and the refcount is still taken, so the Final stays balanced. What that
+    /// costs is stated rather than hidden: on a transport that was down at
+    /// declare time the matching registry stays empty until a reconnect
+    /// replays the cached Interest (`cache_matching_interest`, which
+    /// `send_interest_kinds` writes).
+    #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
+    pub(crate) fn acquire_matching_interest(&self, plane: MatchingPlane, keyexpr: &str) {
+        let key = (plane, keyexpr.to_string());
+        let mut table = match self.matching_interests.lock() {
+            Ok(t) => t,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some((_, refs)) = table.get_mut(&key) {
+            *refs += 1;
+            return;
+        }
+        let interest_id = self.actions().alloc_next_interest_id();
+        table.insert(key, (interest_id, 1));
+        drop(table);
+        let _ = self.actions().send_interest_kinds(
+            interest_id,
+            plane.kinds(),
+            /*current=*/ true,
+            /*future=*/ true,
+            /*keyexpr_mapping_id=*/ 0,
+            Some(keyexpr),
+        );
+    }
+
+    /// R2577 — the interest id standing for this plane and keyexpr, or `None`
+    /// when no handle holds one. Exists so a test can assert against the id the
+    /// emit ACTUALLY allocated rather than a literal: an emit that allocated
+    /// one id and put another on the wire would satisfy a hardcoded
+    /// expectation, which is the trap
+    /// `a_publisher_matching_listener_asks_the_peer_for_subscriber_declarations`
+    /// already records for the listener's own id.
+    #[cfg(all(test, feature = "session-matching", feature = "declare-interest"))]
+    pub(crate) fn matching_interest_id(&self, plane: MatchingPlane, keyexpr: &str) -> Option<u64> {
+        let table = match self.matching_interests.lock() {
+            Ok(t) => t,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        table.get(&(plane, keyexpr.to_string())).map(|(id, _)| *id)
+    }
+
+    /// R2577 — drop a reference, terminating the Interest when the LAST handle
+    /// on that plane and keyexpr goes away. Upstream's rule, in upstream's
+    /// order: `undeclare_publisher_inner` checks "is any other publisher still
+    /// on this resource?" before sending `InterestMode::Final`.
+    #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
+    pub(crate) fn release_matching_interest(&self, plane: MatchingPlane, keyexpr: &str) {
+        let key = (plane, keyexpr.to_string());
+        let mut table = match self.matching_interests.lock() {
+            Ok(t) => t,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let Some((interest_id, refs)) = table.get_mut(&key) else {
+            return;
+        };
+        *refs -= 1;
+        if *refs > 0 {
+            return;
+        }
+        let interest_id = *interest_id;
+        table.remove(&key);
+        drop(table);
+        self.actions().send_interest_final(interest_id);
     }
 
     /// R244 — aliased-keyexpr counterpart of [`Self::declare_publisher`].

@@ -46,11 +46,33 @@ pub struct Publisher<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime
 
 impl<R: SessionRuntime, T: TimeSource> Clone for Publisher<R, T> {
     fn clone(&self) -> Self {
+        // R2577 — a clone is another live publisher on this keyexpr, so it
+        // takes its own reference on the session's SUBSCRIBERS Interest. The
+        // pair with `Drop` below is what lets the interest be retracted at all:
+        // without it, "retract when a handle drops" would cut a live
+        // publisher's interest the moment any clone went out of scope.
+        #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
+        self.session
+            .acquire_matching_interest(crate::session::MatchingPlane::Subscribers, &self.keyexpr);
         Self {
             session: self.session.clone(),
             keyexpr: self.keyexpr.clone(),
             options: self.options.clone(),
         }
+    }
+}
+
+/// R2577 — the handle's half of the Interest lifecycle.
+///
+/// `declare_publisher` is infallible and returns by value, which is why this
+/// reason's residual stood for so long: there was no id and no `undeclare`, so
+/// nothing could carry the `Interest(Final)`. `Drop` is that carrier, and it
+/// works only because the count lives on the SESSION rather than on the handle.
+impl<R: SessionRuntime, T: TimeSource> Drop for Publisher<R, T> {
+    fn drop(&mut self) {
+        #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
+        self.session
+            .release_matching_interest(crate::session::MatchingPlane::Subscribers, &self.keyexpr);
     }
 }
 
@@ -248,27 +270,41 @@ impl<R: SessionRuntime, T: TimeSource> Publisher<R, T> {
                 )
             });
             // R311y771 — ASK THE PEER FOR THE DECLARATIONS THIS WATCH IS FED
-            // BY. Without it the watch is registered against a registry a
-            // zenoh router will never fill: propagation to a face is gated on
+            // BY. Without it the watch is registered against a registry the
+            // neighbour will never fill: propagation to a face is gated on
             // that face's own `remote_interests` carrying `options
-            // .subscribers()` and matching the resource
-            // (`hat/router/pubsub.rs:120-125`). Emitted AFTER the register so
-            // a CURRENT-mode replay that arrives immediately finds the watch
-            // already installed — the same register-first ordering the
-            // liveliness subscriber declare uses, and for the same race.
+            // .subscribers()` and matching the resource. Emitted AFTER the
+            // register so a CURRENT-mode replay that arrives immediately finds
+            // the watch already installed — the same register-first ordering
+            // the liveliness subscriber declare uses, and for the same race.
             //
-            // DIVERGENCE FROM ZENOH, deliberate and recorded: zenoh emits
-            // this Interest from `declare_publisher_inner`
-            // (`api/session.rs:1370-1377`), one per publisher. wz's
-            // `declare_publisher` is an infallible by-value handle with no id
-            // and no undeclare, so it can carry neither a failed emit nor the
-            // `Interest(Final)` that retracts one; emitting there would leak
-            // an interest on the peer for the life of the session. The
-            // matching listener is the surface that both CONSUMES the
-            // resulting declarations and has a lifecycle to hang the Final
-            // on. What this does not cover is stated with it: a bare
-            // `get_matching_status()` poll with no listener declared still
-            // sees an empty remote set against a router.
+            // ⚠ R2577 CORRECTED THE CITATION THAT SENTENCE CARRIED. It named
+            // `hat/router/pubsub.rs:120-125`, and at this tree's pin that file
+            // holds no interest logic at all — its `propagate_subscriber`
+            // reaches net children only. The gate is real and lives on the
+            // hats that own a client's face:
+            // `zenoh/src/net/routing/hat/peer/pubsub.rs` @ `.remote_interests`
+            // and `zenoh/src/net/routing/hat/broker/pubsub.rs` @
+            // `.remote_interests`, each filtering
+            // `i.options.subscribers() && i.matches(res)`.
+            //
+            // ⚠ R2577 ALSO RETIRED THE DIVERGENCE THIS COMMENT USED TO
+            // RECORD. It said wz could not emit the Interest from
+            // `declare_publisher` because that handle is infallible, by value,
+            // with no id and no undeclare — so it could carry neither a failed
+            // emit nor the `Interest(Final)`. The second half was the real
+            // blocker and it is now solved the way upstream solves it: the
+            // COUNT lives on the session, keyed by keyexpr, so `Clone` takes a
+            // reference and `Drop` releases one, and only the last release
+            // retracts (`Session::acquire_publisher_interest` /
+            // `release_publisher_interest`). The first half is accepted and
+            // stated where it happens: a failed emit at declare is dropped as
+            // a dead link drops it.
+            //
+            // THIS EMIT STAYS, and is not redundant with the publisher's: the
+            // publisher's interest was replayed before this watch existed,
+            // while the watch needs a `current=true` replay of its own to be
+            // seeded against what is live NOW. Two asks, two lifetimes.
             #[cfg(feature = "declare-interest")]
             let interest_id = {
                 let interest_id = self.session.actions().alloc_next_interest_id();

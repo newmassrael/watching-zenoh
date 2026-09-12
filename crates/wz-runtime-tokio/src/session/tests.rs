@@ -4578,18 +4578,112 @@ fn declare_querier_returns_handle_with_keyexpr_and_options() {
     assert_eq!(querier.options().timeout_ms, opts.timeout_ms);
 }
 
+/// R2577 — REPLACES `declare_querier_does_not_emit_wire_frame_at_declare_time`.
+///
+/// That pin's reason was "the Query side has no peer-side state to register",
+/// and it is half right: a querier registers no QUERYABLE, but it does ask the
+/// neighbour WHO ANSWERS, because `Querier::get_matching_status` counts remote
+/// queryables and a face is only told about the ones it asked for. zenoh-pico
+/// makes the same ask from `z_declare_querier` --
+/// `vendor/zenoh-pico/src/api/api.c` @
+/// `_z_write_filter_create(zs, &querier->_val._filter` with
+/// `_Z_INTEREST_FLAG_QUERYABLES`.
+#[cfg(all(
+    feature = "session-matching",
+    feature = "declare-interest",
+    feature = "codec-declare"
+))]
 #[test]
-fn declare_querier_does_not_emit_wire_frame_at_declare_time() {
-    // The querier "declaration" is purely a caller-side
-    // aggregation; the Query side has no peer-side state to
-    // register (unlike DeclareSubscriber / DeclareQueryable).
+fn declare_querier_asks_the_peer_for_matching_queryable_declarations() {
+    use wz_session_core::interest_build::{build_interest_queryables, build_interest_subscribers};
+
     let (session, driver) = build_session();
-    let _querier = session.declare_querier("home/temp", QueryOptions::get());
+    let querier = session.declare_querier("home/temp", QueryOptions::get());
     assert_eq!(
         driver.frame_count(),
-        0,
-        "declare_querier is a no-op on the wire"
+        1,
+        "declaring a querier must emit exactly one frame -- the Interest",
     );
+    let id = session
+        .matching_interest_id(crate::session::MatchingPlane::Queryables, querier.keyexpr())
+        .expect("the declare took a reference, so an id stands");
+    let wanted = build_interest_queryables(
+        id,
+        /*current=*/ true,
+        /*future=*/ true,
+        /*mapping_id=*/ 0,
+        Some("home/temp"),
+    )
+    .unwrap()
+    .try_as_borrowed()
+    .expect("test: <=N exts by construction")
+    .encode_to_vec();
+    let frame = driver.frame_bytes(0);
+    assert!(
+        frame.windows(wanted.len()).any(|w| w == wanted),
+        "the frame must carry a QUERYABLES Interest; frame was {frame:02x?}",
+    );
+
+    // ANTI-VACUITY, and the arm that matters most for a SHARED seam: the
+    // subscribers form of the same id and keyexpr must NOT be what went out.
+    // A plane mix-up is exactly the defect one table for two planes could
+    // introduce, so it is pinned rather than trusted.
+    let wrong_plane = build_interest_subscribers(
+        id,
+        /*current=*/ true,
+        /*future=*/ true,
+        /*mapping_id=*/ 0,
+        Some("home/temp"),
+    )
+    .unwrap()
+    .try_as_borrowed()
+    .expect("test: <=N exts by construction")
+    .encode_to_vec();
+    assert!(
+        !frame.windows(wrong_plane.len()).any(|w| w == wrong_plane),
+        "a SUBSCRIBERS Interest would prove nothing about queryables",
+    );
+}
+
+/// R2577 — the two planes take SEPARATE references on one keyexpr. Pinned
+/// because the table is keyed by `(plane, keyexpr)`: keying it by keyexpr alone
+/// would let a publisher's drop retract a querier's interest, and nothing else
+/// in the suite would notice.
+#[cfg(all(
+    feature = "session-matching",
+    feature = "declare-interest",
+    feature = "codec-declare"
+))]
+#[test]
+fn the_two_matching_planes_do_not_share_a_reference_on_one_keyexpr() {
+    let (session, _driver) = build_session();
+    let pubr = session.declare_publisher("home/temp", PublishOptions::put());
+    let querier = session.declare_querier("home/temp", QueryOptions::get());
+
+    let sub_id = session
+        .matching_interest_id(crate::session::MatchingPlane::Subscribers, "home/temp")
+        .expect("the publisher holds one");
+    let qry_id = session
+        .matching_interest_id(crate::session::MatchingPlane::Queryables, "home/temp")
+        .expect("the querier holds one");
+    assert_ne!(
+        sub_id, qry_id,
+        "one id for both planes would make the peer's two interest streams \
+         collide on a single entry",
+    );
+
+    drop(pubr);
+    assert_eq!(
+        session.matching_interest_id(crate::session::MatchingPlane::Subscribers, "home/temp"),
+        None,
+        "the publisher's reference is gone",
+    );
+    assert_eq!(
+        session.matching_interest_id(crate::session::MatchingPlane::Queryables, "home/temp"),
+        Some(qry_id),
+        "and the querier's is untouched",
+    );
+    drop(querier);
 }
 
 #[cfg(all(feature = "query-get", feature = "query-queryable"))]
@@ -4612,6 +4706,11 @@ fn querier_get_fires_loopback_through_session_query_session_local() {
         "home/temp",
         QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
     );
+    // R2577 — counted from AFTER the declare: declaring a querier now asks the
+    // neighbour which queryables answer this keyexpr. The subject here is that
+    // a SessionLocal `get` puts nothing on the wire, so the count must start
+    // where that `get` starts.
+    let after_declare = driver.frame_count();
     let r = reply_count.clone();
     let f = final_count.clone();
     querier
@@ -4627,7 +4726,11 @@ fn querier_get_fires_loopback_through_session_query_session_local() {
 
     assert_eq!(reply_count.load(Ordering::SeqCst), 1);
     assert_eq!(final_count.load(Ordering::SeqCst), 1);
-    assert_eq!(driver.frame_count(), 0, "SessionLocal skips wire");
+    assert_eq!(
+        driver.frame_count(),
+        after_declare,
+        "SessionLocal skips wire"
+    );
 }
 
 #[cfg(feature = "query-get")]
@@ -4678,6 +4781,9 @@ fn querier_get_threads_target_option_into_wire() {
             .with_allowed_destination(Locality::Remote)
             .with_target(QueryTarget::All),
     );
+    // R2577 — the declare emits its own Interest now, so the frame this test
+    // reads is the one the `get` wrote, not frame 0.
+    let after_declare = driver.frame_count();
     querier
         .get(|_| {}, |_| {})
         .expect("query-get feature is ON in this test build");
@@ -4690,7 +4796,7 @@ fn querier_get_threads_target_option_into_wire() {
             ..Default::default()
         },
     );
-    let frame = driver.frame_bytes(0);
+    let frame = driver.frame_bytes(after_declare);
     assert!(
         frame
             .windows(standalone_bytes.len())
@@ -5297,14 +5403,150 @@ fn declare_publisher_returns_handle_with_keyexpr_and_options() {
     assert_eq!(pubr.options().reliability, opts.reliability);
 }
 
+/// R2577 — declaring a publisher ASKS THE PEER for the subscriber declarations
+/// its matching status is computed from. This REPLACES
+/// `declare_publisher_does_not_emit_wire_frame`, which pinned the opposite and
+/// carried no reason beyond restating the behaviour.
+///
+/// The pin was wrong against BOTH references, read at this tree's pin rather
+/// than recalled: `zenoh/src/api/session.rs` @
+/// `pub(crate) fn declare_publisher_inner(` sends an Interest with
+/// `InterestOptions::KEYEXPRS + InterestOptions::SUBSCRIBERS`, and zenoh-pico
+/// does the same inside `z_declare_publisher` at
+/// `vendor/zenoh-pico/src/api/api.c` @ `_z_write_filter_create(zs, &pub->_val._filter`.
+/// A neighbour only forwards `DeclSubscriber` for a resource the face has
+/// asked about -- `zenoh/src/net/routing/hat/peer/pubsub.rs` @
+/// `.remote_interests` filters on `i.options.subscribers() && i.matches(res)`
+/// -- so without this a bare `get_matching_status()` poll reads a registry
+/// nobody was asked to fill.
+#[cfg(all(
+    feature = "session-matching",
+    feature = "declare-subscriber",
+    feature = "declare-interest",
+    feature = "codec-declare"
+))]
 #[test]
-fn declare_publisher_does_not_emit_wire_frame() {
+fn declare_publisher_asks_the_peer_for_matching_subscriber_declarations() {
+    use wz_session_core::interest_build::{
+        build_interest_liveliness_subscriber, build_interest_subscribers,
+    };
+
     let (session, driver) = build_session();
-    let _pubr = session.declare_publisher("home/temp", PublishOptions::put());
+    let pubr = session.declare_publisher("home/temp", PublishOptions::put());
     assert_eq!(
         driver.frame_count(),
-        0,
-        "declare_publisher is a no-op on the wire"
+        1,
+        "declaring a publisher must emit exactly one frame -- the Interest",
+    );
+
+    // The id is read back from the SESSION's table, not written as a literal:
+    // an emit that allocated one id and put another on the wire would satisfy
+    // a hardcoded expectation.
+    let id = session
+        .matching_interest_id(crate::session::MatchingPlane::Subscribers, pubr.keyexpr())
+        .expect("the declare took a reference, so an id stands");
+    let wanted = build_interest_subscribers(
+        id,
+        /*current=*/ true,
+        /*future=*/ true,
+        /*mapping_id=*/ 0,
+        Some("home/temp"),
+    )
+    .unwrap()
+    .try_as_borrowed()
+    .expect("test: <=N exts by construction")
+    .encode_to_vec();
+    let frame = driver.frame_bytes(0);
+    assert!(
+        frame.windows(wanted.len()).any(|w| w == wanted),
+        "the frame must carry a SUBSCRIBERS Interest for the publisher's \
+         keyexpr; frame was {frame:02x?}",
+    );
+
+    // ANTI-VACUITY: the KIND bit is the byte that matters, so the token form
+    // of the same id, keyexpr and mode must NOT be what went out.
+    let token_form = build_interest_liveliness_subscriber(
+        id,
+        /*history=*/ true,
+        /*mapping_id=*/ 0,
+        Some("home/temp"),
+    )
+    .unwrap()
+    .try_as_borrowed()
+    .expect("test: <=N exts by construction")
+    .encode_to_vec();
+    assert!(
+        !frame.windows(token_form.len()).any(|w| w == token_form),
+        "a token-plane Interest would prove nothing about subscribers",
+    );
+}
+
+/// R2577 — the refcount, from the side that makes a naive `Drop` wrong: a
+/// CLONE is another live publisher, so it must NOT emit a second Interest, and
+/// dropping it must NOT retract the one the original still needs.
+#[cfg(all(
+    feature = "session-matching",
+    feature = "declare-subscriber",
+    feature = "declare-interest",
+    feature = "codec-declare"
+))]
+#[test]
+fn a_publisher_clone_shares_one_interest_and_only_the_last_drop_retracts_it() {
+    use wz_session_core::interest_build::build_interest_final;
+
+    let (session, driver) = build_session();
+    let pubr = session.declare_publisher("home/temp", PublishOptions::put());
+    let id = session
+        .matching_interest_id(crate::session::MatchingPlane::Subscribers, "home/temp")
+        .expect("the declare took a reference");
+    let after_declare = driver.frame_count();
+
+    let clone = pubr.clone();
+    assert_eq!(
+        driver.frame_count(),
+        after_declare,
+        "a clone shares the interest; a second emit would double the peer's \
+         interest table for one keyexpr",
+    );
+    assert_eq!(
+        session.matching_interest_id(crate::session::MatchingPlane::Subscribers, "home/temp"),
+        Some(id),
+        "the clone must take a reference on the SAME id",
+    );
+
+    drop(clone);
+    assert_eq!(
+        driver.frame_count(),
+        after_declare,
+        "dropping a clone must not retract an interest the original still \
+         needs -- the whole reason the count lives on the session",
+    );
+    assert_eq!(
+        session.matching_interest_id(crate::session::MatchingPlane::Subscribers, "home/temp"),
+        Some(id),
+        "the original still holds the reference",
+    );
+
+    drop(pubr);
+    assert_eq!(
+        driver.frame_count(),
+        after_declare + 1,
+        "the LAST drop retracts, with exactly one frame",
+    );
+    assert_eq!(
+        session.matching_interest_id(crate::session::MatchingPlane::Subscribers, "home/temp"),
+        None,
+        "and the table forgets it, so a later publisher re-declares",
+    );
+    let expected = build_interest_final(id)
+        .try_as_borrowed()
+        .expect("Final carries no exts")
+        .encode_to_vec();
+    let frame = driver.frame_bytes(after_declare);
+    assert!(
+        frame.windows(expected.len()).any(|w| w == expected),
+        "the retract must name the id the declare allocated ({id}); frame was \
+         {frame:02x?}",
     );
 }
 
@@ -5365,9 +5607,18 @@ fn publisher_clone_shares_session_and_driver() {
     );
     let clone = pubr.clone();
     assert_eq!(clone.keyexpr(), pubr.keyexpr());
+    // R2577 — counted from AFTER the declare, because declaring a publisher is
+    // no longer silent on the wire (it asks the peer for the subscriber
+    // declarations its matching status is computed from). This test's subject
+    // is the shared driver, so it must not also be counting that Interest.
+    let after_declare = driver.frame_count();
     pubr.put(b"a").unwrap();
     clone.put(b"b").unwrap();
-    assert_eq!(driver.frame_count(), 2, "both clones share the wire driver");
+    assert_eq!(
+        driver.frame_count(),
+        after_declare + 2,
+        "both clones share the wire driver"
+    );
 }
 
 #[test]
@@ -8957,9 +9208,15 @@ fn a_publisher_matching_listener_asks_the_peer_for_subscriber_declarations() {
 
     let (session, driver) = build_session();
     mark_session_established(&session);
-    let baseline = driver.frame_count();
 
+    // R2577 — the DECLARE now emits an Interest of its own, so the baseline is
+    // taken after it. The listener's emit is deliberately NOT folded into the
+    // publisher's: the listener asks for a fresh `current=true` replay to seed
+    // the watch it is installing, while the publisher's standing interest was
+    // replayed before that watch existed. Two asks, two lifetimes -- and the
+    // redundancy is named rather than assumed harmless: see the §5.4 residual.
     let pubr = session.declare_publisher("home/temp", PublishOptions::put());
+    let baseline = driver.frame_count();
     let listener = pubr
         .declare_matching_listener(|_| {})
         .expect("session-matching + declare-interest are on in this lane");
@@ -9031,9 +9288,11 @@ fn a_querier_matching_listener_asks_the_peer_for_queryable_declarations() {
 
     let (session, driver) = build_session();
     mark_session_established(&session);
-    let baseline = driver.frame_count();
 
+    // R2577 — the DECLARE emits a QUERYABLES Interest of its own now, so the
+    // baseline is taken after it; this test's subject is the LISTENER's ask.
     let querier = session.declare_querier("demo/**", QueryOptions::default());
+    let baseline = driver.frame_count();
     let listener = querier
         .declare_matching_listener(|_| {})
         .expect("session-matching + declare-interest are on in this lane");
