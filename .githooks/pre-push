@@ -1195,7 +1195,7 @@ fi
 #
 # Which axes of the scouting socket config can move, and which are witnessed
 # BOTH-ENDED. Derived from the socket's own surface: the scalar parameters of
-# `bind_multicast_v4` plus the `pub` fields of `McastSocketConfig`.
+# `bind_multicast` plus the `pub` fields of `McastSocketConfig`.
 #
 # Here for gate 2d's reasons exactly — it reads one file, costs milliseconds, and
 # the thing it catches cannot be caught by the changed-crates tests: adding a

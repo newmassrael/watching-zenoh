@@ -73,7 +73,7 @@
 //! wildcard-bind with `SO_REUSEADDR`/`SO_REUSEPORT` to co-exist on one host at all
 //! (pico does so unconditionally,
 //! `vendor/zenoh-pico/src/link/transport/udp/udp_multicast_posix.c:180,185`; wz
-//! matches it in `UdpDriver::bind_multicast_v4`). Measured, not reasoned: with a
+//! matches it in `UdpDriver::bind_multicast`). Measured, not reasoned: with a
 //! peer co-joined on a real NIC, a `lo`-joined socket still receives that NIC's
 //! group traffic. Observing the pin would need two link domains (two hosts, or
 //! netns with `CAP_NET_ADMIN`). Hence the `partial` claim below.

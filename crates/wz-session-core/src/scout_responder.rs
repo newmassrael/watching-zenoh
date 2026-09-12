@@ -51,7 +51,7 @@
 //! 3. **It must not be our own echo.** Upstream compares the source address
 //!    against its own unicast sockets (`orchestrator.rs:1143`) and can, because
 //!    it SENDS scouts from a different socket than the one it listens on. wz's
-//!    `UdpDriver::bind_multicast_v4` socket both sends and receives and sets
+//!    `UdpDriver::bind_multicast` socket both sends and receives and sets
 //!    `IP_MULTICAST_LOOP`, and a co-located wz scouter additionally joins the
 //!    same group on its own `SO_REUSEPORT` socket, so the responder sees its own
 //!    process's Scout either way. The gate is therefore the ZID, which wz's

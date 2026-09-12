@@ -4,7 +4,7 @@
 //! R311ep — Layer M: active-scouting multicast loopback e2e.
 //!
 //! Exercises the full scout-initiator path end-to-end over a real UDP
-//! multicast socket: `UdpDriver::bind_multicast_v4` (join + loop) ->
+//! multicast socket: `UdpDriver::bind_multicast` (join + loop) ->
 //! `scout_emit` encode + multicast send -> `poll_event` recv -> Hello
 //! decode in `record_hello_and_emit` -> discovered locator. A blind
 //! "responder" socket models a peer replying with a Hello on the group.
@@ -69,7 +69,7 @@ fn craft_hello_datagram(locator: &str) -> Vec<u8> {
 #[ignore = "multicast loopback e2e; Layer M runs via --layer M / WZ_RUN_LAYER_M=1 --ignored"]
 async fn scout_discovers_peer_locator_over_multicast() {
     // Scout side: bind the group port, join the group, loopback on.
-    let mut driver = UdpDriver::bind_multicast_v4(GROUP, PORT, McastSocketConfig::default())
+    let mut driver = UdpDriver::bind_multicast(GROUP, PORT, McastSocketConfig::default())
         .await
         .expect("bind multicast scouting link");
     let actions = ScoutingActions::new(ScoutParams {
@@ -156,7 +156,7 @@ async fn a_scouter_told_to_use_another_group_joins_that_group_and_only_that_grou
     // scouter ALWAYS joins the moved socket — that is the fact under test.
     async fn scout_with_responder_on(answer_on: (Ipv4Addr, u16)) -> ScoutOutcome {
         let mut driver =
-            UdpDriver::bind_multicast_v4(MOVED_GROUP, MOVED_PORT, McastSocketConfig::default())
+            UdpDriver::bind_multicast(MOVED_GROUP, MOVED_PORT, McastSocketConfig::default())
                 .await
                 .expect("bind the MOVED multicast scouting link");
         let actions = ScoutingActions::new(ScoutParams {
@@ -314,7 +314,7 @@ mod round2 {
         let session_locator = format!("tcp/{session_addr}");
 
         // Scout side: bind the multicast group port, join, loopback on.
-        let mut driver = UdpDriver::bind_multicast_v4(GROUP, PORT, McastSocketConfig::default())
+        let mut driver = UdpDriver::bind_multicast(GROUP, PORT, McastSocketConfig::default())
             .await
             .expect("bind multicast scouting link");
         let actions = ScoutingActions::new(ScoutParams {
@@ -450,7 +450,7 @@ mod round3_tls {
         let session_locator = format!("tls/{session_addr}");
 
         // Scout side: bind the multicast group port, join, loopback on.
-        let mut driver = UdpDriver::bind_multicast_v4(GROUP, PORT, McastSocketConfig::default())
+        let mut driver = UdpDriver::bind_multicast(GROUP, PORT, McastSocketConfig::default())
             .await
             .expect("bind multicast scouting link");
         let actions = ScoutingActions::new(ScoutParams {

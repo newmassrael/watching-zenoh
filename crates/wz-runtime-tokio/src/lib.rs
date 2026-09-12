@@ -2103,7 +2103,7 @@ impl UdpDriver {
     /// carries the numeric `peer` this constructor targets, mirroring
     /// [`TcpDriver::connect`] for the datagram transport.
     ///
-    /// Distinct from [`bind_multicast_v4`], which joins a scouting group;
+    /// Distinct from [`bind_multicast`], which joins a scouting group;
     /// this dials a single already-discovered unicast peer. The local
     /// bind address family mirrors `peer` so an IPv6 locator binds an
     /// IPv6 socket (a v4-bound socket cannot reach a v6 peer).
@@ -2132,15 +2132,16 @@ impl UdpDriver {
     ///      `EADDRINUSE`, so co-locating a wz multicast receiver with a
     ///      foreign zenoh-pico peer (the `pico -> wz` dial-in) is
     ///      impossible.
-    ///   2. bind `0.0.0.0:port` (INADDR_ANY) — a socket bound to a
-    ///      unicast address cannot receive datagrams addressed to the
-    ///      group.
-    ///   3. `join_multicast_v4(group, INADDR_ANY)` — subscribe on the
-    ///      default interface; without the join the kernel drops group
-    ///      datagrams even with the matching bind port.
-    ///   4. `set_multicast_loop_v4(true)` — let a same-host peer (and
-    ///      the loopback smoke test) observe the traffic; off by default
-    ///      on some platforms.
+    ///   2. bind the family's wildcard (`0.0.0.0:port` or `[::]:port`) — a
+    ///      socket bound to a unicast address cannot receive datagrams
+    ///      addressed to the group.
+    ///   3. join the group (`join_multicast_v4` on `INADDR_ANY`, or
+    ///      `join_multicast_v6` on index 0, unless `#iface=` pins one) —
+    ///      without the join the kernel drops group datagrams even with the
+    ///      matching bind port.
+    ///   4. enable multicast loopback — let a same-host peer (and the
+    ///      loopback smoke test) observe the traffic; off by default on some
+    ///      platforms.
     ///
     /// `peer` is set to `group:port` so `LinkDriver::send` writes the
     /// Scout datagram to the group.
@@ -2177,33 +2178,37 @@ impl UdpDriver {
     // `INADDR_ANY` does not mean "every interface" either — the kernel resolves it
     // to exactly one via the routing table. So this change is implicit -> explicit,
     // not one -> many.
+    //
+    // R2584 — the group became `impl Into<IpAddr>`, and the constructor lost its
+    // `_v4` suffix with it. It was typed `Ipv4Addr`, so no caller could even
+    // express an IPv6 group, and the v6 multicast plane was absent by signature
+    // rather than by omission. Upstream builds both families in one function
+    // (`io/zenoh-links/zenoh-link-udp/src/multicast.rs` @ `IpAddr::V6(_) => Domain::IPV6,`).
+    // The per-family differences live in [`McastPlan`], so the socket's steps are
+    // written once. A v4 caller passes an `Ipv4Addr` unchanged.
     #[cfg(any(
         feature = "scouting-active",
         feature = "scouting-responder",
         feature = "transport-multicast"
     ))]
-    pub async fn bind_multicast_v4(
-        group: std::net::Ipv4Addr,
+    pub async fn bind_multicast(
+        group: impl Into<std::net::IpAddr>,
         port: u16,
         cfg: McastSocketConfig<'_>,
     ) -> io::Result<Self> {
-        use socket2::{Domain, Protocol, Socket, Type};
+        use socket2::{Protocol, Socket, Type};
 
         // Resolve BEFORE touching the socket, so a bad `#iface=` fails without
-        // leaving a half-configured group membership behind.
-        let selector = match cfg.iface {
-            Some(iface) => crate::link_interfaces::multicast_iface_selector_v4(iface)?,
-            None => None,
-        };
-        // R311y832 — and resolve the extra `#join=` groups before it too, for
-        // the same reason: a typo in the third of four groups must not leave
-        // two memberships installed and the caller believing it has four.
-        let extra = cfg.resolved_joins()?;
+        // leaving a half-configured group membership behind. R311y832 — the extra
+        // `#join=` groups resolve here too, for the same reason: a typo in the
+        // third of four groups must not leave two memberships installed and the
+        // caller believing it has four.
+        let plan = McastPlan::resolve(group.into(), &cfg, JoinsRead::Yes)?;
 
         // Step 1: REUSEADDR + REUSEPORT must be set before bind, and
         // tokio's UdpSocket exposes no pre-bind setsockopt hook, so the
         // socket is built through socket2 and adopted by tokio post-bind.
-        let raw = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+        let raw = Socket::new(plan.domain(), Type::DGRAM, Some(Protocol::UDP))?;
         raw.set_reuse_address(true)?;
         raw.set_reuse_port(true)?;
         // tokio requires the std socket to be non-blocking before adoption.
@@ -2211,38 +2216,27 @@ impl UdpDriver {
         // Egress interface, set through socket2: tokio's `UdpSocket` wraps
         // `IP_ADD_MEMBERSHIP` and `IP_MULTICAST_LOOP` but NOT `IP_MULTICAST_IF`,
         // so this has to happen while the socket is still a `socket2::Socket`.
-        // Independent of the bind address (`0.0.0.0` below) — `IP_MULTICAST_IF`
-        // chooses the egress path, not the local name.
-        if let Some(addr) = selector {
-            raw.set_multicast_if_v4(&addr)?;
-        }
-        let bind_addr = SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, port));
-        raw.bind(&bind_addr.into())?;
+        // Independent of the bind address (the wildcard below) — the multicast
+        // interface chooses the egress path, not the local name.
+        plan.pin_egress(&raw)?;
+        raw.bind(&plan.wildcard(port).into())?;
 
-        // Step 2 done by the bind above; steps 3-4 use tokio's wrappers.
-        let socket = UdpSocket::from_std(raw.into())?;
-        let membership_iface = selector.unwrap_or(std::net::Ipv4Addr::UNSPECIFIED);
-        socket.join_multicast_v4(group, membership_iface)?;
-        // R311y832 — `#join=` groups, joined IN ADDITION to the locator's own
-        // and on the SAME socket, which is the whole point: one bound port
-        // serving several groups (zenoh `multicast.rs:316-347`). The membership
-        // interface is the locator's, not a per-group one — zenoh passes the
-        // same `src_ip4` to every join in that loop.
-        for g in &extra {
-            socket.join_multicast_v4(*g, membership_iface)?;
-        }
-        socket.set_multicast_loop_v4(true)?;
+        // Steps 3-4, still on the socket2 handle: tokio wraps neither the v6
+        // hop limit nor the v6 egress interface, so doing every step here keeps
+        // the two families on one code path.
+        plan.join_groups(&raw)?;
+        plan.loop_back(&raw)?;
         // R311y832 — the hop limit. Set on THIS socket because this
         // constructor's socket is the one that sends as well as receives (see
         // the doc above); zenoh splits the roles and sets it on its `ucast_sock`
         // (`multicast.rs:363`), which is the sending half there.
         if let Some(ttl) = cfg.ttl {
-            socket.set_multicast_ttl_v4(ttl)?;
+            plan.set_hop_limit(&raw, ttl)?;
         }
-        let peer = SocketAddr::from((group, port));
+        let socket = UdpSocket::from_std(raw.into())?;
         Ok(Self {
             socket: Some(socket),
-            peer: Some(peer),
+            peer: Some(plan.peer(port)),
         })
     }
 
@@ -2254,14 +2248,14 @@ impl UdpDriver {
     /// distinct from the wildcard-bound `mcast_sock` it joins and reads on
     /// (`:293-322`). wz already had that split at a higher level: the router's
     /// egress spawns an ephemeral sender (`crate::multicast_glue`) while its
-    /// ingress uses [`Self::bind_multicast_v4`]. What the egress half lacked was
+    /// ingress uses [`Self::bind_multicast`]. What the egress half lacked was
     /// the interface pin, which is why it needs a constructor rather than a bare
     /// `UdpSocket::bind` — there is now a setsockopt between the bind and the
     /// driver, and one SSOT is better than the same three lines at each sender.
     ///
     /// No join: a sender needs no group membership. So this deliberately does NOT
     /// set `IP_MULTICAST_LOOP` either — a send-only socket never reads back its
-    /// own traffic. (The bidirectional [`Self::bind_multicast_v4`] does set it,
+    /// own traffic. (The bidirectional [`Self::bind_multicast`] does set it,
     /// and that IS a divergence from upstream, which sets `IP_MULTICAST_LOOP`
     /// nowhere; it is load-bearing for wz's same-host tests, where the ZID
     /// self-echo gate is what keeps a node from admitting its own JOIN.)
@@ -2270,37 +2264,32 @@ impl UdpDriver {
         feature = "scouting-responder",
         feature = "transport-multicast"
     ))]
-    pub async fn bind_multicast_tx_v4(
-        group: std::net::Ipv4Addr,
+    pub async fn bind_multicast_tx(
+        group: impl Into<std::net::IpAddr>,
         port: u16,
         cfg: McastSocketConfig<'_>,
     ) -> io::Result<Self> {
-        use socket2::{Domain, Protocol, Socket, Type};
+        use socket2::{Protocol, Socket, Type};
 
-        let selector = match cfg.iface {
-            Some(iface) => crate::link_interfaces::multicast_iface_selector_v4(iface)?,
-            None => None,
-        };
+        // R311y832 — `extra_joins` is deliberately not read: a sender installs no
+        // membership, so a `#join=` it would never use must not refuse it either.
+        let plan = McastPlan::resolve(group.into(), &cfg, JoinsRead::No)?;
         // Without an iface this is exactly the `UdpSocket::bind((UNSPECIFIED, 0))`
         // the senders did before, so the un-narrowed path is unchanged.
-        let raw = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+        let raw = Socket::new(plan.domain(), Type::DGRAM, Some(Protocol::UDP))?;
         raw.set_nonblocking(true)?;
-        if let Some(addr) = selector {
-            raw.set_multicast_if_v4(&addr)?;
-        }
-        let bind_addr = SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, 0));
-        raw.bind(&bind_addr.into())?;
-        let socket = UdpSocket::from_std(raw.into())?;
+        plan.pin_egress(&raw)?;
+        raw.bind(&plan.wildcard(0).into())?;
         // R311y832 — this is the SEND-only half, so the hop limit belongs here
         // most directly; it is zenoh's `ucast_sock`, the socket
-        // `multicast.rs:363` sets the TTL on. `extra_joins` is deliberately not
-        // read: a sender installs no membership.
+        // `multicast.rs:363` sets the TTL on.
         if let Some(ttl) = cfg.ttl {
-            socket.set_multicast_ttl_v4(ttl)?;
+            plan.set_hop_limit(&raw, ttl)?;
         }
+        let socket = UdpSocket::from_std(raw.into())?;
         Ok(Self {
             socket: Some(socket),
-            peer: Some(SocketAddr::from((group, port))),
+            peer: Some(plan.peer(port)),
         })
     }
 
@@ -2325,7 +2314,7 @@ impl UdpDriver {
     /// SENDS its own Scouts to the group from the same sockets it answers from
     /// (`Runtime::scout`, `:292-303` passing one `sockets` to both halves). wz
     /// keeps the two apart — the asking half sends from
-    /// [`Self::bind_multicast_tx_v4`], which does set the TTL. A hop limit on a
+    /// [`Self::bind_multicast_tx`], which does set the TTL. A hop limit on a
     /// socket that only ever unicasts is a setting with no reader.
     #[cfg(feature = "scouting-responder")]
     pub async fn bind_reply_unicast(local: std::net::IpAddr) -> io::Result<Self> {
@@ -2767,35 +2756,230 @@ pub struct McastSocketConfig<'a> {
     feature = "transport-multicast"
 ))]
 impl McastSocketConfig<'_> {
-    /// Parse every `#join=` value into a v4 group address.
+    /// Parse every `#join=` value into a group address of the locator group's
+    /// own family, `family` naming it for the refusal.
     ///
     /// Refused rather than skipped on a bad value, and refused BEFORE any
     /// membership is installed: a partially-joined receiver is subscribed to
     /// some of what it was told and silent about the rest, which is the shape
-    /// that looks configured and is not. wz is v4-only on this path (the whole
-    /// multicast surface is — `wz-ap-demo/src/runner.rs` says so of itself), so
-    /// a v6 group here is a refusal with its own message rather than a mis-parse.
+    /// that looks configured and is not. A group of the OTHER family is refused
+    /// the same way, as upstream does: it parses each `join` as the group's own
+    /// address type (`io/zenoh-links/zenoh-link-udp/src/multicast.rs` @ `let g: Ipv6Addr = g.parse().map_err(|e| zerror!("{}: {}", mcast_addr, e))?;`).
     ///
     /// R311y833 — gated on `transport-link-udp` as well as this impl's own
     /// `any(scouting-active, transport-multicast)`, because its ONE caller is
-    /// `UdpDriver::bind_multicast_v4` and that whole impl block carries the udp
-    /// gate (`:1801`). The union `wz-runtime-tokio-multicast-tests` forces —
+    /// `McastPlan::resolve` and `UdpDriver`'s whole impl block carries the udp
+    /// gate. The union `wz-runtime-tokio-multicast-tests` forces —
     /// multicast ON, `transport-link-udp` OFF under `--no-default-features` —
     /// left this method compiled and uncalled, which Layer C1cf reads as dead
     /// code. R311y832 added the method with the impl's gate alone.
     #[cfg(feature = "transport-link-udp")]
-    fn resolved_joins(&self) -> io::Result<Vec<std::net::Ipv4Addr>> {
+    fn parsed_joins<A: core::str::FromStr>(&self, family: &str) -> io::Result<Vec<A>> {
         self.extra_joins
             .iter()
             .map(|g| {
-                g.parse::<std::net::Ipv4Addr>().map_err(|_| {
+                g.parse::<A>().map_err(|_| {
                     io::Error::new(
                         io::ErrorKind::InvalidInput,
-                        format!("#join={g} is not an IPv4 multicast group"),
+                        format!(
+                            "#join={g} is not an {family} multicast group, and the \
+                             locator's own group is {family}"
+                        ),
                     )
                 })
             })
             .collect()
+    }
+}
+
+/// Whether [`McastPlan::resolve`] reads `#join=`. A sender installs no membership,
+/// so it must neither use nor refuse the list.
+#[cfg(all(
+    feature = "transport-link-udp",
+    any(
+        feature = "scouting-active",
+        feature = "scouting-responder",
+        feature = "transport-multicast"
+    )
+))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum JoinsRead {
+    Yes,
+    No,
+}
+
+/// R2584 — a multicast group and its locator config, resolved for the group's
+/// address FAMILY before any socket exists.
+///
+/// The families differ in every primitive a multicast socket needs. An IPv4
+/// interface is selected by one of its ADDRESSES and an IPv6 one by its INDEX. The
+/// hop limit is `IP_MULTICAST_TTL` for v4 and `IPV6_MULTICAST_HOPS` for v6. And a
+/// `#join=` group must be the locator group's own family. Both constructors take
+/// their family-specific steps from here, so the steps they share are written once.
+///
+/// # Where the v6 arm differs from upstream, and why
+///
+/// - **The hop limit is honoured.** Upstream only logs a warning for a v6 `ttl`
+///   (`io/zenoh-links/zenoh-link-udp/src/multicast.rs` @ `"UDP multicast hop limit not supported for v6 socket: {}. See https://github.com/rust-lang/rust/pull/138744.",`).
+///   That warning is about a missing std setter, not a protocol decision, and
+///   `socket2` has the setter. So a v6 `#ttl=N` sends with a hop limit of N,
+///   where upstream sends with the OS default of 1.
+/// - **Membership is installed on the pinned interface.** Upstream joins a v6 group
+///   on interface 0, the kernel's choice, even when `iface` names one
+///   (`io/zenoh-links/zenoh-link-udp/src/multicast.rs` @ `.join_multicast_v6(&dst_ip6, 0)`),
+///   but its v4 arm joins on the named interface. wz follows the v4 arm for both,
+///   so `#iface=` means the same thing whichever family the group is.
+#[cfg(all(
+    feature = "transport-link-udp",
+    any(
+        feature = "scouting-active",
+        feature = "scouting-responder",
+        feature = "transport-multicast"
+    )
+))]
+enum McastPlan {
+    V4 {
+        group: std::net::Ipv4Addr,
+        iface: Option<std::net::Ipv4Addr>,
+        joins: Vec<std::net::Ipv4Addr>,
+    },
+    V6 {
+        group: std::net::Ipv6Addr,
+        iface: Option<u32>,
+        joins: Vec<std::net::Ipv6Addr>,
+    },
+}
+
+#[cfg(all(
+    feature = "transport-link-udp",
+    any(
+        feature = "scouting-active",
+        feature = "scouting-responder",
+        feature = "transport-multicast"
+    )
+))]
+impl McastPlan {
+    /// Resolve `#iface=` and, for a receiver, `#join=` against the group's
+    /// family. The interface is resolved first, as before R2584.
+    fn resolve(
+        group: std::net::IpAddr,
+        cfg: &McastSocketConfig<'_>,
+        joins: JoinsRead,
+    ) -> io::Result<Self> {
+        use crate::link_interfaces::{multicast_iface_selector_v4, multicast_iface_selector_v6};
+        use std::net::IpAddr;
+
+        Ok(match group {
+            IpAddr::V4(group) => Self::V4 {
+                group,
+                iface: cfg
+                    .iface
+                    .map(multicast_iface_selector_v4)
+                    .transpose()?
+                    .flatten(),
+                joins: match joins {
+                    JoinsRead::Yes => cfg.parsed_joins("IPv4")?,
+                    JoinsRead::No => Vec::new(),
+                },
+            },
+            IpAddr::V6(group) => Self::V6 {
+                group,
+                iface: cfg
+                    .iface
+                    .map(multicast_iface_selector_v6)
+                    .transpose()?
+                    .flatten(),
+                joins: match joins {
+                    JoinsRead::Yes => cfg.parsed_joins("IPv6")?,
+                    JoinsRead::No => Vec::new(),
+                },
+            },
+        })
+    }
+
+    fn domain(&self) -> socket2::Domain {
+        match self {
+            Self::V4 { .. } => socket2::Domain::IPV4,
+            Self::V6 { .. } => socket2::Domain::IPV6,
+        }
+    }
+
+    /// The wildcard address of the group's family, on `port`. A socket bound to a
+    /// unicast address cannot receive datagrams addressed to the group.
+    fn wildcard(&self, port: u16) -> SocketAddr {
+        match self {
+            Self::V4 { .. } => SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, port)),
+            Self::V6 { .. } => SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port)),
+        }
+    }
+
+    /// Where `LinkDriver::send` writes: the group itself.
+    fn peer(&self, port: u16) -> SocketAddr {
+        match self {
+            Self::V4 { group, .. } => SocketAddr::from((*group, port)),
+            Self::V6 { group, .. } => SocketAddr::from((*group, port)),
+        }
+    }
+
+    /// The egress interface, when `#iface=` pinned one.
+    fn pin_egress(&self, raw: &socket2::Socket) -> io::Result<()> {
+        match self {
+            Self::V4 {
+                iface: Some(addr), ..
+            } => raw.set_multicast_if_v4(addr),
+            Self::V6 {
+                iface: Some(index), ..
+            } => raw.set_multicast_if_v6(*index),
+            _ => Ok(()),
+        }
+    }
+
+    /// Join the locator's group and every `#join=` group, all on the SAME
+    /// socket and the SAME membership interface. R311y832 — one bound port
+    /// serving several groups is the point of `join` (zenoh `multicast.rs:316-347`),
+    /// and zenoh passes one source interface to every join in that loop. Unpinned,
+    /// the interface is the kernel's choice: `INADDR_ANY` for v4 and index 0 for v6.
+    fn join_groups(&self, raw: &socket2::Socket) -> io::Result<()> {
+        match self {
+            Self::V4 {
+                group,
+                iface,
+                joins,
+            } => {
+                let on = iface.unwrap_or(std::net::Ipv4Addr::UNSPECIFIED);
+                for g in core::iter::once(group).chain(joins) {
+                    raw.join_multicast_v4(g, &on)?;
+                }
+            }
+            Self::V6 {
+                group,
+                iface,
+                joins,
+            } => {
+                let on = iface.unwrap_or(0);
+                for g in core::iter::once(group).chain(joins) {
+                    raw.join_multicast_v6(g, on)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Let a same-host peer (and the loopback tests) observe the traffic.
+    fn loop_back(&self, raw: &socket2::Socket) -> io::Result<()> {
+        match self {
+            Self::V4 { .. } => raw.set_multicast_loop_v4(true),
+            Self::V6 { .. } => raw.set_multicast_loop_v6(true),
+        }
+    }
+
+    /// `#ttl=`: the v4 TTL or the v6 hop limit, which is the same knob under each
+    /// family's name.
+    fn set_hop_limit(&self, raw: &socket2::Socket, ttl: u32) -> io::Result<()> {
+        match self {
+            Self::V4 { .. } => raw.set_multicast_ttl_v4(ttl),
+            Self::V6 { .. } => raw.set_multicast_hops_v6(ttl),
+        }
     }
 }
 
@@ -2852,7 +3036,7 @@ mod udp_multicast_config_tests {
         // (`zenoh-link-udp/src/multicast.rs:355-374`, `set_multicast_ttl_v4` on
         // the sending socket); wz called `set_multicast_ttl_v4` NOWHERE, so no
         // wz deployment could reach past its own subnet by any route.
-        let d = UdpDriver::bind_multicast_v4(GROUP, 0, McastSocketConfig::default())
+        let d = UdpDriver::bind_multicast(GROUP, 0, McastSocketConfig::default())
             .await
             .expect("bind the group");
         let sock = d.socket.as_ref().expect("bound");
@@ -2862,7 +3046,7 @@ mod udp_multicast_config_tests {
             "the default is the single-subnet one, which is why the knob has to exist"
         );
 
-        let d = UdpDriver::bind_multicast_v4(
+        let d = UdpDriver::bind_multicast(
             GROUP,
             0,
             McastSocketConfig {
@@ -2887,7 +3071,7 @@ mod udp_multicast_config_tests {
         // egress, so a hop limit that only reached the bidirectional
         // constructor would leave the one path that exists to send unbounded by
         // it.
-        let d = UdpDriver::bind_multicast_tx_v4(
+        let d = UdpDriver::bind_multicast_tx(
             GROUP,
             7446,
             McastSocketConfig {
@@ -2901,6 +3085,164 @@ mod udp_multicast_config_tests {
         assert_eq!(sock.multicast_ttl_v4().expect("read ttl"), 5);
     }
 
+    /// R2584 — an IPv6 group, for which no constructor existed: its sending
+    /// socket is IPv6, it writes to the group, and `#ttl=` reaches it as the v6
+    /// hop limit.
+    ///
+    /// Upstream only warns here and leaves the hop limit at 1, because std had
+    /// no setter (see `McastPlan`). The default-1 arm is what keeps this from
+    /// passing when the setter is dropped: it is the value the socket has if
+    /// nothing sets it.
+    ///
+    /// Needs only an IPv6 stack, not a v6-capable NIC. A sender joins no group,
+    /// so no interface has to accept a membership.
+    #[tokio::test]
+    async fn an_ipv6_group_sends_from_an_ipv6_socket_with_the_requested_hop_limit() {
+        const GROUP_V6: std::net::Ipv6Addr =
+            std::net::Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0x7a7a, 0x4e10);
+
+        let d = UdpDriver::bind_multicast_tx(GROUP_V6, 7470, McastSocketConfig::default())
+            .await
+            .expect("bind an IPv6 multicast sender");
+        let sock = d.socket.as_ref().expect("bound");
+        assert!(
+            sock.local_addr().expect("local addr").is_ipv6(),
+            "a v6 group must be sent from a v6 socket"
+        );
+        assert_eq!(d.peer, Some(SocketAddr::from((GROUP_V6, 7470))));
+        assert_eq!(
+            socket2::SockRef::from(sock)
+                .multicast_hops_v6()
+                .expect("read hops"),
+            1,
+            "the default is one link, so an honoured #ttl= has to be distinguishable from it"
+        );
+
+        let d = UdpDriver::bind_multicast_tx(
+            GROUP_V6,
+            7470,
+            McastSocketConfig {
+                ttl: Some(8),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("bind an IPv6 multicast sender with a hop limit");
+        let sock = d.socket.as_ref().expect("bound");
+        assert_eq!(
+            socket2::SockRef::from(sock)
+                .multicast_hops_v6()
+                .expect("read hops"),
+            8,
+            "a requested hop limit must reach the v6 socket, or #ttl= is decoration for v6"
+        );
+    }
+
+    /// R2584 — a v6 `#iface=` reaches the socket in BOTH places it has to: the
+    /// membership is installed on that interface, and egress leaves by it.
+    ///
+    /// Delivery cannot show this on a host with one v6 multicast NIC, which is
+    /// measured, not assumed: `an_ipv6_group_datagram_arrives_through_its_membership_and_only_through_it`
+    /// stayed green with the pin DROPPED, because the kernel's own default sent
+    /// and joined on the same interface the pin named. So this reads the kernel's
+    /// own records instead. `/proc/net/igmp6` lists every v6 membership with the
+    /// interface holding it, and `IPV6_MULTICAST_IF` reads back as an index.
+    ///
+    /// It pins to `lo` because `lo` is the one interface guaranteed NOT to be
+    /// the kernel's default for `ff02::/16` (it has no `IFF_MULTICAST`, so no
+    /// multicast route prefers it). A pin that did not take effect therefore shows
+    /// up as a membership on some other interface and an egress index of 0.
+    #[cfg(all(feature = "locator-iface", target_os = "linux"))]
+    #[tokio::test]
+    async fn a_v6_iface_pin_reaches_the_membership_and_the_egress() {
+        const GROUP_V6: std::net::Ipv6Addr =
+            std::net::Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0x7a7a, 0x4e13);
+
+        let lo_index: u32 = std::fs::read_to_string("/sys/class/net/lo/ifindex")
+            .expect("sysfs names the loopback's index")
+            .trim()
+            .parse()
+            .expect("a decimal index");
+        let d = UdpDriver::bind_multicast(
+            GROUP_V6,
+            0,
+            McastSocketConfig {
+                iface: Some("lo"),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("join an IPv6 group pinned to lo");
+        let sock = d.socket.as_ref().expect("bound");
+
+        assert_eq!(
+            socket2::SockRef::from(sock)
+                .multicast_if_v6()
+                .expect("read the egress index"),
+            lo_index,
+            "egress must leave by the pinned interface's index"
+        );
+
+        // The group as the kernel prints it: 32 lowercase hex digits, no colons.
+        let needle: String = GROUP_V6
+            .octets()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let table = std::fs::read_to_string("/proc/net/igmp6").expect("read /proc/net/igmp6");
+        let holders: Vec<(u32, String)> = table
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.split_whitespace();
+                let index = fields.next()?.parse().ok()?;
+                let device = fields.next()?.to_string();
+                (fields.next()? == needle).then_some((index, device))
+            })
+            .collect();
+        assert_eq!(
+            holders,
+            vec![(lo_index, "lo".to_string())],
+            "the membership for [{GROUP_V6}] must be held by the pinned interface and by \
+             no other"
+        );
+    }
+
+    /// R2584 — a `#join=` group of the other family is refused before any
+    /// socket exists, in both directions. Upstream parses each `join` as the
+    /// group's own address type, so a v4 join on a v6 locator is an error there too.
+    #[tokio::test]
+    async fn an_extra_join_of_the_other_family_is_refused_before_any_membership() {
+        const GROUP_V6: std::net::Ipv6Addr =
+            std::net::Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0x7a7a, 0x4e11);
+        let v4_join = vec!["239.255.91.33".to_string()];
+        let v6_join = vec!["ff02::7a7a:4e12".to_string()];
+
+        for (group, joins, family) in [
+            (std::net::IpAddr::V6(GROUP_V6), &v4_join, "IPv6"),
+            (std::net::IpAddr::V4(GROUP), &v6_join, "IPv4"),
+        ] {
+            let e = match UdpDriver::bind_multicast(
+                group,
+                0,
+                McastSocketConfig {
+                    extra_joins: joins,
+                    ..Default::default()
+                },
+            )
+            .await
+            {
+                Ok(_) => panic!("a {family} locator accepted #join={joins:?}"),
+                Err(e) => e,
+            };
+            assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput, "{e}");
+            assert!(
+                e.to_string()
+                    .contains(&format!("not an {family} multicast group")),
+                "the refusal names the locator's family: {e}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn a_malformed_extra_join_installs_no_membership_at_all() {
         // The refusal is BEFORE the first join, so a typo in the second of two
@@ -2908,7 +3250,7 @@ mod udp_multicast_config_tests {
         // has both.
         let joins = vec!["239.255.91.33".to_string(), "not-an-address".to_string()];
         // `expect_err` would need `UdpDriver: Debug`, which it is not.
-        let e = match UdpDriver::bind_multicast_v4(
+        let e = match UdpDriver::bind_multicast(
             GROUP,
             0,
             McastSocketConfig {
@@ -2936,7 +3278,7 @@ mod udp_multicast_config_tests {
         const EXTRA: std::net::Ipv4Addr = std::net::Ipv4Addr::new(239, 255, 91, 33);
         let port = 47_446u16;
         let joins = vec![EXTRA.to_string()];
-        let rx = UdpDriver::bind_multicast_v4(
+        let rx = UdpDriver::bind_multicast(
             GROUP,
             port,
             McastSocketConfig {
@@ -2947,7 +3289,7 @@ mod udp_multicast_config_tests {
         .await
         .expect("bind with an extra join");
 
-        let tx = UdpDriver::bind_multicast_tx_v4(EXTRA, port, McastSocketConfig::default())
+        let tx = UdpDriver::bind_multicast_tx(EXTRA, port, McastSocketConfig::default())
             .await
             .expect("bind a sender");
         let sock = rx.socket.as_ref().expect("bound");

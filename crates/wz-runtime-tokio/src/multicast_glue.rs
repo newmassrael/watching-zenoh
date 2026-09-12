@@ -864,16 +864,21 @@ where
 /// door built at R311y772 had no production caller, so a router leaving the
 /// group never announced its departure and every member held a stale peer entry
 /// until the lease expired. The handle is what a host teardown drives.
+///
+/// R2584 — `group` is either family. It was `Ipv4Addr`, which kept an IPv6
+/// `--multicast-locator` from reaching the socket at all.
 pub fn spawn_router_mcast_egress(
-    group: core::net::Ipv4Addr,
+    group: impl Into<core::net::IpAddr>,
     port: u16,
     zid: Vec<u8>,
     qos: bool,
     opts: crate::McastGroupOptions,
 ) -> (UnboundedSender<MulticastTxItem>, McastFaceStop) {
+    // Converted before the spawn: the task needs an owned `Copy` address.
+    let group: core::net::IpAddr = group.into();
     // R311y454 — `Ipv4Addr` / `SocketAddr` were needed only for the bare
     // `UdpSocket::bind((UNSPECIFIED, 0))` + `from_socket(.., group:port)` this
-    // function used to spell out inline; `UdpDriver::bind_multicast_tx_v4` now owns
+    // function used to spell out inline; `UdpDriver::bind_multicast_tx` now owns
     // both, so the import goes with them.
     use wz_session_core::multicast_dispatch::MulticastConfig;
     use wz_session_core::multicast_params::MulticastParams;
@@ -920,7 +925,7 @@ pub fn spawn_router_mcast_egress(
     // are schedulable against each other rather than sharing a pool.
     let task = WzRuntime::Tx.spawn(async move {
         // R311y454 — was a bare `UdpSocket::bind((UNSPECIFIED, 0))` +
-        // `from_socket`. `bind_multicast_tx_v4` is that same ephemeral bind plus
+        // `from_socket`. `bind_multicast_tx` is that same ephemeral bind plus
         // the `IP_MULTICAST_IF` pin when `#iface=` names one, so an unnarrowed
         // egress is unchanged and a narrowed one fails LOUDLY here rather than
         // sending out an interface the deploy did not name.
@@ -932,7 +937,7 @@ pub fn spawn_router_mcast_egress(
         // transient this loop exists to ride out.
         let mut rejoin = GroupRejoin::new("router multicast egress");
         let mut driver =
-            match UdpDriver::bind_multicast_tx_v4(group, port, opts.as_socket_config()).await {
+            match UdpDriver::bind_multicast_tx(group, port, opts.as_socket_config()).await {
                 Ok(driver) => driver,
                 Err(e) => {
                     log::error!(
@@ -975,7 +980,7 @@ pub fn spawn_router_mcast_egress(
                 return Some(outcome);
             };
             driver = match rejoin_group_driver(
-                || UdpDriver::bind_multicast_tx_v4(group, port, opts.as_socket_config()),
+                || UdpDriver::bind_multicast_tx(group, port, opts.as_socket_config()),
                 &clock,
                 &mut rejoin,
                 &mut shutdown,
@@ -1201,13 +1206,16 @@ type RouterMcastIngressChannels = (
 /// half where `join` bites: every extra group is a second membership on THIS
 /// socket, so one bound port serves several groups (zenoh
 /// `zenoh-link-udp/src/multicast.rs:316-347`).
+///
+/// R2584 — `group` is either family, as for the egress twin.
 pub fn spawn_router_mcast_ingress(
-    group: core::net::Ipv4Addr,
+    group: impl Into<core::net::IpAddr>,
     port: u16,
     zid: Vec<u8>,
     qos: bool,
     opts: crate::McastGroupOptions,
 ) -> RouterMcastIngressChannels {
+    let group: core::net::IpAddr = group.into();
     use wz_session_core::driver_loop::DriverLoopOutcome;
     use wz_session_core::multicast_dispatch::MulticastConfig;
     use wz_session_core::multicast_params::MulticastParams;
@@ -1259,17 +1267,17 @@ pub fn spawn_router_mcast_ingress(
         // R2376 — see the egress twin: the FIRST bind is a deploy error, every
         // later one is a re-join of a face that had come up.
         let mut rejoin = GroupRejoin::new("router multicast ingress");
-        let mut driver =
-            match UdpDriver::bind_multicast_v4(group, port, opts.as_socket_config()).await {
-                Ok(driver) => driver,
-                Err(e) => {
-                    log::error!(
-                        "router multicast ingress: group bind/join failed ({e}); ingress absent"
-                    );
-                    // R2333 — the bind-failure verdict; see the egress twin.
-                    return None;
-                }
-            };
+        let mut driver = match UdpDriver::bind_multicast(group, port, opts.as_socket_config()).await
+        {
+            Ok(driver) => driver,
+            Err(e) => {
+                log::error!(
+                    "router multicast ingress: group bind/join failed ({e}); ingress absent"
+                );
+                // R2333 — the bind-failure verdict; see the egress twin.
+                return None;
+            }
+        };
         let clock = TokioTime::new();
         // Egress rides the separate `spawn_router_mcast_egress` helper; this loop is
         // RX-only. `drive_multicast_session` is bidirectional, so hold a dummy
@@ -1343,7 +1351,7 @@ pub fn spawn_router_mcast_ingress(
                 return Some(outcome);
             };
             driver = match rejoin_group_driver(
-                || UdpDriver::bind_multicast_v4(group, port, opts.as_socket_config()),
+                || UdpDriver::bind_multicast(group, port, opts.as_socket_config()),
                 &clock,
                 &mut rejoin,
                 &mut shutdown,

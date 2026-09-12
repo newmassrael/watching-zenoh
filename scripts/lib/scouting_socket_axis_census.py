@@ -16,7 +16,7 @@ Item 225 said "the moved scouting socket has no both-ended lane". Establishing
 that meant listing what "the scouting socket" even HAS -- group, port, iface,
 ttl, extra joins -- and then saying which are proven. That list was never
 written down, so every round that touched the area re-derived it by reading, and
-a reader who stops at `bind_multicast_v4(group, port, ...)` sees TWO axes when
+a reader who stops at `bind_multicast(group, port, ...)` sees TWO axes when
 there are FIVE. A count nobody prints is a count that drifts.
 
 ## What it DERIVES rather than declares
@@ -24,7 +24,7 @@ there are FIVE. A count nobody prints is a count that drifts.
 The axis population is read out of the socket's own surface, never from a list
 in this file:
 
-  * the leading scalar parameters of `UdpDriver::bind_multicast_v4` -> `group`,
+  * the leading scalar parameters of `UdpDriver::bind_multicast` -> `group`,
     `port`;
   * the `pub` fields of `struct McastSocketConfig` -> `iface`, `ttl`,
     `extra_joins`.
@@ -123,9 +123,9 @@ def read(path: pathlib.Path) -> str:
 
 
 def derive_ctor_axes(src: str) -> list[str]:
-    """The scalar parameters `bind_multicast_v4` takes before its config struct."""
+    """The scalar parameters `bind_multicast` takes before its config struct."""
     m = re.search(
-        r"pub async fn bind_multicast_v4\s*\((?P<params>.*?)\)\s*->", src, re.S
+        r"pub async fn bind_multicast\s*\((?P<params>.*?)\)\s*->", src, re.S
     )
     if not m:
         return []
@@ -178,7 +178,7 @@ def main() -> int:
     failures: list[str] = []
     if not ctor:
         failures.append(
-            "derived 0 axes from `bind_multicast_v4`'s signature -- the parse found "
+            "derived 0 axes from `bind_multicast`'s signature -- the parse found "
             "nothing, so this gate read no population at all"
         )
     if not cfg:
@@ -189,7 +189,7 @@ def main() -> int:
 
     origin: dict[str, str] = {}
     for a in ctor:
-        origin[a] = "bind_multicast_v4 param"
+        origin[a] = "bind_multicast param"
     for a in cfg:
         origin.setdefault(a, "McastSocketConfig field")
     derived = list(origin)

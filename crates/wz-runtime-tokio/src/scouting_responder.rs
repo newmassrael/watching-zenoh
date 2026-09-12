@@ -148,7 +148,7 @@ pub struct ScoutingResponder {
 
 impl ScoutingResponder {
     /// Take ownership of a socket already bound and joined to the scouting
-    /// group — [`UdpDriver::bind_multicast_v4`] is the constructor that does
+    /// group — [`UdpDriver::bind_multicast`] is the constructor that does
     /// all four steps consistently.
     ///
     /// The socket is taken rather than built here so the caller keeps the

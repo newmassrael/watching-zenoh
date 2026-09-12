@@ -3,7 +3,7 @@
 
 //! A1c — Layer M: two-node pub/sub over a real UDP multicast socket.
 //!
-//! Node B joins the group (`UdpDriver::bind_multicast_v4`) and runs the
+//! Node B joins the group (`UdpDriver::bind_multicast`) and runs the
 //! full multicast drive loop with an `ApplicationLayerObserver` carrying a
 //! registered subscriber. Node A runs the same loop on an ephemeral-bound
 //! socket targeting the group (`UdpDriver::from_socket` — the TX-only
@@ -79,7 +79,7 @@ fn mc_params(zid_byte: u8) -> MulticastParams {
 #[ignore = "multicast loopback e2e; Layer M runs via --layer M / WZ_RUN_LAYER_M=1 --ignored"]
 async fn publisher_push_reaches_group_subscriber() {
     // Subscriber node B: group-joined socket + observer-backed drive loop.
-    let mut driver_b = UdpDriver::bind_multicast_v4(GROUP, PORT, McastSocketConfig::default())
+    let mut driver_b = UdpDriver::bind_multicast(GROUP, PORT, McastSocketConfig::default())
         .await
         .expect("bind multicast subscriber link");
     let mut dispatcher_b = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
@@ -198,7 +198,7 @@ async fn qos_group_publish_qos_reaches_subscriber() {
     };
 
     // Subscriber node B: qos group-joined socket + observer-backed drive loop.
-    let mut driver_b = UdpDriver::bind_multicast_v4(GROUP, QOS_PORT, McastSocketConfig::default())
+    let mut driver_b = UdpDriver::bind_multicast(GROUP, QOS_PORT, McastSocketConfig::default())
         .await
         .expect("bind qos multicast subscriber link");
     let mut dispatcher_b = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
@@ -324,10 +324,9 @@ async fn qos_publisher_refused_by_non_qos_subscriber() {
     const REFUSE_PORT: u16 = 7454;
 
     // Subscriber node B is NON-qos (the mc_params default is_qos=false).
-    let mut driver_b =
-        UdpDriver::bind_multicast_v4(GROUP, REFUSE_PORT, McastSocketConfig::default())
-            .await
-            .expect("bind non-qos multicast subscriber link");
+    let mut driver_b = UdpDriver::bind_multicast(GROUP, REFUSE_PORT, McastSocketConfig::default())
+        .await
+        .expect("bind non-qos multicast subscriber link");
     let mut dispatcher_b = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
     let params_b = mc_params(0xBB);
     assert!(
@@ -446,7 +445,7 @@ async fn oversize_put_fragments_and_reassembles_across_nodes() {
         ..mc_params(zid_byte)
     };
 
-    let mut driver_b = UdpDriver::bind_multicast_v4(GROUP, FRAG_PORT, McastSocketConfig::default())
+    let mut driver_b = UdpDriver::bind_multicast(GROUP, FRAG_PORT, McastSocketConfig::default())
         .await
         .expect("bind multicast subscriber link");
     let mut dispatcher_b = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
@@ -570,7 +569,7 @@ async fn concurrent_peers_fragment_reassemble_in_isolation() {
     };
 
     // ── Subscriber B: joins the group, collects every delivered payload.
-    let mut driver_b = UdpDriver::bind_multicast_v4(GROUP, CONC_PORT, McastSocketConfig::default())
+    let mut driver_b = UdpDriver::bind_multicast(GROUP, CONC_PORT, McastSocketConfig::default())
         .await
         .expect("bind multicast subscriber link");
     let mut dispatcher_b = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
@@ -717,10 +716,9 @@ async fn router_egress_helper_reaches_group_subscriber() {
     const HELPER_PORT: u16 = 7451;
 
     // Subscriber node: group-joined socket + observer-backed drive loop.
-    let mut driver_b =
-        UdpDriver::bind_multicast_v4(GROUP, HELPER_PORT, McastSocketConfig::default())
-            .await
-            .expect("bind multicast subscriber link");
+    let mut driver_b = UdpDriver::bind_multicast(GROUP, HELPER_PORT, McastSocketConfig::default())
+        .await
+        .expect("bind multicast subscriber link");
     let mut dispatcher_b = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
     let params_b = mc_params(0xBB);
 
@@ -893,7 +891,7 @@ async fn a_multicast_iface_pin_decides_whether_the_group_datagram_arrives() {
     /// One arm: join the group pinned to `rx_iface`, send one frame pinned to
     /// `tx_iface`, and report whether it arrived inside the budget.
     async fn arrives(group: Ipv4Addr, rx_iface: &str, tx_iface: &str, port: u16) -> bool {
-        let mut rx = UdpDriver::bind_multicast_v4(
+        let mut rx = UdpDriver::bind_multicast(
             group,
             port,
             McastSocketConfig {
@@ -903,7 +901,7 @@ async fn a_multicast_iface_pin_decides_whether_the_group_datagram_arrives() {
         )
         .await
         .unwrap_or_else(|e| panic!("join {group}:{port} on {rx_iface}: {e}"));
-        let mut tx = UdpDriver::bind_multicast_tx_v4(
+        let mut tx = UdpDriver::bind_multicast_tx(
             group,
             port,
             McastSocketConfig {
@@ -946,5 +944,146 @@ async fn a_multicast_iface_pin_decides_whether_the_group_datagram_arrives() {
         "a group joined on `lo` received a datagram whose egress was pinned to \
          `{other}` — one of the two pins did not take effect (IP_MULTICAST_IF on the \
          sender, or imr_interface on the join)"
+    );
+}
+
+/// R2584 — an IPv6 multicast group, end to end on real sockets. The group's
+/// datagram arrives because the receiver joined it, and a `#join=` group arrives
+/// the same way. The constructor used to be typed `Ipv4Addr`, so none of this
+/// could be written before.
+///
+/// # Why a non-`lo` NIC
+///
+/// `lo` has no `IFF_MULTICAST`, so a datagram cannot travel over it. Every arm
+/// pins BOTH halves to one interface that can carry multicast. `ff02::/16` is
+/// link-local scope, and pinning keeps the join and the send on the same
+/// interface on a host with several.
+///
+/// ⚠ This does NOT witness the pin itself, and that was measured: with the v6
+/// egress pin and the membership interface both DROPPED, this test stayed green,
+/// because the kernel's default put the join and the send on one interface anyway.
+/// The pin is witnessed from the kernel's own records instead, by the unit test
+/// `a_v6_iface_pin_reaches_the_membership_and_the_egress`.
+///
+/// # The control, and what keeps it meaningful
+///
+/// Arm B binds the same way, joins a DIFFERENT group, and is sent a group no
+/// socket joins. It must receive nothing. That is what makes arm A's arrival a
+/// statement about the membership rather than about a wildcard-bound port. It
+/// holds only while no other membership for that group exists on the interface,
+/// because `IPV6_MULTICAST_ALL`, like its v4 counterpart, delivers any group held
+/// anywhere on the host. So every group here is a dedicated `ff02::7a7a:*` that
+/// nothing else in the tree joins.
+///
+/// # What is still not witnessed by delivery
+///
+/// That a pin to one interface keeps traffic off another. That needs two
+/// v6-capable multicast NICs, one to join on and one to send on, which is the v4
+/// test above's shape; a runner with a single NIC could not run it.
+#[cfg(feature = "locator-iface")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "real IPv6 multicast sockets + a non-loopback v6 NIC (environment-dependent, \
+            the file's opt-in convention); Layer M runs it via --ignored"]
+async fn an_ipv6_group_datagram_arrives_through_its_membership_and_only_through_it() {
+    use std::net::Ipv6Addr;
+    use wz_runtime_tokio::{LinkDriver, Reliability, TxFrame};
+
+    const JOINED: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0x7a7a, 0x4e01);
+    const OTHER_JOINED: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0x7a7a, 0x4e02);
+    const NOBODY_JOINS: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0x7a7a, 0x4e03);
+    const EXTRA: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0x7a7a, 0x4e04);
+    const PORT: u16 = 7471;
+    // `IFF_MULTICAST` from `<net/if.h>`; sysfs prints the flags word in hex.
+    const IFF_MULTICAST: u32 = 0x1000;
+
+    // A non-`lo` interface that can carry IPv6 multicast: IFF_MULTICAST per sysfs,
+    // plus up, running and holding a v6 address per the production resolver,
+    // which here only chooses test DATA. Sorted for reproducibility. A host with
+    // no such interface PANICS rather than skipping, because a skipped arm
+    // reports green having proved nothing.
+    let mut names: Vec<String> = std::fs::read_dir("/sys/class/net")
+        .expect("read /sys/class/net (Linux host with sysfs)")
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n != "lo")
+        .collect();
+    names.sort();
+    let nic = names
+        .into_iter()
+        .find(|n| {
+            let multicast = std::fs::read_to_string(format!("/sys/class/net/{n}/flags"))
+                .ok()
+                .and_then(|s| u32::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok())
+                .is_some_and(|flags| flags & IFF_MULTICAST != 0);
+            multicast
+                && wz_runtime_tokio::link_interfaces::unicast_addresses_of_interface(n)
+                    .is_ok_and(|addrs| addrs.iter().any(|a| a.is_ipv6()))
+        })
+        .expect(
+            "a non-loopback interface with IFF_MULTICAST that is up, running and has an \
+             IPv6 address; this test cannot run without one",
+        );
+
+    /// Bind a receiver for `group` (plus `joins`) and a sender to `dest`, both
+    /// pinned to `nic`, send one datagram and report whether it arrived.
+    async fn arrives(
+        nic: &str,
+        group: Ipv6Addr,
+        joins: &[String],
+        dest: Ipv6Addr,
+        port: u16,
+    ) -> bool {
+        let mut rx = UdpDriver::bind_multicast(
+            group,
+            port,
+            McastSocketConfig {
+                iface: Some(nic),
+                extra_joins: joins,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_or_else(|e| panic!("join [{group}]:{port} on {nic}: {e}"));
+        let mut tx = UdpDriver::bind_multicast_tx(
+            dest,
+            port,
+            McastSocketConfig {
+                iface: Some(nic),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_or_else(|e| panic!("v6 multicast tx pinned to {nic}: {e}"));
+        let payload = b"wz-v6-membership-probe".to_vec();
+        for _ in 0..5 {
+            tx.send(&TxFrame { bytes: &payload }, Reliability::BestEffort)
+                .await
+                .unwrap_or_else(|e| panic!("send to [{dest}]:{port} via {nic}: {e}"));
+            if tokio::time::timeout(Duration::from_millis(200), rx.poll_event())
+                .await
+                .is_ok()
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    let joined = arrives(&nic, JOINED, &[], JOINED, PORT).await;
+    let not_joined = arrives(&nic, OTHER_JOINED, &[], NOBODY_JOINS, PORT + 1).await;
+    let extra = arrives(&nic, JOINED, &[EXTRA.to_string()], EXTRA, PORT + 2).await;
+
+    assert!(
+        joined,
+        "a v6 group joined on `{nic}` did not receive a datagram sent to it via `{nic}`"
+    );
+    assert!(
+        !not_joined,
+        "a socket that joined a different group received a datagram for a group nobody \
+         joined on `{nic}`, so arm A's arrival says nothing about the membership"
+    );
+    assert!(
+        extra,
+        "a v6 receiver given #join={EXTRA} did not receive a datagram sent to that group"
     );
 }

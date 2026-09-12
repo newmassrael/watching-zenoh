@@ -27,7 +27,7 @@
 //! defect it exists to catch. `IP_MULTICAST_ALL` (ip(7), default 1) delivers to
 //! a WILDCARD-bound socket every group joined *globally on the host*, not the
 //! groups that socket itself joined. wz binds `0.0.0.0:port`
-//! (`lib.rs` `bind_multicast_v4`) and so does zenoh
+//! (`lib.rs` `bind_multicast`) and so does zenoh
 //! (`io/zenoh-links/zenoh-link-udp/src/multicast.rs:308-312`), and NEITHER sets
 //! `IP_MULTICAST_ALL` — so this is upstream-faithful behaviour, not a wz defect,
 //! and the fix is emphatically NOT to diverge by clearing the option.
@@ -63,7 +63,7 @@
 //! that is the environment rather than this code.
 //!
 //! Each arm owns DISTINCT ports. The scouting port is inherently multi-listener
-//! (`bind_multicast_v4` sets `SO_REUSEPORT`), so two arms sharing one would each
+//! (`bind_multicast` sets `SO_REUSEPORT`), so two arms sharing one would each
 //! be asserting about the other's datagrams.
 #![cfg(all(feature = "scouting-active", feature = "scouting-responder"))]
 
@@ -174,7 +174,7 @@ async fn foreign_scouter() -> UdpSocket {
 /// precondition `IP_MULTICAST_ALL` needs. The returned driver must stay ALIVE —
 /// dropping it drops the membership and the leak disappears with it.
 async fn co_joiner(group: Ipv4Addr, port: u16) -> UdpDriver {
-    UdpDriver::bind_multicast_v4(group, port, McastSocketConfig::default())
+    UdpDriver::bind_multicast(group, port, McastSocketConfig::default())
         .await
         .expect("bind + join as the co-joiner")
 }
@@ -186,7 +186,7 @@ async fn co_joiner(group: Ipv4Addr, port: u16) -> UdpDriver {
 /// are wz — that is the whole point of item 225, and what every prior lane
 /// substituted a hand-rolled socket for on one side.
 ///
-/// The scouter sends from an EPHEMERAL port (`bind_multicast_tx_v4`, upstream's
+/// The scouter sends from an EPHEMERAL port (`bind_multicast_tx`, upstream's
 /// `ucast_sock`). It must: the responder replies unicast to the datagram's
 /// source, and if the scouter had bound the group port instead — which the
 /// responder also binds, with `SO_REUSEPORT` — the kernel would hand that reply
@@ -201,7 +201,7 @@ async fn discover(scout: (Ipv4Addr, u16), resp: (Ipv4Addr, u16)) -> ScoutOutcome
     };
 
     let mut scout_driver =
-        UdpDriver::bind_multicast_tx_v4(scout.0, scout.1, McastSocketConfig::default())
+        UdpDriver::bind_multicast_tx(scout.0, scout.1, McastSocketConfig::default())
             .await
             .expect("bind the scouting sender");
     let actions = ScoutingActions::new(ScoutParams {
@@ -355,7 +355,7 @@ async fn a_responder_answers_on_an_extra_joined_group_and_only_because_it_joined
     /// One run: a wz responder whose locator group is HOME, given `joins` as its
     /// `#join=` list, asked on `MOVED_GROUP`.
     async fn answered_with_joins(port: u16, joins: &[String]) -> bool {
-        let driver = UdpDriver::bind_multicast_v4(
+        let driver = UdpDriver::bind_multicast(
             HOME_GROUP,
             port,
             McastSocketConfig {

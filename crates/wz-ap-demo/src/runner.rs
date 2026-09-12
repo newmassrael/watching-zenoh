@@ -935,7 +935,7 @@ pub(crate) async fn scout_for_peer_locator(
     // segment was beaconing wherever the routing table chose, with no way to
     // say otherwise. `--multicast-locator` still narrows the DATA-plane group;
     // this narrows the DISCOVERY one.
-    let mut driver = UdpDriver::bind_multicast_v4(
+    let mut driver = UdpDriver::bind_multicast(
         group,
         port,
         wz::runtime_tokio::McastSocketConfig {
@@ -1094,7 +1094,7 @@ pub(crate) async fn spawn_scouting_responder(
     use wz::runtime_tokio::UdpDriver;
 
     let (group, port) = socket.group_and_port(SCOUT_GROUP, SCOUT_PORT);
-    let driver = UdpDriver::bind_multicast_v4(
+    let driver = UdpDriver::bind_multicast(
         group,
         port,
         wz::runtime_tokio::McastSocketConfig {
@@ -1239,7 +1239,7 @@ pub(crate) async fn spawn_scouting_responder(
 ///
 /// # The socket is the SENDING half, not the group-port one
 ///
-/// `UdpDriver::bind_multicast_tx_v4` — an ephemeral local port, no join. That
+/// `UdpDriver::bind_multicast_tx` — an ephemeral local port, no join. That
 /// is upstream's `ucast_sock`, the socket its scout sends from and receives the
 /// unicast Hello replies on, kept distinct from the wildcard-bound `mcast_sock`
 /// its responder reads. Here the split earns something concrete: a peer running
@@ -1265,7 +1265,7 @@ async fn spawn_scouting_autoconnect(
     use wz::runtime_tokio::UdpDriver;
 
     let (group, port) = args.socket.group_and_port(SCOUT_GROUP, SCOUT_PORT);
-    let mut driver = UdpDriver::bind_multicast_tx_v4(
+    let mut driver = UdpDriver::bind_multicast_tx(
         group,
         port,
         wz::runtime_tokio::McastSocketConfig {
@@ -2730,7 +2730,7 @@ async fn install_rescout_plan(
         return Ok(());
     };
     let (group, port) = plan.socket.group_and_port(SCOUT_GROUP, SCOUT_PORT);
-    let driver = wz::runtime_tokio::UdpDriver::bind_multicast_v4(
+    let driver = wz::runtime_tokio::UdpDriver::bind_multicast(
         group,
         port,
         wz::runtime_tokio::McastSocketConfig {
@@ -5981,12 +5981,12 @@ async fn run_router_hat_until(
     // from an operator's `--multicast-locator` rather than only from a struct
     // literal in a test.
     let (mcast_group, mcast_port, mcast_opts) = {
-        use std::net::{Ipv4Addr, SocketAddr};
+        use std::net::{IpAddr, Ipv4Addr};
         use wz::runtime_tokio::locator::{parse_locator, Proto};
         use wz::runtime_tokio::McastGroupOptions;
         // The demo's default data-plane router multicast group. Distinct port from
         // scouting (7446/7447) + the loopback e2e tests (7449/7450/7451).
-        const MCAST_GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 225);
+        const MCAST_GROUP: IpAddr = IpAddr::V4(Ipv4Addr::new(224, 0, 0, 225));
         const MCAST_PORT: u16 = 7452;
         match multicast_locator {
             None => (MCAST_GROUP, MCAST_PORT, McastGroupOptions::default()),
@@ -6005,26 +6005,18 @@ async fn run_router_hat_until(
                         ),
                     ));
                 }
-                Ok(p) => match p.addr {
-                    SocketAddr::V4(v4) => (
-                        *v4.ip(),
-                        v4.port(),
-                        McastGroupOptions {
-                            iface: p.iface,
-                            ttl: p.mcast_ttl,
-                            joins: p.mcast_join,
-                        },
-                    ),
-                    SocketAddr::V6(_) => {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            format!(
-                                "--multicast-locator {l} is IPv6; wz's multicast plane is \
-                                 v4-only (no join_multicast_v6 anywhere in the workspace)"
-                            ),
-                        ));
-                    }
-                },
+                // R2584 — either family. An IPv6 group used to be refused here
+                // because the socket constructor was typed `Ipv4Addr`; that type was
+                // the base, and with it gone the refusal had no reason left.
+                Ok(p) => (
+                    p.addr.ip(),
+                    p.addr.port(),
+                    McastGroupOptions {
+                        iface: p.iface,
+                        ttl: p.mcast_ttl,
+                        joins: p.mcast_join,
+                    },
+                ),
                 Err(e) => {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,

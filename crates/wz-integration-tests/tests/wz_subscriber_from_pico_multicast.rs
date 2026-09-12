@@ -16,11 +16,11 @@
 //! ## Direction: pico -> wz (the dial-in R311nm carried forward)
 //!
 //! Both peers bind the SAME multicast group port (`0.0.0.0:PORT`). R311nm
-//! could only run wz -> pico because wz's `UdpDriver::bind_multicast_v4`
+//! could only run wz -> pico because wz's `UdpDriver::bind_multicast`
 //! did not set `SO_REUSEADDR` / `SO_REUSEPORT`, so a wz group receiver
 //! could not co-bind the host port already held by pico's group-joined
 //! peer (`pico -> wz` dead-locked on `EADDRINUSE`). R311no adds those
-//! reuse options to `bind_multicast_v4` (via socket2), matching
+//! reuse options to `bind_multicast` (via socket2), matching
 //! zenoh-pico's unconditional REUSEADDR+REUSEPORT on its multicast
 //! listener (`vendor/zenoh-pico/src/link/transport/udp/
 //! udp_multicast_posix.c:180 / :185`), so wz and pico co-bind and this
@@ -125,7 +125,7 @@ async fn wz_subscriber_admits_pico_multicast_push() {
     // Bind + join the group FIRST so wz is listening when pico emits its
     // initial JOIN. The REUSEADDR/REUSEPORT bind (R311no) is what lets wz
     // co-bind the host group port that pico's peer also binds.
-    let mut driver = UdpDriver::bind_multicast_v4(GROUP, PORT, McastSocketConfig::default())
+    let mut driver = UdpDriver::bind_multicast(GROUP, PORT, McastSocketConfig::default())
         .await
         .expect("bind wz multicast subscriber link (REUSE co-bind)");
     let mut dispatcher = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));

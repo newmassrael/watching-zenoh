@@ -1596,7 +1596,7 @@ query-reply-err = ["wz-session-core/query-reply-err"]
 #
 # Implies transport-link-udp: the scouting link is UDP multicast
 # (docs/scouting-fsm.md §1.2 — 224.0.0.224:7446), so the UdpDriver +
-# its multicast constructor (UdpDriver::bind_multicast_v4, gated on
+# its multicast constructor (UdpDriver::bind_multicast, gated on
 # scouting-active inside the transport-link-udp UdpDriver impl) must be
 # compiled in. Without the imply, `--no-default-features --features
 # scouting-active` would gate the multicast constructor out and the
@@ -1632,7 +1632,7 @@ scouting-active = [
 # lib.rs). The wz-session-core forwards are the two CODEC gates rather than
 # `scouting-active`, which is exactly the saving — no `sce-rust-runtime` engine
 # for a decision with no states. `dep:socket2` and the UDP link come along
-# because `bind_multicast_v4` is what binds and joins the group; that
+# because `bind_multicast` is what binds and joins the group; that
 # constructor's cfg names this feature alongside the other two consumers.
 scouting-responder = [
     "wz-session-core/codec-scout",
@@ -1887,7 +1887,7 @@ portable-atomic = "1"
 # tokio's `UdpSocket` exposes no pre-bind setsockopt hook, so the
 # REUSE-then-bind sequence drops to socket2 (Socket -> std UdpSocket ->
 # tokio `from_std`). Gated on the two features that activate
-# `bind_multicast_v4` (scouting-active / transport-multicast) so a
+# `bind_multicast` (scouting-active / transport-multicast) so a
 # unicast-only build never compiles it. `features = ["all"]` unlocks
 # `set_reuse_port` (SO_REUSEADDR is base API; SO_REUSEPORT sits behind
 # socket2's `all`). Distinct from the dev-dependencies socket2 below,

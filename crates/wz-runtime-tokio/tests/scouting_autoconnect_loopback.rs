@@ -51,7 +51,7 @@
 //!
 //! The responder binds the GROUP PORT (upstream's `mcast_sock`); the scouting
 //! side sends from an EPHEMERAL port (upstream's `ucast_sock`,
-//! [`UdpDriver::bind_multicast_tx_v4`]). That is not tidiness: the Hello goes
+//! [`UdpDriver::bind_multicast_tx`]). That is not tidiness: the Hello goes
 //! back UNICAST to the scout's source address, and two sockets sharing the group
 //! port under `SO_REUSEPORT` would make which of them receives it a coin toss.
 //!
@@ -162,7 +162,7 @@ async fn leg(port: u16, matcher: WhatAmIMatcher) -> AcceptLoopSummary {
     };
 
     // The GROUP-PORT socket (upstream's `mcast_sock`): joins, and answers Scouts.
-    let responder_driver = UdpDriver::bind_multicast_v4(GROUP, port, McastSocketConfig::default())
+    let responder_driver = UdpDriver::bind_multicast(GROUP, port, McastSocketConfig::default())
         .await
         .expect("bind + join the scouting group as the responder");
     let identity = ResponderIdentity::try_new(
@@ -187,10 +187,9 @@ async fn leg(port: u16, matcher: WhatAmIMatcher) -> AcceptLoopSummary {
 
     // ── The SCOUTING node: an ephemeral-port sender (upstream's `ucast_sock`)
     //    plus the peer mesh loop that turns intents into dials. ──
-    let mut scout_driver =
-        UdpDriver::bind_multicast_tx_v4(GROUP, port, McastSocketConfig::default())
-            .await
-            .expect("bind the scouting sender");
+    let mut scout_driver = UdpDriver::bind_multicast_tx(GROUP, port, McastSocketConfig::default())
+        .await
+        .expect("bind the scouting sender");
     let actions = ScoutingActions::new(ScoutParams {
         version: 0x09,
         what: 0x03, // ROUTER | PEER — what this node is looking for.

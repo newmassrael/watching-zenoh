@@ -18,7 +18,7 @@
 //! ## Direction: wz -> pico (NOT pico -> wz)
 //!
 //! The multicast group port is shared by every peer on the host. wz's
-//! `UdpDriver::bind_multicast_v4` does NOT set `SO_REUSEADDR` (lib.rs: the
+//! `UdpDriver::bind_multicast` does NOT set `SO_REUSEADDR` (lib.rs: the
 //! single-receiver scouting deploy never needed multiple binders), so a wz
 //! group-joined receiver and a pico group-joined peer cannot co-bind the
 //! same host port — `pico -> wz` would dead-lock on `EADDRINUSE`. Driving

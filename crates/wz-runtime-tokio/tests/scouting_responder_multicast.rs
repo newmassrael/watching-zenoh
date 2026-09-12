@@ -26,7 +26,7 @@
 //! without a socket by the `scout_responder` unit tests in wz-session-core.
 //!
 //! Each test owns a DISTINCT group and port. The scouting port is inherently
-//! multi-listener (`SO_REUSEPORT` is set by `bind_multicast_v4`), so two tests
+//! multi-listener (`SO_REUSEPORT` is set by `bind_multicast`), so two tests
 //! sharing one would receive each other's traffic and each would be asserting
 //! about a datagram the other sent.
 #![cfg(feature = "scouting-responder")]
@@ -82,7 +82,7 @@ fn wz_identity() -> ResponderIdentity {
 }
 
 async fn responder_on(group: Ipv4Addr, port: u16) -> ScoutingResponder {
-    let driver = UdpDriver::bind_multicast_v4(group, port, McastSocketConfig::default())
+    let driver = UdpDriver::bind_multicast(group, port, McastSocketConfig::default())
         .await
         .expect("bind + join the scouting group");
     ScoutingResponder::new(driver, wz_identity())

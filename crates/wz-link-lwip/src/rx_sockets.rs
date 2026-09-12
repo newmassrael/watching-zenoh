@@ -136,7 +136,7 @@ pub const SESSION_MULTICAST_GROUP_DEFAULT: u32 = SCOUT_MULTICAST_GROUP;
 /// multicast `group` (default [`SESSION_MULTICAST_GROUP_DEFAULT`],
 /// `224.0.0.224`) so the socket receives the §3.1 multicast transport
 /// datagrams (Join / Frame / Fragment / KeepAlive / Close). The MCU mirror
-/// of the AP `UdpDriver::bind_multicast_v4`; like [`bind_scout_rx`] it folds
+/// of the AP `UdpDriver::bind_multicast`; like [`bind_scout_rx`] it folds
 /// bind + IGMP join so the two steps stay consistent, but it carries the
 /// full-MTU data pool (not the small scout pool) and takes the group as a
 /// parameter (the transport locator is deploy-configured). The deploy must

@@ -156,7 +156,7 @@ pub fn run_scout(
         // `None`: the scouting group is deliberately NOT interface-narrowed — a
         // discovery beacon must reach every interface a peer could answer on.
         let Ok(mut driver) =
-            UdpDriver::bind_multicast_v4(group, port, McastSocketConfig::default()).await
+            UdpDriver::bind_multicast(group, port, McastSocketConfig::default()).await
         else {
             return Vec::new();
         };
