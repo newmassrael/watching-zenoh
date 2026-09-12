@@ -28,12 +28,20 @@
 # hops and a veth pair is one L2 link inside one subnet, so this topology fails
 # to discriminate TTL for exactly the reason loopback does.
 #
-# A ttl witness written on this substrate would therefore pass for EVERY ttl
-# value, which is the "population of zero reports green" shape this tree has
-# paid for more than once. Closing that clause needs a real multicast-routing
-# hop -- a third namespace with the kernel's MFC populated by an `smcroute` /
-# `pimd` class daemon -- which is a new dependency and a separate decision.
-# Do not read "the environment grew" as covering it.
+# A ttl witness that asserts DELIVERY on this substrate would therefore pass for
+# EVERY ttl value, which is the "population of zero reports green" shape this
+# tree has paid for more than once. Witnessing REACH needs a real
+# multicast-routing hop -- a third namespace with the kernel's MFC populated by
+# an `smcroute` / `pimd` class daemon -- which is a new dependency and a
+# separate decision.
+#
+# R2587 — but reach is not what a `ttl` config key controls. The key sets the
+# value the implementation writes into the IP header, and one link does not
+# decrement it, so a receiver here reads it unchanged through `IP_RECVTTL`.
+# Measured: zenohd told `ttl=5` arrived as 5 and without the key as 1.
+# `wz_multicast_ttl_on_the_wire_netns_zenohd_interop` holds wz to the same values
+# with zenohd as the adjudicator. Do not read that as covering reach, and do not
+# read this paragraph's first half as ruling out the header witness.
 #
 # ## Verdict policy belongs to the CALLER
 #

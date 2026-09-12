@@ -99,11 +99,13 @@ VERDICTS: dict[str, tuple[str, str | None, str]] = {
         "which is foreign but still not two wz NODES, so the verdict stays one-ended.",
     ),
     "ttl": (
-        "none",
-        "the_send_only_half_carries_the_hop_limit_too",
-        "Sockopt readback only. Observing a hop limit end-to-end needs datagrams "
-        "crossing routed subnets; a loopback lane has one hop, so there is no "
-        "arrangement here in which a wrong TTL and a right one differ.",
+        "one",
+        "multicast_ttl_key_reaches_the_wire_as_zenohd_puts_it",
+        "R2587: the IP header value on the wire, read by a libc IP_RECVTTL reader "
+        "in a network namespace, is the same from wz as from zenohd with the key "
+        "(5) and without it (1). One link does not decrement the field, so this "
+        "needs no routed hop; that is only needed to observe REACH, which the "
+        "key does not control. ONE-ENDED: zenohd and one wz node, not two wz nodes.",
     ),
     "extra_joins": (
         "both",
