@@ -999,7 +999,24 @@ PIN_NO_SYMBOL = 2
 # written to cite a file the same round creates is the ordinary way that
 # happens, and it is correct — but it means "did any reason change?" is the
 # wrong question to ask of a moved count.
-PIN_WZ_CITATIONS = 250
+#
+# R2576 (the `session-matching` correction) — 250 -> 256, SIX citations, and it
+# RISES because no atom left the corpus: `session-matching` stays PARTIAL and its
+# reason gained an entry recording that the FOURTH of its four witness gaps is
+# closed by a foreign witness, while the other three stand. DERIVED by running
+# THIS module's own `citation_audit` over that atom alone, before and after:
+# (wz 13, ambiguous 11) -> (wz 19, ambiguous 11), so 250 + 6 = 256 and AMBIGUOUS
+# correctly holds at 56.
+# AMBIGUOUS HELD ONLY ON THE SECOND ATTEMPT, which is worth recording because the
+# first attempt is the ordinary way to write prose: the correction referred to a
+# file by its BARE name (`publisher.rs`), which two tracked files end with, so
+# the audit counted it as ambiguous and 56 -> 57. A bare filename in a residual
+# is a citation a reader cannot follow either. Repointed to the full path, which
+# is why this entry moves one pin rather than two.
+# ⚠ THIS IS THE FIRST PIN THIS TREE PAID AT PUSH TIME RATHER THAN TWO ROUNDS
+# LATER. The same round put this census into `.githooks/pre-push` gate 2z, and
+# the gate caught its own author's next store mutation within the minute.
+PIN_WZ_CITATIONS = 256
 PIN_AMBIGUOUS = 56
 
 
