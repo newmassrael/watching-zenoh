@@ -1046,23 +1046,30 @@ impl SharedSession {
         // field stays where it is because `local_session` / `drive_local_plane`
         // reach it OUTSIDE the registry lock, which is a locking discipline this
         // repair had no business changing.
-        let mut inner = Inner::default();
-        inner.local_face = Some(FaceEntry {
-            session: local.clone(),
-            subs: BTreeMap::new(),
-            qbls: BTreeMap::new(),
-            tokens: BTreeMap::new(),
-            live_subs: BTreeMap::new(),
-            matches: BTreeMap::new(),
-            adv_pubs: BTreeMap::new(),
-            adv_subs: BTreeMap::new(),
-            // `None`: this constructor runs on the C application thread, where
-            // `Handle::current()` panics. See the field.
-            runtime: None,
-            // The plane's re-arm signal is `local_wake`, held beside the session
-            // for the same outside-the-lock reason; this one is never notified.
-            revised: Arc::new(Notify::new()),
-        });
+        // Struct-update rather than `default()` then assign: clippy's
+        // `field_reassign_with_default` refuses the latter, and gate 6 is where
+        // it surfaced — `cargo check` and `cargo test` both passed, because
+        // neither runs clippy.
+        let inner = Inner {
+            local_face: Some(FaceEntry {
+                session: local.clone(),
+                subs: BTreeMap::new(),
+                qbls: BTreeMap::new(),
+                tokens: BTreeMap::new(),
+                live_subs: BTreeMap::new(),
+                matches: BTreeMap::new(),
+                adv_pubs: BTreeMap::new(),
+                adv_subs: BTreeMap::new(),
+                // `None`: this constructor runs on the C application thread,
+                // where `Handle::current()` panics. See the field.
+                runtime: None,
+                // The plane's re-arm signal is `local_wake`, held beside the
+                // session for the same outside-the-lock reason; this one is
+                // never notified.
+                revised: Arc::new(Notify::new()),
+            }),
+            ..Default::default()
+        };
         Ok(Self {
             zid: zid_bytes,
             inner: StdMutex::new(inner),
