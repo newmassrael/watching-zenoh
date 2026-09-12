@@ -37,6 +37,7 @@ printed, `commit` is the tip being replaced (the sha the run graded), and
 | R2568 | `34611269702` | `efada3a9` | E z_info drop-in link · Z same (two jobs, one cause) · A4 cross-impl accessor · C0 gate-provenance | 721 | |
 | R2570 | `34640784537` | `85c21c02` | C1bn feature-gate-diagnostic · C0 lane-reach · A+B C0 (armed) provenance · E6 peer mesh | 721 | |
 | R2574 | `34659495427` | `df7369ec` | C0 python-floor lint, `facade_forward_gate` imports `tomllib` (two jobs, one cause) | — | R2574 |
+| R2576 | `34692815062` | `d21f7a16` | C0 gate-provenance, `netns-topology.sh` carries no citation (two jobs, one cause) | — | R2576 |
 
 ## What the rows above say
 
@@ -167,3 +168,13 @@ including the new gate itself, which has therefore never executed in CI. `paid`
 here means the named cause is fixed and independently re-measured. It does not
 mean Layer C0 is green, and the next hosted run is the first evidence either
 way.
+
+⚠ THE R2576 ROW ACKNOWLEDGES ONE RUN AND THE PUSH PAYS TWO CAUSES, which is
+worth separating because gate 2c only ever reads the immediately previous run.
+`34692815062` died at 25s on the provenance citation and `34690849417` before it
+died at 212s on `depth_axis_census`'s unpaid pins -- two rounds, two causes, and
+in BOTH cases a fail-fast Layer C0 reported one defect while hiding whatever sat
+behind it. R2576 pays both and, more to the point, puts twenty-seven of the
+thirty gates that read the atomic store or the gate corpus into pre-push gate
+2z, so this particular shape -- a hosted-only gate whose subject a commit moved
+without being able to see it -- cannot produce a third round's red in silence.
