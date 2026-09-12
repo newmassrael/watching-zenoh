@@ -17939,6 +17939,26 @@ layer_c1cc_api_compat_c() {
         --test zenoh_c_source_info_twice_and_diff -- --ignored --quiet --test-threads=1 \
         --exact a_patched_upstream_put_carries_source_info_identically_on_wz_and_libzenohc \
         || return 1
+    # R2579 — §5.4 `session-matching`'s SESSION-LOCAL half, by the same
+    # compile-once-link-twice route and for the same reason: no shipped example
+    # on either side holds a queryable and a querier on ONE session, so the
+    # program is written in the leg.
+    #
+    # It runs with NOTHING connected, and that is the leg rather than an
+    # incidental of it. `WzFaces::declare_queryable` registers on every face
+    # session AS WELL AS on the local plane, so any face carries a copy and the
+    # poll answers correctly through it; the plane is load-bearing only when the
+    # face set is EMPTY. Measured both ways before the repair: with one peer
+    # `false -> true`, with none `false -> false` against upstream's
+    # `false -> true`. An interop fixture connects something by definition,
+    # which is exactly why every existing one walked past this.
+    _runci_guarded_test \
+        "C1cc a_session_local_queryable_satisfies_its_own_querier_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_local_queryable_matching_twice_and_diff -- --ignored --quiet \
+        --test-threads=1 \
+        --exact a_session_local_queryable_satisfies_its_own_querier_on_wz_and_libzenohc \
+        || return 1
     # R311y500 — the CROSS-IMPL half, and it is a different question from the
     # three legs above. Those establish that upstream's program LINKS wz and that
     # wz's answers match the real `libzenohc.so`; every byte on their wire was

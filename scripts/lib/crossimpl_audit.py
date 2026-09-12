@@ -614,7 +614,17 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # `while (1)` and so never reaches its own `z_drop`), so only the link-loss
 # purge can lower wz's verdict. Marked `partial`: it closes ONE of that atom's
 # four witness gaps and says nothing about the other three.
-FOREIGN_ADJUDICATOR_LINKS = 899
+#
+# R2579 (+1, 900) -- `session-matching` again, and this one did not fill a gap so
+# much as EXPOSE one. Its residual list asked for a foreign witness of a matching
+# status computed over a SESSION-LOCAL queryable; the witness was built as a
+# compile-once-link-twice differential against `libzenohc.so` and it went RED,
+# because wz's C ABI read the face sessions alone while a declaration also lands
+# on the face-independent local plane. So the entry that moves this counter is a
+# leg whose first run was a defect report. Marked `partial`: it covers the
+# QUERYABLE plane's local half on one ABI, and the matching LISTENER still
+# installs per face.
+FOREIGN_ADJUDICATOR_LINKS = 900
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
