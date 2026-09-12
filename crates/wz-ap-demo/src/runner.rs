@@ -6051,10 +6051,14 @@ async fn run_router_hat_until(
             );
         forwarder.attach_mcast_group(mcast_tx);
         mcast_stops.push(("egress", mcast_egress_stop));
+        // R2584 made the group either family; `SocketAddr` is what brackets a v6
+        // address before its port, where `{group}:{port}` would print
+        // `ff02::7a7a:4e20:7490`, which is ambiguous. A v4 group reads exactly as before.
         log::info!(
-            "wz-ap-demo router-hat: multicast egress group {mcast_group}:{mcast_port} \
+            "wz-ap-demo router-hat: multicast egress group {} \
              attached (router-multicast-faces, {mcast_opts:?}); routed Push \
-             forwards to the group"
+             forwards to the group",
+            std::net::SocketAddr::new(mcast_group, mcast_port)
         );
     }
 
@@ -6093,9 +6097,10 @@ async fn run_router_hat_until(
         // running until the process died.
         mcast_stops.push(("ingress", mcast_ingress_stop));
         log::info!(
-            "wz-ap-demo router-hat: multicast ingress group {mcast_group}:{mcast_port} \
+            "wz-ap-demo router-hat: multicast ingress group {} \
              joined (router-multicast-faces, {mcast_opts:?}); received Push routes \
-             to unicast subscribers"
+             to unicast subscribers",
+            std::net::SocketAddr::new(mcast_group, mcast_port)
         );
         (Some(rx), Some(members_rx), Some(group_subs_rx))
     };
