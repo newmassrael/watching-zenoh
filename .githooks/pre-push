@@ -1577,6 +1577,37 @@ if [[ -n "$path_lanes" ]]; then
     fi
 fi
 
+# ─── gate 5b — a changed gate's OWN selftest (R2582) ───────────────
+# grades: worktree
+#
+# A gate's selftest validates the GATE's logic, and that logic only changes when
+# the gate's source does. So the population is exactly the `scripts/lib/*.py`
+# modules this push edits that carry a `--selftest` arm -- not every selftest,
+# which would pay for 80-odd suites to check files nobody touched, and not none,
+# which is what this hook ran before.
+#
+# MEASURED as a defect, not proposed as hygiene: R2577 wrote two upstream path
+# literals into a budget comment of `upstream_citation_anchor_gate.py`. That
+# gate's selftest refuses its own source carrying one, hosted Layer C0 runs the
+# selftest with `|| return 1`, and the layer died on it for FIVE pushes
+# (R2577..R2582) while every local gate stayed green -- gate 2f runs that
+# gate's `--check`, never its `--selftest`. Red-first against the real defect:
+# with one literal put back, this gate refused naming the file and the literal;
+# with it described instead, green.
+#
+# Placed BEFORE gate 3 for gate 5's reason: gate 3 exits early on a push that
+# touches no crate, and a push editing only gate sources is exactly that push.
+#
+# Membership is derived by AST (the constant, not a comment), and the looser of
+# two candidate rules on purpose -- the tighter one silently dropped four real
+# selftests. See the module doc for both measurements.
+if ! python3 scripts/lib/changed_gate_selftests.py --range "$diff_base..$local_sha"; then
+    echo "" >&2
+    echo "pre-push: [gate 5b] a gate this push edits fails its own selftest." >&2
+    echo "          Hosted Layer C0 runs these with \`|| return 1\`; fix it here." >&2
+    exit 1
+fi
+
 # R311y420 — a while-read loop rather than `mapfile`. mapfile is a bash 4.0
 # builtin, and stock macOS ships bash 3.2, so this hook could not run there at
 # all; scripts/lib/schema-pin-gate.sh already avoids it for the same reason.

@@ -2722,6 +2722,14 @@ PY
     # empty population is a FAILURE.
     python3 scripts/lib/round_fed_gate_reach.py --selftest >/dev/null || return 1
     python3 scripts/lib/round_fed_gate_reach.py || return 1
+    # R2582 — the membership rule behind pre-push gate 5b, which runs a changed
+    # gate's OWN `--selftest`. Only the rule's selftest belongs here: the gate
+    # itself needs a push's diff range and hosted CI already runs every selftest
+    # it could select. Registered so this gate's logic is not graded solely on
+    # the machine that wrote it -- the exact shape of the defect it was built
+    # for, where `upstream_citation_anchor_gate`'s selftest ran only hosted and
+    # its source broke it for five pushes.
+    python3 scripts/lib/changed_gate_selftests.py --selftest >/dev/null || return 1
     # R2208 (open-debt item 562) — WHAT A MACHINE MUST ALREADY HAVE for the
     # lanes this script arms, and the way to ask one.
     #
