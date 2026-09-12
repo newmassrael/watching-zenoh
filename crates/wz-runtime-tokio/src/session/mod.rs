@@ -669,9 +669,20 @@ where
     /// Shared on a fork, never copied: two handles that each believed they
     /// owned the count would emit a Final the other still needs.
     #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
-    matching_interests:
-        Arc<std::sync::Mutex<std::collections::HashMap<(MatchingPlane, String), (u64, usize)>>>,
+    matching_interests: Arc<std::sync::Mutex<MatchingInterestTable>>,
 }
+
+/// R2577 — `(plane, keyexpr) -> (interest id, live handles)`.
+///
+/// Named rather than spelled inline because clippy's `type_complexity` refused
+/// the inline form at `-D warnings`, and it was right for a reason worth
+/// keeping: the shape carries four facts (which plane, which keyexpr, which id
+/// went on the wire, how many handles stand) and a reader meeting it inside an
+/// `Arc<Mutex<..>>` has to reconstruct all four. MEASURED by gate 7, the
+/// all-features clippy — `cargo test` had been green on this field all along,
+/// which is the blind spot that gate exists for.
+#[cfg(all(feature = "session-matching", feature = "declare-interest"))]
+type MatchingInterestTable = std::collections::HashMap<(MatchingPlane, String), (u64, usize)>;
 
 /// R2577 — which declaration plane a matching Interest asks about.
 ///
