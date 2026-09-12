@@ -1050,7 +1050,14 @@ PIN_NO_SYMBOL = 2
 # the same mutation adds no `.rs` / `.c` / `.h` citation, so it moves neither
 # number -- checked, because a new clause that DID cite a wz file would have made
 # these deltas smaller and still looked plausible.
-PIN_WZ_CITATIONS = 237
+#
+# R2584 — 237 -> 238, a RISE with no atom leaving. `transport-link-udp` stays
+# PARTIAL, and the R2584 clause appended to its reason names exactly one wz
+# file, the demo's `args.rs`, where the scouting address silently falls back to
+# the default group for an IPv6 value. That citation is the whole delta. The same
+# clause cites the upstream `multicast.rs` three times, and those land in the
+# upstream bucket this census does not judge, so AMBIGUOUS holds at 45.
+PIN_WZ_CITATIONS = 238
 PIN_AMBIGUOUS = 45
 
 
