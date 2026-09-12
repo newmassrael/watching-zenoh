@@ -14519,6 +14519,18 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     _runci_guarded_test M 2 cargo test -p wz-integration-tests \
         --test wz_multicast_departure_witnessed_by_pico -- --ignored --quiet || return 1
 
+    # R2588 — `--multicast-locator ...#iface=lo;join=<extra>` installs kernel
+    # memberships for the locator's group AND the extra one, in both address
+    # families, read from `/proc/net/igmp{,6}`. It is the process-level leg of
+    # `#join=`, which only the ingress path carries, and the first leg to run an
+    # IPv6 group through a demo process. Needs only the demo built above (with
+    # `locator-iface`); `lo` takes memberships of either family on any Linux
+    # runner. Count-guarded, because the fn name is filtered by nothing but a
+    # rename would still select zero.
+    _runci_guarded_test "M multicast locator flag installs its memberships" 1 \
+        cargo test -p wz-integration-tests \
+        --test wz_multicast_locator_flag_installs_its_memberships -- --ignored || return 1
+
     # R2587 — the multicast `ttl` key, adjudicated by zenohd ON THE WIRE. zenohd
     # and this lane's router demo each get `#iface=<veth>;ttl=5` and then no key,
     # and a libc `IP_RECVTTL` reader in the namespace must read the same header

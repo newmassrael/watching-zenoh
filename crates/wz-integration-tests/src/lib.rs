@@ -6218,6 +6218,57 @@ pub mod common {
         panic!("a datagram arrived but the kernel attached no IP_TTL control message");
     }
 
+    /// R2588 — every multicast group, of either family, that the kernel holds a
+    /// membership for on `device`, read from `/proc/net/igmp` and `/proc/net/igmp6`.
+    ///
+    /// A kernel record rather than a socket option: it answers "which groups
+    /// did this node actually join, and on which interface", independently of how
+    /// the joining process was configured. It reads both families because a
+    /// locator's `#join=` groups follow the family of its own group.
+    ///
+    /// `/proc/net/igmp` prints each group as the `__be32` it stores, formatted as
+    /// a host-endian integer, so the hex is converted with `u32::from_be`.
+    /// `/proc/net/igmp6` prints the 16 address bytes in order.
+    pub fn multicast_memberships(device: &str) -> Vec<std::net::IpAddr> {
+        let mut out = Vec::new();
+
+        let v4 = std::fs::read_to_string("/proc/net/igmp").expect("read /proc/net/igmp");
+        let mut on_device = false;
+        for line in v4.lines().skip(1) {
+            if !line.starts_with(char::is_whitespace) {
+                // `<idx>\t<device> : <count> <querier>` starts a device block.
+                on_device = line.split_whitespace().nth(1) == Some(device);
+                continue;
+            }
+            if !on_device {
+                continue;
+            }
+            if let Some(hex) = line.split_whitespace().next() {
+                if let Ok(raw) = u32::from_str_radix(hex, 16) {
+                    out.push(std::net::IpAddr::V4(Ipv4Addr::from(u32::from_be(raw))));
+                }
+            }
+        }
+
+        let v6 = std::fs::read_to_string("/proc/net/igmp6").expect("read /proc/net/igmp6");
+        for line in v6.lines() {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if fields.len() < 3 || fields[1] != device || fields[2].len() != 32 {
+                continue;
+            }
+            let mut octets = [0u8; 16];
+            let parsed = (0..16).all(|i| {
+                u8::from_str_radix(&fields[2][2 * i..2 * i + 2], 16)
+                    .map(|b| octets[i] = b)
+                    .is_ok()
+            });
+            if parsed {
+                out.push(std::net::IpAddr::V6(std::net::Ipv6Addr::from(octets)));
+            }
+        }
+        out
+    }
+
     impl Drop for NetnsPair {
         fn drop(&mut self) {
             // A process spawned through `sudo` is not reachable by killing the
