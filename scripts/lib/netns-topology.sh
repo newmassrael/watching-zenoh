@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
-# R2575 — a SEPARATE network stack for a witness, as a reusable topology.
+# R2575 (no register item) — a SEPARATE network stack for a witness, as a
+# reusable topology. The citation is `no register item` because what this
+# answers is the owner's decision of 2026-09-12 to GROW THE ENVIRONMENT for
+# oracle-blocked atoms rather than grade their residuals out; that decision has
+# no store `debt-` id for `gate_provenance_lint` to resolve, so naming it in
+# prose here is the honest pair. (Added R2576: the header was written without
+# one and hosted Layer C0 would have said so a round later.)
 #
 # ## Why this exists
 #

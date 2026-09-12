@@ -584,6 +584,83 @@ if ! python3 scripts/lib/grading_pin_ratchet.py; then
     exit 1
 fi
 
+# ─── gate 2z — the gates a ROUND's own changes FEED (R2576) ─────────
+# grades: worktree
+#
+# Gate 2e above is one member of a family, and it was the ONLY member the hook
+# ran. A round in this workspace changes two things almost every time: the
+# atomic store (it closes or re-grades an atom) and the gate corpus under
+# `scripts/` (it writes the instrument that made the round's claim checkable).
+# Gates read both, and several grade them against a PINNED number that is only
+# true if it moves in the commit that moves the measurement.
+#
+# MEASURED TWICE IN FOUR ROUNDS, which is why this is a block and not one more
+# line:
+#   - R2572 took `switchboard` PARTIAL -> COMPLETE and moved two of
+#     `depth_axis_census`'s counts without moving its pins. Nothing local could
+#     say so; hosted Layer C0 is fail-fast and had already died at 14s on an
+#     unrelated python-floor lint, so it did not run there either. The red
+#     surfaced two rounds later.
+#   - R2575 added `netns-topology.sh` with no provenance citation in its
+#     header. `gate_provenance_lint.py` says so in one line and costs 0.13s,
+#     and it too ran only hosted.
+# In both, the commit that moved the subject does not touch the file holding
+# the verdict, so there is nothing for a careful reader to notice.
+#
+# The MEMBERSHIP of this list is itself gated. `round_fed_gate_reach.py`
+# derives the population from the code -- a module whose AST names the store
+# file, OR names the scripts tree and globs it, plus whatever imports one,
+# transitively -- and FAILS when a member is neither run here nor carried by a
+# DEFERRED row with a measured reason. So a new one cannot be added quietly.
+# The closure is load-bearing rather than decoration:
+# `upstream_release_distance.py` names the store nowhere and reaches it through
+# an import.
+#
+# COST, measured warm on this tree at R2576 as ONE BLOCK rather than as a sum
+# of separate runs: 21.75s for the twenty below, of which
+# `upstream_reads_the_surface` is 9.4s and `gate_reason_claims` 5.6s -- the
+# other eighteen are 6.8s together. Three members are DEFERRED for cost or for
+# needing the network, each with its figure in that table, and the gate PRINTS
+# them on every run so a deferral can never read as coverage.
+round_fed_gates=(
+    "scripts/lib/round_fed_gate_reach.py"
+    "scripts/lib/depth_axis_census.py"
+    "scripts/lib/gate_reason_claims.py"
+    "scripts/lib/lane_locality_claim_gate.py"
+    "scripts/lib/replication_fingerprint_recipe_gate.py"
+    "scripts/lib/serde_format_surface_gate.py"
+    "scripts/lib/store_reasons_resolve.py"
+    "scripts/lib/token_plane_parity_gate.py"
+    "scripts/lib/upstream_feature_census.py"
+    "scripts/lib/upstream_link_axis_gate.py --check"
+    "scripts/lib/upstream_link_config_keys_gate.py --check"
+    "scripts/lib/upstream_reads_the_surface.py"
+    "scripts/lib/apt_package_census.py"
+    "scripts/lib/armed_skip_guard.py --check"
+    "scripts/lib/decline_arming_gate.py --check"
+    "scripts/lib/gate_provenance_lint.py"
+    "scripts/lib/gate_test_pin_lint.py"
+    "scripts/lib/lane_reach_gate.py --check"
+    "scripts/lib/python_floor_lint.py"
+    "scripts/lib/store_reader_lane_lint.py"
+)
+for round_fed_gate in "${round_fed_gates[@]}"; do
+    read -ra round_fed_cmd <<< "$round_fed_gate"
+    if ! python3 "${round_fed_cmd[@]}"; then
+        echo "" >&2
+        echo "pre-push: [gate 2z] ${round_fed_cmd[0]} FAILED." >&2
+        echo "          It is fed by what this round changed -- the atomic" >&2
+        echo "          store, or the gate corpus under scripts/. If the" >&2
+        echo "          message above says a pinned count MOVED, move the pin" >&2
+        echo "          IN THIS COMMIT and say which atom and why: that is the" >&2
+        echo "          whole reason this runs here rather than only in hosted" >&2
+        echo "          Layer C0, two rounds away. Never raise a pin to make a" >&2
+        echo "          red go away." >&2
+        echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+        exit 1
+    fi
+done
+
 # ─── gate 2k — the replication-log funnel (R2354) ───────────────────
 # grades: worktree
 #

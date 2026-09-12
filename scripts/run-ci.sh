@@ -2702,6 +2702,19 @@ PY
     # zero is a FAILURE, not a pass.
     python3 scripts/lib/facade_forward_gate.py --selftest >/dev/null || return 1
     python3 scripts/lib/facade_forward_gate.py || return 1
+    # R2576 — a gate fed by what a ROUND changes must run where the round
+    # happens. A round mutates the atomic store (it closes an atom) and the
+    # gate corpus under scripts/ (it writes the instrument), and gates read
+    # both against pinned numbers that only stay true if they move in the same
+    # commit. Measured twice in four rounds: R2572 closed `switchboard` and
+    # moved two of `depth_axis_census`'s counts and neither pin, while this
+    # fail-fast layer had already died at 14s on an unrelated lint; R2575 added
+    # a gate script with no provenance citation, which `gate_provenance_lint`
+    # states in one line and 0.13s. Population DERIVED from the code (two seed
+    # rules plus the transitive importers), deferrals carry a measured cost and
+    # are PRINTED, and an empty population is a FAILURE.
+    python3 scripts/lib/round_fed_gate_reach.py --selftest >/dev/null || return 1
+    python3 scripts/lib/round_fed_gate_reach.py || return 1
     # R2208 (open-debt item 562) — WHAT A MACHINE MUST ALREADY HAVE for the
     # lanes this script arms, and the way to ask one.
     #
