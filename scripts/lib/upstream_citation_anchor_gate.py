@@ -421,11 +421,19 @@ BARE_BUDGET = 58
 #: LINE-NUMBERED reference into the router hat's pubsub file, cited as the
 #: reason a router withholds a subscriber declaration from a face that
 #: registered no interest. At the pin that file carries no interest logic at
-#: all -- `zenoh/src/net/routing/hat/router/pubsub.rs` @ `fn propagate_subscriber(`
-#: reaches net children only. The filter lives on the hats that own a client's
-#: face, so those sites now name
-#: `zenoh/src/net/routing/hat/peer/pubsub.rs` @ `.remote_interests` WITH its
-#: root, which is why this ratchet falls rather than merely moving.
+#: all -- the router hat's subscriber-propagation function reaches net children
+#: only. The filter lives on the hats that own a client's face, the peer and
+#: broker hats' pubsub modules, on their remote-interests check; so those sites
+#: now name that file and needle WITH its root, which is why this ratchet falls
+#: rather than merely moving.
+#: ⚠ R2582 — this paragraph used to QUOTE both files with their upstream root
+#: in the same breath as the sentence below claiming it described rather than
+#: quoted, and this gate's own `--selftest` refuses its own source carrying an
+#: upstream path literal. Layer C0 runs that selftest with `|| return 1`, so the
+#: hosted layer died on it for five pushes (R2577..R2582) while every local gate
+#: stayed green: the pre-push hook runs this gate's `--check` as gate 2f and
+#: never its `--selftest`. Described now, which is what the next line always
+#: said it was doing.
 #: ⚠ The dead citation is DESCRIBED here rather than quoted: writing it out
 #: would have re-added the very root-less occurrence this entry records
 #: removing, and the first draft of this comment did exactly that (793 against
