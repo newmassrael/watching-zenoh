@@ -5994,6 +5994,126 @@ pub mod common {
              environment-dependent multicast interop lanes need one (Layer M)"
         );
     }
+
+    /// R2586 — a SEPARATE network stack joined to this host by a veth pair, for
+    /// a witness whose claim is about SEPARATION. This is the Rust face of
+    /// `scripts/lib/netns-topology.sh`, and it holds no topology of its own: the
+    /// namespace, the link names and the addressing all come from that script,
+    /// so the two cannot disagree about what was built.
+    ///
+    /// # Why a witness needs one
+    ///
+    /// On one host, `IP_MULTICAST_ALL` (Linux default 1) lets a wildcard-bound
+    /// socket receive a group that ANY socket on the same device has joined. A
+    /// foreign peer that sends to a group has joined it, so a wz socket beside it
+    /// receives that group whether or not wz joined, and a membership witness
+    /// collapses. With the foreign peer in its own namespace its membership lives
+    /// on its own device. Measured before this fixture was written: pico `z_pub`
+    /// in the namespace, and a host socket on the same port received nothing in
+    /// 6s without the membership and pico's datagram with it.
+    ///
+    /// # What it cannot witness
+    ///
+    /// A hop count. A veth pair is one link, so a multicast TTL of 1 and of 8
+    /// both arrive (the script's header records that measurement).
+    ///
+    /// # Failure policy
+    ///
+    /// Construction PANICS on both of the script's non-zero codes: 2 (no `ip`,
+    /// or no non-interactive sudo) and 4 (the tools are present and the build
+    /// failed). A test that uses this is `#[ignore]`d and run by a lane, and the
+    /// lane decides whether an absence is a skip, by probing the same script
+    /// before it runs the test. Inside the test a skip would report green over a
+    /// witness that never ran.
+    pub struct NetnsPair {
+        ns: String,
+        ifname: String,
+    }
+
+    impl NetnsPair {
+        /// Build `wzns<tag>` with the host end at `host_cidr` and the peer end at
+        /// `peer_cidr`. Tear-down runs on drop, and also first, so a previous
+        /// run that died mid-test does not leave this one unable to build.
+        pub fn up(tag: &str, host_cidr: &str, peer_cidr: &str) -> Self {
+            let script = project_root().join("scripts/lib/netns-topology.sh");
+            let out = Command::new("bash")
+                .arg("-c")
+                .arg(
+                    r#"source "$1" || exit 4
+                       netns_topology_up "$2" "$3" "$4"; rc=$?
+                       printf '%s' "$NETNS_TOPOLOGY_WHY" >&2
+                       [ "$rc" -eq 0 ] && printf '%s' "$(_netns_ifname "$2")"
+                       exit "$rc""#,
+                )
+                .arg("netns-topology")
+                .arg(&script)
+                .args([tag, host_cidr, peer_cidr])
+                .output()
+                .expect("run bash for netns-topology.sh");
+            let why = String::from_utf8_lossy(&out.stderr).into_owned();
+            match out.status.code() {
+                Some(0) => Self {
+                    ns: format!("wzns{tag}"),
+                    ifname: String::from_utf8_lossy(&out.stdout).into_owned(),
+                },
+                Some(2) => panic!(
+                    "netns-topology: this host cannot build a namespace ({why}); the \
+                     lane that runs this test probes for that and decides whether to skip"
+                ),
+                code => panic!("netns-topology: the build FAILED with {code:?}: {why}"),
+            }
+        }
+
+        /// The host end of the veth pair.
+        pub fn host_iface(&self) -> String {
+            format!("{}0", self.ifname)
+        }
+
+        /// The peer end, inside the namespace.
+        pub fn peer_iface(&self) -> String {
+            format!("{}1", self.ifname)
+        }
+
+        /// `program`, to be run inside the namespace.
+        pub fn command(&self, program: &Path) -> Command {
+            let mut cmd = Command::new("sudo");
+            cmd.args(["-n", "ip", "netns", "exec", &self.ns])
+                .arg(program);
+            cmd
+        }
+    }
+
+    impl Drop for NetnsPair {
+        fn drop(&mut self) {
+            // A process spawned through `sudo` is not reachable by killing the
+            // sudo child: SIGKILL is not relayed. So every process still in the
+            // namespace is killed by pid here, BEFORE the namespace is deleted —
+            // deleting the name would leave such a process running, unreachable.
+            if let Ok(out) = Command::new("sudo")
+                .args(["-n", "ip", "netns", "pids", &self.ns])
+                .output()
+            {
+                let pids: Vec<String> = String::from_utf8_lossy(&out.stdout)
+                    .split_whitespace()
+                    .map(str::to_string)
+                    .collect();
+                if !pids.is_empty() {
+                    let _ = Command::new("sudo")
+                        .args(["-n", "kill", "-KILL"])
+                        .args(&pids)
+                        .status();
+                }
+            }
+            let tag = self.ns.trim_start_matches("wzns").to_string();
+            let _ = Command::new("bash")
+                .arg("-c")
+                .arg(r#"source "$1" && netns_topology_down "$2""#)
+                .arg("netns-topology")
+                .arg(project_root().join("scripts/lib/netns-topology.sh"))
+                .arg(tag)
+                .status();
+        }
+    }
 }
 
 #[cfg(test)]

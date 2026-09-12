@@ -632,7 +632,13 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # that merely intersects does not). Both need a WILDCARD querier keyexpr --
 # against the literal the older pair uses, every intersecting queryable also
 # includes, so those two legs cannot see either axis.
-FOREIGN_ADJUDICATOR_LINKS = 902
+# R2586 — 902 -> 903: `transport-link-udp` pico->wz (partial), the atom's first
+# FOREIGN witness of the `#join=` key. A pico `z_pub` in its own network
+# namespace sends to a group wz reaches only through `#join=` on the pinned veth
+# end. The namespace is what lets the silent arms discriminate: on one host the
+# peer's own membership reaches wz through IP_MULTICAST_ALL. Partial because
+# `ttl` is still unwitnessed by any foreign party.
+FOREIGN_ADJUDICATOR_LINKS = 903
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

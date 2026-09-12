@@ -431,6 +431,15 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
     # target All), so their serve / converge assertions are unaffected. Same
     # additive-unification note as the storage-* pins above.
     "storage-mgr-complete-flag",
+    # R2586 — the `#join=` foreign witness across a network namespace
+    # (tests/wz_multicast_extra_join_pico_netns_interop.rs) pins its wz socket to
+    # the host end of a veth pair with `#iface=`. Without this feature the
+    # multicast selector only WARNS and pins nothing, so the membership lands on
+    # the default-route NIC and the pico peer's datagrams, which arrive on the
+    # veth, are dropped. The witness would then red for a reason that is not its
+    # subject. Adds no third-party dep: `libc` is already in this table's closure.
+    # Same additive-unification note as the storage-* pins above.
+    "locator-iface",
 ] }
 # R71 — `fixture_session_init_params` / `install_session_actions_for_test`
 # / `dispatch_script` live in this sibling crate. Replaces the
