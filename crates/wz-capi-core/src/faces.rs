@@ -1743,6 +1743,43 @@ impl SharedSession {
             .collect()
     }
 
+    /// R2579 — every session a DECLARATION made through this registry reaches:
+    /// the faces AND the [local plane](Self::local). The read-side twin of what
+    /// [`Self::declare_subscriber`] and [`Self::declare_queryable`] write, which
+    /// both end with `self.local.declare_*`.
+    ///
+    /// ## Why this is not [`Self::face_sessions`], measured rather than argued
+    ///
+    /// The two are not interchangeable and neither is a superset worth
+    /// collapsing to. Of the readers built on `face_sessions`, five are RIGHT to
+    /// exclude the local plane because their subject is the WIRE:
+    /// `face_snapshots` and `peer_identities` answer about transports, and a
+    /// local plane is not one; `batch_start_all` / `batch_flush_all` /
+    /// `batch_stop_all` drive a batching window that exists per link. The
+    /// matching polls are the ones that are not about the wire — upstream
+    /// computes a matching verdict over the WHOLE session, session-local
+    /// entities included (`zenoh/src/api/session.rs` @ `.any(|q| q.complete`).
+    ///
+    /// Built on `face_sessions`, they had a hole with a precise shape, and the
+    /// shape is why it survived: `declare_queryable` registers on every face
+    /// session as WELL as on the plane, so any face carries a copy and the poll
+    /// answers correctly THROUGH it. The plane is load-bearing only when the
+    /// face set is EMPTY — and that is exactly the configuration no fixture
+    /// had, because an interop fixture connects something by definition.
+    ///
+    /// MEASURED at R2579 with one C program compiled once and linked twice,
+    /// against `libzenohc.so` and against this ABI: with a peer, both report
+    /// `false` then `true` across a session-local `z_declare_queryable`; with
+    /// NO peer, upstream still reports `true` and this ABI reported `false`.
+    ///
+    /// Same snapshot-out-of-the-lock discipline as `face_sessions`, and for the
+    /// same reason: a consulted session takes its own observer mutex.
+    pub fn matching_planes(&self) -> Vec<TokioSession> {
+        let mut planes = self.face_sessions();
+        planes.push(self.local.clone());
+        planes
+    }
+
     /// R2259 (open-debt item 593) — every ESTABLISHED face as the C
     /// link/transport planes see it: the input to `z_info_transports` and
     /// `z_info_links`.
@@ -2079,10 +2116,15 @@ impl SharedSession {
     }
 
     /// The SESSION's matching verdict for a QUERIER's `keyexpr` (pico
-    /// `z_querier_get_matching_status`): `true` when ANY connected peer has a
-    /// matching QUERYABLE. The publisher twin is [`Self::has_matching`].
+    /// `z_querier_get_matching_status`): `true` when any connected peer has a
+    /// matching QUERYABLE, or this session itself declared one. The publisher
+    /// twin is [`Self::has_matching`].
+    ///
+    /// R2579 — over [`Self::matching_planes`], not `face_sessions`: the doc on
+    /// that method carries the measurement, and the clause this sentence used to
+    /// open with ("ANY connected peer") was the defect written down.
     pub fn has_matching_queryable(&self, keyexpr: &str) -> bool {
-        self.face_sessions().into_iter().any(|session| {
+        self.matching_planes().into_iter().any(|session| {
             session
                 .declare_querier(keyexpr.to_owned(), QueryOptions::default())
                 .get_matching_status()
@@ -2091,21 +2133,30 @@ impl SharedSession {
     }
 
     /// The SESSION's matching verdict for `keyexpr` (pico
-    /// `z_publisher_get_matching_status`): `true` when ANY connected peer has a
-    /// matching subscriber.
+    /// `z_publisher_get_matching_status`): `true` when any connected peer has a
+    /// matching subscriber, or this session itself declared one.
     ///
-    /// The OR across faces is the same aggregation
-    /// [`Self::declare_matching_listener`] delivers, computed fresh here rather
-    /// than read off a listener's cached state — so the poll answers correctly
-    /// for a publisher that never declared a listener at all, and cannot
-    /// disagree with one that did.
+    /// The OR is the same aggregation [`Self::declare_matching_listener`]
+    /// delivers, computed fresh here rather than read off a listener's cached
+    /// state — so the poll answers correctly for a publisher that never declared
+    /// a listener at all, and cannot disagree with one that did.
+    ///
+    /// ⚠ R2579 — it CAN still disagree with one, and in one direction only:
+    /// this poll now reads [`Self::matching_planes`] while
+    /// `declare_matching_listener_scoped` still installs per FACE, so a
+    /// session-local subscriber with no peer connected is seen by the poll and
+    /// not by the listener. Closing that is the same repair applied to the
+    /// watch, and it needs a measurement this round did not take: whether the
+    /// runtime's own `matching_watches` re-evaluates on a session-LOCAL
+    /// declaration at all, since its documented re-evaluation arms are the
+    /// REMOTE `DeclSubscriber` / `UndeclSubscriber` ones.
     ///
     /// Sessions are snapshotted out of the lock before being consulted, the
     /// same discipline as every other fan-out here: `get_matching_status` takes
     /// the face's observer mutex, and taking it under the registry lock would
     /// invert the two locks' order against the drive thread.
     pub fn has_matching(&self, keyexpr: &str) -> bool {
-        self.face_sessions().into_iter().any(|session| {
+        self.matching_planes().into_iter().any(|session| {
             session
                 .declare_publisher(keyexpr.to_owned(), PublishOptions::put())
                 .get_matching_status()
