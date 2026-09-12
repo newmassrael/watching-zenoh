@@ -1016,7 +1016,21 @@ PIN_NO_SYMBOL = 2
 # ⚠ THIS IS THE FIRST PIN THIS TREE PAID AT PUSH TIME RATHER THAN TWO ROUNDS
 # LATER. The same round put this census into `.githooks/pre-push` gate 2z, and
 # the gate caught its own author's next store mutation within the minute.
-PIN_WZ_CITATIONS = 256
+#
+# R2577 (the `session-matching` first-residual BUILD) — 256 -> 258, TWO
+# citations, and it rises for the same reason R2576's did: no atom left the
+# corpus. The reason gained an entry recording that the clause "a bare
+# `get_matching_status()` poll registers no interest" is now FALSE -- a
+# publisher and a querier each take a refcounted Interest at declare -- and
+# naming the two residuals that survive. DERIVED by running THIS module's own
+# `citation_audit` over that atom alone, before and after: (wz 19,
+# ambiguous 11) -> (wz 21, ambiguous 11), so 256 + 2 = 258 and AMBIGUOUS
+# correctly holds at 56.
+# ⚠ FIVE of that entry's new citations are UPSTREAM (33 -> 38) and are counted
+# in neither pin: they name zenoh and zenoh-pico files this tree holds no
+# oracle for. A reader comparing "citations added" against this delta would
+# otherwise find seven where the pin moved by two.
+PIN_WZ_CITATIONS = 258
 PIN_AMBIGUOUS = 56
 
 
