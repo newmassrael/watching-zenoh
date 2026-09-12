@@ -662,9 +662,14 @@ round_fed_gates=(
     "python_floor_lint.py"
     "store_reader_lane_lint.py"
 )
+# ⚠ The module and its ARGUMENTS are expanded separately, and that too is
+# forced rather than chosen: `scripts/lib/"${cmd[@]}"` attaches the prefix to
+# the FIRST element only, which is right but subtle enough that shellcheck
+# refuses it as SC2145 -- Layer 0 said so on this very block. `${cmd[@]:1}` is
+# empty for a member with no arguments, which `set -u` tolerates on bash 4.4+.
 for round_fed_gate in "${round_fed_gates[@]}"; do
     read -ra round_fed_cmd <<< "$round_fed_gate"
-    if ! python3 scripts/lib/"${round_fed_cmd[@]}"; then
+    if ! python3 scripts/lib/"${round_fed_cmd[0]}" "${round_fed_cmd[@]:1}"; then
         echo "" >&2
         echo "pre-push: [gate 2z] ${round_fed_cmd[0]} FAILED." >&2
         echo "          It is fed by what this round changed -- the atomic" >&2
