@@ -815,7 +815,22 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # DERIVED: the departing reason re-audited to wz=5, ambiguous=0, and it sat in
 # the `reached` bucket — which is why UNREACHED and NO_SYMBOL correctly hold
 # while both other pins move.
-PIN_REACHED = 43
+# R2572 (the `switchboard` close) — 43 -> 42, paid a round late by R2576, and
+# the LATENESS is the finding rather than the number. Its residual was disposed
+# by BUILD: the facade forwarded `switchboard` to no runtime, so a `wz`-facade
+# consumer could name the feature and reach no ingress port at all. DERIVED: the
+# departing reason re-audited to wz=5, ambiguous=0, and it sat in the `reached`
+# bucket — which is why UNREACHED and NO_SYMBOL correctly hold while both other
+# pins move.
+# WHY IT WAS LATE, recorded because the cause is structural and not an oversight
+# anyone could have avoided by being careful: Layer C0 is fail-fast, and at
+# R2572 it died at 14s on a python-floor lint (`facade_forward_gate.py` imported
+# `tomllib`), so this census never ran and the hosted job reported the OTHER
+# defect. No local gate ran it either — R2576 measured it at 1.08s and put it in
+# `.githooks/pre-push`, beside `grading_pin_ratchet.py`, which is the sibling
+# pin gate that was already there. A pin the closing commit cannot see is a pin
+# that moves a round late by construction.
+PIN_REACHED = 42
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -961,7 +976,30 @@ PIN_NO_SYMBOL = 2
 # R2564's note above applies, and the same pre-round reason carries 8 citations
 # the audit reads as UPSTREAM and leaves unjudged, which a grep would have
 # folded into the wz count and overshot by exactly those 8.
-PIN_WZ_CITATIONS = 252
+#
+# R2572 + R2573 — 252 -> 250, paid together by R2576, and this is the first
+# entry that is a NET of three effects rather than one atom leaving. Netting is
+# what the earlier entries warn against, so each effect was measured on its own
+# by holding one input fixed and moving the other:
+#   -5  `switchboard` leaves the PARTIAL corpus (R2572). THIS module's own
+#       `citation_audit` over that atom alone against the PRE-round text:
+#       (wz 5, ambiguous 0).
+#   +3  `storage-backend-filesystem` STAYS PARTIAL and its reason GAINED three
+#       citations (R2573). Same instrument over that atom alone, before and
+#       after: (wz 2, ambiguous 0) -> (wz 5, ambiguous 0).
+#   +1  of those three resolves only because R2573 also CREATED the file it
+#       cites. Measured by holding the reasons fixed and swapping the TRACKED
+#       LIST: 249 against the old list, 250 against the new. It is already
+#       inside the +3 above, so it is NOT added twice — it is named because it
+#       is the second input this audit has and the only entry so far to move it.
+# 252 - 5 + 3 = 250 and AMBIGUOUS correctly holds at 56.
+# THE +1 IS THE REUSABLE PART: a citation this audit reads as UPSTREAM becomes a
+# wz citation the day a tracked file ENDS WITH the cited path, so a commit that
+# adds a file can move this count without touching a single reason. A reason
+# written to cite a file the same round creates is the ordinary way that
+# happens, and it is correct — but it means "did any reason change?" is the
+# wrong question to ask of a moved count.
+PIN_WZ_CITATIONS = 250
 PIN_AMBIGUOUS = 56
 
 
