@@ -321,7 +321,7 @@
 #              join only fails at socket bind time), so a missing route
 #              FAILs rather than SKIPs, which would break the no-flaky
 #              rule if M were a required gate. Binds a real UDP multicast
-#              scouting link (UdpDriver::bind_multicast_v4), emits a
+#              scouting link (UdpDriver::bind_multicast), emits a
 #              Scout, and resolves a peer locator from a Hello on the
 #              group. The deterministic FSM + encode/decode logic is
 #              covered socket-free by Layer C1i, so opt-out loses only
@@ -3378,7 +3378,7 @@ PY
     # R2142 (open-debt item 225) — WHICH axes of the scouting socket config can
     # move, and which are witnessed BOTH-ENDED. Here for the same reason as the
     # gate above: the whole population is on disk — the scalar parameters of
-    # `bind_multicast_v4` and the `pub` fields of `McastSocketConfig` — so it is
+    # `bind_multicast` and the `pub` fields of `McastSocketConfig` — so it is
     # derived by reading, in milliseconds, with nothing built.
     #
     # Its ratchet is the point: a new field on that struct arrives UNJUDGED and
@@ -14330,7 +14330,7 @@ install qemu-system-arm" || fail=1
 #
 # R311ep: opt-in via `--layer M` or `WZ_RUN_LAYER_M=1`. Runs the
 # `scouting_multicast_loopback` integration test, which binds a real
-# UDP multicast scouting link (UdpDriver::bind_multicast_v4), emits a
+# UDP multicast scouting link (UdpDriver::bind_multicast), emits a
 # Scout, and resolves a peer locator from a Hello sent on the group.
 # Opt-in (not a default gate) because multicast routing is
 # environment-dependent: a CI container without a multicast route on
@@ -14561,6 +14561,17 @@ PY
         --test multicast_pubsub_loopback a_multicast_iface \
         -- --ignored --quiet 2>&1 \
         | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+    # R2584 — the IPv6 multicast group, on real sockets: a datagram arrives through
+    # the group's membership and through a `#join=` membership, and a group nobody
+    # joined does not arrive. Same build as the leg above, because every arm pins
+    # both halves to one v6-capable NIC with `#iface=`. It needs a non-`lo`
+    # interface with IFF_MULTICAST and an IPv6 address, and PANICS without one
+    # rather than skipping. Count-guarded for the same reason as the leg above: it
+    # carries a name filter.
+    _runci_guarded_test "M v6 multicast membership" 1 \
+        cargo test -p wz-runtime-tokio \
+        --features transport-multicast,locator-iface \
+        --test multicast_pubsub_loopback an_ipv6_group -- --ignored || return 1
     # R311y428 — ACTIVE SCOUTING cross-impl: a wz `--scout` discovers a
     # multicast-scouting zenohd on 224.0.0.224:7446 and opens a session on the
     # locator that router's HELLO advertised. The first cross-impl witness for
@@ -14678,7 +14689,7 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     # a DIRECT in-process observation) and decoded byte-exact by a wz
     # in-library multicast subscriber that co-binds the group port — made
     # possible by the SO_REUSEADDR/SO_REUSEPORT bind added to
-    # `UdpDriver::bind_multicast_v4` this round. Needs the pico `z_pub` CLI
+    # `UdpDriver::bind_multicast` this round. Needs the pico `z_pub` CLI
     # (the z_sub check above covers it — the same build script emits both).
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_subscriber_from_pico_multicast -- --ignored --quiet) || return 1
