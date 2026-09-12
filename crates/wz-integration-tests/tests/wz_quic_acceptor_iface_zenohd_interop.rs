@@ -76,7 +76,9 @@
 //! matches it in `UdpDriver::bind_multicast`). Measured, not reasoned: with a
 //! peer co-joined on a real NIC, a `lo`-joined socket still receives that NIC's
 //! group traffic. Observing the pin would need two link domains (two hosts, or
-//! netns with `CAP_NET_ADMIN`). Hence the `partial` claim below.
+//! netns with `CAP_NET_ADMIN`). Hence the `partial` claim below. (R2586 built the
+//! netns form for the multicast join, `wz_multicast_extra_join_pico_netns_interop`;
+//! this QUIC leg still witnesses the unicast half only.)
 //!
 //! Requires: `wz-ap-demo` built with `--features quic,locator-iface`, and the
 //! reference `zenohd` (STOCK build — quic is in zenoh's default features). Runs on

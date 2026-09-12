@@ -92,9 +92,11 @@ VERDICTS: dict[str, tuple[str, str | None, str]] = {
         "one",
         "a_multicast_iface_pin_decides_whether_the_group_datagram_arrives",
         "Real delivery A/B on a non-`lo` NIC, but ONE-ENDED: it drives two drivers, "
-        "not two nodes. Its own doc argues the cross-impl form CANNOT exist -- a "
-        "foreign peer must share the group to interoperate, and sharing the group "
-        "installs the host membership that hides the pin.",
+        "not two nodes. ON ONE HOST no cross-impl form can run, because a foreign "
+        "peer shares the group and that membership hides the pin. R2586 ran it "
+        "across a network namespace instead "
+        "(wz_multicast_extra_join_pico_netns_interop: its unpinned arm stays silent), "
+        "which is foreign but still not two wz NODES, so the verdict stays one-ended.",
     ),
     "ttl": (
         "none",

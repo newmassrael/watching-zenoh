@@ -839,9 +839,12 @@ async fn router_egress_helper_reaches_group_subscriber() {
 /// group on the other device, arm B has nothing to leak through. A unique port is
 /// kept too, but it is the group that carries the guarantee.
 ///
-/// This is also the precise reason the cross-impl version cannot exist: a foreign
-/// peer has to share the GROUP to be interoperating at all, and sharing the group
-/// is what creates the membership that hides the pin.
+/// This is also why no cross-impl version can run ON ONE HOST: a foreign peer has
+/// to share the GROUP to be interoperating at all, and sharing the group is what
+/// creates the membership that hides the pin. R2586 built the version that does
+/// not share a host stack. `wz_multicast_extra_join_pico_netns_interop` puts a pico
+/// peer in its own network namespace, and its unpinned arm shows the interface a
+/// membership is installed on decides delivery.
 #[cfg(feature = "locator-iface")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "real multicast sockets + a non-loopback NIC (environment-dependent, the \
