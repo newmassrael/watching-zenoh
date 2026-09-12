@@ -12,10 +12,14 @@
 //! topology cannot see the defect R311y771 closed, because nothing in it ever
 //! consults an interest.
 //!
-//! A zenoh ROUTER does. `hat/router/pubsub.rs:120-125` forwards a subscriber
-//! declaration to a destination face only when that face's own
-//! `remote_interests` holds one with `options.subscribers()` matching the
-//! resource. Until R311y771 every Interest wz emitted carried `TO` and only
+//! A zenoh ROUTER does: a subscriber declaration reaches a destination face
+//! only when that face's own `remote_interests` holds one with
+//! `options.subscribers()` matching the resource —
+//! `zenoh/src/net/routing/hat/peer/pubsub.rs` @ `.remote_interests` and
+//! `zenoh/src/net/routing/hat/broker/pubsub.rs` @ `.remote_interests` are where
+//! that filter lives at the pin. (R2578 repointed this: the citation here named
+//! line numbers in the ROUTER hat, whose `propagate_subscriber` reaches net
+//! children only and consults no interest at all.) Until R311y771 every Interest wz emitted carried `TO` and only
 //! `TO`, so a wz face behind zenohd was told about NO remote subscriber, ever —
 //! silently, with no error on any side. Putting zenohd between the two peers is
 //! the whole point of this file: it is the one topology in which the interest is
@@ -241,6 +245,159 @@ fn a_wz_matching_listener_behind_zenohd_learns_of_a_pico_subscriber() {
              {:?}, after the only matching subscriber's process was killed. Either \
              zenohd did not propagate the face-close retraction to wz's face, or wz \
              LATCHED the status on first sight.\n\
+             --- wz-ap-demo stderr ---\n{seen}{demo_captured}\n\
+             --- z_sub stdout ---\n{pico_captured}",
+            MATCHING_TIMEOUT,
+        );
+    }
+}
+
+/// R2578 — a BARE POLL, with no listener declared, answers correctly behind a
+/// real router. IT WITNESSES NO ATOM, and the reason is the measurement this
+/// leg was written to make.
+///
+/// ## What it was written for, and what the probes said instead
+///
+/// §5.4 `session-matching` carries: "a bare `get_matching_status()` poll with
+/// no listener declared registers no interest, so behind a router the REMOTE
+/// half of the poll still sees an empty set". R2577 moved the ask to
+/// `Session::declare_publisher` under
+/// `cfg(all(session-matching, declare-interest))`, so this leg was meant to be
+/// that clause's closer: remove the ask, and the poll should never rise.
+///
+/// MEASURED, against a real zenohd, with the demo rebuilt for every probe:
+/// removing the declare-time ask ENTIRELY leaves this leg green. The negative
+/// was confirmed rather than assumed — `DECLARED MATCHING LISTENER` appears
+/// ZERO times in the captured run, so no listener was quietly supplying an
+/// interest of its own (an earlier cut of the demo wiring did exactly that, and
+/// is why this file now separates "declare a publisher" from "and watch it").
+/// A stock zenohd tells an unasking CLIENT face about a remote subscriber.
+///
+/// ## Why it is tagged `none` rather than `session-matching`
+///
+/// A claim has to bind to the atom's own gated code. This one does not in this
+/// topology: the verdict is identical with the atom's feature doing nothing, so
+/// tagging it would inflate the cross-impl census with a leg that adjudicates
+/// nothing — the exact defect R2577 found in two neighbouring legs, and not one
+/// to add a third instance of while naming it.
+///
+/// ## What it IS worth keeping for
+///
+/// It pins the END-TO-END behaviour a caller sees: a cold ask through a real
+/// router answers, and answers by TRANSITION (`false` then `true`, which the
+/// captured log shows), rather than by a latched initial value. That is a real
+/// regression guard even though it is not a cross-impl proof.
+///
+/// ⚠ ONE ASYMMETRY IS UNEXPLAINED AND DELIBERATELY LEFT SO. Under the SAME
+/// damage the sibling listener leg above still times out at 25s, so its
+/// documented control holds while this one's does not — two paths reading one
+/// registry disagree about whether the interest is load-bearing. The untested
+/// hypothesis is that emitting a WRONG-KIND interest is worse than emitting
+/// none. That is zenohd's forwarding policy, not wz's code, so it was
+/// registered rather than patched here.
+// wz-proves: none -- the verdict is unchanged with `session-matching`'s gated
+// code inert (measured: declare-time ask removed, no listener declared, poll
+// still rises), so it binds to no atom; it guards end-to-end poll behaviour
+#[test]
+#[ignore = "binary-dep e2e (zenohd + zenoh-pico CLI); Layer E runs via --ignored"]
+fn a_bare_matching_poll_behind_zenohd_sees_the_remote_subscriber() {
+    let demo = wz_ap_demo_binary();
+    assert_demo_binary_newer_than_sources(&demo);
+    let z_sub = zenoh_pico_cli_binary("z_sub");
+
+    let (mut zenohd, port) = spawn_zenohd_on_ephemeral_tcp(|| {
+        tempfile::tempfile().expect("tempfile for readiness probe stderr")
+    });
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+
+    // pico declares FIRST, so the CURRENT replay is what answers the poll --
+    // the half that is unreachable without an Interest at all.
+    let z_sub_stdout = tempfile::tempfile().expect("tempfile for z_sub stdout");
+    let z_sub_stdout_writer = z_sub_stdout.try_clone().expect("dup z_sub stdout handle");
+    let mut z_sub_stdout_reader = z_sub_stdout;
+    let mut z_sub_child = ChildGuard::wrap(
+        "z_sub subscriber (zenoh-pico, client of zenohd)",
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&z_sub)
+            .args(["-k", SUB_KEY, "-e", &endpoint, "-m", "client"])
+            .stdout(Stdio::from(z_sub_stdout_writer))
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("spawn z_sub via stdbuf"),
+    );
+
+    if let Err(captured) = wait_for_substring(
+        &mut z_sub_stdout_reader,
+        "Press CTRL-C to quit",
+        Duration::from_secs(10),
+    ) {
+        let _ = z_sub_child.child_mut().kill();
+        let _ = zenohd.child_mut().kill();
+        panic!(
+            "z_sub never declared its subscription within 10s, so this test had \
+             nothing for zenohd to forward.\n\
+             --- captured z_sub stdout ---\n{captured}"
+        );
+    }
+
+    // NO `--matching-log`: the whole point is that nothing declares a listener.
+    let demo_stderr = tempfile::tempfile().expect("tempfile for demo stderr");
+    let demo_stderr_writer = demo_stderr.try_clone().expect("dup demo stderr handle");
+    let mut demo_stderr_reader = demo_stderr;
+    let mut demo_child = ChildGuard::wrap(
+        "wz-ap-demo (--connect zenohd --publish --matching-poll)",
+        Command::new(&demo)
+            .arg("--connect")
+            .arg(format!("127.0.0.1:{port}"))
+            .arg("--publish")
+            .arg(PUBLISH_KEY)
+            .arg("--value")
+            .arg("routed-matching-poll")
+            .arg("--matching-poll")
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(demo_stderr_writer))
+            .spawn()
+            .expect("spawn wz-ap-demo --connect --matching-poll"),
+    );
+
+    let precondition =
+        format!("POLLING MATCHING STATUS keyexpr='{PUBLISH_KEY}' session-matching=on");
+    if let Err(captured) = wait_for_substring(
+        &mut demo_stderr_reader,
+        &precondition,
+        Duration::from_secs(20),
+    ) {
+        let _ = demo_child.child_mut().kill();
+        let _ = z_sub_child.child_mut().kill();
+        let _ = zenohd.child_mut().kill();
+        panic!(
+            "wz-ap-demo never reported a polling build with session-matching=on, so \
+             a `matching=true` below could not have meant anything (feature off, or \
+             the connect failed).\n--- captured wz-ap-demo stderr ---\n{captured}"
+        );
+    }
+
+    // THE CLAIM. No listener was ever declared here, so the only thing that can
+    // have asked zenohd for pico's declaration is the Interest R2577 moved to
+    // `declare_publisher`.
+    let rise = format!("MATCHING POLL keyexpr='{PUBLISH_KEY}' matching=true");
+    let outcome = wait_for_substring(&mut demo_stderr_reader, &rise, MATCHING_TIMEOUT);
+
+    let demo_captured = read_captured(&mut demo_stderr_reader);
+    let pico_captured = read_captured(&mut z_sub_stdout_reader);
+    let _ = demo_child.child_mut().kill();
+    let _ = z_sub_child.child_mut().kill();
+    let _ = zenohd.child_mut().kill();
+
+    if let Err(seen) = outcome {
+        panic!(
+            "a bare poll never saw the remote subscriber behind zenohd within {:?}. A \
+             real pico subscriber on `{SUB_KEY}` was declared at the router BEFORE wz \
+             connected, and wz publishes `{PUBLISH_KEY}` which it covers -- so either \
+             `declare_publisher` emitted no SUBSCRIBERS interest (the pre-R2577 state, \
+             in which this leg is exactly the residual) or zenohd did not answer it.\n\
              --- wz-ap-demo stderr ---\n{seen}{demo_captured}\n\
              --- z_sub stdout ---\n{pico_captured}",
             MATCHING_TIMEOUT,

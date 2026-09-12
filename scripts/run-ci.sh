@@ -15585,13 +15585,25 @@ layer_z_zenohd_interop() {
     # This is the one topology in which the interest is load-bearing. Directly
     # peered, pico pushes declarations unsolicited and the sibling
     # `wz_matching_status_driven_by_pico_zsub` (Layer E) passes with or without
-    # it; behind a router, `hat/router/pubsub.rs:120-125` forwards a subscriber
-    # declaration only to a face whose own interest asked for one. MEASURED as a
-    # red->green split on ONE feature edge: the identical fixture times out at
-    # 25s against a demo whose `session-matching` did not pull `declare-interest`
-    # and passes once it does, with pico's Puts flowing in BOTH runs -- so the
-    # data plane was never the difference.
-    _runci_guarded_test Z 1 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+    # it; behind a router a subscriber declaration reaches a face only when that
+    # face's own interest asked for one --
+    # `zenoh/src/net/routing/hat/peer/pubsub.rs` @ `.remote_interests` and
+    # `zenoh/src/net/routing/hat/broker/pubsub.rs` @ `.remote_interests` are
+    # where that filter lives at the pin. (R2578 repointed this: the citation
+    # here named line numbers in the ROUTER hat, which carries no interest logic
+    # at all -- the FIFTH copy of one wrong sentence this round has found.)
+    # MEASURED as a red->green split on ONE feature edge: the identical fixture
+    # times out at 25s against a demo whose `session-matching` did not pull
+    # `declare-interest` and passes once it does, with pico's Puts flowing in
+    # BOTH runs -- so the data plane was never the difference.
+    #
+    # R2578 — 1 -> 2. The second case is the BARE-POLL leg, which declares no
+    # listener. It is tagged `wz-proves: none`: measured, its verdict does not
+    # change when `session-matching`'s gated code is made inert, because a stock
+    # zenohd tells an unasking CLIENT face about a remote subscriber anyway. It
+    # is kept as an end-to-end regression guard, not as a cross-impl proof, and
+    # the count guard is what keeps it from being silently de-selected.
+    _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_matching_status_through_zenohd_router -- --ignored --quiet --test-threads=1 \
         || return 1
     # R311y775 — the QUERYABLES half, and the reason it is a SECOND file rather

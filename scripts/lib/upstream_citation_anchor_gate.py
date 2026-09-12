@@ -430,7 +430,19 @@ BARE_BUDGET = 58
 #: would have re-added the very root-less occurrence this entry records
 #: removing, and the first draft of this comment did exactly that (793 against
 #: a budget of 791, caught by this gate on its own source).
-ROOTLESS_LINE_BUDGET = 95
+#: R2578 — 95 -> 94. The FOURTH copy of the same dead claim, found while adding
+#: a leg to the fixture that carried it: its module doc named line numbers in
+#: the router hat as the reason a router withholds a declaration. Same repair as
+#: R2577's, onto the hats that actually carry the filter. Four sites for one
+#: wrong sentence is the number worth remembering -- a citation is copied far
+#: more often than it is checked.
+#: R2578 — 94 -> 93. The FIFTH copy, in `run-ci.sh`'s own lane comment, found
+#: while moving that lane's count guard for a new case. Five sites for one wrong
+#: sentence, across a source comment, an atom reason, a fixture's module doc, a
+#: budget comment in THIS file, and a CI lane -- and each was found only because
+#: something else brought a reader to the file. That is the measurement behind
+#: "a citation is copied far more often than it is checked".
+ROOTLESS_LINE_BUDGET = 93
 ROOTLESS_BARE_BUDGET = 36
 #: Root-less LINE citations whose file EXISTS at the pin but whose line number
 #: is past its end -- 1.5.0 line numbers on files that shrank. Measured, not
@@ -512,7 +524,9 @@ ROOTLESS_UNDECLARED_BUDGET = 660
 #: the filter, so they left the root-less population rather than moving between
 #: its halves. (Named in prose here for the reason that entry records: quoting
 #: the retired path would re-add the occurrence being removed.)
-ROOTLESS_TOTAL_BUDGET = 791
+#: R2578 — 791 -> 790, the same single occurrence as the budget above.
+#: R2578 — 790 -> 789, the same single occurrence as the budget above.
+ROOTLESS_TOTAL_BUDGET = 789
 
 #: A LIVE invocation of the RESOLUTION arm. R2242 split this gate in two and,
 #: in doing so, made `--resolve` a flag someone can simply stop passing: delete
