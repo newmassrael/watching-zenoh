@@ -45,11 +45,12 @@
 //! capi listener holds its faces independently of any one peer, which is why the
 //! wz-to-wz purge witness lives there and why this one does too.
 //!
-//! This file lives in `wz-integration-tests` because that crate ALREADY depends
-//! on `wz-capi-pico` (rlib) and owns `zenoh_pico_cli_binary`, whose provenance
-//! check refuses an oracle built from a different `vendor/zenoh-pico` state
-//! (R2326: existence was the wrong question). Putting it beside the other capi
-//! harness would have needed either a dev-dep CYCLE or a copy of that check.
+//! This file lives in `wz-integration-tests` rather than beside the other capi
+//! harness, and the manifest is the reason. `wz-integration-tests` depends on
+//! `wz-capi-pico` (rlib) already, and owns `zenoh_pico_cli_binary`, whose
+//! provenance check refuses an oracle built from a different `vendor/zenoh-pico`
+//! state (R2326: existence was the wrong question). The other placement would
+//! have needed either a dev-dep CYCLE or a copy of that check.
 
 use std::ffi::{c_void, CStr, CString};
 use std::process::{Command, Stdio};
