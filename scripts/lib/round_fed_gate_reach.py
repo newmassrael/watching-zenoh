@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import re
 import sys
 from pathlib import Path
 
@@ -153,13 +154,49 @@ def round_fed(sources: dict[str, str]) -> set[str]:
     return population
 
 
+#: A bash array whose name ends `_gates`, opened on its own line. The ONLY
+#: place a bare filename counts as an invocation -- see `hook_invocations`.
+GATE_LIST_OPEN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*_gates=\(\s*$")
+#: One quoted member of such a list: a bare module name, optional arguments.
+GATE_LIST_MEMBER = re.compile(r'"([A-Za-z0-9_.-]+\.py)(?:\s[^"]*)?"\s*$')
+
+
 def hook_invocations(hook_src: str) -> set[str]:
-    """Which scripts/lib modules the pre-push hook names."""
+    """Which scripts/lib modules the pre-push hook names.
+
+    TWO forms, because the hook legitimately uses both and forcing one shape on
+    it would be this gate dictating rather than reading.
+
+    Most gates spell the path on their own invocation line
+    (`python3 scripts/lib/x.py`). Gate 2z runs a LIST, and that list holds BARE
+    names with the prefix on the invocation instead -- which is not cosmetic:
+    `hook_gate_boundary_gate.py` grades a section by matching
+    `(python3|bash)\\s+scripts/` against its code, so a loop expanding a full
+    path out of an array reads to that gate as a section that runs NOTHING.
+    MEASURED rather than supposed: R2576 shipped the array form and hosted
+    Layer C0 refused the next push, naming `gate 2z`.
+
+    The bare form is read ONLY from inside a `*_gates=( ... )` array, so a
+    quoted filename anywhere else in the hook cannot pass for an invocation.
+    """
     out: set[str] = set()
     marker = LIB_REL + "/"
+    in_list = False
     for line in hook_src.split("\n"):
-        if line.lstrip().startswith("#"):
+        stripped = line.lstrip()
+        if stripped.startswith("#"):
             continue
+        if GATE_LIST_OPEN.match(stripped):
+            in_list = True
+            continue
+        if in_list:
+            if stripped.startswith(")"):
+                in_list = False
+            else:
+                member = GATE_LIST_MEMBER.match(stripped)
+                if member:
+                    out.add(member.group(1))
+                continue
         start = 0
         while True:
             at = line.find(marker, start)
@@ -289,6 +326,18 @@ def selftest() -> int:
         ("arguments do not hide the name", "python3 scripts/lib/a_gate.py --check\n", {"a_gate.py"}),
         ("a COMMENTED invocation does not count", "# python3 scripts/lib/a_gate.py\n", set()),
         ("two on one line are both read", "x=scripts/lib/a.py; y=scripts/lib/b.py\n", {"a.py", "b.py"}),
+        (
+            "a BARE name inside a `*_gates=(` list is an invocation",
+            'round_fed_gates=(\n    "a.py"\n    "b.py --check"\n)\n',
+            {"a.py", "b.py"},
+        ),
+        ("the same bare name OUTSIDE such a list is not", 'echo "a.py"\n', set()),
+        (
+            "the list ends at its closing paren",
+            'x_gates=(\n    "a.py"\n)\necho "b.py"\n',
+            {"a.py"},
+        ),
+        ("an array that is not a gate list opens nothing", 'other=(\n    "a.py"\n)\n', set()),
     ]
     for name, src, want in hook_cases:
         got = hook_invocations(src)

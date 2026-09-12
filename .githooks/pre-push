@@ -625,31 +625,46 @@ fi
 # members are DEFERRED for cost or for needing the network, each with its
 # figure in that table, and the gate PRINTS them on every run so a deferral can
 # never read as coverage.
+# ⚠ THE LIST HOLDS BARE NAMES AND THE INVOCATION CARRIES THE PREFIX, which is
+# not a style choice: `hook_gate_boundary_gate.py` grades every gate section by
+# what it RUNS, matching `(python3|bash)\s+scripts/` against the section's code.
+# The first cut of this block expanded a full path out of the array
+# (`python3 "${round_fed_cmd[@]}"`), so the literal never appeared on any
+# invocation line and that gate refused the push -- correctly: a reader, human
+# or program, could not see what the loop executes. Same lesson bx's own rule
+# records about hiding a command inside a wrapper.
+# ⚠ WHAT THE BARE FORM COSTS, recorded rather than left as a silent count drop:
+# `hook_script_reference_gate.py` verifies that every `scripts/…` PATH a hook
+# names exists, and these twenty no longer appear as paths, so its population
+# fell from 66 to 46. A typo here is caught instead by python failing on the
+# missing module -- which exits the hook, loudly -- and by
+# `round_fed_gate_reach.py`, whose population IS the scripts/lib directory.
+# Neither is a static path check; that is the trade.
 round_fed_gates=(
-    "scripts/lib/round_fed_gate_reach.py"
-    "scripts/lib/depth_axis_census.py"
-    "scripts/lib/gate_reason_claims.py"
-    "scripts/lib/lane_locality_claim_gate.py"
-    "scripts/lib/replication_fingerprint_recipe_gate.py"
-    "scripts/lib/serde_format_surface_gate.py"
-    "scripts/lib/store_reasons_resolve.py"
-    "scripts/lib/token_plane_parity_gate.py"
-    "scripts/lib/upstream_feature_census.py"
-    "scripts/lib/upstream_link_axis_gate.py --check"
-    "scripts/lib/upstream_link_config_keys_gate.py --check"
-    "scripts/lib/upstream_reads_the_surface.py"
-    "scripts/lib/apt_package_census.py"
-    "scripts/lib/armed_skip_guard.py --check"
-    "scripts/lib/decline_arming_gate.py --check"
-    "scripts/lib/gate_provenance_lint.py"
-    "scripts/lib/gate_test_pin_lint.py"
-    "scripts/lib/lane_reach_gate.py --check"
-    "scripts/lib/python_floor_lint.py"
-    "scripts/lib/store_reader_lane_lint.py"
+    "round_fed_gate_reach.py"
+    "depth_axis_census.py"
+    "gate_reason_claims.py"
+    "lane_locality_claim_gate.py"
+    "replication_fingerprint_recipe_gate.py"
+    "serde_format_surface_gate.py"
+    "store_reasons_resolve.py"
+    "token_plane_parity_gate.py"
+    "upstream_feature_census.py"
+    "upstream_link_axis_gate.py --check"
+    "upstream_link_config_keys_gate.py --check"
+    "upstream_reads_the_surface.py"
+    "apt_package_census.py"
+    "armed_skip_guard.py --check"
+    "decline_arming_gate.py --check"
+    "gate_provenance_lint.py"
+    "gate_test_pin_lint.py"
+    "lane_reach_gate.py --check"
+    "python_floor_lint.py"
+    "store_reader_lane_lint.py"
 )
 for round_fed_gate in "${round_fed_gates[@]}"; do
     read -ra round_fed_cmd <<< "$round_fed_gate"
-    if ! python3 "${round_fed_cmd[@]}"; then
+    if ! python3 scripts/lib/"${round_fed_cmd[@]}"; then
         echo "" >&2
         echo "pre-push: [gate 2z] ${round_fed_cmd[0]} FAILED." >&2
         echo "          It is fed by what this round changed -- the atomic" >&2
