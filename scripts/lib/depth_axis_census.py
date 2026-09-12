@@ -839,7 +839,14 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # mixed-completeness legs each with a control that reds it alone. Moved in the
 # same commit as the grade, which is the whole of what this pin's history above
 # is about.
-PIN_REACHED = 41
+# R2589 — 41 -> 45, the opposite event four times over. `transport-link-tcp`,
+# `-tls`, `-quic` and `-quic-datagram` went COMPLETE -> PARTIAL when
+# `upstream_link_config_keys_gate.py` was widened to the keys a link CONSUMES from
+# `zenoh-link-commons` and found each reading keys wz does not (`bind`, `dscp`,
+# the socket buffers, inline PEM, cert-expiration close, handshake timeout, QUIC
+# MTU). All four are reached by an executing test, so UNREACHED and NO_SYMBOL
+# hold.
+PIN_REACHED = 45
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -1057,8 +1064,17 @@ PIN_NO_SYMBOL = 2
 # the default group for an IPv6 value. That citation is the whole delta. The same
 # clause cites the upstream `multicast.rs` three times, and those land in the
 # upstream bucket this census does not judge, so AMBIGUOUS holds at 45.
-PIN_WZ_CITATIONS = 238
-PIN_AMBIGUOUS = 45
+# (R2587 corrected that clause's claim: a v6 scouting address is REFUSED at the
+# argv and config boundaries, so `args.rs`'s fallback is unreachable from operator
+# input. The citation, and so the count, are unchanged.)
+#
+# R2589 — 238 -> 252 and 45 -> 48, from four atoms ENTERING the corpus (see
+# PIN_REACHED). DERIVED with `citation_audit` over each re-graded reason alone:
+# tcp (wz 1, ambiguous 1), tls (4, 0), quic (5, 2), quic-datagram (4, 0), summing
+# to exactly +14 and +3. The R2589 clause appended to each cites no `.rs` / `.c` /
+# `.h` file, so every one of those citations came from the reasons' existing text.
+PIN_WZ_CITATIONS = 252
+PIN_AMBIGUOUS = 48
 
 
 class Fatal(Exception):
