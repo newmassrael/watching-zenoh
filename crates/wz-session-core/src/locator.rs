@@ -353,6 +353,17 @@ pub struct LinkTlsMaterial {
     /// roots. A tail written for the dial half would otherwise make a listener
     /// DEMAND client certificates, which upstream does only under this flag.
     pub enable_mtls: Option<bool>,
+    /// R2600 — `close_link_on_expiration`: tear the link down when the peer's
+    /// certificate chain expires, rather than letting an expired identity keep
+    /// a session alive. Upstream defaults it to `false`
+    /// (`io/zenoh-link-commons/src/tls.rs` @ `pub const TLS_CLOSE_LINK_ON_EXPIRATION_DEFAULT: bool = false;`).
+    ///
+    /// The value the runtime acts on is the CHAIN's earliest `not_after`, not
+    /// the leaf's — upstream folds the whole chain with `min`
+    /// (`io/zenoh-link-commons/src/quic/utils.rs` @ `pub fn get_cert_chain_expiration(conn: &quinn::Connection) -> ZResult<Option<OffsetDateTime>> {`),
+    /// so an intermediate CA expiring first governs. Reading only the leaf
+    /// would keep a link alive that upstream drops.
+    pub close_link_on_expiration: Option<bool>,
 }
 
 impl LinkTlsMaterial {
@@ -364,26 +375,44 @@ impl LinkTlsMaterial {
         connect_certificate: None,
         connect_private_key: None,
         enable_mtls: None,
+        close_link_on_expiration: None,
     };
 
-    /// Whether the tail named no PEM MATERIAL — the state nearly every locator
-    /// is in, and the one that leaves the ambient config unlayered.
+    /// Whether the tail named NOTHING this layer would act on.
     ///
-    /// `enable_mtls` is deliberately NOT counted: it is a modifier on material,
-    /// not material, so a tail carrying it alone has nothing to lay over the
-    /// ambient config and the ambient config already encodes its own mTLS
-    /// decision.
+    /// R2600 CORRECTS R2599's rule here, which counted only the five PEM
+    /// materials and said of `enable_mtls` that "a tail carrying it alone has
+    /// nothing to lay over the ambient config". That reasoning does not survive
+    /// a second flag. `close_link_on_expiration` has NO other surface in wz —
+    /// unlike the certificate material it modifies nothing and the dial/accept
+    /// configs carry no such field — so under the old rule a tail that named it
+    /// ALONE, meaning to arm expiry-close over ambient certificates, parsed to
+    /// `None` and was silently dropped. A key wz advertises and then discards is
+    /// worse than one it never read.
+    ///
+    /// So emptiness is now "no field is set", which is what the name claimed all
+    /// along. The cost is one small allocation for a flag-only tail; the
+    /// alternative was a key that works only in the company of material.
     pub fn is_empty(&self) -> bool {
         self.root_ca.is_none()
             && self.listen_certificate.is_none()
             && self.listen_private_key.is_none()
             && self.connect_certificate.is_none()
             && self.connect_private_key.is_none()
+            && self.enable_mtls.is_none()
+            && self.close_link_on_expiration.is_none()
     }
 
     /// `enable_mtls`, defaulted the way upstream defaults it.
     pub fn mtls(&self) -> bool {
         self.enable_mtls.unwrap_or(false)
+    }
+
+    /// R2600 — `close_link_on_expiration`, defaulted the way upstream defaults
+    /// it. `false` means an expired peer identity keeps its link, which is
+    /// upstream's default too and not a wz narrowing.
+    pub fn closes_on_expiration(&self) -> bool {
+        self.close_link_on_expiration.unwrap_or(false)
     }
 
     /// R2599 — the material a bare `key=value;...` span names, read exactly as
@@ -623,6 +652,13 @@ const LOCATOR_TLS_CONNECT_KEY_FILE_KEY: &str = "connect_private_key_file";
 /// const adds no key to the honoured set — it adds the key to THIS surface,
 /// without which the five materials above cannot be honoured faithfully.
 const LOCATOR_TLS_ENABLE_MTLS_KEY: &str = "enable_mtls";
+
+/// R2600 — close the link when the PEER's certificate chain expires
+/// (`io/zenoh-link-commons/src/tls.rs` @ `pub const TLS_CLOSE_LINK_ON_EXPIRATION: &str = "close_link_on_expiration";`).
+/// The last upstream key of the quic family's vocabulary wz did not read, and
+/// unlike the fifteen R2599 added this one is a BEHAVIOUR rather than a
+/// spelling: honouring it means watching a clock, not decoding a value.
+const LOCATOR_TLS_CLOSE_ON_EXPIRATION_KEY: &str = "close_link_on_expiration";
 
 /// zenoh `UDP_MULTICAST_TTL` config key (`zenoh-link-udp/src/lib.rs:111`).
 const LOCATOR_MCAST_TTL_KEY: &str = "ttl";
@@ -897,28 +933,38 @@ fn parse_tls_material(config: &str) -> Result<Option<Box<LinkTlsMaterial>>, Loca
             LOCATOR_TLS_CONNECT_KEY_BASE64_KEY,
             LOCATOR_TLS_CONNECT_KEY_FILE_KEY,
         )?,
-        // Upstream parses this with `s.parse()` into a `bool` and refuses what
-        // that refuses
-        // (`io/zenoh-link-commons/src/quic/utils.rs` @ `.map_err(|_| zerror!("Unknown enable mTLS argument: {}", s))?,`),
-        // so the accepted set here is `true` / `false` and nothing wider.
-        enable_mtls: match lookup_param(config, LOCATOR_TLS_ENABLE_MTLS_KEY) {
-            None => None,
-            Some(value) => {
-                Some(
-                    value
-                        .parse::<bool>()
-                        .map_err(|_| LocatorParseError::BadConfigValue {
-                            key: LOCATOR_TLS_ENABLE_MTLS_KEY,
-                            value: value.to_string(),
-                        })?,
-                )
-            }
-        },
+        enable_mtls: bool_flag(config, LOCATOR_TLS_ENABLE_MTLS_KEY)?,
+        close_link_on_expiration: bool_flag(config, LOCATOR_TLS_CLOSE_ON_EXPIRATION_KEY)?,
     };
     if material.is_empty() {
         return Ok(None);
     }
     Ok(Some(Box::new(material)))
+}
+
+/// R2600 — ONE boolean flag on the tail, refusing exactly what upstream's own
+/// parse refuses.
+///
+/// Upstream reads each of its tail booleans with `s.parse()` and bails on
+/// anything else
+/// (`io/zenoh-link-commons/src/quic/utils.rs` @ `.map_err(|_| zerror!("Unknown enable mTLS argument: {}", s))?,`),
+/// so the accepted set here is `true` / `false` and nothing wider. Extracted to
+/// ONE reader when the second flag arrived, for the reason [`pem_source`] is one
+/// reader for fifteen spellings: a third copy is a third place for the accepted
+/// set to drift.
+fn bool_flag(config: &str, key: &'static str) -> Result<Option<bool>, LocatorParseError> {
+    match lookup_param(config, key) {
+        None => Ok(None),
+        Some(value) => {
+            value
+                .parse::<bool>()
+                .map(Some)
+                .map_err(|_| LocatorParseError::BadConfigValue {
+                    key,
+                    value: value.to_string(),
+                })
+        }
+    }
 }
 
 /// R2599 — ONE material's source, in upstream's own precedence: raw, then
@@ -3198,6 +3244,58 @@ mod tests {
         assert_eq!(p.tls, None);
         assert!(p.tls().is_empty());
         assert_eq!(p.tls(), &LinkTlsMaterial::NONE);
+    }
+
+    /// R2600 — both tail booleans parse, default upstream's way, and refuse
+    /// what upstream's `s.parse()` refuses. ONE test for both keys because
+    /// R2600 made them one reader (`bool_flag`); it is also the parse branch
+    /// open-debt item 728 names for `enable_mtls`.
+    #[test]
+    fn the_tail_booleans_parse_default_and_refuse_a_non_bool() {
+        let at = |tail: &str| {
+            parse_locator(&alloc::format!("quic/1.2.3.4:7447#{tail}")).expect("addr parses")
+        };
+        let on = at("enable_mtls=true;close_link_on_expiration=true");
+        assert!(on.tls().mtls());
+        assert!(on.tls().closes_on_expiration());
+        let off = at("enable_mtls=false;close_link_on_expiration=false");
+        assert!(!off.tls().mtls());
+        assert!(!off.tls().closes_on_expiration());
+        // Upstream's default for BOTH is false, so a silent tail must not arm
+        // either: an accidental mTLS demand or an accidental teardown would be
+        // the expensive direction to be wrong in.
+        let silent = at("iface=eth0");
+        assert!(!silent.tls().mtls());
+        assert!(!silent.tls().closes_on_expiration());
+        for key in ["enable_mtls", "close_link_on_expiration"] {
+            assert_eq!(
+                parse_locator(&alloc::format!("quic/1.2.3.4:7447#{key}=yes")),
+                Err(LocatorParseError::BadConfigValue {
+                    key,
+                    value: "yes".to_string(),
+                }),
+                "{key} must refuse a non-bool exactly as upstream's parse does"
+            );
+        }
+    }
+
+    /// R2600 — a tail naming ONLY a flag is CARRIED, not dropped.
+    ///
+    /// This is the regression guard for R2599's own rule: `is_empty` counted
+    /// the five PEM materials alone, so a tail arming expiry-close over AMBIENT
+    /// certificates parsed to `None` and vanished. `close_link_on_expiration`
+    /// has no other surface in wz, so that silent drop made the key unusable
+    /// except beside material it does not need.
+    #[test]
+    fn a_tail_naming_only_a_flag_is_still_carried() {
+        let p =
+            parse_locator("quic/1.2.3.4:7447#close_link_on_expiration=true").expect("addr parses");
+        assert!(p.tls.is_some(), "a flag-only tail must survive the parse");
+        assert!(p.tls().closes_on_expiration());
+        // ...and it names no material, which is exactly the case the old rule
+        // mistook for "nothing to carry".
+        assert!(p.tls().root_ca.is_none());
+        assert!(p.tls().listen_certificate.is_none());
     }
 
     /// R2599 — a DNS-named endpoint carries the material a numeric one does.
