@@ -89,6 +89,12 @@ pub enum ReconnectLocator {
         /// [`AnyLocator`] carries it — this narrowing moves the field through
         /// unchanged, so it inherits the size reason with it.
         retry: Option<alloc::boxed::Box<crate::locator::LocatorRetry>>,
+        /// R2599 — the TLS material, preserved across the narrowing for the
+        /// reason the retry overrides are, and with a sharper failure: a
+        /// reconnect that dropped it would re-dial a `quic/...` or `tls/...`
+        /// endpoint with no certificate material at all, so the FIRST dial
+        /// would succeed and every later one would be refused as cert-absent.
+        tls: Option<alloc::boxed::Box<crate::locator::LinkTlsMaterial>>,
     },
 }
 
@@ -136,12 +142,14 @@ impl From<ReconnectLocator> for AnyLocator {
                 port,
                 socket,
                 retry,
+                tls,
             } => AnyLocator::Named {
                 proto,
                 host,
                 port,
                 socket,
                 retry,
+                tls,
             },
         }
     }
@@ -162,12 +170,14 @@ impl TryFrom<AnyLocator> for ReconnectLocator {
                 port,
                 socket,
                 retry,
+                tls,
             } => Ok(ReconnectLocator::Named {
                 proto,
                 host,
                 port,
                 socket,
                 retry,
+                tls,
             }),
             AnyLocator::Serial(_) => Err(NotReconnectable::Serial),
             // R311xi — unix-domain socket: non-IP, not in the reconnect set
@@ -476,6 +486,7 @@ mod reconnect_locator_tests {
             mcast_ttl: None,
             mcast_join: alloc::vec::Vec::new(),
             retry: None,
+            tls: None,
         }
     }
 
@@ -500,6 +511,7 @@ mod reconnect_locator_tests {
             port: 7447,
             socket: None,
             retry: None,
+            tls: None,
         };
         let reconnectable =
             ReconnectLocator::try_from(any.clone()).expect("named is reconnectable");
@@ -511,6 +523,7 @@ mod reconnect_locator_tests {
                 port: 7447,
                 socket: None,
                 retry: None,
+                tls: None,
             }
         );
         assert_eq!(AnyLocator::from(reconnectable), any);

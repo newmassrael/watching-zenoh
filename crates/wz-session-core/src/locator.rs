@@ -200,6 +200,16 @@ pub struct ParsedLocator {
     /// which is nearly all of them; BOXED when present for the reason R2496b
     /// measured rather than assumed. See [`LocatorRetry`]'s size note.
     pub retry: Option<Box<LocatorRetry>>,
+    /// R2599 — the TLS material named on the same `#`-config tail. See
+    /// [`LinkTlsMaterial`]; read it through [`Self::tls`], which answers the
+    /// all-`None` value when the tail named none.
+    ///
+    /// `None` for every locator whose tail names no certificate material, which
+    /// is nearly all of them, and BOXED when present for the reason
+    /// [`Self::retry`] is: a PEM blob written inline is the largest thing a
+    /// tail can carry, so paying for it in every `ParsedLocator` would be the
+    /// wrong trade.
+    pub tls: Option<Box<LinkTlsMaterial>>,
 }
 
 /// R2590 — the options an IP-family link applies to the transport it creates,
@@ -282,10 +292,121 @@ impl LinkSocketOptions {
     }
 }
 
+/// R2599 — WHERE one piece of PEM material named by a locator tail comes from,
+/// UNRESOLVED.
+///
+/// The encoding is resolved where the bytes can actually be fetched, never
+/// here: this crate is `no_std` and a file read belongs to the runtime. That is
+/// the split `CapiTlsConfig` already draws for the C ABI — the edge holding the
+/// key spellings resolves "path or base64" ONCE and hands PEM BYTES inward, so
+/// no layer below it carries key-encoding knowledge. Named in a code span
+/// rather than linked: it lives in a crate this one does not depend on.
+///
+/// Upstream's own loaders take the three in this order — raw, then base64, then
+/// file — and stop at the first present
+/// (`io/zenoh-link-commons/src/quic/utils.rs` @ `if let Some(value) = config.get(tls_private_key_raw_config_key) {`),
+/// so a tail naming two spellings of one material resolves to the earlier of
+/// them. That precedence is applied at PARSE time here, which is the same
+/// answer arrived at one step sooner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PemSource {
+    /// `*_raw=<PEM>` — the PEM text itself, inline in the tail.
+    Raw(String),
+    /// `*_base64=<b64>` — the same PEM, base64-wrapped into one token.
+    Base64(String),
+    /// `*_file=<path>` — a path the runtime reads the PEM out of.
+    File(String),
+}
+
+/// R2599 — the TLS material a locator's `#`-config tail names.
+///
+/// NOT a part of [`LinkSocketOptions`], deliberately and by an existing
+/// decision: the runtime's `LinkDefaults` REFUSES certificate keys, because
+/// upstream's inspector renders them into the same param span while wz takes
+/// them through its dial and accept configs instead. That line stays drawn —
+/// this value rides BESIDE the socket options, not inside them, and the layer
+/// it is laid over is the ambient dial/accept config rather than
+/// `LinkDefaults`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LinkTlsMaterial {
+    /// `root_ca_certificate_{raw,base64,file}` — the trust bundle a DIAL
+    /// verifies the peer's cert against, and, under mTLS, the client-cert roots
+    /// a LISTEN verifies against. Upstream reads one key for both roles
+    /// (`io/zenoh-link-commons/src/quic/utils.rs` @ `fn load_trust_anchors(config: &Config<'_>) -> ZResult<Option<RootCertStore>> {`).
+    pub root_ca: Option<PemSource>,
+    /// `listen_certificate_{raw,base64,file}` — the chain a LISTEN presents.
+    pub listen_certificate: Option<PemSource>,
+    /// `listen_private_key_{raw,base64,file}` — the key matching that chain.
+    pub listen_private_key: Option<PemSource>,
+    /// `connect_certificate_{raw,base64,file}` — the client cert a mutual-TLS
+    /// DIAL presents.
+    pub connect_certificate: Option<PemSource>,
+    /// `connect_private_key_{raw,base64,file}` — the key matching that cert.
+    pub connect_private_key: Option<PemSource>,
+    /// `enable_mtls` — whether `root_ca` is ALSO the client-cert verifier a
+    /// LISTEN requires, and whether a DIAL presents `connect_certificate`.
+    /// Upstream defaults it to `false`
+    /// (`io/zenoh-link-commons/src/tls.rs` @ `pub const TLS_ENABLE_MTLS_DEFAULT: bool = false;`).
+    ///
+    /// Carried here rather than left out because WITHOUT it `root_ca` has two
+    /// meanings on one key: a dial's trust bundle and a listen's client-cert
+    /// roots. A tail written for the dial half would otherwise make a listener
+    /// DEMAND client certificates, which upstream does only under this flag.
+    pub enable_mtls: Option<bool>,
+}
+
+impl LinkTlsMaterial {
+    /// The value a locator whose tail names none of these keys answers.
+    pub const NONE: LinkTlsMaterial = LinkTlsMaterial {
+        root_ca: None,
+        listen_certificate: None,
+        listen_private_key: None,
+        connect_certificate: None,
+        connect_private_key: None,
+        enable_mtls: None,
+    };
+
+    /// Whether the tail named no PEM MATERIAL — the state nearly every locator
+    /// is in, and the one that leaves the ambient config unlayered.
+    ///
+    /// `enable_mtls` is deliberately NOT counted: it is a modifier on material,
+    /// not material, so a tail carrying it alone has nothing to lay over the
+    /// ambient config and the ambient config already encodes its own mTLS
+    /// decision.
+    pub fn is_empty(&self) -> bool {
+        self.root_ca.is_none()
+            && self.listen_certificate.is_none()
+            && self.listen_private_key.is_none()
+            && self.connect_certificate.is_none()
+            && self.connect_private_key.is_none()
+    }
+
+    /// `enable_mtls`, defaulted the way upstream defaults it.
+    pub fn mtls(&self) -> bool {
+        self.enable_mtls.unwrap_or(false)
+    }
+
+    /// R2599 — the material a bare `key=value;...` span names, read exactly as
+    /// a locator's `#`-config tail is. The twin of
+    /// [`LinkSocketOptions::from_config_span`], and it exists for the same
+    /// reason: upstream's per-link-kind configuration takes this shape before
+    /// it is merged under an endpoint's own parameters, so one parser serves
+    /// both.
+    pub fn from_config_span(config: &str) -> Result<LinkTlsMaterial, LocatorParseError> {
+        Ok(parse_tls_material(config)?.map_or(LinkTlsMaterial::NONE, |boxed| *boxed))
+    }
+}
+
 impl ParsedLocator {
     /// The locator's socket options, all-`None` when its tail named none.
     pub fn socket(&self) -> &LinkSocketOptions {
         self.socket.as_deref().unwrap_or(&LinkSocketOptions::NONE)
+    }
+
+    /// R2599 — the locator's TLS material, all-`None` when its tail named none.
+    /// The accessor twin of [`Self::socket`].
+    pub fn tls(&self) -> &LinkTlsMaterial {
+        self.tls.as_deref().unwrap_or(&LinkTlsMaterial::NONE)
     }
 }
 
@@ -420,6 +541,10 @@ pub fn parse_locator(locator: &str) -> Result<ParsedLocator, LocatorParseError> 
         // R2496 — CONFIG span again, for the reason the two above take it: this
         // is where zenoh reads the per-endpoint retry overrides too.
         retry: parse_retry(parts.config)?,
+        // R2599 — CONFIG span again. Upstream's link reads its certificate
+        // material off the endpoint's config, never its metadata
+        // (`io/zenoh-link-commons/src/quic/unicast.rs` @ `let epconf = endpoint.config();`).
+        tls: parse_tls_material(parts.config)?,
     })
 }
 
@@ -456,6 +581,48 @@ const LOCATOR_QUIC_INITIAL_MTU_KEY: &str = "initial_mtu";
 /// R2598 — zenoh `QUIC_MTU_DISCOVERY_INTERVAL` config key
 /// (`io/zenoh-link-commons/src/quic/utils.rs` @ `pub const QUIC_MTU_DISCOVERY_INTERVAL: &str = "mtu_discovery_interval_secs";`).
 const LOCATOR_QUIC_MTU_DISCOVERY_INTERVAL_KEY: &str = "mtu_discovery_interval_secs";
+
+/// R2599 — the five TLS MATERIAL values zenoh reads off a locator's
+/// `#`-config tail, each in the three spellings upstream accepts. The
+/// vocabulary is `zenoh-link-commons`'s `tls` module, read by the tls link and
+/// by the quic family's configurator alike
+/// (`io/zenoh-link-commons/src/tls.rs` @ `pub const TLS_ROOT_CA_CERTIFICATE_RAW: &str = "root_ca_certificate_raw";`).
+///
+/// ⚠ THE TAIL IS THE ONLY SURFACE THE `_raw` SPELLINGS HAVE, in either
+/// implementation. zenoh's config FILE carries the path form and the `_base64`
+/// form and no `_raw` field at all
+/// (`commons/zenoh-config/src/lib.rs` @ `root_ca_certificate_base64: Option<SecretValue>,`),
+/// so an operator writing inline PEM has nowhere else to write it. That is why
+/// these land here rather than beside the keys `HONOURED_CONFIG_KEYS` carries.
+///
+/// All FIFTEEN are parsed, not the five `_raw` alone, and the reason is the one
+/// the retry keys above state: an endpoint string moves between the two
+/// implementations unchanged. wz does read the file and base64 material today —
+/// through the zenoh-config path it honours and through the zenoh-pico config
+/// macros its C ABI reads — but neither route is this one, so a tail naming
+/// `listen_certificate_file` was silently dropped before R2599.
+const LOCATOR_TLS_ROOT_CA_RAW_KEY: &str = "root_ca_certificate_raw";
+const LOCATOR_TLS_ROOT_CA_BASE64_KEY: &str = "root_ca_certificate_base64";
+const LOCATOR_TLS_ROOT_CA_FILE_KEY: &str = "root_ca_certificate_file";
+const LOCATOR_TLS_LISTEN_CERT_RAW_KEY: &str = "listen_certificate_raw";
+const LOCATOR_TLS_LISTEN_CERT_BASE64_KEY: &str = "listen_certificate_base64";
+const LOCATOR_TLS_LISTEN_CERT_FILE_KEY: &str = "listen_certificate_file";
+const LOCATOR_TLS_LISTEN_KEY_RAW_KEY: &str = "listen_private_key_raw";
+const LOCATOR_TLS_LISTEN_KEY_BASE64_KEY: &str = "listen_private_key_base64";
+const LOCATOR_TLS_LISTEN_KEY_FILE_KEY: &str = "listen_private_key_file";
+const LOCATOR_TLS_CONNECT_CERT_RAW_KEY: &str = "connect_certificate_raw";
+const LOCATOR_TLS_CONNECT_CERT_BASE64_KEY: &str = "connect_certificate_base64";
+const LOCATOR_TLS_CONNECT_CERT_FILE_KEY: &str = "connect_certificate_file";
+const LOCATOR_TLS_CONNECT_KEY_RAW_KEY: &str = "connect_private_key_raw";
+const LOCATOR_TLS_CONNECT_KEY_BASE64_KEY: &str = "connect_private_key_base64";
+const LOCATOR_TLS_CONNECT_KEY_FILE_KEY: &str = "connect_private_key_file";
+
+/// R2599 — the modifier that decides what `root_ca_certificate_*` MEANS on a
+/// listen tail (`io/zenoh-link-commons/src/tls.rs` @ `pub const TLS_ENABLE_MTLS: &str = "enable_mtls";`).
+/// Already credited to wz through the zenoh-pico macro its C ABI reads, so this
+/// const adds no key to the honoured set — it adds the key to THIS surface,
+/// without which the five materials above cannot be honoured faithfully.
+const LOCATOR_TLS_ENABLE_MTLS_KEY: &str = "enable_mtls";
 
 /// zenoh `UDP_MULTICAST_TTL` config key (`zenoh-link-udp/src/lib.rs:111`).
 const LOCATOR_MCAST_TTL_KEY: &str = "ttl";
@@ -691,6 +858,100 @@ fn parse_socket_options(config: &str) -> Result<Option<Box<LinkSocketOptions>>, 
         return Ok(None);
     }
     Ok(Some(Box::new(options)))
+}
+
+/// R2599 — the TLS material a `#`-config span names, or `None` when it names
+/// none. The [`parse_socket_options`] twin, boxed for the same reason.
+///
+/// Each material is read through [`pem_source`], so the raw / base64 / file
+/// precedence is upstream's and lives in ONE place rather than five.
+fn parse_tls_material(config: &str) -> Result<Option<Box<LinkTlsMaterial>>, LocatorParseError> {
+    let material = LinkTlsMaterial {
+        root_ca: pem_source(
+            config,
+            LOCATOR_TLS_ROOT_CA_RAW_KEY,
+            LOCATOR_TLS_ROOT_CA_BASE64_KEY,
+            LOCATOR_TLS_ROOT_CA_FILE_KEY,
+        )?,
+        listen_certificate: pem_source(
+            config,
+            LOCATOR_TLS_LISTEN_CERT_RAW_KEY,
+            LOCATOR_TLS_LISTEN_CERT_BASE64_KEY,
+            LOCATOR_TLS_LISTEN_CERT_FILE_KEY,
+        )?,
+        listen_private_key: pem_source(
+            config,
+            LOCATOR_TLS_LISTEN_KEY_RAW_KEY,
+            LOCATOR_TLS_LISTEN_KEY_BASE64_KEY,
+            LOCATOR_TLS_LISTEN_KEY_FILE_KEY,
+        )?,
+        connect_certificate: pem_source(
+            config,
+            LOCATOR_TLS_CONNECT_CERT_RAW_KEY,
+            LOCATOR_TLS_CONNECT_CERT_BASE64_KEY,
+            LOCATOR_TLS_CONNECT_CERT_FILE_KEY,
+        )?,
+        connect_private_key: pem_source(
+            config,
+            LOCATOR_TLS_CONNECT_KEY_RAW_KEY,
+            LOCATOR_TLS_CONNECT_KEY_BASE64_KEY,
+            LOCATOR_TLS_CONNECT_KEY_FILE_KEY,
+        )?,
+        // Upstream parses this with `s.parse()` into a `bool` and refuses what
+        // that refuses
+        // (`io/zenoh-link-commons/src/quic/utils.rs` @ `.map_err(|_| zerror!("Unknown enable mTLS argument: {}", s))?,`),
+        // so the accepted set here is `true` / `false` and nothing wider.
+        enable_mtls: match lookup_param(config, LOCATOR_TLS_ENABLE_MTLS_KEY) {
+            None => None,
+            Some(value) => {
+                Some(
+                    value
+                        .parse::<bool>()
+                        .map_err(|_| LocatorParseError::BadConfigValue {
+                            key: LOCATOR_TLS_ENABLE_MTLS_KEY,
+                            value: value.to_string(),
+                        })?,
+                )
+            }
+        },
+    };
+    if material.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(Box::new(material)))
+}
+
+/// R2599 — ONE material's source, in upstream's own precedence: raw, then
+/// base64, then file, stopping at the first the span names
+/// (`io/zenoh-link-commons/src/quic/utils.rs` @ `if let Some(b64_key) = config.get(tls_private_key_base64_config_key) {`).
+///
+/// An EMPTY value is refused rather than carried, the rule `bind` already
+/// follows: upstream would take the empty string as the material itself and
+/// fail later inside rustls, naming the PEM decoder instead of the locator.
+/// Refusing here names the key an operator mistyped.
+fn pem_source(
+    config: &str,
+    raw_key: &'static str,
+    base64_key: &'static str,
+    file_key: &'static str,
+) -> Result<Option<PemSource>, LocatorParseError> {
+    for (key, wrap) in [
+        (raw_key, PemSource::Raw as fn(String) -> PemSource),
+        (base64_key, PemSource::Base64 as fn(String) -> PemSource),
+        (file_key, PemSource::File as fn(String) -> PemSource),
+    ] {
+        match lookup_param(config, key) {
+            None => continue,
+            Some("") => {
+                return Err(LocatorParseError::BadConfigValue {
+                    key,
+                    value: String::new(),
+                })
+            }
+            Some(value) => return Ok(Some(wrap(value.to_string()))),
+        }
+    }
+    Ok(None)
 }
 
 /// R2590 — a `dscp` value in upstream's EXACT accepted set, or `None`.
@@ -1365,6 +1626,12 @@ pub enum AnyLocator {
         /// tail is silent, boxed when it is not — the same shape, and the same
         /// size reason, as [`ParsedLocator::retry`].
         retry: Option<Box<LocatorRetry>>,
+        /// R2599 — the TLS material from the same config tail, carried for the
+        /// reason `retry` is: the tail belongs to the endpoint, not to the
+        /// address shape that happens to spell it. `None` when the tail names
+        /// no certificate material, boxed when it does — the shape and the size
+        /// reason of [`ParsedLocator::tls`].
+        tls: Option<Box<LinkTlsMaterial>>,
     },
     /// A serial endpoint (`serial/...`) — see [`SerialEndpoint`]. ALWAYS
     /// present (R311ny: the serial locator leaf is ungated), so a
@@ -1496,6 +1763,10 @@ pub fn parse_any_locator(locator: &str) -> Result<AnyLocator, AnyLocatorError> {
                 // here would leave the silent-default defect standing for half
                 // the endpoint population.
                 retry: parse_retry(config).map_err(AnyLocatorError::Ip)?,
+                // R2599 — a DNS-named endpoint carries the same tail, so it
+                // carries the same certificate material. Upstream resolves the
+                // name and reads one config either way.
+                tls: parse_tls_material(config).map_err(AnyLocatorError::Ip)?,
             }),
             None => Err(AnyLocatorError::Ip(LocatorParseError::BadAddress(addr))),
         },
@@ -2080,6 +2351,7 @@ mod tests {
                 port: 7447,
                 socket: None,
                 retry: None,
+                tls: None,
             })
         );
     }
@@ -2145,6 +2417,7 @@ mod tests {
                     ..LinkSocketOptions::NONE
                 })),
                 retry: None,
+                tls: None,
             })
         );
     }
@@ -2196,6 +2469,7 @@ mod tests {
                 port: 7447,
                 socket: None,
                 retry: None,
+                tls: None,
             })
         );
     }
@@ -2219,6 +2493,7 @@ mod tests {
                     port: 7447,
                     socket: None,
                     retry: None,
+                    tls: None,
                 }),
                 "{s} should classify as Named"
             );
@@ -2568,6 +2843,7 @@ mod tests {
                     ..LinkSocketOptions::NONE
                 })),
                 retry: None,
+                tls: None,
             })
         );
     }
@@ -2809,6 +3085,7 @@ mod tests {
                 port: 7447,
                 socket: None,
                 retry: None,
+                tls: None,
             })
         );
     }
@@ -2823,5 +3100,119 @@ mod tests {
             parse_serial_locator("serial//dev/ttyUSB0?meta=x"),
             Err(SerialLocatorError::MissingBaudrate)
         );
+    }
+
+    /// R2599 — all five materials parse from their inline-PEM spelling, which
+    /// is the spelling with no other surface in either implementation.
+    ///
+    /// A PEM blob survives the tail's grammar for the reason it does upstream:
+    /// the list splits on `;` and PEM carries none, and a value's own `=`
+    /// padding is kept because the field split takes only the FIRST `=`.
+    #[test]
+    fn every_tls_material_parses_from_its_raw_spelling() {
+        let p = parse_locator(
+            "quic/1.2.3.4:7447#root_ca_certificate_raw=CA==;\
+             listen_certificate_raw=LC;listen_private_key_raw=LK;\
+             connect_certificate_raw=CC;connect_private_key_raw=CK",
+        )
+        .expect("addr parses");
+        let tls = p.tls();
+        assert_eq!(tls.root_ca, Some(PemSource::Raw("CA==".to_string())));
+        assert_eq!(
+            tls.listen_certificate,
+            Some(PemSource::Raw("LC".to_string()))
+        );
+        assert_eq!(
+            tls.listen_private_key,
+            Some(PemSource::Raw("LK".to_string()))
+        );
+        assert_eq!(
+            tls.connect_certificate,
+            Some(PemSource::Raw("CC".to_string()))
+        );
+        assert_eq!(
+            tls.connect_private_key,
+            Some(PemSource::Raw("CK".to_string()))
+        );
+        assert!(!tls.is_empty());
+    }
+
+    /// R2599 — raw beats base64 beats file, upstream's own order. Each PAIR is
+    /// exercised, not just the triple: a reader that stopped at the first key
+    /// it happened to look up would pass a triple-only test by luck.
+    #[test]
+    fn the_tls_material_spellings_take_upstreams_precedence() {
+        let at = |tail: &str| {
+            parse_locator(&alloc::format!("quic/1.2.3.4:7447#{tail}"))
+                .expect("addr parses")
+                .tls()
+                .root_ca
+                .clone()
+        };
+        assert_eq!(
+            at("root_ca_certificate_raw=R;root_ca_certificate_base64=B;root_ca_certificate_file=F"),
+            Some(PemSource::Raw("R".to_string()))
+        );
+        assert_eq!(
+            at("root_ca_certificate_base64=B;root_ca_certificate_file=F"),
+            Some(PemSource::Base64("B".to_string()))
+        );
+        assert_eq!(
+            at("root_ca_certificate_raw=R;root_ca_certificate_file=F"),
+            Some(PemSource::Raw("R".to_string()))
+        );
+        assert_eq!(
+            at("root_ca_certificate_file=F"),
+            Some(PemSource::File("F".to_string()))
+        );
+    }
+
+    /// R2599 — an empty value is refused NAMING ITS OWN KEY, the rule `bind`
+    /// follows. Upstream would carry the empty string into rustls and fail
+    /// there, reporting the PEM decoder rather than the locator.
+    #[test]
+    fn an_empty_tls_material_value_is_refused_by_its_own_key() {
+        for key in [
+            "root_ca_certificate_raw",
+            "listen_certificate_base64",
+            "connect_private_key_file",
+        ] {
+            assert_eq!(
+                parse_locator(&alloc::format!("quic/1.2.3.4:7447#{key}=")),
+                Err(LocatorParseError::BadConfigValue {
+                    key,
+                    value: String::new(),
+                }),
+                "{key} with an empty value must be refused"
+            );
+        }
+    }
+
+    /// R2599 — a tail naming no material carries NOTHING, which is what leaves
+    /// the ambient dial/accept config unlayered. The anti-vacuity partner of
+    /// the two tests above: a parser answering `Some` for everything passes
+    /// them and fails this.
+    #[test]
+    fn a_tail_naming_no_tls_material_carries_none() {
+        let p = parse_locator("quic/1.2.3.4:7447#iface=eth0").expect("addr parses");
+        assert_eq!(p.tls, None);
+        assert!(p.tls().is_empty());
+        assert_eq!(p.tls(), &LinkTlsMaterial::NONE);
+    }
+
+    /// R2599 — a DNS-named endpoint carries the material a numeric one does.
+    /// The two variants are separate arms, and R311y408 is this tree's record
+    /// of an arm that compiled only under a combination nobody built.
+    #[test]
+    fn a_named_locator_carries_its_tls_material_like_a_numeric_one() {
+        let any = parse_any_locator("quic/example.org:7447#listen_certificate_raw=LC")
+            .expect("named locator parses");
+        match any {
+            AnyLocator::Named { tls, .. } => assert_eq!(
+                tls.as_deref().map(|m| m.listen_certificate.clone()),
+                Some(Some(PemSource::Raw("LC".to_string())))
+            ),
+            other => panic!("expected a named locator, got {other:?}"),
+        }
     }
 }
