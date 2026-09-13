@@ -6346,10 +6346,18 @@ layer_c1ai_cargo_test_liveliness_history() {
 # `^test result: ok\. 1 passed` count-guard (was bare, a silent-0-tests risk), and
 # this whole lane is now HOSTED on ci.yml's feature-gates job (see that step's
 # comment). The datagram sibling of C1ac's hosting.
+#
+# R2598 — that guard moves 2 -> 3. The new case is
+# `initial_mtu_on_the_locator_moves_each_sides_link_mtu_independently`, the
+# witness that the locator's `#initial_mtu=` reaches quinn's `TransportConfig`
+# on EACH SIDE independently. The number is what this exact command PRINTED
+# (`test result: ok. 3 passed`), not what the diff suggests — the count guard
+# lives outside the function body because the `&&` chain below is one
+# backslash-continued command, which admits no comment line between its steps.
 layer_c1aj_cargo_test_quic_datagram() {
     (cd crates \
         && cargo test -p wz-session-core --features alloc --lib locator --quiet \
-        && cargo test -p wz-runtime-tokio --features transport-link-quic-datagram --test quic_datagram_e2e --quiet 2>&1 | grep -qE '^test result: ok\. 2 passed' \
+        && cargo test -p wz-runtime-tokio --features transport-link-quic-datagram --test quic_datagram_e2e --quiet 2>&1 | grep -qE '^test result: ok\. 3 passed' \
         && cargo test -p wz-runtime-tokio --features transport-link-quic-datagram --test link_endpoints_pairing --quiet 2>&1 | grep -qE '^test result: ok\. 3 passed' \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-quic-datagram --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-link-quic-datagram --quiet -- -D warnings)
