@@ -1110,7 +1110,12 @@ PIN_NO_SYMBOL = 2
 # wz 12 -> 17 (`declare_ext_qos.rs`, `query_sink.rs`, `response_build.rs`, the
 # differential witness, `query.rs`), ambiguous 0 -> 0. The clause's five upstream
 # anchors land in the unjudged upstream bucket (11 -> 16).
-PIN_WZ_CITATIONS = 273
+#
+# R2595 — 273 -> 275, no atom entering or leaving. DERIVED the same way on the
+# same atom's reason, before and after the R2595 clause: wz 17 -> 19
+# (`response_final_build.rs`, `linkstate_pending.rs`), ambiguous 0 -> 0, with
+# its one upstream anchor in the unjudged bucket (16 -> 17).
+PIN_WZ_CITATIONS = 275
 PIN_AMBIGUOUS = 47
 
 
