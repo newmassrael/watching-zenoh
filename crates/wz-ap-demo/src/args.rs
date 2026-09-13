@@ -5202,7 +5202,7 @@ mod stock_config_tests {
         );
 
         let tuned = TransportTuning::from_argv(&exp.argv).expect("the expansion is parseable");
-        let params = demo_session_init_params(NodeKind::Initiator, tuned)
+        let params = demo_session_init_params(NodeKind::Initiator, &tuned)
             .expect("OS entropy for the cookie signing key");
         assert_eq!(params.effective_batch_size(), 4096);
         assert_eq!(params.lease_ms, 3000);
@@ -5212,7 +5212,7 @@ mod stock_config_tests {
         // a coincidence between the fixture and the default.
         let bare = demo_session_init_params(
             NodeKind::Initiator,
-            TransportTuning::from_argv(&argv(&["--connect", "tcp/r:7447"])).unwrap(),
+            &TransportTuning::from_argv(&argv(&["--connect", "tcp/r:7447"])).unwrap(),
         )
         .expect("OS entropy for the cookie signing key");
         assert_eq!(bare.effective_batch_size(), 65535);
@@ -6669,7 +6669,14 @@ pub(crate) const DEFAULT_SCOUT_BUDGET_MS: u64 = 10_000;
 /// [`Default`] is the pair the demo announced as literals before this type
 /// existed, so a build with neither flag is byte-identical on the wire to the
 /// one that came before it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// R2592 — the bundle also carries the per-link-kind socket configuration,
+/// the third knob of the `transport/link` subtree this type was made to keep
+/// off the run-mode signatures. Unlike the first two it is not on the wire: it
+/// is applied to the sockets every dial and listen of a link kind opens, under
+/// each locator's own options. It holds strings, so the type is `Clone` and no
+/// longer `Copy`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TransportTuning {
     /// InitSyn `batch_size`. The `0`-unset sentinel is `SessionInitParams`'
     /// own; this type never produces it, since a `0` from a config file is
@@ -6677,6 +6684,8 @@ pub(crate) struct TransportTuning {
     pub(crate) batch_size: u16,
     /// OpenSyn lease, in milliseconds.
     pub(crate) lease_ms: u64,
+    /// R2592 — every `--link-config <kind>#<span>`, layered in argv order.
+    pub(crate) link_defaults: wz::runtime_tokio::link_socket::LinkDefaults,
 }
 
 impl Default for TransportTuning {
@@ -6684,6 +6693,7 @@ impl Default for TransportTuning {
         Self {
             batch_size: 65535,
             lease_ms: 10_000,
+            link_defaults: Default::default(),
         }
     }
 }
@@ -6721,6 +6731,31 @@ impl TransportTuning {
                     "--lease-ms 0 would announce a lease that is already expired",
                 ));
             }
+        }
+        // R2592 — `<kind>#<span>`, the shape upstream gives each link kind's
+        // configuration: a parameter span keyed by the kind. A refusal names the
+        // flag occurrence, since several may be given.
+        for value in parse_pairs(rest, "--link-config") {
+            use wz::runtime_tokio::link_socket::LinkDefaultsError;
+            use wz::runtime_tokio::locator::Proto;
+            let Some((kind, span)) = value.split_once('#') else {
+                return Err(format!(
+                    "--link-config expects <kind>#<key=value;...>, got '{value}'"
+                ));
+            };
+            let proto = match kind {
+                "tcp" => Proto::Tcp,
+                "tls" => Proto::Tls,
+                other => {
+                    return Err(format!(
+                        "--link-config '{value}': zenoh carries no per-link socket \
+                         configuration for `{other}` (tcp and tls have one)"
+                    ))
+                }
+            };
+            out.link_defaults
+                .set(proto, span)
+                .map_err(|e: LinkDefaultsError| format!("--link-config '{value}': {e}"))?;
         }
         Ok(out)
     }
@@ -6799,7 +6834,7 @@ impl NodeTimestamping {
 /// names.
 pub(crate) fn demo_session_init_params(
     kind: NodeKind,
-    tuning: TransportTuning,
+    tuning: &TransportTuning,
 ) -> std::io::Result<SessionInitParams> {
     let whatami = match kind {
         NodeKind::Acceptor => WhatAmI::Peer, // R121b/c/d/e baseline
@@ -7413,6 +7448,65 @@ pub(crate) struct LivelinessGetSpec {
 // `parse_connect_retry`'s own: its consumer set now includes an ungated one, so
 // these cases mean something on every build and no lane has to name a feature
 // to select them.
+#[cfg(test)]
+mod link_config_flag_tests {
+    use super::*;
+    use wz::runtime_tokio::locator::{LinkSocketOptions, Proto};
+
+    fn tuning(flags: &[&str]) -> Result<TransportTuning, String> {
+        let mut args = vec!["--connect".to_string(), "tcp/127.0.0.1:7447".to_string()];
+        args.extend(flags.iter().map(|f| f.to_string()));
+        TransportTuning::from_argv(&args)
+    }
+
+    /// R2592 — each occurrence layers onto its kind, in argv order, and a kind
+    /// never named keeps no defaults.
+    #[test]
+    fn link_config_layers_per_kind_in_argv_order() {
+        let t = tuning(&[
+            "--link-config",
+            "tcp#so_rcvbuf=4096",
+            "--link-config",
+            "tls#so_sndbuf=8192",
+            "--link-config",
+            "tcp#so_sndbuf=16384;so_rcvbuf=2048",
+        ])
+        .expect("three valid spans");
+        assert_eq!(
+            t.link_defaults.for_proto(Proto::Tcp),
+            &LinkSocketOptions {
+                so_rcvbuf: Some(2048),
+                so_sndbuf: Some(16384),
+                ..LinkSocketOptions::NONE
+            }
+        );
+        assert_eq!(t.link_defaults.for_proto(Proto::Tls).so_sndbuf, Some(8192));
+        assert_eq!(
+            tuning(&[]).unwrap().link_defaults,
+            Default::default(),
+            "no flag, no defaults"
+        );
+    }
+
+    /// R2592 — a span this layer cannot carry is refused with the flag named,
+    /// never dropped.
+    #[test]
+    fn a_link_config_the_layer_cannot_carry_is_refused() {
+        for (value, needle) in [
+            ("tcp", "expects <kind>#"),
+            (
+                "udp#so_rcvbuf=4096",
+                "no per-link socket configuration for `udp`",
+            ),
+            ("tcp#bind=127.0.0.1:0", "`bind` is not a key"),
+            ("tls#so_rcvbuf=big", "--link-config 'tls#so_rcvbuf=big'"),
+        ] {
+            let err = tuning(&["--link-config", value]).expect_err(value);
+            assert!(err.contains(needle), "{value} -> {err}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod connect_retry_tests {
     use super::*;

@@ -47,7 +47,7 @@ use wz_session_core::locator::{
 use wz_session_core::scout_static::{resolve_static_config, StaticConfigError};
 // R2590 — the per-scheme socket options every IP-family dial and bind arm
 // resolves before it builds a socket.
-use crate::link_socket::{LinkSide, LinkSocket};
+use crate::link_socket::{LinkDefaults, LinkSide, LinkSocket};
 // R311y808 — the static dial arm's retry reuses the crate's ONE transcription of
 // zenoh's `ConnectionRetryConf` rather than growing a second schedule.
 #[cfg(feature = "scouting-static")]
@@ -280,9 +280,37 @@ pub struct DialConfig {
     /// same shape as `tls`.
     #[cfg(feature = "transport-link-quic")]
     pub quic: Option<QuicDialConfig>,
+    /// R2592 — this node's per-link-kind socket configuration, layered under
+    /// every dialed locator's own options. Empty by default, which is a node
+    /// whose locators alone decide. See [`LinkDefaults`].
+    pub link_defaults: LinkDefaults,
 }
 
 impl DialConfig {
+    /// R2592 — supply the per-link-kind socket configuration every dial layers
+    /// its locator's options over. Ungated, like the layer itself.
+    pub fn with_link_defaults(mut self, link_defaults: LinkDefaults) -> Self {
+        self.link_defaults = link_defaults;
+        self
+    }
+
+    /// R2592 — a dialed locator's socket options, resolved on this node's
+    /// defaults for its link kind: the ONE place a dial arm gets its
+    /// [`LinkSocket`], so no arm can skip the layer.
+    async fn link_socket<'a>(
+        &'a self,
+        options: &'a LinkSocketOptions,
+        proto: Proto,
+    ) -> io::Result<LinkSocket<'a>> {
+        LinkSocket::resolve(
+            options,
+            self.link_defaults.for_proto(proto),
+            proto,
+            LinkSide::Dial,
+        )
+        .await
+    }
+
     /// Supply the TLS client material for a `tls/...` dial. Chain onto
     /// [`DialConfig::default`]; a config without this dials a `tls/...` locator
     /// to a typed `Unsupported`.
@@ -438,9 +466,36 @@ pub struct AcceptConfig {
     /// the TLS-over-TCP server config). R311y401.
     #[cfg(feature = "transport-link-quic")]
     pub quic: Option<QuicAcceptConfig>,
+    /// R2592 — this node's per-link-kind socket configuration, layered under
+    /// every listened locator's own options, the accept mirror of
+    /// [`DialConfig::link_defaults`].
+    pub link_defaults: LinkDefaults,
 }
 
 impl AcceptConfig {
+    /// R2592 — supply the per-link-kind socket configuration every listen
+    /// layers its locator's options over.
+    pub fn with_link_defaults(mut self, link_defaults: LinkDefaults) -> Self {
+        self.link_defaults = link_defaults;
+        self
+    }
+
+    /// R2592 — a listened locator's socket options, resolved on this node's
+    /// defaults for its link kind, the accept mirror of the dial helper.
+    async fn link_socket<'a>(
+        &'a self,
+        options: &'a LinkSocketOptions,
+        proto: Proto,
+    ) -> io::Result<LinkSocket<'a>> {
+        LinkSocket::resolve(
+            options,
+            self.link_defaults.for_proto(proto),
+            proto,
+            LinkSide::Listen,
+        )
+        .await
+    }
+
     /// Supply the TLS server material for a `tls/...` acceptor. Chain onto
     /// [`AcceptConfig::default`]; a config without this binds a `tls/...` listen
     /// to a typed `Unsupported`. Hard-gated on `transport-link-tls` (its
@@ -1842,27 +1897,16 @@ pub const NOT_COMPILED_IN_MARKER: &str = "requires the transport-link-";
 /// check, so a scheme this build cannot dial still answers `Unsupported` before
 /// any `#bind=` lookup or `iface`-with-`bind` refusal is reached.
 pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<DialedLink> {
-    // `cfg` is consumed only by the tls / quic arms; discard it loudly in builds
-    // without either backend so the always-present seam signature carries no
-    // dead-param warning.
-    #[cfg(not(any(feature = "transport-link-tls", feature = "transport-link-quic")))]
-    let _ = cfg;
+    // R2592 — `cfg` is read by every IP arm now (its per-link-kind defaults),
+    // so the discard that silenced it on a build without tls or quic is gone.
     match locator {
         AnyLocator::Ip(ip) => match ip.proto {
             Proto::Tcp => Ok(DialedLink::Tcp(
-                dial_tcp(
-                    ip.addr,
-                    &LinkSocket::resolve(ip.socket(), ip.proto, LinkSide::Dial).await?,
-                )
-                .await?,
+                dial_tcp(ip.addr, &cfg.link_socket(ip.socket(), ip.proto).await?).await?,
             )),
             #[cfg(feature = "transport-link-udp")]
             Proto::Udp => Ok(DialedLink::Udp {
-                socket: dial_udp(
-                    ip.addr,
-                    &LinkSocket::resolve(ip.socket(), ip.proto, LinkSide::Dial).await?,
-                )
-                .await?,
+                socket: dial_udp(ip.addr, &cfg.link_socket(ip.socket(), ip.proto).await?).await?,
                 peer: ip.addr,
             }),
             #[cfg(not(feature = "transport-link-udp"))]
@@ -1884,7 +1928,7 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
                         ip.addr,
                         t.client_config.clone(),
                         t.server_name.clone(),
-                        &LinkSocket::resolve(ip.socket(), ip.proto, LinkSide::Dial).await?,
+                        &cfg.link_socket(ip.socket(), ip.proto).await?,
                     )
                     .await?,
                 ))),
@@ -1907,11 +1951,7 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
             // shape as the udp arm), keeping the match exhaustive.
             #[cfg(feature = "transport-link-ws")]
             Proto::Ws => Ok(DialedLink::Ws(Box::new(
-                dial_ws(
-                    ip.addr,
-                    &LinkSocket::resolve(ip.socket(), ip.proto, LinkSide::Dial).await?,
-                )
-                .await?,
+                dial_ws(ip.addr, &cfg.link_socket(ip.socket(), ip.proto).await?).await?,
             ))),
             #[cfg(not(feature = "transport-link-ws"))]
             Proto::Ws => Err(io::Error::new(
@@ -1934,7 +1974,7 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
                         ip.addr,
                         q.client_config.clone(),
                         &q.server_name,
-                        &LinkSocket::resolve(ip.socket(), ip.proto, LinkSide::Dial).await?,
+                        &cfg.link_socket(ip.socket(), ip.proto).await?,
                     )
                     .await?,
                 ))),
@@ -1963,7 +2003,7 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
                         ip.addr,
                         q.client_config.clone(),
                         &q.server_name,
-                        &LinkSocket::resolve(ip.socket(), ip.proto, LinkSide::Dial).await?,
+                        &cfg.link_socket(ip.socket(), ip.proto).await?,
                     )
                     .await?,
                 ))),
@@ -2017,7 +2057,7 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
             Proto::Tcp => Ok(DialedLink::Tcp(
                 dial_tcp_host(
                     &format!("{host}:{port}"),
-                    &named_link_socket(&socket, proto, LinkSide::Dial).await?,
+                    &cfg.link_socket(named_options(&socket), proto).await?,
                 )
                 .await?,
             )),
@@ -2032,7 +2072,7 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
             Proto::Udp => {
                 let (socket, peer) = dial_udp_host(
                     &format!("{host}:{port}"),
-                    &named_link_socket(&socket, proto, LinkSide::Dial).await?,
+                    &cfg.link_socket(named_options(&socket), proto).await?,
                 )
                 .await?;
                 Ok(DialedLink::Udp { socket, peer })
@@ -2051,7 +2091,7 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
             #[cfg(feature = "transport-link-ws")]
             Proto::Ws => {
                 let addrs = resolve_locator_addrs(&host, port).await?;
-                let link_socket = &named_link_socket(&socket, proto, LinkSide::Dial).await?;
+                let link_socket = &cfg.link_socket(named_options(&socket), proto).await?;
                 Ok(DialedLink::Ws(Box::new(
                     first_reachable(addrs, &format!("ws/{host}:{port}"), |addr| {
                         dial_ws(addr, link_socket)
@@ -2089,7 +2129,7 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
                         )
                     })?;
                     let addrs = resolve_locator_addrs(&host, port).await?;
-                    let link_socket = &named_link_socket(&socket, proto, LinkSide::Dial).await?;
+                    let link_socket = &cfg.link_socket(named_options(&socket), proto).await?;
                     Ok(DialedLink::Tls(Box::new(
                         first_reachable(addrs, &format!("tls/{host}:{port}"), |addr| {
                             dial_tls(
@@ -2121,7 +2161,7 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
             Proto::Quic => match &cfg.quic {
                 Some(q) => {
                     let addrs = resolve_locator_addrs(&host, port).await?;
-                    let link_socket = &named_link_socket(&socket, proto, LinkSide::Dial).await?;
+                    let link_socket = &cfg.link_socket(named_options(&socket), proto).await?;
                     Ok(DialedLink::Quic(Box::new(
                         first_reachable(addrs, &format!("quic/{host}:{port}"), |addr| {
                             dial_quic(addr, q.client_config.clone(), &host, link_socket)
@@ -2145,7 +2185,7 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
             Proto::QuicDatagram => match &cfg.quic {
                 Some(q) => {
                     let addrs = resolve_locator_addrs(&host, port).await?;
-                    let link_socket = &named_link_socket(&socket, proto, LinkSide::Dial).await?;
+                    let link_socket = &cfg.link_socket(named_options(&socket), proto).await?;
                     Ok(DialedLink::QuicDatagram(Box::new(
                         first_reachable(addrs, &format!("quic-datagram/{host}:{port}"), |addr| {
                             dial_quic_datagram(addr, q.client_config.clone(), &host, link_socket)
@@ -2550,15 +2590,12 @@ fn unsupported_mesh_dial(target: &str, scheme: &'static str) -> DialTargetError 
     }
 }
 
-/// R2590 — [`LinkSocket::resolve`] over the options an [`AnyLocator::Named`]
-/// carries, which are boxed and absent when its tail named none.
-async fn named_link_socket(
-    socket: &Option<Box<LinkSocketOptions>>,
-    proto: Proto,
-    side: LinkSide,
-) -> io::Result<LinkSocket<'_>> {
-    let options = socket.as_deref().unwrap_or(&LinkSocketOptions::NONE);
-    LinkSocket::resolve(options, proto, side).await
+/// R2590 — the options an [`AnyLocator::Named`] carries, which are boxed and
+/// absent when its tail named none. R2592 made this a plain accessor: the
+/// resolution itself belongs to the dial or accept config, which holds the
+/// per-link-kind defaults the options are layered on.
+fn named_options(socket: &Option<Box<LinkSocketOptions>>) -> &LinkSocketOptions {
+    socket.as_deref().unwrap_or(&LinkSocketOptions::NONE)
 }
 
 /// Accept-side dispatcher for [`accept_endpoint`]: bind + accept ONE inbound
@@ -2616,18 +2653,11 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
             format!("listen/accept is wired only for tcp; {detail}"),
         )
     }
-    // `cfg` is consumed only by the tls + quic arms (their server cert); inert on a
-    // build with neither backend (mirrors dial_locator's DialConfig usage).
-    #[cfg(not(any(feature = "transport-link-tls", feature = "transport-link-quic")))]
-    let _ = cfg;
+    // R2592 — `cfg` is read by every IP arm now (its per-link-kind defaults).
     match locator {
         AnyLocator::Ip(ip) => match ip.proto {
             Proto::Tcp => Ok(BoundListener::Tcp(
-                bind_tcp(
-                    ip.addr,
-                    &LinkSocket::resolve(ip.socket(), ip.proto, LinkSide::Listen).await?,
-                )
-                .await?,
+                bind_tcp(ip.addr, &cfg.link_socket(ip.socket(), ip.proto).await?).await?,
             )),
             // R311y374 — a `ws/...` acceptor LISTENS on plain TCP; the RFC6455
             // server upgrade happens per-accept in `accept_bound` (`accept_ws`
@@ -2638,11 +2668,7 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
             // dial_locator's ws arm (R311y408 removed the Ip-arm catch-all).
             #[cfg(feature = "transport-link-ws")]
             Proto::Ws => Ok(BoundListener::Ws(
-                bind_tcp(
-                    ip.addr,
-                    &LinkSocket::resolve(ip.socket(), ip.proto, LinkSide::Listen).await?,
-                )
-                .await?,
+                bind_tcp(ip.addr, &cfg.link_socket(ip.socket(), ip.proto).await?).await?,
             )),
             #[cfg(not(feature = "transport-link-ws"))]
             Proto::Ws => Err(unsupported(
@@ -2656,11 +2682,7 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
             #[cfg(feature = "transport-link-tls")]
             Proto::Tls => match &cfg.tls {
                 Some(t) => Ok(BoundListener::Tls(
-                    bind_tcp(
-                        ip.addr,
-                        &LinkSocket::resolve(ip.socket(), ip.proto, LinkSide::Listen).await?,
-                    )
-                    .await?,
+                    bind_tcp(ip.addr, &cfg.link_socket(ip.socket(), ip.proto).await?).await?,
                     t.server_config.clone(),
                 )),
                 None => Err(unsupported(
@@ -2682,11 +2704,7 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
             // `Unsupported` (a clearer message than the `other` catch-all).
             #[cfg(feature = "transport-link-udp")]
             Proto::Udp => Ok(BoundListener::Udp(
-                bind_udp_demux(
-                    ip.addr,
-                    &LinkSocket::resolve(ip.socket(), ip.proto, LinkSide::Listen).await?,
-                )
-                .await?,
+                bind_udp_demux(ip.addr, &cfg.link_socket(ip.socket(), ip.proto).await?).await?,
             )),
             #[cfg(not(feature = "transport-link-udp"))]
             Proto::Udp => Err(unsupported(
@@ -2709,7 +2727,7 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
                     bind_quic(
                         ip.addr,
                         q.server_config.clone(),
-                        &LinkSocket::resolve(ip.socket(), ip.proto, LinkSide::Listen).await?,
+                        &cfg.link_socket(ip.socket(), ip.proto).await?,
                     )
                     .await?,
                 )),
@@ -2737,7 +2755,7 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
                     bind_quic_datagram(
                         ip.addr,
                         q.server_config.clone(),
-                        &LinkSocket::resolve(ip.socket(), ip.proto, LinkSide::Listen).await?,
+                        &cfg.link_socket(ip.socket(), ip.proto).await?,
                     )
                     .await?,
                 )),
@@ -2770,7 +2788,7 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
             Proto::Tcp => Ok(BoundListener::Tcp(
                 bind_tcp_host(
                     &format!("{host}:{port}"),
-                    &named_link_socket(&socket, proto, LinkSide::Listen).await?,
+                    &cfg.link_socket(named_options(&socket), proto).await?,
                 )
                 .await?,
             )),
@@ -2781,7 +2799,7 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
             Proto::Ws => Ok(BoundListener::Ws(
                 bind_tcp_host(
                     &format!("{host}:{port}"),
-                    &named_link_socket(&socket, proto, LinkSide::Listen).await?,
+                    &cfg.link_socket(named_options(&socket), proto).await?,
                 )
                 .await?,
             )),
@@ -2792,7 +2810,7 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
                 Some(t) => Ok(BoundListener::Tls(
                     bind_tcp_host(
                         &format!("{host}:{port}"),
-                        &named_link_socket(&socket, proto, LinkSide::Listen).await?,
+                        &cfg.link_socket(named_options(&socket), proto).await?,
                     )
                     .await?,
                     t.server_config.clone(),
@@ -2811,7 +2829,7 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
             #[cfg(feature = "transport-link-udp")]
             Proto::Udp => {
                 let addrs = resolve_locator_addrs(&host, port).await?;
-                let link_socket = &named_link_socket(&socket, proto, LinkSide::Listen).await?;
+                let link_socket = &cfg.link_socket(named_options(&socket), proto).await?;
                 Ok(BoundListener::Udp(
                     first_reachable(addrs, &format!("udp/{host}:{port}"), |addr| {
                         bind_udp_demux(addr, link_socket)
@@ -2829,7 +2847,7 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
             Proto::Quic => match &cfg.quic {
                 Some(q) => {
                     let addrs = resolve_locator_addrs(&host, port).await?;
-                    let link_socket = &named_link_socket(&socket, proto, LinkSide::Listen).await?;
+                    let link_socket = &cfg.link_socket(named_options(&socket), proto).await?;
                     Ok(BoundListener::Quic(
                         first_reachable(addrs, &format!("quic/{host}:{port}"), |addr| {
                             bind_quic(addr, q.server_config.clone(), link_socket)
@@ -2849,7 +2867,7 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
             Proto::QuicDatagram => match &cfg.quic {
                 Some(q) => {
                     let addrs = resolve_locator_addrs(&host, port).await?;
-                    let link_socket = &named_link_socket(&socket, proto, LinkSide::Listen).await?;
+                    let link_socket = &cfg.link_socket(named_options(&socket), proto).await?;
                     Ok(BoundListener::QuicDatagram(
                         first_reachable(addrs, &format!("quic-datagram/{host}:{port}"), |addr| {
                             bind_quic_datagram(addr, q.server_config.clone(), link_socket)

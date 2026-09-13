@@ -278,7 +278,13 @@ async fn a_listen_iface_bind_decides_whether_a_loopback_quic_dial_connects() {
         let endpoint = bind_quic(
             "127.0.0.1:0".parse().expect("loopback addr"),
             server_config,
-            &LinkSocket::resolve(&options, Proto::Quic, LinkSide::Listen).await?,
+            &LinkSocket::resolve(
+                &options,
+                &LinkSocketOptions::NONE,
+                Proto::Quic,
+                LinkSide::Listen,
+            )
+            .await?,
         )
         .await?;
         // The bind must SUCCEED in both arms — `bind(127.0.0.1)` with a foreign

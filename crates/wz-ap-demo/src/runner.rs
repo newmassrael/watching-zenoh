@@ -99,6 +99,10 @@ use wz::runtime_tokio::session_open::{
     initiate_and_open_session_with_offer, AcceptConfig, DialConfig, DialedLink, OpenError,
     OpenedSession, OpenedSessionParts, SessionOffer, DEFAULT_OPEN_TICK_MS,
 };
+
+// R2592 — the node's per-link-kind socket configuration, carried in
+// `TransportTuning` and threaded into every dial and accept config built here.
+use wz::runtime_tokio::link_socket::LinkDefaults;
 // R2099 (open-debt item 512) — the multi-bind helper's own two names, on the
 // same gate the helper carries: a build with neither binding run-mode compiles
 // no `bind_all_endpoints`, and an ungated import would then be unused.
@@ -274,8 +278,17 @@ struct SpawnedTasks {
 /// / `QuicDialConfig::from_ca_pem`). Each cert transport is applied by its own
 /// feature-gated helper, so a new cert transport is one added `apply_*` call — no
 /// combinatorial cfg on this function.
-fn build_dial_config(tls_ca: &Option<String>, quic_ca: &Option<String>) -> io::Result<DialConfig> {
-    let cfg = DialConfig::default();
+///
+/// R2592 — and every dial config starts from the node's per-link-kind socket
+/// configuration (`--link-config`), so no dial path this binary has can open a
+/// link without it: this builder is the only place a non-default `DialConfig`
+/// is made.
+fn build_dial_config(
+    tls_ca: &Option<String>,
+    quic_ca: &Option<String>,
+    link_defaults: &LinkDefaults,
+) -> io::Result<DialConfig> {
+    let cfg = DialConfig::default().with_link_defaults(link_defaults.clone());
     let cfg = apply_tls_ca(cfg, tls_ca)?;
     let cfg = apply_quic_ca(cfg, quic_ca)?;
     Ok(cfg)
@@ -672,12 +685,13 @@ pub(crate) struct AcceptCertPaths {
 
 #[cfg(feature = "router-hat-router")]
 impl AcceptCertPaths {
-    fn build(&self) -> io::Result<AcceptConfig> {
+    fn build(&self, link_defaults: &LinkDefaults) -> io::Result<AcceptConfig> {
         build_accept_config(
             &self.tls_cert,
             &self.tls_key,
             &self.quic_cert,
             &self.quic_key,
+            link_defaults,
         )
     }
 }
@@ -708,8 +722,8 @@ pub(crate) struct DialCertPaths {
 
 #[cfg(any(feature = "routing-peer", feature = "router-hat-router"))]
 impl DialCertPaths {
-    fn build(&self) -> io::Result<DialConfig> {
-        build_dial_config(&self.tls_ca, &self.quic_ca)
+    fn build(&self, link_defaults: &LinkDefaults) -> io::Result<DialConfig> {
+        build_dial_config(&self.tls_ca, &self.quic_ca, link_defaults)
     }
 }
 
@@ -720,13 +734,17 @@ impl DialCertPaths {
 /// transport is applied by its own feature-gated helper, so a new cert acceptor is
 /// one added `apply_*` call — no combinatorial cfg on this function (the accept
 /// mirror of [`build_dial_config`]'s `apply_tls_ca` / `apply_quic_ca` composition).
+///
+/// R2592 — likewise it starts from the node's per-link-kind socket
+/// configuration, the accept mirror of [`build_dial_config`]'s.
 fn build_accept_config(
     tls_cert: &Option<String>,
     tls_key: &Option<String>,
     quic_cert: &Option<String>,
     quic_key: &Option<String>,
+    link_defaults: &LinkDefaults,
 ) -> io::Result<AcceptConfig> {
-    let cfg = AcceptConfig::default();
+    let cfg = AcceptConfig::default().with_link_defaults(link_defaults.clone());
     let cfg = apply_tls_accept(cfg, tls_cert, tls_key)?;
     let cfg = apply_quic_accept(cfg, quic_cert, quic_key)?;
     Ok(cfg)
@@ -1402,7 +1420,7 @@ fn role_names(matcher: wz::runtime_tokio::linkstate_forward::WhatAmIMatcher) -> 
     }
 }
 
-async fn establish_link(role: &Role) -> io::Result<DialedLink> {
+async fn establish_link(role: &Role, link_defaults: &LinkDefaults) -> io::Result<DialedLink> {
     match role {
         Role::Acceptor {
             listen,
@@ -1421,7 +1439,8 @@ async fn establish_link(role: &Role) -> io::Result<DialedLink> {
             // matching `AcceptConfig` server-cert slot (the accept mirror of the
             // Initiator's `--<scheme>-ca` -> DialConfig); every cert-free acceptor
             // (tcp/ws/udp) takes the default.
-            let accept_cfg = build_accept_config(tls_cert, tls_key, quic_cert, quic_key)?;
+            let accept_cfg =
+                build_accept_config(tls_cert, tls_key, quic_cert, quic_key, link_defaults)?;
             accept_endpoint(listen, &accept_cfg).await
         }
         Role::Initiator {
@@ -1437,7 +1456,7 @@ async fn establish_link(role: &Role) -> io::Result<DialedLink> {
             // R311y365/y366 — a `tls/...` / `quic/...` --connect threads its
             // `--tls-ca` / `--quic-ca` root-CA into the matching `DialConfig` slot;
             // every cert-free transport takes the default.
-            let dial_cfg = build_dial_config(tls_ca, quic_ca)?;
+            let dial_cfg = build_dial_config(tls_ca, quic_ca, link_defaults)?;
             // R2099 (open-debt item 512, the `connect/endpoints` residue) — try
             // EVERY candidate in order and take the first that opens, which is
             // upstream's client: `connect_peers_single_link`
@@ -2919,7 +2938,7 @@ pub(crate) async fn run_demo(
     // into the open helper, install_observer_callbacks, Session::new, the drive
     // loop, and sweep_task (TokioTime is Copy, so every copy is the same epoch).
     let session_clock = TokioTime::new();
-    let mut params = demo_session_init_params(role.node_kind(), tuning)?;
+    let mut params = demo_session_init_params(role.node_kind(), &tuning)?;
     // R2112 (open-debt items 102 + 210) — the role this node ANNOUNCES, read
     // off the params BEFORE they are moved into whichever open path this
     // lifecycle mode takes. It is the role `timestamping.enabled` resolves
@@ -3001,10 +3020,15 @@ pub(crate) async fn run_demo(
             // thing in this binary a config file could not reach. Resolution
             // and announce live in `supervise_reconnect`, which is where they
             // are watchable.
+            // R2592 — the reconnecting client's dial config carries the node's
+            // per-link-kind socket config, built by the one dial builder. Its
+            // root-CA slots stay empty, as the default this replaced left them:
+            // threading `--tls-ca` into a reconnecting dial is a separate
+            // question this round does not answer.
             let mut recon = supervise_reconnect(
                 primary,
                 params,
-                DialConfig::default(),
+                build_dial_config(&None, &None, &tuning.link_defaults)?,
                 session_clock,
                 connect_retry,
             )
@@ -3026,7 +3050,7 @@ pub(crate) async fn run_demo(
         }
         // Acceptor + one-shot Initiator: dial/accept once, open one-shot.
         _ => {
-            let dialed = establish_link(&role).await?;
+            let dialed = establish_link(&role, &tuning.link_defaults).await?;
             let opened = match &role {
                 // R311y505 — the accept side now goes through the OFFER seam too,
                 // so `--shm` stages the establishment capability before the
@@ -3754,7 +3778,13 @@ async fn run_router_until(
     // `bind_locator` reject a tls/quic router listen at cert-absence -- the follow-up
     // `bind_endpoint`'s own doc named. A cert-free transport (tcp/ws/udp) still binds
     // (its cert slots stay None).
-    let accept_cfg = build_accept_config(tls_cert, tls_key, quic_cert, quic_key)?;
+    let accept_cfg = build_accept_config(
+        tls_cert,
+        tls_key,
+        quic_cert,
+        quic_key,
+        &tuning.link_defaults,
+    )?;
     let listener = bind_endpoint_with_config(listen, &accept_cfg).await?;
     // CALLER fail-fast (mesh accept loop): the router holds N faces off ONE
     // listener, so a NON-mesh-capable acceptor (one that could not feed a
@@ -3787,7 +3817,7 @@ async fn run_router_until(
          faces (routing-router foundation, no forwarding)"
     );
 
-    let params = demo_session_init_params(NodeKind::Router, tuning)?;
+    let params = demo_session_init_params(NodeKind::Router, &tuning)?;
 
     // The forwarding seam: with `routing-routes` the router routes Puts between
     // faces ([`RoutingForwarder`]); without it the accept-and-hold foundation
@@ -4283,6 +4313,7 @@ async fn run_peer_until(
         &opts.tls_key,
         &opts.quic_cert,
         &opts.quic_key,
+        &tuning.link_defaults,
     )?;
     // R2099 (item 512) — bind EVERY member of `listen/endpoints`, not the first.
     let listeners = bind_all_endpoints(
@@ -4365,7 +4396,7 @@ async fn run_peer_until(
         }
     );
 
-    let mut params = demo_session_init_params(NodeKind::Peer, tuning)?;
+    let mut params = demo_session_init_params(NodeKind::Peer, &tuning)?;
     // R311rc (c3d-4) — a DISTINCT zid per peer (the mesh routing graph keys on it,
     // so two peers MUST NOT share one; the demo's single hardcoded 0x01020304 would
     // collide — a node would ingest a remote link-state under its OWN zid).
@@ -5061,7 +5092,7 @@ async fn run_peer_until(
             // makes; the default (both CAs absent) is the cert-free mesh, under
             // which a `tls/` or `quic/` target dials to the runtime's typed
             // `Unsupported` rather than to a silent TCP connect.
-            dial_config: std::sync::Arc::new(opts.dial_certs.build()?),
+            dial_config: std::sync::Arc::new(opts.dial_certs.build(&tuning.link_defaults)?),
             dial_intents,
             // A peer node hosts no router multicast ingress plane.
             mcast_ingress: None,
@@ -5836,7 +5867,7 @@ async fn run_router_hat_until(
     // R311y406 — thread the router-hat's server cert (--tls-cert/--quic-cert) into the
     // bind's AcceptConfig via the shared build_accept_config, so a `--router-hat tls/`
     // / `--router-hat quic/` presents its cert (was bind_endpoint's cert-free default).
-    let accept_cfg = cert_paths.build()?;
+    let accept_cfg = cert_paths.build(&opts.tuning.link_defaults)?;
     // R2099 (item 512) — bind EVERY member of `listen/endpoints`, not the first.
     let listeners = bind_all_endpoints(
         listen,
@@ -5931,7 +5962,7 @@ async fn run_router_hat_until(
         dials.len()
     );
 
-    let mut params = demo_session_init_params(NodeKind::RouterHat, opts.tuning)?;
+    let mut params = demo_session_init_params(NodeKind::RouterHat, &opts.tuning)?;
     params.zid = node_zid;
 
     // The dual-mesh router forwarder. Self is a WhatAmI::Router in BOTH meshes
@@ -6451,7 +6482,7 @@ async fn run_router_hat_until(
             // material, the dial mirror of the cert its listen presents. One
             // build, shared by the static federation dials, the reconcile-added
             // ones, and every re-dial.
-            dial_config: std::sync::Arc::new(opts.dial_certs.build()?),
+            dial_config: std::sync::Arc::new(opts.dial_certs.build(&opts.tuning.link_defaults)?),
             // No gossip-autoconnect on a router (zenoh: routers are reached via
             // configured links, `default_autoconnect_matcher(Router)` is empty) —
             // so no dial-intent stream, exactly run_peer's `--autoconnect`-off arm.
@@ -7085,7 +7116,7 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
     use wz::runtime_tokio::compiled_plugins_dyn;
     use wz::runtime_tokio::config::WzConfig;
     use wz::runtime_tokio::query_sink::{QueryView, ReplyOut};
-    use wz::runtime_tokio::session_open::{accept_bound_on, bind_endpoint};
+    use wz::runtime_tokio::session_open::{accept_bound_on, bind_endpoint_with_config};
     use wz::runtime_tokio::sink::SampleView;
     use wz::runtime_tokio::storage_manager_service::RuntimeStorageManager;
     use wz::runtime_tokio::storage_volume::MemoryVolume;
@@ -7148,7 +7179,7 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
     use crate::args::NodeKind;
 
     let session_clock = TokioTime::new();
-    let params = demo_session_init_params(NodeKind::StorageHost, tuning)?;
+    let params = demo_session_init_params(NodeKind::StorageHost, &tuning)?;
     // The pico witness scrapes ONE zid across all four sequential client sessions,
     // so the host zid must be STABLE across accept-loop iterations. The demo's fixed
     // Peer zid is that stable identity; there is exactly one storage host, so the
@@ -7165,7 +7196,12 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
     // failed here at bind. `accept_bound_on` borrows the listener across accepts
     // and runs the per-scheme SERVER upgrade, so bind-once/accept-many now works
     // for every scheme this build carries.
-    let mut listener = bind_endpoint(listen).await?;
+    // R2592 — bound through the SAME accept builder every other listen uses, so
+    // the storage host's links take the node's per-link-kind socket config too.
+    // It carries no server cert (the host has no cert flags), which is what the
+    // cert-free `bind_endpoint` it replaces bound with.
+    let accept_cfg = build_accept_config(&None, &None, &None, &None, &tuning.link_defaults)?;
+    let mut listener = bind_endpoint_with_config(listen, &accept_cfg).await?;
     let local = listener.local_addr_display()?;
 
     // The admin keys this host serves (SSOT-derived from the same zid/whatami).

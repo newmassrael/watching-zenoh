@@ -101,6 +101,11 @@ pub(crate) fn print_usage() {
     eprintln!("                             default 65535). zenoh transport/link/tx/batch_size");
     eprintln!("    --lease-ms <ms>          OpenSyn session lease announced to the peer");
     eprintln!("                             (default 10000). zenoh transport/link/tx/lease");
+    eprintln!("    --link-config <kind>#<k=v;...>");
+    eprintln!("                             socket options every <kind> link takes unless its");
+    eprintln!("                             locator names the same key (repeatable). tcp and tls");
+    eprintln!("                             carry so_rcvbuf and so_sndbuf. zenoh");
+    eprintln!("                             transport/link/<kind>/so_rcvbuf and so_sndbuf");
     eprintln!("    --timestamping <bool>    whether THIS node stamps the un-timestamped data");
     eprintln!("                             it relays. zenoh timestamping/enabled, which is a");
     eprintln!("                             PER-ROLE default: a router stamps, a peer and a");

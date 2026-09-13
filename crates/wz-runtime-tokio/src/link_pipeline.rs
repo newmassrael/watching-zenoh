@@ -486,6 +486,7 @@ mod tests {
         let client = tokio::spawn(async move {
             let link_socket = LinkSocket::resolve(
                 &options,
+                &wz_session_core::locator::LinkSocketOptions::NONE,
                 wz_session_core::locator::Proto::Tcp,
                 crate::link_socket::LinkSide::Dial,
             )

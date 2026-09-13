@@ -55,6 +55,16 @@
 //! socket, whichever process owns it. Measured against zenohd before the
 //! witness was written: `so_rcvbuf=4096` reads as window scale 0 and `rb8192`,
 //! `so_sndbuf=8192` as `tb16384`, and no key as the kernel's defaults.
+//!
+//! # R2592: the same keys set for a whole link kind
+//!
+//! Upstream also takes both keys from the node's configuration, per link kind,
+//! and layers each endpoint's own parameters over that. The buffer witness's
+//! later rows give zenohd `--cfg transport/link/<kind>/<key>:<value>` and the wz
+//! demo `--link-config <kind>#<key>=<value>`, and cover the four cases measured
+//! on zenohd first: a node value applies to a silent locator, a locator key
+//! wins over the node's same key, keys merge one by one, and one kind's value
+//! does not reach another kind's link.
 
 use std::io::Read as _;
 use std::net::{IpAddr, Ipv4Addr, UdpSocket};
@@ -427,9 +437,19 @@ struct Buffers {
 /// A buffer row: the locator and the two sizes its tail sets, as written.
 struct BufferRow {
     locator: &'static str,
+    /// R2592 — node-level link configuration, as `(kind, key, value)`: zenohd
+    /// gets `--cfg transport/link/<kind>/<key>:<value>`, the wz demo
+    /// `--link-config <kind>#<key>=<value>`.
+    node: &'static [(&'static str, &'static str, u32)],
+    /// The EFFECTIVE sizes the row expects, after the locator is layered over
+    /// the node configuration.
     so_rcvbuf: Option<u32>,
     so_sndbuf: Option<u32>,
 }
+
+/// The receive buffer a locator sets over a node default in the precedence
+/// rows. Still small enough for window scale 0.
+const LOCATOR_RCVBUF: u32 = 16384;
 
 /// The receive buffer the rows set. Small enough that the window it allows
 /// needs no scaling at all, so a set buffer reads as window scale 0.
@@ -440,25 +460,81 @@ fn buffer_rows() -> Vec<BufferRow> {
     vec![
         BufferRow {
             locator: "tcp/127.0.0.1:{port}",
+            node: &[],
             so_rcvbuf: None,
             so_sndbuf: None,
         },
         BufferRow {
             locator: "tcp/127.0.0.1:{port}#so_rcvbuf=4096",
+            node: &[],
             so_rcvbuf: Some(SMALL_RCVBUF),
             so_sndbuf: None,
         },
         BufferRow {
             locator: "tcp/127.0.0.1:{port}#so_sndbuf=8192",
+            node: &[],
             so_rcvbuf: None,
             so_sndbuf: Some(SMALL_SNDBUF),
         },
         BufferRow {
             locator: "tls/127.0.0.1:{port}#so_rcvbuf=4096;so_sndbuf=8192",
+            node: &[],
             so_rcvbuf: Some(SMALL_RCVBUF),
             so_sndbuf: Some(SMALL_SNDBUF),
         },
+        // R2592 — the node-level layer. A node default applies to a locator
+        // that names nothing.
+        BufferRow {
+            locator: "tcp/127.0.0.1:{port}",
+            node: &[("tcp", "so_rcvbuf", SMALL_RCVBUF)],
+            so_rcvbuf: Some(SMALL_RCVBUF),
+            so_sndbuf: None,
+        },
+        // The locator's key wins over the node's same key.
+        BufferRow {
+            locator: "tcp/127.0.0.1:{port}#so_rcvbuf=16384",
+            node: &[("tcp", "so_rcvbuf", SMALL_RCVBUF)],
+            so_rcvbuf: Some(LOCATOR_RCVBUF),
+            so_sndbuf: None,
+        },
+        // Keys merge one by one: the node's send buffer survives a locator that
+        // names only the receive buffer.
+        BufferRow {
+            locator: "tcp/127.0.0.1:{port}#so_rcvbuf=16384",
+            node: &[("tcp", "so_sndbuf", SMALL_SNDBUF)],
+            so_rcvbuf: Some(LOCATOR_RCVBUF),
+            so_sndbuf: Some(SMALL_SNDBUF),
+        },
+        // One kind's configuration does not reach another kind's link.
+        BufferRow {
+            locator: "tcp/127.0.0.1:{port}",
+            node: &[("tls", "so_rcvbuf", SMALL_RCVBUF)],
+            so_rcvbuf: None,
+            so_sndbuf: None,
+        },
+        // And a tls link takes its own kind's.
+        BufferRow {
+            locator: "tls/127.0.0.1:{port}",
+            node: &[("tls", "so_sndbuf", SMALL_SNDBUF)],
+            so_rcvbuf: None,
+            so_sndbuf: Some(SMALL_SNDBUF),
+        },
     ]
+}
+
+/// The node-level arguments `row` gives `dialer`, in each implementation's
+/// own spelling of the same configuration.
+fn node_args(dialer: Dialer, row: &BufferRow) -> Vec<String> {
+    row.node
+        .iter()
+        .flat_map(|(kind, key, value)| match dialer {
+            Dialer::Zenohd => [
+                "--cfg".to_string(),
+                format!("transport/link/{kind}/{key}:{value}"),
+            ],
+            Dialer::Wz => ["--link-config".to_string(), format!("{kind}#{key}={value}")],
+        })
+        .collect()
 }
 
 /// Whether `seen` is what `row` asks for. A set buffer must read back as the
@@ -479,16 +555,18 @@ fn buffers_fit(seen: Buffers, row: &BufferRow) -> bool {
 
 /// Accept `dialer`'s connection on a fresh loopback listener and read its
 /// buffers while it is still connected. `None` when it never connects.
-fn observe_buffers(dialer: Dialer, locator: &str, ca: &Path) -> (Option<Buffers>, String) {
+fn observe_buffers(dialer: Dialer, row: &BufferRow, ca: &Path) -> (Option<Buffers>, String) {
     let capture = tempfile::tempfile().expect("tempfile for the dialer's output");
     let mut log = capture.try_clone().expect("dup the capture handle");
     let listener =
         std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind the observer");
     let port = listener.local_addr().expect("listener address").port();
-    let locator = locator.replace("{port}", &port.to_string());
+    let locator = row.locator.replace("{port}", &port.to_string());
+    let node = node_args(dialer, row);
     let child = ChildGuard::wrap(
-        format!("{dialer:?} dialing {locator}"),
+        format!("{dialer:?} dialing {locator} with {node:?}"),
         dialer_command(dialer, &locator, ca)
+            .args(&node)
             .stdout(Stdio::from(capture.try_clone().expect("dup stdout")))
             .stderr(Stdio::from(capture))
             .spawn()
@@ -554,23 +632,24 @@ fn socket_buffers_reach_the_kernel_as_zenohd_sets_them() {
 
     let mut failures = Vec::new();
     for row in buffer_rows() {
-        let (by_zenohd, zenohd_log) = observe_buffers(Dialer::Zenohd, row.locator, &ca);
+        let (by_zenohd, zenohd_log) = observe_buffers(Dialer::Zenohd, &row, &ca);
         let Some(by_zenohd) = by_zenohd.filter(|b| buffers_fit(*b, &row)) else {
             failures.push(format!(
-                "{}: zenohd showed {by_zenohd:?}, which is not what the row sets, so this \
-                 substrate cannot adjudicate it\n--- zenohd ---\n{zenohd_log}",
-                row.locator
+                "{} with node {:?}: zenohd showed {by_zenohd:?}, which is not what the row \
+                 sets, so this substrate cannot adjudicate it\n--- zenohd ---\n{zenohd_log}",
+                row.locator, row.node
             ));
             continue;
         };
-        let (by_wz, wz_log) = observe_buffers(Dialer::Wz, row.locator, &ca);
+        let (by_wz, wz_log) = observe_buffers(Dialer::Wz, &row, &ca);
         let agrees = by_wz.is_some_and(|b| {
             buffers_fit(b, &row) && b.peer_window_scale == by_zenohd.peer_window_scale
         });
         if !agrees {
             failures.push(format!(
-                "{}: wz showed {by_wz:?} where zenohd showed {by_zenohd:?}\n--- wz ---\n{wz_log}",
-                row.locator
+                "{} with node {:?}: wz showed {by_wz:?} where zenohd showed {by_zenohd:?}\n\
+                 --- wz ---\n{wz_log}",
+                row.locator, row.node
             ));
         }
     }

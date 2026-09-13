@@ -250,6 +250,14 @@ impl LinkSocketOptions {
         so_sndbuf: None,
         so_rcvbuf: None,
     };
+
+    /// R2592 — the socket options a bare `key=value;...` span names, read
+    /// exactly as a locator's `#`-config tail is. This is the shape upstream's
+    /// per-link-kind configuration takes before it is merged under an endpoint's
+    /// own parameters, so the one parser serves both.
+    pub fn from_config_span(config: &str) -> Result<LinkSocketOptions, LocatorParseError> {
+        Ok(parse_socket_options(config)?.map_or(LinkSocketOptions::NONE, |boxed| *boxed))
+    }
 }
 
 impl ParsedLocator {
@@ -527,6 +535,16 @@ fn lookup_param<'a>(params: &'a str, key: &'a str) -> Option<&'a str> {
 /// carry several group memberships. Using the singular read there would join
 /// the first group and silently drop the rest — a config that looks accepted
 /// and half works.
+/// R2592 — every KEY a `key=value` span names, in written order, with the
+/// same grammar [`lookup_param`] reads. A consumer that accepts only a fixed key
+/// set checks the span against it with this rather than re-splitting it.
+pub fn config_span_keys(params: &str) -> impl Iterator<Item = &str> {
+    params
+        .split(LOCATOR_PARAM_LIST_SEPARATOR)
+        .filter_map(|pair| pair.split_once(LOCATOR_PARAM_FIELD_SEPARATOR))
+        .map(|(key, _)| key)
+}
+
 fn lookup_param_all<'a>(params: &'a str, key: &'a str) -> impl Iterator<Item = &'a str> {
     params
         .split(LOCATOR_PARAM_LIST_SEPARATOR)
@@ -1869,6 +1887,27 @@ mod tests {
         assert_eq!(only.socket().so_rcvbuf, Some(4096));
         assert_eq!(only.socket().so_sndbuf, None);
         assert!(only.socket.is_some(), "one named key is enough to allocate");
+    }
+
+    /// R2592 — a bare span parses as a locator tail does, and lists its keys in
+    /// written order.
+    #[test]
+    fn a_bare_config_span_parses_like_a_locator_tail() {
+        assert_eq!(
+            LinkSocketOptions::from_config_span("so_rcvbuf=4096;so_sndbuf=8192"),
+            Ok(LinkSocketOptions {
+                so_rcvbuf: Some(4096),
+                so_sndbuf: Some(8192),
+                ..LinkSocketOptions::NONE
+            })
+        );
+        assert_eq!(
+            LinkSocketOptions::from_config_span(""),
+            Ok(LinkSocketOptions::NONE)
+        );
+        assert!(LinkSocketOptions::from_config_span("so_rcvbuf=many").is_err());
+        let keys: Vec<&str> = config_span_keys("so_rcvbuf=1;iface=lo;so_rcvbuf=2").collect();
+        assert_eq!(keys, ["so_rcvbuf", "iface", "so_rcvbuf"]);
     }
 
     #[test]

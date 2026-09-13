@@ -71,6 +71,105 @@ pub enum LinkSide {
     Listen,
 }
 
+/// R2592 — the per-link-kind configuration upstream merges UNDER every
+/// endpoint of that kind: the base [`LinkSocket::resolve`] layers a locator's
+/// own options over.
+///
+/// Upstream builds one parameter string per link kind from the zenoh config
+/// file (`io/zenoh-link/src/lib.rs` @ `insert_config(LinkKind::Tcp, self.tcp_inspector.inspect_config(config));`)
+/// and applies it to every dial and every listen of that kind, whichever path
+/// produced the endpoint. wz had no such layer, so a node could set a socket
+/// option per locator and never for a whole link kind.
+///
+/// The keys are exactly the socket keys upstream's inspectors put there:
+/// `so_rcvbuf` and `so_sndbuf` for tcp
+/// (`io/zenoh-links/zenoh-link-tcp/src/utils.rs` @ `ps.push((TCP_SO_RCV_BUF, &rx_buffer_size));`)
+/// and for tls. Any other key is refused by [`LinkDefaults::set`]: a key upstream
+/// never renders into this layer would make the layer a wz-only capability. The
+/// tls inspector also renders certificate keys, which reach wz through
+/// `TlsDialConfig` / `TlsAcceptConfig` rather than through socket options.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LinkDefaults {
+    tcp: LinkSocketOptions,
+    tls: LinkSocketOptions,
+}
+
+/// Why [`LinkDefaults::set`] refused a span.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkDefaultsError {
+    /// Upstream renders no per-kind socket configuration for this link kind.
+    NoLayerForKind(Proto),
+    /// Upstream's inspector for this kind never renders this key.
+    KeyNotInLayer {
+        /// The link kind named.
+        proto: Proto,
+        /// The key it was given.
+        key: String,
+    },
+    /// A key in the layer with an unusable value.
+    BadValue(wz_session_core::locator::LocatorParseError),
+}
+
+impl core::fmt::Display for LinkDefaultsError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NoLayerForKind(proto) => {
+                write!(
+                    f,
+                    "no per-link-kind socket configuration exists for {proto:?}"
+                )
+            }
+            Self::KeyNotInLayer { proto, key } => write!(
+                f,
+                "`{key}` is not a key zenoh's {proto:?} link configuration carries \
+                 (it carries `so_rcvbuf` and `so_sndbuf`)"
+            ),
+            Self::BadValue(e) => write!(f, "{e:?}"),
+        }
+    }
+}
+
+impl std::error::Error for LinkDefaultsError {}
+
+impl LinkDefaults {
+    /// The socket keys each link kind's layer carries, as upstream's inspectors
+    /// render them.
+    const KEYS: &'static [&'static str] = &["so_rcvbuf", "so_sndbuf"];
+
+    /// Layer the `key=value;...` span onto `proto`'s defaults. A key the span
+    /// names replaces the one already held; the rest are kept.
+    pub fn set(&mut self, proto: Proto, span: &str) -> Result<(), LinkDefaultsError> {
+        let slot = match proto {
+            Proto::Tcp => &mut self.tcp,
+            Proto::Tls => &mut self.tls,
+            other => return Err(LinkDefaultsError::NoLayerForKind(other)),
+        };
+        if let Some(key) =
+            wz_session_core::locator::config_span_keys(span).find(|k| !Self::KEYS.contains(k))
+        {
+            return Err(LinkDefaultsError::KeyNotInLayer {
+                proto,
+                key: key.to_string(),
+            });
+        }
+        let named =
+            LinkSocketOptions::from_config_span(span).map_err(LinkDefaultsError::BadValue)?;
+        slot.so_rcvbuf = named.so_rcvbuf.or(slot.so_rcvbuf);
+        slot.so_sndbuf = named.so_sndbuf.or(slot.so_sndbuf);
+        Ok(())
+    }
+
+    /// The defaults a `proto` endpoint is layered on; none for a kind without
+    /// a layer.
+    pub fn for_proto(&self, proto: Proto) -> &LinkSocketOptions {
+        match proto {
+            Proto::Tcp => &self.tcp,
+            Proto::Tls => &self.tls,
+            _ => &LinkSocketOptions::NONE,
+        }
+    }
+}
+
 /// The socket options a link applies, after its scheme's reader has run.
 ///
 /// Built only by [`LinkSocket::resolve`] (or [`LinkSocket::NONE`]), so a value
@@ -159,22 +258,33 @@ impl<'a> LinkSocket<'a> {
         so_rcvbuf: None,
     };
 
-    /// Run `proto`'s reader for `side` over `options`: refuse what it refuses,
-    /// resolve `bind` the way it does, and keep only what it applies.
+    /// Run `proto`'s reader for `side` over the locator's `options` layered on
+    /// `defaults`, this link kind's configured values: refuse what the reader
+    /// refuses, resolve `bind` the way it does, and keep only what it applies.
+    ///
+    /// R2592 — the layering is upstream's, key by key: the per-link-kind
+    /// configuration is the base and the endpoint's own parameters overwrite it
+    /// (`io/zenoh-transport/src/unicast/manager.rs` @ `// Overwrite config with current endpoint parameters`),
+    /// before the link's reader sees any of it. So a key the locator names wins,
+    /// a key only the defaults name still applies, and every refusal below
+    /// judges the merged set. Pass `&LinkSocketOptions::NONE` for no defaults.
     pub async fn resolve(
         options: &'a LinkSocketOptions,
+        defaults: &'a LinkSocketOptions,
         proto: Proto,
         side: LinkSide,
     ) -> io::Result<LinkSocket<'a>> {
         let reader = SchemeReader::of(proto, side);
-        if reader.refuses_iface_with_bind && options.iface.is_some() && options.bind.is_some() {
+        let iface = options.iface.as_deref().or(defaults.iface.as_deref());
+        let bind_key = options.bind.as_deref().or(defaults.bind.as_deref());
+        if reader.refuses_iface_with_bind && iface.is_some() && bind_key.is_some() {
             // Upstream's text, formatted the way its `bail!` formats it.
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "Using Config options `iface` and `bind` in conjunction is unsupported at this time iface \"bind\"",
             ));
         }
-        let bind = match (reader.bind, options.bind.as_deref()) {
+        let bind = match (reader.bind, bind_key) {
             (BindLookup::NotRead, _) | (_, None) => None,
             (BindLookup::FirstNonMulticast, Some(address)) => tokio::net::lookup_host(address)
                 .await?
@@ -192,15 +302,17 @@ impl<'a> LinkSocket<'a> {
             ),
         };
         Ok(LinkSocket {
-            iface: options.iface.as_deref(),
+            iface,
             bind: if side == LinkSide::Dial { bind } else { None },
-            dscp: if reader.reads_dscp {
-                options.dscp
-            } else {
-                None
-            },
-            so_sndbuf: options.so_sndbuf.filter(|_| reader.reads_buffers),
-            so_rcvbuf: options.so_rcvbuf.filter(|_| reader.reads_buffers),
+            dscp: options.dscp.or(defaults.dscp).filter(|_| reader.reads_dscp),
+            so_sndbuf: options
+                .so_sndbuf
+                .or(defaults.so_sndbuf)
+                .filter(|_| reader.reads_buffers),
+            so_rcvbuf: options
+                .so_rcvbuf
+                .or(defaults.so_rcvbuf)
+                .filter(|_| reader.reads_buffers),
         })
     }
 
@@ -403,6 +515,90 @@ mod tests {
         }
     }
 
+    /// A locator's options resolved with no per-link-kind defaults under them.
+    async fn resolve_alone(
+        options: &LinkSocketOptions,
+        proto: Proto,
+        side: LinkSide,
+    ) -> io::Result<LinkSocket<'_>> {
+        LinkSocket::resolve(options, &LinkSocketOptions::NONE, proto, side).await
+    }
+
+    /// R2592 — the defaults layer: a key only the defaults name applies, a key
+    /// the locator names wins, keys merge one by one, and a kind's defaults
+    /// reach only that kind. These are the four cases measured on zenohd with
+    /// `--cfg transport/link/tcp/...` before the layer was built.
+    #[tokio::test]
+    async fn a_locator_key_wins_over_its_kinds_default_key_by_key() {
+        let mut defaults = LinkDefaults::default();
+        defaults
+            .set(Proto::Tcp, "so_rcvbuf=4096;so_sndbuf=8192")
+            .unwrap();
+        let tcp = defaults.for_proto(Proto::Tcp);
+
+        let silent = LinkSocketOptions::NONE;
+        let alone = LinkSocket::resolve(&silent, tcp, Proto::Tcp, LinkSide::Dial)
+            .await
+            .unwrap();
+        assert_eq!(
+            (alone.so_rcvbuf(), alone.so_sndbuf()),
+            (Some(4096), Some(8192))
+        );
+
+        let own = LinkSocketOptions {
+            so_rcvbuf: Some(16384),
+            ..LinkSocketOptions::NONE
+        };
+        let merged = LinkSocket::resolve(&own, tcp, Proto::Tcp, LinkSide::Listen)
+            .await
+            .unwrap();
+        assert_eq!(
+            (merged.so_rcvbuf(), merged.so_sndbuf()),
+            (Some(16384), Some(8192))
+        );
+
+        assert_eq!(defaults.for_proto(Proto::Tls), &LinkSocketOptions::NONE);
+        assert_eq!(defaults.for_proto(Proto::Udp), &LinkSocketOptions::NONE);
+    }
+
+    /// R2592 — the layer carries only what upstream's inspectors render into
+    /// it, and only for the kinds that have one.
+    #[test]
+    fn the_defaults_layer_refuses_what_upstream_never_puts_there() {
+        let mut defaults = LinkDefaults::default();
+        assert_eq!(
+            defaults.set(Proto::Tcp, "so_rcvbuf=4096;bind=127.0.0.1:0"),
+            Err(LinkDefaultsError::KeyNotInLayer {
+                proto: Proto::Tcp,
+                key: "bind".to_string(),
+            })
+        );
+        assert_eq!(
+            defaults.set(Proto::Udp, "so_rcvbuf=4096"),
+            Err(LinkDefaultsError::NoLayerForKind(Proto::Udp))
+        );
+        assert!(matches!(
+            defaults.set(Proto::Tls, "so_sndbuf=lots"),
+            Err(LinkDefaultsError::BadValue(_))
+        ));
+        assert_eq!(
+            defaults,
+            LinkDefaults::default(),
+            "a refused span changes nothing"
+        );
+        // A second span layers over the first rather than replacing it.
+        defaults.set(Proto::Tls, "so_sndbuf=8192").unwrap();
+        defaults.set(Proto::Tls, "so_rcvbuf=4096").unwrap();
+        assert_eq!(
+            defaults.for_proto(Proto::Tls),
+            &LinkSocketOptions {
+                so_rcvbuf: Some(4096),
+                so_sndbuf: Some(8192),
+                ..LinkSocketOptions::NONE
+            }
+        );
+    }
+
     const ALL: [Proto; 6] = [
         Proto::Tcp,
         Proto::Tls,
@@ -419,7 +615,7 @@ mod tests {
         let both = options(Some("lo"), Some("127.0.0.1:0"), None);
         for proto in ALL {
             for side in [LinkSide::Dial, LinkSide::Listen] {
-                let refused = LinkSocket::resolve(&both, proto, side).await.is_err();
+                let refused = resolve_alone(&both, proto, side).await.is_err();
                 let expected = match (proto, side) {
                     (Proto::Ws, _) => false,
                     (Proto::Quic | Proto::QuicDatagram, _) => true,
@@ -439,7 +635,7 @@ mod tests {
         let local: SocketAddr = "127.0.0.1:4000".parse().unwrap();
         for proto in ALL {
             for side in [LinkSide::Dial, LinkSide::Listen] {
-                let socket = LinkSocket::resolve(&opts, proto, side).await.unwrap();
+                let socket = resolve_alone(&opts, proto, side).await.unwrap();
                 let bound = side == LinkSide::Dial && proto != Proto::Ws;
                 assert_eq!(socket.bind(), bound.then_some(local), "{proto:?} {side:?}");
                 let marked = proto != Proto::Ws;
@@ -459,7 +655,7 @@ mod tests {
         };
         for proto in ALL {
             for side in [LinkSide::Dial, LinkSide::Listen] {
-                let socket = LinkSocket::resolve(&opts, proto, side).await.unwrap();
+                let socket = resolve_alone(&opts, proto, side).await.unwrap();
                 let stream = matches!(proto, Proto::Tcp | Proto::Tls);
                 assert_eq!(
                     socket.so_sndbuf(),
@@ -486,7 +682,7 @@ mod tests {
             so_rcvbuf: Some(4096),
             ..LinkSocketOptions::NONE
         };
-        let socket = LinkSocket::resolve(&opts, Proto::Tcp, LinkSide::Dial)
+        let socket = resolve_alone(&opts, Proto::Tcp, LinkSide::Dial)
             .await
             .unwrap();
         let tcp = tokio::net::TcpSocket::new_v4().unwrap();
@@ -502,11 +698,11 @@ mod tests {
     #[tokio::test]
     async fn a_multicast_bind_is_dropped_by_tcp_only() {
         let opts = options(None, Some("224.0.0.1:0"), None);
-        let tcp = LinkSocket::resolve(&opts, Proto::Tcp, LinkSide::Dial)
+        let tcp = resolve_alone(&opts, Proto::Tcp, LinkSide::Dial)
             .await
             .unwrap();
         assert_eq!(tcp.bind(), None);
-        let tls = LinkSocket::resolve(&opts, Proto::Tls, LinkSide::Dial)
+        let tls = resolve_alone(&opts, Proto::Tls, LinkSide::Dial)
             .await
             .unwrap();
         assert_eq!(tls.bind(), Some("224.0.0.1:0".parse().unwrap()));
@@ -517,16 +713,16 @@ mod tests {
     #[tokio::test]
     async fn only_the_readers_that_look_bind_up_can_fail_on_it() {
         let opts = options(None, Some("no-such-host.invalid:0"), None);
-        assert!(LinkSocket::resolve(&opts, Proto::Udp, LinkSide::Listen)
+        assert!(resolve_alone(&opts, Proto::Udp, LinkSide::Listen)
             .await
             .is_ok());
-        assert!(LinkSocket::resolve(&opts, Proto::Ws, LinkSide::Dial)
+        assert!(resolve_alone(&opts, Proto::Ws, LinkSide::Dial)
             .await
             .is_ok());
-        assert!(LinkSocket::resolve(&opts, Proto::Tcp, LinkSide::Listen)
+        assert!(resolve_alone(&opts, Proto::Tcp, LinkSide::Listen)
             .await
             .is_err());
-        assert!(LinkSocket::resolve(&opts, Proto::Udp, LinkSide::Dial)
+        assert!(resolve_alone(&opts, Proto::Udp, LinkSide::Dial)
             .await
             .is_err());
     }
@@ -537,7 +733,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     async fn dscp_is_written_to_the_option_of_the_sockets_family() {
         let opts = options(None, None, Some(0x28));
-        let socket = LinkSocket::resolve(&opts, Proto::Tcp, LinkSide::Dial)
+        let socket = resolve_alone(&opts, Proto::Tcp, LinkSide::Dial)
             .await
             .unwrap();
         let v4 = tokio::net::TcpSocket::new_v4().unwrap();
