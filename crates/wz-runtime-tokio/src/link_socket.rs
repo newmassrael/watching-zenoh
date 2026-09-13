@@ -32,7 +32,8 @@
 //! `quic` module, which no other link's reader reaches. They also have no
 //! per-link-kind layer under them, unlike every other column: upstream's config
 //! file has `tcp` and `tls` sections and no `quic` one, so
-//! [`LinkDefaults::for_proto`] answers `NONE` for them and the locator is the
+//! [`crate::link_socket::LinkDefaults::for_proto`] answers `NONE` for them and
+//! the locator is the
 //! only source.
 //!
 //! R2591 added the buffer column. The two buffer keys are TCP's
