@@ -5804,7 +5804,10 @@ layer_c1ay_cargo_test_router_hat() {
     # The note R2117 wrote is now a GATE — `scripts/lib/guarded_count_gate.py`,
     # pre-push gate 2i — so the next round that moves a test set under a
     # guard's filter is told by its own push, not by a hosted run afterwards.
-    _runci_guarded_test "C1AY stock_config_tests 38" 38 \
+    # R2593 — 38 -> 39: `link_socket_buffers_expand_per_key_and_yield_to_a_typed_key`,
+    # unconditional inside the module, so both legs compile it. MEASURED by
+    # `guarded_count_gate.py` on this exact command: 39 passed.
+    _runci_guarded_test "C1AY stock_config_tests 39" 39 \
         cargo test -p wz-ap-demo --features zenoh-config stock_config_tests --quiet || return 1
     # R2139 (unregistered open-debt item 227) — THE SAME MODULE WITH THE SINKS
     # PRESENT, and it is not a duplicate of the leg above.
@@ -5853,7 +5856,9 @@ layer_c1ay_cargo_test_router_hat() {
     # build the module itself compiles in, and this leg was never a second
     # opinion about that. MEASURED on this exact command: 43 passed, 14
     # filtered out.
-    _runci_guarded_test "C1AY stock_config_tests role-parity 43" 43 \
+    # R2593 — 43 -> 44, the same R2593 case seen from this feature set.
+    # MEASURED by `guarded_count_gate.py` on this exact command: 44 passed.
+    _runci_guarded_test "C1AY stock_config_tests role-parity 44" 44 \
         cargo test -p wz-ap-demo \
         --features zenoh-config,scouting-responder,routing-peer,router-hat-router,scouting-active \
         stock_config_tests --quiet || return 1
