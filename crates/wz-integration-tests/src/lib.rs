@@ -6376,6 +6376,64 @@ pub mod common {
         ip_tos_in_control(&mut control, len as usize)
     }
 
+    /// R2591 — the window scale the PEER of an accepted `stream` advertised in
+    /// its SYN, from `TCP_INFO`.
+    ///
+    /// A dialer's `SO_RCVBUF`, set before it connects, bounds the receive window
+    /// it can ever offer, and the kernel picks the smallest scale that window
+    /// needs. So this reads, from the far side of the connection, whether a
+    /// receive buffer was set before the dial. `tcpi_snd_wscale` is the low
+    /// nibble of the byte glibc's `tcp_info` names `tcpi_snd_rcv_wscale`; the
+    /// calibration in `wz_link_socket_options_zenohd_interop.rs` pins that
+    /// reading against a plain socket.
+    pub fn peer_window_scale(stream: &TcpStream) -> u8 {
+        use std::os::fd::AsRawFd as _;
+        // SAFETY: `info` is a live, zeroed `tcp_info` and `len` is its size.
+        let mut info: libc::tcp_info = unsafe { std::mem::zeroed() };
+        let mut len = std::mem::size_of::<libc::tcp_info>() as libc::socklen_t;
+        let rc = unsafe {
+            libc::getsockopt(
+                stream.as_raw_fd(),
+                libc::IPPROTO_TCP,
+                libc::TCP_INFO,
+                (&mut info as *mut libc::tcp_info).cast(),
+                &mut len,
+            )
+        };
+        assert_eq!(
+            rc,
+            0,
+            "getsockopt(TCP_INFO): {}",
+            std::io::Error::last_os_error()
+        );
+        info.tcpi_snd_rcv_wscale & 0x0f
+    }
+
+    /// R2591 — the receive and send buffer sizes of the TCP socket whose LOCAL
+    /// address is `local`, as the kernel accounts them (`ss -tm`, `skmem` `rb`
+    /// and `tb`), or `None` if no such socket exists.
+    ///
+    /// The socket may belong to any process: `ss` reads the kernel's socket
+    /// table, so this observes a foreign implementation's dial socket as
+    /// readily as wz's. The kernel reports twice a value set with `SO_RCVBUF` /
+    /// `SO_SNDBUF`, and that doubled value is what is returned.
+    pub fn tcp_socket_buffers(local: SocketAddr) -> Option<(u32, u32)> {
+        let out = Command::new("ss")
+            .args(["-t", "-m", "-n", "-H", "src", &local.to_string()])
+            .output()
+            .expect("run `ss` (iproute2), the socket-table reader this observer uses");
+        assert!(out.status.success(), "ss failed: {out:?}");
+        let text = String::from_utf8_lossy(&out.stdout);
+        let skmem = text.split("skmem:(").nth(1)?.split(')').next()?;
+        let field = |name: &str| {
+            skmem
+                .split(',')
+                .find_map(|f| f.strip_prefix(name))
+                .and_then(|v| v.parse::<u32>().ok())
+        };
+        Some((field("rb")?, field("tb")?))
+    }
+
     /// R2588 — every multicast group, of either family, that the kernel holds a
     /// membership for on `device`, read from `/proc/net/igmp` and `/proc/net/igmp6`.
     ///

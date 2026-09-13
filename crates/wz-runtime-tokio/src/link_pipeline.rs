@@ -270,8 +270,9 @@ fn bind_listener(addr: SocketAddr, link_socket: &LinkSocket<'_>) -> io::Result<T
     // dial-side connect bind). Feature/platform-gated in `bind_socket_to_device`.
     // R2590 — the DSCP rides the same step, as in upstream's
     // `TcpSocketConfig::socket_with_config`, and accepted streams inherit it. A
-    // listen-side `LinkSocket` never carries a `bind`.
-    link_socket.configure(&socket, addr)?;
+    // listen-side `LinkSocket` never carries a `bind`. R2591 — the buffer sizes
+    // too; accepted streams inherit the listener's, as upstream's do.
+    link_socket.configure_stream(&socket, addr)?;
     socket.bind(addr)?;
     socket.listen(LISTEN_BACKLOG)
 }

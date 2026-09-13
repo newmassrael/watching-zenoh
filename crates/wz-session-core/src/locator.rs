@@ -209,8 +209,9 @@ pub struct ParsedLocator {
 /// consume (`io/zenoh-link-commons/src/lib.rs` @ `pub const BIND_SOCKET: &str = "bind";`
 /// and its neighbours), so they travel as ONE value from this parser to every
 /// socket constructor. Before R2590 `iface` was threaded through each constructor
-/// as its own parameter and the other two were dropped. A fourth key (the TCP
-/// socket buffers) is a field here, not a new parameter on a dozen functions.
+/// as its own parameter and the other two were dropped. R2591 added the TCP
+/// socket buffers as two more fields, which is the change this shape exists to
+/// keep that small.
 ///
 /// Parsed, not applied: this crate is no_std and owns no socket. Applying them,
 /// and refusing `iface` together with `bind` where upstream does (the unicast
@@ -230,14 +231,24 @@ pub struct LinkSocketOptions {
     /// (IPv4) or `IPV6_TCLASS` (IPv6) as given, not shifted into the DSCP bits.
     /// Parsed by [`parse_dscp_value`] into upstream's exact accepted set.
     pub dscp: Option<u32>,
+    /// R2591 — `#so_sndbuf=<bytes>` (zenoh `TCP_SO_SND_BUF`): the `SO_SNDBUF` a
+    /// tcp or tls socket is given before it connects or binds. A `u32`, as
+    /// upstream parses it; the kernel doubles what it is given.
+    pub so_sndbuf: Option<u32>,
+    /// R2591 — `#so_rcvbuf=<bytes>` (zenoh `TCP_SO_RCV_BUF`): the `SO_RCVBUF`
+    /// likewise. Set before connect, it also bounds the window scale the SYN
+    /// advertises, which is how a peer can see it.
+    pub so_rcvbuf: Option<u32>,
 }
 
 impl LinkSocketOptions {
-    /// The value a locator whose tail names none of the three answers.
+    /// The value a locator whose tail names none of these keys answers.
     pub const NONE: LinkSocketOptions = LinkSocketOptions {
         iface: None,
         bind: None,
         dscp: None,
+        so_sndbuf: None,
+        so_rcvbuf: None,
     };
 }
 
@@ -402,6 +413,12 @@ const LOCATOR_BIND_KEY: &str = "bind";
 /// R2590 — zenoh `DSCP` config key.
 const LOCATOR_DSCP_KEY: &str = "dscp";
 
+/// R2591 — zenoh `TCP_SO_SND_BUF` config key.
+const LOCATOR_SO_SNDBUF_KEY: &str = "so_sndbuf";
+
+/// R2591 — zenoh `TCP_SO_RCV_BUF` config key.
+const LOCATOR_SO_RCVBUF_KEY: &str = "so_rcvbuf";
+
 /// zenoh `UDP_MULTICAST_TTL` config key (`zenoh-link-udp/src/lib.rs:111`).
 const LOCATOR_MCAST_TTL_KEY: &str = "ttl";
 
@@ -564,10 +581,34 @@ fn parse_socket_options(config: &str) -> Result<Option<Box<LinkSocketOptions>>, 
             )
         }
     };
-    if iface.is_none() && bind.is_none() && dscp.is_none() {
+    // R2591 — upstream parses each with `size.parse()` into a `u32`
+    // (`io/zenoh-links/zenoh-link-tcp/src/utils.rs` @ `.map_err(|_| zerror!("Unknown TCP write buffer size argument: {}", size))?,`),
+    // so an empty or non-numeric value is refused, as `dscp` is above.
+    let buffer = |key: &'static str| match lookup_param(config, key) {
+        None => Ok(None),
+        Some(value) => {
+            value
+                .parse::<u32>()
+                .map(Some)
+                .map_err(|_| LocatorParseError::BadConfigValue {
+                    key,
+                    value: value.to_string(),
+                })
+        }
+    };
+    let so_sndbuf = buffer(LOCATOR_SO_SNDBUF_KEY)?;
+    let so_rcvbuf = buffer(LOCATOR_SO_RCVBUF_KEY)?;
+    let options = LinkSocketOptions {
+        iface,
+        bind,
+        dscp,
+        so_sndbuf,
+        so_rcvbuf,
+    };
+    if options == LinkSocketOptions::NONE {
         return Ok(None);
     }
-    Ok(Some(Box::new(LinkSocketOptions { iface, bind, dscp })))
+    Ok(Some(Box::new(options)))
 }
 
 /// R2590 — a `dscp` value in upstream's EXACT accepted set, or `None`.
@@ -1757,6 +1798,7 @@ mod tests {
                 iface: Some("eth0".to_string()),
                 bind: Some("10.0.0.1:9000".to_string()),
                 dscp: Some(0x10),
+                ..LinkSocketOptions::NONE
             }
         );
         // The metadata span is a different namespace: `?dscp=` is not an option.
@@ -1776,6 +1818,10 @@ mod tests {
             ("tcp/1.2.3.4:7447#dscp=high", "dscp"),
             ("tcp/1.2.3.4:7447#dscp=", "dscp"),
             ("tcp/1.2.3.4:7447#bind=", "bind"),
+            // R2591 — upstream's `u32` parse refuses these too.
+            ("tcp/1.2.3.4:7447#so_sndbuf=big", "so_sndbuf"),
+            ("tcp/1.2.3.4:7447#so_rcvbuf=", "so_rcvbuf"),
+            ("tcp/1.2.3.4:7447#so_rcvbuf=-1", "so_rcvbuf"),
         ] {
             match parse_locator(locator) {
                 Err(LocatorParseError::BadConfigValue { key: got, .. }) => {
@@ -1796,11 +1842,33 @@ mod tests {
                     iface: None,
                     bind: Some("0.0.0.0:0".to_string()),
                     dscp: Some(46),
+                    ..LinkSocketOptions::NONE
                 })
             ),
             other => panic!("expected Named, got {other:?}"),
         }
         assert!(parse_any_locator("tcp/example.org:7447#dscp=bad").is_err());
+    }
+
+    /// R2591 — the two TCP socket buffer keys parse off the config span, alone
+    /// or beside the other socket keys.
+    #[test]
+    fn the_tcp_socket_buffers_parse_off_the_config_span() {
+        let p =
+            parse_locator("tls/1.2.3.4:7447#so_sndbuf=8192;so_rcvbuf=4096;dscp=46").expect("valid");
+        assert_eq!(
+            p.socket(),
+            &LinkSocketOptions {
+                dscp: Some(46),
+                so_sndbuf: Some(8192),
+                so_rcvbuf: Some(4096),
+                ..LinkSocketOptions::NONE
+            }
+        );
+        let only = parse_locator("tcp/1.2.3.4:7447#so_rcvbuf=4096").expect("valid");
+        assert_eq!(only.socket().so_rcvbuf, Some(4096));
+        assert_eq!(only.socket().so_sndbuf, None);
+        assert!(only.socket.is_some(), "one named key is enough to allocate");
     }
 
     #[test]

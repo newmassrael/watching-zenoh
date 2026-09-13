@@ -15925,9 +15925,12 @@ layer_z_zenohd_interop() {
     # source address and the TOS byte of the first thing each sends. Neither key is
     # visible to a session, so no Established assertion could witness either. The
     # demo needs `tls` and `quic` to dial those rows, both in the build above.
+    # R2591 — 1 -> 2 passed: the second leg reads the TCP socket buffer keys
+    # from the accepted end's `TCP_INFO` window scale and from `ss`'s `rb`/`tb`
+    # of the dialer's own socket, since neither key is in a header.
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_link_socket_options_zenohd_interop -- --ignored --quiet --test-threads=1 2>&1 \
-        | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+        | tee /dev/stderr | grep -qE '^test result: ok\. 2 passed') || return 1
     # R311y407 — wz MESH QUIC acceptor cross-impl (transport-link-quic x mesh accept
     # loop x zenohd->wz): a real zenohd DIALS a wz `--peer quic/...` / `--router-hat
     # quic/...` MESH listen and both FEDERATES over it AND routes real pub/sub DATA

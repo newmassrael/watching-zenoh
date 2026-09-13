@@ -1056,7 +1056,7 @@ pub(crate) mod iface_bind {
             SocketAddr::V4(_) => TcpSocket::new_v4()?,
             SocketAddr::V6(_) => TcpSocket::new_v6()?,
         };
-        link_socket.configure(&socket, addr)?;
+        link_socket.configure_stream(&socket, addr)?;
         if let Some(local) = link_socket.bind() {
             let mismatch = match (local, addr) {
                 (SocketAddr::V6(_), SocketAddr::V4(_)) => Some(("IPv6", "IPv4")),

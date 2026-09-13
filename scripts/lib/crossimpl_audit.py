@@ -650,7 +650,13 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # byte of the first packet, zenohd adjudicates every row, and every keyed row has
 # an unkeyed row on its scheme. Partial because each atom keeps other unread keys,
 # and because on QUIC the TOS byte is quinn's ECN codepoint in both implementations.
-FOREIGN_ADJUDICATOR_LINKS = 908
+# R2591 — 908 -> 910: `transport-link-tcp` and `-tls` zenohd->wz (partial), a second
+# leg in the same file for `so_sndbuf` / `so_rcvbuf`. Neither key is in a header, so
+# the observer reads the dialer's SYN window scale from the accepted end's `TCP_INFO`
+# and the dialer socket's `rb` / `tb` from `ss`, after calibrating both on a plain
+# socket. Partial because the same two keys also arrive from the zenoh config file,
+# which wz does not read yet.
+FOREIGN_ADJUDICATOR_LINKS = 910
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

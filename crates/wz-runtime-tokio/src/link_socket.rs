@@ -11,16 +11,22 @@
 //! differences are observable, so [`crate::link_socket::LinkSocket::resolve`] is a table rather than
 //! one rule. Each row below is what that link's own config reader does:
 //!
-//! | link | side | `iface` + `bind` | `bind` resolved | `bind` used | `dscp` |
-//! |---|---|---|---|---|---|
-//! | tcp | dial | refused | first non-multicast, else unbound | yes | yes |
-//! | tcp | listen | accepted | same, then ignored | no | yes |
-//! | tls | dial | refused | first, else an error | yes | yes |
-//! | tls | listen | accepted | same, then ignored | no | yes |
-//! | udp | dial | refused | first, else an error | yes | yes |
-//! | udp | listen | accepted | not read | no | yes |
-//! | quic, quic-datagram | both | refused | first, else an error | dial only | yes |
-//! | ws | both | accepted | not read | no | no |
+//! | link | side | `iface` + `bind` | `bind` resolved | `bind` used | `dscp` | `so_sndbuf`, `so_rcvbuf` |
+//! |---|---|---|---|---|---|---|
+//! | tcp | dial | refused | first non-multicast, else unbound | yes | yes | yes |
+//! | tcp | listen | accepted | same, then ignored | no | yes | yes |
+//! | tls | dial | refused | first, else an error | yes | yes | yes |
+//! | tls | listen | accepted | same, then ignored | no | yes | yes |
+//! | udp | dial | refused | first, else an error | yes | yes | no |
+//! | udp | listen | accepted | not read | no | yes | no |
+//! | quic, quic-datagram | both | refused | first, else an error | dial only | yes | no |
+//! | ws | both | accepted | not read | no | no | no |
+//!
+//! R2591 added the last column. The two buffer keys are TCP's
+//! (`io/zenoh-link-commons/src/lib.rs` @ `pub const TCP_SO_SND_BUF: &str = "so_sndbuf";`),
+//! read by `TcpLinkConfig::new` on both sides and by both of tls's configs, and
+//! applied to the socket in the same step as the device and the DSCP
+//! (`io/zenoh-link-commons/src/tcp.rs` @ `socket.set_send_buffer_size(size)?;`).
 //!
 //! Sources, by row: tcp reads through `TcpLinkConfig::new`
 //! (`io/zenoh-links/zenoh-link-tcp/src/utils.rs`
@@ -75,6 +81,8 @@ pub struct LinkSocket<'a> {
     iface: Option<&'a str>,
     bind: Option<SocketAddr>,
     dscp: Option<u32>,
+    so_sndbuf: Option<u32>,
+    so_rcvbuf: Option<u32>,
 }
 
 /// How a scheme turns a `bind` string into an address.
@@ -95,6 +103,7 @@ struct SchemeReader {
     refuses_iface_with_bind: bool,
     bind: BindLookup,
     reads_dscp: bool,
+    reads_buffers: bool,
 }
 
 impl SchemeReader {
@@ -105,11 +114,13 @@ impl SchemeReader {
                 refuses_iface_with_bind: dial,
                 bind: BindLookup::FirstNonMulticast,
                 reads_dscp: true,
+                reads_buffers: true,
             },
             Proto::Tls => SchemeReader {
                 refuses_iface_with_bind: dial,
                 bind: BindLookup::FirstOrError("TLS"),
                 reads_dscp: true,
+                reads_buffers: true,
             },
             Proto::Udp => SchemeReader {
                 refuses_iface_with_bind: dial,
@@ -119,27 +130,33 @@ impl SchemeReader {
                     BindLookup::NotRead
                 },
                 reads_dscp: true,
+                reads_buffers: false,
             },
             Proto::Quic | Proto::QuicDatagram => SchemeReader {
                 refuses_iface_with_bind: true,
                 bind: BindLookup::FirstOrError("QUIC"),
                 reads_dscp: true,
+                reads_buffers: false,
             },
             Proto::Ws => SchemeReader {
                 refuses_iface_with_bind: false,
                 bind: BindLookup::NotRead,
                 reads_dscp: false,
+                reads_buffers: false,
             },
         }
     }
 }
 
 impl<'a> LinkSocket<'a> {
-    /// A socket with no device, no local bind and no DSCP.
+    /// A socket with no device, no local bind, no DSCP and the kernel's
+    /// buffer sizes.
     pub const NONE: LinkSocket<'static> = LinkSocket {
         iface: None,
         bind: None,
         dscp: None,
+        so_sndbuf: None,
+        so_rcvbuf: None,
     };
 
     /// Run `proto`'s reader for `side` over `options`: refuse what it refuses,
@@ -182,6 +199,8 @@ impl<'a> LinkSocket<'a> {
             } else {
                 None
             },
+            so_sndbuf: options.so_sndbuf.filter(|_| reader.reads_buffers),
+            so_rcvbuf: options.so_rcvbuf.filter(|_| reader.reads_buffers),
         })
     }
 
@@ -198,6 +217,39 @@ impl<'a> LinkSocket<'a> {
     /// The value written to `IP_TOS` / `IPV6_TCLASS`, if any.
     pub fn dscp(&self) -> Option<u32> {
         self.dscp
+    }
+
+    /// The `SO_SNDBUF` a stream socket is given, if any.
+    pub fn so_sndbuf(&self) -> Option<u32> {
+        self.so_sndbuf
+    }
+
+    /// The `SO_RCVBUF` a stream socket is given, if any.
+    pub fn so_rcvbuf(&self) -> Option<u32> {
+        self.so_rcvbuf
+    }
+
+    /// [`Self::configure`] plus the two buffer sizes, for the TCP socket under
+    /// a tcp, tls or ws link. Only a stream socket takes them: the schemes
+    /// whose reader keeps the buffers are exactly the ones that build one, so a
+    /// datagram socket never needs a buffer setter.
+    ///
+    /// Gated on the two features whose TCP socket builders call it, the tcp
+    /// connect and listen primitives and the ws dial.
+    #[cfg(any(feature = "transport-link-tcp", feature = "transport-link-ws"))]
+    pub(crate) fn configure_stream(
+        &self,
+        socket: &tokio::net::TcpSocket,
+        family: SocketAddr,
+    ) -> io::Result<()> {
+        self.configure(socket, family)?;
+        if let Some(size) = self.so_sndbuf {
+            socket.set_send_buffer_size(size)?;
+        }
+        if let Some(size) = self.so_rcvbuf {
+            socket.set_recv_buffer_size(size)?;
+        }
+        Ok(())
     }
 
     /// Set the device and the DSCP on `socket`, created for `family`'s address
@@ -347,6 +399,7 @@ mod tests {
             iface: iface.map(str::to_string),
             bind: bind.map(str::to_string),
             dscp,
+            ..LinkSocketOptions::NONE
         }
     }
 
@@ -393,6 +446,55 @@ mod tests {
                 assert_eq!(socket.dscp(), marked.then_some(0x10), "{proto:?} {side:?}");
             }
         }
+    }
+
+    /// R2591 — the TCP buffer keys reach tcp and tls, on both sides, and no
+    /// other scheme.
+    #[tokio::test]
+    async fn the_buffer_keys_reach_tcp_and_tls_on_both_sides_only() {
+        let opts = LinkSocketOptions {
+            so_sndbuf: Some(8192),
+            so_rcvbuf: Some(4096),
+            ..LinkSocketOptions::NONE
+        };
+        for proto in ALL {
+            for side in [LinkSide::Dial, LinkSide::Listen] {
+                let socket = LinkSocket::resolve(&opts, proto, side).await.unwrap();
+                let stream = matches!(proto, Proto::Tcp | Proto::Tls);
+                assert_eq!(
+                    socket.so_sndbuf(),
+                    stream.then_some(8192),
+                    "{proto:?} {side:?}"
+                );
+                assert_eq!(
+                    socket.so_rcvbuf(),
+                    stream.then_some(4096),
+                    "{proto:?} {side:?}"
+                );
+            }
+        }
+    }
+
+    /// R2591 — the buffers land on the socket: the kernel reports back twice
+    /// what was set, its documented doubling (`man 7 socket`, `SO_SNDBUF`),
+    /// which is also what `ss` showed for zenohd's own socket.
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn the_buffers_are_the_ones_the_kernel_reports_back() {
+        let opts = LinkSocketOptions {
+            so_sndbuf: Some(8192),
+            so_rcvbuf: Some(4096),
+            ..LinkSocketOptions::NONE
+        };
+        let socket = LinkSocket::resolve(&opts, Proto::Tcp, LinkSide::Dial)
+            .await
+            .unwrap();
+        let tcp = tokio::net::TcpSocket::new_v4().unwrap();
+        socket
+            .configure_stream(&tcp, "127.0.0.1:1".parse().unwrap())
+            .unwrap();
+        assert_eq!(tcp.send_buffer_size().unwrap(), 2 * 8192);
+        assert_eq!(tcp.recv_buffer_size().unwrap(), 2 * 4096);
     }
 
     /// tcp drops a multicast `bind` and dials unbound; tls keeps it, and the

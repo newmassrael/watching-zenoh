@@ -44,6 +44,17 @@
 //!   codepoint per packet as a control message, and that replaces the socket's
 //!   TOS. The row pins the observable, so a wz that diverged from zenohd there
 //!   would still red, but it is not evidence that the key has an effect.
+//!
+//! # R2591: the TCP socket buffers, which are not in any header
+//!
+//! `so_sndbuf` and `so_rcvbuf` change no field of any packet directly, so the
+//! second witness reads two other places the kernel exposes them, again from
+//! outside the dialer. The accepted end's `TCP_INFO` gives the window scale the
+//! dialer's SYN advertised, which a receive buffer set before connect bounds;
+//! and `ss` gives the `rb` / `tb` the kernel accounts to the dialer's own
+//! socket, whichever process owns it. Measured against zenohd before the
+//! witness was written: `so_rcvbuf=4096` reads as window scale 0 and `rb8192`,
+//! `so_sndbuf=8192` as `tb16384`, and no key as the kernel's defaults.
 
 use std::io::Read as _;
 use std::net::{IpAddr, Ipv4Addr, UdpSocket};
@@ -53,7 +64,8 @@ use std::time::{Duration, Instant};
 
 use wz_integration_tests::common::{
     assert_demo_binary_newer_than_sources, next_datagram_tos_and_source_v4, opening_segment_tos_v4,
-    read_captured, tos_recording_listener_v4, wz_ap_demo_binary, zenohd_binary, ChildGuard,
+    peer_window_scale, read_captured, tcp_socket_buffers, tos_recording_listener_v4,
+    wz_ap_demo_binary, zenohd_binary, ChildGuard,
 };
 use wz_runtime_tokio_test_support::localhost_cert_key_pem;
 
@@ -395,6 +407,169 @@ fn bind_and_dscp_reach_the_wire_as_zenohd_puts_them() {
         if by_wz != by_zenohd {
             failures.push(format!(
                 "{}: wz put {by_wz:?} where zenohd put {by_zenohd:?}\n--- wz ---\n{wz_log}",
+                row.locator
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// R2591 — a dialer's TCP socket buffers, seen from outside the dialer: the
+/// window scale its SYN advertised (read on the accepted end, `TCP_INFO`) and
+/// the `rb` / `tb` the kernel accounts to its socket (`ss`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Buffers {
+    peer_window_scale: u8,
+    rcvbuf: u32,
+    sndbuf: u32,
+}
+
+/// A buffer row: the locator and the two sizes its tail sets, as written.
+struct BufferRow {
+    locator: &'static str,
+    so_rcvbuf: Option<u32>,
+    so_sndbuf: Option<u32>,
+}
+
+/// The receive buffer the rows set. Small enough that the window it allows
+/// needs no scaling at all, so a set buffer reads as window scale 0.
+const SMALL_RCVBUF: u32 = 4096;
+const SMALL_SNDBUF: u32 = 8192;
+
+fn buffer_rows() -> Vec<BufferRow> {
+    vec![
+        BufferRow {
+            locator: "tcp/127.0.0.1:{port}",
+            so_rcvbuf: None,
+            so_sndbuf: None,
+        },
+        BufferRow {
+            locator: "tcp/127.0.0.1:{port}#so_rcvbuf=4096",
+            so_rcvbuf: Some(SMALL_RCVBUF),
+            so_sndbuf: None,
+        },
+        BufferRow {
+            locator: "tcp/127.0.0.1:{port}#so_sndbuf=8192",
+            so_rcvbuf: None,
+            so_sndbuf: Some(SMALL_SNDBUF),
+        },
+        BufferRow {
+            locator: "tls/127.0.0.1:{port}#so_rcvbuf=4096;so_sndbuf=8192",
+            so_rcvbuf: Some(SMALL_RCVBUF),
+            so_sndbuf: Some(SMALL_SNDBUF),
+        },
+    ]
+}
+
+/// Whether `seen` is what `row` asks for. A set buffer must read back as the
+/// kernel's doubled value, and a set receive buffer as window scale 0; an unset
+/// one must read as anything but the value the keyed rows use, which is the
+/// kernel default on any host this runs on.
+fn buffers_fit(seen: Buffers, row: &BufferRow) -> bool {
+    let rcv = match row.so_rcvbuf {
+        Some(v) => seen.rcvbuf == 2 * v && seen.peer_window_scale == 0,
+        None => seen.rcvbuf != 2 * SMALL_RCVBUF,
+    };
+    let snd = match row.so_sndbuf {
+        Some(v) => seen.sndbuf == 2 * v,
+        None => seen.sndbuf != 2 * SMALL_SNDBUF,
+    };
+    rcv && snd
+}
+
+/// Accept `dialer`'s connection on a fresh loopback listener and read its
+/// buffers while it is still connected. `None` when it never connects.
+fn observe_buffers(dialer: Dialer, locator: &str, ca: &Path) -> (Option<Buffers>, String) {
+    let capture = tempfile::tempfile().expect("tempfile for the dialer's output");
+    let mut log = capture.try_clone().expect("dup the capture handle");
+    let listener =
+        std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind the observer");
+    let port = listener.local_addr().expect("listener address").port();
+    let locator = locator.replace("{port}", &port.to_string());
+    let child = ChildGuard::wrap(
+        format!("{dialer:?} dialing {locator}"),
+        dialer_command(dialer, &locator, ca)
+            .stdout(Stdio::from(capture.try_clone().expect("dup stdout")))
+            .stderr(Stdio::from(capture))
+            .spawn()
+            .unwrap_or_else(|e| panic!("spawn {dialer:?}: {e}")),
+    );
+    let seen = accept_within(&listener, BUDGET).map(|(stream, peer)| {
+        let (rcvbuf, sndbuf) = tcp_socket_buffers(peer)
+            .unwrap_or_else(|| panic!("the kernel lists no socket at {peer}, the dialer's end"));
+        Buffers {
+            peer_window_scale: peer_window_scale(&stream),
+            rcvbuf,
+            sndbuf,
+        }
+    });
+    drop(child);
+    (seen, read_captured(&mut log))
+}
+
+// wz-proves: transport-link-tcp zenohd->wz partial
+// wz-proves: transport-link-tls zenohd->wz partial
+#[test]
+#[ignore = "binary-dep e2e (zenohd + wz-ap-demo built with tls) reading `ss`; Layer Z runs via --ignored"]
+fn socket_buffers_reach_the_kernel_as_zenohd_sets_them() {
+    let demo = wz_ap_demo_binary();
+    assert_demo_binary_newer_than_sources(&demo);
+    let (_ca_dir, ca) = write_ca();
+
+    // CALIBRATION first, on a plain socket: both readers must see a receive
+    // buffer set before connect, and must not see one that was not set, or a
+    // reader answering a constant would pass every row below.
+    for set in [true, false] {
+        let listener =
+            std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind a listener");
+        let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)
+            .expect("a client socket");
+        if set {
+            socket
+                .set_recv_buffer_size(SMALL_RCVBUF as usize)
+                .expect("set SO_RCVBUF");
+        }
+        socket
+            .connect(&listener.local_addr().unwrap().into())
+            .expect("connect");
+        let client = std::net::TcpStream::from(socket);
+        let (accepted, _) = accept_within(&listener, Duration::from_secs(2))
+            .expect("the in-process client connected before the accept, so it must be there");
+        let (rcvbuf, _) = tcp_socket_buffers(client.local_addr().unwrap())
+            .expect("ss lists the calibration client's socket");
+        let scale = peer_window_scale(&accepted);
+        if set {
+            assert_eq!(
+                (rcvbuf, scale),
+                (2 * SMALL_RCVBUF, 0),
+                "a set SO_RCVBUF must read back"
+            );
+        } else {
+            assert!(
+                rcvbuf != 2 * SMALL_RCVBUF && scale != 0,
+                "an unset SO_RCVBUF must not read as the set one: rb {rcvbuf}, scale {scale}"
+            );
+        }
+    }
+
+    let mut failures = Vec::new();
+    for row in buffer_rows() {
+        let (by_zenohd, zenohd_log) = observe_buffers(Dialer::Zenohd, row.locator, &ca);
+        let Some(by_zenohd) = by_zenohd.filter(|b| buffers_fit(*b, &row)) else {
+            failures.push(format!(
+                "{}: zenohd showed {by_zenohd:?}, which is not what the row sets, so this \
+                 substrate cannot adjudicate it\n--- zenohd ---\n{zenohd_log}",
+                row.locator
+            ));
+            continue;
+        };
+        let (by_wz, wz_log) = observe_buffers(Dialer::Wz, row.locator, &ca);
+        let agrees = by_wz.is_some_and(|b| {
+            buffers_fit(b, &row) && b.peer_window_scale == by_zenohd.peer_window_scale
+        });
+        if !agrees {
+            failures.push(format!(
+                "{}: wz showed {by_wz:?} where zenohd showed {by_zenohd:?}\n--- wz ---\n{wz_log}",
                 row.locator
             ));
         }
