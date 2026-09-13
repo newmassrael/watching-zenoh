@@ -29,9 +29,14 @@ use std::sync::Arc;
 use tokio_rustls::rustls::crypto::ring;
 use tokio_rustls::rustls::{version::TLS13, ClientConfig, ServerConfig};
 
-use crate::tls_config::{
-    certs_from_pem, private_key_from_pem, resolve_optional_pem, root_store_from_pem, ClientAuthPem,
-};
+use crate::tls_config::{certs_from_pem, private_key_from_pem, root_store_from_pem, ClientAuthPem};
+// R2602 — these two serve ONLY the locator-material builders below, which are
+// `transport-unicast`-gated because `session_open` is their sole consumer.
+// Ungated here they are `unused_imports` in a `--no-default-features --features
+// transport-link-quic` build, which Layer C1ac compiles with `-D warnings`.
+#[cfg(feature = "transport-unicast")]
+use crate::tls_config::resolve_optional_pem;
+#[cfg(feature = "transport-unicast")]
 use wz_session_core::locator::LinkTlsMaterial;
 
 /// The ALPN protocol id zenoh-link-quic advertises on every QUIC connection
@@ -151,6 +156,14 @@ pub fn quic_server_config_from_pem(
 /// where upstream's loader bails later inside its own PEM step. Failing at the
 /// locator names the key an operator mistyped; failing inside rustls names the
 /// decoder.
+/// R2602 — gated on `transport-unicast` because its ONLY consumer is
+/// `session_open`, which is itself `all(transport-link-tcp, transport-unicast)`.
+/// `transport-link-quic` implies tcp but NOT unicast, so a
+/// `--no-default-features --features transport-link-quic` build compiles the
+/// consumer out and leaves this dead — which Layer C1ac runs with `-D warnings`
+/// and hosted redded on run 34763542586. Neither the reduced-features gate (no
+/// features) nor the non-default gate (all features) builds that combination.
+#[cfg(feature = "transport-unicast")]
 pub(crate) async fn quic_client_config_from_locator(
     material: &LinkTlsMaterial,
 ) -> io::Result<Option<Arc<ClientConfig>>> {
@@ -189,6 +202,8 @@ pub(crate) async fn quic_client_config_from_locator(
 /// dial half turn a listener into one that DEMANDS client certificates.
 /// Upstream gates it the same way and bails when mTLS is on with no roots
 /// (`io/zenoh-link-commons/src/quic/utils.rs` @ `|| Err(zerror!("Missing root certificates while mTLS is enabled.")),`).
+/// R2602 — gated with its dial twin above, for the same reason.
+#[cfg(feature = "transport-unicast")]
 pub(crate) async fn quic_server_config_from_locator(
     material: &LinkTlsMaterial,
 ) -> io::Result<Option<Arc<ServerConfig>>> {

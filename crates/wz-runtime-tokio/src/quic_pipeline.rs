@@ -74,7 +74,11 @@ use wz_session_core::link::InterceptorLink;
 /// of what IS readable, which can only close a link earlier than the truth,
 /// never later — the safe direction for a key whose whole purpose is to stop
 /// trusting an expired identity.
-#[cfg(feature = "transport-link-quic")]
+/// R2602 — also gated on `transport-unicast`: the whole expiry seam is reached
+/// only from `session_open`, which is `all(transport-link-tcp, transport-unicast)`,
+/// and `transport-link-quic` implies tcp but NOT unicast. Layer C1ac builds
+/// exactly that combination with `-D warnings`, where these are dead code.
+#[cfg(all(feature = "transport-link-quic", feature = "transport-unicast"))]
 pub(crate) fn peer_chain_expiry(connection: &Connection) -> Option<i64> {
     use x509_parser::prelude::{FromDer, X509Certificate};
 
@@ -101,11 +105,11 @@ pub(crate) fn peer_chain_expiry(connection: &Connection) -> Option<i64> {
 /// instant. The cap exists because one enormous `tokio::time::sleep` is the
 /// unsound shape, and because re-reading the wall clock is what lets a machine
 /// whose time jumped forward notice.
-#[cfg(feature = "transport-link-quic")]
+#[cfg(all(feature = "transport-link-quic", feature = "transport-unicast"))]
 const EXPIRY_MAX_SLEEP: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// R2600 — sleep until `deadline` (Unix seconds), re-reading the wall clock.
-#[cfg(feature = "transport-link-quic")]
+#[cfg(all(feature = "transport-link-quic", feature = "transport-unicast"))]
 async fn sleep_until_unix(deadline: i64) {
     loop {
         let now = std::time::SystemTime::now()
@@ -140,7 +144,7 @@ async fn sleep_until_unix(deadline: i64) {
 /// per-link clock watcher is. Upstream puts its own on `Acceptor`, but wz's
 /// `Acceptor` is specifically the listen/accept loops and this task belongs to
 /// neither that nor the caller's path.
-#[cfg(feature = "transport-link-quic")]
+#[cfg(all(feature = "transport-link-quic", feature = "transport-unicast"))]
 pub(crate) fn arm_expiry_close(connection: &Connection) {
     let Some(deadline) = peer_chain_expiry(connection) else {
         // No chain, nothing to expire. Upstream answers `None` here too rather
