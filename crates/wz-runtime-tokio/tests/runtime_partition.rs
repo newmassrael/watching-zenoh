@@ -34,6 +34,7 @@ use wz_runtime_tokio::runtime_pool::{
 // gating the import alone would leave that test naming a symbol it cannot see.
 #[cfg(feature = "transport-link-udp")]
 use wz_runtime_tokio::link_socket::LinkSocket;
+#[cfg(feature = "transport-link-udp")]
 use wz_runtime_tokio::udp_pipeline::bind_udp_demux;
 use wz_runtime_tokio::writer_queue::WriterHandle;
 

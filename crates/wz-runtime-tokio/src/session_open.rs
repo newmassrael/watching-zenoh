@@ -36,7 +36,6 @@ use wz_runtime_core::TimeSource;
 use wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr;
 // R311y473 — the single dialable-locator scheme table `advertised_locator`
 // delegates to (and the adminspace per-link emitter shares).
-use crate::link_socket::{LinkSide, LinkSocket};
 use wz_session_core::link::InterceptorLink;
 #[cfg(feature = "transport-link-serial")]
 use wz_session_core::locator::SerialEndpoint;
@@ -46,6 +45,9 @@ use wz_session_core::locator::{
 };
 #[cfg(feature = "scouting-static")]
 use wz_session_core::scout_static::{resolve_static_config, StaticConfigError};
+// R2590 — the per-scheme socket options every IP-family dial and bind arm
+// resolves before it builds a socket.
+use crate::link_socket::{LinkSide, LinkSocket};
 // R311y808 — the static dial arm's retry reuses the crate's ONE transcription of
 // zenoh's `ConnectionRetryConf` rather than growing a second schedule.
 #[cfg(feature = "scouting-static")]
