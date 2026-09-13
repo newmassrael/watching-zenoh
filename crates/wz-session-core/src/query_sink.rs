@@ -185,6 +185,20 @@ pub struct ReplyMeta<'a> {
     /// `z_query_reply_del_options_t` accepts the field. The Del arm below
     /// therefore ignores it rather than pretending to carry it.
     pub attachment: Option<&'a [u8]>,
+    /// R2596 — a PER-REPLY QoS, which OVERRIDES the query's own
+    /// ([`QueryView::qos`], what R2594 made every reply inherit). `None` keeps
+    /// the inheritance, so a caller that names nothing is byte-unchanged.
+    ///
+    /// It exists because inheriting is not always right: an advanced cache
+    /// answers out of a bounded ring on ITS OWN terms, and all three
+    /// references say so by construction — zenoh-ext stamps its
+    /// `RepliesConfig` on every cache reply through a `SampleBuilder`, and
+    /// both C ABIs carry `congestion_control` / `priority` / `is_express` on
+    /// the cache options and set `z_query_reply_options_t` from them per
+    /// reply. A knob on the cache alone could not express that: the value has
+    /// to reach the staged reply, and this is the seam every other per-reply
+    /// value already travels through.
+    pub qos: Option<crate::sample::QosLevel>,
 }
 
 #[cfg(feature = "alloc")]
@@ -211,6 +225,12 @@ impl<'a> ReplyMeta<'a> {
     /// Set the opaque attachment side-band (the body ext id 0x03, Put-only).
     pub fn with_attachment(mut self, attachment: Option<&'a [u8]>) -> Self {
         self.attachment = attachment;
+        self
+    }
+    /// R2596 — override this reply's QoS (see [`Self::qos`]). `None` inherits
+    /// the query's.
+    pub fn with_qos(mut self, qos: Option<crate::sample::QosLevel>) -> Self {
+        self.qos = qos;
         self
     }
 }
@@ -427,6 +447,12 @@ pub trait ReplyOut {
     /// [`Self::reply_keyed_attached`] / [`Self::reply_keyed_encoded`] (dropping
     /// the source_info, which no timestamp-less arm carries). An impl that
     /// wants all four — [`crate::query::QueryResponder`] does — overrides this.
+    ///
+    /// R2596 — the same is now true of [`ReplyMeta::qos`], and for the same
+    /// structural reason: every arm this default can chain to stages the
+    /// QUERY's QoS, so an override reaching this fallback is DROPPED rather
+    /// than applied. `QueryResponder` overrides this method and honours it;
+    /// an impl that does not must not advertise the override to its callers.
     #[cfg(feature = "alloc")]
     fn reply_keyed_meta(&mut self, keyexpr: &str, payload: &[u8], meta: ReplyMeta<'_>) {
         match (meta.timestamp, meta.attachment) {
@@ -471,6 +497,11 @@ pub trait ReplyOut {
     /// which has a parameter to carry an attachment. An impl that wants the
     /// attachment must override this method rather than inherit the fallback —
     /// which is what `QueryResponder` does.
+    ///
+    /// R2596 — [`ReplyMeta::qos`] is dropped by this fallback too, and for the
+    /// same reason: neither arm it chains to carries a QoS, so they stage the
+    /// QUERY's. `QueryResponder` overrides this method and honours the
+    /// override; the Del arm of an advanced cache's reply depends on it.
     #[cfg(feature = "alloc")]
     fn reply_keyed_del_meta(&mut self, keyexpr: &str, meta: ReplyMeta<'_>) {
         match meta.timestamp {

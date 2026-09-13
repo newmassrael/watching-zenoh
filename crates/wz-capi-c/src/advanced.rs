@@ -56,7 +56,7 @@ use std::ffi::c_void;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use wz_runtime_tokio::advanced_cache::CacheConfig;
+use wz_runtime_tokio::advanced_cache::{CacheConfig, RepliesConfig};
 use wz_runtime_tokio::advanced_publisher::{
     AdvancedPublisherOptions, MissDetectionConfig, Sequencing,
 };
@@ -685,8 +685,22 @@ unsafe fn advanced_publisher_options(
     // SAFETY: the caller's contract, for every read below.
     unsafe {
         if (*options).cache.is_enabled {
+            // R2596 — the three reply-QoS fields are READ now. This struct has
+            // declared `congestion_control`, `priority` and `is_express` since
+            // it was written (upstream's `ze_advanced_publisher_cache_options_t`
+            // carries them), and wz mapped only `max_samples`: a C program
+            // could set them and nothing in the tree would read them, which is
+            // the "written by a caller and read by nobody" shape this
+            // workspace refuses by name.
             out.cache = Some(CacheConfig {
                 max_samples: (*options).cache.max_samples.max(1),
+                replies_config: RepliesConfig {
+                    priority: crate::publisher::priority_from_c((*options).cache.priority),
+                    congestion_control: crate::publisher::congestion_from_c(
+                        (*options).cache.congestion_control,
+                    ),
+                    is_express: (*options).cache.is_express,
+                },
             });
         }
         if (*options).sample_miss_detection.is_enabled {
@@ -1891,3 +1905,73 @@ const _: () = {
     assert!(size_of::<ze_owned_sample_miss_listener_t>() == MISS_LISTENER_SIZE);
     assert!(align_of::<ze_owned_sample_miss_listener_t>() == 8);
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// R2596 — the cache's three reply-QoS fields REACH the config.
+    ///
+    /// They were declared on this struct from the day it was written, because
+    /// upstream declares them, and the mapping read only `max_samples`: a C
+    /// program could set all three and nothing in the tree would read them.
+    /// The values here are all NON-default and all different from each other's
+    /// defaults, so a mapping that dropped any one field, or that filled the
+    /// config from `RepliesConfig::default()`, fails on that field.
+    #[test]
+    fn the_cache_reply_qos_options_reach_the_cache_config() {
+        // Start from upstream's own default fill, then set the four cache
+        // fields this test is about — the shape a C program uses.
+        // SAFETY: a zeroed `ze_advanced_publisher_options_t` is a valid
+        // writable target for the default fill; every field is overwritten by
+        // it before any read.
+        let mut options: ze_advanced_publisher_options_t = unsafe { std::mem::zeroed() };
+        // SAFETY: a live, writable struct on this frame.
+        unsafe { ze_advanced_publisher_options_default(&mut options) };
+        options.cache.is_enabled = true;
+        options.cache.max_samples = 4;
+        options.cache.congestion_control = crate::publisher::Z_CONGESTION_CONTROL_BLOCK;
+        options.cache.priority = crate::publisher::Z_PRIORITY_REAL_TIME;
+        options.cache.is_express = true;
+
+        // SAFETY: `options` is a live, fully initialised struct on this frame.
+        let mapped = unsafe { advanced_publisher_options(&options) };
+        let cache = mapped.cache.expect("an enabled cache maps to a config");
+        assert_eq!(cache.max_samples, 4);
+        assert_eq!(
+            cache.replies_config.congestion_control,
+            wz_runtime_tokio::qos::CongestionControl::Block
+        );
+        assert_eq!(
+            cache.replies_config.priority,
+            wz_runtime_tokio::qos::Priority::RealTime
+        );
+        assert!(cache.replies_config.is_express);
+    }
+
+    /// The DEFAULT a C caller gets is upstream's, not the Rust builder's.
+    ///
+    /// Measured against the real `libzenohc.so`: its
+    /// `ze_advanced_publisher_cache_options_default` answers `Drop`, while
+    /// zenoh-ext's `RepliesConfig::default()` is `Block`. Both are right for
+    /// their own surface, so this pins the C one against drifting onto the
+    /// Rust default.
+    #[test]
+    fn the_c_options_default_is_drop_not_the_rust_builders_block() {
+        let mut cache = ze_advanced_publisher_cache_options_t {
+            is_enabled: false,
+            max_samples: 0,
+            congestion_control: 0,
+            priority: 0,
+            is_express: true,
+        };
+        // SAFETY: a live, writable struct on this frame.
+        unsafe { ze_advanced_publisher_cache_options_default(&mut cache) };
+        assert_eq!(
+            cache.congestion_control,
+            crate::publisher::Z_CONGESTION_CONTROL_DROP
+        );
+        assert_eq!(cache.priority, crate::publisher::Z_PRIORITY_DATA);
+        assert!(!cache.is_express);
+    }
+}

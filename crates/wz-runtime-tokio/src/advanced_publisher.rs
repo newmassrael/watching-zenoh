@@ -897,7 +897,10 @@ mod tests {
         // SequenceNumber sequencing + a cache deep enough to hold all three.
         let options = AdvancedPublisherOptions {
             sequencing: Sequencing::SequenceNumber,
-            cache: Some(CacheConfig { max_samples: 8 }),
+            cache: Some(CacheConfig {
+                max_samples: 8,
+                ..CacheConfig::default()
+            }),
             publisher_detection: true,
             sample_miss_detection: MissDetectionConfig::default(),
         };
@@ -988,7 +991,10 @@ mod tests {
 
         let options = AdvancedPublisherOptions {
             sequencing: Sequencing::SequenceNumber,
-            cache: Some(CacheConfig { max_samples: 8 }),
+            cache: Some(CacheConfig {
+                max_samples: 8,
+                ..CacheConfig::default()
+            }),
             publisher_detection: true,
             sample_miss_detection: MissDetectionConfig::default(),
         };
@@ -1103,7 +1109,10 @@ mod tests {
 
         let options = AdvancedPublisherOptions {
             sequencing: Sequencing::SequenceNumber,
-            cache: Some(CacheConfig { max_samples: 8 }),
+            cache: Some(CacheConfig {
+                max_samples: 8,
+                ..CacheConfig::default()
+            }),
             publisher_detection: true,
             sample_miss_detection: MissDetectionConfig::default(),
         };
@@ -1351,7 +1360,10 @@ mod tests {
             "demo/data",
             AdvancedPublisherOptions {
                 sequencing: Sequencing::SequenceNumber,
-                cache: Some(CacheConfig { max_samples: 8 }),
+                cache: Some(CacheConfig {
+                    max_samples: 8,
+                    ..CacheConfig::default()
+                }),
                 publisher_detection: true,
                 sample_miss_detection: MissDetectionConfig::default(),
             },
@@ -1416,7 +1428,10 @@ mod tests {
             "demo/data",
             AdvancedPublisherOptions {
                 sequencing: Sequencing::SequenceNumber,
-                cache: Some(CacheConfig { max_samples: 0 }),
+                cache: Some(CacheConfig {
+                    max_samples: 0,
+                    ..CacheConfig::default()
+                }),
                 publisher_detection: true,
                 sample_miss_detection: MissDetectionConfig::default(),
             },

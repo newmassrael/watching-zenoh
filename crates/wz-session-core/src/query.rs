@@ -1082,7 +1082,9 @@ impl<'a> QueryResponder<'a> {
             encoding: meta.encoding.cloned(),
             timestamp: meta.timestamp.cloned(),
             responder: self.responder.clone(),
-            qos: self.qos,
+            // R2596 — a per-reply override BEATS the query's QoS; absent one,
+            // the reply inherits, which is what R2594 built.
+            qos: meta.qos.unwrap_or(self.qos),
             attachment: meta.attachment.map(<[u8]>::to_vec),
             source_info: meta.source_info.cloned(),
         });
@@ -1123,7 +1125,9 @@ impl<'a> QueryResponder<'a> {
             encoding: None,
             timestamp: meta.timestamp.cloned(),
             responder: self.responder.clone(),
-            qos: self.qos,
+            // R2596 — the Del arm honours the override too: a cache replays a
+            // cached DELETE on its own terms exactly as it replays a Put.
+            qos: meta.qos.unwrap_or(self.qos),
             attachment: meta.attachment.map(<[u8]>::to_vec),
             source_info: meta.source_info.cloned(),
         });

@@ -3344,7 +3344,10 @@ mod tests {
             "demo/data",
             AdvancedPublisherOptions {
                 sequencing: Sequencing::SequenceNumber,
-                cache: Some(CacheConfig { max_samples: 8 }),
+                cache: Some(CacheConfig {
+                    max_samples: 8,
+                    ..CacheConfig::default()
+                }),
                 publisher_detection: true,
                 sample_miss_detection: MissDetectionConfig::default(),
             },
@@ -3584,8 +3587,15 @@ mod tests {
         // it with the FULL stream 0..=4 (cache payload = sn) so the recovery
         // GET can refill any hole.
         let cache_ke = format!("demo/data/@adv/pub/{zid_hex}/{pub_eid}/_");
-        let cache = AdvancedCache::declare(&session, cache_ke, CacheConfig { max_samples: 8 })
-            .expect("advanced cache declares");
+        let cache = AdvancedCache::declare(
+            &session,
+            cache_ke,
+            CacheConfig {
+                max_samples: 8,
+                ..CacheConfig::default()
+            },
+        )
+        .expect("advanced cache declares");
         for sn in 0u8..5 {
             cache.cache_sample(CachedSample::new(
                 "demo/data",
@@ -3691,8 +3701,15 @@ mod tests {
 
         // The cache holds the full stream 0..=4 where sn 3 is a DELETE.
         let cache_ke = format!("demo/data/@adv/pub/{zid_hex}/{pub_eid}/_");
-        let cache = AdvancedCache::declare(&session, cache_ke, CacheConfig { max_samples: 8 })
-            .expect("advanced cache declares");
+        let cache = AdvancedCache::declare(
+            &session,
+            cache_ke,
+            CacheConfig {
+                max_samples: 8,
+                ..CacheConfig::default()
+            },
+        )
+        .expect("advanced cache declares");
         for sn in 0u8..5 {
             let kind = if sn == 3 {
                 SampleKind::Del
@@ -3886,8 +3903,15 @@ mod tests {
         let pub_eid = 4u32;
         let zid_hex = zid_to_zenoh_hex(&pub_zid);
         let cache_ke = format!("demo/data/@adv/pub/{zid_hex}/{pub_eid}/_");
-        let cache = AdvancedCache::declare(&session, cache_ke, CacheConfig { max_samples: 8 })
-            .expect("advanced cache declares");
+        let cache = AdvancedCache::declare(
+            &session,
+            cache_ke,
+            CacheConfig {
+                max_samples: 8,
+                ..CacheConfig::default()
+            },
+        )
+        .expect("advanced cache declares");
         for sn in 0u8..3 {
             cache.cache_sample(CachedSample::new(
                 "demo/data",
@@ -4137,9 +4161,15 @@ mod tests {
         let zid_hex = zid_to_zenoh_hex(&pub_zid);
         let adv_ke = format!("demo/data/@adv/pub/{zid_hex}/{pub_eid}/_");
 
-        let cache =
-            AdvancedCache::declare(&session, adv_ke.clone(), CacheConfig { max_samples: 8 })
-                .expect("advanced cache declares");
+        let cache = AdvancedCache::declare(
+            &session,
+            adv_ke.clone(),
+            CacheConfig {
+                max_samples: 8,
+                ..CacheConfig::default()
+            },
+        )
+        .expect("advanced cache declares");
         for sn in 0u8..3 {
             cache.cache_sample(CachedSample::new(
                 "demo/data",
@@ -4364,9 +4394,15 @@ mod tests {
 
         // `zz` is not hex: the zid chunk does not decode.
         let pub_adv_ke = "demo/data/@adv/pub/zz/7/_".to_string();
-        let cache =
-            AdvancedCache::declare(&session, pub_adv_ke.clone(), CacheConfig { max_samples: 8 })
-                .expect("advanced cache declares");
+        let cache = AdvancedCache::declare(
+            &session,
+            pub_adv_ke.clone(),
+            CacheConfig {
+                max_samples: 8,
+                ..CacheConfig::default()
+            },
+        )
+        .expect("advanced cache declares");
 
         let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
         let d = Arc::clone(&delivered);
@@ -4669,8 +4705,15 @@ mod tests {
         let pub_eid = 4u32;
         let zid_hex = zid_to_zenoh_hex(&pub_zid);
         let cache_ke = format!("demo/data/@adv/pub/{zid_hex}/{pub_eid}/_");
-        let cache = AdvancedCache::declare(&session, cache_ke, CacheConfig { max_samples: 8 })
-            .expect("advanced cache declares");
+        let cache = AdvancedCache::declare(
+            &session,
+            cache_ke,
+            CacheConfig {
+                max_samples: 8,
+                ..CacheConfig::default()
+            },
+        )
+        .expect("advanced cache declares");
         for sn in 0u8..3 {
             cache.cache_sample(CachedSample::new(
                 "demo/data",
@@ -4906,8 +4949,15 @@ mod tests {
         let pub_eid = 4u32;
         let zid_hex = zid_to_zenoh_hex(&pub_zid);
         let cache_ke = format!("demo/data/@adv/pub/{zid_hex}/{pub_eid}/_");
-        let cache = AdvancedCache::declare(&session, cache_ke, CacheConfig { max_samples: 8 })
-            .expect("advanced cache declares");
+        let cache = AdvancedCache::declare(
+            &session,
+            cache_ke,
+            CacheConfig {
+                max_samples: 8,
+                ..CacheConfig::default()
+            },
+        )
+        .expect("advanced cache declares");
         for sn in 0u8..3 {
             cache.cache_sample(CachedSample::new(
                 "demo/data",
@@ -4966,8 +5016,15 @@ mod tests {
         let cache_ke = format!("demo/data/@adv/pub/{zid_hex}/{pub_eid}/_");
         // A cache deep enough to retain all 5 samples (so the cap, not eviction,
         // bounds the result).
-        let cache = AdvancedCache::declare(&session, cache_ke, CacheConfig { max_samples: 8 })
-            .expect("advanced cache declares");
+        let cache = AdvancedCache::declare(
+            &session,
+            cache_ke,
+            CacheConfig {
+                max_samples: 8,
+                ..CacheConfig::default()
+            },
+        )
+        .expect("advanced cache declares");
         for sn in 0u8..5 {
             cache.cache_sample(CachedSample::new(
                 "demo/data",
@@ -5055,8 +5112,15 @@ mod tests {
         let pub_eid = 4u32;
         let zid_hex = zid_to_zenoh_hex(&pub_zid);
         let cache_ke = format!("demo/data/@adv/pub/{zid_hex}/{pub_eid}/_");
-        let cache = AdvancedCache::declare(&session, cache_ke, CacheConfig { max_samples: 8 })
-            .expect("advanced cache declares");
+        let cache = AdvancedCache::declare(
+            &session,
+            cache_ke,
+            CacheConfig {
+                max_samples: 8,
+                ..CacheConfig::default()
+            },
+        )
+        .expect("advanced cache declares");
 
         let now = wall_clock_ntp64();
         let two_hours = 2 * (3600u64 << 32);
@@ -5237,9 +5301,15 @@ mod tests {
         let pub_adv_ke = format!("demo/data/@adv/pub/{zid_hex}/{pub_eid}/_");
 
         // The publisher's cache queryable exists but is EMPTY at declare time.
-        let cache =
-            AdvancedCache::declare(&session, pub_adv_ke.clone(), CacheConfig { max_samples: 8 })
-                .expect("advanced cache declares");
+        let cache = AdvancedCache::declare(
+            &session,
+            pub_adv_ke.clone(),
+            CacheConfig {
+                max_samples: 8,
+                ..CacheConfig::default()
+            },
+        )
+        .expect("advanced cache declares");
 
         let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
         let d = Arc::clone(&delivered);
@@ -5383,9 +5453,15 @@ mod tests {
             crate::advanced_ke::KE_ADV_UHLC,
         );
 
-        let cache =
-            AdvancedCache::declare(&session, pub_adv_ke.clone(), CacheConfig { max_samples: 8 })
-                .expect("advanced cache declares");
+        let cache = AdvancedCache::declare(
+            &session,
+            pub_adv_ke.clone(),
+            CacheConfig {
+                max_samples: 8,
+                ..CacheConfig::default()
+            },
+        )
+        .expect("advanced cache declares");
 
         let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
         let d = Arc::clone(&delivered);
@@ -5564,7 +5640,10 @@ mod tests {
         let cache = AdvancedCache::declare(
             &session,
             format!("demo/data/@adv/pub/{zid_hex}/4/_"),
-            CacheConfig { max_samples: 8 },
+            CacheConfig {
+                max_samples: 8,
+                ..CacheConfig::default()
+            },
         )
         .expect("advanced cache declares");
         cache.cache_sample(CachedSample::new(

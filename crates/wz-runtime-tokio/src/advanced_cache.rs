@@ -56,8 +56,9 @@ use std::sync::{Arc, Mutex};
 use wz_runtime_core::TimeSource;
 use wz_session_core::link::SessionRuntime;
 use wz_session_core::ntp64::Ntp64;
+use wz_session_core::qos::{CongestionControl, Priority};
 use wz_session_core::query_sink::{QueryView, ReplyMeta, ReplyOut};
-use wz_session_core::sample::{EncodingHint, SampleKind, SourceInfo, TimestampHint};
+use wz_session_core::sample::{EncodingHint, QosLevel, SampleKind, SourceInfo, TimestampHint};
 
 use crate::session::{Queryable, QueryableError, QueryableOptions, Session, Unicast};
 use crate::session_glue::SessionLinkActions;
@@ -163,17 +164,71 @@ impl CachedSample {
     }
 }
 
-/// How many samples the cache retains. Mirror of zenoh-ext `CacheConfig`
-/// (advanced_cache.rs:88-100); default 1.
+/// R2596 — the QoS a cache stamps on EVERY reply it makes, overriding the
+/// query's own. wz's mirror of zenoh-ext's
+/// `zenoh-ext/src/advanced_cache.rs` @ `pub struct RepliesConfig {`.
+///
+/// An override rather than an inheritance, and that is upstream's shape in all
+/// three references: zenoh-ext applies `congestion_control` / `priority` /
+/// `is_express` to every cache reply through a `SampleBuilder`, and zenoh-pico
+/// stores the same three on the cache and sets `z_query_reply_options_t` from
+/// them per reply (`vendor/zenoh-pico/src/collections/advanced_cache.c`). A
+/// cache answers out of a bounded ring on its own terms; what the querier asked
+/// for governs its OTHER replies, not these.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RepliesConfig {
+    /// The band cache replies ride.
+    pub priority: Priority,
+    /// What a congested link does with one.
+    pub congestion_control: CongestionControl,
+    /// Skip batching: lower latency, lower throughput.
+    pub is_express: bool,
+}
+
+impl Default for RepliesConfig {
+    /// `Data` / `Block` / not express — zenoh-ext's
+    /// `impl Default for RepliesConfig`.
+    ///
+    /// ⚠ THE TWO C ABIs DEFAULT DIFFERENTLY, measured rather than assumed:
+    /// zenoh-c's `ze_advanced_publisher_cache_options_default` answers
+    /// `congestion_control = Drop` (read out of the real `libzenohc.so`), and
+    /// zenoh-pico's writes `z_internal_congestion_control_default_push()`,
+    /// which is Drop as well. So this default belongs to the RUST surface, and
+    /// each C ABI keeps its own upstream's — a single shared default would
+    /// quietly break one of the two.
+    fn default() -> Self {
+        Self {
+            priority: Priority::DEFAULT,
+            congestion_control: CongestionControl::Block,
+            is_express: false,
+        }
+    }
+}
+
+impl RepliesConfig {
+    /// The packed QoS byte this config puts on a reply.
+    fn qos(&self) -> QosLevel {
+        QosLevel::from_parts(self.priority, self.congestion_control, self.is_express)
+    }
+}
+
+/// How many samples the cache retains, and how it answers. Mirror of zenoh-ext
+/// `CacheConfig` (advanced_cache.rs:88-100); default 1 sample.
 #[derive(Clone, Copy, Debug)]
 pub struct CacheConfig {
     /// Ring depth: the cache keeps at most this many most-recent samples.
     pub max_samples: usize,
+    /// R2596 — the QoS every reply out of this cache carries. Upstream's
+    /// `CacheConfig` carries exactly these two knobs and no others.
+    pub replies_config: RepliesConfig,
 }
 
 impl Default for CacheConfig {
     fn default() -> Self {
-        Self { max_samples: 1 }
+        Self {
+            max_samples: 1,
+            replies_config: RepliesConfig::default(),
+        }
     }
 }
 
@@ -209,6 +264,10 @@ where
     ) -> Result<Self, QueryableError> {
         let ring: CacheRing = Arc::new(Mutex::new(VecDeque::new()));
         let query_ring = Arc::clone(&ring);
+        // R2596 — copied into the answering closure beside the ring: the reply
+        // QoS is a property of the CACHE, so it is fixed at declare time
+        // exactly as `max_samples` is, not read per query.
+        let replies_config = config.replies_config;
         // R2556 — INCOMPLETE, which is upstream's default and, more to the
         // point, the only honest answer this queryable can give.
         //
@@ -237,7 +296,7 @@ where
                 // "now" for the `_time` age filter, read at query time from the
                 // same NTP64 wall-clock base the publisher stamps samples with.
                 let now = crate::timestamp_source::wall_clock_ntp64();
-                answer_from_ring(&guard, view, out, now);
+                answer_from_ring(&guard, view, out, now, replies_config);
             },
         )?;
         Ok(Self {
@@ -289,6 +348,7 @@ fn answer_from_ring(
     view: &dyn QueryView,
     out: &mut dyn ReplyOut,
     now_ntp64: u64,
+    replies_config: RepliesConfig,
 ) {
     let params = view.parameters();
     let sn_range = param_value(params, "_sn").map(parse_sn_range);
@@ -337,9 +397,14 @@ fn answer_from_ring(
         // sample arrived stripped of both. The Del arm carries neither, and
         // that is the wire's rule rather than a leftover — see
         // [`ReplyOut::reply_keyed_del_meta`].
+        // R2596 — `replies_config` OVERRIDES the query's QoS on every reply,
+        // both arms, which is what upstream's `SampleBuilder` chain and pico's
+        // `z_query_reply_options_t` each do. Set on the shared `meta` so the
+        // Put and Del arms cannot drift.
         let meta = ReplyMeta::new()
             .with_timestamp(Some(&s.timestamp))
-            .with_source_info(s.source_info.as_ref());
+            .with_source_info(s.source_info.as_ref())
+            .with_qos(Some(replies_config.qos()));
         match s.kind {
             SampleKind::Put => out.reply_keyed_meta(
                 &s.keyexpr,
@@ -697,7 +762,13 @@ mod tests {
         // `_sn=1..` → sn 1 and 2, oldest-first. (No `_time` param, so the
         // `now` argument is irrelevant here — passed `0`.)
         let mut out = Rec::default();
-        answer_from_ring(&ring, &q(Some(b"_sn=1..")), &mut out, 0);
+        answer_from_ring(
+            &ring,
+            &q(Some(b"_sn=1..")),
+            &mut out,
+            0,
+            RepliesConfig::default(),
+        );
         assert_eq!(
             out.keyed,
             vec![
@@ -708,13 +779,19 @@ mod tests {
 
         // `_max=1` → only the newest (sn 2).
         let mut out = Rec::default();
-        answer_from_ring(&ring, &q(Some(b"_max=1")), &mut out, 0);
+        answer_from_ring(
+            &ring,
+            &q(Some(b"_max=1")),
+            &mut out,
+            0,
+            RepliesConfig::default(),
+        );
         assert_eq!(out.keyed, vec![("demo/k".to_string(), vec![2])]);
 
         // No params → all three, each carrying its source_info (zid, eid, sn)
         // so a recovery subscriber can re-key / reorder the retransmissions.
         let mut out = Rec::default();
-        answer_from_ring(&ring, &q(None), &mut out, 0);
+        answer_from_ring(&ring, &q(None), &mut out, 0, RepliesConfig::default());
         assert_eq!(out.keyed.len(), 3);
         assert_eq!(
             out.sourced,
@@ -782,7 +859,7 @@ mod tests {
         };
 
         let mut out = Rec::default();
-        answer_from_ring(&ring, &q(None), &mut out, 0);
+        answer_from_ring(&ring, &q(None), &mut out, 0, RepliesConfig::default());
 
         assert_eq!(
             out.arms,
@@ -806,7 +883,13 @@ mod tests {
 
         // The `_sn` range is kind-agnostic: `_sn=1..` starts at the DELETE.
         let mut out = Rec::default();
-        answer_from_ring(&ring, &q(Some(b"_sn=1..")), &mut out, 0);
+        answer_from_ring(
+            &ring,
+            &q(Some(b"_sn=1..")),
+            &mut out,
+            0,
+            RepliesConfig::default(),
+        );
         assert_eq!(
             out.arms,
             vec!["del", "put"],
@@ -816,7 +899,13 @@ mod tests {
 
         // ... and so is `_max`, which counts the Del as one of the newest.
         let mut out = Rec::default();
-        answer_from_ring(&ring, &q(Some(b"_max=2")), &mut out, 0);
+        answer_from_ring(
+            &ring,
+            &q(Some(b"_max=2")),
+            &mut out,
+            0,
+            RepliesConfig::default(),
+        );
         assert_eq!(out.arms, vec!["del", "put"], "_max counts the Del");
     }
 
@@ -900,7 +989,7 @@ mod tests {
             qos: wz_session_core::sample::QosLevel::DEFAULT,
         };
         let mut out = Rec::default();
-        answer_from_ring(&ring, &q, &mut out, 0);
+        answer_from_ring(&ring, &q, &mut out, 0, RepliesConfig::default());
 
         assert_eq!(out.arms, vec!["put", "put", "del"], "ring order preserved");
         assert_eq!(
@@ -1053,7 +1142,7 @@ mod tests {
             qos: wz_session_core::sample::QosLevel::DEFAULT,
         };
         let mut out = Rec::default();
-        answer_from_ring(&ring, &q, &mut out, now);
+        answer_from_ring(&ring, &q, &mut out, now, RepliesConfig::default());
         // threshold = 70s -> the 80s (payload 1) + 100s (payload 2) samples;
         // the 60s (payload 0) sample is dropped.
         assert_eq!(
@@ -1108,7 +1197,10 @@ mod tests {
         let _cache = AdvancedCache::declare(
             &session,
             "demo/data/@adv/pub/ff/7/_".to_string(),
-            CacheConfig { max_samples: 8 },
+            CacheConfig {
+                max_samples: 8,
+                ..CacheConfig::default()
+            },
         )
         .expect("advanced cache declares");
 
@@ -1117,5 +1209,126 @@ mod tests {
             "a live cache still does not answer an AllComplete querier: a \
              bounded ring makes no completeness promise"
         );
+    }
+
+    /// R2596 — `replies_config` OVERRIDES the query's QoS on every cache reply,
+    /// on BOTH arms, and an ordinary reply on the same responder still
+    /// inherits.
+    ///
+    /// This is the case that separates this round from R2594's. There a reply
+    /// INHERITED its query's QoS, and a cache that only inherited would pass
+    /// any test whose query already asks for what the cache would have said.
+    /// So the query here asks for something the cache must refuse to echo —
+    /// `RealTime` / `Drop` / express against the cache's `Data` / `Block` /
+    /// not-express — and every field differs, so an implementation that
+    /// forwarded any one of them reds.
+    ///
+    /// The third leg is the anti-vacuity one: `reply` staged directly on the
+    /// same responder must still carry the QUERY's QoS. Without it this test
+    /// would also pass against a build that had simply stopped inheriting.
+    #[test]
+    fn the_cache_replies_on_its_own_qos_not_the_querys() {
+        use wz_session_core::qos::{CongestionControl, Priority};
+        use wz_session_core::query::{QueryReply, QueryResponder};
+        use wz_session_core::query_sink::BorrowedQuery;
+        use wz_session_core::reply_acceptance::ReplyKeyExpr;
+        use wz_session_core::sample::QosLevel;
+
+        let asked = QosLevel::from_parts(Priority::RealTime, CongestionControl::Drop, true);
+        let configured = RepliesConfig::default();
+        assert_ne!(
+            configured.qos(),
+            asked,
+            "the fixture is only discriminating while the two differ"
+        );
+
+        // One Put and one Del, so both reply arms are exercised.
+        let mut ring = VecDeque::new();
+        for (sn, kind) in [(0u32, SampleKind::Put), (1u32, SampleKind::Del)] {
+            ring.push_back(CachedSample::new(
+                "demo/k",
+                if kind == SampleKind::Del {
+                    Vec::new()
+                } else {
+                    vec![sn as u8]
+                },
+                Some(SourceInfo::new(&[0x07], 9, sn)),
+                TimestampHint {
+                    time: 100 + sn as u64,
+                    zid: vec![1],
+                },
+                kind,
+            ));
+        }
+
+        let view = BorrowedQuery {
+            keyexpr: "demo/k",
+            parameters: None,
+            attachment: None,
+            source_info: None,
+            payload: None,
+            encoding: None,
+            rid: 7,
+            is_local: true,
+            qos: asked,
+        };
+
+        let mut replies: Vec<QueryReply> = Vec::new();
+        {
+            let mut responder = QueryResponder::new(
+                7,
+                "demo/k".to_string(),
+                ReplyKeyExpr::MatchingQuery,
+                asked,
+                &mut replies,
+            );
+            answer_from_ring(&ring, &view, &mut responder, 0, configured);
+            // The anti-vacuity leg, staged through the SAME responder.
+            responder.send_reply(b"not-from-the-cache");
+        }
+
+        let staged: Vec<QosLevel> = replies
+            .iter()
+            .map(|r| match r {
+                QueryReply::Reply { qos, .. } => *qos,
+                #[allow(unreachable_patterns)]
+                _ => panic!("the cache stages only Reply records"),
+            })
+            .collect();
+        assert_eq!(staged.len(), 3, "one Put, one Del, one ordinary reply");
+        assert_eq!(
+            &staged[..2],
+            &[configured.qos(), configured.qos()],
+            "both cache arms carry the CACHE's QoS, not the query's {asked:?}"
+        );
+        assert_eq!(
+            staged[2], asked,
+            "a reply the cache did not make still inherits the query's QoS"
+        );
+
+        // And the config is READ rather than defaulted: a different one reaches
+        // the wire record.
+        let custom = RepliesConfig {
+            priority: Priority::InteractiveHigh,
+            congestion_control: CongestionControl::Drop,
+            is_express: true,
+        };
+        let mut replies: Vec<QueryReply> = Vec::new();
+        {
+            let mut responder = QueryResponder::new(
+                7,
+                "demo/k".to_string(),
+                ReplyKeyExpr::MatchingQuery,
+                asked,
+                &mut replies,
+            );
+            answer_from_ring(&ring, &view, &mut responder, 0, custom);
+        }
+        for reply in &replies {
+            let QueryReply::Reply { qos, .. } = reply else {
+                panic!("the cache stages only Reply records");
+            };
+            assert_eq!(*qos, custom.qos(), "a configured QoS reaches every reply");
+        }
     }
 }

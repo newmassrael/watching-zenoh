@@ -43,7 +43,7 @@ use std::ffi::c_void;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use wz_runtime_tokio::advanced_cache::CacheConfig;
+use wz_runtime_tokio::advanced_cache::{CacheConfig, RepliesConfig};
 use wz_runtime_tokio::advanced_publisher::{
     AdvancedPublisherOptions, MissDetectionConfig, Sequencing,
 };
@@ -518,8 +518,21 @@ unsafe fn advanced_publisher_options(
         return out;
     }
     if (*options).cache.is_enabled {
+        // R2596 — the three reply-QoS fields are READ now, through PICO's own
+        // converters: its `Z_CONGESTION_CONTROL_BLOCK` is 1 where zenoh-c's is
+        // 0, so the sibling ABI's mapping would invert the meaning. pico
+        // applies these per reply itself
+        // (`vendor/zenoh-pico/src/collections/advanced_cache.c`), and until now
+        // wz read none of them.
         out.cache = Some(CacheConfig {
             max_samples: (*options).cache.max_samples.max(1),
+            replies_config: RepliesConfig {
+                priority: crate::query::priority_from_pico((*options).cache.priority),
+                congestion_control: crate::query::congestion_from_pico(
+                    (*options).cache.congestion_control,
+                ),
+                is_express: (*options).cache.is_express,
+            },
         });
     }
     if (*options).sample_miss_detection.is_enabled {
@@ -1634,4 +1647,64 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers_background(
             options,
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// R2596 — the cache's three reply-QoS fields REACH the config, through
+    /// PICO's converters.
+    ///
+    /// The ABI-specific half matters: pico's `Z_CONGESTION_CONTROL_BLOCK` is
+    /// `1` where zenoh-c's is `0`, so a mapping that borrowed the sibling ABI's
+    /// conversion would invert this value and still compile. The fixture
+    /// therefore asks for BLOCK by pico's spelling and asserts the typed
+    /// `Block` comes out.
+    #[test]
+    fn the_cache_reply_qos_options_reach_the_cache_config() {
+        // SAFETY: a zeroed options struct is a valid writable target for the
+        // default fill, which overwrites every field before any read.
+        let mut options: ze_advanced_publisher_options_t = unsafe { std::mem::zeroed() };
+        // SAFETY: a live, writable struct on this frame.
+        unsafe { ze_advanced_publisher_options_default(&mut options) };
+        options.cache.is_enabled = true;
+        options.cache.max_samples = 4;
+        options.cache.congestion_control = crate::query::Z_CONGESTION_CONTROL_BLOCK;
+        options.cache.priority = crate::query::Z_PRIORITY_DEFAULT;
+        options.cache.is_express = true;
+
+        // SAFETY: `options` is live and fully initialised on this frame.
+        let mapped = unsafe { advanced_publisher_options(&options) };
+        let cache = mapped.cache.expect("an enabled cache maps to a config");
+        assert_eq!(cache.max_samples, 4);
+        assert_eq!(
+            cache.replies_config.congestion_control,
+            wz_runtime_tokio::qos::CongestionControl::Block,
+            "pico spells BLOCK as 1; reading it as zenoh-c's 0 would invert this"
+        );
+        assert_eq!(
+            cache.replies_config.priority,
+            wz_runtime_tokio::qos::Priority::Data
+        );
+        assert!(cache.replies_config.is_express);
+    }
+
+    /// The DEFAULT a pico caller gets is pico's own — `Drop`, from
+    /// `z_internal_congestion_control_default_push()` — not zenoh-ext's
+    /// `Block`. Measured in `vendor/zenoh-pico/src/api/advanced_publisher.c`.
+    #[test]
+    fn the_pico_options_default_is_drop_not_the_rust_builders_block() {
+        // SAFETY: a zeroed struct is a valid writable target for the fill.
+        let mut cache: ze_advanced_publisher_cache_options_t = unsafe { std::mem::zeroed() };
+        cache.is_express = true;
+        // SAFETY: a live, writable struct on this frame.
+        unsafe { ze_advanced_publisher_cache_options_default(&mut cache) };
+        assert_eq!(
+            cache.congestion_control,
+            crate::query::Z_CONGESTION_CONTROL_DROP
+        );
+        assert_eq!(cache.priority, crate::query::Z_PRIORITY_DEFAULT);
+        assert!(!cache.is_express);
+    }
 }
