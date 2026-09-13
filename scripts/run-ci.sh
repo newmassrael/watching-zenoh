@@ -6875,7 +6875,11 @@ layer_c1aq_cargo_test_ext_pubsub_advanced() {
     # It is gated on `query-target`, which this lane HAS because it does not
     # pass `--no-default-features` (the same default-feature subtlety R2507
     # recorded on C1av). MEASURED here rather than inferred from the diff.
-    _runci_guarded_test "C1aq advanced_" 18 \
+    # R2596 — 18 -> 19: `the_cache_replies_on_its_own_qos_not_the_querys`, the
+    # witness for the `replies_config` override that re-graded the atom. Like
+    # its neighbour above, MEASURED by running this exact command rather than
+    # counted off the diff.
+    _runci_guarded_test "C1aq advanced_" 19 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-publisher,query-get,pubsub-allow-loop \
         --lib advanced_ --quiet || return 1
     (cd crates \
