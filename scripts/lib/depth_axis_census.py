@@ -1124,7 +1124,20 @@ PIN_NO_SYMBOL = 2
 # COMPLETE, so its whole reason leaves the PARTIAL population at (wz 19,
 # ambiguous 0) — the count the per-atom `citation_audit` reported for the
 # pre-round reason. 275 - 19 = 256, exactly what the census measures.
-PIN_WZ_CITATIONS = 256
+#
+# R2599 — 256 -> 264, no atom entering or leaving. The round that MOVED the
+# measurement is not the round paying for it: R2598 rewrote both quic reasons
+# and left the pin where it stood, so the ratchet surfaced at the next push's
+# gate 2z instead of in its own commit. That is the landing cost this block
+# exists to make payable rather than a defect in the reasons. DERIVED with
+# THIS module's own `citation_audit` per atom, against the pre-round store
+# read out of `origin/main`: `transport-link-quic` wz 8 -> 12 and
+# `transport-link-quic-datagram` wz 7 -> 11. Each gained the same four files
+# R2598 built against -- `link_socket.rs`, `quic_pipeline.rs`, `locator.rs`
+# and the `quic_datagram_e2e.rs` witness -- so 256 + 4 + 4 = 264, exactly
+# what the census measures. AMBIGUOUS holds at 47 and the unjudged upstream
+# bucket at 399, both unmoved, which is why only this pin moves here.
+PIN_WZ_CITATIONS = 264
 PIN_AMBIGUOUS = 47
 
 
