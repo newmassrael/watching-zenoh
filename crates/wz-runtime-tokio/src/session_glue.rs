@@ -1449,7 +1449,7 @@ mod tests {
                 .build()
                 .unwrap(),
         );
-        actions.send_response_final(99);
+        actions.send_response_final(99, wz_session_core::sample::QosLevel::DEFAULT);
 
         assert_eq!(driver.frame_count(), 2);
         // Reply frame SN byte is at offset 1 (Frame header + VLE(sn)).

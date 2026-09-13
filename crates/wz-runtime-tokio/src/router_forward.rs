@@ -4983,7 +4983,10 @@ impl RouterForwarder {
                 });
             }
         }
-        let final_msg = wz_session_core::response_final_build::build_response_final(request.rid);
+        let final_msg = wz_session_core::response_final_build::build_response_final(
+            request.rid,
+            wz_session_core::declare_ext_qos::read_request_qos(request),
+        );
         self.send_to_face(inbound, reliable, || {
             NetworkMessage::ResponseFinal(final_msg.clone())
         });
@@ -5104,8 +5107,10 @@ impl RouterForwarder {
                 // must still TERMINATE — zenoh route_query sends a ResponseFinal on
                 // an unknown scope (dispatcher/queries.rs:575), not a silent drop
                 // that would hang the get() until its own timeout.
-                let final_msg =
-                    wz_session_core::response_final_build::build_response_final(request.rid);
+                let final_msg = wz_session_core::response_final_build::build_response_final(
+                    request.rid,
+                    wz_session_core::declare_ext_qos::read_request_qos(request),
+                );
                 self.send_to_face(inbound, reliable, || {
                     NetworkMessage::ResponseFinal(final_msg.clone())
                 });
@@ -5145,7 +5150,11 @@ impl RouterForwarder {
         // entry Rc-shares it, so the closing final aggregates LAST-OUT across all
         // the legs below (mesh tiers + clients): zenoh's one `Arc<Query>` cloned
         // per branch of `compute_final_route`.
-        let fan = QueryFan::new(inbound, request.rid);
+        let fan = QueryFan::new(
+            inbound,
+            request.rid,
+            wz_session_core::declare_ext_qos::read_request_qos(request),
+        );
         // The per-branch deadline — the Query's own carried ext_timeout when
         // present, else this relay's configured default: zenoh route_query's
         // `ext_timeout.unwrap_or(queries_default_timeout)`
@@ -5225,8 +5234,10 @@ impl RouterForwarder {
             // zenoh route_query EMPTY route: no queryable matched, so PROMPT a
             // ResponseFinal back to the querier (its get() terminates at once). No
             // pending entry (nothing is awaited).
-            let final_msg =
-                wz_session_core::response_final_build::build_response_final(request.rid);
+            let final_msg = wz_session_core::response_final_build::build_response_final(
+                request.rid,
+                wz_session_core::declare_ext_qos::read_request_qos(request),
+            );
             self.send_to_face(inbound, reliable, || {
                 NetworkMessage::ResponseFinal(final_msg.clone())
             });
@@ -13291,7 +13302,10 @@ mod tests {
         );
 
         // C finalizes: the final routes back AND frees the entry.
-        let rf = wz_session_core::response_final_build::build_response_final(qid);
+        let rf = wz_session_core::response_final_build::build_response_final(
+            qid,
+            wz_session_core::sample::QosLevel::DEFAULT,
+        );
         forward_one(&fwd, FaceId(1), NetworkMessage::ResponseFinal(rf));
         assert_eq!(sink_a.frame_count(), 2, "the final routed back to A too");
         assert_eq!(
@@ -13342,7 +13356,10 @@ mod tests {
             FaceId(1),
             NetworkMessage::Response(Box::new(response)),
         );
-        let rf = wz_session_core::response_final_build::build_response_final(qid);
+        let rf = wz_session_core::response_final_build::build_response_final(
+            qid,
+            wz_session_core::sample::QosLevel::DEFAULT,
+        );
         forward_one(&fwd, FaceId(1), NetworkMessage::ResponseFinal(rf));
         assert_eq!(
             sink_p.frame_count(),
@@ -13383,7 +13400,10 @@ mod tests {
             FaceId(1),
             NetworkMessage::Response(Box::new(response)),
         );
-        let rf = wz_session_core::response_final_build::build_response_final(42);
+        let rf = wz_session_core::response_final_build::build_response_final(
+            42,
+            wz_session_core::sample::QosLevel::DEFAULT,
+        );
         forward_one(&fwd, FaceId(1), NetworkMessage::ResponseFinal(rf));
         assert_eq!(sink_a.frame_count(), 0, "an unknown qid routes nowhere");
         assert!(fwd.pending.borrow().is_empty(), "and records nothing");
@@ -13475,7 +13495,10 @@ mod tests {
         let qid_c = forwarded_request(&sink_c.frame_bytes(0)).rid;
 
         // B finalizes FIRST: absorbed (C is still answering) — no upstream final.
-        let rf_b = wz_session_core::response_final_build::build_response_final(qid_b);
+        let rf_b = wz_session_core::response_final_build::build_response_final(
+            qid_b,
+            wz_session_core::sample::QosLevel::DEFAULT,
+        );
         forward_one(&fwd, FaceId(1), NetworkMessage::ResponseFinal(rf_b));
         assert_eq!(
             sink_a.frame_count(),
@@ -13497,7 +13520,10 @@ mod tests {
         assert_eq!(forwarded_response(&sink_a.frame_bytes(0)).request_id, 91);
 
         // C finalizes LAST: the fan closes with exactly ONE upstream final.
-        let rf_c = wz_session_core::response_final_build::build_response_final(qid_c);
+        let rf_c = wz_session_core::response_final_build::build_response_final(
+            qid_c,
+            wz_session_core::sample::QosLevel::DEFAULT,
+        );
         forward_one(&fwd, FaceId(2), NetworkMessage::ResponseFinal(rf_c));
         assert_eq!(
             sink_a.frame_count(),
@@ -13588,7 +13614,10 @@ mod tests {
             FaceId(1),
             NetworkMessage::Response(Box::new(response)),
         );
-        let rf = wz_session_core::response_final_build::build_response_final(qid);
+        let rf = wz_session_core::response_final_build::build_response_final(
+            qid,
+            wz_session_core::sample::QosLevel::DEFAULT,
+        );
         forward_one(&fwd, FaceId(1), NetworkMessage::ResponseFinal(rf));
         assert_eq!(
             sink_cq.frame_count(),

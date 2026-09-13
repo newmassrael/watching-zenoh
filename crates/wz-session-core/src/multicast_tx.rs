@@ -113,6 +113,9 @@ pub enum MulticastTxItem {
         /// The request id whose reply chain this frame terminates (drained
         /// from the observer's `pending_final_rids`).
         request_id: u64,
+        /// R2595 — the QUERY's QoS, which the terminator carries as its
+        /// replies do, and which also picks the conduit this frame rides.
+        qos: crate::sample::QosLevel,
     },
     /// R311lr — a declarer-side liveliness interest-response
     /// `Declare(DeclToken|DeclFinal)` over multicast: the reply a held
@@ -301,12 +304,17 @@ pub fn multicast_tx_emit(
         // budget: one minted reliable-ring SN, one frame. Mirrors the unicast
         // `send_response_final` (reliability pinned).
         #[cfg(feature = "codec-response-final")]
-        MulticastTxItem::ResponseFinal { request_id } => {
-            let frame_sn = tx_sn.mint(crate::qos::Priority::DEFAULT, /* reliable = */ true);
-            let dgram = crate::frame_encode::encode_frame_with_response_final(
+        MulticastTxItem::ResponseFinal { request_id, qos } => {
+            // R2595 — the terminator rides its query's band, clamped as the
+            // Response arm above is, rather than a pinned DEFAULT.
+            let eff = effective_mcast_priority(qos.priority(), params.is_qos);
+            let ext_qos = frame_ext_qos(eff);
+            let frame_sn = tx_sn.mint(eff, /* reliable = */ true);
+            let dgram = crate::frame_encode::encode_frame_with_response_final_qos(
                 frame_sn,
-                crate::response_final_build::build_response_final(request_id),
+                crate::response_final_build::build_response_final(request_id, qos),
                 /* reliable = */ true,
+                ext_qos,
             );
             // Uniform egress: a ResponseFinal is a single tiny VLE rid that never
             // reaches the budget, so multicast_frame_or_fragments returns the one
@@ -319,9 +327,7 @@ pub fn multicast_tx_emit(
                 params.batch_size as usize,
                 tx_sn,
                 // Control-plane reply frames (Response / ResponseFinal /
-                // DeclareReply) are DEFAULT-band (zenoh treats reply priority as a
-                // separate concern); no frame ext_qos, no per-priority conduit.
-                None,
+                ext_qos,
             );
             MulticastTxFrames {
                 datagrams,

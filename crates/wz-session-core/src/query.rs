@@ -2001,7 +2001,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
         messages: &[NetworkMessage],
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         pending_replies: &mut Vec<QueryReply>,
-        pending_final_rids: &mut Vec<u64>,
+        pending_final_rids: &mut Vec<(u64, QosLevel)>,
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         // R311dx — the whole registry impl is `codec-request`-gated, so
@@ -2043,7 +2043,11 @@ impl<C: QuerySink> QueryableRegistry<C> {
                 // zenoh's two pre-`handle_query` exits (session.rs:2769-2792).
                 let outcome = self.dispatch_request(req, peer_keyexpr_table, pending_replies);
                 if outcome.dispatched {
-                    pending_final_rids.push(req.rid);
+                    // R2595 — the terminator carries the QUERY's QoS, as every
+                    // reply before it does: upstream stamps it on the final from
+                    // the same `QueryInner::qos` the replies came from.
+                    pending_final_rids
+                        .push((req.rid, crate::declare_ext_qos::read_request_qos(req)));
                 }
             }
         }
@@ -2061,7 +2065,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
         event: IterationEvent<'_>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         pending_replies: &mut Vec<QueryReply>,
-        pending_final_rids: &mut Vec<u64>,
+        pending_final_rids: &mut Vec<(u64, QosLevel)>,
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event {
@@ -3696,7 +3700,7 @@ mod tests {
 
         assert_eq!(replies.len(), 2, "two matched Queries produce two Replies");
         assert_eq!(
-            finals,
+            finals.iter().map(|(rid, _)| *rid).collect::<Vec<u64>>(),
             vec![10u64, 11u64, 12u64],
             "one Final per DISPATCHED rid, in arrival order -- rid 12 resolved \
              but matched nobody, and a query that reached the table still owes \
@@ -3737,7 +3741,7 @@ mod tests {
         assert!(replies.is_empty(), "nothing matched, so nothing replied");
         assert_eq!(
             finals,
-            vec![7],
+            vec![(7, QosLevel::DEFAULT)],
             "a resolvable query that matched NOBODY still owes exactly one \
              Final -- zenoh's Drop<QueryInner> and pico's qle_nb==0 branch both \
              send it, and wz's own loopback leg already did"
@@ -3773,7 +3777,7 @@ mod tests {
         );
         assert_eq!(
             finals,
-            vec![9],
+            vec![(9, QosLevel::DEFAULT)],
             "the query DID reach the table, so it owes a Final even though the \
              completeness filter left nothing to fire"
         );

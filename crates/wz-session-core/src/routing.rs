@@ -323,6 +323,11 @@ mod imp {
         /// re-stamped with this, and the single closing `ResponseFinal` carries
         /// it.
         src_rid: u64,
+        /// R2595 — the QoS the querier's Request arrived with, wz's counterpart
+        /// of zenoh's `Query::src_qos`. The closing `ResponseFinal` carries it,
+        /// so a terminator is as droppable as the query that asked for it and
+        /// no more.
+        src_qos: crate::sample::QosLevel,
         /// How many destination faces have been sent this query and not yet
         /// sent their `ResponseFinal`. The querier is closed when this reaches
         /// zero — never before, because a querier that counts finals (zenoh and
@@ -1739,12 +1744,15 @@ mod imp {
             };
             let src_actions = src.actions.clone();
             let src_rid = request.rid;
+            // R2595 — read once, beside the rid: every close path below carries
+            // it, including the ones that finalize before a pending entry exists.
+            let src_qos = crate::declare_ext_qos::read_request_qos(request);
             let Some(keyexpr) = resolve_wireexpr(&request.keyexpr.body, &src.peer_aliases) else {
                 log::debug!(
                     "RouteTable: face {src_id} queried on an expr-id with no prior \
                      DeclareKeyexpr mapping; finalized without routing"
                 );
-                Self::send_final_to(&src_actions, src_rid);
+                Self::send_final_to(&src_actions, src_rid, src_qos);
                 return;
             };
             let target_chunks: Vec<&str> = keyexpr.split('/').collect();
@@ -1798,7 +1806,7 @@ mod imp {
                     Some(QueryTarget::All) => candidates.iter().map(|(id, _)| *id).collect(),
                 };
             if targets.is_empty() {
-                Self::send_final_to(&src_actions, src_rid);
+                Self::send_final_to(&src_actions, src_rid, src_qos);
                 return;
             }
             // Built ONCE, then re-stamped per destination with that
@@ -1810,7 +1818,7 @@ mod imp {
                         "RouteTable: face {src_id} query keyexpr could not be re-literalized \
                          for routing ({e:?}); finalized without routing"
                     );
-                    Self::send_final_to(&src_actions, src_rid);
+                    Self::send_final_to(&src_actions, src_rid, src_qos);
                     return;
                 }
             };
@@ -1832,7 +1840,7 @@ mod imp {
                 // Unreachable in practice (every target came out of `faces` a
                 // statement ago); still answered rather than dropped, because
                 // the one thing a querier must never get is silence.
-                Self::send_final_to(&src_actions, src_rid);
+                Self::send_final_to(&src_actions, src_rid, src_qos);
                 return;
             }
             self.pending_queries.insert(
@@ -1840,6 +1848,7 @@ mod imp {
                 PendingQuery {
                     src_face: src_id,
                     src_rid,
+                    src_qos,
                     outstanding,
                 },
             );
@@ -1935,10 +1944,10 @@ mod imp {
             if pending.outstanding > 0 {
                 return;
             }
-            let (src_face, src_rid) = (pending.src_face, pending.src_rid);
+            let (src_face, src_rid, src_qos) = (pending.src_face, pending.src_rid, pending.src_qos);
             self.pending_queries.remove(&query_key);
             if let Some(querier) = self.faces.get(&src_face) {
-                Self::send_final_to(&querier.actions.clone(), src_rid);
+                Self::send_final_to(&querier.actions.clone(), src_rid, src_qos);
             }
         }
 
@@ -1955,10 +1964,14 @@ mod imp {
         /// closing message is built, so the four paths that close a query (empty
         /// route, unresolvable keyexpr, last answerer, answerer departure) cannot
         /// drift apart.
-        fn send_final_to(actions: &Arc<SessionLinkActions<R, T>>, rid: u64) {
+        fn send_final_to(
+            actions: &Arc<SessionLinkActions<R, T>>,
+            rid: u64,
+            qos: crate::sample::QosLevel,
+        ) {
             let _ = actions.send_network_message(
                 NetworkMessage::ResponseFinal(crate::response_final_build::build_response_final(
-                    rid,
+                    rid, qos,
                 )),
                 true,
                 true,

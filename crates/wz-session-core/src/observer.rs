@@ -311,7 +311,10 @@ pub struct ApplicationLayerObserver {
     /// `query-queryable` so wire-emit only runs when the queryable
     /// dispatch path is in.
     pending_replies: Vec<QueryReply>,
-    pending_final_rids: Vec<u64>,
+    /// R2595 — `(rid, qos)`: the terminator owed, and the QUERY's QoS it must
+    /// carry. The rid alone could not say what the final should read as, so
+    /// every final wz emitted read as DEFAULT.
+    pending_final_rids: Vec<(u64, crate::sample::QosLevel)>,
     /// R283 — staging buffer for the declarer-side interest-response
     /// (`Declare(DeclToken)` + `Declare(DeclFinal)`). Populated by
     /// `local_tokens` during the fan phase (the `alloc` inbound-parse
@@ -778,8 +781,8 @@ impl ApplicationLayerObserver {
     /// ResponseFinal for R.
     fn drain_query_finals<S: ResponseSink>(&mut self, sink: &S) {
         #[cfg(all(feature = "query-queryable", feature = "codec-response-final"))]
-        for rid in self.pending_final_rids.drain(..) {
-            sink.send_response_final(rid);
+        for (rid, qos) in self.pending_final_rids.drain(..) {
+            sink.send_response_final(rid, qos);
         }
         #[cfg(all(feature = "query-queryable", not(feature = "codec-response-final")))]
         self.pending_final_rids.clear();
@@ -896,7 +899,7 @@ impl ApplicationLayerObserver {
     /// empty `Vec` — the same OFF projection its sibling drains
     /// ([`Self::drain_query_replies`] / [`Self::drain_query_finals`]) already
     /// document, and the shape a `pub` accessor owes its callers.
-    pub fn take_pending_final_rids(&mut self) -> Vec<u64> {
+    pub fn take_pending_final_rids(&mut self) -> Vec<(u64, crate::sample::QosLevel)> {
         core::mem::take(&mut self.pending_final_rids)
     }
 

@@ -242,6 +242,32 @@ pub fn read_response_qos(response: &wz_codecs::response::ResponseOwned) -> QosLe
     read_qos_chain(response.extensions.as_ref())
 }
 
+/// R2595 — read a `ResponseFinal`'s `ext_qos`. Absent means `QosLevel::DEFAULT`,
+/// which is what every final from a pico peer means: pico writes none.
+#[cfg(feature = "codec-response-final")]
+pub fn read_response_final_qos(
+    response_final: &wz_codecs::response_final::ResponseFinalOwned,
+) -> QosLevel {
+    read_qos_chain(response_final.extensions.as_ref())
+}
+
+/// R2595 — set a `ResponseFinal`'s `ext_qos` (`QosLevel::DEFAULT` REMOVES it,
+/// leaving the minimal envelope byte-for-byte). Unlike the Response, whose
+/// chain also holds the responder identity and is therefore built in one place,
+/// a final's chain holds this and nothing else, so the setter IS the builder's
+/// emit step.
+#[cfg(feature = "codec-response-final")]
+pub fn set_response_final_qos(
+    response_final: &mut wz_codecs::response_final::ResponseFinalOwned,
+    qos: QosLevel,
+) {
+    set_qos_chain(
+        &mut response_final.extensions,
+        &mut response_final.header,
+        qos,
+    );
+}
+
 /// The Interest arm's own tests — separate from the Declare module below
 /// because that one needs `codec-declare` and `wz_codecs::interest` does not.
 /// The PAIR is the arm here: the liveliness SUBSCRIBER carries the ext and the

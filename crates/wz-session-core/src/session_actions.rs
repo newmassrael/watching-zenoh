@@ -1530,8 +1530,8 @@ impl<R: SessionRuntime, T: TimeSource> ResponseSink for SessionLinkActions<R, T>
         self.send_response(response);
     }
     #[cfg(feature = "codec-response-final")]
-    fn send_response_final(&self, request_id: u64) {
-        self.send_response_final(request_id);
+    fn send_response_final(&self, request_id: u64, qos: crate::sample::QosLevel) {
+        self.send_response_final(request_id, qos);
     }
 }
 
@@ -5405,8 +5405,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         response_final: wz_codecs::response_final::ResponseFinalOwned,
         reliable: bool,
     ) -> Result<(), SendWireError> {
+        // R2595 — the band comes off the final's own `ext_qos`, as the Response
+        // arm's does, so a terminator rides the conduit its replies rode. A
+        // final built with `QosLevel::DEFAULT` carries no ext and lands on the
+        // DEFAULT band exactly as before.
+        let qos = crate::declare_ext_qos::read_response_final_qos(&response_final);
         self.dispatch_network_message(
-            Priority::DEFAULT,
+            qos.priority(),
             reliable,
             wz_codecs::response_final::ResponseFinal::MAX_ENCODED_BYTES,
             // A pure correlation marker — no key expression and no payload, so
@@ -7189,16 +7194,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// channel; this no-op cannot be elevated to a typed Err
     /// without growing a public error enum for an action that
     /// has historically been a fire-and-forget primitive.
-    pub fn send_response_final(&self, request_id: u64) {
+    pub fn send_response_final(&self, request_id: u64, qos: crate::sample::QosLevel) {
         #[cfg(feature = "codec-response-final")]
         {
-            let response_final = build_response_final(request_id);
+            let response_final = build_response_final(request_id, qos);
             // F2 — this surface has no error channel; a transport-down
             // reject drops the emit exactly as the dead link would.
             let _ = self.dispatch_response_final(response_final, /*reliable=*/ true);
         }
         #[cfg(not(feature = "codec-response-final"))]
-        let _ = request_id;
+        let _ = (request_id, qos);
     }
 
     /// R121j-5c-e2e — encode + dispatch an already-constructed

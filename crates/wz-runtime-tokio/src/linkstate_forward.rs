@@ -2137,8 +2137,10 @@ impl LinkstateForwarder {
                 // on an unknown scope (dispatcher/queries.rs:575), not a silent
                 // drop that would hang the get() until its own timeout (the
                 // router twin's y121 behavior, backported).
-                let final_msg =
-                    wz_session_core::response_final_build::build_response_final(request.rid);
+                let final_msg = wz_session_core::response_final_build::build_response_final(
+                    request.rid,
+                    wz_session_core::declare_ext_qos::read_request_qos(request),
+                );
                 self.send_to_face(inbound, reliable, || {
                     NetworkMessage::ResponseFinal(final_msg.clone())
                 });
@@ -2285,7 +2287,11 @@ impl LinkstateForwarder {
         // ONE shared fan target for this logical Query — every MESH and CLIENT branch's
         // pending entry Rc-shares it, so the fan's closing final aggregates last-out across
         // both legs (zenoh's one Arc<Query> cloned per branch).
-        let fan = QueryFan::new(inbound, request.rid);
+        let fan = QueryFan::new(
+            inbound,
+            request.rid,
+            wz_session_core::declare_ext_qos::read_request_qos(request),
+        );
         // The deadline each pending entry is abandoned at if no ResponseFinal routes back
         // (the Query's own ext_timeout, else this relay's default); the tick sweep reaps it.
         let deadline = self.now()
@@ -2388,7 +2394,10 @@ impl LinkstateForwarder {
         ) {
             return;
         }
-        let final_msg = wz_session_core::response_final_build::build_response_final(request.rid);
+        let final_msg = wz_session_core::response_final_build::build_response_final(
+            request.rid,
+            wz_session_core::declare_ext_qos::read_request_qos(request),
+        );
         self.send_to_face(inbound, reliable, || {
             NetworkMessage::ResponseFinal(final_msg.clone())
         });
@@ -3083,7 +3092,7 @@ impl LinkstateForwarder {
             // No self-query: emit the closing ResponseFinal now — the querier is one
             // hop away (rid = its own inbound rid); upstream hops unwind via the
             // existing forward_response path (the y44 behavior, unchanged).
-            self.emit_query_final(inbound, reliable, request.rid);
+            self.emit_query_final(inbound, reliable, request.rid, view.qos);
         } else {
             // Self-query: queue the busy handler(s) + this query's return context with
             // the Final SUPPRESSED; drain_query_redelivery (outermost forward exit)
@@ -3125,8 +3134,14 @@ impl LinkstateForwarder {
     /// -- zenoh removes the query on ResponseFinal, session.rs:3023), then emitted
     /// once by [`drain_query_redelivery`](Self::drain_query_redelivery) after the
     /// deferred handlers answer.
-    fn emit_query_final(&self, inbound: FaceId, reliable: bool, rid: u64) {
-        let final_msg = wz_session_core::response_final_build::build_response_final(rid);
+    fn emit_query_final(
+        &self,
+        inbound: FaceId,
+        reliable: bool,
+        rid: u64,
+        qos: wz_session_core::sample::QosLevel,
+    ) {
+        let final_msg = wz_session_core::response_final_build::build_response_final(rid, qos);
         self.send_to_face(inbound, reliable, || {
             NetworkMessage::ResponseFinal(final_msg.clone())
         });
@@ -3154,7 +3169,7 @@ impl LinkstateForwarder {
             evicted
         };
         if let Some(ev) = evicted {
-            self.emit_query_final(ev.inbound, ev.reliable, ev.rid);
+            self.emit_query_final(ev.inbound, ev.reliable, ev.rid, ev.qos);
         }
     }
 
@@ -3206,7 +3221,7 @@ impl LinkstateForwarder {
                 }
             }
             self.emit_query_responses(dq.inbound, dq.reliable, replies);
-            self.emit_query_final(dq.inbound, dq.reliable, dq.rid);
+            self.emit_query_final(dq.inbound, dq.reliable, dq.rid, dq.qos);
         }
     }
 
@@ -5646,7 +5661,8 @@ pub(crate) fn synthesize_expired_query_returns(
         if !eq.last {
             continue;
         }
-        let final_msg = wz_session_core::response_final_build::build_response_final(eq.inbound_rid);
+        let final_msg =
+            wz_session_core::response_final_build::build_response_final(eq.inbound_rid, eq.src_qos);
         send(eq.inbound, NetworkMessage::ResponseFinal(final_msg));
     }
 }
@@ -5659,15 +5675,15 @@ pub(crate) fn synthesize_expired_query_returns(
 /// nobody left to notify (skipped); the others get the final that terminates
 /// their `get()` instead of waiting out their own timeout.
 pub(crate) fn synthesize_drained_fan_finals(
-    drained: &[(FaceId, u64)],
+    drained: &[(FaceId, u64, wz_session_core::sample::QosLevel)],
     departed: FaceId,
     mut send: impl FnMut(FaceId, NetworkMessage),
 ) {
-    for &(querier, rid) in drained {
+    for &(querier, rid, src_qos) in drained {
         if querier == departed {
             continue;
         }
-        let final_msg = wz_session_core::response_final_build::build_response_final(rid);
+        let final_msg = wz_session_core::response_final_build::build_response_final(rid, src_qos);
         send(querier, NetworkMessage::ResponseFinal(final_msg));
     }
 }
@@ -15484,7 +15500,10 @@ mod tests {
         );
 
         // 3) C sends a ResponseFinal -> routes back AND frees the entry.
-        let rf = wz_session_core::response_final_build::build_response_final(qid);
+        let rf = wz_session_core::response_final_build::build_response_final(
+            qid,
+            wz_session_core::sample::QosLevel::DEFAULT,
+        );
         fwd.forward_response_final(FaceId(1), true, &rf);
         assert_eq!(sink_a.frame_count(), 2, "the final routed back to A too");
         assert_eq!(
@@ -15548,7 +15567,10 @@ mod tests {
         let qid_c = forwarded_request(&sink_c.frame_bytes(0)).rid;
 
         // B finalizes FIRST: absorbed — no upstream final while C still answers.
-        let rf_b = wz_session_core::response_final_build::build_response_final(qid_b);
+        let rf_b = wz_session_core::response_final_build::build_response_final(
+            qid_b,
+            wz_session_core::sample::QosLevel::DEFAULT,
+        );
         fwd.forward_response_final(FaceId(1), true, &rf_b);
         assert_eq!(
             sink_a.frame_count(),
@@ -15566,7 +15588,10 @@ mod tests {
         assert_eq!(forwarded_response(&sink_a.frame_bytes(0)).request_id, 91);
 
         // C finalizes LAST: exactly one upstream final closes the fan.
-        let rf_c = wz_session_core::response_final_build::build_response_final(qid_c);
+        let rf_c = wz_session_core::response_final_build::build_response_final(
+            qid_c,
+            wz_session_core::sample::QosLevel::DEFAULT,
+        );
         fwd.forward_response_final(FaceId(2), true, &rf_c);
         assert_eq!(
             sink_a.frame_count(),
@@ -16022,7 +16047,10 @@ mod tests {
         assert_eq!(s1.pending_len(), 1, "S1 keeps its entry past a Reply");
 
         // 5) C's ResponseFinal (qid_b) -> S2 (frees) -> S1 (frees) -> A (rid 99).
-        let rf = wz_session_core::response_final_build::build_response_final(qid_b);
+        let rf = wz_session_core::response_final_build::build_response_final(
+            qid_b,
+            wz_session_core::sample::QosLevel::DEFAULT,
+        );
         feed_message(&s2, FaceId(1), NetworkMessage::ResponseFinal(rf));
         assert_eq!(s2.pending_len(), 0, "the final freed S2's entry");
         let final_s1 = forwarded_response_final(&s2_to_s1.frame_bytes(1));

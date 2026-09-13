@@ -724,7 +724,10 @@ mod tests {
         let acl = AclInterceptor::new(deny_admin_policy(), AclFlow::Ingress);
         let ctx = MockCtx::with_subject(Some(Zid::from_slice(&[0x0A])));
         let fin = NetworkMessage::ResponseFinal(
-            wz_session_core::response_final_build::build_response_final(42),
+            wz_session_core::response_final_build::build_response_final(
+                42,
+                wz_session_core::sample::QosLevel::DEFAULT,
+            ),
         );
         assert_eq!(
             acl_action(&fin),

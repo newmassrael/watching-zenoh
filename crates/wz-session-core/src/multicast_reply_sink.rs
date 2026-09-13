@@ -94,9 +94,9 @@ impl<Q: MulticastReplyEnqueue> crate::response_sink::ResponseSink for MulticastR
         });
     }
     #[cfg(feature = "codec-response-final")]
-    fn send_response_final(&self, request_id: u64) {
+    fn send_response_final(&self, request_id: u64, qos: crate::sample::QosLevel) {
         self.queue
-            .enqueue(MulticastTxItem::ResponseFinal { request_id });
+            .enqueue(MulticastTxItem::ResponseFinal { request_id, qos });
     }
 }
 

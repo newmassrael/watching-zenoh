@@ -817,6 +817,11 @@ pub(crate) struct FinalHold {
     /// The dispatch's staged Final job already ran and found a hold, so the
     /// terminator is now the last holder's to emit.
     due: bool,
+    /// R2595 — the QUERY's QoS, recorded by the staged job together with
+    /// `due`. The release path is reached from a C program's drop and knows
+    /// only the rid, so without this the escaped query's terminator would be
+    /// the one final in the tree that read as DEFAULT.
+    qos: wz_session_core::sample::QosLevel,
 }
 
 // R267 cascade — manual Clone impl avoids the derive(Clone) auto-added
@@ -2100,14 +2105,14 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 if hold.holds > 0 {
                     return;
                 }
-                let due = hold.due;
+                let due = hold.due.then_some(hold.qos);
                 map.remove(&rid);
                 due
             }
             Err(_) => return,
         };
-        if due {
-            self.actions().send_response_final(rid);
+        if let Some(qos) = due {
+            self.actions().send_response_final(rid, qos);
         }
     }
 
@@ -2277,7 +2282,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             #[cfg(feature = "query-queryable")]
             {
                 let actions = self.actions();
-                for rid in obs.take_pending_final_rids() {
+                for (rid, qos) in obs.take_pending_final_rids() {
                     let actions = actions.clone();
                     // R311y531 — the hold map is consulted INSIDE the job, not
                     // here: a handler job takes its hold while running, and
@@ -2292,6 +2297,10 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                                 // entry and silently discard every reply the
                                 // escaped query is about to make.
                                 hold.due = true;
+                                // R2595 — hand the holder the query's QoS with
+                                // the debt; `release_response_final` has only
+                                // the rid.
+                                hold.qos = qos;
                                 return;
                             }
                         }
@@ -2303,7 +2312,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                         // went unused under feature-unification builds where
                         // the trait method's `codec-response-final` arm is
                         // absent (the `--all-targets` deny-warnings break).
-                        actions.send_response_final(rid);
+                        actions.send_response_final(rid, qos);
                     }));
                 }
             }

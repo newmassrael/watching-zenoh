@@ -1933,7 +1933,10 @@ mod tests {
             reliable: true,
             sn: 0,
             messages: vec![NetworkMessage::ResponseFinal(
-                wz_session_core::response_final_build::build_response_final(rid),
+                wz_session_core::response_final_build::build_response_final(
+                    rid,
+                    wz_session_core::sample::QosLevel::DEFAULT,
+                ),
             )],
             has_ext: false,
             extensions: Vec::new(),

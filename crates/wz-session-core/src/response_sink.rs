@@ -59,8 +59,12 @@ pub trait ResponseSink {
     /// Encode + enqueue one outbound `ResponseFinal` frame terminating
     /// the reply chain for `request_id`. Mirrors
     /// `SessionLinkActions::send_response_final`.
+    ///
+    /// R2595 — `qos` is the QUERY's, and it is a parameter rather than a
+    /// default for the reason the builder takes one: a terminator that read as
+    /// DEFAULT would be droppable while the replies it closes are not.
     #[cfg(feature = "codec-response-final")]
-    fn send_response_final(&self, request_id: u64);
+    fn send_response_final(&self, request_id: u64, qos: crate::sample::QosLevel);
 }
 
 /// Declarer-side liveliness interest-response emit. Separate from
@@ -190,8 +194,8 @@ impl<S: ResponseSink + ?Sized> ResponseSink for &S {
         (**self).send_response(response)
     }
     #[cfg(feature = "codec-response-final")]
-    fn send_response_final(&self, request_id: u64) {
-        (**self).send_response_final(request_id)
+    fn send_response_final(&self, request_id: u64, qos: crate::sample::QosLevel) {
+        (**self).send_response_final(request_id, qos)
     }
 }
 
@@ -238,8 +242,8 @@ impl<S: ResponseSink + ?Sized> ResponseSink for alloc::sync::Arc<S> {
         (**self).send_response(response)
     }
     #[cfg(feature = "codec-response-final")]
-    fn send_response_final(&self, request_id: u64) {
-        (**self).send_response_final(request_id)
+    fn send_response_final(&self, request_id: u64, qos: crate::sample::QosLevel) {
+        (**self).send_response_final(request_id, qos)
     }
 }
 

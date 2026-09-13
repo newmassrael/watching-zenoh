@@ -418,11 +418,25 @@ pub fn encode_frame_with_response_final(
     response_final: ResponseFinalOwned,
     reliable: bool,
 ) -> Vec<u8> {
+    encode_frame_with_response_final_qos(sn, response_final, reliable, None)
+}
+
+/// R2595 — the QoS-carrying twin of [`encode_frame_with_response_final`], the
+/// terminator's mirror of the Response one: the multicast TX emit rides a
+/// final on its query's clamped band, so the Frame must name it. `None` is
+/// byte-identical to the anchor.
+#[cfg(feature = "codec-response-final")]
+pub fn encode_frame_with_response_final_qos(
+    sn: u64,
+    response_final: ResponseFinalOwned,
+    reliable: bool,
+    ext_qos: Option<Priority>,
+) -> Vec<u8> {
     encode_frame_envelope(
         sn,
         frame_flags(reliable),
         ResponseFinal::MAX_ENCODED_BYTES,
-        None,
+        ext_qos,
         response_final_body(&response_final),
     )
 }
@@ -1270,10 +1284,14 @@ mod tests {
     #[cfg(feature = "codec-response-final")]
     #[test]
     fn encode_frame_with_response_final_wraps_in_frame_envelope() {
-        let rf = build_response_final(42);
+        let rf = build_response_final(42, crate::sample::QosLevel::DEFAULT);
         let rf_bytes = rf.wire();
 
-        let wire_reliable = encode_frame_with_response_final(0, build_response_final(42), true);
+        let wire_reliable = encode_frame_with_response_final(
+            0,
+            build_response_final(42, crate::sample::QosLevel::DEFAULT),
+            true,
+        );
         assert_eq!(
             wire_reliable[0],
             wire_const::FLAG_T_FRAME_R | wire_const::T_MID_FRAME,
@@ -1286,7 +1304,11 @@ mod tests {
             "Frame body tail must be ResponseFinal.wire() bytes verbatim",
         );
 
-        let wire_best_effort = encode_frame_with_response_final(0, build_response_final(42), false);
+        let wire_best_effort = encode_frame_with_response_final(
+            0,
+            build_response_final(42, crate::sample::QosLevel::DEFAULT),
+            false,
+        );
         assert_eq!(
             wire_best_effort[0],
             wire_const::T_MID_FRAME,
