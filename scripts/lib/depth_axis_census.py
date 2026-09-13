@@ -1082,7 +1082,13 @@ PIN_NO_SYMBOL = 2
 # the third is the wire witness for four atoms and `quic_pipeline.rs` for
 # quic-datagram, which that witness does not drive. udp's clause also cites the
 # upstream `multicast.rs` once, which lands in the unjudged upstream bucket.
-PIN_WZ_CITATIONS = 267
+#
+# R2591 — 267 -> 271, again with no atom entering or leaving. DERIVED with
+# `citation_audit` per reason, before and after the R2591 clause: tcp +3 wz
+# (`locator.rs`, `link_socket.rs`, the witness file) and tls +1 (the witness file
+# alone; its clause names the seam without a path), +0 ambiguous. tcp's clause also
+# cites the upstream `utils.rs` once, in the unjudged upstream bucket.
+PIN_WZ_CITATIONS = 271
 PIN_AMBIGUOUS = 48
 
 
