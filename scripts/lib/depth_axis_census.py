@@ -850,7 +850,11 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # of those four to return. Every key R2589 listed was built across R2590-R2593
 # and witnessed against zenohd; it was a reached atom, so it leaves this count
 # with the population, and UNREACHED and NO_SYMBOL hold.
-PIN_REACHED = 44
+# R2596 — 44 -> 43: `ext-pubsub-advanced-cache` went PARTIAL -> COMPLETE on its
+# last clause, `replies_config`. It was a reached atom (its module's own suite
+# runs under `ext-pubsub-advanced-cache`), so it leaves this count with the
+# population; UNREACHED and NO_SYMBOL hold.
+PIN_REACHED = 43
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -1115,7 +1119,12 @@ PIN_NO_SYMBOL = 2
 # same atom's reason, before and after the R2595 clause: wz 17 -> 19
 # (`response_final_build.rs`, `linkstate_pending.rs`), ambiguous 0 -> 0, with
 # its one upstream anchor in the unjudged bucket (16 -> 17).
-PIN_WZ_CITATIONS = 275
+#
+# R2596 — 275 -> 256, an atom LEAVING. `ext-pubsub-advanced-cache` went
+# COMPLETE, so its whole reason leaves the PARTIAL population at (wz 19,
+# ambiguous 0) — the count the per-atom `citation_audit` reported for the
+# pre-round reason. 275 - 19 = 256, exactly what the census measures.
+PIN_WZ_CITATIONS = 256
 PIN_AMBIGUOUS = 47
 
 
