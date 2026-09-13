@@ -788,6 +788,27 @@ pub fn validate_topology_with_external(
     }
 }
 
+/// R2593 — the TCP socket buffers a node sets for a whole link kind, the four
+/// `transport/link/{tcp,tls}/{so_rcvbuf,so_sndbuf}` leaves.
+///
+/// Grouped because they are one layer upstream: `TcpConfigurator` and
+/// `TlsConfigurator` each render their pair into the parameter string merged
+/// under every endpoint of their kind
+/// (`io/zenoh-links/zenoh-link-tcp/src/utils.rs` @ `ps.push((TCP_SO_SND_BUF, &tx_buffer_size));`).
+/// Upstream types each `Option<u32>`, so a value past `u32::MAX` is refused
+/// at ingest as it is there.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LinkSocketBuffers {
+    /// `transport/link/tcp/so_rcvbuf`.
+    pub tcp_so_rcvbuf: Option<u32>,
+    /// `transport/link/tcp/so_sndbuf`.
+    pub tcp_so_sndbuf: Option<u32>,
+    /// `transport/link/tls/so_rcvbuf`.
+    pub tls_so_rcvbuf: Option<u32>,
+    /// `transport/link/tls/so_sndbuf`.
+    pub tls_so_sndbuf: Option<u32>,
+}
+
 /// Admin-space exposure of the emitted node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AdminspaceConfig {
@@ -932,6 +953,13 @@ pub struct ZenohNodeConfig {
     pub tls_listen_certificate: Option<String>,
     /// `transport/link/tls/listen_private_key`. wz's `--tls-key`.
     pub tls_listen_private_key: Option<String>,
+    /// R2593 — `transport/link/tcp/so_rcvbuf`, `transport/link/tcp/so_sndbuf`,
+    /// `transport/link/tls/so_rcvbuf` and `transport/link/tls/so_sndbuf`, in that
+    /// order: the per-link-kind socket buffers upstream's tcp and tls
+    /// inspectors render into every endpoint of their kind. wz's
+    /// `--link-config <kind>#so_rcvbuf=<n>` / `so_sndbuf=<n>`. `None` is an
+    /// unnamed key, which upstream resolves to "leave the kernel's default".
+    pub link_socket_buffers: LinkSocketBuffers,
     /// R311y845 — the three below say WHERE a node listens for its peers, and
     /// until this round wz's answer was a constant. `wz-ap-demo`'s `SCOUT_GROUP`
     /// was `224.0.0.224` compiled in, with a doc that named this very key as
@@ -1111,6 +1139,9 @@ impl Default for ZenohNodeConfig {
             tls_root_ca: None,
             tls_listen_certificate: None,
             tls_listen_private_key: None,
+            // R2593 — all four resolve to `null` on a running zenohd: no buffer
+            // size is set, and the kernel's defaults stand.
+            link_socket_buffers: LinkSocketBuffers::default(),
             // R311y845 — all three resolve to `null` on a running zenohd (no
             // instruction), NOT to the values `DEFAULT_CONFIG.json5` documents
             // in its comments. Defaulting them to `224.0.0.224:7446` / `auto` /
@@ -1459,25 +1490,59 @@ impl ZenohNodeConfig {
         let _ = writeln!(out, "        \"batch_size\": {},", self.batch_size);
         let _ = writeln!(out, "        \"lease\": {}", self.lease_ms);
         out.push_str("      }");
+        // R2593 — the tcp block, only for the buffers the caller set: an absent
+        // key is zenoh's own "kernel default", so emitting nothing is exact.
+        let buffers = self.link_socket_buffers;
+        let tcp: Vec<(&str, u32)> = [
+            ("so_rcvbuf", buffers.tcp_so_rcvbuf),
+            ("so_sndbuf", buffers.tcp_so_sndbuf),
+        ]
+        .into_iter()
+        .filter_map(|(k, v)| v.map(|v| (k, v)))
+        .collect();
+        if !tcp.is_empty() {
+            out.push_str(",\n      \"tcp\": {");
+            for (i, (key, value)) in tcp.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                let _ = write!(out, "\n        \"{key}\": {value}");
+            }
+            out.push_str("\n      }");
+        }
         // The TLS block, likewise inside `link` and likewise only for the paths
         // the caller holds: an empty string here is a filename nothing opens,
-        // and a `null` is what zenoh itself resolves an unset one to.
-        let tls: Vec<(&str, &String)> = [
+        // and a `null` is what zenoh itself resolves an unset one to. R2593
+        // adds tls's two buffer sizes, which are numbers rather than paths.
+        let mut tls: Vec<(&str, String)> = [
             ("root_ca_certificate", self.tls_root_ca.as_ref()),
             ("listen_certificate", self.tls_listen_certificate.as_ref()),
             ("listen_private_key", self.tls_listen_private_key.as_ref()),
         ]
         .into_iter()
-        .filter_map(|(k, v)| v.map(|v| (k, v)))
+        .filter_map(|(k, v)| {
+            v.map(|v| {
+                let mut quoted = String::new();
+                escape_into(v, &mut quoted);
+                (k, quoted)
+            })
+        })
         .collect();
+        for (key, value) in [
+            ("so_rcvbuf", buffers.tls_so_rcvbuf),
+            ("so_sndbuf", buffers.tls_so_sndbuf),
+        ] {
+            if let Some(value) = value {
+                tls.push((key, value.to_string()));
+            }
+        }
         if !tls.is_empty() {
             out.push_str(",\n      \"tls\": {");
             for (i, (key, value)) in tls.iter().enumerate() {
                 if i > 0 {
                     out.push(',');
                 }
-                let _ = write!(out, "\n        \"{key}\": ");
-                escape_into(value, &mut out);
+                let _ = write!(out, "\n        \"{key}\": {value}");
             }
             out.push_str("\n      }");
         }
@@ -1544,6 +1609,15 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     "transport/link/tls/root_ca_certificate",
     "transport/link/tls/listen_certificate",
     "transport/link/tls/listen_private_key",
+    // R2593 — the per-link-kind socket buffers. MOVED from
+    // `UNHONOURED_UPSTREAM_CONFIG_KEYS` (and its beyond-wz group), so the
+    // surface total is unchanged. They reach every tcp and tls link through
+    // `LinkDefaults` (R2592), which is the structure whose absence kept them
+    // unhonoured.
+    "transport/link/tcp/so_rcvbuf",
+    "transport/link/tcp/so_sndbuf",
+    "transport/link/tls/so_rcvbuf",
+    "transport/link/tls/so_sndbuf",
     // R311y845 — WHERE the node looks for its peers. These three MOVED from
     // `UNHONOURED_UPSTREAM_CONFIG_KEYS`, so the surface total below is
     // unchanged: they are resolved leaves of a real zenohd either way, and all
@@ -1878,14 +1952,12 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     "transport/link/protocols",
     "transport/link/rx/buffer_size",
     "transport/link/rx/max_message_size",
-    "transport/link/tcp/so_rcvbuf",
-    "transport/link/tcp/so_sndbuf",
+    // R2593 — `transport/link/{tcp,tls}/so_{rcvbuf,sndbuf}` LEFT this list for
+    // `HONOURED_CONFIG_KEYS`: `LinkDefaults` now carries them to every link.
     "transport/link/tls/close_link_on_expiration",
     "transport/link/tls/connect_certificate",
     "transport/link/tls/connect_private_key",
     "transport/link/tls/enable_mtls",
-    "transport/link/tls/so_rcvbuf",
-    "transport/link/tls/so_sndbuf",
     "transport/link/tls/verify_name_on_connect",
     "transport/link/tx/keep_alive",
     "transport/link/tx/queue/allocation/mode",
@@ -2080,11 +2152,9 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     "transport/link/protocols",
     "transport/link/rx/buffer_size",
     "transport/link/rx/max_message_size",
-    "transport/link/tcp/so_rcvbuf",
-    "transport/link/tcp/so_sndbuf",
+    // R2593 — the four socket-buffer keys left this half with the surface's
+    // other half: wz acts on them now.
     "transport/link/tls/close_link_on_expiration",
-    "transport/link/tls/so_rcvbuf",
-    "transport/link/tls/so_sndbuf",
     "transport/link/tx/keep_alive",
     "transport/link/tx/queue/allocation/mode",
     "transport/link/tx/queue/batching/enabled",
@@ -2332,11 +2402,7 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
             "transport/link/protocols",
             "transport/link/rx/buffer_size",
             "transport/link/rx/max_message_size",
-            "transport/link/tcp/so_rcvbuf",
-            "transport/link/tcp/so_sndbuf",
             "transport/link/tls/close_link_on_expiration",
-            "transport/link/tls/so_rcvbuf",
-            "transport/link/tls/so_sndbuf",
             "transport/link/tx/keep_alive",
             "transport/link/tx/queue/allocation/mode",
             "transport/link/tx/queue/batching/enabled",
@@ -2702,27 +2768,26 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
         "wz-has-it",
         "DEFAULT_FILE_MASK",
     ),
-    // R2226 (open-debt item 575) — TWO capacity knobs wz spells at a GENUINE
+    // R2226 (open-debt item 575) — a capacity knob wz spells at a GENUINE
     // zenohd and never at itself, on the same footing as
     // `sequence_number_resolution` below.
     //
-    // The leg they exist for has to make a real router run out of batches
+    // The leg it exists for has to make a real router run out of batches
     // mid-fragmentation. That needs the router to BLOCK in `write`, and how far
     // it gets first is decided by how much it can hold: one batch object per
-    // priority (`queue/size/data`) and the kernel's send buffer
-    // (`tcp/so_sndbuf`). Both are configured on the far side; wz honours
-    // neither and has no local surface that would.
+    // priority (`queue/size/data`). It is configured on the far side; wz
+    // honours it nowhere.
+    //
+    // R2593 — this row used to cover a second key, `transport/link/tcp/so_sndbuf`,
+    // which the same fixture sets for the same reason. That key is honoured
+    // now (`HONOURED_CONFIG_KEYS`), so its row is gone: the ledger answers only
+    // for keys wz does not act on.
     //
     // ⚠ Kept apart from the DEADLINE the same leg depends on, which is left at
     // its upstream default deliberately: capacity decides how far a sender
     // gets, and only the deadline decides what it does when it stops. Naming
     // that one here too would have made the router's willingness to abandon a
     // property of this harness.
-    (
-        "transport/link/tcp/so_sndbuf",
-        "foreign-node-config",
-        "spawn_zenohd_shallow_tx_queue_on_ephemeral_tcp",
-    ),
     (
         "transport/link/tx/queue/size/data",
         "foreign-node-config",
@@ -4046,6 +4111,24 @@ impl ZenohNodeConfig {
             out.tls_listen_private_key = Some(v);
             named.push("transport/link/tls/listen_private_key");
         }
+        // R2593 — the four per-link-kind socket buffers, each a `u32` upstream.
+        {
+            let buffers = &mut out.link_socket_buffers;
+            for (path, slot) in [
+                ("transport/link/tcp/so_rcvbuf", &mut buffers.tcp_so_rcvbuf),
+                ("transport/link/tcp/so_sndbuf", &mut buffers.tcp_so_sndbuf),
+                ("transport/link/tls/so_rcvbuf", &mut buffers.tls_so_rcvbuf),
+                ("transport/link/tls/so_sndbuf", &mut buffers.tls_so_sndbuf),
+            ] {
+                if let Some(v) = want_u64(&doc, path)? {
+                    *slot = Some(u32::try_from(v).map_err(|_| ConfigIngestError::OutOfRange {
+                        path,
+                        value: v.to_string(),
+                    })?);
+                    named.push(path);
+                }
+            }
+        }
         // `adminspace` is a block rather than a field: an absent block is not
         // `enabled: false`, which is why the struct models it as an Option and
         // why `enabled: false` here has to erase the block rather than record
@@ -4974,6 +5057,24 @@ mod tests {
             (
                 "transport/link/tls/listen_private_key",
                 r#"{ "transport": { "link": { "tls": { "listen_private_key": "/etc/srv.key" } } } }"#,
+            ),
+            // R2593 — the four socket buffers, each to a size no kernel
+            // defaults to.
+            (
+                "transport/link/tcp/so_rcvbuf",
+                r#"{ "transport": { "link": { "tcp": { "so_rcvbuf": 4096 } } } }"#,
+            ),
+            (
+                "transport/link/tcp/so_sndbuf",
+                r#"{ "transport": { "link": { "tcp": { "so_sndbuf": 8192 } } } }"#,
+            ),
+            (
+                "transport/link/tls/so_rcvbuf",
+                r#"{ "transport": { "link": { "tls": { "so_rcvbuf": 4096 } } } }"#,
+            ),
+            (
+                "transport/link/tls/so_sndbuf",
+                r#"{ "transport": { "link": { "tls": { "so_sndbuf": 8192 } } } }"#,
             ),
             // R311y845 — WHERE the node looks. Each is driven to a value that
             // is NOT the upstream default (`224.0.0.224:7446` / `auto` / `1`),

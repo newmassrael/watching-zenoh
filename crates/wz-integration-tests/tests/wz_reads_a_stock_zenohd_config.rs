@@ -162,7 +162,10 @@ fn operator_config(port: u16) -> String {
         root_ca_certificate: "/etc/wz/ca.pem",
         listen_certificate: "/etc/wz/server.pem",
         listen_private_key: "/etc/wz/server.key",
+        so_rcvbuf: 12288,
+        so_sndbuf: 24576,
       }},
+      tcp: {{ so_rcvbuf: 4096, so_sndbuf: 8192 }},
       tx: {{ batch_size: 4096, lease: 8000, threads: 8 }},
     }},
   }},
@@ -395,6 +398,36 @@ fn wz_reads_the_same_values_out_of_a_config_that_zenohd_does() {
                 wz.tls_listen_private_key.clone().unwrap_or_default()
             ),
         ),
+        // R2593 — the per-link-kind socket buffers, each a distinct value so a
+        // reader that swapped two paths reads the wrong number here.
+        (
+            "transport/link/tcp/so_rcvbuf",
+            format!(
+                "{:?}",
+                wz.link_socket_buffers.tcp_so_rcvbuf.unwrap_or_default()
+            ),
+        ),
+        (
+            "transport/link/tcp/so_sndbuf",
+            format!(
+                "{:?}",
+                wz.link_socket_buffers.tcp_so_sndbuf.unwrap_or_default()
+            ),
+        ),
+        (
+            "transport/link/tls/so_rcvbuf",
+            format!(
+                "{:?}",
+                wz.link_socket_buffers.tls_so_rcvbuf.unwrap_or_default()
+            ),
+        ),
+        (
+            "transport/link/tls/so_sndbuf",
+            format!(
+                "{:?}",
+                wz.link_socket_buffers.tls_so_sndbuf.unwrap_or_default()
+            ),
+        ),
     ];
 
     for (path, wz_says) in &expected {
@@ -494,6 +527,14 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         "transport/link/tls/root_ca_certificate",
         "transport/link/tls/listen_certificate",
         "transport/link/tls/listen_private_key",
+        // R2593 — MEASURED on a running zenohd with no file key: its resolved
+        // tree prints `"tcp":{"so_rcvbuf":null,"so_sndbuf":null}` and the same
+        // two nulls inside `tls`. No buffer size is a kernel default, which the
+        // resolved tree cannot show.
+        "transport/link/tcp/so_rcvbuf",
+        "transport/link/tcp/so_sndbuf",
+        "transport/link/tls/so_rcvbuf",
+        "transport/link/tls/so_sndbuf",
         // R2568 — honoured by R2567 and left unclassed, which this leg's own
         // gate caught. Upstream states no value for it either: DEFAULT_CONFIG
         // carries `dictionary_file: null` beside `user` and `password`, so the
@@ -3199,11 +3240,18 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
     multicast: {{ qos: {{ enabled: true }} }},
     shared_memory: {{ enabled: false }},
     link: {{
+      // R2593 — the per-link-kind socket buffers. A client that dials tcp
+      // takes the tcp pair; the tls pair reaches its `--link-config` and waits
+      // unused, which is upstream's shape too (the kind's configuration exists
+      // whether or not a link of that kind opens).
       tls: {{
         root_ca_certificate: "/etc/wz/ca.pem",
         listen_certificate: "/etc/wz/server.pem",
         listen_private_key: "/etc/wz/server.key",
+        so_rcvbuf: 12288,
+        so_sndbuf: 24576,
       }},
+      tcp: {{ so_rcvbuf: 65536, so_sndbuf: 65536 }},
       tx: {{ batch_size: 4096, lease: 3000 }},
     }},
   }},

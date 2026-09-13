@@ -65,6 +65,11 @@
 //! on zenohd first: a node value applies to a silent locator, a locator key
 //! wins over the node's same key, keys merge one by one, and one kind's value
 //! does not reach another kind's link.
+//!
+//! R2593 — and from a zenoh CONFIG FILE: the last rows write the node values as
+//! one JSON5 document and give it to zenohd with `-c` and to the demo with
+//! `--config`, so the demo's config reader and its expansion onto
+//! `--link-config` are judged against zenohd reading the same file.
 
 use std::io::Read as _;
 use std::net::{IpAddr, Ipv4Addr, UdpSocket};
@@ -441,6 +446,11 @@ struct BufferRow {
     /// gets `--cfg transport/link/<kind>/<key>:<value>`, the wz demo
     /// `--link-config <kind>#<key>=<value>`.
     node: &'static [(&'static str, &'static str, u32)],
+    /// R2593 — give `node` as a zenoh CONFIG FILE instead of flags: one JSON5
+    /// document carrying `transport/link/<kind>/<key>: <value>`, which zenohd
+    /// reads with `-c` and the wz demo with `--config`. The same file for both,
+    /// so the row judges the demo's config reader end to end.
+    from_file: bool,
     /// The EFFECTIVE sizes the row expects, after the locator is layered over
     /// the node configuration.
     so_rcvbuf: Option<u32>,
@@ -461,24 +471,28 @@ fn buffer_rows() -> Vec<BufferRow> {
         BufferRow {
             locator: "tcp/127.0.0.1:{port}",
             node: &[],
+            from_file: false,
             so_rcvbuf: None,
             so_sndbuf: None,
         },
         BufferRow {
             locator: "tcp/127.0.0.1:{port}#so_rcvbuf=4096",
             node: &[],
+            from_file: false,
             so_rcvbuf: Some(SMALL_RCVBUF),
             so_sndbuf: None,
         },
         BufferRow {
             locator: "tcp/127.0.0.1:{port}#so_sndbuf=8192",
             node: &[],
+            from_file: false,
             so_rcvbuf: None,
             so_sndbuf: Some(SMALL_SNDBUF),
         },
         BufferRow {
             locator: "tls/127.0.0.1:{port}#so_rcvbuf=4096;so_sndbuf=8192",
             node: &[],
+            from_file: false,
             so_rcvbuf: Some(SMALL_RCVBUF),
             so_sndbuf: Some(SMALL_SNDBUF),
         },
@@ -487,6 +501,7 @@ fn buffer_rows() -> Vec<BufferRow> {
         BufferRow {
             locator: "tcp/127.0.0.1:{port}",
             node: &[("tcp", "so_rcvbuf", SMALL_RCVBUF)],
+            from_file: false,
             so_rcvbuf: Some(SMALL_RCVBUF),
             so_sndbuf: None,
         },
@@ -494,6 +509,7 @@ fn buffer_rows() -> Vec<BufferRow> {
         BufferRow {
             locator: "tcp/127.0.0.1:{port}#so_rcvbuf=16384",
             node: &[("tcp", "so_rcvbuf", SMALL_RCVBUF)],
+            from_file: false,
             so_rcvbuf: Some(LOCATOR_RCVBUF),
             so_sndbuf: None,
         },
@@ -502,6 +518,7 @@ fn buffer_rows() -> Vec<BufferRow> {
         BufferRow {
             locator: "tcp/127.0.0.1:{port}#so_rcvbuf=16384",
             node: &[("tcp", "so_sndbuf", SMALL_SNDBUF)],
+            from_file: false,
             so_rcvbuf: Some(LOCATOR_RCVBUF),
             so_sndbuf: Some(SMALL_SNDBUF),
         },
@@ -509,6 +526,7 @@ fn buffer_rows() -> Vec<BufferRow> {
         BufferRow {
             locator: "tcp/127.0.0.1:{port}",
             node: &[("tls", "so_rcvbuf", SMALL_RCVBUF)],
+            from_file: false,
             so_rcvbuf: None,
             so_sndbuf: None,
         },
@@ -516,15 +534,83 @@ fn buffer_rows() -> Vec<BufferRow> {
         BufferRow {
             locator: "tls/127.0.0.1:{port}",
             node: &[("tls", "so_sndbuf", SMALL_SNDBUF)],
+            from_file: false,
             so_rcvbuf: None,
             so_sndbuf: Some(SMALL_SNDBUF),
+        },
+        // R2593 — the same layer from a CONFIG FILE. Both keys of a kind from
+        // the file reach a silent locator.
+        BufferRow {
+            locator: "tcp/127.0.0.1:{port}",
+            node: &[
+                ("tcp", "so_rcvbuf", SMALL_RCVBUF),
+                ("tcp", "so_sndbuf", SMALL_SNDBUF),
+            ],
+            from_file: true,
+            so_rcvbuf: Some(SMALL_RCVBUF),
+            so_sndbuf: Some(SMALL_SNDBUF),
+        },
+        // A locator key still wins over the file's same key, and the file's
+        // other key still arrives.
+        BufferRow {
+            locator: "tcp/127.0.0.1:{port}#so_rcvbuf=16384",
+            node: &[
+                ("tcp", "so_rcvbuf", SMALL_RCVBUF),
+                ("tcp", "so_sndbuf", SMALL_SNDBUF),
+            ],
+            from_file: true,
+            so_rcvbuf: Some(LOCATOR_RCVBUF),
+            so_sndbuf: Some(SMALL_SNDBUF),
+        },
+        // A file's tls value reaches a tls link and not a tcp one.
+        BufferRow {
+            locator: "tls/127.0.0.1:{port}",
+            node: &[("tls", "so_rcvbuf", SMALL_RCVBUF)],
+            from_file: true,
+            so_rcvbuf: Some(SMALL_RCVBUF),
+            so_sndbuf: None,
+        },
+        BufferRow {
+            locator: "tcp/127.0.0.1:{port}",
+            node: &[("tls", "so_rcvbuf", SMALL_RCVBUF)],
+            from_file: true,
+            so_rcvbuf: None,
+            so_sndbuf: None,
         },
     ]
 }
 
+/// The zenoh config document for `row`'s node values, one `link` subtree per
+/// kind: `{ transport: { link: { tcp: { so_rcvbuf: 4096 } } } }`.
+fn node_config_file(row: &BufferRow) -> String {
+    let mut kinds: Vec<&str> = row.node.iter().map(|(kind, ..)| *kind).collect();
+    kinds.dedup();
+    let blocks: Vec<String> = kinds
+        .iter()
+        .map(|kind| {
+            let keys: Vec<String> = row
+                .node
+                .iter()
+                .filter(|(k, ..)| k == kind)
+                .map(|(_, key, value)| format!("{key}: {value}"))
+                .collect();
+            format!("{kind}: {{ {} }}", keys.join(", "))
+        })
+        .collect();
+    format!("{{ transport: {{ link: {{ {} }} }} }}", blocks.join(", "))
+}
+
 /// The node-level arguments `row` gives `dialer`, in each implementation's
-/// own spelling of the same configuration.
-fn node_args(dialer: Dialer, row: &BufferRow) -> Vec<String> {
+/// own spelling of the same configuration. `file` is where a `from_file` row's
+/// document was written.
+fn node_args(dialer: Dialer, row: &BufferRow, file: &Path) -> Vec<String> {
+    if row.from_file {
+        let flag = match dialer {
+            Dialer::Zenohd => "-c",
+            Dialer::Wz => "--config",
+        };
+        return vec![flag.to_string(), file.display().to_string()];
+    }
     row.node
         .iter()
         .flat_map(|(kind, key, value)| match dialer {
@@ -562,7 +648,10 @@ fn observe_buffers(dialer: Dialer, row: &BufferRow, ca: &Path) -> (Option<Buffer
         std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind the observer");
     let port = listener.local_addr().expect("listener address").port();
     let locator = row.locator.replace("{port}", &port.to_string());
-    let node = node_args(dialer, row);
+    let dir = tempfile::tempdir().expect("a directory for the node config file");
+    let file = dir.path().join("node.json5");
+    std::fs::write(&file, node_config_file(row)).expect("write the node config file");
+    let node = node_args(dialer, row, &file);
     let child = ChildGuard::wrap(
         format!("{dialer:?} dialing {locator} with {node:?}"),
         dialer_command(dialer, &locator, ca)

@@ -506,6 +506,7 @@ pub(crate) fn split_endpoint_list(raw: &str) -> Vec<String> {
 /// | `transport/unicast/compression/enabled: true` | `--compression` |
 /// | `transport/link/tx/batch_size` | `--batch-size <n>` |
 /// | `transport/link/tx/lease` | `--lease-ms <n>` |
+/// | `transport/link/{tcp,tls}/so_{rcvbuf,sndbuf}` | `--link-config <kind>#<key>=<n>` (R2593) |
 /// | an `adminspace` block at all | `--config-queryable` |
 /// | `adminspace/permissions/read: false` | `--no-admin-read` |
 /// | `adminspace/permissions/write: true` | `--config-writable` `--config-write-permit` |
@@ -973,6 +974,46 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
                 }
                 // A key the document names with no value asks for nothing, and
                 // asking for nothing is what this node already does.
+                None => exp.record(key, KeyEffect::AlreadyTheBehaviour),
+            }
+        }
+    }
+    // R2593 — the per-link-kind socket buffers, each onto its own
+    // `--link-config <kind>#<key>=<n>`. No precondition: upstream renders them
+    // into the kind's configuration whether or not the node opens a link of
+    // that kind, and a `--link-config` for an unused kind is inert rather than
+    // refused, so nothing here can turn a valid file into a node that will not
+    // start.
+    let buffers = cfg.link_socket_buffers;
+    for (key, kind, span_key, value) in [
+        (
+            "transport/link/tcp/so_rcvbuf",
+            "tcp",
+            "so_rcvbuf",
+            buffers.tcp_so_rcvbuf,
+        ),
+        (
+            "transport/link/tcp/so_sndbuf",
+            "tcp",
+            "so_sndbuf",
+            buffers.tcp_so_sndbuf,
+        ),
+        (
+            "transport/link/tls/so_rcvbuf",
+            "tls",
+            "so_rcvbuf",
+            buffers.tls_so_rcvbuf,
+        ),
+        (
+            "transport/link/tls/so_sndbuf",
+            "tls",
+            "so_sndbuf",
+            buffers.tls_so_sndbuf,
+        ),
+    ] {
+        if named(key) {
+            match value {
+                Some(value) => exp.link_config(key, kind, span_key, value),
                 None => exp.record(key, KeyEffect::AlreadyTheBehaviour),
             }
         }
@@ -1971,6 +2012,43 @@ impl Expansion<'_> {
         effect
     }
 
+    /// R2593 — one key of a kind's link configuration, onto
+    /// `--link-config <kind>#<span_key>=<value>`.
+    ///
+    /// `--link-config` is repeatable and layered, so "already typed" is a
+    /// question about the KEY, not the flag: an operator's `--link-config
+    /// tcp#so_sndbuf=…` says nothing about the file's `so_rcvbuf`. The typed
+    /// occurrences for `kind` are read the way the binary reads them, and only a
+    /// typed value for this same key decides the key. The expanded flag lands
+    /// after the typed argv, where a later span would win, which is exactly why
+    /// a key the operator typed is never expanded over.
+    fn link_config(&mut self, key: &'static str, kind: &str, span_key: &str, value: u32) {
+        use wz::runtime_tokio::locator::{config_span_keys, LinkSocketOptions};
+        let typed: Option<Option<u32>> = parse_pairs(self.rest, "--link-config")
+            .iter()
+            .filter_map(|v| v.split_once('#'))
+            .filter(|(k, span)| *k == kind && config_span_keys(span).any(|s| s == span_key))
+            .map(|(_, span)| {
+                LinkSocketOptions::from_config_span(span)
+                    .ok()
+                    .and_then(|o| match span_key {
+                        "so_rcvbuf" => o.so_rcvbuf,
+                        _ => o.so_sndbuf,
+                    })
+            })
+            .last();
+        let effect = match typed {
+            Some(Some(typed)) if typed == value => KeyEffect::AlreadyOnTheCommandLine,
+            Some(_) => KeyEffect::OverriddenOnTheCommandLine,
+            None => {
+                self.added.push(String::from("--link-config"));
+                self.added.push(format!("{kind}#{span_key}={value}"));
+                KeyEffect::Expanded
+            }
+        };
+        self.record(key, effect);
+    }
+
     /// A presence flag: the file's `true` is what asks for it, and its `false`
     /// is what the absent flag already means.
     fn decide_presence(
@@ -2456,6 +2534,35 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
         "expands to `--tls-key`. A private key is by construction never on \
          any wire; its effect is whether the TLS handshake completes.",
     ),
+    // R2593 — the four per-link-kind socket buffers. A socket option, so no
+    // zenoh frame carries any of them; the witness reads the kernel instead.
+    (
+        "transport/link/tcp/so_rcvbuf",
+        KIND_OFF_WIRE,
+        "expands to `--link-config tcp#so_rcvbuf=<n>`. SO_RCVBUF on the tcp \
+         socket, visible as the SYN's window scale and the socket's `rb` in \
+         `ss`, which socket_buffers_reach_the_kernel_as_zenohd_sets_them reads; \
+         no field in commons/zenoh-protocol carries a buffer size.",
+    ),
+    (
+        "transport/link/tcp/so_sndbuf",
+        KIND_OFF_WIRE,
+        "expands to `--link-config tcp#so_sndbuf=<n>`. SO_SNDBUF on the tcp \
+         socket, visible only as the socket's `tb` in `ss`; no zenoh frame \
+         field carries it.",
+    ),
+    (
+        "transport/link/tls/so_rcvbuf",
+        KIND_OFF_WIRE,
+        "expands to `--link-config tls#so_rcvbuf=<n>`. SO_RCVBUF on the TCP \
+         socket under a tls link, the same kernel-side effect as tcp's.",
+    ),
+    (
+        "transport/link/tls/so_sndbuf",
+        KIND_OFF_WIRE,
+        "expands to `--link-config tls#so_sndbuf=<n>`. SO_SNDBUF on the TCP \
+         socket under a tls link, the same kernel-side effect as tcp's.",
+    ),
     (
         "namespace",
         KIND_OFF_WIRE,
@@ -2613,6 +2720,54 @@ mod stock_config_tests {
     fn expand(cli: &[&str], file: &str) -> Result<StockConfigExpansion, String> {
         expand_stock_zenoh_config(&argv(cli), |_| Ok(String::from(file)))
             .map(|o| o.expect("--config was on the command line"))
+    }
+
+    /// R2593 — a file's link socket buffers reach `--link-config`, one key per
+    /// flag, and a key the operator typed for the same kind is theirs: the file
+    /// neither overrides it nor is dropped for the keys the operator left
+    /// alone. The expansion is read back through `TransportTuning`, the call
+    /// `main` makes, so this judges what the node gets and not only the argv.
+    #[test]
+    fn link_socket_buffers_expand_per_key_and_yield_to_a_typed_key() {
+        use wz::runtime_tokio::locator::Proto;
+        let file = r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                        transport: { link: { tcp: { so_rcvbuf: 4096, so_sndbuf: 8192 },
+                                             tls: { so_sndbuf: 16384 } } } }"#;
+
+        let alone = expand(&["--config", "z.json5"], file).expect("a valid file");
+        let tuning = TransportTuning::from_argv(&alone.argv).expect("parseable argv");
+        let tcp = tuning.link_defaults.for_proto(Proto::Tcp);
+        assert_eq!((tcp.so_rcvbuf, tcp.so_sndbuf), (Some(4096), Some(8192)));
+        assert_eq!(
+            tuning.link_defaults.for_proto(Proto::Tls).so_sndbuf,
+            Some(16384)
+        );
+
+        let typed = expand(
+            &["--config", "z.json5", "--link-config", "tcp#so_rcvbuf=2048"],
+            file,
+        )
+        .expect("a valid file");
+        let effect = |key: &str| {
+            typed
+                .effects
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, e)| *e)
+                .unwrap_or_else(|| panic!("{key}: no decision recorded"))
+        };
+        assert_eq!(
+            effect("transport/link/tcp/so_rcvbuf"),
+            KeyEffect::OverriddenOnTheCommandLine
+        );
+        assert_eq!(effect("transport/link/tcp/so_sndbuf"), KeyEffect::Expanded);
+        let tuning = TransportTuning::from_argv(&typed.argv).expect("parseable argv");
+        let tcp = tuning.link_defaults.for_proto(Proto::Tcp);
+        assert_eq!(
+            (tcp.so_rcvbuf, tcp.so_sndbuf),
+            (Some(2048), Some(8192)),
+            "the typed key stands and the file's other key still arrives"
+        );
     }
 
     /// [`expand`] as a build that carries EVERY link zenoh does.
@@ -3513,6 +3668,32 @@ mod stock_config_tests {
                 LISTEN_TLS,
                 r#"{ listen: { endpoints: ["tls/0.0.0.0:7447"] },
                      transport: { link: { tls: { listen_private_key: "/etc/srv.key" } } } }"#,
+            ),
+            // R2593 — the per-link-kind socket buffers. The control is the same
+            // listen without the key, so the delta is the one `--link-config`.
+            (
+                "transport/link/tcp/so_rcvbuf",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { link: { tcp: { so_rcvbuf: 4096 } } } }"#,
+            ),
+            (
+                "transport/link/tcp/so_sndbuf",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { link: { tcp: { so_sndbuf: 8192 } } } }"#,
+            ),
+            (
+                "transport/link/tls/so_rcvbuf",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { link: { tls: { so_rcvbuf: 4096 } } } }"#,
+            ),
+            (
+                "transport/link/tls/so_sndbuf",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { link: { tls: { so_sndbuf: 8192 } } } }"#,
             ),
             // R311y845 — the scouting SOCKET. Both sides of each pair are a
             // `--scout` invocation (see `cli_for`), so the control expands to
