@@ -7592,7 +7592,12 @@ layer_c1y_cargo_test_routing_peer() {
     # R311y767 (carry N71) — 202 -> 203 / 200 -> 201 / 213 -> 214, one test in each
     # arm: the_peer_forwarder_emits_no_alias_of_its_own, which is ungated and so
     # lands in the bare arm too (measured, not assumed: the bare run reports 201).
-    _runci_guarded_test "C1y linkstate" 203 \
+    # R2595 — 203 -> 204 / 201 -> 202, one test in each arm:
+    # the_fan_carries_its_querys_qos_out_to_both_exits, which pins that the
+    # pending fan carries its query's QoS out through the timeout sweep and the
+    # face-down drain. Ungated like its siblings, so it lands in the bare arm
+    # too — and both numbers are what the two runs PRINTED, not a diff count.
+    _runci_guarded_test "C1y linkstate" 204 \
         cargo test -p wz-runtime-tokio --features routing-peer --lib linkstate --quiet || return 1
     # R311y513 — the BARE routing peer, and the pin that would have caught the
     # defect this round fixed. Every arm above passes `--features routing-peer`
@@ -7605,7 +7610,7 @@ layer_c1y_cargo_test_routing_peer() {
     # compile that feature ALONE at least once, or it is measuring the default
     # set and reporting the feature's name. 200 not 202: two access-tier tests
     # need the access set, which bare routing-peer does not pull.
-    _runci_guarded_test "C1y linkstate bare" 201 \
+    _runci_guarded_test "C1y linkstate bare" 202 \
         cargo test -p wz-runtime-tokio --no-default-features --features routing-peer \
         --lib linkstate --quiet || return 1
     # R311y451 — 10 -> 16: the six low-pass fidelity tests (attachment in the
