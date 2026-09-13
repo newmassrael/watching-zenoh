@@ -1088,7 +1088,11 @@ PIN_NO_SYMBOL = 2
 # (`locator.rs`, `link_socket.rs`, the witness file) and tls +1 (the witness file
 # alone; its clause names the seam without a path), +0 ambiguous. tcp's clause also
 # cites the upstream `utils.rs` once, in the unjudged upstream bucket.
-PIN_WZ_CITATIONS = 271
+#
+# R2592 — 271 -> 275, no atom entering or leaving. DERIVED with `citation_audit`
+# per reason, before and after the R2592 clause: tcp +2 and tls +2 wz (the one
+# clause both carry cites `link_socket.rs` and the witness file), +0 ambiguous.
+PIN_WZ_CITATIONS = 275
 PIN_AMBIGUOUS = 48
 
 
