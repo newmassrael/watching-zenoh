@@ -8,7 +8,7 @@
 //! # One resolution, keyed by scheme and side
 //!
 //! Upstream does not read the three keys the same way in every link, and the
-//! differences are observable, so [`LinkSocket::resolve`] is a table rather than
+//! differences are observable, so [`crate::link_socket::LinkSocket::resolve`] is a table rather than
 //! one rule. Each row below is what that link's own config reader does:
 //!
 //! | link | side | `iface` + `bind` | `bind` resolved | `bind` used | `dscp` |
@@ -42,9 +42,9 @@
 //!
 //! # Applying the options
 //!
-//! [`LinkSocket::configure`] sets the device and the DSCP on a socket before it
+//! `LinkSocket::configure` sets the device and the DSCP on a socket before it
 //! binds or connects, for tokio's `TcpSocket` and `UdpSocket` alike, through
-//! [`SocketOptionTarget`]. The DSCP value is written as given to `IP_TOS` or
+//! the crate-private `SocketOptionTarget` trait. The DSCP value is written as given to `IP_TOS` or
 //! `IPV6_TCLASS`, chosen by the family of the address the socket was created
 //! for, which is upstream's `set_dscp`
 //! (`io/zenoh-link-commons/src/dscp.rs` @ `SocketAddr::V4(_) => socket.into().set_tos(dscp)?,`).

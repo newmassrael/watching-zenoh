@@ -338,7 +338,8 @@ pub enum LocatorParseError {
 /// The protocol is the substring before the first `/`; the remainder is the
 /// `addr:port` up to an optional `#`-config tail (R311y236), which is parsed as
 /// a [`SocketAddr`]. The `#iface=<name>` tail is extracted into
-/// [`ParsedLocator::iface`]; other config keys are ignored. See the module doc
+/// [`ParsedLocator::socket`] with its `bind` and `dscp` siblings (R2590); other
+/// config keys are ignored here. See the module doc
 /// for the MVP scope (numeric tcp/udp/tls/ws endpoints; DNS names classify to
 /// [`AnyLocator::Named`] via [`parse_any_locator`], other transports are
 /// reported as errors, not silently accepted).

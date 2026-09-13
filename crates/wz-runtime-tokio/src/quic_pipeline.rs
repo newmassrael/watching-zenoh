@@ -271,7 +271,7 @@ pub async fn dial_quic(
 /// R311y454 — `iface` is the `#iface=<name>` LISTEN-side bind, the parameter
 /// shape the sibling acceptors already use (`bind_tcp`,
 /// [`crate::udp_pipeline::bind_udp_demux`]). R2590 — `async` since the listener
-/// socket is bound through tokio (see [`quic_server_endpoint`]).
+/// socket is bound through tokio (see the crate-private `quic_server_endpoint`).
 pub async fn bind_quic(
     addr: SocketAddr,
     server_config: Arc<RustlsServerConfig>,
