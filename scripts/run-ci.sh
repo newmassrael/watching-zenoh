@@ -7705,7 +7705,16 @@ layer_c1y_cargo_test_routing_peer() {
     # ingest or the dump arm reds the client-leaf test, and disabling the mesh
     # ingest reds only the mesh-sourced one. So the pair cannot rot as a unit, and
     # a count that moves names which tier moved.
-    _runci_guarded_test "C1y linkstate+access" 214 \
+    # R2601 — 214 -> 215. `29dd7923` added `the_fan_carries_its_querys_qos_out_to_both_exits`
+    # to `linkstate_pending.rs` and moved no pin, so hosted C1y redded on run
+    # 34749154824 and every push after it. MEASURED, not inferred: this
+    # combination reports 215, while `routing-peer` (204) and the bare build
+    # (202) are UNCHANGED — the new test carries no `cfg`, yet the two narrower
+    # feature sets do not surface it, so only this one guard moves. The first
+    # reading of this red assumed all three had shifted; counting them is what
+    # showed otherwise, and hosted's fail-fast would have hidden the other two
+    # either way.
+    _runci_guarded_test "C1y linkstate+access" 215 \
         cargo test -p wz-runtime-tokio --features "$access" --lib linkstate --quiet || return 1
     # R2567 — the three usrpwd counts move together because ONE structure landed
     # under them: the shared credential store that closed `access-extauth-usrpwd`.
