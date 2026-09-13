@@ -55,6 +55,105 @@ use crate::writer_queue::WriterHandle;
 use crate::{LinkDriver, LinkEvent, Reliability, TxFrame};
 use wz_session_core::link::InterceptorLink;
 
+/// R2600 — the EARLIEST `not_after` in the peer's certificate chain, as Unix
+/// seconds, or `None` when the peer presented no chain.
+///
+/// ⚠ THE FOLD IS THE POINT, and it is the one line easy to drop when porting
+/// this: upstream takes the MINIMUM over the whole chain, not the leaf's value
+/// (`io/zenoh-link-commons/src/quic/utils.rs` @ `pub fn get_cert_chain_expiration(conn: &quinn::Connection) -> ZResult<Option<OffsetDateTime>> {`).
+/// A chain whose intermediate CA expires before its leaf must die with the
+/// intermediate; reading the leaf alone would keep a link upstream drops.
+///
+/// Unix SECONDS rather than upstream's `OffsetDateTime`, because
+/// `ASN1Time::timestamp` already yields them and `std::time` compares them —
+/// the same instant in a representation that costs wz no extra declared crate.
+///
+/// A certificate that fails to parse is SKIPPED rather than fataled: rustls
+/// validated this chain during the handshake, so a parse failure here is this
+/// reader disagreeing with rustls, not a bad peer. Skipping keeps the earliest
+/// of what IS readable, which can only close a link earlier than the truth,
+/// never later — the safe direction for a key whose whole purpose is to stop
+/// trusting an expired identity.
+#[cfg(feature = "transport-link-quic")]
+pub(crate) fn peer_chain_expiry(connection: &Connection) -> Option<i64> {
+    use x509_parser::prelude::{FromDer, X509Certificate};
+
+    let identity = connection.peer_identity()?;
+    let chain = identity
+        .downcast::<Vec<tokio_rustls::rustls::pki_types::CertificateDer>>()
+        .ok()?;
+    chain
+        .iter()
+        .filter_map(|cert| {
+            X509Certificate::from_der(cert.as_ref())
+                .ok()
+                .map(|(_, parsed)| parsed.validity().not_after.timestamp())
+        })
+        .min()
+}
+
+/// R2600 — the longest single sleep the expiry watcher takes, mirroring
+/// upstream's own cap
+/// (`io/zenoh-link-commons/src/tls.rs` @ `const MAX_SLEEP_DURATION: tokio::time::Duration = tokio::time::Duration::from_secs(600);`).
+///
+/// It is NOT a precision limit: the loop re-reads the clock each pass and its
+/// LAST sleep is exactly the remaining time, so the close lands on the expiry
+/// instant. The cap exists because one enormous `tokio::time::sleep` is the
+/// unsound shape, and because re-reading the wall clock is what lets a machine
+/// whose time jumped forward notice.
+#[cfg(feature = "transport-link-quic")]
+const EXPIRY_MAX_SLEEP: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// R2600 — sleep until `deadline` (Unix seconds), re-reading the wall clock.
+#[cfg(feature = "transport-link-quic")]
+async fn sleep_until_unix(deadline: i64) {
+    loop {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(i64::MAX);
+        if deadline <= now {
+            return;
+        }
+        let remaining = std::time::Duration::from_secs((deadline - now) as u64);
+        tokio::time::sleep(remaining.min(EXPIRY_MAX_SLEEP)).await;
+    }
+}
+
+/// R2600 — arm `close_link_on_expiration` for one QUIC link.
+///
+/// Takes a CLONE of the `quinn::Connection`, which is a cheap Arc handle, so
+/// this needs none of upstream's `LinkWithCertExpiration` trait, `Weak` and
+/// `CancellationToken` machinery — wz's structure already carries the signal.
+/// Closing the connection makes the peer's `RecvStream` read fail, which
+/// `poll_framed` turns into a `LinkEvent::Lost`, which is what the session FSM
+/// already consumes.
+///
+/// ⚠ MEASURED, and named because it is a real divergence: quinn maps a closed
+/// connection to `io::ErrorKind::NotConnected`
+/// (`quinn-0.11.11/src/recv_stream.rs` @ `ConnectionLost(_) | ClosedStream => io::ErrorKind::NotConnected,`),
+/// so the link is lost with `LostCause::OsError` rather than a cause naming
+/// expiry. The link DOES die, which is the behaviour the key promises; the
+/// cause is coarser than upstream's dedicated `expire()` path.
+///
+/// The subsystem is `Net` — network-tier background upkeep, which is what a
+/// per-link clock watcher is. Upstream puts its own on `Acceptor`, but wz's
+/// `Acceptor` is specifically the listen/accept loops and this task belongs to
+/// neither that nor the caller's path.
+#[cfg(feature = "transport-link-quic")]
+pub(crate) fn arm_expiry_close(connection: &Connection) {
+    let Some(deadline) = peer_chain_expiry(connection) else {
+        // No chain, nothing to expire. Upstream answers `None` here too rather
+        // than treating an absent chain as an immediate expiry.
+        return;
+    };
+    let conn = connection.clone();
+    crate::runtime_pool::WzRuntime::Net.spawn(async move {
+        sleep_until_unix(deadline).await;
+        conn.close(0u32.into(), b"certificate chain expired");
+    });
+}
+
 /// A dialed / accepted QUIC link: the endpoint + connection (kept alive for the
 /// link) and the single bidirectional stream's split halves. Produced by
 /// [`dial_quic`] (client) / [`accept_quic_on`] (server) and consumed by

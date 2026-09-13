@@ -155,8 +155,8 @@ use tokio_rustls::TlsStream;
 // threaded via `DialConfig.quic`.
 #[cfg(feature = "transport-link-quic")]
 use crate::quic_pipeline::{
-    accept_quic_incoming, bind_quic, complete_quic_accept, dial_quic, wire_quic_stream, QuicLink,
-    QuicReadDriver,
+    accept_quic_incoming, arm_expiry_close, bind_quic, complete_quic_accept, dial_quic,
+    wire_quic_stream, QuicLink, QuicReadDriver,
 };
 // The bound QUIC server endpoint `BoundListener::Quic` carries (R311y401) — quinn's
 // `Endpoint` owns the baked-in server crypto config, so the accept variant needs no
@@ -886,8 +886,15 @@ pub enum BoundListener {
     /// (via [`accept_bound`]), and pico's `z_open(listen=quic/)`. So a quic listen binds
     /// whenever a cert is supplied; only a cert-LESS bind (a direct-API caller passing
     /// [`AcceptConfig::default`]) hits `bind_locator`'s cert-absence `Unsupported`.
+    /// R2600 — the `bool` is `close_link_on_expiration`, read off the LOCATOR at
+    /// bind time and carried to accept time because that is the only place a
+    /// peer chain exists to expire. Upstream does not have to thread it: it
+    /// bundles the flag into its `TlsServerConfig` beside the crypto, and wz's
+    /// equivalent is baked into quinn's `Endpoint`, which cannot carry it. The
+    /// second-field shape is [`Self::Tls`]'s, which already carries accept-time
+    /// state alongside its listener.
     #[cfg(feature = "transport-link-quic")]
-    Quic(Endpoint),
+    Quic(Endpoint, bool),
     /// A bound QUIC server [`Endpoint`] serving the unreliable-DATAGRAM transport
     /// (RFC9221, R311y408) — the datagram sibling of [`Self::Quic`]. Structurally
     /// identical at the accept layer (one bound endpoint yields a per-peer
@@ -905,7 +912,11 @@ pub enum BoundListener {
     /// quic-datagram` implies `transport-link-quic`, so `accept_quic_incoming` is in
     /// scope.
     #[cfg(feature = "transport-link-quic-datagram")]
-    QuicDatagram(Endpoint),
+    /// R2600 — carries `close_link_on_expiration` exactly as [`Self::Quic`]
+    /// does, and for the same reason: the datagram scheme holds a
+    /// `quinn::Connection` too, so an expired peer identity is no more
+    /// acceptable here than under streams.
+    QuicDatagram(Endpoint, bool),
     /// A bound `serial/...` endpoint (R311y805) — the LAST scheme whose acceptor
     /// was an unwired extension point, and the only one that binds NOTHING: a tty
     /// has no listen queue, so [`SerialListener`] holds the endpoint and
@@ -1043,9 +1054,9 @@ impl BoundListener {
             #[cfg(feature = "transport-link-udp")]
             BoundListener::Udp(_) => "udp",
             #[cfg(feature = "transport-link-quic")]
-            BoundListener::Quic(_) => "quic",
+            BoundListener::Quic(_, _) => "quic",
             #[cfg(feature = "transport-link-quic-datagram")]
-            BoundListener::QuicDatagram(_) => "quic-datagram",
+            BoundListener::QuicDatagram(_, _) => "quic-datagram",
             #[cfg(feature = "transport-link-serial")]
             BoundListener::Serial(_) => "serial",
         }
@@ -1110,9 +1121,9 @@ impl BoundListener {
             #[cfg(feature = "transport-link-udp")]
             BoundListener::Udp(_) => InterceptorLink::Udp,
             #[cfg(feature = "transport-link-quic")]
-            BoundListener::Quic(_) => InterceptorLink::Quic,
+            BoundListener::Quic(_, _) => InterceptorLink::Quic,
             #[cfg(feature = "transport-link-quic-datagram")]
-            BoundListener::QuicDatagram(_) => InterceptorLink::QuicDatagram,
+            BoundListener::QuicDatagram(_, _) => InterceptorLink::QuicDatagram,
             #[cfg(feature = "transport-link-serial")]
             BoundListener::Serial(_) => InterceptorLink::Serial,
         }
@@ -1167,10 +1178,10 @@ impl BoundListener {
             // --router-hat (R311y406), pico, and the one-shot --listen; so it binds and
             // reaches here. Only a cert-LESS bind is rejected at cert-absence first.
             #[cfg(feature = "transport-link-quic")]
-            BoundListener::Quic(_) => true,
+            BoundListener::Quic(_, _) => true,
             // Mesh-capable for the SAME reason as `Quic` (deferred crypto handshake).
             #[cfg(feature = "transport-link-quic-datagram")]
-            BoundListener::QuicDatagram(_) => true,
+            BoundListener::QuicDatagram(_, _) => true,
             // R311y805 — `false`, and not for a deferral reason: a tty is
             // POINT-TO-POINT, so one bound serial endpoint can only ever produce
             // ONE peer. Upstream's serial listener is the same shape (it re-opens
@@ -1249,9 +1260,9 @@ impl BoundListener {
             // back from the quinn Endpoint (the ephemeral port a `:0` bind got is
             // readable here, race-free before any accept).
             #[cfg(feature = "transport-link-quic")]
-            BoundListener::Quic(ep) => ep.local_addr()?.to_string(),
+            BoundListener::Quic(ep, _) => ep.local_addr()?.to_string(),
             #[cfg(feature = "transport-link-quic-datagram")]
-            BoundListener::QuicDatagram(ep) => ep.local_addr()?.to_string(),
+            BoundListener::QuicDatagram(ep, _) => ep.local_addr()?.to_string(),
             // A serial endpoint's address is the DEVICE (or the pin pair),
             // rendered with the `#baudrate=` tail that makes it parse back --
             // `locator_address_with_config` is the same renderer the per-link
@@ -1314,9 +1325,9 @@ impl BoundListener {
             // `Ok` (a well-defined `--peer`/`--router-hat` zid-from-port over a quic
             // listen), read from the quinn Endpoint.
             #[cfg(feature = "transport-link-quic")]
-            BoundListener::Quic(ep) => ep.local_addr(),
+            BoundListener::Quic(ep, _) => ep.local_addr(),
             #[cfg(feature = "transport-link-quic-datagram")]
-            BoundListener::QuicDatagram(ep) => ep.local_addr(),
+            BoundListener::QuicDatagram(ep, _) => ep.local_addr(),
             // A tty has no IP address at all (not even a same-host path the way
             // unixsock does); its address is a device node. Same typed error as the
             // other non-IP families -- a zid-from-port caller never binds serial.
@@ -1456,13 +1467,16 @@ impl BoundListener {
             // completed connection). `Box`ed (an `Incoming` carries the quinn proto
             // state, matching the boxed DialedLink::Quic on the far side).
             #[cfg(feature = "transport-link-quic")]
-            BoundListener::Quic(ep) => {
+            BoundListener::Quic(ep, closes_on_expiration) => {
                 let incoming = accept_quic_incoming(ep).await?;
                 let peer = incoming.remote_address();
                 (
                     AcceptedLink::Quic {
                         incoming: Box::new(incoming),
                         endpoint: ep.clone(),
+                        // R2600 — carried one more hop: the chain to watch only
+                        // exists once `handshake` has run the crypto.
+                        closes_on_expiration: *closes_on_expiration,
                     },
                     AcceptedPeer::Ip(peer),
                 )
@@ -1473,13 +1487,15 @@ impl BoundListener {
             // DEFERRED to `handshake` (`complete_quic_datagram_accept`). Real-IP peer
             // from `Incoming::remote_address()` before the handshake.
             #[cfg(feature = "transport-link-quic-datagram")]
-            BoundListener::QuicDatagram(ep) => {
+            BoundListener::QuicDatagram(ep, closes_on_expiration) => {
                 let incoming = accept_quic_incoming(ep).await?;
                 let peer = incoming.remote_address();
                 (
                     AcceptedLink::QuicDatagram {
                         incoming: Box::new(incoming),
                         endpoint: ep.clone(),
+                        // R2600 — the datagram twin carries it the same hop.
+                        closes_on_expiration: *closes_on_expiration,
                     },
                     AcceptedPeer::Ip(peer),
                 )
@@ -1593,6 +1609,11 @@ pub enum AcceptedLink {
     Quic {
         incoming: Box<Incoming>,
         endpoint: Endpoint,
+        /// R2600 — `close_link_on_expiration`, carried from the listen locator
+        /// through [`BoundListener::Quic`]. It rides this far because the peer's
+        /// certificate chain does not exist until [`Self::handshake`] has run
+        /// the crypto, which is the first moment there is an expiry to watch.
+        closes_on_expiration: bool,
     },
     /// A pending QUIC-DATAGRAM connection ARRIVAL awaiting its DEFERRED crypto
     /// handshake (R311y408) — the datagram twin of [`Self::Quic`]. Identical shape
@@ -1605,6 +1626,8 @@ pub enum AcceptedLink {
     QuicDatagram {
         incoming: Box<Incoming>,
         endpoint: Endpoint,
+        /// R2600 — the datagram twin of [`Self::Quic`]'s field, same journey.
+        closes_on_expiration: bool,
     },
     /// An OPEN tty awaiting its DEFERRED serial-LINK handshake (R311y805) — the
     /// `SerialStream` [`BoundListener::accept_raw`] opened WITHOUT waiting for the
@@ -1670,8 +1693,22 @@ impl AcceptedLink {
             // loop — the ws/tls-server-handshake analogue. Yields the SAME
             // `DialedLink::Quic` the dial side produces (shared downstream wiring).
             #[cfg(feature = "transport-link-quic")]
-            AcceptedLink::Quic { incoming, endpoint } => {
-                DialedLink::Quic(Box::new(complete_quic_accept(*incoming, endpoint).await?))
+            AcceptedLink::Quic {
+                incoming,
+                endpoint,
+                closes_on_expiration,
+            } => {
+                let link = complete_quic_accept(*incoming, endpoint).await?;
+                // R2600 — the ACCEPT half of `close_link_on_expiration`. This is
+                // the first moment the peer's chain exists: the crypto has just
+                // run, so `peer_identity` can answer. Arming only the dial half
+                // would leave a listener serving a peer whose identity expired,
+                // while the config-key gate — which credits a `const`, not a
+                // reader (open-debt 726) — reported the key as honoured.
+                if closes_on_expiration {
+                    arm_expiry_close(&link.connection);
+                }
+                DialedLink::Quic(Box::new(link))
             }
             // R311y408 — the DEFERRED QUIC-DATAGRAM handshake, the datagram twin of
             // the `Quic` arm: `complete_quic_datagram_accept` drives the crypto
@@ -1679,9 +1716,18 @@ impl AcceptedLink {
             // (datagrams open no stream). Yields the SAME `DialedLink::QuicDatagram`
             // the dial side produces (shared downstream `wire_quic_datagram`).
             #[cfg(feature = "transport-link-quic-datagram")]
-            AcceptedLink::QuicDatagram { incoming, endpoint } => DialedLink::QuicDatagram(
-                Box::new(complete_quic_datagram_accept(*incoming, endpoint).await?),
-            ),
+            AcceptedLink::QuicDatagram {
+                incoming,
+                endpoint,
+                closes_on_expiration,
+            } => {
+                let link = complete_quic_datagram_accept(*incoming, endpoint).await?;
+                // R2600 — the datagram twin arms at the same moment.
+                if closes_on_expiration {
+                    arm_expiry_close(&link.connection);
+                }
+                DialedLink::QuicDatagram(Box::new(link))
+            }
             // R311y805 — the DEFERRED serial-LINK handshake, the Responder half of
             // the exchange `dial_serial` drives as Initiator: await `INIT`, reply
             // `INIT|ACK`, and leave the stream positioned exactly at the first
@@ -1983,15 +2029,22 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
                 let client_config =
                     quic_dial_client_config(ip.tls(), cfg.quic.as_ref(), "quic").await?;
                 let server_name = quic_dial_server_name(cfg.quic.as_ref(), ip.addr);
-                Ok(DialedLink::Quic(Box::new(
-                    dial_quic(
-                        ip.addr,
-                        client_config,
-                        &server_name,
-                        &cfg.link_socket(ip.socket(), ip.proto).await?,
-                    )
-                    .await?,
-                )))
+                let link = dial_quic(
+                    ip.addr,
+                    client_config,
+                    &server_name,
+                    &cfg.link_socket(ip.socket(), ip.proto).await?,
+                )
+                .await?;
+                // R2600 — arm the expiry watcher HERE, where the locator that
+                // carries the policy and the connection it applies to are both
+                // in scope. The peer's chain is only readable once the
+                // handshake has completed, which is why this follows the dial
+                // rather than riding the config.
+                if ip.tls().closes_on_expiration() {
+                    arm_expiry_close(&link.connection);
+                }
+                Ok(DialedLink::Quic(Box::new(link)))
             }
             // With the backend off, the same `Unsupported` shape as the tls/udp
             // arms — `quic/...` still parses, only its dial is absent.
@@ -2014,15 +2067,20 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
                 let client_config =
                     quic_dial_client_config(ip.tls(), cfg.quic.as_ref(), "quic-datagram").await?;
                 let server_name = quic_dial_server_name(cfg.quic.as_ref(), ip.addr);
-                Ok(DialedLink::QuicDatagram(Box::new(
-                    dial_quic_datagram(
-                        ip.addr,
-                        client_config,
-                        &server_name,
-                        &cfg.link_socket(ip.socket(), ip.proto).await?,
-                    )
-                    .await?,
-                )))
+                let link = dial_quic_datagram(
+                    ip.addr,
+                    client_config,
+                    &server_name,
+                    &cfg.link_socket(ip.socket(), ip.proto).await?,
+                )
+                .await?;
+                // R2600 — the datagram twin arms the same watcher: both schemes
+                // hold a `quinn::Connection`, and an expired peer identity is
+                // no more acceptable under datagrams than under streams.
+                if ip.tls().closes_on_expiration() {
+                    arm_expiry_close(&link.connection);
+                }
+                Ok(DialedLink::QuicDatagram(Box::new(link)))
             }
             // With the backend off, the same `Unsupported` shape as the quic/tls
             // arms — `quic-datagram/...` still parses, only its dial is absent.
@@ -2187,12 +2245,17 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
                     quic_dial_client_config(named_tls(&tls), cfg.quic.as_ref(), "quic").await?;
                 let addrs = resolve_locator_addrs(&host, port).await?;
                 let link_socket = &cfg.link_socket(named_options(&socket), proto).await?;
-                Ok(DialedLink::Quic(Box::new(
-                    first_reachable(addrs, &format!("quic/{host}:{port}"), |addr| {
-                        dial_quic(addr, client_config.clone(), &host, link_socket)
-                    })
-                    .await?,
-                )))
+                let link = first_reachable(addrs, &format!("quic/{host}:{port}"), |addr| {
+                    dial_quic(addr, client_config.clone(), &host, link_socket)
+                })
+                .await?;
+                // R2600 — a NAMED locator carries the policy exactly as a
+                // numeric one does; the walk over candidate addresses changes
+                // which address answered, not whose certificate it was.
+                if named_tls(&tls).closes_on_expiration() {
+                    arm_expiry_close(&link.connection);
+                }
+                Ok(DialedLink::Quic(Box::new(link)))
             }
             #[cfg(not(feature = "transport-link-quic"))]
             Proto::Quic => Err(io::Error::new(
@@ -2209,12 +2272,16 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
                         .await?;
                 let addrs = resolve_locator_addrs(&host, port).await?;
                 let link_socket = &cfg.link_socket(named_options(&socket), proto).await?;
-                Ok(DialedLink::QuicDatagram(Box::new(
+                let link =
                     first_reachable(addrs, &format!("quic-datagram/{host}:{port}"), |addr| {
                         dial_quic_datagram(addr, client_config.clone(), &host, link_socket)
                     })
-                    .await?,
-                )))
+                    .await?;
+                // R2600 — the named datagram twin, same policy, same watcher.
+                if named_tls(&tls).closes_on_expiration() {
+                    arm_expiry_close(&link.connection);
+                }
+                Ok(DialedLink::QuicDatagram(Box::new(link)))
             }
             #[cfg(not(feature = "transport-link-quic-datagram"))]
             Proto::QuicDatagram => Err(io::Error::new(
@@ -2837,6 +2904,9 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
                         &cfg.link_socket(ip.socket(), ip.proto).await?,
                     )
                     .await?,
+                    // R2600 — the policy is read HERE, where the locator is, and
+                    // carried to accept time, where the chain to watch exists.
+                    ip.tls().closes_on_expiration(),
                 ))
             }
             #[cfg(not(feature = "transport-link-quic"))]
@@ -2865,6 +2935,8 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
                         &cfg.link_socket(ip.socket(), ip.proto).await?,
                     )
                     .await?,
+                    // R2600 — the datagram twin carries the same policy.
+                    ip.tls().closes_on_expiration(),
                 ))
             }
             #[cfg(not(feature = "transport-link-quic-datagram"))]
@@ -2966,6 +3038,8 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
                         bind_quic(addr, server_config.clone(), link_socket)
                     })
                     .await?,
+                    // R2600 — a NAMED listen tail carries the policy too.
+                    named_tls(&tls).closes_on_expiration(),
                 ))
             }
             #[cfg(not(feature = "transport-link-quic"))]
@@ -2985,6 +3059,8 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
                         bind_quic_datagram(addr, server_config.clone(), link_socket)
                     })
                     .await?,
+                    // R2600 — the named datagram twin, same policy.
+                    named_tls(&tls).closes_on_expiration(),
                 ))
             }
             #[cfg(not(feature = "transport-link-quic-datagram"))]
@@ -5910,7 +5986,7 @@ mod tests {
         )
         .await
         .expect("bind quic endpoint");
-        let listener = BoundListener::Quic(ep);
+        let listener = BoundListener::Quic(ep, false);
         assert!(
             listener.supports_mesh_multi_peer(),
             "a quic listener is mesh-capable (deferred-handshake split, R311y404)"
@@ -5919,7 +5995,7 @@ mod tests {
     }
 
     /// R311y408 — the quic-DATAGRAM twin of `boundlistener_quic_is_mesh_capable`:
-    /// pins the BIND-time predicate `BoundListener::QuicDatagram(_) => true` at its
+    /// pins the BIND-time predicate `BoundListener::QuicDatagram(_, _) => true` at its
     /// `true` polarity. The wildcard-free match compiler-forces the arm to EXIST but
     /// not its VALUE, so a wrong `false` would make `run_router`/`run_peer`'s
     /// bind-time mesh fail-fast wrongly reject a `--router quic-datagram/` bind with
@@ -5945,7 +6021,7 @@ mod tests {
         )
         .await
         .expect("bind quic-datagram endpoint");
-        let listener = BoundListener::QuicDatagram(ep);
+        let listener = BoundListener::QuicDatagram(ep, false);
         assert!(
             listener.supports_mesh_multi_peer(),
             "a quic-datagram listener is mesh-capable (deferred-handshake split, R311y408)"
@@ -6017,7 +6093,7 @@ mod tests {
         )
         .await
         .expect("bind quic-datagram endpoint");
-        let listener = BoundListener::QuicDatagram(ep);
+        let listener = BoundListener::QuicDatagram(ep, false);
         let addr = listener
             .local_addr_display()
             .expect("a bound quic-datagram listener has an address");

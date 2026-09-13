@@ -957,7 +957,7 @@ transport-link-unixpipe = ["transport-link-tcp", "dep:libc", "dep:rand"]
 # dial/accept BACKEND is gated here. Cert material the locator cannot carry is
 # threaded via `DialConfig.quic` (the tls pattern), so the generic
 # `dial_locator` returns Unsupported for `quic/...` without it. NOT default.
-transport-link-quic = ["transport-link-tcp", "dep:quinn", "dep:tokio-rustls", "dep:rustls-pemfile", "dep:base64"]
+transport-link-quic = ["transport-link-tcp", "dep:quinn", "dep:tokio-rustls", "dep:rustls-pemfile", "dep:base64", "dep:x509-parser"]
 # R311y8 — host QUIC unreliable-DATAGRAM link backend (RFC9221). IMPLIES
 # `transport-link-quic`: it reuses that backend's `quic_config` TLS-1.3 + ALPN
 # builders + the quinn/rustls stack, swapping the bidi stream for the
@@ -1720,6 +1720,20 @@ rustls-pemfile = { version = "2", optional = true }
 # `base64_decode` in `zenoh-link-tls/src/utils.rs`. Optional + tls-gated like
 # the other TLS deps.
 base64 = { version = "0.22", optional = true }
+# R2600 — X.509 reader for `close_link_on_expiration`, behind
+# `transport-link-quic` (`dep:x509-parser`). The key needs the peer chain's
+# `not_after` as a VALUE, and nothing already in this tree can supply it:
+# `rustls-webpki` keeps `Cert::validity` `pub(crate)` and exposes only
+# verify-at-a-time predicates, so there is no accessor to borrow.
+# `x509-parser = "0.18.0"` is what zenoh itself pins for the same job
+# (its workspace `Cargo.toml`), so the parse behind the key is the same one
+# upstream trusts. `default = []` here is its OWN default: the `verify` /
+# `validate` features pull ring and are NOT wanted — this only reads a field
+# out of a chain rustls has already validated during the handshake.
+# Deliberately NOT paired with a `time` dep: `ASN1Time::timestamp()` yields
+# Unix seconds, which `std::time` compares, so wz declares one crate where
+# upstream declares two.
+x509-parser = { version = "0.18", optional = true }
 # transport-shm — the AP POSIX shared-memory provider (behind the optional
 # `transport-shm` feature). A /dev/shm tmpfs file mmap'd MAP_SHARED is exactly
 # POSIX shared memory for the same-host scoped proof; memmap2 is the stable,
@@ -1946,6 +1960,16 @@ default-features = false
 features = ["reassembly"]
 
 [dev-dependencies]
+# R2600 — DEV-ONLY, and the production side deliberately has no `time` dep (see
+# the `x509-parser` note above: `ASN1Time::timestamp` yields Unix seconds, which
+# `std::time` compares). The witness for `close_link_on_expiration` must issue a
+# certificate that expires in SECONDS, and `rcgen`'s `CertificateParams::not_after`
+# is a `time::OffsetDateTime` with no re-export to borrow — rcgen's own
+# `date_time_ymd` helper is day-granular, which cannot express "three seconds from
+# now", and a cert already expired is rejected by rustls at handshake so the link
+# under test would never form. Already in the lock transitively, so this declares
+# a crate the build was compiling anyway.
+time = { version = "0.3", default-features = false, features = ["std"] }
 # R311y578 (G1) — the capture-side front end, used by
 # `tests/pcap_dissect_e2e.rs` to prove a REAL wz handshake replays through
 # pcap -> decapsulation -> TCP reassembly -> the passive decoder. Dev-only:
