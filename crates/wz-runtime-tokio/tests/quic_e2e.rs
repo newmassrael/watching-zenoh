@@ -41,8 +41,8 @@ use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session::{PublishOptions, TokioSession};
 use wz_runtime_tokio::session_glue::drive_session_until_terminal;
 use wz_runtime_tokio::session_open::{
-    accept_and_open_session, connect_and_open_session, DialConfig, DialedLink, QuicDialConfig,
-    DEFAULT_OPEN_TICK_MS,
+    accept_and_open_session, accept_bound_on, bind_locator, connect_and_open_session, dial_locator,
+    AcceptConfig, DialConfig, DialedLink, QuicDialConfig, DEFAULT_OPEN_TICK_MS,
 };
 use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
@@ -457,5 +457,117 @@ async fn a_named_quic_locator_verifies_against_the_locator_name_not_the_configur
         err.kind(),
         std::io::ErrorKind::Unsupported,
         "the numeric arm is wired; its failure must be the certificate check (got {err:?})"
+    );
+}
+
+/// R2599 — a QUIC handshake whose certificate material comes ENTIRELY from the
+/// two locators' own `#`-config tails. Neither side is given an
+/// `AcceptConfig.quic` or a `DialConfig.quic`: both are `::default()`.
+///
+/// THE ABSENCE OF THOSE CONFIGS IS THE ASSERTION. Before R2599 wz read no TLS
+/// material off a locator at all, so this pair bound and dialed cert-absent and
+/// both halves returned a typed `Unsupported`. The keys the tails spell have no
+/// other surface in either implementation — zenoh's config file carries the path
+/// and `_base64` forms and no `_raw` field
+/// (`commons/zenoh-config/src/lib.rs` @ `root_ca_certificate_base64: Option<SecretValue>,`) —
+/// so a locator is the only place an operator can write inline PEM.
+///
+/// The SECOND half is the refutation arm, and it is permanent rather than a
+/// control run once: the SAME pair of locators with the material stripped out
+/// must still be refused. Without it a build that ignored the tails and quietly
+/// fell back to some ambient default would pass the first half.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_locator_carrying_its_own_material_handshakes_with_no_ambient_config() {
+    let issued = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+        .expect("generate self-signed localhost cert");
+    let cert_pem = issued.cert.pem();
+    let key_pem = issued.key_pair.serialize_pem();
+
+    // Bind BEFORE the dial, to learn the OS-chosen port race-free — the
+    // bind/accept split the sibling tests use.
+    let listen = parse_any_locator(&format!(
+        "quic/127.0.0.1:0#listen_certificate_raw={cert_pem};listen_private_key_raw={key_pem}"
+    ))
+    .expect("the listen locator parses");
+    let mut listener = bind_locator(listen, &AcceptConfig::default())
+        .await
+        .expect("a locator's own listen material binds a quic acceptor with no AcceptConfig.quic");
+    let addr: std::net::SocketAddr = listener
+        .local_addr_display()
+        .expect("the bound address is readable")
+        .parse()
+        .expect("a quic listener's address is numeric");
+
+    // `localhost` on the DIAL side, so the SNI is the locator's own host and
+    // matches the cert's SAN — the named-locator rule, unchanged by R2599.
+    let dial = parse_any_locator(&format!(
+        "quic/localhost:{}#root_ca_certificate_raw={cert_pem}",
+        addr.port()
+    ))
+    .expect("the dial locator parses");
+
+    let acc_open = async {
+        let link = accept_bound_on(&mut listener)
+            .await
+            .expect("accept the inbound quic peer");
+        let mut params = fixture_session_init_params();
+        params.zid = vec![0x02; 4];
+        accept_and_open_session(
+            link,
+            params,
+            TokioTime::new(),
+            Some(ITER_CAP),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+        .expect("acceptor reaches Established on locator-supplied material")
+    };
+    let init_open = async {
+        let mut params = fixture_session_init_params();
+        params.zid = vec![0x01; 4];
+        connect_and_open_session(
+            dial,
+            params,
+            &DialConfig::default(),
+            TokioTime::new(),
+            Some(ITER_CAP),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+        .expect("initiator reaches Established on locator-supplied material")
+    };
+    let (opened_acc, opened_init) = tokio::join!(acc_open, init_open);
+    assert!(
+        opened_init.actions.trace_snapshot().record_established_at >= 1,
+        "initiator established with its material taken from the locator alone"
+    );
+    assert!(
+        opened_acc.actions.trace_snapshot().record_established_at >= 1,
+        "acceptor established with its material taken from the locator alone"
+    );
+
+    // ── The refutation arm: the same two locators, stripped of the material.
+    let bare_listen = parse_any_locator("quic/127.0.0.1:0").expect("the bare listen parses");
+    // `expect_err` is unavailable here: neither `BoundListener` nor
+    // `DialedLink` is `Debug`, by design.
+    let listen_err = match bind_locator(bare_listen, &AcceptConfig::default()).await {
+        Ok(_) => panic!("a bare listen locator carries no material and no AcceptConfig.quic"),
+        Err(err) => err,
+    };
+    assert_eq!(
+        listen_err.kind(),
+        std::io::ErrorKind::Unsupported,
+        "the bind refusal must be the cert-absence one (got {listen_err:?})"
+    );
+    let bare_dial = parse_any_locator(&format!("quic/localhost:{}", addr.port()))
+        .expect("the bare dial parses");
+    let dial_err = match dial_locator(bare_dial, &DialConfig::default()).await {
+        Ok(_) => panic!("a bare dial locator carries no material and no DialConfig.quic"),
+        Err(err) => err,
+    };
+    assert_eq!(
+        dial_err.kind(),
+        std::io::ErrorKind::Unsupported,
+        "the dial refusal must be the cert-absence one (got {dial_err:?})"
     );
 }

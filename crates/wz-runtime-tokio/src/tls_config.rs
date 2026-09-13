@@ -81,6 +81,7 @@ use tokio_rustls::rustls::{
     ClientConfig, DigitallySignedStruct, Error as RustlsError, RootCertStore, ServerConfig,
     SignatureScheme,
 };
+use wz_session_core::locator::PemSource;
 
 /// Client-authentication (mTLS) material: the cert chain the dialer presents to
 /// the server plus its matching private key, both as PEM. `Some(_)` on the
@@ -155,6 +156,47 @@ pub fn decode_base64_pem(b64: &str) -> io::Result<Vec<u8>> {
     general_purpose::STANDARD
         .decode(b64.trim())
         .map_err(invalid_data)
+}
+
+/// R2599 — the PEM bytes a locator tail's `PemSource` names, whichever of the
+/// three spellings wrote it.
+///
+/// This is where the difference between the spellings ENDS: `Raw` is the PEM
+/// itself, `Base64` unwraps through [`decode_base64_pem`], `File` is read from
+/// disk. Every consumer below takes PEM bytes and cannot tell which spelling
+/// produced them — the division `CapiTlsConfig` already draws for the C ABI,
+/// applied to the other surface that carries these keys. (Named in a code span:
+/// it lives in a crate this one does not depend on.)
+///
+/// ASYNC, because a locator's material is read on the DIAL path rather than
+/// once at startup — the case [`read_pem_file`]'s "synchronous by design" note
+/// does not cover. Upstream reads its file form asynchronously for the same
+/// reason (`io/zenoh-link-commons/src/quic/utils.rs` @ `return Ok(tokio::fs::read(value)`).
+///
+/// The file arm still goes through [`read_pem_file`] — the ONE PEM-file reader
+/// in this crate, empty-file refusal included — moved to the blocking pool
+/// rather than duplicated in an async spelling. A second reader would be a
+/// second place for the refusal to drift, and `tokio`'s `fs` feature is not in
+/// every combination this module builds under.
+pub async fn resolve_pem_source(source: &PemSource) -> io::Result<Vec<u8>> {
+    match source {
+        PemSource::Raw(pem) => Ok(pem.as_bytes().to_vec()),
+        PemSource::Base64(b64) => decode_base64_pem(b64),
+        PemSource::File(path) => {
+            let path = path.clone();
+            tokio::task::spawn_blocking(move || read_pem_file(path))
+                .await
+                .map_err(io::Error::other)?
+        }
+    }
+}
+
+/// R2599 — [`resolve_pem_source`] over an absent-or-present source.
+pub async fn resolve_optional_pem(source: Option<&PemSource>) -> io::Result<Option<Vec<u8>>> {
+    match source {
+        None => Ok(None),
+        Some(source) => resolve_pem_source(source).await.map(Some),
+    }
 }
 
 /// Parse a PEM cert chain into DER certificates (leaf first). The chain a TLS

@@ -29,7 +29,10 @@ use std::sync::Arc;
 use tokio_rustls::rustls::crypto::ring;
 use tokio_rustls::rustls::{version::TLS13, ClientConfig, ServerConfig};
 
-use crate::tls_config::{certs_from_pem, private_key_from_pem, root_store_from_pem, ClientAuthPem};
+use crate::tls_config::{
+    certs_from_pem, private_key_from_pem, resolve_optional_pem, root_store_from_pem, ClientAuthPem,
+};
+use wz_session_core::locator::LinkTlsMaterial;
 
 /// The ALPN protocol id zenoh-link-quic advertises on every QUIC connection
 /// (`zenoh-link-quic/src/unicast.rs`: `alpn_protocols = [b"hq-29"]`). Both wz
@@ -129,4 +132,88 @@ pub fn quic_server_config_from_pem(
     // config builders do. See `crate::tls_keylog`.
     config.key_log = crate::tls_keylog::key_log();
     Ok(Arc::new(config))
+}
+
+/// R2599 — the rustls CLIENT config a quic-family dial uses when the LOCATOR's
+/// own `#`-config tail carries the material, or `None` when it carries none.
+///
+/// `None` is a fallback signal, not a failure: the caller then uses the ambient
+/// `DialConfig.quic`. That direction — the locator's own value first, the
+/// configured layer beneath — is the one `LinkSocket::resolve` already takes
+/// for every socket key, and it is upstream's own: zenoh renders the global
+/// `transport/link/tls` block INTO locator-parameter vocabulary
+/// (`io/zenoh-link-commons/src/quic/utils.rs` @ `fn inspect_config(&self, config: &ZenohConfig) -> ZResult<String> {`)
+/// and an endpoint's own parameters sit above it.
+///
+/// The client cert is loaded only under `enable_mtls`, as upstream loads it
+/// (`io/zenoh-link-commons/src/quic/utils.rs` @ `let tls_client_server_auth: bool = match config.get(TLS_ENABLE_MTLS) {`).
+/// ONE NAMED DIVERGENCE: a tail naming one half of the pair is REFUSED here,
+/// where upstream's loader bails later inside its own PEM step. Failing at the
+/// locator names the key an operator mistyped; failing inside rustls names the
+/// decoder.
+pub(crate) async fn quic_client_config_from_locator(
+    material: &LinkTlsMaterial,
+) -> io::Result<Option<Arc<ClientConfig>>> {
+    let Some(root_ca) = resolve_optional_pem(material.root_ca.as_ref()).await? else {
+        return Ok(None);
+    };
+    let (cert, key) = if material.mtls() {
+        (
+            resolve_optional_pem(material.connect_certificate.as_ref()).await?,
+            resolve_optional_pem(material.connect_private_key.as_ref()).await?,
+        )
+    } else {
+        (None, None)
+    };
+    let auth =
+        match (&cert, &key) {
+            (None, None) => None,
+            (Some(cert_chain_pem), Some(private_key_pem)) => Some(ClientAuthPem {
+                cert_chain_pem,
+                private_key_pem,
+            }),
+            _ => return Err(invalid_data(
+                "a locator enabling mTLS needs both connect_certificate and connect_private_key",
+            )),
+        };
+    quic_client_config_from_pem(&root_ca, auth).map(Some)
+}
+
+/// R2599 — the rustls SERVER config a quic-family listen uses when the LOCATOR
+/// carries the material, or `None` to fall back to the ambient
+/// `AcceptConfig.quic`. The accept twin of [`quic_client_config_from_locator`].
+///
+/// `root_ca` becomes the client-cert verifier ONLY under `enable_mtls`, which
+/// is the whole reason that key is parsed: the same key is a DIAL's trust
+/// bundle, so using it unconditionally here would make a tail written for the
+/// dial half turn a listener into one that DEMANDS client certificates.
+/// Upstream gates it the same way and bails when mTLS is on with no roots
+/// (`io/zenoh-link-commons/src/quic/utils.rs` @ `|| Err(zerror!("Missing root certificates while mTLS is enabled.")),`).
+pub(crate) async fn quic_server_config_from_locator(
+    material: &LinkTlsMaterial,
+) -> io::Result<Option<Arc<ServerConfig>>> {
+    let cert = resolve_optional_pem(material.listen_certificate.as_ref()).await?;
+    let key = resolve_optional_pem(material.listen_private_key.as_ref()).await?;
+    let (cert, key) = match (cert, key) {
+        (None, None) => return Ok(None),
+        (Some(cert), Some(key)) => (cert, key),
+        _ => {
+            return Err(invalid_data(
+                "a locator listening with its own material needs both listen_certificate and listen_private_key",
+            ))
+        }
+    };
+    let client_ca = if material.mtls() {
+        match resolve_optional_pem(material.root_ca.as_ref()).await? {
+            Some(roots) => Some(roots),
+            None => {
+                return Err(invalid_data(
+                    "a locator enabling mTLS on a listen needs root_ca_certificate for the client roots",
+                ))
+            }
+        }
+    } else {
+        None
+    };
+    quic_server_config_from_pem(&cert, &key, client_ca.as_deref()).map(Some)
 }

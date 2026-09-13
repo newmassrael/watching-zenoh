@@ -5085,7 +5085,7 @@ layer_c1ab_cargo_test_vsock() {
 layer_c1ac_cargo_test_quic() {
     (cd crates \
         && cargo test -p wz-session-core --features alloc --lib locator --quiet \
-        && cargo test -p wz-runtime-tokio --features transport-link-quic --test quic_e2e --quiet 2>&1 | grep -qE '^test result: ok\. 2 passed' \
+        && cargo test -p wz-runtime-tokio --features transport-link-quic --test quic_e2e --quiet 2>&1 | grep -qE '^test result: ok\. 3 passed' \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-quic --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-link-quic --quiet -- -D warnings)
 }

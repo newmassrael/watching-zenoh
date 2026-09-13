@@ -40,8 +40,8 @@ use wz_session_core::link::InterceptorLink;
 #[cfg(feature = "transport-link-serial")]
 use wz_session_core::locator::SerialEndpoint;
 use wz_session_core::locator::{
-    parse_any_locator, AnyLocator, AnyLocatorError, LinkSocketOptions, LocatorParseError,
-    ParsedLocator, Proto,
+    parse_any_locator, AnyLocator, AnyLocatorError, LinkSocketOptions, LinkTlsMaterial,
+    LocatorParseError, ParsedLocator, Proto,
 };
 #[cfg(feature = "scouting-static")]
 use wz_session_core::scout_static::{resolve_static_config, StaticConfigError};
@@ -1967,22 +1967,25 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
             // name dial); the SNI comes from `cfg.quic` (like `tls`), not the
             // numeric locator.
             #[cfg(feature = "transport-link-quic")]
-            Proto::Quic => match &cfg.quic {
-                // Clone the client config lazily — only on an actual QUIC dial.
-                Some(q) => Ok(DialedLink::Quic(Box::new(
+            // R2599 — the crypto comes from ONE seam now: the locator's own
+            // material first, the ambient `cfg.quic` under it. The former
+            // `None => Unsupported` arm lives inside that seam, so a locator
+            // carrying its own certificate material dials with no ambient
+            // config at all.
+            Proto::Quic => {
+                let client_config =
+                    quic_dial_client_config(ip.tls(), cfg.quic.as_ref(), "quic").await?;
+                let server_name = quic_dial_server_name(cfg.quic.as_ref(), ip.addr);
+                Ok(DialedLink::Quic(Box::new(
                     dial_quic(
                         ip.addr,
-                        q.client_config.clone(),
-                        &q.server_name,
+                        client_config,
+                        &server_name,
                         &cfg.link_socket(ip.socket(), ip.proto).await?,
                     )
                     .await?,
-                ))),
-                None => Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "quic dial requires DialConfig.quic (rustls client config + SNI name)",
-                )),
-            },
+                )))
+            }
             // With the backend off, the same `Unsupported` shape as the tls/udp
             // arms — `quic/...` still parses, only its dial is absent.
             #[cfg(not(feature = "transport-link-quic"))]
@@ -1997,21 +2000,23 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
             // `dial_quic_datagram` (build a client endpoint, connect — no bidi
             // stream) is the primitive; this arm orchestrates it.
             #[cfg(feature = "transport-link-quic-datagram")]
-            Proto::QuicDatagram => match &cfg.quic {
-                Some(q) => Ok(DialedLink::QuicDatagram(Box::new(
+            // R2599 — the datagram twin of the arm above, through the same
+            // seam: the two schemes share `cfg.quic`, and they now share the
+            // locator layer over it.
+            Proto::QuicDatagram => {
+                let client_config =
+                    quic_dial_client_config(ip.tls(), cfg.quic.as_ref(), "quic-datagram").await?;
+                let server_name = quic_dial_server_name(cfg.quic.as_ref(), ip.addr);
+                Ok(DialedLink::QuicDatagram(Box::new(
                     dial_quic_datagram(
                         ip.addr,
-                        q.client_config.clone(),
-                        &q.server_name,
+                        client_config,
+                        &server_name,
                         &cfg.link_socket(ip.socket(), ip.proto).await?,
                     )
                     .await?,
-                ))),
-                None => Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "quic-datagram dial requires DialConfig.quic (rustls client config + SNI name)",
-                )),
-            },
+                )))
+            }
             // With the backend off, the same `Unsupported` shape as the quic/tls
             // arms — `quic-datagram/...` still parses, only its dial is absent.
             #[cfg(not(feature = "transport-link-quic-datagram"))]
@@ -2053,6 +2058,9 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
             // R2496 — the retry tail is the RE-DIAL schedule's input, and this
             // arm is a single dial (or bind): it has no schedule to layer over.
             retry: _,
+            // R2599 — the certificate material the quic-family arms below lay
+            // over the ambient config, unused by every other scheme.
+            tls,
         } => match proto {
             Proto::Tcp => Ok(DialedLink::Tcp(
                 dial_tcp_host(
@@ -2158,22 +2166,21 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
             // `zenoh-link-quic/src/utils.rs:509`). quinn takes the SNI as a
             // `&str`, so there is no `ServerName` parse to fail here.
             #[cfg(feature = "transport-link-quic")]
-            Proto::Quic => match &cfg.quic {
-                Some(q) => {
-                    let addrs = resolve_locator_addrs(&host, port).await?;
-                    let link_socket = &cfg.link_socket(named_options(&socket), proto).await?;
-                    Ok(DialedLink::Quic(Box::new(
-                        first_reachable(addrs, &format!("quic/{host}:{port}"), |addr| {
-                            dial_quic(addr, q.client_config.clone(), &host, link_socket)
-                        })
-                        .await?,
-                    )))
-                }
-                None => Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "quic dial requires DialConfig.quic (rustls client config + SNI name)",
-                )),
-            },
+            Proto::Quic => {
+                // R2599 — same seam as the numeric arm. The SNI needs no
+                // fallback here: a named locator's host IS the verified name,
+                // whether the material came from the tail or from the config.
+                let client_config =
+                    quic_dial_client_config(named_tls(&tls), cfg.quic.as_ref(), "quic").await?;
+                let addrs = resolve_locator_addrs(&host, port).await?;
+                let link_socket = &cfg.link_socket(named_options(&socket), proto).await?;
+                Ok(DialedLink::Quic(Box::new(
+                    first_reachable(addrs, &format!("quic/{host}:{port}"), |addr| {
+                        dial_quic(addr, client_config.clone(), &host, link_socket)
+                    })
+                    .await?,
+                )))
+            }
             #[cfg(not(feature = "transport-link-quic"))]
             Proto::Quic => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -2182,22 +2189,20 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
             // A `quic-datagram/NAME:port` dial — the datagram twin of the arm
             // above, sharing `cfg.quic`'s cert and the locator-name SNI rule.
             #[cfg(feature = "transport-link-quic-datagram")]
-            Proto::QuicDatagram => match &cfg.quic {
-                Some(q) => {
-                    let addrs = resolve_locator_addrs(&host, port).await?;
-                    let link_socket = &cfg.link_socket(named_options(&socket), proto).await?;
-                    Ok(DialedLink::QuicDatagram(Box::new(
-                        first_reachable(addrs, &format!("quic-datagram/{host}:{port}"), |addr| {
-                            dial_quic_datagram(addr, q.client_config.clone(), &host, link_socket)
-                        })
-                        .await?,
-                    )))
-                }
-                None => Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "quic-datagram dial requires DialConfig.quic (rustls client config + SNI name)",
-                )),
-            },
+            Proto::QuicDatagram => {
+                // R2599 — the datagram twin, through the same seam.
+                let client_config =
+                    quic_dial_client_config(named_tls(&tls), cfg.quic.as_ref(), "quic-datagram")
+                        .await?;
+                let addrs = resolve_locator_addrs(&host, port).await?;
+                let link_socket = &cfg.link_socket(named_options(&socket), proto).await?;
+                Ok(DialedLink::QuicDatagram(Box::new(
+                    first_reachable(addrs, &format!("quic-datagram/{host}:{port}"), |addr| {
+                        dial_quic_datagram(addr, client_config.clone(), &host, link_socket)
+                    })
+                    .await?,
+                )))
+            }
             #[cfg(not(feature = "transport-link-quic-datagram"))]
             Proto::QuicDatagram => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -2551,6 +2556,7 @@ pub async fn resolve_mesh_dial_target(target: &str) -> Result<AnyLocator, DialTa
             port,
             socket,
             retry,
+            tls,
         } => {
             let addrs = crate::link_pipeline::resolve_locator_addrs(&host, port)
                 .await
@@ -2569,6 +2575,12 @@ pub async fn resolve_mesh_dial_target(target: &str) -> Result<AnyLocator, DialTa
                 // peer silently re-dialing at the global cadence while a
                 // numeric one honoured the operator's value.
                 retry,
+                // R2599 — and it keeps the certificate material for the same
+                // reason, with a louder failure: a resolved `quic/<name>` that
+                // dropped its own material would fall back to the ambient
+                // config, so a mesh peer configured ENTIRELY by its locator
+                // would dial cert-absent while the numeric spelling worked.
+                tls,
             })
         }
         other => other,
@@ -2596,6 +2608,84 @@ fn unsupported_mesh_dial(target: &str, scheme: &'static str) -> DialTargetError 
 /// per-link-kind defaults the options are layered on.
 fn named_options(socket: &Option<Box<LinkSocketOptions>>) -> &LinkSocketOptions {
     socket.as_deref().unwrap_or(&LinkSocketOptions::NONE)
+}
+
+/// R2599 — the TLS material an [`AnyLocator::Named`] carries, all-`None` when
+/// its tail named none. The [`named_options`] twin.
+#[cfg(feature = "transport-link-quic")]
+fn named_tls(tls: &Option<Box<LinkTlsMaterial>>) -> &LinkTlsMaterial {
+    tls.as_deref().unwrap_or(&LinkTlsMaterial::NONE)
+}
+
+/// R2599 — the rustls client config a quic-family dial uses: the LOCATOR's own
+/// material when its tail carries any, else the ambient `DialConfig.quic`.
+///
+/// ONE seam for all four quic dial arms — stream and datagram, numeric and
+/// named — so the layering cannot drift between them. The typed `Unsupported`
+/// for the case where NEITHER supplies material is the arm each
+/// `match &cfg.quic { None => .. }` used to carry; moving it here is what lets
+/// a locator carrying its own material dial with no ambient config at all,
+/// which is upstream's behaviour — there the endpoint's own config IS the
+/// configuration.
+#[cfg(feature = "transport-link-quic")]
+async fn quic_dial_client_config(
+    material: &LinkTlsMaterial,
+    ambient: Option<&QuicDialConfig>,
+    scheme: &'static str,
+) -> io::Result<Arc<ClientConfig>> {
+    if let Some(config) = crate::quic_config::quic_client_config_from_locator(material).await? {
+        return Ok(config);
+    }
+    ambient.map(|q| q.client_config.clone()).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "{scheme} dial requires DialConfig.quic (rustls client config + SNI name), \
+                 or a locator tail carrying its own certificate material"
+            ),
+        )
+    })
+}
+
+/// R2599 — the name a NUMERIC quic dial verifies the peer certificate against:
+/// the configured `server_name` when an ambient config supplies one, else the
+/// locator's own host text, which is upstream's rule
+/// (`io/zenoh-link-commons/src/quic/utils.rs` @ `pub fn get_quic_host<'a>(address: &Address<'a>) -> ZResult<&'a str> {`).
+///
+/// wz's documented superset — a CONFIGURED name for a numeric locator, so one
+/// `localhost` cert can be dialed at an IP with no IP SAN — is untouched
+/// wherever an ambient config exists. This only answers the case that had no
+/// answer before R2599: a locator carrying its own material and no ambient
+/// config, where falling back to upstream's rule is the only thing left to do.
+#[cfg(feature = "transport-link-quic")]
+fn quic_dial_server_name(ambient: Option<&QuicDialConfig>, addr: SocketAddr) -> String {
+    ambient
+        .map(|q| q.server_name.clone())
+        .unwrap_or_else(|| addr.ip().to_string())
+}
+
+/// R2599 — the rustls server config a quic-family listen uses: the LOCATOR's
+/// own material when its tail carries any, else the ambient
+/// `AcceptConfig.quic`. The accept twin of [`quic_dial_client_config`], shared
+/// by the stream and datagram bind arms.
+#[cfg(feature = "transport-link-quic")]
+async fn quic_accept_server_config(
+    material: &LinkTlsMaterial,
+    ambient: Option<&QuicAcceptConfig>,
+    scheme: &'static str,
+) -> io::Result<Arc<ServerConfig>> {
+    if let Some(config) = crate::quic_config::quic_server_config_from_locator(material).await? {
+        return Ok(config);
+    }
+    ambient.map(|q| q.server_config.clone()).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "{scheme} acceptor requires AcceptConfig.quic (a server cert + key), \
+                 or a locator tail carrying its own certificate material"
+            ),
+        )
+    })
 }
 
 /// Accept-side dispatcher for [`accept_endpoint`]: bind + accept ONE inbound
@@ -2722,19 +2812,20 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
             // Absent the cert config => typed `Unsupported`, so a QUIC acceptor is
             // opt-in — the accept mirror of dial_locator's `Proto::Quic => match &cfg.quic`.
             #[cfg(feature = "transport-link-quic")]
-            Proto::Quic => match &cfg.quic {
-                Some(q) => Ok(BoundListener::Quic(
+            // R2599 — one seam, as on the dial side: the locator's own listen
+            // material first, the ambient `cfg.quic` under it.
+            Proto::Quic => {
+                let server_config =
+                    quic_accept_server_config(ip.tls(), cfg.quic.as_ref(), "quic").await?;
+                Ok(BoundListener::Quic(
                     bind_quic(
                         ip.addr,
-                        q.server_config.clone(),
+                        server_config,
                         &cfg.link_socket(ip.socket(), ip.proto).await?,
                     )
                     .await?,
-                )),
-                None => Err(unsupported(
-                    "quic acceptor requires AcceptConfig.quic (a server cert + key)",
-                )),
-            },
+                ))
+            }
             #[cfg(not(feature = "transport-link-quic"))]
             Proto::Quic => Err(unsupported(
                 "quic acceptor requires the transport-link-quic feature",
@@ -2750,19 +2841,19 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
             // the cert config => typed `Unsupported`, so it is opt-in — the accept
             // mirror of dial_locator's `Proto::QuicDatagram => match &cfg.quic`.
             #[cfg(feature = "transport-link-quic-datagram")]
-            Proto::QuicDatagram => match &cfg.quic {
-                Some(q) => Ok(BoundListener::QuicDatagram(
+            // R2599 — the datagram twin, through the same seam.
+            Proto::QuicDatagram => {
+                let server_config =
+                    quic_accept_server_config(ip.tls(), cfg.quic.as_ref(), "quic-datagram").await?;
+                Ok(BoundListener::QuicDatagram(
                     bind_quic_datagram(
                         ip.addr,
-                        q.server_config.clone(),
+                        server_config,
                         &cfg.link_socket(ip.socket(), ip.proto).await?,
                     )
                     .await?,
-                )),
-                None => Err(unsupported(
-                    "quic-datagram acceptor requires AcceptConfig.quic (a server cert + key)",
-                )),
-            },
+                ))
+            }
             #[cfg(not(feature = "transport-link-quic-datagram"))]
             Proto::QuicDatagram => Err(unsupported(
                 "quic-datagram acceptor requires the transport-link-quic-datagram feature",
@@ -2784,6 +2875,9 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
             // R2496 — the retry tail is the RE-DIAL schedule's input, and this
             // arm is a single dial (or bind): it has no schedule to layer over.
             retry: _,
+            // R2599 — the listen material the quic-family arms below lay over
+            // the ambient config, unused by every other scheme.
+            tls,
         } => match proto {
             Proto::Tcp => Ok(BoundListener::Tcp(
                 bind_tcp_host(
@@ -2844,41 +2938,38 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
             // `bind_quic` / `bind_quic_datagram` are async since R2590, so they
             // feed the walk directly, like their udp sibling above.
             #[cfg(feature = "transport-link-quic")]
-            Proto::Quic => match &cfg.quic {
-                Some(q) => {
-                    let addrs = resolve_locator_addrs(&host, port).await?;
-                    let link_socket = &cfg.link_socket(named_options(&socket), proto).await?;
-                    Ok(BoundListener::Quic(
-                        first_reachable(addrs, &format!("quic/{host}:{port}"), |addr| {
-                            bind_quic(addr, q.server_config.clone(), link_socket)
-                        })
-                        .await?,
-                    ))
-                }
-                None => Err(unsupported(
-                    "quic acceptor requires AcceptConfig.quic (a server cert + key)",
-                )),
-            },
+            Proto::Quic => {
+                // R2599 — same seam as the numeric bind arm.
+                let server_config =
+                    quic_accept_server_config(named_tls(&tls), cfg.quic.as_ref(), "quic").await?;
+                let addrs = resolve_locator_addrs(&host, port).await?;
+                let link_socket = &cfg.link_socket(named_options(&socket), proto).await?;
+                Ok(BoundListener::Quic(
+                    first_reachable(addrs, &format!("quic/{host}:{port}"), |addr| {
+                        bind_quic(addr, server_config.clone(), link_socket)
+                    })
+                    .await?,
+                ))
+            }
             #[cfg(not(feature = "transport-link-quic"))]
             Proto::Quic => Err(unsupported(
                 "quic acceptor requires the transport-link-quic feature",
             )),
             #[cfg(feature = "transport-link-quic-datagram")]
-            Proto::QuicDatagram => match &cfg.quic {
-                Some(q) => {
-                    let addrs = resolve_locator_addrs(&host, port).await?;
-                    let link_socket = &cfg.link_socket(named_options(&socket), proto).await?;
-                    Ok(BoundListener::QuicDatagram(
-                        first_reachable(addrs, &format!("quic-datagram/{host}:{port}"), |addr| {
-                            bind_quic_datagram(addr, q.server_config.clone(), link_socket)
-                        })
-                        .await?,
-                    ))
-                }
-                None => Err(unsupported(
-                    "quic-datagram acceptor requires AcceptConfig.quic (a server cert + key)",
-                )),
-            },
+            Proto::QuicDatagram => {
+                // R2599 — the datagram twin, through the same seam.
+                let server_config =
+                    quic_accept_server_config(named_tls(&tls), cfg.quic.as_ref(), "quic-datagram")
+                        .await?;
+                let addrs = resolve_locator_addrs(&host, port).await?;
+                let link_socket = &cfg.link_socket(named_options(&socket), proto).await?;
+                Ok(BoundListener::QuicDatagram(
+                    first_reachable(addrs, &format!("quic-datagram/{host}:{port}"), |addr| {
+                        bind_quic_datagram(addr, server_config.clone(), link_socket)
+                    })
+                    .await?,
+                ))
+            }
             #[cfg(not(feature = "transport-link-quic-datagram"))]
             Proto::QuicDatagram => Err(unsupported(
                 "quic-datagram acceptor requires the transport-link-quic-datagram feature",
@@ -5388,6 +5479,7 @@ mod tests {
                 port: 7447,
                 socket: None,
                 retry: None,
+                tls: None,
             })
         );
     }
@@ -5414,6 +5506,7 @@ mod tests {
                 port: 7447,
                 socket: None,
                 retry: None,
+                tls: None,
             })
         );
         assert_eq!(
