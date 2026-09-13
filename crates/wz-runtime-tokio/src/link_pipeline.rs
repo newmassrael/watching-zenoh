@@ -38,6 +38,7 @@ use tokio::net::{lookup_host, TcpListener, TcpSocket, TcpStream};
 use tokio::sync::mpsc;
 
 use crate::link_interfaces::{ip_link_endpoints, ip_link_subject};
+use crate::link_socket::LinkSocket;
 use crate::stream_link::{writer_task, StreamReadDriver, StreamWriteDriver};
 use crate::writer_queue::WriterHandle;
 use wz_session_core::link::InterceptorLink;
@@ -62,7 +63,7 @@ pub type TcpReadDriver = StreamReadDriver<OwnedReadHalf>;
 /// ([`wz_session_core::locator`]) resolves a locator to a [`SocketAddr`],
 /// deferring DNS to the std layer. [`dial_tcp_host`] is the DNS-capable
 /// sibling for a `host:port` STRING.
-pub async fn dial_tcp(addr: SocketAddr, iface: Option<&str>) -> io::Result<TcpStream> {
+pub async fn dial_tcp(addr: SocketAddr, link_socket: &LinkSocket<'_>) -> io::Result<TcpStream> {
     // R311y236 — the `#iface=` connect helper lives in the ungated
     // [`crate::iface_bind`] module (NOT here) so `ws_pipeline` (which does NOT
     // pull `transport-link-tcp`) can also reach it without dragging in the whole
@@ -70,7 +71,7 @@ pub async fn dial_tcp(addr: SocketAddr, iface: Option<&str>) -> io::Result<TcpSt
     // R2355 — no `configure_tcp_stream` call here any more: the primitive tunes
     // the stream it returns, so tcp/ws/tls are tuned by the SAME step instead of
     // by three remembered ones (two of which were not taken).
-    crate::iface_bind::connect_tcp_bound(addr, iface).await
+    crate::iface_bind::connect_tcp_bound(addr, link_socket).await
 }
 
 /// Dial an outbound TCP connection to a `host:port` STRING — the DNS-capable
@@ -85,7 +86,7 @@ pub async fn dial_tcp(addr: SocketAddr, iface: Option<&str>) -> io::Result<TcpSt
 /// Used by the session-open dial seam ([`crate::session_open::dial_endpoint`])
 /// for a scheme-less `--connect HOST:PORT` and a `tcp/HOST` with a DNS
 /// hostname; the numeric [`dial_tcp`] handles a parsed `tcp/` locator.
-pub async fn dial_tcp_host(host: &str, iface: Option<&str>) -> io::Result<TcpStream> {
+pub async fn dial_tcp_host(host: &str, link_socket: &LinkSocket<'_>) -> io::Result<TcpStream> {
     // R311y236 — a device-bound named dial must resolve first, then connect each
     // candidate through a device-bound `TcpSocket` (the bind precedes connect);
     // `lookup_host` is the std resolver `TcpStream::connect` otherwise uses
@@ -103,7 +104,7 @@ pub async fn dial_tcp_host(host: &str, iface: Option<&str>) -> io::Result<TcpStr
     // `Some(iface)` arm has relied on since R311y236.
     let mut last_err: Option<io::Error> = None;
     for addr in tokio::net::lookup_host(host).await? {
-        match crate::iface_bind::connect_tcp_bound(addr, iface).await {
+        match crate::iface_bind::connect_tcp_bound(addr, link_socket).await {
             Ok(stream) => return Ok(stream),
             Err(e) => last_err = Some(e),
         }
@@ -126,8 +127,8 @@ pub async fn dial_tcp_host(host: &str, iface: Option<&str>) -> io::Result<TcpStr
 /// to"). Numeric only by construction, mirroring [`dial_tcp`]; [`bind_tcp_host`]
 /// is the DNS-capable sibling. Built through the [`bind_listener`] SSOT
 /// (`TcpSocket` + backlog 1024, zenoh parity).
-pub async fn bind_tcp(addr: SocketAddr, iface: Option<&str>) -> io::Result<TcpListener> {
-    bind_listener(addr, iface)
+pub async fn bind_tcp(addr: SocketAddr, link_socket: &LinkSocket<'_>) -> io::Result<TcpListener> {
+    bind_listener(addr, link_socket)
 }
 
 /// Bind a TCP listener on a `host:port` STRING — the DNS-capable sibling of
@@ -139,10 +140,10 @@ pub async fn bind_tcp(addr: SocketAddr, iface: Option<&str>) -> io::Result<TcpLi
 /// posture holds whichever address binds. (Listen-side hostnames are unusual,
 /// but `TcpSocket::bind` takes a single `SocketAddr`, so the resolve loop the
 /// numeric path skips is hand-rolled here.)
-pub async fn bind_tcp_host(host: &str, iface: Option<&str>) -> io::Result<TcpListener> {
+pub async fn bind_tcp_host(host: &str, link_socket: &LinkSocket<'_>) -> io::Result<TcpListener> {
     let mut last_err: Option<io::Error> = None;
     for addr in lookup_host(host).await? {
-        match bind_listener(addr, iface) {
+        match bind_listener(addr, link_socket) {
             Ok(listener) => return Ok(listener),
             Err(e) => last_err = Some(e),
         }
@@ -258,7 +259,7 @@ const LISTEN_BACKLOG: u32 = 1024;
 /// reuseaddr posture this crate has always had. (It also aligns the Windows
 /// case, where mio deliberately skips it; wz does not target Windows, so that is
 /// a side benefit, not the motive.)
-fn bind_listener(addr: SocketAddr, iface: Option<&str>) -> io::Result<TcpListener> {
+fn bind_listener(addr: SocketAddr, link_socket: &LinkSocket<'_>) -> io::Result<TcpListener> {
     let socket = match addr {
         SocketAddr::V4(_) => TcpSocket::new_v4()?,
         SocketAddr::V6(_) => TcpSocket::new_v6()?,
@@ -267,9 +268,10 @@ fn bind_listener(addr: SocketAddr, iface: Option<&str>) -> io::Result<TcpListene
     // R311y236 — honour a listen-side `#iface=` bind (SO_BINDTODEVICE) before
     // bind, so a listener can be pinned to a NIC (the accept-side mirror of the
     // dial-side connect bind). Feature/platform-gated in `bind_socket_to_device`.
-    if let Some(iface) = iface {
-        crate::iface_bind::bind_socket_to_device(&socket, iface)?;
-    }
+    // R2590 — the DSCP rides the same step, as in upstream's
+    // `TcpSocketConfig::socket_with_config`, and accepted streams inherit it. A
+    // listen-side `LinkSocket` never carries a `bind`.
+    link_socket.configure(&socket, addr)?;
     socket.bind(addr)?;
     socket.listen(LISTEN_BACKLOG)
 }
@@ -378,7 +380,7 @@ mod tests {
         let dead = probe.local_addr().expect("probe addr");
         drop(probe);
         assert!(
-            dial_tcp(dead, None).await.is_err(),
+            dial_tcp(dead, &LinkSocket::NONE).await.is_err(),
             "dial to closed port errors"
         );
     }
@@ -390,9 +392,12 @@ mod tests {
     /// port race the prior one-shot `accept_tcp(listen)` form could not avoid.
     #[tokio::test]
     async fn bind_tcp_then_accept_tcp_round_trip() {
-        let listener = bind_tcp("127.0.0.1:0".parse().expect("loopback addr"), None)
-            .await
-            .expect("bind loopback");
+        let listener = bind_tcp(
+            "127.0.0.1:0".parse().expect("loopback addr"),
+            &LinkSocket::NONE,
+        )
+        .await
+        .expect("bind loopback");
         let addr = listener.local_addr().expect("local addr");
         let client = tokio::spawn(async move { TcpStream::connect(addr).await });
         let (server, peer) = accept_tcp(listener).await.expect("accept one peer");
@@ -410,11 +415,14 @@ mod tests {
     /// `configure_tcp_stream`), so there is nothing to assert for it.
     #[tokio::test]
     async fn dialed_and_accepted_streams_have_nodelay() {
-        let listener = bind_tcp("127.0.0.1:0".parse().expect("loopback addr"), None)
-            .await
-            .expect("bind loopback");
+        let listener = bind_tcp(
+            "127.0.0.1:0".parse().expect("loopback addr"),
+            &LinkSocket::NONE,
+        )
+        .await
+        .expect("bind loopback");
         let addr = listener.local_addr().expect("local addr");
-        let client = tokio::spawn(async move { dial_tcp(addr, None).await });
+        let client = tokio::spawn(async move { dial_tcp(addr, &LinkSocket::NONE).await });
         let (server, _peer) = accept_tcp(listener).await.expect("accept one peer");
         let client_stream = client.await.expect("client task").expect("client dial");
         assert!(
@@ -437,9 +445,12 @@ mod tests {
     /// construction + code review.
     #[tokio::test]
     async fn bind_tcp_listener_sets_so_reuseaddr() {
-        let listener = bind_tcp("127.0.0.1:0".parse().expect("loopback addr"), None)
-            .await
-            .expect("bind loopback");
+        let listener = bind_tcp(
+            "127.0.0.1:0".parse().expect("loopback addr"),
+            &LinkSocket::NONE,
+        )
+        .await
+        .expect("bind loopback");
         let std_listener = listener.into_std().expect("into_std");
         let sock = socket2::Socket::from(std_listener);
         assert!(
@@ -451,23 +462,35 @@ mod tests {
     /// R311y236 — `connect_tcp_bound` with `Some(iface)` builds a `TcpSocket` and
     /// connects (the SO_BINDTODEVICE bind precedes connect). Gated on
     /// `not(locator-iface)` so the bind is the warn-NOOP stub (no `socket2`, no
-    /// root-only syscall): this proves the `Some`-arm's socket-build + connect
-    /// wiring is behaviour-preserving vs the plain `TcpStream::connect` `None`
-    /// arm, WITHOUT the root-gated real bind (which zenoh likewise does not
-    /// unit-test). Under `locator-iface` on Linux the same call attempts the real
-    /// `SO_BINDTODEVICE` (needs CAP_NET_RAW), so that path is covered by
+    /// root-only syscall): this proves the device-bound socket-build + connect
+    /// wiring connects, WITHOUT the root-gated real bind (which zenoh likewise
+    /// does not unit-test). Under `locator-iface` on Linux the same call attempts
+    /// the real `SO_BINDTODEVICE` (needs CAP_NET_RAW), so that path is covered by
     /// compilation + the wz-session-core parse tests, not a CI unit test.
+    /// (R2590: there is one socket-building path now, device or not.)
     #[cfg(not(feature = "locator-iface"))]
     #[tokio::test]
     async fn connect_tcp_bound_some_iface_connects_via_noop_stub() {
-        let listener = bind_tcp("127.0.0.1:0".parse().expect("loopback addr"), None)
-            .await
-            .expect("bind loopback");
+        let listener = bind_tcp(
+            "127.0.0.1:0".parse().expect("loopback addr"),
+            &LinkSocket::NONE,
+        )
+        .await
+        .expect("bind loopback");
         let addr = listener.local_addr().expect("local addr");
-        let client =
-            tokio::spawn(
-                async move { crate::iface_bind::connect_tcp_bound(addr, Some("lo")).await },
-            );
+        let options = wz_session_core::locator::LinkSocketOptions {
+            iface: Some("lo".to_string()),
+            ..wz_session_core::locator::LinkSocketOptions::NONE
+        };
+        let client = tokio::spawn(async move {
+            let link_socket = LinkSocket::resolve(
+                &options,
+                wz_session_core::locator::Proto::Tcp,
+                crate::link_socket::LinkSide::Dial,
+            )
+            .await?;
+            crate::iface_bind::connect_tcp_bound(addr, &link_socket).await
+        });
         let (_server, peer) = accept_tcp(listener).await.expect("accept one peer");
         let stream = client
             .await

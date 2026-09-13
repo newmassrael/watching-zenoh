@@ -644,7 +644,13 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # namespace must read the same IP header value from both (5, then 1). The key sets
 # the header field and one link does not decrement it, so no routed hop is
 # needed. Reach across routers is kernel forwarding, and this claim does not cover it.
-FOREIGN_ADJUDICATOR_LINKS = 904
+# R2590 — 904 -> 908: `transport-link-tcp`, `-tls`, `-udp` and `-quic` zenohd->wz
+# (partial), one table-driven leg for the `bind` and `dscp` link keys. zenohd and
+# the wz demo each dial a libc observer that reads the source address and the TOS
+# byte of the first packet, zenohd adjudicates every row, and every keyed row has
+# an unkeyed row on its scheme. Partial because each atom keeps other unread keys,
+# and because on QUIC the TOS byte is quinn's ECN codepoint in both implementations.
+FOREIGN_ADJUDICATOR_LINKS = 908
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

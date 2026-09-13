@@ -211,6 +211,7 @@ async fn udp_dial_and_demux_faces_report_mirrored_endpoints() {
 async fn quic_datagram_link_pair(
     bind_at: &str,
 ) -> (LinkEndpoints, LinkEndpoints, std::net::SocketAddr) {
+    use wz_runtime_tokio::link_socket::LinkSocket;
     use wz_runtime_tokio::quic_config::{quic_client_config_from_pem, quic_server_config_from_pem};
     use wz_runtime_tokio::quic_datagram_pipeline::{
         accept_quic_datagram_on, bind_quic_datagram, dial_quic_datagram, wire_quic_datagram,
@@ -233,8 +234,9 @@ async fn quic_datagram_link_pair(
     let endpoint = bind_quic_datagram(
         bind_at.parse().expect("server bind address"),
         server_config,
-        None,
+        &LinkSocket::NONE,
     )
+    .await
     .expect("bind the quic-datagram server endpoint");
     let bound = endpoint
         .local_addr()
@@ -250,7 +252,7 @@ async fn quic_datagram_link_pair(
                 .expect("accept the inbound quic-datagram connection")
         },
         async {
-            dial_quic_datagram(dial_at, client_config, "localhost", None)
+            dial_quic_datagram(dial_at, client_config, "localhost", &LinkSocket::NONE)
                 .await
                 .expect("dial the quic-datagram endpoint")
         }

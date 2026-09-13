@@ -33,6 +33,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use wz_runtime_tokio::link_socket::{LinkSide, LinkSocket};
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
 use wz_runtime_tokio::quic_config::{quic_client_config_from_pem, quic_server_config_from_pem};
 use wz_runtime_tokio::quic_pipeline::{accept_quic_on, bind_quic};
@@ -46,6 +47,7 @@ use wz_runtime_tokio::session_open::{
 use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
 use wz_session_core::locator::parse_any_locator;
+use wz_session_core::locator::{LinkSocketOptions, Proto};
 use wz_session_core::session_timeouts::SessionTimeouts;
 
 const ITER_CAP: usize = 4096;
@@ -77,8 +79,9 @@ async fn wz_to_wz_over_quic_reaches_established_and_delivers_put() {
     let endpoint = bind_quic(
         "127.0.0.1:0".parse().expect("loopback addr"),
         server_config,
-        None,
+        &LinkSocket::NONE,
     )
+    .await
     .expect("bind quic server endpoint");
     let addr = endpoint.local_addr().expect("endpoint local addr");
 
@@ -267,11 +270,16 @@ async fn a_listen_iface_bind_decides_whether_a_loopback_quic_dial_connects() {
                 .expect("build quic server config");
         let client_config =
             quic_client_config_from_pem(cert_pem.as_bytes(), None).expect("build quic client");
+        let options = LinkSocketOptions {
+            iface: Some(iface.to_string()),
+            ..LinkSocketOptions::NONE
+        };
         let endpoint = bind_quic(
             "127.0.0.1:0".parse().expect("loopback addr"),
             server_config,
-            Some(iface),
-        )?;
+            &LinkSocket::resolve(&options, Proto::Quic, LinkSide::Listen).await?,
+        )
+        .await?;
         // The bind must SUCCEED in both arms — `bind(127.0.0.1)` with a foreign
         // device bound does not fail — so a difference in outcome is a difference in
         // DELIVERY, which is the property under test.
@@ -279,8 +287,11 @@ async fn a_listen_iface_bind_decides_whether_a_loopback_quic_dial_connects() {
         // quinn completes the server half of the handshake only once the `Incoming`
         // is accepted, so the acceptor has to be live for arm A to connect.
         let acceptor = tokio::spawn(async move { accept_quic_on(&endpoint).await.map(|_| ()) });
-        let dialed =
-            tokio::time::timeout(budget, dial_quic(addr, client_config, "localhost", None)).await;
+        let dialed = tokio::time::timeout(
+            budget,
+            dial_quic(addr, client_config, "localhost", &LinkSocket::NONE),
+        )
+        .await;
         acceptor.abort();
         Ok(matches!(dialed, Ok(Ok(_))))
     }

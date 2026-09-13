@@ -6012,7 +6012,7 @@ async fn run_router_hat_until(
                     p.addr.ip(),
                     p.addr.port(),
                     McastGroupOptions {
-                        iface: p.iface,
+                        iface: p.socket.and_then(|socket| socket.iface),
                         ttl: p.mcast_ttl,
                         joins: p.mcast_join,
                     },

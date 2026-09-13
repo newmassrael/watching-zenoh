@@ -62,11 +62,13 @@ use wz_session_core::link::{LinkDropCause, LinkSendOutcome};
 /// session dials through the generic `dial_locator`, not a bespoke seam.
 pub async fn dial_ws(
     addr: SocketAddr,
-    iface: Option<&str>,
+    link_socket: &crate::link_socket::LinkSocket<'_>,
 ) -> io::Result<WebSocketStream<TcpStream>> {
     // R311y236 — the TCP under a WS dial honours the locator `#iface=` bind via
-    // the shared connect primitive (SO_BINDTODEVICE before connect).
-    let tcp = crate::iface_bind::connect_tcp_bound(addr, iface).await?;
+    // the shared connect primitive (SO_BINDTODEVICE before connect). R2590 — a
+    // ws `LinkSocket` carries no `bind` or `dscp`, because upstream's ws link
+    // reads neither.
+    let tcp = crate::iface_bind::connect_tcp_bound(addr, link_socket).await?;
     let url = format!("ws://{addr}/");
     let (ws, _resp) = client_async(url.as_str(), tcp)
         .await

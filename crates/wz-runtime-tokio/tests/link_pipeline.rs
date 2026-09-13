@@ -17,6 +17,7 @@
 
 use tokio::net::TcpListener;
 use wz_runtime_tokio::link_pipeline::{dial_tcp, wire_tcp_stream};
+use wz_runtime_tokio::link_socket::LinkSocket;
 use wz_runtime_tokio::session_glue::{BoxedLinkDriver, LinkSendOutcome};
 use wz_runtime_tokio::{LinkDriver, LinkEvent, Reliability, TcpDriver, TxFrame};
 
@@ -32,7 +33,7 @@ async fn pipeline_round_trips_both_directions_through_codec_envelope() {
 
     // Initiator side: dial via the raw-dial primitive, then split into the
     // session-open pipeline triple.
-    let stream = dial_tcp(addr, None).await.expect("dial");
+    let stream = dial_tcp(addr, &LinkSocket::NONE).await.expect("dial");
     let (mut inbound, outbound, writer_handle) = wire_tcp_stream(stream);
     let mut peer = accept_task.await.expect("accept join");
 

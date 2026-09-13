@@ -78,6 +78,7 @@ use wz_runtime_tokio::accept_loop::{
     accept_loop, peer_loop, AcceptEvent, AcceptLoopSummary, FaceSources, NoOpForwarder,
 };
 use wz_runtime_tokio::link_pipeline::bind_tcp;
+use wz_runtime_tokio::link_socket::LinkSocket;
 use wz_runtime_tokio::retry_period::RetryPolicy;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::scouting_autoconnect::{serve_autoconnect, AutoconnectPlan, AutoconnectStep};
@@ -135,7 +136,7 @@ fn loopback_any() -> SocketAddr {
 async fn leg(port: u16, matcher: WhatAmIMatcher) -> AcceptLoopSummary {
     // ── The node that will be DISCOVERED: a TCP acceptor, plus a scout responder
     //    that advertises that acceptor's address. ──
-    let acceptor_socket = bind_tcp(loopback_any(), None)
+    let acceptor_socket = bind_tcp(loopback_any(), &LinkSocket::NONE)
         .await
         .expect("bind the acceptor");
     let acc_addr = acceptor_socket.local_addr().expect("acceptor local_addr");
@@ -214,7 +215,7 @@ async fn leg(port: u16, matcher: WhatAmIMatcher) -> AcceptLoopSummary {
     let keepalive_tx = dial_tx.clone();
     let (go_tx, go_rx) = watch::channel(false);
 
-    let peer_socket = bind_tcp(loopback_any(), None)
+    let peer_socket = bind_tcp(loopback_any(), &LinkSocket::NONE)
         .await
         .expect("bind the peer listener");
     let mut peer_params = fixture_session_init_params();

@@ -35,7 +35,7 @@
 //! config dials to a typed `Unsupported`.
 
 use std::io;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
@@ -49,6 +49,7 @@ use tokio_rustls::rustls::{
 };
 
 use crate::link_interfaces::ip_link_subject;
+use crate::link_socket::LinkSocket;
 use crate::stream_link::{writer_task, StreamReadDriver, StreamWriteDriver};
 use crate::writer_queue::WriterHandle;
 use crate::{LinkDriver, LinkEvent, Reliability, TxFrame};
@@ -114,53 +115,39 @@ where
     io::Error::other(err)
 }
 
-/// The unspecified bind address of the same IP family as `target` — a QUIC
-/// client endpoint binds an ephemeral local UDP socket, and it must match the
-/// target's family (a V4 socket cannot reach a V6 peer). Mirrors zenoh's
-/// INADDR_ANY / in6addr_any auto-select on dial (`zenoh-link-quic` `new_link`).
-/// `pub(crate)` so the datagram sibling [`crate::quic_datagram_pipeline`] shares
-/// the one ephemeral-bind-family SSOT (R311y8).
-pub(crate) fn client_bind_addr(target: SocketAddr) -> SocketAddr {
-    match target {
-        SocketAddr::V4(_) => (Ipv4Addr::UNSPECIFIED, 0).into(),
-        SocketAddr::V6(_) => (Ipv6Addr::UNSPECIFIED, 0).into(),
-    }
-}
-
-/// Build a client [`Endpoint`] bound to an ephemeral local socket of `addr`'s
-/// family, install the TLS-1.3 + ALPN-`hq-29` rustls `client_config`, and connect
+/// Build a client [`Endpoint`] bound to a local socket (the locator's `#bind=`,
+/// else an ephemeral one of `addr`'s family), install the TLS-1.3 + ALPN-`hq-29`
+/// rustls `client_config`, and connect
 /// to `addr` (SNI = `server_name`) — the shared QUIC client-handshake SSOT for
 /// BOTH the stream backend ([`dial_quic`]) and the datagram backend
 /// ([`crate::quic_datagram_pipeline::dial_quic_datagram`]). Returns the endpoint
 /// (the caller keeps it alive — its driver pumps the connection) + the
 /// established [`Connection`], BEFORE any stream is opened; the caller chooses
 /// `open_bi` (stream) vs riding datagrams. Mirrors zenoh's `new_link` client half.
+///
+/// R2590 — the socket is always built here and handed to quinn, which is what
+/// upstream does whether or not any option is set
+/// (`io/zenoh-link-commons/src/quic/socket.rs`
+/// @ `pub async fn new_link(&self, dst_addr: &SocketAddr) -> ZResult<UdpSocket> {`).
+/// Before R2590 an option-less dial took quinn's `Endpoint::client` instead,
+/// and only a device-bound dial reached `Endpoint::new`; with `bind` and
+/// `dscp` joining `iface` there would have been more pre-built sockets than
+/// convenience ones, and two paths where upstream has one.
 pub(crate) async fn connect_quic_client(
     addr: SocketAddr,
     client_config: Arc<RustlsClientConfig>,
     server_name: &str,
-    iface: Option<&str>,
+    link_socket: &LinkSocket<'_>,
 ) -> io::Result<(Endpoint, Connection)> {
-    let mut endpoint = match iface {
-        // No `#iface=`: the convenience `Endpoint::client` binds its own
-        // ephemeral UDP socket (the original path).
-        None => Endpoint::client(client_bind_addr(addr))?,
-        // R311y236 — a device-bound QUIC client needs a PRE-built UDP socket
-        // (`Endpoint::client` exposes no bind-device hook): build a std
-        // `UdpSocket`, set `SO_BINDTODEVICE` on it, then hand it to
-        // `Endpoint::new` with the tokio runtime. Off-feature / off-platform the
-        // shared `bind_socket_to_device` warns and the socket stays unbound.
-        Some(iface) => {
-            let sock = std::net::UdpSocket::bind(client_bind_addr(addr))?;
-            crate::iface_bind::bind_socket_to_device(&sock, iface)?;
-            Endpoint::new(
-                quinn::EndpointConfig::default(),
-                None,
-                sock,
-                std::sync::Arc::new(quinn::TokioRuntime),
-            )?
-        }
-    };
+    let local = link_socket.dial_local_addr(addr);
+    let sock = tokio::net::UdpSocket::bind(local).await?;
+    link_socket.configure(&sock, local)?;
+    let mut endpoint = Endpoint::new(
+        quinn::EndpointConfig::default(),
+        None,
+        sock.into_std()?,
+        Arc::new(quinn::TokioRuntime),
+    )?;
     let quic_crypto = QuicClientConfig::try_from(client_config).map_err(io_other)?;
     endpoint.set_default_client_config(QuinnClientConfig::new(Arc::new(quic_crypto)));
     let connection = endpoint
@@ -190,8 +177,14 @@ pub(crate) async fn connect_quic_client(
 /// listener, which binds a UDP socket, calls `set_bind_to_device_udp_socket`, and
 /// passes it to `Endpoint::new_with_abstract_socket`
 /// (`zenoh-link-quic/src/unicast.rs:408-427`); `Endpoint::new` IS that call plus
-/// `wrap_udp_socket`. Both stay on the `Endpoint::server` path when no iface is
-/// named, so the un-narrowed listener is byte-for-byte the pre-R311y454 one.
+/// `wrap_udp_socket`.
+///
+/// R2590 — the socket is pre-built for EVERY listener now, not only a
+/// device-bound one: `#dscp=` needs the same pre-bind hook, and upstream builds
+/// it the same way whatever the options (`io/zenoh-link-commons/src/quic/socket.rs`
+/// @ `pub async fn new_listener(&self, addr: &SocketAddr) -> ZResult<UdpSocket> {`).
+/// That is also why this became `async`: the socket is bound through tokio, as
+/// upstream's is, so the options are set with the setters tokio offers.
 ///
 /// The socket MUST reach quinn. Building it, setting the device on it and then
 /// dropping it would leave a listener that passes every "binding to `lo` works"
@@ -202,12 +195,15 @@ pub(crate) async fn connect_quic_client(
 /// Deliberate divergence, named because it is a divergence and not a port: wz
 /// hardcodes `quinn::TokioRuntime` where zenoh asks `quinn::default_runtime()`.
 /// wz-runtime-tokio IS the tokio runtime crate, so there is no other answer to
-/// give, and the dial half already hardcodes it.
-pub(crate) fn quic_server_endpoint(
+/// give, and the dial half already hardcodes it. It stays fully qualified: wz
+/// has its OWN `TokioRuntime` (the `wz_runtime_core::Runtime` impl), and two
+/// unrelated types sharing one name is exactly the collision a bare name would
+/// re-open.
+pub(crate) async fn quic_server_endpoint(
     addr: SocketAddr,
     server_config: Arc<RustlsServerConfig>,
     max_bidi: u8,
-    iface: Option<&str>,
+    link_socket: &LinkSocket<'_>,
 ) -> io::Result<Endpoint> {
     let quic_crypto = QuicServerConfig::try_from(server_config).map_err(io_other)?;
     let mut sc = QuinnServerConfig::with_crypto(Arc::new(quic_crypto));
@@ -215,25 +211,14 @@ pub(crate) fn quic_server_endpoint(
     transport.max_concurrent_uni_streams(0u8.into());
     transport.max_concurrent_bidi_streams(max_bidi.into());
     sc.transport_config(Arc::new(transport));
-    match iface {
-        // No `#iface=`: quinn binds its own socket (the original path).
-        None => Endpoint::server(sc, addr),
-        // A device-bound listener. `quinn::TokioRuntime` stays fully qualified:
-        // wz has its OWN `TokioRuntime` (the `wz_runtime_core::Runtime` impl),
-        // and although R311y519 removed this module's import of it — the writer
-        // is spawned through `WriterHandle::spawn` now — two unrelated types
-        // sharing one name is exactly the collision a bare name would re-open.
-        Some(iface) => {
-            let sock = std::net::UdpSocket::bind(addr)?;
-            crate::iface_bind::bind_socket_to_device(&sock, iface)?;
-            Endpoint::new(
-                quinn::EndpointConfig::default(),
-                Some(sc),
-                sock,
-                Arc::new(quinn::TokioRuntime),
-            )
-        }
-    }
+    let sock = tokio::net::UdpSocket::bind(addr).await?;
+    link_socket.configure(&sock, addr)?;
+    Endpoint::new(
+        quinn::EndpointConfig::default(),
+        Some(sc),
+        sock.into_std()?,
+        Arc::new(quinn::TokioRuntime),
+    )
 }
 
 /// Accept one inbound QUIC connection from a *borrowed* server [`Endpoint`] and
@@ -261,10 +246,10 @@ pub async fn dial_quic(
     addr: SocketAddr,
     client_config: Arc<RustlsClientConfig>,
     server_name: &str,
-    iface: Option<&str>,
+    link_socket: &LinkSocket<'_>,
 ) -> io::Result<QuicLink> {
     let (endpoint, connection) =
-        connect_quic_client(addr, client_config, server_name, iface).await?;
+        connect_quic_client(addr, client_config, server_name, link_socket).await?;
     // The initiator opens the one bidirectional stream; the responder
     // `accept_bi`s it (zenoh: open_bi on dial, accept_bi on listen).
     let (send, recv) = connection.open_bi().await.map_err(io_other)?;
@@ -285,15 +270,14 @@ pub async fn dial_quic(
 ///
 /// R311y454 — `iface` is the `#iface=<name>` LISTEN-side bind, the parameter
 /// shape the sibling acceptors already use (`bind_tcp`,
-/// [`crate::udp_pipeline::bind_udp_demux`]). Still SYNC: `Endpoint::server` was
-/// already binding a std socket and reaching for the ambient tokio runtime, so
-/// the pre-bound arm adds no await.
-pub fn bind_quic(
+/// [`crate::udp_pipeline::bind_udp_demux`]). R2590 — `async` since the listener
+/// socket is bound through tokio (see [`quic_server_endpoint`]).
+pub async fn bind_quic(
     addr: SocketAddr,
     server_config: Arc<RustlsServerConfig>,
-    iface: Option<&str>,
+    link_socket: &LinkSocket<'_>,
 ) -> io::Result<Endpoint> {
-    quic_server_endpoint(addr, server_config, 1, iface)
+    quic_server_endpoint(addr, server_config, 1, link_socket).await
 }
 
 /// Accept the ARRIVAL of one inbound QUIC connection attempt from a *borrowed*

@@ -43,6 +43,7 @@ use tokio::sync::watch;
 
 use wz_runtime_tokio::accept_loop::{peer_loop, AcceptEvent, FaceSources, NoOpForwarder};
 use wz_runtime_tokio::link_pipeline::bind_tcp;
+use wz_runtime_tokio::link_socket::LinkSocket;
 use wz_runtime_tokio::retry_period::RetryPolicy;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_open::{
@@ -84,9 +85,12 @@ async fn shutdown_on(mut rx: watch::Receiver<bool>) {
 async fn observed_gaps_ms(retry: RetryPolicy, want: usize) -> Vec<u128> {
     let target = closed_port();
     let listener = BoundListener::Tcp(
-        bind_tcp(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0), None)
-            .await
-            .expect("bind SUT listener"),
+        bind_tcp(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            &LinkSocket::NONE,
+        )
+        .await
+        .expect("bind SUT listener"),
     );
     let (shut_tx, shut_rx) = watch::channel(false);
 
@@ -199,9 +203,12 @@ async fn an_unreachable_desired_peer_is_redialed_with_a_growing_wait() {
 async fn a_peer_removed_and_re_added_starts_over_at_the_initial_wait() {
     let target = closed_port();
     let listener = BoundListener::Tcp(
-        bind_tcp(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0), None)
-            .await
-            .expect("bind SUT listener"),
+        bind_tcp(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            &LinkSocket::NONE,
+        )
+        .await
+        .expect("bind SUT listener"),
     );
     let (shut_tx, shut_rx) = watch::channel(false);
     let (reconcile_tx, reconcile_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<AnyLocator>>();

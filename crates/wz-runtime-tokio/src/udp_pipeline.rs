@@ -75,7 +75,7 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -93,6 +93,7 @@ use crate::writer_queue::{OutboundQueue, WriterHandle};
 // binds a UDP multicast socket too), so it must not depend on the
 // `transport-unicast`-gated `session_glue`.
 use crate::link_interfaces::{ip_link_endpoints, ip_link_subject};
+use crate::link_socket::LinkSocket;
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
 use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::link::{InterceptorLink, LinkEndpoints, LinkSubject};
@@ -158,10 +159,13 @@ pub const UDP_LINK_MTU: usize = 1450;
 /// `getaddrinfo`'s own ordered list. A UDP "dial" is a bind + `connect`, so a
 /// failure here is a local socket error rather than a peer refusal — the walk
 /// still matters, because the family of the resolved address decides the bind.
-pub async fn dial_udp_host(host: &str, iface: Option<&str>) -> io::Result<(UdpSocket, SocketAddr)> {
+pub async fn dial_udp_host(
+    host: &str,
+    link_socket: &LinkSocket<'_>,
+) -> io::Result<(UdpSocket, SocketAddr)> {
     let mut last_err: Option<io::Error> = None;
     for addr in tokio::net::lookup_host(host).await? {
-        match dial_udp(addr, iface).await {
+        match dial_udp(addr, link_socket).await {
             Ok(socket) => return Ok((socket, addr)),
             Err(e) => last_err = Some(e),
         }
@@ -174,19 +178,20 @@ pub async fn dial_udp_host(host: &str, iface: Option<&str>) -> io::Result<(UdpSo
     }))
 }
 
-pub async fn dial_udp(peer: SocketAddr, iface: Option<&str>) -> io::Result<UdpSocket> {
-    let bind_addr: SocketAddr = match peer {
-        SocketAddr::V4(_) => (Ipv4Addr::UNSPECIFIED, 0).into(),
-        SocketAddr::V6(_) => (Ipv6Addr::UNSPECIFIED, 0).into(),
-    };
+pub async fn dial_udp(peer: SocketAddr, link_socket: &LinkSocket<'_>) -> io::Result<UdpSocket> {
+    // R2590 — the local address is the locator's `#bind=` when it names one,
+    // else the unspecified address of the peer's family, as upstream's
+    // `new_link_inner` binds (`io/zenoh-links/zenoh-link-udp/src/unicast.rs`
+    // @ `let socket = UdpSocket::bind(src_socket_addr).await.map_err(|e| {`).
+    let bind_addr = link_socket.dial_local_addr(peer);
     let socket = UdpSocket::bind(bind_addr).await?;
     // R311y236 — honour the locator `#iface=` bind (SO_BINDTODEVICE). Unlike TCP
     // (where the device must precede connect), a UDP socket sets it after bind
     // and before the first send — both steer egress routing. Linux/Android only;
     // a warn-no-op off-platform (the shared `bind_socket_to_device` stub).
-    if let Some(iface) = iface {
-        crate::iface_bind::bind_socket_to_device(&socket, iface)?;
-    }
+    // R2590 — the DSCP is set in the same step, on the family the socket was
+    // bound for.
+    link_socket.configure(&socket, bind_addr)?;
     // R311y474 — CONNECT the dial socket to its peer, as zenoh does
     // (`zenoh-link-udp/src/unicast.rs:311`, immediately after its identical
     // UNSPECIFIED:0 bind). Two consequences, and the second is why this is not
@@ -214,11 +219,9 @@ pub async fn dial_udp(peer: SocketAddr, iface: Option<&str>) -> io::Result<UdpSo
 /// multi-peer [`UdpDemux`] (spawning the [`udp_demux_task`] pump that learns each
 /// peer from its first datagram's source). `#iface=` is honoured the same as
 /// [`dial_udp`] (SO_BINDTODEVICE, Linux/Android; a warn-no-op off-platform).
-pub async fn bind_udp(listen: SocketAddr, iface: Option<&str>) -> io::Result<UdpSocket> {
+pub async fn bind_udp(listen: SocketAddr, link_socket: &LinkSocket<'_>) -> io::Result<UdpSocket> {
     let socket = UdpSocket::bind(listen).await?;
-    if let Some(iface) = iface {
-        crate::iface_bind::bind_socket_to_device(&socket, iface)?;
-    }
+    link_socket.configure(&socket, listen)?;
     Ok(socket)
 }
 
@@ -340,8 +343,11 @@ pub struct UdpAcceptedInputs {
 /// `#iface=` is honoured via [`bind_udp`]. The pump starts pumping at bind (like
 /// zenoh's `accept_read_task`), buffering faces/datagrams until `accept_raw`
 /// drains them.
-pub async fn bind_udp_demux(listen: SocketAddr, iface: Option<&str>) -> io::Result<UdpDemux> {
-    let socket = bind_udp(listen, iface).await?;
+pub async fn bind_udp_demux(
+    listen: SocketAddr,
+    link_socket: &LinkSocket<'_>,
+) -> io::Result<UdpDemux> {
+    let socket = bind_udp(listen, link_socket).await?;
     let local_addr = socket.local_addr()?;
     let socket = Arc::new(socket);
     let (new_face_tx, new_face_rx) = mpsc::unbounded_channel::<NewUdpFace>();
@@ -756,7 +762,9 @@ mod tests {
     #[tokio::test]
     async fn dial_udp_binds_ephemeral_v4() {
         let peer: SocketAddr = "127.0.0.1:9".parse().expect("peer addr");
-        let socket = dial_udp(peer, None).await.expect("bind ephemeral");
+        let socket = dial_udp(peer, &LinkSocket::NONE)
+            .await
+            .expect("bind ephemeral");
         let local = socket.local_addr().expect("local addr");
         assert!(local.is_ipv4(), "v4 peer -> v4 bind");
         assert_ne!(local.port(), 0, "kernel assigned a concrete port");
@@ -841,7 +849,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn udp_demux_isolates_two_peers_by_src() {
         let listen: SocketAddr = "127.0.0.1:0".parse().expect("listen addr");
-        let mut demux = bind_udp_demux(listen, None).await.expect("bind demux");
+        let mut demux = bind_udp_demux(listen, &LinkSocket::NONE)
+            .await
+            .expect("bind demux");
         let addr = demux.local_addr();
 
         let s1 = UdpSocket::bind("127.0.0.1:0").await.expect("bind s1");
@@ -883,7 +893,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn udp_demux_reaps_a_dropped_face_and_reaccepts_the_src() {
         let listen: SocketAddr = "127.0.0.1:0".parse().expect("listen addr");
-        let mut demux = bind_udp_demux(listen, None).await.expect("bind demux");
+        let mut demux = bind_udp_demux(listen, &LinkSocket::NONE)
+            .await
+            .expect("bind demux");
         let addr = demux.local_addr();
 
         let s1 = UdpSocket::bind("127.0.0.1:0").await.expect("bind s1");

@@ -947,6 +947,18 @@ pub mod stream_link;
 #[cfg(feature = "transport-link-tcp")]
 pub mod link_pipeline;
 
+/// R2590 — the `iface` / `bind` / `dscp` socket options of a link, resolved per
+/// scheme and side the way each upstream link reads them, and applied to the
+/// socket before it binds or connects. Gated like `iface_bind`, whose device
+/// syscall it calls, on the union of the link backends that build a socket.
+#[cfg(any(
+    feature = "transport-link-tcp",
+    feature = "transport-link-udp",
+    feature = "transport-link-quic",
+    feature = "transport-link-ws"
+))]
+pub mod link_socket;
+
 // R311y236 — the `#iface=` SO_BINDTODEVICE honor helper. Lives at the crate
 // root (NOT the `transport-link-tcp`-gated `link_pipeline`) because
 // `udp_pipeline` + `quic_pipeline` also call it and do NOT imply tcp — a
@@ -1024,24 +1036,44 @@ pub(crate) mod iface_bind {
     /// not one. Every TCP-backed wz dial now leaves this function tuned by
     /// construction, so a fifth link family over TCP cannot reintroduce the gap
     /// by omission.
+    ///
+    /// R2590 — the whole [`crate::link_socket::LinkSocket`] is applied here, not
+    /// only the device: the DSCP before connect, and a dial `bind` as the local
+    /// address, refused when its family differs from the peer's with upstream's
+    /// words (`io/zenoh-link-commons/src/tcp.rs`
+    /// @ `"Protocols must match: Cannot bind to IPv6 {local} and connect to IPv4 {dest}",`).
+    /// The socket is always built explicitly now; the socket-less
+    /// `TcpStream::connect` arm is gone, so every dial takes the one path
+    /// upstream's `TcpSocketConfig::new_link` takes.
     #[cfg(any(feature = "transport-link-tcp", feature = "transport-link-ws"))]
     pub(crate) async fn connect_tcp_bound(
         addr: std::net::SocketAddr,
-        iface: Option<&str>,
+        link_socket: &crate::link_socket::LinkSocket<'_>,
     ) -> io::Result<tokio::net::TcpStream> {
         use std::net::SocketAddr;
-        use tokio::net::{TcpSocket, TcpStream};
-        let stream = match iface {
-            None => TcpStream::connect(addr).await?,
-            Some(iface) => {
-                let socket = match addr {
-                    SocketAddr::V4(_) => TcpSocket::new_v4()?,
-                    SocketAddr::V6(_) => TcpSocket::new_v6()?,
-                };
-                bind_socket_to_device(&socket, iface)?;
-                socket.connect(addr).await?
-            }
+        use tokio::net::TcpSocket;
+        let socket = match addr {
+            SocketAddr::V4(_) => TcpSocket::new_v4()?,
+            SocketAddr::V6(_) => TcpSocket::new_v6()?,
         };
+        link_socket.configure(&socket, addr)?;
+        if let Some(local) = link_socket.bind() {
+            let mismatch = match (local, addr) {
+                (SocketAddr::V6(_), SocketAddr::V4(_)) => Some(("IPv6", "IPv4")),
+                (SocketAddr::V4(_), SocketAddr::V6(_)) => Some(("IPv4", "IPv6")),
+                _ => None,
+            };
+            if let Some((local_family, peer_family)) = mismatch {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "Protocols must match: Cannot bind to {local_family} {local} and connect to {peer_family} {addr}"
+                    ),
+                ));
+            }
+            socket.bind(local)?;
+        }
+        let stream = socket.connect(addr).await?;
         configure_tcp_stream(&stream);
         Ok(stream)
     }
@@ -1998,9 +2030,9 @@ impl TcpDriver {
     /// driver — hence the raw-dial seam lives in `link_pipeline`.
     pub async fn connect(addr: SocketAddr) -> io::Result<Self> {
         // R311y236 — the driver-level connect takes a bare addr (no locator, so
-        // no `#iface=`); pass `None` for the interface bind.
+        // no `#iface=`); pass no socket options (R2590: `LinkSocket::NONE`).
         Ok(Self::from_stream(
-            link_pipeline::dial_tcp(addr, None).await?,
+            link_pipeline::dial_tcp(addr, &link_socket::LinkSocket::NONE).await?,
         ))
     }
 }

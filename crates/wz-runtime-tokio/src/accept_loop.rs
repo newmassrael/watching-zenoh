@@ -3206,9 +3206,12 @@ mod tests {
     // ── shared fixtures ────────────────────────────────────────────────
 
     async fn bind_loopback() -> (BoundListener, SocketAddr) {
-        let listener = bind_tcp("127.0.0.1:0".parse().expect("loopback addr"), None)
-            .await
-            .expect("bind");
+        let listener = bind_tcp(
+            "127.0.0.1:0".parse().expect("loopback addr"),
+            &crate::link_socket::LinkSocket::NONE,
+        )
+        .await
+        .expect("bind");
         let addr = listener.local_addr().expect("local addr");
         (BoundListener::Tcp(listener), addr)
     }
@@ -4251,9 +4254,12 @@ mod tests {
     #[tokio::test]
     async fn acceptedlink_tcp_is_mesh_capable() {
         use crate::session_open::AcceptedLink;
-        let listener = bind_tcp("127.0.0.1:0".parse().expect("loopback addr"), None)
-            .await
-            .expect("bind tcp");
+        let listener = bind_tcp(
+            "127.0.0.1:0".parse().expect("loopback addr"),
+            &crate::link_socket::LinkSocket::NONE,
+        )
+        .await
+        .expect("bind tcp");
         let addr = listener.local_addr().expect("local addr");
         // A loopback accept yields a real TcpStream for the AcceptedLink::Tcp arm.
         let (accepted_stream, _client) = tokio::join!(

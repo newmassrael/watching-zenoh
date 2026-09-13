@@ -157,13 +157,17 @@ pub enum Proto {
 pub struct ParsedLocator {
     pub proto: Proto,
     pub addr: SocketAddr,
-    /// R311y236 — the `#iface=<name>` interface-binding config from the
-    /// locator's `#`-delimited config tail (zenoh `BIND_INTERFACE`, applied as
-    /// `SO_BINDTODEVICE` on the dialing socket). `None` = no bind. Carried
-    /// verbatim by the no_std parser; the runtime dial seam honours it on
-    /// Linux/Android and no-ops (with a warn) off-platform — mirroring zenoh
-    /// (`zenoh-util::net::set_bind_to_device_*`, a Linux/Android-only syscall).
-    pub iface: Option<String>,
+    /// R2590 — the per-SOCKET options of the locator's `#`-config tail: `iface`,
+    /// `bind` and `dscp`. See [`LinkSocketOptions`]; read it through
+    /// [`Self::socket`], which answers the all-`None` value when the tail named
+    /// none of them.
+    ///
+    /// `iface` used to be a field of its own here (R311y236). It moved into this
+    /// value, beside the two keys upstream reads from the same `zenoh-link-commons`
+    /// vocabulary, because every IP-family link applies all three to the socket it
+    /// creates. Before R2590 wz honoured one of the three and silently dropped
+    /// the other two.
+    pub socket: Option<Box<LinkSocketOptions>>,
     /// R311y832 — the `#ttl=<n>` multicast hop limit (zenoh
     /// `UDP_MULTICAST_TTL`, applied as `set_multicast_ttl_v4` on the SENDING
     /// socket, `zenoh-link-udp/src/multicast.rs:355-374`). `None` leaves the
@@ -196,6 +200,52 @@ pub struct ParsedLocator {
     /// which is nearly all of them; BOXED when present for the reason R2496b
     /// measured rather than assumed. See [`LocatorRetry`]'s size note.
     pub retry: Option<Box<LocatorRetry>>,
+}
+
+/// R2590 — the options an IP-family link applies to the SOCKET it creates, read
+/// from the locator's `#`-config tail.
+///
+/// These are the `zenoh-link-commons` keys the tcp, udp, tls and quic links all
+/// consume (`io/zenoh-link-commons/src/lib.rs` @ `pub const BIND_SOCKET: &str = "bind";`
+/// and its neighbours), so they travel as ONE value from this parser to every
+/// socket constructor. Before R2590 `iface` was threaded through each constructor
+/// as its own parameter and the other two were dropped. A fourth key (the TCP
+/// socket buffers) is a field here, not a new parameter on a dozen functions.
+///
+/// Parsed, not applied: this crate is no_std and owns no socket. Applying them,
+/// and refusing `iface` together with `bind` where upstream does (the unicast
+/// links, not multicast), belongs to the runtime.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LinkSocketOptions {
+    /// `#iface=<name>` (zenoh `BIND_INTERFACE`): bind the socket to a device
+    /// (`SO_BINDTODEVICE`), honoured on Linux/Android and warned about elsewhere,
+    /// mirroring `zenoh-util::net::set_bind_to_device_*`.
+    pub iface: Option<String>,
+    /// `#bind=<host:port>` (zenoh `BIND_SOCKET`): the LOCAL address a dialing
+    /// socket binds before it connects. Kept as written, because upstream
+    /// resolves it the way it resolves the destination (a name is allowed), and
+    /// resolution is the runtime's.
+    pub bind: Option<String>,
+    /// `#dscp=<value>` (zenoh `DSCP`): the value upstream writes to `IP_TOS`
+    /// (IPv4) or `IPV6_TCLASS` (IPv6) as given, not shifted into the DSCP bits.
+    /// Parsed by [`parse_dscp_value`] into upstream's exact accepted set.
+    pub dscp: Option<u32>,
+}
+
+impl LinkSocketOptions {
+    /// The value a locator whose tail names none of the three answers.
+    pub const NONE: LinkSocketOptions = LinkSocketOptions {
+        iface: None,
+        bind: None,
+        dscp: None,
+    };
+}
+
+impl ParsedLocator {
+    /// The locator's socket options, all-`None` when its tail named none.
+    pub fn socket(&self) -> &LinkSocketOptions {
+        self.socket.as_deref().unwrap_or(&LinkSocketOptions::NONE)
+    }
 }
 
 /// R2496 — the per-endpoint connection-retry overrides a locator's `#`-config
@@ -319,7 +369,7 @@ pub fn parse_locator(locator: &str) -> Result<ParsedLocator, LocatorParseError> 
     Ok(ParsedLocator {
         proto,
         addr,
-        iface: parse_iface(parts.config),
+        socket: parse_socket_options(parts.config)?,
         // R311y832 — CONFIG span, never metadata, for the same reason `iface`
         // takes it: the two are distinct namespaces in zenoh even though they
         // share a grammar, and `?ttl=8` is not a multicast hop limit.
@@ -344,6 +394,12 @@ const LOCATOR_PARAM_FIELD_SEPARATOR: char = '=';
 
 /// zenoh `BIND_INTERFACE` config key (`io/zenoh-link-commons/src/lib.rs:52`).
 const LOCATOR_IFACE_KEY: &str = "iface";
+
+/// R2590 — zenoh `BIND_SOCKET` config key.
+const LOCATOR_BIND_KEY: &str = "bind";
+
+/// R2590 — zenoh `DSCP` config key.
+const LOCATOR_DSCP_KEY: &str = "dscp";
 
 /// zenoh `UDP_MULTICAST_TTL` config key (`zenoh-link-udp/src/lib.rs:111`).
 const LOCATOR_MCAST_TTL_KEY: &str = "ttl";
@@ -473,6 +529,71 @@ fn parse_iface(config: &str) -> Option<String> {
     lookup_param(config, LOCATOR_IFACE_KEY)
         .filter(|value| !value.is_empty())
         .map(ToString::to_string)
+}
+
+/// R2590 — the three socket options from the CONFIG span, or `None` when the
+/// tail names none of them (so a silent tail carries a pointer, not the whole
+/// value; [`AnyLocator`]'s size ceiling is why).
+///
+/// `iface` keeps its R311y236 rule (an empty value is no bind). `bind` and
+/// `dscp` refuse an empty or unusable value, because upstream refuses both at
+/// link open: an empty `bind` does not resolve, and an empty `dscp` is "Unknown
+/// DSCP argument". wz refuses at parse time, the `ttl` divergence again (earlier,
+/// with the same accepted set).
+fn parse_socket_options(config: &str) -> Result<Option<Box<LinkSocketOptions>>, LocatorParseError> {
+    let iface = parse_iface(config);
+    let bind = match lookup_param(config, LOCATOR_BIND_KEY) {
+        None => None,
+        Some("") => {
+            return Err(LocatorParseError::BadConfigValue {
+                key: LOCATOR_BIND_KEY,
+                value: String::new(),
+            })
+        }
+        Some(value) => Some(value.to_string()),
+    };
+    let dscp = match lookup_param(config, LOCATOR_DSCP_KEY) {
+        None => None,
+        Some(value) => {
+            Some(
+                parse_dscp_value(value).ok_or_else(|| LocatorParseError::BadConfigValue {
+                    key: LOCATOR_DSCP_KEY,
+                    value: value.to_string(),
+                })?,
+            )
+        }
+    };
+    if iface.is_none() && bind.is_none() && dscp.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(Box::new(LinkSocketOptions { iface, bind, dscp })))
+}
+
+/// R2590 — a `dscp` value in upstream's EXACT accepted set, or `None`.
+///
+/// Mirrors `parse_dscp`
+/// (`io/zenoh-link-commons/src/dscp.rs` @ `dscp.split('|')`): `|`-separated
+/// integers OR-ed together, each decimal, `0x`/`0X` hexadecimal, or `0B`
+/// binary. Upstream also lists a `0xb` binary prefix, but its `0x` arm is tried
+/// first and takes every string that prefix could match, so `0xb101` is
+/// hexadecimal there and here. Mirrored rather than corrected: an operator's
+/// string must mean the same thing to both implementations. Any part that does
+/// not parse refuses the whole value, as upstream's `reduce` over `Option`s does.
+pub fn parse_dscp_value(value: &str) -> Option<u32> {
+    fn part(s: &str) -> Option<u32> {
+        if let Some(hex) = ["0x", "0X"].iter().find_map(|p| s.strip_prefix(p)) {
+            u32::from_str_radix(hex, 16).ok()
+        } else if let Some(bin) = ["0xb", "0B"].iter().find_map(|p| s.strip_prefix(p)) {
+            u32::from_str_radix(bin, 2).ok()
+        } else {
+            s.parse::<u32>().ok()
+        }
+    }
+    value
+        .split('|')
+        .map(part)
+        .reduce(|a, b| Some(a? | b?))
+        .flatten()
 }
 
 /// R311y832 — the `#ttl=<n>` multicast hop limit from the CONFIG span.
@@ -1109,10 +1230,11 @@ pub enum AnyLocator {
         proto: Proto,
         host: String,
         port: u16,
-        /// R311y236 — the `#iface=<name>` bind from the config tail, carried
-        /// like [`ParsedLocator::iface`] so a DNS-named dial can also bind its
-        /// outgoing socket to a NIC (`SO_BINDTODEVICE`). `None` = no bind.
-        iface: Option<String>,
+        /// R2590 — the socket options from the config tail (`iface`, `bind`,
+        /// `dscp`), carried like [`ParsedLocator::socket`] so a DNS-named dial
+        /// applies the same ones. `None` when the tail named none. R311y236
+        /// carried `iface` alone here.
+        socket: Option<Box<LinkSocketOptions>>,
         /// R2496 — the per-endpoint retry overrides from the same config tail,
         /// carried for the reason `iface` is: the tail belongs to the endpoint,
         /// not to the address shape that happens to spell it. `None` when the
@@ -1240,11 +1362,11 @@ pub fn parse_any_locator(locator: &str) -> Result<AnyLocator, AnyLocatorError> {
         // them here makes DNS-vs-numeric an address-token property the dial seam
         // routes on, instead of a raw-string re-inspection at each caller.
         Err(LocatorParseError::BadAddress(addr)) => match classify_named_ip(locator) {
-            Some((proto, host, port, iface, config)) => Ok(AnyLocator::Named {
+            Some((proto, host, port, config)) => Ok(AnyLocator::Named {
                 proto,
                 host,
                 port,
-                iface,
+                socket: parse_socket_options(config).map_err(AnyLocatorError::Ip)?,
                 // R2496 — a DNS-named endpoint carries the same `#`-config
                 // tail, so it carries the same retry overrides. Dropping them
                 // here would leave the silent-default defect standing for half
@@ -1265,7 +1387,7 @@ pub fn parse_any_locator(locator: &str) -> Result<AnyLocator, AnyLocatorError> {
 /// not already parse numerically — is genuinely malformed (`None`). This only
 /// classifies the token SHAPE; it performs NO DNS resolution (that is the std
 /// dial layer's concern, per this module's deferral contract).
-fn classify_named_ip(locator: &str) -> Option<(Proto, String, u16, Option<String>, &str)> {
+fn classify_named_ip(locator: &str) -> Option<(Proto, String, u16, &str)> {
     let (proto_str, addr) = locator.split_once('/')?;
     let proto = match proto_str {
         "tcp" => Proto::Tcp,
@@ -1298,8 +1420,10 @@ fn classify_named_ip(locator: &str) -> Option<(Proto, String, u16, Option<String
     // the per-endpoint retry overrides from it. Returned rather than parsed
     // here because a malformed retry value is an ERROR, and this function's
     // `None` already means "not a name" — two different answers that must not
-    // share a channel.
-    Some((proto, host.to_string(), port, parse_iface(config), config))
+    // share a channel. R2590 — the socket options follow the same rule for the
+    // same reason (a malformed `dscp` is an error), so `iface` no longer rides out
+    // pre-parsed beside them.
+    Some((proto, host.to_string(), port, config))
 }
 
 #[cfg(test)]
@@ -1602,6 +1726,82 @@ mod tests {
         );
     }
 
+    /// R2590 — `dscp` accepts EXACTLY upstream's set, including its quirks.
+    #[test]
+    fn dscp_accepts_upstreams_set_and_nothing_else() {
+        assert_eq!(parse_dscp_value("46"), Some(46));
+        assert_eq!(parse_dscp_value("0x10"), Some(0x10));
+        assert_eq!(parse_dscp_value("0X10"), Some(0x10));
+        assert_eq!(parse_dscp_value("0B101"), Some(0b101));
+        // `|` ORs the parts, the documented `dscp=0x04|0x10` form.
+        assert_eq!(parse_dscp_value("0x04|0x10"), Some(0x14));
+        // Upstream's `0xb` "binary" prefix is shadowed by its `0x` arm, so this
+        // is HEXADECIMAL 0xb101 there, and must be here.
+        assert_eq!(parse_dscp_value("0xb101"), Some(0xb101));
+        // A lowercase `0b` matches no prefix and is not a decimal.
+        assert_eq!(parse_dscp_value("0b101"), None);
+        // One bad part refuses the whole value, as upstream's `reduce` does.
+        assert_eq!(parse_dscp_value("0x04|nope"), None);
+        assert_eq!(parse_dscp_value(""), None);
+    }
+
+    /// R2590 — the three socket keys ride out in ONE value from the config span.
+    #[test]
+    fn socket_options_parse_from_the_config_span_only() {
+        let p = parse_locator("udp/10.0.0.2:7447#iface=eth0;bind=10.0.0.1:9000;dscp=0x10")
+            .expect("valid");
+        assert_eq!(
+            p.socket(),
+            &LinkSocketOptions {
+                iface: Some("eth0".to_string()),
+                bind: Some("10.0.0.1:9000".to_string()),
+                dscp: Some(0x10),
+            }
+        );
+        // The metadata span is a different namespace: `?dscp=` is not an option.
+        let p = parse_locator("udp/10.0.0.2:7447?dscp=0x10").expect("valid");
+        assert_eq!(p.socket(), &LinkSocketOptions::NONE);
+        // A silent tail allocates nothing; the size ceiling depends on it.
+        assert!(parse_locator("tcp/1.2.3.4:7447")
+            .expect("valid")
+            .socket
+            .is_none());
+    }
+
+    /// R2590 — a known key with an unusable value is refused, not dropped.
+    #[test]
+    fn a_malformed_dscp_or_empty_bind_is_refused_at_parse_time() {
+        for (locator, key) in [
+            ("tcp/1.2.3.4:7447#dscp=high", "dscp"),
+            ("tcp/1.2.3.4:7447#dscp=", "dscp"),
+            ("tcp/1.2.3.4:7447#bind=", "bind"),
+        ] {
+            match parse_locator(locator) {
+                Err(LocatorParseError::BadConfigValue { key: got, .. }) => {
+                    assert_eq!(got, key, "{locator}")
+                }
+                other => panic!("{locator} must be refused on `{key}`, got {other:?}"),
+            }
+        }
+    }
+
+    /// R2590 — a DNS-named endpoint carries the same options, parsed the same way.
+    #[test]
+    fn a_named_endpoint_carries_its_socket_options() {
+        match parse_any_locator("tcp/example.org:7447#bind=0.0.0.0:0;dscp=46").expect("valid") {
+            AnyLocator::Named { socket, .. } => assert_eq!(
+                socket.as_deref(),
+                Some(&LinkSocketOptions {
+                    iface: None,
+                    bind: Some("0.0.0.0:0".to_string()),
+                    dscp: Some(46),
+                })
+            ),
+            other => panic!("expected Named, got {other:?}"),
+        }
+        assert!(parse_any_locator("tcp/example.org:7447#dscp=bad").is_err());
+    }
+
     #[test]
     fn join_collects_every_value_not_only_the_first() {
         // THE DISCRIMINATOR for the multi-value read. zenoh uses
@@ -1616,7 +1816,7 @@ mod tests {
     fn join_and_ttl_share_the_config_span_with_iface() {
         let p =
             parse_locator("udp/224.0.0.224:7446#iface=eth0;ttl=4;join=224.0.0.9").expect("valid");
-        assert_eq!(p.iface.as_deref(), Some("eth0"));
+        assert_eq!(p.socket().iface.as_deref(), Some("eth0"));
         assert_eq!(p.mcast_ttl, Some(4));
         assert_eq!(p.mcast_join, ["224.0.0.9"]);
     }
@@ -1655,7 +1855,7 @@ mod tests {
                 proto: Proto::Quic,
                 host: "example.org".to_string(),
                 port: 7447,
-                iface: None,
+                socket: None,
                 retry: None,
             })
         );
@@ -1682,13 +1882,13 @@ mod tests {
         let p = parse_locator("udp/1.2.3.4:7447#iface=eth0").expect("iface tail parses");
         assert_eq!(p.proto, Proto::Udp);
         assert_eq!(p.addr, "1.2.3.4:7447".parse::<SocketAddr>().unwrap());
-        assert_eq!(p.iface.as_deref(), Some("eth0"));
+        assert_eq!(p.socket().iface.as_deref(), Some("eth0"));
     }
 
     #[test]
     fn no_config_tail_leaves_iface_none() {
         let p = parse_locator("tcp/1.2.3.4:7447").expect("plain locator parses");
-        assert_eq!(p.iface, None);
+        assert_eq!(p.socket().iface, None);
     }
 
     #[test]
@@ -1697,14 +1897,14 @@ mod tests {
         // parses (addr accepted) but yields iface None (only `iface` is honoured).
         let p = parse_locator("tcp/1.2.3.4:7447#priority=4").expect("addr parses");
         assert_eq!(p.addr, "1.2.3.4:7447".parse::<SocketAddr>().unwrap());
-        assert_eq!(p.iface, None);
+        assert_eq!(p.socket().iface, None);
     }
 
     #[test]
     fn empty_iface_value_is_none() {
         // `#iface=` with no value is not a bind (guards the empty-NIC-name case).
         let p = parse_locator("tcp/1.2.3.4:7447#iface=").expect("addr parses");
-        assert_eq!(p.iface, None);
+        assert_eq!(p.socket().iface, None);
     }
 
     #[test]
@@ -1717,7 +1917,10 @@ mod tests {
                 proto: Proto::Tcp,
                 host: "example.org".to_string(),
                 port: 7447,
-                iface: Some("eth0".to_string()),
+                socket: Some(Box::new(LinkSocketOptions {
+                    iface: Some("eth0".to_string()),
+                    ..LinkSocketOptions::NONE
+                })),
                 retry: None,
             })
         );
@@ -1768,7 +1971,7 @@ mod tests {
                 proto: Proto::Tcp,
                 host: "example.org".to_string(),
                 port: 7447,
-                iface: None,
+                socket: None,
                 retry: None,
             })
         );
@@ -1791,7 +1994,7 @@ mod tests {
                     proto,
                     host: "example.org".to_string(),
                     port: 7447,
-                    iface: None,
+                    socket: None,
                     retry: None,
                 }),
                 "{s} should classify as Named"
@@ -2103,7 +2306,7 @@ mod tests {
         let p = parse_locator("tcp/1.2.3.4:7447?prio=1-3").expect("metadata tail parses");
         assert_eq!(p.proto, Proto::Tcp);
         assert_eq!(p.addr, "1.2.3.4:7447".parse::<SocketAddr>().unwrap());
-        assert_eq!(p.iface, None);
+        assert_eq!(p.socket().iface, None);
     }
 
     #[test]
@@ -2113,7 +2316,7 @@ mod tests {
             .expect("metadata+config parses");
         assert_eq!(p.proto, Proto::Udp);
         assert_eq!(p.addr, "1.2.3.4:7447".parse::<SocketAddr>().unwrap());
-        assert_eq!(p.iface.as_deref(), Some("eth0"));
+        assert_eq!(p.socket().iface.as_deref(), Some("eth0"));
     }
 
     #[test]
@@ -2124,7 +2327,7 @@ mod tests {
         // not a bind.
         let p = parse_locator("tcp/1.2.3.4:7447?iface=eth0").expect("addr parses");
         assert_eq!(p.addr, "1.2.3.4:7447".parse::<SocketAddr>().unwrap());
-        assert_eq!(p.iface, None);
+        assert_eq!(p.socket().iface, None);
     }
 
     #[test]
@@ -2137,7 +2340,10 @@ mod tests {
                 proto: Proto::Tcp,
                 host: "example.org".to_string(),
                 port: 7447,
-                iface: Some("eth0".to_string()),
+                socket: Some(Box::new(LinkSocketOptions {
+                    iface: Some("eth0".to_string()),
+                    ..LinkSocketOptions::NONE
+                })),
                 retry: None,
             })
         );
@@ -2378,7 +2584,7 @@ mod tests {
                 proto: Proto::QuicDatagram,
                 host: "example.org".to_string(),
                 port: 7447,
-                iface: None,
+                socket: None,
                 retry: None,
             })
         );
@@ -2389,7 +2595,7 @@ mod tests {
         // `metadata()` ends at the first `#`; with no `#` the config is empty,
         // so no config key can leak out of a metadata-only tail.
         let p = parse_locator("tcp/1.2.3.4:7447?prio=1-3").expect("addr parses");
-        assert_eq!(p.iface, None);
+        assert_eq!(p.socket().iface, None);
         assert_eq!(
             parse_serial_locator("serial//dev/ttyUSB0?meta=x"),
             Err(SerialLocatorError::MissingBaudrate)

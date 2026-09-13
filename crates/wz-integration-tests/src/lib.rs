@@ -6218,6 +6218,164 @@ pub mod common {
         panic!("a datagram arrived but the kernel attached no IP_TTL control message");
     }
 
+    /// R2590 — walk a control-message buffer of `len` bytes and return the
+    /// one-byte payload of its `IPPROTO_IP` / `IP_TOS` message, if it has one.
+    /// Shared by both TOS readers below: `recvmsg` fills such a buffer per
+    /// datagram, `IP_PKTOPTIONS` returns one for a stream.
+    fn ip_tos_in_control(control: &mut [u8], len: usize) -> Option<u8> {
+        // SAFETY: the msghdr only carries the control buffer, which is live for
+        // this call; CMSG_* read inside `len`, which the kernel wrote.
+        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+        msg.msg_control = control.as_mut_ptr().cast();
+        msg.msg_controllen = len as _;
+        let mut cmsg = unsafe { libc::CMSG_FIRSTHDR(&msg) };
+        while !cmsg.is_null() {
+            let hdr = unsafe { &*cmsg };
+            if hdr.cmsg_level == libc::IPPROTO_IP && hdr.cmsg_type == libc::IP_TOS {
+                return Some(unsafe { *libc::CMSG_DATA(cmsg) });
+            }
+            cmsg = unsafe { libc::CMSG_NXTHDR(&msg, cmsg) };
+        }
+        None
+    }
+
+    /// R2590 — the IP TOS byte and the source address of the next datagram to
+    /// reach `socket` (IPv4), or `None` if none arrives within `timeout`.
+    ///
+    /// Read from the header through the kernel's `IP_RECVTOS` control message, so
+    /// it reports what the SENDER put on the wire, whatever implementation that
+    /// was. It is the observer for the `dscp` and `bind` link keys on datagram
+    /// links, where the key's whole effect is those two header fields.
+    pub fn next_datagram_tos_and_source_v4(
+        socket: &std::net::UdpSocket,
+        timeout: Duration,
+    ) -> Option<(u8, SocketAddr)> {
+        use std::os::fd::AsRawFd as _;
+        let fd = socket.as_raw_fd();
+        let one = 1i32;
+        // SAFETY: plain POSIX calls on a descriptor `socket` owns; every pointer
+        // refers to a live local of the stated size.
+        let rc = unsafe {
+            libc::setsockopt(
+                fd,
+                libc::IPPROTO_IP,
+                libc::IP_RECVTOS,
+                (&one as *const i32).cast(),
+                std::mem::size_of::<i32>() as libc::socklen_t,
+            )
+        };
+        assert_eq!(
+            rc,
+            0,
+            "setsockopt(IP_RECVTOS): {}",
+            std::io::Error::last_os_error()
+        );
+        socket
+            .set_read_timeout(Some(timeout))
+            .expect("set the read timeout");
+
+        let mut buf = [0u8; 65_536];
+        let mut control = [0u8; 256];
+        let mut source: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+        let mut iov = libc::iovec {
+            iov_base: buf.as_mut_ptr().cast(),
+            iov_len: buf.len(),
+        };
+        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+        msg.msg_name = (&mut source as *mut libc::sockaddr_in).cast();
+        msg.msg_namelen = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+        msg.msg_iov = &mut iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = control.as_mut_ptr().cast();
+        msg.msg_controllen = control.len() as _;
+        let n = unsafe { libc::recvmsg(fd, &mut msg, 0) };
+        if n < 0 {
+            let err = std::io::Error::last_os_error();
+            assert!(
+                matches!(
+                    err.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ),
+                "recvmsg: {err}"
+            );
+            return None;
+        }
+        let from = SocketAddr::new(
+            Ipv4Addr::from(u32::from_be(source.sin_addr.s_addr)).into(),
+            u16::from_be(source.sin_port),
+        );
+        let len = msg.msg_controllen as usize;
+        let tos = ip_tos_in_control(&mut control, len)
+            .expect("a datagram arrived but the kernel attached no IP_TOS control message");
+        Some((tos, from))
+    }
+
+    /// R2590 — a loopback TCP listener whose accepted streams record the TOS of
+    /// the segment that opened them, for [`opening_segment_tos_v4`].
+    ///
+    /// `IP_RECVTOS` is set on the listening socket, and an accepted socket
+    /// inherits it from its listener.
+    pub fn tos_recording_listener_v4() -> TcpListener {
+        use std::os::fd::AsRawFd as _;
+        let listener =
+            TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind a loopback listener");
+        let one = 1i32;
+        // SAFETY: as in `next_datagram_tos_and_source_v4`.
+        let rc = unsafe {
+            libc::setsockopt(
+                listener.as_raw_fd(),
+                libc::IPPROTO_IP,
+                libc::IP_RECVTOS,
+                (&one as *const i32).cast(),
+                std::mem::size_of::<i32>() as libc::socklen_t,
+            )
+        };
+        assert_eq!(
+            rc,
+            0,
+            "setsockopt(IP_RECVTOS): {}",
+            std::io::Error::last_os_error()
+        );
+        listener
+    }
+
+    /// R2590 — the IP TOS byte of the segment that OPENED an accepted `stream`,
+    /// through Linux's `IP_PKTOPTIONS` on an `IP_RECVTOS` socket.
+    ///
+    /// Measured, not assumed: the value is the connecting peer's SYN's. A client
+    /// that set its TOS before `connect` reads back as that TOS, and one that set
+    /// it after reads back as 0 even once its data has arrived (the calibration
+    /// in `wz_link_socket_options_zenohd_interop.rs` asserts both). That is the
+    /// right observable for a `dscp` link key, which upstream and wz both apply
+    /// before the socket connects, and it is why the reader is named for the
+    /// opening segment rather than the last one.
+    ///
+    /// The stream-link counterpart of [`next_datagram_tos_and_source_v4`]: a TCP
+    /// peer's TOS is visible only here, since a stream read carries no
+    /// per-segment control message.
+    pub fn opening_segment_tos_v4(stream: &TcpStream) -> Option<u8> {
+        use std::os::fd::AsRawFd as _;
+        let mut control = [0u8; 256];
+        let mut len = control.len() as libc::socklen_t;
+        // SAFETY: `control` is live and `len` is its size.
+        let rc = unsafe {
+            libc::getsockopt(
+                stream.as_raw_fd(),
+                libc::IPPROTO_IP,
+                libc::IP_PKTOPTIONS,
+                control.as_mut_ptr().cast(),
+                &mut len,
+            )
+        };
+        assert_eq!(
+            rc,
+            0,
+            "getsockopt(IP_PKTOPTIONS): {}",
+            std::io::Error::last_os_error()
+        );
+        ip_tos_in_control(&mut control, len as usize)
+    }
+
     /// R2588 — every multicast group, of either family, that the kernel holds a
     /// membership for on `device`, read from `/proc/net/igmp` and `/proc/net/igmp6`.
     ///

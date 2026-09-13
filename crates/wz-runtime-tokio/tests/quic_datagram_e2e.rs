@@ -41,6 +41,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use wz_runtime_tokio::link_socket::LinkSocket;
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
 use wz_runtime_tokio::quic_config::{quic_client_config_from_pem, quic_server_config_from_pem};
 use wz_runtime_tokio::quic_datagram_pipeline::{accept_quic_datagram_on, bind_quic_datagram};
@@ -85,8 +86,9 @@ async fn wz_to_wz_over_quic_datagram_reaches_established_and_delivers_put() {
     let endpoint = bind_quic_datagram(
         "127.0.0.1:0".parse().expect("loopback addr"),
         server_config,
-        None,
+        &LinkSocket::NONE,
     )
+    .await
     .expect("bind quic datagram server endpoint");
     let addr = endpoint.local_addr().expect("endpoint local addr");
 

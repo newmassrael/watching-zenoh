@@ -22,6 +22,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use wz::runtime_tokio::link_pipeline::{accept_tcp, bind_tcp_host};
+use wz::runtime_tokio::link_socket::LinkSocket;
 use wz::runtime_tokio::observer::ApplicationLayerObserver;
 use wz::runtime_tokio::runtime_impl::TokioTime;
 use wz::runtime_tokio::session::TokioSession;
@@ -133,7 +134,7 @@ pub async fn run_acceptor_e2e<H>(
     //    so it cannot share accept_bound's "wz accept:" form).
     // R311y236 — the e2e harness listens on a scheme-less host:port with no
     // locator `#iface=`, so no interface bind is threaded (`None`).
-    let listener = bind_tcp_host(&listen, None).await?;
+    let listener = bind_tcp_host(&listen, &LinkSocket::NONE).await?;
     log::info!("{binary_name}: listening on {}", listener.local_addr()?);
     let (stream, peer) = accept_tcp(listener).await?;
     log::info!("{binary_name}: accepted peer {peer}");
@@ -247,7 +248,7 @@ pub async fn run_silent_acceptor_e2e(
     binary_name: &'static str,
     listen: String,
 ) -> std::io::Result<()> {
-    let listener = bind_tcp_host(&listen, None).await?;
+    let listener = bind_tcp_host(&listen, &LinkSocket::NONE).await?;
     log::info!("{binary_name}: listening on {}", listener.local_addr()?);
     let (stream, peer) = accept_tcp(listener).await?;
     log::info!("{binary_name}: accepted peer {peer}");

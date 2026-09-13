@@ -61,6 +61,7 @@ use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_rustls::rustls::{ClientConfig, ServerConfig};
 use tokio_rustls::TlsStream;
 
+use wz_runtime_tokio::link_socket::LinkSocket;
 use wz_runtime_tokio::tls_config::{
     client_config_from_pem, decode_base64_pem, read_pem_file, server_config_from_pem,
     ClientAuthPem, ServerNameVerification,
@@ -97,7 +98,7 @@ async fn tls_handshake_pair(
         let (tcp, _peer) = listener.accept().await.expect("accept tcp");
         accept_tls(tcp, server_config).await
     };
-    let dial = async { dial_tls(addr, client_config, server_name, None).await };
+    let dial = async { dial_tls(addr, client_config, server_name, &LinkSocket::NONE).await };
     tokio::join!(acc, dial)
 }
 

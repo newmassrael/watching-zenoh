@@ -15919,6 +15919,15 @@ layer_z_zenohd_interop() {
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_quic_acceptor_iface_zenohd_interop -- --ignored --quiet --test-threads=1 2>&1 \
         | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+    # R2590 — the `bind` and `dscp` link keys on the WIRE, tcp/tls/udp/quic, with
+    # zenohd as the adjudicator of every row. Both implementations dial a libc
+    # observer this test owns (`IP_RECVTOS`, `IP_PKTOPTIONS`), which reads the
+    # source address and the TOS byte of the first thing each sends. Neither key is
+    # visible to a session, so no Established assertion could witness either. The
+    # demo needs `tls` and `quic` to dial those rows, both in the build above.
+    (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_link_socket_options_zenohd_interop -- --ignored --quiet --test-threads=1 2>&1 \
+        | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
     # R311y407 — wz MESH QUIC acceptor cross-impl (transport-link-quic x mesh accept
     # loop x zenohd->wz): a real zenohd DIALS a wz `--peer quic/...` / `--router-hat
     # quic/...` MESH listen and both FEDERATES over it AND routes real pub/sub DATA

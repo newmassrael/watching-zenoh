@@ -247,10 +247,10 @@ pub async fn dial_quic_datagram(
     addr: SocketAddr,
     client_config: Arc<RustlsClientConfig>,
     server_name: &str,
-    iface: Option<&str>,
+    link_socket: &crate::link_socket::LinkSocket<'_>,
 ) -> io::Result<QuicDatagramLink> {
     let (endpoint, connection) =
-        connect_quic_client(addr, client_config, server_name, iface).await?;
+        connect_quic_client(addr, client_config, server_name, link_socket).await?;
     Ok(QuicDatagramLink {
         endpoint,
         connection,
@@ -270,17 +270,17 @@ pub async fn dial_quic_datagram(
 /// `SO_BINDTODEVICE` arm, so the datagram backend inherits the honor from the
 /// same SSOT that gives it the stream limits. One fix closed BOTH the quic and
 /// quic-datagram listen residuals for exactly this reason.
-pub fn bind_quic_datagram(
+pub async fn bind_quic_datagram(
     addr: SocketAddr,
     server_config: Arc<RustlsServerConfig>,
-    iface: Option<&str>,
+    link_socket: &crate::link_socket::LinkSocket<'_>,
 ) -> io::Result<Endpoint> {
     // Datagram-only: max_bidi = 0 (the shared quic_server_endpoint also pins
     // uni = 0). The QUIC handshake rides crypto frames, not application streams,
     // so it completes; datagrams are on by default (TransportConfig default sets
     // datagram_receive_buffer_size = Some). The datagram mirror of bind_quic's
     // max_bidi = 1.
-    quic_server_endpoint(addr, server_config, 0, iface)
+    quic_server_endpoint(addr, server_config, 0, link_socket).await
 }
 
 /// Accept ONE inbound QUIC datagram connection from a *borrowed* server

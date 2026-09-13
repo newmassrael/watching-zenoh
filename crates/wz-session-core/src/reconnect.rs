@@ -77,12 +77,13 @@ pub enum ReconnectLocator {
         proto: Proto,
         host: String,
         port: u16,
-        /// R311y236 — the `#iface=<name>` NIC bind, preserved across re-dials
-        /// so a reconnect-supervised named dial keeps binding to the same
-        /// interface. Mirrors [`AnyLocator::Named::iface`].
-        iface: Option<String>,
+        /// R2590 — the socket options (`iface`, `bind`, `dscp`), preserved across
+        /// re-dials so a reconnect-supervised named dial keeps applying the same
+        /// ones. Mirrors [`AnyLocator::Named::socket`]; R311y236 carried `iface`
+        /// alone.
+        socket: Option<alloc::boxed::Box<crate::locator::LinkSocketOptions>>,
         /// R2496 — the per-endpoint retry overrides, preserved across the
-        /// narrowing for the reason `iface` is: a reconnect that dropped them
+        /// narrowing for the reason the socket options are: a reconnect that dropped them
         /// would silently fall back to the global cadence on exactly the peers
         /// an operator tuned by hand. Boxed-when-present, exactly as
         /// [`AnyLocator`] carries it — this narrowing moves the field through
@@ -133,13 +134,13 @@ impl From<ReconnectLocator> for AnyLocator {
                 proto,
                 host,
                 port,
-                iface,
+                socket,
                 retry,
             } => AnyLocator::Named {
                 proto,
                 host,
                 port,
-                iface,
+                socket,
                 retry,
             },
         }
@@ -159,13 +160,13 @@ impl TryFrom<AnyLocator> for ReconnectLocator {
                 proto,
                 host,
                 port,
-                iface,
+                socket,
                 retry,
             } => Ok(ReconnectLocator::Named {
                 proto,
                 host,
                 port,
-                iface,
+                socket,
                 retry,
             }),
             AnyLocator::Serial(_) => Err(NotReconnectable::Serial),
@@ -471,7 +472,7 @@ mod reconnect_locator_tests {
         ParsedLocator {
             proto: Proto::Tcp,
             addr: "1.2.3.4:7447".parse::<SocketAddr>().unwrap(),
-            iface: None,
+            socket: None,
             mcast_ttl: None,
             mcast_join: alloc::vec::Vec::new(),
             retry: None,
@@ -497,7 +498,7 @@ mod reconnect_locator_tests {
             proto: Proto::Tcp,
             host: "example.org".into(),
             port: 7447,
-            iface: None,
+            socket: None,
             retry: None,
         };
         let reconnectable =
@@ -508,7 +509,7 @@ mod reconnect_locator_tests {
                 proto: Proto::Tcp,
                 host: "example.org".into(),
                 port: 7447,
-                iface: None,
+                socket: None,
                 retry: None,
             }
         );

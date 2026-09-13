@@ -52,6 +52,7 @@ use tokio::sync::watch;
 
 use wz_runtime_tokio::accept_loop::{peer_loop, AcceptEvent, FaceSources, NoOpForwarder};
 use wz_runtime_tokio::link_pipeline::bind_tcp;
+use wz_runtime_tokio::link_socket::LinkSocket;
 use wz_runtime_tokio::retry_period::RetryPolicy;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::scouting_static::static_peer_sources;
@@ -98,9 +99,12 @@ fn sources(
 }
 
 async fn bind_loopback() -> (BoundListener, SocketAddr) {
-    let listener = bind_tcp(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0), None)
-        .await
-        .expect("bind loopback");
+    let listener = bind_tcp(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        &LinkSocket::NONE,
+    )
+    .await
+    .expect("bind loopback");
     let addr = listener.local_addr().expect("local_addr");
     (BoundListener::Tcp(listener), addr)
 }

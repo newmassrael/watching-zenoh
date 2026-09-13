@@ -33,6 +33,7 @@ use wz_runtime_tokio::runtime_pool::{
 // its push stopped at an earlier gate. The one test below is gated with it —
 // gating the import alone would leave that test naming a symbol it cannot see.
 #[cfg(feature = "transport-link-udp")]
+use wz_runtime_tokio::link_socket::LinkSocket;
 use wz_runtime_tokio::udp_pipeline::bind_udp_demux;
 use wz_runtime_tokio::writer_queue::WriterHandle;
 
@@ -733,7 +734,7 @@ fn a_listener_pump_is_paced_by_the_acceptor_subsystem() {
     let mut demux = binder
         .block_on(bind_udp_demux(
             "127.0.0.1:0".parse().expect("loopback"),
-            None,
+            &LinkSocket::NONE,
         ))
         .expect("udp demux binds on an ephemeral loopback port");
     let listen_addr = demux.local_addr();
