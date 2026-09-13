@@ -1073,7 +1073,16 @@ PIN_NO_SYMBOL = 2
 # tcp (wz 1, ambiguous 1), tls (4, 0), quic (5, 2), quic-datagram (4, 0), summing
 # to exactly +14 and +3. The R2589 clause appended to each cites no `.rs` / `.c` /
 # `.h` file, so every one of those citations came from the reasons' existing text.
-PIN_WZ_CITATIONS = 252
+#
+# R2590 — 252 -> 267, a RISE with no atom entering or leaving: the five link atoms
+# stay PARTIAL and each gains a clause recording the `bind` / `dscp` build. DERIVED
+# with `citation_audit` over each reason before and after the clause: tcp, tls,
+# udp, quic and quic-datagram each +3 wz and +0 ambiguous, summing to exactly +15
+# and +0. Two of each three are the shared seam (`locator.rs`, `link_socket.rs`);
+# the third is the wire witness for four atoms and `quic_pipeline.rs` for
+# quic-datagram, which that witness does not drive. udp's clause also cites the
+# upstream `multicast.rs` once, which lands in the unjudged upstream bucket.
+PIN_WZ_CITATIONS = 267
 PIN_AMBIGUOUS = 48
 
 
