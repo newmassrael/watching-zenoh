@@ -327,4 +327,25 @@ fn a_wz_reply_carries_the_qos_a_stock_zenoh_queryable_gives_the_same_query_via_z
         stock.responses,
         wz.responses
     );
+
+    // R2595 — the ResponseFinal, the carrier R2594 measured here and left
+    // un-asserted. Upstream stamps the query's QoS on the terminator as well
+    // (`zenoh/src/api/queryable.rs` @ `ext_qos: self.qos.into(),`), and a
+    // router re-stamps its own with the originating query's, so a final that
+    // reads DEFAULT is droppable exactly where its replies are not.
+    assert!(
+        !wz.finals.is_empty() && !stock.finals.is_empty(),
+        "both legs must terminate their reply chain, or the comparison below is \
+         between two empty sets: stock={:?} wz={:?}",
+        stock.finals,
+        wz.finals
+    );
+    assert_eq!(
+        distinct(&wz.finals),
+        distinct(&stock.finals),
+        "the same default query was terminated with a different ResponseFinal QoS. \
+         stock={:?} wz={:?}",
+        stock.finals,
+        wz.finals
+    );
 }
