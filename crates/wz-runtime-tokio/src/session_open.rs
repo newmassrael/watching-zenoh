@@ -40,9 +40,16 @@ use wz_session_core::link::InterceptorLink;
 #[cfg(feature = "transport-link-serial")]
 use wz_session_core::locator::SerialEndpoint;
 use wz_session_core::locator::{
-    parse_any_locator, AnyLocator, AnyLocatorError, LinkSocketOptions, LinkTlsMaterial,
-    LocatorParseError, ParsedLocator, Proto,
+    parse_any_locator, AnyLocator, AnyLocatorError, LinkSocketOptions, LocatorParseError,
+    ParsedLocator, Proto,
 };
+// R2599 — the quic family is the only consumer of the locator's TLS material,
+// so the import is gated like the arms that use it. Ungated it is an
+// `unused_imports` error in every build without the backend, which `-D warnings`
+// makes fatal: the R311y408 shape, caught by the count gate rather than by a
+// check run at `--all-features`.
+#[cfg(feature = "transport-link-quic")]
+use wz_session_core::locator::LinkTlsMaterial;
 #[cfg(feature = "scouting-static")]
 use wz_session_core::scout_static::{resolve_static_config, StaticConfigError};
 // R2590 — the per-scheme socket options every IP-family dial and bind arm
@@ -2059,8 +2066,14 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
             // arm is a single dial (or bind): it has no schedule to layer over.
             retry: _,
             // R2599 — the certificate material the quic-family arms below lay
-            // over the ambient config, unused by every other scheme.
+            // over the ambient config, unused by every other scheme. The
+            // cfg-twin is the shape every sibling here uses: without the quic
+            // backend there is no consumer, and a bound-but-unused field is an
+            // error under `-D warnings`.
+            #[cfg(feature = "transport-link-quic")]
             tls,
+            #[cfg(not(feature = "transport-link-quic"))]
+                tls: _,
         } => match proto {
             Proto::Tcp => Ok(DialedLink::Tcp(
                 dial_tcp_host(
@@ -2876,8 +2889,12 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
             // arm is a single dial (or bind): it has no schedule to layer over.
             retry: _,
             // R2599 — the listen material the quic-family arms below lay over
-            // the ambient config, unused by every other scheme.
+            // the ambient config, unused by every other scheme; the same
+            // cfg-twin as the dial dispatcher, for the same reason.
+            #[cfg(feature = "transport-link-quic")]
             tls,
+            #[cfg(not(feature = "transport-link-quic"))]
+                tls: _,
         } => match proto {
             Proto::Tcp => Ok(BoundListener::Tcp(
                 bind_tcp_host(
