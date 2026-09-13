@@ -15936,6 +15936,29 @@ layer_z_zenohd_interop() {
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_link_socket_options_zenohd_interop -- --ignored --quiet --test-threads=1 2>&1 \
         | tee /dev/stderr | grep -qE '^test result: ok\. 2 passed') || return 1
+    # R2594 — the QoS a queryable's REPLY carries, adjudicated by a stock zenoh
+    # queryable answering the same stock `z_get` through the same zenohd. The
+    # expected byte is not written in the test: each run records the stock
+    # queryable's Response first and holds the wz demo's to it. Upstream seeds a
+    # reply from its query's QoS, so a default query's reply carries `Block`, and
+    # wz's read as DEFAULT (droppable) until this round. Needs the core zenoh
+    # examples beside zenohd, so it carries the same unavailability guard as the
+    # reassembly leg above; its own `1 passed` guard stops a dropped `#[ignore]`.
+    local reply_qos_examples_dir="${WZ_ZENOH_CORE_EXAMPLES_DIR:-$PWD/target/zenohd}"
+    local missing_reply_qos_example=""
+    for ex in zenoh_z_queryable zenoh_z_get; do
+        [[ -x "$reply_qos_examples_dir/$ex" ]] || missing_reply_qos_example="$ex"
+    done
+    if [[ -n "$missing_reply_qos_example" ]]; then
+        _z_unavailable "zenoh core example oracle not built \
+($reply_qos_examples_dir/$missing_reply_qos_example; run: bash scripts/build-zenohd.sh)" || return 1
+    else
+        _runci_guarded_test Z 1 env WZ_ZENOHD_BIN="$zenohd" \
+            WZ_ZENOH_CORE_EXAMPLES_DIR="$reply_qos_examples_dir" \
+            cargo test -p wz-integration-tests \
+            --test reply_qos_zenohd_differential \
+            -- --ignored --quiet --test-threads=1 || return 1
+    fi
     # R311y407 — wz MESH QUIC acceptor cross-impl (transport-link-quic x mesh accept
     # loop x zenohd->wz): a real zenohd DIALS a wz `--peer quic/...` / `--router-hat
     # quic/...` MESH listen and both FEDERATES over it AND routes real pub/sub DATA

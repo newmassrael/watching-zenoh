@@ -656,7 +656,13 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # and the dialer socket's `rb` / `tb` from `ss`, after calibrating both on a plain
 # socket. Partial because the same two keys also arrive from the zenoh config file,
 # which wz does not read yet.
-FOREIGN_ADJUDICATOR_LINKS = 910
+# R2594 — 910 -> 911: `query-reply` wz->zenoh (partial), the QoS a queryable's
+# reply carries. A stock zenoh queryable and the wz demo queryable answer the same
+# stock `z_get` through the same zenohd, each behind a tap, and the wz Response's
+# `ext_qos` must equal the stock one recorded in that run. Partial because the
+# ResponseFinal's QoS is printed there and not yet asserted, and because a stock
+# get cannot vary its QoS, so inheritance itself is witnessed in-tree.
+FOREIGN_ADJUDICATOR_LINKS = 911
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
