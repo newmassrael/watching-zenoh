@@ -2036,7 +2036,8 @@ impl Expansion<'_> {
                         _ => o.so_sndbuf,
                     })
             })
-            .last();
+            // The LAST typed span for the key is the one the binary keeps.
+            .next_back();
         let effect = match typed {
             Some(Some(typed)) if typed == value => KeyEffect::AlreadyOnTheCommandLine,
             Some(_) => KeyEffect::OverriddenOnTheCommandLine,
