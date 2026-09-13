@@ -33,7 +33,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use wz_runtime_tokio::link_socket::{LinkSide, LinkSocket};
+use wz_runtime_tokio::link_socket::LinkSocket;
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
 use wz_runtime_tokio::quic_config::{quic_client_config_from_pem, quic_server_config_from_pem};
 use wz_runtime_tokio::quic_pipeline::{accept_quic_on, bind_quic};
@@ -47,7 +47,6 @@ use wz_runtime_tokio::session_open::{
 use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
 use wz_session_core::locator::parse_any_locator;
-use wz_session_core::locator::{LinkSocketOptions, Proto};
 use wz_session_core::session_timeouts::SessionTimeouts;
 
 const ITER_CAP: usize = 4096;
@@ -265,6 +264,8 @@ async fn a_listen_iface_bind_decides_whether_a_loopback_quic_dial_connects() {
         key_pem: &str,
         budget: Duration,
     ) -> std::io::Result<bool> {
+        use wz_runtime_tokio::link_socket::LinkSide;
+        use wz_session_core::locator::{LinkSocketOptions, Proto};
         let server_config =
             quic_server_config_from_pem(cert_pem.as_bytes(), key_pem.as_bytes(), None)
                 .expect("build quic server config");

@@ -221,7 +221,9 @@ impl<'a> LinkSocket<'a> {
 
     /// The address a dialing UDP-family socket binds: `bind` when given, else
     /// the unspecified address of the peer's family with an ephemeral port, as
-    /// upstream's udp and quic dials do.
+    /// upstream's udp and quic dials do. Gated on those two dialers, its only
+    /// callers, so a tcp- or ws-only build carries no dead method.
+    #[cfg(any(feature = "transport-link-udp", feature = "transport-link-quic"))]
     pub(crate) fn dial_local_addr(&self, peer: SocketAddr) -> SocketAddr {
         use std::net::{Ipv4Addr, Ipv6Addr};
         self.bind.unwrap_or(match peer {
