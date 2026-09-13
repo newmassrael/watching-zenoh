@@ -178,13 +178,24 @@ pub fn decode_base64_pem(b64: &str) -> io::Result<Vec<u8>> {
 /// rather than duplicated in an async spelling. A second reader would be a
 /// second place for the refusal to drift, and `tokio`'s `fs` feature is not in
 /// every combination this module builds under.
+///
+/// The blocking pool is NAMED, through
+/// [`WzRuntime::Application`](crate::runtime_pool::WzRuntime::spawn_blocking)
+/// rather than `tokio::task::spawn_blocking`: an unnamed production spawn lands
+/// on whichever runtime is ambient and `WZ_RUNTIME` cannot pace it. `Application`
+/// is the subsystem because this read is SETUP on the caller's own path — both
+/// `dial_locator` and `bind_locator` are reached from the session API surface,
+/// not from an accept loop or a framing task — and it is where upstream puts the
+/// one blocking call of that same shape, its SHM segment handshake
+/// (`io/zenoh-transport/src/common/shm/interop.rs` @ `ZRuntime::Application.spawn_blocking(`).
 pub async fn resolve_pem_source(source: &PemSource) -> io::Result<Vec<u8>> {
     match source {
         PemSource::Raw(pem) => Ok(pem.as_bytes().to_vec()),
         PemSource::Base64(b64) => decode_base64_pem(b64),
         PemSource::File(path) => {
             let path = path.clone();
-            tokio::task::spawn_blocking(move || read_pem_file(path))
+            crate::runtime_pool::WzRuntime::Application
+                .spawn_blocking(move || read_pem_file(path))
                 .await
                 .map_err(io::Error::other)?
         }
