@@ -1137,7 +1137,19 @@ PIN_NO_SYMBOL = 2
 # and the `quic_datagram_e2e.rs` witness -- so 256 + 4 + 4 = 264, exactly
 # what the census measures. AMBIGUOUS holds at 47 and the unjudged upstream
 # bucket at 399, both unmoved, which is why only this pin moves here.
-PIN_WZ_CITATIONS = 264
+#
+# R2599 — 264 -> 272, no atom entering or leaving, and this time the round that
+# moved the measurement is the one paying for it. DERIVED with THIS module's own
+# `citation_audit` per atom, before and after the R2599 clause:
+# `transport-link-quic` wz 12 -> 16 and `transport-link-quic-datagram` wz 11 ->
+# 15, each gaining the four wz files the locator TLS-material seam is built from
+# -- `locator.rs`, `tls_config.rs`, `session_open.rs` and the `quic_e2e.rs`
+# witness -- so 264 + 4 + 4 = 272, exactly what the census measures. AMBIGUOUS
+# holds at 47. The unjudged upstream bucket rises 399 -> 407 (four anchors per
+# clause: the zenoh-config `TLSConf` field, the base64 precedence arm, the
+# config inspector and the `x509_parser` import naming the residual), which this
+# gate does not pin and R2215 records as unjudgeable here.
+PIN_WZ_CITATIONS = 272
 PIN_AMBIGUOUS = 47
 
 
