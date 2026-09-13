@@ -429,7 +429,10 @@ pub(crate) async fn advanced_publisher_task<T>(
 
     let mut options = AdvancedPublisherOptions::default();
     if let Some(max_samples) = spec.cache_max {
-        options.cache = Some(CacheConfig { max_samples });
+        options.cache = Some(CacheConfig {
+            max_samples,
+            ..CacheConfig::default()
+        });
     }
     // R311y444 — arm the last-sn heartbeat BEACON. `AdvancedPublisherOptions`
     // defaults to `Sequencing::SequenceNumber` (`advanced_publisher.rs:116`),
