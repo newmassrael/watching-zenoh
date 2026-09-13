@@ -342,3 +342,158 @@ async fn a_named_quic_datagram_locator_verifies_against_the_locator_name() {
         "the numeric arm is wired; its failure must be the certificate check (got {err:?})"
     );
 }
+
+/// R2598 — `#initial_mtu=<n>` reaches quinn's `TransportConfig` and moves the
+/// link MTU wz publishes, on EACH SIDE INDEPENDENTLY.
+///
+/// The observable is `link_mtu()`, the `max_datagram_size` `wire_quic_datagram`
+/// samples once at wire time. That single sample is NOT deterministic on its
+/// own, which cost two red runs to learn: quinn's MTU discovery races the
+/// sample, so an unkeyed link read 1162 once and 1288 the next time, following
+/// whichever side the scheduler left open longer. An earlier draft of this test
+/// probed at 1400 — under discovery's 1452 bound — reasoning that discovery
+/// could then not erase the difference. That was the wrong way round. The
+/// assertions below instead put the keyed value ABOVE the bound, where
+/// discovery cannot follow, so they compare against a CEILING rather than
+/// against a drifting baseline.
+///
+/// THE THIRD ARM IS THE POINT. Measured on loopback before this test existed, a
+/// build applying the key on the DIAL side alone still moves the dialer's own
+/// `max_datagram_size` by the full amount, because each endpoint's `initial_mtu`
+/// governs what THAT endpoint may send. A witness reading one side would
+/// therefore pass a build that never configured the acceptor — the exact
+/// half-build a shared `quic_server_endpoint` / `connect_quic_client` seam makes
+/// easy to write. So the asymmetric arm asserts the acceptor stays at its
+/// default while the dialer rises.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn initial_mtu_on_the_locator_moves_each_sides_link_mtu_independently() {
+    use wz_runtime_tokio::link_socket::LinkSide;
+    use wz_runtime_tokio::quic_datagram_pipeline::{dial_quic_datagram, wire_quic_datagram};
+    use wz_session_core::link::BoxedLinkDriver;
+    use wz_session_core::locator::{LinkSocketOptions, Proto};
+
+    fn opts(mtu: Option<u16>) -> LinkSocketOptions {
+        LinkSocketOptions {
+            initial_mtu: mtu,
+            ..LinkSocketOptions::NONE
+        }
+    }
+
+    /// One loopback quic-datagram link; returns (acceptor mtu, dialer mtu).
+    async fn link_mtus(listen_mtu: Option<u16>, dial_mtu: Option<u16>) -> (usize, usize) {
+        let issued = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("generate self-signed localhost cert");
+        let cert_pem = issued.cert.pem();
+        let key_pem = issued.key_pair.serialize_pem();
+        let server_config =
+            quic_server_config_from_pem(cert_pem.as_bytes(), key_pem.as_bytes(), None)
+                .expect("build quic server config");
+        let client_config =
+            quic_client_config_from_pem(cert_pem.as_bytes(), None).expect("build quic client");
+
+        let listen_opts = opts(listen_mtu);
+        let listen_sock = LinkSocket::resolve(
+            &listen_opts,
+            &LinkSocketOptions::NONE,
+            Proto::QuicDatagram,
+            LinkSide::Listen,
+        )
+        .await
+        .expect("resolve listen socket");
+        let endpoint = bind_quic_datagram(
+            "127.0.0.1:0".parse().expect("loopback addr"),
+            server_config,
+            &listen_sock,
+        )
+        .await
+        .expect("bind quic datagram endpoint");
+        let addr = endpoint.local_addr().expect("endpoint local addr");
+
+        // Each side wires its OWN link the instant it has one, which is what
+        // production does (`dial_locator` hands straight to
+        // `wire_quic_datagram`). Sampling after a `join!` instead leaves the
+        // first-completed connection open while quinn's MTU discovery runs, and
+        // the sample then reads a DISCOVERED mtu rather than the configured
+        // one: measured, that alone lifted the dialer's baseline from 1162 to
+        // 1288 and made the figure depend on scheduling. A standalone quinn
+        // probe reads 1162 on BOTH sides at the default, so the asymmetry was
+        // this harness, never QUIC.
+        let acc = async {
+            let link = accept_quic_datagram_on(&endpoint)
+                .await
+                .expect("accept quic datagram peer");
+            let (_r, w, _h) = wire_quic_datagram(link);
+            w.link_mtu()
+        };
+        let dial = async {
+            let dial_opts = opts(dial_mtu);
+            let dial_sock = LinkSocket::resolve(
+                &dial_opts,
+                &LinkSocketOptions::NONE,
+                Proto::QuicDatagram,
+                LinkSide::Dial,
+            )
+            .await
+            .expect("resolve dial socket");
+            let link = dial_quic_datagram(addr, client_config, "localhost", &dial_sock)
+                .await
+                .expect("dial quic datagram");
+            let (_r, w, _h) = wire_quic_datagram(link);
+            w.link_mtu()
+        };
+        tokio::join!(acc, dial)
+    }
+
+    // THE PROBE VALUE IS ABOVE quinn's discovery ceiling, and that is the whole
+    // design of this test. `MtuDiscoveryConfig::default()` searches up to an
+    // `upper_bound` of 1452, so an UNKEYED link's sampled mtu can be anywhere in
+    // a range whose top is 1452 minus per-packet overhead — wherever discovery
+    // happened to get to before `wire_quic_datagram` took its one sample.
+    // Measured: the same unkeyed link read 1162 on one run and 1288 on the next,
+    // and the drift followed whichever side was scheduled later, so NO absolute
+    // unkeyed value is stable and no delta between the two sides is either. A
+    // keyed value ABOVE the ceiling is reachable only by the key, which makes
+    // the assertion independent of discovery timing instead of racing it.
+    const PROBE_MTU: u16 = 1500;
+    /// The most an unkeyed link can ever sample: quinn's `upper_bound` less the
+    /// 38 bytes of 1-RTT overhead + datagram frame bound measured on this stack
+    /// (1200 configured reads back as 1162).
+    const DISCOVERY_CEILING: usize = 1452 - 38;
+
+    let (base_acc, base_dial) = link_mtus(None, None).await;
+    let (both_acc, both_dial) = link_mtus(Some(PROBE_MTU), Some(PROBE_MTU)).await;
+    let (dial_only_acc, dial_only_dial) = link_mtus(None, Some(PROBE_MTU)).await;
+
+    for (side, base) in [("acceptor", base_acc), ("dialer", base_dial)] {
+        assert!(
+            base <= DISCOVERY_CEILING,
+            "an UNKEYED {side} cannot exceed quinn's discovery ceiling \
+             {DISCOVERY_CEILING}; got {base}. If this fires the ceiling is wrong \
+             and every assertion below rests on it"
+        );
+    }
+    assert!(
+        both_dial > DISCOVERY_CEILING,
+        "the dialer's `initial_mtu` must carry it past anything discovery alone \
+         could reach (ceiling {DISCOVERY_CEILING}, keyed {both_dial}, base {base_dial})"
+    );
+    assert!(
+        both_acc > DISCOVERY_CEILING,
+        "the acceptor's `initial_mtu` must carry it past anything discovery alone \
+         could reach (ceiling {DISCOVERY_CEILING}, keyed {both_acc}, base {base_acc})"
+    );
+
+    // The asymmetric arm: the dialer's key governs the DIALER only.
+    assert!(
+        dial_only_dial > DISCOVERY_CEILING,
+        "the dialer's own key governs its own mtu whatever the acceptor was \
+         given (got {dial_only_dial})"
+    );
+    assert!(
+        dial_only_acc <= DISCOVERY_CEILING,
+        "the acceptor was given NO key, so it must stay within discovery's reach \
+         ({DISCOVERY_CEILING}); got {dial_only_acc}. If this exceeds the ceiling \
+         the acceptor is somehow reading the dialer's key, and this test can no \
+         longer detect a missing listen-side apply"
+    );
+}

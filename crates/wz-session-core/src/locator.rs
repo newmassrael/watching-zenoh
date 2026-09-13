@@ -202,8 +202,15 @@ pub struct ParsedLocator {
     pub retry: Option<Box<LocatorRetry>>,
 }
 
-/// R2590 — the options an IP-family link applies to the SOCKET it creates, read
-/// from the locator's `#`-config tail.
+/// R2590 — the options an IP-family link applies to the transport it creates,
+/// read from the locator's `#`-config tail.
+///
+/// R2598 widened this from "the SOCKET it creates": for the QUIC family two of
+/// these keys configure quinn's `TransportConfig` rather than the UDP socket
+/// under it. They ride here rather than in a struct of their own because this
+/// is the ONE value every dial and listen arm already receives, and an arm that
+/// can forget a parameter eventually does. Which keys a scheme actually reads
+/// stays the runtime's per-scheme table, not this parser's business.
 ///
 /// These are the `zenoh-link-commons` keys the tcp, udp, tls and quic links all
 /// consume (`io/zenoh-link-commons/src/lib.rs` @ `pub const BIND_SOCKET: &str = "bind";`
@@ -239,6 +246,19 @@ pub struct LinkSocketOptions {
     /// likewise. Set before connect, it also bounds the window scale the SYN
     /// advertises, which is how a peer can see it.
     pub so_rcvbuf: Option<u32>,
+    /// R2598 — `#initial_mtu=<bytes>` (zenoh `QUIC_INITIAL_MTU`): the maximum
+    /// UDP payload quinn assumes before MTU discovery runs. A `u16`, as
+    /// upstream parses it. quinn CLAMPS a value under 1200 up to it rather than
+    /// refusing one (`TransportConfig::initial_mtu` @ `self.initial_mtu = value.max(INITIAL_MTU);`),
+    /// so a low value is honoured-as-clamped on both implementations and wz
+    /// adds no refusal upstream does not have.
+    pub initial_mtu: Option<u16>,
+    /// R2598 — `#mtu_discovery_interval_secs=<secs>` (zenoh
+    /// `QUIC_MTU_DISCOVERY_INTERVAL`): how long quinn waits after COMPLETING an
+    /// MTU discovery run before starting a new one. A `u64` of seconds, as
+    /// upstream parses it; quinn stores it unchecked, so zero is accepted here
+    /// exactly as upstream accepts it.
+    pub mtu_discovery_interval_secs: Option<u64>,
 }
 
 impl LinkSocketOptions {
@@ -249,6 +269,8 @@ impl LinkSocketOptions {
         dscp: None,
         so_sndbuf: None,
         so_rcvbuf: None,
+        initial_mtu: None,
+        mtu_discovery_interval_secs: None,
     };
 
     /// R2592 — the socket options a bare `key=value;...` span names, read
@@ -426,6 +448,14 @@ const LOCATOR_SO_SNDBUF_KEY: &str = "so_sndbuf";
 
 /// R2591 — zenoh `TCP_SO_RCV_BUF` config key.
 const LOCATOR_SO_RCVBUF_KEY: &str = "so_rcvbuf";
+
+/// R2598 — zenoh `QUIC_INITIAL_MTU` config key
+/// (`io/zenoh-link-commons/src/quic/utils.rs` @ `pub const QUIC_INITIAL_MTU: &str = "initial_mtu";`).
+const LOCATOR_QUIC_INITIAL_MTU_KEY: &str = "initial_mtu";
+
+/// R2598 — zenoh `QUIC_MTU_DISCOVERY_INTERVAL` config key
+/// (`io/zenoh-link-commons/src/quic/utils.rs` @ `pub const QUIC_MTU_DISCOVERY_INTERVAL: &str = "mtu_discovery_interval_secs";`).
+const LOCATOR_QUIC_MTU_DISCOVERY_INTERVAL_KEY: &str = "mtu_discovery_interval_secs";
 
 /// zenoh `UDP_MULTICAST_TTL` config key (`zenoh-link-udp/src/lib.rs:111`).
 const LOCATOR_MCAST_TTL_KEY: &str = "ttl";
@@ -616,12 +646,46 @@ fn parse_socket_options(config: &str) -> Result<Option<Box<LinkSocketOptions>>, 
     };
     let so_sndbuf = buffer(LOCATOR_SO_SNDBUF_KEY)?;
     let so_rcvbuf = buffer(LOCATOR_SO_RCVBUF_KEY)?;
+    // R2598 — upstream parses each straight into its width and refuses only
+    // what the parse refuses
+    // (`io/zenoh-link-commons/src/quic/utils.rs` @ `initial_mtu = Some(v.parse::<u16>().map_err(|err| {`),
+    // so the accepted set here is the `u16` / `u64` one and nothing narrower:
+    // the floor on `initial_mtu` is quinn's clamp, not a rejection.
+    let initial_mtu = match lookup_param(config, LOCATOR_QUIC_INITIAL_MTU_KEY) {
+        None => None,
+        Some(value) => {
+            Some(
+                value
+                    .parse::<u16>()
+                    .map_err(|_| LocatorParseError::BadConfigValue {
+                        key: LOCATOR_QUIC_INITIAL_MTU_KEY,
+                        value: value.to_string(),
+                    })?,
+            )
+        }
+    };
+    let mtu_discovery_interval_secs =
+        match lookup_param(config, LOCATOR_QUIC_MTU_DISCOVERY_INTERVAL_KEY) {
+            None => None,
+            Some(value) => {
+                Some(
+                    value
+                        .parse::<u64>()
+                        .map_err(|_| LocatorParseError::BadConfigValue {
+                            key: LOCATOR_QUIC_MTU_DISCOVERY_INTERVAL_KEY,
+                            value: value.to_string(),
+                        })?,
+                )
+            }
+        };
     let options = LinkSocketOptions {
         iface,
         bind,
         dscp,
         so_sndbuf,
         so_rcvbuf,
+        initial_mtu,
+        mtu_discovery_interval_secs,
     };
     if options == LinkSocketOptions::NONE {
         return Ok(None);
@@ -1840,6 +1904,20 @@ mod tests {
             ("tcp/1.2.3.4:7447#so_sndbuf=big", "so_sndbuf"),
             ("tcp/1.2.3.4:7447#so_rcvbuf=", "so_rcvbuf"),
             ("tcp/1.2.3.4:7447#so_rcvbuf=-1", "so_rcvbuf"),
+            // R2598 — upstream's `u16` / `u64` parse refuses exactly these.
+            ("quic/1.2.3.4:7447#initial_mtu=", "initial_mtu"),
+            ("quic/1.2.3.4:7447#initial_mtu=big", "initial_mtu"),
+            ("quic/1.2.3.4:7447#initial_mtu=-1", "initial_mtu"),
+            // 65536 overflows a `u16`, where 65535 below is accepted.
+            ("quic/1.2.3.4:7447#initial_mtu=65536", "initial_mtu"),
+            (
+                "quic/1.2.3.4:7447#mtu_discovery_interval_secs=",
+                "mtu_discovery_interval_secs",
+            ),
+            (
+                "quic/1.2.3.4:7447#mtu_discovery_interval_secs=-1",
+                "mtu_discovery_interval_secs",
+            ),
         ] {
             match parse_locator(locator) {
                 Err(LocatorParseError::BadConfigValue { key: got, .. }) => {
@@ -1848,6 +1926,43 @@ mod tests {
                 other => panic!("{locator} must be refused on `{key}`, got {other:?}"),
             }
         }
+    }
+
+    /// R2598 — the two quinn transport keys parse off the config tail, and the
+    /// values upstream ACCEPTS are accepted here.
+    ///
+    /// The accepted half is the half worth pinning. Upstream refuses only what
+    /// the `u16` / `u64` parse refuses, so a wz floor on `initial_mtu` would be
+    /// a divergence wz invented: quinn CLAMPS a low value up to 1200
+    /// (`TransportConfig::initial_mtu` @ `self.initial_mtu = value.max(INITIAL_MTU);`)
+    /// rather than rejecting it, and stores the interval unchecked, so `1` and
+    /// `0` must both survive parsing here.
+    #[test]
+    fn the_quic_transport_keys_parse_and_keep_upstreams_accepted_set() {
+        let p = parse_locator("quic/1.2.3.4:7447#initial_mtu=1400;mtu_discovery_interval_secs=30")
+            .expect("valid");
+        assert_eq!(p.socket().initial_mtu, Some(1400));
+        assert_eq!(p.socket().mtu_discovery_interval_secs, Some(30));
+
+        for (locator, mtu, secs) in [
+            ("quic/1.2.3.4:7447#initial_mtu=1", Some(1u16), None),
+            ("quic/1.2.3.4:7447#initial_mtu=65535", Some(65535), None),
+            (
+                "quic/1.2.3.4:7447#mtu_discovery_interval_secs=0",
+                None,
+                Some(0u64),
+            ),
+        ] {
+            let got = parse_locator(locator).expect(locator);
+            assert_eq!(got.socket().initial_mtu, mtu, "{locator}");
+            assert_eq!(got.socket().mtu_discovery_interval_secs, secs, "{locator}");
+        }
+
+        // A locator naming neither key carries neither, so the apply seam has
+        // nothing to write and quinn keeps its own defaults.
+        let silent = parse_locator("quic/1.2.3.4:7447#dscp=46").expect("valid");
+        assert_eq!(silent.socket().initial_mtu, None);
+        assert_eq!(silent.socket().mtu_discovery_interval_secs, None);
     }
 
     /// R2590 — a DNS-named endpoint carries the same options, parsed the same way.

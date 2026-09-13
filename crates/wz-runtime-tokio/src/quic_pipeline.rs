@@ -149,7 +149,15 @@ pub(crate) async fn connect_quic_client(
         Arc::new(quinn::TokioRuntime),
     )?;
     let quic_crypto = QuicClientConfig::try_from(client_config).map_err(io_other)?;
-    endpoint.set_default_client_config(QuinnClientConfig::new(Arc::new(quic_crypto)));
+    let mut quinn_client = QuinnClientConfig::new(Arc::new(quic_crypto));
+    // R2598 — the dial half of the locator's quinn transport keys. Before this
+    // round the dial set NO `TransportConfig` at all, so no locator config key
+    // could reach quinn's transport on this side however it was spelled: the
+    // gap was a missing seam, not a missing branch.
+    let mut transport = TransportConfig::default();
+    link_socket.apply_quic_transport(&mut transport);
+    quinn_client.transport_config(Arc::new(transport));
+    endpoint.set_default_client_config(quinn_client);
     let connection = endpoint
         .connect(addr, server_name)
         .map_err(io_other)?
@@ -210,6 +218,12 @@ pub(crate) async fn quic_server_endpoint(
     let mut transport = TransportConfig::default();
     transport.max_concurrent_uni_streams(0u8.into());
     transport.max_concurrent_bidi_streams(max_bidi.into());
+    // R2598 — the listen half of the locator's quinn transport keys. Upstream
+    // configures the MTU on BOTH builders
+    // (`io/zenoh-link-commons/src/quic/unicast.rs` @ `.configure_mtu(&QuicMtuConfig::try_from(&epconf)?);`,
+    // once in the server path and once in the client path), and each side's
+    // value governs what THAT side may send, so neither is redundant.
+    link_socket.apply_quic_transport(&mut transport);
     sc.transport_config(Arc::new(transport));
     let sock = tokio::net::UdpSocket::bind(addr).await?;
     link_socket.configure(&sock, addr)?;

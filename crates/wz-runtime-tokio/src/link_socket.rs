@@ -1,28 +1,41 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! R2590 — the socket a link creates, configured from the locator's `#`-config
-//! tail: `iface`, `bind` and `dscp`, the three `zenoh-link-commons` keys
-//! (`io/zenoh-link-commons/src/lib.rs` @ `pub const BIND_SOCKET: &str = "bind";`).
+//! R2590 — the transport a link creates, configured from the locator's
+//! `#`-config tail: `iface`, `bind` and `dscp`, the three `zenoh-link-commons`
+//! keys (`io/zenoh-link-commons/src/lib.rs` @ `pub const BIND_SOCKET: &str = "bind";`),
+//! the two TCP socket buffers R2591 added, and the two quinn transport keys
+//! R2598 added.
 //!
 //! # One resolution, keyed by scheme and side
 //!
-//! Upstream does not read the three keys the same way in every link, and the
+//! Upstream does not read these keys the same way in every link, and the
 //! differences are observable, so [`crate::link_socket::LinkSocket::resolve`] is a table rather than
 //! one rule. Each row below is what that link's own config reader does:
 //!
-//! | link | side | `iface` + `bind` | `bind` resolved | `bind` used | `dscp` | `so_sndbuf`, `so_rcvbuf` |
-//! |---|---|---|---|---|---|---|
-//! | tcp | dial | refused | first non-multicast, else unbound | yes | yes | yes |
-//! | tcp | listen | accepted | same, then ignored | no | yes | yes |
-//! | tls | dial | refused | first, else an error | yes | yes | yes |
-//! | tls | listen | accepted | same, then ignored | no | yes | yes |
-//! | udp | dial | refused | first, else an error | yes | yes | no |
-//! | udp | listen | accepted | not read | no | yes | no |
-//! | quic, quic-datagram | both | refused | first, else an error | dial only | yes | no |
-//! | ws | both | accepted | not read | no | no | no |
+//! | link | side | `iface` + `bind` | `bind` resolved | `bind` used | `dscp` | `so_sndbuf`, `so_rcvbuf` | `initial_mtu`, `mtu_discovery_interval_secs` |
+//! |---|---|---|---|---|---|---|---|
+//! | tcp | dial | refused | first non-multicast, else unbound | yes | yes | yes | no |
+//! | tcp | listen | accepted | same, then ignored | no | yes | yes | no |
+//! | tls | dial | refused | first, else an error | yes | yes | yes | no |
+//! | tls | listen | accepted | same, then ignored | no | yes | yes | no |
+//! | udp | dial | refused | first, else an error | yes | yes | no | no |
+//! | udp | listen | accepted | not read | no | yes | no | no |
+//! | quic, quic-datagram | both | refused | first, else an error | dial only | yes | no | yes |
+//! | ws | both | accepted | not read | no | no | no | no |
 //!
-//! R2591 added the last column. The two buffer keys are TCP's
+//! R2598 added the last column, and it is the first one that is NOT a socket
+//! option: `initial_mtu` and `mtu_discovery_interval_secs` configure quinn's
+//! `TransportConfig` rather than the UDP socket beneath it
+//! (`io/zenoh-link-commons/src/quic/utils.rs` @ `pub const QUIC_INITIAL_MTU: &str = "initial_mtu";`).
+//! They are the QUIC family's alone because they are declared by the commons
+//! `quic` module, which no other link's reader reaches. They also have no
+//! per-link-kind layer under them, unlike every other column: upstream's config
+//! file has `tcp` and `tls` sections and no `quic` one, so
+//! [`LinkDefaults::for_proto`] answers `NONE` for them and the locator is the
+//! only source.
+//!
+//! R2591 added the buffer column. The two buffer keys are TCP's
 //! (`io/zenoh-link-commons/src/lib.rs` @ `pub const TCP_SO_SND_BUF: &str = "so_sndbuf";`),
 //! read by `TcpLinkConfig::new` on both sides and by both of tls's configs, and
 //! applied to the socket in the same step as the device and the DSCP
@@ -182,6 +195,8 @@ pub struct LinkSocket<'a> {
     dscp: Option<u32>,
     so_sndbuf: Option<u32>,
     so_rcvbuf: Option<u32>,
+    initial_mtu: Option<u16>,
+    mtu_discovery_interval_secs: Option<u64>,
 }
 
 /// How a scheme turns a `bind` string into an address.
@@ -203,6 +218,10 @@ struct SchemeReader {
     bind: BindLookup,
     reads_dscp: bool,
     reads_buffers: bool,
+    /// R2598 — whether this scheme reads the two quinn transport keys. Only the
+    /// QUIC family does: they are declared by `zenoh-link-commons`'s `quic`
+    /// module, which no other link's reader reaches.
+    reads_quic_mtu: bool,
 }
 
 impl SchemeReader {
@@ -214,12 +233,14 @@ impl SchemeReader {
                 bind: BindLookup::FirstNonMulticast,
                 reads_dscp: true,
                 reads_buffers: true,
+                reads_quic_mtu: false,
             },
             Proto::Tls => SchemeReader {
                 refuses_iface_with_bind: dial,
                 bind: BindLookup::FirstOrError("TLS"),
                 reads_dscp: true,
                 reads_buffers: true,
+                reads_quic_mtu: false,
             },
             Proto::Udp => SchemeReader {
                 refuses_iface_with_bind: dial,
@@ -230,18 +251,21 @@ impl SchemeReader {
                 },
                 reads_dscp: true,
                 reads_buffers: false,
+                reads_quic_mtu: false,
             },
             Proto::Quic | Proto::QuicDatagram => SchemeReader {
                 refuses_iface_with_bind: true,
                 bind: BindLookup::FirstOrError("QUIC"),
                 reads_dscp: true,
                 reads_buffers: false,
+                reads_quic_mtu: true,
             },
             Proto::Ws => SchemeReader {
                 refuses_iface_with_bind: false,
                 bind: BindLookup::NotRead,
                 reads_dscp: false,
                 reads_buffers: false,
+                reads_quic_mtu: false,
             },
         }
     }
@@ -256,6 +280,8 @@ impl<'a> LinkSocket<'a> {
         dscp: None,
         so_sndbuf: None,
         so_rcvbuf: None,
+        initial_mtu: None,
+        mtu_discovery_interval_secs: None,
     };
 
     /// Run `proto`'s reader for `side` over the locator's `options` layered on
@@ -313,6 +339,16 @@ impl<'a> LinkSocket<'a> {
                 .so_rcvbuf
                 .or(defaults.so_rcvbuf)
                 .filter(|_| reader.reads_buffers),
+            // R2598 — the locator ALONE, deliberately, where every key above
+            // falls back to the per-link-kind layer. Upstream's config file has
+            // `tcp` and `tls` sections and NO `quic` one, so there is no layer
+            // for these two to be merged under; `LinkDefaults::for_proto`
+            // already answers `NONE` for the QUIC family, so an `.or(defaults)`
+            // here would read as a layering that exists and cannot fire.
+            initial_mtu: options.initial_mtu.filter(|_| reader.reads_quic_mtu),
+            mtu_discovery_interval_secs: options
+                .mtu_discovery_interval_secs
+                .filter(|_| reader.reads_quic_mtu),
         })
     }
 
@@ -339,6 +375,51 @@ impl<'a> LinkSocket<'a> {
     /// The `SO_RCVBUF` a stream socket is given, if any.
     pub fn so_rcvbuf(&self) -> Option<u32> {
         self.so_rcvbuf
+    }
+
+    /// R2598 — the maximum UDP payload quinn assumes before MTU discovery, if
+    /// this scheme reads one.
+    pub fn initial_mtu(&self) -> Option<u16> {
+        self.initial_mtu
+    }
+
+    /// R2598 — the wait between completed MTU discovery runs, if this scheme
+    /// reads one.
+    pub fn mtu_discovery_interval_secs(&self) -> Option<u64> {
+        self.mtu_discovery_interval_secs
+    }
+
+    /// R2598 — write this locator's quinn transport keys onto `transport`, the
+    /// SINGLE seam both QUIC endpoint constructors go through.
+    ///
+    /// Mirrors upstream's `QuicMtuConfig::apply_to_transport`
+    /// (`io/zenoh-link-commons/src/quic/utils.rs` @ `fn apply_to_transport(&self, quic_transport_conf: &mut TransportConfig) {`)
+    /// call for call, including that a present interval REPLACES the whole
+    /// `MtuDiscoveryConfig` rather than editing quinn's default in place.
+    ///
+    /// ⚠ `mtu_discovery_interval_secs` HAS NO BEHAVIOURAL WITNESS and the
+    /// residue is named rather than papered over. quinn exposes no getter for
+    /// the discovery config, and the interval only schedules a RE-RUN
+    /// (`quinn-proto` @ `let next_mtud_activation = now + self.config.interval;`)
+    /// which issues no probes at all on a path already at its ceiling. Measured
+    /// on loopback, four arms — default and 1s, with and without discovery
+    /// headroom — every one sent exactly 4 probes. quinn tests its own
+    /// reactivation against a SYNTHETIC path for the same reason. So this line
+    /// is witnessed by construction: it is the only route from the parsed value
+    /// to quinn, and deleting it fails to compile the caller rather than
+    /// quietly passing a test. `initial_mtu` beside it IS witnessed on the
+    /// wire, and on BOTH sides, since a client-only apply still moves the
+    /// client's own `max_datagram_size` by the full amount.
+    #[cfg(feature = "transport-link-quic")]
+    pub(crate) fn apply_quic_transport(&self, transport: &mut quinn::TransportConfig) {
+        if let Some(mtu) = self.initial_mtu {
+            transport.initial_mtu(mtu);
+        }
+        if let Some(interval) = self.mtu_discovery_interval_secs {
+            let mut discovery = quinn::MtuDiscoveryConfig::default();
+            discovery.interval(std::time::Duration::from_secs(interval));
+            transport.mtu_discovery_config(Some(discovery));
+        }
     }
 
     /// [`Self::configure`] plus the two buffer sizes, for the TCP socket under
@@ -668,6 +749,65 @@ mod tests {
                     "{proto:?} {side:?}"
                 );
             }
+        }
+    }
+
+    /// R2598 — the two quinn transport keys reach the QUIC family on both
+    /// sides and NO other scheme, swept over every `Proto` rather than a list.
+    ///
+    /// Both sides matter and the asymmetry is why this asserts them separately:
+    /// each endpoint's own `initial_mtu` governs what THAT endpoint may send,
+    /// so a build applying it on the dial alone still moves the dialer's own
+    /// `max_datagram_size` by the full amount — measured on loopback before
+    /// this test was written, which is exactly the half-build a dial-only
+    /// assertion would have waved through.
+    #[tokio::test]
+    async fn the_quic_transport_keys_reach_the_quic_family_on_both_sides_only() {
+        let opts = LinkSocketOptions {
+            initial_mtu: Some(1400),
+            mtu_discovery_interval_secs: Some(30),
+            ..LinkSocketOptions::NONE
+        };
+        for proto in ALL {
+            for side in [LinkSide::Dial, LinkSide::Listen] {
+                let socket = resolve_alone(&opts, proto, side).await.unwrap();
+                let quic = matches!(proto, Proto::Quic | Proto::QuicDatagram);
+                assert_eq!(
+                    socket.initial_mtu(),
+                    quic.then_some(1400),
+                    "{proto:?} {side:?}"
+                );
+                assert_eq!(
+                    socket.mtu_discovery_interval_secs(),
+                    quic.then_some(30),
+                    "{proto:?} {side:?}"
+                );
+            }
+        }
+    }
+
+    /// R2598 — these two keys have NO per-link-kind layer under them, unlike
+    /// every other key this resolver carries.
+    ///
+    /// Upstream's config file has `tcp` and `tls` sections and no `quic` one,
+    /// so there is nowhere for a default to come from. The assertion is that a
+    /// silent locator stays silent even when a defaults value is handed in:
+    /// were `resolve` to fall back the way it does for `dscp`, this reads the
+    /// planted value back and fails.
+    #[tokio::test]
+    async fn the_quic_transport_keys_have_no_defaults_layer_to_fall_back_to() {
+        let planted = LinkSocketOptions {
+            initial_mtu: Some(9000),
+            mtu_discovery_interval_secs: Some(7),
+            ..LinkSocketOptions::NONE
+        };
+        for proto in [Proto::Quic, Proto::QuicDatagram] {
+            let socket =
+                LinkSocket::resolve(&LinkSocketOptions::NONE, &planted, proto, LinkSide::Dial)
+                    .await
+                    .unwrap();
+            assert_eq!(socket.initial_mtu(), None, "{proto:?}");
+            assert_eq!(socket.mtu_discovery_interval_secs(), None, "{proto:?}");
         }
     }
 
