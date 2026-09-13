@@ -1149,7 +1149,21 @@ PIN_NO_SYMBOL = 2
 # clause: the zenoh-config `TLSConf` field, the base64 precedence arm, the
 # config inspector and the `x509_parser` import naming the residual), which this
 # gate does not pin and R2215 records as unjudgeable here.
-PIN_WZ_CITATIONS = 272
+#
+# R2600 — 272 -> 279, no atom entering or leaving. DERIVED with THIS module's own
+# `citation_audit` per atom, before and after the R2600 clauses:
+# `transport-link-quic` wz 16 -> 19, `transport-link-quic-datagram` wz 15 -> 18
+# (each gaining `quic_pipeline.rs` and the two `quic_e2e.rs` witnesses), and
+# `transport-link-tls` wz 12 -> 13 (the shared `locator.rs` parser its own clause
+# names as the source of an over-credit). 272 + 3 + 3 + 1 = 279, exactly what the
+# census measures. AMBIGUOUS holds at 47. The unjudged upstream bucket rises
+# 407 -> 415, which this gate does not pin.
+#
+# ⚠ THE TLS ENTRY IS THE ONE TO READ TWICE. Its citation rose because R2600
+# recorded that `upstream_link_config_keys_gate` OVER-CREDITS that scheme: the
+# shared locator parser declares consts the `Proto::Tls` arms never read. The
+# count moving is a record of a defect being written down, not of work done.
+PIN_WZ_CITATIONS = 279
 PIN_AMBIGUOUS = 47
 
 
