@@ -846,7 +846,11 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # the socket buffers, inline PEM, cert-expiration close, handshake timeout, QUIC
 # MTU). All four are reached by an executing test, so UNREACHED and NO_SYMBOL
 # hold.
-PIN_REACHED = 45
+# R2593 — 45 -> 44: `transport-link-tcp` went back PARTIAL -> COMPLETE, the first
+# of those four to return. Every key R2589 listed was built across R2590-R2593
+# and witnessed against zenohd; it was a reached atom, so it leaves this count
+# with the population, and UNREACHED and NO_SYMBOL hold.
+PIN_REACHED = 44
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -1092,8 +1096,16 @@ PIN_NO_SYMBOL = 2
 # R2592 — 271 -> 275, no atom entering or leaving. DERIVED with `citation_audit`
 # per reason, before and after the R2592 clause: tcp +2 and tls +2 wz (the one
 # clause both carry cites `link_socket.rs` and the witness file), +0 ambiguous.
-PIN_WZ_CITATIONS = 275
-PIN_AMBIGUOUS = 48
+#
+# R2593 — 275 -> 268 and 48 -> 47, an atom LEAVING and another gaining. DERIVED
+# with `citation_audit` per reason: `transport-link-tcp` went COMPLETE, so its
+# whole pre-round reason leaves the population at (wz 9, ambiguous 1); tls's
+# R2593 clause adds +2 wz (`zenoh_config.rs`, `args.rs`). 275 - 9 + 2 = 268 and
+# 48 - 1 = 47, exactly what the census reports. The needle both reasons carried
+# for `fn node_args` was corrected in place to its new signature, which moves no
+# count.
+PIN_WZ_CITATIONS = 268
+PIN_AMBIGUOUS = 47
 
 
 class Fatal(Exception):
