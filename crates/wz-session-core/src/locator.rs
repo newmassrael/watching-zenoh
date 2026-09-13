@@ -536,7 +536,7 @@ fn lookup_param<'a>(params: &'a str, key: &'a str) -> Option<&'a str> {
 /// the first group and silently drop the rest — a config that looks accepted
 /// and half works.
 /// R2592 — every KEY a `key=value` span names, in written order, with the
-/// same grammar [`lookup_param`] reads. A consumer that accepts only a fixed key
+/// same grammar the private `lookup_param` reads. A consumer that accepts only a fixed key
 /// set checks the span against it with this rather than re-splitting it.
 pub fn config_span_keys(params: &str) -> impl Iterator<Item = &str> {
     params
