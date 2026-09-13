@@ -1104,7 +1104,13 @@ PIN_NO_SYMBOL = 2
 # 48 - 1 = 47, exactly what the census reports. The needle both reasons carried
 # for `fn node_args` was corrected in place to its new signature, which moves no
 # count.
-PIN_WZ_CITATIONS = 268
+#
+# R2594 — 268 -> 273, no atom entering or leaving. DERIVED with `citation_audit`
+# on `ext-pubsub-advanced-cache`'s reason, before and after the R2594 clause:
+# wz 12 -> 17 (`declare_ext_qos.rs`, `query_sink.rs`, `response_build.rs`, the
+# differential witness, `query.rs`), ambiguous 0 -> 0. The clause's five upstream
+# anchors land in the unjudged upstream bucket (11 -> 16).
+PIN_WZ_CITATIONS = 273
 PIN_AMBIGUOUS = 47
 
 
